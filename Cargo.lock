@@ -1273,6 +1273,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
 
 [[package]]
+name = "humantime-serde"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57a3db5ea5923d99402c94e9feb261dc5ee9b4efa158b0315f788cf549cc200c"
+dependencies = [
+ "humantime",
+ "serde",
+]
+
+[[package]]
 name = "hyper"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1785,7 +1795,10 @@ dependencies = [
  "console-subscriber",
  "futures",
  "hex",
+ "humantime",
+ "humantime-serde",
  "moq-lite",
+ "once_cell",
  "parking_lot",
  "quinn",
  "rcgen",
@@ -1798,10 +1811,12 @@ dependencies = [
  "serde_with",
  "time",
  "tokio",
+ "tokio-tungstenite 0.24.0",
  "tracing",
  "tracing-subscriber",
  "url",
  "web-transport-quinn",
+ "web-transport-ws",
 ]
 
 [[package]]
