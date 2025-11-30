@@ -1,10 +1,38 @@
 use crate::crypto;
 use anyhow::Context;
+use once_cell::sync::Lazy;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::RootCertStore;
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::{fs, io, net, sync::Arc, time};
 use url::Url;
+use web_transport_any::WebTransportSessionAny;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ServerCacheKey(String, u16);
+
+impl std::fmt::Display for ServerCacheKey {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}:{}", self.0, self.1)
+	}
+}
+
+// Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
+// Keyed by "hostname:port" string (e.g., "relay.example.com:443")
+static WEBSOCKET_WON: Lazy<Mutex<HashSet<ServerCacheKey>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+// Helper function to extract hostname:port key from URL
+fn server_key(url: &Url) -> Option<ServerCacheKey> {
+	let host = url.host_str()?;
+	let port = url.port().unwrap_or_else(|| match url.scheme() {
+		"https" | "wss" | "moql" | "moqt" => 443,
+		"http" | "ws" => 80,
+		_ => 443,
+	});
+	Some(ServerCacheKey(host.to_string(), port))
+}
 
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -30,6 +58,41 @@ pub struct ClientTls {
 	pub disable_verify: Option<bool>,
 }
 
+#[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClientWebSocket {
+	/// Delay in milliseconds before attempting WebSocket fallback (default: 200)
+	/// If WebSocket won the previous race for a given server, this will be 0.
+	#[arg(
+		id = "websocket-delay",
+		long = "websocket-delay",
+		env = "MOQ_CLIENT_WEBSOCKET_DELAY",
+		default_value = "200ms"
+	)]
+	#[serde(deserialize_with = "deserialize_humantime")]
+	#[serde(serialize_with = "serialize_humantime")]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub delay: Option<humantime::Duration>,
+}
+
+fn deserialize_humantime<'de, D>(deserializer: D) -> Result<Option<humantime::Duration>, D::Error>
+where
+	D: serde::Deserializer<'de>,
+{
+	let buf = <String as serde::Deserialize>::deserialize(deserializer)?;
+
+	buf.parse::<humantime::Duration>()
+		.map_err(serde::de::Error::custom)
+		.map(Some)
+}
+
+fn serialize_humantime<S>(duration: &Option<humantime::Duration>, serializer: S) -> Result<S::Ok, S::Error>
+where
+	S: serde::Serializer,
+{
+	<String as serde::Serialize>::serialize(&duration.unwrap_or_default().to_string(), serializer)
+}
+
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ClientConfig {
@@ -45,6 +108,10 @@ pub struct ClientConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ClientTls,
+
+	#[command(flatten)]
+	#[serde(default)]
+	pub websocket: ClientWebSocket,
 }
 
 impl Default for ClientConfig {
@@ -52,6 +119,7 @@ impl Default for ClientConfig {
 		Self {
 			bind: "[::]:0".parse().unwrap(),
 			tls: ClientTls::default(),
+			websocket: ClientWebSocket::default(),
 		}
 	}
 }
@@ -67,6 +135,7 @@ pub struct Client {
 	pub quic: quinn::Endpoint,
 	pub tls: rustls::ClientConfig,
 	pub transport: Arc<quinn::TransportConfig>,
+	pub websocket_delay: Option<std::time::Duration>,
 }
 
 impl Client {
@@ -135,11 +204,71 @@ impl Client {
 		let quic =
 			quinn::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
 
-		Ok(Self { quic, tls, transport })
+		Ok(Self {
+			quic,
+			tls,
+			transport,
+			websocket_delay: config.websocket.delay.map(Into::into),
+		})
 	}
 
 	pub async fn connect(&self, url: Url) -> anyhow::Result<web_transport_quinn::Session> {
 		self.connect_quic(url).await
+	}
+
+	pub async fn connect_with_fallback(&self, url: Url) -> anyhow::Result<WebTransportSessionAny> {
+		// Capture QUIC error so it can be used if both transports fail
+		let mut quic_error: Option<anyhow::Error> = None;
+
+		// Create futures for both possible protocols
+		let quic_url = url.clone();
+		let quic_handle = async {
+			match self.connect_quic(quic_url).await {
+				Ok(session) => Some(session),
+				Err(err) => {
+					quic_error = Some(err);
+					None
+				}
+			}
+		};
+
+		let ws_handle = async {
+			let cache_key = server_key(&url);
+
+			// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
+			// unless we've already had to fall back to WebSockets for this server.
+			let websocket_penalty = match &cache_key {
+				Some(key) if !WEBSOCKET_WON.lock().unwrap().contains(key) => self.websocket_delay,
+				_ => None,
+			};
+
+			if let Some(delay) = websocket_penalty {
+				tokio::time::sleep(delay).await;
+				tracing::debug!(url = %url, delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
+			}
+
+			match self.connect_websocket(url).await {
+				Ok(session) => {
+					if let Some(cache_key) = cache_key {
+						tracing::warn!(server = %cache_key, "using WebSocket fallback");
+						WEBSOCKET_WON.lock().unwrap().insert(cache_key);
+					}
+					Some(session)
+				}
+				Err(err) => {
+					tracing::debug!(%err, "WebSocket connection failed");
+					None
+				}
+			}
+		};
+
+		// Race the connection futures
+		tokio::select! {
+			Some(quic_session) = quic_handle => Ok(quic_session.into()),
+			Some(ws_session) = ws_handle => Ok(ws_session.into()),
+			// If both attempts fail, return the QUIC error (if available)
+			else => Err(quic_error.unwrap_or_else(|| anyhow::Error::msg("unknown error"))),
+		}
 	}
 
 	async fn connect_quic(&self, mut url: Url) -> anyhow::Result<web_transport_quinn::Session> {
@@ -204,6 +333,44 @@ impl Client {
 			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => web_transport_quinn::Session::raw(connection, url),
 			_ => unreachable!("ALPN was checked above"),
 		};
+
+		Ok(session)
+	}
+
+	async fn connect_websocket(&self, mut url: Url) -> anyhow::Result<web_transport_ws::Session> {
+		// Convert URL scheme: http:// -> ws://, https:// -> wss://
+		let ws_url = match url.scheme() {
+			"http" => {
+				url.set_scheme("ws").expect("failed to set scheme");
+				url
+			}
+			"https" | "moql" | "moqt" => {
+				url.set_scheme("wss").expect("failed to set scheme");
+				url
+			}
+			"ws" | "wss" => url,
+			_ => anyhow::bail!("unsupported URL scheme for WebSocket: {}", url.scheme()),
+		};
+
+		tracing::debug!(url = %ws_url, "connecting via WebSocket");
+
+		// Connect using tokio-tungstenite
+		let (ws_stream, _response) = tokio_tungstenite::connect_async_with_config(
+			ws_url.as_str(),
+			Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+				max_message_size: Some(64 << 20), // 64 MB
+				max_frame_size: Some(16 << 20),   // 16 MB
+				accept_unmasked_frames: false,
+				..Default::default()
+			}),
+			false, // disable_nagle
+		)
+		.await
+		.context("failed to connect WebSocket")?;
+
+		// Wrap WebSocket in WebTransport compatibility layer
+		// Similar to what the relay does: web_transport_ws::Session::new(socket, true)
+		let session = web_transport_ws::Session::new(ws_stream, false);
 
 		Ok(session)
 	}

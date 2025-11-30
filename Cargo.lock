@@ -1785,7 +1785,9 @@ dependencies = [
  "console-subscriber",
  "futures",
  "hex",
+ "humantime",
  "moq-lite",
+ "once_cell",
  "parking_lot",
  "quinn",
  "rcgen",
@@ -1798,10 +1800,15 @@ dependencies = [
  "serde_with",
  "time",
  "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "url",
+ "web-transport-any",
  "web-transport-quinn",
+ "web-transport-trait",
+ "web-transport-ws",
 ]
 
 [[package]]
@@ -3746,6 +3753,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-transport-any"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "web-transport-quinn",
+ "web-transport-trait",
+ "web-transport-ws",
+]
+
+[[package]]
 name = "web-transport-proto"
 version = "0.3.0"
 dependencies = [
@@ -4253,7 +4270,3 @@ dependencies = [
  "quote",
  "syn",
 ]
-
-[[patch.unused]]
-name = "web-transport-any"
-version = "0.1.0"
