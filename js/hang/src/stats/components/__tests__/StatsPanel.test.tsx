@@ -1,73 +1,67 @@
-/**
- * StatsPanel component tests
- * Tests panel rendering and item list generation
- */
-
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render } from "solid-js/web";
 import { StatsPanel } from "../StatsPanel";
 
 describe("StatsPanel", () => {
-    it("renders with correct base class", () => {
-        const container = document.createElement("div");
+	let container: HTMLDivElement;
 
-        render(() => <StatsPanel />, container);
+	beforeEach(() => {
+		container = document.createElement("div");
+		document.body.appendChild(container);
+	});
 
-        const panel = container.querySelector(".stats__panel");
-        expect(panel).toBeTruthy();
-    });
+	afterEach(() => {
+		document.body.removeChild(container);
+	});
 
-    it("renders all metric items", () => {
-        const container = document.createElement("div");
+	it("renders with correct base class", () => {
+		render(() => <StatsPanel />, container);
 
-        render(() => <StatsPanel />, container);
+		const panel = container.querySelector(".stats__panel");
+		expect(panel).toBeTruthy();
+	});
 
-        const items = container.querySelectorAll(".stats__item");
-        expect(items.length).toBe(4); // network, video, audio, buffer
-    });
+	it("renders all metric items", () => {
+		render(() => <StatsPanel />, container);
 
-    it("renders items with correct icon types", () => {
-        const expectedIcons = ["network", "video", "audio", "buffer"];
-        const container = document.createElement("div");
+		const items = container.querySelectorAll(".stats__item");
+		expect(items.length).toBe(4);
+	});
 
-        render(() => <StatsPanel />, container);
+	it("renders items with correct icon types", () => {
+		const expectedIcons = ["network", "video", "audio", "buffer"];
+		render(() => <StatsPanel />, container);
 
-        const items = container.querySelectorAll(".stats__item");
-        items.forEach((item, index) => {
-            expect(item.classList.contains(`stats__item--${expectedIcons[index]}`)).toBe(true);
-        });
-    });
+		const items = container.querySelectorAll(".stats__item");
+		items.forEach((item, index) => {
+			expect(item.classList.contains(`stats__item--${expectedIcons[index]}`)).toBe(true);
+		});
+	});
 
-    it("renders each item with icon wrapper", () => {
-        const container = document.createElement("div");
+	it("renders each item with icon wrapper", () => {
+		render(() => <StatsPanel />, container);
 
-        render(() => <StatsPanel />, container);
+		const wrappers = container.querySelectorAll(".stats__icon-wrapper");
+		expect(wrappers.length).toBe(4);
+	});
 
-        const wrappers = container.querySelectorAll(".stats__icon-wrapper");
-        expect(wrappers.length).toBe(4);
-    });
+	it("renders each item with detail section", () => {
+		render(() => <StatsPanel />, container);
 
-    it("renders each item with detail section", () => {
-        const container = document.createElement("div");
+		const details = container.querySelectorAll(".stats__item-detail");
+		expect(details.length).toBe(4);
+	});
 
-        render(() => <StatsPanel />, container);
+	it("maintains correct DOM structure", () => {
+		render(() => <StatsPanel />, container);
 
-        const details = container.querySelectorAll(".stats__item-detail");
-        expect(details.length).toBe(4);
-    });
+		const panel = container.querySelector(".stats__panel");
+		const items = panel?.querySelectorAll(".stats__item");
 
-    it("maintains correct DOM structure", () => {
-        const container = document.createElement("div");
-
-        render(() => <StatsPanel />, container);
-
-        const panel = container.querySelector(".stats__panel");
-        const items = panel?.querySelectorAll(".stats__item");
-
-        expect(panel?.children.length).toBe(4);
-        items?.forEach((item) => {
-            expect(item.querySelector(".stats__icon-wrapper")).toBeTruthy();
-            expect(item.querySelector(".stats__item-detail")).toBeTruthy();
-        });
-    });
+		expect(panel?.children.length).toBe(4);
+		items?.forEach((item) => {
+			expect(item.querySelector(".stats__icon-wrapper")).toBeTruthy();
+			expect(item.querySelector(".stats__item-detail")).toBeTruthy();
+		});
+	});
 });

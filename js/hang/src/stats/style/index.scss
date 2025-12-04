@@ -2,6 +2,17 @@
 @use "./colors.scss" as colors;
 @use "./spacing.scss" as spacing;
 
+@mixin flex($direction: row, $align: center, $justify: center) {
+    display: flex;
+    align-items: $align;
+    justify-content: $justify;
+    flex-direction: $direction;
+}
+
+@mixin text-base {
+    font-family: "Segoe UI", Roboto, sans-serif;
+}
+
 hang-stats {
     display: flex;
     position: absolute;
@@ -18,19 +29,14 @@ hang-stats {
             position: absolute;
             width: 100%;
             height: 100%;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: flex-start;
+            @include flex(column, center, flex-start);
         }
 
-        .stats__toggle {
+        .stats__button {
             position: absolute;
             top: spacing.$lg;
             right: spacing.$lg;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            @include flex();
             width: 40px;
             height: 40px;
             padding: spacing.$sm;
@@ -56,32 +62,37 @@ hang-stats {
 
         .stats__panel {
             position: absolute;
-            display: flex;
-            flex-direction: row;
+            @include flex(row, flex-start);
             flex-wrap: wrap;
             gap: spacing.$md;
-            max-width: 280px;
+            max-width: 240px;
             width: 100%;
             background-color: colors.$black-alpha-85;
             border: 1px solid colors.$gray-light-alpha-25;
             border-radius: 8px;
-            padding: spacing.$xl;
+            padding: spacing.$md;
             pointer-events: auto;
             top: 8px;
 
+            @container (width > 480px) and (width <=768px) {
+                max-width: 360px;
+                padding: spacing.$xl;
+            }
+
             @container (width > 768px) {
                 max-width: 600px;
+                padding: spacing.$xl;
             }
 
             .stats__item {
-                display: flex;
-                flex-direction: row;
+                @include flex(row, flex-start, flex-start);
+                height: -webkit-fill-available;
                 column-gap: spacing.$sm;
                 flex-basis: calc(50% - spacing.$md);
                 flex-grow: 1;
                 flex-shrink: 1;
 
-                @container (width > 768px) {
+                @container (width > 480px) {
                     flex-basis: calc(25% - spacing.$md);
                 }
 
@@ -105,50 +116,49 @@ hang-stats {
                 }
 
                 .stats__icon-wrapper {
+                    display: none;
                     padding: spacing.$sm;
                     border-radius: 8px;
                     width: fit-content;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
+                    height: fit-content;
                     flex-shrink: 0;
+
+                    @container (width > 480px) {
+                        @include flex();
+                    }
 
                     .stats__icon {
                         width: 24px;
                         height: 24px;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
+                        @include flex();
                     }
 
-                    .stats__icon svg {
+                    svg {
                         width: 100%;
                         height: 100%;
                     }
                 }
 
                 .stats__item-detail {
-                    display: flex;
-                    flex-direction: column;
-                    justify-content: space-evenly;
+                    @include flex(column, flex-start, space-evenly);
                     gap: spacing.$xs;
-
 
                     .stats__item-text {
                         font-size: 12px;
                         font-weight: 500;
-                        line-height: 12px;
                         text-transform: capitalize;
                         color: colors.$gray-light;
-                        font-family: "Segoe UI", Roboto, sans-serif;
+                        @include text-base;
                         letter-spacing: 1px;
+                        line-height: 12px;
                     }
 
                     .stats__item-data {
                         font-size: 16px;
                         font-weight: bold;
-                        line-height: 16px;
-                        font-family: "Segoe UI", Roboto, monospace;
+                        @include text-base;
+                        white-space: pre-wrap;
+                        line-height: 1.5;
                     }
                 }
             }

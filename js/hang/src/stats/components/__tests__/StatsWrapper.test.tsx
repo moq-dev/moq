@@ -1,78 +1,70 @@
-/**
- * StatsWrapper component tests
- * Tests visibility state management and component composition
- */
-
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render } from "solid-js/web";
 import { StatsWrapper } from "../StatsWrapper";
 
 describe("StatsWrapper", () => {
-    it("renders with wrapper class", () => {
-        const container = document.createElement("div");
+	let container: HTMLDivElement;
 
-        render(() => <StatsWrapper />, container);
+	beforeEach(() => {
+		container = document.createElement("div");
+		document.body.appendChild(container);
+	});
 
-        const wrapper = container.querySelector(".stats__wrapper");
-        expect(wrapper).toBeTruthy();
-    });
+	afterEach(() => {
+		document.body.removeChild(container);
+	});
 
-    it("renders button component", () => {
-        const container = document.createElement("div");
+	it("renders with wrapper class", () => {
+		render(() => <StatsWrapper />, container);
 
-        render(() => <StatsWrapper />, container);
+		const wrapper = container.querySelector(".stats__wrapper");
+		expect(wrapper).toBeTruthy();
+	});
 
-        const button = container.querySelector(".stats__toggle");
-        expect(button).toBeTruthy();
-    });
+	it("renders button component", () => {
+		render(() => <StatsWrapper />, container);
 
-    it("initially hides stats panel", () => {
-        const container = document.createElement("div");
+		const button = container.querySelector(".stats__button");
+		expect(button).toBeTruthy();
+	});
 
-        render(() => <StatsWrapper />, container);
+	it("initially hides stats panel", () => {
+		render(() => <StatsWrapper />, container);
 
-        const panel = container.querySelector(".stats__panel");
-        expect(panel).toBeFalsy();
-    });
+		const panel = container.querySelector(".stats__panel");
+		expect(panel).toBeFalsy();
+	});
 
-    it("has button with correct aria attributes", () => {
-        const container = document.createElement("div");
+	it("has button with correct aria attributes", () => {
+		render(() => <StatsWrapper />, container);
 
-        render(() => <StatsWrapper />, container);
+		const button = container.querySelector("button");
+		expect(button?.getAttribute("aria-pressed")).toBe("false");
+		expect(button?.getAttribute("aria-label")).toBe("Show stats");
+	});
 
-        const button = container.querySelector("button");
-        expect(button?.getAttribute("aria-pressed")).toBe("false");
-        expect(button?.getAttribute("aria-label")).toBe("Show stats");
-    });
+	it("button has correct accessibility attributes", () => {
+		render(() => <StatsWrapper />, container);
 
-    it("button has correct accessibility attributes", () => {
-        const container = document.createElement("div");
+		const button = container.querySelector("button");
+		expect(button?.hasAttribute("aria-label")).toBe(true);
+		expect(button?.hasAttribute("aria-pressed")).toBe(true);
+	});
 
-        render(() => <StatsWrapper />, container);
+	it("renders with correct structure", () => {
+		render(() => <StatsWrapper />, container);
 
-        const button = container.querySelector("button");
-        expect(button?.hasAttribute("aria-label")).toBe(true);
-        expect(button?.hasAttribute("aria-pressed")).toBe(true);
-    });
+		const wrapper = container.querySelector(".stats__wrapper");
+		const button = wrapper?.querySelector(".stats__button");
 
-    it("renders with correct structure", () => {
-        const container = document.createElement("div");
+		expect(wrapper).toBeTruthy();
+		expect(button).toBeTruthy();
+	});
 
-        render(() => <StatsWrapper />, container);
+	it("button is clickable", () => {
+		render(() => <StatsWrapper />, container);
 
-        const wrapper = container.querySelector(".stats__wrapper");
-        const button = wrapper?.querySelector(".stats__toggle");
-
-        expect(wrapper?.children.length).toBeGreaterThan(0);
-        expect(button).toBeTruthy();
-    });
-
-    it("button is clickable", () => {
-        const container = document.createElement("div");
-
-        render(() => <StatsWrapper />, container);
-
-        const button = container.querySelector("button") as HTMLElement;
-        expect(() => button.click()).not.toThrow();
-    });
+		const button = container.querySelector("button") as HTMLElement;
+		expect(() => button.click()).not.toThrow();
+	});
 });

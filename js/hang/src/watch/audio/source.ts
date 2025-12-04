@@ -40,6 +40,9 @@ export class Source {
 	#sampleRate = new Signal<number | undefined>(undefined);
 	readonly sampleRate: Getter<number | undefined> = this.#sampleRate;
 
+	#bitrate = new Signal<number | undefined>(undefined);
+	readonly bitrate: Getter<number | undefined> = this.#bitrate;
+
 	catalog = new Signal<Catalog.Audio | undefined>(undefined);
 	config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 
@@ -165,6 +168,11 @@ export class Source {
 		});
 		effect.cleanup(() => consumer.close());
 
+		let totalBytes = 0;
+		let lastTimestamp = 0;
+		let lastCalculation = 0;
+		const bitrateSmoothingTime = 250;
+
 		effect.spawn(async () => {
 			const loaded = await libav.polyfill();
 			if (!loaded) return; // cancelled
@@ -184,6 +192,20 @@ export class Source {
 			for (;;) {
 				const frame = await consumer.decode();
 				if (!frame) break;
+
+				totalBytes += frame.data.byteLength;
+				const now = performance.now();
+
+				if (now - lastCalculation >= bitrateSmoothingTime) {
+					const elapsedMs = now - lastTimestamp;
+					if (elapsedMs > 0 && lastTimestamp !== 0) {
+						const bitrate = (totalBytes * 8 * 1000) / elapsedMs;
+						this.#bitrate.set(bitrate);
+					}
+					totalBytes = 0;
+					lastTimestamp = now;
+					lastCalculation = now;
+				}
 
 				const chunk = new EncodedAudioChunk({
 					type: frame.keyframe ? "key" : "delta",

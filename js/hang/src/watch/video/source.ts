@@ -71,6 +71,10 @@ export class Source {
 	// Expose the current frame to render as a signal
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
+	// Real-time FPS calculation
+	#fps = new Signal<number | undefined>(undefined);
+	readonly fps = this.#fps as Signal<number | undefined>;
+
 	// The target latency in milliseconds.
 	latency: Signal<Time.Milli>;
 
@@ -219,6 +223,10 @@ export class Source {
 			}
 		});
 
+		let lastFrameTimestamp: number | null = null;
+		let recentFpsValues: number[] = [];
+		const fpsSmoothing = 5;
+
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				// Insert into a queue so we can perform ordered sleeps.
@@ -241,6 +249,25 @@ export class Source {
 			for (;;) {
 				const { value: frame } = await reader.read();
 				if (!frame) break;
+
+				const now = performance.now() * 1000;
+				if (lastFrameTimestamp !== null) {
+					const deltaUs = now - lastFrameTimestamp;
+					if (deltaUs > 0) {
+						const instantFps = 1_000_000 / deltaUs;
+						recentFpsValues.push(instantFps);
+
+						if (recentFpsValues.length > fpsSmoothing) {
+							recentFpsValues.shift();
+						}
+
+						if (recentFpsValues.length > 0) {
+							const avgFps = recentFpsValues.reduce((a, b) => a + b, 0) / recentFpsValues.length;
+							this.#fps.set(avgFps);
+						}
+					}
+				}
+				lastFrameTimestamp = now;
 
 				// Sleep until it's time to decode the next frame.
 				const ref = performance.now() - frame.timestamp / 1000;

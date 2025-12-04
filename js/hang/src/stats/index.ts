@@ -1,7 +1,6 @@
 import HangStats from "./element";
 
 export default HangStats;
-export type { Icons } from "./constants";
 
 customElements.define("hang-stats", HangStats);
 
