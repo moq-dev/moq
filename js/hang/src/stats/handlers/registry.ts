@@ -4,6 +4,9 @@ import { AudioHandler } from "./audio";
 import { BufferHandler } from "./buffer";
 import { NetworkHandler } from "./network";
 
+/**
+ * Registry mapping metric types to their handler implementations
+ */
 export const handlerRegistry: Record<Icons, HandlerConstructor> = {
 	video: VideoHandler,
 	audio: AudioHandler,
@@ -11,6 +14,11 @@ export const handlerRegistry: Record<Icons, HandlerConstructor> = {
 	network: NetworkHandler,
 };
 
+/**
+ * Get handler class for a metric type
+ * @param icon - Metric type identifier
+ * @returns Handler constructor or undefined if not found
+ */
 export function getHandlerClass(icon: Icons): HandlerConstructor | undefined {
 	return handlerRegistry[icon];
 }

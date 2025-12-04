@@ -1,11 +1,20 @@
 import type { HandlerContext } from "../types";
 import { BaseHandler } from "./base";
 
+/**
+ * Handler for video stream metrics (resolution, frame rate)
+ */
 export class VideoHandler extends BaseHandler {
+	/** Display context for updating metrics */
 	private context: HandlerContext | undefined;
+	/** Polling interval ID */
 	private updateInterval: number | undefined;
+	/** Bound callback for display updates */
 	private updateDisplay = () => this.updateDisplayData();
 
+	/**
+	 * Initialize video handler with polling interval
+	 */
 	setup(context: HandlerContext): void {
 		this.context = context;
 		const video = this.props.video;
@@ -19,6 +28,9 @@ export class VideoHandler extends BaseHandler {
 		this.updateDisplayData();
 	}
 
+	/**
+	 * Calculate and display current video metrics
+	 */
 	private updateDisplayData(): void {
 		if (!this.context || !this.props.video) {
 			return;
@@ -37,6 +49,9 @@ export class VideoHandler extends BaseHandler {
 		this.context.setDisplayData(parts.join("\n"));
 	}
 
+	/**
+	 * Clean up polling interval
+	 */
 	override cleanup(): void {
 		if (this.updateInterval !== undefined) {
 			clearInterval(this.updateInterval);

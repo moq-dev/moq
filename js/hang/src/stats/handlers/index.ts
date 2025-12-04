@@ -1,3 +1,6 @@
+/**
+ * Public exports for all handlers and utilities
+ */
 export { BaseHandler } from "./base";
 export { VideoHandler } from "./video";
 export { AudioHandler } from "./audio";

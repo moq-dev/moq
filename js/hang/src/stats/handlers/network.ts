@@ -1,29 +1,56 @@
 import type { HandlerContext } from "../types";
 import { BaseHandler } from "./base";
 
+/**
+ * Extended Navigator interface with connection property
+ */
 interface NavigatorWithConnection extends Navigator {
+	/** Standard Network Information API */
 	connection?: NetworkInformation;
+	/** Mozilla variant */
 	mozConnection?: NetworkInformation;
+	/** WebKit variant */
 	webkitConnection?: NetworkInformation;
 }
 
+/**
+ * Network information interface from navigator.connection
+ */
 interface NetworkInformation {
+	/** Connection type (wifi, cellular, etc) */
 	type?: string;
+	/** Effective connection speed category */
 	effectiveType?: "slow-2g" | "2g" | "3g" | "4g";
+	/** Downlink speed in Mbps */
 	downlink?: number;
+	/** Round-trip time in ms */
 	rtt?: number;
+	/** User has enabled data saver mode */
 	saveData?: boolean;
+	/** Listen for connection changes */
 	addEventListener?(type: string, listener: () => void): void;
+	/** Stop listening for connection changes */
 	removeEventListener?(type: string, listener: () => void): void;
 }
 
+/**
+ * Handler for network metrics (connection type, bandwidth, latency)
+ */
 export class NetworkHandler extends BaseHandler {
+	/** Display context for updating metrics */
 	private context: HandlerContext | undefined;
+	/** Network information from navigator.connection */
 	private networkInfo?: NetworkInformation;
+	/** Polling interval ID */
 	private updateInterval?: number;
+	/** Bound callback for display updates */
 	private updateDisplay = () => this.updateDisplayData();
+	/** Bound callback for online/offline changes */
 	private onlineStatusChanged = () => this.updateDisplayData();
 
+	/**
+	 * Initialize network handler with connection listeners
+	 */
 	setup(context: HandlerContext): void {
 		this.context = context;
 
@@ -41,6 +68,9 @@ export class NetworkHandler extends BaseHandler {
 		this.updateDisplayData();
 	}
 
+	/**
+	 * Clean up event listeners and polling interval
+	 */
 	override cleanup(): void {
 		if (this.networkInfo?.removeEventListener) {
 			this.networkInfo.removeEventListener("change", this.updateDisplay);
@@ -53,6 +83,9 @@ export class NetworkHandler extends BaseHandler {
 		super.cleanup();
 	}
 
+	/**
+	 * Calculate and display current network metrics
+	 */
 	private updateDisplayData(): void {
 		if (!this.context) {
 			return;
@@ -68,6 +101,10 @@ export class NetworkHandler extends BaseHandler {
 		this.context.setDisplayData(parts.length > 0 ? parts.join("\n") : "N/A");
 	}
 
+	/**
+	 * Get formatted connection type
+	 * @returns Connection type or null if unavailable
+	 */
 	private getConnectionType(): string | null {
 		if (!navigator.onLine) {
 			return "offline";
@@ -92,6 +129,10 @@ export class NetworkHandler extends BaseHandler {
 		return type ? type.charAt(0).toUpperCase() + type.slice(1) : null;
 	}
 
+	/**
+	 * Get formatted bandwidth in Mbps or Gbps
+	 * @returns Bandwidth string or null if unavailable
+	 */
 	private getEffectiveBandwidth(): string | null {
 		const downlink = this.networkInfo?.downlink;
 		if (!downlink || downlink <= 0) return null;
@@ -105,11 +146,19 @@ export class NetworkHandler extends BaseHandler {
 		return `${(downlink * 1000).toFixed(0)}Kbps`;
 	}
 
+	/**
+	 * Get formatted round-trip latency
+	 * @returns Latency string or null if unavailable
+	 */
 	private getLatency(): string | null {
 		const rtt = this.networkInfo?.rtt;
 		return rtt && rtt > 0 ? `${rtt}ms` : null;
 	}
 
+	/**
+	 * Get data saver mode status
+	 * @returns Data saver indicator or null if disabled
+	 */
 	private getSaveDataStatus(): string | null {
 		return this.networkInfo?.saveData ? "Save-Data" : null;
 	}

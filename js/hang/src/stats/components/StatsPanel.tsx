@@ -3,8 +3,14 @@ import { PANEL_SVGS } from "./icons";
 import { StatsItem } from "./StatsItem";
 import type { Icons, HandlerProps } from "../types";
 
+/**
+ * Props for stats panel component
+ */
 interface StatsPanelProps extends HandlerProps {}
 
+/**
+ * Panel displaying all metrics in a grid layout
+ */
 export const StatsPanel = (props: StatsPanelProps) => {
 	return (
 		<div class="stats__panel">

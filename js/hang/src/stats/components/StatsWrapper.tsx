@@ -4,6 +4,9 @@ import { StatsPanel } from "./StatsPanel";
 import { useMetrics } from "../context";
 import { BUTTON_SVG } from "./icons";
 
+/**
+ * Root wrapper component managing visibility state and layout
+ */
 export const StatsWrapper = () => {
     const [isVisible, setIsVisible] = createSignal(false);
     const metrics = useMetrics();

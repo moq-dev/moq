@@ -1,11 +1,20 @@
 import type { HandlerContext } from "../types";
 import { BaseHandler } from "./base";
 
+/**
+ * Handler for audio stream metrics (channels, bitrate, codec)
+ */
 export class AudioHandler extends BaseHandler {
+	/** Display context for updating metrics */
 	private context: HandlerContext | undefined;
+	/** Polling interval ID */
 	private updateInterval: number | undefined;
+	/** Bound callback for display updates */
 	private updateDisplay = () => this.updateDisplayData();
 
+	/**
+	 * Initialize audio handler with polling interval
+	 */
 	setup(context: HandlerContext): void {
 		this.context = context;
 		const audio = this.props.audio;
@@ -20,6 +29,9 @@ export class AudioHandler extends BaseHandler {
 		this.updateDisplayData();
 	}
 
+	/**
+	 * Calculate and display current audio metrics
+	 */
 	private updateDisplayData(): void {
 		if (!this.context || !this.props.audio) {
 			return;
@@ -59,6 +71,9 @@ export class AudioHandler extends BaseHandler {
 		this.context.setDisplayData(parts.length > 0 ? parts.join("\n") : "N/A");
 	}
 
+	/**
+	 * Clean up polling interval
+	 */
 	override cleanup(): void {
 		if (this.updateInterval !== undefined) {
 			clearInterval(this.updateInterval);
