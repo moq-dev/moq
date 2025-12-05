@@ -184,7 +184,7 @@ The component is optimized for minimal overhead:
 - **Reactive Updates** - Uses fine-grained reactivity; only affected components re-render on data changes
 - **Efficient Subscriptions** - Handlers only subscribe to signals they need; unsubscribe on cleanup
 - **No Polling** - Event-driven architecture using signal subscriptions, not timers or interval polling
-- **Virtual DOM** - Built with SolidJS which uses a highly efficient virtual DOM implementation
+- **Direct DOM Updates** - Built with SolidJS which compiles to direct DOM manipulations without a virtual DOM
 
 Typical memory footprint: ~50-100KB including all handlers and UI components.
 

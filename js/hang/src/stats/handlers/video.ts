@@ -41,7 +41,7 @@ export class VideoHandler extends BaseHandler {
 
 		const parts = [
 			display?.width && display?.height ? `${display.width}x${display.height}` : null,
-			fps ? `@${fps.toFixed(1)} fps` : "N/A",
+			typeof fps === "number" ? `@${fps.toFixed(1)} fps` : "N/A",
 		].filter((part): part is string => part !== null);
 
 		this.context.setDisplayData(parts.join("\n"));

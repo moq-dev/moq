@@ -36,7 +36,7 @@ describe("NetworkHandler", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.clearAllMocks();
-		handler.cleanup();
+		handler?.cleanup();
 	});
 
 	it("should display N/A initially when no connection info", () => {
