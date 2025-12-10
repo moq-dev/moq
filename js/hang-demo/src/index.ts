@@ -1,8 +1,8 @@
 import "./highlight";
 import "@moq/hang-ui/watch/element";
 
-import HangSupport from "@kixelated/hang/support/element";
-import HangWatch from "@kixelated/hang/watch/element";
+import HangSupport from "@moq/hang/support/element";
+import HangWatch from "@moq/hang/watch/element";
 
 export { HangSupport, HangWatch };
 
