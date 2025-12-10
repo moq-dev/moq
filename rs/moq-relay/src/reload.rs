@@ -43,7 +43,7 @@ impl ConfigReloader {
 			let _ = tx.blocking_send(res);
 		})?;
 
-		watcher.configure(Config::default().with_follow_symlinks(true))?;
+		watcher.configure(Config::default().with_follow_symlinks(false))?;
 
 		for path in &self.paths {
 			watcher.watch(path, RecursiveMode::NonRecursive)?;
