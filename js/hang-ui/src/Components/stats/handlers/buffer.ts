@@ -1,4 +1,4 @@
-import type { BufferStatus, HandlerContext, SyncStatus } from "../types";
+import type { HandlerContext } from "../types";
 import { BaseHandler } from "./base";
 
 /**
@@ -7,8 +7,6 @@ import { BaseHandler } from "./base";
 export class BufferHandler extends BaseHandler {
 	/** Display context for updating metrics */
 	private context: HandlerContext | undefined;
-	/** Bound callback for display updates */
-	private updateDisplay = () => this.updateDisplayData();
 
 	/**
 	 * Initialize buffer handler with signal subscriptions
@@ -22,9 +20,18 @@ export class BufferHandler extends BaseHandler {
 			return;
 		}
 
-		this.subscribe(video.source.syncStatus, this.updateDisplay);
-		this.subscribe(video.source.bufferStatus, this.updateDisplay);
-		this.subscribe(video.source.latency, this.updateDisplay);
+		// Subscribe to signal changes using Effect
+		this.signals.effect(() => {
+			if (video.source.syncStatus) {
+				video.source.syncStatus.subscribe?.(() => this.updateDisplayData());
+			}
+			if (video.source.bufferStatus) {
+				video.source.bufferStatus.subscribe?.(() => this.updateDisplayData());
+			}
+			if (video.source.latency) {
+				video.source.latency.subscribe?.(() => this.updateDisplayData());
+			}
+		});
 
 		this.updateDisplayData();
 	}
@@ -37,9 +44,9 @@ export class BufferHandler extends BaseHandler {
 			return;
 		}
 
-		const syncStatus = this.peekSignal<SyncStatus>(this.props.video?.source.syncStatus);
-		const bufferStatus = this.peekSignal<BufferStatus>(this.props.video?.source.bufferStatus);
-		const latency = this.peekSignal<number>(this.props.video.source.latency);
+		const syncStatus = this.props.video.source.syncStatus.peek();
+		const bufferStatus = this.props.video.source.bufferStatus.peek();
+		const latency = this.props.video.source.latency.peek();
 
 		const isLatencyValid = latency !== null && latency !== undefined && latency > 0;
 		const bufferPercentage =

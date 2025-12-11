@@ -172,7 +172,9 @@ export class Source {
 		});
 		effect.cleanup(() => consumer.close());
 
-		let totalBytes = 0;
+		// Persist totalBytes across rendition changes
+		const currentStats = this.#stats.peek() ?? { bytesReceived: 0 };
+		let totalBytes = currentStats.bytesReceived;
 
 		effect.spawn(async () => {
 			const loaded = await libav.polyfill();

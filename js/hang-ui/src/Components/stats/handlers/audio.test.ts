@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AudioConfig, AudioSource, AudioStats, HandlerContext, HandlerProps } from "../types";
 import { AudioHandler } from "./audio";
 
+declare global {
+	var __advanceTime: (ms: number) => void;
+}
+
 describe("AudioHandler", () => {
 	let handler: AudioHandler;
 	let context: HandlerContext;
@@ -25,6 +29,17 @@ describe("AudioHandler", () => {
 			setInterval: mockSetInterval,
 			clearInterval: mockClearInterval,
 		} as unknown as typeof window;
+
+		// Mock performance.now()
+		let mockTime = 0;
+		global.performance = {
+			now: vi.fn(() => mockTime),
+		} as unknown as Performance;
+
+		// Helper to advance mock time
+		global.__advanceTime = (ms: number) => {
+			mockTime += ms;
+		};
 	});
 
 	afterEach(() => {
@@ -43,6 +58,7 @@ describe("AudioHandler", () => {
 		const audioConfig: AudioConfig = {
 			sampleRate: 48000,
 			numberOfChannels: 2,
+			bitrate: 128000,
 			codec: "opus",
 		};
 
@@ -76,6 +92,7 @@ describe("AudioHandler", () => {
 		const audioConfig: AudioConfig = {
 			sampleRate: 48000,
 			numberOfChannels: 2,
+			bitrate: 128000,
 			codec: "opus",
 		};
 
@@ -109,13 +126,15 @@ describe("AudioHandler", () => {
 		// Simulate bytesReceived increasing: 6250 bytes delta = 200 kbps at 250ms interval
 		// (6250 bytes * 8 bits/byte * 4) / 1000 = 200 kbps
 		peekFn.mockReturnValue({ bytesReceived: 11250 } as AudioStats);
+		global.__advanceTime(250);
 		intervalCallback?.(250);
-		expect(setDisplayData).toHaveBeenCalledWith("48.0kHz\n2ch\n200kbps\nopus");
+		expect(setDisplayData).toHaveBeenNthCalledWith(2, "48.0kHz\n2ch\n200kbps\nopus");
 
 		// Increase bytes more: delta 3125 = 100 kbps
 		peekFn.mockReturnValue({ bytesReceived: 14375 } as AudioStats);
+		global.__advanceTime(250);
 		intervalCallback?.(250);
-		expect(setDisplayData).toHaveBeenCalledWith("48.0kHz\n2ch\n100kbps\nopus");
+		expect(setDisplayData).toHaveBeenNthCalledWith(3, "48.0kHz\n2ch\n100kbps\nopus");
 	});
 
 	it("should display N/A when active or config is missing", () => {
@@ -147,6 +166,8 @@ describe("AudioHandler", () => {
 		const audioConfig: AudioConfig = {
 			sampleRate: 44100,
 			numberOfChannels: 1,
+			bitrate: 128000,
+			codec: "opus",
 		};
 
 		const audio: AudioSource = {
@@ -170,13 +191,14 @@ describe("AudioHandler", () => {
 		handler = new AudioHandler(props);
 		handler.setup(context);
 
-		expect(setDisplayData).toHaveBeenCalledWith("44.1kHz\n1ch\nN/A");
+		expect(setDisplayData).toHaveBeenCalledWith("44.1kHz\n1ch\nN/A\nopus");
 	});
 
 	it("should format Mbps for high bitrates", () => {
 		const audioConfig: AudioConfig = {
 			sampleRate: 48000,
 			numberOfChannels: 2,
+			bitrate: 128000,
 			codec: "opus",
 		};
 
@@ -208,9 +230,10 @@ describe("AudioHandler", () => {
 
 		// Simulate 5 Mbps: 156250 bytes delta = 5000000 bits/s = 5 Mbps
 		peekFn.mockReturnValue({ bytesReceived: 204250 } as AudioStats);
+		global.__advanceTime(250);
 		intervalCallback?.(250);
 
-		expect(setDisplayData).toHaveBeenCalledWith("48.0kHz\n2ch\n5.0Mbps\nopus");
+		expect(setDisplayData).toHaveBeenNthCalledWith(2, "48.0kHz\n2ch\n5.0Mbps\nopus");
 	});
 
 	it("should cleanup interval on dispose", () => {

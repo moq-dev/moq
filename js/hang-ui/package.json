@@ -24,7 +24,8 @@
 		"release": "bun ../scripts/release.ts"
 	},
 	"peerDependencies": {
-		"@moq/hang": "workspace:^0.1.0"
+		"@moq/hang": "workspace:^0.1.0",
+		"@moq/signals": "workspace:^0.1.0"
 	},
 	"devDependencies": {
 		"@rollup/plugin-node-resolve": "^16.0.3",

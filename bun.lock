@@ -79,6 +79,7 @@
       },
       "peerDependencies": {
         "@moq/hang": "workspace:^0.1.0",
+        "@moq/signals": "workspace:^0.1.0",
       },
     },
     "js/lite": {

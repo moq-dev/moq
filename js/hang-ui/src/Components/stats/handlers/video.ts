@@ -1,4 +1,4 @@
-import type { HandlerContext, VideoResolution, VideoStats } from "../types";
+import type { HandlerContext } from "../types";
 import { BaseHandler } from "./base";
 
 /**
@@ -19,6 +19,8 @@ export class VideoHandler extends BaseHandler {
 	private previousTimestamp = 0;
 	/** Previous bytes received for bitrate calculation */
 	private previousBytesReceived = 0;
+	/** Previous timestamp for accurate elapsed time calculation in bitrate */
+	private previousWhen = 0;
 
 	/**
 	 * Initialize video handler with polling interval
@@ -33,6 +35,7 @@ export class VideoHandler extends BaseHandler {
 		}
 
 		this.updateInterval = window.setInterval(this.updateDisplay, VideoHandler.POLLING_INTERVAL_MS);
+		this.previousWhen = performance.now();
 		this.updateDisplayData();
 	}
 
@@ -44,8 +47,9 @@ export class VideoHandler extends BaseHandler {
 			return;
 		}
 
-		const display = this.peekSignal<VideoResolution>(this.props.video?.source.display);
-		const stats = this.peekSignal<VideoStats>(this.props.video?.source.stats);
+		const display = this.props.video.source.display.peek();
+		const stats = this.props.video.source.stats.peek();
+		const now = performance.now();
 
 		// Calculate FPS from frame count delta and timestamp delta
 		let fps: number | undefined;
@@ -64,7 +68,8 @@ export class VideoHandler extends BaseHandler {
 			const bytesDelta = stats.bytesReceived - this.previousBytesReceived;
 			// Only calculate bitrate if there's actual data change
 			if (bytesDelta > 0) {
-				const bitsPerSecond = bytesDelta * 8 * (1000 / VideoHandler.POLLING_INTERVAL_MS);
+				const elapsedMs = now - this.previousWhen;
+				const bitsPerSecond = bytesDelta * 8 * (1000 / elapsedMs);
 
 				if (bitsPerSecond >= 1_000_000) {
 					bitrate = `${(bitsPerSecond / 1_000_000).toFixed(1)}Mbps`;
@@ -81,6 +86,7 @@ export class VideoHandler extends BaseHandler {
 			this.previousFrameCount = stats.frameCount;
 			this.previousTimestamp = stats.timestamp;
 			this.previousBytesReceived = stats.bytesReceived;
+			this.previousWhen = now;
 		}
 
 		const { width, height } = display ?? {};

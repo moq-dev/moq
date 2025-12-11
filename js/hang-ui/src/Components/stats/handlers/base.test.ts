@@ -6,20 +6,10 @@ class TestHandler extends BaseHandler {
 	public setupCalled = false;
 	public setupContext: HandlerContext | undefined;
 	public cleanupCalled = false;
-	public mockUnsubscribe = vi.fn();
 
 	setup(context: HandlerContext): void {
 		this.setupCalled = true;
 		this.setupContext = context;
-		// Add a mock subscription to test cleanup
-		this.subscribe(
-			{
-				subscribe: () => {
-					return this.mockUnsubscribe;
-				},
-			},
-			() => {},
-		);
 	}
 
 	cleanup(): void {
@@ -52,13 +42,11 @@ describe("BaseHandler", () => {
 		expect(handler.setupContext).toEqual(context);
 	});
 
-	it("should cleanup subscriptions", () => {
+	it("should cleanup", () => {
 		handler.setup(context);
 		expect(handler.cleanupCalled).toBe(false);
-		expect(handler.mockUnsubscribe).not.toHaveBeenCalled();
 		handler.cleanup();
 		expect(handler.cleanupCalled).toBe(true);
-		expect(handler.mockUnsubscribe).toHaveBeenCalled();
 		expect(handler.setupCalled).toBe(true);
 	});
 

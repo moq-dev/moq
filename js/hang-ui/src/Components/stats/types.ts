@@ -53,9 +53,9 @@ export type AudioStats = {
  */
 export interface AudioSource {
 	source: {
-		active?: Signal<string>;
-		config?: Signal<AudioConfig>;
-		stats?: Signal<AudioStats>;
+		active: Signal<string>;
+		config: Signal<AudioConfig>;
+		stats: Signal<AudioStats>;
 	};
 }
 
@@ -63,10 +63,10 @@ export interface AudioSource {
  * Audio stream configuration properties
  */
 export interface AudioConfig {
-	sampleRate?: number;
-	numberOfChannels?: number;
-	bitrate?: number;
-	codec?: string;
+	sampleRate: number;
+	numberOfChannels: number;
+	bitrate: number;
+	codec: string;
 }
 
 /**
@@ -83,12 +83,11 @@ export type VideoStats = {
  */
 export interface VideoSource {
 	source: {
-		display?: Signal<VideoResolution>;
-		fps?: Signal<number>;
-		syncStatus?: Signal<SyncStatus>;
-		bufferStatus?: Signal<BufferStatus>;
-		latency?: Signal<number>;
-		stats?: Signal<VideoStats>;
+		display: Signal<VideoResolution>;
+		syncStatus: Signal<SyncStatus>;
+		bufferStatus: Signal<BufferStatus>;
+		latency: Signal<number>;
+		stats: Signal<VideoStats>;
 	};
 }
 

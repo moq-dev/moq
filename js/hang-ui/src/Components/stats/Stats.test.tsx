@@ -1,6 +1,6 @@
 import { createContext, createSignal } from "solid-js";
 import { render } from "solid-js/web";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Stats } from "./Stats";
 import type { HandlerProps } from "./types";
 
@@ -12,6 +12,22 @@ const createMockHandlerProps = (): HandlerProps => ({
 		source: {
 			active: {
 				peek: () => "audio-active",
+				subscribe: vi.fn(() => vi.fn()),
+			},
+			config: {
+				peek: () => ({
+					sampleRate: 48000,
+					numberOfChannels: 2,
+					bitrate: 128000,
+					codec: "aac",
+				}),
+				subscribe: vi.fn(() => vi.fn()),
+			},
+			stats: {
+				peek: () => ({
+					bytesReceived: 0,
+				}),
+				subscribe: vi.fn(() => vi.fn()),
 			},
 		},
 	},
@@ -22,6 +38,27 @@ const createMockHandlerProps = (): HandlerProps => ({
 					width: 1920,
 					height: 1080,
 				}),
+				subscribe: vi.fn(() => vi.fn()),
+			},
+			syncStatus: {
+				peek: () => ({ state: "ready" as const }),
+				subscribe: vi.fn(() => vi.fn()),
+			},
+			bufferStatus: {
+				peek: () => ({ state: "filled" as const }),
+				subscribe: vi.fn(() => vi.fn()),
+			},
+			latency: {
+				peek: () => 100,
+				subscribe: vi.fn(() => vi.fn()),
+			},
+			stats: {
+				peek: () => ({
+					frameCount: 0,
+					timestamp: 0,
+					bytesReceived: 0,
+				}),
+				subscribe: vi.fn(() => vi.fn()),
 			},
 		},
 	},
@@ -88,6 +125,22 @@ describe("Stats Component", () => {
 				source: {
 					active: {
 						peek: () => "audio-active",
+						subscribe: vi.fn(() => vi.fn()),
+					},
+					config: {
+						peek: () => ({
+							sampleRate: 48000,
+							numberOfChannels: 2,
+							bitrate: 128000,
+							codec: "aac",
+						}),
+						subscribe: vi.fn(() => vi.fn()),
+					},
+					stats: {
+						peek: () => ({
+							bytesReceived: 0,
+						}),
+						subscribe: vi.fn(() => vi.fn()),
 					},
 				},
 			},

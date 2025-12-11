@@ -1,4 +1,4 @@
-import type { AudioStats, HandlerContext } from "../types";
+import type { HandlerContext } from "../types";
 import { BaseHandler } from "./base";
 
 /**
@@ -15,6 +15,8 @@ export class AudioHandler extends BaseHandler {
 	private updateDisplay = () => this.updateDisplayData();
 	/** Previous bytes received for bitrate calculation */
 	private previousBytesReceived = 0;
+	/** Previous timestamp for accurate elapsed time calculation */
+	private previousWhen = 0;
 
 	/**
 	 * Initialize audio handler with polling interval
@@ -30,6 +32,7 @@ export class AudioHandler extends BaseHandler {
 
 		this.updateInterval = window.setInterval(this.updateDisplay, AudioHandler.POLLING_INTERVAL_MS);
 
+		this.previousWhen = performance.now();
 		this.updateDisplayData();
 	}
 
@@ -41,28 +44,25 @@ export class AudioHandler extends BaseHandler {
 			return;
 		}
 
-		const active = this.peekSignal<string>(this.props.audio.source.active);
+		const active = this.props.audio.source.active.peek();
 
-		const config = this.peekSignal<{
-			sampleRate?: number;
-			numberOfChannels?: number;
-			bitrate?: number;
-			codec?: string;
-		}>(this.props.audio.source.config);
+		const config = this.props.audio.source.config.peek();
 
-		const stats = this.peekSignal<AudioStats>(this.props.audio.source.stats);
+		const stats = this.props.audio.source.stats.peek();
 
 		if (!active || !config) {
 			this.context.setDisplayData("N/A");
 			return;
 		}
 
+		const now = performance.now();
 		let bitrate: string | undefined;
 		if (stats && this.previousBytesReceived > 0) {
 			const bytesDelta = stats.bytesReceived - this.previousBytesReceived;
 			// Only calculate bitrate if there's actual data change
 			if (bytesDelta > 0) {
-				const bitsPerSecond = bytesDelta * 8 * (1000 / AudioHandler.POLLING_INTERVAL_MS);
+				const elapsedMs = now - this.previousWhen;
+				const bitsPerSecond = bytesDelta * 8 * (1000 / elapsedMs);
 
 				if (bitsPerSecond >= 1_000_000) {
 					bitrate = `${(bitsPerSecond / 1_000_000).toFixed(1)}Mbps`;
@@ -77,6 +77,7 @@ export class AudioHandler extends BaseHandler {
 		// Always update previous values for next calculation, even on first call
 		if (stats) {
 			this.previousBytesReceived = stats.bytesReceived;
+			this.previousWhen = now;
 		}
 
 		const parts: string[] = [];

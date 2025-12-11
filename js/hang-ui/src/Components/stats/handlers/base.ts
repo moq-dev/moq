@@ -1,12 +1,12 @@
+import { Effect } from "@moq/signals";
 import type { HandlerContext, HandlerProps, IStatsHandler } from "../types";
-import { SubscriptionManager } from "../utils/subscription";
 
 /**
  * Base class for metric handlers providing common utilities
  */
 export abstract class BaseHandler implements IStatsHandler {
-	/** Manages signal subscriptions */
-	protected subscriptionManager = new SubscriptionManager();
+	/** Manages subscriptions lifecycle */
+	protected signals = new Effect();
 	/** Stream sources provided to handler */
 	protected props: HandlerProps;
 
@@ -28,27 +28,6 @@ export abstract class BaseHandler implements IStatsHandler {
 	 * Clean up subscriptions
 	 */
 	cleanup(): void {
-		this.subscriptionManager.unsubscribeAll();
-	}
-
-	/**
-	 * Get current value from signal
-	 * @param signal - Signal to peek
-	 * @returns Current signal value or undefined
-	 */
-	protected peekSignal<T>(signal: { peek: () => T | undefined } | undefined): T | undefined {
-		return signal?.peek?.();
-	}
-
-	/**
-	 * Subscribe to signal changes
-	 * @param signal - Signal to subscribe to
-	 * @param callback - Function called on signal change
-	 */
-	protected subscribe(
-		signal: { subscribe?: (callback: () => void) => () => void } | undefined,
-		callback: () => void,
-	): void {
-		this.subscriptionManager.subscribe(signal, callback);
+		this.signals.close();
 	}
 }

@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/lite";
-import { Effect, Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import { PRIORITY } from "../../publish/priority";
@@ -252,12 +252,11 @@ export class Source {
 				if (!frame) break;
 
 				// Track frame count and timestamp for FPS calculation in the UI
-				const currentStats = this.#stats.peek();
-				this.#stats.set({
-					frameCount: (currentStats?.frameCount ?? 0) + 1,
+				this.#stats.update((current) => ({
+					frameCount: (current?.frameCount ?? 0) + 1,
 					timestamp: frame.timestamp,
-					bytesReceived: currentStats?.bytesReceived ?? 0,
-				});
+					bytesReceived: current?.bytesReceived ?? 0,
+				}));
 
 				// Sleep until it's time to decode the next frame.
 				const ref = performance.now() - frame.timestamp / 1000;
@@ -322,12 +321,11 @@ export class Source {
 				});
 
 				// Track bytes received for bitrate calculation in the UI
-				const currentStats = this.#stats.peek();
-				this.#stats.set({
-					frameCount: currentStats?.frameCount ?? 0,
-					timestamp: currentStats?.timestamp ?? 0,
-					bytesReceived: (currentStats?.bytesReceived ?? 0) + next.data.byteLength,
-				});
+				this.#stats.update((current) => ({
+					frameCount: current?.frameCount ?? 0,
+					timestamp: current?.timestamp ?? 0,
+					bytesReceived: (current?.bytesReceived ?? 0) + next.data.byteLength,
+				}));
 
 				decoder.decode(chunk);
 			}
