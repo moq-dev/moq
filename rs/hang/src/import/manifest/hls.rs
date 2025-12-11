@@ -288,21 +288,13 @@ impl Hls {
 	) -> Result<usize> {
 		self.ensure_init_segment(kind, track, playlist).await?;
 
-		let mut consumed = 0usize;
-		let mut sequence = playlist.media_sequence;
-
-		for segment in &playlist.segments {
-			if let Some(next) = track.next_sequence {
-				if sequence < next {
-					sequence += 1;
-					continue;
-				}
-			}
-
-			self.push_segment(kind, track, segment, sequence).await?;
-			consumed += 1;
-			sequence += 1;
+		// Skip segments we've already seen
+		let skip = track.next_sequence.unwrap_or(0).saturating_sub(playlist.media_sequence) as usize;
+		let base_seq = playlist.media_sequence + skip as u64;
+		for (i, segment) in playlist.segments[skip..].iter().enumerate() {
+			self.push_segment(kind, track, segment, base_seq + i as u64).await?;
 		}
+		let consumed = playlist.segments.len() - skip;
 
 		if consumed == 0 {
 			debug!(media_type = ?track.media_type, "no fresh HLS segments available");

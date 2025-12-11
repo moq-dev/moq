@@ -88,11 +88,6 @@ impl Fmp4 {
 		}
 	}
 
-	/// Get the catalog producer for sharing with other importers.
-	pub fn catalog(&self) -> CatalogProducer {
-		self.catalog.clone()
-	}
-
 	/// Parse fMP4/CMAF bytes (init segment or media segment).
 	///
 	/// This is a convenience wrapper around `decode()` for use with byte slices.
