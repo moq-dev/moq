@@ -16,6 +16,8 @@ export class Renderer {
 	// Whether the video is paused.
 	paused: Signal<boolean>;
 
+	// Cache the last rendered frame to keep it visible when paused
+	#lastFrame = new Signal<VideoFrame | undefined>(undefined);
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
 	#signals = new Effect();
 
@@ -76,14 +78,25 @@ export class Renderer {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
+		const currentFrame = effect.get(this.source.frame);
 		const paused = effect.get(this.paused);
-		if (paused) return;
 
-		const frame = effect.get(this.source.frame)?.clone();
+		// Update cached frame while is playing
+		if (currentFrame && !paused) {
+			this.#lastFrame.update((prev) => {
+				prev?.close();
+				return currentFrame.clone();
+			});
+		}
+
+		// Use current frame for rendering if not paused, 
+		// otherwise use cached frame
+		const frameToRender = paused ? effect.get(this.#lastFrame)?.clone() : currentFrame?.clone();
 
 		// Request a callback to render the frame based on the monitor's refresh rate.
+		// Always render, even when paused (to show last frame)
 		let animate: number | undefined = requestAnimationFrame(() => {
-			this.#render(ctx, frame);
+			this.#render(ctx, frameToRender);
 			animate = undefined;
 		});
 
@@ -91,7 +104,7 @@ export class Renderer {
 		effect.cleanup(() => {
 			// NOTE: Closing this frame is the only reason we don't use `effect.animate`.
 			// It's slighly more efficient to use one .cleanup() callback instead of two.
-			frame?.close();
+			frameToRender?.close();
 			if (animate) cancelAnimationFrame(animate);
 		});
 	}
@@ -122,6 +135,11 @@ export class Renderer {
 
 	// Close the track and all associated resources.
 	close() {
+		// Clean up cached frame
+		this.#lastFrame.update((prev) => {
+			prev?.close();
+			return undefined;
+		});
 		this.#signals.close();
 	}
 }
