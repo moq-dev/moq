@@ -1,15 +1,19 @@
 ---
-title: Core Concepts
-description: Understanding MoQ's fundamental concepts
+title: Concepts
+description: Understanding MoQ's fundamental concepts and layering
 ---
 
-# Core Concepts
+# Concepts
 
-MoQ is built on a few simple but powerful concepts. Understanding these will help you work effectively with the protocol.
+MoQ is built on a few simple but powerful concepts.
+Understanding these will help you work effectively with the protocol and build your own applications.
 
-## Layered Architecture
+## Layers
+The over-arching design philosophy of MoQ is to make things simple, composable, and customizable.
+We don't want you to hit a brick wall if you deviate from the standard path (*ahem* WebRTC).
+We also want to benefit from economies of scale (like HTTP), utilizing generic libraries and tools whenever possible.
 
-MoQ uses a layered protocol stack where each layer has a specific responsibility:
+To accomplish this, MoQ is broken into layers:
 
 ```
 ┌─────────────────┐
@@ -23,9 +27,18 @@ MoQ uses a layered protocol stack where each layer has a specific responsibility
 │                 │     - broadcasts, tracks, groups, frames
 ├─────────────────┤
 │  WebTransport   │  🌐 Browser-compatible QUIC
-│      QUIC       │     - HTTP/3 handshake, multiplexing, etc.
+│                 │     - HTTP/3 handshake
+├─────────────────┤
+|      QUIC       |  🌐 Underlying transport protocol
+│                 │     - streams, datagrams, prioritization, etc.
 └─────────────────┘
 ```
+
+You get to choose which layers you want to use and which layers you want to replace.
+
+For example, if you want to implement end-to-end encryption or a custom media format, you can fork the `hang` layer.
+You still benefit from the generic `moq-lite` layer and the mass fanout (and CDN support) it provides.
+If you're feeling generous, you could even contribute your changes, perhaps as a separate layer on top of `moq-lite`.
 
 ### Key Rule
 

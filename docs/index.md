@@ -7,17 +7,14 @@ hero:
       text: Setup
       link: /setup/
     - theme: alt
+      text: Concepts
+      link: /concepts/
+    - theme: alt
+      text: API
+      link: /api/
+    - theme: alt
       text: Demo
-      link: https://moq.dev/watch/
-    - theme: alt
-      text: Blog
-      link: https://moq.dev/blog/
-    - theme: alt
-      text: GitHub
-      link: https://github.com/moq-dev/moq
-    - theme: alt
-      text: Discord
-      link: https://discord.gg/FCYF3p99mr
+      link: https://moq.dev/
 
 features:
   - icon: 🚀

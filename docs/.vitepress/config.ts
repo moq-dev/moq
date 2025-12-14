@@ -14,15 +14,8 @@ export default defineConfig({
 
 		nav: [
 			{ text: "Setup", link: "/setup/" },
-			{ text: "Guide", link: "/guide/architecture" },
-			{
-				text: "API",
-				items: [
-					{ text: "Rust", link: "/rust/" },
-					{ text: "TypeScript", link: "/typescript/" },
-				],
-			},
-			{ text: "Contributing", link: "/contributing/" },
+			{ text: "Concepts", link: "/concepts/" },
+			{ text: "API", link: "/api/" },
 		],
 
 		sidebar: {
@@ -37,14 +30,13 @@ export default defineConfig({
 				},
 			],
 
-			"/guide/": [
+			"/concepts/": [
 				{
-					text: "Guide",
+					text: "Concepts",
 					items: [
-						{ text: "Architecture", link: "/guide/architecture" },
-						{ text: "Protocol", link: "/guide/protocol" },
-						{ text: "Authentication", link: "/guide/authentication" },
-						{ text: "Deployment", link: "/guide/deployment" },
+						{ text: "Layers", link: "/concepts/" },
+						{ text: "Latency", link: "/concepts/latency" },
+						{ text: "Standards", link: "/concepts/standards" },
 					],
 				},
 			],
@@ -71,23 +63,6 @@ export default defineConfig({
 						{ text: "@moq/hang", link: "/typescript/hang" },
 						{ text: "Web Components", link: "/typescript/web-components" },
 						{ text: "Examples", link: "/typescript/examples" },
-					],
-				},
-			],
-
-			"/api/": [
-				{
-					text: "API Reference",
-					items: [{ text: "Rust API", link: "/api/rust" }],
-				},
-			],
-
-			"/contributing/": [
-				{
-					text: "Contributing",
-					items: [
-						{ text: "Overview", link: "/contributing/" },
-						{ text: "Development Setup", link: "/contributing/development" },
 					],
 				},
 			],

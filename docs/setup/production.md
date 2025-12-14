@@ -104,5 +104,6 @@ If the server is using a non-standard TLS certificate, you'll need to configure 
 
 ## What's Next?
 Grats on getting MoQ running in production!
+I knew you could do it.
 
-Or if you're stuck, click on the links above to dive deeper into individual libraries.
+Check out the [concepts](/concepts/) and [API](/api/) docs to dive deeper.
