@@ -4,19 +4,20 @@
 	"private": true,
 	"type": "module",
 	"workspaces": [
-		"lite",
-		"clock",
-		"token",
-		"hang",
-		"hang-ui",
-		"hang-demo",
-		"signals"
+		"js/lite",
+		"js/clock",
+		"js/token",
+		"js/hang",
+		"js/hang-ui",
+		"js/hang-demo",
+		"js/signals"
 	],
 	"scripts": {
 		"check": "bun run --filter='*' check",
 		"fix": "bun run --filter='*' fix"
 	},
 	"devDependencies": {
+		"@biomejs/biome": "^2.3.8",
 		"concurrently": "^9.2.1"
 	}
 }

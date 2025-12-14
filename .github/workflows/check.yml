@@ -25,7 +25,6 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "rs -> target"
           cache-on-failure: true
 
       # Run checks with cached dependencies

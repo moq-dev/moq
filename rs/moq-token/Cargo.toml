@@ -13,7 +13,7 @@ anyhow = "1"
 aws-lc-rs = "1"
 base64 = "0.22"
 elliptic-curve = "0.13.8"
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 p256 = "0.13.2"
 p384 = "0.13.1"
 rsa = "0.9.9"

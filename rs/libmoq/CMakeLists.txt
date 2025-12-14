@@ -25,7 +25,7 @@ if(BUILD_RUST_LIB)
         set(CARGO_BUILD_FLAG "--release")
     endif()
 
-    set(RUST_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../target")
+    set(RUST_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../target")
     set(RUST_DIR "${RUST_TARGET_DIR}/${CARGO_BUILD_TYPE}")
     set(RUST_LIB "${RUST_DIR}/${LIB_PREFIX}moq${LIB_SUFFIX}")
     set(RUST_HEADER "${RUST_TARGET_DIR}/include/moq.h")

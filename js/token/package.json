@@ -13,9 +13,8 @@
 	],
 	"scripts": {
 		"build": "tsc -b",
-		"check": "tsc --noEmit && biome check",
+		"check": "tsc --noEmit",
 		"test": "bun test",
-		"fix": "biome check --fix",
 		"release": "bun ../scripts/release.ts"
 	},
 	"dependencies": {
@@ -25,7 +24,6 @@
 	},
 	"devDependencies": {
 		"@types/node": "^24.3.1",
-		"typescript": "^5.9.2",
-		"@biomejs/biome": "^2.2.2"
+		"typescript": "^5.9.2"
 	}
 }

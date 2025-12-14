@@ -1,4 +1,4 @@
-import { Reader, Writer } from "../stream";
+import { Reader, Writer } from "../stream.ts";
 
 // Encodes a message with a u16 (16-bit) size prefix as per draft-14.
 export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {

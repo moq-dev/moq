@@ -1,4 +1,4 @@
-import * as Moq from "@moq/lite";
+import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../catalog";
 import { PRIORITY } from "../publish/priority";

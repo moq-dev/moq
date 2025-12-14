@@ -1,13 +1,15 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "moq",
       "devDependencies": {
+        "@biomejs/biome": "^2.3.8",
         "concurrently": "^9.2.1",
       },
     },
-    "clock": {
+    "js/clock": {
       "name": "@moq/clock",
       "version": "0.1.0",
       "bin": {
@@ -17,12 +19,11 @@
         "@moq/lite": "workspace:*",
       },
       "devDependencies": {
-        "@biomejs/biome": "^2.2.2",
         "@types/deno": "^2.3.0",
         "typescript": "^5.9.2",
       },
     },
-    "hang": {
+    "js/hang": {
       "name": "@moq/hang",
       "version": "0.1.0",
       "dependencies": {
@@ -43,7 +44,7 @@
         "vitest": "^3.2.4",
       },
     },
-    "hang-demo": {
+    "js/hang-demo": {
       "name": "@moq/hang-demo",
       "version": "0.1.0",
       "dependencies": {
@@ -51,7 +52,6 @@
         "@moq/hang-ui": "workspace:^",
       },
       "devDependencies": {
-        "@biomejs/biome": "^2.2.2",
         "@tailwindcss/postcss": "^4.1.13",
         "@tailwindcss/typography": "^0.5.16",
         "@tailwindcss/vite": "^4.1.13",
@@ -63,11 +63,10 @@
         "vite-plugin-solid": "^2.11.10",
       },
     },
-    "hang-ui": {
+    "js/hang-ui": {
       "name": "@moq/hang-ui",
       "version": "0.1.0",
       "devDependencies": {
-        "@biomejs/biome": "^2.2.2",
         "@rollup/plugin-node-resolve": "^16.0.3",
         "rimraf": "^6.0.1",
         "rollup": "^4.53.3",
@@ -80,7 +79,7 @@
         "@moq/hang": "workspace:^0.1.0",
       },
     },
-    "lite": {
+    "js/lite": {
       "name": "@moq/lite",
       "version": "0.1.0",
       "dependencies": {
@@ -89,7 +88,6 @@
         "async-mutex": "^0.5.0",
       },
       "devDependencies": {
-        "@biomejs/biome": "^2.2.2",
         "@types/deno": "^2.3.0",
         "@types/node": "^24.3.1",
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
@@ -103,14 +101,13 @@
         "zod": "^4.1.0",
       },
     },
-    "signals": {
+    "js/signals": {
       "name": "@moq/signals",
       "version": "0.1.0",
       "dependencies": {
         "dequal": "^2.0.3",
       },
       "devDependencies": {
-        "@biomejs/biome": "^2.2.2",
         "@types/react": "^19.1.8",
         "rimraf": "^6.0.1",
         "solid-js": "^1.9.7",
@@ -126,7 +123,7 @@
         "solid-js",
       ],
     },
-    "token": {
+    "js/token": {
       "name": "@moq/token",
       "version": "0.1.0",
       "dependencies": {
@@ -135,7 +132,6 @@
         "zod": "^4.1.5",
       },
       "devDependencies": {
-        "@biomejs/biome": "^2.2.2",
         "@types/node": "^24.3.1",
         "typescript": "^5.9.2",
       },
@@ -180,23 +176,23 @@
 
     "@babel/types": ["@babel/types@7.28.5", "", { "dependencies": { "@babel/helper-string-parser": "^7.27.1", "@babel/helper-validator-identifier": "^7.28.5" } }, "sha512-qQ5m48eI/MFLQ5PxQj4PFaprjyCTLI37ElWMmNs0K8Lk3dVeOdNpB3ks8jc7yM5CDmVC73eMVk/trk3fgmrUpA=="],
 
-    "@biomejs/biome": ["@biomejs/biome@2.2.4", "", { "optionalDependencies": { "@biomejs/cli-darwin-arm64": "2.2.4", "@biomejs/cli-darwin-x64": "2.2.4", "@biomejs/cli-linux-arm64": "2.2.4", "@biomejs/cli-linux-arm64-musl": "2.2.4", "@biomejs/cli-linux-x64": "2.2.4", "@biomejs/cli-linux-x64-musl": "2.2.4", "@biomejs/cli-win32-arm64": "2.2.4", "@biomejs/cli-win32-x64": "2.2.4" }, "bin": { "biome": "bin/biome" } }, "sha512-TBHU5bUy/Ok6m8c0y3pZiuO/BZoY/OcGxoLlrfQof5s8ISVwbVBdFINPQZyFfKwil8XibYWb7JMwnT8wT4WVPg=="],
+    "@biomejs/biome": ["@biomejs/biome@2.3.8", "", { "optionalDependencies": { "@biomejs/cli-darwin-arm64": "2.3.8", "@biomejs/cli-darwin-x64": "2.3.8", "@biomejs/cli-linux-arm64": "2.3.8", "@biomejs/cli-linux-arm64-musl": "2.3.8", "@biomejs/cli-linux-x64": "2.3.8", "@biomejs/cli-linux-x64-musl": "2.3.8", "@biomejs/cli-win32-arm64": "2.3.8", "@biomejs/cli-win32-x64": "2.3.8" }, "bin": { "biome": "bin/biome" } }, "sha512-Qjsgoe6FEBxWAUzwFGFrB+1+M8y/y5kwmg5CHac+GSVOdmOIqsAiXM5QMVGZJ1eCUCLlPZtq4aFAQ0eawEUuUA=="],
 
-    "@biomejs/cli-darwin-arm64": ["@biomejs/cli-darwin-arm64@2.2.4", "", { "os": "darwin", "cpu": "arm64" }, "sha512-RJe2uiyaloN4hne4d2+qVj3d3gFJFbmrr5PYtkkjei1O9c+BjGXgpUPVbi8Pl8syumhzJjFsSIYkcLt2VlVLMA=="],
+    "@biomejs/cli-darwin-arm64": ["@biomejs/cli-darwin-arm64@2.3.8", "", { "os": "darwin", "cpu": "arm64" }, "sha512-HM4Zg9CGQ3txTPflxD19n8MFPrmUAjaC7PQdLkugeeC0cQ+PiVrd7i09gaBS/11QKsTDBJhVg85CEIK9f50Qww=="],
 
-    "@biomejs/cli-darwin-x64": ["@biomejs/cli-darwin-x64@2.2.4", "", { "os": "darwin", "cpu": "x64" }, "sha512-cFsdB4ePanVWfTnPVaUX+yr8qV8ifxjBKMkZwN7gKb20qXPxd/PmwqUH8mY5wnM9+U0QwM76CxFyBRJhC9tQwg=="],
+    "@biomejs/cli-darwin-x64": ["@biomejs/cli-darwin-x64@2.3.8", "", { "os": "darwin", "cpu": "x64" }, "sha512-lUDQ03D7y/qEao7RgdjWVGCu+BLYadhKTm40HkpJIi6kn8LSv5PAwRlew/DmwP4YZ9ke9XXoTIQDO1vAnbRZlA=="],
 
-    "@biomejs/cli-linux-arm64": ["@biomejs/cli-linux-arm64@2.2.4", "", { "os": "linux", "cpu": "arm64" }, "sha512-M/Iz48p4NAzMXOuH+tsn5BvG/Jb07KOMTdSVwJpicmhN309BeEyRyQX+n1XDF0JVSlu28+hiTQ2L4rZPvu7nMw=="],
+    "@biomejs/cli-linux-arm64": ["@biomejs/cli-linux-arm64@2.3.8", "", { "os": "linux", "cpu": "arm64" }, "sha512-Uo1OJnIkJgSgF+USx970fsM/drtPcQ39I+JO+Fjsaa9ZdCN1oysQmy6oAGbyESlouz+rzEckLTF6DS7cWse95g=="],
 
-    "@biomejs/cli-linux-arm64-musl": ["@biomejs/cli-linux-arm64-musl@2.2.4", "", { "os": "linux", "cpu": "arm64" }, "sha512-7TNPkMQEWfjvJDaZRSkDCPT/2r5ESFPKx+TEev+I2BXDGIjfCZk2+b88FOhnJNHtksbOZv8ZWnxrA5gyTYhSsQ=="],
+    "@biomejs/cli-linux-arm64-musl": ["@biomejs/cli-linux-arm64-musl@2.3.8", "", { "os": "linux", "cpu": "arm64" }, "sha512-PShR4mM0sjksUMyxbyPNMxoKFPVF48fU8Qe8Sfx6w6F42verbwRLbz+QiKNiDPRJwUoMG1nPM50OBL3aOnTevA=="],
 
-    "@biomejs/cli-linux-x64": ["@biomejs/cli-linux-x64@2.2.4", "", { "os": "linux", "cpu": "x64" }, "sha512-orr3nnf2Dpb2ssl6aihQtvcKtLySLta4E2UcXdp7+RTa7mfJjBgIsbS0B9GC8gVu0hjOu021aU8b3/I1tn+pVQ=="],
+    "@biomejs/cli-linux-x64": ["@biomejs/cli-linux-x64@2.3.8", "", { "os": "linux", "cpu": "x64" }, "sha512-QDPMD5bQz6qOVb3kiBui0zKZXASLo0NIQ9JVJio5RveBEFgDgsvJFUvZIbMbUZT3T00M/1wdzwWXk4GIh0KaAw=="],
 
-    "@biomejs/cli-linux-x64-musl": ["@biomejs/cli-linux-x64-musl@2.2.4", "", { "os": "linux", "cpu": "x64" }, "sha512-m41nFDS0ksXK2gwXL6W6yZTYPMH0LughqbsxInSKetoH6morVj43szqKx79Iudkp8WRT5SxSh7qVb8KCUiewGg=="],
+    "@biomejs/cli-linux-x64-musl": ["@biomejs/cli-linux-x64-musl@2.3.8", "", { "os": "linux", "cpu": "x64" }, "sha512-YGLkqU91r1276uwSjiUD/xaVikdxgV1QpsicT0bIA1TaieM6E5ibMZeSyjQ/izBn4tKQthUSsVZacmoJfa3pDA=="],
 
-    "@biomejs/cli-win32-arm64": ["@biomejs/cli-win32-arm64@2.2.4", "", { "os": "win32", "cpu": "arm64" }, "sha512-NXnfTeKHDFUWfxAefa57DiGmu9VyKi0cDqFpdI+1hJWQjGJhJutHPX0b5m+eXvTKOaf+brU+P0JrQAZMb5yYaQ=="],
+    "@biomejs/cli-win32-arm64": ["@biomejs/cli-win32-arm64@2.3.8", "", { "os": "win32", "cpu": "arm64" }, "sha512-H4IoCHvL1fXKDrTALeTKMiE7GGWFAraDwBYFquE/L/5r1927Te0mYIGseXi4F+lrrwhSWbSGt5qPFswNoBaCxg=="],
 
-    "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.2.4", "", { "os": "win32", "cpu": "x64" }, "sha512-3Y4V4zVRarVh/B/eSHczR4LYoSVyv3Dfuvm3cWs5w/HScccS0+Wt/lHOcDTRYeHjQmMYVC3rIRWqyN2EI52+zg=="],
+    "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.3.8", "", { "os": "win32", "cpu": "x64" }, "sha512-RguzimPoZWtBapfKhKjcWXBVI91tiSprqdBYu7tWhgN8pKRZhw24rFeNZTNf6UiBfjCYCi9eFQs/JzJZIhuK4w=="],
 
     "@dependents/detective-less": ["@dependents/detective-less@5.0.1", "", { "dependencies": { "gonzales-pe": "^4.3.0", "node-source-walk": "^7.0.1" } }, "sha512-Y6+WUMsTFWE5jb20IFP4YGa5IrGY/+a/FbOSjDF/wz9gepU2hwCYSXRHP/vPwBvwcY3SVMASt4yXxbXNXigmZQ=="],
 
@@ -280,19 +276,19 @@
 
     "@libav.js/variant-opus-af": ["@libav.js/variant-opus-af@6.8.8", "", {}, "sha512-8KBQyA8n5goN7lyctOaPxpcx7dapOgqKh8dWW/NAcl87AgM/WoUGSex3fFc46oCtTHYrUKEm1OmZUrtkt3Q56A=="],
 
-    "@moq/clock": ["@moq/clock@workspace:clock"],
+    "@moq/clock": ["@moq/clock@workspace:js/clock"],
 
-    "@moq/hang": ["@moq/hang@workspace:hang"],
+    "@moq/hang": ["@moq/hang@workspace:js/hang"],
 
-    "@moq/hang-demo": ["@moq/hang-demo@workspace:hang-demo"],
+    "@moq/hang-demo": ["@moq/hang-demo@workspace:js/hang-demo"],
 
-    "@moq/hang-ui": ["@moq/hang-ui@workspace:hang-ui"],
+    "@moq/hang-ui": ["@moq/hang-ui@workspace:js/hang-ui"],
 
-    "@moq/lite": ["@moq/lite@workspace:lite"],
+    "@moq/lite": ["@moq/lite@workspace:js/lite"],
 
-    "@moq/signals": ["@moq/signals@workspace:signals"],
+    "@moq/signals": ["@moq/signals@workspace:js/signals"],
 
-    "@moq/token": ["@moq/token@workspace:token"],
+    "@moq/token": ["@moq/token@workspace:js/token"],
 
     "@moq/web-transport-ws": ["@moq/web-transport-ws@0.1.2", "", {}, "sha512-mYha+AkLNPT3uOGnTA5YWjpxc9LO/yriFSoWzKkR0zN3UMZb9RXbsD8Gbhg1pJZod6QD4tevHoOWTBADYN7yAQ=="],
 

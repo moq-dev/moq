@@ -1,4 +1,4 @@
 {
-    "css.lint.unknownAtRules": "ignore",
-	"biome.lsp.bin": "./js/node_modules/.bin/biome"
+	"css.lint.unknownAtRules": "ignore",
+	"biome.lsp.bin": "./node_modules/.bin/biome"
 }

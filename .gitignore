@@ -13,6 +13,7 @@ dist
 out
 result
 *.tsbuildinfo
+node_modules
 /.direnv
 
 # Don't leak dev stuff
@@ -23,3 +24,8 @@ result
 *.hex
 *.jwk
 *.jwt
+
+# We're using bun (and sometimes deno)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml

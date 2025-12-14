@@ -1,7 +1,7 @@
 import { Announced } from "../announced.ts";
 import { Broadcast, type TrackRequest } from "../broadcast.ts";
 import { Group } from "../group.ts";
-import * as Path from "../path.js";
+import * as Path from "../path.ts";
 import type { Reader } from "../stream.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";

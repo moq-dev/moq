@@ -4,7 +4,7 @@ import * as base64 from "@hexagon/base64";
 import { exportJWK, generateKeyPair } from "jose";
 import type { Algorithm } from "./algorithm";
 import type { Claims } from "./claims";
-import { Key, load, loadPublic, sign, toPublicKey, verify } from "./key";
+import { type Key, load, loadPublic, sign, toPublicKey, verify } from "./key";
 
 // Helper function to encode JSON to base64url
 function encodeJwk(obj: unknown): string {

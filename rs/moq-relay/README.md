@@ -4,7 +4,7 @@
 It's designed to be run in a datacenter, relaying media across multiple hops to deduplicate and improve QoS.
 
 The only argument is the path to a TOML configuration file.
-See [dev.toml](cfg/dev.toml) for an example configuration.
+See [relay.toml](../dev/relay.toml) for an example configuration.
 
 ## HTTP
 Primarily for debugging, you can also connect to the relay via HTTP.

@@ -15,16 +15,14 @@
 	],
 	"scripts": {
 		"build": "bun run clean && rollup -c && bun ../scripts/package.ts",
-		"check": "biome check src",
+		"check": "tsc --noEmit",
 		"clean": "rimraf dist",
-		"fix": "biome check src --fix",
 		"release": "bun ../scripts/release.ts"
 	},
 	"peerDependencies": {
 		"@moq/hang": "workspace:^0.1.0"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.2.2",
 		"@rollup/plugin-node-resolve": "^16.0.3",
 		"rimraf": "^6.0.1",
 		"rollup": "^4.53.3",

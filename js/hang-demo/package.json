@@ -8,15 +8,13 @@
 	"repository": "github:moq-dev/moq",
 	"scripts": {
 		"dev": "vite --open",
-		"check": "tsc --noEmit && biome check",
-		"fix": "biome check --fix"
+		"check": "tsc --noEmit"
 	},
 	"dependencies": {
 		"@moq/hang": "workspace:^",
 		"@moq/hang-ui": "workspace:^"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.2.2",
 		"@tailwindcss/postcss": "^4.1.13",
 		"@tailwindcss/typography": "^0.5.16",
 		"@tailwindcss/vite": "^4.1.13",

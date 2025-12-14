@@ -1,6 +1,6 @@
-import * as Moq from "@moq/lite";
+import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import * as Catalog from "../../catalog";
+import type * as Catalog from "../../catalog";
 import { u53 } from "../../catalog";
 import * as Frame from "../../frame";
 import * as Time from "../../time";

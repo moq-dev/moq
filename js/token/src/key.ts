@@ -105,16 +105,19 @@ export function toPublicKey(key: Key): PublicKey {
 			throw new Error("Cannot derive public key from oct (symmetric) key");
 
 		case "RSA": {
+			// biome-ignore lint/correctness/noUnusedVariables: On purpose to remove fields from publicKey
 			const { d, p, q, dp, dq, qi, key_ops, ...publicKey } = key;
 			return { ...publicKey, key_ops: key_ops.filter((op) => op !== "sign" && op !== "decrypt") };
 		}
 
 		case "EC": {
+			// biome-ignore lint/correctness/noUnusedVariables: On purpose to remove fields from publicKey
 			const { d, key_ops, ...publicKey } = key;
 			return { ...publicKey, key_ops: key_ops.filter((op) => op !== "sign" && op !== "decrypt") };
 		}
 
 		case "OKP": {
+			// biome-ignore lint/correctness/noUnusedVariables: On purpose to remove fields from publicKey
 			const { d, key_ops, ...publicKey } = key;
 			return { ...publicKey, key_ops: key_ops.filter((op) => op !== "sign" && op !== "decrypt") };
 		}

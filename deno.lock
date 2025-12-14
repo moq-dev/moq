@@ -11,20 +11,20 @@
   "workspace": {
     "packageJson": {
       "dependencies": [
+        "npm:@biomejs/biome@^2.3.8",
         "npm:concurrently@^9.2.1"
       ]
     },
     "members": {
-      "clock": {
+      "js/clock": {
         "packageJson": {
           "dependencies": [
-            "npm:@biomejs/biome@^2.2.2",
             "npm:@types/deno@^2.3.0",
             "npm:typescript@^5.9.2"
           ]
         }
       },
-      "hang": {
+      "js/hang": {
         "packageJson": {
           "dependencies": [
             "npm:@kixelated/libavjs-webcodecs-polyfill@~0.5.5",
@@ -41,10 +41,9 @@
           ]
         }
       },
-      "hang-demo": {
+      "js/hang-demo": {
         "packageJson": {
           "dependencies": [
-            "npm:@biomejs/biome@^2.2.2",
             "npm:@tailwindcss/postcss@^4.1.13",
             "npm:@tailwindcss/typography@~0.5.16",
             "npm:@tailwindcss/vite@^4.1.13",
@@ -57,10 +56,9 @@
           ]
         }
       },
-      "hang-ui": {
+      "js/hang-ui": {
         "packageJson": {
           "dependencies": [
-            "npm:@biomejs/biome@^2.2.2",
             "npm:@rollup/plugin-node-resolve@^16.0.3",
             "npm:rimraf@^6.0.1",
             "npm:rollup-plugin-esbuild@^6.2.1",
@@ -71,11 +69,10 @@
           ]
         }
       },
-      "lite": {
+      "js/lite": {
         "packageJson": {
           "dependencies": [
-            "npm:@biomejs/biome@^2.2.2",
-            "npm:@kixelated/web-transport-ws@~0.1.2",
+            "npm:@moq/web-transport-ws@~0.1.2",
             "npm:@types/deno@^2.3.0",
             "npm:@types/node@^24.3.1",
             "npm:@types/web@^0.0.241",
@@ -88,10 +85,9 @@
           ]
         }
       },
-      "signals": {
+      "js/signals": {
         "packageJson": {
           "dependencies": [
-            "npm:@biomejs/biome@^2.2.2",
             "npm:@types/react@^19.1.8",
             "npm:dequal@^2.0.3",
             "npm:rimraf@^6.0.1",
@@ -100,10 +96,9 @@
           ]
         }
       },
-      "token": {
+      "js/token": {
         "packageJson": {
           "dependencies": [
-            "npm:@biomejs/biome@^2.2.2",
             "npm:@hexagon/base64@^2.0.4",
             "npm:@types/node@^24.3.1",
             "npm:jose@^6.1.0",

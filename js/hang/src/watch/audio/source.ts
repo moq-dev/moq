@@ -21,7 +21,7 @@ export type SourceProps = {
 };
 
 // Unfortunately, we need to use a Vite-exclusive import for now.
-import RenderWorklet from "./render-worklet?worker&url";
+import RenderWorklet from "./render-worklet.ts?worker&url";
 
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.

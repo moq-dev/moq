@@ -13,7 +13,7 @@ const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
 
 // Unfortunately, we need to use a Vite-exclusive import for now.
-import CaptureWorklet from "./capture-worklet?worker&url";
+import CaptureWorklet from "./capture-worklet.ts?worker&url";
 
 // The initial values for our signals.
 export type EncoderProps = {

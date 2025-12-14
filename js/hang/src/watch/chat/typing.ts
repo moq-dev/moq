@@ -1,6 +1,6 @@
-import * as Moq from "@moq/lite";
+import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import * as Catalog from "../../catalog";
+import type * as Catalog from "../../catalog";
 
 export interface TypingProps {
 	// Whether to start downloading the chat.

@@ -1,8 +1,8 @@
-import * as Moq from "@moq/lite";
-import { Effect, Signal } from "@moq/signals";
-import * as Catalog from "../../catalog";
-import { Peers, PeersProps } from "./peers";
-import { Window, WindowProps } from "./window";
+import type * as Moq from "@moq/lite";
+import { Effect, type Signal } from "@moq/signals";
+import type * as Catalog from "../../catalog";
+import { Peers, type PeersProps } from "./peers";
+import { Window, type WindowProps } from "./window";
 
 export interface Props {
 	window?: WindowProps;
