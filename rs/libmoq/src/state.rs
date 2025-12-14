@@ -8,6 +8,7 @@ use moq_lite::coding::Buf;
 use tokio::sync::oneshot;
 use url::Url;
 
+use crate::ffi::ReturnCode;
 use crate::{ffi, Error, Id, NonZeroSlab};
 
 struct Session {
@@ -46,9 +47,14 @@ pub struct SubscriptionCallbacks {
 		unsafe extern "C" fn(user_data: *mut std::ffi::c_void, track: i32, data: *const u8, size: usize, pts: u64),
 	>,
 	#[allow(dead_code)] // TODO: Implement safe error callback mechanism for tokio threads
-	pub on_error: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, code: i32)>,
+	pub on_error: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, code: i32)>, // Called when subscription fails
 }
 
+// SAFETY: SubscriptionCallbacks will be moved into tokio tasks and called across thread boundaries.
+// The C/FFI side MUST guarantee:
+// - user_data points to thread-safe data or is only accessed from a single thread
+// - Function pointers remain valid for the subscription's lifetime
+// - Proper synchronization of any user_data access
 unsafe impl Send for SubscriptionCallbacks {}
 
 pub struct State {
@@ -255,6 +261,12 @@ impl State {
 
 		let id = self.subscriptions.insert(Subscription { closed: closed.0 });
 
+		// Extract error callback before moving callbacks
+		// SAFETY: Function pointers are Copy and thread-safe, and the C side guarantees
+		// thread safety of user_data according to the SubscriptionCallbacks safety contract
+		let on_error_fn = callbacks.on_error;
+		let user_data_usize = callbacks.user_data as usize;
+
 		tokio::spawn(async move {
 			let result = tokio::select! {
 				// No more receiver, which means [subscription_close] was called.
@@ -266,11 +278,12 @@ impl State {
 			if let Err(err) = result {
 				tracing::error!("Subscription error: {}", err);
 
-				// TODO: Invoke the error callback when safe callback mechanism is implemented
-				// For now, we just clean up the subscription to prevent resource leaks
-
-				// Clean up the subscription from the slab to prevent resource leak
-				let _ = State::lock().unsubscribe(id);
+				// Invoke the error callback if provided
+				if let Some(on_error) = on_error_fn {
+					let code = err.code();
+					let user_data = user_data_usize as *mut std::ffi::c_void;
+					unsafe { on_error(user_data, code) };
+				}
 			}
 		});
 
