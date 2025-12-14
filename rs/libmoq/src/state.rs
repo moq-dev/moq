@@ -46,6 +46,11 @@ pub struct SubscriptionCallbacks {
 	pub on_error: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, code: i32)>,
 }
 
+// SAFETY: SubscriptionCallbacks will be moved into tokio tasks and called across thread boundaries.
+// The C/FFI side MUST guarantee:
+// - user_data points to thread-safe data or is only accessed from a single thread
+// - Function pointers remain valid for the subscription's lifetime
+// - Proper synchronization of any user_data access
 unsafe impl Send for SubscriptionCallbacks {}
 
 pub struct State {
