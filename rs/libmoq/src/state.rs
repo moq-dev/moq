@@ -26,7 +26,6 @@ struct Subscription {
 	closed: oneshot::Sender<()>,
 }
 
-#[derive(Clone)]
 pub struct SubscriptionCallbacks {
 	pub user_data: *mut std::ffi::c_void,
 	pub on_catalog:
