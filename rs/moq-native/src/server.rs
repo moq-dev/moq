@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::{net, sync::Arc, time::Duration};
+use std::{net, time::Duration};
 
 use crate::crypto;
 use anyhow::Context;
@@ -8,7 +8,9 @@ use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use std::fs;
 use std::io::{self, Cursor, Read};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
 use url::Url;
 use web_transport_quinn::{http, ServerError};
 
@@ -79,35 +81,9 @@ impl ServerConfig {
 	}
 }
 
-#[derive(Clone)]
-pub struct ServerReloader {
-	certs: Arc<ServeCerts>,
-}
-
-impl ServerReloader {
-	pub fn reload(&self, config: &ServerTlsConfig) -> anyhow::Result<()> {
-		let mut certs = Vec::new();
-
-		anyhow::ensure!(config.cert.len() == config.key.len(), "must provide both cert and key");
-
-		for (cert, key) in config.cert.iter().zip(config.key.iter()) {
-			certs.push(Arc::new(self.certs.load(cert, key)?));
-		}
-
-		if !config.generate.is_empty() {
-			certs.push(Arc::new(self.certs.generate(&config.generate)?));
-		}
-
-		self.certs.set(certs);
-
-		Ok(())
-	}
-}
-
 pub struct Server {
 	quic: quinn::Endpoint,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
-	fingerprints: Vec<String>,
 	certs: Arc<ServeCerts>,
 }
 
@@ -126,24 +102,32 @@ impl Server {
 
 		let certs = ServeCerts::new(provider.clone());
 
-		// Load the certificate and key files based on their index.
-		anyhow::ensure!(
-			config.tls.cert.len() == config.tls.key.len(),
-			"must provide both cert and key"
-		);
-
-		for (cert, key) in config.tls.cert.iter().zip(config.tls.key.iter()) {
-			let cert = certs.load(cert, key)?;
-			certs.add(Arc::new(cert));
+		for cert in certs.load_certs(&config.tls)? {
+			certs.add(cert);
 		}
 
-		if !config.tls.generate.is_empty() {
-			let cert = certs.generate(&config.tls.generate)?;
-			certs.add(Arc::new(cert));
-		}
-
-		let fingerprints = certs.fingerprints();
 		let certs = Arc::new(certs);
+
+		#[cfg(unix)]
+		{
+			let certs = certs.clone();
+			tokio::spawn(async move {
+				let tls_config = config.tls.clone();
+
+				match signal(SignalKind::user_defined1()) {
+					Ok(mut signal) => loop {
+						if signal.recv().await.is_some() {
+							tracing::info!("reloading server certificates");
+
+							if let Err(err) = certs.reload(&tls_config) {
+								tracing::warn!(%err, "failed to reload server certificates");
+							}
+						}
+					},
+					Err(err) => tracing::warn!(%err, "failed to setup server certificate reloading"),
+				}
+			});
+		}
 
 		let mut tls = rustls::ServerConfig::builder_with_provider(provider)
 			.with_protocol_versions(&[&rustls::version::TLS13])?
@@ -175,19 +159,13 @@ impl Server {
 		Ok(Self {
 			quic: quic.clone(),
 			accept: Default::default(),
-			fingerprints,
 			certs,
 		})
 	}
 
-	pub fn reloader(&self) -> ServerReloader {
-		ServerReloader {
-			certs: self.certs.clone(),
-		}
-	}
-
-	pub fn fingerprints(&self) -> &[String] {
-		&self.fingerprints
+	// Return the SHA256 fingerprints of all our certificates.
+	pub fn fingerprints(&self) -> Arc<RwLock<Vec<String>>> {
+		self.certs.fingerprints.clone()
 	}
 
 	/// Returns the next partially established QUIC or WebTransport session.
@@ -339,6 +317,7 @@ impl QuicRequest {
 #[derive(Debug)]
 struct ServeCerts {
 	certs: RwLock<Vec<Arc<CertifiedKey>>>,
+	fingerprints: Arc<RwLock<Vec<String>>>,
 	provider: crypto::Provider,
 }
 
@@ -346,13 +325,37 @@ impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
 			certs: RwLock::new(Vec::new()),
+			fingerprints: Arc::new(RwLock::new(Vec::new())),
 			provider,
 		}
 	}
 
+	pub fn reload(&self, config: &ServerTlsConfig) -> anyhow::Result<()> {
+		let certs = self.load_certs(config)?;
+		self.set(certs);
+		Ok(())
+	}
+
+	fn load_certs(&self, config: &ServerTlsConfig) -> anyhow::Result<Vec<Arc<CertifiedKey>>> {
+		anyhow::ensure!(config.cert.len() == config.key.len(), "must provide both cert and key");
+
+		let mut certs = Vec::new();
+
+		// Load the certificate and key files based on their index.
+		for (cert, key) in config.cert.iter().zip(config.key.iter()) {
+			certs.push(Arc::new(self.load(cert, key)?));
+		}
+
+		if !config.generate.is_empty() {
+			certs.push(Arc::new(self.generate(&config.generate)?));
+		}
+
+		Ok(certs)
+	}
+
 	// Load a certificate and corresponding key from a file, but don't add it to the certs
-	pub fn load(&self, chain: &PathBuf, key: &PathBuf) -> anyhow::Result<CertifiedKey> {
-		let chain = fs::File::open(chain).context("failed to open cert file")?;
+	pub fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<CertifiedKey> {
+		let chain = fs::File::open(chain_path).context("failed to open cert file")?;
 		let mut chain = io::BufReader::new(chain);
 
 		let chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut chain)
@@ -362,7 +365,7 @@ impl ServeCerts {
 		anyhow::ensure!(!chain.is_empty(), "could not find certificate");
 
 		// Read the PEM private key
-		let mut keys = fs::File::open(key).context("failed to open key file")?;
+		let mut keys = fs::File::open(key_path).context("failed to open key file")?;
 
 		// Read the keys into a Vec so we can parse it twice.
 		let mut buf = Vec::new();
@@ -373,9 +376,11 @@ impl ServeCerts {
 
 		let certified_key = CertifiedKey::new(chain, key);
 
-		certified_key
-			.keys_match()
-			.context("private key doesn't match certificate")?;
+		certified_key.keys_match().context(format!(
+			"private key {} doesn't match certificate {}",
+			key_path.display(),
+			chain_path.display()
+		))?;
 
 		Ok(certified_key)
 	}
@@ -404,17 +409,23 @@ impl ServeCerts {
 
 	// Replace the certificates
 	pub fn set(&self, certs: Vec<Arc<CertifiedKey>>) {
-		*self.certs.write().unwrap() = certs;
+		{
+			*self.certs.write().expect("certs write lock poisened") = certs;
+		}
+		self.update_fingerprints();
 	}
 
 	// Add a certificate
 	pub fn add(&self, cert: Arc<CertifiedKey>) {
-		self.certs.write().unwrap().push(cert);
+		{
+			self.certs.write().expect("certs write lock poisened").push(cert);
+		}
+		self.update_fingerprints();
 	}
 
-	// Return the SHA256 fingerprints of all our certificates.
-	pub fn fingerprints(&self) -> Vec<String> {
-		self.certs
+	fn update_fingerprints(&self) {
+		let fingerprints = self
+			.certs
 			.read()
 			.unwrap()
 			.iter()
@@ -422,7 +433,9 @@ impl ServeCerts {
 				let fingerprint = crate::crypto::sha256(&self.provider, ck.cert[0].as_ref());
 				hex::encode(fingerprint)
 			})
-			.collect()
+			.collect();
+
+		*self.fingerprints.write().expect("fingerprints write lock poisened") = fingerprints;
 	}
 
 	// Return the best certificate for the given ClientHello.

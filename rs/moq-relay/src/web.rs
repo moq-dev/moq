@@ -24,9 +24,11 @@ use clap::Parser;
 use moq_lite::{OriginConsumer, OriginProducer};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{Auth, Cluster, ConfigReloader};
+use crate::{Auth, Cluster};
 
 #[derive(Debug, Deserialize)]
 struct Params {
@@ -75,7 +77,7 @@ pub struct HttpsConfig {
 pub struct WebState {
 	pub auth: Auth,
 	pub cluster: Cluster,
-	pub fingerprints: Vec<String>,
+	pub fingerprints: Arc<std::sync::RwLock<Vec<String>>>,
 	pub conn_id: AtomicU64,
 }
 
@@ -83,25 +85,16 @@ pub struct WebState {
 pub struct Web {
 	state: WebState,
 	config: WebConfig,
-	reloader: Arc<ConfigReloader>,
 }
 
 impl Web {
-	pub fn new(state: WebState, config: WebConfig, reloader: Arc<ConfigReloader>) -> Self {
-		Self {
-			state,
-			config,
-			reloader,
-		}
+	pub fn new(state: WebState, config: WebConfig) -> Self {
+		Self { state, config }
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
-		// Get the first certificate's fingerprint.
-		// TODO serve all of them so we can support multiple signature algorithms.
-		let fingerprint = self.state.fingerprints.first().expect("missing certificate").clone();
-
 		let app = Router::new()
-			.route("/certificate.sha256", get(fingerprint))
+			.route("/certificate.sha256", get(serve_fingerprint))
 			.route("/announced", get(serve_announced))
 			.route("/announced/{*prefix}", get(serve_announced))
 			.route("/fetch/{*path}", get(serve_fetch));
@@ -123,22 +116,12 @@ impl Web {
 		};
 
 		let https = if let Some(listen) = self.config.https.listen {
-			let cert = self.config.https.cert.clone().expect("missing https.cert");
-			let key = self.config.https.key.clone().expect("missing https.key");
+			let cert = self.config.https.cert.expect("missing https.cert");
+			let key = self.config.https.key.expect("missing https.key");
 			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
 
-			let config_clone = config.clone();
-			self.reloader.watch_changes(move || {
-				let config_clone = config_clone.clone();
-				let cert = cert.clone();
-				let key = key.clone();
-
-				tokio::spawn(async move {
-					if let Err(err) = config_clone.reload_from_pem_file(cert, key).await {
-						tracing::warn!(%err, "failed to reload web certificate");
-					}
-				});
-			});
+			#[cfg(unix)]
+			setup_reload(config.clone(), cert.clone(), key.clone());
 
 			let server = hyper_serve::bind_rustls(listen, config);
 			Some(server.serve(app))
@@ -154,6 +137,36 @@ impl Web {
 
 		Ok(())
 	}
+}
+
+#[cfg(unix)]
+fn setup_reload(config: hyper_serve::tls_rustls::RustlsConfig, cert: PathBuf, key: PathBuf) {
+	tokio::spawn(async move {
+		match signal(SignalKind::user_defined1()) {
+			Ok(mut signal) => loop {
+				if signal.recv().await.is_some() {
+					tracing::info!("reloading web certificate");
+
+					if let Err(err) = config.reload_from_pem_file(cert.clone(), key.clone()).await {
+						tracing::warn!(%err, "failed to reload web certificate");
+					}
+				}
+			},
+			Err(err) => tracing::warn!(%err, "failed to setup web certificate reloading"),
+		}
+	});
+}
+
+async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
+	// Get the first certificate's fingerprint.
+	// TODO serve all of them so we can support multiple signature algorithms.
+	state
+		.fingerprints
+		.read()
+		.expect("fingerprints lock poisoned")
+		.first()
+		.expect("missing certificate")
+		.clone()
 }
 
 async fn serve_ws(

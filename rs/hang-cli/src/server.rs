@@ -30,7 +30,14 @@ pub async fn server<T: AsyncRead + Unpin>(
 
 	// Get the first certificate's fingerprint.
 	// TODO serve all of them so we can support multiple signature algorithms.
-	let fingerprint = server.fingerprints().first().context("missing certificate")?.clone();
+	// TODO Handle reloading of fingerprints
+	let fingerprint = server
+		.fingerprints()
+		.read()
+		.expect("fingerprints read lock poisened")
+		.first()
+		.context("missing certificate")?
+		.clone();
 
 	let broadcast = moq_lite::Broadcast::produce();
 	let mut import = Import::new(broadcast.producer.into(), format);
