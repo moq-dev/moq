@@ -27,12 +27,13 @@ customElement("hang-watch-ui", {}, function WatchUIWebComponent(_, { element }) 
 						<slot />
 						<Stats
 							context={WatchUIContext}
-							getElement={(ctx) =>
-								({
-									audio: { source: ctx?.hangWatch.audio.source },
-									video: { source: ctx?.hangWatch.video.source },
-								}) as ProviderProps
-							}
+							getElement={(ctx): ProviderProps | undefined => {
+								if (!ctx?.hangWatch) return undefined;
+								return {
+									audio: { source: ctx.hangWatch.audio.source },
+									video: { source: ctx.hangWatch.video.source },
+								};
+							}}
 						/>
 						<BufferingIndicator />
 					</div>

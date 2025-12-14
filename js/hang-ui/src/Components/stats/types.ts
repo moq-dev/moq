@@ -63,7 +63,7 @@ export interface AudioSource {
 export interface AudioConfig {
 	sampleRate: number;
 	numberOfChannels: number;
-	bitrate: number;
+	bitrate?: number;
 	codec: string;
 }
 
