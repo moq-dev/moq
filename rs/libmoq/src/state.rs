@@ -20,23 +20,29 @@ struct Session {
 }
 
 struct Subscription {
-	// The origin consumer for this subscription.
-	origin: moq_lite::OriginConsumer,
-
 	// A simple signal to notify the background task when closed.
 	#[allow(dead_code)]
 	closed: oneshot::Sender<()>,
-
-	// Callbacks for handling catalog and frame data.
-	callbacks: SubscriptionCallbacks,
 }
 
 #[derive(Clone)]
 pub struct SubscriptionCallbacks {
 	pub user_data: *mut std::ffi::c_void,
-	pub on_catalog: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, catalog_json: *const std::ffi::c_char)>,
-	pub on_video: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, track: i32, data: *const u8, size: usize, pts: u64, keyframe: bool)>,
-	pub on_audio: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, track: i32, data: *const u8, size: usize, pts: u64)>,
+	pub on_catalog:
+		Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, catalog_json: *const std::ffi::c_char)>,
+	pub on_video: Option<
+		unsafe extern "C" fn(
+			user_data: *mut std::ffi::c_void,
+			track: i32,
+			data: *const u8,
+			size: usize,
+			pts: u64,
+			keyframe: bool,
+		),
+	>,
+	pub on_audio: Option<
+		unsafe extern "C" fn(user_data: *mut std::ffi::c_void, track: i32, data: *const u8, size: usize, pts: u64),
+	>,
 	pub on_error: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, code: i32)>,
 }
 
@@ -213,7 +219,12 @@ impl State {
 		Ok(())
 	}
 
-	pub fn subscribe_from_session(&mut self, session_id: Id, path: String, callbacks: SubscriptionCallbacks) -> Result<Id, Error> {
+	pub fn subscribe_from_session(
+		&mut self,
+		session_id: Id,
+		path: String,
+		callbacks: SubscriptionCallbacks,
+	) -> Result<Id, Error> {
 		let session = self.sessions.get_mut(session_id).ok_or(Error::NotFound)?;
 
 		// For now, we'll create a new connection for subscribing since the existing session is used for publishing
@@ -223,11 +234,7 @@ impl State {
 		// Used just to notify when the subscription is removed from the map.
 		let closed = oneshot::channel();
 
-		let id = self.subscriptions.insert(Subscription {
-			closed: closed.0,
-			origin: moq_lite::Origin::produce().consumer,
-			callbacks: callbacks.clone(),
-		});
+		let id = self.subscriptions.insert(Subscription { closed: closed.0 });
 
 		let _on_error = callbacks.on_error;
 		let _user_data = callbacks.user_data;
@@ -252,11 +259,7 @@ impl State {
 		Ok(id)
 	}
 
-	async fn subscribe_run(
-		url: Url,
-		path: String,
-		callbacks: SubscriptionCallbacks,
-	) -> Result<(), Error> {
+	async fn subscribe_run(url: Url, path: String, callbacks: SubscriptionCallbacks) -> Result<(), Error> {
 		let config = moq_native::ClientConfig::default();
 		let client = config.init().map_err(|err| Error::Connect(Arc::new(err)))?;
 		let connection = client.connect(url).await.map_err(|err| Error::Connect(Arc::new(err)))?;
@@ -266,14 +269,13 @@ impl State {
 		tracing::info!(broadcast = %path, "waiting for broadcast to be online");
 
 		let path: moq_lite::Path<'_> = path.into();
-		let mut origin = origin
-			.consumer
-			.consume_only(&[path])
-			.ok_or(Error::NotFound)?;
+		let mut origin = origin.consumer.consume_only(&[path]).ok_or(Error::NotFound)?;
 
 		// Track the current video and audio subscribers
-		let mut video_subscribers: std::collections::HashMap<String, hang::TrackConsumer> = std::collections::HashMap::new();
-		let mut audio_subscribers: std::collections::HashMap<String, hang::TrackConsumer> = std::collections::HashMap::new();
+		let mut video_subscribers: std::collections::HashMap<String, hang::TrackConsumer> =
+			std::collections::HashMap::new();
+		let mut audio_subscribers: std::collections::HashMap<String, hang::TrackConsumer> =
+			std::collections::HashMap::new();
 
 		loop {
 			tokio::select! {
@@ -299,7 +301,7 @@ impl State {
 
 							// Subscribe to video tracks
 							if let Some(video) = &catalog_data.video {
-								for (track_name, _config) in &video.renditions {
+								for track_name in video.renditions.keys() {
 									let track = broadcast.subscribe_track(&moq_lite::Track {
 										name: track_name.clone(),
 										priority: video.priority,
@@ -310,7 +312,7 @@ impl State {
 
 							// Subscribe to audio tracks
 							if let Some(audio) = &catalog_data.audio {
-								for (track_name, _config) in &audio.renditions {
+								for track_name in audio.renditions.keys() {
 									let track = broadcast.subscribe_track(&moq_lite::Track {
 										name: track_name.clone(),
 										priority: audio.priority,
@@ -376,7 +378,9 @@ impl State {
 		}
 	}
 
-	async fn next_video_frame(subscribers: &mut std::collections::HashMap<String, hang::TrackConsumer>) -> Option<(String, hang::Frame)> {
+	async fn next_video_frame(
+		subscribers: &mut std::collections::HashMap<String, hang::TrackConsumer>,
+	) -> Option<(String, hang::Frame)> {
 		// This is a simplified version - in practice you'd need to handle multiple subscribers
 		for (name, subscriber) in subscribers.iter_mut() {
 			if let Ok(Some(frame)) = subscriber.read_frame().await {
@@ -386,7 +390,9 @@ impl State {
 		None
 	}
 
-	async fn next_audio_frame(subscribers: &mut std::collections::HashMap<String, hang::TrackConsumer>) -> Option<(String, hang::Frame)> {
+	async fn next_audio_frame(
+		subscribers: &mut std::collections::HashMap<String, hang::TrackConsumer>,
+	) -> Option<(String, hang::Frame)> {
 		// This is a simplified version - in practice you'd need to handle multiple subscribers
 		for (name, subscriber) in subscribers.iter_mut() {
 			if let Ok(Some(frame)) = subscriber.read_frame().await {

@@ -180,8 +180,19 @@ pub unsafe extern "C" fn moq_subscribe_create(
 	session: i32,
 	path: *const std::ffi::c_char,
 	on_catalog: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, catalog_json: *const std::ffi::c_char)>,
-	on_video: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, track: i32, data: *const u8, size: usize, pts: u64, keyframe: bool)>,
-	on_audio: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, track: i32, data: *const u8, size: usize, pts: u64)>,
+	on_video: Option<
+		unsafe extern "C" fn(
+			user_data: *mut std::ffi::c_void,
+			track: i32,
+			data: *const u8,
+			size: usize,
+			pts: u64,
+			keyframe: bool,
+		),
+	>,
+	on_audio: Option<
+		unsafe extern "C" fn(user_data: *mut std::ffi::c_void, track: i32, data: *const u8, size: usize, pts: u64),
+	>,
 	on_error: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, code: i32)>,
 	user_data: *mut std::ffi::c_void,
 ) -> i32 {
