@@ -426,7 +426,13 @@ impl State {
 		}
 
 		// Wait for the first available frame from any subscriber
-		futures.next().await.flatten()
+		// Important: don't return early on `None`, or we may drop other pending futures and stop getting wakeups.
+		while let Some(item) = futures.next().await {
+			if let Some(v) = item {
+				return Some(v);
+			}
+		}
+		None
 	}
 
 	pub fn unsubscribe(&mut self, id: Id) -> Result<(), Error> {
