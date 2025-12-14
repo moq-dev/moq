@@ -45,8 +45,10 @@ pub struct SubscriptionCallbacks {
 	pub on_audio: Option<
 		unsafe extern "C" fn(user_data: *mut std::ffi::c_void, track: i32, data: *const u8, size: usize, pts: u64),
 	>,
+	#[allow(dead_code)] // TODO: Implement safe error callback mechanism for tokio threads
 	pub on_error: Option<unsafe extern "C" fn(user_data: *mut std::ffi::c_void, code: i32)>,
 }
+
 
 unsafe impl Send for SubscriptionCallbacks {}
 
@@ -254,12 +256,6 @@ impl State {
 
 		let id = self.subscriptions.insert(Subscription { closed: closed.0 });
 
-		let _on_error = callbacks.on_error;
-		let _user_data = callbacks.user_data;
-
-		// For now, we'll handle errors by logging them since calling callbacks
-		// from tokio threads with raw pointers is complex in Rust.
-		// TODO: Implement a proper callback mechanism that works with tokio
 		tokio::spawn(async move {
 			let result = tokio::select! {
 				// No more receiver, which means [subscription_close] was called.
@@ -270,7 +266,12 @@ impl State {
 
 			if let Err(err) = result {
 				tracing::error!("Subscription error: {}", err);
-				// TODO: Send error to main thread for callback
+
+				// TODO: Invoke the error callback when safe callback mechanism is implemented
+				// For now, we just clean up the subscription to prevent resource leaks
+
+				// Clean up the subscription from the slab to prevent resource leak
+				let _ = State::lock().unsubscribe(id);
 			}
 		});
 
