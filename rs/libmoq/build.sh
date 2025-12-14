@@ -84,20 +84,13 @@ else
     exit 1
 fi
 
-# Copy libraries based on platform
+# Copy static library
 case "$TARGET" in
-    *-apple-*)
-        cp "$TARGET_DIR/libmoq.dylib" "$PACKAGE_DIR/lib/"
-        cp "$TARGET_DIR/libmoq.a" "$PACKAGE_DIR/lib/"
-        ;;
     *-windows-*)
-        cp "$TARGET_DIR/moq.dll" "$PACKAGE_DIR/lib/"
-        cp "$TARGET_DIR/moq.dll.lib" "$PACKAGE_DIR/lib/"
         cp "$TARGET_DIR/moq.lib" "$PACKAGE_DIR/lib/"
         ;;
     *)
-        # Linux and others
-        cp "$TARGET_DIR/libmoq.so" "$PACKAGE_DIR/lib/"
+        # Unix-like (macOS, Linux, etc.)
         cp "$TARGET_DIR/libmoq.a" "$PACKAGE_DIR/lib/"
         ;;
 esac
