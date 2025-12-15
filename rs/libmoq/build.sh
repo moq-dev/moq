@@ -62,10 +62,10 @@ if [[ "$TARGET" == "aarch64-unknown-linux-gnu" ]]; then
 	export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 fi
 
-cargo build --release --package libmoq --target "$TARGET" --manifest-path "$RS_DIR/Cargo.toml"
+cargo build --release --package libmoq --target "$TARGET" --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 
 # Determine paths
-TARGET_DIR="$RS_DIR/target/$TARGET/release"
+TARGET_DIR="$WORKSPACE_DIR/target/$TARGET/release"
 NAME="moq-${VERSION}-${TARGET}"
 PACKAGE_DIR="$OUTPUT_DIR/$NAME"
 
@@ -76,7 +76,7 @@ rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR/include" "$PACKAGE_DIR/lib"
 
 # Copy header (generated in target/include/ by build.rs)
-HEADER_FILE="$RS_DIR/target/include/moq.h"
+HEADER_FILE="$WORKSPACE_DIR/target/include/moq.h"
 if [[ -f "$HEADER_FILE" ]]; then
     cp "$HEADER_FILE" "$PACKAGE_DIR/include/"
 else
@@ -84,20 +84,13 @@ else
     exit 1
 fi
 
-# Copy libraries based on platform
+# Copy static library
 case "$TARGET" in
-    *-apple-*)
-        cp "$TARGET_DIR/libmoq.dylib" "$PACKAGE_DIR/lib/"
-        cp "$TARGET_DIR/libmoq.a" "$PACKAGE_DIR/lib/"
-        ;;
     *-windows-*)
-        cp "$TARGET_DIR/moq.dll" "$PACKAGE_DIR/lib/"
-        cp "$TARGET_DIR/moq.dll.lib" "$PACKAGE_DIR/lib/"
         cp "$TARGET_DIR/moq.lib" "$PACKAGE_DIR/lib/"
         ;;
     *)
-        # Linux and others
-        cp "$TARGET_DIR/libmoq.so" "$PACKAGE_DIR/lib/"
+        # Unix-like (macOS, Linux, etc.)
         cp "$TARGET_DIR/libmoq.a" "$PACKAGE_DIR/lib/"
         ;;
 esac
@@ -105,7 +98,7 @@ esac
 # Copy pkg-config file (generated in target/ by build.rs, not for Windows)
 if [[ "$TARGET" != *"-windows-"* ]]; then
     mkdir -p "$PACKAGE_DIR/lib/pkgconfig"
-    cp "$RS_DIR/target/moq.pc" "$PACKAGE_DIR/lib/pkgconfig/"
+    cp "$WORKSPACE_DIR/target/moq.pc" "$PACKAGE_DIR/lib/pkgconfig/"
 fi
 
 # Create archive

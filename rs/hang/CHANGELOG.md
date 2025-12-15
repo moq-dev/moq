@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/moq-dev/moq/compare/hang-v0.7.0...hang-v0.8.0) - 2025-12-13
+
+### Other
+
+- Use BufList for hang::Frame ([#769](https://github.com/moq-dev/moq/pull/769))
+- Fix and over-optimize the H.264 annex.b import ([#766](https://github.com/moq-dev/moq/pull/766))
+- Add extended AAC support for variable-length AudioSpecificConfig ([#756](https://github.com/moq-dev/moq/pull/756))
+- kixelated -> moq-dev ([#749](https://github.com/moq-dev/moq/pull/749))
+- Revamp the C API and have it use hang/import ([#732](https://github.com/moq-dev/moq/pull/732))
+- Fix some deployment stuff. ([#747](https://github.com/moq-dev/moq/pull/747))
+- Revamp hang imports: consolidate annexb/cmaf into import module ([#739](https://github.com/moq-dev/moq/pull/739))
+- Make a proper Timestamp type to detect overflows. ([#735](https://github.com/moq-dev/moq/pull/735))
+
 ## [0.7.0](https://github.com/moq-dev/moq/compare/hang-v0.6.1...hang-v0.7.0) - 2025-11-26
 
 ### Fixed

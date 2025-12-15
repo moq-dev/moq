@@ -6,14 +6,10 @@ option(BUILD_RUST_LIB "Build the Rust library using cargo" ON)
 # Determine library extension based on platform
 if(WIN32)
     set(LIB_PREFIX "")
-    set(LIB_SUFFIX ".dll")
-    set(IMPORT_SUFFIX ".dll.lib")
-elseif(APPLE)
-    set(LIB_PREFIX "lib")
-    set(LIB_SUFFIX ".dylib")
+    set(LIB_SUFFIX ".lib")
 else()
     set(LIB_PREFIX "lib")
-    set(LIB_SUFFIX ".so")
+    set(LIB_SUFFIX ".a")
 endif()
 
 if(BUILD_RUST_LIB)
@@ -49,17 +45,11 @@ file(MAKE_DIRECTORY ${RUST_DIR})
 file(MAKE_DIRECTORY ${RUST_TARGET_DIR}/include)
 
 # Create imported library target
-add_library(moq SHARED IMPORTED GLOBAL)
+add_library(moq STATIC IMPORTED GLOBAL)
 set_target_properties(moq PROPERTIES
     IMPORTED_LOCATION ${RUST_LIB}
     INTERFACE_INCLUDE_DIRECTORIES ${RUST_TARGET_DIR}/include
 )
-
-if(WIN32)
-    set_target_properties(moq PROPERTIES
-        IMPORTED_IMPLIB "${RUST_DIR}/moq${IMPORT_SUFFIX}"
-    )
-endif()
 
 if(BUILD_RUST_LIB)
     add_dependencies(moq rust_build)
