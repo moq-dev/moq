@@ -79,8 +79,8 @@ impl BroadcastConsumer {
 		Self { inner, catalog }
 	}
 
-	pub fn subscribe(&self, track: &moq_lite::Track) -> TrackConsumer {
-		self.inner.subscribe_track(track).into()
+	pub fn subscribe(&self, track: &moq_lite::Track, latency: std::time::Duration) -> TrackConsumer {
+		TrackConsumer::new(self.inner.subscribe_track(track), latency)
 	}
 }
 

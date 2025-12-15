@@ -9,25 +9,42 @@ use url::Url;
 
 use crate::ffi::OnStatus;
 use crate::{ffi, Announced, AudioTrack, Error, Frame, Id, NonZeroSlab, VideoTrack};
+
+/// Global state managing all active resources.
+///
+/// Stores all sessions, origins, broadcasts, tracks, and frames in slab allocators,
+/// returning opaque IDs to C callers. Also manages async tasks via oneshot channels
+/// for cancellation.
 #[derive(Default)]
 pub struct State {
+	/// Active origin producers for publishing and consuming broadcasts.
 	origin: NonZeroSlab<moq_lite::OriginProducer>,
 
-	// Contains a oneshot so we can detect when the session is removed from the slab.
+	/// Session task cancellation channels.
 	session_task: NonZeroSlab<oneshot::Sender<()>>,
 
+	/// Broadcast announcement information (path, active status).
 	announced: NonZeroSlab<(String, bool)>,
+	/// Announcement listener task cancellation channels.
 	announced_task: NonZeroSlab<oneshot::Sender<()>>,
 
+	/// Active broadcast producers for publishing.
 	publish_broadcast: NonZeroSlab<hang::BroadcastProducer>,
+	/// Active media encoders/decoders for publishing.
 	publish_media: NonZeroSlab<hang::import::Decoder>,
 
+	/// Active broadcast consumers.
 	consume_broadcast: NonZeroSlab<hang::BroadcastConsumer>,
+	/// Active catalog consumers and their broadcast references.
 	consume_catalog: NonZeroSlab<(hang::catalog::Catalog, moq_lite::BroadcastConsumer)>,
+	/// Catalog consumer task cancellation channels.
 	consume_catalog_task: NonZeroSlab<oneshot::Sender<()>>,
+	/// Audio track consumer task cancellation channels.
 	consume_audio_task: NonZeroSlab<oneshot::Sender<()>>,
+	/// Video track consumer task cancellation channels.
 	consume_video_task: NonZeroSlab<oneshot::Sender<()>>,
 
+	/// Buffered frames ready for consumption.
 	consume_frame: NonZeroSlab<hang::Frame>,
 }
 
@@ -188,9 +205,9 @@ impl State {
 
 		let mut data = unsafe { ffi::parse_slice(frame.payload, frame.payload_size) }?;
 
-		let pts = hang::Timestamp::from_micros(frame.pts)?;
+		let timestamp = hang::Timestamp::from_micros(frame.timestamp_us)?;
 		media
-			.decode_frame(&mut data, Some(pts))
+			.decode_frame(&mut data, Some(timestamp))
 			.map_err(|err| Error::DecodeFailed(Arc::new(err)))?;
 		assert!(data.is_empty(), "buffer was not fully consumed");
 
@@ -305,11 +322,11 @@ impl State {
 		let video = catalog.video.as_ref().ok_or(Error::NotFound)?;
 		let rendition = video.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
-		let mut track = hang::TrackConsumer::from(broadcast.subscribe_track(&moq_lite::Track {
+		let track = broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: video.priority,
-		}));
-		track.set_latency(latency);
+		});
+		let track = TrackConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
 		tokio::spawn(async move {
@@ -336,11 +353,11 @@ impl State {
 		let audio = catalog.audio.as_ref().ok_or(Error::NotFound)?;
 		let rendition = audio.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
-		let mut track = hang::TrackConsumer::from(broadcast.subscribe_track(&moq_lite::Track {
+		let track = broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: audio.priority,
-		}));
-		track.set_latency(latency);
+		});
+		let track = TrackConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
 		tokio::spawn(async move {
@@ -399,7 +416,7 @@ impl State {
 
 		dst.payload = chunk.as_ptr();
 		dst.payload_size = chunk.len();
-		dst.pts = frame.timestamp.as_micros();
+		dst.timestamp_us = frame.timestamp.as_micros();
 		dst.keyframe = frame.keyframe;
 
 		Ok(())
@@ -416,6 +433,10 @@ impl State {
 	}
 }
 
+/// Guard that holds the global state lock and tokio runtime context.
+///
+/// Automatically enters the tokio runtime context when locked, allowing
+/// spawning of async tasks from FFI functions.
 pub struct StateGuard {
 	_runtime: tokio::runtime::EnterGuard<'static>,
 	state: MutexGuard<'static, State>,
@@ -435,6 +456,7 @@ impl DerefMut for StateGuard {
 }
 
 impl State {
+	/// Lock the global state and enter the tokio runtime context.
 	pub fn lock() -> StateGuard {
 		let runtime = RUNTIME.enter();
 		let state = STATE.lock().unwrap();
@@ -445,6 +467,10 @@ impl State {
 	}
 }
 
+/// Global tokio runtime handle.
+///
+/// Runs in a dedicated background thread to process async operations
+/// spawned from FFI calls.
 static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
@@ -462,4 +488,5 @@ static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	handle
 });
 
+/// Global shared state instance.
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| Mutex::new(State::default()));

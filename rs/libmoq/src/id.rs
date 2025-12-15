@@ -2,7 +2,11 @@ use std::num::NonZero;
 
 use crate::Error;
 
-// Massive overkill, but it's fun.
+/// Opaque resource identifier returned to C code.
+///
+/// Non-zero u32 value that uniquely identifies resources like sessions,
+/// origins, broadcasts, tracks, etc. Zero is reserved to indicate "none"
+/// or optional parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Id(NonZero<u32>);
 
@@ -12,7 +16,10 @@ impl std::fmt::Display for Id {
 	}
 }
 
-// We purposely don't return 0 for slab IDs.
+/// Slab allocator that only returns non-zero IDs.
+///
+/// Wraps [slab::Slab] to ensure all IDs start from 1 instead of 0,
+/// allowing 0 to represent null/none in the FFI layer.
 pub(crate) struct NonZeroSlab<T>(slab::Slab<T>);
 
 impl<T> NonZeroSlab<T> {
