@@ -1,11 +1,11 @@
-import { Show, useContext } from "solid-js";
-import { WatchUIContext } from "./WatchUIContextProvider";
+import { Show } from "solid-js";
+import useWatchUIContext from "./useWatchUIContext";
 
 export default function BufferingIndicator() {
-	const context = useContext(WatchUIContext);
+	const context = useWatchUIContext();
 
 	return (
-		<Show when={context?.buffering()}>
+		<Show when={context.buffering()}>
 			<div class="bufferingContainer">
 				<div class="bufferingSpinner" />
 			</div>

@@ -66,10 +66,6 @@ pub enum Error {
 	#[error("timestamp went backwards")]
 	TimestampBackwards,
 
-	/// An error during HLS ingest.
-	#[error("hls error: {0}")]
-	Hls(String),
-
 	/// An error from the HTTP client.
 	#[error("http error: {0}")]
 	Http(Arc<reqwest::Error>),

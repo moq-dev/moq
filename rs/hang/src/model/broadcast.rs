@@ -32,6 +32,12 @@ impl BroadcastProducer {
 	}
 }
 
+impl Default for BroadcastProducer {
+	fn default() -> Self {
+		Self::new(moq_lite::BroadcastProducer::default())
+	}
+}
+
 impl Deref for BroadcastProducer {
 	type Target = moq_lite::BroadcastProducer;
 

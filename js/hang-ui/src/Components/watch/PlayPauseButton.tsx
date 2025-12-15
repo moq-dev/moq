@@ -1,20 +1,19 @@
-import { useContext } from "solid-js";
-import { WatchUIContext } from "./WatchUIContextProvider";
+import useWatchUIContext from "./useWatchUIContext";
 
 export default function PlayPauseButton() {
-	const context = useContext(WatchUIContext);
+	const context = useWatchUIContext();
 	const onClick = () => {
-		context?.togglePlayback();
+		context.togglePlayback();
 	};
 
 	return (
 		<button
 			type="button"
-			title={context?.isPlaying() ? "Pause" : "Play"}
+			title={context.isPlaying() ? "Pause" : "Play"}
 			class="watchControlButton"
 			onClick={onClick}
 		>
-			{context?.isPlaying() ? "⏸️" : "▶️"}
+			{context.isPlaying() ? "⏸️" : "▶️"}
 		</button>
 	);
 }

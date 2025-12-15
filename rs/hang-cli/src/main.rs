@@ -1,14 +1,13 @@
 mod client;
-mod import;
+mod publish;
 mod server;
 
-use std::path::PathBuf;
-
 use client::*;
-use import::*;
+use publish::*;
 use server::*;
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use url::Url;
 
 #[derive(Parser, Clone)]
@@ -35,8 +34,8 @@ pub enum Command {
 		dir: Option<PathBuf>,
 
 		/// The format of the input media.
-		#[arg(long, value_enum, default_value_t = ImportType::Cmaf)]
-		format: ImportType,
+		#[command(subcommand)]
+		format: PublishFormat,
 	},
 	Publish {
 		/// The MoQ client configuration.
@@ -61,12 +60,8 @@ pub enum Command {
 		name: String,
 
 		/// The format of the input media.
-		#[arg(long, value_enum, default_value_t = ImportType::Cmaf)]
-		format: ImportType,
-
-		/// URL of an HLS playlist to ingest (for --format hls).
-		#[arg(long)]
-		hls_url: Option<Url>,
+		#[command(subcommand)]
+		format: PublishFormat,
 	},
 }
 
@@ -75,19 +70,16 @@ async fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 	cli.log.init();
 
+	let mut publish = Publish::new(match &cli.command {
+		Command::Serve { format, .. } => format,
+		Command::Publish { format, .. } => format,
+	});
+
+	// Initialize the broadcast from stdin before starting any client/server.
+	publish.init().await?;
+
 	match cli.command {
-		Command::Serve {
-			config,
-			dir,
-			name,
-			format,
-		} => server(config, name, dir, format, &mut tokio::io::stdin()).await,
-		Command::Publish {
-			config,
-			url,
-			name,
-			format,
-			hls_url,
-		} => client(config, url, name, format, hls_url, &mut tokio::io::stdin()).await,
+		Command::Serve { config, dir, name, .. } => server(config, name, dir, publish).await,
+		Command::Publish { config, url, name, .. } => client(config, url, name, publish).await,
 	}
 }

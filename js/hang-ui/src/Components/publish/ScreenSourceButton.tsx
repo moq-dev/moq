@@ -1,15 +1,11 @@
-import { useContext } from "solid-js";
-import { PublishUIContext } from "./PublishUIContextProvider";
+import usePublishUIContext from "./usePublishUIContext";
 
 export default function ScreenSourceButton() {
-	const context = useContext(PublishUIContext);
+	const context = usePublishUIContext();
 	const onClick = () => {
-		const hangPublishEl = context?.hangPublish();
-		if (!hangPublishEl) return;
-
-		hangPublishEl.source.set("screen");
-		hangPublishEl.invisible.set(false);
-		hangPublishEl.muted.set(false);
+		context.hangPublish.source.set("screen");
+		context.hangPublish.invisible.set(false);
+		context.hangPublish.muted.set(false);
 	};
 
 	return (
@@ -17,7 +13,7 @@ export default function ScreenSourceButton() {
 			<button
 				type="button"
 				title="Screen"
-				class={`publishButton publishSourceButton ${context?.screenActive?.() ? "active" : ""}`}
+				class={`publishButton publishSourceButton ${context.screenActive() ? "active" : ""}`}
 				onClick={onClick}
 			>
 				🖥️

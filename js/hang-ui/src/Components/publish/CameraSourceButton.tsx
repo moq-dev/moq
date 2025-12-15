@@ -1,27 +1,21 @@
-import { Show, useContext } from "solid-js";
+import { Show } from "solid-js";
 import MediaSourceSourceSelector from "./MediaSourceSelector";
-import { PublishUIContext } from "./PublishUIContextProvider";
+import usePublishUIContext from "./usePublishUIContext";
 
 export default function CameraSourceButton() {
-	const context = useContext(PublishUIContext);
+	const context = usePublishUIContext();
 	const onClick = () => {
-		const hangPublishEl = context?.hangPublish();
-		if (!hangPublishEl) return;
-
-		if (hangPublishEl.source.peek() === "camera") {
+		if (context.hangPublish.source.peek() === "camera") {
 			// Camera already selected, toggle video.
-			hangPublishEl.invisible.update((invisible) => !invisible);
+			context.hangPublish.invisible.update((invisible) => !invisible);
 		} else {
-			hangPublishEl.source.set("camera");
-			hangPublishEl.invisible.set(false);
+			context.hangPublish.source.set("camera");
+			context.hangPublish.invisible.set(false);
 		}
 	};
 
 	const onSourceSelected = (sourceId: MediaDeviceInfo["deviceId"]) => {
-		const hangPublishEl = context?.hangPublish();
-		if (!hangPublishEl) return;
-
-		const video = hangPublishEl.video.peek();
+		const video = context.hangPublish.video.peek();
 		if (!video || !("device" in video)) return;
 
 		video.device.preferred.set(sourceId);
@@ -32,15 +26,15 @@ export default function CameraSourceButton() {
 			<button
 				type="button"
 				title="Camera"
-				class={`publishButton publishSourceButton ${context?.cameraActive?.() ? "active" : ""}`}
+				class={`publishButton publishSourceButton ${context.cameraActive() ? "active" : ""}`}
 				onClick={onClick}
 			>
 				📷
 			</button>
-			<Show when={context?.cameraActive?.() && context?.cameraDevices().length}>
+			<Show when={context.cameraActive() && context.cameraDevices().length}>
 				<MediaSourceSourceSelector
-					sources={context?.cameraDevices()}
-					selectedSource={context?.selectedCameraSource?.()}
+					sources={context.cameraDevices()}
+					selectedSource={context.selectedCameraSource?.()}
 					onSelected={onSourceSelected}
 				/>
 			</Show>

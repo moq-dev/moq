@@ -9,6 +9,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::time::Duration;
 
+use anyhow::Context;
 use bytes::Bytes;
 use m3u8_rs::{
 	AlternativeMedia, AlternativeMediaType, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution, VariantStream,
@@ -17,19 +18,23 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::import::media::Fmp4;
-use crate::{BroadcastProducer, Error, Result};
+use crate::import::Fmp4;
+use crate::BroadcastProducer;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
 pub struct HlsConfig {
 	/// The master or media playlist URL to ingest.
 	pub playlist: Url,
+
+	/// An optional HTTP client to use for fetching the playlist and segments.
+	/// If not provided, a default client will be created.
+	pub client: Option<Client>,
 }
 
 impl HlsConfig {
 	pub fn new(playlist: Url) -> Self {
-		Self { playlist }
+		Self { playlist, client: None }
 	}
 }
 
@@ -96,12 +101,17 @@ impl TrackState {
 
 impl Hls {
 	/// Create a new HLS ingest that will write into the given broadcast.
-	pub fn new(broadcast: BroadcastProducer, cfg: HlsConfig, client: Client) -> Self {
+	pub fn new(broadcast: BroadcastProducer, cfg: HlsConfig) -> Self {
 		Self {
 			broadcast,
 			video_importers: Vec::new(),
 			audio_importer: None,
-			client,
+			client: cfg.client.clone().unwrap_or_else(|| {
+				Client::builder()
+					.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+					.build()
+					.unwrap()
+			}),
 			cfg,
 			video: Vec::new(),
 			audio: None,
@@ -111,7 +121,7 @@ impl Hls {
 	/// Fetch the latest playlist, download the init segment, and prime the importer with a buffer of segments.
 	///
 	/// Returns the number of segments buffered during initialization.
-	pub async fn init(&mut self) -> Result<()> {
+	pub async fn init(&mut self) -> anyhow::Result<()> {
 		let buffered = self.prime().await?;
 		if buffered == 0 {
 			warn!("HLS playlist had no new segments during init step");
@@ -122,7 +132,7 @@ impl Hls {
 	}
 
 	/// Run the ingest loop until cancelled.
-	pub async fn service(&mut self) -> Result<()> {
+	pub async fn run(&mut self) -> anyhow::Result<()> {
 		loop {
 			let outcome = self.step().await?;
 			let delay = self.refresh_delay(outcome.target_duration, outcome.wrote_segments);
@@ -138,7 +148,7 @@ impl Hls {
 	}
 
 	/// Internal: fetch the latest playlist, download the init segment, and buffer segments.
-	async fn prime(&mut self) -> Result<usize> {
+	async fn prime(&mut self) -> anyhow::Result<usize> {
 		self.ensure_tracks().await?;
 
 		let mut buffered = 0usize;
@@ -149,8 +159,7 @@ impl Hls {
 		// the ingest and the tracks without running into borrow checker issues.
 		let video_tracks = std::mem::take(&mut self.video);
 		for (index, mut track) in video_tracks.into_iter().enumerate() {
-			let url = track.playlist.clone();
-			let playlist = self.fetch_media_playlist(&url).await?;
+			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
 			let count = self
 				.consume_segments(TrackKind::Video(index), &mut track, &playlist)
 				.await?;
@@ -160,7 +169,7 @@ impl Hls {
 
 		// Prime the shared audio track, if any.
 		if let Some(mut track) = self.audio.take() {
-			let playlist = self.fetch_media_playlist(&track.playlist).await?;
+			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
 			let count = self.consume_segments(TrackKind::Audio, &mut track, &playlist).await?;
 			buffered += count;
 			self.audio = Some(track);
@@ -174,7 +183,7 @@ impl Hls {
 	/// This fetches the current media playlists, consumes any fresh segments,
 	/// and returns how many segments were written along with the target
 	/// duration to guide scheduling of the next step.
-	async fn step(&mut self) -> Result<StepOutcome> {
+	async fn step(&mut self) -> anyhow::Result<StepOutcome> {
 		self.ensure_tracks().await?;
 
 		let mut wrote = 0usize;
@@ -183,8 +192,7 @@ impl Hls {
 		// Ingest a step from all active video variants.
 		let video_tracks = std::mem::take(&mut self.video);
 		for (index, mut track) in video_tracks.into_iter().enumerate() {
-			let url = track.playlist.clone();
-			let playlist = self.fetch_media_playlist(&url).await?;
+			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
 			// Use the first video's target duration as the base.
 			if target_duration.is_none() {
 				target_duration = Some(playlist.target_duration);
@@ -198,7 +206,7 @@ impl Hls {
 
 		// Ingest from the shared audio track, if present.
 		if let Some(mut track) = self.audio.take() {
-			let playlist = self.fetch_media_playlist(&track.playlist).await?;
+			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
 			if target_duration.is_none() {
 				target_duration = Some(playlist.target_duration);
 			}
@@ -225,25 +233,27 @@ impl Hls {
 		base
 	}
 
-	async fn fetch_media_playlist(&self, url: &Url) -> Result<MediaPlaylist> {
+	async fn fetch_media_playlist(&self, url: Url) -> anyhow::Result<MediaPlaylist> {
 		let body = self.fetch_bytes(url).await?;
-		let (_, playlist) = m3u8_rs::parse_media_playlist(&body)
-			.map_err(|err| Error::Hls(format!("failed to parse media playlist: {err}")))?;
+
+		// Nom errors take ownership of the input, so we need to stringify any error messages.
+		let playlist = m3u8_rs::parse_media_playlist_res(&body)
+			.map_err(|e| anyhow::anyhow!("failed to parse media playlist: {}", e))?;
+
 		Ok(playlist)
 	}
 
-	async fn ensure_tracks(&mut self) -> Result<()> {
+	async fn ensure_tracks(&mut self) -> anyhow::Result<()> {
 		// Tracks already discovered.
 		if !self.video.is_empty() {
 			return Ok(());
 		}
 
-		let body = self.fetch_bytes(&self.cfg.playlist).await?;
+		let body = self.fetch_bytes(self.cfg.playlist.clone()).await?;
 		if let Ok((_, master)) = m3u8_rs::parse_master_playlist(&body) {
 			let variants = select_variants(&master);
-			if variants.is_empty() {
-				return Err(Error::Hls("no usable variants found in master playlist".into()));
-			}
+			anyhow::ensure!(!variants.is_empty(), "no usable variants found in master playlist");
+
 			// Create a video track state for every usable variant.
 			for variant in &variants {
 				let video_url = resolve_uri(&self.cfg.playlist, &variant.uri)?;
@@ -285,7 +295,7 @@ impl Hls {
 		kind: TrackKind,
 		track: &mut TrackState,
 		playlist: &MediaPlaylist,
-	) -> Result<usize> {
+	) -> anyhow::Result<usize> {
 		self.ensure_init_segment(kind, track, playlist).await?;
 
 		// Skip segments we've already seen
@@ -308,25 +318,27 @@ impl Hls {
 		kind: TrackKind,
 		track: &mut TrackState,
 		playlist: &MediaPlaylist,
-	) -> Result<()> {
+	) -> anyhow::Result<()> {
 		if track.init_ready {
 			return Ok(());
 		}
 
-		let map = self
-			.find_map(playlist)
-			.ok_or_else(|| Error::Hls("playlist missing EXT-X-MAP".to_string()))?;
+		let map = self.find_map(playlist).context("playlist missing EXT-X-MAP")?;
 
 		let url = resolve_uri(&track.playlist, &map.uri)?;
-		let bytes = self.fetch_bytes(&url).await?;
+		let mut bytes = self.fetch_bytes(url).await?;
 		let importer = match kind {
-			TrackKind::Video(index) => self.ensure_video_importer_for(index)?,
-			TrackKind::Audio => self.ensure_audio_importer()?,
+			TrackKind::Video(index) => self.ensure_video_importer_for(index),
+			TrackKind::Audio => self.ensure_audio_importer(),
 		};
 
-		importer
-			.parse(&bytes)
-			.map_err(|e| Error::Hls(format!("init segment parse error: {e}")))?;
+		importer.decode(&mut bytes).context("init segment parse error")?;
+
+		anyhow::ensure!(bytes.is_empty(), "init segment was not fully consumed");
+		anyhow::ensure!(
+			importer.is_initialized(),
+			"init segment did not initialize the importer"
+		);
 
 		track.init_ready = true;
 		info!(media_type = ?track.media_type, "loaded HLS init segment");
@@ -339,22 +351,18 @@ impl Hls {
 		track: &mut TrackState,
 		segment: &MediaSegment,
 		sequence: u64,
-	) -> Result<()> {
-		if segment.uri.is_empty() {
-			return Err(Error::Hls("encountered segment with empty URI".to_string()));
-		}
+	) -> anyhow::Result<()> {
+		anyhow::ensure!(!segment.uri.is_empty(), "encountered segment with empty URI");
 
 		let url = resolve_uri(&track.playlist, &segment.uri)?;
-		let bytes = self.fetch_bytes(&url).await?;
+		let mut bytes = self.fetch_bytes(url).await?;
 
 		let importer = match kind {
-			TrackKind::Video(index) => self.ensure_video_importer_for(index)?,
-			TrackKind::Audio => self.ensure_audio_importer()?,
+			TrackKind::Video(index) => self.ensure_video_importer_for(index),
+			TrackKind::Audio => self.ensure_audio_importer(),
 		};
 
-		importer
-			.parse(&bytes)
-			.map_err(|e| Error::Hls(format!("media segment parse error: {e}")))?;
+		importer.decode(&mut bytes).context("failed to parse media segment")?;
 		track.next_sequence = Some(sequence + 1);
 
 		Ok(())
@@ -364,45 +372,30 @@ impl Hls {
 		playlist.segments.iter().find_map(|segment| segment.map.as_ref())
 	}
 
-	async fn fetch_bytes(&self, url: &Url) -> Result<Bytes> {
-		let response = self.client.get(url.clone()).send().await?;
+	async fn fetch_bytes(&self, url: Url) -> anyhow::Result<Bytes> {
+		let response = self.client.get(url).send().await?;
 		let response = response.error_for_status()?;
-		let bytes = response.bytes().await?;
+		let bytes = response.bytes().await.context("failed to read response body")?;
 		Ok(bytes)
-	}
-
-	/// Create a new fMP4 importer using the broadcast's catalog.
-	fn create_importer(&self) -> Fmp4 {
-		Fmp4::with_catalog(self.broadcast.clone(), self.broadcast.catalog.clone())
 	}
 
 	/// Create or retrieve the fMP4 importer for a specific video rendition.
 	///
 	/// Each video variant gets its own importer so that their tracks remain
 	/// independent while still contributing to the same shared catalog.
-	fn ensure_video_importer_for(&mut self, index: usize) -> Result<&mut Fmp4> {
+	fn ensure_video_importer_for(&mut self, index: usize) -> &mut Fmp4 {
 		while self.video_importers.len() <= index {
-			let importer = self.create_importer();
+			let importer = Fmp4::new(self.broadcast.clone());
 			self.video_importers.push(importer);
 		}
 
-		Ok(self
-			.video_importers
-			.get_mut(index)
-			.expect("video_importer must be initialized"))
+		self.video_importers.get_mut(index).unwrap()
 	}
 
 	/// Create or retrieve the fMP4 importer for the audio rendition.
-	fn ensure_audio_importer(&mut self) -> Result<&mut Fmp4> {
-		if self.audio_importer.is_none() {
-			let importer = self.create_importer();
-			self.audio_importer = Some(importer);
-		}
-
-		Ok(self
-			.audio_importer
-			.as_mut()
-			.expect("audio_importer must be initialized"))
+	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
+		self.audio_importer
+			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone()))
 	}
 
 	#[cfg(test)]
@@ -535,8 +528,7 @@ mod tests {
 		let broadcast = moq_lite::Broadcast::produce().producer.into();
 		let url = Url::parse("https://example.com/master.m3u8").unwrap();
 		let cfg = HlsConfig::new(url);
-		let client = Client::new();
-		let hls = Hls::new(broadcast, cfg, client);
+		let hls = Hls::new(broadcast, cfg);
 
 		assert!(!hls.has_video_importer());
 		assert!(!hls.has_audio_importer());

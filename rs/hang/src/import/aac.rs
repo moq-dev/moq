@@ -7,11 +7,16 @@ use moq_lite as moq;
 pub struct Aac {
 	broadcast: hang::BroadcastProducer,
 	track: Option<hang::TrackProducer>,
+	zero: Option<tokio::time::Instant>,
 }
 
 impl Aac {
 	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
-		Self { broadcast, track: None }
+		Self {
+			broadcast,
+			track: None,
+			zero: None,
+		}
 	}
 
 	pub fn initialize<T: Buf>(&mut self, buf: &mut T) -> anyhow::Result<()> {
@@ -117,7 +122,8 @@ impl Aac {
 		Ok(())
 	}
 
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: hang::Timestamp) -> anyhow::Result<()> {
+	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::Timestamp>) -> anyhow::Result<()> {
+		let pts = self.pts(pts)?;
 		let track = self.track.as_mut().context("not initialized")?;
 
 		let frame = hang::Frame {
@@ -133,6 +139,15 @@ impl Aac {
 
 	pub fn is_initialized(&self) -> bool {
 		self.track.is_some()
+	}
+
+	fn pts(&mut self, hint: Option<hang::Timestamp>) -> anyhow::Result<hang::Timestamp> {
+		if let Some(pts) = hint {
+			return Ok(pts);
+		}
+
+		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
+		Ok(hang::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }
 

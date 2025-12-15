@@ -39,9 +39,6 @@ pub enum Error {
 	#[error("decode failed: {0}")]
 	DecodeFailed(Arc<anyhow::Error>),
 
-	#[error("short decode")]
-	ShortDecode,
-
 	#[error("timestamp overflow")]
 	TimestampOverflow(#[from] hang::TimestampOverflow),
 
@@ -76,7 +73,6 @@ impl ffi::ReturnCode for Error {
 			Error::UnknownFormat(_) => -9,
 			Error::InitFailed(_) => -10,
 			Error::DecodeFailed(_) => -11,
-			Error::ShortDecode => -12,
 			Error::TimestampOverflow(_) => -13,
 			Error::Level(_) => -14,
 			Error::InvalidCode => -15,

@@ -23,9 +23,7 @@ bytes = "1.10"
 clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
 hyper-serve = { version = "0.6", features = ["tls-rustls"] }
-m3u8-rs = "5"
 moq-native = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 sd-notify = "0.4"
 tokio = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }

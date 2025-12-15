@@ -18,6 +18,9 @@ export type Target = {
 	// The desired size of the video in pixels.
 	pixels?: number;
 
+	// Optional manual override for the selected rendition name.
+	rendition?: string;
+
 	// TODO bitrate
 };
 
@@ -139,7 +142,8 @@ export class Source {
 		const supported = effect.get(this.#supported);
 		const target = effect.get(this.target);
 
-		const selected = this.#selectRendition(supported, target);
+		const manual = target?.rendition;
+		const selected = manual && manual in supported ? manual : this.#selectRendition(supported, target);
 		if (!selected) return;
 
 		effect.set(this.#selected, selected);

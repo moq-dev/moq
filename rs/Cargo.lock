@@ -956,11 +956,13 @@ dependencies = [
  "moq-lite",
  "moq-native",
  "mp4-atom",
+ "num_enum",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
  "serde_with",
+ "strum",
  "thiserror 2.0.17",
  "tokio",
  "tracing",
@@ -977,9 +979,7 @@ dependencies = [
  "clap",
  "hang",
  "hyper-serve",
- "m3u8-rs",
  "moq-native",
- "reqwest",
  "sd-notify",
  "tokio",
  "tower-http",
@@ -1434,7 +1434,6 @@ name = "libmoq"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "cbindgen",
  "hang",
  "moq-lite",
@@ -1668,9 +1667,9 @@ dependencies = [
 
 [[package]]
 name = "mp4-atom"
-version = "0.9.1"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9775fca58c2fa27720d0f6d168d9763eaf0cb678222985a0b307070566e207b"
+checksum = "58b9fcf396d53fdf1c43a9afd38953412b9d782d11391807b473927317bb28f9"
 dependencies = [
  "bytes",
  "derive_more",
@@ -2786,6 +2785,27 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "strum"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
+dependencies = [
+ "strum_macros",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.27.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "subtle"

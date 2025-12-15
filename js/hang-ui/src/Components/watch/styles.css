@@ -114,3 +114,46 @@
 	border-radius: 8px;
 	margin: 8px 0px;
 }
+
+.qualitySelectorContainer {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 12px;
+	background: transparent;
+	border-radius: 8px;
+	margin: 8px 0;
+}
+
+.qualityLabel {
+	font-size: 20px;
+	font-weight: 500;
+	color: #fff;
+	white-space: nowrap;
+}
+
+.qualitySelect {
+	flex: 0 1 auto;
+	font-size: 16px;
+	padding: 4px 8px;
+	border-radius: 4px;
+	background: rgba(255, 255, 255, 0.1);
+	color: #fff;
+	border: 1px solid rgba(255, 255, 255, 0.2);
+	cursor: pointer;
+	transition: background 0.2s ease;
+}
+
+.qualitySelect:hover {
+	background: rgba(255, 255, 255, 0.15);
+}
+
+.qualitySelect:focus {
+	outline: 2px solid rgba(255, 255, 255, 0.3);
+	outline-offset: 2px;
+}
+
+.qualitySelect option {
+	background: #1a1a1a;
+	color: #fff;
+}

@@ -1,13 +1,12 @@
-import { useContext } from "solid-js";
-import { WatchUIContext } from "./WatchUIContextProvider";
+import useWatchUIContext from "./useWatchUIContext";
 
 export default function FullscreenButton() {
-	const context = useContext(WatchUIContext);
+	const context = useWatchUIContext();
 	const onClick = () => {
 		if (document.fullscreenElement) {
 			document.exitFullscreen();
 		} else {
-			context?.hangWatch()?.requestFullscreen();
+			context.hangWatch.requestFullscreen();
 		}
 	};
 

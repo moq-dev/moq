@@ -1,6 +1,7 @@
 import type HangWatch from "@moq/hang/watch/element";
 import { customElement } from "solid-element";
 import { createSignal, onMount } from "solid-js";
+import { Show } from "solid-js/web";
 import BufferingIndicator from "./BufferingIndicator";
 import styles from "./styles.css?inline";
 import WatchControls from "./WatchControls";
@@ -16,13 +17,17 @@ customElement("hang-watch-ui", {}, function WatchUIWebComponent(_, { element }) 
 	});
 
 	return (
-		<WatchUIContextProvider hangWatch={hangWatchEl}>
-			<style>{styles}</style>
-			<div class="watchVideoContainer">
-				<slot />
-				<BufferingIndicator />
-			</div>
-			<WatchControls />
-		</WatchUIContextProvider>
+		<Show when={hangWatchEl()} keyed>
+			{(watchEl: HangWatch) => (
+				<WatchUIContextProvider hangWatch={watchEl}>
+					<style>{styles}</style>
+					<div class="watchVideoContainer">
+						<slot />
+						<BufferingIndicator />
+					</div>
+					<WatchControls />
+				</WatchUIContextProvider>
+			)}
+		</Show>
 	);
 });

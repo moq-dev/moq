@@ -1,7 +1,7 @@
 use std::ops::{Deref, DerefMut};
+use std::str::FromStr;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
-use bytes::Buf;
 use tokio::sync::oneshot;
 use url::Url;
 
@@ -24,7 +24,7 @@ pub struct State {
 	broadcasts: NonZeroSlab<hang::BroadcastProducer>,
 
 	// All tracks, indexed by an ID.
-	tracks: NonZeroSlab<hang::import::ImportMedia>,
+	tracks: NonZeroSlab<hang::import::Decoder>,
 }
 
 pub struct StateGuard {
@@ -153,18 +153,17 @@ impl State {
 
 	pub fn create_track(&mut self, broadcast: Id, format: &str, mut init: &[u8]) -> Result<Id, Error> {
 		let broadcast = self.broadcasts.get_mut(broadcast).ok_or(Error::NotFound)?;
-		let mut track = hang::import::ImportMedia::new(broadcast.clone(), format)
-			.ok_or_else(|| Error::UnknownFormat(format.to_string()))?;
+		// TODO add support for stream decoders too.
+		let format =
+			hang::import::DecoderFormat::from_str(format).map_err(|err| Error::UnknownFormat(err.to_string()))?;
+		let mut decoder = hang::import::Decoder::new(broadcast.clone(), format);
 
-		track
+		decoder
 			.initialize(&mut init)
 			.map_err(|err| Error::InitFailed(Arc::new(err)))?;
-		if !init.is_empty() {
-			return Err(Error::ShortDecode);
-		}
+		assert!(init.is_empty(), "buffer was not fully consumed");
 
-		let id = self.tracks.insert(track);
-		Ok(id)
+		Ok(self.tracks.insert(decoder))
 	}
 
 	pub fn write_track(&mut self, track: Id, mut data: &[u8], pts: u64) -> Result<(), Error> {
@@ -172,12 +171,9 @@ impl State {
 
 		let pts = hang::Timestamp::from_micros(pts)?;
 		track
-			.decode(&mut data, Some(pts))
+			.decode_frame(&mut data, Some(pts))
 			.map_err(|err| Error::DecodeFailed(Arc::new(err)))?;
-
-		if data.has_remaining() {
-			return Err(Error::ShortDecode);
-		}
+		assert!(data.is_empty(), "buffer was not fully consumed");
 
 		Ok(())
 	}

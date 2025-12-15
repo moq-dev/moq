@@ -3,7 +3,7 @@ use crate::catalog::{
 };
 use crate::{self as hang, Timestamp};
 use anyhow::Context;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use moq_lite as moq;
 use mp4_atom::{Any, Atom, DecodeMaybe, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
@@ -26,9 +26,6 @@ use std::collections::HashMap;
 /// - AAC (MP4A)
 /// - Opus
 pub struct Fmp4 {
-	// Any remaining data from the previous call to parse.
-	buffer: Bytes,
-
 	// The broadcast being produced
 	// This `hang` variant includes a catalog.
 	broadcast: hang::BroadcastProducer,
@@ -60,7 +57,6 @@ impl Fmp4 {
 		broadcast.insert_track(catalog.consumer.track);
 
 		Self {
-			buffer: Bytes::new(),
 			broadcast,
 			catalog: catalog.producer,
 			tracks: HashMap::default(),
@@ -71,90 +67,46 @@ impl Fmp4 {
 		}
 	}
 
-	/// Create a new fMP4 importer that shares an existing catalog.
-	///
-	/// This allows multiple importers (e.g., for different HLS renditions) to
-	/// contribute to the same catalog track.
-	pub fn with_catalog(broadcast: hang::BroadcastProducer, catalog: CatalogProducer) -> Self {
-		Self {
-			buffer: Bytes::new(),
-			broadcast,
-			catalog,
-			tracks: HashMap::default(),
-			last_keyframe: HashMap::default(),
-			moov: None,
-			moof: None,
-			moof_size: 0,
-		}
-	}
-
-	/// Parse fMP4/CMAF bytes (init segment or media segment).
-	///
-	/// This is a convenience wrapper around `decode()` for use with byte slices.
-	pub fn parse(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
-		use std::io::Cursor;
-		let mut cursor = Cursor::new(Bytes::copy_from_slice(bytes));
-		self.decode(&mut cursor)
-	}
-
-	pub fn decode<T: Buf>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		if !buf.has_remaining() {
-			return Ok(());
-		}
-
-		// This code is huge because mp4 atom requires the buffer to be continuous.
-		// We'll try to parse buf.chunk() but if it fails, we may need to allocate.
-		if self.buffer.is_empty() {
-			// Try to parse the first chunk of the provided buffer.
-			let mut cursor = std::io::Cursor::new(buf.chunk());
-
-			while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
-				let size = cursor.position() as usize;
-
-				// Process the parsed atom.
-				self.process(atom, size)?;
-
-				// Advance the buffer by the size of the parsed atom.
-				buf.advance(size);
-
-				// Create a new cursor for the next chunk of the buffer.
-				cursor = std::io::Cursor::new(buf.chunk());
-			}
-
-			// If the buffer is continuous, we can stop here.
-			if buf.chunk().len() == buf.remaining() {
-				return Ok(());
-			}
-
-			// Otherwise we need to allocate to make a continuous buffer.
-			self.buffer = buf.copy_to_bytes(buf.remaining());
-		}
-
-		self.buffer = match std::mem::take(&mut self.buffer).try_into_mut() {
-			Ok(mut buffer) => {
-				// It worked, append the new data to the existing buffer.
-				buffer.put(buf);
-				buffer.freeze()
-			}
-			Err(old) => {
-				// Make a new buffer and append the new data to it.
-				let mut buffer = BytesMut::with_capacity(old.len() + buf.remaining());
-				buffer.put(old);
-				buffer.put(buf);
-				buffer.freeze()
-			}
-		};
-
-		let mut cursor = std::io::Cursor::new(&self.buffer);
+	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+		let mut cursor = std::io::Cursor::new(buf);
+		let mut position = 0;
 
 		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
-			let size = cursor.position() as usize;
+			// Process the parsed atom.
+			let size = cursor.position() as usize - position;
+			position = cursor.position() as usize;
 
-			self.buffer.advance(size);
-			self.process(atom, size)?;
+			match atom {
+				Any::Ftyp(_) | Any::Styp(_) => {
+					// Skip
+				}
+				Any::Moov(moov) => {
+					// Create the broadcast.
+					self.init(moov)?;
+				}
+				Any::Moof(moof) => {
+					if self.moof.is_some() {
+						// Two moof boxes in a row.
+						anyhow::bail!("duplicate moof box");
+					}
 
-			cursor = std::io::Cursor::new(&self.buffer);
+					self.moof = Some(moof);
+					self.moof_size = size;
+				}
+				Any::Mdat(mdat) => {
+					// Extract the samples from the mdat atom.
+					let header_size = size - mdat.data.len();
+					self.extract(mdat, header_size)?;
+				}
+				_ => {
+					// Skip unknown atoms
+					tracing::warn!(?atom, "skipping")
+				}
+			}
 		}
+
+		// Advance the buffer by the amount of data that was processed.
+		cursor.into_inner().advance(position);
 
 		Ok(())
 	}
@@ -405,38 +357,6 @@ impl Fmp4 {
 		};
 
 		Ok(config)
-	}
-
-	fn process(&mut self, atom: mp4_atom::Any, size: usize) -> anyhow::Result<()> {
-		match atom {
-			Any::Ftyp(_) | Any::Styp(_) => {
-				// Skip
-			}
-			Any::Moov(moov) => {
-				// Create the broadcast.
-				self.init(moov)?;
-			}
-			Any::Moof(moof) => {
-				if self.moof.is_some() {
-					// Two moof boxes in a row.
-					anyhow::bail!("duplicate moof box");
-				}
-
-				self.moof = Some(moof);
-				self.moof_size = size;
-			}
-			Any::Mdat(mdat) => {
-				// Extract the samples from the mdat atom.
-				let header_size = size - mdat.data.len();
-				self.extract(mdat, header_size)?;
-			}
-			_ => {
-				// Skip unknown atoms
-				tracing::warn!(?atom, "skipping")
-			}
-		};
-
-		Ok(())
 	}
 
 	// Extract all frames out of an mdat atom.
