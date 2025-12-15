@@ -91,8 +91,8 @@ impl TrackProducer {
 	///
 	/// Multiple consumers can be created from the same producer, each receiving
 	/// a copy of all data written to the track.
-	pub fn consume(&self, max_latency: std::time::Duration) -> TrackConsumer {
-		TrackConsumer::new(self.inner.consume(), max_latency)
+	pub fn consume(&self, max_buffer: std::time::Duration) -> TrackConsumer {
+		TrackConsumer::new(self.inner.consume(), max_buffer)
 	}
 }
 
@@ -132,18 +132,18 @@ pub struct TrackConsumer {
 	max_timestamp: Timestamp,
 
 	// The maximum buffer size before skipping a group.
-	max_latency: std::time::Duration,
+	max_buffer: std::time::Duration,
 }
 
 impl TrackConsumer {
 	/// Create a new TrackConsumer wrapping the given moq-lite consumer.
-	pub fn new(inner: moq_lite::TrackConsumer, max_latency: std::time::Duration) -> Self {
+	pub fn new(inner: moq_lite::TrackConsumer, max_buffer: std::time::Duration) -> Self {
 		Self {
 			inner,
 			current: None,
 			pending: VecDeque::new(),
 			max_timestamp: Timestamp::default(),
-			max_latency,
+			max_buffer,
 		}
 	}
 
@@ -155,7 +155,7 @@ impl TrackConsumer {
 	///
 	/// Returns `None` when the track has ended.
 	pub async fn read_frame(&mut self) -> Result<Option<Frame>, Error> {
-		let latency = self.max_latency.try_into()?;
+		let latency = self.max_buffer.try_into()?;
 		loop {
 			let cutoff = self
 				.max_timestamp
@@ -209,7 +209,7 @@ impl TrackConsumer {
 				},
 				Some((index, timestamp)) = buffering.next() => {
 					if self.current.is_some() {
-						tracing::debug!(old = ?self.max_timestamp, new = ?timestamp, buffer = ?self.max_latency, "skipping slow group");
+						tracing::debug!(old = ?self.max_timestamp, new = ?timestamp, buffer = ?self.max_buffer, "skipping slow group");
 					}
 
 					drop(buffering);
@@ -228,9 +228,9 @@ impl TrackConsumer {
 
 	/// Set the maximum latency tolerance for this consumer.
 	///
-	/// Groups with timestamps older than `max_timestamp - max_latency` will be skipped.
-	pub fn set_max_latency(&mut self, max: std::time::Duration) {
-		self.max_latency = max;
+	/// Groups with timestamps older than `max_timestamp - max_buffer` will be skipped.
+	pub fn set_max_buffer(&mut self, max: std::time::Duration) {
+		self.max_buffer = max;
 	}
 
 	/// Wait until the track is closed.

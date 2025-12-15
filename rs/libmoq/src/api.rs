@@ -406,8 +406,8 @@ pub extern "C" fn moq_consume_catalog_close(catalog: i32) -> i32 {
 
 /// Consume a video track from a broadcast.
 ///
-/// The callback is called with a frame ID when a new frame is available.
-/// The latency_ms parameter controls how much buffering to apply.
+/// - `max_buffer_ms` controls the maximum amount of buffering allowed before skipping a GoP.
+/// - `on_frame` is called with a frame ID when a new frame is available.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
@@ -417,16 +417,16 @@ pub extern "C" fn moq_consume_catalog_close(catalog: i32) -> i32 {
 pub unsafe extern "C" fn moq_consume_video_track(
 	broadcast: i32,
 	index: i32,
-	latency_ms: u64,
+	max_buffer_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::return_code(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
-		let latency = std::time::Duration::from_millis(latency_ms);
+		let max_buffer = std::time::Duration::from_millis(max_buffer_ms);
 		let on_frame = ffi::OnStatus::new(user_data, on_frame);
-		State::lock().consume_video_track(broadcast, index, latency, on_frame)
+		State::lock().consume_video_track(broadcast, index, max_buffer, on_frame)
 	})
 }
 
