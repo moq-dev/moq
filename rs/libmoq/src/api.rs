@@ -8,25 +8,31 @@ use std::str::FromStr;
 
 use tracing::Level;
 
+/// Video track information. Fields with value 0 or null indicate "not set".
 #[repr(C)]
 pub struct VideoTrack {
 	pub name: *const c_char,
 	pub name_len: usize,
 	pub codec: *const c_char,
 	pub codec_len: usize,
-	pub description: Option<*const u8>,
+	/// Pointer to description data, or null if not available
+	pub description: *const u8,
 	pub description_len: usize,
-	pub coded_width: Option<u32>,
-	pub coded_height: Option<u32>,
+	/// Coded width, or 0 if not available
+	pub coded_width: u32,
+	/// Coded height, or 0 if not available
+	pub coded_height: u32,
 }
 
+/// Audio track information. Fields with value 0 or null indicate "not set".
 #[repr(C)]
 pub struct AudioTrack {
 	pub name: *const c_char,
 	pub name_len: usize,
 	pub codec: *const c_char,
 	pub codec_len: usize,
-	pub description: Option<*const u8>,
+	/// Pointer to description data, or null if not available
+	pub description: *const u8,
 	pub description_len: usize,
 	pub sample_rate: u32,
 	pub channel_count: u32,
