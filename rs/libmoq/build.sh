@@ -101,6 +101,31 @@ if [[ "$TARGET" != *"-windows-"* ]]; then
     cp "$WORKSPACE_DIR/target/moq.pc" "$PACKAGE_DIR/lib/pkgconfig/"
 fi
 
+# Generate CMake config files from templates
+mkdir -p "$PACKAGE_DIR/lib/cmake/moq"
+
+# Determine library filename
+if [[ "$TARGET" == *"-windows-"* ]]; then
+    LIB_FILE="moq.lib"
+else
+    LIB_FILE="libmoq.a"
+fi
+
+# Extract major version
+MAJOR_VERSION="${VERSION%%.*}"
+
+# Generate moq-config.cmake from template
+sed -e "s|@LIB_FILE@|${LIB_FILE}|g" \
+    -e "s|@VERSION@|${VERSION}|g" \
+    "$SCRIPT_DIR/cmake/moq-config.cmake.in" > "$PACKAGE_DIR/lib/cmake/moq/moq-config.cmake"
+
+# Generate moq-config-version.cmake from template
+sed -e "s|@VERSION@|${VERSION}|g" \
+    -e "s|@MAJOR_VERSION@|${MAJOR_VERSION}|g" \
+    "$SCRIPT_DIR/cmake/moq-config-version.cmake.in" > "$PACKAGE_DIR/lib/cmake/moq/moq-config-version.cmake"
+
+echo "Generated CMake config files from templates"
+
 # Create archive
 cd "$OUTPUT_DIR"
 if [[ "$TARGET" == *"-windows-"* ]]; then
