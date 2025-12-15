@@ -67,6 +67,7 @@ impl From<BroadcastProducer> for moq_lite::BroadcastProducer {
 	}
 }
 
+#[derive(Clone)]
 pub struct BroadcastConsumer {
 	pub inner: moq_lite::BroadcastConsumer,
 	pub catalog: CatalogConsumer,

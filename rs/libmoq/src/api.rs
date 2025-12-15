@@ -8,45 +8,74 @@ use std::str::FromStr;
 
 use tracing::Level;
 
+/// Information about a video rendition in the catalog.
 #[repr(C)]
 pub struct VideoTrack {
+	/// The name of the track, NOT NULL terminated
 	pub name: *const c_char,
 	pub name_len: usize,
+
+	/// The codec of the track, NOT NULL terminated
 	pub codec: *const c_char,
 	pub codec_len: usize,
-	pub description: Option<*const u8>,
+
+	/// The description of the track, or NULL if not used.
+	/// This is codec specific, for example H264:
+	///   - NULL: annex.b encoded
+	///   - Non-NULL: AVCC encoded
+	pub description: *const u8,
 	pub description_len: usize,
-	pub coded_width: Option<u32>,
-	pub coded_height: Option<u32>,
+
+	/// The encoded width/height of the media, or NULL if not available
+	pub coded_width: *const u32,
+	pub coded_height: *const u32,
 }
 
+/// Information about an audio rendition in the catalog.
 #[repr(C)]
 pub struct AudioTrack {
+	/// The name of the track, NOT NULL terminated
 	pub name: *const c_char,
 	pub name_len: usize,
+
+	/// The codec of the track, NOT NULL terminated
 	pub codec: *const c_char,
 	pub codec_len: usize,
-	pub description: Option<*const u8>,
+
+	/// The description of the track, or NULL if not used.
+	pub description: *const u8,
 	pub description_len: usize,
+
+	/// The sample rate of the track in Hz
 	pub sample_rate: u32,
+
+	/// The number of channels in the track
 	pub channel_count: u32,
 }
 
+/// Information about a frame of media.
 #[repr(C)]
 pub struct Frame {
+	/// The payload of the frame, or NULL/0 if the stream has ended
 	pub payload: *const u8,
 	pub payload_size: usize,
 
-	// microseconds
+	// The presentation timestamp of the frame in microseconds
 	pub pts: u64,
 
+	/// Whether the frame is a keyframe (meaningless for audio)
 	pub keyframe: bool,
 }
 
+/// Information about a broadcast announced by an origin.
 #[repr(C)]
 pub struct Announced {
+	/// The path of the broadcast, NOT NULL terminated
 	pub path: *const c_char,
 	pub path_len: usize,
+
+	/// Whether the broadcast is active or has ended
+	/// This MUST toggle between true and false over the lifetime of the broadcast
 	pub active: bool,
 }
 
@@ -76,8 +105,13 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char) -> i32 {
 
 /// Start establishing a connection to a MoQ server.
 ///
+/// Takes origin handles, which are used for publishing and consuming broadcasts respectively.
+/// - Any broadcasts in `origin_publish` will be announced to the server.
+/// - Any broadcasts announced by the server will be available in `origin_consume`.
+/// - If an origin handle is 0, that functionality is completely disabled.
+///
 /// This may be called multiple times to connect to different servers.
-/// Broadcast may be published before or after the connection is established.
+/// Origins can be shared across sessions, useful for fanout or relaying.
 ///
 /// Returns a non-zero handle to the session on success, or a negative code on (immediate) failure.
 /// You should call [moq_session_close], even on error, to free up resources.
@@ -109,7 +143,7 @@ pub unsafe extern "C" fn moq_session_connect(
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
-/// The [moq_session_connect] callback will be called with [Error::Closed].
+/// The [moq_session_connect] `on_status` callback will be called with [Error::Closed].
 #[no_mangle]
 pub extern "C" fn moq_session_close(session: i32) -> i32 {
 	ffi::return_code(move || {
@@ -120,7 +154,11 @@ pub extern "C" fn moq_session_close(session: i32) -> i32 {
 
 /// Create an origin for publishing broadcasts.
 ///
-/// Sessions
+/// Origins contain any number of broadcasts addressed by path.
+/// The same broadcast can be published to multiple origins under different paths.
+///
+/// [moq_origin_announced] can be used to discover broadcasts published to this origin.
+/// This is extremely useful for discovering what is available on the server to [moq_origin_consume].
 ///
 /// Returns a non-zero handle to the origin on success.
 #[no_mangle]
@@ -128,6 +166,14 @@ pub extern "C" fn moq_origin_create() -> i32 {
 	ffi::return_code(move || State::lock().origin_create())
 }
 
+/// Publish a broadcast to an origin.
+///
+/// The broadcast will be announced to any origin consumers, such as over the network.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that path is a valid null-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn moq_origin_publish(origin: i32, path: *const c_char, broadcast: i32) -> i32 {
 	ffi::return_code(move || {
@@ -138,6 +184,18 @@ pub unsafe extern "C" fn moq_origin_publish(origin: i32, path: *const c_char, br
 	})
 }
 
+/// Learn about all broadcasts published to an origin.
+///
+/// The callback is called with an announced ID when a new broadcast is published.
+///
+/// - [moq_origin_announced_info] is used to query information about the broadcast.
+/// - [moq_origin_announced_close] is used to stop receiving announcements.
+///
+/// Returns a non-zero handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that on_announce is a valid function pointer, or null.
+/// - The caller must ensure that user_data is a valid pointer.
 #[no_mangle]
 pub unsafe extern "C" fn moq_origin_announced(
 	origin: i32,
@@ -151,6 +209,14 @@ pub unsafe extern "C" fn moq_origin_announced(
 	})
 }
 
+/// Query information about a broadcast discovered by [moq_origin_announced].
+///
+/// The destination is filled with the broadcast information.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that dst is a valid pointer.
 #[no_mangle]
 pub unsafe extern "C" fn moq_origin_announced_info(announced: i32, dst: *mut Announced) -> i32 {
 	ffi::return_code(move || {

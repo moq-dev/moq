@@ -218,29 +218,20 @@ impl Drop for CatalogGuard<'_> {
 pub struct CatalogConsumer {
 	/// Access to the underlying track consumer.
 	pub track: moq_lite::TrackConsumer,
-	current: Option<Catalog>,
 	group: Option<moq_lite::GroupConsumer>,
 }
 
 impl CatalogConsumer {
 	/// Create a new catalog consumer from a MoQ track consumer.
 	pub fn new(track: moq_lite::TrackConsumer) -> Self {
-		Self {
-			track,
-			current: None,
-			group: None,
-		}
-	}
-
-	pub fn current(&self) -> Option<&Catalog> {
-		self.current.as_ref()
+		Self { track, group: None }
 	}
 
 	/// Get the next catalog update.
 	///
 	/// This method waits for the next catalog publication and returns the
 	/// catalog data. If there are no more updates, `None` is returned.
-	pub async fn next(&mut self) -> Result<Option<&Catalog>> {
+	pub async fn next(&mut self) -> Result<Option<Catalog>> {
 		loop {
 			tokio::select! {
 				res = self.track.next_group() => {
@@ -256,8 +247,7 @@ impl CatalogConsumer {
 				Some(frame) = async { self.group.as_mut()?.read_frame().await.transpose() } => {
 					self.group.take(); // We don't support deltas yet
 					let catalog = Catalog::from_slice(&frame?)?;
-					self.current = Some(catalog.clone());
-					return Ok(self.current.as_ref());
+					return Ok(Some(catalog));
 				}
 			}
 		}
@@ -285,8 +275,6 @@ mod test {
 
 	#[test]
 	fn simple() {
-		use std::collections::HashMap;
-
 		let mut encoded = r#"{
 			"video": {
 				"renditions": {

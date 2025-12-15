@@ -23,7 +23,7 @@ pub struct State {
 	publish_media: NonZeroSlab<hang::import::Decoder>,
 
 	consume_broadcast: NonZeroSlab<hang::BroadcastConsumer>,
-	consume_catalog: NonZeroSlab<hang::catalog::Catalog>,
+	consume_catalog: NonZeroSlab<(hang::catalog::Catalog, moq_lite::BroadcastConsumer)>,
 	consume_catalog_task: NonZeroSlab<oneshot::Sender<()>>,
 	consume_audio_task: NonZeroSlab<oneshot::Sender<()>>,
 	consume_video_task: NonZeroSlab<oneshot::Sender<()>>,
@@ -54,7 +54,7 @@ impl State {
 		tokio::spawn(async move {
 			let res = tokio::select! {
 				// No more receiver, which means [session_close] was called.
-				_ = closed.1 => Ok(()),
+				_ = closed.1 => Err(Error::Closed),
 				// The connection failed.
 				res = Self::session_connect_run(url, publish, consume, &mut callback) => res,
 			};
@@ -111,8 +111,13 @@ impl State {
 		on_announce: &mut OnStatus,
 	) -> Result<(), Error> {
 		while let Some((path, broadcast)) = consumer.announced().await {
-			let mut state = STATE.lock().unwrap();
-			let id = state.announced.insert((path.to_string(), broadcast.is_some()));
+			let id = STATE
+				.lock()
+				.unwrap()
+				.announced
+				.insert((path.to_string(), broadcast.is_some()));
+
+			// Important: Don't hold the mutex during this callback.
 			on_announce.call(id);
 		}
 
@@ -198,18 +203,13 @@ impl State {
 	}
 
 	pub fn consume_catalog(&mut self, broadcast: Id, mut on_catalog: OnStatus) -> Result<Id, Error> {
-		let catalog = self
-			.consume_broadcast
-			.get(broadcast)
-			.ok_or(Error::NotFound)?
-			.catalog
-			.clone();
+		let broadcast = self.consume_broadcast.get(broadcast).ok_or(Error::NotFound)?.clone();
 
 		let channel = oneshot::channel();
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_consume_catalog(catalog, &mut on_catalog) => res,
+				res = Self::run_consume_catalog(broadcast, &mut on_catalog) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_catalog.call(res);
@@ -221,12 +221,17 @@ impl State {
 	}
 
 	async fn run_consume_catalog(
-		mut catalog: hang::catalog::CatalogConsumer,
+		mut broadcast: hang::BroadcastConsumer,
 		on_catalog: &mut OnStatus,
 	) -> Result<(), Error> {
-		while let Some(catalog) = catalog.next().await? {
-			let mut state = STATE.lock().unwrap();
-			let id = state.consume_catalog.insert(catalog.clone());
+		while let Some(catalog) = broadcast.catalog.next().await? {
+			let id = STATE
+				.lock()
+				.unwrap()
+				.consume_catalog
+				.insert((catalog.clone(), broadcast.inner.clone()));
+
+			// Important: Don't hold the mutex during this callback.
 			on_catalog.call(Ok(id));
 		}
 
@@ -234,24 +239,37 @@ impl State {
 	}
 
 	pub fn consume_catalog_video(&mut self, catalog: Id, index: usize, dst: &mut VideoTrack) -> Result<(), Error> {
-		let catalog = self.consume_catalog.get(catalog).ok_or(Error::NotFound)?;
+		let (catalog, _) = self.consume_catalog.get(catalog).ok_or(Error::NotFound)?;
 		let video = catalog.video.as_ref().ok_or(Error::NoIndex)?;
 		let (rendition, config) = video.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
 
+		// TODO figure out a way to NULL terminate the strings without too much boilerplate?
 		dst.name = rendition.as_str().as_ptr() as *const c_char;
 		dst.name_len = rendition.len();
 		dst.codec = rendition.as_str().as_ptr() as *const c_char;
 		dst.codec_len = rendition.len();
-		dst.description = config.description.as_ref().map(|desc| desc.as_ptr() as *const u8);
+		dst.description = config
+			.description
+			.as_ref()
+			.map(|desc| desc.as_ptr())
+			.unwrap_or(std::ptr::null());
 		dst.description_len = config.description.as_ref().map(|desc| desc.len()).unwrap_or(0);
-		dst.coded_width = config.coded_width;
-		dst.coded_height = config.coded_height;
+		dst.coded_width = config
+			.coded_width
+			.as_ref()
+			.map(|width| width as *const u32)
+			.unwrap_or(std::ptr::null());
+		dst.coded_height = config
+			.coded_height
+			.as_ref()
+			.map(|height| height as *const u32)
+			.unwrap_or(std::ptr::null());
 
 		Ok(())
 	}
 
 	pub fn consume_catalog_audio(&mut self, catalog: Id, index: usize, dst: &mut AudioTrack) -> Result<(), Error> {
-		let catalog = self.consume_catalog.get(catalog).ok_or(Error::NotFound)?;
+		let (catalog, _) = self.consume_catalog.get(catalog).ok_or(Error::NotFound)?;
 		let audio = catalog.audio.as_ref().ok_or(Error::NoIndex)?;
 		let (rendition, config) = audio.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
 
@@ -259,7 +277,11 @@ impl State {
 		dst.name_len = rendition.len();
 		dst.codec = rendition.as_str().as_ptr() as *const c_char;
 		dst.codec_len = rendition.len();
-		dst.description = config.description.as_ref().map(|desc| desc.as_ptr() as *const u8);
+		dst.description = config
+			.description
+			.as_ref()
+			.map(|desc| desc.as_ptr())
+			.unwrap_or(std::ptr::null());
 		dst.description_len = config.description.as_ref().map(|desc| desc.len()).unwrap_or(0);
 		dst.sample_rate = config.sample_rate;
 		dst.channel_count = config.channel_count;
@@ -274,20 +296,19 @@ impl State {
 
 	pub fn consume_video_track(
 		&mut self,
-		broadcast: Id,
+		catalog: Id,
 		index: usize,
 		latency: std::time::Duration,
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let broadcast = self.consume_broadcast.get(broadcast).ok_or(Error::NotFound)?;
-		let catalog = broadcast.catalog.current().ok_or(Error::Offline)?;
+		let (catalog, broadcast) = self.consume_catalog.get(catalog).ok_or(Error::NotFound)?;
 		let video = catalog.video.as_ref().ok_or(Error::NotFound)?;
 		let rendition = video.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
-		let mut track = broadcast.subscribe(&moq_lite::Track {
+		let mut track = hang::TrackConsumer::from(broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: video.priority,
-		});
+		}));
 		track.set_latency(latency);
 
 		let channel = oneshot::channel();
@@ -306,20 +327,19 @@ impl State {
 
 	pub fn consume_audio_track(
 		&mut self,
-		broadcast: Id,
+		catalog: Id,
 		index: usize,
 		latency: std::time::Duration,
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let broadcast = self.consume_broadcast.get(broadcast).ok_or(Error::NotFound)?;
-		let catalog = broadcast.catalog.current().ok_or(Error::Offline)?;
-		let video = catalog.video.as_ref().ok_or(Error::NotFound)?;
-		let rendition = video.renditions.keys().nth(index).ok_or(Error::NotFound)?;
+		let (catalog, broadcast) = self.consume_catalog.get(catalog).ok_or(Error::NotFound)?;
+		let audio = catalog.audio.as_ref().ok_or(Error::NotFound)?;
+		let rendition = audio.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
-		let mut track = broadcast.subscribe(&moq_lite::Track {
+		let mut track = hang::TrackConsumer::from(broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
-			priority: video.priority,
-		});
+			priority: audio.priority,
+		}));
 		track.set_latency(latency);
 
 		let channel = oneshot::channel();
@@ -331,15 +351,13 @@ impl State {
 			on_frame.call(res);
 		});
 
-		let id = self.consume_video_task.insert(channel.0);
+		let id = self.consume_audio_task.insert(channel.0);
 
 		Ok(id)
 	}
 
 	async fn run_consume_track(mut track: TrackConsumer, on_frame: &mut OnStatus) -> Result<(), Error> {
 		while let Some(mut frame) = track.read_frame().await? {
-			let mut state = STATE.lock().unwrap();
-
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::BufList::new();
 			new_payload.push_chunk(if frame.payload.num_chunks() == 1 {
@@ -356,7 +374,8 @@ impl State {
 				keyframe: frame.keyframe,
 			};
 
-			let id = state.consume_frame.insert(new_frame);
+			// Important: Don't hold the mutex during this callback.
+			let id = STATE.lock().unwrap().consume_frame.insert(new_frame);
 			on_frame.call(Ok(id));
 		}
 
