@@ -22,6 +22,11 @@ impl<T> NonZeroSlab<T> {
 		Id(unsafe { NonZero::new_unchecked(id) })
 	}
 
+	pub fn get(&self, id: Id) -> Option<&T> {
+		let id = (id.0.get() - 1) as usize;
+		self.0.get(id)
+	}
+
 	pub fn get_mut(&mut self, id: Id) -> Option<&mut T> {
 		let id = (id.0.get() - 1) as usize;
 		self.0.get_mut(id)

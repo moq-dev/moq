@@ -51,6 +51,13 @@ set_target_properties(moq PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES ${RUST_TARGET_DIR}/include
 )
 
+# Link required system frameworks on macOS
+if(APPLE)
+    set_property(TARGET moq APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES "-framework CoreFoundation" "-framework Security"
+    )
+endif()
+
 if(BUILD_RUST_LIB)
     add_dependencies(moq rust_build)
 endif()
@@ -58,6 +65,7 @@ endif()
 if(PROJECT_IS_TOP_LEVEL)
     include(GNUInstallDirs)
 
+    # Install header and library files
     install(FILES ${RUST_HEADER}
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
@@ -66,25 +74,14 @@ if(PROJECT_IS_TOP_LEVEL)
         DESTINATION ${CMAKE_INSTALL_LIBDIR}
     )
 
-    install(TARGETS moq
-        EXPORT moq-targets
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    )
-
-    install(EXPORT moq-targets
-        FILE moq-targets.cmake
-        NAMESPACE moq::
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq
-    )
-
+    # Generate and install CMake package config files
     include(CMakePackageConfigHelpers)
 
     configure_package_config_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/moq-config.cmake.in
         ${CMAKE_CURRENT_BINARY_DIR}/moq-config.cmake
         INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq
+        PATH_VARS CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_INCLUDEDIR
     )
 
     write_basic_package_version_file(

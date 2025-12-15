@@ -24,9 +24,18 @@ fn main() {
 	let pc_in = PathBuf::from(&crate_dir).join(format!("{}.pc.in", LIB_NAME));
 	let pc_out = target_dir.join(format!("{}.pc", LIB_NAME));
 	if let Ok(template) = fs::read_to_string(&pc_in) {
+		let target = env::var("TARGET").unwrap();
+		let libs_private = if target.contains("apple") {
+			"-framework CoreFoundation -framework Security"
+		} else if target.contains("windows") {
+			"-lws2_32 -lbcrypt -luserenv -lntdll"
+		} else {
+			"-ldl -lm -lpthread"
+		};
+
 		let content = template
-			.replace("@PREFIX@", "/usr/local")
-			.replace("@VERSION@", &version);
+			.replace("@VERSION@", &version)
+			.replace("@LIBS_PRIVATE@", libs_private);
 		fs::write(&pc_out, content).expect("Failed to write pkg-config file");
 	}
 }

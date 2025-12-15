@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Audio, AudioConfig, Chat, Track, User, Video, VideoConfig};
 use crate::Result;
-use moq_lite::Produce;
+use moq_lite::Pair;
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 #[serde_with::serde_as]
@@ -83,10 +83,10 @@ impl Catalog {
 	}
 
 	/// Produce a catalog track that describes the available media tracks.
-	pub fn produce(self) -> Produce<CatalogProducer, CatalogConsumer> {
+	pub fn produce(self) -> Pair<CatalogProducer, CatalogConsumer> {
 		let track = Catalog::default_track().produce();
 
-		Produce {
+		Pair {
 			producer: CatalogProducer::new(track.producer, self),
 			consumer: track.consumer.into(),
 		}
@@ -218,20 +218,29 @@ impl Drop for CatalogGuard<'_> {
 pub struct CatalogConsumer {
 	/// Access to the underlying track consumer.
 	pub track: moq_lite::TrackConsumer,
+	current: Option<Catalog>,
 	group: Option<moq_lite::GroupConsumer>,
 }
 
 impl CatalogConsumer {
 	/// Create a new catalog consumer from a MoQ track consumer.
 	pub fn new(track: moq_lite::TrackConsumer) -> Self {
-		Self { track, group: None }
+		Self {
+			track,
+			current: None,
+			group: None,
+		}
+	}
+
+	pub fn current(&self) -> Option<&Catalog> {
+		self.current.as_ref()
 	}
 
 	/// Get the next catalog update.
 	///
 	/// This method waits for the next catalog publication and returns the
 	/// catalog data. If there are no more updates, `None` is returned.
-	pub async fn next(&mut self) -> Result<Option<Catalog>> {
+	pub async fn next(&mut self) -> Result<Option<&Catalog>> {
 		loop {
 			tokio::select! {
 				res = self.track.next_group() => {
@@ -247,7 +256,8 @@ impl CatalogConsumer {
 				Some(frame) = async { self.group.as_mut()?.read_frame().await.transpose() } => {
 					self.group.take(); // We don't support deltas yet
 					let catalog = Catalog::from_slice(&frame?)?;
-					return Ok(Some(catalog));
+					self.current = Some(catalog.clone());
+					return Ok(self.current.as_ref());
 				}
 			}
 		}
@@ -267,6 +277,8 @@ impl From<moq_lite::TrackConsumer> for CatalogConsumer {
 
 #[cfg(test)]
 mod test {
+	use std::collections::BTreeMap;
+
 	use crate::catalog::{AudioCodec::Opus, AudioConfig, VideoConfig, H264};
 
 	use super::*;
@@ -304,7 +316,7 @@ mod test {
 
 		encoded.retain(|c| !c.is_whitespace());
 
-		let mut video_renditions = HashMap::new();
+		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert(
 			"video".to_string(),
 			VideoConfig {
@@ -326,7 +338,7 @@ mod test {
 			},
 		);
 
-		let mut audio_renditions = HashMap::new();
+		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert(
 			"audio".to_string(),
 			AudioConfig {

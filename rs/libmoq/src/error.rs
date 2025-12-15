@@ -50,6 +50,18 @@ pub enum Error {
 
 	#[error("panic")]
 	Panic,
+
+	#[error("offline")]
+	Offline,
+
+	#[error("hang error: {0}")]
+	Hang(#[from] hang::Error),
+
+	#[error("no index")]
+	NoIndex,
+
+	#[error("nul error")]
+	NulError(#[from] std::ffi::NulError),
 }
 
 impl From<tracing::metadata::ParseLevelError> for Error {
@@ -77,6 +89,10 @@ impl ffi::ReturnCode for Error {
 			Error::Level(_) => -14,
 			Error::InvalidCode => -15,
 			Error::Panic => -16,
+			Error::Offline => -17,
+			Error::Hang(_) => -18,
+			Error::NoIndex => -19,
+			Error::NulError(_) => -20,
 		}
 	}
 }

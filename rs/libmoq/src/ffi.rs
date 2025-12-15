@@ -4,12 +4,12 @@ use url::Url;
 
 use crate::{Error, Id};
 
-pub struct Callback {
+pub struct OnStatus {
 	user_data: *mut c_void,
 	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
 }
 
-impl Callback {
+impl OnStatus {
 	pub unsafe fn new(
 		user_data: *mut c_void,
 		on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
@@ -17,6 +17,7 @@ impl Callback {
 		Self { user_data, on_status }
 	}
 
+	// &mut avoids the need for Sync
 	pub fn call<C: ReturnCode>(&mut self, ret: C) {
 		if let Some(on_status) = &self.on_status {
 			on_status(self.user_data, ret.code());
@@ -24,7 +25,7 @@ impl Callback {
 	}
 }
 
-unsafe impl Send for Callback {}
+unsafe impl Send for OnStatus {}
 
 pub fn return_code<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
 	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
@@ -100,6 +101,13 @@ impl ReturnCode for Id {
 
 pub fn parse_id(id: i32) -> Result<Id, Error> {
 	Id::try_from(id)
+}
+
+pub fn parse_id_optional(id: i32) -> Result<Option<Id>, Error> {
+	match id {
+		0 => Ok(None),
+		id => Ok(Some(parse_id(id)?)),
+	}
 }
 
 pub fn parse_url(url: *const c_char) -> Result<Url, Error> {

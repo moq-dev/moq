@@ -57,16 +57,16 @@ pub struct Cluster {
 	client: moq_native::Client,
 
 	// Advertises ourselves as an origin to other nodes.
-	noop: moq_lite::Produce<BroadcastProducer, BroadcastConsumer>,
+	noop: moq_lite::Pair<BroadcastProducer, BroadcastConsumer>,
 
 	// Broadcasts announced by local clients (users).
-	pub primary: Arc<moq_lite::Produce<OriginProducer, OriginConsumer>>,
+	pub primary: Arc<moq_lite::Pair<OriginProducer, OriginConsumer>>,
 
 	// Broadcasts announced by remote servers (cluster).
-	pub secondary: Arc<moq_lite::Produce<OriginProducer, OriginConsumer>>,
+	pub secondary: Arc<moq_lite::Pair<OriginProducer, OriginConsumer>>,
 
 	// Broadcasts announced by local clients and remote servers.
-	pub combined: Arc<moq_lite::Produce<OriginProducer, OriginConsumer>>,
+	pub combined: Arc<moq_lite::Pair<OriginProducer, OriginConsumer>>,
 }
 
 impl Cluster {
