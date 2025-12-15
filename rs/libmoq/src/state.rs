@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::c_char;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -27,6 +28,9 @@ pub struct State {
 	consume_catalog_task: NonZeroSlab<oneshot::Sender<()>>,
 	consume_audio_task: NonZeroSlab<oneshot::Sender<()>>,
 	consume_video_task: NonZeroSlab<oneshot::Sender<()>>,
+
+	// Maps broadcast ID to its latest catalog ID
+	consume_broadcast_latest_catalog: HashMap<Id, Id>,
 
 	consume_frame: NonZeroSlab<hang::Frame>,
 }
@@ -111,8 +115,12 @@ impl State {
 		on_announce: &mut OnStatus,
 	) -> Result<(), Error> {
 		while let Some((path, broadcast)) = consumer.announced().await {
-			let mut state = STATE.lock().unwrap();
-			let id = state.announced.insert((path.to_string(), broadcast.is_some()));
+			// Insert and get ID while holding lock
+			let id = {
+				let mut state = STATE.lock().unwrap();
+				state.announced.insert((path.to_string(), broadcast.is_some()))
+			};
+			// Release lock BEFORE calling callback to avoid deadlock
 			on_announce.call(id);
 		}
 
@@ -209,7 +217,7 @@ impl State {
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_consume_catalog(catalog, &mut on_catalog) => res,
+				res = Self::run_consume_catalog(broadcast, catalog, &mut on_catalog) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_catalog.call(res);
@@ -221,12 +229,21 @@ impl State {
 	}
 
 	async fn run_consume_catalog(
+		broadcast_id: Id,
 		mut catalog: hang::catalog::CatalogConsumer,
 		on_catalog: &mut OnStatus,
 	) -> Result<(), Error> {
 		while let Some(catalog) = catalog.next().await? {
-			let mut state = STATE.lock().unwrap();
-			let id = state.consume_catalog.insert(catalog.clone());
+			// Insert catalog and get ID while holding the lock
+			// Also update the broadcast -> latest catalog mapping
+			let id = {
+				let mut state = STATE.lock().unwrap();
+				let catalog_id = state.consume_catalog.insert(catalog.clone());
+				state.consume_broadcast_latest_catalog.insert(broadcast_id, catalog_id);
+				catalog_id
+			};
+			// Release lock BEFORE calling callback to avoid deadlock
+			// (callback may call other moq functions that need the lock)
 			on_catalog.call(Ok(id));
 		}
 
@@ -242,10 +259,13 @@ impl State {
 		dst.name_len = rendition.len();
 		dst.codec = rendition.as_str().as_ptr() as *const c_char;
 		dst.codec_len = rendition.len();
-		dst.description = config.description.as_ref().map(|desc| desc.as_ptr() as *const u8);
+		dst.description = config
+			.description
+			.as_ref()
+			.map_or(std::ptr::null(), |desc| desc.as_ptr());
 		dst.description_len = config.description.as_ref().map(|desc| desc.len()).unwrap_or(0);
-		dst.coded_width = config.coded_width;
-		dst.coded_height = config.coded_height;
+		dst.coded_width = config.coded_width.unwrap_or(0);
+		dst.coded_height = config.coded_height.unwrap_or(0);
 
 		Ok(())
 	}
@@ -259,7 +279,10 @@ impl State {
 		dst.name_len = rendition.len();
 		dst.codec = rendition.as_str().as_ptr() as *const c_char;
 		dst.codec_len = rendition.len();
-		dst.description = config.description.as_ref().map(|desc| desc.as_ptr() as *const u8);
+		dst.description = config
+			.description
+			.as_ref()
+			.map_or(std::ptr::null(), |desc| desc.as_ptr());
 		dst.description_len = config.description.as_ref().map(|desc| desc.len()).unwrap_or(0);
 		dst.sample_rate = config.sample_rate;
 		dst.channel_count = config.channel_count;
@@ -274,16 +297,22 @@ impl State {
 
 	pub fn consume_video_track(
 		&mut self,
-		broadcast: Id,
+		broadcast_id: Id,
 		index: usize,
 		latency: std::time::Duration,
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let broadcast = self.consume_broadcast.get(broadcast).ok_or(Error::NotFound)?;
-		let catalog = broadcast.catalog.current().ok_or(Error::Offline)?;
+		// Get the latest catalog for this broadcast
+		let catalog_id = self
+			.consume_broadcast_latest_catalog
+			.get(&broadcast_id)
+			.copied()
+			.ok_or(Error::Offline)?;
+		let catalog = self.consume_catalog.get(catalog_id).ok_or(Error::NotFound)?;
 		let video = catalog.video.as_ref().ok_or(Error::NotFound)?;
 		let rendition = video.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
+		let broadcast = self.consume_broadcast.get(broadcast_id).ok_or(Error::NotFound)?;
 		let mut track = broadcast.subscribe(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: video.priority,
@@ -306,19 +335,25 @@ impl State {
 
 	pub fn consume_audio_track(
 		&mut self,
-		broadcast: Id,
+		broadcast_id: Id,
 		index: usize,
 		latency: std::time::Duration,
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let broadcast = self.consume_broadcast.get(broadcast).ok_or(Error::NotFound)?;
-		let catalog = broadcast.catalog.current().ok_or(Error::Offline)?;
-		let video = catalog.video.as_ref().ok_or(Error::NotFound)?;
-		let rendition = video.renditions.keys().nth(index).ok_or(Error::NotFound)?;
+		// Get the latest catalog for this broadcast
+		let catalog_id = self
+			.consume_broadcast_latest_catalog
+			.get(&broadcast_id)
+			.copied()
+			.ok_or(Error::Offline)?;
+		let catalog = self.consume_catalog.get(catalog_id).ok_or(Error::NotFound)?;
+		let audio = catalog.audio.as_ref().ok_or(Error::NotFound)?;
+		let rendition = audio.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
+		let broadcast = self.consume_broadcast.get(broadcast_id).ok_or(Error::NotFound)?;
 		let mut track = broadcast.subscribe(&moq_lite::Track {
 			name: rendition.clone(),
-			priority: video.priority,
+			priority: audio.priority,
 		});
 		track.set_latency(latency);
 
@@ -338,8 +373,6 @@ impl State {
 
 	async fn run_consume_track(mut track: TrackConsumer, on_frame: &mut OnStatus) -> Result<(), Error> {
 		while let Some(mut frame) = track.read_frame().await? {
-			let mut state = STATE.lock().unwrap();
-
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::BufList::new();
 			new_payload.push_chunk(if frame.payload.num_chunks() == 1 {
@@ -356,7 +389,12 @@ impl State {
 				keyframe: frame.keyframe,
 			};
 
-			let id = state.consume_frame.insert(new_frame);
+			// Insert frame and get ID while holding lock
+			let id = {
+				let mut state = STATE.lock().unwrap();
+				state.consume_frame.insert(new_frame)
+			};
+			// Release lock BEFORE calling callback to avoid deadlock
 			on_frame.call(Ok(id));
 		}
 
