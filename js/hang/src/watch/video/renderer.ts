@@ -46,7 +46,7 @@ export class Renderer {
 
 		// Only update if dimensions actually changed (setting canvas.width/height clears the canvas)
 		// TODO I thought the signals library would prevent this, but I'm too lazy to investigate.
-		if (canvas.width !== display.width && canvas.height !== display.height) {
+		if (canvas.width !== display.width || canvas.height !== display.height) {
 			canvas.width = display.width;
 			canvas.height = display.height;
 		}
