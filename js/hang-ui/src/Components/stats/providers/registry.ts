@@ -22,7 +22,7 @@ export const providers: Record<KnownStatsProviders, ProviderConstructor> = {
 
 /**
  * Get provider class for a metric type
- * @param icon - Metric type identifier
+ * @param statProvider - Metric type identifier
  * @returns Provider constructor or undefined if not found
  */
 export function getStatsInformationProvider(statProvider: KnownStatsProviders): ProviderConstructor | undefined {
