@@ -1,6 +1,4 @@
-use crate::catalog::{
-	AudioCodec, AudioConfig, Catalog, CatalogProducer, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9,
-};
+use crate::catalog::{AudioCodec, AudioConfig, CatalogProducer, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9};
 use crate::{self as hang, Timestamp};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -30,7 +28,8 @@ pub struct Fmp4 {
 	// This `hang` variant includes a catalog.
 	broadcast: hang::BroadcastProducer,
 
-	// The catalog being produced
+	// A clone of the broadcast's catalog for mutable access.
+	// This is the same underlying catalog (via Arc), just a separate binding.
 	catalog: CatalogProducer,
 
 	// A lookup to tracks in the broadcast
@@ -51,14 +50,12 @@ impl Fmp4 {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the
-	/// fMP4 file and the catalog will be automatically generated.
-	pub fn new(mut broadcast: hang::BroadcastProducer) -> Self {
-		let catalog = Catalog::default().produce();
-		broadcast.insert_track(catalog.consumer.track);
-
+	/// fMP4 file. The catalog from the `hang::BroadcastProducer` is used automatically.
+	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
+		let catalog = broadcast.catalog.clone();
 		Self {
 			broadcast,
-			catalog: catalog.producer,
+			catalog,
 			tracks: HashMap::default(),
 			last_keyframe: HashMap::default(),
 			moov: None,
@@ -498,7 +495,7 @@ impl Fmp4 {
 
 impl Drop for Fmp4 {
 	fn drop(&mut self) {
-		let mut catalog = self.catalog.lock();
+		let mut catalog = self.broadcast.catalog.lock();
 
 		for track in self.tracks.values() {
 			tracing::debug!(name = ?track.info.name, "ending track");
