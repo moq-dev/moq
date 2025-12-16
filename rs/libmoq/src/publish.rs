@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{ffi, Error, Frame, Id, NonZeroSlab, RuntimeLock};
+use crate::{Error, Id, NonZeroSlab, RuntimeLock};
 
 #[derive(Default)]
 pub struct Publish {
@@ -42,12 +42,9 @@ impl Publish {
 		Ok(id)
 	}
 
-	pub fn media_frame(&mut self, media: Id, frame: Frame) -> Result<(), Error> {
+	pub fn media_frame(&mut self, media: Id, mut data: &[u8], timestamp: hang::Timestamp) -> Result<(), Error> {
 		let media = self.media.get_mut(media).ok_or(Error::NotFound)?;
 
-		let mut data = unsafe { ffi::parse_slice(frame.payload, frame.payload_size) }?;
-
-		let timestamp = hang::Timestamp::from_micros(frame.timestamp_us)?;
 		media
 			.decode_frame(&mut data, Some(timestamp))
 			.map_err(|err| Error::DecodeFailed(Arc::new(err)))?;

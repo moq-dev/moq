@@ -5,7 +5,7 @@ use moq_lite::coding::Buf;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{AudioTrack, Error, Frame, Id, NonZeroSlab, RuntimeLock, VideoTrack};
+use crate::{moq_audio_track, moq_frame, moq_video_track, Error, Id, NonZeroSlab, RuntimeLock};
 
 struct ConsumeCatalog {
 	broadcast: hang::BroadcastConsumer,
@@ -104,14 +104,14 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn catalog_video(&mut self, catalog: Id, index: usize, dst: &mut VideoTrack) -> Result<(), Error> {
+	pub fn catalog_video(&mut self, catalog: Id, index: usize, dst: &mut moq_video_track) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
 
 		let video = consume.catalog.video.as_ref().ok_or(Error::NoIndex)?;
 		let (rendition, config) = video.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
 		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
 
-		*dst = VideoTrack {
+		*dst = moq_video_track {
 			name: rendition.as_str().as_ptr() as *const c_char,
 			name_len: rendition.len(),
 			codec: codec.as_str().as_ptr() as *const c_char,
@@ -137,14 +137,14 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn catalog_audio(&mut self, catalog: Id, index: usize, dst: &mut AudioTrack) -> Result<(), Error> {
+	pub fn catalog_audio(&mut self, catalog: Id, index: usize, dst: &mut moq_audio_track) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
 
 		let audio = consume.catalog.audio.as_ref().ok_or(Error::NoIndex)?;
 		let (rendition, config) = audio.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
 		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
 
-		*dst = AudioTrack {
+		*dst = moq_audio_track {
 			name: rendition.as_str().as_ptr() as *const c_char,
 			name_len: rendition.len(),
 			codec: codec.as_str().as_ptr() as *const c_char,
@@ -266,11 +266,11 @@ impl Consume {
 	}
 
 	// NOTE: You're supposed to call this multiple times to get all of the chunks.
-	pub fn frame_chunk(&self, frame: Id, index: usize, dst: &mut Frame) -> Result<(), Error> {
+	pub fn frame_chunk(&self, frame: Id, index: usize, dst: &mut moq_frame) -> Result<(), Error> {
 		let frame = self.frame.get(frame).ok_or(Error::NotFound)?;
 		let chunk = frame.payload.get_chunk(index).ok_or(Error::NoIndex)?;
 
-		*dst = Frame {
+		*dst = moq_frame {
 			payload: chunk.as_ptr(),
 			payload_size: chunk.len(),
 			timestamp_us: frame.timestamp.as_micros(),

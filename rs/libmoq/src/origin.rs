@@ -3,7 +3,7 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Announced, Error, Id, NonZeroSlab, RuntimeLock};
+use crate::{moq_announced, Error, Id, NonZeroSlab, RuntimeLock};
 
 /// Global state managing all active resources.
 ///
@@ -60,9 +60,9 @@ impl Origin {
 		Ok(())
 	}
 
-	pub fn announced_info(&self, announced: Id, dst: &mut Announced) -> Result<(), Error> {
+	pub fn announced_info(&self, announced: Id, dst: &mut moq_announced) -> Result<(), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::NotFound)?;
-		*dst = Announced {
+		*dst = moq_announced {
 			path: announced.0.as_str().as_ptr() as *const c_char,
 			path_len: announced.0.len(),
 			active: announced.1,

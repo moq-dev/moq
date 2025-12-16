@@ -9,7 +9,8 @@ use tracing::Level;
 
 /// Information about a video rendition in the catalog.
 #[repr(C)]
-pub struct VideoTrack {
+#[allow(non_camel_case_types)]
+pub struct moq_video_track {
 	/// The name of the track, NOT NULL terminated.
 	pub name: *const c_char,
 	pub name_len: usize,
@@ -32,7 +33,8 @@ pub struct VideoTrack {
 
 /// Information about an audio rendition in the catalog.
 #[repr(C)]
-pub struct AudioTrack {
+#[allow(non_camel_case_types)]
+pub struct moq_audio_track {
 	/// The name of the track, NOT NULL terminated
 	pub name: *const c_char,
 	pub name_len: usize,
@@ -54,7 +56,8 @@ pub struct AudioTrack {
 
 /// Information about a frame of media.
 #[repr(C)]
-pub struct Frame {
+#[allow(non_camel_case_types)]
+pub struct moq_frame {
 	/// The payload of the frame, or NULL/0 if the stream has ended
 	pub payload: *const u8,
 	pub payload_size: usize,
@@ -68,7 +71,8 @@ pub struct Frame {
 
 /// Information about a broadcast announced by an origin.
 #[repr(C)]
-pub struct Announced {
+#[allow(non_camel_case_types)]
+pub struct moq_announced {
 	/// The path of the broadcast, NOT NULL terminated
 	pub path: *const c_char,
 	pub path_len: usize,
@@ -224,9 +228,9 @@ pub unsafe extern "C" fn moq_origin_announced(
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [Announced] struct.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_announced] struct.
 #[no_mangle]
-pub unsafe extern "C" fn moq_origin_announced_info(announced: i32, dst: *mut Announced) -> i32 {
+pub unsafe extern "C" fn moq_origin_announced_info(announced: i32, dst: *mut moq_announced) -> i32 {
 	ffi::return_code(move || {
 		let announced = ffi::parse_id(announced)?;
 		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
@@ -336,12 +340,19 @@ pub extern "C" fn moq_publish_media_close(export: i32) -> i32 {
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that frame.payload is a valid pointer to frame.payload_size bytes of data.
+/// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
 #[no_mangle]
-pub unsafe extern "C" fn moq_publish_media_frame(media: i32, frame: Frame) -> i32 {
+pub unsafe extern "C" fn moq_publish_media_frame(
+	media: i32,
+	payload: *const u8,
+	payload_size: usize,
+	timestamp_us: u64,
+) -> i32 {
 	ffi::return_code(move || {
 		let media = ffi::parse_id(media)?;
-		PUBLISH.lock().media_frame(media, frame)
+		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
+		let timestamp = hang::Timestamp::from_micros(timestamp_us)?;
+		PUBLISH.lock().media_frame(media, payload, timestamp)
 	})
 }
 
@@ -374,10 +385,10 @@ pub unsafe extern "C" fn moq_consume_catalog(
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [VideoTrack] struct.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_video_track] struct.
 /// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
 #[no_mangle]
-pub unsafe extern "C" fn moq_consume_catalog_video(catalog: i32, index: i32, dst: *mut VideoTrack) -> i32 {
+pub unsafe extern "C" fn moq_consume_catalog_video(catalog: i32, index: i32, dst: *mut moq_video_track) -> i32 {
 	ffi::return_code(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
@@ -393,10 +404,10 @@ pub unsafe extern "C" fn moq_consume_catalog_video(catalog: i32, index: i32, dst
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to an [AudioTrack] struct.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_audio_track] struct.
 /// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
 #[no_mangle]
-pub unsafe extern "C" fn moq_consume_catalog_audio(catalog: i32, index: i32, dst: *mut AudioTrack) -> i32 {
+pub unsafe extern "C" fn moq_consume_catalog_audio(catalog: i32, index: i32, dst: *mut moq_audio_track) -> i32 {
 	ffi::return_code(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
@@ -498,9 +509,9 @@ pub extern "C" fn moq_consume_audio_track_close(track: i32) -> i32 {
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [Frame] struct.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_frame] struct.
 #[no_mangle]
-pub unsafe extern "C" fn moq_consume_frame_chunk(frame: i32, index: i32, dst: *mut Frame) -> i32 {
+pub unsafe extern "C" fn moq_consume_frame_chunk(frame: i32, index: i32, dst: *mut moq_frame) -> i32 {
 	ffi::return_code(move || {
 		let frame = ffi::parse_id(frame)?;
 		let index = index as usize;
