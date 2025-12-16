@@ -29,7 +29,7 @@
 	},
 	"devDependencies": {
 		"@rollup/plugin-node-resolve": "^16.0.3",
-		"happy-dom": "^13.3.5",
+		"happy-dom": "^20.0.11",
 		"rimraf": "^6.0.1",
 		"rollup": "^4.53.3",
 		"rollup-plugin-esbuild": "^6.2.1",
