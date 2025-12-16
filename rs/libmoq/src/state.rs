@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::c_char;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -15,6 +16,7 @@ use crate::{ffi, Announced, AudioTrack, Error, Frame, Id, NonZeroSlab, VideoTrac
 /// Stores all sessions, origins, broadcasts, tracks, and frames in slab allocators,
 /// returning opaque IDs to C callers. Also manages async tasks via oneshot channels
 /// for cancellation.
+// TODO split this up into separate structs/mutexes
 #[derive(Default)]
 pub struct State {
 	/// Active origin producers for publishing and consuming broadcasts.
@@ -25,22 +27,38 @@ pub struct State {
 
 	/// Broadcast announcement information (path, active status).
 	announced: NonZeroSlab<(String, bool)>,
+
 	/// Announcement listener task cancellation channels.
 	announced_task: NonZeroSlab<oneshot::Sender<()>>,
 
 	/// Active broadcast producers for publishing.
 	publish_broadcast: NonZeroSlab<hang::BroadcastProducer>,
+
 	/// Active media encoders/decoders for publishing.
 	publish_media: NonZeroSlab<hang::import::Decoder>,
 
 	/// Active broadcast consumers.
 	consume_broadcast: NonZeroSlab<hang::BroadcastConsumer>,
+
 	/// Active catalog consumers and their broadcast references.
 	consume_catalog: NonZeroSlab<(hang::catalog::Catalog, moq_lite::BroadcastConsumer)>,
+
 	/// Catalog consumer task cancellation channels.
 	consume_catalog_task: NonZeroSlab<oneshot::Sender<()>>,
+
+	/// We need to store the codec information on the heap.
+	/// Key: Catalog ID, Audio Index
+	/// Value: the codec name.
+	consume_catalog_audio: HashMap<(Id, usize), String>,
+
+	/// We need to store the codec information on the heap.
+	/// Key: Catalog ID, Video Index
+	/// Value: the codec name.
+	consume_catalog_video: HashMap<(Id, usize), String>,
+
 	/// Audio track consumer task cancellation channels.
 	consume_audio_task: NonZeroSlab<oneshot::Sender<()>>,
+
 	/// Video track consumer task cancellation channels.
 	consume_video_task: NonZeroSlab<oneshot::Sender<()>>,
 
@@ -143,9 +161,11 @@ impl State {
 
 	pub fn origin_announced_info(&self, announced: Id, dst: &mut Announced) -> Result<(), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::NotFound)?;
-		dst.path = announced.0.as_str().as_ptr() as *const c_char;
-		dst.path_len = announced.0.len();
-		dst.active = announced.1;
+		*dst = Announced {
+			path: announced.0.as_str().as_ptr() as *const c_char,
+			path_len: announced.0.len(),
+			active: announced.1,
+		};
 		Ok(())
 	}
 
@@ -256,52 +276,93 @@ impl State {
 	}
 
 	pub fn consume_catalog_video(&mut self, catalog: Id, index: usize, dst: &mut VideoTrack) -> Result<(), Error> {
-		let (catalog, _) = self.consume_catalog.get(catalog).ok_or(Error::NotFound)?;
-		let video = catalog.video.as_ref().ok_or(Error::NoIndex)?;
+		let video = self
+			.consume_catalog
+			.get(catalog)
+			.ok_or(Error::NotFound)?
+			.0
+			.video
+			.as_ref()
+			.ok_or(Error::NoIndex)?;
 		let (rendition, config) = video.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
 
-		// TODO figure out a way to NULL terminate the strings without too much boilerplate?
-		dst.name = rendition.as_str().as_ptr() as *const c_char;
-		dst.name_len = rendition.len();
-		dst.codec = rendition.as_str().as_ptr() as *const c_char;
-		dst.codec_len = rendition.len();
-		dst.description = config
-			.description
-			.as_ref()
-			.map(|desc| desc.as_ptr())
-			.unwrap_or(std::ptr::null());
-		dst.description_len = config.description.as_ref().map(|desc| desc.len()).unwrap_or(0);
-		dst.coded_width = config
-			.coded_width
-			.as_ref()
-			.map(|width| width as *const u32)
-			.unwrap_or(std::ptr::null());
-		dst.coded_height = config
-			.coded_height
-			.as_ref()
-			.map(|height| height as *const u32)
-			.unwrap_or(std::ptr::null());
+		let codec = config.codec.to_string();
+
+		*dst = VideoTrack {
+			name: rendition.as_str().as_ptr() as *const c_char,
+			name_len: rendition.len(),
+			codec: codec.as_str().as_ptr() as *const c_char,
+			codec_len: codec.len(),
+			description: config
+				.description
+				.as_ref()
+				.map(|desc| desc.as_ptr())
+				.unwrap_or(std::ptr::null()),
+			description_len: config.description.as_ref().map(|desc| desc.len()).unwrap_or(0),
+			coded_width: config
+				.coded_width
+				.as_ref()
+				.map(|width| width as *const u32)
+				.unwrap_or(std::ptr::null()),
+			coded_height: config
+				.coded_height
+				.as_ref()
+				.map(|height| height as *const u32)
+				.unwrap_or(std::ptr::null()),
+		};
+
+		// Store it on the heap so we can return it to the caller.
+		self.consume_catalog_video.insert((catalog, index), codec);
+
+		Ok(())
+	}
+
+	pub fn consume_catalog_video_close(&mut self, catalog: Id, index: usize) -> Result<(), Error> {
+		self.consume_catalog_video
+			.remove(&(catalog, index))
+			.ok_or(Error::NotFound)?;
 
 		Ok(())
 	}
 
 	pub fn consume_catalog_audio(&mut self, catalog: Id, index: usize, dst: &mut AudioTrack) -> Result<(), Error> {
-		let (catalog, _) = self.consume_catalog.get(catalog).ok_or(Error::NotFound)?;
-		let audio = catalog.audio.as_ref().ok_or(Error::NoIndex)?;
-		let (rendition, config) = audio.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
-
-		dst.name = rendition.as_str().as_ptr() as *const c_char;
-		dst.name_len = rendition.len();
-		dst.codec = rendition.as_str().as_ptr() as *const c_char;
-		dst.codec_len = rendition.len();
-		dst.description = config
-			.description
+		let audio = self
+			.consume_catalog
+			.get(catalog)
+			.ok_or(Error::NotFound)?
+			.0
+			.audio
 			.as_ref()
-			.map(|desc| desc.as_ptr())
-			.unwrap_or(std::ptr::null());
-		dst.description_len = config.description.as_ref().map(|desc| desc.len()).unwrap_or(0);
-		dst.sample_rate = config.sample_rate;
-		dst.channel_count = config.channel_count;
+			.ok_or(Error::NoIndex)?;
+		let (rendition, config) = audio.renditions.iter().nth(index).ok_or(Error::NoIndex)?.clone();
+
+		let codec = config.codec.to_string();
+
+		*dst = AudioTrack {
+			name: rendition.as_str().as_ptr() as *const c_char,
+			name_len: rendition.len(),
+			codec: codec.as_str().as_ptr() as *const c_char,
+			codec_len: codec.len(),
+			description: config
+				.description
+				.as_ref()
+				.map(|desc| desc.as_ptr())
+				.unwrap_or(std::ptr::null()),
+			description_len: config.description.as_ref().map(|desc| desc.len()).unwrap_or(0),
+			sample_rate: config.sample_rate,
+			channel_count: config.channel_count,
+		};
+
+		// Store it on the heap so we can return it to the caller.
+		self.consume_catalog_audio.insert((catalog, index), codec);
+
+		Ok(())
+	}
+
+	pub fn consume_catalog_audio_close(&mut self, catalog: Id, index: usize) -> Result<(), Error> {
+		self.consume_catalog_audio
+			.remove(&(catalog, index))
+			.ok_or(Error::NotFound)?;
 
 		Ok(())
 	}
@@ -414,10 +475,12 @@ impl State {
 		let frame = self.consume_frame.get(frame).ok_or(Error::NotFound)?;
 		let chunk = frame.payload.get_chunk(index).ok_or(Error::NoIndex)?;
 
-		dst.payload = chunk.as_ptr();
-		dst.payload_size = chunk.len();
-		dst.timestamp_us = frame.timestamp.as_micros();
-		dst.keyframe = frame.keyframe;
+		*dst = Frame {
+			payload: chunk.as_ptr(),
+			payload_size: chunk.len(),
+			timestamp_us: frame.timestamp.as_micros(),
+			keyframe: frame.keyframe,
+		};
 
 		Ok(())
 	}
