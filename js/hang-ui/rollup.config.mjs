@@ -1,4 +1,3 @@
-// rollup.config.mjs / rollup.config.js
 import { readFileSync } from "node:fs";
 import nodeResolve from "@rollup/plugin-node-resolve";
 import esbuild from "rollup-plugin-esbuild";

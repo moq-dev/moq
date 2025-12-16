@@ -7,28 +7,35 @@
 	"repository": "github:moq-dev/moq",
 	"exports": {
 		"./publish/element": "./src/Components/publish/element.tsx",
-		"./watch/element": "./src/Components/watch/element.tsx"
+		"./watch/element": "./src/Components/watch/element.tsx",
+		"./stats": "./src/Components/stats/index.ts"
 	},
 	"sideEffects": [
 		"./src/Components/publish/element.tsx",
-		"./src/Components/watch/element.tsx"
+		"./src/Components/watch/element.tsx",
+		"./src/Components/stats/element.ts"
 	],
 	"scripts": {
 		"build": "bun run clean && rollup -c && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
 		"clean": "rimraf dist",
+		"fix": "biome check src --fix",
+		"test": "vitest",
 		"release": "bun ../scripts/release.ts"
 	},
 	"peerDependencies": {
-		"@moq/hang": "workspace:^0.1.0"
+		"@moq/hang": "workspace:^0.1.0",
+		"@moq/signals": "workspace:^0.1.0"
 	},
 	"devDependencies": {
 		"@rollup/plugin-node-resolve": "^16.0.3",
+		"happy-dom": "^20.0.11",
 		"rimraf": "^6.0.1",
 		"rollup": "^4.53.3",
 		"rollup-plugin-esbuild": "^6.2.1",
 		"solid-element": "^1.9.1",
 		"solid-js": "^1.9.10",
-		"unplugin-solid": "^1.0.0"
+		"unplugin-solid": "^1.0.0",
+		"vitest": "^3.2.4"
 	}
 }
