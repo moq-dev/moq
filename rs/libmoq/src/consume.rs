@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::ffi::c_char;
 
 use hang::TrackConsumer;
@@ -8,26 +7,26 @@ use tokio::sync::oneshot;
 use crate::ffi::OnStatus;
 use crate::{AudioTrack, Error, Frame, Id, NonZeroSlab, RuntimeLock, VideoTrack};
 
+struct ConsumeCatalog {
+	broadcast: hang::BroadcastConsumer,
+
+	catalog: hang::catalog::Catalog,
+
+	/// We need to store the codec information on the heap unfortunately.
+	audio_codec: Vec<String>,
+	video_codec: Vec<String>,
+}
+
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
 	broadcast: NonZeroSlab<hang::BroadcastConsumer>,
 
 	/// Active catalog consumers and their broadcast references.
-	catalog: NonZeroSlab<(hang::catalog::Catalog, moq_lite::BroadcastConsumer)>,
+	catalog: NonZeroSlab<ConsumeCatalog>,
 
 	/// Catalog consumer task cancellation channels.
 	catalog_task: NonZeroSlab<oneshot::Sender<()>>,
-
-	/// We need to store the codec information on the heap.
-	/// Key: Catalog ID, Audio Index
-	/// Value: the codec name.
-	catalog_audio: HashMap<(Id, usize), String>,
-
-	/// We need to store the codec information on the heap.
-	/// Key: Catalog ID, Video Index
-	/// Value: the codec name.
-	catalog_video: HashMap<(Id, usize), String>,
 
 	/// Audio track consumer task cancellation channels.
 	audio_task: NonZeroSlab<oneshot::Sender<()>>,
@@ -64,12 +63,41 @@ impl Consume {
 
 	async fn run_catalog(mut broadcast: hang::BroadcastConsumer, on_catalog: &mut OnStatus) -> Result<(), Error> {
 		while let Some(catalog) = broadcast.catalog.next().await? {
-			let id = CONSUME
-				.lock()
-				.catalog
-				.insert((catalog.clone(), broadcast.inner.clone()));
+			// Unfortunately we need to store the codec information on the heap.
+			let audio_codec = catalog
+				.audio
+				.as_ref()
+				.map(|audio| {
+					audio
+						.renditions
+						.values()
+						.map(|config| config.codec.to_string())
+						.collect()
+				})
+				.unwrap_or_default();
 
-			//nt: Don't hold the mutex during this callback.
+			let video_codec = catalog
+				.video
+				.as_ref()
+				.map(|video| {
+					video
+						.renditions
+						.values()
+						.map(|config| config.codec.to_string())
+						.collect()
+				})
+				.unwrap_or_default();
+
+			let catalog = ConsumeCatalog {
+				broadcast: broadcast.clone(),
+				catalog,
+				audio_codec,
+				video_codec,
+			};
+
+			let id = CONSUME.lock().catalog.insert(catalog);
+
+			// Important: Don't hold the mutex during this callback.
 			on_catalog.call(Ok(id));
 		}
 
@@ -77,17 +105,11 @@ impl Consume {
 	}
 
 	pub fn catalog_video(&mut self, catalog: Id, index: usize, dst: &mut VideoTrack) -> Result<(), Error> {
-		let video = self
-			.catalog
-			.get(catalog)
-			.ok_or(Error::NotFound)?
-			.0
-			.video
-			.as_ref()
-			.ok_or(Error::NoIndex)?;
-		let (rendition, config) = video.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
+		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
 
-		let codec = config.codec.to_string();
+		let video = consume.catalog.video.as_ref().ok_or(Error::NoIndex)?;
+		let (rendition, config) = video.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
+		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
 
 		*dst = VideoTrack {
 			name: rendition.as_str().as_ptr() as *const c_char,
@@ -112,30 +134,15 @@ impl Consume {
 				.unwrap_or(std::ptr::null()),
 		};
 
-		// Store it on the heap so we can return it to the caller.
-		self.catalog_video.insert((catalog, index), codec);
-
-		Ok(())
-	}
-
-	pub fn catalog_video_close(&mut self, catalog: Id, index: usize) -> Result<(), Error> {
-		self.catalog_video.remove(&(catalog, index)).ok_or(Error::NotFound)?;
-
 		Ok(())
 	}
 
 	pub fn catalog_audio(&mut self, catalog: Id, index: usize, dst: &mut AudioTrack) -> Result<(), Error> {
-		let audio = self
-			.catalog
-			.get(catalog)
-			.ok_or(Error::NotFound)?
-			.0
-			.audio
-			.as_ref()
-			.ok_or(Error::NoIndex)?;
-		let (rendition, config) = audio.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
+		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
 
-		let codec = config.codec.to_string();
+		let audio = consume.catalog.audio.as_ref().ok_or(Error::NoIndex)?;
+		let (rendition, config) = audio.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
+		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
 
 		*dst = AudioTrack {
 			name: rendition.as_str().as_ptr() as *const c_char,
@@ -152,15 +159,6 @@ impl Consume {
 			channel_count: config.channel_count,
 		};
 
-		// Store it on the heap so we can return it to the caller.
-		self.catalog_audio.insert((catalog, index), codec);
-
-		Ok(())
-	}
-
-	pub fn catalog_audio_close(&mut self, catalog: Id, index: usize) -> Result<(), Error> {
-		self.catalog_audio.remove(&(catalog, index)).ok_or(Error::NotFound)?;
-
 		Ok(())
 	}
 
@@ -176,11 +174,11 @@ impl Consume {
 		latency: std::time::Duration,
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let (catalog, broadcast) = self.catalog.get(catalog).ok_or(Error::NotFound)?;
-		let video = catalog.video.as_ref().ok_or(Error::NotFound)?;
+		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
+		let video = consume.catalog.video.as_ref().ok_or(Error::NotFound)?;
 		let rendition = video.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
-		let track = broadcast.subscribe_track(&moq_lite::Track {
+		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: video.priority,
 		});
@@ -207,11 +205,11 @@ impl Consume {
 		latency: std::time::Duration,
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let (catalog, broadcast) = self.catalog.get(catalog).ok_or(Error::NotFound)?;
-		let audio = catalog.audio.as_ref().ok_or(Error::NotFound)?;
+		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
+		let audio = consume.catalog.audio.as_ref().ok_or(Error::NotFound)?;
 		let rendition = audio.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
-		let track = broadcast.subscribe_track(&moq_lite::Track {
+		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: audio.priority,
 		});

@@ -375,7 +375,7 @@ pub unsafe extern "C" fn moq_consume_catalog(
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [VideoTrack] struct.
-/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_video_close] is called.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
 #[no_mangle]
 pub unsafe extern "C" fn moq_consume_catalog_video(catalog: i32, index: i32, dst: *mut VideoTrack) -> i32 {
 	ffi::return_code(move || {
@@ -386,28 +386,15 @@ pub unsafe extern "C" fn moq_consume_catalog_video(catalog: i32, index: i32, dst
 	})
 }
 
-/// Close a video catalog info and clean up its resources.
-///
-/// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
-pub extern "C" fn moq_consume_catalog_video_close(catalog: i32, index: i32) -> i32 {
-	ffi::return_code(move || {
-		let catalog = ffi::parse_id(catalog)?;
-		let index = index as usize;
-		CONSUME.lock().catalog_video_close(catalog, index)
-	})
-}
-
 /// Query information about an audio track in a catalog.
 ///
 /// The destination is filled with the audio track information.
-/// [moq_consume_catalog_audio_close] must be called when `AudioTrack` is no longer needed.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to an [AudioTrack] struct.
-/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_audio_close] is called.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
 #[no_mangle]
 pub unsafe extern "C" fn moq_consume_catalog_audio(catalog: i32, index: i32, dst: *mut AudioTrack) -> i32 {
 	ffi::return_code(move || {
@@ -415,18 +402,6 @@ pub unsafe extern "C" fn moq_consume_catalog_audio(catalog: i32, index: i32, dst
 		let index = index as usize;
 		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
 		CONSUME.lock().catalog_audio(catalog, index, dst)
-	})
-}
-
-/// Close an audio catalog info and clean up its resources.
-///
-/// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
-pub extern "C" fn moq_consume_catalog_audio_close(catalog: i32, index: i32) -> i32 {
-	ffi::return_code(move || {
-		let catalog = ffi::parse_id(catalog)?;
-		let index = index as usize;
-		CONSUME.lock().catalog_audio_close(catalog, index)
 	})
 }
 
