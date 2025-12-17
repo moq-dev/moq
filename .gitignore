@@ -25,6 +25,9 @@ node_modules
 *.jwk
 *.jwt
 
+# HLS stream output (just hls-stream)
+dev/hls_*/
+
 # We're using bun (and sometimes deno)
 package-lock.json
 yarn.lock
