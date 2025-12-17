@@ -9,7 +9,7 @@ use tracing::Level;
 /// Information about a video rendition in the catalog.
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct moq_video_track {
+pub struct moq_video_config {
 	/// The name of the track, NOT NULL terminated.
 	pub name: *const c_char,
 	pub name_len: usize,
@@ -33,7 +33,7 @@ pub struct moq_video_track {
 /// Information about an audio rendition in the catalog.
 #[repr(C)]
 #[allow(non_camel_case_types)]
-pub struct moq_audio_track {
+pub struct moq_audio_config {
 	/// The name of the track, NOT NULL terminated
 	pub name: *const c_char,
 	pub name_len: usize,
@@ -376,6 +376,17 @@ pub unsafe extern "C" fn moq_consume_catalog(
 	})
 }
 
+/// Close a catalog consumer and clean up its resources.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[no_mangle]
+pub extern "C" fn moq_consume_catalog_close(catalog: i32) -> i32 {
+	State::enter(move |state| {
+		let catalog = ffi::parse_id(catalog)?;
+		state.consume.catalog_close(catalog)
+	})
+}
+
 /// Query information about a video track in a catalog.
 ///
 /// The destination is filled with the video track information.
@@ -383,15 +394,15 @@ pub unsafe extern "C" fn moq_consume_catalog(
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [moq_video_track] struct.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_video_config] struct.
 /// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
 #[no_mangle]
-pub unsafe extern "C" fn moq_consume_catalog_video(catalog: i32, index: i32, dst: *mut moq_video_track) -> i32 {
+pub unsafe extern "C" fn moq_consume_video_config(catalog: i32, index: i32, dst: *mut moq_video_config) -> i32 {
 	State::enter(move |state| {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
 		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
-		state.consume.catalog_video(catalog, index, dst)
+		state.consume.video_config(catalog, index, dst)
 	})
 }
 
@@ -402,26 +413,15 @@ pub unsafe extern "C" fn moq_consume_catalog_video(catalog: i32, index: i32, dst
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [moq_audio_track] struct.
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_audio_config] struct.
 /// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
 #[no_mangle]
-pub unsafe extern "C" fn moq_consume_catalog_audio(catalog: i32, index: i32, dst: *mut moq_audio_track) -> i32 {
+pub unsafe extern "C" fn moq_consume_audio_config(catalog: i32, index: i32, dst: *mut moq_audio_config) -> i32 {
 	State::enter(move |state| {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
 		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
-		state.consume.catalog_audio(catalog, index, dst)
-	})
-}
-
-/// Close a catalog consumer and clean up its resources.
-///
-/// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
-pub extern "C" fn moq_consume_catalog_close(catalog: i32) -> i32 {
-	State::enter(move |state| {
-		let catalog = ffi::parse_id(catalog)?;
-		state.consume.catalog_close(catalog)
+		state.consume.audio_config(catalog, index, dst)
 	})
 }
 

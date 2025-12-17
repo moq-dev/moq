@@ -5,7 +5,7 @@ use moq_lite::coding::Buf;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{moq_audio_track, moq_frame, moq_video_track, Error, Id, NonZeroSlab, State};
+use crate::{moq_audio_config, moq_frame, moq_video_config, Error, Id, NonZeroSlab, State};
 
 struct ConsumeCatalog {
 	broadcast: hang::BroadcastConsumer,
@@ -104,14 +104,14 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn catalog_video(&mut self, catalog: Id, index: usize, dst: &mut moq_video_track) -> Result<(), Error> {
+	pub fn video_config(&mut self, catalog: Id, index: usize, dst: &mut moq_video_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
 
 		let video = consume.catalog.video.as_ref().ok_or(Error::NoIndex)?;
 		let (rendition, config) = video.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
 		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
 
-		*dst = moq_video_track {
+		*dst = moq_video_config {
 			name: rendition.as_str().as_ptr() as *const c_char,
 			name_len: rendition.len(),
 			codec: codec.as_str().as_ptr() as *const c_char,
@@ -137,14 +137,14 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn catalog_audio(&mut self, catalog: Id, index: usize, dst: &mut moq_audio_track) -> Result<(), Error> {
+	pub fn audio_config(&mut self, catalog: Id, index: usize, dst: &mut moq_audio_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
 
 		let audio = consume.catalog.audio.as_ref().ok_or(Error::NoIndex)?;
 		let (rendition, config) = audio.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
 		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
 
-		*dst = moq_audio_track {
+		*dst = moq_audio_config {
 			name: rendition.as_str().as_ptr() as *const c_char,
 			name_len: rendition.len(),
 			codec: codec.as_str().as_ptr() as *const c_char,
