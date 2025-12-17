@@ -9,7 +9,7 @@ use rustls::sign::CertifiedKey;
 use std::fs;
 use std::io::{self, Cursor, Read};
 use url::Url;
-use web_transport_quinn::{http, ServerError};
+use web_transport_quinn::http;
 
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -229,20 +229,40 @@ impl Server {
 	}
 }
 
+pub enum Session {
+	Quinn(web_transport_quinn::Session),
+	#[cfg(feature = "iroh")]
+	Iroh(web_transport_iroh::Session),
+}
+
+impl Session {
+	pub fn into_quinn(self) -> Option<web_transport_quinn::Session> {
+		match self {
+			Session::Quinn(session) => Some(session),
+			#[cfg(feature = "iroh")]
+			Session::Iroh(_) => None,
+		}
+	}
+}
+
 pub enum Request {
 	WebTransport(web_transport_quinn::Request),
 	Quic(QuicRequest),
+	#[cfg(feature = "iroh")]
+	Iroh(web_transport_iroh::Request),
 }
 
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn close(self, status: http::StatusCode) -> Result<(), ServerError> {
+	pub async fn close(self, status: http::StatusCode) -> anyhow::Result<()> {
 		match self {
-			Self::WebTransport(request) => request.close(status).await,
+			Self::WebTransport(request) => request.close(status).await.map_err(Into::into),
 			Self::Quic(request) => {
 				request.close(status);
 				Ok(())
 			}
+			#[cfg(feature = "iroh")]
+			Request::Iroh(request) => request.close(status).await.map_err(Into::into),
 		}
 	}
 
@@ -250,10 +270,12 @@ impl Request {
 	///
 	/// For WebTransport, this completes the HTTP handshake (200 OK).
 	/// For raw QUIC, this constructs a raw session.
-	pub async fn ok(self) -> Result<web_transport_quinn::Session, ServerError> {
+	pub async fn ok(self) -> anyhow::Result<Session> {
 		match self {
-			Request::WebTransport(request) => request.ok().await,
-			Request::Quic(request) => Ok(request.ok()),
+			Request::WebTransport(request) => request.ok().await.map_err(Into::into).map(Session::Quinn),
+			Request::Quic(request) => Ok(request.ok()).map(Session::Quinn),
+			#[cfg(feature = "iroh")]
+			Request::Iroh(request) => request.ok().await.map_err(Into::into).map(Session::Iroh),
 		}
 	}
 
@@ -262,6 +284,8 @@ impl Request {
 		match self {
 			Request::WebTransport(request) => request.url(),
 			Request::Quic(request) => request.url(),
+			#[cfg(feature = "iroh")]
+			Request::Iroh(request) => request.url(),
 		}
 	}
 }

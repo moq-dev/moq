@@ -24,6 +24,8 @@ impl Connection {
 				(path, token)
 			}
 			Request::Quic(_conn) => ("", None),
+			#[cfg(feature = "iroh")]
+			Request::Iroh(_conn) => ("", None),
 		};
 		// Verify the URL before accepting the connection.
 		let token = match self.auth.verify(path, token.as_deref()) {
@@ -56,9 +58,20 @@ impl Connection {
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
 		// We subscribe to the tracks the client is allowed to publish.
-		let session = moq_lite::Session::accept(session, subscribe, publish).await?;
+		match session {
+			moq_native::Session::Quinn(session) => {
+				let session = moq_lite::Session::accept(session, subscribe, publish).await?;
 
-		// Wait until the session is closed.
-		session.closed().await.map_err(Into::into)
+				// Wait until the session is closed.
+				session.closed().await.map_err(Into::into)
+			}
+			#[cfg(feature = "iroh")]
+			moq_native::Session::Iroh(session) => {
+				let session = moq_lite::Session::accept(session, subscribe, publish).await?;
+
+				// Wait until the session is closed.
+				session.closed().await.map_err(Into::into)
+			}
+		}
 	}
 }

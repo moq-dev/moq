@@ -81,6 +81,9 @@ async fn run_session(
 	let origin = moq_lite::Origin::produce();
 	origin.producer.publish_broadcast(&name, consumer);
 
+	let session = session
+		.into_quinn()
+		.context("only quinn sessions are supported currently")?;
 	let session = moq_lite::Session::accept(session, origin.consumer, None)
 		.await
 		.context("failed to accept session")?;

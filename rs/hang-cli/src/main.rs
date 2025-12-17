@@ -42,6 +42,10 @@ pub enum Command {
 		#[command(flatten)]
 		config: moq_native::ClientConfig,
 
+		/// Configuration for the iroh endpoint.
+		#[command(flatten)]
+		iroh: moq_native::iroh::EndpointConfig,
+
 		/// The URL of the MoQ server.
 		///
 		/// The URL must start with `https://` or `http://`.
@@ -80,6 +84,23 @@ async fn main() -> anyhow::Result<()> {
 
 	match cli.command {
 		Command::Serve { config, dir, name, .. } => server(config, name, dir, publish).await,
-		Command::Publish { config, url, name, .. } => client(config, url, name, publish).await,
+		Command::Publish {
+			config,
+			#[cfg(feature = "iroh")]
+			iroh,
+			url,
+			name,
+			..
+		} => {
+			client(
+				config,
+				#[cfg(feature = "iroh")]
+				iroh,
+				url,
+				name,
+				publish,
+			)
+			.await
+		}
 	}
 }

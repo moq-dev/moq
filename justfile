@@ -134,17 +134,28 @@ download-url name:
 pub name url="http://localhost:4443/anon" *args:
 	# Download the sample media.
 	just download "{{name}}"
+	# Publish the media with the hang cli.
+	just hang-pub-fmp4 "dev/{{name}}.fmp4" "{{name}}" "{{url}}" {{args}}
 
+# Publish a fmp4 (CMAF) video file using ffmpeg to a relay server
+hang-pub-fmp4 input name url *args:
 	# Pre-build the binary so we don't queue media while compiling.
 	cargo build --bin hang
-
 	# Run ffmpeg and pipe the output to hang
 	ffmpeg -hide_banner -v quiet \
 		-stream_loop -1 -re \
-		-i "dev/{{name}}.fmp4" \
+		-i "{{input}}" \
 		-c copy \
 		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
 		- | cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
+		
+# Publish a video file using ffmpeg to a relay server over iroh
+# NOTE: The default url (iroh endpoint id) matches the secret key set in dev/relay.toml
+pub-iroh name='bbb' url='iroh://a73123fce41108f024a196a399edadbba8060be166c779aa50bf4731931492d3' *args:
+	# Download the sample media.
+	just download "{{name}}"
+	# Publish the media with the hang cli.
+	just hang-pub-fmp4 "dev/{{name}}.fmp4" "anon/{{name}}" "{{url}}" {{args}}
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
@@ -206,7 +217,7 @@ pub-hls name relay="http://localhost:4443/anon":
 
 	# Run hang to ingest from local files
 	cargo run --bin hang -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8"
-
+	
 # Publish a video using H.264 Annex B format to the localhost relay server
 pub-h264 name url="http://localhost:4443/anon" *args:
 	# Download the sample media.

@@ -25,3 +25,9 @@ listen = "[::]:4443"
 [auth]
 # Allow anonymous access to everything.
 public = ""
+
+[iroh]
+# 32 byte secret key for the iroh endpoint. Defines the endpoint ID of the iroh endpoint.
+# The matching endpoint id is set in the justfile as a default for the `pub-iroh` command.
+# Can also be set via MOQ_IROH_SECRET env variable if you don't want to put secrets into the config file.
+secret_key = "b724c6a37a004ae3d14c3efed84ccc145ee78f884e40f1b47063bdfd479ebed1"

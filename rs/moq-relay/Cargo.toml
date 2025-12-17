@@ -41,5 +41,9 @@ tracing = "0.1"
 url = { version = "2", features = ["serde"] }
 web-transport-ws = { workspace = true }
 
+[features]
+default = ["iroh"]
+iroh = ["moq-native/iroh"]
+
 [dev-dependencies]
 tempfile = "3"
