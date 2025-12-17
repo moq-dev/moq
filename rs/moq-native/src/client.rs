@@ -138,7 +138,11 @@ impl Client {
 		Ok(Self { quic, tls, transport })
 	}
 
-	pub async fn connect(&self, mut url: Url) -> anyhow::Result<web_transport_quinn::Session> {
+	pub async fn connect(&self, url: Url) -> anyhow::Result<web_transport_quinn::Session> {
+		self.connect_quic(url).await
+	}
+
+	async fn connect_quic(&self, mut url: Url) -> anyhow::Result<web_transport_quinn::Session> {
 		let mut config = self.tls.clone();
 
 		let host = url.host().context("invalid DNS name")?.to_string();
