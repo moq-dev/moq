@@ -38,16 +38,6 @@ impl OnStatus {
 
 unsafe impl Send for OnStatus {}
 
-/// Execute a function and convert the result to a C-compatible error code.
-///
-/// Catches panics and converts them to error codes.
-pub fn return_code<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
-	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-		Ok(ret) => ret.code(),
-		Err(_) => Error::Panic.code(),
-	}
-}
-
 /// Types that can be converted to C-compatible return codes.
 pub trait ReturnCode {
 	/// Convert to an i32 status code.

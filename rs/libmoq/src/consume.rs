@@ -5,7 +5,7 @@ use moq_lite::coding::Buf;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{moq_audio_track, moq_frame, moq_video_track, Error, Id, NonZeroSlab, RuntimeLock};
+use crate::{moq_audio_track, moq_frame, moq_video_track, Error, Id, NonZeroSlab, State};
 
 struct ConsumeCatalog {
 	broadcast: hang::BroadcastConsumer,
@@ -95,7 +95,7 @@ impl Consume {
 				video_codec,
 			};
 
-			let id = CONSUME.lock().catalog.insert(catalog);
+			let id = State::enter(move |state| state.consume.catalog.insert(catalog));
 
 			// Important: Don't hold the mutex during this callback.
 			on_catalog.call(Ok(id));
@@ -248,7 +248,7 @@ impl Consume {
 			};
 
 			// Important: Don't hold the mutex during this callback.
-			let id = CONSUME.lock().frame.insert(new_frame);
+			let id = State::enter(move |state| state.consume.frame.insert(new_frame));
 			on_frame.call(Ok(id));
 		}
 
@@ -290,6 +290,3 @@ impl Consume {
 		Ok(())
 	}
 }
-
-/// Global shared state instance.
-pub static CONSUME: RuntimeLock<Consume> = RuntimeLock::new();

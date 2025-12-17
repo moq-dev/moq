@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::{Error, Id, NonZeroSlab, RuntimeLock};
+use moq_lite::coding::Buf;
+
+use crate::{Error, Id, NonZeroSlab};
 
 #[derive(Default)]
 pub struct Publish {
@@ -27,16 +29,19 @@ impl Publish {
 		Ok(())
 	}
 
-	pub fn media_init(&mut self, broadcast: Id, format: &str, init: &[u8]) -> Result<Id, Error> {
+	pub fn media_init(&mut self, broadcast: Id, format: &str, mut init: &[u8]) -> Result<Id, Error> {
 		let broadcast = self.broadcasts.get(broadcast).ok_or(Error::NotFound)?;
 		let mut decoder = hang::import::Decoder::new(broadcast.clone(), format)
 			.ok_or_else(|| Error::UnknownFormat(format.to_string()))?;
 
-		let mut temp = init;
 		decoder
-			.initialize(&mut temp)
+			.initialize(&mut init)
 			.map_err(|err| Error::InitFailed(Arc::new(err)))?;
-		assert!(init.is_empty(), "buffer was not fully consumed");
+		if init.has_remaining() {
+			return Err(Error::InitFailed(Arc::new(anyhow::anyhow!(
+				"buffer was not fully consumed"
+			))));
+		}
 
 		let id = self.media.insert(decoder);
 		Ok(id)
@@ -48,7 +53,12 @@ impl Publish {
 		media
 			.decode_frame(&mut data, Some(timestamp))
 			.map_err(|err| Error::DecodeFailed(Arc::new(err)))?;
-		assert!(data.is_empty(), "buffer was not fully consumed");
+
+		if data.has_remaining() {
+			return Err(Error::DecodeFailed(Arc::new(anyhow::anyhow!(
+				"buffer was not fully consumed"
+			))));
+		}
 
 		Ok(())
 	}
@@ -58,6 +68,3 @@ impl Publish {
 		Ok(())
 	}
 }
-
-/// Global shared state instance.
-pub static PUBLISH: RuntimeLock<Publish> = RuntimeLock::new();

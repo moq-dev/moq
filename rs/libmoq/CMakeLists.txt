@@ -44,18 +44,16 @@ endif()
 file(MAKE_DIRECTORY ${RUST_DIR})
 file(MAKE_DIRECTORY ${RUST_TARGET_DIR}/include)
 
-# Create imported library target
-add_library(moq STATIC IMPORTED GLOBAL)
-set_target_properties(moq PROPERTIES
-    IMPORTED_LOCATION ${RUST_LIB}
-    INTERFACE_INCLUDE_DIRECTORIES ${RUST_TARGET_DIR}/include
-)
+# Create interface library target that wraps the Rust static library
+add_library(moq INTERFACE)
+target_include_directories(moq INTERFACE ${RUST_TARGET_DIR}/include)
+
+# Force absolute path to be used in linker command
+target_link_options(moq INTERFACE "$<LINK_ONLY:${RUST_LIB}>")
 
 # Link required system frameworks on macOS
 if(APPLE)
-    set_property(TARGET moq APPEND PROPERTY
-        INTERFACE_LINK_LIBRARIES "-framework CoreFoundation" "-framework Security"
-    )
+    target_link_options(moq INTERFACE "LINKER:-framework,CoreFoundation" "LINKER:-framework,Security")
 endif()
 
 if(BUILD_RUST_LIB)

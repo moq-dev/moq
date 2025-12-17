@@ -3,7 +3,7 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{moq_announced, Error, Id, NonZeroSlab, RuntimeLock};
+use crate::{moq_announced, Error, Id, NonZeroSlab, State};
 
 /// Global state managing all active resources.
 ///
@@ -51,9 +51,7 @@ impl Origin {
 
 	async fn run_announced(mut consumer: moq_lite::OriginConsumer, on_announce: &mut OnStatus) -> Result<(), Error> {
 		while let Some((path, broadcast)) = consumer.announced().await {
-			let id = ORIGIN.lock().announced.insert((path.to_string(), broadcast.is_some()));
-
-			// Important: Don't hold the mutex during this callback.
+			let id = State::enter(move |state| state.origin.announced.insert((path.to_string(), broadcast.is_some())));
 			on_announce.call(id);
 		}
 
@@ -96,6 +94,3 @@ impl Origin {
 		Ok(())
 	}
 }
-
-/// Global shared state instance.
-pub static ORIGIN: RuntimeLock<Origin> = RuntimeLock::new();

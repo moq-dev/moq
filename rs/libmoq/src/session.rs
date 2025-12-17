@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;
 
-use crate::{ffi, runtime::RuntimeLock, Error, Id, NonZeroSlab};
+use crate::{ffi, Error, Id, NonZeroSlab};
 
 #[derive(Default)]
 pub struct Session {
@@ -57,6 +57,3 @@ impl Session {
 		Ok(())
 	}
 }
-
-/// Global shared state instance.
-pub static SESSION: RuntimeLock<Session> = RuntimeLock::new();

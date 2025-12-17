@@ -20,8 +20,8 @@ mod ffi;
 mod id;
 mod origin;
 mod publish;
-mod runtime;
 mod session;
+mod state;
 
 pub use api::*;
 pub use error::*;
@@ -30,5 +30,5 @@ pub use id::*;
 pub(crate) use consume::*;
 pub(crate) use origin::*;
 pub(crate) use publish::*;
-pub(crate) use runtime::*;
 pub(crate) use session::*;
+pub(crate) use state::*;
