@@ -261,8 +261,10 @@ pub unsafe extern "C" fn moq_origin_consume(origin: u32, path: *const c_char, pa
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let path = unsafe { ffi::parse_str(path, path_len)? };
-		let broadcast = State::lock().origin.consume(origin, path)?;
-		Ok(State::lock().consume.start(broadcast.into()))
+
+		let mut state = State::lock();
+		let broadcast = state.origin.consume(origin, path)?;
+		Ok(state.consume.start(broadcast.into()))
 	})
 }
 
