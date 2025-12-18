@@ -41,13 +41,14 @@ fn main() {
 }
 
 fn target_dir() -> PathBuf {
-	// Always use the workspace target directory (target/)
-	// regardless of whether --target is used or not.
-	// CARGO_MANIFEST_DIR is rs/libmoq/, so go up two levels to repo root
-	PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-		.parent()
-		.expect("Failed to get parent of CARGO_MANIFEST_DIR")
-		.parent()
-		.expect("Failed to get repo root")
-		.join("target")
+	// OUT_DIR is always set by Cargo to something like:
+	// target/{debug|release}/build/{crate}-{hash}/out
+	// Go up 4 levels to get to target/
+	PathBuf::from(env::var("OUT_DIR").unwrap())
+		.parent() // build/{crate}-{hash}
+		.and_then(|p| p.parent()) // build/
+		.and_then(|p| p.parent()) // {debug|release}/
+		.and_then(|p| p.parent()) // target/
+		.expect("Failed to get target directory from OUT_DIR")
+		.to_path_buf()
 }
