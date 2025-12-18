@@ -96,11 +96,11 @@ export class Encoder {
 						group?.close();
 						group = track.appendGroup();
 					} else if (!group) {
-					throw new Error("no keyframe");
-				}
+						throw new Error("no keyframe");
+					}
 
-				const buffer = Frame.encode(frame, frame.timestamp as Time.Micro, this.#container);
-				group?.writeFrame(buffer);
+					const buffer = Frame.encode(frame, frame.timestamp as Time.Micro, this.#container);
+					group?.writeFrame(buffer);
 				},
 				error: (err: Error) => {
 					track.close(err);
