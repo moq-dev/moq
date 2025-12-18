@@ -1,13 +1,13 @@
 use std::{
 	ffi::{c_char, c_void},
-	sync::LazyLock,
+	sync::{LazyLock, Mutex},
 };
 
 use url::Url;
 
 use crate::{Error, Id};
 
-pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
+pub static RUNTIME: LazyLock<Mutex<tokio::runtime::Handle>> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
@@ -21,15 +21,20 @@ pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 		})
 		.expect("failed to spawn runtime thread");
 
-	handle
+	Mutex::new(handle)
 });
 
-/// Runs the provided function while holding the global state and runtime lock.
+/// Runs the provided function in the runtime context.
 /// Additionally, we convert the return code to a C-compatible return value.
+///
+/// Uses a mutex to ensure Handle::enter() guards are dropped in LIFO order,
+/// as required by tokio to avoid panics in multi-threaded FFI contexts.
 pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
-	// TODO Do we need a mutex to make sure RUNTIME is dropped in order?
-	// I think this might panic otherwise if libmoq is used in a multi-threaded context.
-	let _guard = RUNTIME.enter();
+	// NOTE: I think we need a mutex because Handle::enter() needs to be dropped in LIFO order.
+	// If this starts to become a bottleneck, we might have to rethink our runtime model.
+	let handle = RUNTIME.lock().unwrap();
+	let _guard = handle.enter();
+
 	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
 		Ok(ret) => ret.code(),
 		Err(_) => Error::Panic.code(),
