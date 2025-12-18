@@ -7,13 +7,11 @@ use std::{
 	},
 };
 
-use crate::{Error, Pair, TrackConsumer, TrackProducer};
+use crate::{Error, Produce, TrackConsumer, TrackProducer};
 use tokio::sync::watch;
 use web_async::Lock;
 
 use super::Track;
-
-pub type BroadcastPair = Pair<BroadcastProducer, BroadcastConsumer>;
 
 struct State {
 	// When explicitly publishing, we hold a reference to the consumer.
@@ -31,10 +29,10 @@ pub struct Broadcast {
 }
 
 impl Broadcast {
-	pub fn produce() -> BroadcastPair {
+	pub fn produce() -> Produce<BroadcastProducer, BroadcastConsumer> {
 		let producer = BroadcastProducer::new();
 		let consumer = producer.consume();
-		BroadcastPair { producer, consumer }
+		Produce { producer, consumer }
 	}
 }
 

@@ -14,13 +14,11 @@
 
 use tokio::sync::watch;
 
-use crate::{Error, Pair, Result};
+use crate::{Error, Produce, Result};
 
 use super::{Group, GroupConsumer, GroupProducer};
 
 use std::{cmp::Ordering, future::Future};
-
-pub type TrackPair = Pair<TrackProducer, TrackConsumer>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -37,10 +35,10 @@ impl Track {
 		}
 	}
 
-	pub fn produce(self) -> TrackPair {
+	pub fn produce(self) -> Produce<TrackProducer, TrackConsumer> {
 		let producer = TrackProducer::new(self);
 		let consumer = producer.consume();
-		TrackPair { producer, consumer }
+		Produce { producer, consumer }
 	}
 }
 

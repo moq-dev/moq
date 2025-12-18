@@ -3,9 +3,7 @@ use std::future::Future;
 use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
 
-use crate::{Error, Pair, Result};
-
-pub type FramePair = Pair<FrameProducer, FrameConsumer>;
+use crate::{Error, Produce, Result};
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -14,10 +12,10 @@ pub struct Frame {
 }
 
 impl Frame {
-	pub fn produce(self) -> FramePair {
+	pub fn produce(self) -> Produce<FrameProducer, FrameConsumer> {
 		let producer = FrameProducer::new(self);
 		let consumer = producer.consume();
-		FramePair { producer, consumer }
+		Produce { producer, consumer }
 	}
 }
 

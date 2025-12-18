@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Audio, AudioConfig, Chat, Track, User, Video, VideoConfig};
 use crate::Result;
-use moq_lite::Pair;
+use moq_lite::Produce;
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 #[serde_with::serde_as]
@@ -83,10 +83,10 @@ impl Catalog {
 	}
 
 	/// Produce a catalog track that describes the available media tracks.
-	pub fn produce(self) -> Pair<CatalogProducer, CatalogConsumer> {
+	pub fn produce(self) -> Produce<CatalogProducer, CatalogConsumer> {
 		let track = Catalog::default_track().produce();
 
-		Pair {
+		Produce {
 			producer: CatalogProducer::new(track.producer, self),
 			consumer: track.consumer.into(),
 		}

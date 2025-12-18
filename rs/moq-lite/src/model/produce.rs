@@ -4,7 +4,7 @@
 /// However when the number of references reaches zero, the other will receive a signal to close.
 /// A new consumer may be created at any time by calling [T::consume].
 #[derive(Clone)]
-pub struct Pair<P, C> {
+pub struct Produce<P, C> {
 	pub producer: P,
 	pub consumer: C,
 }
