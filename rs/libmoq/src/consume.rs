@@ -47,6 +47,7 @@ impl Consume {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::NotFound)?.clone();
 
 		let channel = oneshot::channel();
+		let id = self.catalog_task.insert(channel.0);
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
@@ -54,9 +55,9 @@ impl Consume {
 				_ = channel.1 => Ok(()),
 			};
 			on_catalog.call(res);
-		});
 
-		let id = self.catalog_task.insert(channel.0);
+			State::lock().consume.catalog_task.remove(id);
+		});
 
 		Ok(id)
 	}
@@ -95,7 +96,7 @@ impl Consume {
 				video_codec,
 			};
 
-			let id = State::enter(move |state| state.consume.catalog.insert(catalog));
+			let id = State::lock().consume.catalog.insert(catalog);
 
 			// Important: Don't hold the mutex during this callback.
 			on_catalog.call(Ok(id));
@@ -185,15 +186,18 @@ impl Consume {
 		let track = TrackConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
+		let id = self.video_task.insert(channel.0);
+
 		tokio::spawn(async move {
 			let res = tokio::select! {
 				res = Self::run_track(track, &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_frame.call(res);
-		});
 
-		let id = self.video_task.insert(channel.0);
+			// Make sure we clean up the task on exit.
+			State::lock().consume.video_task.remove(id);
+		});
 
 		Ok(id)
 	}
@@ -216,15 +220,18 @@ impl Consume {
 		let track = TrackConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
+		let id = self.audio_task.insert(channel.0);
+
 		tokio::spawn(async move {
 			let res = tokio::select! {
 				res = Self::run_track(track, &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_frame.call(res);
-		});
 
-		let id = self.audio_task.insert(channel.0);
+			// Make sure we clean up the task on exit.
+			State::lock().consume.audio_task.remove(id);
+		});
 
 		Ok(id)
 	}
@@ -248,7 +255,7 @@ impl Consume {
 			};
 
 			// Important: Don't hold the mutex during this callback.
-			let id = State::enter(move |state| state.consume.frame.insert(new_frame));
+			let id = State::lock().consume.frame.insert(new_frame);
 			on_frame.call(Ok(id));
 		}
 

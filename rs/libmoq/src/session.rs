@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;
 
-use crate::{ffi, Error, Id, NonZeroSlab};
+use crate::{ffi, Error, Id, NonZeroSlab, State};
 
 #[derive(Default)]
 pub struct Session {
@@ -31,6 +31,9 @@ impl Session {
 				res = Self::connect_run(url, publish, consume, &mut callback) => res,
 			};
 			callback.call(res);
+
+			// Make sure we clean up the task on exit.
+			State::lock().session.task.remove(id);
 		});
 
 		Ok(id)

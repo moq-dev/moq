@@ -1,8 +1,40 @@
-use std::ffi::{c_char, c_void};
+use std::{
+	ffi::{c_char, c_void},
+	sync::LazyLock,
+};
 
 use url::Url;
 
 use crate::{Error, Id};
+
+pub const RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let handle = runtime.handle().clone();
+
+	std::thread::Builder::new()
+		.name("libmoq".into())
+		.spawn(move || {
+			runtime.block_on(std::future::pending::<()>());
+		})
+		.expect("failed to spawn runtime thread");
+
+	handle
+});
+
+/// Runs the provided function while holding the global state and runtime lock.
+/// Additionally, we convert the return code to a C-compatible return value.
+pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
+	// TODO Do we need a mutex to make sure RUNTIME is dropped in order?
+	// I think this might panic otherwise if libmoq is used in a multi-threaded context.
+	let _guard = RUNTIME.enter();
+	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+		Ok(ret) => ret.code(),
+		Err(_) => Error::Panic.code(),
+	}
+}
 
 /// Wrapper for C callback functions with user data.
 ///

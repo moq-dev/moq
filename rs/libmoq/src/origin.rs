@@ -51,7 +51,10 @@ impl Origin {
 
 	async fn run_announced(mut consumer: moq_lite::OriginConsumer, on_announce: &mut OnStatus) -> Result<(), Error> {
 		while let Some((path, broadcast)) = consumer.announced().await {
-			let id = State::enter(move |state| state.origin.announced.insert((path.to_string(), broadcast.is_some())));
+			let id = State::lock()
+				.origin
+				.announced
+				.insert((path.to_string(), broadcast.is_some()));
 			on_announce.call(id);
 		}
 
