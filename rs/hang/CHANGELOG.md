@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/moq-dev/moq/compare/hang-v0.8.0...hang-v0.9.0) - 2025-12-18
+
+### Other
+
+- Revert the moq_lite changes. ([#787](https://github.com/moq-dev/moq/pull/787))
+- libmoq consume API ([#777](https://github.com/moq-dev/moq/pull/777))
+
 ## [0.8.0](https://github.com/moq-dev/moq/compare/hang-v0.7.0...hang-v0.8.0) - 2025-12-13
 
 ### Other
