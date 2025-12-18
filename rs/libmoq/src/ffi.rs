@@ -7,7 +7,7 @@ use url::Url;
 
 use crate::{Error, Id};
 
-pub const RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
+pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
