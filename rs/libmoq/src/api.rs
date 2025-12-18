@@ -61,10 +61,10 @@ pub struct moq_frame {
 	pub payload: *const u8,
 	pub payload_size: usize,
 
-	// The presentation timestamp of the frame in microseconds
+	/// The presentation timestamp of the frame in microseconds
 	pub timestamp_us: u64,
 
-	/// Whether the frame is a keyframe (meaningless for audio)
+	/// Whether the frame is a keyframe, aka the start of a new group.
 	pub keyframe: bool,
 }
 
@@ -293,9 +293,10 @@ pub extern "C" fn moq_publish_close(broadcast: i32) -> i32 {
 	})
 }
 
-/// Create a new track for a broadcast.
+/// Create a new media track for a broadcast
 ///
-/// The encoding of `init` depends on the `format` string.
+/// All frames in [moq_publish_media_frame] must be written in decode order.
+/// The `format` controls the encoding, both of `init` and frame payloads.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
@@ -303,7 +304,7 @@ pub extern "C" fn moq_publish_close(broadcast: i32) -> i32 {
 /// - The caller must ensure that format is a valid pointer to format_len bytes of data.
 /// - The caller must ensure that init is a valid pointer to init_size bytes of data.
 #[no_mangle]
-pub unsafe extern "C" fn moq_publish_media_init(
+pub unsafe extern "C" fn moq_publish_media_ordered(
 	broadcast: i32,
 	format: *const c_char,
 	format_len: usize,
@@ -315,7 +316,7 @@ pub unsafe extern "C" fn moq_publish_media_init(
 		let format = unsafe { ffi::parse_str(format, format_len)? };
 		let init = unsafe { ffi::parse_slice(init, init_size)? };
 
-		state.publish.media_init(broadcast, format, init)
+		state.publish.media_ordered(broadcast, format, init)
 	})
 }
 
@@ -425,9 +426,9 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: i32, index: i32, dst:
 	})
 }
 
-/// Consume a video track from a broadcast.
+/// Consume a video track from a broadcast, delivering frames in order.
 ///
-/// - `max_buffer_ms` controls the maximum amount of buffering allowed before skipping a GoP.
+/// - `max_latency_ms` controls the maximum amount of buffering allowed before skipping a GoP.
 /// - `on_frame` is called with a frame ID when a new frame is available.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
@@ -435,19 +436,19 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: i32, index: i32, dst:
 /// # Safety
 /// - The caller must ensure that `on_frame` is valid until [moq_consume_video_track_close] is called.
 #[no_mangle]
-pub unsafe extern "C" fn moq_consume_video_track(
+pub unsafe extern "C" fn moq_consume_video_ordered(
 	broadcast: i32,
 	index: i32,
-	max_buffer_ms: u64,
+	max_latency_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	State::enter(move |state| {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
-		let max_buffer = std::time::Duration::from_millis(max_buffer_ms);
+		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = ffi::OnStatus::new(user_data, on_frame);
-		state.consume.video_track(broadcast, index, max_buffer, on_frame)
+		state.consume.video_ordered(broadcast, index, max_latency, on_frame)
 	})
 }
 
@@ -455,36 +456,36 @@ pub unsafe extern "C" fn moq_consume_video_track(
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[no_mangle]
-pub extern "C" fn moq_consume_video_track_close(track: i32) -> i32 {
+pub extern "C" fn moq_consume_video_close(track: i32) -> i32 {
 	State::enter(move |state| {
 		let track = ffi::parse_id(track)?;
-		state.consume.video_track_close(track)
+		state.consume.video_close(track)
 	})
 }
 
-/// Consume an audio track from a broadcast.
+/// Consume an audio track from a broadcast, emitting the frames in order.
 ///
 /// The callback is called with a frame ID when a new frame is available.
-/// The latency_ms parameter controls how much buffering to apply.
+/// The `max_latency_ms` parameter controls how long to wait before skipping frames.
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_frame` is valid until [moq_consume_audio_track_close] is called.
+/// - The caller must ensure that `on_frame` is valid until [moq_consume_audio_close] is called.
 #[no_mangle]
-pub unsafe extern "C" fn moq_consume_audio_track(
+pub unsafe extern "C" fn moq_consume_audio_ordered(
 	broadcast: i32,
 	index: i32,
-	latency_ms: u64,
+	max_latency_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	State::enter(move |state| {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
-		let latency = std::time::Duration::from_millis(latency_ms);
+		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = ffi::OnStatus::new(user_data, on_frame);
-		state.consume.audio_track(broadcast, index, latency, on_frame)
+		state.consume.audio_ordered(broadcast, index, max_latency, on_frame)
 	})
 }
 
@@ -492,10 +493,10 @@ pub unsafe extern "C" fn moq_consume_audio_track(
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[no_mangle]
-pub extern "C" fn moq_consume_audio_track_close(track: i32) -> i32 {
+pub extern "C" fn moq_consume_audio_close(track: i32) -> i32 {
 	State::enter(move |state| {
 		let track = ffi::parse_id(track)?;
-		state.consume.audio_track_close(track)
+		state.consume.audio_close(track)
 	})
 }
 

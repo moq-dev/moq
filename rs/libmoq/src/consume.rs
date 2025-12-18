@@ -167,7 +167,7 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn video_track(
+	pub fn video_ordered(
 		&mut self,
 		catalog: Id,
 		index: usize,
@@ -198,7 +198,7 @@ impl Consume {
 		Ok(id)
 	}
 
-	pub fn audio_track(
+	pub fn audio_ordered(
 		&mut self,
 		catalog: Id,
 		index: usize,
@@ -255,12 +255,12 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn audio_track_close(&mut self, track: Id) -> Result<(), Error> {
+	pub fn audio_close(&mut self, track: Id) -> Result<(), Error> {
 		self.audio_task.remove(track).ok_or(Error::NotFound)?;
 		Ok(())
 	}
 
-	pub fn video_track_close(&mut self, track: Id) -> Result<(), Error> {
+	pub fn video_close(&mut self, track: Id) -> Result<(), Error> {
 		self.video_task.remove(track).ok_or(Error::NotFound)?;
 		Ok(())
 	}

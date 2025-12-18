@@ -29,7 +29,7 @@ impl Publish {
 		Ok(())
 	}
 
-	pub fn media_init(&mut self, broadcast: Id, format: &str, mut init: &[u8]) -> Result<Id, Error> {
+	pub fn media_ordered(&mut self, broadcast: Id, format: &str, mut init: &[u8]) -> Result<Id, Error> {
 		let broadcast = self.broadcasts.get(broadcast).ok_or(Error::NotFound)?;
 		let mut decoder = hang::import::Decoder::new(broadcast.clone(), format)
 			.ok_or_else(|| Error::UnknownFormat(format.to_string()))?;
