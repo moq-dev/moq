@@ -60,7 +60,7 @@
         "packageJson": {
           "dependencies": [
             "npm:@rollup/plugin-node-resolve@^16.0.3",
-            "npm:happy-dom@^13.3.5",
+            "npm:happy-dom@^20.0.11",
             "npm:rimraf@^6.0.1",
             "npm:rollup-plugin-esbuild@^6.2.1",
             "npm:rollup@^4.53.3",
