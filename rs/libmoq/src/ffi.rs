@@ -138,12 +138,12 @@ impl ReturnCode for Id {
 }
 
 /// Parse an i32 handle into an Id.
-pub fn parse_id(id: i32) -> Result<Id, Error> {
+pub fn parse_id(id: u32) -> Result<Id, Error> {
 	Id::try_from(id)
 }
 
 /// Parse an optional i32 handle (0 = None) into an Option<Id>.
-pub fn parse_id_optional(id: i32) -> Result<Option<Id>, Error> {
+pub fn parse_id_optional(id: u32) -> Result<Option<Id>, Error> {
 	match id {
 		0 => Ok(None),
 		id => Ok(Some(parse_id(id)?)),
