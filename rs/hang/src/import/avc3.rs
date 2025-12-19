@@ -73,13 +73,14 @@ impl Avc3 {
 		}
 
 		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.info.name, "reinitializing track");
-			self.broadcast.catalog.lock().remove_video(&track.info.name);
+			tracing::debug!(name = ?track.name, "reinitializing track");
+			self.broadcast.catalog.lock().remove_video(&track.name);
 		}
 
 		let track = moq::Track {
 			name: self.broadcast.track_name("video"),
 			priority: 2,
+			max_latency: super::DEFAULT_MAX_LATENCY,
 		};
 
 		tracing::debug!(name = ?track.name, ?config, "starting track");
@@ -90,11 +91,11 @@ impl Avc3 {
 			video.priority = 2;
 		}
 
-		let track = track.produce();
-		self.broadcast.insert_track(track.consumer);
+		let track = moq::TrackProducer::new(track);
+		self.broadcast.insert_track(track.consume());
 
 		self.config = Some(config);
-		self.track = Some(track.producer.into());
+		self.track = Some(track.into());
 
 		Ok(())
 	}
@@ -253,8 +254,8 @@ impl Avc3 {
 impl Drop for Avc3 {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
-			tracing::debug!(name = ?track.info.name, "ending track");
-			self.broadcast.catalog.lock().remove_video(&track.info.name);
+			tracing::debug!(name = ?track.name, "ending track");
+			self.broadcast.catalog.lock().remove_video(&track.name);
 		}
 	}
 }

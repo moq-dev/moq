@@ -7,8 +7,7 @@ use crate::{
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId, Version},
 	model::BroadcastProducer,
-	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
-	TrackProducer,
+	Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track, TrackProducer,
 };
 
 use web_async::Lock;
@@ -88,13 +87,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Ok(entry.get().producer.clone());
 			}
 			Entry::Vacant(entry) => {
-				let broadcast = Broadcast::produce();
-				origin.publish_broadcast(path.clone(), broadcast.consumer);
+				let broadcast = BroadcastProducer::new();
+				origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
-					producer: broadcast.producer.clone(),
+					producer: broadcast.clone(),
 					count: 1,
 				});
-				broadcast.producer
+				broadcast
 			}
 		};
 
@@ -154,7 +153,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_subscribe_error(&mut self, msg: ietf::SubscribeError) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
-		if let Some(track) = state.subscribes.remove(&msg.request_id) {
+		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
 			track.producer.abort(Error::Cancel);
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
@@ -167,7 +166,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_publish_done(&mut self, msg: ietf::PublishDone<'_>) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
-		if let Some(track) = state.subscribes.remove(&msg.request_id) {
+		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
 			track.producer.close();
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
@@ -259,13 +258,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		request_id: RequestId,
 		broadcast: Path<'_>,
-		track: TrackProducer,
+		mut track: TrackProducer,
 	) -> Result<(), Error> {
 		self.control.send(ietf::Subscribe {
 			request_id,
 			track_namespace: broadcast.to_owned(),
-			track_name: (&track.info.name).into(),
-			subscriber_priority: track.info.priority,
+			track_name: (&track.name).into(),
+			subscriber_priority: track.priority,
 			group_order: GroupOrder::Descending,
 			// we want largest group
 			filter_type: FilterType::LargestObject,
@@ -274,10 +273,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// TODO we should send a joining fetch, but it's annoying to implement.
 		// We hope instead that publisher start subscriptions at group boundaries.
 
-		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe started");
+		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.name, "subscribe started");
 
 		track.unused().await;
-		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
+		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.name, "subscribe cancelled");
 
 		track.abort(Error::Cancel);
 
@@ -306,7 +305,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let group = Group {
 				sequence: group.group_id,
 			};
-			track.producer.create_group(group).ok_or(Error::Old)?
+			track.producer.create_group(group)?
 		};
 
 		let res = tokio::select! {
@@ -316,15 +315,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
-				tracing::trace!(group = %producer.info.sequence, "group cancelled");
+				tracing::trace!(group = %producer.sequence, "group cancelled");
 				producer.abort(Error::Cancel);
 			}
 			Err(err) => {
-				tracing::debug!(%err, group = %producer.info.sequence, "group error");
+				tracing::debug!(%err, group = %producer.sequence, "group error");
 				producer.abort(err);
 			}
 			_ => {
-				tracing::trace!(group = %producer.info.sequence, "group complete");
+				tracing::trace!(group = %producer.sequence, "group complete");
 				producer.close();
 			}
 		}
@@ -446,14 +445,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let track = Track {
 			name: msg.track_name.to_string(),
 			priority: 0,
-		}
-		.produce();
+			// TODO Delivery Timeout
+			max_latency: std::time::Duration::from_millis(100),
+		};
+		let track = TrackProducer::new(track);
+
+		let consumer = track.consume();
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
 			Entry::Vacant(entry) => {
 				entry.insert(TrackState {
-					producer: track.producer,
+					producer: track,
 					alias: Some(msg.track_alias),
 				});
 			}
@@ -468,7 +471,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
 
-		let exists = broadcast.insert_track(track.consumer);
+		let exists = broadcast.insert_track(consumer);
 		if exists {
 			tracing::warn!(track = %msg.track_name, "track already exists, replacing it");
 		}

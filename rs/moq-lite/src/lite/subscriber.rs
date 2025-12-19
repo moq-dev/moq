@@ -7,8 +7,7 @@ use crate::{
 	coding::{Reader, Stream},
 	lite::{self, Version},
 	model::BroadcastProducer,
-	AsPath, Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
-	TrackProducer,
+	AsPath, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, TrackProducer,
 };
 
 use tokio::sync::oneshot;
@@ -129,21 +128,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		tracing::debug!(broadcast = %self.log_path(&path), "announce");
 
-		let broadcast = Broadcast::produce();
+		let broadcast = BroadcastProducer::new();
 
 		// Make sure the peer doesn't double announce.
 		match producers.entry(path.to_owned()) {
 			Entry::Occupied(_) => return Err(Error::Duplicate),
-			Entry::Vacant(entry) => entry.insert(broadcast.producer.clone()),
+			Entry::Vacant(entry) => entry.insert(broadcast.clone()),
 		};
 
 		// Run the broadcast in the background until all consumers are dropped.
 		self.origin
 			.as_mut()
 			.unwrap()
-			.publish_broadcast(path.clone(), broadcast.consumer);
+			.publish_broadcast(path.clone(), broadcast.consume());
 
-		web_async::spawn(self.clone().run_broadcast(path, broadcast.producer));
+		web_async::spawn(self.clone().run_broadcast(path, broadcast));
 
 		Ok(())
 	}
@@ -173,17 +172,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, track: TrackProducer) {
+	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer) {
 		self.subscribes.lock().insert(id, track.clone());
 
 		let msg = lite::Subscribe {
 			id,
 			broadcast: broadcast.to_owned(),
-			track: (&track.info.name).into(),
-			priority: track.info.priority,
+			track: (&track.name).into(),
+			priority: track.priority,
+			max_latency: track.max_latency,
+			version: self.version,
 		};
 
-		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe started");
+		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe started");
 
 		let res = tokio::select! {
 			_ = track.unused() => Err(Error::Cancel),
@@ -192,15 +193,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe cancelled");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe cancelled");
 				track.abort(Error::Cancel);
 			}
 			Err(err) => {
-				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, %err, "subscribe error");
+				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.name, %err, "subscribe error");
 				track.abort(err);
 			}
 			_ => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe complete");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe complete");
 				track.close();
 			}
 		}
@@ -243,7 +244,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let track = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
 			let group = Group { sequence: hdr.sequence };
-			track.create_group(group).ok_or(Error::Old)?
+			track.create_group(group)?
 		};
 
 		let res = tokio::select! {
@@ -253,15 +254,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
-				tracing::trace!(group = %group.info.sequence, "group cancelled");
+				tracing::trace!(group = %group.sequence, "group cancelled");
 				group.abort(Error::Cancel);
 			}
 			Err(err) => {
-				tracing::debug!(%err, group = %group.info.sequence, "group error");
+				tracing::debug!(%err, group = %group.sequence, "group error");
 				group.abort(err);
 			}
 			_ => {
-				tracing::trace!(group = %group.info.sequence, "group complete");
+				tracing::trace!(group = %group.sequence, "group complete");
 				group.close();
 			}
 		}

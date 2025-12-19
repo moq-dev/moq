@@ -12,7 +12,8 @@ pub struct Session<S: web_transport_trait::Session> {
 /// The versions of MoQ that are supported by this implementation.
 ///
 /// Ordered by preference, with the client's preference taking priority.
-pub const VERSIONS: [coding::Version; 3] = [
+pub const VERSIONS: [coding::Version; 4] = [
+	lite::Version::Draft03.coding(),
 	lite::Version::Draft02.coding(),
 	lite::Version::Draft01.coding(),
 	ietf::Version::Draft14.coding(),

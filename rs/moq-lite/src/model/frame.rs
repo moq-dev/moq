@@ -3,20 +3,12 @@ use std::future::Future;
 use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
 
-use crate::{Error, Produce, Result};
+use crate::{Error, Result};
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {
 	pub size: u64,
-}
-
-impl Frame {
-	pub fn produce(self) -> Produce<FrameProducer, FrameConsumer> {
-		let producer = FrameProducer::new(self);
-		let consumer = producer.consume();
-		Produce { producer, consumer }
-	}
 }
 
 impl From<usize> for Frame {
@@ -66,7 +58,7 @@ pub struct FrameProducer {
 }
 
 impl FrameProducer {
-	fn new(info: Frame) -> Self {
+	pub fn new(info: Frame) -> Self {
 		Self {
 			info,
 			state: Default::default(),

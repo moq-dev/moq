@@ -249,6 +249,7 @@ async fn serve_fetch(
 	let track = moq_lite::Track {
 		name: track,
 		priority: 0,
+		max_latency: std::time::Duration::ZERO,
 	};
 
 	// NOTE: The auth token is already scoped to the broadcast.

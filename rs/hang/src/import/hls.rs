@@ -20,8 +20,8 @@ use tokio::fs;
 use tracing::{debug, info, warn};
 use url::Url;
 
+use crate as hang;
 use crate::import::Fmp4;
-use crate::BroadcastProducer;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
@@ -71,7 +71,7 @@ struct StepOutcome {
 /// to run the continuous ingest loop.
 pub struct Hls {
 	/// Broadcast that all CMAF importers write into.
-	broadcast: BroadcastProducer,
+	broadcast: hang::BroadcastProducer,
 
 	/// fMP4 importers for each discovered video rendition.
 	/// Each importer feeds a separate MoQ track but shares the same catalog.
@@ -113,7 +113,7 @@ impl TrackState {
 
 impl Hls {
 	/// Create a new HLS ingest that will write into the given broadcast.
-	pub fn new(broadcast: BroadcastProducer, cfg: HlsConfig) -> anyhow::Result<Self> {
+	pub fn new(broadcast: hang::BroadcastProducer, cfg: HlsConfig) -> anyhow::Result<Self> {
 		let base_url = cfg.parse_playlist()?;
 		let client = cfg.client.unwrap_or_else(|| {
 			Client::builder()
@@ -544,7 +544,7 @@ mod tests {
 
 	#[test]
 	fn hls_ingest_starts_without_importers() {
-		let broadcast = moq_lite::Broadcast::produce().producer.into();
+		let broadcast = hang::BroadcastProducer::default();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);
 		let hls = Hls::new(broadcast, cfg).unwrap();

@@ -68,7 +68,7 @@ impl TrackProducer {
 
 		let mut group = match self.group.take() {
 			Some(group) => group,
-			None if frame.keyframe => self.inner.append_group(),
+			None if frame.keyframe => self.inner.append_group()?,
 			// The first frame must be a keyframe.
 			None => return Err(Error::MissingKeyframe),
 		};
@@ -91,8 +91,8 @@ impl TrackProducer {
 	///
 	/// Multiple consumers can be created from the same producer, each receiving
 	/// a copy of all data written to the track.
-	pub fn consume(&self, max_latency: std::time::Duration) -> TrackConsumer {
-		TrackConsumer::new(self.inner.consume(), max_latency)
+	pub fn consume(&self) -> TrackConsumer {
+		self.inner.consume().into()
 	}
 }
 
@@ -120,7 +120,7 @@ impl Deref for TrackProducer {
 /// The consumer can skip groups that are too far behind to maintain low latency.
 /// Use [`set_latency`](Self::set_latency) to configure the maximum acceptable delay.
 pub struct TrackConsumer {
-	pub inner: moq_lite::TrackConsumer,
+	inner: moq_lite::TrackConsumer,
 
 	// The current group that we are reading from.
 	current: Option<GroupConsumer>,
@@ -130,20 +130,16 @@ pub struct TrackConsumer {
 
 	// The maximum timestamp seen thus far, or zero because that's easier than None.
 	max_timestamp: Timestamp,
-
-	// The maximum buffer size before skipping a group.
-	max_latency: std::time::Duration,
 }
 
 impl TrackConsumer {
 	/// Create a new TrackConsumer wrapping the given moq-lite consumer.
-	pub fn new(inner: moq_lite::TrackConsumer, max_latency: std::time::Duration) -> Self {
+	pub fn new(inner: moq_lite::TrackConsumer) -> Self {
 		Self {
 			inner,
 			current: None,
 			pending: VecDeque::new(),
 			max_timestamp: Timestamp::default(),
-			max_latency,
 		}
 	}
 
@@ -195,13 +191,13 @@ impl TrackConsumer {
 					drop(buffering);
 
 					match self.current.as_ref() {
-						Some(current) if group.info.sequence < current.info.sequence => {
+						Some(current) if group.sequence < current.sequence => {
 							// Ignore old groups
-							tracing::debug!(old = ?group.info.sequence, current = ?current.info.sequence, "skipping old group");
+							tracing::debug!(old = ?group.sequence, current = ?current.sequence, "skipping old group");
 						},
 						Some(_) => {
 							// Insert into pending based on the sequence number ascending.
-							let index = self.pending.partition_point(|g| g.info.sequence < group.info.sequence);
+							let index = self.pending.partition_point(|g| g.sequence < group.sequence);
 							self.pending.insert(index, group);
 						},
 						None => self.current = Some(group),
@@ -209,7 +205,7 @@ impl TrackConsumer {
 				},
 				Some((index, timestamp)) = buffering.next() => {
 					if self.current.is_some() {
-						tracing::debug!(old = ?self.max_timestamp, new = ?timestamp, buffer = ?self.max_latency, "skipping slow group");
+						tracing::debug!(old = ?self.max_timestamp, new = ?timestamp, buffer = ?self.inner.max_latency, "skipping slow group");
 					}
 
 					drop(buffering);
@@ -226,13 +222,6 @@ impl TrackConsumer {
 		}
 	}
 
-	/// Set the maximum latency tolerance for this consumer.
-	///
-	/// Groups with timestamps older than `max_timestamp - max_latency` will be skipped.
-	pub fn set_max_latency(&mut self, max: std::time::Duration) {
-		self.max_latency = max;
-	}
-
 	/// Wait until the track is closed.
 	pub async fn closed(&self) -> Result<(), Error> {
 		Ok(self.inner.closed().await?)
@@ -242,6 +231,12 @@ impl TrackConsumer {
 impl From<TrackConsumer> for moq_lite::TrackConsumer {
 	fn from(inner: TrackConsumer) -> Self {
 		inner.inner
+	}
+}
+
+impl From<moq_lite::TrackConsumer> for TrackConsumer {
+	fn from(inner: moq_lite::TrackConsumer) -> Self {
+		Self::new(inner)
 	}
 }
 

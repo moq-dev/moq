@@ -1,5 +1,5 @@
 use crate::catalog::{AudioCodec, AudioConfig, CatalogProducer, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9};
-use crate::{self as hang, Timestamp};
+use crate::{self as hang};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use moq_lite as moq;
@@ -126,6 +126,7 @@ impl Fmp4 {
 					let track = moq::Track {
 						name: self.broadcast.track_name("video"),
 						priority: 1,
+						max_latency: super::DEFAULT_MAX_LATENCY,
 					};
 
 					tracing::debug!(name = ?track.name, ?config, "starting track");
@@ -133,9 +134,7 @@ impl Fmp4 {
 					let video = catalog.insert_video(track.name.clone(), config);
 					video.priority = 1;
 
-					let track = track.produce();
-					self.broadcast.insert_track(track.consumer);
-					track.producer
+					track
 				}
 				b"soun" => {
 					let config = Self::init_audio(trak)?;
@@ -143,6 +142,7 @@ impl Fmp4 {
 					let track = moq::Track {
 						name: self.broadcast.track_name("audio"),
 						priority: 2,
+						max_latency: super::DEFAULT_MAX_LATENCY,
 					};
 
 					tracing::debug!(name = ?track.name, ?config, "starting track");
@@ -150,13 +150,14 @@ impl Fmp4 {
 					let audio = catalog.insert_audio(track.name.clone(), config);
 					audio.priority = 2;
 
-					let track = track.produce();
-					self.broadcast.insert_track(track.consumer);
-					track.producer
+					track
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
+
+			let track = moq::TrackProducer::new(track);
+			self.broadcast.insert_track(track.consume());
 
 			self.tracks.insert(track_id, track.into());
 		}
@@ -450,7 +451,7 @@ impl Fmp4 {
 					} else {
 						match self.last_keyframe.get(&track_id) {
 							// Force an audio keyframe at least every 10 seconds, but ideally at video keyframes
-							Some(prev) => timestamp - *prev > Timestamp::from_secs(10).unwrap(),
+							Some(prev) => timestamp - *prev > hang::Timestamp::from_secs(10).unwrap(),
 							None => true,
 						}
 					};
@@ -484,7 +485,7 @@ impl Fmp4 {
 		if let (Some(min), Some(max)) = (min_timestamp, max_timestamp) {
 			let diff = max - min;
 
-			if diff > Timestamp::from_millis(1).unwrap() {
+			if diff > hang::Timestamp::from_millis(1).unwrap() {
 				tracing::warn!("fMP4 introduced {:?} of latency", diff);
 			}
 		}
@@ -498,11 +499,11 @@ impl Drop for Fmp4 {
 		let mut catalog = self.broadcast.catalog.lock();
 
 		for track in self.tracks.values() {
-			tracing::debug!(name = ?track.info.name, "ending track");
+			tracing::debug!(name = ?track.name, "ending track");
 
 			// We're too lazy to keep track of if this track is for audio or video, so we just remove both.
-			catalog.remove_video(&track.info.name);
-			catalog.remove_audio(&track.info.name);
+			catalog.remove_video(&track.name);
+			catalog.remove_audio(&track.name);
 		}
 	}
 }

@@ -78,10 +78,10 @@ async fn run_session(
 	let session = session.ok().await.context("failed to accept session")?;
 
 	// Create an origin producer to publish to the broadcast.
-	let origin = moq_lite::Origin::produce();
-	origin.producer.publish_broadcast(&name, consumer);
+	let origin = moq_lite::OriginProducer::new();
+	origin.publish_broadcast(&name, consumer);
 
-	let session = moq_lite::Session::accept(session, origin.consumer, None)
+	let session = moq_lite::Session::accept(session, origin.consume(), None)
 		.await
 		.context("failed to accept session")?;
 

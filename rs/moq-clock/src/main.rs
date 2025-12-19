@@ -53,18 +53,19 @@ async fn main() -> anyhow::Result<()> {
 	let track = Track {
 		name: config.track,
 		priority: 0,
+		max_latency: std::time::Duration::default(),
 	};
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = moq_lite::Broadcast::produce();
-			let track = broadcast.producer.create_track(track);
+			let mut broadcast = moq_lite::BroadcastProducer::new();
+			let track = broadcast.create_track(track);
 			let clock = clock::Publisher::new(track);
 
-			let origin = moq_lite::Origin::produce();
-			origin.producer.publish_broadcast(&config.broadcast, broadcast.consumer);
+			let origin = moq_lite::OriginProducer::new();
+			origin.publish_broadcast(&config.broadcast, broadcast.consume());
 
-			let session = moq_lite::Session::connect(session, origin.consumer, None).await?;
+			let session = moq_lite::Session::connect(session, origin.consume(), None).await?;
 
 			tokio::select! {
 				res = session.closed() => res.map_err(Into::into),
@@ -72,27 +73,28 @@ async fn main() -> anyhow::Result<()> {
 			}
 		}
 		Command::Subscribe => {
-			let origin = moq_lite::Origin::produce();
-			let session = moq_lite::Session::connect(session, None, Some(origin.producer)).await?;
+			let origin = moq_lite::OriginProducer::new();
+
+			let path: moq_lite::Path<'_> = config.broadcast.into();
+			let mut consumer = origin
+				.consume()
+				.consume_only(&[path.clone()])
+				.context("not allowed to consume broadcast")?;
+
+			let session = moq_lite::Session::connect(session, None, Some(origin)).await?;
 
 			// NOTE: We could just call `session.consume_broadcast(&config.broadcast)` instead,
 			// However that won't work with IETF MoQ and the current OriginConsumer API the moment.
 			// So instead we do the cooler thing and loop while the broadcast is announced.
 
-			tracing::info!(broadcast = %config.broadcast, "waiting for broadcast to be online");
-
-			let path: moq_lite::Path<'_> = config.broadcast.into();
-			let mut origin = origin
-				.consumer
-				.consume_only(&[path])
-				.context("not allowed to consume broadcast")?;
+			tracing::info!(broadcast = %path, "waiting for broadcast to be online");
 
 			// The current subscriber if any, dropped after each announce.
 			let mut clock: Option<clock::Subscriber> = None;
 
 			loop {
 				tokio::select! {
-					Some(announce) = origin.announced() => match announce {
+					Some(announce) = consumer.announced() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast.subscribe_track(&track);

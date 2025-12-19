@@ -12,113 +12,137 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use tokio::sync::watch;
+use tokio::{sync::watch, time::Instant};
 
-use crate::{Error, Produce, Result};
+use crate::{Error, Result};
 
 use super::{Group, GroupConsumer, GroupProducer};
 
-use std::{cmp::Ordering, future::Future};
+use std::{collections::VecDeque, future::Future, ops::Deref};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
+	/// The name of the track.
 	pub name: String,
+
+	/// Higher priority tracks will be served first during congestion.
 	pub priority: u8,
-}
 
-impl Track {
-	pub fn new<T: Into<String>>(name: T) -> Self {
-		Self {
-			name: name.into(),
-			priority: 0,
-		}
-	}
-
-	pub fn produce(self) -> Produce<TrackProducer, TrackConsumer> {
-		let producer = TrackProducer::new(self);
-		let consumer = producer.consume();
-		Produce { producer, consumer }
-	}
+	/// Groups will be dropped if they are this much older than the latest group.
+	pub max_latency: std::time::Duration,
 }
 
 #[derive(Default)]
 struct TrackState {
-	latest: Option<GroupConsumer>,
+	// Groups in order of arrival.
+	// If None, the group has expired but was not in the front of the queue.
+	groups: VecDeque<Option<GroupProducer>>,
+
+	// +1 every time we remove a group from the front.
+	offset: usize,
+
+	// The highest sequence number seen.
+	max_sequence: Option<u64>,
+
+	// Some if the track is closed
 	closed: Option<Result<()>>,
 }
 
 /// A producer for a track, used to create new groups.
 #[derive(Clone)]
 pub struct TrackProducer {
-	pub info: Track,
+	info: Track,
 	state: watch::Sender<TrackState>,
 }
 
 impl TrackProducer {
-	fn new(info: Track) -> Self {
-		Self {
+	pub fn new(info: Track) -> Self {
+		let this = Self {
 			info,
 			state: Default::default(),
-		}
+		};
+		web_async::spawn(this.clone().run_expires());
+		this
 	}
 
-	/// Insert a group into the track, returning true if this is the latest group.
-	pub fn insert_group(&mut self, group: GroupConsumer) -> bool {
-		self.state.send_if_modified(|state| {
-			assert!(state.closed.is_none());
+	pub fn info(&self) -> &Track {
+		&self.info
+	}
 
-			if let Some(latest) = &state.latest {
-				match group.info.cmp(&latest.info) {
-					Ordering::Less => return false,
-					Ordering::Equal => return false,
-					Ordering::Greater => (),
-				}
+	/// Create a new group with the given info.
+	///
+	/// Returns an error if the track is closed.
+	pub fn create_group(&mut self, info: Group) -> Result<GroupProducer> {
+		let group = GroupProducer::new(info);
+		let mut result = Ok(group.clone());
+
+		self.state.send_if_modified(|state| {
+			if let Some(closed) = state.closed.clone() {
+				result = Err(closed.err().unwrap_or(Error::Closed));
+				return false;
 			}
 
-			state.latest = Some(group.clone());
-			true
-		})
-	}
+			// As a sanity check, make sure this is not a duplicate.
+			if state
+				.groups
+				.iter()
+				.filter_map(|g| g.as_ref())
+				.any(|g| g.sequence == group.sequence)
+			{
+				result = Err(Error::Duplicate);
+				return false;
+			}
 
-	/// Create a new group with the given sequence number.
-	///
-	/// If the sequence number is not the latest, this method will return None.
-	pub fn create_group(&mut self, info: Group) -> Option<GroupProducer> {
-		let group = info.produce();
-		self.insert_group(group.consumer).then_some(group.producer)
+			if group.sequence >= state.max_sequence.unwrap_or(0) {
+				state.max_sequence = Some(group.sequence);
+			}
+
+			state.groups.push_back(Some(group));
+			true
+		});
+
+		result
 	}
 
 	/// Create a new group with the next sequence number.
-	pub fn append_group(&mut self) -> GroupProducer {
-		let mut producer = None;
+	pub fn append_group(&mut self) -> Result<GroupProducer> {
+		let mut result = Err(Error::Closed);
 
 		self.state.send_if_modified(|state| {
-			assert!(state.closed.is_none());
+			if let Some(closed) = state.closed.clone() {
+				result = Err(closed.err().unwrap_or(Error::Closed));
+				return false;
+			}
 
-			let sequence = state.latest.as_ref().map_or(0, |group| group.info.sequence + 1);
-			let group = Group { sequence }.produce();
-			state.latest = Some(group.consumer);
-			producer = Some(group.producer);
+			let sequence = match state.max_sequence {
+				Some(sequence) => sequence + 1,
+				None => 0,
+			};
+
+			let group = GroupProducer::new(Group { sequence });
+			state.max_sequence = Some(sequence);
+			state.groups.push_back(Some(group.clone()));
+			result = Ok(group);
 
 			true
 		});
 
-		producer.unwrap()
+		result
 	}
 
-	/// Create a group with a single frame.
-	pub fn write_frame<B: Into<bytes::Bytes>>(&mut self, frame: B) {
-		let mut group = self.append_group();
-		group.write_frame(frame.into());
-		group.close();
+	pub fn close(&mut self) {
+		self.state.send_if_modified(|state| {
+			if state.closed.is_some() {
+				return false;
+			}
+
+			state.closed = Some(Ok(()));
+			true
+		});
 	}
 
-	pub fn close(self) {
-		self.state.send_modify(|state| state.closed = Some(Ok(())));
-	}
-
-	pub fn abort(self, err: Error) {
+	pub fn abort(&mut self, err: Error) {
 		self.state.send_modify(|state| state.closed = Some(Err(err)));
 	}
 
@@ -127,7 +151,7 @@ impl TrackProducer {
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.subscribe(),
-			prev: None,
+			index: 0,
 		}
 	}
 
@@ -143,6 +167,67 @@ impl TrackProducer {
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
+
+	async fn run_expires(self) {
+		let mut receiver = self.state.subscribe();
+		let mut arrived = VecDeque::new();
+
+		loop {
+			let (next, closed) = {
+				let state = receiver.borrow();
+
+				// This monster of an iterator:
+				// - combines the group and arrival timestamp
+				// - only looks at existing groups older than the max sequence
+				// - finds the group with the minimum arrival timestamp
+				// - returns the index and arrival timestamp of the group to expire
+				//
+				// We sleep by that amount, and if we wake up, remove that index.
+				let next = state
+					.groups
+					.iter()
+					.zip(arrived.iter())
+					.enumerate()
+					.filter_map(|(index, (group, when))| group.as_ref().map(|g| (index, g.sequence, when)))
+					.filter(|(_index, sequence, _when)| *sequence < state.max_sequence.unwrap_or(0))
+					.min_by_key(|(_index, _sequence, when)| *when)
+					.map(|(index, _sequence, when)| (index, when));
+
+				(next, state.closed.is_some())
+			};
+
+			if closed && next.is_none() {
+				// No more groups to expire, only the last one is left.
+				break;
+			}
+
+			tokio::select! {
+				Some(()) = async { Some(tokio::time::sleep_until(*next?.1).await) } => {
+					let (index, _) = next.unwrap();
+
+					self.state.send_if_modified(|state| {
+						let group = state.groups.get_mut(index).unwrap().take().expect("group must have been Some");
+						group.abort(Error::Cancel);
+
+						while state.groups.front().is_none() {
+							state.groups.pop_front();
+							state.offset += 1;
+						}
+
+						false
+					});
+				},
+				_ = receiver.changed() => {
+					let now = Instant::now();
+
+					let state = receiver.borrow_and_update();
+					for _ in state.groups.iter().skip(arrived.len()) {
+						arrived.push_back(now);
+					}
+				},
+			};
+		}
+	}
 }
 
 impl From<Track> for TrackProducer {
@@ -151,42 +236,73 @@ impl From<Track> for TrackProducer {
 	}
 }
 
+impl Drop for TrackProducer {
+	fn drop(&mut self) {
+		// +1 because of run_expires
+		if self.state.sender_count() > 2 {
+			return;
+		}
+
+		self.state.send_if_modified(|state| {
+			if state.closed.is_some() {
+				return false;
+			}
+
+			state.closed = Some(Err(Error::Cancel));
+			true
+		});
+	}
+}
+
+impl Deref for TrackProducer {
+	type Target = Track;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 /// A consumer for a track, used to read groups.
 #[derive(Clone)]
 pub struct TrackConsumer {
-	pub info: Track,
+	info: Track,
+
 	state: watch::Receiver<TrackState>,
-	prev: Option<u64>, // The previous sequence number
+
+	// We last returned this group, factoring in offset
+	index: usize,
 }
 
 impl TrackConsumer {
+	pub fn info(&self) -> &Track {
+		&self.info
+	}
+
 	/// Return the next group in order.
 	///
 	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
-		// Wait until there's a new latest group or the track is closed.
-		let state = match self
-			.state
-			.wait_for(|state| {
-				state.latest.as_ref().map(|group| group.info.sequence) > self.prev || state.closed.is_some()
-			})
-			.await
-		{
-			Ok(state) => state,
-			Err(_) => return Err(Error::Cancel),
-		};
+		loop {
+			// Wait until there's a new latest group or the track is closed.
+			let state = self
+				.state
+				.wait_for(|state| state.closed.is_some() || self.index < state.offset + state.groups.len())
+				.await
+				.map_err(|_| Error::Cancel)?;
 
-		match &state.closed {
-			Some(Ok(_)) => return Ok(None),
-			Some(Err(err)) => return Err(err.clone()),
-			_ => {}
+			for i in self.index.saturating_sub(state.offset)..state.groups.len() {
+				if let Some(group) = &state.groups[i] {
+					self.index = state.offset + i + 1;
+					return Ok(Some(group.consume()));
+				}
+			}
+
+			match &state.closed {
+				Some(Ok(_)) => return Ok(None),
+				Some(Err(err)) => return Err(err.clone()),
+				_ => continue, // There must have been a new None group.
+			}
 		}
-
-		// If there's a new latest group, return it.
-		let group = state.latest.clone().unwrap();
-		self.prev = Some(group.info.sequence);
-
-		Ok(Some(group))
 	}
 
 	/// Block until the track is closed.
@@ -199,6 +315,14 @@ impl TrackConsumer {
 
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+}
+
+impl Deref for TrackConsumer {
+	type Target = Track;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
 	}
 }
 

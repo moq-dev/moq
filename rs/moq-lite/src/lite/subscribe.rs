@@ -15,6 +15,8 @@ pub struct Subscribe<'a> {
 	pub broadcast: Path<'a>,
 	pub track: Cow<'a, str>,
 	pub priority: u8,
+	pub max_latency: std::time::Duration,
+	pub version: Version,
 }
 
 impl<'a> Message for Subscribe<'a> {
@@ -24,11 +26,19 @@ impl<'a> Message for Subscribe<'a> {
 		let track = Cow::<str>::decode(r, version)?;
 		let priority = u8::decode(r, version)?;
 
+		let max_latency = if version == Version::Draft03 {
+			std::time::Duration::from_millis(u64::decode(r, version)?)
+		} else {
+			std::time::Duration::default()
+		};
+
 		Ok(Self {
 			id,
 			broadcast,
 			track,
 			priority,
+			max_latency,
+			version,
 		})
 	}
 
@@ -37,6 +47,11 @@ impl<'a> Message for Subscribe<'a> {
 		self.broadcast.encode(w, version);
 		self.track.encode(w, version);
 		self.priority.encode(w, version);
+
+		if version == Version::Draft03 {
+			let max_latency: u64 = self.max_latency.as_millis().try_into().expect("duration too large");
+			max_latency.encode(w, version);
+		}
 	}
 }
 

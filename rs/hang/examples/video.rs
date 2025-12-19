@@ -10,14 +10,14 @@ async fn main() -> anyhow::Result<()> {
 	.init();
 
 	// Create an origin that we can publish to and the session can consume from.
-	let origin = moq_lite::Origin::produce();
+	let origin = moq_lite::OriginProducer::new();
 
 	// Run the broadcast production and the session in parallel.
 	// This is a simple example of how you can concurrently run multiple tasks.
 	// tokio::spawn works too.
 	tokio::select! {
-		res = run_broadcast(origin.producer) => res,
-		res = run_session(origin.consumer) => res,
+		res = run_session(origin.consume()) => res,
+		res = run_broadcast(origin) => res,
 	}
 }
 
@@ -49,6 +49,8 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 	let video_track = moq_lite::Track {
 		name: "video".to_string(),
 		priority: 1, // Video typically has lower priority than audio
+		// You can configure the amount of time to keep old groups in cache.
+		max_latency: std::time::Duration::from_secs(10),
 	};
 
 	// Example video configuration
@@ -90,14 +92,11 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 
 	// Create a producer/consumer pair for the catalog.
 	// This JSON encodes the catalog as a "catalog.json" track.
-	let catalog = hang::catalog::Catalog {
-		video: Some(video),
-		..Default::default()
-	}
-	.produce();
+	let mut catalog = hang::catalog::CatalogProducer::default();
+	catalog.lock().video = Some(video);
 
 	// Publish the catalog track to the broadcast.
-	broadcast.insert_track(catalog.consumer.track);
+	broadcast.insert_track(catalog.consume().track);
 
 	// Actually create the media track now.
 	let track = broadcast.create_track(video_track);
@@ -109,12 +108,12 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 // Produce a broadcast and publish it to the origin.
 async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin.
-	let mut broadcast = moq_lite::Broadcast::produce();
-	let mut track = create_track(&mut broadcast.producer);
+	let mut broadcast = moq_lite::BroadcastProducer::default();
+	let mut track = create_track(&mut broadcast);
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
-	origin.publish_broadcast("", broadcast.consumer);
+	origin.publish_broadcast("", broadcast.consume());
 
 	// Not real frames of course.
 	track.write(hang::Frame {

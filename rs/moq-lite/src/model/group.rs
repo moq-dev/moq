@@ -7,12 +7,12 @@
 //! The reader can be cloned, in which case each reader receives a copy of each frame. (fanout)
 //!
 //! The stream is closed with [ServeError::MoqError] when all writers or readers are dropped.
-use std::future::Future;
+use std::{future::Future, ops::Deref};
 
 use bytes::Bytes;
 use tokio::sync::watch;
 
-use crate::{Error, Produce, Result};
+use crate::{Error, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
 
@@ -20,14 +20,6 @@ use super::{Frame, FrameConsumer, FrameProducer};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Group {
 	pub sequence: u64,
-}
-
-impl Group {
-	pub fn produce(self) -> Produce<GroupProducer, GroupConsumer> {
-		let producer = GroupProducer::new(self);
-		let consumer = producer.consume();
-		Produce { producer, consumer }
-	}
 }
 
 impl From<usize> for Group {
@@ -75,16 +67,19 @@ pub struct GroupProducer {
 	// Mutable stream state.
 	state: watch::Sender<GroupState>,
 
-	// Immutable stream state.
-	pub info: Group,
+	info: Group,
 }
 
 impl GroupProducer {
-	fn new(info: Group) -> Self {
+	pub fn new(info: Group) -> Self {
 		Self {
 			info,
 			state: Default::default(),
 		}
+	}
+
+	pub fn info(&self) -> &Group {
+		&self.info
 	}
 
 	/// A helper method to write a frame from a single byte buffer.
@@ -103,9 +98,9 @@ impl GroupProducer {
 
 	/// Create a frame with an upfront size
 	pub fn create_frame(&mut self, info: Frame) -> FrameProducer {
-		let frame = Frame::produce(info);
-		self.append_frame(frame.consumer);
-		frame.producer
+		let frame = FrameProducer::new(info);
+		self.append_frame(frame.consume());
+		frame
 	}
 
 	/// Append a frame to the group.
@@ -149,6 +144,14 @@ impl From<Group> for GroupProducer {
 	}
 }
 
+impl Deref for GroupProducer {
+	type Target = Group;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 /// Consume a group, frame-by-frame.
 #[derive(Clone)]
 pub struct GroupConsumer {
@@ -156,7 +159,7 @@ pub struct GroupConsumer {
 	state: watch::Receiver<GroupState>,
 
 	// Immutable stream state.
-	pub info: Group,
+	info: Group,
 
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
@@ -167,6 +170,10 @@ pub struct GroupConsumer {
 }
 
 impl GroupConsumer {
+	pub fn info(&self) -> &Group {
+		&self.info
+	}
+
 	/// Read the next frame.
 	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
 		// In order to be cancel safe, we need to save the active frame.
@@ -213,5 +220,13 @@ impl GroupConsumer {
 				return Err(Error::Cancel);
 			}
 		}
+	}
+}
+
+impl Deref for GroupConsumer {
+	type Target = Group;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
 	}
 }

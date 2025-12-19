@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Audio, AudioConfig, Chat, Track, User, Video, VideoConfig};
 use crate::Result;
-use moq_lite::Produce;
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 #[serde_with::serde_as]
@@ -82,20 +81,12 @@ impl Catalog {
 		Ok(serde_json::to_writer(writer, self)?)
 	}
 
-	/// Produce a catalog track that describes the available media tracks.
-	pub fn produce(self) -> Produce<CatalogProducer, CatalogConsumer> {
-		let track = Catalog::default_track().produce();
-
-		Produce {
-			producer: CatalogProducer::new(track.producer, self),
-			consumer: track.consumer.into(),
-		}
-	}
-
 	pub fn default_track() -> moq_lite::Track {
 		moq_lite::Track {
 			name: Catalog::DEFAULT_NAME.to_string(),
 			priority: 100,
+			// Don't cache old catalogs
+			max_latency: std::time::Duration::ZERO,
 		}
 	}
 
@@ -147,10 +138,10 @@ pub struct CatalogProducer {
 }
 
 impl CatalogProducer {
-	/// Create a new catalog producer with the given track and initial catalog.
-	fn new(track: moq_lite::TrackProducer, init: Catalog) -> Self {
+	/// Create a new catalog producer for the given track.
+	pub fn new(track: moq_lite::TrackProducer) -> Self {
 		Self {
-			current: Arc::new(Mutex::new(init)),
+			current: Arc::new(Mutex::new(Catalog::default())),
 			track,
 		}
 	}
@@ -169,14 +160,20 @@ impl CatalogProducer {
 	}
 
 	/// Finish publishing to this catalog and close the track.
-	pub fn close(self) {
+	pub fn close(mut self) {
 		self.track.close();
 	}
 }
 
 impl From<moq_lite::TrackProducer> for CatalogProducer {
 	fn from(inner: moq_lite::TrackProducer) -> Self {
-		Self::new(inner, Catalog::default())
+		Self::new(inner)
+	}
+}
+
+impl Default for CatalogProducer {
+	fn default() -> Self {
+		Self::new(moq_lite::TrackProducer::new(Catalog::default_track()))
 	}
 }
 
@@ -201,12 +198,12 @@ impl<'a> DerefMut for CatalogGuard<'a> {
 
 impl Drop for CatalogGuard<'_> {
 	fn drop(&mut self) {
-		let mut group = self.track.append_group();
-
-		// TODO decide if this should return an error, or be impossible to fail
-		let frame = self.catalog.to_string().expect("invalid catalog");
-		group.write_frame(frame);
-		group.close();
+		if let Ok(mut group) = self.track.append_group() {
+			// TODO decide if this should return an error, or be impossible to fail
+			let frame = self.catalog.to_string().expect("invalid catalog");
+			group.write_frame(frame);
+			group.close();
+		}
 	}
 }
 

@@ -99,6 +99,7 @@ impl Aac {
 		let track = moq::Track {
 			name: self.broadcast.track_name("audio"),
 			priority: 2,
+			max_latency: super::DEFAULT_MAX_LATENCY,
 		};
 
 		let config = hang::catalog::AudioConfig {
@@ -111,14 +112,14 @@ impl Aac {
 
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
-		let track = track.produce();
-		self.broadcast.insert_track(track.consumer);
+		let track = moq::TrackProducer::new(track);
+		self.broadcast.insert_track(track.consume());
 
 		let mut catalog = self.broadcast.catalog.lock();
-		let audio = catalog.insert_audio(track.producer.info.name.clone(), config);
+		let audio = catalog.insert_audio(track.name.clone(), config);
 		audio.priority = 2;
 
-		self.track = Some(track.producer.into());
+		self.track = Some(track.into());
 
 		Ok(())
 	}
@@ -161,8 +162,8 @@ impl Aac {
 impl Drop for Aac {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.info.name, "ending track");
-			self.broadcast.catalog.lock().remove_audio(&track.info.name);
+			tracing::debug!(name = ?track.name, "ending track");
+			self.broadcast.catalog.lock().remove_audio(&track.name);
 		}
 	}
 }

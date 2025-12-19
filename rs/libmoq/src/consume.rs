@@ -172,7 +172,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		latency: std::time::Duration,
+		max_latency: std::time::Duration,
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
@@ -182,15 +182,15 @@ impl Consume {
 		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: video.priority,
+			max_latency,
 		});
-		let track = TrackConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
 		let id = self.video_task.insert(channel.0);
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(track, &mut on_frame) => res,
+				res = Self::run_track(track.into(), &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_frame.call(res);
@@ -206,7 +206,7 @@ impl Consume {
 		&mut self,
 		catalog: Id,
 		index: usize,
-		latency: std::time::Duration,
+		max_latency: std::time::Duration,
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
@@ -216,15 +216,15 @@ impl Consume {
 		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: audio.priority,
+			max_latency,
 		});
-		let track = TrackConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
 		let id = self.audio_task.insert(channel.0);
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(track, &mut on_frame) => res,
+				res = Self::run_track(track.into(), &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_frame.call(res);

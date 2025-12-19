@@ -10,7 +10,7 @@ use crate::{
 		Version,
 	},
 	model::GroupConsumer,
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, OriginConsumer, OriginProducer, Track, TrackConsumer,
 };
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -23,7 +23,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn new(session: S, origin: Option<OriginConsumer>, version: Version) -> Self {
 		// Default to a dummy origin that is immediately closed.
-		let origin = origin.unwrap_or_else(|| Origin::produce().consumer);
+		let origin = origin.unwrap_or_else(|| OriginProducer::new().consume());
 		Self {
 			session,
 			origin,
@@ -187,6 +187,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = Track {
 			name: subscribe.track.to_string(),
 			priority: subscribe.priority,
+			max_latency: subscribe.max_latency,
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
@@ -195,7 +196,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// TODO wait until track.info() to get the *real* priority
 
 		let info = lite::SubscribeOk {
-			priority: track.info.priority,
+			priority: track.priority,
+			// TODO max_latency?
 		};
 
 		stream.writer.encode(&info).await?;
@@ -248,15 +250,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				else => return Ok(()),
 			}?;
 
-			let sequence = group.info.sequence;
+			let sequence = group.sequence;
 			let latest = new_sequence.as_ref().unwrap_or(&0);
 
-			tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, sequence, latest, "serving group");
+			tracing::debug!(subscribe = %subscribe.id, track = %track.name, sequence, latest, "serving group");
 
 			// If this group is older than the oldest group we're serving, skip it.
 			// We always serve at most two groups, but maybe we should serve only sequence >= MAX-1.
 			if sequence < *old_sequence.as_ref().unwrap_or(&0) {
-				tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, old = %sequence, %latest, "skipping group");
+				tracing::debug!(subscribe = %subscribe.id, track = %track.name, old = %sequence, %latest, "skipping group");
 				continue;
 			}
 
@@ -265,7 +267,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				sequence,
 			};
 
-			let priority = priority.insert(track.info.priority, sequence);
+			let priority = priority.insert(track.priority, sequence);
 
 			// Spawn a task to serve this group, ignoring any errors because they don't really matter.
 			// TODO add some logging at least.
@@ -273,7 +275,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			// Terminate the old group if it's still running.
 			if let Some(old_sequence) = old_sequence.take() {
-				tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, old = %old_sequence, %latest, "aborting group");
+				tracing::debug!(subscribe = %subscribe.id, track = %track.name, old = %old_sequence, %latest, "aborting group");
 				old_group.take(); // Drop the future to cancel it.
 			}
 
