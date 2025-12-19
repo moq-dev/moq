@@ -14,9 +14,9 @@ use web_async::Lock;
 use super::Track;
 
 struct State {
-	// When explicitly publishing, we hold a reference to the consumer.
+	// When explicitly publishing, we hold a reference to the consumer too.
 	// This prevents the track from being marked as "unused".
-	published: HashMap<String, TrackConsumer>,
+	published: HashMap<String, (TrackProducer, TrackConsumer)>,
 
 	// When requesting, we hold a reference to the producer for dynamic tracks.
 	// The track will be marked as "unused" when the last consumer is dropped.
@@ -61,14 +61,17 @@ impl BroadcastProducer {
 	/// Produce a new track and insert it into the broadcast.
 	pub fn create_track(&mut self, track: Track) -> TrackProducer {
 		let track = TrackProducer::new(track);
-		self.insert_track(track.consume());
+		self.insert_track(track.clone());
 		track
 	}
 
 	/// Insert a track into the lookup, returning true if it was unique.
-	pub fn insert_track(&mut self, track: TrackConsumer) -> bool {
+	pub fn insert_track(&mut self, track: TrackProducer) -> bool {
 		let mut state = self.state.lock();
-		let unique = state.published.insert(track.name.clone(), track.clone()).is_none();
+		let unique = state
+			.published
+			.insert(track.name.clone(), (track.clone(), track.consume()))
+			.is_none();
 		let removed = state.requested.remove(&track.name).is_some();
 
 		unique && !removed
@@ -175,21 +178,29 @@ pub struct BroadcastConsumer {
 }
 
 impl BroadcastConsumer {
-	pub fn subscribe_track(&self, track: &Track) -> TrackConsumer {
+	pub fn subscribe(&self, track: TrackProducer) {
 		let mut state = self.state.lock();
 
 		// Return any explictly published track.
-		if let Some(consumer) = state.published.get(&track.name).cloned() {
-			return consumer;
+		if let Some((producer, _)) = state.published.get(&track.name) {
+			let consumer = producer.consume();
+			web_async::spawn(async move {
+				consumer.proxy(track).await;
+			});
+			return;
 		}
 
 		// Return any requested tracks.
 		if let Some(producer) = state.requested.get(&track.name) {
-			return producer.consume();
+			let consumer = producer.consume();
+			web_async::spawn(async move {
+				consumer.proxy(track).await;
+			});
+			return;
 		}
 
 		// Otherwise we have never seen this track before and need to create a new producer.
-		let mut producer = TrackProducer::new(track.clone());
+		let mut producer = TrackProducer::new(track.info().clone());
 		let consumer = producer.consume();
 
 		// Insert the producer into the lookup so we will deduplicate requests.
@@ -200,7 +211,7 @@ impl BroadcastConsumer {
 				// If the BroadcastProducer is closed, immediately close the track.
 				// This is a bit more ergonomic than returning None.
 				producer.abort(Error::Cancel);
-				return consumer;
+				return;
 			}
 		}
 
@@ -214,6 +225,16 @@ impl BroadcastConsumer {
 			state.lock().requested.remove(&producer.name);
 		});
 
+		web_async::spawn(async move {
+			consumer.proxy(track).await;
+		});
+	}
+
+	// Backwards compatibility for the old API.
+	pub fn subscribe_track(&self, track: &Track) -> TrackConsumer {
+		let producer = TrackProducer::new(track.clone());
+		let consumer = producer.consume();
+		self.subscribe(producer);
 		consumer
 	}
 
@@ -260,7 +281,7 @@ mod test {
 		});
 
 		// Make sure we can insert before a consumer is created.
-		producer.insert_track(track1.consume());
+		producer.insert_track(track1.clone());
 		track1.append_group();
 
 		let consumer = producer.consume();
@@ -273,7 +294,7 @@ mod test {
 			priority: 0,
 			max_latency: Duration::from_secs(1),
 		});
-		producer.insert_track(track2.consume());
+		producer.insert_track(track2.clone());
 
 		let consumer2 = producer.consume();
 		let mut track2_consumer = consumer2.subscribe_track(track2.info());
@@ -336,7 +357,7 @@ mod test {
 			max_latency: Duration::from_secs(1),
 		});
 		track1.append_group();
-		producer.insert_track(track1.consume());
+		producer.insert_track(track1.clone());
 
 		let mut track1c = consumer.subscribe_track(track1.info());
 		let track2 = consumer.subscribe_track(&Track {

@@ -66,24 +66,63 @@ impl FrameProducer {
 		}
 	}
 
-	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) {
+	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
 		let chunk = chunk.into();
+		if self.written + chunk.len() > self.info.size as usize {
+			return Err(Error::WrongSize);
+		}
+
 		self.written += chunk.len();
-		assert!(self.written <= self.info.size as usize);
 
-		self.state.send_modify(|state| {
-			assert!(state.closed.is_none());
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			if let Some(closed) = state.closed.clone() {
+				result = Err(closed.err().unwrap_or(Error::Closed));
+				return false;
+			}
+
 			state.chunks.push(chunk);
+			true
 		});
+
+		result
 	}
 
-	pub fn close(self) {
-		assert!(self.written == self.info.size as usize);
-		self.state.send_modify(|state| state.closed = Some(Ok(())));
+	pub fn close(&mut self) -> Result<()> {
+		let mut result = Ok(());
+
+		if self.written != self.info.size as usize {
+			return Err(Error::WrongSize);
+		}
+
+		self.state.send_if_modified(|state| {
+			if let Some(closed) = state.closed.clone() {
+				result = Err(closed.err().unwrap_or(Error::Closed));
+				return false;
+			}
+
+			state.closed = Some(Ok(()));
+			true
+		});
+
+		result
 	}
 
-	pub fn abort(self, err: Error) {
-		self.state.send_modify(|state| state.closed = Some(Err(err)));
+	pub fn abort(&mut self, err: Error) -> Result<()> {
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			if let Some(Err(closed)) = state.closed.clone() {
+				result = Err(closed);
+				return false;
+			}
+
+			state.closed = Some(Err(err));
+			true
+		});
+
+		result
 	}
 
 	/// Create a new consumer for the frame.
@@ -111,7 +150,6 @@ impl From<Frame> for FrameProducer {
 }
 
 /// Used to consume a frame's worth of data in chunks.
-#[derive(Clone)]
 pub struct FrameConsumer {
 	// Immutable stream state.
 	pub info: Frame,
@@ -200,5 +238,18 @@ impl FrameConsumer {
 		}
 
 		Ok(buf.freeze())
+	}
+
+	/// Proxy all chunks and errors to the given producer.
+	///
+	/// Returns an error on any unexpected close, which can happen if the [GroupProducer] is cloned.
+	pub async fn proxy(mut self, mut dst: FrameProducer) -> Result<()> {
+		loop {
+			match self.read_chunk().await {
+				Ok(Some(chunk)) => dst.write_chunk(chunk)?,
+				Ok(None) => return dst.close(),
+				Err(err) => return dst.abort(err),
+			}
+		}
 	}
 }

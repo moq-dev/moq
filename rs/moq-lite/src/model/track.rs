@@ -12,7 +12,9 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
+use futures::StreamExt;
 use tokio::{sync::watch, time::Instant};
+use web_async::FuturesExt;
 
 use crate::{Error, Result};
 
@@ -131,19 +133,36 @@ impl TrackProducer {
 		result
 	}
 
-	pub fn close(&mut self) {
+	pub fn close(&mut self) -> Result<()> {
+		let mut result = Ok(());
+
 		self.state.send_if_modified(|state| {
-			if state.closed.is_some() {
+			if let Some(closed) = state.closed.clone() {
+				result = Err(closed.err().unwrap_or(Error::Closed));
 				return false;
 			}
 
 			state.closed = Some(Ok(()));
 			true
 		});
+
+		result
 	}
 
-	pub fn abort(&mut self, err: Error) {
-		self.state.send_modify(|state| state.closed = Some(Err(err)));
+	pub fn abort(&mut self, err: Error) -> Result<()> {
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			if let Some(Err(closed)) = state.closed.clone() {
+				result = Err(closed);
+				return false;
+			}
+
+			state.closed = Some(Err(err));
+			true
+		});
+
+		result
 	}
 
 	/// Create a new consumer for the track.
@@ -206,7 +225,7 @@ impl TrackProducer {
 					let (index, _) = next.unwrap();
 
 					self.state.send_if_modified(|state| {
-						let group = state.groups.get_mut(index).unwrap().take().expect("group must have been Some");
+						let mut group = state.groups.get_mut(index).unwrap().take().expect("group must have been Some");
 						group.abort(Error::Cancel);
 
 						while state.groups.front().is_none() {
@@ -263,7 +282,6 @@ impl Deref for TrackProducer {
 }
 
 /// A consumer for a track, used to read groups.
-#[derive(Clone)]
 pub struct TrackConsumer {
 	info: Track,
 
@@ -315,6 +333,32 @@ impl TrackConsumer {
 
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+
+	/// Proxy all groups and errors to the given producer.
+	///
+	/// Returns an error on any unexpected close, which can happen if the [TrackProducer] is cloned.
+	pub async fn proxy(mut self, mut dst: TrackProducer) -> Result<()> {
+		let mut tasks = futures::stream::FuturesUnordered::new();
+
+		loop {
+			tokio::select! {
+				biased;
+				Some(res) = self.next_group().transpose() => {
+					match res {
+						Ok(group) => {
+							let dst = dst.create_group(group.info().clone())?;
+							tasks.push(group.proxy(dst));
+						}
+						Err(err) => return dst.abort(err),
+					}
+				}
+				// Wait until all groups have finished being proxied.
+				Some(_) = tasks.next() => (),
+				// We're done with the proxy.
+				else => return Ok(()),
+			}
+		}
 	}
 }
 

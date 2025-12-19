@@ -211,10 +211,9 @@ impl Drop for CatalogGuard<'_> {
 ///
 /// This wraps a `moq_lite::TrackConsumer` and automatically deserializes JSON
 /// catalog data to discover available audio and video tracks in a broadcast.
-#[derive(Clone)]
 pub struct CatalogConsumer {
 	/// Access to the underlying track consumer.
-	pub track: moq_lite::TrackConsumer,
+	track: moq_lite::TrackConsumer,
 	group: Option<moq_lite::GroupConsumer>,
 }
 
@@ -222,6 +221,10 @@ impl CatalogConsumer {
 	/// Create a new catalog consumer from a MoQ track consumer.
 	pub fn new(track: moq_lite::TrackConsumer) -> Self {
 		Self { track, group: None }
+	}
+
+	pub fn track(&self) -> &moq_lite::TrackConsumer {
+		&self.track
 	}
 
 	/// Get the next catalog update.

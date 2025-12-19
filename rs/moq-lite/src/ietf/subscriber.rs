@@ -291,7 +291,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, stripping");
 		}
 
-		let producer = {
+		let mut producer = {
 			let mut state = self.state.lock();
 			let request_id = match state.aliases.get(&group.track_alias) {
 				Some(request_id) => *request_id,
@@ -353,8 +353,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
 					// Empty frame
-					let frame = producer.create_frame(Frame { size: 0 });
-					frame.close();
+					let mut frame = producer.create_frame(Frame { size: 0 })?;
+					frame.close()?;
 				} else if status == 3 && !group.flags.has_end {
 					// End of group
 					break;
@@ -362,7 +362,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				let frame = producer.create_frame(Frame { size });
+				let mut frame = producer.create_frame(Frame { size })?;
 
 				let res = tokio::select! {
 					_ = frame.unused() => Err(Error::Cancel),
@@ -370,13 +370,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				};
 
 				if let Err(err) = res {
-					frame.abort(err.clone());
+					frame.abort(err.clone())?;
 					return Err(err);
 				}
 			}
 		}
 
-		producer.close();
+		producer.close()?;
 
 		Ok(())
 	}
@@ -450,13 +450,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 		let track = TrackProducer::new(track);
 
-		let consumer = track.consume();
-
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
 			Entry::Vacant(entry) => {
 				entry.insert(TrackState {
-					producer: track,
+					producer: track.clone(),
 					alias: Some(msg.track_alias),
 				});
 			}
@@ -471,7 +469,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
 
-		let exists = broadcast.insert_track(consumer);
+		let exists = broadcast.insert_track(track);
 		if exists {
 			tracing::warn!(track = %msg.track_name, "track already exists, replacing it");
 		}

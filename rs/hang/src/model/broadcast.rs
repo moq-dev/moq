@@ -3,10 +3,7 @@ use std::{
 	sync::{atomic, Arc},
 };
 
-use crate::{
-	catalog::{Catalog, CatalogConsumer, CatalogProducer},
-	TrackConsumer,
-};
+use crate::catalog::{Catalog, CatalogConsumer, CatalogProducer};
 
 #[derive(Clone)]
 pub struct BroadcastProducer {
@@ -19,7 +16,7 @@ pub struct BroadcastProducer {
 impl BroadcastProducer {
 	pub fn new(mut inner: moq_lite::BroadcastProducer) -> Self {
 		let catalog = CatalogProducer::default();
-		inner.insert_track(catalog.track.consume());
+		inner.insert_track(catalog.track.clone());
 
 		Self {
 			inner,
@@ -67,7 +64,6 @@ impl From<BroadcastProducer> for moq_lite::BroadcastProducer {
 	}
 }
 
-#[derive(Clone)]
 pub struct BroadcastConsumer {
 	pub inner: moq_lite::BroadcastConsumer,
 	pub catalog: CatalogConsumer,

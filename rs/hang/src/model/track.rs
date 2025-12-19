@@ -51,8 +51,8 @@ impl TrackProducer {
 		frame.timestamp.as_micros().encode(&mut header, lite::Version::Draft02);
 
 		if frame.keyframe {
-			if let Some(group) = self.group.take() {
-				group.close();
+			if let Some(mut group) = self.group.take() {
+				group.close()?;
 			}
 
 			// Make sure this frame's timestamp doesn't go backwards relative to the last keyframe.
@@ -75,7 +75,7 @@ impl TrackProducer {
 
 		let size = header.len() + frame.payload.remaining();
 
-		let mut chunked = group.create_frame(size.into());
+		let mut chunked = group.create_frame(size.into())?;
 		chunked.write_chunk(header.freeze());
 		for chunk in frame.payload {
 			chunked.write_chunk(chunk);

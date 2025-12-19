@@ -92,7 +92,7 @@ impl Avc3 {
 		}
 
 		let track = moq::TrackProducer::new(track);
-		self.broadcast.insert_track(track.consume());
+		self.broadcast.insert_track(track.clone());
 
 		self.config = Some(config);
 		self.track = Some(track.into());

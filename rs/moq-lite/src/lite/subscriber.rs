@@ -239,7 +239,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let group = {
+		let mut group = {
 			let mut subs = self.subscribes.lock();
 			let track = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
@@ -276,7 +276,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut group: GroupProducer,
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
-			let frame = group.create_frame(Frame { size });
+			let mut frame = group.create_frame(Frame { size })?;
 
 			let res = tokio::select! {
 				_ = frame.unused() => Err(Error::Cancel),

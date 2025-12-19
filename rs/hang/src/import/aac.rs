@@ -113,7 +113,7 @@ impl Aac {
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
 		let track = moq::TrackProducer::new(track);
-		self.broadcast.insert_track(track.consume());
+		self.broadcast.insert_track(track.clone());
 
 		let mut catalog = self.broadcast.catalog.lock();
 		let audio = catalog.insert_audio(track.name.clone(), config);

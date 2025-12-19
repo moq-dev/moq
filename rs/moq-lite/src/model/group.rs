@@ -10,7 +10,9 @@
 use std::{future::Future, ops::Deref};
 
 use bytes::Bytes;
+use futures::StreamExt;
 use tokio::sync::watch;
+use web_async::FuturesExt;
 
 use crate::{Error, Result};
 
@@ -55,7 +57,7 @@ impl From<u16> for Group {
 #[derive(Default)]
 struct GroupState {
 	// The frames that has been written thus far
-	frames: Vec<FrameConsumer>,
+	frames: Vec<FrameProducer>,
 
 	// Whether the group is closed
 	closed: Option<Result<()>>,
@@ -86,38 +88,73 @@ impl GroupProducer {
 	///
 	/// If you want to write multiple chunks, use [Self::create] or [Self::append].
 	/// But an upfront size is required.
-	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B) {
+	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B) -> Result<()> {
 		let data = frame.into();
 		let frame = Frame {
 			size: data.len() as u64,
 		};
-		let mut frame = self.create_frame(frame);
-		frame.write_chunk(data);
-		frame.close();
+		let mut frame = self.create_frame(frame)?;
+		frame.write_chunk(data)?;
+		frame.close()?;
+
+		Ok(())
 	}
 
 	/// Create a frame with an upfront size
-	pub fn create_frame(&mut self, info: Frame) -> FrameProducer {
+	pub fn create_frame(&mut self, info: Frame) -> Result<FrameProducer> {
 		let frame = FrameProducer::new(info);
-		self.append_frame(frame.consume());
-		frame
+		self.append_frame(frame.clone())?;
+		Ok(frame)
 	}
 
 	/// Append a frame to the group.
-	pub fn append_frame(&mut self, consumer: FrameConsumer) {
-		self.state.send_modify(|state| {
-			assert!(state.closed.is_none());
-			state.frames.push(consumer)
+	pub fn append_frame(&mut self, producer: FrameProducer) -> Result<()> {
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			if let Some(closed) = state.closed.clone() {
+				result = Err(closed.err().unwrap_or(Error::Closed));
+				return false;
+			}
+
+			state.frames.push(producer);
+			true
 		});
+
+		result
 	}
 
 	// Clean termination of the group.
-	pub fn close(self) {
-		self.state.send_modify(|state| state.closed = Some(Ok(())));
+	pub fn close(&mut self) -> Result<()> {
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			if let Some(closed) = state.closed.clone() {
+				result = Err(closed.err().unwrap_or(Error::Closed));
+				return false;
+			}
+
+			state.closed = Some(Ok(()));
+			true
+		});
+
+		result
 	}
 
-	pub fn abort(self, err: Error) {
-		self.state.send_modify(|state| state.closed = Some(Err(err)));
+	pub fn abort(&mut self, err: Error) -> Result<()> {
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			if let Some(Err(closed)) = state.closed.clone() {
+				result = Err(closed);
+				return false;
+			}
+
+			state.closed = Some(Err(err));
+			true
+		});
+
+		result
 	}
 
 	/// Create a new consumer for the group.
@@ -153,7 +190,6 @@ impl Deref for GroupProducer {
 }
 
 /// Consume a group, frame-by-frame.
-#[derive(Clone)]
 pub struct GroupConsumer {
 	// Modify the stream state.
 	state: watch::Receiver<GroupState>,
@@ -206,7 +242,7 @@ impl GroupConsumer {
 
 				if let Some(frame) = state.frames.get(self.index).cloned() {
 					self.index += 1;
-					return Ok(Some(frame));
+					return Ok(Some(frame.consume()));
 				}
 
 				match &state.closed {
@@ -219,6 +255,44 @@ impl GroupConsumer {
 			if self.state.changed().await.is_err() {
 				return Err(Error::Cancel);
 			}
+		}
+	}
+
+	/// Proxy all frames and errors to the given producer.
+	///
+	/// Returns an error on any unexpected close, which can happen if the [GroupProducer] is cloned.
+	pub async fn proxy(mut self, mut dst: GroupProducer) -> Result<()> {
+		let mut tasks = futures::stream::FuturesUnordered::new();
+
+		loop {
+			tokio::select! {
+				biased;
+				Some(res) = self.next_frame().transpose() => {
+					match res {
+						Ok(frame) => {
+							let dst = dst.create_frame(frame.info.clone())?;
+							tasks.push(frame.proxy(dst));
+						}
+						Err(err) => return dst.abort(err),
+					}
+				}
+				// Wait until all groups have finished being proxied.
+				Some(_) = tasks.next() => (),
+				// We're done with the proxy.
+				else => return Ok(()),
+			}
+		}
+	}
+
+	// Returns a Future so &self is not borrowed during the future.
+	pub fn closed(&self) -> impl Future<Output = Result<()>> {
+		let mut receiver = self.state.clone();
+		async move {
+			let state = receiver
+				.wait_for(|state| state.closed.is_some())
+				.await
+				.map_err(|_| Error::Cancel)?;
+			state.closed.clone().unwrap()
 		}
 	}
 }
