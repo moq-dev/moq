@@ -635,4 +635,114 @@ mod tests {
 
 		assert!(iter.next().is_none());
 	}
+
+	// Tests for flush - extracts final NAL without trailing start code
+
+	#[test]
+	fn test_flush_after_iteration() {
+		// Normal case: iterate over NALs, then flush the final one
+		let mut data = Bytes::from(vec![
+			0, 0, 0, 1, 0x67, 0x42, // First NAL
+			0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80, // Second NAL (final, no trailing start code)
+		]);
+		let mut iter = NalIterator::new(&mut data);
+
+		let nal1 = iter.next().unwrap().unwrap();
+		assert_eq!(nal1.as_ref(), &[0x67, 0x42]);
+
+		assert!(iter.next().is_none());
+
+		let final_nal = iter.flush().unwrap().unwrap();
+		assert_eq!(final_nal.as_ref(), &[0x68, 0xce, 0x3c, 0x80]);
+	}
+
+	#[test]
+	fn test_flush_single_nal() {
+		// Buffer contains only a single NAL with no trailing start code
+		let mut data = Bytes::from(vec![0, 0, 1, 0x67, 0x42, 0x00, 0x1f]);
+		let iter = NalIterator::new(&mut data);
+
+		let final_nal = iter.flush().unwrap().unwrap();
+		assert_eq!(final_nal.as_ref(), &[0x67, 0x42, 0x00, 0x1f]);
+	}
+
+	#[test]
+	fn test_flush_4_byte_start_code() {
+		// Test flush with 4-byte start code
+		let mut data = Bytes::from(vec![0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0xff]);
+		let iter = NalIterator::new(&mut data);
+
+		let final_nal = iter.flush().unwrap().unwrap();
+		assert_eq!(final_nal.as_ref(), &[0x65, 0x88, 0x84, 0x00, 0xff]);
+	}
+
+	#[test]
+	fn test_flush_no_start_code() {
+		// Buffer doesn't start with a start code and has no cached start position
+		let mut data = Bytes::from(vec![0x67, 0x42, 0x00, 0x1f]);
+		let iter = NalIterator::new(&mut data);
+
+		let result = iter.flush();
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_flush_empty_buffer() {
+		// Empty buffer should return None
+		let mut data = Bytes::from(vec![]);
+		let iter = NalIterator::new(&mut data);
+
+		let result = iter.flush().unwrap();
+		assert!(result.is_none());
+	}
+
+	#[test]
+	fn test_flush_incomplete_start_code() {
+		// Buffer has incomplete start code (not enough bytes)
+		let mut data = Bytes::from(vec![0, 0]);
+		let iter = NalIterator::new(&mut data);
+
+		let result = iter.flush().unwrap();
+		assert!(result.is_none());
+	}
+
+	#[test]
+	fn test_flush_multiple_nals_then_flush() {
+		// Iterate over multiple NALs, then flush the final one
+		let mut data = Bytes::from(vec![
+			0, 0, 0, 1, 0x67, 0x42, // SPS
+			0, 0, 0, 1, 0x68, 0xce, // PPS
+			0, 0, 0, 1, 0x65, 0x88, 0x84, // IDR (final NAL)
+		]);
+		let mut iter = NalIterator::new(&mut data);
+
+		let sps = iter.next().unwrap().unwrap();
+		assert_eq!(sps.as_ref(), &[0x67, 0x42]);
+
+		let pps = iter.next().unwrap().unwrap();
+		assert_eq!(pps.as_ref(), &[0x68, 0xce]);
+
+		assert!(iter.next().is_none());
+
+		let idr = iter.flush().unwrap().unwrap();
+		assert_eq!(idr.as_ref(), &[0x65, 0x88, 0x84]);
+	}
+
+	#[test]
+	fn test_flush_empty_final_nal() {
+		// Edge case: final NAL is empty (just a start code with no data)
+		let mut data = Bytes::from(vec![
+			0, 0, 0, 1, 0x67, 0x42, // First NAL
+			0, 0, 0, 1, // Second NAL (empty)
+		]);
+		let mut iter = NalIterator::new(&mut data);
+
+		let nal1 = iter.next().unwrap().unwrap();
+		assert_eq!(nal1.as_ref(), &[0x67, 0x42]);
+
+		assert!(iter.next().is_none());
+
+		let final_nal = iter.flush().unwrap().unwrap();
+		assert_eq!(final_nal.len(), 0);
+	}
 }

@@ -16,7 +16,6 @@ use m3u8_rs::{
 	AlternativeMedia, AlternativeMediaType, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution, VariantStream,
 };
 use reqwest::Client;
-use tokio::fs;
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -388,7 +387,7 @@ impl Hls {
 	async fn fetch_bytes(&self, url: Url) -> anyhow::Result<Bytes> {
 		if url.scheme() == "file" {
 			let path = url.to_file_path().ok().context("invalid file URL")?;
-			let bytes = fs::read(&path).await.context("failed to read file")?;
+			let bytes = tokio::fs::read(&path).await.context("failed to read file")?;
 			Ok(Bytes::from(bytes))
 		} else {
 			let response = self.client.get(url).send().await?;
