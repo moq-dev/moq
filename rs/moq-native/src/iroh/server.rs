@@ -9,18 +9,18 @@ use futures::{
 	FutureExt,
 };
 
-use crate::{iroh::EndpointConfig, Request};
-
-impl EndpointConfig {
-	pub async fn init_server(self) -> anyhow::Result<Server> {
-		Server::new(self).await
-	}
-}
+use crate::{iroh::EndpointConfig, MoqServer, Request};
 
 pub struct Server {
 	endpoint: iroh::Endpoint,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	fingerprints: Vec<String>,
+}
+
+impl MoqServer for Server {
+	async fn accept(&mut self) -> Option<Request> {
+		self.accept().await
+	}
 }
 
 impl Server {
@@ -31,6 +31,10 @@ impl Server {
 			accept: Default::default(),
 			fingerprints: vec![], // TODO: Do we need these for iroh endpoint? Don't think so.
 		})
+	}
+
+	pub fn endpoint(&self) -> &iroh::Endpoint {
+		&self.endpoint
 	}
 
 	pub fn fingerprints(&self) -> &[String] {

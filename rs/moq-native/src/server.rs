@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::{net, sync::Arc, time::Duration};
 
@@ -14,6 +15,27 @@ use web_transport_quinn::http;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::FutureExt;
+
+/// Abstraction over different implementations of a MoQ server.
+///
+/// This is implemented for [`Server`], and for `crate::iroh::Server` if the `iroh` feature is enabled.
+pub trait MoqServer {
+	/// Returns the next partially established QUIC or WebTransport session.
+	///
+	/// This returns a [Request] instead of a [web_transport_quinn::Session]
+	/// so the connection can be rejected early on an invalid path or missing auth.
+	///
+	/// The [Request] is either a WebTransport or a raw QUIC request.
+	/// Call [Request::ok] or [Request::close] to complete the handshake in case this is
+	/// a WebTransport request.
+	fn accept(&mut self) -> impl Future<Output = Option<Request>> + Send;
+}
+
+impl MoqServer for Server {
+	async fn accept(&mut self) -> Option<Request> {
+		self.accept().await
+	}
+}
 
 #[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,16 +255,6 @@ pub enum Session {
 	Quinn(web_transport_quinn::Session),
 	#[cfg(feature = "iroh")]
 	Iroh(web_transport_iroh::Session),
-}
-
-impl Session {
-	pub fn into_quinn(self) -> Option<web_transport_quinn::Session> {
-		match self {
-			Session::Quinn(session) => Some(session),
-			#[cfg(feature = "iroh")]
-			Session::Iroh(_) => None,
-		}
-	}
 }
 
 pub enum Request {

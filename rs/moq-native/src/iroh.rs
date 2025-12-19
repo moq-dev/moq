@@ -12,6 +12,8 @@ pub use self::server::*;
 #[serde(deny_unknown_fields, default)]
 pub struct EndpointConfig {
 	/// Path to a secret key for the iroh endpoint.
+	///
+	/// If the file doesn't exist, a random key will be generated and stored there.
 	#[arg(
 		id = "iroh-secret-key-path",
 		long = "iroh-secret-key-path",
@@ -19,7 +21,7 @@ pub struct EndpointConfig {
 		conflicts_with = "iroh-secret-key"
 	)]
 	secret_key_path: Option<PathBuf>,
-	/// Path to a secret key for the iroh endpoint.
+	/// Secret key for the iroh endpoint.
 	#[arg(
 		id = "iroh-secret-key",
 		long = "iroh-secret-key",
@@ -68,7 +70,15 @@ impl EndpointConfig {
 		}
 
 		let endpoint = builder.bind().await?;
-		tracing::info!("iroh endpoint bound: {}", endpoint.id());
+		tracing::info!(endpoint_id = %endpoint.id(), "iroh listening");
 		Ok(endpoint)
+	}
+
+	pub async fn init_server(self) -> anyhow::Result<Server> {
+		Server::new(self).await
+	}
+
+	pub async fn init_client(self) -> anyhow::Result<Client> {
+		Client::new(self).await
 	}
 }

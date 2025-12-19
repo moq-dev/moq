@@ -3,12 +3,6 @@ use anyhow::Context;
 use url::Url;
 use web_transport_iroh::iroh::{Endpoint, EndpointAddr, EndpointId};
 
-impl EndpointConfig {
-	pub async fn init_client(self) -> anyhow::Result<Client> {
-		Client::new(self).await
-	}
-}
-
 #[derive(Clone)]
 pub struct Client {
 	endpoint: Endpoint,

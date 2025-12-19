@@ -25,6 +25,16 @@ pub enum Command {
 		#[command(flatten)]
 		config: moq_native::ServerConfig,
 
+		/// Optionally enable serving via iroh.
+		#[cfg(feature = "iroh")]
+		#[clap(long)]
+		iroh: bool,
+
+		/// Configuration for the iroh endpoint.
+		#[cfg(feature = "iroh")]
+		#[command(flatten)]
+		iroh_config: moq_native::iroh::EndpointConfig,
+
 		/// The name of the broadcast to serve.
 		#[arg(long)]
 		name: String,
@@ -43,8 +53,11 @@ pub enum Command {
 		config: moq_native::ClientConfig,
 
 		/// Configuration for the iroh endpoint.
+		///
+		/// It will be used for URLs with the iroh:// scheme.
+		#[cfg(feature = "iroh")]
 		#[command(flatten)]
-		iroh: moq_native::iroh::EndpointConfig,
+		iroh_config: moq_native::iroh::EndpointConfig,
 
 		/// The URL of the MoQ server.
 		///
@@ -83,11 +96,30 @@ async fn main() -> anyhow::Result<()> {
 	publish.init().await?;
 
 	match cli.command {
-		Command::Serve { config, dir, name, .. } => server(config, name, dir, publish).await,
+		Command::Serve {
+			config,
+			dir,
+			name,
+			#[cfg(feature = "iroh")]
+			iroh,
+			#[cfg(feature = "iroh")]
+			iroh_config,
+			..
+		} => {
+			server(
+				config,
+				#[cfg(feature = "iroh")]
+				iroh.then_some(iroh_config),
+				name,
+				dir,
+				publish,
+			)
+			.await
+		}
 		Command::Publish {
 			config,
 			#[cfg(feature = "iroh")]
-			iroh,
+			iroh_config,
 			url,
 			name,
 			..
@@ -95,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
 			client(
 				config,
 				#[cfg(feature = "iroh")]
-				iroh,
+				iroh_config,
 				url,
 				name,
 				publish,
