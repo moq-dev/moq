@@ -7,6 +7,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -15,6 +16,7 @@ use m3u8_rs::{
 	AlternativeMedia, AlternativeMediaType, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution, VariantStream,
 };
 use reqwest::Client;
+use tokio::fs;
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -24,8 +26,8 @@ use crate::BroadcastProducer;
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
 pub struct HlsConfig {
-	/// The master or media playlist URL to ingest.
-	pub playlist: Url,
+	/// The master or media playlist URL or file path to ingest.
+	pub playlist: String,
 
 	/// An optional HTTP client to use for fetching the playlist and segments.
 	/// If not provided, a default client will be created.
@@ -33,8 +35,25 @@ pub struct HlsConfig {
 }
 
 impl HlsConfig {
-	pub fn new(playlist: Url) -> Self {
+	pub fn new(playlist: String) -> Self {
 		Self { playlist, client: None }
+	}
+
+	/// Parse the playlist string into a URL.
+	/// If it starts with http:// or https://, parse as URL.
+	/// Otherwise, treat as a file path and convert to file:// URL.
+	fn parse_playlist(&self) -> anyhow::Result<Url> {
+		if self.playlist.starts_with("http://") || self.playlist.starts_with("https://") {
+			Url::parse(&self.playlist).context("invalid playlist URL")
+		} else {
+			let path = PathBuf::from(&self.playlist);
+			let absolute = if path.is_absolute() {
+				path
+			} else {
+				std::env::current_dir()?.join(path)
+			};
+			Url::from_file_path(&absolute).map_err(|_| anyhow::anyhow!("invalid file path: {}", self.playlist))
+		}
 	}
 }
 
@@ -62,7 +81,8 @@ pub struct Hls {
 	audio_importer: Option<Fmp4>,
 
 	client: Client,
-	cfg: HlsConfig,
+	/// Parsed base URL for the playlist (file:// or http(s)://).
+	base_url: Url,
 	/// All discovered video variants (one per HLS rendition).
 	video: Vec<TrackState>,
 	/// Optional audio track shared across variants.
@@ -93,21 +113,23 @@ impl TrackState {
 
 impl Hls {
 	/// Create a new HLS ingest that will write into the given broadcast.
-	pub fn new(broadcast: BroadcastProducer, cfg: HlsConfig) -> Self {
-		Self {
+	pub fn new(broadcast: BroadcastProducer, cfg: HlsConfig) -> anyhow::Result<Self> {
+		let base_url = cfg.parse_playlist()?;
+		let client = cfg.client.unwrap_or_else(|| {
+			Client::builder()
+				.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+				.build()
+				.unwrap()
+		});
+		Ok(Self {
 			broadcast,
 			video_importers: Vec::new(),
 			audio_importer: None,
-			client: cfg.client.clone().unwrap_or_else(|| {
-				Client::builder()
-					.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
-					.build()
-					.unwrap()
-			}),
-			cfg,
+			client,
+			base_url,
 			video: Vec::new(),
 			audio: None,
-		}
+		})
 	}
 
 	/// Fetch the latest playlist, download the init segment, and prime the importer with a buffer of segments.
@@ -241,14 +263,14 @@ impl Hls {
 			return Ok(());
 		}
 
-		let body = self.fetch_bytes(self.cfg.playlist.clone()).await?;
+		let body = self.fetch_bytes(self.base_url.clone()).await?;
 		if let Ok((_, master)) = m3u8_rs::parse_master_playlist(&body) {
 			let variants = select_variants(&master);
 			anyhow::ensure!(!variants.is_empty(), "no usable variants found in master playlist");
 
 			// Create a video track state for every usable variant.
 			for variant in &variants {
-				let video_url = resolve_uri(&self.cfg.playlist, &variant.uri)?;
+				let video_url = resolve_uri(&self.base_url, &variant.uri)?;
 				self.video.push(TrackState::new(video_url));
 			}
 
@@ -256,7 +278,7 @@ impl Hls {
 			if let Some(group_id) = variants.iter().find_map(|v| v.audio.as_deref()) {
 				if let Some(audio_tag) = select_audio(&master, group_id) {
 					if let Some(uri) = &audio_tag.uri {
-						let audio_url = resolve_uri(&self.cfg.playlist, uri)?;
+						let audio_url = resolve_uri(&self.base_url, uri)?;
 						self.audio = Some(TrackState::new(audio_url));
 					} else {
 						warn!(%group_id, "audio rendition missing URI");
@@ -277,7 +299,7 @@ impl Hls {
 		}
 
 		// Fallback: treat the provided URL as a single media playlist.
-		self.video.push(TrackState::new(self.cfg.playlist.clone()));
+		self.video.push(TrackState::new(self.base_url.clone()));
 		Ok(())
 	}
 
@@ -364,10 +386,18 @@ impl Hls {
 	}
 
 	async fn fetch_bytes(&self, url: Url) -> anyhow::Result<Bytes> {
-		let response = self.client.get(url).send().await?;
-		let response = response.error_for_status()?;
-		let bytes = response.bytes().await.context("failed to read response body")?;
-		Ok(bytes)
+		if url.scheme() == "file" {
+			let path = url.to_file_path().map_err(|_| anyhow::anyhow!("invalid file URL: {}", url))?;
+			let bytes = fs::read(&path)
+				.await
+				.with_context(|| format!("failed to read file: {}", path.display()))?;
+			Ok(Bytes::from(bytes))
+		} else {
+			let response = self.client.get(url).send().await?;
+			let response = response.error_for_status()?;
+			let bytes = response.bytes().await.context("failed to read response body")?;
+			Ok(bytes)
+		}
 	}
 
 	/// Create or retrieve the fMP4 importer for a specific video rendition.
@@ -509,7 +539,7 @@ mod tests {
 
 	#[test]
 	fn hls_config_new_sets_fields() {
-		let url = Url::parse("https://example.com/stream.m3u8").unwrap();
+		let url = "https://example.com/stream.m3u8".to_string();
 		let cfg = HlsConfig::new(url.clone());
 		assert_eq!(cfg.playlist, url);
 	}
@@ -517,9 +547,9 @@ mod tests {
 	#[test]
 	fn hls_ingest_starts_without_importers() {
 		let broadcast = moq_lite::Broadcast::produce().producer.into();
-		let url = Url::parse("https://example.com/master.m3u8").unwrap();
+		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);
-		let hls = Hls::new(broadcast, cfg);
+		let hls = Hls::new(broadcast, cfg).unwrap();
 
 		assert!(!hls.has_video_importer());
 		assert!(!hls.has_audio_importer());

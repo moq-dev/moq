@@ -6,9 +6,11 @@ use tokio::sync::mpsc;
 use web_async::Lock;
 
 use super::BroadcastConsumer;
-use crate::{AsPath, Path, PathOwned, Produce};
+use crate::{AsPath, Pair, Path, PathOwned};
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
+
+pub type OriginPair = Pair<OriginProducer, OriginConsumer>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ConsumerId(u64);
@@ -337,10 +339,10 @@ pub type OriginAnnounce = (PathOwned, Option<BroadcastConsumer>);
 pub struct Origin {}
 
 impl Origin {
-	pub fn produce() -> Produce<OriginProducer, OriginConsumer> {
+	pub fn produce() -> OriginPair {
 		let producer = OriginProducer::default();
 		let consumer = producer.consume();
-		Produce { producer, consumer }
+		OriginPair { producer, consumer }
 	}
 }
 

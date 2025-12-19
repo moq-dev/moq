@@ -76,7 +76,7 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 
 	// Create a map of video renditions
 	// Multiple renditions allow the viewer to choose based on their capabilities
-	let mut renditions = std::collections::HashMap::new();
+	let mut renditions = std::collections::BTreeMap::new();
 	renditions.insert(video_track.name.clone(), video_config);
 
 	// Create the video catalog entry with the renditions

@@ -12,9 +12,11 @@ use std::future::Future;
 use bytes::Bytes;
 use tokio::sync::watch;
 
-use crate::{Error, Produce, Result};
+use crate::{Error, Pair, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
+
+pub type GroupPair = Pair<GroupProducer, GroupConsumer>;
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -23,10 +25,10 @@ pub struct Group {
 }
 
 impl Group {
-	pub fn produce(self) -> Produce<GroupProducer, GroupConsumer> {
+	pub fn produce(self) -> GroupPair {
 		let producer = GroupProducer::new(self);
 		let consumer = producer.consume();
-		Produce { producer, consumer }
+		GroupPair { producer, consumer }
 	}
 }
 

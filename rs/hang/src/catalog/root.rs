@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Audio, AudioConfig, Chat, Track, User, Video, VideoConfig};
 use crate::Result;
-use moq_lite::Produce;
+use moq_lite::Pair;
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 #[serde_with::serde_as]
@@ -83,10 +83,10 @@ impl Catalog {
 	}
 
 	/// Produce a catalog track that describes the available media tracks.
-	pub fn produce(self) -> Produce<CatalogProducer, CatalogConsumer> {
+	pub fn produce(self) -> Pair<CatalogProducer, CatalogConsumer> {
 		let track = Catalog::default_track().produce();
 
-		Produce {
+		Pair {
 			producer: CatalogProducer::new(track.producer, self),
 			consumer: track.consumer.into(),
 		}
@@ -267,14 +267,14 @@ impl From<moq_lite::TrackConsumer> for CatalogConsumer {
 
 #[cfg(test)]
 mod test {
+	use std::collections::BTreeMap;
+
 	use crate::catalog::{AudioCodec::Opus, AudioConfig, VideoConfig, H264};
 
 	use super::*;
 
 	#[test]
 	fn simple() {
-		use std::collections::HashMap;
-
 		let mut encoded = r#"{
 			"video": {
 				"renditions": {
@@ -304,7 +304,7 @@ mod test {
 
 		encoded.retain(|c| !c.is_whitespace());
 
-		let mut video_renditions = HashMap::new();
+		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert(
 			"video".to_string(),
 			VideoConfig {
@@ -326,7 +326,7 @@ mod test {
 			},
 		);
 
-		let mut audio_renditions = HashMap::new();
+		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert(
 			"audio".to_string(),
 			AudioConfig {

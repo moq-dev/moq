@@ -4,7 +4,7 @@ mod codec;
 pub use aac::*;
 pub use codec::*;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use bytes::Bytes;
 
@@ -21,7 +21,8 @@ use serde_with::{hex::Hex, DisplayFromStr};
 pub struct Audio {
 	/// A map of track name to rendition configuration.
 	/// This is not an array so it will work with JSON Merge Patch.
-	pub renditions: HashMap<String, AudioConfig>,
+	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
+	pub renditions: BTreeMap<String, AudioConfig>,
 
 	/// The priority of the audio track, relative to other tracks in the broadcast.
 	pub priority: u8,

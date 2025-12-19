@@ -24,9 +24,8 @@ node_modules
 *.hex
 *.jwk
 *.jwt
-
-# HLS stream output (just hls-stream)
-dev/hls_*/
+*.m3u8
+*.m4s
 
 # We're using bun (and sometimes deno)
 package-lock.json

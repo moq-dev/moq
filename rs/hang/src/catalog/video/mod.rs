@@ -10,7 +10,7 @@ pub use h264::*;
 pub use h265::*;
 pub use vp9::*;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,8 @@ use serde_with::{hex::Hex, DisplayFromStr};
 pub struct Video {
 	/// A map of track name to rendition configuration.
 	/// This is not an array in order for it to work with JSON Merge Patch.
-	pub renditions: HashMap<String, VideoConfig>,
+	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
+	pub renditions: BTreeMap<String, VideoConfig>,
 
 	/// The priority of the video track, relative to other tracks in the broadcast.
 	pub priority: u8,

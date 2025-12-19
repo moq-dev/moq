@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
 	let mut publish = Publish::new(match &cli.command {
 		Command::Serve { format, .. } => format,
 		Command::Publish { format, .. } => format,
-	});
+	})?;
 
 	// Initialize the broadcast from stdin before starting any client/server.
 	publish.init().await?;

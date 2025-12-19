@@ -6,7 +6,6 @@ use hang::{
 	BroadcastProducer,
 };
 use tokio::io::AsyncReadExt;
-use url::Url;
 
 #[derive(Subcommand, Clone)]
 pub enum PublishFormat {
@@ -14,15 +13,15 @@ pub enum PublishFormat {
 	Fmp4,
 	// NOTE: No aac support because it needs framing.
 	Hls {
-		/// URL of an HLS playlist to ingest.
+		/// URL or file path of an HLS playlist to ingest.
 		#[arg(long)]
-		playlist: Url,
+		playlist: String,
 	},
 }
 
 enum PublishDecoder {
-	Decoder(hang::import::Decoder),
-	Hls(hang::import::Hls),
+	Decoder(Box<hang::import::Decoder>),
+	Hls(Box<hang::import::Hls>),
 }
 
 pub struct Publish {
@@ -32,19 +31,19 @@ pub struct Publish {
 }
 
 impl Publish {
-	pub fn new(format: &PublishFormat) -> Self {
+	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
 		let broadcast = BroadcastProducer::default();
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {
 				let format = DecoderFormat::Avc3;
 				let stream = Decoder::new(broadcast.clone(), format);
-				PublishDecoder::Decoder(stream)
+				PublishDecoder::Decoder(Box::new(stream))
 			}
 			PublishFormat::Fmp4 => {
 				let format = DecoderFormat::Fmp4;
 				let stream = Decoder::new(broadcast.clone(), format);
-				PublishDecoder::Decoder(stream)
+				PublishDecoder::Decoder(Box::new(stream))
 			}
 			PublishFormat::Hls { playlist } => {
 				let hls = hang::import::Hls::new(
@@ -53,16 +52,16 @@ impl Publish {
 						playlist: playlist.clone(),
 						client: None,
 					},
-				);
-				PublishDecoder::Hls(hls)
+				)?;
+				PublishDecoder::Hls(Box::new(hls))
 			}
 		};
 
-		Self {
+		Ok(Self {
 			decoder,
 			buffer: BytesMut::new(),
 			broadcast,
-		}
+		})
 	}
 
 	pub fn consume(&self) -> BroadcastConsumer {

@@ -146,9 +146,66 @@ pub name url="http://localhost:4443/anon" *args:
 		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
 		- | cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
 
-# Ingest a live HLS media playlist and publish it via hang (full ladder).
-pub-hls url name="demo" relay="http://localhost:4443/anon":
-	cargo run --bin hang -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "{{url}}"
+# Generate and ingest an HLS stream from a video file.
+pub-hls name relay="http://localhost:4443/anon":
+	#!/usr/bin/env bash
+	set -euo pipefail
+
+	just download "{{name}}"
+
+	INPUT="dev/{{name}}.mp4"
+	OUT_DIR="dev/{{name}}"
+
+	rm -rf "$OUT_DIR"
+	mkdir -p "$OUT_DIR"
+
+	echo ">>> Generating HLS stream to disk..."
+
+	# Start ffmpeg in the background to generate HLS
+	ffmpeg -loglevel warning -re -stream_loop -1 -i "$INPUT" \
+		-map 0:v:0 -map 0:v:0 -map 0:a:0 \
+		-r 25 -preset veryfast -g 50 -keyint_min 50 -sc_threshold 0 \
+		-c:v:0 libx264 -profile:v:0 high -level:v:0 4.1 -pix_fmt:v:0 yuv420p -tag:v:0 avc1 -bsf:v:0 dump_extra -b:v:0 4M -vf:0 "scale=1920:-2" \
+		-c:v:1 libx264 -profile:v:1 high -level:v:1 4.1 -pix_fmt:v:1 yuv420p -tag:v:1 avc1 -bsf:v:1 dump_extra -b:v:1 300k -vf:1 "scale=256:-2" \
+		-c:a aac -b:a 128k \
+		-f hls \
+		-hls_time 2 -hls_list_size 12 \
+		-hls_flags independent_segments+delete_segments \
+		-hls_segment_type fmp4 \
+		-master_pl_name master.m3u8 \
+		-var_stream_map "v:0,agroup:audio v:1,agroup:audio a:0,agroup:audio" \
+		-hls_segment_filename "$OUT_DIR/v%v/segment_%09d.m4s" \
+		"$OUT_DIR/v%v/stream.m3u8" &
+
+	FFMPEG_PID=$!
+
+	# Wait for master playlist to be generated
+	echo ">>> Waiting for HLS playlist generation..."
+	for i in {1..30}; do
+		if [ -f "$OUT_DIR/master.m3u8" ]; then
+			break
+		fi
+		sleep 0.5
+	done
+
+	if [ ! -f "$OUT_DIR/master.m3u8" ]; then
+		kill $FFMPEG_PID 2>/dev/null || true
+		echo "Error: master.m3u8 not generated in time"
+		exit 1
+	fi
+
+	echo ">>> Starting HLS ingest from disk: $OUT_DIR/master.m3u8"
+
+	# Trap to clean up ffmpeg on exit
+	cleanup() {
+		echo "Shutting down..."
+		kill $FFMPEG_PID 2>/dev/null || true
+		exit 0
+	}
+	trap cleanup SIGINT SIGTERM
+
+	# Run hang to ingest from local files
+	cargo run --bin hang -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8"
 
 # Publish a video using H.264 Annex B format to the localhost relay server
 pub-h264 name url="http://localhost:4443/anon" *args:
@@ -292,33 +349,17 @@ build:
 	cargo build
 
 # Generate and serve an HLS stream from a video for testing pub-hls
-hls-stream name="bbb" port="8000":
+serve-hls name port="8000":
 	#!/usr/bin/env bash
 	set -euo pipefail
 
 	just download "{{name}}"
 
 	INPUT="dev/{{name}}.mp4"
-	OUT_DIR="dev/hls_{{name}}"
+	OUT_DIR="dev/{{name}}"
 
 	rm -rf "$OUT_DIR"
-	mkdir -p "$OUT_DIR/video_1080p" "$OUT_DIR/video_144p" "$OUT_DIR/audio"
-
-	START_NUMBER=$(date +%s)
-
-	cat > "$OUT_DIR/master.m3u8" << 'EOF'
-	#EXTM3U
-
-	#EXT-X-MEDIA:TYPE=AUDIO,NAME="Stereo",GROUP-ID="audio",DEFAULT=YES,AUTOSELECT=YES,URI="audio/audio.m3u8"
-
-	#EXT-X-STREAM-INF:BANDWIDTH=4500000,CODECS="avc1.640029,mp4a.40.2",RESOLUTION=1920x1080,AUDIO="audio"
-	video_1080p/video.m3u8
-
-	#EXT-X-STREAM-INF:BANDWIDTH=350000,CODECS="avc1.640029,mp4a.40.2",RESOLUTION=256x144,AUDIO="audio"
-	video_144p/video.m3u8
-	EOF
-
-	sed -i 's/^\t//' "$OUT_DIR/master.m3u8"
+	mkdir -p "$OUT_DIR"
 
 	echo ">>> Starting HLS stream generation..."
 	echo ">>> Master playlist: http://localhost:{{port}}/master.m3u8"
@@ -331,32 +372,19 @@ hls-stream name="bbb" port="8000":
 	trap cleanup SIGINT SIGTERM
 
 	ffmpeg -loglevel warning -re -stream_loop -1 -i "$INPUT" \
-		-map 0:v:0 -r 25 -preset veryfast -g 50 -keyint_min 50 -sc_threshold 0 \
-		-c:v libx264 -profile:v high -level 4.1 -pix_fmt yuv420p -tag:v avc1 \
-		-bsf:v dump_extra -b:v 4M -vf "scale=1920:-2" \
-		-f hls -hls_time 2 -hls_list_size 12 \
+		-map 0:v:0 -map 0:v:0 -map 0:a:0 \
+		-r 25 -preset veryfast -g 50 -keyint_min 50 -sc_threshold 0 \
+		-c:v:0 libx264 -profile:v:0 high -level:v:0 4.1 -pix_fmt:v:0 yuv420p -tag:v:0 avc1 -bsf:v:0 dump_extra -b:v:0 4M -vf:0 "scale=1920:-2" \
+		-c:v:1 libx264 -profile:v:1 high -level:v:1 4.1 -pix_fmt:v:1 yuv420p -tag:v:1 avc1 -bsf:v:1 dump_extra -b:v:1 300k -vf:1 "scale=256:-2" \
+		-c:a aac -b:a 128k \
+		-f hls \
+		-hls_time 2 -hls_list_size 12 \
 		-hls_flags independent_segments+delete_segments \
-		-hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 \
-		-hls_segment_filename "$OUT_DIR/video_1080p/segment_%09d.m4s" \
-		-start_number "$START_NUMBER" "$OUT_DIR/video_1080p/video.m3u8" &
-
-	ffmpeg -loglevel warning -re -stream_loop -1 -i "$INPUT" \
-		-map 0:v:0 -r 25 -preset veryfast -g 50 -keyint_min 50 -sc_threshold 0 \
-		-c:v libx264 -profile:v high -level 4.1 -pix_fmt yuv420p -tag:v avc1 \
-		-bsf:v dump_extra -b:v 300k -vf "scale=256:-2" \
-		-f hls -hls_time 2 -hls_list_size 12 \
-		-hls_flags independent_segments+delete_segments \
-		-hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 \
-		-hls_segment_filename "$OUT_DIR/video_144p/segment_%09d.m4s" \
-		-start_number "$START_NUMBER" "$OUT_DIR/video_144p/video.m3u8" &
-
-	ffmpeg -loglevel warning -re -stream_loop -1 -i "$INPUT" \
-		-map 0:a:0 -c:a aac -b:a 128k \
-		-f hls -hls_time 2 -hls_list_size 12 \
-		-hls_flags independent_segments+delete_segments \
-		-hls_segment_type fmp4 -hls_fmp4_init_filename init.mp4 \
-		-hls_segment_filename "$OUT_DIR/audio/segment_%09d.m4s" \
-		-start_number "$START_NUMBER" "$OUT_DIR/audio/audio.m3u8" &
+		-hls_segment_type fmp4 \
+		-master_pl_name master.m3u8 \
+		-var_stream_map "v:0,agroup:audio v:1,agroup:audio a:0,agroup:audio" \
+		-hls_segment_filename "$OUT_DIR/v%v/segment_%09d.m4s" \
+		"$OUT_DIR/v%v/stream.m3u8" &
 
 	sleep 2
 	echo ">>> HTTP server: http://localhost:{{port}}/"
