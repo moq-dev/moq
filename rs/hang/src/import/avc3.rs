@@ -101,10 +101,14 @@ impl Avc3 {
 
 	/// Initialize the decoder with SPS/PPS and other non-slice NALs.
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		let nals = NalIterator::new(buf);
+		let mut nals = NalIterator::new(buf);
 
-		for nal in nals {
-			self.decode_nal(nal?, None)?;
+		while let Some(nal) = nals.next().transpose()? {
+			self.decode_nal(nal, None)?;
+		}
+
+		if let Some(nal) = nals.flush()? {
+			self.decode_nal(nal, None)?;
 		}
 
 		Ok(())
@@ -112,8 +116,10 @@ impl Avc3 {
 
 	/// Decode as much data as possible from the given buffer.
 	///
-	/// Unlike [Self::decode_framed], this method needs the start code for the next frame.
+	/// Unlike [Self::decode_frame], this method needs the start code for the next frame.
 	/// This means it works for streaming media (ex. stdin) but adds a frame of latency.
+	///
+	/// TODO: This currently associates PTS with the *previous* frame, as part of `maybe_start_frame`.
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
@@ -144,17 +150,18 @@ impl Avc3 {
 		pts: Option<hang::Timestamp>,
 	) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
+		// Iterate over the NAL units in the buffer based on start codes.
+		let mut nals = NalIterator::new(buf);
 
-		// Decode any NALs at the start of the buffer.
-		self.decode_stream(buf, Some(pts))?;
-
-		// Make sure there's a start code at the start of the buffer.
-		let start = after_start_code(buf.as_ref())?.context("missing start code")?;
-		buf.advance(start);
+		// Iterate over each NAL that is followed by a start code.
+		while let Some(nal) = nals.next().transpose()? {
+			self.decode_nal(nal, Some(pts))?;
+		}
 
 		// Assume the rest of the buffer is a single NAL.
-		let nal = buf.copy_to_bytes(buf.remaining());
-		self.decode_nal(nal, Some(pts))?;
+		if let Some(nal) = nals.flush()? {
+			self.decode_nal(nal, Some(pts))?;
+		}
 
 		// Flush the frame if we read a slice.
 		self.maybe_start_frame(Some(pts))?;
@@ -281,18 +288,35 @@ pub enum NalType {
 	DepthParameterSet = 16,
 }
 
-struct NalIterator<T: Buf + AsRef<[u8]>> {
-	buf: T,
+struct NalIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
+	buf: &'a mut T,
 	start: Option<usize>,
 }
 
-impl<T: Buf + AsRef<[u8]>> NalIterator<T> {
-	pub fn new(buf: T) -> Self {
+impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
+	pub fn new(buf: &'a mut T) -> Self {
 		Self { buf, start: None }
+	}
+
+	/// Assume the buffer ends with a NAL unit and flush it.
+	/// This is more efficient because we cache the last "start" code position.
+	pub fn flush(self) -> anyhow::Result<Option<Bytes>> {
+		let start = match self.start {
+			Some(start) => start,
+			None => match after_start_code(self.buf.as_ref())? {
+				Some(start) => start,
+				None => return Ok(None),
+			},
+		};
+
+		self.buf.advance(start);
+
+		let nal = self.buf.copy_to_bytes(self.buf.remaining());
+		Ok(Some(nal))
 	}
 }
 
-impl<T: Buf + AsRef<[u8]>> Iterator for NalIterator<T> {
+impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
 	type Item = anyhow::Result<Bytes>;
 
 	fn next(&mut self) -> Option<Self::Item> {
@@ -534,28 +558,34 @@ mod tests {
 
 	#[test]
 	fn test_nal_iterator_simple_3_byte() {
-		let data = vec![0, 0, 1, 0x67, 0x42, 0, 0, 1];
-		let mut iter = NalIterator::new(Bytes::from(data));
+		let mut data = Bytes::from(vec![0, 0, 1, 0x67, 0x42, 0, 0, 1]);
+		let mut iter = NalIterator::new(&mut data);
 
 		let nal = iter.next().unwrap().unwrap();
 		assert_eq!(nal.as_ref(), &[0x67, 0x42]);
 		assert!(iter.next().is_none());
+
+		// Make sure the trailing 001 is still in the buffer.
+		assert_eq!(data.as_ref(), &[0, 0, 1]);
 	}
 
 	#[test]
 	fn test_nal_iterator_simple_4_byte() {
-		let data = vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1];
-		let mut iter = NalIterator::new(Bytes::from(data));
+		let mut data = Bytes::from(vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1]);
+		let mut iter = NalIterator::new(&mut data);
 
 		let nal = iter.next().unwrap().unwrap();
 		assert_eq!(nal.as_ref(), &[0x67, 0x42]);
 		assert!(iter.next().is_none());
+
+		// Make sure the trailing 0001 is still in the buffer.
+		assert_eq!(data.as_ref(), &[0, 0, 0, 1]);
 	}
 
 	#[test]
 	fn test_nal_iterator_multiple_nals() {
-		let data = vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1];
-		let mut iter = NalIterator::new(Bytes::from(data));
+		let mut data = Bytes::from(vec![0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1]);
+		let mut iter = NalIterator::new(&mut data);
 
 		let nal1 = iter.next().unwrap().unwrap();
 		assert_eq!(nal1.as_ref(), &[0x67, 0x42]);
@@ -564,20 +594,23 @@ mod tests {
 		assert_eq!(nal2.as_ref(), &[0x68, 0xce]);
 
 		assert!(iter.next().is_none());
+
+		// Make sure the trailing 0001 is still in the buffer.
+		assert_eq!(data.as_ref(), &[0, 0, 0, 1]);
 	}
 
 	#[test]
 	fn test_nal_iterator_realistic_h264() {
 		// A realistic H.264 stream with SPS, PPS, and IDR
-		let data = vec![
+		let mut data = Bytes::from(vec![
 			// SPS NAL
 			0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, // PPS NAL
 			0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80, // IDR slice
 			0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00,
 			// Trailing start code (needed to detect the end of the last NAL)
 			0, 0, 0, 1,
-		];
-		let mut iter = NalIterator::new(Bytes::from(data));
+		]);
+		let mut iter = NalIterator::new(&mut data);
 
 		let sps = iter.next().unwrap().unwrap();
 		assert_eq!(sps[0] & 0x1f, 7); // SPS type
@@ -592,21 +625,27 @@ mod tests {
 		assert_eq!(idr.as_ref(), &[0x65, 0x88, 0x84, 0x00]);
 
 		assert!(iter.next().is_none());
+
+		// Make sure the trailing 0001 is still in the buffer.
+		assert_eq!(data.as_ref(), &[0, 0, 0, 1]);
 	}
 
 	#[test]
 	fn test_nal_iterator_invalid_start() {
-		let data = vec![1, 0, 1, 0x67];
-		let mut iter = NalIterator::new(Bytes::from(data));
+		let mut data = Bytes::from(vec![1, 0, 1, 0x67]);
+		let mut iter = NalIterator::new(&mut data);
 
 		assert!(iter.next().unwrap().is_err());
+
+		// Make sure the data is still in the buffer.
+		assert_eq!(data.as_ref(), &[1, 0, 1, 0x67]);
 	}
 
 	#[test]
 	fn test_nal_iterator_empty_nal() {
 		// Two consecutive start codes create an empty NAL
-		let data = vec![0, 0, 1, 0, 0, 1, 0x67, 0, 0, 1];
-		let mut iter = NalIterator::new(Bytes::from(data));
+		let mut data = Bytes::from(vec![0, 0, 1, 0, 0, 1, 0x67, 0, 0, 1]);
+		let mut iter = NalIterator::new(&mut data);
 
 		let nal1 = iter.next().unwrap().unwrap();
 		assert_eq!(nal1.len(), 0);
@@ -615,17 +654,20 @@ mod tests {
 		assert_eq!(nal2.as_ref(), &[0x67]);
 
 		assert!(iter.next().is_none());
+
+		// Make sure the data is still in the buffer.
+		assert_eq!(data.as_ref(), &[0, 0, 1]);
 	}
 
 	#[test]
 	fn test_nal_iterator_nal_with_embedded_zeros() {
 		// NAL data that contains zeros (but not a start code pattern)
-		let data = vec![
+		let mut data = Bytes::from(vec![
 			0, 0, 1, 0x67, 0x00, 0x00, 0x00, 0xff, // NAL with embedded zeros
 			0, 0, 1, 0x68, // Next NAL
 			0, 0, 1,
-		];
-		let mut iter = NalIterator::new(Bytes::from(data));
+		]);
+		let mut iter = NalIterator::new(&mut data);
 
 		let nal1 = iter.next().unwrap().unwrap();
 		assert_eq!(nal1.as_ref(), &[0x67, 0x00, 0x00, 0x00, 0xff]);
@@ -634,5 +676,8 @@ mod tests {
 		assert_eq!(nal2.as_ref(), &[0x68]);
 
 		assert!(iter.next().is_none());
+
+		// Make sure the data is still in the buffer.
+		assert_eq!(data.as_ref(), &[0, 0, 1]);
 	}
 }
