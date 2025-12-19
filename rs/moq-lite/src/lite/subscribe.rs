@@ -26,10 +26,9 @@ impl<'a> Message for Subscribe<'a> {
 		let track = Cow::<str>::decode(r, version)?;
 		let priority = u8::decode(r, version)?;
 
-		let max_latency = if version == Version::Draft03 {
-			std::time::Duration::from_millis(u64::decode(r, version)?)
-		} else {
-			std::time::Duration::default()
+		let max_latency = match version {
+			Version::Draft01 | Version::Draft02 => std::time::Duration::default(),
+			Version::Draft03 => std::time::Duration::from_millis(u64::decode(r, version)?),
 		};
 
 		Ok(Self {
@@ -48,9 +47,12 @@ impl<'a> Message for Subscribe<'a> {
 		self.track.encode(w, version);
 		self.priority.encode(w, version);
 
-		if version == Version::Draft03 {
-			let max_latency: u64 = self.max_latency.as_millis().try_into().expect("duration too large");
-			max_latency.encode(w, version);
+		match version {
+			Version::Draft01 | Version::Draft02 => {}
+			Version::Draft03 => {
+				let max_latency: u64 = self.max_latency.as_millis().try_into().expect("duration too large");
+				max_latency.encode(w, version);
+			}
 		}
 	}
 }
@@ -62,18 +64,48 @@ pub struct SubscribeOk {
 
 impl Message for SubscribeOk {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		if version == Version::Draft01 {
-			self.priority.encode(w, version);
+		match version {
+			Version::Draft01 => self.priority.encode(w, version),
+			Version::Draft02 | Version::Draft03 => {}
 		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let priority = if version == Version::Draft01 {
-			u8::decode(r, version)?
-		} else {
-			0
+		let priority = match version {
+			Version::Draft01 => u8::decode(r, version)?,
+			Version::Draft02 | Version::Draft03 => 0,
 		};
 
 		Ok(Self { priority })
+	}
+}
+
+pub struct SubscribeUpdate {
+	pub priority: u8,
+	pub max_latency: std::time::Duration,
+}
+
+impl Message for SubscribeUpdate {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+		self.priority.encode(w, version);
+
+		match version {
+			Version::Draft01 | Version::Draft02 => {}
+			Version::Draft03 => {
+				let max_latency: u64 = self.max_latency.as_millis().try_into().expect("duration too large");
+				max_latency.encode(w, version);
+			}
+		}
+	}
+
+	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let priority = u8::decode(r, version)?;
+
+		let max_latency = match version {
+			Version::Draft01 | Version::Draft02 => std::time::Duration::default(),
+			Version::Draft03 => std::time::Duration::from_millis(u64::decode(r, version)?),
+		};
+
+		Ok(Self { priority, max_latency })
 	}
 }

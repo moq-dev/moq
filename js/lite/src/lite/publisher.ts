@@ -138,18 +138,18 @@ export class Publisher {
 			return;
 		}
 
-		const track = broadcast.subscribe(msg.track, msg.priority);
+		const track = broadcast.subscribe({ name: msg.track, priority: msg.priority, maxLatency: msg.maxLatency });
 
 		try {
-			const info = new SubscribeOk({ version: this.version, priority: msg.priority });
-			await info.encode(stream.writer);
+			const info = new SubscribeOk({ priority: msg.priority });
+			await info.encode(stream.writer, this.version);
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
 			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer);
 
 			for (;;) {
-				const decode = SubscribeUpdate.decodeMaybe(stream.reader);
+				const decode = SubscribeUpdate.decodeMaybe(stream.reader, this.version);
 
 				const result = await Promise.any([serving, decode]);
 				if (!result) break;

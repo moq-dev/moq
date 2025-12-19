@@ -4,6 +4,7 @@ import { Track } from "./track.ts";
 export interface TrackRequest {
 	track: Track;
 	priority: number;
+	maxLatency: DOMHighResTimeStamp;
 }
 
 export class BroadcastState {
@@ -51,14 +52,22 @@ export class Broadcast {
 	/**
 	 * Populates the provided track over the network.
 	 */
-	subscribe(name: string, priority: number): Track {
+	subscribe({
+		name,
+		priority,
+		maxLatency,
+	}: {
+		name: string;
+		priority: number;
+		maxLatency: DOMHighResTimeStamp;
+	}): Track {
 		const track = new Track(name);
 
 		if (this.state.closed.peek()) {
 			throw new Error(`broadcast is closed: ${this.state.closed.peek()}`);
 		}
 		this.state.requested.mutate((requested) => {
-			requested.push({ track, priority });
+			requested.push({ track, priority, maxLatency });
 			// Sort the tracks by priority in ascending order (we will pop)
 			requested.sort((a, b) => a.priority - b.priority);
 		});

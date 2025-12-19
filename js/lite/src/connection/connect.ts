@@ -5,6 +5,8 @@ import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
 import type { Established } from "./established.ts";
 
+const SUPPORTED = [Lite.Version.DRAFT_03, Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14];
+
 export interface WebSocketOptions {
 	// If true (default), enable the WebSocket fallback.
 	enabled?: boolean;
@@ -82,7 +84,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n); // Allow a ton of request IDs.
 	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js")); // Put the implementation name in the parameters.
 
-	const client = new Ietf.ClientSetup([Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14], params);
+	const client = new Ietf.ClientSetup(SUPPORTED, params);
 	console.debug(url.toString(), "sending client setup", client);
 	await client.encode(stream.writer);
 

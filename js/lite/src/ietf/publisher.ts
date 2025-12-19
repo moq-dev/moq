@@ -94,7 +94,11 @@ export class Publisher {
 			return;
 		}
 
-		const track = broadcast.subscribe(msg.trackName, msg.subscriberPriority);
+		const track = broadcast.subscribe({
+			name: msg.trackName,
+			priority: msg.subscriberPriority,
+			maxLatency: 100, // TODO delivery timeout
+		});
 
 		// Send SUBSCRIBE_OK response on control stream
 		const okMsg = new SubscribeOk(msg.requestId, msg.requestId);
