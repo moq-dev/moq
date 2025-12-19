@@ -1,19 +1,21 @@
+import Button from "../shared/components/button";
+import type { Icon } from "../shared/types/icons";
 import useWatchUIContext from "./useWatchUIContext";
 
-const statsButtonIcon = () => (
+const statsButtonIcon: Icon = () => (
 	<svg
 		xmlns="http://www.w3.org/2000/svg"
-		width="16"
-		height="16"
+		width="24"
+		height="24"
 		viewBox="0 0 24 24"
 		fill="none"
 		stroke="currentColor"
 		stroke-width="2"
 		stroke-linecap="round"
 		stroke-linejoin="round"
+		aria-hidden="true"
 		class="stats__icon"
 	>
-		<title>Open statistics</title>
 		<path d="M5 21v-6" />
 		<path d="M12 21V3" />
 		<path d="M19 21V9" />
@@ -31,15 +33,8 @@ export default function StatsButton() {
 	};
 
 	return (
-		<button
-			type="button"
-			class="watchControlButton stats__button"
-			onClick={onClick}
-			title={context.isStatsPanelVisible() ? "Hide stats" : "Show stats"}
-			aria-label={context.isStatsPanelVisible() ? "Hide stats" : "Show stats"}
-			aria-pressed={context.isStatsPanelVisible()}
-		>
-			<div class="stats__icon">{statsButtonIcon()}</div>
-		</button>
+		<Button title={context.isStatsPanelVisible() ? "Hide stats" : "Show stats"} onClick={onClick}>
+			{statsButtonIcon()}
+		</Button>
 	);
 }

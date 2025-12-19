@@ -68,6 +68,8 @@
         "packageJson": {
           "dependencies": [
             "npm:@rollup/plugin-node-resolve@^16.0.3",
+            "npm:@solidjs/testing-library@~0.8.10",
+            "npm:@testing-library/jest-dom@^6.9.1",
             "npm:happy-dom@^20.0.11",
             "npm:rimraf@^6.0.1",
             "npm:rollup-plugin-esbuild@^6.2.1",

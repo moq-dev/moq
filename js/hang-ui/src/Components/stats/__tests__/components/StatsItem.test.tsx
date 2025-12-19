@@ -38,8 +38,7 @@ describe("StatsItem", () => {
 					name="Network"
 					statProvider="network"
 					svg={
-						<svg>
-							<title>Title</title>
+						<svg aria-hidden="true">
 							<circle r="5"></circle>
 						</svg>
 					}
@@ -59,8 +58,7 @@ describe("StatsItem", () => {
 		vi.mocked(registry.getStatsInformationProvider).mockReturnValue(undefined);
 
 		const testSvg = () => (
-			<svg data-testid="test-icon">
-				<title>Title</title>
+			<svg data-testid="test-icon" aria-hidden="true">
 				<circle r="5"></circle>
 			</svg>
 		);
@@ -93,11 +91,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Audio"
 					statProvider="audio"
-					svg={
-						<svg>
-							<title>Title</title>
-						</svg>
-					}
+					svg={<svg aria-hidden="true"></svg>}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -117,11 +111,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Buffer"
 					statProvider="buffer"
-					svg={
-						<svg>
-							<title>Title</title>
-						</svg>
-					}
+					svg={<svg aria-hidden="true"></svg>}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -149,11 +139,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Network"
 					statProvider="network"
-					svg={
-						<svg>
-							<title>Title</title>
-						</svg>
-					}
+					svg={<svg aria-hidden="true"></svg>}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -180,11 +166,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Video"
 					statProvider="video"
-					svg={
-						<svg>
-							<title>Title</title>
-						</svg>
-					}
+					svg={<svg aria-hidden="true"></svg>}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -219,11 +201,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Audio"
 					statProvider="audio"
-					svg={
-						<svg>
-							<title>Title</title>
-						</svg>
-					}
+					svg={<svg aria-hidden="true"></svg>}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -253,11 +231,7 @@ describe("StatsItem", () => {
 					<StatsItem
 						name={provider.charAt(0).toUpperCase() + provider.slice(1)}
 						statProvider={provider}
-						svg={
-							<svg>
-								<title>Title</title>
-							</svg>
-						}
+						svg={<svg aria-hidden="true"></svg>}
 						audio={mockAudioVideo.audio}
 						video={mockAudioVideo.video}
 					/>
@@ -314,11 +288,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name={statProvider().charAt(0).toUpperCase() + statProvider().slice(1)}
 					statProvider={statProvider()}
-					svg={
-						<svg>
-							<title>Title</title>
-						</svg>
-					}
+					svg={<svg aria-hidden="true"></svg>}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -342,11 +312,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Network"
 					statProvider="network"
-					svg={
-						<svg>
-							<title>Title</title>
-						</svg>
-					}
+					svg={<svg aria-hidden="true"></svg>}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>

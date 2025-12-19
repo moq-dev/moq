@@ -13,23 +13,6 @@
 	flex-direction: column;
 }
 
-.watchControlButton {
-	background: transparent;
-	border: none;
-	cursor: pointer;
-	display: inline-block;
-	font: inherit;
-	color: inherit;
-}
-
-.watchControlButton.stats__button .stats__icon {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	width: 16px;
-	height: 16px;
-}
-
 .volumeSliderContainer {
 	display: flex;
 	align-items: center;

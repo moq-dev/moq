@@ -1,0 +1,17 @@
+:host {
+	--color-trnasparent: transparent;
+	--color-white: #ffffff;
+	--color-light-gray: #dddddd;
+	--color-red: #e60000;
+	--color-black-alpha-8: rgba(0, 0, 0, 0.08);
+	--color-black-alpha-10: rgba(0, 0, 0, 0.1);
+	--color-black: #000000;
+	--spacing-1: 1rem;
+	--spacing-2: 2rem;
+	--spacing-4: 4rem;
+	--spacing-8: 8rem;
+	--spacing-12: 12rem;
+	--spacing-16: 16rem;
+	--spacing-24: 24rem;
+	--spacing-32: 32rem;
+}

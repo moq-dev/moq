@@ -1,0 +1,29 @@
+@import "../../styles/flex.css";
+@import "../../styles/variables.css";
+
+.button {
+	border: none;
+	color: var(--color-white);
+	cursor: pointer;
+	background-color: var(--color-transparent);
+	transition: transform 0.15s cubic-bezier(0.21, 0.61, 0.35, 1);
+	width: 36px;
+	height: 36px;
+}
+
+.button:hover:not(:disabled) {
+	color: var(--color-white);
+	transform: scale(1.04);
+	box-shadow: 0 var(--spacing-2) var(--spacing-8) var(--color-black-alpha-10);
+}
+
+.button:active:not(:disabled) {
+	transform: scale(0.98);
+	box-shadow: 0 var(--spacing-1) var(--spacing-4) var(--color-black-alpha-8);
+}
+
+.button:disabled {
+	opacity: 0.5;
+	cursor: default;
+	color: var(--color-light-gray);
+}

@@ -34,6 +34,8 @@ type WatchUIContextValues = {
 	setActiveRendition: (name: string | undefined) => void;
 	isStatsPanelVisible: () => boolean;
 	setIsStatsPanelVisible: (visible: boolean) => void;
+	isFullscreen: () => boolean;
+	toggleFullscreen: () => void;
 };
 
 export const WatchUIContext = createContext<WatchUIContextValues>();
@@ -48,9 +50,19 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
 	const [activeRendition, setActiveRendition] = createSignal<string | undefined>(undefined);
 	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
+	const [isFullscreen, setIsFullscreen] = createSignal<boolean>(!!document.fullscreenElement);
 
 	const togglePlayback = () => {
 		props.hangWatch.paused.set(!props.hangWatch.paused.get());
+	};
+
+	const toggleFullscreen = () => {
+		if (document.fullscreenElement) {
+			document.exitFullscreen();
+		} else {
+			props.hangWatch.requestFullscreen();
+		}
+		setIsFullscreen(!!document.fullscreenElement);
 	};
 
 	const setVolume = (volume: number) => {
@@ -89,6 +101,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		setActiveRendition: setActiveRenditionValue,
 		isStatsPanelVisible,
 		setIsStatsPanelVisible,
+		isFullscreen,
+		toggleFullscreen,
 	};
 
 	createEffect(() => {
