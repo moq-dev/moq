@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/moq-dev/moq/compare/hang-v0.9.0...hang-v0.9.1) - 2025-12-19
+
+### Other
+
+- Add HLS import module ([#789](https://github.com/moq-dev/moq/pull/789))
+
 ## [0.9.0](https://github.com/moq-dev/moq/compare/hang-v0.8.0...hang-v0.9.0) - 2025-12-18
 
 ### Other
