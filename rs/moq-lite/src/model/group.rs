@@ -113,7 +113,7 @@ impl GroupProducer {
 
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Closed));
+				result = Err(closed.err().unwrap_or(Error::Cancel));
 				return false;
 			}
 
@@ -130,7 +130,7 @@ impl GroupProducer {
 
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Closed));
+				result = Err(closed.err().unwrap_or(Error::Cancel));
 				return false;
 			}
 
@@ -190,6 +190,9 @@ impl Deref for GroupProducer {
 }
 
 /// Consume a group, frame-by-frame.
+///
+/// If the consumer is cloned, it will receive a copy of all unread frames.
+#[derive(Clone)]
 pub struct GroupConsumer {
 	// Modify the stream state.
 	state: watch::Receiver<GroupState>,
@@ -270,7 +273,7 @@ impl GroupConsumer {
 				Some(res) = self.next_frame().transpose() => {
 					match res {
 						Ok(frame) => {
-							let dst = dst.create_frame(frame.info.clone())?;
+							let dst = dst.create_frame(frame.info().clone())?;
 							tasks.push(frame.proxy(dst));
 						}
 						Err(err) => return dst.abort(err),

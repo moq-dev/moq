@@ -1,11 +1,4 @@
-use std::{
-	collections::HashMap,
-	future::Future,
-	sync::{
-		atomic::{AtomicUsize, Ordering},
-		Arc,
-	},
-};
+use std::{collections::HashMap, future::Future};
 
 use crate::{Error, TrackConsumer, TrackProducer};
 use tokio::sync::watch;
@@ -24,6 +17,7 @@ struct State {
 }
 
 /// Receive broadcast/track requests and return if we can fulfill them.
+#[derive(Clone)]
 pub struct BroadcastProducer {
 	state: Lock<State>,
 	closed: watch::Sender<bool>,
@@ -31,7 +25,6 @@ pub struct BroadcastProducer {
 		async_channel::Sender<TrackProducer>,
 		async_channel::Receiver<TrackProducer>,
 	),
-	cloned: Arc<AtomicUsize>,
 }
 
 impl Default for BroadcastProducer {
@@ -49,7 +42,6 @@ impl BroadcastProducer {
 			}),
 			closed: Default::default(),
 			requested: async_channel::unbounded(),
-			cloned: Default::default(),
 		}
 	}
 
@@ -108,42 +100,6 @@ impl BroadcastProducer {
 	}
 }
 
-impl Clone for BroadcastProducer {
-	fn clone(&self) -> Self {
-		self.cloned.fetch_add(1, Ordering::Relaxed);
-		Self {
-			state: self.state.clone(),
-			closed: self.closed.clone(),
-			requested: self.requested.clone(),
-			cloned: self.cloned.clone(),
-		}
-	}
-}
-
-impl Drop for BroadcastProducer {
-	fn drop(&mut self) {
-		if self.cloned.fetch_sub(1, Ordering::Relaxed) > 0 {
-			return;
-		}
-
-		// Cleanup any lingering state when the last producer is dropped.
-
-		// Close the sender so consumers can't send any more requests.
-		self.requested.0.close();
-
-		// Drain any remaining requests.
-		while let Ok(mut producer) = self.requested.1.try_recv() {
-			producer.abort(Error::Cancel);
-		}
-
-		let mut state = self.state.lock();
-
-		// Cleanup any published tracks.
-		state.published.clear();
-		state.requested.clear();
-	}
-}
-
 #[cfg(test)]
 use futures::FutureExt;
 
@@ -178,29 +134,25 @@ pub struct BroadcastConsumer {
 }
 
 impl BroadcastConsumer {
-	pub fn subscribe(&self, track: TrackProducer) {
+	pub async fn serve(&self, track: TrackProducer) -> Result<(), Error> {
+		self.get_track(track.info()).proxy(track).await
+	}
+
+	fn get_track(&self, track: &Track) -> TrackConsumer {
 		let mut state = self.state.lock();
 
 		// Return any explictly published track.
 		if let Some((producer, _)) = state.published.get(&track.name) {
-			let consumer = producer.consume();
-			web_async::spawn(async move {
-				consumer.proxy(track).await;
-			});
-			return;
+			return producer.consume();
 		}
 
 		// Return any requested tracks.
 		if let Some(producer) = state.requested.get(&track.name) {
-			let consumer = producer.consume();
-			web_async::spawn(async move {
-				consumer.proxy(track).await;
-			});
-			return;
+			return producer.consume();
 		}
 
 		// Otherwise we have never seen this track before and need to create a new producer.
-		let mut producer = TrackProducer::new(track.info().clone());
+		let mut producer = TrackProducer::new(track.clone());
 		let consumer = producer.consume();
 
 		// Insert the producer into the lookup so we will deduplicate requests.
@@ -208,12 +160,10 @@ impl BroadcastConsumer {
 		match self.requested.try_send(producer.clone()) {
 			Ok(()) => {}
 			Err(_) => {
-				// If the BroadcastProducer is closed, immediately close the track.
-				// This is a bit more ergonomic than returning None.
-				producer.abort(Error::Cancel);
-				return;
+				producer.abort(Error::Cancel).ok();
+				return consumer;
 			}
-		}
+		};
 
 		// Insert the producer into the lookup so we will deduplicate requests.
 		state.requested.insert(producer.name.clone(), producer.clone());
@@ -225,16 +175,19 @@ impl BroadcastConsumer {
 			state.lock().requested.remove(&producer.name);
 		});
 
-		web_async::spawn(async move {
-			consumer.proxy(track).await;
-		});
+		consumer
 	}
 
 	// Backwards compatibility for the old API.
-	pub fn subscribe_track(&self, track: &Track) -> TrackConsumer {
+	pub fn subscribe(&self, track: &Track) -> TrackConsumer {
+		let source = self.get_track(track);
 		let producer = TrackProducer::new(track.clone());
 		let consumer = producer.consume();
-		self.subscribe(producer);
+		web_async::spawn(async move {
+			if let Err(err) = source.proxy(producer).await {
+				tracing::warn!(%err, "error proxying track");
+			}
+		});
 		consumer
 	}
 
@@ -282,11 +235,11 @@ mod test {
 
 		// Make sure we can insert before a consumer is created.
 		producer.insert_track(track1.clone());
-		track1.append_group();
+		track1.append_group().expect("should be able to append group");
 
 		let consumer = producer.consume();
 
-		let mut track1_sub = consumer.subscribe_track(track1.info());
+		let mut track1_sub = consumer.subscribe(track1.info());
 		track1_sub.assert_group();
 
 		let mut track2 = TrackProducer::new(Track {
@@ -297,10 +250,10 @@ mod test {
 		producer.insert_track(track2.clone());
 
 		let consumer2 = producer.consume();
-		let mut track2_consumer = consumer2.subscribe_track(track2.info());
+		let mut track2_consumer = consumer2.subscribe(track2.info());
 		track2_consumer.assert_no_group();
 
-		track2.append_group();
+		track2.append_group().expect("should be able to append group");
 
 		track2_consumer.assert_group();
 	}
@@ -329,7 +282,7 @@ mod test {
 		let consumer3 = producer.consume();
 		producer.assert_used();
 
-		let track1 = consumer3.subscribe_track(&Track {
+		let track1 = consumer3.subscribe(&Track {
 			name: "track1".to_string(),
 			priority: 0,
 			max_latency: Duration::from_secs(1),
@@ -356,11 +309,11 @@ mod test {
 			priority: 0,
 			max_latency: Duration::from_secs(1),
 		});
-		track1.append_group();
+		track1.append_group().expect("should be able to append group");
 		producer.insert_track(track1.clone());
 
-		let mut track1c = consumer.subscribe_track(track1.info());
-		let track2 = consumer.subscribe_track(&Track {
+		let mut track1c = consumer.subscribe(track1.info());
+		let track2 = consumer.subscribe(&Track {
 			name: "track2".to_string(),
 			priority: 0,
 			max_latency: Duration::from_secs(1),
@@ -400,7 +353,7 @@ mod test {
 		let consumer = producer.consume();
 		let consumer2 = consumer.clone();
 
-		let mut track1 = consumer.subscribe_track(&Track {
+		let mut track1 = consumer.subscribe(&Track {
 			name: "track1".to_string(),
 			priority: 0,
 			max_latency: Duration::from_secs(1),
@@ -409,7 +362,7 @@ mod test {
 		track1.assert_no_group();
 
 		// Make sure we deduplicate requests while track1 is still active.
-		let mut track2 = consumer2.subscribe_track(&Track {
+		let mut track2 = consumer2.subscribe(&Track {
 			name: "track1".to_string(),
 			priority: 0,
 			max_latency: Duration::from_secs(1),
@@ -424,12 +377,12 @@ mod test {
 		track3.consume().assert_is_clone(&track1);
 
 		// Append a group and make sure they all get it.
-		track3.append_group();
+		track3.append_group().expect("should be able to append group");
 		track1.assert_group();
 		track2.assert_group();
 
 		// Make sure that tracks are cancelled when the producer is dropped.
-		let track4 = consumer.subscribe_track(&Track {
+		let track4 = consumer.subscribe(&Track {
 			name: "track2".to_string(),
 			priority: 0,
 			max_latency: Duration::from_secs(1),
@@ -439,7 +392,7 @@ mod test {
 		// Make sure the track is errored, not closed.
 		track4.assert_error();
 
-		let track5 = consumer2.subscribe_track(&Track {
+		let track5 = consumer2.subscribe(&Track {
 			name: "track3".to_string(),
 			priority: 0,
 			max_latency: Duration::from_secs(1),
@@ -452,7 +405,7 @@ mod test {
 		let mut broadcast = BroadcastProducer::new();
 
 		// Subscribe to a track that doesn't exist - this creates a request
-		let consumer1 = broadcast.consume().subscribe_track(&Track {
+		let consumer1 = broadcast.consume().subscribe(&Track {
 			name: "unknown_track".to_string(),
 			priority: 0,
 			max_latency: Duration::from_secs(1),
@@ -468,7 +421,7 @@ mod test {
 		);
 
 		// Making a new consumer will keep the producer alive
-		let consumer2 = broadcast.consume().subscribe_track(&Track {
+		let consumer2 = broadcast.consume().subscribe(&Track {
 			name: "unknown_track".to_string(),
 			priority: 0,
 			max_latency: Duration::from_secs(1),
@@ -499,7 +452,7 @@ mod test {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
 		// Now the cleanup task should have run and we can subscribe again to the unknown track.
-		let consumer3 = broadcast.consume().subscribe_track(&Track {
+		let consumer3 = broadcast.consume().subscribe(&Track {
 			name: "unknown_track".to_string(),
 			priority: 0,
 			max_latency: Duration::from_secs(1),

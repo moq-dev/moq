@@ -1,4 +1,4 @@
-use std::future::Future;
+use std::{future::Future, ops::Deref};
 
 use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
@@ -47,8 +47,7 @@ struct FrameState {
 /// Used to write a frame's worth of data in chunks.
 #[derive(Clone)]
 pub struct FrameProducer {
-	// Immutable stream state.
-	pub info: Frame,
+	info: Frame,
 
 	// Mutable stream state.
 	state: watch::Sender<FrameState>,
@@ -66,6 +65,10 @@ impl FrameProducer {
 		}
 	}
 
+	pub fn info(&self) -> &Frame {
+		&self.info
+	}
+
 	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
 		let chunk = chunk.into();
 		if self.written + chunk.len() > self.info.size as usize {
@@ -78,7 +81,7 @@ impl FrameProducer {
 
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Closed));
+				result = Err(closed.err().unwrap_or(Error::Cancel));
 				return false;
 			}
 
@@ -98,7 +101,7 @@ impl FrameProducer {
 
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Closed));
+				result = Err(closed.err().unwrap_or(Error::Cancel));
 				return false;
 			}
 
@@ -149,10 +152,21 @@ impl From<Frame> for FrameProducer {
 	}
 }
 
+impl Deref for FrameProducer {
+	type Target = Frame;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 /// Used to consume a frame's worth of data in chunks.
+///
+/// If the consumer is cloned, it will receive a copy of all unread chunks.
+#[derive(Clone)]
 pub struct FrameConsumer {
 	// Immutable stream state.
-	pub info: Frame,
+	info: Frame,
 
 	// Modify the stream state.
 	state: watch::Receiver<FrameState>,
@@ -163,6 +177,10 @@ pub struct FrameConsumer {
 }
 
 impl FrameConsumer {
+	pub fn info(&self) -> &Frame {
+		&self.info
+	}
+
 	/// Return the next chunk.
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
 		loop {
@@ -251,5 +269,13 @@ impl FrameConsumer {
 				Err(err) => return dst.abort(err),
 			}
 		}
+	}
+}
+
+impl Deref for FrameConsumer {
+	type Target = Frame;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
 	}
 }

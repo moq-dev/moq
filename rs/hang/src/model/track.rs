@@ -76,11 +76,11 @@ impl TrackProducer {
 		let size = header.len() + frame.payload.remaining();
 
 		let mut chunked = group.create_frame(size.into())?;
-		chunked.write_chunk(header.freeze());
+		chunked.write_chunk(header.freeze())?;
 		for chunk in frame.payload {
-			chunked.write_chunk(chunk);
+			chunked.write_chunk(chunk)?;
 		}
-		chunked.close();
+		chunked.close()?;
 
 		self.group.replace(group);
 

@@ -10,7 +10,7 @@ use crate::{
 		Version,
 	},
 	model::GroupConsumer,
-	AsPath, BroadcastConsumer, Error, OriginConsumer, OriginProducer, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, OriginConsumer, OriginProducer, Track, TrackConsumer, TrackProducer,
 };
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -191,9 +191,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track);
-
-		// TODO wait until track.info() to get the *real* priority
+		let track = TrackProducer::new(track);
 
 		let info = lite::SubscribeOk {
 			priority: track.priority,
@@ -203,8 +201,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.writer.encode(&info).await?;
 
 		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, version) => res?,
+			res = Self::run_track(session, track.consume(), subscribe, priority, version) => res?,
 			res = stream.reader.closed() => res?,
+			res = broadcast.serve(track) => res?,
 		}
 
 		stream.writer.finish()?;
@@ -329,9 +328,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 
-			tracing::trace!(size = %frame.info.size, "writing frame");
+			tracing::trace!(size = %frame.size, "writing frame");
 
-			stream.encode(&frame.info.size).await?;
+			stream.encode(&frame.size).await?;
 
 			loop {
 				let chunk = tokio::select! {
@@ -351,7 +350,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 			}
 
-			tracing::trace!(size = %frame.info.size, "wrote frame");
+			tracing::trace!(size = %frame.size, "wrote frame");
 		}
 
 		stream.finish()?;

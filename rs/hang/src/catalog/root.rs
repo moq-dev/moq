@@ -160,8 +160,9 @@ impl CatalogProducer {
 	}
 
 	/// Finish publishing to this catalog and close the track.
-	pub fn close(mut self) {
-		self.track.close();
+	pub fn close(mut self) -> Result<()> {
+		self.track.close()?;
+		Ok(())
 	}
 }
 
@@ -201,8 +202,8 @@ impl Drop for CatalogGuard<'_> {
 		if let Ok(mut group) = self.track.append_group() {
 			// TODO decide if this should return an error, or be impossible to fail
 			let frame = self.catalog.to_string().expect("invalid catalog");
-			group.write_frame(frame);
-			group.close();
+			group.write_frame(frame).ok();
+			group.close().ok();
 		}
 	}
 }
@@ -211,6 +212,9 @@ impl Drop for CatalogGuard<'_> {
 ///
 /// This wraps a `moq_lite::TrackConsumer` and automatically deserializes JSON
 /// catalog data to discover available audio and video tracks in a broadcast.
+///
+/// If the consumer is cloned, it will receive a copy of all unread catalogs.
+#[derive(Clone)]
 pub struct CatalogConsumer {
 	/// Access to the underlying track consumer.
 	track: moq_lite::TrackConsumer,

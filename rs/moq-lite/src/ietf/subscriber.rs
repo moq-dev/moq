@@ -154,7 +154,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut state = self.state.lock();
 
 		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
-			track.producer.abort(Error::Cancel);
+			track.producer.abort(Error::Cancel)?;
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -167,7 +167,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut state = self.state.lock();
 
 		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
-			track.producer.close();
+			track.producer.close()?;
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -278,7 +278,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		track.unused().await;
 		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.name, "subscribe cancelled");
 
-		track.abort(Error::Cancel);
+		track.abort(Error::Cancel)?;
 
 		Ok(())
 	}
@@ -316,15 +316,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
 				tracing::trace!(group = %producer.sequence, "group cancelled");
-				producer.abort(Error::Cancel);
+				producer.abort(Error::Cancel)?;
 			}
 			Err(err) => {
 				tracing::debug!(%err, group = %producer.sequence, "group error");
-				producer.abort(err);
+				producer.abort(err)?;
 			}
 			_ => {
 				tracing::trace!(group = %producer.sequence, "group complete");
-				producer.close();
+				producer.close()?;
 			}
 		}
 
@@ -386,19 +386,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut frame: FrameProducer,
 	) -> Result<(), Error> {
-		let mut remain = frame.info.size;
+		let mut remain = frame.size;
 
-		tracing::trace!(size = %frame.info.size, "reading frame");
+		tracing::trace!(size = %frame.size, "reading frame");
 
 		while remain > 0 {
 			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
-			frame.write_chunk(chunk);
+			frame.write_chunk(chunk)?;
 		}
 
-		tracing::trace!(size = %frame.info.size, "read frame");
+		tracing::trace!(size = %frame.size, "read frame");
 
-		frame.close();
+		frame.close()?;
 
 		Ok(())
 	}

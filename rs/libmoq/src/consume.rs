@@ -176,10 +176,11 @@ impl Consume {
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
+		let broadcast = consume.broadcast.clone();
 		let video = consume.catalog.video.as_ref().ok_or(Error::NotFound)?;
 		let rendition = video.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
-		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
+		let track = moq_lite::TrackProducer::new(moq_lite::Track {
 			name: rendition.clone(),
 			priority: video.priority,
 			max_latency,
@@ -190,8 +191,9 @@ impl Consume {
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(track.into(), &mut on_frame) => res,
+				res = Self::run_track(track.consume().into(), &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
+				res = broadcast.serve(track) => res.map_err(Into::into),
 			};
 			on_frame.call(res);
 
@@ -210,10 +212,11 @@ impl Consume {
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
+		let broadcast = consume.broadcast.clone();
 		let audio = consume.catalog.audio.as_ref().ok_or(Error::NotFound)?;
 		let rendition = audio.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
-		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
+		let track = moq_lite::TrackProducer::new(moq_lite::Track {
 			name: rendition.clone(),
 			priority: audio.priority,
 			max_latency,
@@ -224,7 +227,8 @@ impl Consume {
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(track.into(), &mut on_frame) => res,
+				res = Self::run_track(track.consume().into(), &mut on_frame) => res,
+				res = broadcast.serve(track) => res.map_err(Into::into),
 				_ = channel.1 => Ok(()),
 			};
 			on_frame.call(res);

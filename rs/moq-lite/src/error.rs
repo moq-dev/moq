@@ -80,8 +80,8 @@ pub enum Error {
 	#[error("invalid role")]
 	InvalidRole,
 
-	#[error("closed")]
-	Closed,
+	#[error("expired")]
+	Expired,
 }
 
 impl Error {
@@ -107,7 +107,7 @@ impl Error {
 			Self::TooLarge => 18,
 			Self::TooManyParameters => 19,
 			Self::InvalidRole => 20,
-			Self::Closed => 21,
+			Self::Expired => 22,
 			Self::App(app) => *app + 64,
 		}
 	}

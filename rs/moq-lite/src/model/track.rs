@@ -81,7 +81,7 @@ impl TrackProducer {
 
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Closed));
+				result = Err(closed.err().unwrap_or(Error::Cancel));
 				return false;
 			}
 
@@ -109,11 +109,11 @@ impl TrackProducer {
 
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&mut self) -> Result<GroupProducer> {
-		let mut result = Err(Error::Closed);
+		let mut result = Err(Error::Cancel);
 
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Closed));
+				result = Err(closed.err().unwrap_or(Error::Cancel));
 				return false;
 			}
 
@@ -138,7 +138,7 @@ impl TrackProducer {
 
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Closed));
+				result = Err(closed.err().unwrap_or(Error::Cancel));
 				return false;
 			}
 
@@ -189,7 +189,7 @@ impl TrackProducer {
 
 	async fn run_expires(self) {
 		let mut receiver = self.state.subscribe();
-		let mut arrived = VecDeque::new();
+		let mut arrived: VecDeque<Instant> = VecDeque::new();
 
 		loop {
 			let (next, closed) = {
@@ -210,7 +210,7 @@ impl TrackProducer {
 					.filter_map(|(index, (group, when))| group.as_ref().map(|g| (index, g.sequence, when)))
 					.filter(|(_index, sequence, _when)| *sequence < state.max_sequence.unwrap_or(0))
 					.min_by_key(|(_index, _sequence, when)| *when)
-					.map(|(index, _sequence, when)| (index, when));
+					.map(|(index, _sequence, when)| (index, *when));
 
 				(next, state.closed.is_some())
 			};
@@ -221,15 +221,26 @@ impl TrackProducer {
 			}
 
 			tokio::select! {
-				Some(()) = async { Some(tokio::time::sleep_until(*next?.1).await) } => {
+				Some(()) = async {
+					let next = next?.1;
+
+					if !self.max_latency.is_zero() {
+						// Sleep until the group expires.
+						tokio::time::sleep_until(next + self.max_latency).await;
+					}
+
+					Some(())
+				} => {
 					let (index, _) = next.unwrap();
 
 					self.state.send_if_modified(|state| {
 						let mut group = state.groups.get_mut(index).unwrap().take().expect("group must have been Some");
-						group.abort(Error::Cancel);
+						group.abort(Error::Expired).ok();
 
 						while state.groups.front().is_none() {
 							state.groups.pop_front();
+							arrived.pop_front();
+
 							state.offset += 1;
 						}
 
@@ -282,6 +293,9 @@ impl Deref for TrackProducer {
 }
 
 /// A consumer for a track, used to read groups.
+///
+/// If the consumer is cloned, it will receive a copy of all unread groups.
+#[derive(Clone)]
 pub struct TrackConsumer {
 	info: Track,
 

@@ -98,7 +98,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			max_latency: std::time::Duration::from_millis(100),
 		};
 
-		let track = broadcast.subscribe_track(&track);
+		let track = broadcast.subscribe(&track);
 
 		let (tx, rx) = oneshot::channel();
 		let mut subscribes = self.subscribes.lock();
@@ -277,9 +277,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 
 			// Write the size of the frame.
-			stream.encode(&frame.info.size).await?;
+			stream.encode(&frame.size).await?;
 
-			if frame.info.size == 0 {
+			if frame.size == 0 {
 				// Have to write the object status too.
 				stream.encode(&0u8).await?;
 			} else {

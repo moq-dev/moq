@@ -166,13 +166,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			let path = path.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(id, path, track).await;
+				if let Err(err) = this.run_subscribe(id, path, track).await {
+					tracing::warn!(%err, id = %id, "error running subscribe");
+				}
+
 				this.subscribes.lock().remove(&id);
 			});
 		}
 	}
 
-	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer) {
+	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer) -> Result<(), Error> {
 		self.subscribes.lock().insert(id, track.clone());
 
 		let msg = lite::Subscribe {
@@ -194,17 +197,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
 				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe cancelled");
-				track.abort(Error::Cancel);
+				track.abort(Error::Cancel)?;
 			}
 			Err(err) => {
 				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.name, %err, "subscribe error");
-				track.abort(err);
+				track.abort(err)?;
 			}
 			_ => {
 				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe complete");
-				track.close();
+				track.close()?;
 			}
 		}
+
+		Ok(())
 	}
 
 	async fn run_track(&mut self, msg: lite::Subscribe<'_>) -> Result<(), Error> {
@@ -255,15 +260,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
 				tracing::trace!(group = %group.sequence, "group cancelled");
-				group.abort(Error::Cancel);
+				group.abort(Error::Cancel)?;
 			}
 			Err(err) => {
 				tracing::debug!(%err, group = %group.sequence, "group error");
-				group.abort(err);
+				group.abort(err)?;
 			}
 			_ => {
 				tracing::trace!(group = %group.sequence, "group complete");
-				group.close();
+				group.close()?;
 			}
 		}
 
@@ -284,12 +289,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 
 			if let Err(err) = res {
-				frame.abort(err.clone());
+				frame.abort(err.clone())?;
 				return Err(err);
 			}
 		}
 
-		group.close();
+		group.close()?;
 
 		Ok(())
 	}
@@ -299,9 +304,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut frame: FrameProducer,
 	) -> Result<(), Error> {
-		let mut remain = frame.info.size;
+		let mut remain = frame.size;
 
-		tracing::trace!(size = %frame.info.size, "reading frame");
+		tracing::trace!(size = %frame.size, "reading frame");
 
 		const MAX_CHUNK: usize = 1024 * 1024; // 1 MiB
 		while remain > 0 {
@@ -310,12 +315,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				.await?
 				.ok_or(Error::WrongSize)?;
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
-			frame.write_chunk(chunk);
+			frame.write_chunk(chunk)?;
 		}
 
-		tracing::trace!(size = %frame.info.size, "read frame");
+		tracing::trace!(size = %frame.size, "read frame");
 
-		frame.close();
+		frame.close()?;
 
 		Ok(())
 	}
