@@ -52,7 +52,7 @@ impl HlsConfig {
 			} else {
 				std::env::current_dir()?.join(path)
 			};
-			Url::from_file_path(&absolute).map_err(|_| anyhow::anyhow!("invalid file path: {}", self.playlist))
+			Url::from_file_path(&absolute).ok().context("invalid file path")
 		}
 	}
 }
@@ -387,10 +387,8 @@ impl Hls {
 
 	async fn fetch_bytes(&self, url: Url) -> anyhow::Result<Bytes> {
 		if url.scheme() == "file" {
-			let path = url.to_file_path().map_err(|_| anyhow::anyhow!("invalid file URL: {}", url))?;
-			let bytes = fs::read(&path)
-				.await
-				.with_context(|| format!("failed to read file: {}", path.display()))?;
+			let path = url.to_file_path().ok().context("invalid file URL")?;
+			let bytes = fs::read(&path).await.context("failed to read file")?;
 			Ok(Bytes::from(bytes))
 		} else {
 			let response = self.client.get(url).send().await?;
