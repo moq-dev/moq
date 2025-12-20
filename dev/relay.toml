@@ -30,4 +30,6 @@ public = ""
 # 32 byte secret key for the iroh endpoint. Defines the endpoint ID of the iroh endpoint.
 # The matching endpoint id is set in the justfile as a default for the `pub-iroh` command.
 # Can also be set via MOQ_IROH_SECRET env variable if you don't want to put secrets into the config file.
+# Alternatively, set `secret_key_path` to a path to load the secret key from a file.
+# If the file does not exist, a random key will be generated and written to the path.
 secret_key = "b724c6a37a004ae3d14c3efed84ccc145ee78f884e40f1b47063bdfd479ebed1"

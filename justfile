@@ -150,7 +150,9 @@ pub name='bbb' url="http://localhost:4443/anon" *args:
 # Publish a video file using ffmpeg to a relay server over iroh
 # NOTE: The default url (iroh endpoint id) matches the secret key set in dev/relay.toml
 pub-iroh name='bbb' url='iroh://a73123fce41108f024a196a399edadbba8060be166c779aa50bf4731931492d3' *args:
-	just pub "{{name}}" "{{url}}"
+	cargo build --bin hang
+	# Publish the media with the hang cli.
+	just ffmpeg-cmaf "dev/{{name}}.fmp4" | cargo run --bin hang -- publish --url "{{url}}" --name "anon/{{name}}" fmp4 {{args}}
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
