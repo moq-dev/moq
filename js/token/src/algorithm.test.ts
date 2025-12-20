@@ -3,9 +3,24 @@ import test from "node:test";
 import { AlgorithmSchema } from "./algorithm";
 
 test("algorithm schema - valid algorithms", () => {
-	assert.strictEqual(AlgorithmSchema.parse("HS256"), "HS256");
-	assert.strictEqual(AlgorithmSchema.parse("HS384"), "HS384");
-	assert.strictEqual(AlgorithmSchema.parse("HS512"), "HS512");
+	const validAlgorithms = [
+		"HS256",
+		"HS384",
+		"HS512",
+		"ES256",
+		"ES384",
+		"RS256",
+		"RS384",
+		"RS512",
+		"PS256",
+		"PS384",
+		"PS512",
+		"EdDSA",
+	] as const;
+
+	for (const alg of validAlgorithms) {
+		assert.strictEqual(AlgorithmSchema.parse(alg), alg);
+	}
 });
 
 test("algorithm schema - invalid algorithms", () => {
@@ -14,7 +29,7 @@ test("algorithm schema - invalid algorithms", () => {
 	}, /Invalid option/);
 
 	assert.throws(() => {
-		AlgorithmSchema.parse("RS256");
+		AlgorithmSchema.parse("ES512");
 	}, /Invalid option/);
 
 	assert.throws(() => {
@@ -30,7 +45,22 @@ test("algorithm schema - type safety", () => {
 	// Test that TypeScript types are working correctly
 	const validAlgorithm = AlgorithmSchema.parse("HS256");
 	assert.ok(typeof validAlgorithm === "string");
-	assert.ok(["HS256", "HS384", "HS512"].includes(validAlgorithm));
+	assert.ok(
+		[
+			"HS256",
+			"HS384",
+			"HS512",
+			"ES256",
+			"ES384",
+			"RS256",
+			"RS384",
+			"RS512",
+			"PS256",
+			"PS384",
+			"PS512",
+			"EdDSA",
+		].includes(validAlgorithm),
+	);
 });
 
 test("algorithm schema - case sensitivity", () => {

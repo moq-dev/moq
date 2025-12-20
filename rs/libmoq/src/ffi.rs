@@ -1,15 +1,61 @@
-use std::ffi::{c_char, c_void, CStr};
+use std::{
+	ffi::{c_char, c_void},
+	sync::{LazyLock, Mutex},
+};
 
 use url::Url;
 
-use crate::Error;
+use crate::{Error, Id};
 
-pub struct Callback {
+pub static RUNTIME: LazyLock<Mutex<tokio::runtime::Handle>> = LazyLock::new(|| {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let handle = runtime.handle().clone();
+
+	std::thread::Builder::new()
+		.name("libmoq".into())
+		.spawn(move || {
+			runtime.block_on(std::future::pending::<()>());
+		})
+		.expect("failed to spawn runtime thread");
+
+	Mutex::new(handle)
+});
+
+/// Runs the provided function in the runtime context.
+/// Additionally, we convert the return code to a C-compatible return value.
+///
+/// Uses a mutex to ensure Handle::enter() guards are dropped in LIFO order,
+/// as required by tokio to avoid panics in multi-threaded FFI contexts.
+pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
+	// NOTE: I think we need a mutex because Handle::enter() needs to be dropped in LIFO order.
+	// If this starts to become a bottleneck, we might have to rethink our runtime model.
+	let handle = RUNTIME.lock().unwrap();
+	let _guard = handle.enter();
+
+	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+		Ok(ret) => ret.code(),
+		Err(_) => Error::Panic.code(),
+	}
+}
+
+/// Wrapper for C callback functions with user data.
+///
+/// Stores a function pointer and user data pointer to call C callbacks
+/// from async Rust code.
+pub struct OnStatus {
 	user_data: *mut c_void,
 	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
 }
 
-impl Callback {
+impl OnStatus {
+	/// Create a new callback wrapper.
+	///
+	/// # Safety
+	/// - The caller must ensure user_data remains valid for the callback's lifetime.
+	/// - The callback function pointer must be valid if provided.
 	pub unsafe fn new(
 		user_data: *mut c_void,
 		on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
@@ -17,6 +63,9 @@ impl Callback {
 		Self { user_data, on_status }
 	}
 
+	/// Invoke the callback with a result code.
+	///
+	/// Using &mut avoids the need for Sync.
 	pub fn call<C: ReturnCode>(&mut self, ret: C) {
 		if let Some(on_status) = &self.on_status {
 			on_status(self.user_data, ret.code());
@@ -24,16 +73,11 @@ impl Callback {
 	}
 }
 
-unsafe impl Send for Callback {}
+unsafe impl Send for OnStatus {}
 
-pub fn return_code<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
-	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-		Ok(ret) => ret.code(),
-		Err(_) => Error::Panic.code(),
-	}
-}
-
+/// Types that can be converted to C-compatible return codes.
 pub trait ReturnCode {
+	/// Convert to an i32 status code.
 	fn code(&self) -> i32;
 }
 
@@ -68,6 +112,15 @@ impl ReturnCode for Result<usize, Error> {
 	}
 }
 
+impl ReturnCode for Result<Id, Error> {
+	fn code(&self) -> i32 {
+		match self {
+			Ok(id) => i32::try_from(*id).unwrap_or_else(|_| Error::InvalidCode.code()),
+			Err(e) => e.code(),
+		}
+	}
+}
+
 impl ReturnCode for Result<(), Error> {
 	fn code(&self) -> i32 {
 		match self {
@@ -83,30 +136,48 @@ impl ReturnCode for usize {
 	}
 }
 
-pub fn parse_url(url: *const c_char) -> Result<Url, Error> {
-	if url.is_null() {
-		return Err(Error::InvalidPointer);
+impl ReturnCode for Id {
+	fn code(&self) -> i32 {
+		i32::try_from(*self).unwrap_or_else(|_| Error::InvalidCode.code())
 	}
+}
 
-	let url = unsafe { CStr::from_ptr(url) };
-	let url = url.to_str()?;
+/// Parse an i32 handle into an Id.
+pub fn parse_id(id: u32) -> Result<Id, Error> {
+	Id::try_from(id)
+}
+
+/// Parse an optional i32 handle (0 = None) into an Option<Id>.
+pub fn parse_id_optional(id: u32) -> Result<Option<Id>, Error> {
+	match id {
+		0 => Ok(None),
+		id => Ok(Some(parse_id(id)?)),
+	}
+}
+
+/// Parse a C string pointer into a Url.
+pub fn parse_url(url: *const c_char, url_len: usize) -> Result<Url, Error> {
+	let url = unsafe { parse_str(url, url_len)? };
 	Ok(Url::parse(url)?)
 }
 
-/// # Safety
+/// Parse a C string pointer into a &str.
 ///
+/// Returns an empty string if the pointer is null.
+///
+/// # Safety
 /// The caller must ensure that cstr is valid for 'a.
-pub unsafe fn parse_str<'a>(cstr: *const c_char) -> Result<&'a str, Error> {
-	if cstr.is_null() {
-		return Ok("");
-	}
-
-	let string = unsafe { CStr::from_ptr(cstr) };
-	Ok(string.to_str()?)
+pub unsafe fn parse_str<'a>(cstr: *const c_char, cstr_len: usize) -> Result<&'a str, Error> {
+	let slice = parse_slice(cstr as *const u8, cstr_len)?;
+	let string = std::str::from_utf8(slice)?;
+	Ok(string)
 }
 
-/// # Safety
+/// Parse a raw pointer and size into a byte slice.
 ///
+/// Returns an empty slice if both pointer and size are zero.
+///
+/// # Safety
 /// The caller must ensure that data is valid for 'a.
 pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], Error> {
 	if data.is_null() {
@@ -119,8 +190,4 @@ pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], 
 
 	let data = unsafe { std::slice::from_raw_parts(data, size) };
 	Ok(data)
-}
-
-pub fn parse_id(id: i32) -> Result<usize, Error> {
-	usize::try_from(id).map_err(|_| Error::InvalidId)
 }

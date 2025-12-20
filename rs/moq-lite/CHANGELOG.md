@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/moq-dev/moq/compare/moq-lite-v0.10.0...moq-lite-v0.10.1) - 2025-12-13
+
+### Other
+
+- Use BufList for hang::Frame ([#769](https://github.com/moq-dev/moq/pull/769))
+- kixelated -> moq-dev ([#749](https://github.com/moq-dev/moq/pull/749))
+
 ## [0.10.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.9.6...moq-lite-v0.10.0) - 2025-11-26
 
 ### Other

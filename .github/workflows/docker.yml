@@ -54,8 +54,7 @@ jobs:
       - uses: depot/build-push-action@v1
         with:
           project: r257ctfqm6
-          file: rs/Dockerfile
-          context: rs
+          context: .
           push: true
           # Make a smaller image by specifying the package to build
           build-args: |

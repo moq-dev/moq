@@ -20,8 +20,12 @@ export type SourceProps = {
 	latency?: Time.Milli | Signal<Time.Milli>;
 };
 
+export interface AudioStats {
+	bytesReceived: number;
+}
+
 // Unfortunately, we need to use a Vite-exclusive import for now.
-import RenderWorklet from "./render-worklet?worker&url";
+import RenderWorklet from "./render-worklet.ts?worker&url";
 
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
@@ -39,6 +43,9 @@ export class Source {
 
 	#sampleRate = new Signal<number | undefined>(undefined);
 	readonly sampleRate: Getter<number | undefined> = this.#sampleRate;
+
+	#stats = new Signal<AudioStats | undefined>(undefined);
+	readonly stats: Getter<AudioStats | undefined> = this.#stats;
 
 	catalog = new Signal<Catalog.Audio | undefined>(undefined);
 	config = new Signal<Catalog.AudioConfig | undefined>(undefined);
@@ -160,8 +167,11 @@ export class Source {
 		effect.cleanup(() => sub.close());
 
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
+		// Container defaults to "legacy" via Zod schema for backward compatibility
+		console.log(`[Audio Subscriber] Using container format: ${config.container}`);
 		const consumer = new Frame.Consumer(sub, {
 			latency: Math.max(this.latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
+			container: config.container,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -184,6 +194,10 @@ export class Source {
 			for (;;) {
 				const frame = await consumer.decode();
 				if (!frame) break;
+
+				this.#stats.update((stats) => ({
+					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
+				}));
 
 				const chunk = new EncodedAudioChunk({
 					type: frame.keyframe ? "key" : "delta",

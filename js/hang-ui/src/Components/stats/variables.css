@@ -1,0 +1,32 @@
+.stats {
+	--color-white: #ffffff;
+	--color-gray-light: #9ca3af;
+	--color-gray-light-alpha-25: rgba(255, 255, 255, 0.25);
+	--color-gray: #414141;
+	--color-gray-dark: #111111;
+	/* Network theme */
+	--color-blue-primary: #00dfff;
+	--color-blue-surface: #1b3243;
+	/* Video theme */
+	--color-purple-primary: #a855f7;
+	--color-purple-surface: #31144a;
+	/* Audio theme */
+	--color-green-primary: #65ee2e;
+	--color-green-surface: #3d4928;
+	/* Buffer theme */
+	--color-orange-primary: #ff9900;
+	--color-orange-surface: #4d301b;
+	--color-black-alpha-85: rgba(0, 0, 0, 0.85);
+	--color-black: #000000;
+
+	/* extra small */
+	--spacing-xs: 4px;
+	/* small */
+	--spacing-sm: 8px;
+	/* medium */
+	--spacing-md: 12px;
+	/* large */
+	--spacing-lg: 16px;
+	/* extra large */
+	--spacing-xl: 24px;
+}

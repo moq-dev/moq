@@ -2,11 +2,19 @@ import { z } from "zod";
 
 /**
  * Supported JWT algorithms.
- *
- * We currently only support HMAC algorithms since the relay can fetch any resource it wants;
- * it doesn't need to forge tokens.
- *
- * TODO: Support public key crypto at some point.
  */
-export const AlgorithmSchema = z.enum(["HS256", "HS384", "HS512"]);
+export const AlgorithmSchema = z.enum([
+	"HS256",
+	"HS384",
+	"HS512",
+	"ES256",
+	"ES384",
+	"RS256",
+	"RS384",
+	"RS512",
+	"PS256",
+	"PS384",
+	"PS512",
+	"EdDSA",
+]);
 export type Algorithm = z.infer<typeof AlgorithmSchema>;

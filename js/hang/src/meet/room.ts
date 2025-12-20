@@ -1,4 +1,4 @@
-import { Path } from "@moq/lite";
+import type { Path } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import { type Moq, type Publish, Watch } from "..";
 

@@ -267,14 +267,14 @@ impl From<moq_lite::TrackConsumer> for CatalogConsumer {
 
 #[cfg(test)]
 mod test {
+	use std::collections::BTreeMap;
+
 	use crate::catalog::{AudioCodec::Opus, AudioConfig, VideoConfig, H264};
 
 	use super::*;
 
 	#[test]
 	fn simple() {
-		use std::collections::HashMap;
-
 		let mut encoded = r#"{
 			"video": {
 				"renditions": {
@@ -304,7 +304,7 @@ mod test {
 
 		encoded.retain(|c| !c.is_whitespace());
 
-		let mut video_renditions = HashMap::new();
+		let mut video_renditions = BTreeMap::new();
 		video_renditions.insert(
 			"video".to_string(),
 			VideoConfig {
@@ -326,7 +326,7 @@ mod test {
 			},
 		);
 
-		let mut audio_renditions = HashMap::new();
+		let mut audio_renditions = BTreeMap::new();
 		audio_renditions.insert(
 			"audio".to_string(),
 			AudioConfig {

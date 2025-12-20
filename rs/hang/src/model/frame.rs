@@ -1,7 +1,8 @@
-use bytes::Bytes;
 use derive_more::Debug;
 
 use crate::Timestamp;
+
+pub use buf_list::BufList;
 
 /// A media frame with a timestamp and codec-specific payload.
 ///
@@ -24,10 +25,10 @@ pub struct Frame {
 	/// It's necessary to periodically encode keyframes to support new subscribers.
 	pub keyframe: bool,
 
-	/// The encoded media data for this frame.
+	/// The encoded media data for this frame, split into chunks.
 	///
 	/// The format depends on the codec being used (H.264, AV1, Opus, etc.).
 	/// The debug implementation shows only the payload length for brevity.
-	#[debug("{} bytes", payload.len())]
-	pub payload: Bytes,
+	#[debug("{} bytes", payload.num_bytes())]
+	pub payload: BufList,
 }

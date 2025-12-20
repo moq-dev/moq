@@ -11,9 +11,8 @@
 	},
 	"scripts": {
 		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
-		"check": "tsc --noEmit && biome check && madge --circular --extensions ts,tsx src",
+		"check": "tsc --noEmit && madge --circular --extensions ts,tsx src",
 		"test": "bun test",
-		"fix": "biome check --fix",
 		"release": "bun ../scripts/release.ts"
 	},
 	"dependencies": {
@@ -31,7 +30,6 @@
 		"vite-plugin-html": "^3.2.2",
 		"rimraf": "^6.0.1",
 		"@types/deno": "^2.3.0",
-		"@biomejs/biome": "^2.2.2",
 		"typescript": "^5.9.2",
 		"madge": "^8.0.0"
 	}

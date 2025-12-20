@@ -359,11 +359,18 @@ impl Key {
 					_ => bail!("Invalid curve for EC key"),
 				}
 			}
-			KeyType::OKP { ref curve, ref d, .. } => {
+			KeyType::OKP {
+				ref curve,
+				ref d,
+				ref x,
+			} => {
 				let d = d.as_ref().context("Missing private key")?;
 
+				let key_pair =
+					aws_lc_rs::signature::Ed25519KeyPair::from_seed_and_public_key(d.as_slice(), x.as_slice())?;
+
 				match curve {
-					EllipticCurve::Ed25519 => EncodingKey::from_ed_der(d.as_slice()),
+					EllipticCurve::Ed25519 => EncodingKey::from_ed_der(key_pair.to_pkcs8()?.as_ref()),
 					_ => bail!("Invalid curve for OKP key"),
 				}
 			}

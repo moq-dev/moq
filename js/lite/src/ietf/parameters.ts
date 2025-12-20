@@ -1,4 +1,4 @@
-import type { Reader, Writer } from "../stream";
+import type { Reader, Writer } from "../stream.ts";
 
 export const Parameter = {
 	MaxRequestId: 2n,

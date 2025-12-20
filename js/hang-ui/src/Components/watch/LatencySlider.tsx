@@ -1,16 +1,15 @@
-import { useContext } from "solid-js";
-import { WatchUIContext } from "./WatchUIContextProvider";
+import useWatchUIContext from "./useWatchUIContext";
 
 const MIN_RANGE = 0;
 const MAX_RANGE = 200_000;
 const RANGE_STEP = 100;
 
 export default function LatencySlider() {
-	const context = useContext(WatchUIContext);
+	const context = useWatchUIContext();
 	const onInputChange = (event: Event) => {
 		const target = event.currentTarget as HTMLInputElement;
 		const latency = parseFloat(target.value);
-		context?.setLatencyValue(latency);
+		context.setLatencyValue(latency);
 	};
 
 	return (
@@ -26,9 +25,9 @@ export default function LatencySlider() {
 				min={MIN_RANGE}
 				max={MAX_RANGE}
 				step={RANGE_STEP}
-				value={context?.latency()}
+				value={context.latency()}
 			/>
-			<span>{typeof context?.latency() !== "undefined" ? `${Math.round(context?.latency())}ms` : ""}</span>
+			<span>{typeof context.latency() !== "undefined" ? `${Math.round(context.latency())}ms` : ""}</span>
 		</div>
 	);
 }

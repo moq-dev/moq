@@ -1,0 +1,24 @@
+{
+	"name": "moq",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"doc",
+		"js/lite",
+		"js/clock",
+		"js/token",
+		"js/hang",
+		"js/hang-ui",
+		"js/hang-demo",
+		"js/signals"
+	],
+	"scripts": {
+		"check": "bun run --filter='*' check",
+		"fix": "bun run --filter='*' fix"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.3.8",
+		"concurrently": "^9.2.1"
+	}
+}

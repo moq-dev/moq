@@ -1,9 +1,11 @@
 mod aac;
-mod annexb;
+mod avc3;
+mod decoder;
 mod fmp4;
-mod generic;
+mod hls;
 
 pub use aac::*;
-pub use annexb::*;
+pub use avc3::*;
+pub use decoder::*;
 pub use fmp4::*;
-pub use generic::*;
+pub use hls::*;

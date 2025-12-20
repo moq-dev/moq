@@ -1,6 +1,6 @@
-import * as Moq from "@moq/lite";
+import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
-import { Effect, Getter, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
 
 export interface PeersProps {

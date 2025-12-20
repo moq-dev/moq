@@ -11,7 +11,7 @@ cargo build --release
 ```
 
 This will:
-- Build the shared library (`libmoq.dylib` on macOS, `libmoq.so` on Linux, `moq.dll` on Windows)
+- Build the static library (`libmoq.a` on Unix-like systems, `moq.lib` on Windows)
 - Generate the C header file at `target/include/moq.h`
 - Generate the pkg-config file at `target/moq.pc`
 

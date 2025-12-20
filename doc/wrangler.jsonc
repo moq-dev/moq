@@ -1,0 +1,10 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "moq-doc",
+	"compatibility_date": "2025-12-13",
+	"pages_build_output_dir": ".vitepress/dist"
+	// Deployment is done via `wrangler pages deploy`
+	// Example: wrangler pages deploy .vitepress/dist --project-name=moq-docs
+	// Custom domain (configured separately via CLI or dashboard):
+	// wrangler pages domain add doc.moq.dev --project-name=moq-docs
+}

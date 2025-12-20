@@ -13,8 +13,7 @@
 	},
 	"scripts": {
 		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
-		"check": "tsc --noEmit && biome check",
-		"fix": "biome check --fix",
+		"check": "tsc --noEmit",
 		"release": "bun ../scripts/release.ts"
 	},
 	"dependencies": {
@@ -22,7 +21,6 @@
 	},
 	"devDependencies": {
 		"typescript": "^5.9.2",
-		"@biomejs/biome": "^2.2.2",
 		"rimraf": "^6.0.1",
 		"@types/react": "^19.1.8",
 		"solid-js": "^1.9.7"

@@ -1,5 +1,5 @@
-import { Effect, Getter, Signal } from "@moq/signals";
-import * as Catalog from "../catalog";
+import { Effect, type Getter, Signal } from "@moq/signals";
+import type * as Catalog from "../catalog";
 
 export interface Props {
 	enabled?: boolean | Signal<boolean>;

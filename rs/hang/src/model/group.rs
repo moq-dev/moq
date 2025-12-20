@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use crate::model::{Frame, Timestamp};
 use crate::Result;
 
+use buf_list::BufList;
 use moq_lite::coding::Decode;
 use moq_lite::lite;
 
@@ -60,10 +61,12 @@ impl GroupConsumer {
 	}
 
 	async fn read_unbuffered(&mut self) -> Result<Option<Frame>> {
-		let mut payload = match self.group.read_frame().await? {
-			Some(payload) => payload,
+		let payload = match self.group.next_frame().await? {
+			Some(mut frame) => frame.read_chunks().await?,
 			None => return Ok(None),
 		};
+
+		let mut payload = BufList::from_iter(payload);
 
 		let micros = u64::decode(&mut payload, lite::Version::Draft02)?;
 		let timestamp = Timestamp::from_micros(micros)?;

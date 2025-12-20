@@ -5,22 +5,22 @@ import { createContext, createEffect, createSignal } from "solid-js";
 type PublishStatus = "no-url" | "disconnected" | "connecting" | "live" | "audio-only" | "video-only" | "select-source";
 
 type PublishUIContextValue = {
-	hangPublish: () => HangPublish | undefined;
+	hangPublish: HangPublish;
 	cameraDevices: () => MediaDeviceInfo[];
 	microphoneDevices: () => MediaDeviceInfo[];
 	publishStatus: () => PublishStatus;
 	microphoneActive: () => boolean;
-	cameraActive?: () => boolean;
-	screenActive?: () => boolean;
-	fileActive?: () => boolean;
-	nothingActive?: () => boolean;
+	cameraActive: () => boolean;
+	screenActive: () => boolean;
+	fileActive: () => boolean;
+	nothingActive: () => boolean;
 	selectedCameraSource?: () => MediaDeviceInfo["deviceId"] | undefined;
 	selectedMicrophoneSource?: () => MediaDeviceInfo["deviceId"] | undefined;
 	setFile: (file: File) => void;
 };
 
 type PublishUIContextProviderProps = {
-	hangPublish: () => HangPublish | undefined;
+	hangPublish: HangPublish;
 	children: JSX.Element;
 };
 
@@ -41,12 +41,9 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 	const [publishStatus, setPublishStatus] = createSignal<PublishStatus>("no-url");
 
 	const setFile = (file: File) => {
-		const hangPublishEl = props.hangPublish();
-		if (!hangPublishEl) return;
-
-		hangPublishEl.source.set(file);
-		hangPublishEl.invisible.set(false);
-		hangPublishEl.muted.set(false);
+		props.hangPublish.source.set(file);
+		props.hangPublish.invisible.set(false);
+		props.hangPublish.muted.set(false);
 	};
 
 	const value: PublishUIContextValue = {
@@ -65,8 +62,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 	};
 
 	createEffect(() => {
-		const publish = props.hangPublish();
-		if (!publish) return;
+		const publish = props.hangPublish;
 
 		publish.signals.effect((effect) => {
 			const clearCameraDevices = () => setCameraMediaDevices([]);

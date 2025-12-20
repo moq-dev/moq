@@ -1,6 +1,8 @@
 export * from "./audio";
 export * from "./capabilities";
 export * from "./chat";
+export * from "./container";
+export { DEFAULT_CONTAINER } from "./container";
 export * from "./integers";
 export * from "./location";
 export * from "./preview";

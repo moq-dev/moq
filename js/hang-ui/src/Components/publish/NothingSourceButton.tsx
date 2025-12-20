@@ -1,15 +1,11 @@
-import { useContext } from "solid-js";
-import { PublishUIContext } from "./PublishUIContextProvider";
+import usePublishUIContext from "./usePublishUIContext";
 
 export default function NothingSourceButton() {
-	const context = useContext(PublishUIContext);
+	const context = usePublishUIContext();
 	const onClick = () => {
-		const hangPublishEl = context?.hangPublish();
-		if (!hangPublishEl) return;
-
-		hangPublishEl.source.set(undefined);
-		hangPublishEl.muted.set(true);
-		hangPublishEl.invisible.set(true);
+		context.hangPublish.source.set(undefined);
+		context.hangPublish.muted.set(true);
+		context.hangPublish.invisible.set(true);
 	};
 
 	return (
@@ -17,7 +13,7 @@ export default function NothingSourceButton() {
 			<button
 				type="button"
 				title="No Source"
-				class={`publishButton publishSourceButton ${context?.nothingActive?.() ? "active" : ""}`}
+				class={`publishButton publishSourceButton ${context.nothingActive() ? "active" : ""}`}
 				onClick={onClick}
 			>
 				🚫

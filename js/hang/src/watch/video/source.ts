@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/lite";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import { PRIORITY } from "../../publish/priority";
@@ -18,6 +18,9 @@ export type Target = {
 	// The desired size of the video in pixels.
 	pixels?: number;
 
+	// Optional manual override for the selected rendition name.
+	rendition?: string;
+
 	// TODO bitrate
 };
 
@@ -32,6 +35,12 @@ type SyncStatus = {
 	state: "ready" | "wait";
 	bufferDuration?: number;
 };
+
+export interface VideoStats {
+	frameCount: number;
+	timestamp: number;
+	bytesReceived: number;
+}
 
 // Only count it as buffering if we had to sleep for 200ms or more before rendering the next frame.
 // Unfortunately, this has to be quite high because of b-frames.
@@ -82,6 +91,9 @@ export class Source {
 
 	bufferStatus = new Signal<BufferStatus>({ state: "empty" });
 	syncStatus = new Signal<SyncStatus>({ state: "ready" });
+
+	#stats = new Signal<VideoStats | undefined>(undefined);
+	readonly stats: Getter<VideoStats | undefined> = this.#stats;
 
 	#signals = new Effect();
 
@@ -139,7 +151,8 @@ export class Source {
 		const supported = effect.get(this.#supported);
 		const target = effect.get(this.target);
 
-		const selected = this.#selectRendition(supported, target);
+		const manual = target?.rendition;
+		const selected = manual && manual in supported ? manual : this.#selectRendition(supported, target);
 		if (!selected) return;
 
 		effect.set(this.#selected, selected);
@@ -183,8 +196,11 @@ export class Source {
 		effect.cleanup(() => sub.close());
 
 		// Create consumer that reorders groups/frames up to the provided latency.
+		// Container defaults to "legacy" via Zod schema for backward compatibility
+		console.log(`[Video Subscriber] Using container format: ${config.container}`);
 		const consumer = new Frame.Consumer(sub, {
 			latency: this.latency,
+			container: config.container,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -299,6 +315,13 @@ export class Source {
 					data: next.data,
 					timestamp: next.timestamp,
 				});
+
+				// Track both frame count and bytes received for stats in the UI
+				this.#stats.update((current) => ({
+					frameCount: (current?.frameCount ?? 0) + 1,
+					timestamp: next.timestamp,
+					bytesReceived: (current?.bytesReceived ?? 0) + next.data.byteLength,
+				}));
 
 				decoder.decode(chunk);
 			}

@@ -54,7 +54,7 @@ test("Subscribe: round trip", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, Subscribe.Subscribe.decode);
 
-	assert.strictEqual(decoded.requestId, 1);
+	assert.strictEqual(decoded.requestId, 1n);
 	assert.strictEqual(decoded.trackNamespace, "test");
 	assert.strictEqual(decoded.trackName, "video");
 	assert.strictEqual(decoded.subscriberPriority, 128);
@@ -75,8 +75,8 @@ test("SubscribeOk: without largest", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, Subscribe.SubscribeOk.decode);
 
-	assert.strictEqual(decoded.requestId, 42);
-	assert.strictEqual(decoded.trackAlias, 43);
+	assert.strictEqual(decoded.requestId, 42n);
+	assert.strictEqual(decoded.trackAlias, 43n);
 });
 
 test("SubscribeError: round trip", async () => {
@@ -85,7 +85,7 @@ test("SubscribeError: round trip", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, Subscribe.SubscribeError.decode);
 
-	assert.strictEqual(decoded.requestId, 123);
+	assert.strictEqual(decoded.requestId, 123n);
 	assert.strictEqual(decoded.errorCode, 500);
 	assert.strictEqual(decoded.reasonPhrase, "Not found");
 });
@@ -96,7 +96,7 @@ test("Unsubscribe: round trip", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, Subscribe.Unsubscribe.decode);
 
-	assert.strictEqual(decoded.requestId, 999);
+	assert.strictEqual(decoded.requestId, 999n);
 });
 
 test("PublishDone: basic test", async () => {
@@ -105,7 +105,7 @@ test("PublishDone: basic test", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, PublishDone.decode);
 
-	assert.strictEqual(decoded.requestId, 10);
+	assert.strictEqual(decoded.requestId, 10n);
 	assert.strictEqual(decoded.statusCode, 0);
 	assert.strictEqual(decoded.reasonPhrase, "complete");
 });
@@ -116,7 +116,7 @@ test("PublishDone: with error", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, PublishDone.decode);
 
-	assert.strictEqual(decoded.requestId, 10);
+	assert.strictEqual(decoded.requestId, 10n);
 	assert.strictEqual(decoded.statusCode, 1);
 	assert.strictEqual(decoded.reasonPhrase, "error");
 });
@@ -128,7 +128,7 @@ test("PublishNamespace: round trip", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, Announce.PublishNamespace.decode);
 
-	assert.strictEqual(decoded.requestId, 1);
+	assert.strictEqual(decoded.requestId, 1n);
 	assert.strictEqual(decoded.trackNamespace, "test/broadcast");
 });
 
@@ -138,7 +138,7 @@ test("PublishNamespaceOk: round trip", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, Announce.PublishNamespaceOk.decode);
 
-	assert.strictEqual(decoded.requestId, 2);
+	assert.strictEqual(decoded.requestId, 2n);
 });
 
 test("PublishNamespaceError: round trip", async () => {
@@ -147,7 +147,7 @@ test("PublishNamespaceError: round trip", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, Announce.PublishNamespaceError.decode);
 
-	assert.strictEqual(decoded.requestId, 3);
+	assert.strictEqual(decoded.requestId, 3n);
 	assert.strictEqual(decoded.errorCode, 404);
 	assert.strictEqual(decoded.reasonPhrase, "Unauthorized");
 });
@@ -264,6 +264,8 @@ test("SubscribeError: unicode strings", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, Subscribe.SubscribeError.decode);
 
+	assert.strictEqual(decoded.requestId, 1n);
+	assert.strictEqual(decoded.errorCode, 400);
 	assert.strictEqual(decoded.reasonPhrase, "Error: 错误 🚫");
 });
 
@@ -273,5 +275,6 @@ test("PublishNamespace: unicode namespace", async () => {
 	const encoded = await encodeMessage(msg);
 	const decoded = await decodeMessage(encoded, Announce.PublishNamespace.decode);
 
+	assert.strictEqual(decoded.requestId, 1n);
 	assert.strictEqual(decoded.trackNamespace, "会议/房间");
 });

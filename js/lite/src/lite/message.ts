@@ -1,4 +1,4 @@
-import { Reader, Writer } from "../stream";
+import { Reader, Writer } from "../stream.ts";
 
 export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
 	let scratch = new Uint8Array();

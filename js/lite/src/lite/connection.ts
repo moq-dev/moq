@@ -1,7 +1,7 @@
 import type { Announced } from "../announced.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
-import * as Path from "../path.js";
+import * as Path from "../path.ts";
 import { type Reader, Readers, Stream } from "../stream.ts";
 import { AnnounceInterest } from "./announce.ts";
 import { Group } from "./group.ts";

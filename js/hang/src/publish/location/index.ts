@@ -1,7 +1,7 @@
 import { Effect, Signal } from "@moq/signals";
-import { Catalog } from "../..";
-import { Peers, PeersProps } from "./peers";
-import { Window, WindowProps } from "./window";
+import type { Catalog } from "../..";
+import { Peers, type PeersProps } from "./peers";
+import { Window, type WindowProps } from "./window";
 
 export * from "./peers";
 export * from "./window";

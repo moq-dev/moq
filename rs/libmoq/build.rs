@@ -24,19 +24,31 @@ fn main() {
 	let pc_in = PathBuf::from(&crate_dir).join(format!("{}.pc.in", LIB_NAME));
 	let pc_out = target_dir.join(format!("{}.pc", LIB_NAME));
 	if let Ok(template) = fs::read_to_string(&pc_in) {
+		let target = env::var("TARGET").unwrap();
+		let libs_private = if target.contains("apple") {
+			"-framework CoreFoundation -framework Security"
+		} else if target.contains("windows") {
+			"-lws2_32 -lbcrypt -luserenv -lntdll"
+		} else {
+			"-ldl -lm -lpthread"
+		};
+
 		let content = template
-			.replace("@PREFIX@", "/usr/local")
-			.replace("@VERSION@", &version);
+			.replace("@VERSION@", &version)
+			.replace("@LIBS_PRIVATE@", libs_private);
 		fs::write(&pc_out, content).expect("Failed to write pkg-config file");
 	}
 }
 
 fn target_dir() -> PathBuf {
-	// Always use the workspace target directory (rs/target/)
-	// regardless of whether --target is used or not.
-	// CARGO_MANIFEST_DIR is rs/libmoq/, so go up one level to rs/
-	PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-		.parent()
-		.expect("Failed to get parent of CARGO_MANIFEST_DIR")
-		.join("target")
+	// OUT_DIR is always set by Cargo to something like:
+	// target/{debug|release}/build/{crate}-{hash}/out
+	// Go up 4 levels to get to target/
+	PathBuf::from(env::var("OUT_DIR").unwrap())
+		.parent() // build/{crate}-{hash}
+		.and_then(|p| p.parent()) // build/
+		.and_then(|p| p.parent()) // {debug|release}/
+		.and_then(|p| p.parent()) // target/
+		.expect("Failed to get target directory from OUT_DIR")
+		.to_path_buf()
 }

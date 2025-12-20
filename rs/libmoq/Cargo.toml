@@ -1,11 +1,11 @@
 [package]
 name = "libmoq"
-description = "Media over QUIC, C Library"
+description = "Media over QUIC, C bindings"
 authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.1.0"
+version = "0.2.2"
 edition = "2021"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
@@ -13,12 +13,11 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [lib]
 name = "moq"
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["staticlib"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-bytes = "1.10"
 hang = { workspace = true }
 moq-lite = { workspace = true, features = ["serde"] }
 moq-native = { workspace = true }

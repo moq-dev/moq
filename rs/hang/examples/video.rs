@@ -76,7 +76,7 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 
 	// Create a map of video renditions
 	// Multiple renditions allow the viewer to choose based on their capabilities
-	let mut renditions = std::collections::HashMap::new();
+	let mut renditions = std::collections::BTreeMap::new();
 	renditions.insert(video_track.name.clone(), video_config);
 
 	// Create the video catalog entry with the renditions
@@ -120,7 +120,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	track.write(hang::Frame {
 		keyframe: true,
 		timestamp: hang::Timestamp::from_secs(1).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data"),
+		payload: Bytes::from_static(b"keyframe NAL data").into(),
 	})?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -128,7 +128,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	track.write(hang::Frame {
 		keyframe: false,
 		timestamp: hang::Timestamp::from_secs(2).unwrap(),
-		payload: Bytes::from_static(b"delta NAL data"),
+		payload: Bytes::from_static(b"delta NAL data").into(),
 	})?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -138,7 +138,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	track.write(hang::Frame {
 		keyframe: true,
 		timestamp: hang::Timestamp::from_secs(3).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data"),
+		payload: Bytes::from_static(b"keyframe NAL data").into(),
 	})?;
 
 	// Sleep before exiting and closing the broadcast.

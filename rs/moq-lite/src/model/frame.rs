@@ -133,7 +133,7 @@ pub struct FrameConsumer {
 }
 
 impl FrameConsumer {
-	// Return the next chunk.
+	/// Return the next chunk.
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
 		loop {
 			{
@@ -157,7 +157,28 @@ impl FrameConsumer {
 		}
 	}
 
-	// Return all of the remaining chunks concatenated together.
+	/// Read all of the remaining chunks into a vector.
+	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>> {
+		// Wait until the writer is done before even attempting to read.
+		// That way this function can be cancelled without consuming half of the frame.
+		let state = match self.state.wait_for(|state| state.closed.is_some()).await {
+			Ok(state) => {
+				if let Some(Err(err)) = &state.closed {
+					return Err(err.clone());
+				}
+				state
+			}
+			Err(_) => return Err(Error::Cancel),
+		};
+
+		// Get all of the remaining chunks.
+		let chunks = state.chunks[self.index..].to_vec();
+		self.index = state.chunks.len();
+
+		Ok(chunks)
+	}
+
+	/// Return all of the remaining chunks concatenated together.
 	pub async fn read_all(&mut self) -> Result<Bytes> {
 		// Wait until the writer is done before even attempting to read.
 		// That way this function can be cancelled without consuming half of the frame.

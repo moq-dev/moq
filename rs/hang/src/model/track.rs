@@ -45,6 +45,8 @@ impl TrackProducer {
 	/// The timestamp is usually monotonically increasing, but it depends on the encoding.
 	/// For example, H.264 B-frames will introduce jitter and reordering.
 	pub fn write(&mut self, frame: Frame) -> Result<(), Error> {
+		tracing::trace!(?frame, "write frame");
+
 		let mut header = BytesMut::new();
 		frame.timestamp.as_micros().encode(&mut header, lite::Version::Draft02);
 
@@ -71,10 +73,13 @@ impl TrackProducer {
 			None => return Err(Error::MissingKeyframe),
 		};
 
-		let size = header.len() + frame.payload.len();
+		let size = header.len() + frame.payload.remaining();
+
 		let mut chunked = group.create_frame(size.into());
 		chunked.write_chunk(header.freeze());
-		chunked.write_chunk(frame.payload);
+		for chunk in frame.payload {
+			chunked.write_chunk(chunk);
+		}
 		chunked.close();
 
 		self.group.replace(group);
@@ -86,8 +91,8 @@ impl TrackProducer {
 	///
 	/// Multiple consumers can be created from the same producer, each receiving
 	/// a copy of all data written to the track.
-	pub fn consume(&self) -> TrackConsumer {
-		TrackConsumer::new(self.inner.consume())
+	pub fn consume(&self, max_latency: std::time::Duration) -> TrackConsumer {
+		TrackConsumer::new(self.inner.consume(), max_latency)
 	}
 }
 
@@ -127,18 +132,18 @@ pub struct TrackConsumer {
 	max_timestamp: Timestamp,
 
 	// The maximum buffer size before skipping a group.
-	latency: std::time::Duration,
+	max_latency: std::time::Duration,
 }
 
 impl TrackConsumer {
 	/// Create a new TrackConsumer wrapping the given moq-lite consumer.
-	pub fn new(inner: moq_lite::TrackConsumer) -> Self {
+	pub fn new(inner: moq_lite::TrackConsumer, max_latency: std::time::Duration) -> Self {
 		Self {
 			inner,
 			current: None,
 			pending: VecDeque::new(),
 			max_timestamp: Timestamp::default(),
-			latency: std::time::Duration::ZERO,
+			max_latency,
 		}
 	}
 
@@ -150,7 +155,7 @@ impl TrackConsumer {
 	///
 	/// Returns `None` when the track has ended.
 	pub async fn read_frame(&mut self) -> Result<Option<Frame>, Error> {
-		let latency = self.latency.try_into()?;
+		let latency = self.max_latency.try_into()?;
 		loop {
 			let cutoff = self
 				.max_timestamp
@@ -173,6 +178,7 @@ impl TrackConsumer {
 					match res {
 						// Got the next frame.
 						Ok(Some(frame)) => {
+							tracing::trace!(?frame, "read frame");
 							self.max_timestamp = frame.timestamp;
 							return Ok(Some(frame));
 						}
@@ -203,7 +209,7 @@ impl TrackConsumer {
 				},
 				Some((index, timestamp)) = buffering.next() => {
 					if self.current.is_some() {
-						tracing::debug!(old = ?self.max_timestamp, new = ?timestamp, buffer = ?self.latency, "skipping slow group");
+						tracing::debug!(old = ?self.max_timestamp, new = ?timestamp, buffer = ?self.max_latency, "skipping slow group");
 					}
 
 					drop(buffering);
@@ -222,20 +228,14 @@ impl TrackConsumer {
 
 	/// Set the maximum latency tolerance for this consumer.
 	///
-	/// Groups with timestamps older than `max_timestamp - latency` will be skipped.
-	pub fn set_latency(&mut self, max: std::time::Duration) {
-		self.latency = max;
+	/// Groups with timestamps older than `max_timestamp - max_latency` will be skipped.
+	pub fn set_max_latency(&mut self, max: std::time::Duration) {
+		self.max_latency = max;
 	}
 
 	/// Wait until the track is closed.
 	pub async fn closed(&self) -> Result<(), Error> {
 		Ok(self.inner.closed().await?)
-	}
-}
-
-impl From<moq_lite::TrackConsumer> for TrackConsumer {
-	fn from(inner: moq_lite::TrackConsumer) -> Self {
-		Self::new(inner)
 	}
 }
 
