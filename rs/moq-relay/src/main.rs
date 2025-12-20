@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
 		WebState {
 			auth: auth.clone(),
 			cluster: cluster.clone(),
-			fingerprints: server.fingerprints(),
+			tls_info: server.tls_info(),
 			conn_id: Default::default(),
 		},
 		config.web,

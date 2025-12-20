@@ -77,7 +77,7 @@ pub struct HttpsConfig {
 pub struct WebState {
 	pub auth: Auth,
 	pub cluster: Cluster,
-	pub fingerprints: Arc<std::sync::RwLock<Vec<String>>>,
+	pub tls_info: Arc<std::sync::RwLock<moq_native::TlsInfo>>,
 	pub conn_id: AtomicU64,
 }
 
@@ -161,9 +161,10 @@ async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
 	// Get the first certificate's fingerprint.
 	// TODO serve all of them so we can support multiple signature algorithms.
 	state
-		.fingerprints
+		.tls_info
 		.read()
-		.expect("fingerprints lock poisoned")
+		.expect("tls_info lock poisoned")
+		.fingerprints
 		.first()
 		.expect("missing certificate")
 		.clone()

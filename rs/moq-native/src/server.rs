@@ -162,8 +162,8 @@ impl Server {
 	}
 
 	// Return the SHA256 fingerprints of all our certificates.
-	pub fn fingerprints(&self) -> Arc<RwLock<Vec<String>>> {
-		self.certs.fingerprints.clone()
+	pub fn tls_info(&self) -> Arc<RwLock<TlsInfo>> {
+		self.certs.info.clone()
 	}
 
 	/// Returns the next partially established QUIC or WebTransport session.
@@ -313,17 +313,24 @@ impl QuicRequest {
 }
 
 #[derive(Debug)]
+pub struct TlsInfo {
+	pub(crate) certs: Vec<Arc<CertifiedKey>>,
+	pub fingerprints: Vec<String>,
+}
+
+#[derive(Debug)]
 struct ServeCerts {
-	certs: RwLock<Vec<Arc<CertifiedKey>>>,
-	fingerprints: Arc<RwLock<Vec<String>>>,
+	info: Arc<RwLock<TlsInfo>>,
 	provider: crypto::Provider,
 }
 
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
-			certs: RwLock::new(Vec::new()),
-			fingerprints: Arc::new(RwLock::new(Vec::new())),
+			info: Arc::new(RwLock::new(TlsInfo {
+				certs: Vec::new(),
+				fingerprints: Vec::new(),
+			})),
 			provider,
 		}
 	}
@@ -403,15 +410,7 @@ impl ServeCerts {
 
 	// Replace the certificates
 	pub fn set_certs(&self, certs: Vec<Arc<CertifiedKey>>) {
-		*self.certs.write().expect("certs write lock poisened") = certs;
-		self.update_fingerprints();
-	}
-
-	fn update_fingerprints(&self) {
-		let fingerprints = self
-			.certs
-			.read()
-			.unwrap()
+		let fingerprints = certs
 			.iter()
 			.map(|ck| {
 				let fingerprint = crate::crypto::sha256(&self.provider, ck.cert[0].as_ref());
@@ -419,7 +418,9 @@ impl ServeCerts {
 			})
 			.collect();
 
-		*self.fingerprints.write().expect("fingerprints write lock poisened") = fingerprints;
+		let mut info = self.info.write().expect("info write lock poisoned");
+		info.certs = certs;
+		info.fingerprints = fingerprints;
 	}
 
 	// Return the best certificate for the given ClientHello.
@@ -427,7 +428,7 @@ impl ServeCerts {
 		let server_name = client_hello.server_name()?;
 		let dns_name = rustls::pki_types::ServerName::try_from(server_name).ok()?;
 
-		for ck in self.certs.read().expect("certs read lock poisoned").iter() {
+		for ck in self.info.read().expect("info read lock poisoned").certs.iter() {
 			let leaf: webpki::EndEntityCert = ck
 				.end_entity_cert()
 				.expect("missing certificate")
@@ -453,6 +454,11 @@ impl ResolvesServerCert for ServeCerts {
 		// We do our best and return the first certificate.
 		tracing::warn!(server_name = ?client_hello.server_name(), "no SNI certificate found");
 
-		self.certs.read().expect("certs read lock poisoned").first().cloned()
+		self.info
+			.read()
+			.expect("info read lock poisoned")
+			.certs
+			.first()
+			.cloned()
 	}
 }
