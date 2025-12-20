@@ -391,6 +391,5 @@ serve-hls name port="8000":
 	cd "$OUT_DIR" && python3 -m http.server {{port}}
 
 # Serve the documentation locally.
-# NOTE: `just doc/dev` is the same result.
-docs:
-	cd doc && just dev
+doc:
+	cd doc && bun run dev
