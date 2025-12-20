@@ -10,4 +10,4 @@ build:
 
 # Deploy documentation to Cloudflare Pages
 deploy: build
-	bun run deploy
+	bun wrangler pages deploy .vitepress/dist --project-name=moq-doc

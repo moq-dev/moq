@@ -32,6 +32,8 @@ type WatchUIContextValues = {
 	availableRenditions: () => Rendition[];
 	activeRendition: () => string | undefined;
 	setActiveRendition: (name: string | undefined) => void;
+	isStatsPanelVisible: () => boolean;
+	setIsStatsPanelVisible: (visible: boolean) => void;
 };
 
 export const WatchUIContext = createContext<WatchUIContextValues>();
@@ -45,6 +47,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const [latency, setLatency] = createSignal<number>(0);
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
 	const [activeRendition, setActiveRendition] = createSignal<string | undefined>(undefined);
+	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
 
 	const togglePlayback = () => {
 		props.hangWatch.paused.set(!props.hangWatch.paused.get());
@@ -84,6 +87,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		availableRenditions,
 		activeRendition,
 		setActiveRendition: setActiveRenditionValue,
+		isStatsPanelVisible,
+		setIsStatsPanelVisible,
 	};
 
 	createEffect(() => {

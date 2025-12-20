@@ -11,7 +11,8 @@
 //! - **Catalog**: A list of available tracks and their metadata.
 //! - **Codec support**: Integration with common audio/video codecs
 //! - **Container**: A simple timestamped container format.
-//! - **CMAF Import**: Convert a fMP4 file into a hang broadcast.
+//! - **fMP4 Import**: Convert a fMP4 file into a hang broadcast.
+//! - **HLS Import**: Reusable HLS/fMP4 ingest logic via [`hls`].
 //!
 mod error;
 

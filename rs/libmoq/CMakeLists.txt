@@ -6,14 +6,10 @@ option(BUILD_RUST_LIB "Build the Rust library using cargo" ON)
 # Determine library extension based on platform
 if(WIN32)
     set(LIB_PREFIX "")
-    set(LIB_SUFFIX ".dll")
-    set(IMPORT_SUFFIX ".dll.lib")
-elseif(APPLE)
-    set(LIB_PREFIX "lib")
-    set(LIB_SUFFIX ".dylib")
+    set(LIB_SUFFIX ".lib")
 else()
     set(LIB_PREFIX "lib")
-    set(LIB_SUFFIX ".so")
+    set(LIB_SUFFIX ".a")
 endif()
 
 if(BUILD_RUST_LIB)
@@ -48,17 +44,16 @@ endif()
 file(MAKE_DIRECTORY ${RUST_DIR})
 file(MAKE_DIRECTORY ${RUST_TARGET_DIR}/include)
 
-# Create imported library target
-add_library(moq SHARED IMPORTED GLOBAL)
-set_target_properties(moq PROPERTIES
-    IMPORTED_LOCATION ${RUST_LIB}
-    INTERFACE_INCLUDE_DIRECTORIES ${RUST_TARGET_DIR}/include
-)
+# Create interface library target that wraps the Rust static library
+add_library(moq INTERFACE)
+target_include_directories(moq INTERFACE ${RUST_TARGET_DIR}/include)
 
-if(WIN32)
-    set_target_properties(moq PROPERTIES
-        IMPORTED_IMPLIB "${RUST_DIR}/moq${IMPORT_SUFFIX}"
-    )
+# Force absolute path to be used in linker command
+target_link_options(moq INTERFACE "$<LINK_ONLY:${RUST_LIB}>")
+
+# Link required system frameworks on macOS
+if(APPLE)
+    target_link_options(moq INTERFACE "LINKER:-framework,CoreFoundation" "LINKER:-framework,Security")
 endif()
 
 if(BUILD_RUST_LIB)
@@ -68,6 +63,7 @@ endif()
 if(PROJECT_IS_TOP_LEVEL)
     include(GNUInstallDirs)
 
+    # Install header and library files
     install(FILES ${RUST_HEADER}
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
@@ -76,25 +72,14 @@ if(PROJECT_IS_TOP_LEVEL)
         DESTINATION ${CMAKE_INSTALL_LIBDIR}
     )
 
-    install(TARGETS moq
-        EXPORT moq-targets
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    )
-
-    install(EXPORT moq-targets
-        FILE moq-targets.cmake
-        NAMESPACE moq::
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq
-    )
-
+    # Generate and install CMake package config files
     include(CMakePackageConfigHelpers)
 
     configure_package_config_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/moq-config.cmake.in
         ${CMAKE_CURRENT_BINARY_DIR}/moq-config.cmake
         INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/moq
+        PATH_VARS CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_INCLUDEDIR
     )
 
     write_basic_package_version_file(

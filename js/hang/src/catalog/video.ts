@@ -1,5 +1,5 @@
 import { z } from "zod";
-
+import { ContainerSchema, DEFAULT_CONTAINER } from "./container";
 import { u53Schema } from "./integers";
 
 // Backwards compatibility: old track schema
@@ -12,6 +12,10 @@ const TrackSchema = z.object({
 export const VideoConfigSchema = z.object({
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
+
+	// Container format for timestamp encoding
+	// Defaults to "legacy" when not specified in catalog (backward compatibility)
+	container: ContainerSchema.default(DEFAULT_CONTAINER),
 
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.

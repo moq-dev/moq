@@ -1,8 +1,47 @@
+use std::{fmt, str::FromStr};
+
 use bytes::Buf;
 
-use crate::{self as hang, import::Aac};
+use crate::{self as hang, import::Aac, Error};
 
 use super::{Avc3, Fmp4};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecoderFormat {
+	/// aka H264 with inline SPS/PPS
+	Avc3,
+	/// fMP4/CMAF container.
+	Fmp4,
+	/// Raw AAC frames (not ADTS).
+	Aac,
+}
+
+impl FromStr for DecoderFormat {
+	type Err = Error;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		match s {
+			"avc3" => Ok(DecoderFormat::Avc3),
+			"h264" | "annex-b" => {
+				tracing::warn!("format '{s}' is deprecated, use 'avc3' instead");
+				Ok(DecoderFormat::Avc3)
+			}
+			"fmp4" | "cmaf" => Ok(DecoderFormat::Fmp4),
+			"aac" => Ok(DecoderFormat::Aac),
+			_ => Err(Error::UnknownFormat(s.to_string())),
+		}
+	}
+}
+
+impl fmt::Display for DecoderFormat {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			DecoderFormat::Avc3 => write!(f, "avc3"),
+			DecoderFormat::Fmp4 => write!(f, "fmp4"),
+			DecoderFormat::Aac => write!(f, "aac"),
+		}
+	}
+}
 
 #[derive(derive_more::From)]
 enum DecoderKind {
@@ -19,31 +58,18 @@ enum DecoderKind {
 pub struct Decoder {
 	// The decoder for the given format.
 	decoder: DecoderKind,
-
-	// Used for decoders that don't have timestamps in the stream.
-	zero: Option<tokio::time::Instant>,
 }
 
 impl Decoder {
-	/// Create a new decoder with the given format, or `None` if the format is not supported.
-	pub fn new(broadcast: hang::BroadcastProducer, format: &str) -> Option<Self> {
+	/// Create a new decoder with the given format.
+	pub fn new(broadcast: hang::BroadcastProducer, format: DecoderFormat) -> Self {
 		let decoder = match format {
-			"avc3" => Avc3::new(broadcast).into(),
-			"h264" => {
-				// NOTE: avc1 is unsupported, because the SPS/PPS are out-of-band.
-				tracing::warn!("'h264' format is deprecated, use 'avc3' instead");
-				Avc3::new(broadcast).into()
-			}
-			"annex-b" => {
-				tracing::warn!("'annex-b' format is deprecated, use 'avc3' instead");
-				Avc3::new(broadcast).into()
-			}
-			"fmp4" | "cmaf" => Box::new(Fmp4::new(broadcast)).into(),
-			"aac" => Aac::new(broadcast).into(),
-			_ => return None,
+			DecoderFormat::Avc3 => Avc3::new(broadcast).into(),
+			DecoderFormat::Fmp4 => Box::new(Fmp4::new(broadcast)).into(),
+			DecoderFormat::Aac => Aac::new(broadcast).into(),
 		};
 
-		Some(Self { decoder, zero: None })
+		Self { decoder }
 	}
 
 	/// Initialize the decoder with the given buffer and populate the broadcast.
@@ -53,13 +79,8 @@ impl Decoder {
 	///
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		let mut pts = || {
-			self.zero = self.zero.or_else(|| Some(tokio::time::Instant::now()));
-			hang::Timestamp::from_micros(self.zero.unwrap().elapsed().as_micros() as u64)
-		};
-
 		match &mut self.decoder {
-			DecoderKind::Avc3(decoder) => decoder.decode_frame(buf, pts()?)?,
+			DecoderKind::Avc3(decoder) => decoder.initialize(buf)?,
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
 			DecoderKind::Aac(decoder) => decoder.initialize(buf)?,
 		}
@@ -83,18 +104,14 @@ impl Decoder {
 	///
 	/// If the buffer is not fully consumed, more data is needed.
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		// Make a function to compute the PTS timestamp only if needed by a decoder.
-		// We want to avoid calling Instant::now() if not needed.
-		let mut pts = || {
-			self.zero = self.zero.or_else(|| Some(tokio::time::Instant::now()));
-			hang::Timestamp::from_micros(self.zero.unwrap().elapsed().as_micros() as u64)
-		};
-
 		match &mut self.decoder {
-			DecoderKind::Avc3(decoder) => decoder.decode_stream(buf, pts()?),
-			DecoderKind::Fmp4(decoder) => decoder.decode(buf),
-			DecoderKind::Aac(decoder) => decoder.decode(buf, pts()?),
+			DecoderKind::Avc3(decoder) => decoder.decode_stream(buf, None)?,
+			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
+			// TODO Fix or make this more type safe.
+			DecoderKind::Aac(_) => anyhow::bail!("AAC does not support stream decoding"),
 		}
+
+		Ok(())
 	}
 
 	/// Flush the decoder at a frame boundary.
@@ -112,20 +129,10 @@ impl Decoder {
 		buf: &mut T,
 		pts: Option<hang::Timestamp>,
 	) -> anyhow::Result<()> {
-		// Make a function to compute the PTS timestamp only if needed by a decoder.
-		// We want to avoid calling Instant::now() if not needed.
-		let mut pts = || {
-			pts.or_else(|| {
-				self.zero = self.zero.or_else(|| Some(tokio::time::Instant::now()));
-				hang::Timestamp::from_micros(self.zero.unwrap().elapsed().as_micros() as u64).ok()
-			})
-			.ok_or(crate::TimestampOverflow)
-		};
-
 		match &mut self.decoder {
-			DecoderKind::Avc3(decoder) => decoder.decode_frame(buf, pts()?)?,
+			DecoderKind::Avc3(decoder) => decoder.decode_frame(buf, pts)?,
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
-			DecoderKind::Aac(decoder) => decoder.decode(buf, pts()?)?,
+			DecoderKind::Aac(decoder) => decoder.decode(buf, pts)?,
 		}
 
 		Ok(())

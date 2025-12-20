@@ -3,7 +3,10 @@ use std::{
 	sync::{atomic, Arc},
 };
 
-use crate::catalog::{Catalog, CatalogProducer};
+use crate::{
+	catalog::{Catalog, CatalogConsumer, CatalogProducer},
+	TrackConsumer,
+};
 
 #[derive(Clone)]
 pub struct BroadcastProducer {
@@ -29,6 +32,12 @@ impl BroadcastProducer {
 	pub fn track_name(&self, prefix: &str) -> String {
 		let track_id = self.track_id.fetch_add(1, atomic::Ordering::Relaxed);
 		format!("{}{}", prefix, track_id)
+	}
+}
+
+impl Default for BroadcastProducer {
+	fn default() -> Self {
+		Self::new(moq_lite::BroadcastProducer::default())
 	}
 }
 
@@ -58,4 +67,33 @@ impl From<BroadcastProducer> for moq_lite::BroadcastProducer {
 	}
 }
 
-// TODO BroadcastConsumer
+#[derive(Clone)]
+pub struct BroadcastConsumer {
+	pub inner: moq_lite::BroadcastConsumer,
+	pub catalog: CatalogConsumer,
+}
+
+impl BroadcastConsumer {
+	pub fn new(inner: moq_lite::BroadcastConsumer) -> Self {
+		let catalog = inner.subscribe_track(&Catalog::default_track()).into();
+		Self { inner, catalog }
+	}
+
+	pub fn subscribe(&self, track: &moq_lite::Track, latency: std::time::Duration) -> TrackConsumer {
+		TrackConsumer::new(self.inner.subscribe_track(track), latency)
+	}
+}
+
+impl Deref for BroadcastConsumer {
+	type Target = moq_lite::BroadcastConsumer;
+
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl From<moq_lite::BroadcastConsumer> for BroadcastConsumer {
+	fn from(inner: moq_lite::BroadcastConsumer) -> Self {
+		Self::new(inner)
+	}
+}

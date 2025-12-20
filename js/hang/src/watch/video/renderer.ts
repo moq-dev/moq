@@ -16,6 +16,9 @@ export class Renderer {
 	// Whether the video is paused.
 	paused: Signal<boolean>;
 
+	// Cache the last rendered frame to keep it visible when paused
+	#lastFrame?: VideoFrame;
+
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
 	#signals = new Effect();
 
@@ -41,8 +44,12 @@ export class Renderer {
 		const display = effect.get(this.source.display);
 		if (!display) return; // Keep current canvas size until we have new dimensions
 
-		canvas.width = display.width;
-		canvas.height = display.height;
+		// Only update if dimensions actually changed (setting canvas.width/height clears the canvas)
+		// TODO I thought the signals library would prevent this, but I'm too lazy to investigate.
+		if (canvas.width !== display.width || canvas.height !== display.height) {
+			canvas.width = display.width;
+			canvas.height = display.height;
+		}
 	}
 
 	// Detect when video should be downloaded.
@@ -76,12 +83,19 @@ export class Renderer {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
-		const paused = effect.get(this.paused);
-		if (paused) return;
+		let frame: VideoFrame | undefined;
 
-		const frame = effect.get(this.source.frame)?.clone();
+		const paused = effect.get(this.paused);
+		if (!paused) {
+			frame = effect.get(this.source.frame);
+			this.#lastFrame?.close();
+			this.#lastFrame = frame?.clone();
+		} else {
+			frame = this.#lastFrame?.clone();
+		}
 
 		// Request a callback to render the frame based on the monitor's refresh rate.
+		// Always render, even when paused (to show last frame)
 		let animate: number | undefined = requestAnimationFrame(() => {
 			this.#render(ctx, frame);
 			animate = undefined;
@@ -122,6 +136,9 @@ export class Renderer {
 
 	// Close the track and all associated resources.
 	close() {
+		// Clean up cached frame
+		this.#lastFrame?.close();
+		this.#lastFrame = undefined;
 		this.#signals.close();
 	}
 }

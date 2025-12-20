@@ -13,7 +13,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-hang = { version = "0.7", path = "rs/hang" }
+hang = { version = "0.9", path = "rs/hang" }
 moq-lite = { version = "0.10", path = "rs/moq-lite" }
 moq-native = { version = "0.10", path = "rs/moq-native" }
 moq-token = { version = "0.5", path = "rs/moq-token" }

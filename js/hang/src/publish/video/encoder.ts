@@ -1,7 +1,7 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
-import { u53 } from "../../catalog";
+import { DEFAULT_CONTAINER, u53 } from "../../catalog";
 import * as Frame from "../../frame";
 import * as Time from "../../time";
 import { isFirefox } from "../../util/hacks";
@@ -10,6 +10,7 @@ import type { Source } from "./types";
 export interface EncoderProps {
 	enabled?: boolean | Signal<boolean>;
 	config?: EncoderConfig | Signal<EncoderConfig | undefined>;
+	container?: Catalog.Container;
 }
 
 // TODO support signals?
@@ -39,6 +40,7 @@ export class Encoder {
 	enabled: Signal<boolean>;
 	source: Signal<Source | undefined>;
 	frame: Getter<VideoFrame | undefined>;
+	#container: Catalog.Container;
 
 	#catalog = new Signal<Catalog.VideoConfig | undefined>(undefined);
 	readonly catalog: Getter<Catalog.VideoConfig | undefined> = this.#catalog;
@@ -62,6 +64,7 @@ export class Encoder {
 		this.source = source;
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.config = Signal.from(props?.config);
+		this.#container = props?.container ?? DEFAULT_CONTAINER;
 
 		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runConfig.bind(this));
@@ -75,6 +78,8 @@ export class Encoder {
 		effect.set(this.active, true, false);
 
 		effect.spawn(async () => {
+			console.log(`[Video Publisher] Using container format: ${this.#container}`);
+
 			let group: Moq.Group | undefined;
 			effect.cleanup(() => group?.close());
 
@@ -90,7 +95,7 @@ export class Encoder {
 						throw new Error("no keyframe");
 					}
 
-					const buffer = Frame.encode(frame, frame.timestamp as Time.Micro);
+					const buffer = Frame.encode(frame, frame.timestamp as Time.Micro, this.#container);
 					group?.writeFrame(buffer);
 				},
 				error: (err: Error) => {
@@ -143,6 +148,7 @@ export class Encoder {
 			codedWidth: u53(config.width),
 			codedHeight: u53(config.height),
 			optimizeForLatency: true,
+			container: this.#container,
 		};
 
 		effect.set(this.#catalog, catalog);

@@ -1,5 +1,55 @@
-@PACKAGE_INIT@
+# moq CMake configuration file
 
-include("${CMAKE_CURRENT_LIST_DIR}/moq-targets.cmake")
+# Compute installation prefix relative to this file
+get_filename_component(_moq_prefix "${CMAKE_CURRENT_LIST_FILE}" PATH)
+get_filename_component(_moq_prefix "${_moq_prefix}" PATH)
+get_filename_component(_moq_prefix "${_moq_prefix}" PATH)
+get_filename_component(_moq_prefix "${_moq_prefix}" PATH)
 
-check_required_components(moq)
+# Set install paths
+set(PACKAGE_PREFIX_DIR "${_moq_prefix}")
+set(_moq_includedir "${_moq_prefix}/include")
+set(_moq_libdir "${_moq_prefix}/lib")
+
+set(_moq_lib_name "@LIB_FILE@")
+
+# Create imported target
+if(NOT TARGET moq::moq)
+    add_library(moq::moq STATIC IMPORTED)
+
+    set_target_properties(moq::moq PROPERTIES
+        IMPORTED_LOCATION "${_moq_libdir}/${_moq_lib_name}"
+        INTERFACE_INCLUDE_DIRECTORIES "${_moq_includedir}"
+    )
+
+    # Link required system frameworks on macOS
+    if(APPLE)
+        set_property(TARGET moq::moq APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES "-framework CoreFoundation" "-framework Security"
+        )
+    endif()
+
+    # On Windows, add required system libraries
+    if(WIN32)
+        set_property(TARGET moq::moq APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES "ws2_32" "userenv" "bcrypt" "ntdll"
+        )
+    endif()
+
+    # On Linux, add required system libraries
+    if(UNIX AND NOT APPLE)
+        set_property(TARGET moq::moq APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES "dl" "m" "pthread"
+        )
+    endif()
+endif()
+
+# Clean up internal variables
+unset(_moq_prefix)
+unset(_moq_includedir)
+unset(_moq_libdir)
+unset(_moq_lib_name)
+
+# Package metadata
+set(moq_FOUND TRUE)
+set(moq_VERSION "@VERSION@")

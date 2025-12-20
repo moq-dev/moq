@@ -6,18 +6,16 @@ use axum::{http::Method, routing::get, Router};
 use hang::moq_lite;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use tokio::io::AsyncRead;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
-use crate::import::{Import, ImportType};
+use crate::Publish;
 
-pub async fn server<T: AsyncRead + Unpin>(
+pub async fn server(
 	config: moq_native::ServerConfig,
 	name: String,
 	public: Option<PathBuf>,
-	format: ImportType,
-	input: &mut T,
+	publish: Publish,
 ) -> anyhow::Result<()> {
 	let mut listen = config.bind.unwrap_or("[::]:443".parse().unwrap());
 	listen = tokio::net::lookup_host(listen)
@@ -32,17 +30,12 @@ pub async fn server<T: AsyncRead + Unpin>(
 	// TODO serve all of them so we can support multiple signature algorithms.
 	let fingerprint = server.fingerprints().first().context("missing certificate")?.clone();
 
-	let broadcast = moq_lite::Broadcast::produce();
-	let mut import = Import::new(broadcast.producer.into(), format);
-
-	import.init_from(input).await?;
-
 	// Notify systemd that we're ready.
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 
 	tokio::select! {
-		res = accept(server, name, broadcast.consumer) => res,
-		res = import.read_from(input) => res,
+		res = accept(server, name, publish.consume()) => res,
+		res = publish.run() => res,
 		res = web(listen, fingerprint, public) => res,
 	}
 }
