@@ -6,12 +6,12 @@
 	--color-black-alpha-8: rgba(0, 0, 0, 0.08);
 	--color-black-alpha-10: rgba(0, 0, 0, 0.1);
 	--color-black: #000000;
-	--spacing-1: 1rem;
-	--spacing-2: 2rem;
-	--spacing-4: 4rem;
-	--spacing-8: 8rem;
-	--spacing-12: 12rem;
-	--spacing-16: 16rem;
-	--spacing-24: 24rem;
-	--spacing-32: 32rem;
+	--spacing-1: 0.0625rem; /* 1px */
+	--spacing-2: 0.125rem; /* 2px */
+	--spacing-4: 0.25rem; /* 4px */
+	--spacing-8: 0.5rem; /* 8px */
+	--spacing-12: 0.75rem; /* 12px */
+	--spacing-16: 1rem; /* 16px */
+	--spacing-24: 1.5rem; /* 24px */
+	--spacing-32: 2rem; /* 32px */
 }
