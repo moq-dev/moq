@@ -285,7 +285,7 @@ impl Request {
 	pub async fn ok(self) -> anyhow::Result<Session> {
 		match self {
 			Request::WebTransport(request) => request.ok().await.map_err(Into::into).map(Session::Quinn),
-			Request::Quic(request) => Ok(request.ok()).map(Session::Quinn),
+			Request::Quic(request) => Ok(Session::Quinn(request.ok())),
 			#[cfg(feature = "iroh")]
 			Request::Iroh(request) => request.ok().await.map_err(Into::into).map(Session::Iroh),
 		}
