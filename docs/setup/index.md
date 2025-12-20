@@ -36,7 +36,7 @@ just dev
 ```
 
 
-### Option 2: Manual Installation
+## Option 2: Manual Installation
 
 If you prefer not to use Nix (or are a Windows fiend), then you can manually install the dependencies:
 

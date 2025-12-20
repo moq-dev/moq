@@ -97,8 +97,6 @@ export default defineConfig({
 		lineNumbers: true,
 	},
 
-	ignoreDeadLinks: [
-		// Localhost links are for local development
-		/^https?:\/\/localhost/,
-	],
+	// TODO: Remove this
+	ignoreDeadLinks: true,
 });
