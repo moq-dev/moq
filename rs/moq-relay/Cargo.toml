@@ -14,8 +14,11 @@ ignored = ["hyper", "hyper-util"]
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-[dependencies]
+[features]
+default = ["iroh"]
+iroh = ["moq-native/iroh"]
 
+[dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio", "ws"] }
 bytes = "1"

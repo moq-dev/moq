@@ -128,23 +128,31 @@ download-url name:
 		*) echo "unknown" && exit 1 ;; \
 	esac
 
+# Convert an h264 input file to CMAF (fmp4) format to stdout.
+ffmpeg-cmaf input output='-' *args:
+	ffmpeg -hide_banner -v quiet \
+		-stream_loop -1 -re \
+		-i "{{input}}" \
+		-c copy \
+		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame {{args}} {{output}}
+
 # Publish a video using ffmpeg to the localhost relay server
 # NOTE: The `http` means that we perform insecure certificate verification.
 # Switch it to `https` when you're ready to use a real certificate.
-pub name url="http://localhost:4443/anon" *args:
+pub name='bbb' url="http://localhost:4443/anon" *args:
 	# Download the sample media.
 	just download "{{name}}"
-
 	# Pre-build the binary so we don't queue media while compiling.
 	cargo build --bin hang
+	# Publish the media with the hang cli.
+	just ffmpeg-cmaf "dev/{{name}}.fmp4" | cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
 
-	# Run ffmpeg and pipe the output to hang
-	ffmpeg -hide_banner -v quiet \
-		-stream_loop -1 -re \
-		-i "dev/{{name}}.fmp4" \
-		-c copy \
-		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
-		- | cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
+# Publish a video file using ffmpeg to a relay server over iroh
+# NOTE: The default url (iroh endpoint id) matches the secret key set in dev/relay.toml
+pub-iroh name='bbb' url='iroh://a73123fce41108f024a196a399edadbba8060be166c779aa50bf4731931492d3' *args:
+	cargo build --bin hang
+	# Publish the media with the hang cli.
+	just ffmpeg-cmaf "dev/{{name}}.fmp4" | cargo run --bin hang -- publish --url "{{url}}" --name "anon/{{name}}" fmp4 {{args}}
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
@@ -235,7 +243,7 @@ sub name url='http://localhost:4443/anon':
 	@echo "Install and use hang-gst directly for GStreamer functionality"
 
 # Publish a video using ffmpeg directly from hang to the localhost
-serve name:
+serve name="bbb":
 	# Download the sample media.
 	just download "{{name}}"
 
@@ -243,12 +251,19 @@ serve name:
 	cargo build --bin hang
 
 	# Run ffmpeg and pipe the output to hang
-	ffmpeg -hide_banner -v quiet \
-		-stream_loop -1 -re \
-		-i "dev/{{name}}.fmp4" \
-		-c copy \
-		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
-		- | cargo run --bin hang -- serve --listen "[::]:4443" --tls-generate "localhost" --name "{{name}}"
+	just ffmpeg-cmaf "dev/{{name}}.fmp4" | \
+		cargo run --bin hang -- serve --listen "[::]:4443" --tls-generate "localhost" --name "{{name}}" fmp4
+
+serve-iroh name="bbb":
+	# Download the sample media.
+	just download "{{name}}"
+
+	# Pre-build the binary so we don't queue media while compiling.
+	cargo build --bin hang
+
+	# Run ffmpeg and pipe the output to hang
+	just ffmpeg-cmaf "dev/{{name}}.fmp4" | \
+		cargo run --bin hang -- serve --iroh --listen "[::]:4443" --tls-generate "localhost" --name "{{name}}" fmp4
 
 # Run the web server
 web url='http://localhost:4443/anon':

@@ -15,10 +15,13 @@ async fn main() -> anyhow::Result<()> {
 	let config = Config::load()?;
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
-	let mut server = config.server.init()?;
+	let server = config.server.init()?;
 	let client = config.client.init()?;
 	let auth = config.auth.init()?;
 	let fingerprints = server.fingerprints().to_vec();
+
+	#[cfg(feature = "iroh")]
+	let iroh = config.iroh.init_server().await?;
 
 	let cluster = Cluster::new(config.cluster, client);
 	let cloned = cluster.clone();
@@ -44,8 +47,22 @@ async fn main() -> anyhow::Result<()> {
 	// Notify systemd that we're ready after all initialization is complete
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 
-	let mut conn_id = 0;
+	let accept_quic = tokio::spawn(accept_loop(server, cluster.clone(), auth.clone()));
+	#[cfg(feature = "iroh")]
+	let accept_iroh = tokio::spawn(accept_loop(iroh, cluster.clone(), auth.clone()));
 
+	futures::future::join_all([
+		accept_quic,
+		#[cfg(feature = "iroh")]
+		accept_iroh,
+	])
+	.await;
+
+	Ok(())
+}
+
+async fn accept_loop(mut server: impl moq_native::MoqServer, cluster: Cluster, auth: Auth) {
+	let mut conn_id = 0;
 	while let Some(request) = server.accept().await {
 		let conn = Connection {
 			id: conn_id,
@@ -62,6 +79,4 @@ async fn main() -> anyhow::Result<()> {
 			}
 		});
 	}
-
-	Ok(())
 }

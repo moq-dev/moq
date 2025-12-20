@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::{net, sync::Arc, time::Duration};
 
@@ -9,11 +10,32 @@ use rustls::sign::CertifiedKey;
 use std::fs;
 use std::io::{self, Cursor, Read};
 use url::Url;
-use web_transport_quinn::{http, ServerError};
+use web_transport_quinn::http;
 
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::FutureExt;
+
+/// Abstraction over different implementations of a MoQ server.
+///
+/// This is implemented for [`Server`], and for `crate::iroh::Server` if the `iroh` feature is enabled.
+pub trait MoqServer {
+	/// Returns the next partially established QUIC or WebTransport session.
+	///
+	/// This returns a [Request] instead of a [web_transport_quinn::Session]
+	/// so the connection can be rejected early on an invalid path or missing auth.
+	///
+	/// The [Request] is either a WebTransport or a raw QUIC request.
+	/// Call [Request::ok] or [Request::close] to complete the handshake in case this is
+	/// a WebTransport request.
+	fn accept(&mut self) -> impl Future<Output = Option<Request>> + Send;
+}
+
+impl MoqServer for Server {
+	async fn accept(&mut self) -> Option<Request> {
+		self.accept().await
+	}
+}
 
 #[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -229,20 +251,30 @@ impl Server {
 	}
 }
 
+pub enum Session {
+	Quinn(web_transport_quinn::Session),
+	#[cfg(feature = "iroh")]
+	Iroh(web_transport_iroh::Session),
+}
+
 pub enum Request {
 	WebTransport(web_transport_quinn::Request),
 	Quic(QuicRequest),
+	#[cfg(feature = "iroh")]
+	Iroh(web_transport_iroh::Request),
 }
 
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn close(self, status: http::StatusCode) -> Result<(), ServerError> {
+	pub async fn close(self, status: http::StatusCode) -> anyhow::Result<()> {
 		match self {
-			Self::WebTransport(request) => request.close(status).await,
+			Self::WebTransport(request) => request.close(status).await.map_err(Into::into),
 			Self::Quic(request) => {
 				request.close(status);
 				Ok(())
 			}
+			#[cfg(feature = "iroh")]
+			Request::Iroh(request) => request.close(status).await.map_err(Into::into),
 		}
 	}
 
@@ -250,10 +282,12 @@ impl Request {
 	///
 	/// For WebTransport, this completes the HTTP handshake (200 OK).
 	/// For raw QUIC, this constructs a raw session.
-	pub async fn ok(self) -> Result<web_transport_quinn::Session, ServerError> {
+	pub async fn ok(self) -> anyhow::Result<Session> {
 		match self {
-			Request::WebTransport(request) => request.ok().await,
-			Request::Quic(request) => Ok(request.ok()),
+			Request::WebTransport(request) => request.ok().await.map_err(Into::into).map(Session::Quinn),
+			Request::Quic(request) => Ok(Session::Quinn(request.ok())),
+			#[cfg(feature = "iroh")]
+			Request::Iroh(request) => request.ok().await.map_err(Into::into).map(Session::Iroh),
 		}
 	}
 
@@ -262,6 +296,8 @@ impl Request {
 		match self {
 			Request::WebTransport(request) => request.url(),
 			Request::Quic(request) => request.url(),
+			#[cfg(feature = "iroh")]
+			Request::Iroh(request) => request.url(),
 		}
 	}
 }

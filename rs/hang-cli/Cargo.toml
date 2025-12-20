@@ -14,6 +14,10 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [[bin]]
 name = "hang"
 path = "src/main.rs"
+
+[features]
+default = ["iroh"]
+iroh = ["moq-native/iroh"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
