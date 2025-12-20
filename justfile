@@ -263,7 +263,7 @@ serve-iroh name="bbb":
 
 	# Run ffmpeg and pipe the output to hang
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" | \
-		cargo run --bin hang -- serve --iroh --listen "[::]:4443" --tls-generate "localhost" --name "{{name}}" fmp4 \
+		cargo run --bin hang -- serve --iroh --listen "[::]:4443" --tls-generate "localhost" --name "{{name}}" fmp4
 
 # Run the web server
 web url='http://localhost:4443/anon':

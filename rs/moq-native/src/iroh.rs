@@ -34,7 +34,7 @@ pub struct EndpointConfig {
 	#[arg(id = "iroh-bind-v4", long = "iroh-bind-v4", env = "MOQ_IROH_BIND_V4")]
 	pub bind_v4: Option<net::SocketAddrV4>,
 	/// Listen for UDP packets on the given address.
-	/// Defaults to `0.0.0.0:0` if not provided.
+	/// Defaults to `[::]:0` if not provided.
 	#[arg(id = "iroh-bind-v6", long = "iroh-bind-v6", env = "MOQ_IROH_BIND_V6")]
 	pub bind_v6: Option<net::SocketAddrV6>,
 }
@@ -45,11 +45,12 @@ impl EndpointConfig {
 			(Some(key), None) => SecretKey::from_str(&key)?,
 			(None, Some(path)) => {
 				if path.exists() {
-					let key = tokio::fs::read_to_string(&path).await?;
-					SecretKey::from_str(&key)?
+					let key_str = tokio::fs::read_to_string(&path).await?;
+					SecretKey::from_str(&key_str)?
 				} else {
 					let key = SecretKey::generate(&mut rand::rng());
-					tokio::fs::write(path, key.to_bytes()).await?;
+					let key_str = hex::encode(key.to_bytes());
+					tokio::fs::write(path, key_str).await?;
 					key
 				}
 			}

@@ -97,6 +97,8 @@ impl Server {
 			.context("failed to get local address")
 	}
 
+	// Takes `&mut self` even though `&self` would be enough, because otherwise [`Self::accept`] becomes !Sync.
+	// Alternative would be wrapping `Self::accept` in [sync_wrapper](https://docs.rs/sync_wrapper/latest/sync_wrapper/)
 	pub async fn close(&mut self) {
 		self.endpoint.close().await
 	}
