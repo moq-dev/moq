@@ -14,8 +14,11 @@ ignored = ["hyper", "hyper-util"]
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-[dependencies]
+[features]
+default = ["iroh"]
+iroh = ["moq-native/iroh"]
 
+[dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio", "ws"] }
 bytes = "1"
@@ -40,10 +43,6 @@ tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 url = { version = "2", features = ["serde"] }
 web-transport-ws = { workspace = true }
-
-[features]
-default = ["iroh"]
-iroh = ["moq-native/iroh"]
 
 [dev-dependencies]
 tempfile = "3"
