@@ -623,13 +623,12 @@ impl Fmp4 {
 		// Loop over ALL tracks in moof
 		for traf in &moof.traf {
 			let track_id = traf.tfhd.track_id;
-			let track = match self.tracks.get_mut(&track_id) {
-				Some(t) => t,
-				None => {
-					tracing::warn!("Unknown track_id: {}, skipping", track_id);
-					continue;
-				}
-			};
+
+			// Check if the track exists (immutable borrow)
+			if !self.tracks.contains_key(&track_id) {
+				tracing::warn!("Unknown track_id: {}, skipping", track_id);
+				continue;
+			}
 
 			// Find the track information in the moov
 			let trak = moov
@@ -709,20 +708,19 @@ impl Fmp4 {
 				}
 			}
 
-			// Add the captured moof bytes
-			segment_data.extend_from_slice(&self.moof_buffer);
+			// Build per-track moof and mdat containing only this track's data.
+			// This is required for MSE with demuxed SourceBuffers.
+			let (per_track_moof_bytes, per_track_mdat_bytes) =
+				self.build_per_track_segment(&moof.mfhd, traf, &mdat_data)?;
 
-			// Add mdat box: size (4 bytes) + 'mdat' fourcc (4 bytes) + data
-			let mdat_size = (8 + mdat_data.len()) as u32;
-			segment_data.extend_from_slice(&mdat_size.to_be_bytes());
-			segment_data.extend_from_slice(b"mdat");
-			segment_data.extend_from_slice(&mdat_data);
+			segment_data.extend_from_slice(&per_track_moof_bytes);
+			segment_data.extend_from_slice(&per_track_mdat_bytes);
 
 			tracing::debug!(
 				"Sending fMP4 segment: {} bytes (moof: {}, mdat: {}), keyframe: {}, timestamp: {:?}",
 				segment_data.len(),
-				self.moof_buffer.len(),
-				mdat_size,
+				per_track_moof_bytes.len(),
+				per_track_mdat_bytes.len(),
 				keyframe,
 				timestamp
 			);
@@ -733,10 +731,116 @@ impl Fmp4 {
 				payload: segment_data.freeze().into(),
 			};
 
+			// Now get mutable reference to write the frame
+			let track = self.tracks.get_mut(&track_id).context("track disappeared")?;
 			track.write(frame)?;
 		}
 
 		Ok(())
+	}
+
+	/// Build a per-track moof and mdat pair containing only the specified track's data.
+	///
+	/// This is required for MSE with demuxed SourceBuffers, where each buffer
+	/// expects to receive data for only its track.
+	fn build_per_track_segment(
+		&self,
+		mfhd: &mp4_atom::Mfhd,
+		traf: &mp4_atom::Traf,
+		global_mdat: &Bytes,
+	) -> anyhow::Result<(Bytes, Bytes)> {
+		use mp4_atom::Encode;
+
+		let moov = self.moov.as_ref().context("missing moov box")?;
+		let track_id = traf.tfhd.track_id;
+		let trex = moov
+			.mvex
+			.as_ref()
+			.and_then(|mvex| mvex.trex.iter().find(|trex| trex.track_id == track_id));
+		let default_sample_size = trex.map(|trex| trex.default_sample_size).unwrap_or_default();
+
+		// First, extract all sample data for this track from the global mdat
+		let mut track_mdat_data = BytesMut::new();
+		let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
+
+		for trun in &traf.trun {
+			if let Some(data_offset) = trun.data_offset {
+				let base_offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
+				// data_offset is relative to the start of the moof
+				let data_offset_usize: usize = data_offset.try_into().context("invalid data offset")?;
+				if data_offset_usize < self.moof_size {
+					anyhow::bail!("invalid data offset: {} < moof_size {}", data_offset_usize, self.moof_size);
+				}
+				// Calculate offset into mdat (moof_size is subtracted, and we also need to
+				// account for the 8-byte mdat header that was stripped when parsing)
+				offset = base_offset + data_offset_usize - self.moof_size - 8;
+			}
+
+			for entry in &trun.entries {
+				let size = entry
+					.size
+					.unwrap_or(traf.tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
+
+				if offset + size > global_mdat.len() {
+					anyhow::bail!(
+						"invalid sample offset: {} + {} > {}",
+						offset,
+						size,
+						global_mdat.len()
+					);
+				}
+
+				track_mdat_data.extend_from_slice(&global_mdat[offset..offset + size]);
+				offset += size;
+			}
+		}
+
+		// Now build the per-track moof with updated trun data_offsets
+		// Clone traf and update trun data_offsets
+		let mut new_traf = traf.clone();
+
+		// Create a temporary moof to calculate its size
+		let temp_moof = Moof {
+			mfhd: mfhd.clone(),
+			traf: vec![new_traf.clone()],
+		};
+		let mut temp_moof_bytes = BytesMut::new();
+		temp_moof.encode(&mut temp_moof_bytes)?;
+		let new_moof_size = temp_moof_bytes.len();
+
+		// Now update the trun data_offsets to point into the new per-track mdat
+		// data_offset should be: new_moof_size + 8 (mdat header) + offset_within_track_mdat
+		let mut current_offset_in_track_mdat: i32 = 0;
+		for trun in &mut new_traf.trun {
+			// Set data_offset to point to the start of this trun's samples in the per-track mdat
+			// The offset is relative to the start of the moof
+			trun.data_offset = Some((new_moof_size as i32) + 8 + current_offset_in_track_mdat);
+
+			// Calculate how many bytes this trun consumes
+			for entry in &trun.entries {
+				let size = entry
+					.size
+					.unwrap_or(traf.tfhd.default_sample_size.unwrap_or(default_sample_size));
+				current_offset_in_track_mdat += size as i32;
+			}
+		}
+
+		// Build the final per-track moof
+		let per_track_moof = Moof {
+			mfhd: mfhd.clone(),
+			traf: vec![new_traf],
+		};
+		let mut moof_bytes = BytesMut::new();
+		per_track_moof.encode(&mut moof_bytes)?;
+
+		// Build the per-track mdat: 4 bytes size + 4 bytes 'mdat' + data
+		let mdat_size = (8 + track_mdat_data.len()) as u32;
+		let mut mdat_bytes = BytesMut::new();
+		mdat_bytes.extend_from_slice(&mdat_size.to_be_bytes());
+		mdat_bytes.extend_from_slice(b"mdat");
+		mdat_bytes.extend_from_slice(&track_mdat_data);
+
+		Ok((moof_bytes.freeze(), mdat_bytes.freeze()))
 	}
 }
 
@@ -751,5 +855,270 @@ impl Drop for Fmp4 {
 			catalog.remove_video(&track.info.name);
 			catalog.remove_audio(&track.info.name);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use mp4_atom::{Mfhd, Traf, Tfhd, Tfdt, Trun, TrunEntry};
+
+	/// Test that build_per_track_segment creates a moof with only one traf
+	/// and an mdat containing only that track's samples.
+	#[test]
+	fn test_per_track_moof_mdat_extraction() {
+		// Create a mock mfhd (movie fragment header)
+		let mfhd = Mfhd {
+			sequence_number: 1,
+		};
+
+		// Create sample data that would be in the global mdat
+		// Track 1 samples: [0x11, 0x12, 0x13] (3 bytes) + [0x14, 0x15] (2 bytes) = 5 bytes
+		// Track 2 samples: [0x21, 0x22, 0x23, 0x24] (4 bytes) = 4 bytes
+		let track1_sample1 = vec![0x11, 0x12, 0x13];
+		let track1_sample2 = vec![0x14, 0x15];
+		let track2_sample1 = vec![0x21, 0x22, 0x23, 0x24];
+
+		// Simulate mdat containing both tracks' data
+		let mut global_mdat_data = BytesMut::new();
+		global_mdat_data.extend_from_slice(&track1_sample1);
+		global_mdat_data.extend_from_slice(&track1_sample2);
+		global_mdat_data.extend_from_slice(&track2_sample1);
+		let global_mdat = global_mdat_data.freeze();
+
+		// Create traf for track 1
+		// The data_offset points to after the moof (we'll use a mock moof_size)
+		let mock_moof_size = 100; // Assume moof is 100 bytes
+		let mdat_header_size = 8; // mdat box header
+
+		let traf1 = Traf {
+			tfhd: Tfhd {
+				track_id: 1,
+				base_data_offset: None,
+				sample_description_index: Some(1),
+				default_sample_duration: Some(1024),
+				default_sample_size: None,
+				default_sample_flags: None,
+			},
+			tfdt: Some(Tfdt {
+				base_media_decode_time: 0,
+			}),
+			trun: vec![Trun {
+				// data_offset is relative to moof start, points to mdat data
+				data_offset: Some((mock_moof_size + mdat_header_size) as i32),
+				entries: vec![
+					TrunEntry {
+						duration: Some(1024),
+						size: Some(3), // 3 bytes
+						flags: Some(0x02000000), // keyframe
+						cts: Some(0),
+					},
+					TrunEntry {
+						duration: Some(1024),
+						size: Some(2), // 2 bytes
+						flags: Some(0x01010000), // non-keyframe
+						cts: Some(0),
+					},
+				],
+			}],
+			..Default::default()
+		};
+
+		// Create traf for track 2
+		let traf2 = Traf {
+			tfhd: Tfhd {
+				track_id: 2,
+				base_data_offset: None,
+				sample_description_index: Some(1),
+				default_sample_duration: Some(1024),
+				default_sample_size: None,
+				default_sample_flags: None,
+			},
+			tfdt: Some(Tfdt {
+				base_media_decode_time: 0,
+			}),
+			trun: vec![Trun {
+				// Track 2 data starts at offset 5 (after track 1's 5 bytes)
+				data_offset: Some((mock_moof_size + mdat_header_size + 5) as i32),
+				entries: vec![TrunEntry {
+					duration: Some(1024),
+					size: Some(4), // 4 bytes
+					flags: Some(0x02000000), // keyframe
+					cts: Some(0),
+				}],
+			}],
+			..Default::default()
+		};
+
+		// Test extracting track 1
+		let (moof_bytes, mdat_bytes) =
+			build_per_track_segment_standalone(&mfhd, &traf1, &global_mdat, mock_moof_size);
+
+		// Verify mdat contains only track 1 samples (5 bytes + 8 byte header)
+		assert_eq!(mdat_bytes.len(), 8 + 5, "Track 1 mdat should be 13 bytes (8 header + 5 data)");
+
+		// Verify mdat header
+		let mdat_size = u32::from_be_bytes([mdat_bytes[0], mdat_bytes[1], mdat_bytes[2], mdat_bytes[3]]);
+		assert_eq!(mdat_size, 13, "Track 1 mdat size field should be 13");
+		assert_eq!(&mdat_bytes[4..8], b"mdat", "mdat fourcc should be 'mdat'");
+
+		// Verify mdat data content
+		assert_eq!(&mdat_bytes[8..11], &[0x11, 0x12, 0x13], "Track 1 sample 1 data");
+		assert_eq!(&mdat_bytes[11..13], &[0x14, 0x15], "Track 1 sample 2 data");
+
+		// Verify moof contains only one traf
+		let decoded_moof = decode_moof(&moof_bytes);
+		assert_eq!(decoded_moof.traf.len(), 1, "Per-track moof should have exactly 1 traf");
+		assert_eq!(decoded_moof.traf[0].tfhd.track_id, 1, "Traf should be for track 1");
+
+		// Test extracting track 2
+		let (moof_bytes2, mdat_bytes2) =
+			build_per_track_segment_standalone(&mfhd, &traf2, &global_mdat, mock_moof_size);
+
+		// Verify mdat contains only track 2 samples (4 bytes + 8 byte header)
+		assert_eq!(mdat_bytes2.len(), 8 + 4, "Track 2 mdat should be 12 bytes (8 header + 4 data)");
+
+		// Verify mdat data content
+		assert_eq!(&mdat_bytes2[8..12], &[0x21, 0x22, 0x23, 0x24], "Track 2 sample data");
+
+		// Verify moof contains only one traf for track 2
+		let decoded_moof2 = decode_moof(&moof_bytes2);
+		assert_eq!(decoded_moof2.traf.len(), 1, "Per-track moof should have exactly 1 traf");
+		assert_eq!(decoded_moof2.traf[0].tfhd.track_id, 2, "Traf should be for track 2");
+	}
+
+	/// Test that data_offset in the per-track moof points correctly into the per-track mdat
+	#[test]
+	fn test_per_track_data_offset() {
+		let mfhd = Mfhd { sequence_number: 1 };
+
+		// Single sample of 10 bytes
+		let sample_data = vec![0xAA; 10];
+		let global_mdat = Bytes::from(sample_data.clone());
+
+		let mock_moof_size = 80;
+		let mdat_header_size = 8;
+
+		let traf = Traf {
+			tfhd: Tfhd {
+				track_id: 1,
+				base_data_offset: None,
+				sample_description_index: Some(1),
+				default_sample_duration: Some(1024),
+				default_sample_size: None,
+				default_sample_flags: None,
+			},
+			tfdt: Some(Tfdt {
+				base_media_decode_time: 0,
+			}),
+			trun: vec![Trun {
+				data_offset: Some((mock_moof_size + mdat_header_size) as i32),
+				entries: vec![TrunEntry {
+					duration: Some(1024),
+					size: Some(10),
+					flags: Some(0x02000000),
+					cts: Some(0),
+				}],
+			}],
+			..Default::default()
+		};
+
+		let (moof_bytes, mdat_bytes) =
+			build_per_track_segment_standalone(&mfhd, &traf, &global_mdat, mock_moof_size);
+
+		// Decode the moof to check the data_offset
+		let decoded_moof = decode_moof(&moof_bytes);
+		let new_moof_size = moof_bytes.len();
+
+		// The data_offset should point to right after the moof + mdat header
+		let expected_data_offset = (new_moof_size + 8) as i32;
+		assert_eq!(
+			decoded_moof.traf[0].trun[0].data_offset,
+			Some(expected_data_offset),
+			"data_offset should point to start of sample data in mdat"
+		);
+
+		// Verify that reading at that offset gives us the sample data
+		let actual_offset = expected_data_offset as usize - new_moof_size;
+		assert_eq!(&mdat_bytes[actual_offset..actual_offset + 10], &sample_data[..], "Data at offset should match sample");
+	}
+
+	/// Standalone version of build_per_track_segment for testing without Fmp4 instance
+	fn build_per_track_segment_standalone(
+		mfhd: &Mfhd,
+		traf: &Traf,
+		global_mdat: &Bytes,
+		moof_size: usize,
+	) -> (Bytes, Bytes) {
+		use mp4_atom::Encode;
+
+		let default_sample_size = traf.tfhd.default_sample_size.unwrap_or(0);
+
+		// Extract sample data for this track
+		let mut track_mdat_data = BytesMut::new();
+		let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
+
+		for trun in &traf.trun {
+			if let Some(data_offset) = trun.data_offset {
+				let base_offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
+				let data_offset_usize = data_offset as usize;
+				// Calculate offset into mdat
+				offset = base_offset + data_offset_usize - moof_size - 8;
+			}
+
+			for entry in &trun.entries {
+				let size = entry.size.unwrap_or(default_sample_size) as usize;
+				if offset + size <= global_mdat.len() {
+					track_mdat_data.extend_from_slice(&global_mdat[offset..offset + size]);
+				}
+				offset += size;
+			}
+		}
+
+		// Clone and update traf
+		let mut new_traf = traf.clone();
+
+		// Calculate new moof size
+		let temp_moof = Moof {
+			mfhd: mfhd.clone(),
+			traf: vec![new_traf.clone()],
+		};
+		let mut temp_moof_bytes = BytesMut::new();
+		temp_moof.encode(&mut temp_moof_bytes).unwrap();
+		let new_moof_size = temp_moof_bytes.len();
+
+		// Update trun data_offsets
+		let mut current_offset_in_track_mdat: i32 = 0;
+		for trun in &mut new_traf.trun {
+			trun.data_offset = Some((new_moof_size as i32) + 8 + current_offset_in_track_mdat);
+			for entry in &trun.entries {
+				let size = entry.size.unwrap_or(default_sample_size);
+				current_offset_in_track_mdat += size as i32;
+			}
+		}
+
+		// Build final moof
+		let per_track_moof = Moof {
+			mfhd: mfhd.clone(),
+			traf: vec![new_traf],
+		};
+		let mut moof_bytes = BytesMut::new();
+		per_track_moof.encode(&mut moof_bytes).unwrap();
+
+		// Build mdat
+		let mdat_size = (8 + track_mdat_data.len()) as u32;
+		let mut mdat_bytes = BytesMut::new();
+		mdat_bytes.extend_from_slice(&mdat_size.to_be_bytes());
+		mdat_bytes.extend_from_slice(b"mdat");
+		mdat_bytes.extend_from_slice(&track_mdat_data);
+
+		(moof_bytes.freeze(), mdat_bytes.freeze())
+	}
+
+	/// Helper to decode a Moof from bytes
+	fn decode_moof(bytes: &Bytes) -> Moof {
+		use mp4_atom::Decode;
+		let mut cursor = std::io::Cursor::new(bytes);
+		Moof::decode(&mut cursor).expect("Failed to decode moof")
 	}
 }
