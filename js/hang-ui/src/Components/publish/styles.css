@@ -31,6 +31,13 @@
 	padding-left: 4px;
 }
 
+.button.button--media-source-selector,
+.button.button--media-source-selector:hover:not(:disabled) {
+	background-color: unset;
+	box-shadow: none;
+	border: unset;
+}
+
 .mediaSourceSelector {
 	position: absolute;
 	top: 100%;

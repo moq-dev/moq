@@ -53,7 +53,7 @@ export default function Button(props: ButtonProps) {
 			ref={buttonRef}
 			type={props.type ?? "button"}
 			title={props.title ?? "Simple button"}
-			class={`flex center button ${props.class ? `${props.class}` : ""}`.trimEnd()}
+			class={`flex flex--center button ${props.class ? `${props.class}` : ""}`.trimEnd()}
 			onClick={props.onClick}
 			aria-label={
 				props.ariaLabel ?? props.title ?? (typeof props.children === "string" ? props.children : undefined)

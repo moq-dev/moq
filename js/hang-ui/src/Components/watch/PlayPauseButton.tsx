@@ -45,7 +45,7 @@ export default function PlayPauseButton() {
 	};
 
 	return (
-		<Button title={context.isPlaying() ? "Pause" : "Play"} onClick={onClick}>
+		<Button title={context.isPlaying() ? "Pause" : "Play"} class="button--playback" onClick={onClick}>
 			{context.isPlaying() ? playbackIcons.pause() : playbackIcons.play()}
 		</Button>
 	);
