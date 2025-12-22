@@ -1,7 +1,15 @@
 :host {
 	--color-transparent: transparent;
 	--color-white: #ffffff;
+	--color-white-alpha-10: rgba(255, 255, 255, 0.1);
+	--color-white-alpha-20: rgba(255, 255, 255, 0.2);
+	--color-white-alpha-30: rgba(255, 255, 255, 0.3);
 	--color-light-gray: #dddddd;
+	--color-orange-400: #fb923c;
+	--color-orange-500: #f97316;
+	--color-amber-600: #d97706;
+	--color-orange-500-alpha-60: rgba(249, 115, 22, 0.6);
+	--color-orange-500-alpha-80: rgba(249, 115, 22, 0.8);
 	--color-red: #e60000;
 	--color-black-alpha-8: rgba(0, 0, 0, 0.08);
 	--color-black-alpha-10: rgba(0, 0, 0, 0.1);

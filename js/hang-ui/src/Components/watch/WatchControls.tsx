@@ -9,7 +9,7 @@ import WatchStatusIndicator from "./WatchStatusIndicator";
 export default function WatchControls() {
 	return (
 		<div class="watchControlsContainer">
-			<div class="playbackControlsRow">
+			<div class="playbackControlsRow flex--align-center">
 				<PlayPauseButton />
 				<VolumeSlider />
 				<WatchStatusIndicator />
