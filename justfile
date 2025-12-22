@@ -389,3 +389,7 @@ serve-hls name port="8000":
 	sleep 2
 	echo ">>> HTTP server: http://localhost:{{port}}/"
 	cd "$OUT_DIR" && python3 -m http.server {{port}}
+
+# Serve the documentation locally.
+doc:
+	cd doc && bun run dev

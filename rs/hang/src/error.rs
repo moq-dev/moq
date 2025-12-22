@@ -73,6 +73,9 @@ pub enum Error {
 	/// Failed to parse a URL.
 	#[error("url parse error: {0}")]
 	Url(#[from] url::ParseError),
+
+	#[error("unknown format: {0}")]
+	UnknownFormat(String),
 }
 
 /// A Result type alias for hang operations.

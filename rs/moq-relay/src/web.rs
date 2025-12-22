@@ -75,7 +75,7 @@ pub struct HttpsConfig {
 pub struct WebState {
 	pub auth: Auth,
 	pub cluster: Cluster,
-	pub fingerprints: Vec<String>,
+	pub tls_info: Arc<std::sync::RwLock<moq_native::TlsInfo>>,
 	pub conn_id: AtomicU64,
 }
 
@@ -91,12 +91,8 @@ impl Web {
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
-		// Get the first certificate's fingerprint.
-		// TODO serve all of them so we can support multiple signature algorithms.
-		let fingerprint = self.state.fingerprints.first().expect("missing certificate").clone();
-
 		let app = Router::new()
-			.route("/certificate.sha256", get(fingerprint))
+			.route("/certificate.sha256", get(serve_fingerprint))
 			.route("/announced", get(serve_announced))
 			.route("/announced/{*prefix}", get(serve_announced))
 			.route("/fetch/{*path}", get(serve_fetch));
@@ -118,10 +114,12 @@ impl Web {
 		};
 
 		let https = if let Some(listen) = self.config.https.listen {
-			let cert = self.config.https.cert.as_ref().expect("missing certificate");
-			let key = self.config.https.key.as_ref().expect("missing key");
+			let cert = self.config.https.cert.expect("missing https.cert");
+			let key = self.config.https.key.expect("missing https.key");
+			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
 
-			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+			#[cfg(unix)]
+			tokio::spawn(reload_certs(config.clone(), cert, key));
 
 			let server = hyper_serve::bind_rustls(listen, config);
 			Some(server.serve(app))
@@ -137,6 +135,35 @@ impl Web {
 
 		Ok(())
 	}
+}
+
+#[cfg(unix)]
+async fn reload_certs(config: hyper_serve::tls_rustls::RustlsConfig, cert: PathBuf, key: PathBuf) {
+	use tokio::signal::unix::{signal, SignalKind};
+
+	// Dunno why we wouldn't be allowed to listen for signals, but just in case.
+	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
+
+	while listener.recv().await.is_some() {
+		tracing::info!("reloading web certificate");
+
+		if let Err(err) = config.reload_from_pem_file(cert.clone(), key.clone()).await {
+			tracing::warn!(%err, "failed to reload web certificate");
+		}
+	}
+}
+
+async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
+	// Get the first certificate's fingerprint.
+	// TODO serve all of them so we can support multiple signature algorithms.
+	state
+		.tls_info
+		.read()
+		.expect("tls_info lock poisoned")
+		.fingerprints
+		.first()
+		.expect("missing certificate")
+		.clone()
 }
 
 async fn serve_ws(

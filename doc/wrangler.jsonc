@@ -1,0 +1,10 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "moq-doc",
+	"compatibility_date": "2025-12-13",
+	"main": "worker.js",
+	"assets": {
+		"directory": ".vitepress/dist",
+		"binding": "ASSETS"
+	}
+}

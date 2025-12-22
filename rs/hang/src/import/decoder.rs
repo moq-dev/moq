@@ -1,11 +1,12 @@
+use std::{fmt, str::FromStr};
+
 use bytes::Buf;
 
-use crate::{self as hang, import::Aac};
+use crate::{self as hang, import::Aac, Error};
 
 use super::{Avc3, Fmp4};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString)]
-#[strum(serialize_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecoderFormat {
 	/// aka H264 with inline SPS/PPS
 	Avc3,
@@ -13,6 +14,33 @@ pub enum DecoderFormat {
 	Fmp4,
 	/// Raw AAC frames (not ADTS).
 	Aac,
+}
+
+impl FromStr for DecoderFormat {
+	type Err = Error;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		match s {
+			"avc3" => Ok(DecoderFormat::Avc3),
+			"h264" | "annex-b" => {
+				tracing::warn!("format '{s}' is deprecated, use 'avc3' instead");
+				Ok(DecoderFormat::Avc3)
+			}
+			"fmp4" | "cmaf" => Ok(DecoderFormat::Fmp4),
+			"aac" => Ok(DecoderFormat::Aac),
+			_ => Err(Error::UnknownFormat(s.to_string())),
+		}
+	}
+}
+
+impl fmt::Display for DecoderFormat {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			DecoderFormat::Avc3 => write!(f, "avc3"),
+			DecoderFormat::Fmp4 => write!(f, "fmp4"),
+			DecoderFormat::Aac => write!(f, "aac"),
+		}
+	}
 }
 
 #[derive(derive_more::From)]

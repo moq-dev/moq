@@ -1,10 +1,10 @@
 # Authentication
 
-[moq-relay](../rs/moq-relay) uses JWT tokens in the URL for authentication and authorization.
+[moq-relay](/rust/moq-relay) uses JWT tokens in the URL for authentication and authorization.
 This scopes sessions to a selected root path with additional rules for publishing and subscribing.
 
 Note that this authentication only applies when using the relay.
-The application is responsible for authentication when using [moq-lite](../rs/moq-lite) directly,
+The application is responsible for authentication when using [moq-lite](/rust/moq-lite) directly,
 
 
 ## Overview
@@ -109,7 +109,7 @@ Our example token from above:
 
 ### Generating Tokens
 
-`moq-token` is available as a [Rust crate](../rs/moq-token), [JS library](../js/moq-token), and [CLI](../rs/moq-token-cli).
+`moq-token` is available as a Rust crate ([docs.rs](https://docs.rs/moq-token)), JS library ([@moq/token](https://www.npmjs.com/package/@moq/token)), and CLI.
 This documentation focuses on the CLI but the same concepts apply to all.
 
 **Installation**:

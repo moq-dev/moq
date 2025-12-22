@@ -1,0 +1,194 @@
+:root {
+	/* Brand colors - green accent matching moq.dev */
+	--vp-c-brand-1: #16a34a;
+	--vp-c-brand-2: #15803d;
+	--vp-c-brand-3: #14532d;
+	--vp-c-brand-soft: rgba(22, 163, 74, 0.14);
+
+	/* Dark slate theme matching moq.dev */
+	--vp-c-bg: #0f172a;
+	--vp-c-bg-alt: #1e293b;
+	--vp-c-bg-elv: #1e293b;
+	--vp-c-bg-soft: #334155;
+
+	/* Text colors */
+	--vp-c-text-1: #e2e8f0;
+	--vp-c-text-2: #cbd5e1;
+	--vp-c-text-3: #94a3b8;
+
+	/* Border colors */
+	--vp-c-border: #334155;
+	--vp-c-divider: #334155;
+	--vp-c-gutter: #1e293b;
+
+	/* Sidebar */
+	--vp-sidebar-bg-color: #0f172a;
+
+	/* Code blocks */
+	--vp-code-bg: rgba(0, 0, 0, 0.5);
+	--vp-code-block-bg: rgba(0, 0, 0, 0.5);
+
+	/* Custom home colors */
+	--vp-home-hero-name-color: #22c55e;
+
+	/* Button colors */
+	--vp-button-brand-bg: #16a34a;
+	--vp-button-brand-hover-bg: #15803d;
+	--vp-button-brand-active-bg: #14532d;
+}
+
+.dark {
+	/* Override dark mode with same colors for consistency */
+	--vp-c-bg: #0f172a;
+	--vp-c-bg-alt: #1e293b;
+	--vp-c-bg-elv: #1e293b;
+	--vp-c-bg-soft: #334155;
+}
+
+/* Custom heading styles with green underline like moq.dev */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3 {
+	text-decoration: underline;
+	text-decoration-color: #22c55e;
+	text-underline-offset: 0.25em;
+	color: #ffffff;
+}
+
+.vp-doc h1 {
+	text-decoration-thickness: 8px;
+	margin-top: 3rem;
+	margin-bottom: 2rem;
+}
+
+.vp-doc h2 {
+	text-decoration-thickness: 4px;
+}
+
+.vp-doc h3 {
+	text-decoration-thickness: 2px;
+	font-size: 1.5rem;
+}
+
+/* Links with green underline like moq.dev */
+.vp-doc a {
+	color: #22c55e;
+	font-weight: 700;
+	text-decoration: underline;
+	text-decoration-color: #22c55e;
+	text-decoration-thickness: 2px;
+	text-underline-offset: 0.25em;
+}
+
+.vp-doc a:hover {
+	color: #16a34a;
+	text-decoration-color: #16a34a;
+}
+
+/* Strong/bold text in green */
+.vp-doc strong {
+	color: #22c55e;
+	font-weight: 700;
+}
+
+/* Code styling */
+.vp-doc :not(pre) > code {
+	color: #ffffff;
+	background-color: rgba(0, 0, 0, 0.5);
+}
+
+/* Lists */
+.vp-doc li {
+	margin: 0.25rem 0;
+}
+
+/* Images */
+.vp-doc img {
+	border-radius: 0.5rem;
+	margin: 0 auto;
+}
+
+/* Navbar background */
+.VPNav {
+	background-color: #0f172a;
+	border-bottom-color: #334155;
+}
+
+/* Sidebar styling */
+.VPSidebar {
+	background-color: #0f172a;
+}
+
+/* Home hero styling */
+.VPHero .name {
+	color: #22c55e;
+}
+
+/* Feature layout - emoji in top right corner */
+.VPFeature {
+	position: relative;
+	padding-top: 0rem;
+	background-color: transparent !important;
+	border: 2px solid #334155 !important;
+}
+
+.VPFeature .icon {
+	background-color: #0f172a !important;
+	position: absolute !important;
+	top: 1rem;
+	right: 1rem;
+	width: 2rem !important;
+	height: 2rem !important;
+	font-size: 1.5rem !important;
+	display: flex !important;
+	align-items: center !important;
+	justify-content: center !important;
+	margin: 0 !important;
+}
+
+.VPFeature .title {
+	font-size: 1.5rem !important;
+	margin-top: 0 !important;
+	padding-top: 0 !important;
+	text-decoration: underline;
+	text-decoration-color: #22c55e;
+	text-decoration-thickness: 2px;
+	text-underline-offset: 0.25em;
+}
+
+.VPFeature .details {
+	margin-top: 0.5rem;
+}
+
+.VPHero .tagline {
+	color: #cbd5e1;
+}
+
+/* Footer */
+.VPFooter {
+	background-color: #0f172a;
+	border-top-color: #334155;
+}
+
+/* Hero logo - display logo above action buttons */
+.VPHero .container {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+
+.VPHero .container::before {
+	content: "";
+	display: block;
+	width: 100%;
+	max-width: 800px;
+	height: 120px;
+	background-image: url("/logo.svg");
+	background-size: contain;
+	background-repeat: no-repeat;
+	background-position: center;
+}
+
+.VPHero .actions {
+	justify-content: center;
+}
