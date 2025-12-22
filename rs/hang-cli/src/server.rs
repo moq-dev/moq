@@ -6,6 +6,7 @@ use axum::{http::Method, routing::get, Router};
 use hang::moq_lite;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
@@ -26,17 +27,15 @@ pub async fn server(
 
 	let server = config.init()?;
 
-	// Get the first certificate's fingerprint.
-	// TODO serve all of them so we can support multiple signature algorithms.
-	let fingerprint = server.fingerprints().first().context("missing certificate")?.clone();
-
 	// Notify systemd that we're ready.
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+
+	let tls_info = server.tls_info();
 
 	tokio::select! {
 		res = accept(server, name, publish.consume()) => res,
 		res = publish.run() => res,
-		res = web(listen, fingerprint, public) => res,
+		res = web(listen, tls_info, public) => res,
 	}
 }
 
@@ -91,13 +90,29 @@ async fn run_session(
 }
 
 // Initialize the HTTP server (but don't serve yet).
-async fn web(bind: SocketAddr, fingerprint: String, public: Option<PathBuf>) -> anyhow::Result<()> {
+async fn web(
+	bind: SocketAddr,
+	tls_info: Arc<RwLock<moq_native::TlsInfo>>,
+	public: Option<PathBuf>,
+) -> anyhow::Result<()> {
 	async fn handle_404() -> impl IntoResponse {
 		(StatusCode::NOT_FOUND, "Not found")
 	}
 
+	let fingerprint_handler = move || async move {
+		// Get the first certificate's fingerprint.
+		// TODO serve all of them so we can support multiple signature algorithms.
+		tls_info
+			.read()
+			.expect("tls_info read lock poisoned")
+			.fingerprints
+			.first()
+			.expect("missing certificate")
+			.clone()
+	};
+
 	let mut app = Router::new()
-		.route("/certificate.sha256", get(fingerprint))
+		.route("/certificate.sha256", get(fingerprint_handler))
 		.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]));
 
 	// If a public directory is provided, serve it.

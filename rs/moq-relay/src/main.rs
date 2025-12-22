@@ -18,7 +18,6 @@ async fn main() -> anyhow::Result<()> {
 	let mut server = config.server.init()?;
 	let client = config.client.init()?;
 	let auth = config.auth.init()?;
-	let fingerprints = server.fingerprints().to_vec();
 
 	let cluster = Cluster::new(config.cluster, client);
 	let cloned = cluster.clone();
@@ -29,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
 		WebState {
 			auth: auth.clone(),
 			cluster: cluster.clone(),
-			fingerprints,
+			tls_info: server.tls_info(),
 			conn_id: Default::default(),
 		},
 		config.web,
