@@ -11,6 +11,7 @@ export default defineConfig({
 		rollupOptions: {
 			input: {
 				watch: "index.html",
+				"watch-mse": "watch-mse.html",
 				publish: "publish.html",
 				support: "support.html",
 				meet: "meet.html",

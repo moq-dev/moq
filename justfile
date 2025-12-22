@@ -146,6 +146,23 @@ pub name url="http://localhost:4443/anon" *args:
 		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
 		- | cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
 
+# Publish a video using MSE-compatible fMP4 segments (for browser MSE playback)
+# This sends complete moof+mdat segments instead of individual frames.
+pub-mse name url="http://localhost:4443/anon" *args:
+	# Download the sample media.
+	just download "{{name}}"
+
+	# Pre-build the binary so we don't queue media while compiling.
+	cargo build --bin hang
+
+	# Run ffmpeg and pipe the output to hang with MSE segment mode
+	ffmpeg -hide_banner -v quiet \
+		-stream_loop -1 -re \
+		-i "dev/{{name}}.fmp4" \
+		-c copy \
+		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
+		- | cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4-mse {{args}}
+
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
 	#!/usr/bin/env bash

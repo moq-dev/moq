@@ -6,6 +6,27 @@ use moq_lite as moq;
 use mp4_atom::{Any, Atom, DecodeMaybe, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 
+/// Mode for importing fMP4 content.
+///
+/// This determines how frames are transmitted over MOQ:
+/// - `Frames`: Individual frames for WebCodecs (lower latency)
+/// - `Segments`: Complete fMP4 segments for MSE (broader compatibility)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ImportMode {
+	/// Extract individual frames from segments (default, for WebCodecs).
+	///
+	/// Each frame is sent separately with a timestamp header.
+	/// This provides the lowest latency but requires WebCodecs on the client.
+	#[default]
+	Frames,
+
+	/// Send complete fMP4 segments (moof+mdat) for MSE.
+	///
+	/// Init segment (ftyp+moov) is sent at each keyframe.
+	/// This is compatible with MSE-based players but has slightly higher latency.
+	Segments,
+}
+
 /// Converts fMP4/CMAF files into hang broadcast streams.
 ///
 /// This struct processes fragmented MP4 (fMP4) files and converts them into hang broadcasts.
@@ -23,6 +44,11 @@ use std::collections::HashMap;
 /// **Audio:**
 /// - AAC (MP4A)
 /// - Opus
+///
+/// ## Import Modes
+///
+/// - [`ImportMode::Frames`]: Extract individual frames (for WebCodecs)
+/// - [`ImportMode::Segments`]: Send complete fMP4 segments (for MSE)
 pub struct Fmp4 {
 	// The broadcast being produced
 	// This `hang` variant includes a catalog.
@@ -44,6 +70,20 @@ pub struct Fmp4 {
 	// The latest moof header
 	moof: Option<Moof>,
 	moof_size: usize,
+
+	// --- MSE Segment Mode fields ---
+	// Import mode (frames vs segments)
+	mode: ImportMode,
+
+	// Buffer to accumulate raw moof bytes (for Segments mode)
+	moof_buffer: BytesMut,
+
+	// Buffer to store ftyp box for init segment
+	ftyp_buffer: BytesMut,
+
+	// Per-track init segments (ftyp + moov with single track) for MSE mode
+	// Key is track_id, value is complete init segment bytes
+	track_init_segments: HashMap<u32, Bytes>,
 }
 
 impl Fmp4 {
@@ -51,7 +91,22 @@ impl Fmp4 {
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the
 	/// fMP4 file. The catalog from the `hang::BroadcastProducer` is used automatically.
+	///
+	/// Uses [`ImportMode::Frames`] by default (for WebCodecs).
+	/// Use [`Self::with_mode`] to specify a different mode.
 	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
+		Self::with_mode(broadcast, ImportMode::default())
+	}
+
+	/// Create a new CMAF importer with a specific import mode.
+	///
+	/// # Arguments
+	///
+	/// * `broadcast` - The broadcast to write tracks to
+	/// * `mode` - The import mode:
+	///   - [`ImportMode::Frames`]: Extract individual frames (for WebCodecs)
+	///   - [`ImportMode::Segments`]: Send complete fMP4 segments (for MSE)
+	pub fn with_mode(broadcast: hang::BroadcastProducer, mode: ImportMode) -> Self {
 		let catalog = broadcast.catalog.clone();
 		Self {
 			broadcast,
@@ -61,6 +116,10 @@ impl Fmp4 {
 			moov: None,
 			moof: None,
 			moof_size: 0,
+			mode,
+			moof_buffer: BytesMut::new(),
+			ftyp_buffer: BytesMut::new(),
+			track_init_segments: HashMap::default(),
 		}
 	}
 
@@ -71,20 +130,38 @@ impl Fmp4 {
 		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
 			// Process the parsed atom.
 			let size = cursor.position() as usize - position;
+			let atom_start = position;
 			position = cursor.position() as usize;
 
 			match atom {
 				Any::Ftyp(_) | Any::Styp(_) => {
-					// Skip
+					// In Segments mode, capture ftyp bytes for init segment
+					if self.mode == ImportMode::Segments && self.ftyp_buffer.is_empty() {
+						let data = cursor.get_ref().as_ref();
+						self.ftyp_buffer.extend_from_slice(&data[atom_start..position]);
+						tracing::debug!("Captured ftyp/styp box: {} bytes", size);
+					}
 				}
 				Any::Moov(moov) => {
-					// Create the broadcast.
-					self.init(moov)?;
+					// Create the broadcast first
+					self.init(moov.clone())?;
+
+					// In Segments mode, create per-track init segments
+					if self.mode == ImportMode::Segments && self.track_init_segments.is_empty() {
+						self.create_per_track_init_segments(&moov)?;
+					}
 				}
 				Any::Moof(moof) => {
 					if self.moof.is_some() {
 						// Two moof boxes in a row.
 						anyhow::bail!("duplicate moof box");
+					}
+
+					// In Segments mode, capture moof bytes
+					if self.mode == ImportMode::Segments {
+						self.moof_buffer.clear();
+						let data = cursor.get_ref().as_ref();
+						self.moof_buffer.extend_from_slice(&data[atom_start..position]);
 					}
 
 					self.moof = Some(moof);
@@ -93,7 +170,10 @@ impl Fmp4 {
 				Any::Mdat(mdat) => {
 					// Extract the samples from the mdat atom.
 					let header_size = size - mdat.data.len();
-					self.extract(mdat, header_size)?;
+					match self.mode {
+						ImportMode::Frames => self.extract(mdat, header_size)?,
+						ImportMode::Segments => self.extract_segment(mdat, header_size)?,
+					}
 				}
 				_ => {
 					// Skip unknown atoms
@@ -142,13 +222,13 @@ impl Fmp4 {
 
 					let track = moq::Track {
 						name: self.broadcast.track_name("audio"),
-						priority: 2,
+						priority: 1,
 					};
 
 					tracing::debug!(name = ?track.name, ?config, "starting track");
 
 					let audio = catalog.insert_audio(track.name.clone(), config);
-					audio.priority = 2;
+					audio.priority = 1;
 
 					let track = track.produce();
 					self.broadcast.insert_track(track.consumer);
@@ -162,6 +242,46 @@ impl Fmp4 {
 		}
 
 		self.moov = Some(moov);
+
+		Ok(())
+	}
+
+	/// Create per-track init segments for MSE mode.
+	/// Each track needs its own ftyp + moov with only that track's info.
+	fn create_per_track_init_segments(&mut self, moov: &Moov) -> anyhow::Result<()> {
+		use mp4_atom::Encode;
+
+		for trak in &moov.trak {
+			let track_id = trak.tkhd.track_id;
+
+			// Create a new moov with only this track
+			let single_track_moov = Moov {
+				mvhd: moov.mvhd.clone(),
+				mvex: moov.mvex.clone(),
+				trak: vec![trak.clone()],
+				udta: moov.udta.clone(),
+				meta: moov.meta.clone(),
+			};
+
+			// Encode the single-track moov to bytes
+			let mut moov_bytes = BytesMut::new();
+			single_track_moov.encode(&mut moov_bytes)?;
+
+			// Create the complete init segment: ftyp + moov
+			let mut init_segment = BytesMut::new();
+			init_segment.extend_from_slice(&self.ftyp_buffer);
+			init_segment.extend_from_slice(&moov_bytes);
+
+			tracing::debug!(
+				"Created init segment for track {}: {} bytes (ftyp: {}, moov: {})",
+				track_id,
+				init_segment.len(),
+				self.ftyp_buffer.len(),
+				moov_bytes.len()
+			);
+
+			self.track_init_segments.insert(track_id, init_segment.freeze());
+		}
 
 		Ok(())
 	}
@@ -487,6 +607,133 @@ impl Fmp4 {
 			if diff > Timestamp::from_millis(1).unwrap() {
 				tracing::warn!("fMP4 introduced {:?} of latency", diff);
 			}
+		}
+
+		Ok(())
+	}
+
+	/// Extract complete fMP4 segment (moof + mdat) as a single frame.
+	///
+	/// Used when [`ImportMode::Segments`] is selected for MSE compatibility.
+	fn extract_segment(&mut self, mdat: Mdat, _header_size: usize) -> anyhow::Result<()> {
+		let mdat_data = Bytes::from(mdat.data);
+		let moov = self.moov.as_ref().context("missing moov box")?;
+		let moof = self.moof.take().context("missing moof box")?;
+
+		// Loop over ALL tracks in moof
+		for traf in &moof.traf {
+			let track_id = traf.tfhd.track_id;
+			let track = match self.tracks.get_mut(&track_id) {
+				Some(t) => t,
+				None => {
+					tracing::warn!("Unknown track_id: {}, skipping", track_id);
+					continue;
+				}
+			};
+
+			// Find the track information in the moov
+			let trak = moov
+				.trak
+				.iter()
+				.find(|trak| trak.tkhd.track_id == track_id)
+				.context("unknown track")?;
+
+			let tfdt = traf.tfdt.as_ref().context("missing tfdt box")?;
+			let dts = tfdt.base_media_decode_time;
+			let timescale = trak.mdia.mdhd.timescale as u64;
+
+			// Calculate timestamp from DTS
+			let micros = (dts as u128 * 1_000_000 / timescale as u128) as u64;
+			let timestamp = hang::Timestamp::from_micros(micros)?;
+
+			// Check if this is a keyframe segment by looking at first sample flags
+			let keyframe = if let Some(trun) = traf.trun.first() {
+				if let Some(entry) = trun.entries.first() {
+					let trex = moov
+						.mvex
+						.as_ref()
+						.and_then(|mvex| mvex.trex.iter().find(|trex| trex.track_id == track_id));
+					let default_sample_flags = trex.map(|trex| trex.default_sample_flags).unwrap_or_default();
+
+					let flags = entry
+						.flags
+						.unwrap_or(traf.tfhd.default_sample_flags.unwrap_or(default_sample_flags));
+
+					if trak.mdia.hdlr.handler == b"vide".into() {
+						let is_keyframe = (flags >> 24) & 0x3 == 0x2; // kSampleDependsOnNoOther
+						let non_sync = (flags >> 16) & 0x1 == 0x1; // kSampleIsNonSyncSample
+
+						if is_keyframe && !non_sync {
+							// Force audio keyframe when video has a keyframe (for sync)
+							for audio in moov.trak.iter().filter(|t| t.mdia.hdlr.handler == b"soun".into()) {
+								self.last_keyframe.remove(&audio.tkhd.track_id);
+							}
+							true
+						} else {
+							false
+						}
+					} else {
+						// Audio - check if it's been 10 seconds since last keyframe
+						// OR if video just had a keyframe (last_keyframe was cleared)
+						match self.last_keyframe.get(&track_id) {
+							Some(prev) => timestamp - *prev > Timestamp::from_secs(10).unwrap(),
+							None => true, // No previous keyframe = force one now
+						}
+					}
+				} else {
+					false
+				}
+			} else {
+				false
+			};
+
+			if keyframe {
+				self.last_keyframe.insert(track_id, timestamp);
+			}
+
+			// Create complete fMP4 segment
+			let mut segment_data = BytesMut::new();
+
+			// For keyframes, prepend the per-track init segment to make each
+			// keyframe self-contained. Each track has its own init segment with
+			// only that track's moov info - this is required for MSE with separate
+			// SourceBuffers.
+			if keyframe {
+				if let Some(init_segment) = self.track_init_segments.get(&track_id) {
+					segment_data.extend_from_slice(init_segment);
+					tracing::debug!(
+						"Prepending per-track init segment to keyframe for track {}: {} bytes",
+						track_id,
+						init_segment.len()
+					);
+				}
+			}
+
+			// Add the captured moof bytes
+			segment_data.extend_from_slice(&self.moof_buffer);
+
+			// Add mdat box: size (4 bytes) + 'mdat' fourcc (4 bytes) + data
+			let mdat_size = (8 + mdat_data.len()) as u32;
+			segment_data.extend_from_slice(&mdat_size.to_be_bytes());
+			segment_data.extend_from_slice(b"mdat");
+			segment_data.extend_from_slice(&mdat_data);
+
+			tracing::debug!(
+				"Sending fMP4 segment: {} bytes (moof: {}, mdat: {}), keyframe: {}, timestamp: {:?}",
+				segment_data.len(),
+				self.moof_buffer.len(),
+				mdat_size,
+				keyframe,
+				timestamp
+			);
+
+			let frame = hang::Frame {
+				timestamp,
+				keyframe,
+				payload: segment_data.freeze().into(),
+			};
+
+			track.write(frame)?;
 		}
 
 		Ok(())

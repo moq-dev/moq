@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en" class="dark">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MoQ MSE Player Demo</title>
+
+	<link rel="stylesheet" href="index.css">
+	<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+</head>
+
+<body class="dark:bg-black p-4">
+	<h1 class="text-2xl font-bold mb-4">MSE Player Demo</h1>
+
+	<p class="mb-4">
+		This demo uses <strong>MediaSource Extensions</strong> for native <code>&lt;video&gt;</code> playback.
+		It requires publishing with <code>fmp4-mse</code> mode (complete fMP4 segments).
+	</p>
+
+	<!--
+		MSE-based video player component.
+
+		Unlike the WebCodecs-based <hang-watch>, this uses a native <video> element.
+
+		Attributes:
+		- url: The relay URL (with path like /anon or with JWT auth)
+		- path: The broadcast name (e.g., "bbb")
+		- debug: Show debug overlay with latency, buffer, and playback stats
+	-->
+	<moq-mse-player
+		url="%VITE_RELAY_URL%"
+		path="bbb"
+		debug>
+	</moq-mse-player>
+
+	<h3 class="text-lg font-semibold mt-6 mb-2">How to Use</h3>
+	<p class="mb-2">
+		You must publish using the MSE-compatible segment mode:
+	</p>
+	<pre class="bg-gray-800 text-green-400 p-4 rounded mb-4"><code class="language-bash"># Publish with MSE mode (fMP4 segments)
+just pub-mse bbb
+
+# Or manually:
+ffmpeg -i input.mp4 -c copy -f mp4 \
+  -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
+  - | cargo run --bin hang -- publish --url "http://localhost:4443/anon" --name "bbb" fmp4-mse</code></pre>
+
+	<h3 class="text-lg font-semibold mt-6 mb-2">Live Sync Strategies</h3>
+	<p class="mb-2">
+		This player implements HLS.js-style live sync:
+	</p>
+	<ul class="list-disc list-inside mb-4">
+		<li><strong>Target latency:</strong> ~2 seconds behind live edge</li>
+		<li><strong>Catch-up:</strong> Speeds up to 1.1x when latency &gt; 3s</li>
+		<li><strong>Hard seek:</strong> Jumps to live edge when latency &gt; 5s</li>
+		<li><strong>Buffer cleanup:</strong> Removes old data after 60s (5s if quota exceeded)</li>
+	</ul>
+
+	<h3 class="text-lg font-semibold mt-6 mb-2">WebCodecs vs MSE</h3>
+	<table class="table-auto border-collapse border border-gray-600 mb-4">
+		<thead>
+			<tr class="bg-gray-800">
+				<th class="border border-gray-600 px-4 py-2">Feature</th>
+				<th class="border border-gray-600 px-4 py-2">WebCodecs (<a href="index.html">&lt;hang-watch&gt;</a>)</th>
+				<th class="border border-gray-600 px-4 py-2">MSE (&lt;moq-mse-player&gt;)</th>
+			</tr>
+		</thead>
+		<tbody>
+			<tr>
+				<td class="border border-gray-600 px-4 py-2">Render Target</td>
+				<td class="border border-gray-600 px-4 py-2">&lt;canvas&gt;</td>
+				<td class="border border-gray-600 px-4 py-2">&lt;video&gt;</td>
+			</tr>
+			<tr>
+				<td class="border border-gray-600 px-4 py-2">Native Controls</td>
+				<td class="border border-gray-600 px-4 py-2">❌ Custom</td>
+				<td class="border border-gray-600 px-4 py-2">✅ Built-in</td>
+			</tr>
+			<tr>
+				<td class="border border-gray-600 px-4 py-2">Latency</td>
+				<td class="border border-gray-600 px-4 py-2">⚡ Ultra-low</td>
+				<td class="border border-gray-600 px-4 py-2">📊 ~2s target</td>
+			</tr>
+			<tr>
+				<td class="border border-gray-600 px-4 py-2">Browser Support</td>
+				<td class="border border-gray-600 px-4 py-2">Chrome, Edge</td>
+				<td class="border border-gray-600 px-4 py-2">All modern</td>
+			</tr>
+			<tr>
+				<td class="border border-gray-600 px-4 py-2">Publish Mode</td>
+				<td class="border border-gray-600 px-4 py-2"><code>just pub bbb</code></td>
+				<td class="border border-gray-600 px-4 py-2"><code>just pub-mse bbb</code></td>
+			</tr>
+		</tbody>
+	</table>
+
+	<p>
+		<a href="index.html" class="text-blue-400 hover:underline">← Back to WebCodecs demo</a>
+	</p>
+</body>
+
+<script type="module" src="watch-mse.ts"></script>
+
+</html>
