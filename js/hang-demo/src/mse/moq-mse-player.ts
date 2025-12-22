@@ -26,6 +26,7 @@ export class MoqMsePlayer extends HTMLElement {
   private lastAudioProcessTime = 0;
   private userPaused = false;
   private monitorInterval: number | null = null;
+  private statusIntervalId: number | null = null;
   private connectionState = "disconnected";
   private reconnectTimer: number | null = null;
   private catalogReceived = false;
@@ -149,8 +150,14 @@ export class MoqMsePlayer extends HTMLElement {
   }
 
   private async connect() {
+    // Clear any existing status interval before creating a new one
+    if (this.statusIntervalId !== null) {
+      clearInterval(this.statusIntervalId);
+      this.statusIntervalId = null;
+    }
+
     // Start periodic status logging
-    setInterval(() => {
+    this.statusIntervalId = window.setInterval(() => {
         if (!this.video) return;
         const vBuf = this.videoSourceBuffer?.buffered.length ? `${this.videoSourceBuffer.buffered.start(0).toFixed(2)}-${this.videoSourceBuffer.buffered.end(this.videoSourceBuffer.buffered.length-1).toFixed(2)}` : "empty";
         const aBuf = this.audioSourceBuffer?.buffered.length ? `${this.audioSourceBuffer.buffered.start(0).toFixed(2)}-${this.audioSourceBuffer.buffered.end(this.audioSourceBuffer.buffered.length-1).toFixed(2)}` : "empty";
@@ -214,6 +221,10 @@ export class MoqMsePlayer extends HTMLElement {
   }
 
   private disconnect() {
+    if (this.statusIntervalId !== null) {
+      clearInterval(this.statusIntervalId);
+      this.statusIntervalId = null;
+    }
     if (this.monitorInterval) {
       clearInterval(this.monitorInterval);
       this.monitorInterval = null;
