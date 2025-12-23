@@ -2,7 +2,7 @@ import type { Time } from "@moq/hang";
 import type * as Catalog from "@moq/hang/catalog";
 import type HangWatch from "@moq/hang/watch/element";
 import type { JSX } from "solid-js";
-import { createContext, createEffect, createSignal } from "solid-js";
+import { createContext, createEffect, createSignal, onCleanup } from "solid-js";
 
 type WatchUIContextProviderProps = {
 	hangWatch: HangWatch;
@@ -182,9 +182,9 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 
 		document.addEventListener("fullscreenchange", handleFullscreenChange);
 
-		return () => {
+		onCleanup(() => {
 			document.removeEventListener("fullscreenchange", handleFullscreenChange);
-		};
+		});
 	});
 
 	return <WatchUIContext.Provider value={value}>{props.children}</WatchUIContext.Provider>;
