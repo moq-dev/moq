@@ -769,7 +769,11 @@ impl Fmp4 {
 				// data_offset is relative to the start of the moof
 				let data_offset_usize: usize = data_offset.try_into().context("invalid data offset")?;
 				if data_offset_usize < self.moof_size {
-					anyhow::bail!("invalid data offset: {} < moof_size {}", data_offset_usize, self.moof_size);
+					anyhow::bail!(
+						"invalid data offset: {} < moof_size {}",
+						data_offset_usize,
+						self.moof_size
+					);
 				}
 				// Calculate offset into mdat (moof_size is subtracted, and we also need to
 				// account for the 8-byte mdat header that was stripped when parsing)
@@ -782,12 +786,7 @@ impl Fmp4 {
 					.unwrap_or(traf.tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 				if offset + size > global_mdat.len() {
-					anyhow::bail!(
-						"invalid sample offset: {} + {} > {}",
-						offset,
-						size,
-						global_mdat.len()
-					);
+					anyhow::bail!("invalid sample offset: {} + {} > {}", offset, size, global_mdat.len());
 				}
 
 				track_mdat_data.extend_from_slice(&global_mdat[offset..offset + size]);
@@ -861,16 +860,14 @@ impl Drop for Fmp4 {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use mp4_atom::{Mfhd, Traf, Tfhd, Tfdt, Trun, TrunEntry};
+	use mp4_atom::{Mfhd, Tfdt, Tfhd, Traf, Trun, TrunEntry};
 
 	/// Test that build_per_track_segment creates a moof with only one traf
 	/// and an mdat containing only that track's samples.
 	#[test]
 	fn test_per_track_moof_mdat_extraction() {
 		// Create a mock mfhd (movie fragment header)
-		let mfhd = Mfhd {
-			sequence_number: 1,
-		};
+		let mfhd = Mfhd { sequence_number: 1 };
 
 		// Create sample data that would be in the global mdat
 		// Track 1 samples: [0x11, 0x12, 0x13] (3 bytes) + [0x14, 0x15] (2 bytes) = 5 bytes
@@ -909,13 +906,13 @@ mod tests {
 				entries: vec![
 					TrunEntry {
 						duration: Some(1024),
-						size: Some(3), // 3 bytes
+						size: Some(3),           // 3 bytes
 						flags: Some(0x02000000), // keyframe
 						cts: Some(0),
 					},
 					TrunEntry {
 						duration: Some(1024),
-						size: Some(2), // 2 bytes
+						size: Some(2),           // 2 bytes
 						flags: Some(0x01010000), // non-keyframe
 						cts: Some(0),
 					},
@@ -942,7 +939,7 @@ mod tests {
 				data_offset: Some((mock_moof_size + mdat_header_size + 5) as i32),
 				entries: vec![TrunEntry {
 					duration: Some(1024),
-					size: Some(4), // 4 bytes
+					size: Some(4),           // 4 bytes
 					flags: Some(0x02000000), // keyframe
 					cts: Some(0),
 				}],
@@ -951,11 +948,14 @@ mod tests {
 		};
 
 		// Test extracting track 1
-		let (moof_bytes, mdat_bytes) =
-			build_per_track_segment_standalone(&mfhd, &traf1, &global_mdat, mock_moof_size);
+		let (moof_bytes, mdat_bytes) = build_per_track_segment_standalone(&mfhd, &traf1, &global_mdat, mock_moof_size);
 
 		// Verify mdat contains only track 1 samples (5 bytes + 8 byte header)
-		assert_eq!(mdat_bytes.len(), 8 + 5, "Track 1 mdat should be 13 bytes (8 header + 5 data)");
+		assert_eq!(
+			mdat_bytes.len(),
+			8 + 5,
+			"Track 1 mdat should be 13 bytes (8 header + 5 data)"
+		);
 
 		// Verify mdat header
 		let mdat_size = u32::from_be_bytes([mdat_bytes[0], mdat_bytes[1], mdat_bytes[2], mdat_bytes[3]]);
@@ -976,7 +976,11 @@ mod tests {
 			build_per_track_segment_standalone(&mfhd, &traf2, &global_mdat, mock_moof_size);
 
 		// Verify mdat contains only track 2 samples (4 bytes + 8 byte header)
-		assert_eq!(mdat_bytes2.len(), 8 + 4, "Track 2 mdat should be 12 bytes (8 header + 4 data)");
+		assert_eq!(
+			mdat_bytes2.len(),
+			8 + 4,
+			"Track 2 mdat should be 12 bytes (8 header + 4 data)"
+		);
 
 		// Verify mdat data content
 		assert_eq!(&mdat_bytes2[8..12], &[0x21, 0x22, 0x23, 0x24], "Track 2 sample data");
@@ -1023,8 +1027,7 @@ mod tests {
 			..Default::default()
 		};
 
-		let (moof_bytes, mdat_bytes) =
-			build_per_track_segment_standalone(&mfhd, &traf, &global_mdat, mock_moof_size);
+		let (moof_bytes, mdat_bytes) = build_per_track_segment_standalone(&mfhd, &traf, &global_mdat, mock_moof_size);
 
 		// Decode the moof to check the data_offset
 		let decoded_moof = decode_moof(&moof_bytes);
@@ -1040,7 +1043,11 @@ mod tests {
 
 		// Verify that reading at that offset gives us the sample data
 		let actual_offset = expected_data_offset as usize - new_moof_size;
-		assert_eq!(&mdat_bytes[actual_offset..actual_offset + 10], &sample_data[..], "Data at offset should match sample");
+		assert_eq!(
+			&mdat_bytes[actual_offset..actual_offset + 10],
+			&sample_data[..],
+			"Data at offset should match sample"
+		);
 	}
 
 	/// Standalone version of build_per_track_segment for testing without Fmp4 instance
