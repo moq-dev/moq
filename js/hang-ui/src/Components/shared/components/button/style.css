@@ -2,7 +2,6 @@
 @import "../../styles/variables.css";
 
 .button {
-	border: none;
 	color: var(--color-white);
 	cursor: pointer;
 	background-color: var(--color-white-alpha-10);
