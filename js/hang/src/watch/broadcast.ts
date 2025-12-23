@@ -91,12 +91,15 @@ export class Broadcast {
 		const path = effect.get(this.path);
 		if (path === undefined) return;
 
+		console.log("waiting for announcement", path);
+
 		const announced = conn.announced(path);
 		effect.cleanup(() => announced.close());
 
 		effect.spawn(async () => {
 			for (;;) {
 				const update = await announced.next();
+				console.log("got announcement", update?.path);
 				if (!update) break;
 
 				// Require full equality
@@ -131,7 +134,7 @@ export class Broadcast {
 
 		this.status.set("loading");
 
-		const catalog = broadcast.subscribe("catalog.json", PRIORITY.catalog);
+		const catalog = broadcast.subscribe({ name: "catalog.json", priority: PRIORITY.catalog });
 		effect.cleanup(() => catalog.close());
 
 		effect.spawn(this.#fetchCatalog.bind(this, catalog));

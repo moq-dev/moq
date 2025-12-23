@@ -72,45 +72,45 @@ export class Broadcast {
 
 	async #runBroadcast(broadcast: Moq.Broadcast, effect: Effect) {
 		for (;;) {
-			const request = await broadcast.requested();
-			if (!request) break;
+			const track = await broadcast.requested();
+			if (!track) break;
 
-			effect.cleanup(() => request.track.close());
+			effect.cleanup(() => track.close());
 
 			effect.effect((effect) => {
-				if (effect.get(request.track.state.closed)) return;
+				if (effect.get(track.closed)) return;
 
-				switch (request.track.name) {
+				switch (track.name) {
 					case Broadcast.CATALOG_TRACK:
-						this.#serveCatalog(request.track, effect);
+						this.#serveCatalog(track, effect);
 						break;
 					case Location.Window.TRACK:
-						this.location.window.serve(request.track, effect);
+						this.location.window.serve(track, effect);
 						break;
 					case Location.Peers.TRACK:
-						this.location.peers.serve(request.track, effect);
+						this.location.peers.serve(track, effect);
 						break;
 					case Preview.TRACK:
-						this.preview.serve(request.track, effect);
+						this.preview.serve(track, effect);
 						break;
 					case Chat.Typing.TRACK:
-						this.chat.typing.serve(request.track, effect);
+						this.chat.typing.serve(track, effect);
 						break;
 					case Chat.Message.TRACK:
-						this.chat.message.serve(request.track, effect);
+						this.chat.message.serve(track, effect);
 						break;
 					case Audio.Encoder.TRACK:
-						this.audio.serve(request.track, effect);
+						this.audio.serve(track, effect);
 						break;
 					case Video.Root.TRACK_HD:
-						this.video.hd.serve(request.track, effect);
+						this.video.hd.serve(track, effect);
 						break;
 					case Video.Root.TRACK_SD:
-						this.video.sd.serve(request.track, effect);
+						this.video.sd.serve(track, effect);
 						break;
 					default:
-						console.error("received subscription for unknown track", request.track.name);
-						request.track.close(new Error(`Unknown track: ${request.track.name}`));
+						console.error("received subscription for unknown track", track.name);
+						track.close(new Error(`Unknown track: ${track.name}`));
 						break;
 				}
 			});

@@ -1,4 +1,4 @@
-import type * as Time from "../../time";
+import { Time } from "@moq/lite";
 
 export interface AudioFrame {
 	timestamp: Time.Micro;

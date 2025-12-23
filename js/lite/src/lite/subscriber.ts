@@ -1,5 +1,6 @@
+import { Effect } from "@moq/signals";
 import { Announced } from "../announced.ts";
-import { Broadcast, type TrackRequest } from "../broadcast.ts";
+import { Broadcast } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
@@ -8,7 +9,7 @@ import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import { StreamId } from "./stream.ts";
-import { Subscribe, SubscribeOk } from "./subscribe.ts";
+import { Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import type { Version } from "./version.ts";
 
 /**
@@ -25,6 +26,8 @@ export class Subscriber {
 	// Our subscribed tracks.
 	#subscribes = new Map<bigint, Track>();
 	#subscribeNext = 0n;
+
+	#effect = new Effect();
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -95,6 +98,7 @@ export class Subscriber {
 		(async () => {
 			for (;;) {
 				const request = await broadcast.requested();
+				console.log("request", request);
 				if (!request) break;
 				this.#runSubscribe(path, request);
 			}
@@ -103,41 +107,70 @@ export class Subscriber {
 		return broadcast;
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: TrackRequest) {
+	async #runSubscribe(broadcast: Path.Valid, track: Track) {
 		const id = this.#subscribeNext++;
 
 		// Save the writer so we can append groups to it.
-		this.#subscribes.set(id, request.track);
+		this.#subscribes.set(id, track);
 
-		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${track.name}`);
 
 		const msg = new Subscribe({
 			id,
 			broadcast,
-			track: request.track.name,
-			priority: request.priority,
-			maxLatency: request.maxLatency,
+			track: track.name,
+			priority: track.priority.peek(),
+			maxLatency: track.maxLatency.peek(),
 		});
 
 		const stream = await Stream.open(this.#quic);
 		await stream.writer.u53(StreamId.Subscribe);
+
 		await msg.encode(stream.writer, this.version);
 
 		try {
 			await SubscribeOk.decode(stream.reader, this.version);
-			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${track.name}`);
 
-			await Promise.race([stream.reader.closed, request.track.closed]);
+			const closed = track.closed.promise();
 
-			request.track.close();
+			for (;;) {
+				// TODO this is super gross and needs to be refactored.
+				// Listen for changes to the priority and max latency and send an update message.
+				let dispose!: () => void;
+				const updated = new Promise<boolean>((resolve) => {
+					const d1 = track.priority.changed(() => resolve(true));
+					const d2 = track.maxLatency.changed(() => resolve(true));
+
+					dispose = () => {
+						d1();
+						d2();
+					};
+				});
+
+				const result = await Promise.race([stream.reader.closed, closed, updated]);
+				dispose();
+
+				if (result === true) {
+					const update = new SubscribeUpdate({
+						priority: track.priority.peek(),
+						maxLatency: track.maxLatency.peek(),
+					});
+					await update.encode(stream.writer, this.version);
+				} else if (result instanceof Error) {
+					throw result;
+				} else {
+					break;
+				}
+			}
+
+			track.close();
 			stream.close();
-			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${track.name}`);
 		} catch (err) {
 			const e = error(err);
-			request.track.close(e);
-			console.warn(
-				`subscribe error: id=${id} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
-			);
+			track.close(e);
+			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${track.name} error=${e.message}`);
 			stream.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
@@ -191,5 +224,6 @@ export class Subscriber {
 		}
 
 		this.#subscribes.clear();
+		this.#effect.close();
 	}
 }

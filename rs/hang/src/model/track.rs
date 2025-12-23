@@ -45,7 +45,7 @@ impl TrackProducer {
 	/// The timestamp is usually monotonically increasing, but it depends on the encoding.
 	/// For example, H.264 B-frames will introduce jitter and reordering.
 	pub fn write(&mut self, frame: Frame) -> Result<(), Error> {
-		tracing::trace!(?frame, "write frame");
+		//tracing::trace!(?frame, "write");
 
 		let mut header = BytesMut::new();
 		frame.timestamp.as_micros().encode(&mut header, lite::Version::Draft02);
@@ -174,7 +174,7 @@ impl TrackConsumer {
 					match res {
 						// Got the next frame.
 						Ok(Some(frame)) => {
-							tracing::trace!(?frame, "read frame");
+							//tracing::trace!(?frame, "read");
 							self.max_timestamp = frame.timestamp;
 							return Ok(Some(frame));
 						}

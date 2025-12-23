@@ -37,7 +37,8 @@ export class Preview {
 			if (!catalog) return;
 
 			// Subscribe to the preview.json track directly
-			const track = broadcast.subscribe(catalog.name, catalog.priority);
+			// TODO maxLatency
+			const track = broadcast.subscribe({ name: catalog.name, priority: catalog.priority });
 			effect.cleanup(() => track.close());
 
 			effect.spawn(async () => {

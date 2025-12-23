@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import * as Time from "../../time";
+import { Time } from "@moq/lite";
 import { AudioRingBuffer } from "./ring-buffer";
 
 function read(buffer: AudioRingBuffer, samples: number, channelCount = 2): Float32Array[] {

@@ -1,5 +1,5 @@
 import { Announced } from "../announced.ts";
-import { Broadcast, type TrackRequest } from "../broadcast.ts";
+import { Broadcast } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import type { Reader } from "../stream.ts";
@@ -114,15 +114,15 @@ export class Subscriber {
 		return broadcast;
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: TrackRequest) {
+	async #runSubscribe(broadcast: Path.Valid, track: Track) {
 		const requestId = await this.#control.nextRequestId();
 		if (requestId === undefined) return;
 
-		this.#subscribes.set(requestId, request.track);
+		this.#subscribes.set(requestId, track);
 
-		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${track.name}`);
 
-		const msg = new Subscribe(requestId, broadcast, request.track.name, request.priority);
+		const msg = new Subscribe(requestId, broadcast, track.name, track.priority.peek());
 
 		// Send SUBSCRIBE message on control stream and wait for response
 		const responsePromise = new Promise<SubscribeOk>((resolve, reject) => {
@@ -134,23 +134,23 @@ export class Subscriber {
 		try {
 			const ok = await responsePromise;
 			this.#trackAliases.set(ok.trackAlias, requestId);
-			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${track.name}`);
 
 			try {
-				await request.track.closed;
+				await track.closed.promise();
 
 				const msg = new Unsubscribe(requestId);
 				await this.#control.write(msg);
-				console.debug(`unsubscribe: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+				console.debug(`unsubscribe: id=${requestId} broadcast=${broadcast} track=${track.name}`);
 			} finally {
 				this.#trackAliases.delete(ok.trackAlias);
 			}
 		} catch (err) {
 			const e = error(err);
-			request.track.close(e);
+			track.close(e);
 
 			console.warn(
-				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
+				`subscribe error: id=${requestId} broadcast=${broadcast} track=${track.name} error=${e.message}`,
 			);
 		} finally {
 			this.#subscribes.delete(requestId);
@@ -220,9 +220,11 @@ export class Subscriber {
 			// Convert to Group (moq-lite equivalent)
 			track.writeGroup(producer);
 
+			const closed = track.closed.promise();
+
 			// Read objects from the stream until end of group
 			for (;;) {
-				const done = await Promise.race([stream.done(), producer.closed, track.closed]);
+				const done = await Promise.race([stream.done(), producer.closed, closed]);
 				if (done !== false) break;
 
 				const frame = await Frame.decode(stream, group.flags);

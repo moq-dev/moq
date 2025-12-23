@@ -108,6 +108,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
+		println!("announce_init: suffixes = {:?}", init);
+
 		let announce_init = lite::AnnounceInit { suffixes: init };
 		stream.writer.encode(&announce_init).await?;
 
@@ -119,6 +121,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				announced = origin.announced() => {
 					match announced {
 						Some((path, active)) => {
+							println!("announce: path = {:?}, active = {:?}", path, active.is_some());
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 
 							if active.is_some() {
@@ -142,6 +145,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub async fn recv_subscribe(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		println!("recv_subscribe");
 		let subscribe = stream.reader.decode::<lite::Subscribe>().await?;
 
 		let id = subscribe.id;

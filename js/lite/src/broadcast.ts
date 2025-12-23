@@ -1,16 +1,5 @@
 import { Signal } from "@moq/signals";
-import { Track } from "./track.ts";
-
-export interface TrackRequest {
-	track: Track;
-	priority: number;
-	maxLatency: DOMHighResTimeStamp;
-}
-
-export class BroadcastState {
-	requested = new Signal<TrackRequest[]>([]);
-	closed = new Signal<boolean | Error>(false);
-}
+import { Track, type TrackProps } from "./track.js";
 
 /**
  * Handles writing and managing tracks in a broadcast.
@@ -18,13 +7,14 @@ export class BroadcastState {
  * @public
  */
 export class Broadcast {
-	state = new BroadcastState();
+	#requested = new Signal<Track[]>([]);
+	#closed = new Signal<boolean | Error>(false);
 
 	readonly closed: Promise<Error | undefined>;
 
 	constructor() {
 		this.closed = new Promise((resolve) => {
-			const dispose = this.state.closed.subscribe((closed) => {
+			const dispose = this.#closed.subscribe((closed) => {
 				if (!closed) return;
 				resolve(closed instanceof Error ? closed : undefined);
 				dispose();
@@ -35,41 +25,38 @@ export class Broadcast {
 	/**
 	 * A track requested over the network.
 	 */
-	async requested(): Promise<TrackRequest | undefined> {
+	async requested(): Promise<Track | undefined> {
 		for (;;) {
 			// We use pop instead of shift because it's slightly more efficient.
-			const track = this.state.requested.peek().pop();
+			const track = this.#requested.peek().pop();
 			if (track) return track;
 
-			const closed = this.state.closed.peek();
+			const closed = this.#closed.peek();
 			if (closed instanceof Error) throw closed;
 			if (closed) return undefined;
 
-			await Signal.race(this.state.requested, this.state.closed);
+			await Signal.race(this.#requested, this.#closed);
 		}
+	}
+
+	/**
+	 * Creates a new track and serves it over the network.
+	 */
+	subscribe(track: TrackProps): Track {
+		const t = new Track(track);
+		this.serve(t);
+		return t;
 	}
 
 	/**
 	 * Populates the provided track over the network.
 	 */
-	subscribe({
-		name,
-		priority,
-		maxLatency,
-	}: {
-		name: string;
-		priority: number;
-		maxLatency: DOMHighResTimeStamp;
-	}): Track {
-		const track = new Track(name);
-
-		if (this.state.closed.peek()) {
-			throw new Error(`broadcast is closed: ${this.state.closed.peek()}`);
+	serve(track: Track) {
+		if (this.#closed.peek()) {
+			throw new Error(`broadcast is closed: ${this.#closed.peek()}`);
 		}
-		this.state.requested.mutate((requested) => {
-			requested.push({ track, priority, maxLatency });
-			// Sort the tracks by priority in ascending order (we will pop)
-			requested.sort((a, b) => a.priority - b.priority);
+		this.#requested.mutate((requested) => {
+			requested.push(track);
 		});
 
 		return track;
@@ -81,11 +68,11 @@ export class Broadcast {
 	 * @param abort - If provided, throw this exception instead of returning undefined.
 	 */
 	close(abort?: Error) {
-		this.state.closed.set(abort ?? true);
-		for (const { track } of this.state.requested.peek()) {
+		this.#closed.set(abort ?? true);
+		for (const track of this.#requested.peek()) {
 			track.close(abort);
 		}
-		this.state.requested.mutate((requested) => {
+		this.#requested.mutate((requested) => {
 			requested.length = 0;
 		});
 	}

@@ -3,7 +3,7 @@ import type { Broadcast } from "../broadcast.ts";
 import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
-import type { Track } from "../track.ts";
+import { Track } from "../track.js";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
@@ -138,7 +138,8 @@ export class Publisher {
 			return;
 		}
 
-		const track = broadcast.subscribe({ name: msg.track, priority: msg.priority, maxLatency: msg.maxLatency });
+		const track = new Track({ name: msg.track, priority: msg.priority, maxLatency: msg.maxLatency });
+		broadcast.serve(track);
 
 		try {
 			const info = new SubscribeOk({ priority: msg.priority });
@@ -154,10 +155,8 @@ export class Publisher {
 				const result = await Promise.any([serving, decode]);
 				if (!result) break;
 
-				if (result instanceof SubscribeUpdate) {
-					// TODO use the update
-					console.warn("subscribe update not supported", result);
-				}
+				track.priority.set(result.priority);
+				track.maxLatency.set(result.maxLatency);
 			}
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);

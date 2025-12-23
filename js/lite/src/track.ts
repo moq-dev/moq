@@ -1,29 +1,29 @@
 import { Signal } from "@moq/signals";
 import { Group } from "./group.ts";
+import { Time } from "./index.ts";
 
-export class TrackState {
-	groups = new Signal<Group[]>([]);
-	closed = new Signal<boolean | Error>(false);
+export interface TrackProps {
+	name: string;
+	priority?: number | Signal<number>;
+	maxLatency?: Time.Milli | Signal<Time.Milli>;
 }
 
 export class Track {
 	readonly name: string;
 
-	state = new TrackState();
+	#groups = new Signal<Group[]>([]);
+	maxLatency: Signal<Time.Milli>;
+	priority = new Signal<number>(0);
+
+	#closed = new Signal<boolean | Error>(false);
+	readonly closed: Signal<boolean | Error> = this.#closed;
+
 	#next?: number;
 
-	readonly closed: Promise<Error | undefined>;
-
-	constructor(name: string) {
-		this.name = name;
-
-		this.closed = new Promise((resolve) => {
-			const dispose = this.state.closed.subscribe((closed) => {
-				if (!closed) return;
-				resolve(closed instanceof Error ? closed : undefined);
-				dispose();
-			});
-		});
+	constructor(props: TrackProps) {
+		this.name = props.name;
+		this.priority = Signal.from(props.priority ?? 0);
+		this.maxLatency = Signal.from(props.maxLatency ?? Time.Milli.zero);
 	}
 
 	/**
@@ -31,12 +31,12 @@ export class Track {
 	 * @returns A GroupProducer for the new group
 	 */
 	appendGroup(): Group {
-		if (this.state.closed.peek()) throw new Error("track is closed");
+		if (this.#closed.peek()) throw new Error("track is closed");
 
 		const group = new Group(this.#next ?? 0);
 
 		this.#next = group.sequence + 1;
-		this.state.groups.mutate((groups) => {
+		this.#groups.mutate((groups) => {
 			groups.push(group);
 			groups.sort((a, b) => a.sequence - b.sequence);
 		});
@@ -49,7 +49,7 @@ export class Track {
 	 * @param group - The group to insert
 	 */
 	writeGroup(group: Group) {
-		if (this.state.closed.peek()) throw new Error("track is closed");
+		if (this.#closed.peek()) throw new Error("track is closed");
 
 		if (group.sequence < (this.#next ?? 0)) {
 			group.close();
@@ -57,7 +57,7 @@ export class Track {
 		}
 
 		this.#next = group.sequence + 1;
-		this.state.groups.mutate((groups) => {
+		this.#groups.mutate((groups) => {
 			groups.push(group);
 			groups.sort((a, b) => a.sequence - b.sequence);
 		});
@@ -94,16 +94,16 @@ export class Track {
 
 	async nextGroup(): Promise<Group | undefined> {
 		for (;;) {
-			const groups = this.state.groups.peek();
+			const groups = this.#groups.peek();
 			if (groups.length > 0) {
 				return groups.shift();
 			}
 
-			const closed = this.state.closed.peek();
+			const closed = this.#closed.peek();
 			if (closed instanceof Error) throw closed;
 			if (closed) return undefined;
 
-			await Signal.race(this.state.groups, this.state.closed);
+			await Signal.race(this.#groups, this.#closed);
 		}
 	}
 
@@ -114,7 +114,7 @@ export class Track {
 	// Returns the sequence number of the group and frame, not just the data.
 	async readFrameSequence(): Promise<{ group: number; frame: number; data: Uint8Array } | undefined> {
 		for (;;) {
-			const groups = this.state.groups.peek();
+			const groups = this.#groups.peek();
 
 			// Discard old groups.
 			while (groups.length > 1) {
@@ -131,11 +131,11 @@ export class Track {
 
 			// If there's no groups, wait for a new one.
 			if (groups.length === 0) {
-				const closed = this.state.closed.peek();
+				const closed = this.#closed.peek();
 				if (closed instanceof Error) throw closed;
 				if (closed) return undefined;
 
-				await Signal.race(this.state.groups, this.state.closed);
+				await Signal.race(this.#groups, this.#closed);
 				continue;
 			}
 
@@ -149,12 +149,12 @@ export class Track {
 			}
 
 			// If the track is closed, return undefined.
-			const closed = this.state.closed.peek();
+			const closed = this.#closed.peek();
 			if (closed instanceof Error) throw closed;
 			if (closed) return undefined;
 
 			// NOTE: We don't care if the latest group was closed or not.
-			await Signal.race(this.state.groups, this.state.closed, group.state.frames);
+			await Signal.race(this.#groups, this.#closed, group.state.frames);
 		}
 	}
 
@@ -181,9 +181,9 @@ export class Track {
 	 * Closes the publisher and all associated groups.
 	 */
 	close(abort?: Error) {
-		this.state.closed.set(abort ?? true);
+		this.#closed.set(abort ?? true);
 
-		for (const group of this.state.groups.peek()) {
+		for (const group of this.#groups.peek()) {
 			group.close(abort);
 		}
 	}
