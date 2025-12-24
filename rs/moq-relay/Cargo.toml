@@ -14,7 +14,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio", "ws"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
