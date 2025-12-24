@@ -7,19 +7,13 @@ pub fn provider() -> Provider {
 	if let Some(provider) = rustls::crypto::CryptoProvider::get_default().cloned() {
 		return provider;
 	}
-
-	#[cfg(feature = "aws-lc-rs")]
+	#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
+	return Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+	#[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
+	return Arc::new(rustls::crypto::ring::default_provider());
+	#[allow(unreachable_code)]
 	{
-		let provider_inner = rustls::crypto::aws_lc_rs::default_provider();
-		let _ = rustls::crypto::CryptoProvider::install_default(provider_inner.clone());
-		return Arc::new(provider_inner);
-	}
-
-	#[cfg(feature = "ring")]
-	{
-		let provider_inner = rustls::crypto::ring::default_provider();
-		let _ = rustls::crypto::CryptoProvider::install_default(provider_inner.clone());
-		return Arc::new(provider_inner);
+		panic!("no CryptoProvider available; install_default() or enable either the aws-lc-rs or ring feature");
 	}
 }
 

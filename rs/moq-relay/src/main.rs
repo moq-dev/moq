@@ -12,6 +12,10 @@ pub use web::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+	// Install the default crypto provider for rustls
+	rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
+		.expect("failed to install crypto provider");
+
 	let config = Config::load()?;
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());

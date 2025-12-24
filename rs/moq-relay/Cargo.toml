@@ -18,6 +18,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio", "ws"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"

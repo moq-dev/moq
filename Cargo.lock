@@ -1690,6 +1690,7 @@ dependencies = [
  "moq-lite",
  "moq-native",
  "moq-token",
+ "rustls",
  "sd-notify",
  "serde",
  "serde_with",
