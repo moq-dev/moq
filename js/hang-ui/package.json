@@ -29,6 +29,8 @@
 	},
 	"devDependencies": {
 		"@rollup/plugin-node-resolve": "^16.0.3",
+		"@solidjs/testing-library": "^0.8.10",
+		"@testing-library/jest-dom": "^6.9.1",
 		"happy-dom": "^20.0.11",
 		"rimraf": "^6.0.1",
 		"rollup": "^4.53.3",
