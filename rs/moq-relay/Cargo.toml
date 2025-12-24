@@ -18,7 +18,6 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio", "ws"] }
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
@@ -31,6 +30,7 @@ hyper-util = "=0.1.17"
 moq-lite = { workspace = true, features = ["serde"] }
 moq-native = { workspace = true }
 moq-token = { workspace = true }
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 sd-notify = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["json", "base64"] }
