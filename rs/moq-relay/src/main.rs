@@ -12,6 +12,12 @@ pub use web::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+	// TODO: It would be nice to remove this and rely on feature flags only.
+	// However, some dependency is pulling in `ring` and I don't know why, so meh for now.
+	rustls::crypto::aws_lc_rs::default_provider()
+		.install_default()
+		.expect("failed to install default crypto provider");
+
 	let config = Config::load()?;
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
