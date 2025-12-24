@@ -184,6 +184,7 @@ export class Connection implements Established {
 					stream.stop(new Error("cancel"));
 				})
 				.catch((err: unknown) => {
+					console.warn("error running uni stream", err);
 					stream.stop(err);
 				});
 		}

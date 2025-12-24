@@ -57,29 +57,46 @@ impl<'a> Message for Subscribe<'a> {
 	}
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SubscribeOk {
 	pub priority: u8,
+	pub max_latency: std::time::Duration,
 }
 
 impl Message for SubscribeOk {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
 		match version {
 			Version::Draft01 => self.priority.encode(w, version),
-			Version::Draft02 | Version::Draft03 => {}
+			Version::Draft02 => {}
+			Version::Draft03 => {
+				self.priority.encode(w, version);
+				let max_latency: u64 = self.max_latency.as_millis().try_into().expect("duration too large");
+				max_latency.encode(w, version);
+			}
 		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let priority = match version {
-			Version::Draft01 => u8::decode(r, version)?,
-			Version::Draft02 | Version::Draft03 => 0,
-		};
+		Ok(match version {
+			Version::Draft01 => {
+				let priority = u8::decode(r, version)?;
+				Self {
+					priority,
+					max_latency: std::time::Duration::default(),
+				}
+			}
+			Version::Draft02 => Self::default(),
+			Version::Draft03 => {
+				let priority = u8::decode(r, version)?;
+				let max_latency = std::time::Duration::from_millis(u64::decode(r, version)?);
 
-		Ok(Self { priority })
+				Self { priority, max_latency }
+			}
+		})
 	}
 }
 
+#[derive(Clone, Debug)]
 pub struct SubscribeUpdate {
 	pub priority: u8,
 	pub max_latency: std::time::Duration,

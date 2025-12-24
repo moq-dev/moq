@@ -1,4 +1,4 @@
-use std::{future::Future, ops::Deref};
+use std::{fmt, future::Future, ops::Deref};
 
 use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
@@ -44,6 +44,16 @@ struct FrameState {
 	closed: Option<Result<()>>,
 }
 
+impl fmt::Debug for FrameState {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("FrameState")
+			.field("chunks", &self.chunks.len())
+			.field("size", &self.chunks.iter().map(Bytes::len).sum::<usize>())
+			.field("closed", &self.closed.is_some())
+			.finish()
+	}
+}
+
 /// Used to write a frame's worth of data in chunks.
 #[derive(Clone)]
 pub struct FrameProducer {
@@ -54,6 +64,16 @@ pub struct FrameProducer {
 
 	// Sanity check to ensure we don't write more than the frame size.
 	written: usize,
+}
+
+impl fmt::Debug for FrameProducer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("FrameProducer")
+			.field("info", &self.info)
+			.field("state", &self.state.borrow().deref())
+			.field("written", &self.written)
+			.finish()
+	}
 }
 
 impl FrameProducer {
@@ -93,12 +113,11 @@ impl FrameProducer {
 	}
 
 	pub fn close(&mut self) -> Result<()> {
-		let mut result = Ok(());
-
 		if self.written != self.info.size as usize {
 			return Err(Error::WrongSize);
 		}
 
+		let mut result = Ok(());
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
 				result = Err(closed.err().unwrap_or(Error::Cancel));
@@ -176,6 +195,16 @@ pub struct FrameConsumer {
 	index: usize,
 }
 
+impl fmt::Debug for FrameConsumer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("FrameConsumer")
+			.field("info", &self.info)
+			.field("state", &self.state.borrow().deref())
+			.field("index", &self.index)
+			.finish()
+	}
+}
+
 impl FrameConsumer {
 	pub fn info(&self) -> &Frame {
 		&self.info
@@ -193,8 +222,12 @@ impl FrameConsumer {
 				}
 
 				match &state.closed {
-					Some(Ok(_)) => return Ok(None),
-					Some(Err(err)) => return Err(err.clone()),
+					Some(Ok(_)) => {
+						return Ok(None);
+					}
+					Some(Err(err)) => {
+						return Err(err.clone());
+					}
 					_ => {}
 				}
 			}

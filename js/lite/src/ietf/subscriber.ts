@@ -137,7 +137,7 @@ export class Subscriber {
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${track.name}`);
 
 			try {
-				await track.closed.promise();
+				await track.closed;
 
 				const msg = new Unsubscribe(requestId);
 				await this.#control.write(msg);
@@ -220,11 +220,9 @@ export class Subscriber {
 			// Convert to Group (moq-lite equivalent)
 			track.writeGroup(producer);
 
-			const closed = track.closed.promise();
-
 			// Read objects from the stream until end of group
 			for (;;) {
-				const done = await Promise.race([stream.done(), producer.closed, closed]);
+				const done = await Promise.race([stream.done(), producer.closed, track.closed]);
 				if (done !== false) break;
 
 				const frame = await Frame.decode(stream, group.flags);

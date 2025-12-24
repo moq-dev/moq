@@ -98,7 +98,6 @@ export class Subscriber {
 		(async () => {
 			for (;;) {
 				const request = await broadcast.requested();
-				console.log("request", request);
 				if (!request) break;
 				this.#runSubscribe(path, request);
 			}
@@ -128,41 +127,24 @@ export class Subscriber {
 
 		await msg.encode(stream.writer, this.version);
 
+		const update = async () => {
+			const msg = new SubscribeUpdate({
+				priority: track.priority.peek(),
+				maxLatency: track.maxLatency.peek(),
+			});
+			await msg.encode(stream.writer, this.version);
+		};
+
+		// TODO: There's no backpressure, so this could fail, but I hate javascript.
+		const dispose = track.priority.subscribe(update);
+		const dispose2 = track.maxLatency.subscribe(update);
+
 		try {
 			await SubscribeOk.decode(stream.reader, this.version);
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${track.name}`);
 
-			const closed = track.closed.promise();
-
-			for (;;) {
-				// TODO this is super gross and needs to be refactored.
-				// Listen for changes to the priority and max latency and send an update message.
-				let dispose!: () => void;
-				const updated = new Promise<boolean>((resolve) => {
-					const d1 = track.priority.changed(() => resolve(true));
-					const d2 = track.maxLatency.changed(() => resolve(true));
-
-					dispose = () => {
-						d1();
-						d2();
-					};
-				});
-
-				const result = await Promise.race([stream.reader.closed, closed, updated]);
-				dispose();
-
-				if (result === true) {
-					const update = new SubscribeUpdate({
-						priority: track.priority.peek(),
-						maxLatency: track.maxLatency.peek(),
-					});
-					await update.encode(stream.writer, this.version);
-				} else if (result instanceof Error) {
-					throw result;
-				} else {
-					break;
-				}
-			}
+			const result = await Promise.race([stream.reader.closed, track.closed]);
+			if (result instanceof Error) throw result;
 
 			track.close();
 			stream.close();
@@ -174,6 +156,9 @@ export class Subscriber {
 			stream.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
+
+			dispose();
+			dispose2();
 		}
 	}
 

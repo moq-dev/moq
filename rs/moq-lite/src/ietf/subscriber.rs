@@ -276,7 +276,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.name, "subscribe started");
 
 		track.unused().await;
-		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.name, "subscribe cancelled");
+		tracing::warn!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.name, "subscribe cancelled");
 
 		track.abort(Error::Cancel)?;
 
@@ -395,8 +395,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
 			frame.write_chunk(chunk)?;
 		}
-
-		tracing::trace!(size = %frame.size, "read frame");
 
 		frame.close()?;
 

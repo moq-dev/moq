@@ -7,7 +7,7 @@
 //! The reader can be cloned, in which case each reader receives a copy of each frame. (fanout)
 //!
 //! The stream is closed with [ServeError::MoqError] when all writers or readers are dropped.
-use std::{future::Future, ops::Deref};
+use std::{fmt, future::Future, ops::Deref};
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -54,10 +54,10 @@ impl From<u16> for Group {
 	}
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct GroupState {
 	// The frames that has been written thus far
-	frames: Vec<FrameProducer>,
+	frames: Vec<FrameConsumer>,
 
 	// Whether the group is closed
 	closed: Option<Result<()>>,
@@ -70,6 +70,15 @@ pub struct GroupProducer {
 	state: watch::Sender<GroupState>,
 
 	info: Group,
+}
+
+impl fmt::Debug for GroupProducer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("GroupProducer")
+			.field("info", &self.info)
+			.field("state", &self.state.borrow().deref())
+			.finish()
+	}
 }
 
 impl GroupProducer {
@@ -103,12 +112,12 @@ impl GroupProducer {
 	/// Create a frame with an upfront size
 	pub fn create_frame(&mut self, info: Frame) -> Result<FrameProducer> {
 		let frame = FrameProducer::new(info);
-		self.append_frame(frame.clone())?;
+		self.append_frame(frame.consume())?;
 		Ok(frame)
 	}
 
 	/// Append a frame to the group.
-	pub fn append_frame(&mut self, producer: FrameProducer) -> Result<()> {
+	pub fn append_frame(&mut self, frame: FrameConsumer) -> Result<()> {
 		let mut result = Ok(());
 
 		self.state.send_if_modified(|state| {
@@ -117,7 +126,7 @@ impl GroupProducer {
 				return false;
 			}
 
-			state.frames.push(producer);
+			state.frames.push(frame);
 			true
 		});
 
@@ -208,6 +217,16 @@ pub struct GroupConsumer {
 	active: Option<FrameConsumer>,
 }
 
+impl fmt::Debug for GroupConsumer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("GroupConsumer")
+			.field("info", &self.info)
+			.field("state", &self.state.borrow().deref())
+			.field("index", &self.index)
+			.finish()
+	}
+}
+
 impl GroupConsumer {
 	pub fn info(&self) -> &Group {
 		&self.info
@@ -239,26 +258,19 @@ impl GroupConsumer {
 			return Ok(Some(frame));
 		}
 
-		loop {
-			{
-				let state = self.state.borrow_and_update();
+		let state = self
+			.state
+			.wait_for(|state| self.index < state.frames.len() || state.closed.is_some())
+			.await
+			.map_err(|_| Error::Cancel)?;
 
-				if let Some(frame) = state.frames.get(self.index).cloned() {
-					self.index += 1;
-					return Ok(Some(frame.consume()));
-				}
-
-				match &state.closed {
-					Some(Ok(_)) => return Ok(None),
-					Some(Err(err)) => return Err(err.clone()),
-					_ => {}
-				}
-			}
-
-			if self.state.changed().await.is_err() {
-				return Err(Error::Cancel);
-			}
+		if let Some(frame) = state.frames.get(self.index).cloned() {
+			self.index += 1;
+			return Ok(Some(frame.clone()));
 		}
+
+		let closed = state.closed.clone().expect("wait_for returned");
+		closed.map(|_| None)
 	}
 
 	/// Proxy all frames and errors to the given producer.
@@ -270,17 +282,16 @@ impl GroupConsumer {
 		loop {
 			tokio::select! {
 				biased;
-				Some(res) = self.next_frame().transpose() => {
-					match res {
-						Ok(frame) => {
-							let dst = dst.create_frame(frame.info().clone())?;
-							tasks.push(frame.proxy(dst));
-						}
-						Err(err) => return dst.abort(err),
+				Some(res) = self.next_frame().transpose() => match res {
+					Ok(frame) => {
+						let dst = dst.create_frame(frame.info().clone())?;
+						tasks.push(frame.proxy(dst));
 					}
-				}
+					// TODO should we wait for the tasks to finish?
+					Err(err) => return dst.abort(err),
+				},
 				// Wait until all groups have finished being proxied.
-				Some(_) = tasks.next() => (),
+				Some(_) = tasks.next() => continue,
 				// We're done with the proxy.
 				else => return Ok(()),
 			}

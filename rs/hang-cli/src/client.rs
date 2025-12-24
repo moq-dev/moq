@@ -14,7 +14,7 @@ pub async fn client(config: moq_native::ClientConfig, url: Url, name: String, pu
 	origin.publish_broadcast(&name, publish.consume());
 
 	// Establish the connection, not providing a subscriber.
-	let session = moq_lite::Session::connect(session, None, origin).await?;
+	let session = moq_lite::Session::connect(session, origin.consume(), None).await?;
 
 	// Notify systemd that we're ready.
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);

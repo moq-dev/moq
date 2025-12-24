@@ -16,7 +16,7 @@ export class Track {
 	priority = new Signal<number>(0);
 
 	#closed = new Signal<boolean | Error>(false);
-	readonly closed: Signal<boolean | Error> = this.#closed;
+	readonly closed: Promise<Error | undefined>;
 
 	#next?: number;
 
@@ -24,6 +24,14 @@ export class Track {
 		this.name = props.name;
 		this.priority = Signal.from(props.priority ?? 0);
 		this.maxLatency = Signal.from(props.maxLatency ?? Time.Milli.zero);
+
+		this.closed = new Promise((resolve) => {
+			const dispose = this.#closed.watch((closed) => {
+				if (!closed) return;
+				resolve(closed instanceof Error ? closed : undefined);
+				dispose();
+			});
+		});
 	}
 
 	/**

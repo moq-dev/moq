@@ -62,9 +62,9 @@ impl BroadcastProducer {
 		let mut state = self.state.lock();
 		let unique = state
 			.published
-			.insert(track.name.clone(), (track.clone(), track.consume()))
+			.insert(track.name().to_string(), (track.clone(), track.consume()))
 			.is_none();
-		let removed = state.requested.remove(&track.name).is_some();
+		let removed = state.requested.remove(track.name()).is_some();
 
 		unique && !removed
 	}
@@ -134,25 +134,21 @@ pub struct BroadcastConsumer {
 }
 
 impl BroadcastConsumer {
-	pub async fn serve(&self, track: TrackProducer) -> Result<(), Error> {
-		self.get_track(track.info()).proxy(track).await
-	}
-
-	fn get_track(&self, track: &Track) -> TrackConsumer {
+	pub fn get(&self, track: &str) -> TrackConsumer {
 		let mut state = self.state.lock();
 
 		// Return any explictly published track.
-		if let Some((producer, _)) = state.published.get(&track.name) {
+		if let Some((producer, _)) = state.published.get(track) {
 			return producer.consume();
 		}
 
 		// Return any requested tracks.
-		if let Some(producer) = state.requested.get(&track.name) {
+		if let Some(producer) = state.requested.get(track) {
 			return producer.consume();
 		}
 
 		// Otherwise we have never seen this track before and need to create a new producer.
-		let mut producer = TrackProducer::new(track.clone());
+		let mut producer = TrackProducer::new(Track::new(track));
 		let consumer = producer.consume();
 
 		// Insert the producer into the lookup so we will deduplicate requests.
@@ -166,13 +162,13 @@ impl BroadcastConsumer {
 		};
 
 		// Insert the producer into the lookup so we will deduplicate requests.
-		state.requested.insert(producer.name.clone(), producer.clone());
+		state.requested.insert(track.to_string(), producer.clone());
 
 		// Remove the track from the lookup when it's unused.
 		let state = self.state.clone();
 		web_async::spawn(async move {
 			producer.unused().await;
-			state.lock().requested.remove(&producer.name);
+			state.lock().requested.remove(producer.name());
 		});
 
 		consumer
@@ -180,12 +176,13 @@ impl BroadcastConsumer {
 
 	// Backwards compatibility for the old API.
 	pub fn subscribe(&self, track: &Track) -> TrackConsumer {
-		let source = self.get_track(track);
+		let source = self.get(&track.name);
 		let producer = TrackProducer::new(track.clone());
 		let consumer = producer.consume();
+
 		web_async::spawn(async move {
 			if let Err(err) = source.proxy(producer).await {
-				tracing::warn!(%err, "error proxying track");
+				tracing::warn!(%err, "proxying track");
 			}
 		});
 		consumer
@@ -227,6 +224,7 @@ mod test {
 	#[tokio::test]
 	async fn insert() {
 		let mut producer = BroadcastProducer::new();
+
 		let mut track1 = TrackProducer::new(Track {
 			name: "track1".to_string(),
 			priority: 0,
@@ -239,7 +237,7 @@ mod test {
 
 		let consumer = producer.consume();
 
-		let mut track1_sub = consumer.subscribe(track1.info());
+		let mut track1_sub = consumer.subscribe(&Track::new("track1"));
 		track1_sub.assert_group();
 
 		let mut track2 = TrackProducer::new(Track {
@@ -250,7 +248,7 @@ mod test {
 		producer.insert_track(track2.clone());
 
 		let consumer2 = producer.consume();
-		let mut track2_consumer = consumer2.subscribe(track2.info());
+		let mut track2_consumer = consumer2.subscribe(&Track::new("track2"));
 		track2_consumer.assert_no_group();
 
 		track2.append_group().expect("should be able to append group");
@@ -312,7 +310,7 @@ mod test {
 		track1.append_group().expect("should be able to append group");
 		producer.insert_track(track1.clone());
 
-		let mut track1c = consumer.subscribe(track1.info());
+		let mut track1c = consumer.subscribe(&Track::new("track1"));
 		let track2 = consumer.subscribe(&Track {
 			name: "track2".to_string(),
 			priority: 0,

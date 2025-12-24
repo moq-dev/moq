@@ -43,12 +43,11 @@ impl Publisher {
 	async fn send_segment(mut segment: GroupProducer, mut now: DateTime<Utc>) -> anyhow::Result<()> {
 		// Everything but the second.
 		let base = now.format("%Y-%m-%d %H:%M:").to_string();
-
-		segment.write_frame(base.clone())?;
+		segment.write_frame(base)?;
 
 		loop {
 			let delta = now.format("%S").to_string();
-			segment.write_frame(delta.clone())?;
+			segment.write_frame(delta)?;
 
 			let next = now + chrono::Duration::try_seconds(1).unwrap();
 			let next = next.with_nanosecond(0).unwrap();
@@ -89,7 +88,7 @@ impl Subscriber {
 
 			let base = String::from_utf8_lossy(&base);
 
-			while let Some(object) = group.read_frame().await? {
+			while let Ok(Some(object)) = group.read_frame().await {
 				let str = String::from_utf8_lossy(&object);
 				println!("{base}{str}");
 			}

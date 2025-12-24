@@ -140,19 +140,23 @@ export class Subscribe {
 
 export class SubscribeOk {
 	priority: number;
+	maxLatency: Time.Milli;
 
-	constructor({ priority }: { priority: number }) {
+	constructor({ priority, maxLatency }: { priority: number; maxLatency: Time.Milli }) {
 		this.priority = priority;
+		this.maxLatency = maxLatency;
 	}
 
 	async #encode(version: Version, w: Writer) {
 		switch (version) {
-			case Version.DRAFT_02:
-			case Version.DRAFT_03:
-				// noop
-				break;
 			case Version.DRAFT_01:
 				await w.u8(this.priority);
+				break;
+			case Version.DRAFT_02:
+				break;
+			case Version.DRAFT_03:
+				await w.u8(this.priority);
+				await w.u53(this.maxLatency);
 				break;
 			default: {
 				const v: never = version;
@@ -163,14 +167,18 @@ export class SubscribeOk {
 
 	static async #decode(version: Version, r: Reader): Promise<SubscribeOk> {
 		let priority = 0;
+		let maxLatency = Time.Milli.zero;
 
 		switch (version) {
-			case Version.DRAFT_02:
-			case Version.DRAFT_03:
-				// noop
-				break;
 			case Version.DRAFT_01:
 				priority = await r.u8();
+				break;
+			case Version.DRAFT_02:
+				// noop
+				break;
+			case Version.DRAFT_03:
+				priority = await r.u8();
+				maxLatency = (await r.u53()) as Time.Milli;
 				break;
 			default: {
 				const v: never = version;
@@ -178,7 +186,7 @@ export class SubscribeOk {
 			}
 		}
 
-		return new SubscribeOk({ priority });
+		return new SubscribeOk({ priority, maxLatency });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

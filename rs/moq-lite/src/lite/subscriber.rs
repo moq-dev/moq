@@ -181,13 +181,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let msg = lite::Subscribe {
 			id,
 			broadcast: broadcast.to_owned(),
-			track: (&track.name).into(),
-			priority: track.priority,
-			max_latency: track.max_latency,
+			track: track.name().into(),
+			priority: track.meta().priority,
+			max_latency: track.meta().max_latency,
 			version: self.version,
 		};
 
-		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe started");
+		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name(), "subscribe started");
 
 		let res = tokio::select! {
 			_ = track.unused() => Err(Error::Cancel),
@@ -196,15 +196,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe cancelled");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name(), "subscribe cancelled");
 				track.abort(Error::Cancel)?;
 			}
 			Err(err) => {
-				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.name, %err, "subscribe error");
+				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = ?track.name(), %err, "subscribe error");
 				track.abort(err)?;
 			}
 			_ => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe complete");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name(), "subscribe complete");
 				track.close()?;
 			}
 		}
@@ -285,7 +285,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			let res = tokio::select! {
 				_ = frame.unused() => Err(Error::Cancel),
-				res = self.run_frame(stream, frame.clone()) => res,
+				res = self.run_frame(stream, group.sequence, frame.clone()) => res,
 			};
 
 			if let Err(err) = res {
@@ -302,11 +302,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_frame(
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
+		group: u64,
 		mut frame: FrameProducer,
 	) -> Result<(), Error> {
 		let mut remain = frame.size;
 
-		tracing::trace!(size = %frame.size, "reading frame");
+		tracing::trace!(%group, size = %frame.size, "reading frame");
 
 		const MAX_CHUNK: usize = 1024 * 1024; // 1 MiB
 		while remain > 0 {
@@ -317,8 +318,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
 			frame.write_chunk(chunk)?;
 		}
-
-		tracing::trace!(size = %frame.size, "read frame");
 
 		frame.close()?;
 

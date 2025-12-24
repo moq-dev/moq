@@ -61,6 +61,8 @@ impl<S: web_transport_trait::Session> Session<S> {
 		if let Ok(version) = lite::Version::try_from(server.version) {
 			let stream = stream.with_version(version);
 			lite::start(session.clone(), stream, publish.into(), subscribe.into(), version).await?;
+
+			tracing::debug!(version = ?server.version, "connected");
 		} else if let Ok(version) = ietf::Version::try_from(server.version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
@@ -78,12 +80,12 @@ impl<S: web_transport_trait::Session> Session<S> {
 				version,
 			)
 			.await?;
+
+			tracing::debug!(version = ?server.version, "connected");
 		} else {
 			// unreachable, but just in case
 			return Err(Error::Version(client.versions, [server.version].into()));
 		}
-
-		tracing::debug!(version = ?server.version, "connected");
 
 		Ok(Self::new(session))
 	}
@@ -129,6 +131,8 @@ impl<S: web_transport_trait::Session> Session<S> {
 		if let Ok(version) = lite::Version::try_from(version) {
 			let stream = stream.with_version(version);
 			lite::start(session.clone(), stream, publish.into(), subscribe.into(), version).await?;
+
+			tracing::debug!(?version, "connected");
 		} else if let Ok(version) = ietf::Version::try_from(version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
@@ -146,12 +150,12 @@ impl<S: web_transport_trait::Session> Session<S> {
 				version,
 			)
 			.await?;
+
+			tracing::debug!(?version, "connected");
 		} else {
 			// unreachable, but just in case
 			return Err(Error::Version(client.versions, VERSIONS.into()));
 		}
-
-		tracing::debug!(?version, "connected");
 
 		Ok(Self::new(session))
 	}
