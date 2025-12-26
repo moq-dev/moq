@@ -22,6 +22,7 @@ use crate::{Error, Produce, Result, TrackMeta, TrackMetaConsumer, TrackMetaProdu
 use std::{collections::VecDeque, fmt, future::Future, ops::Deref, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
 	/// The name of the track.
 	pub name: String,
@@ -48,6 +49,12 @@ impl Track {
 			consumer: producer.consume(),
 			producer,
 		}
+	}
+}
+
+impl<T: AsRef<str>> From<T> for Track {
+	fn from(name: T) -> Self {
+		Self::new(name.as_ref())
 	}
 }
 
@@ -96,7 +103,9 @@ pub struct TrackProducer {
 }
 
 impl TrackProducer {
-	pub fn new(info: Track) -> Self {
+	pub fn new<T: Into<Track>>(info: T) -> Self {
+		let info = info.into();
+
 		let this = Self {
 			state: Default::default(),
 			meta: TrackMeta {
@@ -124,8 +133,8 @@ impl TrackProducer {
 	/// Create a new group with the given info.
 	///
 	/// Returns an error if the track is closed.
-	pub fn create_group(&mut self, info: Group) -> Result<GroupProducer> {
-		let group = GroupProducer::new(info);
+	pub fn create_group<T: Into<Group>>(&mut self, info: T) -> Result<GroupProducer> {
+		let group = GroupProducer::new(info.into());
 		let mut result = Err(Error::Cancel);
 
 		self.state.send_if_modified(|state| {
@@ -341,7 +350,8 @@ impl TrackProducer {
 
 			tokio::select! {
 				// Sleep until the next group expires.
-				Some(()) = async { Some(tokio::time::sleep_until(expires?).await) } => {},
+				Some(()) = async { let _: () = tokio::time::sleep_until(expires?).await;
+    Some(()) } => {},
 				Some(_) = meta.next() => {},
 				_ = receiver.changed() => {},
 			};

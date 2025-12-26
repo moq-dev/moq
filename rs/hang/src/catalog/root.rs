@@ -87,7 +87,7 @@ impl Catalog {
 		let track = Catalog::default_track().produce();
 
 		Produce {
-			producer: CatalogProducer::new(track.producer, self),
+			producer: track.producer.into(),
 			consumer: track.consumer.into(),
 		}
 	}
@@ -143,8 +143,7 @@ impl Catalog {
 /// You'll have to call [`publish`](Self::publish) once all updates are complete.
 #[derive(Clone)]
 pub struct CatalogProducer {
-	/// Access to the underlying track producer.
-	pub track: moq_lite::TrackProducer,
+	track: moq_lite::TrackProducer,
 	current: Arc<Mutex<Catalog>>,
 }
 
@@ -163,6 +162,11 @@ impl CatalogProducer {
 			catalog: self.current.lock().unwrap(),
 			track: &mut self.track,
 		}
+	}
+
+	/// Access to the underlying [moq_lite::TrackProducer].
+	pub fn track(&self) -> moq_lite::TrackProducer {
+		self.track.clone()
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're [published](Self::publish).
@@ -238,8 +242,8 @@ impl CatalogConsumer {
 		Self { track, group: None }
 	}
 
-	pub fn track(&self) -> &moq_lite::TrackConsumer {
-		&self.track
+	pub fn track(&self) -> moq_lite::TrackConsumer {
+		self.track.clone()
 	}
 
 	/// Get the next catalog update.

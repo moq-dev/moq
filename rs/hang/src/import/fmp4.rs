@@ -156,10 +156,8 @@ impl Fmp4 {
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
 
-			let track = moq::TrackProducer::new(track);
-			self.broadcast.insert_track(track.clone());
-
-			self.tracks.insert(track_id, track.into());
+			let producer = self.broadcast.create_track(track);
+			self.tracks.insert(track_id, producer.into());
 		}
 
 		self.moov = Some(moov);

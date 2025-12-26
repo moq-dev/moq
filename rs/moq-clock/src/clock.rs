@@ -20,7 +20,7 @@ impl Publisher {
 		let mut sequence = start.minute();
 
 		loop {
-			let segment = self.track.create_group(sequence.into()).unwrap();
+			let segment = self.track.create_group(sequence).unwrap();
 
 			sequence += 1;
 

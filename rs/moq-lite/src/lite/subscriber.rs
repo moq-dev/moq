@@ -7,7 +7,8 @@ use crate::{
 	coding::{Reader, Stream},
 	lite::{self, Version},
 	model::BroadcastProducer,
-	AsPath, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, TrackProducer,
+	AsPath, Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
+	TrackProducer,
 };
 
 use tokio::sync::oneshot;
@@ -111,7 +112,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 					// Close the producer.
 					let mut producer = producers.remove(&path.into_owned()).ok_or(Error::NotFound)?;
-					producer.close();
+					producer.close()?;
 				}
 			}
 		}

@@ -7,7 +7,8 @@ use crate::{
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId, Version},
 	model::BroadcastProducer,
-	Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track, TrackProducer,
+	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
+	TrackProducer,
 };
 
 use web_async::Lock;
@@ -443,6 +444,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let track = Track {
 			name: msg.track_name.to_string(),
 			priority: 0,
+			// TODO Use delivery-timeout arg.
+			max_latency: std::time::Duration::from_millis(100),
 		}
 		.produce();
 

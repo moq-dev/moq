@@ -151,11 +151,11 @@ impl TrackConsumer {
 	///
 	/// Returns `None` when the track has ended.
 	pub async fn read_frame(&mut self) -> Result<Option<Frame>, Error> {
-		let latency = self.max_latency.try_into()?;
+		let max_latency = self.inner.meta().get().max_latency.try_into()?;
 		loop {
 			let cutoff = self
 				.max_timestamp
-				.checked_add(latency)
+				.checked_add(max_latency)
 				.ok_or(crate::TimestampOverflow)?;
 
 			// Keep track of all pending groups, buffering until we detect a timestamp far enough in the future.
@@ -205,7 +205,7 @@ impl TrackConsumer {
 				},
 				Some((index, timestamp)) = buffering.next() => {
 					if self.current.is_some() {
-						tracing::debug!(old = ?self.max_timestamp, new = ?timestamp, buffer = ?self.inner.max_latency, "skipping slow group");
+						tracing::debug!(old = ?self.max_timestamp, new = ?timestamp, ?max_latency, "skipping slow group");
 					}
 
 					drop(buffering);

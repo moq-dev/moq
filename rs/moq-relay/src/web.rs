@@ -273,25 +273,14 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let track = moq_lite::TrackProducer::new(moq_lite::Track {
-		name: track,
-		priority: 0,
-		max_latency: std::time::Duration::ZERO,
-	});
-
 	// NOTE: The auth token is already scoped to the broadcast.
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
+	let mut track = broadcast.subscribe_track(track);
 
-	// TODO Make an easier API for peeking at the current state, instead of subscribing.
-	let mut consumer = track.consume();
-
-	let group = tokio::select! {
-		res = consumer.next_group() => match res {
-			Ok(Some(group)) => group,
-			Ok(None) => return Err(StatusCode::NOT_FOUND.into()),
-			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR.into()),
-		},
-		Err(_) = broadcast.serve(track) => return Err(StatusCode::INTERNAL_SERVER_ERROR.into()),
+	let group = match track.next_group().await {
+		Ok(Some(group)) => group,
+		Ok(None) => return Err(StatusCode::NOT_FOUND.into()),
+		Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR.into()),
 	};
 
 	Ok(ServeGroup::new(group))

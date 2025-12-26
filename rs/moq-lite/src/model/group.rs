@@ -19,8 +19,17 @@ use crate::{Error, Result};
 use super::{Frame, FrameConsumer, FrameProducer};
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Group {
 	pub sequence: u64,
+}
+
+impl<T: Into<u64>> From<T> for Group {
+	fn from(sequence: T) -> Self {
+		Self {
+			sequence: sequence.into(),
+		}
+	}
 }
 
 #[derive(Default, Debug)]

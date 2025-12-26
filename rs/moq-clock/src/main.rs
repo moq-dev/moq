@@ -4,7 +4,6 @@ use anyhow::Context;
 use clap::Parser;
 
 mod clock;
-use moq_lite::*;
 
 #[derive(Parser, Clone)]
 pub struct Config {
@@ -50,16 +49,10 @@ async fn main() -> anyhow::Result<()> {
 
 	let session = client.connect(config.url).await?;
 
-	let track = Track {
-		name: config.track,
-		priority: 0,
-		max_latency: std::time::Duration::default(),
-	};
-
 	match config.role {
 		Command::Publish => {
 			let mut broadcast = moq_lite::BroadcastProducer::new();
-			let track = broadcast.create_track(track);
+			let track = broadcast.create_track(config.track);
 			let clock = clock::Publisher::new(track);
 
 			let origin = moq_lite::OriginProducer::new();
@@ -97,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
 					Some(announce) = consumer.announced() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(&track);
+							let track = broadcast.subscribe_track(&config.track);
 							clock = Some(clock::Subscriber::new(track));
 						}
 						(path, None) => {

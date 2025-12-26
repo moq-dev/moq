@@ -16,7 +16,7 @@ pub struct BroadcastProducer {
 impl BroadcastProducer {
 	pub fn new(mut inner: moq_lite::BroadcastProducer) -> Self {
 		let catalog = Catalog::default().produce();
-		inner.insert_track(catalog.consumer.track);
+		inner.insert_track(catalog.consumer.track());
 
 		Self {
 			inner,
@@ -72,7 +72,7 @@ pub struct BroadcastConsumer {
 
 impl BroadcastConsumer {
 	pub fn new(inner: moq_lite::BroadcastConsumer) -> Self {
-		let catalog = inner.subscribe_track(&Catalog::default_track()).into();
+		let catalog = inner.subscribe_track(Catalog::default_track()).into();
 		Self { inner, catalog }
 	}
 }

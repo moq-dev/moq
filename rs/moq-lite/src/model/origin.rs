@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use web_async::Lock;
 
 use super::BroadcastConsumer;
-use crate::{AsPath, Path, PathOwned};
+use crate::{AsPath, Path, PathOwned, Produce};
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -16,6 +16,18 @@ struct ConsumerId(u64);
 impl ConsumerId {
 	fn new() -> Self {
 		Self(NEXT_CONSUMER_ID.fetch_add(1, Ordering::Relaxed))
+	}
+}
+
+pub struct Origin {}
+
+impl Origin {
+	pub fn produce() -> Produce<OriginProducer, OriginConsumer> {
+		let producer = OriginProducer::new();
+		Produce {
+			consumer: producer.consume(),
+			producer,
+		}
 	}
 }
 
@@ -372,7 +384,7 @@ impl OriginProducer {
 		let root = root.clone();
 
 		web_async::spawn(async move {
-			broadcast.closed().await;
+			broadcast.closed().await.ok();
 			root.lock().remove(&full, broadcast, &rest);
 		});
 

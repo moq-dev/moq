@@ -180,20 +180,21 @@ impl Consume {
 		let video = consume.catalog.video.as_ref().ok_or(Error::NotFound)?;
 		let rendition = video.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
-		let track = moq_lite::TrackProducer::new(moq_lite::Track {
-			name: rendition.clone(),
-			priority: video.priority,
-			max_latency,
-		});
+		let track = broadcast
+			.subscribe_track(moq_lite::Track {
+				name: rendition.clone(),
+				priority: video.priority,
+				max_latency,
+			})
+			.into();
 
 		let channel = oneshot::channel();
 		let id = self.video_task.insert(channel.0);
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(track.consume().into(), &mut on_frame) => res,
+				res = Self::run_track(track, &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
-				res = broadcast.serve(track) => res.map_err(Into::into),
 			};
 			on_frame.call(res);
 
@@ -216,19 +217,20 @@ impl Consume {
 		let audio = consume.catalog.audio.as_ref().ok_or(Error::NotFound)?;
 		let rendition = audio.renditions.keys().nth(index).ok_or(Error::NotFound)?;
 
-		let track = moq_lite::TrackProducer::new(moq_lite::Track {
-			name: rendition.clone(),
-			priority: audio.priority,
-			max_latency,
-		});
+		let track = broadcast
+			.subscribe_track(moq_lite::Track {
+				name: rendition.clone(),
+				priority: audio.priority,
+				max_latency,
+			})
+			.into();
 
 		let channel = oneshot::channel();
 		let id = self.audio_task.insert(channel.0);
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(track.consume().into(), &mut on_frame) => res,
-				res = broadcast.serve(track) => res.map_err(Into::into),
+				res = Self::run_track(track, &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_frame.call(res);

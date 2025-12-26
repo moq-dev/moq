@@ -41,7 +41,7 @@ impl TrackMetaProducer {
 	}
 
 	pub fn get(&self) -> TrackMeta {
-		self.state.borrow().clone()
+		*self.state.borrow()
 	}
 
 	pub fn set(&mut self, meta: TrackMeta) {
@@ -77,11 +77,11 @@ pub struct TrackMetaConsumer {
 
 impl TrackMetaConsumer {
 	pub fn get(&self) -> TrackMeta {
-		self.state.borrow().clone()
+		*self.state.borrow()
 	}
 
 	pub async fn next(&mut self) -> Option<TrackMeta> {
 		self.state.changed().await.ok()?;
-		Some(self.state.borrow_and_update().clone())
+		Some(*self.state.borrow_and_update())
 	}
 }
