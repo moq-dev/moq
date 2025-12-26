@@ -87,13 +87,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Ok(entry.get().producer.clone());
 			}
 			Entry::Vacant(entry) => {
-				let broadcast = BroadcastProducer::new();
-				origin.publish_broadcast(path.clone(), broadcast.consume());
+				let broadcast = Broadcast::produce();
+				origin.publish_broadcast(path.clone(), broadcast.consumer);
 				entry.insert(BroadcastState {
-					producer: broadcast.clone(),
+					producer: broadcast.producer.clone(),
 					count: 1,
 				});
-				broadcast
+				broadcast.producer
 			}
 		};
 
@@ -263,8 +263,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		self.control.send(ietf::Subscribe {
 			request_id,
 			track_namespace: broadcast.to_owned(),
-			track_name: (&track.name).into(),
-			subscriber_priority: track.priority,
+			track_name: track.name.as_ref().into(),
+			subscriber_priority: track.meta().get().priority,
 			group_order: GroupOrder::Descending,
 			// we want largest group
 			filter_type: FilterType::LargestObject,
@@ -443,16 +443,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let track = Track {
 			name: msg.track_name.to_string(),
 			priority: 0,
-			// TODO Delivery Timeout
-			max_latency: std::time::Duration::from_millis(100),
-		};
-		let track = TrackProducer::new(track);
+		}
+		.produce();
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
 			Entry::Vacant(entry) => {
 				entry.insert(TrackState {
-					producer: track.clone(),
+					producer: track.producer,
 					alias: Some(msg.track_alias),
 				});
 			}
@@ -467,7 +465,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
 
-		let exists = broadcast.insert_track(track);
+		let exists = broadcast.insert_track(track.consumer);
 		if exists {
 			tracing::warn!(track = %msg.track_name, "track already exists, replacing it");
 		}

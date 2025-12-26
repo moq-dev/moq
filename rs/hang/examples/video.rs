@@ -10,14 +10,14 @@ async fn main() -> anyhow::Result<()> {
 	.init();
 
 	// Create an origin that we can publish to and the session can consume from.
-	let origin = moq_lite::OriginProducer::new();
+	let origin = moq_lite::Origin::produce();
 
 	// Run the broadcast production and the session in parallel.
 	// This is a simple example of how you can concurrently run multiple tasks.
 	// tokio::spawn works too.
 	tokio::select! {
-		res = run_session(origin.consume()) => res,
-		res = run_broadcast(origin) => res,
+		res = run_broadcast(origin.producer) => res,
+		res = run_session(origin.consumer) => res,
 	}
 }
 
@@ -96,7 +96,7 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 	catalog.lock().video = Some(video);
 
 	// Publish the catalog track to the broadcast.
-	broadcast.insert_track(catalog.track.clone());
+	broadcast.insert_track(catalog.consumer.track);
 
 	// Actually create the media track now.
 	let track = broadcast.create_track(video_track);
@@ -108,12 +108,12 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 // Produce a broadcast and publish it to the origin.
 async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin.
-	let mut broadcast = moq_lite::BroadcastProducer::default();
-	let mut track = create_track(&mut broadcast);
+	let mut broadcast = moq_lite::Broadcast::produce();
+	let mut track = create_track(&mut broadcast.producer);
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
-	origin.publish_broadcast("", broadcast.consume());
+	origin.publish_broadcast("", broadcast.consumer);
 
 	// Not real frames of course.
 	track.write(hang::Frame {

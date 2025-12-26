@@ -19,39 +19,8 @@ use crate::{Error, Result};
 use super::{Frame, FrameConsumer, FrameProducer};
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Group {
 	pub sequence: u64,
-}
-
-impl From<usize> for Group {
-	fn from(sequence: usize) -> Self {
-		Self {
-			sequence: sequence as u64,
-		}
-	}
-}
-
-impl From<u64> for Group {
-	fn from(sequence: u64) -> Self {
-		Self { sequence }
-	}
-}
-
-impl From<u32> for Group {
-	fn from(sequence: u32) -> Self {
-		Self {
-			sequence: sequence as u64,
-		}
-	}
-}
-
-impl From<u16> for Group {
-	fn from(sequence: u16) -> Self {
-		Self {
-			sequence: sequence as u64,
-		}
-	}
 }
 
 #[derive(Default, Debug)]
@@ -176,6 +145,7 @@ impl GroupProducer {
 		}
 	}
 
+	// We don't use the `async` keyword so we don't borrow &self across the await.
 	pub fn unused(&self) -> impl Future<Output = ()> {
 		let state = self.state.clone();
 		async move {
@@ -276,7 +246,7 @@ impl GroupConsumer {
 	/// Proxy all frames and errors to the given producer.
 	///
 	/// Returns an error on any unexpected close, which can happen if the [GroupProducer] is cloned.
-	pub async fn proxy(mut self, mut dst: GroupProducer) -> Result<()> {
+	pub(super) async fn proxy(mut self, mut dst: GroupProducer) -> Result<()> {
 		let mut tasks = futures::stream::FuturesUnordered::new();
 
 		loop {
@@ -298,15 +268,10 @@ impl GroupConsumer {
 		}
 	}
 
-	// Returns a Future so &self is not borrowed during the future.
-	pub fn closed(&self) -> impl Future<Output = Result<()>> {
-		let mut receiver = self.state.clone();
-		async move {
-			let state = receiver
-				.wait_for(|state| state.closed.is_some())
-				.await
-				.map_err(|_| Error::Cancel)?;
-			state.closed.clone().unwrap()
+	pub async fn closed(&self) -> Result<()> {
+		match self.state.clone().wait_for(|state| state.closed.is_some()).await {
+			Ok(state) => state.closed.clone().unwrap(),
+			Err(_) => Err(Error::Cancel),
 		}
 	}
 }

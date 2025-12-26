@@ -128,21 +128,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		tracing::debug!(broadcast = %self.log_path(&path), "announce");
 
-		let broadcast = BroadcastProducer::new();
+		let broadcast = Broadcast::produce();
 
 		// Make sure the peer doesn't double announce.
 		match producers.entry(path.to_owned()) {
 			Entry::Occupied(_) => return Err(Error::Duplicate),
-			Entry::Vacant(entry) => entry.insert(broadcast.clone()),
+			Entry::Vacant(entry) => entry.insert(broadcast.producer.clone()),
 		};
 
 		// Run the broadcast in the background until all consumers are dropped.
 		self.origin
 			.as_mut()
 			.unwrap()
-			.publish_broadcast(path.clone(), broadcast.consume());
+			.publish_broadcast(path.clone(), broadcast.consumer);
 
-		web_async::spawn(self.clone().run_broadcast(path, broadcast));
+		web_async::spawn(self.clone().run_broadcast(path, broadcast.producer));
 
 		Ok(())
 	}
@@ -153,9 +153,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
 			let track = tokio::select! {
-				_ = broadcast.unused() => break,
-				producer = broadcast.requested_track() => match producer {
-					Some(producer) => producer,
+				track = broadcast.requested_track() => match track {
+					Some(track) => track,
 					None => break,
 				},
 				_ = self.session.closed() => break,
@@ -178,33 +177,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer) -> Result<(), Error> {
 		self.subscribes.lock().insert(id, track.clone());
 
-		let msg = lite::Subscribe {
-			id,
-			broadcast: broadcast.to_owned(),
-			track: track.name().into(),
-			priority: track.meta().priority,
-			max_latency: track.meta().max_latency,
-			version: self.version,
-		};
-
-		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name(), "subscribe started");
+		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name, "subscribe started");
 
 		let res = tokio::select! {
 			_ = track.unused() => Err(Error::Cancel),
-			res = self.run_track(msg) => res,
+			res = self.run_track(id, broadcast.clone(), track.clone()) => res,
 		};
 
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name(), "subscribe cancelled");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name, "subscribe cancelled");
 				track.abort(Error::Cancel)?;
 			}
 			Err(err) => {
-				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = ?track.name(), %err, "subscribe error");
+				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = ?track.name, %err, "subscribe error");
 				track.abort(err)?;
 			}
 			_ => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name(), "subscribe complete");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name, "subscribe complete");
 				track.close()?;
 			}
 		}
@@ -212,11 +202,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_track(&mut self, msg: lite::Subscribe<'_>) -> Result<(), Error> {
+	async fn run_track(&mut self, id: u64, broadcast: Path<'_>, track: TrackProducer) -> Result<(), Error> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Subscribe).await?;
 
-		if let Err(err) = self.run_track_stream(&mut stream, msg).await {
+		if let Err(err) = self.run_track_stream(&mut stream, id, broadcast, track).await {
 			stream.writer.abort(&err);
 			return Err(err);
 		}
@@ -228,17 +218,40 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_track_stream(
 		&mut self,
 		stream: &mut Stream<S, Version>,
-		msg: lite::Subscribe<'_>,
+		id: u64,
+		broadcast: Path<'_>,
+		track: TrackProducer,
 	) -> Result<(), Error> {
+		let mut meta = track.meta();
+		let current = meta.get();
+
+		let msg = lite::Subscribe {
+			id,
+			// NOTE: Makes a copy because we're not cool.
+			broadcast: broadcast.to_owned(),
+			// NOTE: Avoids making a copy because we're cool.
+			track: track.name.as_ref().into(),
+			priority: current.priority,
+			max_latency: current.max_latency,
+		};
+
 		stream.writer.encode(&msg).await?;
 
-		// TODO use the response correctly populate the track info
 		let _info: lite::SubscribeOk = stream.reader.decode().await?;
 
-		// Wait until the stream is closed
-		stream.reader.closed().await?;
-
-		Ok(())
+		loop {
+			tokio::select! {
+				// Wait until the priority/latency is updated
+				Some(update) = meta.next() => {
+					stream.writer.encode(&lite::SubscribeUpdate {
+						priority: update.priority,
+						max_latency: update.max_latency,
+					}).await?;
+				}
+				// Wait until the stream is closed
+				res = stream.reader.closed() => return res,
+			}
+		}
 	}
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {

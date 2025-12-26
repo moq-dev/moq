@@ -11,7 +11,7 @@ use crate::{
 		Version,
 	},
 	model::GroupConsumer,
-	AsPath, BroadcastConsumer, Error, OriginConsumer, OriginProducer, Track, TrackConsumer, TrackProducer,
+	AsPath, BroadcastConsumer, Error, OriginConsumer, OriginProducer, Track, TrackMeta,
 };
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -24,7 +24,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn new(session: S, origin: Option<OriginConsumer>, version: Version) -> Self {
 		// Default to a dummy origin that is immediately closed.
-		let origin = origin.unwrap_or_else(|| OriginProducer::new().consume());
+		let origin = origin.unwrap_or_else(|| Origin::produce().consumer);
 		Self {
 			session,
 			origin,
@@ -181,7 +181,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		consumer: Option<BroadcastConsumer>,
+		broadcast: Option<BroadcastConsumer>,
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
@@ -191,27 +191,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			max_latency: subscribe.max_latency,
 		};
 
-		let consumer = consumer.ok_or(Error::NotFound)?.get(&track.name);
-		let producer = TrackProducer::new(track);
+		let mut track = broadcast.ok_or(Error::NotFound)?.subscribe_track(track);
 
-		tokio::select! {
-			res = Self::serve_track(stream, producer.clone(), producer.consume(), version) => res,
-			res = consumer.proxy(producer) => res,
-		}?;
-
-		Ok(())
-	}
-
-	async fn serve_track(
-		stream: &mut Stream<S, Version>,
-		// I hate that we need a pair.
-		producer: TrackProducer,
-		track: TrackConsumer,
-		version: Version,
-	) -> Result<(), Error> {
 		let info = lite::SubscribeOk {
-			priority: track.priority(),
-			max_latency: track.max_latency(),
+			// NOTE: this is not used in any modern versions.
+			priority: subscribe.priority,
 		};
 
 		stream.writer.encode(&info).await?;
@@ -228,21 +212,27 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 				Some(res) = stream.reader.decode_maybe::<lite::SubscribeUpdate>().transpose() => {
 					let update = res?;
-					track.set_priority(update.priority);
-					track.set_max_latency(update.max_latency);
+
+					track.meta().set(TrackMeta {
+						priority: update.priority,
+						max_latency: update.max_latency,
+					});
+
+					// TODO we should update the priority of all outstanding groups.
+
 					continue;
 				},
 				else => break,
 			}?;
 
-			tracing::debug!(subscribe = %subscribe.id, track = ?track.name(), group = %group.sequence, "serving group");
+			tracing::debug!(subscribe = %subscribe.id, track = ?track.name, group = %group.sequence, "serving group");
 
 			let msg = lite::Group {
 				subscribe: subscribe.id,
 				sequence: group.sequence,
 			};
 
-			let priority = priority.insert(track.priority, group.sequence);
+			let priority = priority.insert(track.meta().get().priority, group.sequence);
 
 			// Run the group in the background until it's closed or expires.
 			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version));

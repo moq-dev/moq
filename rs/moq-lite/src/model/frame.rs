@@ -156,7 +156,7 @@ impl FrameProducer {
 		}
 	}
 
-	// Returns a Future so &self is not borrowed during the future.
+	// We don't use the `async` keyword so we don't borrow &self across the await.
 	pub fn unused(&self) -> impl Future<Output = ()> {
 		let state = self.state.clone();
 		async move {
@@ -294,7 +294,7 @@ impl FrameConsumer {
 	/// Proxy all chunks and errors to the given producer.
 	///
 	/// Returns an error on any unexpected close, which can happen if the [GroupProducer] is cloned.
-	pub async fn proxy(mut self, mut dst: FrameProducer) -> Result<()> {
+	pub(super) async fn proxy(mut self, mut dst: FrameProducer) -> Result<()> {
 		loop {
 			match self.read_chunk().await {
 				Ok(Some(chunk)) => dst.write_chunk(chunk)?,

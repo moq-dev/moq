@@ -16,9 +16,8 @@ use futures::StreamExt;
 use tokio::{sync::watch, time::Instant};
 use web_async::FuturesExt;
 
-use crate::{Error, Result};
-
 use super::{Group, GroupConsumer, GroupProducer};
+use crate::{Error, Produce, Result, TrackMeta, TrackMetaConsumer, TrackMetaProducer};
 
 use std::{collections::VecDeque, fmt, future::Future, ops::Deref, sync::Arc};
 
@@ -42,22 +41,26 @@ impl Track {
 			max_latency: std::time::Duration::ZERO,
 		}
 	}
+
+	pub fn produce(self) -> Produce<TrackProducer, TrackConsumer> {
+		let producer = TrackProducer::new(self.clone());
+		Produce {
+			consumer: producer.consume(),
+			producer,
+		}
+	}
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct TrackMeta {
-	/// Higher priority tracks will be served first during congestion.
-	pub priority: u8,
-
-	/// Groups will be dropped if they are this much older than the latest group.
-	pub max_latency: std::time::Duration,
+/// Static information about a track
+///
+/// Only used to make accessing the name easy/fast.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackInfo {
+	pub name: Arc<String>,
 }
 
 #[derive(Debug, Default)]
-struct TrackState {
-	// Metadata about the track.
-	meta: TrackMeta,
-
+struct State {
 	// Groups in order of arrival.
 	// If None, the group has expired but was not in the front of the queue.
 	groups: VecDeque<Option<GroupState>>,
@@ -70,21 +73,6 @@ struct TrackState {
 
 	// Some if the track is closed
 	closed: Option<Result<()>>,
-}
-
-impl TrackState {
-	pub fn new(track: &Track) -> Self {
-		Self {
-			meta: TrackMeta {
-				priority: track.priority,
-				max_latency: track.max_latency,
-			},
-			groups: VecDeque::new(),
-			offset: 0,
-			max: None,
-			closed: None,
-		}
-	}
 }
 
 #[derive(Debug)]
@@ -102,22 +90,35 @@ struct GroupState {
 /// A producer for a track, used to create new groups.
 #[derive(Clone)]
 pub struct TrackProducer {
-	name: Arc<String>, // can't change, cheap to clone
-	state: watch::Sender<TrackState>,
+	info: TrackInfo,
+	state: watch::Sender<State>,
+	meta: Produce<TrackMetaProducer, TrackMetaConsumer>,
 }
 
 impl TrackProducer {
 	pub fn new(info: Track) -> Self {
 		let this = Self {
-			state: watch::Sender::new(TrackState::new(&info)),
-			name: Arc::new(info.name),
+			state: Default::default(),
+			meta: TrackMeta {
+				priority: info.priority,
+				max_latency: info.max_latency,
+			}
+			.produce(),
+			info: TrackInfo {
+				name: Arc::new(info.name),
+			},
 		};
 		web_async::spawn(this.clone().run_expires());
 		this
 	}
 
-	pub fn name(&self) -> &str {
-		&self.name
+	pub fn info(&self) -> TrackInfo {
+		self.info.clone()
+	}
+
+	// Information about all of the consumers of this track.
+	pub fn meta(&self) -> TrackMetaConsumer {
+		self.meta.consumer.clone()
 	}
 
 	/// Create a new group with the given info.
@@ -128,6 +129,8 @@ impl TrackProducer {
 		let mut result = Err(Error::Cancel);
 
 		self.state.send_if_modified(|state| {
+			let meta = self.meta.consumer.get();
+
 			if let Some(closed) = state.closed.clone() {
 				result = Err(closed.err().unwrap_or(Error::Cancel));
 				return false;
@@ -148,7 +151,7 @@ impl TrackProducer {
 				let now = Instant::now();
 				state.max = Some((group.sequence, now));
 				now
-			} else if state.meta.max_latency.is_zero() {
+			} else if meta.max_latency.is_zero() {
 				// Guaranteed to expire, we don't even need to call Instant::now
 				result = Err(Error::Expired);
 				return false;
@@ -158,7 +161,7 @@ impl TrackProducer {
 				let max = state.max.expect("impossible").1;
 
 				let now = Instant::now();
-				if now - max > state.meta.max_latency {
+				if now - max > meta.max_latency {
 					result = Err(Error::Expired);
 					return false;
 				}
@@ -253,13 +256,15 @@ impl TrackProducer {
 	/// Create a new consumer for the track.
 	pub fn consume(&self) -> TrackConsumer {
 		TrackConsumer {
-			name: self.name.clone(),
+			info: self.info.clone(),
 			state: self.state.subscribe(),
+			meta: self.meta.producer.clone(),
 			index: 0,
 		}
 	}
 
 	/// Block until there are no active consumers.
+	// We don't use the `async` keyword so we don't borrow &self across the await.
 	pub fn unused(&self) -> impl Future<Output = ()> {
 		let state = self.state.clone();
 		async move {
@@ -274,10 +279,12 @@ impl TrackProducer {
 
 	async fn run_expires(self) {
 		let mut receiver = self.state.subscribe();
+		let mut meta = self.meta.consumer.clone();
 
 		loop {
 			let (expires, closed) = {
 				let state = receiver.borrow();
+				let max_latency = meta.get().max_latency;
 
 				// This monster of an iterator:
 				// - only looks at existing groups older than the max sequence
@@ -292,13 +299,13 @@ impl TrackProducer {
 					.filter_map(|(index, group)| {
 						group
 							.as_ref()
-							.map(|g| (index, g.producer.sequence, g.when + state.meta.max_latency))
+							.map(|g| (index, g.producer.sequence, g.when + max_latency))
 					})
 					.filter(|(_index, sequence, _expires)| *sequence < state.max.map(|m| m.0).unwrap_or(0))
 					.min_by_key(|(_index, _sequence, expires)| *expires);
 
 				let expires = if let Some((index, _sequence, expires)) = next {
-					if state.meta.max_latency.is_zero() || !expires.elapsed().is_zero() {
+					if max_latency.is_zero() || !expires.elapsed().is_zero() {
 						self.state.send_if_modified(|state| {
 							let mut group = state
 								.groups
@@ -335,19 +342,10 @@ impl TrackProducer {
 			tokio::select! {
 				// Sleep until the next group expires.
 				Some(()) = async { Some(tokio::time::sleep_until(expires?).await) } => {},
+				Some(_) = meta.next() => {},
 				_ = receiver.changed() => {},
 			};
 		}
-	}
-
-	pub fn meta(&self) -> TrackMeta {
-		self.state.borrow().meta
-	}
-
-	pub fn set_meta(&mut self, meta: TrackMeta) {
-		self.state.send_modify(|state| {
-			state.meta = meta;
-		});
 	}
 }
 
@@ -375,14 +373,23 @@ impl Drop for TrackProducer {
 	}
 }
 
+impl Deref for TrackProducer {
+	type Target = TrackInfo;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 /// A consumer for a track, used to read groups.
 ///
 /// If the consumer is cloned, it will receive a copy of all unread groups.
 #[derive(Clone)]
 pub struct TrackConsumer {
-	name: Arc<String>,
+	info: TrackInfo,
 
-	state: watch::Receiver<TrackState>,
+	state: watch::Receiver<State>,
+	meta: TrackMetaProducer,
 
 	// We last returned this group, factoring in offset
 	index: usize,
@@ -399,12 +406,8 @@ impl fmt::Debug for TrackConsumer {
 }
 
 impl TrackConsumer {
-	pub fn name(&self) -> &str {
-		&self.name
-	}
-
-	pub fn meta(&self) -> TrackMeta {
-		self.state.borrow().meta
+	pub fn info(&self) -> TrackInfo {
+		self.info.clone()
 	}
 
 	/// Return the next group in order.
@@ -420,6 +423,7 @@ impl TrackConsumer {
 				.map_err(|_| Error::Cancel)?;
 
 			for i in self.index.saturating_sub(state.offset)..state.groups.len() {
+				// If None, the group has expired out of order.
 				if let Some(group) = &state.groups[i] {
 					self.index = state.offset + i + 1;
 					return Ok(Some(group.consumer.clone()));
@@ -437,10 +441,14 @@ impl TrackConsumer {
 	}
 
 	/// Block until the track is closed.
-	pub async fn closed(&self) -> Result<()> {
-		match self.state.clone().wait_for(|state| state.closed.is_some()).await {
-			Ok(state) => state.closed.clone().unwrap(),
-			Err(_) => Err(Error::Cancel),
+	pub fn closed(&self) -> impl Future<Output = Result<()>> {
+		let mut state = self.state.clone();
+
+		async move {
+			match state.wait_for(|state| state.closed.is_some()).await {
+				Ok(state) => state.closed.clone().unwrap(),
+				Err(_) => Err(Error::Cancel),
+			}
 		}
 	}
 
@@ -448,10 +456,14 @@ impl TrackConsumer {
 		self.state.same_channel(&other.state)
 	}
 
+	pub fn meta(&mut self) -> TrackMetaProducer {
+		self.meta.clone()
+	}
+
 	/// Proxy all groups and errors to the given producer.
 	///
 	/// Returns an error on any unexpected close, which can happen if the [TrackProducer] is cloned.
-	pub async fn proxy(mut self, mut dst: TrackProducer) -> Result<()> {
+	pub(super) async fn proxy(mut self, mut dst: TrackProducer) -> Result<()> {
 		let mut tasks = futures::stream::FuturesUnordered::new();
 
 		loop {
@@ -474,6 +486,14 @@ impl TrackConsumer {
 				else => return Ok(()),
 			}
 		}
+	}
+}
+
+impl Deref for TrackConsumer {
+	type Target = TrackInfo;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
 	}
 }
 

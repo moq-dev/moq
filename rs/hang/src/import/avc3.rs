@@ -91,11 +91,11 @@ impl Avc3 {
 			video.priority = 2;
 		}
 
-		let track = moq::TrackProducer::new(track);
-		self.broadcast.insert_track(track.clone());
+		let track = track.produce();
+		self.broadcast.insert_track(track.consumer);
 
 		self.config = Some(config);
-		self.track = Some(track.into());
+		self.track = Some(track.producer.into());
 
 		Ok(())
 	}
