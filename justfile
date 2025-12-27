@@ -34,7 +34,7 @@ dev:
 # Run a localhost relay server without authentication.
 relay:
 	# Run the relay server overriding the provided configuration file.
-	cargo run --bin moq-relay -- dev/relay.toml
+	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- dev/relay.toml
 
 # Run a cluster of relay servers
 cluster:
@@ -144,7 +144,7 @@ pub name url="http://localhost:4443/anon" *args:
 		-i "dev/{{name}}.fmp4" \
 		-c copy \
 		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
-		- | cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
+		- | TOKIO_CONSOLE_BIND=127.0.0.1:6681 cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
@@ -159,23 +159,29 @@ pub-hls name relay="http://localhost:4443/anon":
 	rm -rf "$OUT_DIR"
 	mkdir -p "$OUT_DIR"
 
-	echo ">>> Generating HLS stream to disk..."
+	echo ">>> Generating HLS stream to disk (1280x720 + 256x144)..."
 
 	# Start ffmpeg in the background to generate HLS
-	ffmpeg -loglevel warning -re -stream_loop -1 -i "$INPUT" \
-		-map 0:v:0 -map 0:v:0 -map 0:a:0 \
+	ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -i "$INPUT" \
+		-filter_complex "\
+		[0:v]split=2[v0][v1]; \
+		[v0]scale=-2:720[v720]; \
+		[v1]scale=-2:144[v144]" \
+		-map "[v720]" -map "[v144]" -map 0:a:0 \
 		-r 25 -preset veryfast -g 50 -keyint_min 50 -sc_threshold 0 \
-		-c:v:0 libx264 -profile:v:0 high -level:v:0 4.1 -pix_fmt:v:0 yuv420p -tag:v:0 avc1 -bsf:v:0 dump_extra -b:v:0 4M -vf:0 "scale=1920:-2" \
-		-c:v:1 libx264 -profile:v:1 high -level:v:1 4.1 -pix_fmt:v:1 yuv420p -tag:v:1 avc1 -bsf:v:1 dump_extra -b:v:1 300k -vf:1 "scale=256:-2" \
+		-c:v:0 libx264 -profile:v:0 high -level:v:0 4.1 -pix_fmt:v:0 yuv420p -tag:v:0 avc1 \
+		-b:v:0 4M -maxrate:v:0 4.4M -bufsize:v:0 8M \
+		-c:v:1 libx264 -profile:v:1 high -level:v:1 4.1 -pix_fmt:v:1 yuv420p -tag:v:1 avc1 \
+		-b:v:1 300k -maxrate:v:1 330k -bufsize:v:1 600k \
 		-c:a aac -b:a 128k \
-		-f hls \
-		-hls_time 2 -hls_list_size 12 \
+		-f hls -hls_time 2 -hls_list_size 12 \
 		-hls_flags independent_segments+delete_segments \
 		-hls_segment_type fmp4 \
 		-master_pl_name master.m3u8 \
-		-var_stream_map "v:0,agroup:audio v:1,agroup:audio a:0,agroup:audio" \
+		-var_stream_map "v:0,agroup:audio,name:720 v:1,agroup:audio,name:144 a:0,agroup:audio,name:audio" \
 		-hls_segment_filename "$OUT_DIR/v%v/segment_%09d.m4s" \
 		"$OUT_DIR/v%v/stream.m3u8" &
+
 
 	FFMPEG_PID=$!
 
@@ -252,7 +258,7 @@ serve name:
 
 # Run the web server
 web url='http://localhost:4443/anon':
-	VITE_RELAY_URL="{{url}}" bun run --filter='*' dev
+	cd js/hang-demo && VITE_RELAY_URL="{{url}}" bun run dev
 
 # Publish the clock broadcast
 # `action` is either `publish` or `subscribe`
@@ -389,6 +395,14 @@ serve-hls name port="8000":
 	sleep 2
 	echo ">>> HTTP server: http://localhost:{{port}}/"
 	cd "$OUT_DIR" && python3 -m http.server {{port}}
+
+# Connect tokio-console to the relay server (port 6680)
+relay-console:
+	tokio-console http://127.0.0.1:6680
+
+# Connect tokio-console to the publisher (port 6681)
+pub-console:
+	tokio-console http://127.0.0.1:6681
 
 # Serve the documentation locally.
 doc:
