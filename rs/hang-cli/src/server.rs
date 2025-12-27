@@ -126,7 +126,7 @@ async fn web(
 		app = app.fallback_service(handle_404.into_service());
 	}
 
-	let server = hyper_serve::bind(bind);
+	let server = axum_server::bind(bind);
 	server.serve(app.into_make_service()).await?;
 
 	Ok(())
