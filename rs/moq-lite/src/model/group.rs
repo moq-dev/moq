@@ -10,7 +10,7 @@
 use std::{fmt, future::Future, ops::Deref};
 
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::FutureExt;
 use tokio::sync::watch;
 
 use crate::{Error, Result};
@@ -266,37 +266,18 @@ impl GroupConsumer {
 	///
 	/// Returns an error on any unexpected close, which can happen if the [GroupProducer] is cloned.
 	pub(super) async fn proxy(mut self, mut dst: GroupProducer) -> Result<()> {
-		let mut tasks = futures::stream::FuturesUnordered::new();
-
-		loop {
-			let frame = tokio::select! {
-				res = self.next_frame() => res,
-				// Wait until all groups have finished being proxied.
-				Some(_) = tasks.next() => continue,
-			};
-
+		while let Some(frame) = self.next_frame().await.transpose() {
 			match frame {
-				Ok(Some(frame)) => {
+				Ok(frame) => {
 					let dst = dst.create_frame(frame.info().clone())?;
-					tasks.push(frame.proxy(dst));
+					web_async::spawn_named("proxy-frame", frame.proxy(dst).map(|_| ()));
 				}
-				Ok(None) => break,
 				Err(err) => return dst.abort(err),
 			}
 		}
 
 		// Close the group.
-		dst.close()?;
-
-		// Wait until all frames have been proxied.
-		loop {
-			tokio::select! {
-				biased;
-				Err(err) = self.closed() => return dst.abort(err),
-				Some(_) = tasks.next() => continue,
-				else => return Ok(()),
-			}
-		}
+		dst.close()
 	}
 
 	pub async fn closed(&self) -> Result<()> {

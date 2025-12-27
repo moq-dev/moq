@@ -12,7 +12,7 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use futures::StreamExt;
+use futures::FutureExt;
 use tokio::{sync::watch, time::Instant};
 
 use super::{Group, GroupConsumer, GroupProducer};
@@ -514,64 +514,17 @@ impl TrackConsumer {
 	///
 	/// Returns an error on any unexpected close, which can happen if the [TrackProducer] is cloned.
 	pub(super) async fn proxy(mut self, mut dst: TrackProducer) -> Result<()> {
-		tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "starting track proxy");
-		let mut tasks = futures::stream::FuturesUnordered::new();
-
-		loop {
-			let group = tokio::select! {
-				group = self.next_group() => group,
-				// Wait until all groups have finished being proxied.
-				Some(_) = tasks.next() => {
-					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "group proxy task completed");
-					continue;
-				}
-				// We're done with the proxy.
-				else => {
-					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "proxy finished (all tasks done)");
-					return Ok(());
-				}
-			};
-
+		while let Some(group) = self.next_group().await.transpose() {
 			match group {
-				Ok(Some(group)) => {
-					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, group = %group.sequence, "proxying group");
+				Ok(group) => {
 					let dst = dst.create_group(group.info().clone())?;
-					tasks.push(group.proxy(dst));
+					web_async::spawn_named("proxy-group", group.proxy(dst).map(|_| ()));
 				}
-				Ok(None) => {
-					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "no more groups, breaking");
-					break;
-				}
-				Err(err) => {
-					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, %err, "error in proxy, aborting dst");
-					return dst.abort(err);
-				}
+				Err(err) => return dst.abort(err),
 			}
 		}
 
-		// Close the track.
-		tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "closing dst track");
-		dst.close()?;
-
-		// Wait until all groups have finished being proxied.
-		tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "waiting for remaining group proxy tasks");
-		loop {
-			tokio::select! {
-				biased;
-				Err(err) = self.closed() => {
-					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, %err, "src track closed with error, aborting dst");
-					return dst.abort(err);
-				}
-				Some(_) = tasks.next() => {
-					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "final group proxy task completed");
-					continue;
-				}
-				else => {
-					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "proxy complete");
-					return Ok(());
-				}
-			}
-		}
+		dst.close()
 	}
 }
 
@@ -582,9 +535,6 @@ impl Deref for TrackConsumer {
 		&self.info
 	}
 }
-
-#[cfg(test)]
-use futures::FutureExt;
 
 #[cfg(test)]
 impl TrackConsumer {

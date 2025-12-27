@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures::StreamExt;
+use futures::FutureExt;
 use web_async::FuturesExt;
 
 use crate::{
@@ -199,22 +199,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		stream.writer.encode(&info).await?;
-		let mut tasks = futures::stream::FuturesUnordered::new();
 
 		loop {
-			tracing::trace!(subscribe = %subscribe.id, track = ?track.name, "select loop iteration, tasks_len={}", tasks.len());
 			let group = tokio::select! {
 				Some(group) = track.next_group().transpose() => group,
-				Some(res) = tasks.next() => {
-					match &res {
-						Ok(_) => tracing::trace!(subscribe = %subscribe.id, track = ?track.name, "serve_group task completed successfully"),
-						Err(err) => tracing::trace!(subscribe = %subscribe.id, track = ?track.name, %err, "serve_group task completed with error"),
-					}
-					if let Err(err) = res {
-						tracing::warn!(?err, "serve group error");
-					}
-					continue;
-				}
 				Some(res) = stream.reader.decode_maybe::<lite::SubscribeUpdate>().transpose() => {
 					let update = res?;
 
@@ -243,10 +231,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let priority = priority.insert(track.meta().get().priority, group.sequence);
 
 			// Run the group in the background until it's closed or expires.
-			tracing::trace!(subscribe = %subscribe.id, track = ?track.name, group = %group.sequence, "pushing serve_group task");
-			let group_seq = group.sequence;
-			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version));
-			tracing::trace!(subscribe = %subscribe.id, track = ?track.name, group = %group_seq, "pushed serve_group task, tasks_len={}", tasks.len());
+			web_async::spawn_named(
+				"serve-group",
+				Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()),
+			);
 		}
 
 		stream.writer.finish()?;

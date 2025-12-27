@@ -181,21 +181,21 @@ impl BroadcastConsumer {
 		// Clone a published track.
 		if let Some(existing) = state.published.get(&track.name) {
 			let track = track.produce();
-			web_async::spawn_named("proxy", existing.clone().proxy(track.producer).map(|_| ()));
+			web_async::spawn_named("proxy-track", existing.clone().proxy(track.producer).map(|_| ()));
 			return track.consumer;
 		}
 
 		// Return any requested tracks.
 		if let Some(existing) = state.requested.get(&track.name) {
 			let track = track.produce();
-			web_async::spawn_named("proxy", existing.consume().proxy(track.producer).map(|_| ()));
+			web_async::spawn_named("proxy-track", existing.consume().proxy(track.producer).map(|_| ()));
 			return track.consumer;
 		}
 
 		let mut producer = TrackProducer::new(track.clone());
 		let track = track.produce();
 
-		web_async::spawn_named("proxy", producer.consume().proxy(track.producer).map(|_| ()));
+		web_async::spawn_named("proxy-track", producer.consume().proxy(track.producer).map(|_| ()));
 
 		// TODO await this
 		match self.requested.try_send(producer.clone()) {
@@ -209,7 +209,7 @@ impl BroadcastConsumer {
 		state.requested.insert(producer.name.to_string(), producer.clone());
 		let state = self.state.clone();
 
-		web_async::spawn_named("unused", async move {
+		web_async::spawn_named("unused-track", async move {
 			producer.unused().await;
 			state.lock().requested.remove(producer.name.as_ref());
 		});
