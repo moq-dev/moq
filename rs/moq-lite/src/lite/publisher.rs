@@ -250,15 +250,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut group: GroupConsumer,
 		version: Version,
 	) -> Result<(), Error> {
-		tracing::trace!(group = %msg.sequence, "!!! serve_group START !!!");
-
 		// TODO add a way to open in priority order.
-		tracing::trace!(group = %msg.sequence, "opening uni stream");
 		let stream = session
 			.open_uni()
 			.await
 			.map_err(|err| Error::Transport(Arc::new(err)))?;
-		tracing::trace!(group = %msg.sequence, "opened uni stream");
 
 		let mut stream = Writer::new(stream, version);
 		stream.set_priority(priority.current());
@@ -276,14 +272,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 			};
 
-			tracing::trace!(group = %msg.sequence, ?frame, "serving frame");
-
 			let mut frame = match frame? {
 				Some(frame) => frame,
 				None => break,
 			};
-
-			tracing::trace!(group = %msg.sequence, size = %frame.size, "writing frame");
 
 			stream.encode(&frame.size).await?;
 
@@ -303,17 +295,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					None => break,
 				}
 			}
-
-			tracing::trace!(group = %msg.sequence, size = %frame.size, "finished frame");
 		}
 
-		tracing::trace!(group = %msg.sequence, "!!! finished group !!!");
-
-		tracing::trace!(group = %msg.sequence, "finishing stream");
 		stream.finish()?;
-		tracing::trace!(group = %msg.sequence, "waiting for stream closed");
 		stream.closed().await?;
-		tracing::trace!(group = %msg.sequence, "stream closed");
 
 		Ok(())
 	}

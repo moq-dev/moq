@@ -70,13 +70,12 @@ impl Log {
 					thread::sleep(Duration::from_secs(1));
 					let deadlocks = parking_lot::deadlock::check_deadlock();
 					if !deadlocks.is_empty() {
-						eprintln!("\n🔴 DEADLOCK DETECTED 🔴\n");
+						tracing::error!("DEADLOCK DETECTED");
 						for (i, threads) in deadlocks.iter().enumerate() {
-							eprintln!("Deadlock #{}", i);
+							tracing::error!("Deadlock #{}", i);
 							for t in threads {
-								eprintln!("Thread Id {:#?}", t.thread_id());
-								eprintln!("{:#?}", t.backtrace());
-								eprintln!();
+								tracing::error!("Thread Id {:#?}", t.thread_id());
+								tracing::error!("{:#?}", t.backtrace());
 							}
 						}
 						// Optionally: std::process::abort() to get a core dump

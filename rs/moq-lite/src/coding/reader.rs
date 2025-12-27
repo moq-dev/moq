@@ -143,33 +143,23 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 
 	/// Wait until the stream is closed, erroring if there are any additional bytes.
 	pub async fn closed(&mut self) -> Result<(), Error> {
-		tracing::trace!(buffer_len = %self.buffer.len(), buffer_capacity = %self.buffer.capacity(), "closed: checking");
 		if !self.buffer.is_empty() {
-			tracing::trace!("closed: buffer not empty, has data");
 			return Err(DecodeError::ExpectedEnd.into());
 		}
 
 		// Ensure buffer has capacity to avoid read_buf with empty slice
 		if self.buffer.capacity() == 0 {
-			tracing::trace!("closed: reserving capacity");
 			self.buffer.reserve(1024);
 		}
 
-		tracing::trace!(buffer_capacity = %self.buffer.capacity(), "closed: calling read_buf");
 		match self
 			.stream
 			.read_buf(&mut self.buffer)
 			.await
 			.map_err(|e| Error::Transport(Arc::new(e)))?
 		{
-			None => {
-				tracing::trace!("closed: stream is closed");
-				Ok(())
-			}
-			Some(n) => {
-				tracing::trace!(bytes_read = %n, "closed: got more data");
-				Err(DecodeError::ExpectedEnd.into())
-			}
+			None => Ok(()),
+			Some(_) => Err(DecodeError::ExpectedEnd.into())
 		}
 	}
 

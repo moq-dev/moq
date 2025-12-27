@@ -129,7 +129,6 @@ impl TrackProducer {
 				name: Arc::new(info.name),
 			},
 		};
-		tracing::trace!(track_id = %this.id, track = %this.info.name, "created TrackProducer");
 		web_async::spawn_named("expires", this.clone().run_expires());
 		this
 	}
@@ -150,12 +149,9 @@ impl TrackProducer {
 		let group = GroupProducer::new(info.into());
 		let mut result = Err(Error::Cancel);
 
-		let sequence = group.sequence;
-
 		// NOTE: The TrackProducer is unused when this returns None.
 		let meta = self.meta.consumer.get().unwrap_or_default();
 
-		tracing::trace!(track_id = %self.id, track = %self.info.name, group = %sequence, "creating group");
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
 				result = Err(closed.err().unwrap_or(Error::Cancel));
@@ -207,7 +203,6 @@ impl TrackProducer {
 
 			true
 		});
-		tracing::trace!(track_id = %self.id, track = %self.info.name, group = %sequence, ?result, "created group");
 
 		result
 	}
@@ -250,7 +245,6 @@ impl TrackProducer {
 	pub fn close(&mut self) -> Result<()> {
 		let mut result = Ok(());
 
-		tracing::trace!(track_id = %self.id, track = %self.info.name, "closing TrackProducer");
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
 				result = Err(closed.err().unwrap_or(Error::Cancel));
@@ -260,7 +254,6 @@ impl TrackProducer {
 			state.closed = Some(Ok(()));
 			true
 		});
-		tracing::trace!(track_id = %self.id, track = %self.info.name, ?result, "closed TrackProducer");
 
 		result
 	}
@@ -268,7 +261,6 @@ impl TrackProducer {
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut result = Ok(());
 
-		tracing::trace!(track_id = %self.id, track = %self.info.name, %err, "aborting TrackProducer");
 		self.state.send_if_modified(|state| {
 			if let Some(Err(closed)) = state.closed.clone() {
 				result = Err(closed);
@@ -279,7 +271,6 @@ impl TrackProducer {
 
 			true
 		});
-		tracing::trace!(track_id = %self.id, track = %self.info.name, ?result, "aborted TrackProducer");
 
 		result
 	}
@@ -452,7 +443,6 @@ impl TrackConsumer {
 	///
 	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
-		tracing::trace!(track_id = %self.id, track = %self.info.name, index = %self.index, "waiting for next group");
 		loop {
 			// Wait until there's a new latest group or the track is closed.
 			let state = self
@@ -461,31 +451,20 @@ impl TrackConsumer {
 				.await
 				.map_err(|_| Error::Cancel)?;
 
-			tracing::trace!(track_id = %self.id, track = %self.info.name, index = %self.index, offset = %state.offset, groups_len = %state.groups.len(), closed = ?state.closed.is_some(), "wait_for returned");
-
 			for i in self.index.saturating_sub(state.offset)..state.groups.len() {
 				// If None, the group has expired out of order.
 				if let Some(group) = &state.groups[i] {
 					self.index = state.offset + i + 1;
-					tracing::trace!(track_id = %self.id, track = %self.info.name, group = %group.producer.sequence, "got next group");
 					return Ok(Some(group.consumer.clone()));
 				}
 			}
 
 			match &state.closed {
-				Some(Ok(_)) => {
-					tracing::trace!(track_id = %self.id, track = %self.info.name, "track closed, no more groups");
-					return Ok(None);
-				}
-				Some(Err(err)) => {
-					tracing::trace!(track_id = %self.id, track = %self.info.name, %err, "track closed with error");
-					return Err(err.clone());
-				}
+				Some(Ok(_)) => return Ok(None),
+				Some(Err(err)) => return Err(err.clone()),
 				// There must have been a new None group
 				// This can happen if an immediately expired group is received, or just a race.
-				_ => {
-					tracing::trace!(track_id = %self.id, track = %self.info.name, "spurious wakeup, looping");
-				}
+				_ => {}
 			}
 		}
 	}

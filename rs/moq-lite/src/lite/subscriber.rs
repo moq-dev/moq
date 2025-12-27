@@ -308,10 +308,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
 	) -> Result<(), Error> {
-		tracing::trace!(group = %group.sequence, "run_group: starting");
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
-			tracing::trace!(group = group.sequence, size, "recv group");
-
 			let mut frame = group.create_frame(Frame { size })?;
 
 			let res = tokio::select! {
@@ -325,9 +322,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 
-		tracing::trace!(group = %group.sequence, "run_group: stream ended, closing group");
 		group.close()?;
-		tracing::trace!(group = %group.sequence, "run_group: group closed");
 
 		Ok(())
 	}
@@ -335,12 +330,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_frame(
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
-		group: u64,
+		_group: u64,
 		mut frame: FrameProducer,
 	) -> Result<(), Error> {
 		let mut remain = frame.size;
-
-		tracing::trace!(%group, size = %frame.size, "reading frame");
 
 		const MAX_CHUNK: usize = 1024 * 1024; // 1 MiB
 		while remain > 0 {
@@ -351,8 +344,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
 			frame.write_chunk(chunk)?;
 		}
-
-		tracing::trace!(%group, size = %frame.size, "done reading frame");
 
 		frame.close()?;
 
