@@ -55,7 +55,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		Ok(())
 	}
 
-	/// A clean termination of the stream, waiting for the peer to close.
+	/// Mark the clean termination of the stream.
 	pub fn finish(&mut self) -> Result<(), Error> {
 		self.stream
 			.as_mut()

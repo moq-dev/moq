@@ -15,7 +15,7 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 	subscribe: Option<OriginProducer>,
 	version: Version,
 ) -> Result<(), Error> {
-	web_async::spawn(async move {
+	web_async::spawn_named("session", async move {
 		match run(
 			session.clone(),
 			setup,

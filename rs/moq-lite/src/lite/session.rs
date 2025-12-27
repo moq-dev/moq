@@ -1,3 +1,4 @@
+use futures::FutureExt;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -24,28 +25,7 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 
 	let init = oneshot::channel();
 
-	web_async::spawn(async move {
-		let res = tokio::select! {
-			res = run_session(setup) => res,
-			res = publisher.run() => res,
-			res = subscriber.run(init.0) => res,
-		};
-
-		match res {
-			Err(Error::Transport(_)) => {
-				tracing::info!("session terminated");
-				session.close(1, "");
-			}
-			Err(err) => {
-				tracing::warn!(%err, "session error");
-				session.close(err.to_code(), err.to_string().as_ref());
-			}
-			_ => {
-				tracing::info!("session closed");
-				session.close(0, "");
-			}
-		}
-	});
+	web_async::spawn_named("session", run(session, setup, publisher, subscriber, init.0).boxed());
 
 	// Wait until receiving the initial announcements to prevent some race conditions.
 	// Otherwise, `consume()` might return not found if we don't wait long enough, so just wait.
@@ -54,6 +34,35 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 	init.1.await.map_err(|_| Error::Cancel)?;
 
 	Ok(())
+}
+
+async fn run<S: web_transport_trait::Session>(
+	session: S,
+	setup: Stream<S, Version>,
+	publisher: Publisher<S>,
+	subscriber: Subscriber<S>,
+	init: oneshot::Sender<()>,
+) {
+	let res = tokio::select! {
+		res = run_session(setup) => res,
+		res = publisher.run() => res,
+		res = subscriber.run(init) => res,
+	};
+
+	match res {
+		Err(Error::Transport(_)) => {
+			tracing::info!("session terminated");
+			session.close(1, "");
+		}
+		Err(err) => {
+			tracing::warn!(%err, "session error");
+			session.close(err.to_code(), err.to_string().as_ref());
+		}
+		_ => {
+			tracing::info!("session closed");
+			session.close(0, "");
+		}
+	}
 }
 
 // TODO do something useful with this

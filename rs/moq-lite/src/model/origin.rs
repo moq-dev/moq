@@ -383,7 +383,7 @@ impl OriginProducer {
 		root.lock().publish(&full, &broadcast, &rest);
 		let root = root.clone();
 
-		web_async::spawn(async move {
+		web_async::spawn_named("announce", async move {
 			broadcast.closed().await.ok();
 			root.lock().remove(&full, broadcast, &rest);
 		});

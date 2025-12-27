@@ -119,7 +119,10 @@ impl Web {
 			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
 
 			#[cfg(unix)]
-			tokio::spawn(reload_certs(config.clone(), cert, key));
+			tokio::task::Builder::new()
+				.name("certs")
+				.spawn(reload_certs(config.clone(), cert, key))
+				.expect("failed to spawn reload certs task");
 
 			let server = hyper_serve::bind_rustls(listen, config);
 			Some(server.serve(app))

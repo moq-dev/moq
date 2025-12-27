@@ -37,13 +37,16 @@ impl Origin {
 		let consumer = origin.consume();
 		let channel = oneshot::channel();
 
-		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_announced(consumer, &mut on_announce) => res,
-				_ = channel.1 => Ok(()),
-			};
-			on_announce.call(res);
-		});
+		tokio::task::Builder::new()
+			.name("announced")
+			.spawn(async move {
+				let res = tokio::select! {
+					res = Self::run_announced(consumer, &mut on_announce) => res,
+					_ = channel.1 => Ok(()),
+				};
+				on_announce.call(res);
+			})
+			.expect("failed to spawn announced task");
 
 		let id = self.announced_task.insert(channel.0);
 		Ok(id)

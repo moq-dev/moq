@@ -1,5 +1,7 @@
 use std::{collections::HashMap, future::Future};
 
+use futures::FutureExt;
+
 use crate::{Error, Produce, Track, TrackConsumer, TrackProducer};
 use tokio::sync::watch;
 use web_async::Lock;
@@ -69,13 +71,11 @@ impl BroadcastProducer {
 		track.producer
 	}
 
-	/// Insert a track into the lookup, returning true if it was unique.
-	pub fn insert_track(&mut self, track: TrackConsumer) -> bool {
+	/// Insert a track into the broadcast.
+	pub fn insert_track(&mut self, track: TrackConsumer) {
+		let name = track.name.to_string();
 		let mut state = self.state.lock();
-		let unique = state.published.insert(track.name.to_string(), track.clone()).is_none();
-		let removed = state.requested.remove(track.name.as_ref()).is_some();
-
-		unique && !removed
+		state.published.insert(name, track);
 	}
 
 	/// Remove a track from the lookup.
@@ -141,9 +141,6 @@ impl BroadcastProducer {
 }
 
 #[cfg(test)]
-use futures::FutureExt;
-
-#[cfg(test)]
 impl BroadcastProducer {
 	pub fn assert_used(&self) {
 		assert!(self.unused().now_or_never().is_none(), "should be used");
@@ -174,66 +171,49 @@ pub struct BroadcastConsumer {
 }
 
 impl BroadcastConsumer {
-	fn get(&self, track: &str) -> TrackConsumer {
-		let mut state = self.state.lock();
-
-		// Clone a published track.
-		if let Some(existing) = state.published.get(track) {
-			return existing.clone();
-		}
-
-		// Return any requested tracks.
-		if let Some(existing) = state.requested.get(track) {
-			return existing.consume();
-		}
-
-		// Use the first request as the initial info.
-		// NOTE: The SubscribeOk will replace the priority/max_latency.
-		// TODO Make this async, so we only return the original producer's settings.
-		let mut producer = TrackProducer::new(Track {
-			name: track.to_string(),
-			priority: 0,
-			// TODO Make None an option, meaning we have no preference.
-			max_latency: std::time::Duration::from_secs(10),
-		});
-
-		let consumer = producer.consume();
-
-		match self.requested.try_send(producer.clone()) {
-			Ok(()) => {}
-			Err(_) => {
-				producer.abort(Error::Cancel).ok();
-				return consumer;
-			}
-		};
-
-		state.requested.insert(track.to_string(), producer.clone());
-
-		let state = self.state.clone();
-		let track = track.to_string();
-
-		web_async::spawn(async move {
-			producer.unused().await;
-			state.lock().requested.remove(&track);
-		});
-
-		web_async::spawn(async move {});
-
-		consumer
-	}
-
 	/// Fetches the Track over the network, using the given settings.
 	///
 	/// [TrackConsumer::meta] can be used to update the priority/max_latency of the track.
 	pub fn subscribe_track<T: Into<Track>>(&self, track: T) -> TrackConsumer {
 		let track = track.into();
-		let src = self.get(&track.name);
+		let mut state = self.state.lock();
+
+		// Clone a published track.
+		if let Some(existing) = state.published.get(&track.name) {
+			let track = track.produce();
+			web_async::spawn_named("proxy", existing.clone().proxy(track.producer).map(|_| ()));
+			return track.consumer;
+		}
+
+		// Return any requested tracks.
+		if let Some(existing) = state.requested.get(&track.name) {
+			let track = track.produce();
+			web_async::spawn_named("proxy", existing.consume().proxy(track.producer).map(|_| ()));
+			return track.consumer;
+		}
+
+		let mut producer = TrackProducer::new(track.clone());
 		let track = track.produce();
 
-		web_async::spawn(async move {
-			// This should never fail because we don't clone the track producer.
-			src.proxy(track.producer).await.expect("track proxy failed");
+		web_async::spawn_named("proxy", producer.consume().proxy(track.producer).map(|_| ()));
+
+		// TODO await this
+		match self.requested.try_send(producer.clone()) {
+			Ok(()) => {}
+			Err(_) => {
+				producer.abort(Error::Cancel).ok();
+				return track.consumer;
+			}
+		};
+
+		state.requested.insert(producer.name.to_string(), producer.clone());
+		let state = self.state.clone();
+
+		web_async::spawn_named("unused", async move {
+			producer.unused().await;
+			state.lock().requested.remove(producer.name.as_ref());
 		});
+
 		track.consumer
 	}
 
@@ -252,59 +232,6 @@ impl BroadcastConsumer {
 	}
 }
 
-#[derive(Clone)]
-struct TrackDedupe {
-	// We keep a reference to producers so they don't count towards our active consumers.
-	// TODO TrackConsumerWeak would be cool.
-	producer: TrackProducer,
-
-	// All of the active consumers, which we monitor to update the max latency/priority.
-	consumers: Vec<TrackProducer>,
-}
-
-impl TrackDedupe {
-	pub fn new(init: Track) -> Self {
-		let producer = TrackProducer::new(init);
-
-		Self {
-			producer,
-			consumers: Vec::new(),
-		}
-	}
-
-	pub fn serve(&mut self, track: TrackProducer) {
-		self.consumers.push(track.clone());
-		self.update();
-
-		let mut this = self.clone();
-		let mut meta = this.producer.meta();
-
-		// TODO: Ugh I hate tokio. We should make a non-async version.
-		tokio::spawn(async move {
-			loop {
-				tokio::select! {
-					_ = this.producer.unused() => break,
-					// TODO Only prove our current value, not all N
-					Some(_) = meta.next() => this.update(),
-				};
-			}
-
-			this.consumers.retain(|consumer| !consumer.is_clone(&track));
-			this.update();
-		});
-	}
-
-	fn update(&mut self) {
-		let meta = self
-			.consumers
-			.iter()
-			.map(|consumer| consumer.meta().get())
-			.reduce(|a, b| a.max(&b))
-			.unwrap_or_default();
-		self.producer.consume().meta().set(meta);
-	}
-}
-
 #[cfg(test)]
 impl BroadcastConsumer {
 	pub fn assert_not_closed(&self) {
@@ -319,32 +246,6 @@ impl BroadcastConsumer {
 #[cfg(test)]
 mod test {
 	use super::*;
-
-	#[tokio::test]
-	async fn insert() {
-		let mut producer = BroadcastProducer::new();
-		let mut track1 = TrackProducer::new("track1");
-
-		// Make sure we can insert before a consumer is created.
-		producer.insert_track(track1.consume());
-		track1.append_group();
-
-		let consumer = producer.consume();
-
-		let mut track1_sub = consumer.subscribe_track("track1");
-		track1_sub.assert_group();
-
-		let mut track2 = TrackProducer::new("track2");
-		producer.insert_track(track2.consume());
-
-		let consumer2 = producer.consume();
-		let mut track2_consumer = consumer2.subscribe_track("track2");
-		track2_consumer.assert_no_group();
-
-		track2.append_group();
-
-		track2_consumer.assert_group();
-	}
 
 	#[tokio::test]
 	async fn unused() {
@@ -388,9 +289,8 @@ mod test {
 		consumer.assert_not_closed();
 
 		// Create a new track and insert it into the broadcast.
-		let mut track1 = Track::new("track1").produce();
-		track1.producer.append_group();
-		producer.insert_track(track1.consumer);
+		let mut track1 = producer.create_track("track1");
+		track1.append_group().expect("failed to append group");
 
 		let mut track1c = consumer.subscribe_track("track1");
 		let track2 = consumer.subscribe_track("track2");
@@ -407,7 +307,7 @@ mod test {
 		track1c.assert_not_closed();
 
 		// TODO: We should probably cascade the closed state.
-		drop(track1.producer);
+		drop(track1);
 		track1c.assert_closed();
 	}
 
@@ -445,7 +345,7 @@ mod test {
 		track3.consume().assert_is_clone(&track1);
 
 		// Append a group and make sure they all get it.
-		track3.append_group();
+		track3.append_group().expect("failed to append group");
 		track1.assert_group();
 		track2.assert_group();
 

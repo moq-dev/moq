@@ -12,7 +12,6 @@ use std::{fmt, future::Future, ops::Deref};
 use bytes::Bytes;
 use futures::StreamExt;
 use tokio::sync::watch;
-use web_async::FuturesExt;
 
 use crate::{Error, Result};
 
@@ -98,6 +97,7 @@ impl GroupProducer {
 	pub fn append_frame(&mut self, frame: FrameConsumer) -> Result<()> {
 		let mut result = Ok(());
 
+		tracing::trace!(group = %self.info.sequence, "appending frame");
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
 				result = Err(closed.err().unwrap_or(Error::Cancel));
@@ -107,6 +107,7 @@ impl GroupProducer {
 			state.frames.push(frame);
 			true
 		});
+		tracing::trace!(group = %self.info.sequence, ?result, "appended frame");
 
 		result
 	}
@@ -115,6 +116,7 @@ impl GroupProducer {
 	pub fn close(&mut self) -> Result<()> {
 		let mut result = Ok(());
 
+		tracing::trace!(group = %self.info.sequence, "closing group");
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
 				result = Err(closed.err().unwrap_or(Error::Cancel));
@@ -124,6 +126,7 @@ impl GroupProducer {
 			state.closed = Some(Ok(()));
 			true
 		});
+		tracing::trace!(group = %self.info.sequence, ?result, "closed group");
 
 		result
 	}
@@ -131,6 +134,7 @@ impl GroupProducer {
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut result = Ok(());
 
+		tracing::trace!(group = %self.info.sequence, "aborting group");
 		self.state.send_if_modified(|state| {
 			if let Some(Err(closed)) = state.closed.clone() {
 				result = Err(closed);
@@ -140,6 +144,7 @@ impl GroupProducer {
 			state.closed = Some(Err(err));
 			true
 		});
+		tracing::trace!(group = %self.info.sequence, ?result, "aborted group");
 
 		result
 	}
@@ -232,8 +237,11 @@ impl GroupConsumer {
 
 	/// Return a reader for the next frame.
 	pub async fn next_frame(&mut self) -> Result<Option<FrameConsumer>> {
+		tracing::trace!(group = %self.info.sequence, "waiting for frame");
+
 		// Just in case someone called read_frame, cancelled it, then called next_frame.
 		if let Some(frame) = self.active.take() {
+			tracing::trace!("using active");
 			return Ok(Some(frame));
 		}
 
@@ -244,11 +252,13 @@ impl GroupConsumer {
 			.map_err(|_| Error::Cancel)?;
 
 		if let Some(frame) = state.frames.get(self.index).cloned() {
+			tracing::trace!(group = %self.info.sequence, index = %self.index, "got frame");
 			self.index += 1;
 			return Ok(Some(frame.clone()));
 		}
 
 		let closed = state.closed.clone().expect("wait_for returned");
+		tracing::trace!(group = %self.info.sequence, ?closed, "got closed");
 		closed.map(|_| None)
 	}
 
@@ -259,19 +269,31 @@ impl GroupConsumer {
 		let mut tasks = futures::stream::FuturesUnordered::new();
 
 		loop {
-			tokio::select! {
-				biased;
-				Some(res) = self.next_frame().transpose() => match res {
-					Ok(frame) => {
-						let dst = dst.create_frame(frame.info().clone())?;
-						tasks.push(frame.proxy(dst));
-					}
-					// TODO should we wait for the tasks to finish?
-					Err(err) => return dst.abort(err),
-				},
+			let frame = tokio::select! {
+				res = self.next_frame() => res,
 				// Wait until all groups have finished being proxied.
 				Some(_) = tasks.next() => continue,
-				// We're done with the proxy.
+			};
+
+			match frame {
+				Ok(Some(frame)) => {
+					let dst = dst.create_frame(frame.info().clone())?;
+					tasks.push(frame.proxy(dst));
+				}
+				Ok(None) => break,
+				Err(err) => return dst.abort(err),
+			}
+		}
+
+		// Close the group.
+		dst.close()?;
+
+		// Wait until all frames have been proxied.
+		loop {
+			tokio::select! {
+				biased;
+				Err(err) = self.closed() => return dst.abort(err),
+				Some(_) = tasks.next() => continue,
 				else => return Ok(()),
 			}
 		}

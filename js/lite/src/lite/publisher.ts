@@ -143,7 +143,7 @@ export class Publisher {
 
 		try {
 			// TODO get the priority/latency from the original source.
-			const info = new SubscribeOk({ priority: msg.priority, maxLatency: msg.maxLatency });
+			const info = new SubscribeOk({ priority: msg.priority });
 			await info.encode(stream.writer, this.version);
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);

@@ -98,12 +98,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+		tracing::debug!(broadcast = %origin.absolute(&path), "announced");
 
 		let mut this = self.clone();
 		let producer = broadcast.clone();
 
-		web_async::spawn(async move {
+		web_async::spawn_named("announced", async move {
 			if let Err(err) = this.run_broadcast(path.clone(), producer).await {
 				tracing::debug!(%err, "error running broadcast");
 			}
@@ -193,7 +193,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let stream = Reader::new(stream, self.version);
 			let this = self.clone();
 
-			web_async::spawn(async move {
+			web_async::spawn_named("uni", async move {
 				if let Err(err) = this.run_uni_stream(stream).await {
 					tracing::debug!(%err, "error running uni stream");
 				}
@@ -244,7 +244,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			);
 
 			let path = path.to_owned();
-			web_async::spawn(async move {
+			web_async::spawn_named("subscribe", async move {
 				if let Err(err) = this.run_subscribe(request_id, path, track).await {
 					tracing::debug!(%err, id = %request_id, "error running subscribe");
 				}
@@ -265,7 +265,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			request_id,
 			track_namespace: broadcast.to_owned(),
 			track_name: track.name.as_ref().into(),
-			subscriber_priority: track.meta().get().priority,
+			subscriber_priority: track.meta().get().unwrap_or_default().priority,
 			group_order: GroupOrder::Descending,
 			// we want largest group
 			filter_type: FilterType::LargestObject,
@@ -377,8 +377,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 
-		producer.close()?;
-
 		Ok(())
 	}
 
@@ -441,19 +439,22 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		let track = Track {
+		// Announce our namespace if we haven't already.
+		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
+		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
+
+		let track = broadcast.create_track(Track {
 			name: msg.track_name.to_string(),
 			priority: 0,
 			// TODO Use delivery-timeout arg.
 			max_latency: std::time::Duration::from_millis(100),
-		}
-		.produce();
+		});
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
 			Entry::Vacant(entry) => {
 				entry.insert(TrackState {
-					producer: track.producer,
+					producer: track.clone(),
 					alias: Some(msg.track_alias),
 				});
 			}
@@ -462,16 +463,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Save that we're implicitly announcing this track.
 		state.publishes.insert(request_id, msg.track_namespace.to_owned());
-		drop(state);
-
-		// Announce our namespace if we haven't already.
-		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
-		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-
-		let exists = broadcast.insert_track(track.consumer);
-		if exists {
-			tracing::warn!(track = %msg.track_name, "track already exists, replacing it");
-		}
 
 		Ok(())
 	}

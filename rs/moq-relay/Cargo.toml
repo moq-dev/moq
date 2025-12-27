@@ -15,7 +15,6 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [dependencies]
-
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio", "ws"] }
 bytes = "1"
@@ -28,7 +27,7 @@ hyper-serve = { version = "0.6", features = [
 ] } # fork of axum-server
 hyper-util = "=0.1.17"
 moq-lite = { workspace = true, features = ["serde"] }
-moq-native = { workspace = true }
+moq-native = { workspace = true, features = ["tokio-console"] }
 moq-token = { workspace = true }
 sd-notify = "0.4"
 serde = { version = "1", features = ["derive"] }

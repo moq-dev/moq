@@ -23,18 +23,21 @@ impl Session {
 		let closed = oneshot::channel();
 
 		let id = self.task.insert(closed.0);
-		tokio::spawn(async move {
-			let res = tokio::select! {
-				// No more receiver, which means [session_close] was called.
-				_ = closed.1 => Err(Error::Closed),
-				// The connection failed.
-				res = Self::connect_run(url, publish, consume, &mut callback) => res,
-			};
-			callback.call(res);
+		tokio::task::Builder::new()
+			.name("connect")
+			.spawn(async move {
+				let res = tokio::select! {
+					// No more receiver, which means [session_close] was called.
+					_ = closed.1 => Err(Error::Closed),
+					// The connection failed.
+					res = Self::connect_run(url, publish, consume, &mut callback) => res,
+				};
+				callback.call(res);
 
-			// Make sure we clean up the task on exit.
-			State::lock().session.task.remove(id);
-		});
+				// Make sure we clean up the task on exit.
+				State::lock().session.task.remove(id);
+			})
+			.expect("failed to spawn connect task");
 
 		Ok(id)
 	}

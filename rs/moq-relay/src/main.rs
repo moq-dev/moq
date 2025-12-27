@@ -8,6 +8,7 @@ pub use auth::*;
 pub use cluster::*;
 pub use config::*;
 pub use connection::*;
+use futures::FutureExt;
 pub use web::*;
 
 #[tokio::main]
@@ -20,8 +21,10 @@ async fn main() -> anyhow::Result<()> {
 	let auth = config.auth.init()?;
 
 	let cluster = Cluster::new(config.cluster, client);
-	let cloned = cluster.clone();
-	tokio::spawn(async move { cloned.run().await.expect("cluster failed") });
+	tokio::task::Builder::new()
+		.name("cluster")
+		.spawn(cluster.clone().run().boxed())
+		.expect("failed to spawn cluster task");
 
 	// Create a web server too.
 	let web = Web::new(
@@ -34,9 +37,10 @@ async fn main() -> anyhow::Result<()> {
 		config.web,
 	);
 
-	tokio::spawn(async move {
-		web.run().await.expect("failed to run web server");
-	});
+	tokio::task::Builder::new()
+		.name("web")
+		.spawn(web.run().boxed())
+		.expect("failed to spawn web task");
 
 	tracing::info!(%addr, "listening");
 
@@ -54,12 +58,16 @@ async fn main() -> anyhow::Result<()> {
 		};
 
 		conn_id += 1;
-		tokio::spawn(async move {
-			let err = conn.run().await;
-			if let Err(err) = err {
-				tracing::warn!(%err, "connection closed");
-			}
-		});
+
+		tokio::task::Builder::new()
+			.name("conn")
+			.spawn(async move {
+				let err = conn.run().await;
+				if let Err(err) = err {
+					tracing::warn!(%err, "connection closed");
+				}
+			})
+			.expect("failed to spawn conn task");
 	}
 
 	Ok(())

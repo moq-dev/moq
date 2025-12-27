@@ -63,7 +63,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.consume_only(&[prefix.as_path()])
 			.ok_or(Error::Unauthorized)?;
 
-		web_async::spawn(async move {
+		web_async::spawn_named("announce", async move {
 			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix).await {
 				match &err {
 					Error::Cancel => {
@@ -156,7 +156,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let version = self.version;
 
 		let session = self.session.clone();
-		web_async::spawn(async move {
+		web_async::spawn_named("subscribed", async move {
 			if let Err(err) = Self::run_subscribe(session, &mut stream, &subscribe, broadcast, priority, version).await
 			{
 				match &err {
@@ -202,9 +202,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut tasks = futures::stream::FuturesUnordered::new();
 
 		loop {
+			tracing::trace!(subscribe = %subscribe.id, track = ?track.name, "select loop iteration, tasks_len={}", tasks.len());
 			let group = tokio::select! {
 				Some(group) = track.next_group().transpose() => group,
 				Some(res) = tasks.next() => {
+					match &res {
+						Ok(_) => tracing::trace!(subscribe = %subscribe.id, track = ?track.name, "serve_group task completed successfully"),
+						Err(err) => tracing::trace!(subscribe = %subscribe.id, track = ?track.name, %err, "serve_group task completed with error"),
+					}
 					if let Err(err) = res {
 						tracing::warn!(?err, "serve group error");
 					}
@@ -213,10 +218,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				Some(res) = stream.reader.decode_maybe::<lite::SubscribeUpdate>().transpose() => {
 					let update = res?;
 
-					track.meta().set(TrackMeta {
+					let meta = TrackMeta {
 						priority: update.priority,
 						max_latency: update.max_latency,
-					});
+					};
+
+					tracing::trace!(subscribe = %subscribe.id, track = ?track.name, ?meta, "subscribed update");
+					track.meta().set(meta);
 
 					// TODO we should update the priority of all outstanding groups.
 
@@ -235,7 +243,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let priority = priority.insert(track.meta().get().priority, group.sequence);
 
 			// Run the group in the background until it's closed or expires.
+			tracing::trace!(subscribe = %subscribe.id, track = ?track.name, group = %group.sequence, "pushing serve_group task");
+			let group_seq = group.sequence;
 			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version));
+			tracing::trace!(subscribe = %subscribe.id, track = ?track.name, group = %group_seq, "pushed serve_group task, tasks_len={}", tasks.len());
 		}
 
 		stream.writer.finish()?;
@@ -251,11 +262,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut group: GroupConsumer,
 		version: Version,
 	) -> Result<(), Error> {
+		tracing::trace!(group = %msg.sequence, "!!! serve_group START !!!");
+
 		// TODO add a way to open in priority order.
+		tracing::trace!(group = %msg.sequence, "opening uni stream");
 		let stream = session
 			.open_uni()
 			.await
 			.map_err(|err| Error::Transport(Arc::new(err)))?;
+		tracing::trace!(group = %msg.sequence, "opened uni stream");
 
 		let mut stream = Writer::new(stream, version);
 		stream.set_priority(priority.current());
@@ -264,7 +279,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		loop {
 			let frame = tokio::select! {
-				biased;
 				_ = stream.closed() => return Err(Error::Cancel),
 				frame = group.next_frame() => frame,
 				// Update the priority if it changes.
@@ -273,6 +287,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					continue;
 				}
 			};
+
+			tracing::trace!(group = %msg.sequence, ?frame, "serving frame");
 
 			let mut frame = match frame? {
 				Some(frame) => frame,
@@ -285,7 +301,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			loop {
 				let chunk = tokio::select! {
-					biased;
 					_ = stream.closed() => return Err(Error::Cancel),
 					chunk = frame.read_chunk() => chunk,
 					// Update the priority if it changes.
@@ -300,10 +315,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					None => break,
 				}
 			}
+
+			tracing::trace!(group = %msg.sequence, size = %frame.size, "finished frame");
 		}
 
+		tracing::trace!(group = %msg.sequence, "!!! finished group !!!");
+
+		tracing::trace!(group = %msg.sequence, "finishing stream");
 		stream.finish()?;
+		tracing::trace!(group = %msg.sequence, "waiting for stream closed");
 		stream.closed().await?;
+		tracing::trace!(group = %msg.sequence, "stream closed");
 
 		Ok(())
 	}

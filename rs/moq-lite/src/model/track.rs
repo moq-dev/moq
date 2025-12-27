@@ -14,12 +14,22 @@
 
 use futures::StreamExt;
 use tokio::{sync::watch, time::Instant};
-use web_async::FuturesExt;
 
 use super::{Group, GroupConsumer, GroupProducer};
 use crate::{Error, Produce, Result, TrackMeta, TrackMetaConsumer, TrackMetaProducer};
 
-use std::{collections::VecDeque, fmt, future::Future, ops::Deref, sync::Arc};
+use std::{
+	collections::VecDeque,
+	fmt,
+	future::Future,
+	ops::Deref,
+	sync::{
+		atomic::{AtomicU64, Ordering},
+		Arc,
+	},
+};
+
+static TRACK_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -97,6 +107,7 @@ struct GroupState {
 /// A producer for a track, used to create new groups.
 #[derive(Clone)]
 pub struct TrackProducer {
+	id: u64,
 	info: TrackInfo,
 	state: watch::Sender<State>,
 	meta: Produce<TrackMetaProducer, TrackMetaConsumer>,
@@ -107,6 +118,7 @@ impl TrackProducer {
 		let info = info.into();
 
 		let this = Self {
+			id: TRACK_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
 			state: Default::default(),
 			meta: TrackMeta {
 				priority: info.priority,
@@ -117,7 +129,8 @@ impl TrackProducer {
 				name: Arc::new(info.name),
 			},
 		};
-		web_async::spawn(this.clone().run_expires());
+		tracing::trace!(track_id = %this.id, track = %this.info.name, "created TrackProducer");
+		web_async::spawn_named("expires", this.clone().run_expires());
 		this
 	}
 
@@ -137,9 +150,13 @@ impl TrackProducer {
 		let group = GroupProducer::new(info.into());
 		let mut result = Err(Error::Cancel);
 
-		self.state.send_if_modified(|state| {
-			let meta = self.meta.consumer.get();
+		let sequence = group.sequence;
 
+		// NOTE: The TrackProducer is unused when this returns None.
+		let meta = self.meta.consumer.get().unwrap_or_default();
+
+		tracing::trace!(track_id = %self.id, track = %self.info.name, group = %sequence, "creating group");
+		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
 				result = Err(closed.err().unwrap_or(Error::Cancel));
 				return false;
@@ -190,6 +207,7 @@ impl TrackProducer {
 
 			true
 		});
+		tracing::trace!(track_id = %self.id, track = %self.info.name, group = %sequence, ?result, "created group");
 
 		result
 	}
@@ -232,6 +250,7 @@ impl TrackProducer {
 	pub fn close(&mut self) -> Result<()> {
 		let mut result = Ok(());
 
+		tracing::trace!(track_id = %self.id, track = %self.info.name, "closing TrackProducer");
 		self.state.send_if_modified(|state| {
 			if let Some(closed) = state.closed.clone() {
 				result = Err(closed.err().unwrap_or(Error::Cancel));
@@ -241,6 +260,7 @@ impl TrackProducer {
 			state.closed = Some(Ok(()));
 			true
 		});
+		tracing::trace!(track_id = %self.id, track = %self.info.name, ?result, "closed TrackProducer");
 
 		result
 	}
@@ -248,6 +268,7 @@ impl TrackProducer {
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut result = Ok(());
 
+		tracing::trace!(track_id = %self.id, track = %self.info.name, %err, "aborting TrackProducer");
 		self.state.send_if_modified(|state| {
 			if let Some(Err(closed)) = state.closed.clone() {
 				result = Err(closed);
@@ -258,6 +279,7 @@ impl TrackProducer {
 
 			true
 		});
+		tracing::trace!(track_id = %self.id, track = %self.info.name, ?result, "aborted TrackProducer");
 
 		result
 	}
@@ -265,6 +287,7 @@ impl TrackProducer {
 	/// Create a new consumer for the track.
 	pub fn consume(&self) -> TrackConsumer {
 		TrackConsumer {
+			id: self.id,
 			info: self.info.clone(),
 			state: self.state.subscribe(),
 			meta: self.meta.producer.clone(),
@@ -286,62 +309,65 @@ impl TrackProducer {
 		self.state.same_channel(&other.state)
 	}
 
+	// TODO This never stops?
 	async fn run_expires(self) {
-		let mut receiver = self.state.subscribe();
+		let mut updates = self.state.subscribe();
 		let mut meta = self.meta.consumer.clone();
 
 		loop {
-			let (expires, closed) = {
-				let state = receiver.borrow();
-				let max_latency = meta.get().max_latency;
+			let max_latency = meta.get().unwrap_or_default().max_latency;
+			let mut expires = None;
+			let mut closed = false;
 
-				// This monster of an iterator:
-				// - only looks at existing groups older than the max sequence
-				// - finds the group with the minimum arrival timestamp
-				// - returns the index and arrival timestamp of the group to expire
-				//
-				// We sleep by that amount, and if we wake up, remove that index.
-				let next = state
-					.groups
-					.iter()
-					.enumerate()
-					.filter_map(|(index, group)| {
-						group
-							.as_ref()
-							.map(|g| (index, g.producer.sequence, g.when + max_latency))
-					})
-					.filter(|(_index, sequence, _expires)| *sequence < state.max.map(|m| m.0).unwrap_or(0))
-					.min_by_key(|(_index, _sequence, expires)| *expires);
+			self.state.send_if_modified(|state| {
+				closed = state.closed.is_some();
 
-				let expires = if let Some((index, _sequence, expires)) = next {
-					if max_latency.is_zero() || !expires.elapsed().is_zero() {
-						self.state.send_if_modified(|state| {
+				loop {
+					// Find the next group to expire, which should be index 0 but not if we receive out of order.
+					expires = state
+						.groups
+						.iter()
+						// Get the index as well, so we can remove it.
+						.enumerate()
+						// Only look at Some entries, so we can ignore None groups.
+						.filter_map(|(index, group)| {
+							group
+								.as_ref()
+								.map(|g| (index, g.producer.sequence, g.when + max_latency))
+						})
+						// Ignore the maximum group, wherever it might be
+						.filter(|(_index, sequence, _when)| *sequence < state.max.map(|m| m.0).unwrap_or(0))
+						// Return the next group to expire.
+						.min_by_key(|(_index, _sequence, when)| *when);
+
+					// We found the next group to expire.
+					if let Some((index, _sequence, when)) = expires {
+						// Check if the group should be expired now.
+						if max_latency.is_zero() || !when.elapsed().is_zero() {
 							let mut group = state
 								.groups
 								.get_mut(index)
-								.unwrap()
+								.expect("index out of bounds")
 								.take()
 								.expect("group must have been Some");
 							group.producer.abort(Error::Expired).ok();
 
-							while state.groups.front().is_none() {
+							while let Some(None) = state.groups.front() {
 								state.groups.pop_front();
 								state.offset += 1;
 							}
 
-							// Don't notify anybody; we're just cleaning up.
-							false
-						});
-						continue;
+							continue;
+						}
 					}
 
-					Some(expires)
-				} else {
-					None
-				};
+					// Otherwise, we sleep until the next group will expire, or something changes.
+					break;
+				}
 
-				(expires, state.closed.is_some())
-			};
+				// Never notify anybody; we're just cleaning up.
+				false
+			});
 
 			if closed && expires.is_none() {
 				// No more groups to expire, only the last one is left.
@@ -350,10 +376,11 @@ impl TrackProducer {
 
 			tokio::select! {
 				// Sleep until the next group expires.
-				Some(()) = async { let _: () = tokio::time::sleep_until(expires?).await;
-    Some(()) } => {},
-				Some(_) = meta.next() => {},
-				_ = receiver.changed() => {},
+				Some(()) = async { let _: () = tokio::time::sleep_until(expires?.2).await; Some(()) } => {},
+				// If the max_latency changes, rerun again.
+				_ = meta.changed() => {},
+				// If self.state changes, rerun again.
+				_ = updates.changed() => {},
 			};
 		}
 	}
@@ -396,6 +423,7 @@ impl Deref for TrackProducer {
 /// If the consumer is cloned, it will receive a copy of all unread groups.
 #[derive(Clone)]
 pub struct TrackConsumer {
+	id: u64,
 	info: TrackInfo,
 
 	state: watch::Receiver<State>,
@@ -424,6 +452,7 @@ impl TrackConsumer {
 	///
 	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
+		tracing::trace!(track_id = %self.id, track = %self.info.name, index = %self.index, "waiting for next group");
 		loop {
 			// Wait until there's a new latest group or the track is closed.
 			let state = self
@@ -432,20 +461,31 @@ impl TrackConsumer {
 				.await
 				.map_err(|_| Error::Cancel)?;
 
+			tracing::trace!(track_id = %self.id, track = %self.info.name, index = %self.index, offset = %state.offset, groups_len = %state.groups.len(), closed = ?state.closed.is_some(), "wait_for returned");
+
 			for i in self.index.saturating_sub(state.offset)..state.groups.len() {
 				// If None, the group has expired out of order.
 				if let Some(group) = &state.groups[i] {
 					self.index = state.offset + i + 1;
+					tracing::trace!(track_id = %self.id, track = %self.info.name, group = %group.producer.sequence, "got next group");
 					return Ok(Some(group.consumer.clone()));
 				}
 			}
 
 			match &state.closed {
-				Some(Ok(_)) => return Ok(None),
-				Some(Err(err)) => return Err(err.clone()),
+				Some(Ok(_)) => {
+					tracing::trace!(track_id = %self.id, track = %self.info.name, "track closed, no more groups");
+					return Ok(None);
+				}
+				Some(Err(err)) => {
+					tracing::trace!(track_id = %self.id, track = %self.info.name, %err, "track closed with error");
+					return Err(err.clone());
+				}
 				// There must have been a new None group
 				// This can happen if an immediately expired group is received, or just a race.
-				_ => {}
+				_ => {
+					tracing::trace!(track_id = %self.id, track = %self.info.name, "spurious wakeup, looping");
+				}
 			}
 		}
 	}
@@ -474,26 +514,62 @@ impl TrackConsumer {
 	///
 	/// Returns an error on any unexpected close, which can happen if the [TrackProducer] is cloned.
 	pub(super) async fn proxy(mut self, mut dst: TrackProducer) -> Result<()> {
+		tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "starting track proxy");
 		let mut tasks = futures::stream::FuturesUnordered::new();
 
 		loop {
+			let group = tokio::select! {
+				group = self.next_group() => group,
+				// Wait until all groups have finished being proxied.
+				Some(_) = tasks.next() => {
+					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "group proxy task completed");
+					continue;
+				}
+				// We're done with the proxy.
+				else => {
+					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "proxy finished (all tasks done)");
+					return Ok(());
+				}
+			};
+
+			match group {
+				Ok(Some(group)) => {
+					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, group = %group.sequence, "proxying group");
+					let dst = dst.create_group(group.info().clone())?;
+					tasks.push(group.proxy(dst));
+				}
+				Ok(None) => {
+					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "no more groups, breaking");
+					break;
+				}
+				Err(err) => {
+					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, %err, "error in proxy, aborting dst");
+					return dst.abort(err);
+				}
+			}
+		}
+
+		// Close the track.
+		tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "closing dst track");
+		dst.close()?;
+
+		// Wait until all groups have finished being proxied.
+		tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "waiting for remaining group proxy tasks");
+		loop {
 			tokio::select! {
 				biased;
-				Some(res) = self.next_group().transpose() => match res {
-					Ok(group) => {
-						let dst = dst.create_group(group.info().clone())?;
-						tasks.push(group.proxy(dst));
-					}
-					Err(err) => return dst.abort(err),
-				},
-				// Wait until all groups have finished being proxied.
-				Some(res) = tasks.next() => {
-					if let Err(err) = res {
-						tracing::warn!(?err, "proxy track");
-					}
-				},
-				// We're done with the proxy.
-				else => return Ok(()),
+				Err(err) = self.closed() => {
+					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, %err, "src track closed with error, aborting dst");
+					return dst.abort(err);
+				}
+				Some(_) = tasks.next() => {
+					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "final group proxy task completed");
+					continue;
+				}
+				else => {
+					tracing::trace!(src_track_id = %self.id, dst_track_id = %dst.id, track = %self.info.name, "proxy complete");
+					return Ok(());
+				}
 			}
 		}
 	}

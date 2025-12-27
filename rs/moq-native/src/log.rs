@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
 use tracing::level_filters::LevelFilter;
 use tracing::Level;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 use tracing_subscriber::EnvFilter;
 
 #[serde_with::serde_as]
@@ -32,13 +35,54 @@ impl Log {
 			.add_directive("h2=warn".parse().unwrap())
 			.add_directive("quinn=info".parse().unwrap())
 			.add_directive("tracing::span=off".parse().unwrap())
-			.add_directive("tracing::span::active=off".parse().unwrap());
+			.add_directive("tracing::span::active=off".parse().unwrap())
+			.add_directive("tokio=info".parse().unwrap())
+			.add_directive("runtime=info".parse().unwrap());
 
-		let logger = tracing_subscriber::FmtSubscriber::builder()
+		let fmt_layer = tracing_subscriber::fmt::layer()
 			.with_writer(std::io::stderr)
-			.with_env_filter(filter)
-			.finish();
+			.with_filter(filter);
 
-		tracing::subscriber::set_global_default(logger).unwrap();
+		#[cfg(feature = "tokio-console")]
+		{
+			let console_layer = console_subscriber::spawn();
+			tracing_subscriber::registry()
+				.with(fmt_layer)
+				.with(console_layer)
+				.init();
+		}
+
+		#[cfg(not(feature = "tokio-console"))]
+		{
+			tracing_subscriber::registry()
+				.with(fmt_layer)
+				.init();
+		}
+
+		// Start deadlock detection thread (only in debug builds)
+		#[cfg(debug_assertions)]
+		{
+			use std::thread;
+			use std::time::Duration;
+
+			thread::spawn(move || {
+				loop {
+					thread::sleep(Duration::from_secs(1));
+					let deadlocks = parking_lot::deadlock::check_deadlock();
+					if !deadlocks.is_empty() {
+						eprintln!("\n🔴 DEADLOCK DETECTED 🔴\n");
+						for (i, threads) in deadlocks.iter().enumerate() {
+							eprintln!("Deadlock #{}", i);
+							for t in threads {
+								eprintln!("Thread Id {:#?}", t.thread_id());
+								eprintln!("{:#?}", t.backtrace());
+								eprintln!();
+							}
+						}
+						// Optionally: std::process::abort() to get a core dump
+					}
+				}
+			});
+		}
 	}
 }

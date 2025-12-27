@@ -54,7 +54,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let stream = Reader::new(stream, self.version);
 			let this = self.clone();
 
-			web_async::spawn(async move {
+			web_async::spawn_named("uni", async move {
 				if let Err(err) = this.run_uni_stream(stream).await {
 					tracing::debug!(%err, "error running uni stream");
 				}
@@ -143,7 +143,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.unwrap()
 			.publish_broadcast(path.clone(), broadcast.consumer);
 
-		web_async::spawn(self.clone().run_broadcast(path, broadcast.producer));
+		web_async::spawn_named("announced", self.clone().run_broadcast(path, broadcast.producer));
 
 		Ok(())
 	}
@@ -165,7 +165,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut this = self.clone();
 
 			let path = path.clone();
-			web_async::spawn(async move {
+			web_async::spawn_named("subscribe", async move {
 				if let Err(err) = this.run_subscribe(id, path, track).await {
 					tracing::warn!(%err, id = %id, "error running subscribe");
 				}
@@ -196,7 +196,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			_ => {
 				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name, "subscribe complete");
-				track.close()?;
 			}
 		}
 
@@ -213,7 +212,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		stream.writer.finish()?;
-		stream.writer.closed().await
+		stream.writer.closed().await?;
+
+		Ok(())
 	}
 
 	async fn run_track_stream(
@@ -221,10 +222,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Stream<S, Version>,
 		id: u64,
 		broadcast: Path<'_>,
-		track: TrackProducer,
+		mut track: TrackProducer,
 	) -> Result<(), Error> {
 		let mut meta = track.meta();
-		let current = meta.get();
+		let current = meta.get().unwrap_or_default();
 
 		let msg = lite::Subscribe {
 			id,
@@ -241,18 +242,32 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let _info: lite::SubscribeOk = stream.reader.decode().await?;
 
 		loop {
-			tokio::select! {
+			let meta = tokio::select! {
 				// Wait until the priority/latency is updated
-				Some(update) = meta.next() => {
-					stream.writer.encode(&lite::SubscribeUpdate {
-						priority: update.priority,
-						max_latency: update.max_latency,
-					}).await?;
-				}
+				meta = meta.changed() => meta,
 				// Wait until the stream is closed
 				res = stream.reader.closed() => return res,
+			};
+
+			if let Some(meta) = meta {
+				tracing::trace!(subscribe = %id, track = ?track.name, ?meta, "subscribe update");
+
+				stream
+					.writer
+					.encode(&lite::SubscribeUpdate {
+						priority: meta.priority,
+						max_latency: meta.max_latency,
+					})
+					.await?;
+			} else {
+				// No more consumers
+				break;
 			}
 		}
+
+		track.close()?;
+
+		Ok(())
 	}
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
@@ -282,7 +297,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			_ => {
 				tracing::trace!(group = %group.sequence, "group complete");
-				group.close()?;
 			}
 		}
 
@@ -294,7 +308,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
 	) -> Result<(), Error> {
+		tracing::trace!(group = %group.sequence, "run_group: starting");
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
+			tracing::trace!(group = group.sequence, size, "recv group");
+
 			let mut frame = group.create_frame(Frame { size })?;
 
 			let res = tokio::select! {
@@ -308,7 +325,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		}
 
+		tracing::trace!(group = %group.sequence, "run_group: stream ended, closing group");
 		group.close()?;
+		tracing::trace!(group = %group.sequence, "run_group: group closed");
 
 		Ok(())
 	}
@@ -332,6 +351,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
 			frame.write_chunk(chunk)?;
 		}
+
+		tracing::trace!(%group, size = %frame.size, "done reading frame");
 
 		frame.close()?;
 
