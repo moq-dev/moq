@@ -313,7 +313,7 @@ impl TrackProducer {
 				name: Arc::new(info.name),
 			},
 		};
-		web_async::spawn_named("expires", this.clone().run_expires());
+		web_async::spawn(this.clone().run_expires());
 		this
 	}
 

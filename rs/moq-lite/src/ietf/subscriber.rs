@@ -103,7 +103,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut this = self.clone();
 		let producer = broadcast.clone();
 
-		web_async::spawn_named("announced", async move {
+		web_async::spawn(async move {
 			if let Err(err) = this.run_broadcast(path.clone(), producer).await {
 				tracing::debug!(%err, "error running broadcast");
 			}
@@ -193,7 +193,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let stream = Reader::new(stream, self.version);
 			let this = self.clone();
 
-			web_async::spawn_named("uni", async move {
+			web_async::spawn(async move {
 				if let Err(err) = this.run_uni_stream(stream).await {
 					tracing::debug!(%err, "error running uni stream");
 				}
@@ -244,7 +244,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			);
 
 			let path = path.to_owned();
-			web_async::spawn_named("subscribe", async move {
+			web_async::spawn(async move {
 				if let Err(err) = this.run_subscribe(request_id, path, track).await {
 					tracing::debug!(%err, id = %request_id, "error running subscribe");
 				}

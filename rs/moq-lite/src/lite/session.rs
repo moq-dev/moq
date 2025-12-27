@@ -25,7 +25,7 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 
 	let init = oneshot::channel();
 
-	web_async::spawn_named("session", run(session, setup, publisher, subscriber, init.0).boxed());
+	web_async::spawn(run(session, setup, publisher, subscriber, init.0).boxed());
 
 	// Wait until receiving the initial announcements to prevent some race conditions.
 	// Otherwise, `consume()` might return not found if we don't wait long enough, so just wait.

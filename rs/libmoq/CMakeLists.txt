@@ -48,8 +48,9 @@ file(MAKE_DIRECTORY ${RUST_TARGET_DIR}/include)
 add_library(moq INTERFACE)
 target_include_directories(moq INTERFACE ${RUST_TARGET_DIR}/include)
 
-# Force absolute path to be used in linker command
-target_link_options(moq INTERFACE "$<LINK_ONLY:${RUST_LIB}>")
+# Link the static library - must use target_link_libraries so it appears
+# after object files in the link command (linker order matters for static libs)
+target_link_libraries(moq INTERFACE "${RUST_LIB}")
 
 # Link required system frameworks on macOS
 if(APPLE)

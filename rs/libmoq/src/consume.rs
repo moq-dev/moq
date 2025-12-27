@@ -49,9 +49,7 @@ impl Consume {
 		let channel = oneshot::channel();
 		let id = self.catalog_task.insert(channel.0);
 
-		tokio::task::Builder::new()
-			.name("catalog")
-			.spawn(async move {
+		tokio::spawn(async move {
 				let res = tokio::select! {
 					res = Self::run_catalog(broadcast, &mut on_catalog) => res,
 					_ = channel.1 => Ok(()),
@@ -60,7 +58,7 @@ impl Consume {
 
 				State::lock().consume.catalog_task.remove(id);
 			})
-			.expect("failed to spawn catalog task");
+;
 
 		Ok(id)
 	}
@@ -194,9 +192,7 @@ impl Consume {
 		let channel = oneshot::channel();
 		let id = self.video_task.insert(channel.0);
 
-		tokio::task::Builder::new()
-			.name("video_ordered")
-			.spawn(async move {
+		tokio::spawn(async move {
 				let res = tokio::select! {
 					res = Self::run_track(track, &mut on_frame) => res,
 					_ = channel.1 => Ok(()),
@@ -206,7 +202,7 @@ impl Consume {
 				// Make sure we clean up the task on exit.
 				State::lock().consume.video_task.remove(id);
 			})
-			.expect("failed to spawn video ordered task");
+;
 
 		Ok(id)
 	}
@@ -234,9 +230,7 @@ impl Consume {
 		let channel = oneshot::channel();
 		let id = self.audio_task.insert(channel.0);
 
-		tokio::task::Builder::new()
-			.name("audio_ordered")
-			.spawn(async move {
+		tokio::spawn(async move {
 				let res = tokio::select! {
 					res = Self::run_track(track, &mut on_frame) => res,
 					_ = channel.1 => Ok(()),
@@ -246,7 +240,7 @@ impl Consume {
 				// Make sure we clean up the task on exit.
 				State::lock().consume.audio_task.remove(id);
 			})
-			.expect("failed to spawn audio ordered task");
+;
 
 		Ok(id)
 	}

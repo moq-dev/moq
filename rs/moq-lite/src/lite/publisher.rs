@@ -63,7 +63,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.consume_only(&[prefix.as_path()])
 			.ok_or(Error::Unauthorized)?;
 
-		web_async::spawn_named("announce", async move {
+		web_async::spawn(async move {
 			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix).await {
 				match &err {
 					Error::Cancel => {
@@ -156,7 +156,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let version = self.version;
 
 		let session = self.session.clone();
-		web_async::spawn_named("subscribed", async move {
+		web_async::spawn(async move {
 			if let Err(err) = Self::run_subscribe(session, &mut stream, &subscribe, broadcast, priority, version).await
 			{
 				match &err {
@@ -231,10 +231,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let priority = priority.insert(track.meta().get().priority, group.sequence);
 
 			// Run the group in the background until it's closed or expires.
-			web_async::spawn_named(
-				"serve-group",
-				Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()),
-			);
+			web_async::spawn(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
 		}
 
 		stream.writer.finish()?;

@@ -115,7 +115,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let subscribes = self.subscribes.clone();
 		let version = self.version;
 
-		web_async::spawn_named("subscribed", async move {
+		web_async::spawn(async move {
 			if let Err(err) = Self::run_track(session, track, request_id, rx, version).await {
 				control
 					.send(ietf::PublishDone {
@@ -405,7 +405,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let request_id = msg.request_id;
 		let version = self.version;
 
-		web_async::spawn_named("fetch", async move {
+		web_async::spawn(async move {
 			if let Err(err) = Self::run_fetch(session, request_id, version).await {
 				tracing::warn!(?err, "error running fetch");
 			}

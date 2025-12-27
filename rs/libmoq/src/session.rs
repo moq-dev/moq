@@ -23,9 +23,7 @@ impl Session {
 		let closed = oneshot::channel();
 
 		let id = self.task.insert(closed.0);
-		tokio::task::Builder::new()
-			.name("connect")
-			.spawn(async move {
+		tokio::spawn(async move {
 				let res = tokio::select! {
 					// No more receiver, which means [session_close] was called.
 					_ = closed.1 => Err(Error::Closed),
@@ -37,7 +35,7 @@ impl Session {
 				// Make sure we clean up the task on exit.
 				State::lock().session.task.remove(id);
 			})
-			.expect("failed to spawn connect task");
+;
 
 		Ok(id)
 	}

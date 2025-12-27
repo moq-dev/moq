@@ -107,7 +107,7 @@ impl Web {
 		.into_make_service();
 
 		let http = if let Some(listen) = self.config.http.listen {
-			let server = hyper_serve::bind(listen);
+			let server = axum_server::bind(listen);
 			Some(server.serve(app.clone()))
 		} else {
 			None
@@ -116,15 +116,13 @@ impl Web {
 		let https = if let Some(listen) = self.config.https.listen {
 			let cert = self.config.https.cert.expect("missing https.cert");
 			let key = self.config.https.key.expect("missing https.key");
-			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
+			let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
 
 			#[cfg(unix)]
-			tokio::task::Builder::new()
-				.name("certs")
-				.spawn(reload_certs(config.clone(), cert, key))
-				.expect("failed to spawn reload certs task");
+			tokio::spawn(reload_certs(config.clone(), cert, key))
+;
 
-			let server = hyper_serve::bind_rustls(listen, config);
+			let server = axum_server::bind_rustls(listen, config);
 			Some(server.serve(app))
 		} else {
 			None
@@ -141,7 +139,7 @@ impl Web {
 }
 
 #[cfg(unix)]
-async fn reload_certs(config: hyper_serve::tls_rustls::RustlsConfig, cert: PathBuf, key: PathBuf) {
+async fn reload_certs(config: axum_server::tls_rustls::RustlsConfig, cert: PathBuf, key: PathBuf) {
 	use tokio::signal::unix::{signal, SignalKind};
 
 	// Dunno why we wouldn't be allowed to listen for signals, but just in case.

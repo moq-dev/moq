@@ -13,6 +13,12 @@ pub use web::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+	// TODO: It would be nice to remove this and rely on feature flags only.
+	// However, some dependency is pulling in `ring` and I don't know why, so meh for now.
+	rustls::crypto::aws_lc_rs::default_provider()
+		.install_default()
+		.expect("failed to install default crypto provider");
+
 	let config = Config::load()?;
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
@@ -21,10 +27,8 @@ async fn main() -> anyhow::Result<()> {
 	let auth = config.auth.init()?;
 
 	let cluster = Cluster::new(config.cluster, client);
-	tokio::task::Builder::new()
-		.name("cluster")
-		.spawn(cluster.clone().run().boxed())
-		.expect("failed to spawn cluster task");
+	tokio::spawn(cluster.clone().run().boxed())
+;
 
 	// Create a web server too.
 	let web = Web::new(
@@ -37,10 +41,8 @@ async fn main() -> anyhow::Result<()> {
 		config.web,
 	);
 
-	tokio::task::Builder::new()
-		.name("web")
-		.spawn(web.run().boxed())
-		.expect("failed to spawn web task");
+	tokio::spawn(web.run().boxed())
+;
 
 	tracing::info!(%addr, "listening");
 
@@ -59,15 +61,13 @@ async fn main() -> anyhow::Result<()> {
 
 		conn_id += 1;
 
-		tokio::task::Builder::new()
-			.name("conn")
-			.spawn(async move {
+		tokio::spawn(async move {
 				let err = conn.run().await;
 				if let Err(err) = err {
 					tracing::warn!(%err, "connection closed");
 				}
 			})
-			.expect("failed to spawn conn task");
+;
 	}
 
 	Ok(())

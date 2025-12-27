@@ -56,14 +56,12 @@ async fn accept(
 
 		let consumer = consumer.clone();
 		// Handle the connection in a new task.
-		tokio::task::Builder::new()
-			.name("accept")
-			.spawn(async move {
+		tokio::spawn(async move {
 				if let Err(err) = run_session(id, session, name, consumer).await {
 					tracing::warn!(%err, "failed to accept session");
 				}
 			})
-			.expect("failed to spawn session task");
+;
 	}
 
 	Ok(())
@@ -129,7 +127,7 @@ async fn web(
 		app = app.fallback_service(handle_404.into_service());
 	}
 
-	let server = hyper_serve::bind(bind);
+	let server = axum_server::bind(bind);
 	server.serve(app.into_make_service()).await?;
 
 	Ok(())

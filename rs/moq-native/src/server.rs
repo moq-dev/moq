@@ -105,10 +105,7 @@ impl Server {
 		let certs = Arc::new(certs);
 
 		#[cfg(unix)]
-		tokio::task::Builder::new()
-			.name("certs")
-			.spawn(Self::reload_certs(certs.clone(), config.tls.clone()))
-			.expect("failed to spawn reload certs task");
+		tokio::spawn(Self::reload_certs(certs.clone(), config.tls.clone()));
 
 		let mut tls = rustls::ServerConfig::builder_with_provider(provider)
 			.with_protocol_versions(&[&rustls::version::TLS13])?

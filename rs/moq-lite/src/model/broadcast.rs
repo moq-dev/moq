@@ -204,7 +204,7 @@ impl BroadcastConsumer {
 		state.producers.insert(producer.name.to_string(), producer.clone());
 		let state = self.state.clone();
 
-		web_async::spawn_named("unused-track", async move {
+		web_async::spawn(async move {
 			producer.unused().await;
 			state.lock().producers.remove(producer.name.as_ref());
 		});

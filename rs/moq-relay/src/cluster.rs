@@ -213,9 +213,7 @@ impl Cluster {
 			let token = token.clone();
 			let node2 = node.clone();
 
-			let handle = tokio::task::Builder::new()
-				.name("remote")
-				.spawn(
+			let handle = tokio::spawn(
 					async move {
 						match this.run_remote(node2.as_str(), token, origin).await {
 							Ok(()) => tracing::info!(%node2, "origin closed"),
@@ -224,7 +222,7 @@ impl Cluster {
 					}
 					.in_current_span(),
 				)
-				.expect("failed to spawn remote task");
+;
 
 			active.insert(node.to_string(), handle.abort_handle());
 		}
