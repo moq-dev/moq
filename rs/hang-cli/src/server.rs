@@ -27,6 +27,7 @@ pub async fn server(
 
 	let server = config.init()?;
 
+	#[cfg(unix)]
 	// Notify systemd that we're ready.
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 

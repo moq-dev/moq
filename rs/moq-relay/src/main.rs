@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(%addr, "listening");
 
+	#[cfg(unix)]
 	// Notify systemd that we're ready after all initialization is complete
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 

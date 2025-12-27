@@ -27,8 +27,10 @@ moq-native = { workspace = true }
 rustls = { version = "0.23", features = [
 	"aws-lc-rs",
 ], default-features = false }
-sd-notify = "0.4"
 tokio = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 tracing = "0.1"
 url = "2"
+
+[target.'cfg(unix)'.dependencies]
+sd-notify = "0.4"
