@@ -1,20 +1,16 @@
 use std::{collections::HashMap, future::Future};
 
-use futures::FutureExt;
-
 use crate::{Error, Produce, Track, TrackConsumer, TrackProducer};
 use tokio::sync::watch;
 use web_async::Lock;
 
 #[derive(Default)]
 struct State {
-	// When explicitly publishing, we hold a reference to the consumer.
-	// This prevents the track from being marked as "unused".
-	published: HashMap<String, TrackConsumer>,
+	producers: HashMap<String, TrackProducer>,
 
-	// When requesting, we hold a reference to the producer for dynamic tracks.
-	// The track will be marked as "unused" when the last consumer is dropped.
-	requested: HashMap<String, TrackProducer>,
+	// Only when explicitly publishing a track will we hold a reference to the consumer.
+	// This prevents it from being marked as "unused".
+	consumers: HashMap<String, TrackConsumer>,
 }
 
 pub struct Broadcast {}
@@ -66,22 +62,25 @@ impl BroadcastProducer {
 
 	/// Produce a new track and insert it into the broadcast.
 	pub fn create_track<T: Into<Track>>(&mut self, track: T) -> TrackProducer {
-		let track = track.into().produce();
-		self.insert_track(track.consumer);
-		track.producer
+		let track = TrackProducer::new(track.into());
+		self.publish_track(track.clone());
+		track
 	}
 
 	/// Insert a track into the broadcast.
-	pub fn insert_track(&mut self, track: TrackConsumer) {
+	pub fn publish_track(&mut self, track: TrackProducer) {
 		let name = track.name.to_string();
+
 		let mut state = self.state.lock();
-		state.published.insert(name, track);
+		state.consumers.insert(name.clone(), track.consume());
+		state.producers.insert(name, track);
 	}
 
 	/// Remove a track from the lookup.
-	pub fn remove_track(&mut self, name: &str) -> bool {
+	pub fn remove_track(&mut self, name: &str) {
 		let mut state = self.state.lock();
-		state.published.remove(name).is_some() || state.requested.remove(name).is_some()
+		state.consumers.remove(name);
+		state.producers.remove(name);
 	}
 
 	pub fn consume(&self) -> BroadcastConsumer {
@@ -141,6 +140,9 @@ impl BroadcastProducer {
 }
 
 #[cfg(test)]
+use futures::FutureExt;
+
+#[cfg(test)]
 impl BroadcastProducer {
 	pub fn assert_used(&self) {
 		assert!(self.unused().now_or_never().is_none(), "should be used");
@@ -178,24 +180,17 @@ impl BroadcastConsumer {
 		let track = track.into();
 		let mut state = self.state.lock();
 
-		// Clone a published track.
-		if let Some(existing) = state.published.get(&track.name) {
+		// If the track is already published, proxy it to the new consumer.
+		if let Some(existing) = state.producers.get(&track.name) {
 			let track = track.produce();
-			web_async::spawn_named("proxy-track", existing.clone().proxy(track.producer).map(|_| ()));
-			return track.consumer;
-		}
-
-		// Return any requested tracks.
-		if let Some(existing) = state.requested.get(&track.name) {
-			let track = track.produce();
-			web_async::spawn_named("proxy-track", existing.consume().proxy(track.producer).map(|_| ()));
+			existing.proxy(track.producer).ok();
 			return track.consumer;
 		}
 
 		let mut producer = TrackProducer::new(track.clone());
 		let track = track.produce();
 
-		web_async::spawn_named("proxy-track", producer.consume().proxy(track.producer).map(|_| ()));
+		producer.proxy(track.producer).ok();
 
 		// TODO await this
 		match self.requested.try_send(producer.clone()) {
@@ -206,12 +201,12 @@ impl BroadcastConsumer {
 			}
 		};
 
-		state.requested.insert(producer.name.to_string(), producer.clone());
+		state.producers.insert(producer.name.to_string(), producer.clone());
 		let state = self.state.clone();
 
 		web_async::spawn_named("unused-track", async move {
 			producer.unused().await;
-			state.lock().requested.remove(producer.name.as_ref());
+			state.lock().producers.remove(producer.name.as_ref());
 		});
 
 		track.consumer

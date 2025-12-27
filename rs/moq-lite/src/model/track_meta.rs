@@ -1,4 +1,6 @@
+use std::ops::Deref;
 use std::{
+	fmt,
 	future::Future,
 	sync::{
 		atomic::{self, AtomicUsize},
@@ -36,7 +38,7 @@ impl TrackMeta {
 }
 
 /// Keeps track of the maximum priority and max latency of all consumers.
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct State {
 	priority: PriorityQueue<usize, u8>,
 	max_latency: PriorityQueue<usize, std::time::Duration>,
@@ -49,6 +51,15 @@ pub struct TrackMetaProducer {
 	id: usize,
 	state: watch::Sender<State>,
 	current: TrackMeta,
+}
+
+impl fmt::Debug for TrackMetaProducer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("TrackMetaProducer")
+			.field("state", &self.state.borrow().deref())
+			.field("current", &self.current)
+			.finish()
+	}
 }
 
 impl TrackMetaProducer {
@@ -139,6 +150,14 @@ impl Drop for TrackMetaProducer {
 #[derive(Clone)]
 pub struct TrackMetaConsumer {
 	state: watch::Receiver<State>,
+}
+
+impl fmt::Debug for TrackMetaConsumer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("TrackMetaConsumer")
+			.field("state", &self.state.borrow().deref())
+			.finish()
+	}
 }
 
 impl TrackMetaConsumer {

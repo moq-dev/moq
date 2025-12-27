@@ -10,7 +10,6 @@
 use std::{fmt, future::Future, ops::Deref};
 
 use bytes::Bytes;
-use futures::FutureExt;
 use tokio::sync::watch;
 
 use crate::{Error, Result};
@@ -34,10 +33,64 @@ impl<T: Into<u64>> From<T> for Group {
 #[derive(Default, Debug)]
 struct GroupState {
 	// The frames that has been written thus far
-	frames: Vec<FrameConsumer>,
+	frames: Vec<FrameProducer>,
 
 	// Whether the group is closed
 	closed: Option<Result<()>>,
+
+	proxy: Vec<GroupProducer>,
+}
+
+impl GroupState {
+	fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
+		if let Some(closed) = self.closed.clone() {
+			return Err(closed.err().unwrap_or(Error::Cancel));
+		}
+
+		self.proxy.retain_mut(|proxy| proxy.append_frame(frame.clone()).is_ok());
+		self.frames.push(frame);
+
+		Ok(())
+	}
+
+	fn close(&mut self) -> Result<()> {
+		if let Some(closed) = self.closed.clone() {
+			return Err(closed.err().unwrap_or(Error::Cancel));
+		}
+
+		self.proxy.retain_mut(|proxy| proxy.close().is_ok());
+		self.closed = Some(Ok(()));
+
+		Ok(())
+	}
+
+	fn abort(&mut self, err: Error) -> Result<()> {
+		if let Some(Err(err)) = self.closed.clone() {
+			return Err(err);
+		}
+
+		self.proxy.retain_mut(|proxy| proxy.abort(err.clone()).is_ok());
+		self.closed = Some(Err(err));
+
+		Ok(())
+	}
+
+	fn proxy(&mut self, mut dst: GroupProducer) -> Result<()> {
+		for frame in self.frames.iter() {
+			let dst = dst.create_frame(frame.info().clone())?;
+			frame.proxy(dst)?;
+		}
+
+		match self.closed.clone() {
+			Some(Ok(_)) => dst.close()?,
+			Some(Err(err)) => dst.abort(err)?,
+			None => {}
+		};
+
+		self.proxy.push(dst);
+
+		Ok(())
+	}
 }
 
 /// Create a group, frame-by-frame.
@@ -89,22 +142,17 @@ impl GroupProducer {
 	/// Create a frame with an upfront size
 	pub fn create_frame(&mut self, info: Frame) -> Result<FrameProducer> {
 		let frame = FrameProducer::new(info);
-		self.append_frame(frame.consume())?;
+		self.append_frame(frame.clone())?;
 		Ok(frame)
 	}
 
 	/// Append a frame to the group.
-	pub fn append_frame(&mut self, frame: FrameConsumer) -> Result<()> {
+	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
 		let mut result = Ok(());
 
 		self.state.send_if_modified(|state| {
-			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Cancel));
-				return false;
-			}
-
-			state.frames.push(frame);
-			true
+			result = state.append_frame(frame);
+			result.is_ok()
 		});
 
 		result
@@ -115,13 +163,8 @@ impl GroupProducer {
 		let mut result = Ok(());
 
 		self.state.send_if_modified(|state| {
-			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Cancel));
-				return false;
-			}
-
-			state.closed = Some(Ok(()));
-			true
+			result = state.close();
+			result.is_ok()
 		});
 
 		result
@@ -131,13 +174,8 @@ impl GroupProducer {
 		let mut result = Ok(());
 
 		self.state.send_if_modified(|state| {
-			if let Some(Err(closed)) = state.closed.clone() {
-				result = Err(closed);
-				return false;
-			}
-
-			state.closed = Some(Err(err));
-			true
+			result = state.abort(err);
+			result.is_ok()
 		});
 
 		result
@@ -159,6 +197,17 @@ impl GroupProducer {
 		async move {
 			state.closed().await;
 		}
+	}
+
+	pub fn proxy(&self, dst: GroupProducer) -> Result<()> {
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			result = state.proxy(dst);
+			false
+		});
+
+		result
 	}
 }
 
@@ -244,29 +293,11 @@ impl GroupConsumer {
 
 		if let Some(frame) = state.frames.get(self.index).cloned() {
 			self.index += 1;
-			return Ok(Some(frame.clone()));
+			return Ok(Some(frame.consume()));
 		}
 
 		let closed = state.closed.clone().expect("wait_for returned");
 		closed.map(|_| None)
-	}
-
-	/// Proxy all frames and errors to the given producer.
-	///
-	/// Returns an error on any unexpected close, which can happen if the [GroupProducer] is cloned.
-	pub(super) async fn proxy(mut self, mut dst: GroupProducer) -> Result<()> {
-		while let Some(frame) = self.next_frame().await.transpose() {
-			match frame {
-				Ok(frame) => {
-					let dst = dst.create_frame(frame.info().clone())?;
-					web_async::spawn_named("proxy-frame", frame.proxy(dst).map(|_| ()));
-				}
-				Err(err) => return dst.abort(err),
-			}
-		}
-
-		// Close the group.
-		dst.close()
 	}
 
 	pub async fn closed(&self) -> Result<()> {

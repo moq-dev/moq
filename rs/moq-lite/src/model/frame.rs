@@ -1,4 +1,4 @@
-use std::{fmt, future::Future, ops::Deref};
+use std::{fmt, ops::Deref};
 
 use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
@@ -42,6 +42,12 @@ struct FrameState {
 
 	// Set when the writer or all readers are dropped.
 	closed: Option<Result<()>>,
+
+	// Forward all chunks to these producers.
+	proxy: Vec<FrameProducer>,
+
+	// Sanity check to ensure we don't write more than the frame size.
+	remaining: u64,
 }
 
 impl fmt::Debug for FrameState {
@@ -54,6 +60,71 @@ impl fmt::Debug for FrameState {
 	}
 }
 
+impl FrameState {
+	fn new(size: u64) -> Self {
+		Self {
+			chunks: Vec::new(),
+			closed: None,
+			proxy: Vec::new(),
+			remaining: size,
+		}
+	}
+
+	fn write_chunk(&mut self, chunk: Bytes) -> Result<()> {
+		if let Some(closed) = self.closed.clone() {
+			return Err(closed.err().unwrap_or(Error::Cancel));
+		}
+
+		self.remaining = self.remaining.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
+
+		self.proxy.retain_mut(|proxy| proxy.write_chunk(chunk.clone()).is_ok());
+		self.chunks.push(chunk);
+
+		Ok(())
+	}
+
+	fn close(&mut self) -> Result<()> {
+		if self.remaining != 0 {
+			return Err(Error::WrongSize);
+		}
+
+		if let Some(closed) = self.closed.clone() {
+			return Err(closed.err().unwrap_or(Error::Cancel));
+		}
+
+		self.proxy.retain_mut(|proxy| proxy.close().is_ok());
+		self.closed = Some(Ok(()));
+
+		Ok(())
+	}
+
+	fn abort(&mut self, err: Error) -> Result<()> {
+		if let Some(Err(err)) = self.closed.clone() {
+			return Err(err);
+		}
+
+		self.proxy.retain_mut(|proxy| proxy.abort(err.clone()).is_ok());
+		self.closed = Some(Err(err));
+
+		Ok(())
+	}
+
+	fn proxy(&mut self, mut dst: FrameProducer) -> Result<()> {
+		for chunk in self.chunks.iter() {
+			dst.write_chunk(chunk.clone()).ok();
+		}
+
+		match self.closed.clone() {
+			Some(Ok(_)) => dst.close()?,
+			Some(Err(err)) => dst.abort(err)?,
+			None => {}
+		};
+
+		self.proxy.push(dst);
+		Ok(())
+	}
+}
+
 /// Used to write a frame's worth of data in chunks.
 #[derive(Clone)]
 pub struct FrameProducer {
@@ -61,9 +132,6 @@ pub struct FrameProducer {
 
 	// Mutable stream state.
 	state: watch::Sender<FrameState>,
-
-	// Sanity check to ensure we don't write more than the frame size.
-	written: usize,
 }
 
 impl fmt::Debug for FrameProducer {
@@ -71,7 +139,6 @@ impl fmt::Debug for FrameProducer {
 		f.debug_struct("FrameProducer")
 			.field("info", &self.info)
 			.field("state", &self.state.borrow().deref())
-			.field("written", &self.written)
 			.finish()
 	}
 }
@@ -79,9 +146,8 @@ impl fmt::Debug for FrameProducer {
 impl FrameProducer {
 	pub fn new(info: Frame) -> Self {
 		Self {
+			state: watch::Sender::new(FrameState::new(info.size)),
 			info,
-			state: Default::default(),
-			written: 0,
 		}
 	}
 
@@ -90,44 +156,22 @@ impl FrameProducer {
 	}
 
 	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
-		let chunk = chunk.into();
-		if self.written + chunk.len() > self.info.size as usize {
-			return Err(Error::WrongSize);
-		}
-
-		self.written += chunk.len();
-
 		let mut result = Ok(());
 
 		self.state.send_if_modified(|state| {
-			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Cancel));
-				return false;
-			}
-
-			state.chunks.push(chunk);
-			true
+			result = state.write_chunk(chunk.into());
+			result.is_ok()
 		});
 
 		result
 	}
 
 	pub fn close(&mut self) -> Result<()> {
-		if self.written != self.info.size as usize {
-			return Err(Error::WrongSize);
-		}
-
 		let mut result = Ok(());
 		self.state.send_if_modified(|state| {
-			if let Some(closed) = state.closed.clone() {
-				result = Err(closed.err().unwrap_or(Error::Cancel));
-				return false;
-			}
-
-			state.closed = Some(Ok(()));
-			true
+			result = state.close();
+			result.is_ok()
 		});
-
 		result
 	}
 
@@ -135,13 +179,8 @@ impl FrameProducer {
 		let mut result = Ok(());
 
 		self.state.send_if_modified(|state| {
-			if let Some(Err(closed)) = state.closed.clone() {
-				result = Err(closed);
-				return false;
-			}
-
-			state.closed = Some(Err(err));
-			true
+			result = state.abort(err);
+			result.is_ok()
 		});
 
 		result
@@ -156,12 +195,13 @@ impl FrameProducer {
 		}
 	}
 
-	// We don't use the `async` keyword so we don't borrow &self across the await.
-	pub fn unused(&self) -> impl Future<Output = ()> {
-		let state = self.state.clone();
-		async move {
-			state.closed().await;
-		}
+	pub fn proxy(&self, dst: FrameProducer) -> Result<()> {
+		let mut result = Ok(());
+		self.state.send_if_modified(|state| {
+			result = state.proxy(dst);
+			false
+		});
+		result
 	}
 }
 
@@ -289,19 +329,6 @@ impl FrameConsumer {
 		}
 
 		Ok(buf.freeze())
-	}
-
-	/// Proxy all chunks and errors to the given producer.
-	///
-	/// Returns an error on any unexpected close, which can happen if the [GroupProducer] is cloned.
-	pub(super) async fn proxy(mut self, mut dst: FrameProducer) -> Result<()> {
-		loop {
-			match self.read_chunk().await {
-				Ok(Some(chunk)) => dst.write_chunk(chunk)?,
-				Ok(None) => return dst.close(),
-				Err(err) => return dst.abort(err),
-			}
-		}
 	}
 }
 

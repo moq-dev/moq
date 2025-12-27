@@ -365,12 +365,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			} else {
 				let mut frame = producer.create_frame(Frame { size })?;
 
-				let res = tokio::select! {
-					_ = frame.unused() => Err(Error::Cancel),
-					res = self.run_frame(stream, frame.clone()) => res,
-				};
-
-				if let Err(err) = res {
+				if let Err(err) = self.run_frame(stream, frame.clone()).await {
 					frame.abort(err.clone())?;
 					return Err(err);
 				}
