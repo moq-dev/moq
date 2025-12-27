@@ -85,11 +85,9 @@ struct State {
 
 impl State {
 	fn proxy(&mut self, mut dst: TrackProducer) -> Result<()> {
-		for group in self.groups.iter() {
-			if let Some(group) = group {
-				let dst = dst.create_group(group.producer.info().clone())?;
-				group.producer.proxy(dst)?;
-			}
+		for group in self.groups.iter().flatten() {
+			let dst = dst.create_group(group.producer.info().clone())?;
+			group.producer.proxy(dst)?;
 		}
 
 		match self.closed.clone() {

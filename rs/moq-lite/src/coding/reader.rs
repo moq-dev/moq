@@ -159,7 +159,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			.map_err(|e| Error::Transport(Arc::new(e)))?
 		{
 			None => Ok(()),
-			Some(_) => Err(DecodeError::ExpectedEnd.into())
+			Some(_) => Err(DecodeError::ExpectedEnd.into()),
 		}
 	}
 

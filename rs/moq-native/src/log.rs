@@ -4,8 +4,8 @@ use tracing::level_filters::LevelFilter;
 use tracing::Level;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::Layer;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
 
 #[serde_with::serde_as]
 #[derive(Clone, clap::Parser, Serialize, Deserialize, Debug)]
@@ -54,9 +54,7 @@ impl Log {
 
 		#[cfg(not(feature = "tokio-console"))]
 		{
-			tracing_subscriber::registry()
-				.with(fmt_layer)
-				.init();
+			tracing_subscriber::registry().with(fmt_layer).init();
 		}
 
 		// Start deadlock detection thread (only in debug builds)
