@@ -25,6 +25,12 @@ web-transport-quinn = "0.10"
 web-transport-trait = "0.3"
 web-transport-ws = "0.2"
 
+[patch.crates-io]
+web-transport-any = { path = "../web-transport/web-transport-any" }
+web-transport-quinn = { path = "../web-transport/web-transport-quinn" }
+web-transport-trait = { path = "../web-transport/web-transport-trait" }
+web-transport-ws = { path = "../web-transport/web-transport-ws" }
+
 [profile.dev]
 panic = "abort"
 
