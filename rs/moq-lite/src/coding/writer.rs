@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::sync::Arc;
 
 use crate::{coding::*, Error};
 
@@ -18,7 +18,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		}
 	}
 
-	pub async fn encode<T: Encode<V> + Debug>(&mut self, msg: &T) -> Result<(), Error>
+	pub async fn encode<T: Encode<V>>(&mut self, msg: &T) -> Result<(), Error>
 	where
 		V: Clone,
 	{

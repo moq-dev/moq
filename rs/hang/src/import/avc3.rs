@@ -23,9 +23,6 @@ pub struct Avc3 {
 
 	// The current frame being built.
 	current: Frame,
-
-	// Used to compute wall clock timestamps if needed.
-	zero: Option<tokio::time::Instant>,
 }
 
 impl Avc3 {
@@ -35,7 +32,6 @@ impl Avc3 {
 			track: None,
 			config: None,
 			current: Default::default(),
-			zero: None,
 		}
 	}
 
@@ -122,7 +118,7 @@ impl Avc3 {
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::Timestamp>,
+		pts: Option<moq_lite::Time>,
 	) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 
@@ -146,7 +142,7 @@ impl Avc3 {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::Timestamp>,
+		pts: Option<moq_lite::Time>,
 	) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 		// Iterate over the NAL units in the buffer based on start codes.
@@ -168,7 +164,7 @@ impl Avc3 {
 		Ok(())
 	}
 
-	fn decode_nal(&mut self, nal: Bytes, pts: Option<hang::Timestamp>) -> anyhow::Result<()> {
+	fn decode_nal(&mut self, nal: Bytes, pts: Option<moq_lite::Time>) -> anyhow::Result<()> {
 		let header = nal.first().context("NAL unit is too short")?;
 		let forbidden_zero_bit = (header >> 7) & 1;
 		anyhow::ensure!(forbidden_zero_bit == 0, "forbidden zero bit is not zero");
@@ -218,7 +214,7 @@ impl Avc3 {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<hang::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<moq_lite::Time>) -> anyhow::Result<()> {
 		// If we haven't seen any slices, we shouldn't flush yet.
 		if !self.current.contains_slice {
 			return Ok(());
@@ -246,13 +242,13 @@ impl Avc3 {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<hang::Timestamp>) -> anyhow::Result<hang::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_lite::Time>) -> anyhow::Result<moq_lite::Time> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
-		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(hang::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
+		// Default to the unix timestamp
+		Ok(tokio::time::Instant::now().into())
 	}
 }
 

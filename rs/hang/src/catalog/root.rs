@@ -97,7 +97,7 @@ impl Catalog {
 			name: Catalog::DEFAULT_NAME.to_string(),
 			priority: 100,
 			// Don't cache old catalogs
-			max_latency: std::time::Duration::ZERO,
+			max_latency: moq_lite::Time::ZERO,
 		}
 	}
 
@@ -217,7 +217,7 @@ impl Drop for CatalogGuard<'_> {
 		if let Ok(mut group) = self.track.append_group() {
 			// TODO decide if this should return an error, or be impossible to fail
 			let frame = self.catalog.to_string().expect("invalid catalog");
-			group.write_frame(frame).ok();
+			group.write_frame(frame, tokio::time::Instant::now().into()).ok();
 			group.close().ok();
 		}
 	}

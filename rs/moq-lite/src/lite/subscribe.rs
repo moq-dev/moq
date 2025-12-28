@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::{
 	coding::{Decode, DecodeError, Encode},
 	lite::{Message, Version},
-	Path,
+	Time, Path,
 };
 
 /// Sent by the subscriber to request all future objects for the given track.
@@ -15,7 +15,7 @@ pub struct Subscribe<'a> {
 	pub broadcast: Path<'a>,
 	pub track: Cow<'a, str>,
 	pub priority: u8,
-	pub max_latency: std::time::Duration,
+	pub max_latency: Time,
 }
 
 impl<'a> Message for Subscribe<'a> {
@@ -26,8 +26,8 @@ impl<'a> Message for Subscribe<'a> {
 		let priority = u8::decode(r, version)?;
 
 		let max_latency = match version {
-			Version::Draft01 | Version::Draft02 => std::time::Duration::default(),
-			Version::Draft03 => std::time::Duration::from_millis(u64::decode(r, version)?),
+			Version::Draft01 | Version::Draft02 => Time::ZERO,
+			Version::Draft03 => Time::decode(r, version)?,
 		};
 
 		Ok(Self {
@@ -47,10 +47,7 @@ impl<'a> Message for Subscribe<'a> {
 
 		match version {
 			Version::Draft01 | Version::Draft02 => {}
-			Version::Draft03 => {
-				let max_latency: u64 = self.max_latency.as_millis().try_into().expect("duration too large");
-				max_latency.encode(w, version);
-			}
+			Version::Draft03 => self.max_latency.encode(w, version),
 		}
 	}
 }
@@ -82,7 +79,7 @@ impl Message for SubscribeOk {
 #[derive(Clone, Debug)]
 pub struct SubscribeUpdate {
 	pub priority: u8,
-	pub max_latency: std::time::Duration,
+	pub max_latency: Time,
 }
 
 impl Message for SubscribeUpdate {
@@ -91,10 +88,7 @@ impl Message for SubscribeUpdate {
 
 		match version {
 			Version::Draft01 | Version::Draft02 => {}
-			Version::Draft03 => {
-				let max_latency: u64 = self.max_latency.as_millis().try_into().expect("duration too large");
-				max_latency.encode(w, version);
-			}
+			Version::Draft03 => self.max_latency.encode(w, version),
 		}
 	}
 
@@ -102,8 +96,8 @@ impl Message for SubscribeUpdate {
 		let priority = u8::decode(r, version)?;
 
 		let max_latency = match version {
-			Version::Draft01 | Version::Draft02 => std::time::Duration::default(),
-			Version::Draft03 => std::time::Duration::from_millis(u64::decode(r, version)?),
+			Version::Draft01 | Version::Draft02 => Time::ZERO,
+			Version::Draft03 => Time::decode(r, version)?,
 		};
 
 		Ok(Self { priority, max_latency })

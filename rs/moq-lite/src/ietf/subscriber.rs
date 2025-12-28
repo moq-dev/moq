@@ -7,7 +7,7 @@ use crate::{
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId, Version},
 	model::BroadcastProducer,
-	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
+	Broadcast, Time, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
 	TrackProducer,
 };
 
@@ -348,13 +348,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				stream.skip(size).await?;
 			}
 
-			let size: u64 = stream.decode().await?;
+			let size: usize = stream.decode().await?;
 			if size == 0 {
 				// Have to read the object status.
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
 					// Empty frame
-					let mut frame = producer.create_frame(Frame { size: 0 })?;
+					let mut frame = producer.create_frame(Frame {
+						// Use the receive time as the timestamp.
+						// TODO use an extension instead.
+						timestamp: tokio::time::Instant::now().into(),
+						size: 0,
+					})?;
 					frame.close()?;
 				} else if status == 3 && !group.flags.has_end {
 					// End of group
@@ -363,7 +368,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				let mut frame = producer.create_frame(Frame { size })?;
+				let mut frame = producer.create_frame(Frame {
+					// Use the receive time as the timestamp.
+					// TODO use an extension instead
+					timestamp: tokio::time::Instant::now().into(),
+					size,
+				})?;
 
 				if let Err(err) = self.run_frame(stream, frame.clone()).await {
 					frame.abort(err.clone())?;
@@ -386,7 +396,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		while remain > 0 {
 			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;
-			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
+			remain = remain.checked_sub(chunk.len()).ok_or(Error::WrongSize)?;
 			frame.write_chunk(chunk)?;
 		}
 
@@ -442,7 +452,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			name: msg.track_name.to_string(),
 			priority: 0,
 			// TODO Use delivery-timeout arg.
-			max_latency: std::time::Duration::from_millis(100),
+			max_latency: Time::from_millis(100).unwrap(),
 		});
 
 		let mut state = self.state.lock();

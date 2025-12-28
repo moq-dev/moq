@@ -53,7 +53,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 		name: "chat".to_string(),
 		priority: 0,
 		// You can configure the amount of time to keep old messages in cache.
-		max_latency: std::time::Duration::from_secs(10),
+		max_latency: moq_lite::Time::from_secs(10)?,
 	});
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
@@ -67,9 +67,9 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 
 	// Write frames to the group.
 	// Each frame is dependent on the previous frame, so older frames are prioritized.
-	group.write_frame(bytes::Bytes::from_static(b"Hello"));
-	group.write_frame(bytes::Bytes::from_static(b"World"));
-	group.close();
+	group.write_frame(bytes::Bytes::from_static(b"Hello"), moq_lite::Time::from_secs(1)?)?;
+	group.write_frame(bytes::Bytes::from_static(b"World"), moq_lite::Time::from_secs(2)?)?;
+	group.close()?;
 
 	tracing::info!("wrote hello + world");
 

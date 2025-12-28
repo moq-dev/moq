@@ -19,6 +19,7 @@ pub struct BoundsExceeded;
 /// It would be neat if we could express to Rust that the top two bits are available for use as enum
 /// discriminants
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VarInt(u64);
 
 impl VarInt {
@@ -34,11 +35,11 @@ impl VarInt {
 		Self(x as u64)
 	}
 
-	pub const fn from_u64(x: u64) -> Result<Self, BoundsExceeded> {
+	pub const fn from_u64(x: u64) -> Option<Self> {
 		if x <= Self::MAX.0 {
-			Ok(Self(x))
+			Some(Self(x))
 		} else {
-			Err(BoundsExceeded)
+			None
 		}
 	}
 

@@ -1,4 +1,4 @@
-use std::{cmp, fmt::Debug, io, sync::Arc};
+use std::{cmp, io, sync::Arc};
 
 use bytes::{Buf, Bytes, BytesMut};
 
@@ -19,7 +19,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
-	pub async fn decode<T: Decode<V> + Debug>(&mut self) -> Result<T, Error>
+	pub async fn decode<T: Decode<V>>(&mut self) -> Result<T, Error>
 	where
 		V: Clone,
 	{
@@ -49,7 +49,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	}
 
 	// Decode optional messages at the end of a stream
-	pub async fn decode_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
+	pub async fn decode_maybe<T: Decode<V>>(&mut self) -> Result<Option<T>, Error>
 	where
 		V: Clone,
 	{
@@ -60,7 +60,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
-	pub async fn decode_peek<T: Decode<V> + Debug>(&mut self) -> Result<T, Error>
+	pub async fn decode_peek<T: Decode<V>>(&mut self) -> Result<T, Error>
 	where
 		V: Clone,
 	{

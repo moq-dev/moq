@@ -11,4 +11,4 @@ pub use fmp4::*;
 pub use hls::*;
 
 // TODO this should be configurable
-pub const DEFAULT_MAX_LATENCY: std::time::Duration = std::time::Duration::from_millis(10000);
+pub const DEFAULT_MAX_LATENCY: moq_lite::Time = moq_lite::Time::from_millis_unchecked(10000);

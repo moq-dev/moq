@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::coding;
+use crate::{coding, TimeOverflow};
 use web_transport_trait::{MaybeSend, MaybeSync};
 
 pub trait SendSyncError: std::error::Error + MaybeSend + MaybeSync {}
@@ -82,6 +82,9 @@ pub enum Error {
 
 	#[error("expired")]
 	Expired,
+
+	#[error("duration overflow")]
+	DurationOverflow(#[from] TimeOverflow),
 }
 
 impl Error {
@@ -108,6 +111,7 @@ impl Error {
 			Self::TooManyParameters => 19,
 			Self::InvalidRole => 20,
 			Self::Expired => 22,
+			Self::DurationOverflow(_) => 23,
 			Self::App(app) => *app + 64,
 		}
 	}

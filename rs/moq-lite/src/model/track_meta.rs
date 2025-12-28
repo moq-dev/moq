@@ -11,7 +11,7 @@ use std::{
 use priority_queue::PriorityQueue;
 use tokio::sync::watch;
 
-use crate::Produce;
+use crate::{Time, Produce};
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy, Default)]
 pub struct TrackMeta {
@@ -19,7 +19,7 @@ pub struct TrackMeta {
 	pub priority: u8,
 
 	/// Groups will be dropped if they are this much older than the latest group.
-	pub max_latency: std::time::Duration,
+	pub max_latency: Time,
 }
 
 impl TrackMeta {
@@ -41,7 +41,7 @@ impl TrackMeta {
 #[derive(Default, Debug)]
 struct State {
 	priority: PriorityQueue<usize, u8>,
-	max_latency: PriorityQueue<usize, std::time::Duration>,
+	max_latency: PriorityQueue<usize, Time>,
 }
 
 static NEXT_ID: LazyLock<AtomicUsize> = LazyLock::new(|| AtomicUsize::new(0));

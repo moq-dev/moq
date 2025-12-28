@@ -50,7 +50,7 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 		name: "video".to_string(),
 		priority: 1, // Video typically has lower priority than audio
 		// You can configure the amount of time to keep old groups in cache.
-		max_latency: std::time::Duration::from_secs(10),
+		max_latency: moq_lite::Time::from_secs(10).unwrap(),
 	};
 
 	// Example video configuration
@@ -118,7 +118,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Not real frames of course.
 	track.write(hang::Frame {
 		keyframe: true,
-		timestamp: hang::Timestamp::from_secs(1).unwrap(),
+		timestamp: moq_lite::Time::from_secs(1).unwrap(),
 		payload: Bytes::from_static(b"keyframe NAL data").into(),
 	})?;
 
@@ -126,7 +126,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 
 	track.write(hang::Frame {
 		keyframe: false,
-		timestamp: hang::Timestamp::from_secs(2).unwrap(),
+		timestamp: moq_lite::Time::from_secs(2).unwrap(),
 		payload: Bytes::from_static(b"delta NAL data").into(),
 	})?;
 
@@ -136,7 +136,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 
 	track.write(hang::Frame {
 		keyframe: true,
-		timestamp: hang::Timestamp::from_secs(3).unwrap(),
+		timestamp: moq_lite::Time::from_secs(3).unwrap(),
 		payload: Bytes::from_static(b"keyframe NAL data").into(),
 	})?;
 

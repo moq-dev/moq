@@ -127,7 +127,7 @@ impl Decoder {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::Timestamp>,
+		pts: Option<moq_lite::Time>,
 	) -> anyhow::Result<()> {
 		match &mut self.decoder {
 			DecoderKind::Avc3(decoder) => decoder.decode_frame(buf, pts)?,

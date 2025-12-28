@@ -54,10 +54,6 @@ pub enum Error {
 	#[error("hex error: {0}")]
 	Hex(#[from] hex::FromHexError),
 
-	/// The timestamp is too large.
-	#[error("timestamp overflow")]
-	TimestampOverflow(#[from] crate::TimestampOverflow),
-
 	/// The track must start with a keyframe.
 	#[error("must start with a keyframe")]
 	MissingKeyframe,
@@ -76,6 +72,9 @@ pub enum Error {
 
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
+
+	#[error("time overflow")]
+	TimeOverflow(#[from] moq_lite::TimeOverflow),
 }
 
 /// A Result type alias for hang operations.

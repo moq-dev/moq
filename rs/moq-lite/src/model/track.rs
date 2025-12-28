@@ -14,10 +14,10 @@
 
 use tokio::{sync::watch, time::Instant};
 
-use super::{Group, GroupConsumer, GroupProducer};
+use super::{Time, Group, GroupConsumer, GroupProducer};
 use crate::{Error, Produce, Result, TrackMeta, TrackMetaConsumer, TrackMetaProducer};
 
-use std::{collections::VecDeque, fmt, future::Future, ops::Deref, sync::Arc, time::Duration};
+use std::{collections::VecDeque, fmt, future::Future, ops::Deref, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -29,7 +29,7 @@ pub struct Track {
 	pub priority: u8,
 
 	/// Groups will be dropped if they are this much older than the latest group.
-	pub max_latency: std::time::Duration,
+	pub max_latency: Time,
 }
 
 impl Track {
@@ -37,7 +37,7 @@ impl Track {
 		Self {
 			name: name.to_string(),
 			priority: 0,
-			max_latency: std::time::Duration::ZERO,
+			max_latency: Time::ZERO,
 		}
 	}
 
@@ -101,7 +101,7 @@ impl State {
 		Ok(())
 	}
 
-	fn create_group(&mut self, info: Group, max_latency: Duration) -> Result<GroupProducer> {
+	fn create_group(&mut self, info: Group, max_latency: Time) -> Result<GroupProducer> {
 		if let Some(closed) = self.closed.clone() {
 			return Err(closed.err().unwrap_or(Error::Cancel));
 		}
@@ -131,7 +131,7 @@ impl State {
 			let max = self.max.expect("impossible").1;
 
 			let now = Instant::now();
-			if now - max > max_latency {
+			if now - max > max_latency.into() {
 				return Err(Error::Expired);
 			}
 
@@ -182,7 +182,7 @@ impl State {
 		Ok(group)
 	}
 
-	fn expire(&mut self, max_latency: Duration) -> Result<Option<Instant>> {
+	fn expire(&mut self, max_latency: Time) -> Result<Option<Instant>> {
 		loop {
 			// Find the next group to expire, which should be index 0 but not if we receive out of order.
 			let expires = self
@@ -194,7 +194,7 @@ impl State {
 				.filter_map(|(index, group)| {
 					group
 						.as_ref()
-						.map(|g| (index, g.producer.sequence, g.when + max_latency))
+						.map(|g| (index, g.producer.sequence, g.when + max_latency.into()))
 				})
 				// Ignore the maximum group, wherever it might be
 				.filter(|(_index, sequence, _when)| *sequence < self.max.map(|m| m.0).unwrap_or(0))

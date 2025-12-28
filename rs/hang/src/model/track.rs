@@ -1,8 +1,7 @@
 use std::collections::VecDeque;
 use std::ops::Deref;
 
-use crate::model::{Frame, GroupConsumer, Timestamp};
-use crate::Error;
+use crate::{Error, Frame, GroupConsumer};
 use futures::{stream::FuturesUnordered, StreamExt};
 
 use moq_lite::{coding::*, lite};
@@ -22,7 +21,7 @@ use moq_lite::{coding::*, lite};
 pub struct TrackProducer {
 	pub inner: moq_lite::TrackProducer,
 	group: Option<moq_lite::GroupProducer>,
-	keyframe: Option<Timestamp>,
+	keyframe: Option<moq_lite::Time>,
 }
 
 impl TrackProducer {
@@ -75,7 +74,10 @@ impl TrackProducer {
 
 		let size = header.len() + frame.payload.remaining();
 
-		let mut chunked = group.create_frame(size.into())?;
+		let mut chunked = group.create_frame(moq_lite::Frame {
+			timestamp: frame.timestamp,
+			size,
+		})?;
 		chunked.write_chunk(header.freeze())?;
 		for chunk in frame.payload {
 			chunked.write_chunk(chunk)?;
@@ -129,7 +131,7 @@ pub struct TrackConsumer {
 	pending: VecDeque<GroupConsumer>,
 
 	// The maximum timestamp seen thus far, or zero because that's easier than None.
-	max_timestamp: Timestamp,
+	max_timestamp: moq_lite::Time,
 }
 
 impl TrackConsumer {
@@ -139,7 +141,7 @@ impl TrackConsumer {
 			inner,
 			current: None,
 			pending: VecDeque::new(),
-			max_timestamp: Timestamp::default(),
+			max_timestamp: moq_lite::Time::default(),
 		}
 	}
 
@@ -151,12 +153,9 @@ impl TrackConsumer {
 	///
 	/// Returns `None` when the track has ended.
 	pub async fn read_frame(&mut self) -> Result<Option<Frame>, Error> {
-		let max_latency = self.inner.meta().get().max_latency.try_into()?;
+		let max_latency = self.inner.meta().get().max_latency;
 		loop {
-			let cutoff = self
-				.max_timestamp
-				.checked_add(max_latency)
-				.ok_or(crate::TimestampOverflow)?;
+			let cutoff = self.max_timestamp.checked_add(max_latency)?;
 
 			// Keep track of all pending groups, buffering until we detect a timestamp far enough in the future.
 			// This is a race; only the first group will succeed.

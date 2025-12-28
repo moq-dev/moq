@@ -8,7 +8,7 @@ use crate::{
 	coding::Writer,
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId, Version},
 	model::GroupConsumer,
-	Error, Origin, OriginConsumer, Track, TrackConsumer,
+	Error, Origin, OriginConsumer, Time, Track, TrackConsumer,
 };
 
 #[derive(Clone)]
@@ -95,7 +95,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			name: msg.track_name.to_string(),
 			priority: msg.subscriber_priority,
 			// TODO Delivery Timeout
-			max_latency: std::time::Duration::from_millis(100),
+			max_latency: Time::from_millis(100).unwrap(),
 		};
 
 		let track = broadcast.subscribe_track(track);

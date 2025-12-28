@@ -8,16 +8,11 @@ use moq_lite as moq;
 pub struct Aac {
 	broadcast: hang::BroadcastProducer,
 	track: Option<hang::TrackProducer>,
-	zero: Option<tokio::time::Instant>,
 }
 
 impl Aac {
 	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
-		Self {
-			broadcast,
-			track: None,
-			zero: None,
-		}
+		Self { broadcast, track: None }
 	}
 
 	pub fn initialize<T: Buf>(&mut self, buf: &mut T) -> anyhow::Result<()> {
@@ -123,7 +118,7 @@ impl Aac {
 		Ok(())
 	}
 
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::Timestamp>) -> anyhow::Result<()> {
+	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<moq_lite::Time>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 		let track = self.track.as_mut().context("not initialized")?;
 
@@ -148,13 +143,13 @@ impl Aac {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<hang::Timestamp>) -> anyhow::Result<hang::Timestamp> {
+	fn pts(&mut self, hint: Option<moq_lite::Time>) -> anyhow::Result<moq_lite::Time> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
-		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(hang::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
+		// Default to the unix timestamp
+		Ok(tokio::time::Instant::now().into())
 	}
 }
 

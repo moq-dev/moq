@@ -1,7 +1,5 @@
 use derive_more::Debug;
 
-use crate::Timestamp;
-
 pub use buf_list::BufList;
 
 /// A media frame with a timestamp and codec-specific payload.
@@ -17,7 +15,7 @@ pub struct Frame {
 	/// This indicates when the frame should be displayed relative to the
 	/// start of the stream or some other reference point.
 	/// This is NOT a wall clock time.
-	pub timestamp: Timestamp,
+	pub timestamp: moq_lite::Time,
 
 	/// Whether this frame is a keyframe (can be decoded independently).
 	///

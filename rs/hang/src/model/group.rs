@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::model::{Frame, Timestamp};
+use crate as hang;
 use crate::Result;
 
 use buf_list::BufList;
@@ -26,10 +26,10 @@ pub struct GroupConsumer {
 	index: usize,
 
 	// The any buffered frames in the group.
-	buffered: VecDeque<Frame>,
+	buffered: VecDeque<hang::Frame>,
 
 	// The max timestamp in the group
-	max_timestamp: Option<Timestamp>,
+	max_timestamp: Option<moq_lite::Time>,
 }
 
 impl GroupConsumer {
@@ -52,7 +52,7 @@ impl GroupConsumer {
 	/// - Tracks the maximum timestamp seen
 	///
 	/// Returns `None` when the group has ended.
-	pub async fn read(&mut self) -> Result<Option<Frame>> {
+	pub async fn read(&mut self) -> Result<Option<hang::Frame>> {
 		if let Some(frame) = self.buffered.pop_front() {
 			Ok(Some(frame))
 		} else {
@@ -60,18 +60,22 @@ impl GroupConsumer {
 		}
 	}
 
-	async fn read_unbuffered(&mut self) -> Result<Option<Frame>> {
-		let payload = match self.group.next_frame().await? {
-			Some(mut frame) => frame.read_chunks().await?,
+	async fn read_unbuffered(&mut self) -> Result<Option<hang::Frame>> {
+		let mut frame = match self.group.next_frame().await? {
+			Some(frame) => frame,
 			None => return Ok(None),
 		};
 
+		let payload = frame.read_chunks().await?;
 		let mut payload = BufList::from_iter(payload);
 
+		// moq-lite contains a timestamp, but for backwards compatibility, we also encode it into the payload.
+		// Otherwise, we would use wall clock time for a draft02 publisher and it will be wrong.
+		// TODO Remove this when we remove support for draft02.
 		let micros = u64::decode(&mut payload, lite::Version::Draft02)?;
-		let timestamp = Timestamp::from_micros(micros)?;
+		let timestamp = moq_lite::Time::from_micros(micros)?;
 
-		let frame = Frame {
+		let frame = hang::Frame {
 			keyframe: (self.index == 0),
 			timestamp,
 			payload,
@@ -86,7 +90,7 @@ impl GroupConsumer {
 	// Keep reading and buffering new frames, returning when `max` is larger than or equal to the cutoff.
 	// Not publish because the API is super weird.
 	// This will BLOCK FOREVER if the group has ended early; it's intended to be used within select!
-	pub(super) async fn buffer_until(&mut self, cutoff: Timestamp) -> Timestamp {
+	pub(super) async fn buffer_until(&mut self, cutoff: moq_lite::Time) -> moq_lite::Time {
 		loop {
 			match self.max_timestamp {
 				Some(timestamp) if timestamp >= cutoff => return timestamp,
@@ -104,7 +108,7 @@ impl GroupConsumer {
 	/// Get the maximum timestamp seen in this group so far.
 	///
 	/// Returns `None` if no frames have been read yet.
-	pub fn max_timestamp(&self) -> Option<Timestamp> {
+	pub fn max_timestamp(&self) -> Option<moq_lite::Time> {
 		self.max_timestamp
 	}
 }

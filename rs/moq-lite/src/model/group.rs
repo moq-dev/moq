@@ -12,7 +12,7 @@ use std::{fmt, future::Future, ops::Deref};
 use bytes::Bytes;
 use tokio::sync::watch;
 
-use crate::{Error, Result};
+use crate::{Error, Result, Time};
 
 use super::{Frame, FrameConsumer, FrameProducer};
 
@@ -125,12 +125,12 @@ impl GroupProducer {
 
 	/// A helper method to write a frame from a single byte buffer.
 	///
-	/// If you want to write multiple chunks, use [Self::create] or [Self::append].
-	/// But an upfront size is required.
-	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B) -> Result<()> {
+	/// If you want to write multiple chunks, use [Self::create_frame] or [Self::append_frame].
+	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B, timestamp: Time) -> Result<()> {
 		let data = frame.into();
 		let frame = Frame {
-			size: data.len() as u64,
+			size: data.len(),
+			timestamp,
 		};
 		let mut frame = self.create_frame(frame)?;
 		frame.write_chunk(data)?;

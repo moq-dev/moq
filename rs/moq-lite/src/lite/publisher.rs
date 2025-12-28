@@ -274,7 +274,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 
-			stream.encode(&frame.size).await?;
+			stream
+				.encode(&lite::Frame {
+					size: frame.size,
+					timestamp: frame.timestamp,
+				})
+				.await?;
 
 			loop {
 				let chunk = tokio::select! {

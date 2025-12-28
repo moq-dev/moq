@@ -3,36 +3,22 @@ use std::{fmt, ops::Deref};
 use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
 
-use crate::{Error, Result};
+use crate::{Error, Result, Time};
 
+/// A unit of data, representing a point in time.
+///
+/// This is often a video frame or a packet of audio samples.
+/// The presentation timestamp is when the frame should be rendered, relative to the *broadcast*.
+///
+/// The size must be known upfront. If you don't know the size, write a Frame for each chunk.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {
-	pub size: u64,
-}
+	/// The presentation timestamp of the frame in microseconds.
+	pub timestamp: Time,
 
-impl From<usize> for Frame {
-	fn from(size: usize) -> Self {
-		Self { size: size as u64 }
-	}
-}
-
-impl From<u64> for Frame {
-	fn from(size: u64) -> Self {
-		Self { size }
-	}
-}
-
-impl From<u32> for Frame {
-	fn from(size: u32) -> Self {
-		Self { size: size as u64 }
-	}
-}
-
-impl From<u16> for Frame {
-	fn from(size: u16) -> Self {
-		Self { size: size as u64 }
-	}
+	/// The size of the frame in bytes.
+	pub size: usize,
 }
 
 #[derive(Default)]
@@ -47,7 +33,7 @@ struct FrameState {
 	proxy: Vec<FrameProducer>,
 
 	// Sanity check to ensure we don't write more than the frame size.
-	remaining: u64,
+	remaining: usize,
 }
 
 impl fmt::Debug for FrameState {
@@ -61,7 +47,7 @@ impl fmt::Debug for FrameState {
 }
 
 impl FrameState {
-	fn new(size: u64) -> Self {
+	fn new(size: usize) -> Self {
 		Self {
 			chunks: Vec::new(),
 			closed: None,
@@ -75,7 +61,7 @@ impl FrameState {
 			return Err(closed.err().unwrap_or(Error::Cancel));
 		}
 
-		self.remaining = self.remaining.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
+		self.remaining = self.remaining.checked_sub(chunk.len()).ok_or(Error::WrongSize)?;
 
 		self.proxy.retain_mut(|proxy| proxy.write_chunk(chunk.clone()).is_ok());
 		self.chunks.push(chunk);

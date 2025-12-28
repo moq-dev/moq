@@ -78,8 +78,6 @@ export class Broadcast {
 			effect.cleanup(() => track.close());
 
 			effect.effect((effect) => {
-				if (effect.get(track.closed)) return;
-
 				switch (track.name) {
 					case Broadcast.CATALOG_TRACK:
 						this.#serveCatalog(track, effect);

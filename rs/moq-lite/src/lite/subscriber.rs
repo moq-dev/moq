@@ -308,8 +308,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
 	) -> Result<(), Error> {
-		while let Some(size) = stream.decode_maybe::<u64>().await? {
-			let mut frame = group.create_frame(Frame { size })?;
+		while let Some(frame) = stream.decode_maybe::<lite::Frame>().await? {
+			let mut frame = group.create_frame(Frame {
+				timestamp: frame.timestamp,
+				size: frame.size,
+			})?;
 
 			if let Err(err) = self.run_frame(stream, group.sequence, frame.clone()).await {
 				frame.abort(err.clone())?;
@@ -336,7 +339,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				.read(MAX_CHUNK.min(remain as usize))
 				.await?
 				.ok_or(Error::WrongSize)?;
-			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
+			remain = remain.checked_sub(chunk.len()).ok_or(Error::WrongSize)?;
 			frame.write_chunk(chunk)?;
 		}
 

@@ -6,6 +6,8 @@ use moq_lite as moq;
 use mp4_atom::{Any, Atom, DecodeMaybe, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 
+const MAX_GOP: moq::Time = moq::Time::from_secs_unchecked(10);
+
 /// Converts fMP4/CMAF files into hang broadcast streams.
 ///
 /// This struct processes fragmented MP4 (fMP4) files and converts them into hang broadcasts.
@@ -36,7 +38,7 @@ pub struct Fmp4 {
 	tracks: HashMap<u32, hang::TrackProducer>,
 
 	// The timestamp of the last keyframe for each track
-	last_keyframe: HashMap<u32, hang::Timestamp>,
+	last_keyframe: HashMap<u32, moq::Time>,
 
 	// The moov atom at the start of the file.
 	moov: Option<Moov>,
@@ -424,8 +426,7 @@ impl Fmp4 {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let micros = (pts as u128 * 1_000_000 / timescale as u128) as u64;
-					let timestamp = hang::Timestamp::from_micros(micros)?;
+					let timestamp = moq::Time::from_timescale(pts, timescale)?;
 
 					if offset + size > mdat.len() {
 						anyhow::bail!("invalid data offset");
@@ -449,7 +450,7 @@ impl Fmp4 {
 					} else {
 						match self.last_keyframe.get(&track_id) {
 							// Force an audio keyframe at least every 10 seconds, but ideally at video keyframes
-							Some(prev) => timestamp - *prev > hang::Timestamp::from_secs(10).unwrap(),
+							Some(prev) => timestamp - *prev > MAX_GOP,
 							None => true,
 						}
 					};
@@ -483,7 +484,7 @@ impl Fmp4 {
 		if let (Some(min), Some(max)) = (min_timestamp, max_timestamp) {
 			let diff = max - min;
 
-			if diff > hang::Timestamp::from_millis(1).unwrap() {
+			if diff > moq::Time::from_millis(1).unwrap() {
 				tracing::warn!("fMP4 introduced {:?} of latency", diff);
 			}
 		}
