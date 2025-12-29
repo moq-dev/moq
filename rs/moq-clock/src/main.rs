@@ -48,8 +48,6 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(url = ?config.url, "connecting to server");
 
-	let session = client.connect(config.url).await?;
-
 	let track = Track {
 		name: config.track,
 		priority: 0,
@@ -64,16 +62,15 @@ async fn main() -> anyhow::Result<()> {
 			let origin = moq_lite::Origin::produce();
 			origin.producer.publish_broadcast(&config.broadcast, broadcast.consumer);
 
-			let session = moq_lite::Session::connect(session, origin.consumer, None).await?;
-
 			tokio::select! {
-				res = session.closed() => res.map_err(Into::into),
+				res = run_session(client, config.url, Some(origin.consumer), None) => res,
 				_ = clock.run() => Ok(()),
 			}
 		}
 		Command::Subscribe => {
 			let origin = moq_lite::Origin::produce();
-			let session = moq_lite::Session::connect(session, None, Some(origin.producer)).await?;
+			let session_runner = run_session(client, config.url, None, Some(origin.producer));
+			tokio::pin!(session_runner);
 
 			// NOTE: We could just call `session.consume_broadcast(&config.broadcast)` instead,
 			// However that won't work with IETF MoQ and the current OriginConsumer API the moment.
@@ -102,11 +99,32 @@ async fn main() -> anyhow::Result<()> {
 							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
 						}
 					},
-					res = session.closed() => return res.context("session closed"),
+					res = &mut session_runner => return res.context("session closed"),
 					// NOTE: This drops clock when a new announce arrives, canceling it.
 					Some(res) = async { Some(clock.take()?.run().await) } => res.context("clock error")?,
 				}
 			}
 		}
 	}
+}
+
+async fn run_session(
+	client: moq_native::Client,
+	url: Url,
+	publish: Option<moq_lite::OriginConsumer>,
+	subscribe: Option<moq_lite::OriginProducer>,
+) -> anyhow::Result<()> {
+	let session = client.connect_with_fallback(url).await?;
+
+	match session {
+		moq_native::WebTransportSessionAny::Quinn(session) => {
+			let session = moq_lite::Session::connect(session, publish, subscribe).await?;
+			session.closed().await
+		}
+		moq_native::WebTransportSessionAny::WebSocket(session) => {
+			let session = moq_lite::Session::connect(session, publish, subscribe).await?;
+			session.closed().await
+		}
+	}
+	.map_err(Into::into)
 }
