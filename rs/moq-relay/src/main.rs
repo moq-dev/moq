@@ -27,8 +27,7 @@ async fn main() -> anyhow::Result<()> {
 	let auth = config.auth.init()?;
 
 	let cluster = Cluster::new(config.cluster, client);
-	tokio::spawn(cluster.clone().run().boxed())
-;
+	tokio::spawn(cluster.clone().run().boxed());
 
 	// Create a web server too.
 	let web = Web::new(
@@ -41,8 +40,7 @@ async fn main() -> anyhow::Result<()> {
 		config.web,
 	);
 
-	tokio::spawn(web.run().boxed())
-;
+	tokio::spawn(web.run().boxed());
 
 	tracing::info!(%addr, "listening");
 
@@ -63,12 +61,11 @@ async fn main() -> anyhow::Result<()> {
 		conn_id += 1;
 
 		tokio::spawn(async move {
-				let err = conn.run().await;
-				if let Err(err) = err {
-					tracing::warn!(%err, "connection closed");
-				}
-			})
-;
+			let err = conn.run().await;
+			if let Err(err) = err {
+				tracing::warn!(%err, "connection closed");
+			}
+		});
 	}
 
 	Ok(())

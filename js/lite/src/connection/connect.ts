@@ -1,8 +1,8 @@
 import WebTransportWs from "@moq/web-transport-ws";
 import * as Ietf from "../ietf/index.ts";
-import type { Time } from "../index.ts";
 import * as Lite from "../lite/index.ts";
 import { Stream } from "../stream.ts";
+import type * as Time from "../time.ts";
 import * as Hex from "../util/hex.ts";
 import type { Established } from "./established.ts";
 

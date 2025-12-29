@@ -38,13 +38,12 @@ impl Origin {
 		let channel = oneshot::channel();
 
 		tokio::spawn(async move {
-				let res = tokio::select! {
-					res = Self::run_announced(consumer, &mut on_announce) => res,
-					_ = channel.1 => Ok(()),
-				};
-				on_announce.call(res);
-			})
-;
+			let res = tokio::select! {
+				res = Self::run_announced(consumer, &mut on_announce) => res,
+				_ = channel.1 => Ok(()),
+			};
+			on_announce.call(res);
+		});
 
 		let id = self.announced_task.insert(channel.0);
 		Ok(id)

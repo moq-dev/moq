@@ -12,7 +12,7 @@ use std::{fmt, future::Future, ops::Deref};
 use bytes::Bytes;
 use tokio::sync::watch;
 
-use crate::{Error, Result, Time};
+use crate::{Error, ExpiresConsumer, ExpiresProducer, Result, Time};
 
 use super::{Frame, FrameConsumer, FrameProducer};
 
@@ -38,7 +38,8 @@ struct GroupState {
 	// Whether the group is closed
 	closed: Option<Result<()>>,
 
-	proxy: Vec<GroupProducer>,
+	// The maximum timestamp of the frames in the group
+	max_timestamp: Option<Time>,
 }
 
 impl GroupState {
@@ -47,7 +48,8 @@ impl GroupState {
 			return Err(closed.err().unwrap_or(Error::Cancel));
 		}
 
-		self.proxy.retain_mut(|proxy| proxy.append_frame(frame.clone()).is_ok());
+		self.max_timestamp = Some(self.max_timestamp.unwrap_or(Time::ZERO).max(frame.timestamp));
+
 		self.frames.push(frame);
 
 		Ok(())
@@ -58,7 +60,6 @@ impl GroupState {
 			return Err(closed.err().unwrap_or(Error::Cancel));
 		}
 
-		self.proxy.retain_mut(|proxy| proxy.close().is_ok());
 		self.closed = Some(Ok(()));
 
 		Ok(())
@@ -69,25 +70,7 @@ impl GroupState {
 			return Err(err);
 		}
 
-		self.proxy.retain_mut(|proxy| proxy.abort(err.clone()).is_ok());
 		self.closed = Some(Err(err));
-
-		Ok(())
-	}
-
-	fn proxy(&mut self, mut dst: GroupProducer) -> Result<()> {
-		for frame in self.frames.iter() {
-			let dst = dst.create_frame(frame.info().clone())?;
-			frame.proxy(dst)?;
-		}
-
-		match self.closed.clone() {
-			Some(Ok(_)) => dst.close()?,
-			Some(Err(err)) => dst.abort(err)?,
-			None => {}
-		};
-
-		self.proxy.push(dst);
 
 		Ok(())
 	}
@@ -98,8 +81,8 @@ impl GroupState {
 pub struct GroupProducer {
 	// Mutable stream state.
 	state: watch::Sender<GroupState>,
-
 	info: Group,
+	expires: ExpiresProducer,
 }
 
 impl fmt::Debug for GroupProducer {
@@ -116,6 +99,15 @@ impl GroupProducer {
 		Self {
 			info,
 			state: Default::default(),
+			expires: Default::default(),
+		}
+	}
+
+	pub(super) fn new_expires(info: Group, expires: ExpiresProducer) -> Self {
+		Self {
+			info,
+			state: Default::default(),
+			expires: expires,
 		}
 	}
 
@@ -149,6 +141,10 @@ impl GroupProducer {
 	/// Append a frame to the group.
 	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
 		let mut result = Ok(());
+
+		// Add the current frame to the expiration tracker.
+		// NOTE: This might return an error if the current group is expired.
+		self.expires.create_frame(self.info.sequence, frame.timestamp)?;
 
 		self.state.send_if_modified(|state| {
 			result = state.append_frame(frame);
@@ -188,6 +184,7 @@ impl GroupProducer {
 			state: self.state.subscribe(),
 			index: 0,
 			active: None,
+			expires: self.expires.consume(),
 		}
 	}
 
@@ -197,17 +194,6 @@ impl GroupProducer {
 		async move {
 			state.closed().await;
 		}
-	}
-
-	pub fn proxy(&self, dst: GroupProducer) -> Result<()> {
-		let mut result = Ok(());
-
-		self.state.send_if_modified(|state| {
-			result = state.proxy(dst);
-			false
-		});
-
-		result
 	}
 }
 
@@ -242,6 +228,9 @@ pub struct GroupConsumer {
 
 	// Used to make read_frame cancel safe.
 	active: Option<FrameConsumer>,
+
+	// Used to check if the group is expired early.
+	expires: ExpiresConsumer,
 }
 
 impl fmt::Debug for GroupConsumer {
@@ -285,11 +274,16 @@ impl GroupConsumer {
 			return Ok(Some(frame));
 		}
 
-		let state = self
+		let max_timestamp = self.state.borrow().max_timestamp;
+
+		let state = tokio::select! {
+			state = self
 			.state
-			.wait_for(|state| self.index < state.frames.len() || state.closed.is_some())
-			.await
-			.map_err(|_| Error::Cancel)?;
+			.wait_for(|state| self.index < state.frames.len() || state.closed.is_some()) => state,
+			err = self.expires.expired(self.info.sequence, max_timestamp.unwrap_or_default()), if max_timestamp.is_some() => return Err(err),
+		};
+
+		let state = state.map_err(|_| Error::Cancel)?;
 
 		if let Some(frame) = state.frames.get(self.index).cloned() {
 			self.index += 1;

@@ -56,11 +56,11 @@ export class Message {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const frame = await track.readString();
+				const frame = await track.readFrame();
 				if (frame === undefined) break;
 
 				// Use a function to avoid the dequal check.
-				this.#latest.set(frame);
+				this.#latest.set(frame.toString());
 			}
 		});
 	}

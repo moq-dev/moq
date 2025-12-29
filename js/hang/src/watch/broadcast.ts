@@ -91,20 +91,16 @@ export class Broadcast {
 		const path = effect.get(this.path);
 		if (path === undefined) return;
 
-		console.log("waiting for announcement", path);
-
 		const announced = conn.announced(path);
 		effect.cleanup(() => announced.close());
 
 		effect.spawn(async () => {
 			for (;;) {
 				const update = await announced.next();
-				console.log("got announcement", update?.path);
 				if (!update) break;
 
 				// Require full equality
 				if (update.path !== path) {
-					console.warn("ignoring announce", update.path);
 					continue;
 				}
 

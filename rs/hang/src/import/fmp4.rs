@@ -131,7 +131,7 @@ impl Fmp4 {
 						max_latency: super::DEFAULT_MAX_LATENCY,
 					};
 
-					tracing::debug!(name = ?track.name, ?config, "starting track");
+					tracing::debug!(name = %track.name, ?config, "starting track");
 
 					let video = catalog.insert_video(track.name.clone(), config);
 					video.priority = 1;
@@ -147,7 +147,7 @@ impl Fmp4 {
 						max_latency: super::DEFAULT_MAX_LATENCY,
 					};
 
-					tracing::debug!(name = ?track.name, ?config, "starting track");
+					tracing::debug!(name = %track.name, ?config, "starting track");
 
 					let audio = catalog.insert_audio(track.name.clone(), config);
 					audio.priority = 2;
@@ -498,7 +498,7 @@ impl Drop for Fmp4 {
 		let mut catalog = self.broadcast.catalog.lock();
 
 		for track in self.tracks.values() {
-			tracing::debug!(name = ?track.name, "ending track");
+			tracing::debug!(name = %track.name, "ending track");
 
 			// We're too lazy to keep track of if this track is for audio or video, so we just remove both.
 			catalog.remove_video(&track.name);

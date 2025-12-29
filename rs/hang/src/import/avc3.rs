@@ -69,7 +69,7 @@ impl Avc3 {
 		}
 
 		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.name, "reinitializing track");
+			tracing::debug!(name = %track.name, "reinitializing track");
 			self.broadcast.catalog.lock().remove_video(&track.name);
 		}
 
@@ -79,7 +79,7 @@ impl Avc3 {
 			max_latency: super::DEFAULT_MAX_LATENCY,
 		};
 
-		tracing::debug!(name = ?track.name, ?config, "starting track");
+		tracing::debug!(name = %track.name, ?config, "starting track");
 
 		{
 			let mut catalog = self.broadcast.catalog.lock();
@@ -255,7 +255,7 @@ impl Avc3 {
 impl Drop for Avc3 {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
-			tracing::debug!(name = ?track.name, "ending track");
+			tracing::debug!(name = %track.name, "ending track");
 			self.broadcast.catalog.lock().remove_video(&track.name);
 		}
 	}

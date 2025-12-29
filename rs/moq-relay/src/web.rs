@@ -119,8 +119,7 @@ impl Web {
 			let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
 
 			#[cfg(unix)]
-			tokio::spawn(reload_certs(config.clone(), cert, key))
-;
+			tokio::spawn(reload_certs(config.clone(), cert, key));
 
 			let server = axum_server::bind_rustls(listen, config);
 			Some(server.serve(app))

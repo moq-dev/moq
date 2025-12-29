@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::{
 	coding::{Decode, DecodeError, Encode},
 	lite::{Message, Version},
-	Time, Path,
+	Path, Time,
 };
 
 /// Sent by the subscriber to request all future objects for the given track.

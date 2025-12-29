@@ -125,10 +125,10 @@ export class Connection implements Established {
 	async #runSession() {
 		try {
 			// Receive messages until the connection is closed.
-			for (;;) {
-				const msg = await SessionInfo.decodeMaybe(this.#session.reader);
-				if (!msg) break;
-				// TODO use the session info
+			while (!(await this.#session.reader.done())) {
+				const msg = await SessionInfo.decode(this.#session.reader);
+				// TODO use SessionInfo
+				console.debug("session info", msg);
 			}
 		} finally {
 			console.warn("session stream closed");

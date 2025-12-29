@@ -1,12 +1,13 @@
 import { Announced } from "../announced.ts";
 import { Broadcast } from "../broadcast.ts";
+import { Frame } from "../frame.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import type { Reader } from "../stream.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import type * as Control from "./control.ts";
-import { Frame, type Group as GroupMessage } from "./object.ts";
+import { Frame as FrameMessage, type Group as GroupMessage } from "./object.ts";
 import { type Publish, type PublishDone, PublishError } from "./publish.ts";
 import type { PublishNamespace, PublishNamespaceDone } from "./publish_namespace.ts";
 import { Subscribe, type SubscribeError, type SubscribeOk, Unsubscribe } from "./subscribe.ts";
@@ -225,11 +226,14 @@ export class Subscriber {
 				const done = await Promise.race([stream.done(), producer.closed, track.closed]);
 				if (done !== false) break;
 
-				const frame = await Frame.decode(stream, group.flags);
-				if (frame.payload === undefined) break;
+				const msg = await FrameMessage.decode(stream, group.flags);
+				if (msg.payload === undefined) break;
+
+				// TODO support timestamps
+				const frame = new Frame({ payload: msg.payload });
 
 				// Treat each object payload as a frame
-				producer.writeFrame(frame.payload);
+				producer.writeFrame(frame);
 			}
 
 			producer.close();

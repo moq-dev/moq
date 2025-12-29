@@ -1,12 +1,15 @@
 import { Effect } from "@moq/signals";
 import { Announced } from "../announced.ts";
 import { Broadcast } from "../broadcast.ts";
+import { Frame } from "../frame.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
+import * as Time from "../time.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
+import { Frame as FrameMessage } from "./frame.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import { StreamId } from "./stream.ts";
 import { Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
@@ -70,10 +73,11 @@ export class Subscriber {
 
 			// Then receive updates
 			for (;;) {
-				const announce = await Promise.race([Announce.decodeMaybe(stream.reader), announced.closed]);
-				if (!announce) break;
-				if (announce instanceof Error) throw announce;
+				const done = await Promise.any([stream.reader.done(), announced.closed]);
+				if (done instanceof Error) throw done;
+				if (done) break;
 
+				const announce = await Announce.decode(stream.reader);
 				const path = Path.join(prefix, announce.suffix);
 
 				console.debug(`announced: broadcast=${path} active=${announce.active}`);
@@ -119,7 +123,7 @@ export class Subscriber {
 			broadcast,
 			track: track.name,
 			priority: track.priority.peek(),
-			maxLatency: track.maxLatency.peek(),
+			maxLatency: Time.Micro.fromMilli(track.maxLatency.peek()),
 		});
 
 		const stream = await Stream.open(this.#quic);
@@ -187,11 +191,8 @@ export class Subscriber {
 				const done = await Promise.race([stream.done(), subscribe.closed, producer.closed]);
 				if (done !== false) break;
 
-				const size = await stream.u53();
-				const payload = await stream.read(size);
-				if (!payload) break;
-
-				producer.writeFrame(payload);
+				const frame = await FrameMessage.decode(stream, this.version);
+				producer.writeFrame(new Frame({ payload: frame.payload, timestamp: frame.timestamp }));
 			}
 
 			producer.close();

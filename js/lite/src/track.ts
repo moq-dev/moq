@@ -1,6 +1,7 @@
 import { Signal } from "@moq/signals";
+import type { Frame } from "./frame.ts";
 import { Group } from "./group.ts";
-import { Time } from "./index.ts";
+import * as Time from "./time.ts";
 
 export interface TrackProps {
 	name: string;
@@ -76,27 +77,9 @@ export class Track {
 	 *
 	 * @param frame - The frame to append
 	 */
-	writeFrame(frame: Uint8Array) {
+	writeFrame(frame: Frame) {
 		const group = this.appendGroup();
 		group.writeFrame(frame);
-		group.close();
-	}
-
-	writeString(str: string) {
-		const group = this.appendGroup();
-		group.writeString(str);
-		group.close();
-	}
-
-	writeJson(json: unknown) {
-		const group = this.appendGroup();
-		group.writeJson(json);
-		group.close();
-	}
-
-	writeBool(bool: boolean) {
-		const group = this.appendGroup();
-		group.writeBool(bool);
 		group.close();
 	}
 
@@ -115,12 +98,12 @@ export class Track {
 		}
 	}
 
-	async readFrame(): Promise<Uint8Array | undefined> {
-		return (await this.readFrameSequence())?.data;
+	async readFrame(): Promise<Frame | undefined> {
+		return (await this.readFrameSequence())?.frame;
 	}
 
 	// Returns the sequence number of the group and frame, not just the data.
-	async readFrameSequence(): Promise<{ group: number; frame: number; data: Uint8Array } | undefined> {
+	async readFrameSequence(): Promise<{ group: number; sequence: number; frame: Frame } | undefined> {
 		for (;;) {
 			const groups = this.#groups.peek();
 
@@ -129,8 +112,8 @@ export class Track {
 				const frames = groups[0].state.frames.peek();
 				const next = frames.shift();
 				if (next) {
-					const frame = groups[0].state.total.peek() - frames.length - 1;
-					return { group: groups[0].sequence, frame, data: next };
+					const sequence = groups[0].state.total.peek() - frames.length - 1;
+					return { group: groups[0].sequence, sequence, frame: next };
 				}
 
 				// Skip this old group
@@ -152,8 +135,8 @@ export class Track {
 			const frames = group.state.frames.peek();
 			const next = frames.shift();
 			if (next) {
-				const frame = group.state.total.peek() - frames.length - 1;
-				return { group: group.sequence, frame, data: next };
+				const sequence = group.state.total.peek() - frames.length - 1;
+				return { group: group.sequence, sequence, frame: next };
 			}
 
 			// If the track is closed, return undefined.
@@ -164,25 +147,6 @@ export class Track {
 			// NOTE: We don't care if the latest group was closed or not.
 			await Signal.race(this.#groups, this.#closed, group.state.frames);
 		}
-	}
-
-	async readString(): Promise<string | undefined> {
-		const next = await this.readFrame();
-		if (!next) return undefined;
-		return new TextDecoder().decode(next);
-	}
-
-	async readJson(): Promise<unknown | undefined> {
-		const next = await this.readString();
-		if (!next) return undefined;
-		return JSON.parse(next);
-	}
-
-	async readBool(): Promise<boolean | undefined> {
-		const next = await this.readFrame();
-		if (!next) return undefined;
-		if (next.byteLength !== 1 || !(next[0] === 0 || next[0] === 1)) throw new Error("invalid bool frame");
-		return next[0] === 1;
 	}
 
 	/**

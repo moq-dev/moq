@@ -1,4 +1,5 @@
 mod broadcast;
+mod expires;
 mod frame;
 mod group;
 mod origin;
@@ -8,6 +9,7 @@ mod track;
 mod track_meta;
 
 pub use broadcast::*;
+pub(super) use expires::*;
 pub use frame::*;
 pub use group::*;
 pub use origin::*;

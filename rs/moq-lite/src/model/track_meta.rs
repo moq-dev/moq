@@ -11,7 +11,7 @@ use std::{
 use priority_queue::PriorityQueue;
 use tokio::sync::watch;
 
-use crate::{Time, Produce};
+use crate::{ExpiresProducer, Produce, Time};
 
 #[derive(Clone, Debug, PartialEq, Eq, Copy, Default)]
 pub struct TrackMeta {
@@ -51,6 +51,7 @@ pub struct TrackMetaProducer {
 	id: usize,
 	state: watch::Sender<State>,
 	current: TrackMeta,
+	expires: ExpiresProducer,
 }
 
 impl fmt::Debug for TrackMetaProducer {
@@ -64,10 +65,15 @@ impl fmt::Debug for TrackMetaProducer {
 
 impl TrackMetaProducer {
 	pub fn new(meta: TrackMeta) -> Self {
+		Self::new_expires(meta, Default::default())
+	}
+
+	pub(super) fn new_expires(meta: TrackMeta, expires: ExpiresProducer) -> Self {
 		let mut this = Self {
 			id: NEXT_ID.fetch_add(1, atomic::Ordering::Relaxed),
 			state: Default::default(),
 			current: meta,
+			expires,
 		};
 		this.set(meta);
 		this
@@ -97,8 +103,15 @@ impl TrackMetaProducer {
 			state.priority.push(self.id, meta.priority);
 			state.max_latency.push(self.id, meta.max_latency);
 
-			// Only wake up consumers if we're the new maximum for either.
-			meta.priority > max_priority || meta.max_latency > max_max_latency
+			if meta.max_latency > max_max_latency {
+				self.expires.set_max_latency(meta.max_latency);
+				true
+			} else if meta.priority > max_priority {
+				true
+			} else {
+				// Only wake up consumers if we're the new maximum for either.
+				false
+			}
 		});
 	}
 
@@ -123,6 +136,7 @@ impl Clone for TrackMetaProducer {
 			id: NEXT_ID.fetch_add(1, atomic::Ordering::Relaxed),
 			state: self.state.clone(),
 			current: self.current,
+			expires: self.expires.clone(),
 		};
 		this.set(self.current);
 		this

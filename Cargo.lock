@@ -1771,6 +1771,7 @@ dependencies = [
  "hex",
  "num_enum",
  "priority-queue",
+ "rand 0.9.2",
  "serde",
  "thiserror 2.0.17",
  "tokio",
@@ -3733,9 +3734,8 @@ dependencies = [
 [[package]]
 name = "web-async"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6b2260b739b0e95cf9b78f22a64704af7ed9760ea12baa3745b4b97899dc89a"
 dependencies = [
+ "parking_lot",
  "tokio",
  "tracing",
  "wasm-bindgen-futures",

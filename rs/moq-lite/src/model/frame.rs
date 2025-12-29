@@ -29,9 +29,6 @@ struct FrameState {
 	// Set when the writer or all readers are dropped.
 	closed: Option<Result<()>>,
 
-	// Forward all chunks to these producers.
-	proxy: Vec<FrameProducer>,
-
 	// Sanity check to ensure we don't write more than the frame size.
 	remaining: usize,
 }
@@ -51,7 +48,6 @@ impl FrameState {
 		Self {
 			chunks: Vec::new(),
 			closed: None,
-			proxy: Vec::new(),
 			remaining: size,
 		}
 	}
@@ -63,7 +59,6 @@ impl FrameState {
 
 		self.remaining = self.remaining.checked_sub(chunk.len()).ok_or(Error::WrongSize)?;
 
-		self.proxy.retain_mut(|proxy| proxy.write_chunk(chunk.clone()).is_ok());
 		self.chunks.push(chunk);
 
 		Ok(())
@@ -78,7 +73,6 @@ impl FrameState {
 			return Err(closed.err().unwrap_or(Error::Cancel));
 		}
 
-		self.proxy.retain_mut(|proxy| proxy.close().is_ok());
 		self.closed = Some(Ok(()));
 
 		Ok(())
@@ -89,24 +83,8 @@ impl FrameState {
 			return Err(err);
 		}
 
-		self.proxy.retain_mut(|proxy| proxy.abort(err.clone()).is_ok());
 		self.closed = Some(Err(err));
 
-		Ok(())
-	}
-
-	fn proxy(&mut self, mut dst: FrameProducer) -> Result<()> {
-		for chunk in self.chunks.iter() {
-			dst.write_chunk(chunk.clone()).ok();
-		}
-
-		match self.closed.clone() {
-			Some(Ok(_)) => dst.close()?,
-			Some(Err(err)) => dst.abort(err)?,
-			None => {}
-		};
-
-		self.proxy.push(dst);
 		Ok(())
 	}
 }
@@ -179,15 +157,6 @@ impl FrameProducer {
 			state: self.state.subscribe(),
 			index: 0,
 		}
-	}
-
-	pub fn proxy(&self, dst: FrameProducer) -> Result<()> {
-		let mut result = Ok(());
-		self.state.send_if_modified(|state| {
-			result = state.proxy(dst);
-			false
-		});
-		result
 	}
 }
 

@@ -50,10 +50,10 @@ export class Typing {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const value = await track.readBool();
-				if (value === undefined) break;
+				const frame = await track.readFrame();
+				if (frame === undefined) break;
 
-				this.active.set(value);
+				this.active.set(frame.toBool());
 			}
 		});
 

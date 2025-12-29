@@ -1,4 +1,4 @@
-import type * as Moq from "@moq/lite";
+import * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import type * as Catalog from "./catalog";
@@ -16,7 +16,7 @@ export interface Frame {
 	group: number;
 }
 
-export function encode(source: Uint8Array | Source, timestamp: Time.Micro, container?: Catalog.Container): Uint8Array {
+export function encode(source: Uint8Array | Source, timestamp: Time.Micro, container?: Catalog.Container): Moq.Frame {
 	// Encode timestamp using the specified container format
 	const timestampBytes = Container.encodeTimestamp(timestamp, container);
 
@@ -34,13 +34,14 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro, conta
 		source.copyTo(data.subarray(timestampBytes.byteLength));
 	}
 
-	return data;
+	return new Moq.Frame({ payload: data, timestamp: timestamp });
 }
 
 // NOTE: A keyframe is always the first frame in a group, so it's not encoded on the wire.
-export function decode(buffer: Uint8Array, container?: Catalog.Container): { data: Uint8Array; timestamp: Time.Micro } {
+export function decode(frame: Moq.Frame, container?: Catalog.Container): { data: Uint8Array; timestamp: Time.Micro } {
 	// Decode timestamp using the specified container format
-	const [timestamp, data] = Container.decodeTimestamp(buffer, container);
+	// TODO: Use the timestamp from `frame` instead of the payload once we remove support for draft02.
+	const [timestamp, data] = Container.decodeTimestamp(frame.payload, container);
 	return { timestamp: timestamp as Time.Micro, data };
 }
 

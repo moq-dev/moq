@@ -1,5 +1,5 @@
 import { Effect, Signal } from "@moq/signals";
-import type { Time } from "../index.ts";
+import type * as Time from "../time.ts";
 import { type ConnectProps, connect, type WebSocketOptions } from "./connect.ts";
 import type { Established } from "./established.ts";
 

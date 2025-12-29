@@ -58,11 +58,10 @@ async fn accept(
 		let consumer = consumer.clone();
 		// Handle the connection in a new task.
 		tokio::spawn(async move {
-				if let Err(err) = run_session(id, session, name, consumer).await {
-					tracing::warn!(%err, "failed to accept session");
-				}
-			})
-;
+			if let Err(err) = run_session(id, session, name, consumer).await {
+				tracing::warn!(%err, "failed to accept session");
+			}
+		});
 	}
 
 	Ok(())

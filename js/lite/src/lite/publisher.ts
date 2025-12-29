@@ -3,9 +3,11 @@ import type { Broadcast } from "../broadcast.ts";
 import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
+import * as Time from "../time.ts";
 import { Track } from "../track.js";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
+import { Frame as FrameMessage } from "./frame.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import type { Version } from "./version.ts";
@@ -138,7 +140,11 @@ export class Publisher {
 			return;
 		}
 
-		const track = new Track({ name: msg.track, priority: msg.priority, maxLatency: msg.maxLatency });
+		const track = new Track({
+			name: msg.track,
+			priority: msg.priority,
+			maxLatency: Time.Micro.toMilli(msg.maxLatency),
+		});
 		broadcast.serve(track);
 
 		try {
@@ -151,13 +157,12 @@ export class Publisher {
 			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer);
 
 			for (;;) {
-				const decode = SubscribeUpdate.decodeMaybe(stream.reader, this.version);
+				const done = await Promise.any([serving, stream.reader.done()]);
+				if (done) break;
 
-				const result = await Promise.any([serving, decode]);
-				if (!result) break;
-
-				track.priority.set(result.priority);
-				track.maxLatency.set(result.maxLatency);
+				const update = await SubscribeUpdate.decode(stream.reader, this.version);
+				track.priority.set(update.priority);
+				track.maxLatency.set(update.maxLatency);
 			}
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -223,8 +228,8 @@ export class Publisher {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
 
-					await stream.u53(frame.byteLength);
-					await stream.write(frame);
+					const msg = new FrameMessage({ payload: frame.payload, timestamp: frame.timestamp });
+					await msg.encode(stream, this.version);
 				}
 
 				stream.close();

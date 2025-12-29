@@ -118,7 +118,8 @@ export class Broadcast {
 	#serveCatalog(track: Moq.Track, effect: Effect): void {
 		if (!effect.get(this.enabled)) {
 			// Clear the catalog.
-			track.writeFrame(Catalog.encode({}));
+			const frame = new Moq.Frame({ payload: Catalog.encode({}) });
+			track.writeFrame(frame);
 			return;
 		}
 
@@ -132,8 +133,8 @@ export class Broadcast {
 			preview: effect.get(this.preview.catalog),
 		};
 
-		const encoded = Catalog.encode(catalog);
-		track.writeFrame(encoded);
+		const frame = new Moq.Frame({ payload: Catalog.encode(catalog) });
+		track.writeFrame(frame);
 	}
 
 	close() {

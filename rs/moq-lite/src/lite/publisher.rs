@@ -211,7 +211,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						max_latency: update.max_latency,
 					};
 
-					tracing::trace!(subscribe = %subscribe.id, track = ?track.name, ?meta, "subscribed update");
+					tracing::trace!(subscribe = %subscribe.id, track = %track.name, ?meta, "subscribed update");
 					track.meta().set(meta);
 
 					// TODO we should update the priority of all outstanding groups.
@@ -221,7 +221,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				else => break,
 			}?;
 
-			tracing::debug!(subscribe = %subscribe.id, track = ?track.name, group = %group.sequence, "serving group");
+			tracing::debug!(subscribe = %subscribe.id, track = %track.name, group = %group.sequence, "serving group");
 
 			let msg = lite::Group {
 				subscribe: subscribe.id,

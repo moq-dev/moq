@@ -1,4 +1,4 @@
-import type * as Moq from "@moq/lite";
+import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import { PRIORITY } from "../priority";
@@ -37,7 +37,8 @@ export class Typing {
 		if (!enabled) return;
 
 		const active = effect.get(this.active);
-		track.writeBool(active);
+		const frame = Moq.Frame.fromBool(active);
+		track.writeFrame(frame);
 	}
 
 	close() {

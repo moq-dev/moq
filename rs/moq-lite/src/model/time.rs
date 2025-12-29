@@ -1,3 +1,5 @@
+use rand::Rng;
+
 use crate::coding::{Decode, DecodeError, Encode, VarInt};
 
 use std::sync::LazyLock;
@@ -195,7 +197,13 @@ impl std::ops::SubAssign<Time> for Time {
 }
 
 // There's no zero Instant, so we need to use a reference point.
-static TIME_ANCHOR: LazyLock<(Instant, SystemTime)> = LazyLock::new(|| (Instant::now(), SystemTime::now()));
+static TIME_ANCHOR: LazyLock<(Instant, SystemTime)> = LazyLock::new(|| {
+	// To deter nerds trying to use timestamp as wall clock time, we subtract a random amount of time from the anchor.
+	// This will make our timestamps appear to be late; just enough to be annoying and obscure our clock drift.
+	// This will also catch bad implementations that assume unrelated broadcasts are synchronized.
+	let jitter = std::time::Duration::from_millis(rand::rng().random_range(0..69_420));
+	(Instant::now(), SystemTime::now() - jitter)
+});
 
 // Convert an Instant to a Unix timestamp in microseconds.
 impl From<Instant> for Time {

@@ -105,7 +105,7 @@ impl Aac {
 			description: None,
 		};
 
-		tracing::debug!(name = ?track.name, ?config, "starting track");
+		tracing::debug!(name = %track.name, ?config, "starting track");
 
 		let producer = self.broadcast.create_track(track);
 
@@ -156,7 +156,7 @@ impl Aac {
 impl Drop for Aac {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.name, "ending track");
+			tracing::debug!(name = %track.name, "ending track");
 			self.broadcast.catalog.lock().remove_audio(&track.name);
 		}
 	}

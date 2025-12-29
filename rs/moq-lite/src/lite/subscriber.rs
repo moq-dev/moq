@@ -178,7 +178,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer) -> Result<(), Error> {
 		self.subscribes.lock().insert(id, track.clone());
 
-		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name, "subscribe started");
+		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe started");
 
 		let res = tokio::select! {
 			_ = track.unused() => Err(Error::Cancel),
@@ -187,15 +187,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name, "subscribe cancelled");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe cancelled");
 				track.abort(Error::Cancel)?;
 			}
 			Err(err) => {
-				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = ?track.name, %err, "subscribe error");
+				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.name, %err, "subscribe error");
 				track.abort(err)?;
 			}
 			_ => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = ?track.name, "subscribe complete");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe complete");
 			}
 		}
 
@@ -250,7 +250,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 
 			if let Some(meta) = meta {
-				tracing::trace!(subscribe = %id, track = ?track.name, ?meta, "subscribe update");
+				tracing::trace!(subscribe = %id, track = %track.name, ?meta, "subscribe update");
 
 				stream
 					.writer
@@ -335,10 +335,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		const MAX_CHUNK: usize = 1024 * 1024; // 1 MiB
 		while remain > 0 {
-			let chunk = stream
-				.read(MAX_CHUNK.min(remain as usize))
-				.await?
-				.ok_or(Error::WrongSize)?;
+			let chunk = stream.read(MAX_CHUNK.min(remain)).await?.ok_or(Error::WrongSize)?;
 			remain = remain.checked_sub(chunk.len()).ok_or(Error::WrongSize)?;
 			frame.write_chunk(chunk)?;
 		}

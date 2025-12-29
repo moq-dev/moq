@@ -7,7 +7,7 @@ use crate::{
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId, Version},
 	model::BroadcastProducer,
-	Broadcast, Time, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
+	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Time, Track,
 	TrackProducer,
 };
 
@@ -395,7 +395,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		tracing::trace!(size = %frame.size, "reading frame");
 
 		while remain > 0 {
-			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;
+			let chunk = stream.read(remain).await?.ok_or(Error::WrongSize)?;
 			remain = remain.checked_sub(chunk.len()).ok_or(Error::WrongSize)?;
 			frame.write_chunk(chunk)?;
 		}

@@ -1,6 +1,6 @@
-import { Time } from "../index.js";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import * as Time from "../time.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
 
@@ -59,10 +59,6 @@ export class SubscribeUpdate {
 	static async decode(r: Reader, version: Version): Promise<SubscribeUpdate> {
 		return Message.decode(r, (r) => SubscribeUpdate.#decode(r, version));
 	}
-
-	static async decodeMaybe(r: Reader, version: Version): Promise<SubscribeUpdate | undefined> {
-		return Message.decodeMaybe(r, (r) => SubscribeUpdate.#decode(r, version));
-	}
 }
 
 export class Subscribe {
@@ -70,7 +66,7 @@ export class Subscribe {
 	broadcast: Path.Valid;
 	track: string;
 	priority: number;
-	maxLatency: Time.Milli;
+	maxLatency: Time.Micro;
 
 	constructor({
 		id,
@@ -78,7 +74,7 @@ export class Subscribe {
 		track,
 		priority,
 		maxLatency,
-	}: { id: bigint; broadcast: Path.Valid; track: string; priority: number; maxLatency: Time.Milli }) {
+	}: { id: bigint; broadcast: Path.Valid; track: string; priority: number; maxLatency: Time.Micro }) {
 		this.id = id;
 		this.broadcast = broadcast;
 		this.track = track;
@@ -111,11 +107,11 @@ export class Subscribe {
 		const broadcast = Path.from(await r.string());
 		const track = await r.string();
 		const priority = await r.u8();
-		let maxLatency = Time.Milli.zero;
+		let maxLatency = Time.Micro.zero;
 
 		switch (version) {
 			case Version.DRAFT_03:
-				maxLatency = (await r.u53()) as Time.Milli;
+				maxLatency = (await r.u53()) as Time.Micro;
 				break;
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:

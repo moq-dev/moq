@@ -214,15 +214,14 @@ impl Cluster {
 			let node2 = node.clone();
 
 			let handle = tokio::spawn(
-					async move {
-						match this.run_remote(node2.as_str(), token, origin).await {
-							Ok(()) => tracing::info!(%node2, "origin closed"),
-							Err(err) => tracing::warn!(%err, %node2, "origin error"),
-						}
+				async move {
+					match this.run_remote(node2.as_str(), token, origin).await {
+						Ok(()) => tracing::info!(%node2, "origin closed"),
+						Err(err) => tracing::warn!(%err, %node2, "origin error"),
 					}
-					.in_current_span(),
-				)
-;
+				}
+				.in_current_span(),
+			);
 
 			active.insert(node.to_string(), handle.abort_handle());
 		}

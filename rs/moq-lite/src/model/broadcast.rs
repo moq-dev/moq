@@ -180,33 +180,30 @@ impl BroadcastConsumer {
 		let track = track.into();
 		let mut state = self.state.lock();
 
-		// If the track is already published, proxy it to the new consumer.
+		// If the track is already published, return it.
 		if let Some(existing) = state.producers.get(&track.name) {
-			let track = track.produce();
-			existing.proxy(track.producer).ok();
-			return track.consumer;
+			return existing.consume();
 		}
 
-		let mut producer = TrackProducer::new(track.clone());
-		let track = track.produce();
-
-		producer.proxy(track.producer).ok();
+		let mut track = track.produce();
 
 		// TODO await this
-		match self.requested.try_send(producer.clone()) {
+		match self.requested.try_send(track.producer.clone()) {
 			Ok(()) => {}
 			Err(_) => {
-				producer.abort(Error::Cancel).ok();
+				track.producer.abort(Error::Cancel).ok();
 				return track.consumer;
 			}
 		};
 
-		state.producers.insert(producer.name.to_string(), producer.clone());
+		state
+			.producers
+			.insert(track.producer.name.to_string(), track.producer.clone());
 		let state = self.state.clone();
 
 		web_async::spawn(async move {
-			producer.unused().await;
-			state.lock().producers.remove(producer.name.as_ref());
+			track.producer.unused().await;
+			state.lock().producers.remove(track.producer.name.as_ref());
 		});
 
 		track.consumer

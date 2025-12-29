@@ -1,12 +1,12 @@
 import type { Broadcast } from "../broadcast.ts";
 import type { Group } from "../group.ts";
-import type { Time } from "../index.ts";
 import type * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
+import type * as Time from "../time.ts";
 import { Track } from "../track.js";
 import { error } from "../util/error.ts";
 import type * as Control from "./control.ts";
-import { Frame, Group as GroupMessage } from "./object.ts";
+import { Frame as FrameMessage, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
 import {
 	PublishNamespace,
@@ -170,7 +170,8 @@ export class Publisher {
 					if (!frame) break;
 
 					// Write each frame as an object
-					const obj = new Frame(frame);
+					// TODO support timestamps
+					const obj = new FrameMessage(frame.payload);
 					await obj.encode(stream, header.flags);
 				}
 
