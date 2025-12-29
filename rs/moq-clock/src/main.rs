@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(url = ?config.url, "connecting to server");
 
-	let session = client.connect(config.url).await?;
+	let session = client.connect_with_fallback(config.url).await?;
 
 	let track = Track {
 		name: config.track,
