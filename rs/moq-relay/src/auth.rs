@@ -1,8 +1,9 @@
-use std::sync::Arc;
-
 use axum::http;
 use moq_lite::{AsPath, Path, PathOwned};
+use moq_token::{KeyProvider, KeySet, KeySetLoader};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum AuthError {
@@ -36,8 +37,18 @@ impl axum::response::IntoResponse for AuthError {
 pub struct AuthConfig {
 	/// The root authentication key.
 	/// If present, all paths will require a token unless they are in the public list.
-	#[arg(long = "auth-key", env = "MOQ_AUTH_KEY")]
-	pub key: Option<String>,
+	#[arg(long = "auth-key", env = "MOQ_AUTH_KEY", conflicts_with = "jwks_uri")]
+	key: Option<String>,
+
+	/// The URI to the JWK set.
+	/// If present, all paths will require a token that can be validated with the given JWK set
+	/// unless they are in the public list.
+	#[arg(long = "jwks-uri", env = "MOQ_AUTH_JWKS_URI", conflicts_with = "key")]
+	pub jwks_uri: Option<String>,
+
+	/// How often to refresh the JWK set (in seconds), if not provided the JWKs won't be refreshed.
+	#[arg(long = "jwks-refresh-interval", env = "MOQ_AUTH_JWKS_REFRESH_INTERVAL")]
+	pub jwks_refresh_interval: Option<u64>,
 
 	/// The prefix that will be public for reading and writing.
 	/// If present, unauthorized users will be able to read and write to this prefix ONLY.
@@ -60,18 +71,102 @@ pub struct AuthToken {
 	pub cluster: bool,
 }
 
-#[derive(Clone)]
+const JWKS_REFRESH_ERROR_INTERVAL: Duration = Duration::from_mins(5);
+
 pub struct Auth {
-	key: Option<Arc<moq_token::Key>>,
+	key: Option<Box<Arc<dyn KeyProvider + Send + Sync>>>,
 	public: Option<PathOwned>,
+	refresh_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Auth {
+	fn drop(&mut self) {
+		if let Some(handle) = &self.refresh_task {
+			handle.abort();
+		}
+	}
 }
 
 impl Auth {
+	fn compare_key_sets(previous: KeySet, new: KeySet) {
+		for new_key in new.keys {
+			if new_key.kid.is_some() {
+				if previous.keys.iter().find(|k| k.kid == new_key.kid).is_none() {
+					tracing::info!("Found new JWT key \"{}\"", new_key.kid.as_deref().unwrap())
+				}
+			}
+		}
+	}
+
+	async fn refresh(loader: &KeySetLoader) -> anyhow::Result<()> {
+		let previous = loader.get_keys();
+
+		let result = loader.refresh().await;
+		if let Ok(()) = result {
+			if let (Ok(previous), Ok(new)) = (previous, loader.get_keys()) {
+				Self::compare_key_sets(previous, new);
+			}
+		}
+		result
+	}
+
+	fn spawn_refresh_task(interval: Duration, loader: Arc<KeySetLoader>) -> tokio::task::JoinHandle<()> {
+		tokio::spawn(async move {
+			loop {
+				if let Err(e) = Self::refresh(loader.as_ref()).await {
+					if interval > JWKS_REFRESH_ERROR_INTERVAL * 2 {
+						tracing::error!(
+							"failed to load JWKS, will retry in {} seconds: {:?}",
+							JWKS_REFRESH_ERROR_INTERVAL.as_secs(),
+							e
+						);
+						tokio::time::sleep(JWKS_REFRESH_ERROR_INTERVAL).await;
+
+						if let Err(e) = Self::refresh(loader.as_ref()).await {
+							tracing::error!("failed to load JWKS again, giving up this time: {:?}", e);
+						} else {
+							tracing::info!("successfully loaded JWKS on the second try");
+						}
+					} else {
+						// Don't retry because the next refresh is going to happen very soon
+						tracing::error!("failed to refresh JWKS: {:?}", e);
+					}
+				}
+
+				tokio::time::sleep(interval).await;
+			}
+		})
+	}
+
 	pub fn new(config: AuthConfig) -> anyhow::Result<Self> {
-		let key = match config.key.as_deref() {
-			Some(path) => Some(moq_token::Key::from_file(path)?),
-			None => None,
-		};
+		let mut refresh_task = None;
+
+		let key: Option<Box<Arc<dyn KeyProvider + Send + Sync>>> =
+			match (config.key.as_deref(), config.jwks_uri.as_deref()) {
+				(Some(key), None) => Some(Box::new(Arc::new(KeySet {
+					keys: vec![Arc::new(moq_token::Key::from_file(key.to_string())?)],
+				}))),
+				(None, Some(jwks_uri)) => {
+					let loader = Arc::new(KeySetLoader::new(jwks_uri.to_string()));
+
+					refresh_task = match config.jwks_refresh_interval {
+						Some(refresh_interval_secs) => {
+							// Spawn async task to refresh periodically
+							Some(Self::spawn_refresh_task(
+								Duration::from_secs(refresh_interval_secs),
+								loader.clone(),
+							))
+						}
+						None => None,
+					};
+
+					// TODO Probably the best would be to crash when the initial load fails
+
+					Some(Box::new(loader))
+				}
+				(Some(_), Some(_)) => anyhow::bail!("Cannot provide both key and jwks_uri, choose one!"),
+				(None, None) => None,
+			};
 
 		let public = config.public;
 
@@ -82,8 +177,9 @@ impl Auth {
 		}
 
 		Ok(Self {
-			key: key.map(Arc::new),
+			key,
 			public: public.map(|p| p.as_path().to_owned()),
+			refresh_task,
 		})
 	}
 
@@ -119,7 +215,7 @@ impl Auth {
 			Some(suffix) => suffix,
 		};
 
-		// If a more specific path is is provided, reduce the permissions.
+		// If a more specific path is provided, reduce the permissions.
 		let subscribe = claims
 			.subscribe
 			.into_iter()
@@ -173,6 +269,8 @@ mod tests {
 		// Test anonymous access to /anon path
 		let auth = Auth::new(AuthConfig {
 			key: None,
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: Some("anon".to_string()),
 		})?;
 
@@ -196,6 +294,8 @@ mod tests {
 		// Test fully public access (public = "")
 		let auth = Auth::new(AuthConfig {
 			key: None,
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: Some("".to_string()),
 		})?;
 
@@ -213,6 +313,8 @@ mod tests {
 		// Test anonymous access denied for wrong prefix
 		let auth = Auth::new(AuthConfig {
 			key: None,
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: Some("anon".to_string()),
 		})?;
 
@@ -228,6 +330,8 @@ mod tests {
 		let (key_file, _) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -242,6 +346,8 @@ mod tests {
 	fn test_token_provided_but_no_key_configured() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
 			key: None,
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: Some("anon".to_string()),
 		})?;
 
@@ -257,6 +363,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -283,6 +391,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -307,6 +417,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -333,6 +445,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -357,6 +471,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -381,6 +497,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -410,6 +528,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -439,6 +559,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -467,6 +589,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -505,6 +629,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 
@@ -542,6 +668,8 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			jwks_uri: None,
+			jwks_refresh_interval: None,
 			public: None,
 		})?;
 

@@ -8,6 +8,7 @@ pub use auth::*;
 pub use cluster::*;
 pub use config::*;
 pub use connection::*;
+use std::sync::Arc;
 pub use web::*;
 
 #[tokio::main]
@@ -23,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
 	let mut server = config.server.init()?;
 	let client = config.client.init()?;
-	let auth = config.auth.init()?;
+	let auth = Arc::new(config.auth.init()?);
 
 	let cluster = Cluster::new(config.cluster, client);
 	let cloned = cluster.clone();
