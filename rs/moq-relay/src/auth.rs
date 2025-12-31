@@ -90,10 +90,8 @@ impl Drop for Auth {
 impl Auth {
 	fn compare_key_sets(previous: KeySet, new: KeySet) {
 		for new_key in new.keys {
-			if new_key.kid.is_some() {
-				if previous.keys.iter().find(|k| k.kid == new_key.kid).is_none() {
-					tracing::info!("Found new JWT key \"{}\"", new_key.kid.as_deref().unwrap())
-				}
+			if new_key.kid.is_some() && !previous.keys.iter().any(|k| k.kid == new_key.kid) {
+				tracing::info!("Found new JWT key \"{}\"", new_key.kid.as_deref().unwrap())
 			}
 		}
 	}
@@ -144,21 +142,15 @@ impl Auth {
 		let key: Option<Box<Arc<dyn KeyProvider + Send + Sync>>> =
 			match (config.key.as_deref(), config.jwks_uri.as_deref()) {
 				(Some(key), None) => Some(Box::new(Arc::new(KeySet {
-					keys: vec![Arc::new(moq_token::Key::from_file(key.to_string())?)],
+					keys: vec![Arc::new(moq_token::Key::from_file(key)?)],
 				}))),
 				(None, Some(jwks_uri)) => {
 					let loader = Arc::new(KeySetLoader::new(jwks_uri.to_string()));
 
-					refresh_task = match config.jwks_refresh_interval {
-						Some(refresh_interval_secs) => {
-							// Spawn async task to refresh periodically
-							Some(Self::spawn_refresh_task(
-								Duration::from_secs(refresh_interval_secs),
-								loader.clone(),
-							))
-						}
-						None => None,
-					};
+					refresh_task = config.jwks_refresh_interval.map(|refresh_interval_secs| {
+						// Spawn async task to refresh periodically
+						Self::spawn_refresh_task(Duration::from_secs(refresh_interval_secs), loader.clone())
+					});
 
 					// TODO Probably the best would be to crash when the initial load fails
 
