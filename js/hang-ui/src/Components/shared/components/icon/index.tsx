@@ -79,14 +79,20 @@ export default function Icon(props: IconProps): JSX.Element {
 		// Update state when fetch completes
 		void fetchPromise
 			.then((svgContent) => {
-				setSvg(svgContent);
-				setLoading(false);
-				setError(false);
+				// Only update if this icon is still the current one
+				if (props.name === iconName) {
+					setSvg(svgContent);
+					setLoading(false);
+					setError(false);
+				}
 			})
 			.catch((err) => {
 				console.error(`Error loading icon "${iconName}":`, err);
-				setLoading(false);
-				setError(true);
+				// Only update if this icon is still the current one
+				if (props.name === iconName) {
+					setLoading(false);
+					setError(true);
+				}
 			})
 			.finally(() => {
 				fetchingIcons.delete(iconName);
