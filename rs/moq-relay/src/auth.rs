@@ -38,7 +38,7 @@ pub struct AuthConfig {
 	/// The root authentication key.
 	/// If present, all paths will require a token unless they are in the public list.
 	#[arg(long = "auth-key", env = "MOQ_AUTH_KEY", conflicts_with = "jwks_uri")]
-	key: Option<String>,
+	pub key: Option<String>,
 
 	/// The URI to the JWK set.
 	/// If present, all paths will require a token that can be validated with the given JWK set
