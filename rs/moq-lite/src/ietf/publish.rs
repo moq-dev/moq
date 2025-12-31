@@ -181,7 +181,7 @@ impl<'a> Message for Publish<'a> {
 		let mut params = Parameters::default();
 		params.set_int(
 			SubscribeParameter::DeliveryTimeout.into(),
-			self.delivery_timeout.as_millis() as u64,
+			self.delivery_timeout.as_millis(),
 		);
 		params.encode(w, version);
 	}
@@ -244,7 +244,7 @@ impl Message for PublishOk {
 		let mut params = Parameters::default();
 		params.set_int(
 			SubscribeParameter::DeliveryTimeout.into(),
-			self.delivery_timeout.as_millis() as u64,
+			self.delivery_timeout.as_millis(),
 		);
 		params.encode(w, version);
 	}

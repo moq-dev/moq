@@ -293,7 +293,7 @@ impl GroupConsumer {
 	pub async fn timestamp(&self) -> Result<Time> {
 		self.state
 			.clone()
-			.wait_for(|state| state.frames.len() > 0)
+			.wait_for(|state| !state.frames.is_empty())
 			.await
 			.map_err(|_| Error::Cancel)?;
 		Ok(self.state.borrow().frames[0].timestamp)

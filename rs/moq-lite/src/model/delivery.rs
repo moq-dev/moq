@@ -69,11 +69,11 @@ impl fmt::Debug for DeliveryConsumer {
 
 impl DeliveryConsumer {
 	pub fn current(&self) -> Delivery {
-		self.state.borrow().clone()
+		*self.state.borrow()
 	}
 
 	pub async fn changed(&mut self) -> Option<Delivery> {
 		self.state.changed().await.ok()?;
-		Some(self.state.borrow_and_update().clone())
+		Some(*self.state.borrow_and_update())
 	}
 }

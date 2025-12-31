@@ -292,10 +292,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track_namespace: broadcast.to_owned(),
 			track_name: track.name.as_ref().into(),
 			subscriber_priority: max.priority,
-			group_order: max
-				.ordered
-				.then_some(GroupOrder::Ascending)
-				.unwrap_or(GroupOrder::Descending),
+			group_order: if max
+				.ordered { GroupOrder::Ascending } else { GroupOrder::Descending },
 			// we want largest group
 			filter_type: FilterType::LargestObject,
 			delivery_timeout: max.max_latency,

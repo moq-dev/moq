@@ -121,10 +121,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							request_id,
 							track_alias: request_id.0, // NOTE: using track alias as request id for now
 							delivery_timeout: delivery.max_latency,
-							group_order: delivery
-								.ordered
-								.then_some(GroupOrder::Ascending)
-								.unwrap_or(GroupOrder::Descending),
+							group_order: if delivery
+								.ordered { GroupOrder::Ascending } else { GroupOrder::Descending },
 						})
 						.ok();
 

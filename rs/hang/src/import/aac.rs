@@ -116,7 +116,7 @@ impl Aac {
 		};
 
 		let producer = self.broadcast.create_track(track, delivery);
-		self.track = Some(producer.into());
+		self.track = Some(producer);
 
 		Ok(())
 	}

@@ -60,22 +60,22 @@ impl<V: Clone> Encode<V> for Parameters {
 
 impl Parameters {
 	pub fn get_int(&self, kind: u64) -> Option<u64> {
-		assert!(kind % 2 == 0);
+		assert!(kind.is_multiple_of(2));
 		self.ints.get(&kind).copied()
 	}
 
 	pub fn set_int(&mut self, kind: u64, value: u64) {
-		assert!(kind % 2 == 0);
+		assert!(kind.is_multiple_of(2));
 		self.ints.insert(kind, value);
 	}
 
 	pub fn get_bytes(&self, kind: u64) -> Option<&[u8]> {
-		assert!(kind % 2 != 0);
+		assert!(!kind.is_multiple_of(2));
 		self.bytes.get(&kind).map(|v| v.as_slice())
 	}
 
 	pub fn set_bytes(&mut self, kind: u64, value: Vec<u8>) {
-		assert!(kind % 2 != 0);
+		assert!(!kind.is_multiple_of(2));
 		self.bytes.insert(kind, value);
 	}
 }

@@ -24,11 +24,10 @@ impl State {
 			self.max_timestamp = timestamp;
 		}
 
-		if !new_group && !new_timestamp {
-			if timestamp + max_latency <= self.max_timestamp {
+		if !new_group && !new_timestamp
+			&& timestamp + max_latency <= self.max_timestamp {
 				return Err(Error::Expired);
 			}
-		}
 
 		Ok(new_group || new_timestamp)
 	}
