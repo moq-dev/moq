@@ -90,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
 					Some(announce) = consumer.announced() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(config.track.clone(), moq_lite::Delivery::default()).await?;
+							let track = broadcast.subscribe_track(config.track.clone(), moq_lite::Delivery::default());
 							clock = Some(clock::Subscriber::new(track));
 						}
 						(path, None) => {

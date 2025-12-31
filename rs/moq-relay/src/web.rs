@@ -276,15 +276,11 @@ async fn serve_fetch(
 	// NOTE: The auth token is already scoped to the broadcast.
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
 
-	let mut track = match broadcast.subscribe_track(track, moq_lite::Delivery::default()).await {
-		Ok(track) => track,
-		Err(_) => return Err(StatusCode::NOT_FOUND.into()),
-	};
+	let mut track = broadcast.subscribe_track(track, moq_lite::Delivery::default());
 
 	let group = match track.next_group().await {
 		Ok(Some(group)) => group,
-		Ok(None) => return Err(StatusCode::NOT_FOUND.into()),
-		Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR.into()),
+		_ => return Err(StatusCode::NOT_FOUND.into()),
 	};
 
 	Ok(ServeGroup::new(group))

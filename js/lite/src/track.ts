@@ -7,6 +7,7 @@ export interface TrackProps {
 	name: string;
 	priority?: number | Signal<number>;
 	maxLatency?: Time.Milli | Signal<Time.Milli>;
+	ordered?: boolean;
 }
 
 export class Track {
@@ -14,7 +15,8 @@ export class Track {
 
 	#groups = new Signal<Group[]>([]);
 	maxLatency: Signal<Time.Milli>;
-	priority = new Signal<number>(0);
+	priority: Signal<number>;
+	ordered: Signal<boolean>;
 
 	#closed = new Signal<boolean | Error>(false);
 	readonly closed: Promise<Error | undefined>;
@@ -25,6 +27,7 @@ export class Track {
 		this.name = props.name;
 		this.priority = Signal.from(props.priority ?? 0);
 		this.maxLatency = Signal.from(props.maxLatency ?? Time.Milli.zero);
+		this.ordered = Signal.from(props.ordered ?? false);
 
 		this.closed = new Promise((resolve) => {
 			const dispose = this.#closed.watch((closed) => {

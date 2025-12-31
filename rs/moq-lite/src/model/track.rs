@@ -12,7 +12,7 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 use web_async::FuturesExt;
 
 use super::{Group, GroupConsumer, GroupProducer};
@@ -35,6 +35,7 @@ use std::{
 /// Only used to make accessing the name easy/fast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct Track {
 	pub name: Arc<String>,
 }
@@ -493,99 +494,6 @@ impl TrackConsumer {
 
 	pub fn assert_not_clone(&self, other: &Self) {
 		assert!(!self.is_clone(other), "should not be clone");
-	}
-}
-
-struct TrackRequestState {
-	// If we got a response already, save it here.
-	ready: Option<Result<TrackProducer>>,
-
-	// Subscribers waiting for a response.
-	// We don't use just `ready` because TrackProducer would be unused for a split second.
-	subscribers: Vec<(Delivery, oneshot::Sender<Result<TrackConsumer>>)>,
-}
-
-#[derive(Clone)]
-pub struct TrackRequest {
-	info: Track,
-	state: watch::Sender<TrackRequestState>,
-}
-
-impl TrackRequest {
-	pub(super) fn new<T: Into<Track>>(track: T) -> Self {
-		Self {
-			info: track.into(),
-			state: watch::Sender::new(TrackRequestState {
-				ready: None,
-				subscribers: Vec::new(),
-			}),
-		}
-	}
-
-	pub fn info(&self) -> &Track {
-		&self.info
-	}
-
-	pub fn respond(&self, response: Result<TrackProducer>) {
-		self.state.send_if_modified(|state| {
-			for (subscriber, tx) in state.subscribers.drain(..) {
-				match &response {
-					Ok(track) => tx.send(Ok(track.subscribe(subscriber))),
-					Err(err) => tx.send(Err(err.clone())),
-				}
-				.ok();
-			}
-
-			state.ready = Some(response);
-			true
-		});
-	}
-
-	pub fn subscribe(&self, delivery: Delivery) -> impl Future<Output = Result<TrackConsumer>> {
-		let (tx, rx) = oneshot::channel();
-
-		self.state.send_if_modified(|state| {
-			match &state.ready {
-				Some(Ok(track)) => {
-					tx.send(Ok(track.subscribe(delivery))).ok();
-				}
-				Some(Err(err)) => {
-					tx.send(Err(err.clone())).ok();
-				}
-				None => state.subscribers.push((delivery, tx)),
-			};
-
-			false
-		});
-
-		async move { rx.await.map_err(|_| Error::Cancel)? }
-	}
-
-	pub fn unused(&self) -> impl Future<Output = ()> {
-		let mut state = self.state.subscribe();
-		async move {
-			let producer = {
-				let state = match state.wait_for(|state| state.ready.is_some()).await {
-					Ok(state) => state,
-					Err(_) => return,
-				};
-
-				match state.ready.as_ref().unwrap() {
-					Ok(producer) => producer.clone(),
-					Err(_) => return,
-				}
-			};
-
-			producer.unused().await;
-		}
-	}
-}
-
-impl Deref for TrackRequest {
-	type Target = Track;
-
-	fn deref(&self) -> &Self::Target {
-		&self.info
 	}
 }
 

@@ -112,44 +112,38 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let version = self.version;
 
 		web_async::spawn(async move {
-			match broadcast.subscribe_track(track, delivery).await {
-				Ok(mut track) => {
-					let delivery = track.delivery().current();
+			let mut track = broadcast.subscribe_track(track, delivery);
+			let delivery = track.delivery().current();
 
-					control
-						.send(ietf::SubscribeOk {
-							request_id,
-							track_alias: request_id.0, // NOTE: using track alias as request id for now
-							delivery_timeout: delivery.max_latency,
-							group_order: if delivery
-								.ordered { GroupOrder::Ascending } else { GroupOrder::Descending },
-						})
-						.ok();
+			// TODO: This is wrong, as we haven't actually gotten a response from the origin yet.
+			control
+				.send(ietf::SubscribeOk {
+					request_id,
+					track_alias: request_id.0, // NOTE: using track alias as request id for now
+					delivery_timeout: delivery.max_latency,
+					group_order: if delivery.ordered {
+						GroupOrder::Ascending
+					} else {
+						GroupOrder::Descending
+					},
+				})
+				.ok();
 
-					match Self::run_track(session, track, request_id, rx, version).await {
-						Err(err) => control
-							.send(ietf::PublishDone {
-								request_id,
-								status_code: 500,
-								stream_count: 0, // TODO send the correct value if we want the peer to block.
-								reason_phrase: err.to_string().into(),
-							})
-							.ok(),
-						Ok(_) => control
-							.send(ietf::PublishDone {
-								request_id,
-								status_code: 200,
-								stream_count: 0, // TODO send the correct value if we want the peer to block.
-								reason_phrase: "OK".into(),
-							})
-							.ok(),
-					}
-				}
+			match Self::run_track(session, track, request_id, rx, version).await {
 				Err(err) => control
-					.send(ietf::SubscribeError {
+					.send(ietf::PublishDone {
 						request_id,
-						error_code: 500,
+						status_code: 500,
+						stream_count: 0, // TODO send the correct value if we want the peer to block.
 						reason_phrase: err.to_string().into(),
+					})
+					.ok(),
+				Ok(_) => control
+					.send(ietf::PublishDone {
+						request_id,
+						status_code: 200,
+						stream_count: 0, // TODO send the correct value if we want the peer to block.
+						reason_phrase: "OK".into(),
 					})
 					.ok(),
 			};

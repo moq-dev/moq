@@ -6,11 +6,13 @@ import { Version } from "./version.ts";
 
 export class SubscribeUpdate {
 	priority: number;
+	ordered: boolean;
 	maxLatency: Time.Milli;
 
-	constructor({ priority, maxLatency }: { priority: number; maxLatency: Time.Milli }) {
+	constructor({ priority, maxLatency, ordered }: { priority: number; maxLatency: Time.Milli; ordered: boolean }) {
 		this.priority = priority;
 		this.maxLatency = maxLatency;
+		this.ordered = ordered;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -21,6 +23,7 @@ export class SubscribeUpdate {
 				break;
 			case Version.DRAFT_03:
 				await w.u8(this.priority);
+				await w.bool(this.ordered);
 				await w.u53(this.maxLatency);
 				break;
 			default: {
@@ -33,6 +36,7 @@ export class SubscribeUpdate {
 	static async #decode(r: Reader, version: Version): Promise<SubscribeUpdate> {
 		let priority: number;
 		let maxLatency = Time.Milli.zero;
+		let ordered = false;
 
 		switch (version) {
 			case Version.DRAFT_01:
@@ -41,6 +45,7 @@ export class SubscribeUpdate {
 				break;
 			case Version.DRAFT_03:
 				priority = await r.u8();
+				ordered = await r.bool();
 				maxLatency = (await r.u53()) as Time.Milli;
 				break;
 			default: {
@@ -49,7 +54,7 @@ export class SubscribeUpdate {
 			}
 		}
 
-		return new SubscribeUpdate({ priority, maxLatency });
+		return new SubscribeUpdate({ priority, maxLatency, ordered });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -66,6 +71,7 @@ export class Subscribe {
 	broadcast: Path.Valid;
 	track: string;
 	priority: number;
+	ordered: boolean;
 	maxLatency: Time.Micro;
 
 	constructor({
@@ -73,12 +79,21 @@ export class Subscribe {
 		broadcast,
 		track,
 		priority,
+		ordered,
 		maxLatency,
-	}: { id: bigint; broadcast: Path.Valid; track: string; priority: number; maxLatency: Time.Micro }) {
+	}: {
+		id: bigint;
+		broadcast: Path.Valid;
+		track: string;
+		priority: number;
+		ordered: boolean;
+		maxLatency: Time.Micro;
+	}) {
 		this.id = id;
 		this.broadcast = broadcast;
 		this.track = track;
 		this.priority = priority;
+		this.ordered = ordered;
 		this.maxLatency = maxLatency;
 	}
 
@@ -90,6 +105,7 @@ export class Subscribe {
 
 		switch (version) {
 			case Version.DRAFT_03:
+				await w.bool(this.ordered);
 				await w.u53(this.maxLatency);
 				break;
 			case Version.DRAFT_01:
@@ -108,9 +124,11 @@ export class Subscribe {
 		const track = await r.string();
 		const priority = await r.u8();
 		let maxLatency = Time.Micro.zero;
+		let ordered = false;
 
 		switch (version) {
 			case Version.DRAFT_03:
+				ordered = await r.bool();
 				maxLatency = (await r.u53()) as Time.Micro;
 				break;
 			case Version.DRAFT_01:
@@ -122,7 +140,7 @@ export class Subscribe {
 			}
 		}
 
-		return new Subscribe({ id, broadcast, track, priority, maxLatency });
+		return new Subscribe({ id, broadcast, track, priority, maxLatency, ordered });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -136,9 +154,13 @@ export class Subscribe {
 
 export class SubscribeOk {
 	priority: number;
+	ordered: boolean;
+	maxLatency: Time.Micro;
 
-	constructor({ priority }: { priority: number }) {
+	constructor({ priority, maxLatency, ordered }: { priority: number; maxLatency: Time.Micro; ordered: boolean }) {
 		this.priority = priority;
+		this.maxLatency = maxLatency;
+		this.ordered = ordered;
 	}
 
 	async #encode(version: Version, w: Writer) {
@@ -147,7 +169,11 @@ export class SubscribeOk {
 				await w.u8(this.priority);
 				break;
 			case Version.DRAFT_02:
+				break;
 			case Version.DRAFT_03:
+				await w.u8(this.priority);
+				await w.bool(this.ordered);
+				await w.u53(this.maxLatency);
 				break;
 			default: {
 				const v: never = version;
@@ -158,14 +184,20 @@ export class SubscribeOk {
 
 	static async #decode(version: Version, r: Reader): Promise<SubscribeOk> {
 		let priority = 0;
+		let ordered = false;
+		let maxLatency = Time.Micro.zero;
 
 		switch (version) {
 			case Version.DRAFT_01:
 				priority = await r.u8();
 				break;
-			case Version.DRAFT_03:
 			case Version.DRAFT_02:
 				// noop
+				break;
+			case Version.DRAFT_03:
+				priority = await r.u8();
+				ordered = await r.bool();
+				maxLatency = (await r.u53()) as Time.Micro;
 				break;
 			default: {
 				const v: never = version;
@@ -173,7 +205,7 @@ export class SubscribeOk {
 			}
 		}
 
-		return new SubscribeOk({ priority });
+		return new SubscribeOk({ priority, maxLatency, ordered });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

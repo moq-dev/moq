@@ -193,12 +193,14 @@ impl Consume {
 			ordered: false,
 		};
 
+		let track = broadcast.subscribe_track(rendition, delivery).ordered();
+
 		let channel = oneshot::channel();
 		let id = self.video_task.insert(channel.0);
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(broadcast, rendition, delivery, &mut on_frame) => res,
+				res = Self::run_track(track, &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_frame.call(res);
@@ -235,12 +237,14 @@ impl Consume {
 			ordered: false,
 		};
 
+		let track = broadcast.subscribe_track(rendition, delivery).ordered();
+
 		let channel = oneshot::channel();
 		let id = self.audio_task.insert(channel.0);
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(broadcast, rendition, delivery, &mut on_frame) => res,
+				res = Self::run_track(track, &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_frame.call(res);
@@ -252,14 +256,7 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_track(
-		broadcast: moq_lite::BroadcastConsumer,
-		track: moq_lite::Track,
-		delivery: moq_lite::Delivery,
-		on_frame: &mut OnStatus,
-	) -> Result<(), Error> {
-		let mut track = broadcast.subscribe_track(track, delivery).await?.ordered();
-
+	async fn run_track(mut track: moq_lite::TrackConsumerOrdered, on_frame: &mut OnStatus) -> Result<(), Error> {
 		loop {
 			let Some(mut group) = track.next_group().await? else {
 				return Ok(());

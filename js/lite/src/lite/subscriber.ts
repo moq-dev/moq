@@ -124,6 +124,7 @@ export class Subscriber {
 			track: track.name,
 			priority: track.priority.peek(),
 			maxLatency: Time.Micro.fromMilli(track.maxLatency.peek()),
+			ordered: track.ordered.peek(),
 		});
 
 		const stream = await Stream.open(this.#quic);
@@ -131,24 +132,30 @@ export class Subscriber {
 
 		await msg.encode(stream.writer, this.version);
 
-		const update = async () => {
+		const sendUpdate = async () => {
 			const msg = new SubscribeUpdate({
 				priority: track.priority.peek(),
 				maxLatency: track.maxLatency.peek(),
+				ordered: track.ordered.peek(),
 			});
 			await msg.encode(stream.writer, this.version);
 		};
 
 		// TODO: There's no backpressure, so this could fail, but I hate javascript.
-		const dispose = track.priority.subscribe(update);
-		const dispose2 = track.maxLatency.subscribe(update);
+		const dispose = track.priority.subscribe(sendUpdate);
+		const dispose2 = track.maxLatency.subscribe(sendUpdate);
+		const dispose3 = track.ordered.subscribe(sendUpdate);
 
 		try {
-			await SubscribeOk.decode(stream.reader, this.version);
-			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${track.name}`);
+			for (;;) {
+				// TODO do something with the publisher's priority/latency/ordered
+				await SubscribeOk.decode(stream.reader, this.version);
+				console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${track.name} `);
 
-			const result = await Promise.race([stream.reader.closed, track.closed]);
-			if (result instanceof Error) throw result;
+				const result = await Promise.race([stream.reader.closed, track.closed]);
+				if (result instanceof Error) throw result;
+				if (result) break;
+			}
 
 			track.close();
 			stream.close();
@@ -163,6 +170,7 @@ export class Subscriber {
 
 			dispose();
 			dispose2();
+			dispose3();
 		}
 	}
 

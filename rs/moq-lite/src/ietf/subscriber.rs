@@ -8,7 +8,7 @@ use crate::{
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId, Version},
 	model::BroadcastProducer,
 	Broadcast, Delivery, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
-	TrackProducer, TrackRequest,
+	TrackProducer,
 };
 
 use web_async::Lock;
@@ -30,7 +30,6 @@ struct State {
 
 struct TrackState {
 	producer: TrackProducer,
-	request: Option<TrackRequest>,
 	alias: Option<u64>,
 }
 
@@ -155,9 +154,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				max_latency: msg.delivery_timeout,
 				ordered: msg.group_order == GroupOrder::Ascending,
 			});
-			if let Some(request) = subscribe.request.take() {
-				request.respond(Ok(producer));
-			}
 
 			subscribe.alias = Some(msg.track_alias);
 			state.aliases.insert(msg.track_alias, msg.request_id);
@@ -173,11 +169,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track.producer.abort(Error::Cancel)?;
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
-			}
-
-			// TODO use the actual error message/code
-			if let Some(request) = track.request.take() {
-				request.respond(Err(Error::Cancel));
 			}
 		}
 
@@ -242,10 +233,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
-			let request = tokio::select! {
+			let track = tokio::select! {
 				_ = broadcast.unused() => break,
-				request = broadcast.requested_track() => match request {
-					Some(request) => request,
+				track = broadcast.requested_track() => match track {
+					Some(track) => track,
 					None => break,
 				},
 				_ = self.session.closed() => break,
@@ -254,14 +245,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let request_id = self.control.next_request_id().await?;
 			let mut this = self.clone();
 
-			let track = TrackProducer::new(request.info().clone(), Default::default());
-
 			let mut state = self.state.lock();
 			state.subscribes.insert(
 				request_id,
 				TrackState {
 					producer: track.clone(),
-					request: Some(request),
 					alias: None,
 				},
 			);
@@ -292,8 +280,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track_namespace: broadcast.to_owned(),
 			track_name: track.name.as_ref().into(),
 			subscriber_priority: max.priority,
-			group_order: if max
-				.ordered { GroupOrder::Ascending } else { GroupOrder::Descending },
+			group_order: if max.ordered {
+				GroupOrder::Ascending
+			} else {
+				GroupOrder::Descending
+			},
 			// we want largest group
 			filter_type: FilterType::LargestObject,
 			delivery_timeout: max.max_latency,
@@ -493,7 +484,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				entry.insert(TrackState {
 					producer: track.clone(),
 					alias: Some(msg.track_alias),
-					request: None,
 				});
 			}
 			Entry::Occupied(_) => return Err(Error::Duplicate),

@@ -95,11 +95,7 @@ impl CatalogConsumer {
 	/// catalog data. If there are no more updates, `None` is returned.
 	pub async fn next(&mut self) -> Result<Option<Catalog>, Error> {
 		if let Some(broadcast) = &mut self.broadcast {
-			self.track = Some(
-				broadcast
-					.subscribe_track(Catalog::default_track(), Catalog::default_delivery())
-					.await?,
-			);
+			self.track = Some(broadcast.subscribe_track(Catalog::default_track(), Catalog::default_delivery()));
 			self.broadcast = None;
 		}
 

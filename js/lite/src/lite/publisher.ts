@@ -144,13 +144,27 @@ export class Publisher {
 			name: msg.track,
 			priority: msg.priority,
 			maxLatency: Time.Micro.toMilli(msg.maxLatency),
+			ordered: msg.ordered,
 		});
 		broadcast.serve(track);
 
+		// When any of the properties are updated, send the SubscribeOk message
+		const sendOk = async () => {
+			const msg = new SubscribeOk({
+				priority: track.priority.peek(),
+				maxLatency: Time.Micro.fromMilli(track.maxLatency.peek()),
+				ordered: track.ordered.peek(),
+			});
+			await msg.encode(stream.writer, this.version);
+		};
+
+		// TODO: There's no backpressure, so this could fail, but I hate javascript.
+		const dispose = track.priority.subscribe(sendOk);
+		const dispose2 = track.maxLatency.subscribe(sendOk);
+		const dispose3 = track.ordered.subscribe(sendOk);
+
 		try {
-			// TODO get the priority/latency from the original source.
-			const info = new SubscribeOk({ priority: msg.priority });
-			await info.encode(stream.writer, this.version);
+			await sendOk();
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
@@ -163,6 +177,7 @@ export class Publisher {
 				const update = await SubscribeUpdate.decode(stream.reader, this.version);
 				track.priority.set(update.priority);
 				track.maxLatency.set(update.maxLatency);
+				track.ordered.set(update.ordered);
 			}
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -173,6 +188,10 @@ export class Publisher {
 			console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${e.message}`);
 			track.close(e);
 			stream.abort(e);
+		} finally {
+			dispose();
+			dispose2();
+			dispose3();
 		}
 	}
 

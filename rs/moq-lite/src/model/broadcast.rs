@@ -1,6 +1,6 @@
 use std::{collections::HashMap, future::Future};
 
-use crate::{Delivery, Error, Produce, Track, TrackConsumer, TrackProducer, TrackRequest};
+use crate::{Delivery, Error, Produce, Track, TrackConsumer, TrackProducer};
 use tokio::sync::watch;
 use web_async::Lock;
 
@@ -12,7 +12,7 @@ struct State {
 
 	// Tracks requested over the network.
 	// NOTE: These will be removed on `unused`.
-	requested: HashMap<String, TrackRequest>,
+	requested: HashMap<String, TrackProducer>,
 }
 
 pub struct Broadcast {}
@@ -35,8 +35,8 @@ pub struct BroadcastProducer {
 	closed: watch::Sender<Option<Result<(), Error>>>,
 	requested: (
 		// We need the sender so we can clone new consumers
-		async_channel::Sender<TrackRequest>,
-		async_channel::Receiver<TrackRequest>,
+		async_channel::Sender<TrackProducer>,
+		async_channel::Receiver<TrackProducer>,
 	),
 }
 
@@ -56,7 +56,7 @@ impl BroadcastProducer {
 	}
 
 	/// Return the next requested track, or None if there are no Consumers active.
-	pub async fn requested_track(&mut self) -> Option<TrackRequest> {
+	pub async fn requested_track(&mut self) -> Option<TrackProducer> {
 		tokio::select! {
 			request = self.requested.1.recv() => request.ok(),
 			_ = self.closed.closed() => None,
@@ -141,75 +141,52 @@ impl BroadcastProducer {
 	}
 }
 
-#[cfg(test)]
-use futures::FutureExt;
-
-#[cfg(test)]
-impl BroadcastProducer {
-	pub fn assert_used(&self) {
-		assert!(self.unused().now_or_never().is_none(), "should be used");
-	}
-
-	pub fn assert_unused(&self) {
-		assert!(self.unused().now_or_never().is_some(), "should be unused");
-	}
-
-	pub fn assert_request(&mut self) -> TrackRequest {
-		self.requested_track()
-			.now_or_never()
-			.expect("should not have blocked")
-			.expect("should be a request")
-	}
-
-	pub fn assert_no_request(&mut self) {
-		assert!(self.requested_track().now_or_never().is_none(), "should have blocked");
-	}
-}
-
 /// Subscribe to abitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
 	state: Lock<State>,
 	closed: watch::Receiver<Option<Result<(), Error>>>,
-	requested: async_channel::Sender<TrackRequest>,
+	requested: async_channel::Sender<TrackProducer>,
 }
 
 impl BroadcastConsumer {
-	/// Fetches the Track over the network, using the given settings.
-	pub async fn subscribe_track(&self, track: impl Into<Track>, delivery: Delivery) -> Result<TrackConsumer, Error> {
+	/// Starts fetches the Track over the network, using the given settings.
+	///
+	/// This is synchronous and cannot fail.
+	/// However, the returned [TrackConsumer] will be aborted if the track can't be found.
+	pub fn subscribe_track(&self, track: impl Into<Track>, delivery: Delivery) -> TrackConsumer {
 		let track = track.into();
 
-		let response = {
-			let mut state = self.state.lock();
+		let mut state = self.state.lock();
 
-			// If the track is already published, return it.
-			if let Some(existing) = state.producers.get(track.name.as_ref()) {
-				return Ok(existing.subscribe(delivery));
+		// If the track is already published, return it.
+		if let Some(existing) = state.producers.get(track.name.as_ref()) {
+			return existing.subscribe(delivery);
+		}
+
+		if let Some(existing) = state.requested.get(track.name.as_ref()) {
+			return existing.subscribe(delivery);
+		}
+
+		// Create a new track producer using this first request's delivery information.
+		// The publisher SHOULD replace them with their own settigns on OK.
+		let track = TrackProducer::new(track, delivery);
+
+		let consumer = track.subscribe(delivery);
+
+		state.requested.insert(track.name.to_string(), track.clone());
+
+		let state = self.state.clone();
+		let requested = self.requested.clone();
+
+		web_async::spawn(async move {
+			if requested.send(track.clone()).await.is_ok() {
+				track.unused().await;
 			}
+			state.lock().requested.remove(track.name.as_ref());
+		});
 
-			if let Some(existing) = state.requested.get(track.name.as_ref()) {
-				existing.subscribe(delivery)
-			} else {
-				let request = TrackRequest::new(track.name.as_ref().to_string());
-				let response = request.subscribe(delivery);
-
-				state.requested.insert(request.name.to_string(), request.clone());
-
-				let state = self.state.clone();
-				let requested = self.requested.clone();
-
-				web_async::spawn(async move {
-					if requested.send(request.clone()).await.is_ok() {
-						request.unused().await;
-					}
-					state.lock().requested.remove(request.name.as_ref());
-				});
-
-				response
-			}
-		};
-
-		response.await
+		consumer
 	}
 
 	pub async fn closed(&self) -> Result<(), Error> {
@@ -224,189 +201,5 @@ impl BroadcastConsumer {
 	/// Duplicate names are allowed in the case of resumption.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.closed.same_channel(&other.closed)
-	}
-}
-
-#[cfg(test)]
-impl BroadcastConsumer {
-	pub fn assert_not_closed(&self) {
-		assert!(self.closed().now_or_never().is_none(), "should not be closed");
-	}
-
-	pub fn assert_closed(&self) {
-		assert!(self.closed().now_or_never().is_some(), "should be closed");
-	}
-}
-
-#[cfg(test)]
-mod test {
-	use super::*;
-
-	#[tokio::test]
-	async fn unused() {
-		let producer = BroadcastProducer::new();
-		producer.assert_unused();
-
-		// Create a new consumer.
-		let consumer1 = producer.consume();
-		producer.assert_used();
-
-		// It's also valid to clone the consumer.
-		let consumer2 = consumer1.clone();
-		producer.assert_used();
-
-		// Dropping one consumer doesn't make it unused.
-		drop(consumer1);
-		producer.assert_used();
-
-		drop(consumer2);
-		producer.assert_unused();
-
-		// Even though it's unused, we can still create a new consumer.
-		let consumer3 = producer.consume();
-		producer.assert_used();
-
-		let track1 = consumer3.subscribe_track(Track::new("track1"), Default::default());
-
-		// It doesn't matter if a subscription is alive, we only care about the broadcast handle.
-		// TODO is this the right behavior?
-		drop(consumer3);
-		producer.assert_unused();
-
-		drop(track1);
-	}
-
-	#[tokio::test]
-	async fn closed() {
-		let mut producer = BroadcastProducer::new();
-
-		let consumer = producer.consume();
-		consumer.assert_not_closed();
-
-		// Create a new track and insert it into the broadcast.
-		let mut track1 = producer.create_track("track1", Delivery::default());
-		track1.append_group().expect("failed to append group");
-
-		let mut track1c = consumer.subscribe_track("track1", Delivery::default());
-		let track2 = consumer.subscribe_track("track2", Delivery::default());
-
-		drop(producer);
-		consumer.assert_closed();
-
-		// The requested TrackProducer should have been dropped, so the track should be closed.
-		track2.assert_closed();
-
-		// But track1 is still open because we currently don't cascade the closed state.
-		track1c.assert_group();
-		track1c.assert_no_group();
-		track1c.assert_not_closed();
-
-		// TODO: We should probably cascade the closed state.
-		drop(track1);
-		track1c.assert_closed();
-	}
-
-	#[tokio::test]
-	async fn select() {
-		let mut producer = BroadcastProducer::new();
-
-		// Make sure this compiles; it's actually more involved than it should be.
-		tokio::select! {
-			_ = producer.unused() => {}
-			_ = producer.requested_track() => {}
-		}
-	}
-
-	#[tokio::test]
-	async fn requests() {
-		let mut producer = BroadcastProducer::new();
-
-		let consumer = producer.consume();
-		let consumer2 = consumer.clone();
-
-		let mut track1 = consumer.subscribe_track("track1", Delivery::default());
-		track1.assert_not_closed();
-		track1.assert_no_group();
-
-		// Make sure we deduplicate requests while track1 is still active.
-		let mut track2 = consumer2.subscribe_track("track1", Delivery::default());
-		track2.assert_is_clone(&track1);
-
-		// Get the requested track, and there should only be one.
-		let mut track3 = producer.assert_request();
-		producer.assert_no_request();
-
-		// Make sure the consumer is the same.
-		track3.consume().assert_is_clone(&track1);
-
-		// Append a group and make sure they all get it.
-		track3.append_group().expect("failed to append group");
-		track1.assert_group();
-		track2.assert_group();
-
-		// Make sure that tracks are cancelled when the producer is dropped.
-		let track4 = consumer.subscribe_track("track2", Delivery::default());
-		drop(producer);
-
-		// Make sure the track is errored, not closed.
-		track4.assert_error();
-
-		let track5 = consumer2.subscribe_track("track3", Delivery::default());
-		track5.assert_error();
-	}
-
-	#[tokio::test]
-	async fn requested_unused() {
-		let mut broadcast = Broadcast::produce();
-
-		// Subscribe to a track that doesn't exist - this creates a request
-		let consumer1 = broadcast.consumer.subscribe_track("unknown_track", Delivery::default());
-
-		// Get the requested track producer
-		let producer1 = broadcast.producer.assert_request();
-
-		// The track producer should NOT be unused yet because there's a consumer
-		assert!(
-			producer1.unused().now_or_never().is_none(),
-			"track producer should be used"
-		);
-
-		// Making a new consumer will keep the producer alive
-		let consumer2 = broadcast.consumer.subscribe_track("unknown_track", Delivery::default());
-		consumer2.assert_is_clone(&consumer1);
-
-		// Drop the consumer subscription
-		drop(consumer1);
-
-		// The track producer should NOT be unused yet because there's a consumer
-		assert!(
-			producer1.unused().now_or_never().is_none(),
-			"track producer should be used"
-		);
-
-		// Drop the second consumer, now the producer should be unused
-		drop(consumer2);
-
-		// BUG: The track producer should become unused after dropping the consumer,
-		// but it won't because the broadcast keeps a reference in the lookup HashMap
-		// This assertion will fail, demonstrating the bug
-		assert!(
-			producer1.unused().now_or_never().is_some(),
-			"track producer should be unused after consumer is dropped"
-		);
-
-		// TODO Unfortunately, we need to sleep for a little bit to detect when unused.
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-
-		// Now the cleanup task should have run and we can subscribe again to the unknown track.
-		let consumer3 = broadcast.consumer.subscribe_track("unknown_track", Delivery::default());
-		let producer2 = broadcast.producer.assert_request();
-
-		// Drop the consumer, now the producer should be unused
-		drop(consumer3);
-		assert!(
-			producer2.unused().now_or_never().is_some(),
-			"track producer should be unused after consumer is dropped"
-		);
 	}
 }

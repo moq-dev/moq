@@ -66,10 +66,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		web_async::spawn(async move {
 			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix).await {
 				match &err {
-					Error::Cancel => {
-						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
-					}
-					Error::Transport(_) => {
+					Error::Cancel | Error::Transport(_) => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
 					}
 					err => {
@@ -193,11 +190,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			ordered: subscribe.ordered,
 		};
 
-		let mut track = broadcast
-			.ok_or(Error::NotFound)?
-			.subscribe_track(track, subscriber)
-			.await?;
-
+		let mut track = broadcast.ok_or(Error::NotFound)?.subscribe_track(track, subscriber);
 		let delivery = track.delivery().current();
 
 		let info = lite::SubscribeOk {
@@ -217,6 +210,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let group = tokio::select! {
 				Some(group) = track.next_group().transpose() => group,
 				Some(res) = stream.reader.decode_maybe::<lite::SubscribeUpdate>().transpose() => {
+					println!("update = {:?}", res);
 					let update = res?;
 
 					let info = Delivery {
@@ -233,6 +227,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					continue;
 				},
 				Some(update) = delivery.changed() => {
+					println!("delivery = {:?}", update);
 					let info = lite::SubscribeOk {
 						priority: update.priority,
 						max_latency: update.max_latency,
@@ -245,7 +240,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					continue;
 
 				},
-				else => break,
+				else => {
+					println!("else");
+					break
+				}
 			}?;
 
 			tracing::debug!(subscribe = %subscribe.id, track = %track.name, group = %group.sequence, "serving group");
