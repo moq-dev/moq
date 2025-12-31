@@ -41,7 +41,8 @@ export const AudioSchema = z
 		renditions: z.record(z.string(), AudioConfigSchema),
 
 		// The priority of the audio track, relative to other tracks in the broadcast.
-		priority: z.number().int().min(0).max(255),
+		// TODO: Default is for backwards compatibility with old catalogs
+		priority: z.number().int().min(0).max(255).default(0),
 	})
 	.or(
 		// Backwards compatibility: transform old {track, config} format to new object format

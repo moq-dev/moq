@@ -33,8 +33,9 @@ pub struct Video {
 
 	/// The priority of the video track, relative to other tracks in the broadcast.
 	///
-	/// If not provided, the viewer is responsible for choosing the priority.
-	pub priority: Option<u8>,
+	/// TODO: Default is for backwards compatibility with old catalogs
+	#[serde(default)]
+	pub priority: u8,
 
 	/// Render the video at this size in pixels.
 	/// This is separate from the display aspect ratio because it does not require reinitialization.

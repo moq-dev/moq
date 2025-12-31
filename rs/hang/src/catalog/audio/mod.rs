@@ -27,8 +27,9 @@ pub struct Audio {
 
 	/// The priority of the audio track, relative to other tracks in the broadcast.
 	///
-	/// If not provided, the viewer is responsible for choosing the priority.
-	pub priority: Option<u8>,
+	/// TODO: Default is for backwards compatibility with old catalogs
+	#[serde(default)]
+	pub priority: u8,
 }
 
 impl Audio {

@@ -166,14 +166,14 @@ mod test {
 		let decoded = Catalog {
 			video: Video {
 				renditions: video_renditions,
-				priority: Some(1),
+				priority: 1,
 				display: None,
 				rotation: None,
 				flip: None,
 			},
 			audio: Audio {
 				renditions: audio_renditions,
-				priority: Some(2),
+				priority: 2,
 			},
 			..Default::default()
 		};
