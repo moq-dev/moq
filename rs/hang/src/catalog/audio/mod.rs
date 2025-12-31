@@ -39,10 +39,10 @@ impl Audio {
 
 	/// Create a new audio track with a configuration and generate a unique name.
 	pub fn create(&mut self, name: &str, config: AudioConfig) -> Track {
-		let mut index = self.renditions.len();
+		let mut index = 0;
 
 		loop {
-			let track = Track::from(format!("audio:{}{:x}", name, index));
+			let track = Track::from(format!("audio:{}:{}", name, index));
 			match self.renditions.entry(track.clone()) {
 				btree_map::Entry::Vacant(entry) => {
 					entry.insert(config);

@@ -40,7 +40,9 @@ export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
 // Reads a message with a varint size prefix.
 export async function decode<T>(reader: Reader, f: (r: Reader) => Promise<T>): Promise<T> {
 	const size = await reader.u53();
+	console.log("message size", size);
 	const data = await reader.read(size);
+	console.log("message data", data);
 
 	const limit = new Reader(undefined, data);
 	const msg = await f(limit);

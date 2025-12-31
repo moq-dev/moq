@@ -210,7 +210,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let group = tokio::select! {
 				Some(group) = track.next_group().transpose() => group,
 				Some(res) = stream.reader.decode_maybe::<lite::SubscribeUpdate>().transpose() => {
-					println!("update = {:?}", res);
 					let update = res?;
 
 					let info = Delivery {
@@ -227,7 +226,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					continue;
 				},
 				Some(update) = delivery.changed() => {
-					println!("delivery = {:?}", update);
 					let info = lite::SubscribeOk {
 						priority: update.priority,
 						max_latency: update.max_latency,
@@ -240,10 +238,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					continue;
 
 				},
-				else => {
-					println!("else");
-					break
-				}
+				else => break,
 			}?;
 
 			tracing::debug!(subscribe = %subscribe.id, track = %track.name, group = %group.sequence, "serving group");
@@ -301,9 +296,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			stream
-				.encode(&lite::Frame {
-					size: frame.size,
+				.encode(&lite::FrameHeader {
 					timestamp: frame.timestamp,
+					size: frame.size,
 				})
 				.await?;
 
@@ -318,10 +313,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 				};
 
-				match chunk? {
-					Some(mut chunk) => stream.write_all(&mut chunk).await?,
-					None => break,
-				}
+				let Some(mut chunk) = chunk? else {
+					break;
+				};
+				stream.write_all(&mut chunk).await?;
 			}
 		}
 

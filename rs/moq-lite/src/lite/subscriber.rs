@@ -231,8 +231,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// Wait until the priority/latency is updated
 				// This is the same result as `track.unused()`
 				max = track.subscribers().changed() => {
-					println!("max = {:?}", max);
-
 					// Cancel when there are no more subscribers.
 					let max = max.ok_or(Error::Cancel)?;
 					tracing::trace!(subscribe = %id, track = %track.name, ?max, "subscribe update");
@@ -248,8 +246,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				},
 				// Wait until the stream is closed
 				update = stream.reader.decode_maybe::<lite::SubscribeOk>() => {
-					println!("update = {:?}", update);
-
 					let Some(update) = update? else {break};
 					tracing::trace!(subscribe = %id, track = %track.name, ?update, "subscribe ok");
 
@@ -306,7 +302,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
 	) -> Result<(), Error> {
-		while let Some(frame) = stream.decode_maybe::<lite::Frame>().await? {
+		while let Some(frame) = stream.decode_maybe::<lite::FrameHeader>().await? {
 			let mut frame = group.create_frame(Frame {
 				timestamp: frame.timestamp,
 				size: frame.size,

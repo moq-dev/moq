@@ -24,10 +24,9 @@ impl State {
 			self.max_timestamp = timestamp;
 		}
 
-		if !new_group && !new_timestamp
-			&& timestamp + max_latency <= self.max_timestamp {
-				return Err(Error::Expired);
-			}
+		if !new_group && !new_timestamp && timestamp + max_latency <= self.max_timestamp {
+			return Err(Error::Expired);
+		}
 
 		Ok(new_group || new_timestamp)
 	}
@@ -100,7 +99,7 @@ impl ExpiresConsumer {
 			tokio::select! {
 				state = self
 				.state
-				.wait_for(|state| state.max_group >= group && state.max_timestamp + max_latency >= timestamp) => match state {
+				.wait_for(|state| state.max_group > group && state.max_timestamp + max_latency >= timestamp) => match state {
 					Ok(_) => return Error::Expired,
 					Err(_) => return Error::Cancel,
 				},
@@ -115,6 +114,6 @@ impl ExpiresConsumer {
 	pub fn is_expired(&self, group: u64, timestamp: Time) -> bool {
 		let max_latency = self.delivery.current().max_latency;
 		let state = self.state.borrow();
-		state.max_group >= group && state.max_timestamp + max_latency >= timestamp
+		state.max_group > group && state.max_timestamp + max_latency >= timestamp
 	}
 }
