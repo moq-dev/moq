@@ -1,4 +1,4 @@
-use crate::catalog::{AudioCodec, VideoCodec};
+use crate::{AudioCodec, VideoCodec};
 
 use serde::{Deserialize, Serialize};
 

@@ -151,7 +151,7 @@ impl Default for AV1 {
 mod test {
 	use std::str::FromStr;
 
-	use crate::catalog::VideoCodec;
+	use crate::VideoCodec;
 
 	use super::*;
 

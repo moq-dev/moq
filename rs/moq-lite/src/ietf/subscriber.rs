@@ -7,8 +7,8 @@ use crate::{
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId, Version},
 	model::BroadcastProducer,
-	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Time, Track,
-	TrackProducer,
+	Broadcast, Delivery, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
+	TrackProducer, TrackRequest,
 };
 
 use web_async::Lock;
@@ -30,6 +30,7 @@ struct State {
 
 struct TrackState {
 	producer: TrackProducer,
+	request: Option<TrackRequest>,
 	alias: Option<u64>,
 }
 
@@ -143,7 +144,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_subscribe_ok(&mut self, msg: ietf::SubscribeOk) -> Result<(), Error> {
 		// Save the track alias
 		let mut state = self.state.lock();
+
 		if let Some(subscribe) = state.subscribes.get_mut(&msg.request_id) {
+			// Respond that we got an okay.
+			let mut producer = subscribe.producer.clone();
+
+			// Update the track with information we learned from the network.
+			producer.delivery().update(Delivery {
+				priority: 0, // TODO petition to get publisher priority in SubscribeOk
+				max_latency: msg.delivery_timeout,
+				ordered: msg.group_order == GroupOrder::Ascending,
+			});
+			if let Some(request) = subscribe.request.take() {
+				request.respond(Ok(producer));
+			}
+
 			subscribe.alias = Some(msg.track_alias);
 			state.aliases.insert(msg.track_alias, msg.request_id);
 		}
@@ -158,6 +173,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track.producer.abort(Error::Cancel)?;
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
+			}
+
+			// TODO use the actual error message/code
+			if let Some(request) = track.request.take() {
+				request.respond(Err(Error::Cancel));
 			}
 		}
 
@@ -222,10 +242,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
-			let track = tokio::select! {
+			let request = tokio::select! {
 				_ = broadcast.unused() => break,
-				producer = broadcast.requested_track() => match producer {
-					Some(producer) => producer,
+				request = broadcast.requested_track() => match request {
+					Some(request) => request,
 					None => break,
 				},
 				_ = self.session.closed() => break,
@@ -234,11 +254,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let request_id = self.control.next_request_id().await?;
 			let mut this = self.clone();
 
+			let track = TrackProducer::new(request.info().clone(), Default::default());
+
 			let mut state = self.state.lock();
 			state.subscribes.insert(
 				request_id,
 				TrackState {
 					producer: track.clone(),
+					request: Some(request),
 					alias: None,
 				},
 			);
@@ -261,14 +284,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		broadcast: Path<'_>,
 		mut track: TrackProducer,
 	) -> Result<(), Error> {
+		let subscribers = track.subscribers().clone();
+		let max = subscribers.max().unwrap_or_default();
+
 		self.control.send(ietf::Subscribe {
 			request_id,
 			track_namespace: broadcast.to_owned(),
 			track_name: track.name.as_ref().into(),
-			subscriber_priority: track.meta().get().unwrap_or_default().priority,
-			group_order: GroupOrder::Descending,
+			subscriber_priority: max.priority,
+			group_order: max
+				.ordered
+				.then_some(GroupOrder::Ascending)
+				.unwrap_or(GroupOrder::Descending),
 			// we want largest group
 			filter_type: FilterType::LargestObject,
+			delivery_timeout: max.max_latency,
 		})?;
 
 		// TODO we should send a joining fetch, but it's annoying to implement.
@@ -431,10 +461,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		} else {
 			self.control.send(ietf::PublishOk {
 				request_id: msg.request_id,
-				forward: true,
 				subscriber_priority: 0,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
+				// How are you even supposed to use this?
+				delivery_timeout: msg.delivery_timeout,
 			})?;
 		}
 
@@ -448,12 +479,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
 
-		let track = broadcast.create_track(Track {
-			name: msg.track_name.to_string(),
+		let track = Track::from(msg.track_name.to_string());
+		let delivery = Delivery {
+			// TODO petition to get publisher priority in PublishOk
 			priority: 0,
-			// TODO Use delivery-timeout arg.
-			max_latency: Time::from_millis(100).unwrap(),
-		});
+			max_latency: msg.delivery_timeout,
+			ordered: msg.group_order == GroupOrder::Ascending,
+		};
+
+		let track = broadcast.create_track(track, delivery);
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
@@ -461,6 +495,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				entry.insert(TrackState {
 					producer: track.clone(),
 					alias: Some(msg.track_alias),
+					request: None,
 				});
 			}
 			Entry::Occupied(_) => return Err(Error::Duplicate),

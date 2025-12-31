@@ -6,13 +6,18 @@ use moq_lite as moq;
 
 /// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
 pub struct Aac {
-	broadcast: hang::BroadcastProducer,
-	track: Option<hang::TrackProducer>,
+	broadcast: moq_lite::BroadcastProducer,
+	catalog: hang::CatalogProducer,
+	track: Option<moq_lite::TrackProducer>,
 }
 
 impl Aac {
-	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
-		Self { broadcast, track: None }
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer) -> Self {
+		Self {
+			broadcast,
+			track: None,
+			catalog,
+		}
 	}
 
 	pub fn initialize<T: Buf>(&mut self, buf: &mut T) -> anyhow::Result<()> {
@@ -91,28 +96,26 @@ impl Aac {
 			(object_type, sample_rate, channel_count)
 		};
 
-		let track = moq::Track {
-			name: self.broadcast.track_name("audio"),
-			priority: 2,
-			max_latency: super::DEFAULT_MAX_LATENCY,
-		};
+		let mut catalog = self.catalog.lock();
 
-		let config = hang::catalog::AudioConfig {
-			codec: hang::catalog::AAC { profile }.into(),
+		let config = hang::AudioConfig {
+			codec: hang::AAC { profile }.into(),
 			sample_rate,
 			channel_count,
 			bitrate: None,
 			description: None,
 		};
 
-		tracing::debug!(name = %track.name, ?config, "starting track");
+		let track = catalog.audio.create("aac", config.clone());
+		tracing::info!(%track, ?config, "started track");
 
-		let producer = self.broadcast.create_track(track);
+		let delivery = moq::Delivery {
+			priority: 2,
+			max_latency: super::DEFAULT_MAX_LATENCY,
+			ordered: false,
+		};
 
-		let mut catalog = self.broadcast.catalog.lock();
-		let audio = catalog.insert_audio(producer.name.to_string(), config);
-		audio.priority = 2;
-
+		let producer = self.broadcast.create_track(track, delivery);
 		self.track = Some(producer.into());
 
 		Ok(())
@@ -128,13 +131,15 @@ impl Aac {
 			payload.push_chunk(buf.copy_to_bytes(buf.chunk().len()));
 		}
 
-		let frame = hang::Frame {
+		let container = hang::Container {
 			timestamp: pts,
-			keyframe: true,
 			payload,
 		};
 
-		track.write(frame)?;
+		// Each audio frame is a single group, because they are independent.
+		let mut group = track.append_group()?;
+		container.encode(&mut group)?;
+		group.close()?;
 
 		Ok(())
 	}
@@ -155,10 +160,11 @@ impl Aac {
 
 impl Drop for Aac {
 	fn drop(&mut self) {
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = %track.name, "ending track");
-			self.broadcast.catalog.lock().remove_audio(&track.name);
-		}
+		let Some(mut track) = self.track.take() else { return };
+		track.close().ok();
+
+		let config = self.catalog.lock().audio.remove(&track).unwrap();
+		tracing::debug!(track = %track.info(), ?config, "ended track");
 	}
 }
 

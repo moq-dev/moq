@@ -8,9 +8,10 @@ pub use av1::*;
 pub use codec::*;
 pub use h264::*;
 pub use h265::*;
+use moq_lite::Track;
 pub use vp9::*;
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map, BTreeMap};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -28,10 +29,12 @@ pub struct Video {
 	/// A map of track name to rendition configuration.
 	/// This is not an array in order for it to work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
-	pub renditions: BTreeMap<String, VideoConfig>,
+	pub renditions: BTreeMap<Track, VideoConfig>,
 
 	/// The priority of the video track, relative to other tracks in the broadcast.
-	pub priority: u8,
+	///
+	/// If not provided, the viewer is responsible for choosing the priority.
+	pub priority: Option<u8>,
 
 	/// Render the video at this size in pixels.
 	/// This is separate from the display aspect ratio because it does not require reinitialization.
@@ -47,6 +50,34 @@ pub struct Video {
 	/// Default: false
 	#[serde(default)]
 	pub flip: Option<bool>,
+}
+
+impl Video {
+	/// Don't serialize if there are no renditions.
+	pub fn is_empty(&self) -> bool {
+		self.renditions.is_empty()
+	}
+
+	/// Create a new video track with a configuration and generate a unique name.
+	pub fn create(&mut self, name: &str, config: VideoConfig) -> Track {
+		let mut index = self.renditions.len();
+
+		loop {
+			let track = Track::from(format!("video:{}{:x}", name, index));
+			match self.renditions.entry(track.clone()) {
+				btree_map::Entry::Vacant(entry) => {
+					entry.insert(config);
+					return track;
+				}
+				btree_map::Entry::Occupied(_) => index += 1,
+			}
+		}
+	}
+
+	/// Remove a video track from the catalog.
+	pub fn remove(&mut self, track: &Track) -> Option<VideoConfig> {
+		self.renditions.remove(track)
+	}
 }
 
 /// Display size for rendering video

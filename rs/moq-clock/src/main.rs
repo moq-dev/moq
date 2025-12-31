@@ -52,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
 	match config.role {
 		Command::Publish => {
 			let mut broadcast = moq_lite::BroadcastProducer::new();
-			let track = broadcast.create_track(config.track);
+			let track = broadcast.create_track(config.track, moq_lite::Delivery::default());
 			let clock = clock::Publisher::new(track);
 
 			let origin = moq_lite::OriginProducer::new();
@@ -90,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
 					Some(announce) = consumer.announced() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(&config.track);
+							let track = broadcast.subscribe_track(config.track.clone(), moq_lite::Delivery::default()).await?;
 							clock = Some(clock::Subscriber::new(track));
 						}
 						(path, None) => {

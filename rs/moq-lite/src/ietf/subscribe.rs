@@ -7,10 +7,17 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	coding::*,
 	ietf::{GroupOrder, Location, Message, Parameters, RequestId, Version},
-	Path,
+	Path, Time,
 };
 
 use super::namespace::{decode_namespace, encode_namespace};
+
+#[derive(Debug, Copy, Clone, IntoPrimitive, Eq, Hash, PartialEq)]
+#[repr(u64)]
+pub enum SubscribeParameter {
+	DeliveryTimeout = 0x2,
+	MaxCacheDuration = 0x4,
+}
 
 #[derive(Clone, Copy, Debug, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
@@ -43,6 +50,7 @@ pub struct Subscribe<'a> {
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
 	pub filter_type: FilterType,
+	pub delivery_timeout: Time,
 }
 
 impl<'a> Message for Subscribe<'a> {
@@ -76,14 +84,16 @@ impl<'a> Message for Subscribe<'a> {
 			FilterType::NextGroup | FilterType::LargestObject => {}
 		};
 
-		// Ignore parameters, who cares.
-		let _params = Parameters::decode(r, version)?;
+		let params = Parameters::decode(r, version)?;
+		let delivery_timeout = params.get_int(SubscribeParameter::DeliveryTimeout.into()).unwrap_or(0);
+		let delivery_timeout = Time::from_millis(delivery_timeout).map_err(|_| DecodeError::InvalidValue)?;
 
 		Ok(Self {
 			request_id,
 			track_namespace,
 			track_name,
 			subscriber_priority,
+			delivery_timeout,
 			group_order,
 			filter_type,
 		})
@@ -112,6 +122,8 @@ impl<'a> Message for Subscribe<'a> {
 pub struct SubscribeOk {
 	pub request_id: RequestId,
 	pub track_alias: u64,
+	pub delivery_timeout: Time,
+	pub group_order: GroupOrder,
 }
 
 impl Message for SubscribeOk {
@@ -120,10 +132,16 @@ impl Message for SubscribeOk {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
 		self.request_id.encode(w, version);
 		self.track_alias.encode(w, version);
-		0u64.encode(w, version); // expires = 0
-		GroupOrder::Descending.encode(w, version);
+		0u8.encode(w, version); // subscription expires
+		self.group_order.encode(w, version);
 		false.encode(w, version); // no content
-		0u8.encode(w, version); // no parameters
+
+		let mut params = Parameters::default();
+		params.set_int(
+			SubscribeParameter::DeliveryTimeout.into(),
+			self.delivery_timeout.as_millis() as u64,
+		);
+		params.encode(w, version);
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -135,8 +153,7 @@ impl Message for SubscribeOk {
 			return Err(DecodeError::Unsupported);
 		}
 
-		// Ignore group order, who cares.
-		let _group_order = u8::decode(r, version)?;
+		let group_order = GroupOrder::decode(r, version)?;
 
 		// TODO: We don't support largest group/object yet
 		if bool::decode(r, version)? {
@@ -144,12 +161,15 @@ impl Message for SubscribeOk {
 			let _object = u64::decode(r, version)?;
 		}
 
-		// Ignore parameters, who cares.
-		let _params = Parameters::decode(r, version)?;
+		let params = Parameters::decode(r, version)?;
+		let delivery_timeout = params.get_int(SubscribeParameter::DeliveryTimeout.into()).unwrap_or(0);
+		let delivery_timeout = Time::from_millis(delivery_timeout).map_err(|_| DecodeError::InvalidValue)?;
 
 		Ok(Self {
 			request_id,
 			track_alias,
+			delivery_timeout,
+			group_order,
 		})
 	}
 }
@@ -221,8 +241,7 @@ pub struct SubscribeUpdate {
 	pub start_location: Location,
 	pub end_group: u64,
 	pub subscriber_priority: u8,
-	pub forward: bool,
-	// pub parameters: Parameters,
+	pub delivery_timeout: Time,
 }
 
 impl Message for SubscribeUpdate {
@@ -234,8 +253,14 @@ impl Message for SubscribeUpdate {
 		self.start_location.encode(w, version);
 		self.end_group.encode(w, version);
 		self.subscriber_priority.encode(w, version);
-		self.forward.encode(w, version);
-		0u8.encode(w, version); // no parameters
+		true.encode(w, version); // forward
+
+		let mut params = Parameters::default();
+		params.set_int(
+			SubscribeParameter::DeliveryTimeout.into(),
+			self.delivery_timeout.as_millis() as u64,
+		);
+		params.encode(w, version);
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -245,7 +270,15 @@ impl Message for SubscribeUpdate {
 		let end_group = u64::decode(r, version)?;
 		let subscriber_priority = u8::decode(r, version)?;
 		let forward = bool::decode(r, version)?;
-		let _parameters = Parameters::decode(r, version)?;
+		if !forward {
+			return Err(DecodeError::Unsupported);
+		}
+
+		let parameters = Parameters::decode(r, version)?;
+		let delivery_timeout = parameters
+			.get_int(SubscribeParameter::DeliveryTimeout.into())
+			.unwrap_or(0);
+		let delivery_timeout = Time::from_millis(delivery_timeout).map_err(|_| DecodeError::InvalidValue)?;
 
 		Ok(Self {
 			request_id,
@@ -253,7 +286,7 @@ impl Message for SubscribeUpdate {
 			start_location,
 			end_group,
 			subscriber_priority,
-			forward,
+			delivery_timeout,
 		})
 	}
 }
@@ -283,6 +316,7 @@ mod tests {
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			filter_type: FilterType::LargestObject,
+			delivery_timeout: Time::from_millis(1000).unwrap(),
 		};
 
 		let encoded = encode_message(&msg);
@@ -292,6 +326,7 @@ mod tests {
 		assert_eq!(decoded.track_namespace.as_str(), "test");
 		assert_eq!(decoded.track_name, "video");
 		assert_eq!(decoded.subscriber_priority, 128);
+		assert_eq!(decoded.delivery_timeout, Time::from_millis(1000).unwrap());
 	}
 
 	#[test]
@@ -303,12 +338,14 @@ mod tests {
 			subscriber_priority: 255,
 			group_order: GroupOrder::Descending,
 			filter_type: FilterType::LargestObject,
+			delivery_timeout: Time::from_millis(1000).unwrap(),
 		};
 
 		let encoded = encode_message(&msg);
 		let decoded: Subscribe = decode_message(&encoded).unwrap();
 
 		assert_eq!(decoded.track_namespace.as_str(), "conference/room123");
+		assert_eq!(decoded.delivery_timeout, Time::from_millis(1000).unwrap());
 	}
 
 	#[test]
@@ -316,12 +353,17 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: RequestId(42),
 			track_alias: 42,
+			delivery_timeout: Time::from_millis(1000).unwrap(),
+			group_order: GroupOrder::Ascending,
 		};
 
 		let encoded = encode_message(&msg);
 		let decoded: SubscribeOk = decode_message(&encoded).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(42));
+		assert_eq!(decoded.track_alias, 42);
+		assert_eq!(decoded.delivery_timeout, Time::from_millis(1000).unwrap());
+		assert_eq!(decoded.group_order, GroupOrder::Ascending);
 	}
 
 	#[test]

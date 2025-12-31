@@ -11,7 +11,7 @@ use crate::{
 		Version,
 	},
 	model::GroupConsumer,
-	AsPath, BroadcastConsumer, Error, OriginConsumer, OriginProducer, Track, TrackMeta,
+	AsPath, BroadcastConsumer, Delivery, Error, OriginConsumer, OriginProducer, Track,
 };
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -185,20 +185,33 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
-		let track = Track {
-			name: subscribe.track.to_string(),
+		let track = Track::from(subscribe.track.to_string());
+
+		let subscriber = Delivery {
 			priority: subscribe.priority,
 			max_latency: subscribe.max_latency,
+			ordered: subscribe.ordered,
 		};
 
-		let mut track = broadcast.ok_or(Error::NotFound)?.subscribe_track(track);
+		let mut track = broadcast
+			.ok_or(Error::NotFound)?
+			.subscribe_track(track, subscriber)
+			.await?;
+
+		let delivery = track.delivery().current();
 
 		let info = lite::SubscribeOk {
-			// NOTE: this is not used in any modern versions.
-			priority: subscribe.priority,
+			priority: delivery.priority,
+			max_latency: delivery.max_latency,
+			ordered: delivery.ordered,
 		};
 
+		tracing::trace!(subscribe = %subscribe.id, track = %track.name, ?info, "subscribed ok");
+
 		stream.writer.encode(&info).await?;
+
+		// Just to get around ownership issues.
+		let mut delivery = track.delivery().clone();
 
 		loop {
 			let group = tokio::select! {
@@ -206,17 +219,31 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				Some(res) = stream.reader.decode_maybe::<lite::SubscribeUpdate>().transpose() => {
 					let update = res?;
 
-					let meta = TrackMeta {
+					let info = Delivery {
 						priority: update.priority,
 						max_latency: update.max_latency,
+						ordered: update.ordered,
 					};
 
-					tracing::trace!(subscribe = %subscribe.id, track = %track.name, ?meta, "subscribed update");
-					track.meta().set(meta);
+					tracing::trace!(subscribe = %subscribe.id, track = %track.name, ?info, "subscribed update");
+					track.subscriber().update(info);
 
-					// TODO we should update the priority of all outstanding groups.
+					// TODO update the priority of all outstanding groups.
 
 					continue;
+				},
+				Some(update) = delivery.changed() => {
+					let info = lite::SubscribeOk {
+						priority: update.priority,
+						max_latency: update.max_latency,
+						ordered: update.ordered,
+					};
+
+					tracing::trace!(subscribe = %subscribe.id, track = %track.name, ?info, "subscribed ok");
+					stream.writer.encode(&info).await?;
+
+					continue;
+
 				},
 				else => break,
 			}?;
@@ -228,7 +255,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				sequence: group.sequence,
 			};
 
-			let priority = priority.insert(track.meta().get().priority, group.sequence);
+			// TODO factor in ordered.
+			let priority = priority.insert(track.subscriber().current().priority, group.sequence);
 
 			// Run the group in the background until it's closed or expires.
 			web_async::spawn(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));

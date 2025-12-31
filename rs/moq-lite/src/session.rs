@@ -39,8 +39,8 @@ impl<S: web_transport_trait::Session> Session<S> {
 		let mut stream = Stream::open(&session, setup::ServerKind::Ietf14).await?;
 
 		let mut parameters = ietf::Parameters::default();
-		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
-		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+		parameters.set_int(ietf::SetupParameter::MaxRequestId.into(), u32::MAX as u64);
+		parameters.set_bytes(ietf::SetupParameter::Implementation.into(), b"moq-lite-rs".to_vec());
 		let parameters = parameters.encode_bytes(());
 
 		let client = setup::Client {
@@ -66,8 +66,10 @@ impl<S: web_transport_trait::Session> Session<S> {
 		} else if let Ok(version) = ietf::Version::try_from(server.version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
-			let request_id_max =
-				ietf::RequestId(parameters.get_varint(ietf::ParameterVarInt::MaxRequestId).unwrap_or(0));
+			let request_id_max = parameters
+				.get_int(ietf::SetupParameter::MaxRequestId.into())
+				.map(ietf::RequestId)
+				.unwrap_or_default();
 
 			let stream = stream.with_version(version);
 			ietf::start(
@@ -115,8 +117,8 @@ impl<S: web_transport_trait::Session> Session<S> {
 		// Only encode parameters if we're using the IETF draft because it has max_request_id
 		let parameters = if ietf::Version::try_from(version).is_ok() && client.kind == setup::ClientKind::Ietf14 {
 			let mut parameters = ietf::Parameters::default();
-			parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
-			parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+			parameters.set_int(ietf::SetupParameter::MaxRequestId.into(), u32::MAX as u64);
+			parameters.set_bytes(ietf::SetupParameter::Implementation.into(), b"moq-lite-rs".to_vec());
 			parameters.encode_bytes(())
 		} else {
 			lite::Parameters::default().encode_bytes(())
@@ -136,8 +138,10 @@ impl<S: web_transport_trait::Session> Session<S> {
 		} else if let Ok(version) = ietf::Version::try_from(version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
-			let request_id_max =
-				ietf::RequestId(parameters.get_varint(ietf::ParameterVarInt::MaxRequestId).unwrap_or(0));
+			let request_id_max = parameters
+				.get_int(ietf::SetupParameter::MaxRequestId.into())
+				.map(ietf::RequestId)
+				.unwrap_or_default();
 
 			let stream = stream.with_version(version);
 			ietf::start(

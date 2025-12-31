@@ -8,7 +8,7 @@ use crate::{
 	coding::Writer,
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId, Version},
 	model::GroupConsumer,
-	Error, Origin, OriginConsumer, Time, Track, TrackConsumer,
+	Delivery, Error, Origin, OriginConsumer, Time, TrackConsumer,
 };
 
 #[derive(Clone)]
@@ -91,23 +91,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		};
 
-		let track = Track {
-			name: msg.track_name.to_string(),
+		let track = msg.track_name.to_string();
+
+		let delivery = Delivery {
 			priority: msg.subscriber_priority,
 			// TODO Delivery Timeout
 			max_latency: Time::from_millis(100).unwrap(),
+			// TODO Delivery order
+			ordered: false,
 		};
-
-		let track = broadcast.subscribe_track(track);
 
 		let (tx, rx) = oneshot::channel();
 		let mut subscribes = self.subscribes.lock();
 		subscribes.insert(request_id, tx);
-
-		self.control.send(ietf::SubscribeOk {
-			request_id,
-			track_alias: request_id.0, // NOTE: using track alias as request id for now
-		})?;
 
 		let session = self.session.clone();
 		let control = self.control.clone();
@@ -116,25 +112,49 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let version = self.version;
 
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_track(session, track, request_id, rx, version).await {
-				control
-					.send(ietf::PublishDone {
+			match broadcast.subscribe_track(track, delivery).await {
+				Ok(mut track) => {
+					let delivery = track.delivery().current();
+
+					control
+						.send(ietf::SubscribeOk {
+							request_id,
+							track_alias: request_id.0, // NOTE: using track alias as request id for now
+							delivery_timeout: delivery.max_latency,
+							group_order: delivery
+								.ordered
+								.then_some(GroupOrder::Ascending)
+								.unwrap_or(GroupOrder::Descending),
+						})
+						.ok();
+
+					match Self::run_track(session, track, request_id, rx, version).await {
+						Err(err) => control
+							.send(ietf::PublishDone {
+								request_id,
+								status_code: 500,
+								stream_count: 0, // TODO send the correct value if we want the peer to block.
+								reason_phrase: err.to_string().into(),
+							})
+							.ok(),
+						Ok(_) => control
+							.send(ietf::PublishDone {
+								request_id,
+								status_code: 200,
+								stream_count: 0, // TODO send the correct value if we want the peer to block.
+								reason_phrase: "OK".into(),
+							})
+							.ok(),
+					}
+				}
+				Err(err) => control
+					.send(ietf::SubscribeError {
 						request_id,
-						status_code: 500,
-						stream_count: 0, // TODO send the correct value if we want the peer to block.
+						error_code: 500,
 						reason_phrase: err.to_string().into(),
 					})
-					.ok();
-			} else {
-				control
-					.send(ietf::PublishDone {
-						request_id,
-						status_code: 200,
-						stream_count: 0, // TODO send the correct value if we want the peer to block.
-						reason_phrase: "OK".into(),
-					})
-					.ok();
-			}
+					.ok(),
+			};
 
 			subscribes.lock().remove(&request_id);
 		});
@@ -215,7 +235,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let handle = Box::pin(Self::run_group(
 				session.clone(),
 				msg,
-				track.meta().get().priority,
+				track.subscriber().current().priority,
 				group,
 				version,
 			));

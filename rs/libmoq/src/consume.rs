@@ -1,16 +1,14 @@
 use std::ffi::c_char;
 
-use hang::TrackConsumer;
-use moq_lite::coding::Buf;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
 use crate::{moq_audio_config, moq_frame, moq_video_config, Error, Id, NonZeroSlab, State};
 
 struct ConsumeCatalog {
-	broadcast: hang::BroadcastConsumer,
+	broadcast: moq_lite::BroadcastConsumer,
 
-	catalog: hang::catalog::Catalog,
+	catalog: hang::Catalog,
 
 	/// We need to store the codec information on the heap unfortunately.
 	audio_codec: Vec<String>,
@@ -20,7 +18,7 @@ struct ConsumeCatalog {
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
-	broadcast: NonZeroSlab<hang::BroadcastConsumer>,
+	broadcast: NonZeroSlab<moq_lite::BroadcastConsumer>,
 
 	/// Active catalog consumers and their broadcast references.
 	catalog: NonZeroSlab<ConsumeCatalog>,
@@ -35,11 +33,11 @@ pub struct Consume {
 	video_task: NonZeroSlab<oneshot::Sender<()>>,
 
 	/// Buffered frames ready for consumption.
-	frame: NonZeroSlab<hang::Frame>,
+	frame: NonZeroSlab<(hang::Container, bool)>,
 }
 
 impl Consume {
-	pub fn start(&mut self, broadcast: hang::BroadcastConsumer) -> Id {
+	pub fn start(&mut self, broadcast: moq_lite::BroadcastConsumer) -> Id {
 		self.broadcast.insert(broadcast)
 	}
 
@@ -62,32 +60,24 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_catalog(mut broadcast: hang::BroadcastConsumer, on_catalog: &mut OnStatus) -> Result<(), Error> {
-		while let Some(catalog) = broadcast.catalog.next().await? {
+	async fn run_catalog(broadcast: moq_lite::BroadcastConsumer, on_catalog: &mut OnStatus) -> Result<(), Error> {
+		let mut catalog = hang::CatalogConsumer::new(broadcast.clone());
+
+		while let Some(catalog) = catalog.next().await? {
 			// Unfortunately we need to store the codec information on the heap.
 			let audio_codec = catalog
 				.audio
-				.as_ref()
-				.map(|audio| {
-					audio
-						.renditions
-						.values()
-						.map(|config| config.codec.to_string())
-						.collect()
-				})
-				.unwrap_or_default();
+				.renditions
+				.values()
+				.map(|config| config.codec.to_string())
+				.collect();
 
 			let video_codec = catalog
 				.video
-				.as_ref()
-				.map(|video| {
-					video
-						.renditions
-						.values()
-						.map(|config| config.codec.to_string())
-						.collect()
-				})
-				.unwrap_or_default();
+				.renditions
+				.values()
+				.map(|config| config.codec.to_string())
+				.collect();
 
 			let catalog = ConsumeCatalog {
 				broadcast: broadcast.clone(),
@@ -108,13 +98,18 @@ impl Consume {
 	pub fn video_config(&mut self, catalog: Id, index: usize, dst: &mut moq_video_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
 
-		let video = consume.catalog.video.as_ref().ok_or(Error::NoIndex)?;
-		let (rendition, config) = video.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
+		let (rendition, config) = consume
+			.catalog
+			.video
+			.renditions
+			.iter()
+			.nth(index)
+			.ok_or(Error::NoIndex)?;
 		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
 
 		*dst = moq_video_config {
 			name: rendition.as_str().as_ptr() as *const c_char,
-			name_len: rendition.len(),
+			name_len: rendition.as_str().len(),
 			codec: codec.as_str().as_ptr() as *const c_char,
 			codec_len: codec.len(),
 			description: config
@@ -141,13 +136,18 @@ impl Consume {
 	pub fn audio_config(&mut self, catalog: Id, index: usize, dst: &mut moq_audio_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
 
-		let audio = consume.catalog.audio.as_ref().ok_or(Error::NoIndex)?;
-		let (rendition, config) = audio.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
+		let (rendition, config) = consume
+			.catalog
+			.audio
+			.renditions
+			.iter()
+			.nth(index)
+			.ok_or(Error::NoIndex)?;
 		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
 
 		*dst = moq_audio_config {
 			name: rendition.as_str().as_ptr() as *const c_char,
-			name_len: rendition.len(),
+			name_len: rendition.as_str().len(),
 			codec: codec.as_str().as_ptr() as *const c_char,
 			codec_len: codec.len(),
 			description: config
@@ -177,23 +177,28 @@ impl Consume {
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
 		let broadcast = consume.broadcast.clone();
-		let video = consume.catalog.video.as_ref().ok_or(Error::NotFound)?;
-		let rendition = video.renditions.keys().nth(index).ok_or(Error::NotFound)?;
+		let rendition = consume
+			.catalog
+			.video
+			.renditions
+			.keys()
+			.nth(index)
+			.ok_or(Error::NoIndex)?
+			.clone();
 
-		let track = broadcast
-			.subscribe_track(moq_lite::Track {
-				name: rendition.clone(),
-				priority: video.priority,
-				max_latency,
-			})
-			.into();
+		// TODO expose all of these via the C API
+		let delivery = moq_lite::Delivery {
+			max_latency,
+			priority: consume.catalog.video.priority.unwrap_or_default(),
+			ordered: false,
+		};
 
 		let channel = oneshot::channel();
 		let id = self.video_task.insert(channel.0);
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(track, &mut on_frame) => res,
+				res = Self::run_track(broadcast, rendition, delivery, &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_frame.call(res);
@@ -214,23 +219,28 @@ impl Consume {
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
 		let broadcast = consume.broadcast.clone();
-		let audio = consume.catalog.audio.as_ref().ok_or(Error::NotFound)?;
-		let rendition = audio.renditions.keys().nth(index).ok_or(Error::NotFound)?;
+		let rendition = consume
+			.catalog
+			.audio
+			.renditions
+			.keys()
+			.nth(index)
+			.ok_or(Error::NoIndex)?
+			.clone();
 
-		let track = broadcast
-			.subscribe_track(moq_lite::Track {
-				name: rendition.clone(),
-				priority: audio.priority,
-				max_latency,
-			})
-			.into();
+		// TODO expose all of these via the C API
+		let delivery = moq_lite::Delivery {
+			max_latency,
+			priority: consume.catalog.audio.priority.unwrap_or_default(),
+			ordered: false,
+		};
 
 		let channel = oneshot::channel();
 		let id = self.audio_task.insert(channel.0);
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(track, &mut on_frame) => res,
+				res = Self::run_track(broadcast, rendition, delivery, &mut on_frame) => res,
 				_ = channel.1 => Ok(()),
 			};
 			on_frame.call(res);
@@ -242,30 +252,30 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_track(mut track: TrackConsumer, on_frame: &mut OnStatus) -> Result<(), Error> {
-		while let Some(mut frame) = track.read_frame().await? {
-			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
-			let mut new_payload = hang::BufList::new();
-			new_payload.push_chunk(if frame.payload.num_chunks() == 1 {
-				// We can avoid allocating
-				frame.payload.get_chunk(0).expect("frame has zero chunks").clone()
-			} else {
-				// We need to allocate
-				frame.payload.copy_to_bytes(frame.payload.num_bytes())
-			});
+	async fn run_track(
+		broadcast: moq_lite::BroadcastConsumer,
+		track: moq_lite::Track,
+		delivery: moq_lite::Delivery,
+		on_frame: &mut OnStatus,
+	) -> Result<(), Error> {
+		let mut track = broadcast.subscribe_track(track, delivery).await?.ordered();
 
-			let new_frame = hang::Frame {
-				payload: new_payload,
-				timestamp: frame.timestamp,
-				keyframe: frame.keyframe,
+		loop {
+			let Some(mut group) = track.next_group().await? else {
+				return Ok(());
 			};
 
-			// Important: Don't hold the mutex during this callback.
-			let id = State::lock().consume.frame.insert(new_frame);
-			on_frame.call(Ok(id));
-		}
+			let mut keyframe = true;
 
-		Ok(())
+			// NOTE: We ignore errors for frames because the group can be aborted/expired at any time.
+			while let Ok(Some(frame)) = hang::Container::decode(&mut group).await {
+				// Important: Don't hold the mutex during this callback.
+				let id = State::lock().consume.frame.insert((frame, keyframe));
+				on_frame.call(Ok(id));
+
+				keyframe = false;
+			}
+		}
 	}
 
 	pub fn audio_close(&mut self, track: Id) -> Result<(), Error> {
@@ -280,14 +290,14 @@ impl Consume {
 
 	// NOTE: You're supposed to call this multiple times to get all of the chunks.
 	pub fn frame_chunk(&self, frame: Id, index: usize, dst: &mut moq_frame) -> Result<(), Error> {
-		let frame = self.frame.get(frame).ok_or(Error::NotFound)?;
+		let (frame, keyframe) = self.frame.get(frame).ok_or(Error::NotFound)?;
 		let chunk = frame.payload.get_chunk(index).ok_or(Error::NoIndex)?;
 
 		*dst = moq_frame {
 			payload: chunk.as_ptr(),
 			payload_size: chunk.len(),
 			timestamp_us: frame.timestamp.as_micros(),
-			keyframe: frame.keyframe,
+			keyframe: *keyframe,
 		};
 
 		Ok(())

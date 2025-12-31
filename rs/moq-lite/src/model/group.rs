@@ -38,7 +38,7 @@ struct GroupState {
 	// Whether the group is closed
 	closed: Option<Result<()>>,
 
-	// The maximum timestamp of the frames in the group
+	// The maximum timestamp of the frames in the group.
 	max_timestamp: Option<Time>,
 }
 
@@ -95,19 +95,11 @@ impl fmt::Debug for GroupProducer {
 }
 
 impl GroupProducer {
-	pub fn new(info: Group) -> Self {
+	pub fn new(info: Group, expires: ExpiresProducer) -> Self {
 		Self {
 			info,
 			state: Default::default(),
-			expires: Default::default(),
-		}
-	}
-
-	pub(super) fn new_expires(info: Group, expires: ExpiresProducer) -> Self {
-		Self {
-			info,
-			state: Default::default(),
-			expires: expires,
+			expires,
 		}
 	}
 
@@ -197,12 +189,6 @@ impl GroupProducer {
 	}
 }
 
-impl From<Group> for GroupProducer {
-	fn from(info: Group) -> Self {
-		GroupProducer::new(info)
-	}
-}
-
 impl Deref for GroupProducer {
 	type Target = Group;
 
@@ -277,10 +263,12 @@ impl GroupConsumer {
 		let max_timestamp = self.state.borrow().max_timestamp;
 
 		let state = tokio::select! {
-			state = self
-			.state
-			.wait_for(|state| self.index < state.frames.len() || state.closed.is_some()) => state,
-			err = self.expires.expired(self.info.sequence, max_timestamp.unwrap_or_default()), if max_timestamp.is_some() => return Err(err),
+			// Wait until a new frame.
+			state = self.state.wait_for(|state| self.index < state.frames.len() || state.closed.is_some()) => state,
+			// Or wait until the maximum timestamp in the group is expired.
+			err = self.expires.wait_expired(self.info.sequence, max_timestamp.unwrap_or_default()), if max_timestamp.is_some() => return Err(err),
+			// NOTE: We don't have to wait for a new maximum, because it will satisfy the wait for the next frame.
+
 		};
 
 		let state = state.map_err(|_| Error::Cancel)?;
@@ -299,6 +287,16 @@ impl GroupConsumer {
 			Ok(state) => state.closed.clone().unwrap(),
 			Err(_) => Err(Error::Cancel),
 		}
+	}
+
+	/// Returns the first timestamp of a frame in the group, once it is available.
+	pub async fn timestamp(&self) -> Result<Time> {
+		self.state
+			.clone()
+			.wait_for(|state| state.frames.len() > 0)
+			.await
+			.map_err(|_| Error::Cancel)?;
+		Ok(self.state.borrow().frames[0].timestamp)
 	}
 }
 

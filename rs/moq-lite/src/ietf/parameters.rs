@@ -1,40 +1,18 @@
 use std::collections::{hash_map, HashMap};
 
-use num_enum::{FromPrimitive, IntoPrimitive};
-
 use crate::coding::*;
 
 const MAX_PARAMS: u64 = 64;
 
-#[derive(Debug, Copy, Clone, FromPrimitive, IntoPrimitive, Eq, Hash, PartialEq)]
-#[repr(u64)]
-pub enum ParameterVarInt {
-	MaxRequestId = 2,
-	MaxAuthTokenCacheSize = 4,
-	#[num_enum(catch_all)]
-	Unknown(u64),
-}
-
-#[derive(Debug, Copy, Clone, FromPrimitive, IntoPrimitive, Eq, Hash, PartialEq)]
-#[repr(u64)]
-pub enum ParameterBytes {
-	Path = 1,
-	AuthorizationToken = 3,
-	Authority = 5,
-	Implementation = 7,
-	#[num_enum(catch_all)]
-	Unknown(u64),
-}
-
 #[derive(Default, Debug, Clone)]
 pub struct Parameters {
-	vars: HashMap<ParameterVarInt, u64>,
-	bytes: HashMap<ParameterBytes, Vec<u8>>,
+	ints: HashMap<u64, u64>,
+	bytes: HashMap<u64, Vec<u8>>,
 }
 
 impl<V: Clone> Decode<V> for Parameters {
 	fn decode<R: bytes::Buf>(mut r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let mut vars = HashMap::new();
+		let mut ints = HashMap::new();
 		let mut bytes = HashMap::new();
 
 		// I hate this encoding so much; let me encode my role and get on with my life.
@@ -48,13 +26,11 @@ impl<V: Clone> Decode<V> for Parameters {
 			let kind = u64::decode(r, version.clone())?;
 
 			if kind % 2 == 0 {
-				let kind = ParameterVarInt::from(kind);
-				match vars.entry(kind) {
+				match ints.entry(kind) {
 					hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
 					hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version.clone())?),
 				};
 			} else {
-				let kind = ParameterBytes::from(kind);
 				match bytes.entry(kind) {
 					hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
 					hash_map::Entry::Vacant(entry) => entry.insert(Vec::<u8>::decode(&mut r, version.clone())?),
@@ -62,40 +38,44 @@ impl<V: Clone> Decode<V> for Parameters {
 			}
 		}
 
-		Ok(Parameters { vars, bytes })
+		Ok(Parameters { ints, bytes })
 	}
 }
 
 impl<V: Clone> Encode<V> for Parameters {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		(self.vars.len() + self.bytes.len()).encode(w, version.clone());
+		(self.ints.len() + self.bytes.len()).encode(w, version.clone());
 
-		for (kind, value) in self.vars.iter() {
-			u64::from(*kind).encode(w, version.clone());
+		for (kind, value) in self.ints.iter() {
+			kind.encode(w, version.clone());
 			value.encode(w, version.clone());
 		}
 
 		for (kind, value) in self.bytes.iter() {
-			u64::from(*kind).encode(w, version.clone());
+			kind.encode(w, version.clone());
 			value.encode(w, version.clone());
 		}
 	}
 }
 
 impl Parameters {
-	pub fn get_varint(&self, kind: ParameterVarInt) -> Option<u64> {
-		self.vars.get(&kind).copied()
+	pub fn get_int(&self, kind: u64) -> Option<u64> {
+		assert!(kind % 2 == 0);
+		self.ints.get(&kind).copied()
 	}
 
-	pub fn set_varint(&mut self, kind: ParameterVarInt, value: u64) {
-		self.vars.insert(kind, value);
+	pub fn set_int(&mut self, kind: u64, value: u64) {
+		assert!(kind % 2 == 0);
+		self.ints.insert(kind, value);
 	}
 
-	pub fn get_bytes(&self, kind: ParameterBytes) -> Option<&[u8]> {
+	pub fn get_bytes(&self, kind: u64) -> Option<&[u8]> {
+		assert!(kind % 2 != 0);
 		self.bytes.get(&kind).map(|v| v.as_slice())
 	}
 
-	pub fn set_bytes(&mut self, kind: ParameterBytes, value: Vec<u8>) {
+	pub fn set_bytes(&mut self, kind: u64, value: Vec<u8>) {
+		assert!(kind % 2 != 0);
 		self.bytes.insert(kind, value);
 	}
 }

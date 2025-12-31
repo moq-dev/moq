@@ -42,21 +42,73 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 	session.closed().await.map_err(Into::into)
 }
 
+// Produce a broadcast and publish it to the origin.
+async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
+	// Create and publish a broadcast to the origin.
+	let mut broadcast = moq_lite::Broadcast::produce();
+
+	// Create the track and get a producer handle.
+	let mut track = create_track(&mut broadcast.producer);
+
+	// NOTE: The path is empty because we're using the URL to scope the broadcast.
+	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
+	origin.publish_broadcast("", broadcast.consumer);
+
+	// Create a group of frames.
+	// Each group must start with a keyframe.
+	let mut group = track.append_group()?;
+
+	// Encode a simple container that consists of a timestamp and a payload.
+	// NOTE: This will be removed in the future; it's for backwards compatibility.
+	hang::Container {
+		timestamp: moq_lite::Time::from_secs(1).unwrap(),
+		payload: Bytes::from_static(b"keyframe NAL data").into(),
+	}
+	.encode(&mut group)?;
+
+	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+	hang::Container {
+		timestamp: moq_lite::Time::from_secs(2).unwrap(),
+		payload: Bytes::from_static(b"delta NAL data").into(),
+	}
+	.encode(&mut group)?;
+
+	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+	// You can create a new group for each keyframe.
+	group.close()?;
+	let mut group = track.append_group()?;
+
+	hang::Container {
+		timestamp: moq_lite::Time::from_secs(3).unwrap(),
+		payload: Bytes::from_static(b"keyframe NAL data").into(),
+	}
+	.encode(&mut group)?;
+
+	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+	// You can also abort a group if you want to abandon delivery immediately.
+	group.abort(moq_lite::Error::Expired)?;
+
+	Ok(())
+}
+
 // Create a video track with a catalog that describes it.
+//
 // The catalog can contain multiple tracks, used by the viewer to choose the best track.
-fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProducer {
-	// Basic information about the video track.
-	let video_track = moq_lite::Track {
-		name: "video".to_string(),
-		priority: 1, // Video typically has lower priority than audio
-		// You can configure the amount of time to keep old groups in cache.
-		max_latency: moq_lite::Time::from_secs(10).unwrap(),
-	};
+fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> moq_lite::TrackProducer {
+	// We also need a catalog to describe our tracks.
+	// NOTE: You would reuse this for all tracks; we're creating a new one here for simplicity.
+	let mut catalog = hang::CatalogProducer::new(broadcast.clone());
+
+	// Once we unlock (drop) the catalog, it will be published to the broadcast.
+	let mut catalog = catalog.lock();
 
 	// Example video configuration
 	// In a real application, you would get this from the encoder
-	let video_config = hang::catalog::VideoConfig {
-		codec: hang::catalog::H264 {
+	let config = hang::VideoConfig {
+		codec: hang::H264 {
 			profile: 0x4D, // Main profile
 			constraints: 0,
 			level: 0x28,  // Level 4.0
@@ -76,72 +128,20 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 		optimize_for_latency: None,
 	};
 
-	// Create a map of video renditions
-	// Multiple renditions allow the viewer to choose based on their capabilities
-	let mut renditions = std::collections::BTreeMap::new();
-	renditions.insert(video_track.name.clone(), video_config);
+	// This is a helper that creates a unique track name and adds it to the catalog.
+	// You can also set `catalog.video` fields directly.
+	let track = catalog.video.create("example", config);
 
-	// Create the video catalog entry with the renditions
-	let video = hang::catalog::Video {
-		renditions,
+	// We also need some details on how to deliver the track over the network.
+	let delivery = moq_lite::Delivery {
+		// Video typically has lower priority than audio; we'll try to transmit it later
 		priority: 1,
-		display: None,
-		rotation: None,
-		flip: None,
+		// You can configure the amount of time to keep old groups in cache.
+		max_latency: moq_lite::Time::from_secs(10).unwrap(),
+		// You can even tell the CDN if it should try to delver in group order.
+		ordered: false,
 	};
 
-	// Create a producer/consumer pair for the catalog.
-	// This JSON encodes the catalog as a "catalog.json" track.
-	let mut catalog = hang::catalog::CatalogProducer::default();
-	catalog.lock().video = Some(video);
-
-	// Publish the catalog track to the broadcast.
-	broadcast.publish_track(catalog.track());
-
-	// Actually create the media track now.
-	let track = broadcast.create_track(video_track);
-
-	// Wrap the track in a hang:TrackProducer for convenience methods.
-	track.into()
-}
-
-// Produce a broadcast and publish it to the origin.
-async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
-	// Create and publish a broadcast to the origin.
-	let mut broadcast = moq_lite::Broadcast::produce();
-	let mut track = create_track(&mut broadcast.producer);
-
-	// NOTE: The path is empty because we're using the URL to scope the broadcast.
-	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
-	origin.publish_broadcast("", broadcast.consumer);
-
-	// Not real frames of course.
-	track.write(hang::Frame {
-		keyframe: true,
-		timestamp: moq_lite::Time::from_secs(1).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data").into(),
-	})?;
-
-	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-	track.write(hang::Frame {
-		keyframe: false,
-		timestamp: moq_lite::Time::from_secs(2).unwrap(),
-		payload: Bytes::from_static(b"delta NAL data").into(),
-	})?;
-
-	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-	// Automatically creates a new group if you write a new keyframe.
-
-	track.write(hang::Frame {
-		keyframe: true,
-		timestamp: moq_lite::Time::from_secs(3).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data").into(),
-	})?;
-
-	// Sleep before exiting and closing the broadcast.
-	tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-	Ok(())
+	// Actually create the media track now and return it
+	broadcast.create_track(track, delivery)
 }

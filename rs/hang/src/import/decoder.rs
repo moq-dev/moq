@@ -62,11 +62,11 @@ pub struct Decoder {
 
 impl Decoder {
 	/// Create a new decoder with the given format.
-	pub fn new(broadcast: hang::BroadcastProducer, format: DecoderFormat) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer, format: DecoderFormat) -> Self {
 		let decoder = match format {
-			DecoderFormat::Avc3 => Avc3::new(broadcast).into(),
-			DecoderFormat::Fmp4 => Box::new(Fmp4::new(broadcast)).into(),
-			DecoderFormat::Aac => Aac::new(broadcast).into(),
+			DecoderFormat::Avc3 => Avc3::new(broadcast, catalog).into(),
+			DecoderFormat::Fmp4 => Box::new(Fmp4::new(broadcast, catalog)).into(),
+			DecoderFormat::Aac => Aac::new(broadcast, catalog).into(),
 		};
 
 		Self { decoder }
