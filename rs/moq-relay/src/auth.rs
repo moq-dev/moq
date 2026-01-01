@@ -282,11 +282,8 @@ mod tests {
 	fn test_anonymous_access_with_public_path() -> anyhow::Result<()> {
 		// Test anonymous access to /anon path
 		let auth = Auth::new(AuthConfig {
-			key: None,
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
 			public: Some("anon".to_string()),
+			..Default::default()
 		})?;
 
 		// Should succeed for anonymous path
@@ -308,11 +305,8 @@ mod tests {
 	fn test_anonymous_access_fully_public() -> anyhow::Result<()> {
 		// Test fully public access (public = "")
 		let auth = Auth::new(AuthConfig {
-			key: None,
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
 			public: Some("".to_string()),
+			..Default::default()
 		})?;
 
 		// Should succeed for any path
@@ -328,11 +322,8 @@ mod tests {
 	fn test_anonymous_access_denied_wrong_prefix() -> anyhow::Result<()> {
 		// Test anonymous access denied for wrong prefix
 		let auth = Auth::new(AuthConfig {
-			key: None,
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
 			public: Some("anon".to_string()),
+			..Default::default()
 		})?;
 
 		// Should fail for non-anonymous path
@@ -347,10 +338,7 @@ mod tests {
 		let (key_file, _) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Should fail when no token and no public path
@@ -363,11 +351,8 @@ mod tests {
 	#[test]
 	fn test_token_provided_but_no_key_configured() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			key: None,
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
 			public: Some("anon".to_string()),
+			..Default::default()
 		})?;
 
 		// Should fail when token provided but no key configured
@@ -382,10 +367,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a token with basic permissions
@@ -411,10 +393,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a token for room/123
@@ -438,10 +417,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a token with specific pub/sub restrictions
@@ -467,10 +443,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a read-only token (no publish permissions)
@@ -494,10 +467,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a write-only token (no subscribe permissions)
@@ -521,10 +491,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a token with root at room/123 and unrestricted pub/sub
@@ -553,10 +520,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Token allows publishing only to alice/*
@@ -585,10 +549,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Token allows subscribing only to bob/*
@@ -616,10 +577,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Token allows publishing to alice/* and subscribing to bob/*
@@ -657,10 +615,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Token with nested publish/subscribe paths
@@ -697,10 +652,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			jwks_uri: None,
-			jwks_refresh_interval: None,
-			dangerously_allow_insecure_jwks: None,
-			public: None,
+			..Default::default()
 		})?;
 
 		// Read-only token
