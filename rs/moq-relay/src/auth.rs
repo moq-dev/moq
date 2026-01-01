@@ -46,7 +46,15 @@ pub struct AuthConfig {
 	#[arg(long = "jwks-uri", env = "MOQ_AUTH_JWKS_URI", conflicts_with = "key")]
 	pub jwks_uri: Option<String>,
 
+	#[arg(
+		long = "dangerously-allow-insecure-jwks",
+		env = "MOQ_AUTH_DANGEROUSLY_ALLOW_INSECURE_JWKS",
+		conflicts_with = "key"
+	)]
+	pub dangerously_allow_insecure_jwks: Option<bool>,
+
 	/// How often to refresh the JWK set (in seconds), if not provided the JWKs won't be refreshed.
+	/// Minimum value: 30
 	#[arg(long = "jwks-refresh-interval", env = "MOQ_AUTH_JWKS_REFRESH_INTERVAL")]
 	pub jwks_refresh_interval: Option<u64>,
 
@@ -145,12 +153,26 @@ impl Auth {
 					keys: vec![Arc::new(moq_token::Key::from_file(key)?)],
 				}))),
 				(None, Some(jwks_uri)) => {
+					if !jwks_uri.starts_with("https") && config.dangerously_allow_insecure_jwks != Some(true) {
+						tracing::info!("{:?}", config);
+						anyhow::bail!("jwks_uri must be https")
+					}
+
 					let loader = Arc::new(KeySetLoader::new(jwks_uri.to_string()));
 
-					refresh_task = config.jwks_refresh_interval.map(|refresh_interval_secs| {
-						// Spawn async task to refresh periodically
-						Self::spawn_refresh_task(Duration::from_secs(refresh_interval_secs), loader.clone())
-					});
+					refresh_task = config
+						.jwks_refresh_interval
+						.map(|refresh_interval_secs| {
+							if refresh_interval_secs < 30 {
+								anyhow::bail!("jwks_refresh_interval cannot be less than 30")
+							}
+							// Spawn async task to refresh periodically
+							Ok(Self::spawn_refresh_task(
+								Duration::from_secs(refresh_interval_secs),
+								loader.clone(),
+							))
+						})
+						.transpose()?;
 
 					// TODO Probably the best would be to crash when the initial load fails
 
@@ -263,6 +285,7 @@ mod tests {
 			key: None,
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: Some("anon".to_string()),
 		})?;
 
@@ -288,6 +311,7 @@ mod tests {
 			key: None,
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: Some("".to_string()),
 		})?;
 
@@ -307,6 +331,7 @@ mod tests {
 			key: None,
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: Some("anon".to_string()),
 		})?;
 
@@ -324,6 +349,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -340,6 +366,7 @@ mod tests {
 			key: None,
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: Some("anon".to_string()),
 		})?;
 
@@ -357,6 +384,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -385,6 +413,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -411,6 +440,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -439,6 +469,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -465,6 +496,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -491,6 +523,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -522,6 +555,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -553,6 +587,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -583,6 +618,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -623,6 +659,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
@@ -662,6 +699,7 @@ mod tests {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			jwks_uri: None,
 			jwks_refresh_interval: None,
+			dangerously_allow_insecure_jwks: None,
 			public: None,
 		})?;
 
