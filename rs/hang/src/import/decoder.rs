@@ -2,7 +2,7 @@ use std::{fmt, str::FromStr};
 
 use bytes::Buf;
 
-use crate::{self as hang, import::Aac, Error};
+use crate::{self as hang, import::Aac, import::Opus, Error};
 
 use super::{Avc3, Fmp4};
 
@@ -14,6 +14,8 @@ pub enum DecoderFormat {
 	Fmp4,
 	/// Raw AAC frames (not ADTS).
 	Aac,
+	/// Raw Opus frames (not Ogg).
+	Opus,
 }
 
 impl FromStr for DecoderFormat {
@@ -28,6 +30,7 @@ impl FromStr for DecoderFormat {
 			}
 			"fmp4" | "cmaf" => Ok(DecoderFormat::Fmp4),
 			"aac" => Ok(DecoderFormat::Aac),
+			"opus" => Ok(DecoderFormat::Opus),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
 	}
@@ -39,6 +42,7 @@ impl fmt::Display for DecoderFormat {
 			DecoderFormat::Avc3 => write!(f, "avc3"),
 			DecoderFormat::Fmp4 => write!(f, "fmp4"),
 			DecoderFormat::Aac => write!(f, "aac"),
+			DecoderFormat::Opus => write!(f, "opus"),
 		}
 	}
 }
@@ -50,6 +54,7 @@ enum DecoderKind {
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<Fmp4>),
 	Aac(Aac),
+	Opus(Opus),
 }
 
 /// A generic interface for importing a stream of media into a hang broadcast.
@@ -67,6 +72,7 @@ impl Decoder {
 			DecoderFormat::Avc3 => Avc3::new(broadcast).into(),
 			DecoderFormat::Fmp4 => Box::new(Fmp4::new(broadcast)).into(),
 			DecoderFormat::Aac => Aac::new(broadcast).into(),
+			DecoderFormat::Opus => Opus::new(broadcast).into(),
 		};
 
 		Self { decoder }
@@ -83,6 +89,7 @@ impl Decoder {
 			DecoderKind::Avc3(decoder) => decoder.initialize(buf)?,
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
 			DecoderKind::Aac(decoder) => decoder.initialize(buf)?,
+			DecoderKind::Opus(decoder) => decoder.initialize(buf)?,
 		}
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -107,8 +114,9 @@ impl Decoder {
 		match &mut self.decoder {
 			DecoderKind::Avc3(decoder) => decoder.decode_stream(buf, None)?,
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
-			// TODO Fix or make this more type safe.
+			// TODO Fix or make these more type safe.
 			DecoderKind::Aac(_) => anyhow::bail!("AAC does not support stream decoding"),
+			DecoderKind::Opus(_) => anyhow::bail!("Opus does not support stream decoding"),
 		}
 
 		Ok(())
@@ -133,6 +141,7 @@ impl Decoder {
 			DecoderKind::Avc3(decoder) => decoder.decode_frame(buf, pts)?,
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
 			DecoderKind::Aac(decoder) => decoder.decode(buf, pts)?,
+			DecoderKind::Opus(decoder) => decoder.decode(buf, pts)?,
 		}
 
 		Ok(())
@@ -144,6 +153,7 @@ impl Decoder {
 			DecoderKind::Avc3(decoder) => decoder.is_initialized(),
 			DecoderKind::Fmp4(decoder) => decoder.is_initialized(),
 			DecoderKind::Aac(decoder) => decoder.is_initialized(),
+			DecoderKind::Opus(decoder) => decoder.is_initialized(),
 		}
 	}
 }
