@@ -2,6 +2,7 @@ import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
+import { PRIORITY } from "../../priority";
 
 export interface PeersProps {
 	enabled?: boolean | Signal<boolean>;
@@ -41,7 +42,7 @@ export class Peers {
 		const broadcast = effect.get(this.broadcast);
 		if (!broadcast) return;
 
-		const track = broadcast.subscribe({ name: catalog.name, priority: catalog.priority });
+		const track = broadcast.subscribe({ name: catalog.name, priority: PRIORITY.location });
 		effect.cleanup(() => track.close());
 
 		effect.spawn(this.#runTrack.bind(this, track));

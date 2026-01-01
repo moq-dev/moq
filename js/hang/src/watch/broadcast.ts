@@ -1,7 +1,7 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../catalog";
-import { PRIORITY } from "../publish/priority";
+import { PRIORITY } from "../priority";
 import * as Audio from "./audio";
 import { Chat, type ChatProps } from "./chat";
 import * as Location from "./location";

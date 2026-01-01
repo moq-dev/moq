@@ -5,8 +5,8 @@ import type * as Catalog from "../../catalog";
 import { DEFAULT_CONTAINER } from "../../catalog";
 import { u53 } from "../../catalog/integers";
 import * as Frame from "../../frame";
+import { PRIORITY } from "../../priority";
 import * as libav from "../../util/libav";
-import { PRIORITY } from "../priority";
 import type * as Capture from "./capture";
 import type { Source } from "./types";
 

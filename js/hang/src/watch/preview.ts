@@ -2,6 +2,7 @@ import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
 import { Effect, Signal } from "@moq/signals";
 import * as Catalog from "../catalog";
+import { PRIORITY } from "../priority";
 
 export interface PreviewProps {
 	enabled?: boolean | Signal<boolean>;
@@ -38,7 +39,7 @@ export class Preview {
 
 			// Subscribe to the preview.json track directly
 			// TODO maxLatency
-			const track = broadcast.subscribe({ name: catalog.name, priority: catalog.priority });
+			const track = broadcast.subscribe({ name: catalog.name, priority: PRIORITY.preview });
 			effect.cleanup(() => track.close());
 
 			effect.spawn(async () => {

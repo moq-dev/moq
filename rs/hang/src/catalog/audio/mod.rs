@@ -27,7 +27,7 @@ pub struct Audio {
 
 	/// The priority of the audio track, relative to other tracks in the broadcast.
 	///
-	/// TODO: Default is for backwards compatibility with old catalogs
+	/// TODO: Remove this; it's for backwards compatibility only
 	#[serde(default)]
 	pub priority: u8,
 }

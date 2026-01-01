@@ -54,7 +54,7 @@ export const VideoSchema = z
 		renditions: z.record(z.string(), VideoConfigSchema),
 
 		// The priority of the video track, relative to other tracks in the broadcast.
-		// TODO: Default is for backwards compatibility with old catalogs
+		// TODO: Remove this; it's for backwards compatibility only
 		priority: z.number().int().min(0).max(255).default(0),
 
 		// Render the video at this size in pixels.

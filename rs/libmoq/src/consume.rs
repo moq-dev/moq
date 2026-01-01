@@ -189,7 +189,7 @@ impl Consume {
 		// TODO expose all of these via the C API
 		let delivery = moq_lite::Delivery {
 			max_latency,
-			priority: consume.catalog.video.priority.unwrap_or_default(),
+			priority: 1,
 			ordered: false,
 		};
 
@@ -233,7 +233,7 @@ impl Consume {
 		// TODO expose all of these via the C API
 		let delivery = moq_lite::Delivery {
 			max_latency,
-			priority: consume.catalog.audio.priority.unwrap_or_default(),
+			priority: 2,
 			ordered: false,
 		};
 

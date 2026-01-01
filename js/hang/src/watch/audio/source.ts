@@ -3,6 +3,7 @@ import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
+import { PRIORITY } from "../../priority";
 import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
 import type * as Render from "./render";
@@ -163,7 +164,7 @@ export class Source {
 		const active = effect.get(this.active);
 		if (!active) return;
 
-		const sub = broadcast.subscribe({ name: active, priority: catalog.priority });
+		const sub = broadcast.subscribe({ name: active, priority: PRIORITY.audio });
 		effect.cleanup(() => sub.close());
 
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.

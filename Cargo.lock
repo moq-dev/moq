@@ -1124,7 +1124,6 @@ dependencies = [
  "buf-list",
  "bytes",
  "derive_more",
- "futures",
  "h264-parser",
  "hex",
  "lazy_static",
