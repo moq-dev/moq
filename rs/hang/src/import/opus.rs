@@ -28,9 +28,10 @@ impl Opus {
 		//  - Ignores pre-skip, gain, channel mapping for now
 
 		anyhow::ensure!(buf.remaining() >= 19, "OpusHead must be at least 19 bytes");
-		anyhow::ensure!(buf.chunk().starts_with(b"OpusHead"), "invalid OpusHead signature");
+		const OPUS_HEAD: u64 = u64::from_be_bytes(*b"OpusHead");
+		let signature = buf.get_u64();
+		anyhow::ensure!(signature == OPUS_HEAD, "invalid OpusHead signature");
 
-		buf.advance(8); // Skip "OpusHead" signature
 		buf.advance(1); // Skip version
 		let channel_count = buf.get_u8() as u32;
 		buf.advance(2); // Skip pre-skip (lol)
