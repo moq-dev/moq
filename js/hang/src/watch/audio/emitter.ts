@@ -46,7 +46,10 @@ export class Emitter {
 		});
 
 		this.#signals.effect((effect) => {
-			const enabled = !effect.get(this.paused) && !effect.get(this.muted);
+			const paused = effect.get(this.paused);
+			const muted = effect.get(this.muted);
+			const enabled = !paused && !muted;
+			console.log(`[Audio Emitter] Setting source.enabled=${enabled} (paused=${paused}, muted=${muted})`);
 			this.source.enabled.set(enabled);
 		});
 
@@ -56,7 +59,49 @@ export class Emitter {
 			this.muted.set(volume === 0);
 		});
 
+		// Handle MSE path (HTMLAudioElement) vs WebCodecs path (AudioWorklet)
 		this.#signals.effect((effect) => {
+			const mseAudio = effect.get(this.source.mseAudioElement);
+			if (mseAudio) {
+				console.log("[Audio Emitter] MSE audio element found, setting up volume/mute/pause control");
+				// MSE path: control HTMLAudioElement directly
+				effect.effect(() => {
+					const volume = effect.get(this.volume);
+					const muted = effect.get(this.muted);
+					const paused = effect.get(this.paused);
+					console.log(`[Audio Emitter] Setting volume=${volume}, muted=${muted}, paused=${paused}`);
+					mseAudio.volume = volume;
+					mseAudio.muted = muted;
+					
+					// Control play/pause state
+					if (paused && !mseAudio.paused) {
+						console.log("[Audio Emitter] Pausing audio element (paused=true)");
+						mseAudio.pause();
+					} else if (!paused && mseAudio.paused) {
+						// Resume if paused - try to play even if readyState is low
+						const tryPlay = () => {
+							if (!paused && mseAudio.paused) {
+								console.log("[Audio Emitter] Resuming audio element (paused=false)", {
+									readyState: mseAudio.readyState,
+									buffered: mseAudio.buffered.length > 0 ? `${mseAudio.buffered.length} ranges` : "no ranges",
+								});
+								mseAudio.play().catch(err => console.error("[Audio Emitter] Failed to resume audio:", err));
+							}
+						};
+						
+						// Try to play if we have metadata (HAVE_METADATA = 1), browser will start when ready
+						if (mseAudio.readyState >= HTMLMediaElement.HAVE_METADATA) {
+							tryPlay();
+						} else {
+							// Wait for loadedmetadata event if not ready yet
+							mseAudio.addEventListener("loadedmetadata", tryPlay, { once: true });
+						}
+					}
+				});
+				return;
+			}
+
+			// WebCodecs path: use AudioWorklet with GainNode
 			const root = effect.get(this.source.root);
 			if (!root) return;
 
@@ -76,9 +121,10 @@ export class Emitter {
 			});
 		});
 
+		// Only apply gain transitions for WebCodecs path (when gain node exists)
 		this.#signals.effect((effect) => {
 			const gain = effect.get(this.#gain);
-			if (!gain) return;
+			if (!gain) return; // MSE path doesn't use gain node
 
 			// Cancel any scheduled transitions on change.
 			effect.cleanup(() => gain.gain.cancelScheduledValues(gain.context.currentTime));

@@ -15,8 +15,10 @@ export function encodeTimestamp(timestamp: Time.Micro, container: Catalog.Contai
 			return encodeVarInt(timestamp);
 		case "raw":
 			return encodeU64(timestamp);
-		case "fmp4":
-			throw new Error("fmp4 container not yet implemented");
+		case "fmp4": {
+			// For CMAF fragments, use raw encoding (8 bytes) for timestamp header
+			return encodeU64(timestamp);
+		}
 	}
 }
 
@@ -40,8 +42,14 @@ export function decodeTimestamp(
 			const [value, remaining] = decodeU64(buffer);
 			return [value as Time.Micro, remaining];
 		}
-		case "fmp4":
-			throw new Error("fmp4 container not yet implemented");
+		case "fmp4": {
+			// For CMAF fragments, timestamp is in the moof atom, but we still need to decode
+			// the header to get to the fragment. The server uses VarInt encoding (same as legacy)
+			// for the timestamp header, so we use VarInt decoding here.
+			// The actual media timestamp will be extracted by MSE from the moof.
+			const [value, remaining] = decodeVarInt(buffer);
+			return [value as Time.Micro, remaining];
+		}
 	}
 }
 
@@ -59,7 +67,7 @@ export function getTimestampSize(container: Catalog.Container = DEFAULT_CONTAINE
 		case "raw":
 			return 8; // u64 fixed size
 		case "fmp4":
-			throw new Error("fmp4 container not yet implemented");
+			return 8; // VarInt maximum size (same as legacy)
 	}
 }
 

@@ -51,6 +51,16 @@ pub struct Fmp4 {
 
 	/// When passthrough_mode is enabled, store raw bytes of moof
 	moof_bytes: Option<Bytes>,
+
+	/// When passthrough_mode is enabled, store raw bytes of ftyp (file type box)
+	ftyp_bytes: Option<Bytes>,
+	
+	/// When passthrough_mode is enabled, store raw bytes of moov (init segment)
+	moov_bytes: Option<Bytes>,
+	
+	/// When passthrough_mode is enabled, store a copy of init segment (ftyp+moov) to send with each keyframe
+	/// This ensures new subscribers can receive the init segment even if group 0 is not available
+	init_segment_bytes_for_keyframes: Option<Bytes>,
 }
 
 impl Fmp4 {
@@ -70,6 +80,9 @@ impl Fmp4 {
 			moof_size: 0,
 			passthrough_mode: false,
 			moof_bytes: None,
+			ftyp_bytes: None,
+			moov_bytes: None,
+			init_segment_bytes_for_keyframes: None,
 		}
 	}
 
@@ -101,9 +114,35 @@ impl Fmp4 {
 
 			match atom {
 				Any::Ftyp(_) | Any::Styp(_) => {
-					// Skip
+					// If passthrough mode, capture raw bytes of ftyp (file type box)
+					if self.passthrough_mode {
+						if let Some(ref bytes) = available_bytes {
+							if bytes_offset + size <= bytes.len() {
+								self.ftyp_bytes = Some(bytes.slice(bytes_offset..bytes_offset + size));
+								tracing::debug!(ftyp_size = size, bytes_offset, "captured ftyp bytes for init segment");
+							} else {
+								tracing::warn!(bytes_offset, size, available_len = bytes.len(), "ftyp bytes out of range");
+							}
+						} else {
+							tracing::warn!("passthrough mode but available_bytes is None when processing ftyp");
+						}
+					}
+					// Skip ftyp/styp atoms in normal processing
 				}
 				Any::Moov(moov) => {
+					// If passthrough mode, capture raw bytes of moov (init segment)
+					if self.passthrough_mode {
+						if let Some(ref bytes) = available_bytes {
+							if bytes_offset + size <= bytes.len() {
+								self.moov_bytes = Some(bytes.slice(bytes_offset..bytes_offset + size));
+								tracing::debug!(moov_size = size, bytes_offset, "captured moov bytes for init segment");
+							} else {
+								tracing::warn!(bytes_offset, size, available_len = bytes.len(), "moov bytes out of range");
+							}
+						} else {
+							tracing::warn!("passthrough mode but available_bytes is None when processing moov");
+						}
+					}
 					// Create the broadcast.
 					self.init(moov)?;
 				}
@@ -146,7 +185,9 @@ impl Fmp4 {
 						fragment_bytes.extend_from_slice(&mdat_bytes);
 						let fragment = fragment_bytes.freeze();
 
+						tracing::info!(moof_size = moof_bytes.len(), mdat_size = mdat_bytes.len(), total_fragment_size = fragment.len(), "processing CMAF fragment (moof+mdat)");
 						self.transport_fragment(fragment, moof)?;
+						tracing::info!("finished processing CMAF fragment, ready for next fragment");
 					} else {
 						// Extract the samples from the mdat atom (existing behavior)
 						let header_size = size - mdat.data.len();
@@ -154,8 +195,9 @@ impl Fmp4 {
 					}
 				}
 				_ => {
-					// Skip unknown atoms
-					tracing::warn!(?atom, "skipping")
+					// Skip unknown atoms (e.g., sidx, which is optional and used for segment indexing)
+					// These are safe to ignore and don't affect playback
+					tracing::debug!(?atom, "skipping optional atom")
 				}
 			}
 
@@ -174,6 +216,7 @@ impl Fmp4 {
 
 	fn init(&mut self, moov: Moov) -> anyhow::Result<()> {
 		let passthrough_mode = self.passthrough_mode;
+		tracing::info!(passthrough_mode, "initializing fMP4 with passthrough mode");
 		let mut catalog = self.catalog.lock();
 
 		for trak in &moov.trak {
@@ -183,6 +226,7 @@ impl Fmp4 {
 			let track = match handler.as_ref() {
 				b"vide" => {
 					let config = Self::init_video_static(trak, passthrough_mode)?;
+					tracing::info!(container = ?config.container, "created video config with container");
 
 					let track = moq::Track {
 						name: self.broadcast.track_name("video"),
@@ -200,6 +244,7 @@ impl Fmp4 {
 				}
 				b"soun" => {
 					let config = Self::init_audio_static(trak, passthrough_mode)?;
+					tracing::info!(container = ?config.container, "created audio config with container");
 
 					let track = moq::Track {
 						name: self.broadcast.track_name("audio"),
@@ -223,6 +268,52 @@ impl Fmp4 {
 		}
 
 		self.moov = Some(moov);
+
+		// In passthrough mode, send the init segment (ftyp+moov) as a special frame
+		// This must be sent before any fragments for MSE to work
+		// NOTE: We send this AFTER creating tracks so that the tracks exist
+		// when we try to write to them. The init segment will create the first
+		// group (sequence 0), and fragments will create subsequent groups.
+		if passthrough_mode {
+			if let Some(moov_bytes) = self.moov_bytes.take() {
+				let timestamp = hang::Timestamp::from_micros(0)?;
+				
+				// Build init segment: ftyp (if available) + moov
+				let mut init_segment = BytesMut::new();
+				if let Some(ref ftyp_bytes) = self.ftyp_bytes {
+					init_segment.extend_from_slice(ftyp_bytes);
+					tracing::debug!(ftyp_size = ftyp_bytes.len(), "including ftyp in init segment");
+				}
+				init_segment.extend_from_slice(&moov_bytes);
+				let init_segment_bytes = init_segment.freeze();
+				
+				tracing::info!(tracks = self.tracks.len(), init_segment_size = init_segment_bytes.len(), ftyp_included = self.ftyp_bytes.is_some(), "sending init segment to all tracks");
+				
+				// Verify moov atom signature
+				let moov_offset = self.ftyp_bytes.as_ref().map(|f| f.len()).unwrap_or(0);
+				if moov_offset + 8 <= init_segment_bytes.len() {
+					let atom_type = String::from_utf8_lossy(&init_segment_bytes[moov_offset + 4..moov_offset + 8]);
+					tracing::info!(atom_type = %atom_type, "verifying moov atom signature in init segment");
+				}
+				
+				// Store a copy for sending with keyframes
+				self.init_segment_bytes_for_keyframes = Some(init_segment_bytes.clone());
+				
+				// Send init segment to all tracks - this creates the first group (sequence 0)
+				for (_track_id, track) in &mut self.tracks {
+					let frame = hang::Frame {
+						timestamp,
+						keyframe: true, // Init segment is always a keyframe - this creates a new group
+						payload: init_segment_bytes.clone().into(),
+					};
+					track.write(frame)?;
+					tracing::debug!(track_id = ?_track_id, timestamp = ?timestamp, "wrote init segment frame to track");
+				}
+				tracing::info!("init segment (ftyp+moov) sent to all tracks - should create groups with sequence 0");
+			} else {
+				tracing::warn!("passthrough mode enabled but moov_bytes is None - init segment will not be sent");
+			}
+		}
 
 		Ok(())
 	}
@@ -562,7 +653,21 @@ impl Fmp4 {
 
 	// Transport a complete CMAF fragment (moof+mdat) directly without decomposing.
 	fn transport_fragment(&mut self, fragment: Bytes, moof: Moof) -> anyhow::Result<()> {
-		let moov = self.moov.as_ref().context("missing moov box")?;
+		// Verify that init segment was sent before fragments
+		if self.moov_bytes.is_some() {
+			tracing::warn!("transporting fragment but moov_bytes is still set - init segment may not have been sent");
+		}
+		
+		// Verify fragment starts with moof atom
+		if fragment.len() >= 8 {
+			let atom_type = String::from_utf8_lossy(&fragment[4..8]);
+			tracing::info!(atom_type = %atom_type, fragment_size = fragment.len(), passthrough_mode = self.passthrough_mode, "transporting fragment");
+		}
+		
+		// Ensure moov is available (init segment must be processed first)
+		let moov = self.moov.as_ref().ok_or_else(|| {
+			anyhow::anyhow!("missing moov box - init segment must be processed before fragments. Make sure ensure_init_segment() is called first.")
+		})?;
 
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
@@ -585,7 +690,7 @@ impl Fmp4 {
 			let timestamp = hang::Timestamp::from_micros(micros)?;
 
 			// Determine keyframe status (reuse logic from extract())
-			let keyframe = if trak.mdia.hdlr.handler == b"vide".into() {
+			let is_keyframe = if trak.mdia.hdlr.handler == b"vide".into() {
 				// For video, check sample flags in trun entries
 				let mut is_keyframe = false;
 				if let Some(trun) = traf.trun.first() {
@@ -616,18 +721,55 @@ impl Fmp4 {
 				}
 			};
 
-			if keyframe {
+			if is_keyframe {
 				self.last_keyframe.insert(track_id, timestamp);
 			}
 
-			// Create frame with entire fragment as payload
-			let frame = hang::Frame {
-				timestamp,
-				keyframe,
-				payload: fragment.clone().into(),
-			};
-
-			track.write(frame)?;
+			// In passthrough mode, create new groups periodically (every keyframe) to allow
+			// new subscribers to join at the most recent point. Each group starts with init segment.
+			// This makes it behave like a live stream where new subscribers start from recent content.
+			if self.passthrough_mode {
+				// For keyframes, send init segment to create a new group (every keyframe creates a new group)
+				// This allows new subscribers to receive the init segment and start from recent content
+				if is_keyframe {
+					tracing::info!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), "KEYFRAME DETECTED - creating new group");
+					if let Some(ref init_segment_bytes) = self.init_segment_bytes_for_keyframes {
+						let init_frame = hang::Frame {
+							timestamp,
+							keyframe: true, // Send as keyframe to create a new group
+							payload: init_segment_bytes.clone().into(),
+						};
+						track.write(init_frame)?;
+						tracing::info!(track_id, timestamp = ?timestamp, init_segment_size = init_segment_bytes.len(), "sent init segment as first frame of new group (keyframe) for live stream");
+					} else {
+						tracing::warn!(track_id, "is_keyframe=true but init_segment_bytes_for_keyframes is None");
+					}
+				} else {
+					tracing::debug!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), "non-keyframe fragment in passthrough mode");
+				}
+				
+				// Send fragment as non-keyframe (in same group as init segment if keyframe, or current group if not)
+				let frame = hang::Frame {
+					timestamp,
+					keyframe: false, // Send as non-keyframe so it goes in the same group as init segment (if keyframe) or current group
+					payload: fragment.clone().into(),
+				};
+				track.write(frame)?;
+				if is_keyframe {
+					tracing::info!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), "sent keyframe fragment in passthrough mode (new group created)");
+				} else {
+					tracing::debug!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), "sent non-keyframe fragment in passthrough mode");
+				}
+			} else {
+				// For non-passthrough mode, just write the frame normally
+				let frame = hang::Frame {
+					timestamp,
+					keyframe: is_keyframe,
+					payload: fragment.clone().into(),
+				};
+				track.write(frame)?;
+				tracing::info!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), is_keyframe = is_keyframe, "sent fragment (non-passthrough mode)");
+			}
 		}
 
 		Ok(())

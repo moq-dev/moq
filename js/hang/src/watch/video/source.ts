@@ -126,6 +126,11 @@ export class Source {
 			const supported: Record<string, Catalog.VideoConfig> = {};
 
 			for (const [name, rendition] of Object.entries(renditions)) {
+				console.log(`[Video Source] Rendition ${name} from catalog:`, {
+					codec: rendition.codec,
+					container: rendition.container,
+					hasContainer: "container" in rendition,
+				});
 				const description = rendition.description ? Hex.toBytes(rendition.description) : undefined;
 
 				const { supported: valid } = await VideoDecoder.isConfigSupported({
@@ -192,6 +197,59 @@ export class Source {
 	}
 
 	#runTrack(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
+		// Route to MSE for CMAF, WebCodecs for legacy/raw
+		if (config.container === "fmp4") {
+			this.#runMSEPath(effect, broadcast, name, config);
+		} else {
+			this.#runWebCodecsPath(effect, broadcast, name, config);
+		}
+	}
+
+	#runMSEPath(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
+		// Import MSE source dynamically to avoid loading if not needed
+		effect.spawn(async () => {
+			const { SourceMSE } = await import("./source-mse.js");
+			const mseSource = new SourceMSE(this.latency);
+			effect.cleanup(() => mseSource.close());
+
+			// Forward signals using effects
+			this.#signals.effect((eff) => {
+				const frame = eff.get(mseSource.frame);
+				eff.set(this.frame, frame);
+			});
+
+			this.#signals.effect((eff) => {
+				const display = eff.get(mseSource.display);
+				eff.set(this.display, display);
+			});
+
+			this.#signals.effect((eff) => {
+				const status = eff.get(mseSource.bufferStatus);
+				eff.set(this.bufferStatus, status, { state: "empty" });
+			});
+
+			this.#signals.effect((eff) => {
+				const status = eff.get(mseSource.syncStatus);
+				eff.set(this.syncStatus, status, { state: "ready" });
+			});
+
+			this.#signals.effect((eff) => {
+				const stats = eff.get(mseSource.stats);
+				eff.set(this.#stats, stats);
+			});
+
+			// Run MSE track
+			try {
+				await mseSource.runTrack(effect, broadcast, name, config);
+			} catch (error) {
+				console.error("MSE path error, falling back to WebCodecs:", error);
+				// Fallback to WebCodecs
+				this.#runWebCodecsPath(effect, broadcast, name, config);
+			}
+		});
+	}
+
+	#runWebCodecsPath(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
 		const sub = broadcast.subscribe(name, PRIORITY.video); // TODO use priority from catalog
 		effect.cleanup(() => sub.close());
 

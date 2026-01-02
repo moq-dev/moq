@@ -49,6 +49,7 @@ impl Publish {
 				PublishDecoder::Decoder(Box::new(stream))
 			}
 			PublishFormat::Hls { playlist, passthrough } => {
+				tracing::info!(passthrough = *passthrough, "HLS publish with passthrough flag");
 				let hls = hang::import::Hls::new(
 					broadcast.clone(),
 					hang::import::HlsConfig {

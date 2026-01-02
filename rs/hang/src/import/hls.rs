@@ -163,9 +163,10 @@ impl Hls {
 			let outcome = self.step().await?;
 			let delay = self.refresh_delay(outcome.target_duration, outcome.wrote_segments);
 
-			debug!(
-				wrote = outcome.wrote_segments,
-				delay = ?delay,
+			info!(
+				wrote_segments = outcome.wrote_segments,
+				target_duration = ?outcome.target_duration,
+				delay_secs = delay.as_secs_f32(),
 				"HLS ingest step complete"
 			);
 
@@ -178,6 +179,7 @@ impl Hls {
 		self.ensure_tracks().await?;
 
 		let mut buffered = 0usize;
+		const MAX_INIT_SEGMENTS: usize = 3; // Only process a few segments during init to avoid getting ahead of live stream
 
 		// Prime all discovered video variants.
 		//
@@ -187,7 +189,7 @@ impl Hls {
 		for (index, mut track) in video_tracks.into_iter().enumerate() {
 			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
 			let count = self
-				.consume_segments(TrackKind::Video(index), &mut track, &playlist)
+				.consume_segments_limited(TrackKind::Video(index), &mut track, &playlist, MAX_INIT_SEGMENTS)
 				.await?;
 			buffered += count;
 			self.video.push(track);
@@ -196,7 +198,7 @@ impl Hls {
 		// Prime the shared audio track, if any.
 		if let Some(mut track) = self.audio.take() {
 			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
-			let count = self.consume_segments(TrackKind::Audio, &mut track, &playlist).await?;
+			let count = self.consume_segments_limited(TrackKind::Audio, &mut track, &playlist, MAX_INIT_SEGMENTS).await?;
 			buffered += count;
 			self.audio = Some(track);
 		}
@@ -315,6 +317,49 @@ impl Hls {
 		Ok(())
 	}
 
+	async fn consume_segments_limited(
+		&mut self,
+		kind: TrackKind,
+		track: &mut TrackState,
+		playlist: &MediaPlaylist,
+		max_segments: usize,
+	) -> anyhow::Result<usize> {
+		// Calculate segments to process
+		let next_seq = track.next_sequence.unwrap_or(0);
+		let playlist_seq = playlist.media_sequence;
+		let total_segments = playlist.segments.len();
+		
+		let last_playlist_seq = playlist_seq + total_segments as u64;
+		
+		let skip = if next_seq > last_playlist_seq {
+			total_segments
+		} else if next_seq < playlist_seq {
+			track.next_sequence = None;
+			0
+		} else {
+			(next_seq - playlist_seq) as usize
+		};
+		
+		let available = if skip < total_segments {
+			total_segments - skip
+		} else {
+			0
+		};
+		
+		// Limit how many segments we process
+		let to_process = available.min(max_segments);
+		
+		if to_process > 0 {
+			let base_seq = playlist_seq + skip as u64;
+			for (i, segment) in playlist.segments[skip..skip+to_process].iter().enumerate() {
+				self.push_segment(kind, track, segment, base_seq + i as u64).await?;
+			}
+			info!(?kind, processed = to_process, available = available, "processed limited segments during init");
+		}
+		
+		Ok(to_process)
+	}
+
 	async fn consume_segments(
 		&mut self,
 		kind: TrackKind,
@@ -323,19 +368,67 @@ impl Hls {
 	) -> anyhow::Result<usize> {
 		self.ensure_init_segment(kind, track, playlist).await?;
 
-		// Skip segments we've already seen
-		let skip = track.next_sequence.unwrap_or(0).saturating_sub(playlist.media_sequence) as usize;
-		let base_seq = playlist.media_sequence + skip as u64;
-		for (i, segment) in playlist.segments[skip..].iter().enumerate() {
-			self.push_segment(kind, track, segment, base_seq + i as u64).await?;
-		}
-		let consumed = playlist.segments.len() - skip;
-
-		if consumed == 0 {
+		// Calculate how many segments to skip (already processed)
+		let next_seq = track.next_sequence.unwrap_or(0);
+		let playlist_seq = playlist.media_sequence;
+		let total_segments = playlist.segments.len();
+		
+		// Calculate the last sequence number in the playlist
+		let last_playlist_seq = playlist_seq + total_segments as u64;
+		
+		// If we've already processed beyond what's in the playlist, wait for new segments
+		let skip = if next_seq > last_playlist_seq {
+			// We're ahead of the playlist - wait for ffmpeg to generate more segments
+			warn!(
+				?kind,
+				next_sequence = next_seq,
+				playlist_sequence = playlist_seq,
+				last_playlist_sequence = last_playlist_seq,
+				"imported ahead of playlist, waiting for new segments"
+			);
+			total_segments // Skip all segments in playlist
+		} else if next_seq < playlist_seq {
+			// We're behind - reset and start from the beginning of the playlist
+			warn!(
+				?kind,
+				next_sequence = next_seq,
+				playlist_sequence = playlist_seq,
+				"next_sequence behind playlist, resetting to start of playlist"
+			);
+			track.next_sequence = None;
+			0
+		} else {
+			// Normal case: next_seq is within playlist range
+			(next_seq - playlist_seq) as usize
+		};
+		
+		let fresh_segments = if skip < total_segments {
+			total_segments - skip
+		} else {
+			0
+		};
+		
+		info!(
+			?kind,
+			playlist_sequence = playlist_seq,
+			next_sequence = next_seq,
+			skip = skip,
+			total_segments = total_segments,
+			fresh_segments = fresh_segments,
+			"consuming HLS segments"
+		);
+		
+		if fresh_segments > 0 {
+			let base_seq = playlist_seq + skip as u64;
+			for (i, segment) in playlist.segments[skip..].iter().enumerate() {
+				self.push_segment(kind, track, segment, base_seq + i as u64).await?;
+			}
+			info!(?kind, consumed = fresh_segments, "consumed HLS segments");
+		} else {
 			debug!(?kind, "no fresh HLS segments available");
 		}
 
-		Ok(consumed)
+		Ok(fresh_segments)
 	}
 
 	async fn ensure_init_segment(
@@ -382,10 +475,27 @@ impl Hls {
 		let url = resolve_uri(&track.playlist, &segment.uri)?;
 		let mut bytes = self.fetch_bytes(url).await?;
 
+		// Ensure the importer is initialized before processing fragments
+		// Use track.init_ready to avoid borrowing issues
+		if !track.init_ready {
+			// Try to ensure init segment is processed
+			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
+			self.ensure_init_segment(kind, track, &playlist).await?;
+		}
+
+		// Get importer after ensuring init segment
 		let importer = match kind {
 			TrackKind::Video(index) => self.ensure_video_importer_for(index),
 			TrackKind::Audio => self.ensure_audio_importer(),
 		};
+
+		// Final check after ensuring init segment
+		if !importer.is_initialized() {
+			return Err(anyhow::anyhow!(
+				"importer not initialized for {:?} after ensure_init_segment - init segment processing failed",
+				kind
+			));
+		}
 
 		importer.decode(&mut bytes).context("failed to parse media segment")?;
 		track.next_sequence = Some(sequence + 1);

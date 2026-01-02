@@ -40,6 +40,10 @@ export class Source {
 	#worklet = new Signal<AudioWorkletNode | undefined>(undefined);
 	// Downcast to AudioNode so it matches Publish.Audio
 	readonly root = this.#worklet as Getter<AudioNode | undefined>;
+	
+	// For MSE path, expose the HTMLAudioElement for direct control
+	#mseAudioElement = new Signal<HTMLAudioElement | undefined>(undefined);
+	readonly mseAudioElement = this.#mseAudioElement as Getter<HTMLAudioElement | undefined>;
 
 	#sampleRate = new Signal<number | undefined>(undefined);
 	readonly sampleRate: Getter<number | undefined> = this.#sampleRate;
@@ -74,6 +78,11 @@ export class Source {
 			if (audio?.renditions) {
 				const first = Object.entries(audio.renditions).at(0);
 				if (first) {
+					console.log(`[Audio Source] Rendition ${first[0]} from catalog:`, {
+						codec: first[1].codec,
+						container: first[1].container,
+						hasContainer: "container" in first[1],
+					});
 					effect.set(this.active, first[0]);
 					effect.set(this.config, first[1]);
 				}
@@ -94,6 +103,13 @@ export class Source {
 
 		const config = effect.get(this.config);
 		if (!config) return;
+
+		// Don't create worklet for MSE (fmp4) - browser handles playback directly
+		// The worklet is only needed for WebCodecs path
+		if (config.container === "fmp4") {
+			console.log("[Audio Source] Skipping worklet creation for MSE (fmp4) - browser handles playback directly");
+			return;
+		}
 
 		const sampleRate = config.sampleRate;
 		const channelCount = config.numberOfChannels;
@@ -149,21 +165,90 @@ export class Source {
 
 	#runDecoder(effect: Effect): void {
 		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
+		console.log(`[Audio Source] #runDecoder: enabled=${enabled}`);
+		if (!enabled) {
+			console.log(`[Audio Source] #runDecoder: skipping because enabled=false`);
+			return;
+		}
 
 		const catalog = effect.get(this.catalog);
-		if (!catalog) return;
+		if (!catalog) {
+			console.log(`[Audio Source] #runDecoder: skipping because catalog is undefined`);
+			return;
+		}
 
 		const broadcast = effect.get(this.broadcast);
-		if (!broadcast) return;
+		if (!broadcast) {
+			console.log(`[Audio Source] #runDecoder: skipping because broadcast is undefined`);
+			return;
+		}
 
 		const config = effect.get(this.config);
-		if (!config) return;
+		if (!config) {
+			console.log(`[Audio Source] #runDecoder: skipping because config is undefined`);
+			return;
+		}
 
 		const active = effect.get(this.active);
-		if (!active) return;
+		if (!active) {
+			console.log(`[Audio Source] #runDecoder: skipping because active is undefined`);
+			return;
+		}
 
-		const sub = broadcast.subscribe(active, catalog.priority);
+		console.log(`[Audio Source] #runDecoder: subscribing to track="${active}", container="${config.container}"`);
+		// Route to MSE for CMAF, WebCodecs for legacy/raw
+		if (config.container === "fmp4") {
+			this.#runMSEPath(effect, broadcast, active, config, catalog);
+		} else {
+			this.#runWebCodecsPath(effect, broadcast, active, config, catalog);
+		}
+	}
+
+	#runMSEPath(
+		effect: Effect,
+		broadcast: Moq.Broadcast,
+		name: string,
+		config: Catalog.AudioConfig,
+		catalog: Catalog.Audio,
+	): void {
+		// Import MSE source dynamically
+		effect.spawn(async () => {
+			const { SourceMSE } = await import("./source-mse.js");
+			const mseSource = new SourceMSE(this.latency);
+			effect.cleanup(() => mseSource.close());
+
+			// Expose HTMLAudioElement for Emitter to control volume/mute
+			// Use effect to reactively get the audio element when it's ready
+			this.#signals.effect((eff) => {
+				const audioElement = eff.get(mseSource.audioElement);
+				eff.set(this.#mseAudioElement, audioElement);
+			});
+
+			// Forward stats
+			this.#signals.effect((eff) => {
+				const stats = eff.get(mseSource.stats);
+				eff.set(this.#stats, stats);
+			});
+
+			// Run MSE track - no worklet needed, browser handles everything
+			try {
+				await mseSource.runTrack(effect, broadcast, name, config);
+			} catch (error) {
+				console.error("MSE path error, falling back to WebCodecs:", error);
+				// Fallback to WebCodecs
+				this.#runWebCodecsPath(effect, broadcast, name, config, catalog);
+			}
+		});
+	}
+
+	#runWebCodecsPath(
+		effect: Effect,
+		broadcast: Moq.Broadcast,
+		name: string,
+		config: Catalog.AudioConfig,
+		catalog: Catalog.Audio,
+	): void {
+		const sub = broadcast.subscribe(name, catalog.priority);
 		effect.cleanup(() => sub.close());
 
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.

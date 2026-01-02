@@ -112,21 +112,57 @@ export class Consumer {
 
 	async #run() {
 		// Start fetching groups in the background
+		// For live streams (fmp4), start from the first group we receive (which should be the most recent available)
+		// The init segment will be detected from the first frame of the active group
+		
 		for (;;) {
+			console.log(`[Frame.Consumer] Waiting for next group, current active=${this.#active ?? 'undefined'}, totalGroups=${this.#groups.length}`);
 			const consumer = await this.#track.nextGroup();
-			if (!consumer) break;
-
-			// To improve TTV, we always start with the first group.
-			// For higher latencies we might need to figure something else out, as its racey.
-			if (this.#active === undefined) {
-				this.#active = consumer.sequence;
+			if (!consumer) {
+				console.log(`[Frame.Consumer] No more groups available (nextGroup returned null), breaking`);
+				break;
 			}
 
-			if (consumer.sequence < this.#active) {
-				console.warn(`skipping old group: ${consumer.sequence} < ${this.#active}`);
-				// Skip old groups.
-				consumer.close();
-				continue;
+			console.log(`[Frame.Consumer] Received group: sequence=${consumer.sequence}, active=${this.#active ?? 'undefined'}, container=${this.#container ?? 'undefined'}, totalGroups=${this.#groups.length}`);
+
+			// For fmp4 container (live streams), start from the first group we receive
+			// This should be the most recent group available when we subscribe
+			if (this.#container === "fmp4") {
+				if (this.#active === undefined) {
+					// First group - start from here (this is a live stream, so start from the most recent available)
+					this.#active = consumer.sequence;
+					console.log(`[Frame.Consumer] Starting from first received group (live stream): sequence=${consumer.sequence}, setting active=${this.#active}`);
+				} else if (consumer.sequence < this.#active) {
+					// Skip old groups (but accept groups equal to or greater than active)
+					console.log(`[Frame.Consumer] Skipping old group in live stream: sequence=${consumer.sequence} < active=${this.#active}`);
+					consumer.close();
+					continue;
+				} else if (consumer.sequence === this.#active && this.#groups.some(g => g.consumer.sequence === consumer.sequence)) {
+					// Skip duplicate group (same sequence and already in groups)
+					console.log(`[Frame.Consumer] Skipping duplicate group in live stream: sequence=${consumer.sequence} == active=${this.#active} and already in groups`);
+					consumer.close();
+					continue;
+				} else {
+					// New group or same sequence but not in groups yet - accept it and update active
+					if (consumer.sequence > this.#active) {
+						console.log(`[Frame.Consumer] New group in live stream: sequence=${consumer.sequence} > active=${this.#active}, accepting and updating active`);
+						this.#active = consumer.sequence;
+					} else {
+						console.log(`[Frame.Consumer] Accepting group with same sequence as active: sequence=${consumer.sequence} == active=${this.#active} (not in groups yet)`);
+					}
+				}
+			} else {
+				// For non-fmp4 containers, use standard logic
+				if (this.#active === undefined) {
+					this.#active = consumer.sequence;
+					console.log(`[Frame.Consumer] First group received: sequence=${consumer.sequence}, setting active=${this.#active}`);
+				}
+
+				if (consumer.sequence < this.#active) {
+					console.warn(`[Frame.Consumer] Skipping old group: sequence=${consumer.sequence} < active=${this.#active}`);
+					consumer.close();
+					continue;
+				}
 			}
 
 			const group = {
@@ -147,11 +183,19 @@ export class Consumer {
 	async #runGroup(group: Group) {
 		try {
 			let keyframe = true;
+			let frameCount = 0;
+
+			console.log(`[Frame.Consumer] Starting to read frames from group ${group.consumer.sequence}, active=${this.#active ?? 'undefined'}`);
 
 			for (;;) {
+				console.log(`[Frame.Consumer] Calling readFrame() on group ${group.consumer.sequence}, frameCount=${frameCount}`);
 				const next = await group.consumer.readFrame();
-				if (!next) break;
+				if (!next) {
+					console.log(`[Frame.Consumer] Group ${group.consumer.sequence} finished (readFrame returned null), read ${frameCount} frames total, active=${this.#active ?? 'undefined'}`);
+					break;
+				}
 
+				frameCount++;
 				const { data, timestamp } = decode(next, this.#container);
 				const frame = {
 					data,
@@ -159,6 +203,8 @@ export class Consumer {
 					keyframe,
 					group: group.consumer.sequence,
 				};
+
+				console.log(`[Frame.Consumer] Read frame ${frameCount} from group ${group.consumer.sequence}: timestamp=${timestamp}, size=${data.byteLength}, keyframe=${keyframe}, active=${this.#active ?? 'undefined'}`);
 
 				keyframe = false;
 
@@ -169,6 +215,7 @@ export class Consumer {
 				}
 
 				if (group.consumer.sequence === this.#active) {
+					console.log(`[Frame.Consumer] Notifying decoder that frame is available from active group ${group.consumer.sequence}`);
 					this.#notify?.();
 					this.#notify = undefined;
 				} else {
@@ -181,7 +228,9 @@ export class Consumer {
 		} finally {
 			if (group.consumer.sequence === this.#active) {
 				// Advance to the next group.
+				const oldActive = this.#active;
 				this.#active += 1;
+				console.log(`[Frame.Consumer] Group ${oldActive} finished, advancing active to ${this.#active}, totalGroups=${this.#groups.length}`);
 
 				this.#notify?.();
 				this.#notify = undefined;
@@ -246,10 +295,14 @@ export class Consumer {
 				this.#groups[0].consumer.sequence <= this.#active
 			) {
 				const frame = this.#groups[0].frames.shift();
-				if (frame) return frame;
+				if (frame) {
+					console.log(`[Frame.Consumer] Returning frame from group ${this.#groups[0].consumer.sequence}, remaining frames in group=${this.#groups[0].frames.length}, active=${this.#active}`);
+					return frame;
+				}
 
 				// Check if the group is done and then remove it.
 				if (this.#active > this.#groups[0].consumer.sequence) {
+					console.log(`[Frame.Consumer] Group ${this.#groups[0].consumer.sequence} is done (active=${this.#active}), removing from groups`);
 					this.#groups.shift();
 					continue;
 				}
@@ -259,13 +312,19 @@ export class Consumer {
 				throw new Error("multiple calls to decode not supported");
 			}
 
+			console.log(`[Frame.Consumer] No frames available, waiting for notify. active=${this.#active ?? 'undefined'}, groups=${this.#groups.length}, groupSequences=[${this.#groups.map(g => g.consumer.sequence).join(', ')}]`);
+
 			const wait = new Promise<void>((resolve) => {
 				this.#notify = resolve;
-			}).then(() => true);
+			}).then(() => {
+				console.log(`[Frame.Consumer] Notified, checking for frames again. active=${this.#active ?? 'undefined'}, groups=${this.#groups.length}`);
+				return true;
+			});
 
 			if (!(await Promise.race([wait, this.#signals.closed]))) {
 				this.#notify = undefined;
 				// Consumer was closed while waiting for a new frame.
+				console.log(`[Frame.Consumer] Consumer closed while waiting`);
 				return undefined;
 			}
 		}

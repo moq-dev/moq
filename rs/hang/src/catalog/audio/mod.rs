@@ -65,6 +65,5 @@ pub struct AudioConfig {
 
 	/// Container format for frame encoding.
 	/// Defaults to "legacy" for backward compatibility.
-	#[serde(default)]
 	pub container: Container,
 }
