@@ -74,16 +74,12 @@ async fn run_session(
 	name: String,
 	consumer: moq_lite::BroadcastConsumer,
 ) -> anyhow::Result<()> {
-	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
-	let session = session.ok().await.context("failed to accept session")?;
-
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_lite::Origin::produce();
 	origin.producer.publish_broadcast(&name, consumer);
 
-	let session = moq_lite::Session::accept(session, origin.consumer, None)
-		.await
-		.context("failed to accept session")?;
+	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
+	let session = session.accept(origin.consumer, None).await?;
 
 	tracing::info!(id, "accepted session");
 
