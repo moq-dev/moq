@@ -114,7 +114,6 @@ To set this up, you need to have an HTTPS server hosting a JWK set that looks li
 ```
 
 :::tip The following must be considered:
-- The endpoint must be HTTPS (unless you know what you're doing, then you can set `dangerously_allow_insecure_jwks = true` to allow HTTP)
 - Every JWK MUST be public and contain no private key information
 - If your JWK set contains more than one key:
   1. Every JWK MUST have a `kid` so they can be identified on verification
@@ -130,7 +129,5 @@ Configure the relay:
 
 jwks_uri = "https://auth.example.com/keys.json"                 # JWK set URL for authenticated paths
 jwks_refresh_interval = 86400                                   # Optional: refresh the JWK set every N seconds, no refreshing if omitted
-# If you know what you're doing, you can opt in to using a non-secure connection to load the JWK set
-# dangerously_allow_insecure_jwks = true
 ```
 :::

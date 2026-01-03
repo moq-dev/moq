@@ -46,14 +46,8 @@ pub struct AuthConfig {
 	#[arg(long = "jwks-uri", env = "MOQ_AUTH_JWKS_URI", conflicts_with = "key")]
 	pub jwks_uri: Option<String>,
 
-	#[arg(
-		long = "dangerously-allow-insecure-jwks",
-		env = "MOQ_AUTH_DANGEROUSLY_ALLOW_INSECURE_JWKS",
-		conflicts_with = "key"
-	)]
-	pub dangerously_allow_insecure_jwks: Option<bool>,
-
 	/// How often to refresh the JWK set (in seconds), if not provided the JWKs won't be refreshed.
+	/// If not provided, there won't be any refreshing, the JWK set will only be loaded once at startup.
 	/// Minimum value: 30
 	#[arg(long = "jwks-refresh-interval", env = "MOQ_AUTH_JWKS_REFRESH_INTERVAL")]
 	pub jwks_refresh_interval: Option<u64>,
@@ -153,11 +147,6 @@ impl Auth {
 					keys: vec![Arc::new(moq_token::Key::from_file(key)?)],
 				}))),
 				(None, Some(jwks_uri)) => {
-					if !jwks_uri.starts_with("https") && config.dangerously_allow_insecure_jwks != Some(true) {
-						tracing::info!("{:?}", config);
-						anyhow::bail!("jwks_uri must be https")
-					}
-
 					let loader = Arc::new(KeySetLoader::new(jwks_uri.to_string()));
 
 					refresh_task = config
