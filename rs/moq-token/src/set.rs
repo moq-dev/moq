@@ -2,49 +2,7 @@ use crate::{Claims, Key, KeyOperation};
 use anyhow::Context;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::Path;
-use std::sync::{Arc, RwLock};
-
-pub trait KeyProvider {
-	fn get_keys(&self) -> anyhow::Result<KeySet>;
-
-	fn find_key(&self, kid: &str) -> anyhow::Result<Option<Arc<Key>>> {
-		Ok(self
-			.get_keys()?
-			.keys
-			.iter()
-			.find(|k| k.kid.is_some() && k.kid.as_deref().unwrap() == kid)
-			.cloned())
-	}
-
-	fn find_supported_key(&self, operation: &KeyOperation) -> anyhow::Result<Option<Arc<Key>>> {
-		Ok(self
-			.get_keys()?
-			.keys
-			.iter()
-			.find(|key| key.operations.contains(operation))
-			.cloned())
-	}
-
-	fn decode(&self, token: &str) -> anyhow::Result<Claims> {
-		let header = jsonwebtoken::decode_header(token).context("failed to decode JWT header")?;
-
-		let key_set = self.get_keys()?;
-		let key = match header.kid {
-			Some(kid) => key_set
-				.find_key(kid.as_str())?
-				.ok_or_else(|| anyhow::anyhow!("cannot find key with kid {kid}")),
-			None => {
-				if key_set.keys.len() == 1 {
-					Ok(key_set.keys[0].clone())
-				} else {
-					anyhow::bail!("missing kid in JWT header")
-				}
-			}
-		}?;
-
-		key.decode(token)
-	}
-}
+use std::sync::Arc;
 
 /// JWK Set to spec https://datatracker.ietf.org/doc/html/rfc7517#section-5
 #[derive(Default, Clone)]
@@ -120,58 +78,58 @@ impl KeySet {
 				.collect::<Result<Vec<Arc<Key>>, _>>()?,
 		})
 	}
-}
 
-impl KeyProvider for KeySet {
-	fn get_keys(&self) -> anyhow::Result<KeySet> {
-		Ok(self.clone())
-	}
-}
-
-/// JWK Set Loader that allows refreshing of a JWK Set
-#[cfg(feature = "jwks-loader")]
-pub struct KeySetLoader {
-	jwks_uri: String,
-	keys: RwLock<Option<KeySet>>,
-}
-
-#[cfg(feature = "jwks-loader")]
-impl KeySetLoader {
-	pub fn new(jwks_uri: String) -> Self {
-		Self {
-			jwks_uri,
-			keys: RwLock::new(None), // start with no KeySet
-		}
-	}
-
-	pub async fn refresh(&self) -> anyhow::Result<()> {
-		// Fetch the JWKS JSON
-		let jwks_json = reqwest::get(&self.jwks_uri)
-			.await
-			.with_context(|| format!("failed to GET JWKS from {}", self.jwks_uri))?
-			.error_for_status()
-			.with_context(|| format!("JWKS endpoint returned error: {}", self.jwks_uri))?
-			.text()
-			.await
-			.context("failed to read JWKS response body")?;
-
-		// Parse the JWKS into a KeySet
-		let new_keys = KeySet::from_str(&jwks_json).context("Failed to parse JWKS into KeySet")?;
-
-		// Replace the existing KeySet atomically
-		*self.keys.write().expect("keys write lock poisoned") = Some(new_keys);
-
-		Ok(())
-	}
-}
-
-#[cfg(feature = "jwks-loader")]
-impl KeyProvider for KeySetLoader {
-	fn get_keys(&self) -> anyhow::Result<KeySet> {
-		let guard = self.keys.read().expect("keys read lock poisoned");
-		guard
-			.as_ref()
+	pub fn find_key(&self, kid: &str) -> Option<Arc<Key>> {
+		self.keys
+			.iter()
+			.find(|k| k.kid.is_some() && k.kid.as_deref().unwrap() == kid)
 			.cloned()
-			.ok_or_else(|| anyhow::anyhow!("keys not loaded yet"))
 	}
+
+	pub fn find_supported_key(&self, operation: &KeyOperation) -> Option<Arc<Key>> {
+		self.keys.iter().find(|key| key.operations.contains(operation)).cloned()
+	}
+
+	pub fn encode(&self, payload: &Claims) -> anyhow::Result<String> {
+		let key = self
+			.find_supported_key(&KeyOperation::Sign)
+			.context("cannot find signing key")?;
+		key.encode(payload)
+	}
+
+	pub fn decode(&self, token: &str) -> anyhow::Result<Claims> {
+		let header = jsonwebtoken::decode_header(token).context("failed to decode JWT header")?;
+
+		let key = match header.kid {
+			Some(kid) => self
+				.find_key(kid.as_str())
+				.ok_or_else(|| anyhow::anyhow!("cannot find key with kid {kid}")),
+			None => {
+				// If we only have one key we can use it without a kid
+				if self.keys.len() == 1 {
+					Ok(self.keys[0].clone())
+				} else {
+					anyhow::bail!("missing kid in JWT header")
+				}
+			}
+		}?;
+
+		key.decode(token)
+	}
+}
+
+#[cfg(feature = "jwks-loader")]
+pub async fn load_keys(jwks_uri: &str) -> anyhow::Result<KeySet> {
+	// Fetch the JWKS JSON
+	let jwks_json = reqwest::get(jwks_uri)
+		.await
+		.with_context(|| format!("failed to GET JWKS from {}", jwks_uri))?
+		.error_for_status()
+		.with_context(|| format!("JWKS endpoint returned error: {}", jwks_uri))?
+		.text()
+		.await
+		.context("failed to read JWKS response body")?;
+
+	// Parse the JWKS into a KeySet
+	KeySet::from_str(&jwks_json).context("Failed to parse JWKS into KeySet")
 }

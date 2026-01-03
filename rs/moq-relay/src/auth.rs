@@ -1,9 +1,9 @@
 use anyhow::Context;
 use axum::http;
 use moq_lite::{AsPath, Path, PathOwned};
-use moq_token::{KeyProvider, KeySet, KeySetLoader};
+use moq_token::KeySet;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(thiserror::Error, Debug, Clone)]
@@ -71,7 +71,7 @@ pub struct AuthToken {
 const JWKS_REFRESH_ERROR_INTERVAL: Duration = Duration::from_mins(5);
 
 pub struct Auth {
-	key: Option<Box<Arc<dyn KeyProvider + Send + Sync>>>,
+	key: Option<Arc<Mutex<KeySet>>>,
 	public: Option<PathOwned>,
 	refresh_task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -85,30 +85,32 @@ impl Drop for Auth {
 }
 
 impl Auth {
-	fn compare_key_sets(previous: KeySet, new: KeySet) {
-		for new_key in new.keys {
+	fn compare_key_sets(previous: &KeySet, new: &KeySet) {
+		for new_key in new.keys.iter() {
 			if new_key.kid.is_some() && !previous.keys.iter().any(|k| k.kid == new_key.kid) {
-				tracing::info!("Found new JWT key \"{}\"", new_key.kid.as_deref().unwrap())
+				tracing::info!("Found new JWK \"{}\"", new_key.kid.as_deref().unwrap())
 			}
 		}
 	}
 
-	async fn refresh(loader: &KeySetLoader) -> anyhow::Result<()> {
-		let previous = loader.get_keys();
+	async fn refresh_key_set(jwks_uri: &str, key_set: &Mutex<KeySet>) -> anyhow::Result<()> {
+		let new_keys = moq_token::load_keys(jwks_uri).await?;
 
-		let result = loader.refresh().await;
-		if let Ok(()) = result {
-			if let (Ok(previous), Ok(new)) = (previous, loader.get_keys()) {
-				Self::compare_key_sets(previous, new);
-			}
-		}
-		result
+		let mut key_set = key_set.lock().expect("keyset mutex poisoned");
+		Self::compare_key_sets(&key_set, &new_keys);
+		*key_set = new_keys;
+
+		Ok(())
 	}
 
-	fn spawn_refresh_task(interval: Duration, loader: Arc<KeySetLoader>) -> tokio::task::JoinHandle<()> {
+	fn spawn_refresh_task(
+		interval: Duration,
+		key_set: Arc<Mutex<KeySet>>,
+		jwks_uri: String,
+	) -> tokio::task::JoinHandle<()> {
 		tokio::spawn(async move {
 			loop {
-				if let Err(e) = Self::refresh(loader.as_ref()).await {
+				if let Err(e) = Self::refresh_key_set(&jwks_uri, key_set.as_ref()).await {
 					if interval > JWKS_REFRESH_ERROR_INTERVAL * 2 {
 						tracing::error!(
 							"failed to load JWKS, will retry in {} seconds: {:?}",
@@ -117,7 +119,7 @@ impl Auth {
 						);
 						tokio::time::sleep(JWKS_REFRESH_ERROR_INTERVAL).await;
 
-						if let Err(e) = Self::refresh(loader.as_ref()).await {
+						if let Err(e) = Self::refresh_key_set(&jwks_uri, key_set.as_ref()).await {
 							tracing::error!("failed to load JWKS again, giving up this time: {:?}", e);
 						} else {
 							tracing::info!("successfully loaded JWKS on the second try");
@@ -136,32 +138,44 @@ impl Auth {
 	pub fn new(config: AuthConfig) -> anyhow::Result<Self> {
 		let mut refresh_task = None;
 
-		let key: Option<Arc<dyn KeyProvider + Send + Sync>> = match config.key {
+		let key = match config.key {
 			Some(uri) if uri.starts_with("http://") || uri.starts_with("https://") => {
-				let loader = Arc::new(KeySetLoader::new(uri));
+				// Start with an empty KeySet
+				let key_set = Arc::new(Mutex::new(KeySet::default()));
 
-				if let Some(refresh_interval_secs) = config.jwks_refresh_interval {
-					anyhow::ensure!(
-						refresh_interval_secs >= 30,
-						"jwks_refresh_interval cannot be less than 30"
-					);
+				// TODO Better error handling when initial load fails
+				match config.jwks_refresh_interval {
+					Some(refresh_interval_secs) => {
+						anyhow::ensure!(
+							refresh_interval_secs >= 30,
+							"jwks_refresh_interval cannot be less than 30"
+						);
 
-					refresh_task = Some(Self::spawn_refresh_task(
-						Duration::from_secs(refresh_interval_secs),
-						loader.clone(),
-					));
+						refresh_task = Some(Self::spawn_refresh_task(
+							Duration::from_secs(refresh_interval_secs),
+							key_set.clone(),
+							uri,
+						));
+					}
+					None => {
+						let key_set = key_set.clone();
+						tokio::spawn(async move {
+							Self::refresh_key_set(&uri, key_set.as_ref())
+								.await
+								.expect("failed to load key set");
+						});
+					}
 				}
 
-				// TODO Probably the best would be to crash when the initial load fails
-				Some(loader)
+				Some(key_set)
 			}
 
 			Some(key_file) => {
 				let key = moq_token::Key::from_file(&key_file)
 					.with_context(|| format!("cannot load key from {}", &key_file))?;
-				Some(Arc::new(KeySet {
+				Some(Arc::new(Mutex::new(KeySet {
 					keys: vec![Arc::new(key)],
-				}))
+				})))
 			}
 
 			None => None,
@@ -176,7 +190,7 @@ impl Auth {
 		}
 
 		Ok(Self {
-			key: key.map(Box::new),
+			key,
 			public: public.map(|p| p.as_path().to_owned()),
 			refresh_task,
 		})
@@ -188,8 +202,11 @@ impl Auth {
 		// Find the token in the query parameters.
 		// ?jwt=...
 		let claims = if let Some(token) = token {
-			if let Some(key) = self.key.as_ref() {
-				key.decode(token).map_err(|_| AuthError::DecodeFailed)?
+			if let Some(key) = self.key.as_deref() {
+				key.lock()
+					.expect("key mutex poisoned")
+					.decode(token)
+					.map_err(|_| AuthError::DecodeFailed)?
 			} else {
 				return Err(AuthError::UnexpectedToken);
 			}
