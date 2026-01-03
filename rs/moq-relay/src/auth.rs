@@ -1,3 +1,4 @@
+use anyhow::Context;
 use axum::http;
 use moq_lite::{AsPath, Path, PathOwned};
 use moq_token::{KeyProvider, KeySet, KeySetLoader};
@@ -35,20 +36,14 @@ impl axum::response::IntoResponse for AuthError {
 #[derive(clap::Args, Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AuthConfig {
-	/// The root authentication key.
+	/// Either the root authentication key or a URI to a JWK set.
 	/// If present, all paths will require a token unless they are in the public list.
-	#[arg(long = "auth-key", env = "MOQ_AUTH_KEY", conflicts_with = "jwks_uri")]
+	#[arg(long = "auth-key", env = "MOQ_AUTH_KEY")]
 	pub key: Option<String>,
 
-	/// The URI to the JWK set.
-	/// If present, all paths will require a token that can be validated with the given JWK set
-	/// unless they are in the public list.
-	#[arg(long = "jwks-uri", env = "MOQ_AUTH_JWKS_URI", conflicts_with = "key")]
-	pub jwks_uri: Option<String>,
-
-	/// How often to refresh the JWK set (in seconds), if not provided the JWKs won't be refreshed.
+	/// How often to refresh the JWK set (in seconds), will be ignored if the `key` is not a valid URI.
 	/// If not provided, there won't be any refreshing, the JWK set will only be loaded once at startup.
-	/// Minimum value: 30
+	/// Minimum value: 30, defaults to None
 	#[arg(long = "jwks-refresh-interval", env = "MOQ_AUTH_JWKS_REFRESH_INTERVAL")]
 	pub jwks_refresh_interval: Option<u64>,
 
@@ -141,35 +136,36 @@ impl Auth {
 	pub fn new(config: AuthConfig) -> anyhow::Result<Self> {
 		let mut refresh_task = None;
 
-		let key: Option<Box<Arc<dyn KeyProvider + Send + Sync>>> =
-			match (config.key.as_deref(), config.jwks_uri.as_deref()) {
-				(Some(key), None) => Some(Box::new(Arc::new(KeySet {
-					keys: vec![Arc::new(moq_token::Key::from_file(key)?)],
-				}))),
-				(None, Some(jwks_uri)) => {
-					let loader = Arc::new(KeySetLoader::new(jwks_uri.to_string()));
+		let key: Option<Arc<dyn KeyProvider + Send + Sync>> = match config.key {
+			Some(uri) if uri.starts_with("http://") || uri.starts_with("https://") => {
+				let loader = Arc::new(KeySetLoader::new(uri));
 
-					refresh_task = config
-						.jwks_refresh_interval
-						.map(|refresh_interval_secs| {
-							if refresh_interval_secs < 30 {
-								anyhow::bail!("jwks_refresh_interval cannot be less than 30")
-							}
-							// Spawn async task to refresh periodically
-							Ok(Self::spawn_refresh_task(
-								Duration::from_secs(refresh_interval_secs),
-								loader.clone(),
-							))
-						})
-						.transpose()?;
+				if let Some(refresh_interval_secs) = config.jwks_refresh_interval {
+					anyhow::ensure!(
+						refresh_interval_secs >= 30,
+						"jwks_refresh_interval cannot be less than 30"
+					);
 
-					// TODO Probably the best would be to crash when the initial load fails
-
-					Some(Box::new(loader))
+					refresh_task = Some(Self::spawn_refresh_task(
+						Duration::from_secs(refresh_interval_secs),
+						loader.clone(),
+					));
 				}
-				(Some(_), Some(_)) => anyhow::bail!("Cannot provide both key and jwks_uri, choose one!"),
-				(None, None) => None,
-			};
+
+				// TODO Probably the best would be to crash when the initial load fails
+				Some(loader)
+			}
+
+			Some(key_file) => {
+				let key = moq_token::Key::from_file(&key_file)
+					.with_context(|| format!("cannot load key from {}", &key_file))?;
+				Some(Arc::new(KeySet {
+					keys: vec![Arc::new(key)],
+				}))
+			}
+
+			None => None,
+		};
 
 		let public = config.public;
 
@@ -180,7 +176,7 @@ impl Auth {
 		}
 
 		Ok(Self {
-			key,
+			key: key.map(Box::new),
 			public: public.map(|p| p.as_path().to_owned()),
 			refresh_task,
 		})

@@ -127,7 +127,7 @@ Configure the relay:
 [auth]
 # public = "anon"                                               # Optional: allow anonymous access to anon/**
 
-jwks_uri = "https://auth.example.com/keys.json"                 # JWK set URL for authenticated paths
+key = "https://auth.example.com/keys.json"                      # JWK set URL for authenticated paths
 jwks_refresh_interval = 86400                                   # Optional: refresh the JWK set every N seconds, no refreshing if omitted
 ```
 :::
