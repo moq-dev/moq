@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::{fs, io, net, sync::Arc, time};
 use url::Url;
+use web_transport_ws::{tokio_tungstenite, tungstenite};
 
 // Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -326,7 +327,7 @@ impl Client {
 		// Connect using tokio-tungstenite
 		let (ws_stream, _response) = tokio_tungstenite::connect_async_with_config(
 			url.as_str(),
-			Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+			Some(tungstenite::protocol::WebSocketConfig {
 				max_message_size: Some(64 << 20), // 64 MB
 				max_frame_size: Some(16 << 20),   // 16 MB
 				accept_unmasked_frames: false,

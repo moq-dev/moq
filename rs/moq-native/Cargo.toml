@@ -43,7 +43,6 @@ serde = { version = "1", features = ["derive"] }
 serde_with = "3"
 time = "0.3"
 tokio = { workspace = true, features = ["full"] }
-tokio-tungstenite = "0.24"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
