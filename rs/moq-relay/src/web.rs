@@ -73,7 +73,7 @@ pub struct HttpsConfig {
 }
 
 pub struct WebState {
-	pub auth: Arc<Auth>,
+	pub auth: Auth,
 	pub cluster: Cluster,
 	pub tls_info: Arc<std::sync::RwLock<moq_native::TlsInfo>>,
 	pub conn_id: AtomicU64,

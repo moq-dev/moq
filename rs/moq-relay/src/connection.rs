@@ -1,5 +1,4 @@
 use crate::{Auth, Cluster};
-use std::sync::Arc;
 
 use moq_native::Request;
 
@@ -7,7 +6,7 @@ pub struct Connection {
 	pub id: u64,
 	pub request: Request,
 	pub cluster: Cluster,
-	pub auth: Arc<Auth>,
+	pub auth: Auth,
 }
 
 impl Connection {

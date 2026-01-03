@@ -70,15 +70,16 @@ pub struct AuthToken {
 
 const JWKS_REFRESH_ERROR_INTERVAL: Duration = Duration::from_mins(5);
 
+#[derive(Clone)]
 pub struct Auth {
 	key: Option<Arc<Mutex<KeySet>>>,
 	public: Option<PathOwned>,
-	refresh_task: Option<tokio::task::JoinHandle<()>>,
+	refresh_task: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
 
 impl Drop for Auth {
 	fn drop(&mut self) {
-		if let Some(handle) = &self.refresh_task {
+		if let Some(handle) = self.refresh_task.as_deref() {
 			handle.abort();
 		}
 	}
@@ -192,7 +193,7 @@ impl Auth {
 		Ok(Self {
 			key,
 			public: public.map(|p| p.as_path().to_owned()),
-			refresh_task,
+			refresh_task: refresh_task.map(Arc::new),
 		})
 	}
 
