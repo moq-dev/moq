@@ -1,12 +1,12 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup, Error, OriginConsumer, OriginProducer,
 };
 
-pub struct Session<S: web_transport_trait::Session> {
-	session: S,
+pub struct Session {
+	session: Arc<dyn SessionInner>,
 }
 
 /// The versions of MoQ that are supported by this implementation.
@@ -21,16 +21,18 @@ pub const VERSIONS: [coding::Version; 3] = [
 /// The ALPN strings for supported versions.
 pub const ALPNS: [&str; 2] = [lite::ALPN, ietf::ALPN];
 
-impl<S: web_transport_trait::Session> Session<S> {
-	fn new(session: S) -> Self {
-		Self { session }
+impl Session {
+	fn new<S: web_transport_trait::Session>(session: S) -> Self {
+		Self {
+			session: Arc::new(session),
+		}
 	}
 
 	/// Perform the MoQ handshake as a client, negotiating the version.
 	///
 	/// Publishing is performed with [OriginConsumer] and subscribing with [OriginProducer].
 	/// The connection remains active until the session is closed.
-	pub async fn connect(
+	pub async fn connect<S: web_transport_trait::Session>(
 		session: S,
 		publish: impl Into<Option<OriginConsumer>>,
 		subscribe: impl Into<Option<OriginProducer>>,
@@ -91,7 +93,7 @@ impl<S: web_transport_trait::Session> Session<S> {
 	///
 	/// Publishing is performed with [OriginConsumer] and subscribing with [OriginProducer].
 	/// The connection remains active until the session is closed.
-	pub async fn accept(
+	pub async fn accept<S: web_transport_trait::Session>(
 		session: S,
 		publish: impl Into<Option<OriginConsumer>>,
 		subscribe: impl Into<Option<OriginProducer>>,
@@ -163,6 +165,23 @@ impl<S: web_transport_trait::Session> Session<S> {
 	/// Block until the transport session is closed.
 	// TODO Remove the Result the next time we make a breaking change.
 	pub async fn closed(&self) -> Result<(), Error> {
-		Err(Error::Transport(Arc::new(self.session.closed().await)))
+		let err = self.session.closed().await;
+		Err(Error::Transport(err))
+	}
+}
+
+// We use a wrapper type that is dyn-compatible to remove the generic bounds from Session.
+trait SessionInner: Send + Sync {
+	fn close(&self, code: u32, reason: &str);
+	fn closed(&self) -> Pin<Box<dyn Future<Output = Arc<dyn crate::error::SendSyncError>> + Send + '_>>;
+}
+
+impl<S: web_transport_trait::Session> SessionInner for S {
+	fn close(&self, code: u32, reason: &str) {
+		S::close(self, code, reason);
+	}
+
+	fn closed(&self) -> Pin<Box<dyn Future<Output = Arc<dyn crate::error::SendSyncError>> + Send + '_>> {
+		Box::pin(async move { Arc::new(S::closed(self).await) as Arc<dyn crate::error::SendSyncError> })
 	}
 }

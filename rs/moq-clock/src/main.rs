@@ -114,17 +114,6 @@ async fn run_session(
 	publish: Option<moq_lite::OriginConsumer>,
 	subscribe: Option<moq_lite::OriginProducer>,
 ) -> anyhow::Result<()> {
-	let session = client.connect_with_fallback(url).await?;
-
-	match session {
-		moq_native::WebTransportSessionAny::Quinn(session) => {
-			let session = moq_lite::Session::connect(session, publish, subscribe).await?;
-			session.closed().await
-		}
-		moq_native::WebTransportSessionAny::WebSocket(session) => {
-			let session = moq_lite::Session::connect(session, publish, subscribe).await?;
-			session.closed().await
-		}
-	}
-	.map_err(Into::into)
+	let session = client.connect_with_fallback(url, publish, subscribe).await?;
+	session.closed().await.map_err(Into::into)
 }

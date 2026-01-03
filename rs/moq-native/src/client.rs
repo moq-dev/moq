@@ -1,37 +1,15 @@
 use crate::crypto;
 use anyhow::Context;
-use once_cell::sync::Lazy;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::RootCertStore;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::{fs, io, net, sync::Arc, time};
 use url::Url;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ServerCacheKey(String, u16);
-
-impl std::fmt::Display for ServerCacheKey {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "{}:{}", self.0, self.1)
-	}
-}
-
 // Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
-// Keyed by "hostname:port" string (e.g., "relay.example.com:443")
-static WEBSOCKET_WON: Lazy<Mutex<HashSet<ServerCacheKey>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-
-// Helper function to extract hostname:port key from URL
-fn server_key(url: &Url) -> Option<ServerCacheKey> {
-	let host = url.host_str()?;
-	let port = url.port().unwrap_or_else(|| match url.scheme() {
-		"https" | "wss" | "moql" | "moqt" => 443,
-		"http" | "ws" => 80,
-		_ => 443,
-	});
-	Some(ServerCacheKey(host.to_string(), port))
-}
+static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -108,23 +86,6 @@ impl Default for ClientConfig {
 impl ClientConfig {
 	pub fn init(self) -> anyhow::Result<Client> {
 		Client::new(self)
-	}
-}
-
-pub enum WebTransportSessionAny {
-	Quinn(web_transport_quinn::Session),
-	WebSocket(web_transport_ws::Session),
-}
-
-impl From<web_transport_quinn::Session> for WebTransportSessionAny {
-	fn from(session: web_transport_quinn::Session) -> Self {
-		WebTransportSessionAny::Quinn(session)
-	}
-}
-
-impl From<web_transport_ws::Session> for WebTransportSessionAny {
-	fn from(session: web_transport_ws::Session) -> Self {
-		WebTransportSessionAny::WebSocket(session)
 	}
 }
 
@@ -210,63 +171,56 @@ impl Client {
 		})
 	}
 
-	pub async fn connect(&self, url: Url) -> anyhow::Result<web_transport_quinn::Session> {
-		self.connect_quic(url).await
+	/// Establish a WebTransport/QUIC connection followed by a MoQ handshake.
+	pub async fn connect(
+		&self,
+		url: Url,
+		publish: impl Into<Option<moq_lite::OriginConsumer>>,
+		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
+	) -> anyhow::Result<moq_lite::Session> {
+		let session = self.connect_quic(url).await?;
+		let session = moq_lite::Session::connect(session, publish, subscribe).await?;
+		Ok(session)
 	}
 
-	pub async fn connect_with_fallback(&self, url: Url) -> anyhow::Result<WebTransportSessionAny> {
-		// Capture QUIC error so it can be used if both transports fail
-		let mut quic_error: Option<anyhow::Error> = None;
-
+	/// Establish a WebTransport/QUIC connection or a WebSocket connection, whichever is available first.
+	///
+	/// Establishes a MoQ handshake on the winning transport.
+	pub async fn connect_with_fallback(
+		&self,
+		url: Url,
+		publish: impl Into<Option<moq_lite::OriginConsumer>>,
+		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
+	) -> anyhow::Result<moq_lite::Session> {
 		// Create futures for both possible protocols
 		let quic_url = url.clone();
 		let quic_handle = async {
 			match self.connect_quic(quic_url).await {
 				Ok(session) => Some(session),
 				Err(err) => {
-					quic_error = Some(err);
+					tracing::warn!(%err, "QUIC connection failed");
 					None
 				}
 			}
 		};
 
 		let ws_handle = async {
-			let cache_key = server_key(&url);
-
-			// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
-			// unless we've already had to fall back to WebSockets for this server.
-			let websocket_penalty = match &cache_key {
-				Some(key) if !WEBSOCKET_WON.lock().unwrap().contains(key) => self.websocket_delay,
-				_ => None,
-			};
-
-			if let Some(delay) = websocket_penalty {
-				tokio::time::sleep(delay).await;
-				tracing::debug!(url = %url, delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
-			}
-
 			match self.connect_websocket(url).await {
-				Ok(session) => {
-					if let Some(cache_key) = cache_key {
-						tracing::warn!(server = %cache_key, "using WebSocket fallback");
-						WEBSOCKET_WON.lock().unwrap().insert(cache_key);
-					}
-					Some(session)
-				}
+				Ok(session) => Some(session),
 				Err(err) => {
-					tracing::debug!(%err, "WebSocket connection failed");
+					tracing::warn!(%err, "WebSocket connection failed");
 					None
 				}
 			}
 		};
 
 		// Race the connection futures
-		tokio::select! {
-			Some(quic_session) = quic_handle => Ok(quic_session.into()),
-			Some(ws_session) = ws_handle => Ok(ws_session.into()),
-			// If both attempts fail, return the QUIC error (if available)
-			else => Err(quic_error.unwrap_or_else(|| anyhow::Error::msg("unknown error"))),
-		}
+		Ok(tokio::select! {
+			Some(quic) = quic_handle => moq_lite::Session::connect(quic, publish, subscribe).await?,
+			Some(ws) = ws_handle => moq_lite::Session::connect(ws, publish, subscribe).await?,
+			// If both attempts fail, return an error
+			else => anyhow::bail!("failed to connect to server"),
+		})
 	}
 
 	async fn connect_quic(&self, mut url: Url) -> anyhow::Result<web_transport_quinn::Session> {
@@ -336,25 +290,42 @@ impl Client {
 	}
 
 	async fn connect_websocket(&self, mut url: Url) -> anyhow::Result<web_transport_ws::Session> {
+		let host = url.host_str().context("missing hostname")?.to_string();
+		let port = url.port().unwrap_or_else(|| match url.scheme() {
+			"https" | "wss" | "moql" | "moqt" => 443,
+			"http" | "ws" => 80,
+			_ => 443,
+		});
+		let key = (host, port);
+
+		// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
+		// unless we've already had to fall back to WebSockets for this server.
+		// TODO if let chain
+		match self.websocket_delay {
+			Some(delay) if !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
+				tokio::time::sleep(delay).await;
+				tracing::debug!(%url, delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
+			}
+			_ => {}
+		}
+
 		// Convert URL scheme: http:// -> ws://, https:// -> wss://
-		let ws_url = match url.scheme() {
+		match url.scheme() {
 			"http" => {
 				url.set_scheme("ws").expect("failed to set scheme");
-				url
 			}
 			"https" | "moql" | "moqt" => {
 				url.set_scheme("wss").expect("failed to set scheme");
-				url
 			}
-			"ws" | "wss" => url,
+			"ws" | "wss" => {}
 			_ => anyhow::bail!("unsupported URL scheme for WebSocket: {}", url.scheme()),
 		};
 
-		tracing::debug!(url = %ws_url, "connecting via WebSocket");
+		tracing::debug!(%url, "connecting via WebSocket");
 
 		// Connect using tokio-tungstenite
 		let (ws_stream, _response) = tokio_tungstenite::connect_async_with_config(
-			ws_url.as_str(),
+			url.as_str(),
 			Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
 				max_message_size: Some(64 << 20), // 64 MB
 				max_frame_size: Some(16 << 20),   // 16 MB
@@ -369,6 +340,9 @@ impl Client {
 		// Wrap WebSocket in WebTransport compatibility layer
 		// Similar to what the relay does: web_transport_ws::Session::new(socket, true)
 		let session = web_transport_ws::Session::new(ws_stream, false);
+
+		tracing::warn!(%url, "using WebSocket fallback");
+		WEBSOCKET_WON.lock().unwrap().insert(key);
 
 		Ok(session)
 	}

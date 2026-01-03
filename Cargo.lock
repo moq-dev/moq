@@ -1798,7 +1798,6 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "moq-lite",
- "once_cell",
  "parking_lot",
  "quinn",
  "rcgen",
