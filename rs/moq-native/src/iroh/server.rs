@@ -1,7 +1,7 @@
 use std::net;
 
 use anyhow::Context;
-use web_transport_iroh::iroh;
+use web_transport_iroh::{http, iroh};
 
 use futures::{
 	future::BoxFuture,
@@ -71,21 +71,22 @@ impl Server {
 	}
 
 	async fn accept_session(conn: iroh::endpoint::Incoming) -> anyhow::Result<Request> {
-		let conn = conn.accept()?;
-		let conn = conn.await?;
+		let conn = conn.accept()?.await?;
 		let alpn = String::from_utf8(conn.alpn().to_vec()).context("failed to decode ALPN")?;
-		let span = tracing::Span::current();
-		span.record("id", conn.stable_id()); // TODO can we get this earlier?
+		tracing::Span::current().record("id", conn.stable_id());
 		tracing::debug!(remote = %conn.remote_id().fmt_short(), %alpn, "accepted");
-
 		match alpn.as_str() {
-			moq_lite::lite::ALPN | moq_lite::ietf::ALPN | web_transport_iroh::ALPN => {
-				let request = web_transport_iroh::Request::accept(conn)
+			web_transport_iroh::ALPN_H3 => {
+				let request = web_transport_iroh::H3Request::accept(conn)
 					.await
 					.context("failed to receive WebTransport request")?;
-				Ok(Request::Iroh(request))
+				Ok(Request::IrohWebTransport(request))
 			}
-			_ => anyhow::bail!("unsupported ALPN: {alpn}"),
+			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => {
+				let request = IrohQuicRequest::accept(conn);
+				Ok(Request::IrohQuic(request))
+			}
+			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
 		}
 	}
 
@@ -101,5 +102,24 @@ impl Server {
 	// Alternative would be wrapping `Self::accept` in [sync_wrapper](https://docs.rs/sync_wrapper/latest/sync_wrapper/)
 	pub async fn close(&mut self) {
 		self.endpoint.close().await
+	}
+}
+
+pub struct IrohQuicRequest(iroh::endpoint::Connection);
+
+impl IrohQuicRequest {
+	/// Accept a new QUIC-only WebTransport session from a client.
+	pub fn accept(conn: iroh::endpoint::Connection) -> Self {
+		Self(conn)
+	}
+
+	/// Accept the session.
+	pub fn ok(self) -> web_transport_iroh::Session {
+		web_transport_iroh::Session::raw(self.0)
+	}
+
+	/// Reject the session.
+	pub fn close(self, status: http::StatusCode) {
+		self.0.close(status.as_u16().into(), status.as_str().as_bytes());
 	}
 }

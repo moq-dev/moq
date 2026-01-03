@@ -59,7 +59,7 @@ impl EndpointConfig {
 		};
 
 		let mut builder = Endpoint::builder().secret_key(secret_key).alpns(vec![
-			web_transport_iroh::ALPN.as_bytes().to_vec(),
+			web_transport_iroh::ALPN_H3.as_bytes().to_vec(),
 			moq_lite::lite::ALPN.as_bytes().to_vec(),
 			moq_lite::ietf::ALPN.as_bytes().to_vec(),
 		]);

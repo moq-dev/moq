@@ -4999,7 +4999,6 @@ dependencies = [
 [[package]]
 name = "web-transport-iroh"
 version = "0.1.0"
-source = "git+https://github.com/n0-computer/iroh-live#5c4cf0042d8167035bb4609cbe12be8ae85926e9"
 dependencies = [
  "bytes",
  "http",

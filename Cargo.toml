@@ -24,3 +24,6 @@ web-async = { version = "0.1.1", features = ["tracing"] }
 web-transport-quinn = "0.10"
 web-transport-trait = "0.3"
 web-transport-ws = "0.2"
+
+[patch."https://github.com/n0-computer/iroh-live"]
+web-transport-iroh = { path = "../iroh-live/web-transport-iroh" }

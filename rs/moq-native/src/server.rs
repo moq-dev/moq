@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::{net, sync::Arc, time::Duration};
 
 use crate::crypto;
+#[cfg(feature = "iroh")]
+use crate::iroh::IrohQuicRequest;
 use anyhow::Context;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
@@ -261,7 +263,9 @@ pub enum Request {
 	WebTransport(web_transport_quinn::Request),
 	Quic(QuicRequest),
 	#[cfg(feature = "iroh")]
-	Iroh(web_transport_iroh::Request),
+	IrohWebTransport(web_transport_iroh::H3Request),
+	#[cfg(feature = "iroh")]
+	IrohQuic(IrohQuicRequest),
 }
 
 impl Request {
@@ -274,7 +278,11 @@ impl Request {
 				Ok(())
 			}
 			#[cfg(feature = "iroh")]
-			Request::Iroh(request) => request.close(status).await.map_err(Into::into),
+			Request::IrohWebTransport(request) => request.close(status).await.map_err(Into::into),
+			Request::IrohQuic(request) => {
+				request.close(status);
+				Ok(())
+			}
 		}
 	}
 
@@ -283,21 +291,24 @@ impl Request {
 	/// For WebTransport, this completes the HTTP handshake (200 OK).
 	/// For raw QUIC, this constructs a raw session.
 	pub async fn ok(self) -> anyhow::Result<Session> {
-		match self {
-			Request::WebTransport(request) => request.ok().await.map_err(Into::into).map(Session::Quinn),
-			Request::Quic(request) => Ok(Session::Quinn(request.ok())),
+		let session = match self {
+			Request::WebTransport(request) => Session::Quinn(request.ok().await?),
+			Request::Quic(request) => Session::Quinn(request.ok()),
 			#[cfg(feature = "iroh")]
-			Request::Iroh(request) => request.ok().await.map_err(Into::into).map(Session::Iroh),
-		}
+			Request::IrohWebTransport(request) => Session::Iroh(request.ok().await?),
+			#[cfg(feature = "iroh")]
+			Request::IrohQuic(request) => Session::Iroh(request.ok()),
+		};
+		Ok(session)
 	}
 
 	/// Returns the URL provided by the client.
-	pub fn url(&self) -> &Url {
+	pub fn url(&self) -> Option<&Url> {
 		match self {
-			Request::WebTransport(request) => request.url(),
-			Request::Quic(request) => request.url(),
+			Request::WebTransport(request) => Some(request.url()),
 			#[cfg(feature = "iroh")]
-			Request::Iroh(request) => request.url(),
+			Request::IrohWebTransport(request) => Some(request.url()),
+			_ => None,
 		}
 	}
 }

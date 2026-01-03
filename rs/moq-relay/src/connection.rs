@@ -12,20 +12,20 @@ pub struct Connection {
 impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let (path, token) = match &self.request {
-			Request::WebTransport(request) => {
+		let url = match &self.request {
+			Request::WebTransport(request) => Some(request.url()),
+			#[cfg(feature = "iroh")]
+			Request::IrohWebTransport(request) => Some(request.url()),
+			_ => None,
+		};
+		let (path, token) = match url {
+			Some(url) => {
 				// Extract the path and token from the URL.
-				let path = request.url().path();
-				let token = request
-					.url()
-					.query_pairs()
-					.find(|(k, _)| k == "jwt")
-					.map(|(_, v)| v.to_string());
+				let path = url.path();
+				let token = url.query_pairs().find(|(k, _)| k == "jwt").map(|(_, v)| v.to_string());
 				(path, token)
 			}
-			Request::Quic(_conn) => ("", None),
-			#[cfg(feature = "iroh")]
-			Request::Iroh(_conn) => ("", None),
+			None => ("", None),
 		};
 		// Verify the URL before accepting the connection.
 		let token = match self.auth.verify(path, token.as_deref()) {
