@@ -53,24 +53,27 @@ async fn main() -> anyhow::Result<()> {
 		priority: 0,
 	};
 
+	let origin = moq_lite::Origin::produce();
+
 	match config.role {
 		Command::Publish => {
 			let mut broadcast = moq_lite::Broadcast::produce();
 			let track = broadcast.producer.create_track(track);
 			let clock = clock::Publisher::new(track);
 
-			let origin = moq_lite::Origin::produce();
 			origin.producer.publish_broadcast(&config.broadcast, broadcast.consumer);
 
+			let session = client
+				.connect_with_fallback(config.url, Some(origin.consumer), None)
+				.await?;
+
 			tokio::select! {
-				res = run_session(client, config.url, Some(origin.consumer), None) => res,
+				res = session.closed() => res.context("session closed"),
 				_ = clock.run() => Ok(()),
 			}
 		}
 		Command::Subscribe => {
-			let origin = moq_lite::Origin::produce();
-			let session_runner = run_session(client, config.url, None, Some(origin.producer));
-			tokio::pin!(session_runner);
+			let session = client.connect_with_fallback(config.url, None, origin.producer).await?;
 
 			// NOTE: We could just call `session.consume_broadcast(&config.broadcast)` instead,
 			// However that won't work with IETF MoQ and the current OriginConsumer API the moment.
@@ -99,21 +102,11 @@ async fn main() -> anyhow::Result<()> {
 							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
 						}
 					},
-					res = &mut session_runner => return res.context("session closed"),
+					res = session.closed() => return res.context("session closed"),
 					// NOTE: This drops clock when a new announce arrives, canceling it.
 					Some(res) = async { Some(clock.take()?.run().await) } => res.context("clock error")?,
 				}
 			}
 		}
 	}
-}
-
-async fn run_session(
-	client: moq_native::Client,
-	url: Url,
-	publish: Option<moq_lite::OriginConsumer>,
-	subscribe: Option<moq_lite::OriginProducer>,
-) -> anyhow::Result<()> {
-	let session = client.connect_with_fallback(url, publish, subscribe).await?;
-	session.closed().await.map_err(Into::into)
 }

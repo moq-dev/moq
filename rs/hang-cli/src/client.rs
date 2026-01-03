@@ -13,7 +13,7 @@ pub async fn client(config: moq_native::ClientConfig, url: Url, name: String, pu
 	tracing::info!(%url, %name, "connecting");
 
 	// Establish the connection, not providing a subscriber.
-	let session = client.connect(url, origin.consumer, None).await?;
+	let session = client.connect_with_fallback(url, origin.consumer, None).await?;
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready.
