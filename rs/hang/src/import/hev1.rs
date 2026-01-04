@@ -227,8 +227,6 @@ impl Hev1 {
 			_ => {}
 		}
 
-		tracing::trace!(kind = ?nal_type, "parsed NAL");
-
 		// Rather than keeping the original size of the start code, we replace it with a 4 byte start code.
 		// It's just marginally easier and potentially more efficient down the line (JS player with MSE).
 		// NOTE: This is ref-counted and static, so it's extremely cheap to clone.
@@ -353,13 +351,12 @@ fn get_vui_data(vui: &Option<scuffle_h265::VuiParameters>) -> VuiData {
 		.as_ref()
 		.map(|v| &v.aspect_ratio_info)
 		.and_then(|ar| {
-			tracing::trace!(?ar, "~~~aspect ratio info");
 			match ar {
 				// Extended SAR has explicit arbitrary values for width and height.
 				scuffle_h265::AspectRatioInfo::ExtendedSar { sar_width, sar_height } => {
 					Some((Some(*sar_width as u32), Some(*sar_height as u32)))
 				}
-				//
+				// Predefined map to known values.
 				scuffle_h265::AspectRatioInfo::Predefined(idc) => {
 					aspect_ratio_from_idc(*idc).map(|(w, h)| (Some(w), Some(h)))
 				}
