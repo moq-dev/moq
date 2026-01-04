@@ -193,6 +193,7 @@ impl Hev1 {
 			Some(HevcNalType::Aud | HevcNalType::Pps | HevcNalType::SeiPrefix | HevcNalType::SeiSuffix) => {
 				self.maybe_start_frame(pts)?;
 			}
+			// Keyframe containing slices
 			Some(
 				HevcNalType::IdrWRadl
 				| HevcNalType::IdrNLp
@@ -204,7 +205,7 @@ impl Hev1 {
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
 			}
-			// All slice types (both N and R variants)
+			// All other slice types (both N and R variants)
 			Some(
 				HevcNalType::TrailN
 				| HevcNalType::TrailR
