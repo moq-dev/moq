@@ -1,13 +1,11 @@
 use crate as hang;
+use crate::import::annexb::{NalIterator, START_CODE};
+
 use anyhow::Context;
 use buf_list::BufList;
 use bytes::{Buf, Bytes};
 use moq_lite as moq;
 use scuffle_h265::SpsNALUnit;
-
-// Prepend each NAL with a 4 byte start code.
-// Yes, it's one byte longer than the 3 byte start code, but it's easier to convert to MP4.
-const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
 
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams, ignores VPS.
@@ -315,137 +313,6 @@ pub enum HevcNalType {
 	SeiPrefix = 39,
 	SeiSuffix = 40,
 } // ITU H.265 V10 Table 7-1 – NAL unit type codes and NAL unit type classes
-
-struct NalIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
-	buf: &'a mut T,
-	start: Option<usize>,
-}
-
-impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
-	pub fn new(buf: &'a mut T) -> Self {
-		Self { buf, start: None }
-	}
-
-	/// Assume the buffer ends with a NAL unit and flush it.
-	/// This is more efficient because we cache the last "start" code position.
-	pub fn flush(self) -> anyhow::Result<Option<Bytes>> {
-		let start = match self.start {
-			Some(start) => start,
-			None => match after_start_code(self.buf.as_ref())? {
-				Some(start) => start,
-				None => return Ok(None),
-			},
-		};
-
-		self.buf.advance(start);
-
-		let nal = self.buf.copy_to_bytes(self.buf.remaining());
-		Ok(Some(nal))
-	}
-}
-
-impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for NalIterator<'a, T> {
-	type Item = anyhow::Result<Bytes>;
-
-	fn next(&mut self) -> Option<Self::Item> {
-		let start = match self.start {
-			Some(start) => start,
-			None => match after_start_code(self.buf.as_ref()).transpose()? {
-				Ok(start) => start,
-				Err(err) => return Some(Err(err)),
-			},
-		};
-
-		let (size, new_start) = find_start_code(&self.buf.as_ref()[start..])?;
-		self.buf.advance(start);
-
-		let nal = self.buf.copy_to_bytes(size);
-		self.start = Some(new_start);
-		Some(Ok(nal))
-	}
-}
-
-// Return the size of the start code at the start of the buffer.
-fn after_start_code(b: &[u8]) -> anyhow::Result<Option<usize>> {
-	if b.len() < 3 {
-		return Ok(None);
-	}
-
-	// NOTE: We have to check every byte, so the `find_start_code` optimization doesn't matter.
-	anyhow::ensure!(b[0] == 0, "missing Annex B start code");
-	anyhow::ensure!(b[1] == 0, "missing Annex B start code");
-
-	match b[2] {
-		0 if b.len() < 4 => Ok(None),
-		0 if b[3] != 1 => anyhow::bail!("missing Annex B start code"),
-		0 => Ok(Some(4)),
-		1 => Ok(Some(3)),
-		_ => anyhow::bail!("invalid Annex B start code"),
-	}
-}
-
-// Return the number of bytes until the next start code, and the size of that start code.
-fn find_start_code(mut b: &[u8]) -> Option<(usize, usize)> {
-	// Okay this is over-engineered because this was my interview question.
-	// We need to find either a 3 byte or 4 byte start code.
-	// 3-byte: 0 0 1
-	// 4-byte: 0 0 0 1
-	//
-	// You fail the interview if you call string.split twice or something.
-	// You get a pass if you do index += 1 and check the next 3-4 bytes.
-	// You get my eternal respect if you check the 3rd byte first.
-	// What?
-	//
-	// If we check the 3rd byte and it's not a 0 or 1, then we immediately index += 3
-	// Sometimes we might only skip 1 or 2 bytes, but it's still better than checking every byte.
-	//
-	// TODO Is this the type of thing that SIMD could further improve?
-	// If somebody can figure that out, I'll buy you a beer.
-	let size = b.len();
-
-	while b.len() >= 3 {
-		// ? ? ?
-		match b[2] {
-			// ? ? 0
-			0 if b.len() >= 4 => match b[3] {
-				// ? ? 0 1
-				1 => match b[1] {
-					// ? 0 0 1
-					0 => match b[0] {
-						// 0 0 0 1
-						0 => return Some((size - b.len(), 4)),
-						// ? 0 0 1
-						_ => return Some((size - b.len() + 1, 3)),
-					},
-					// ? x 0 1
-					_ => b = &b[4..],
-				},
-				// ? ? 0 0 - skip only 1 byte to check for potential 0 0 0 1
-				0 => b = &b[1..],
-				// ? ? 0 x
-				_ => b = &b[4..],
-			},
-			// ? ? 0 FIN
-			0 => return None,
-			// ? ? 1
-			1 => match b[1] {
-				// ? 0 1
-				0 => match b[0] {
-					// 0 0 1
-					0 => return Some((size - b.len(), 3)),
-					// ? 0 1
-					_ => b = &b[3..],
-				},
-				// ? x 1
-				_ => b = &b[3..],
-			},
-			// ? ? x
-			_ => b = &b[3..],
-		}
-	}
-
-	None
-}
 
 // Packs the constraint flags from ITU H.265 V10 Section 7.3.3 Profile, tier and level syntax
 fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] {
