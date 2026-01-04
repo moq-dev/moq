@@ -192,13 +192,13 @@ export class Source {
 	}
 
 	#runTrack(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
-		const sub = broadcast.subscribe(name, PRIORITY.video); // TODO use priority from catalog
-		effect.cleanup(() => sub.close());
+		const track = broadcast.subscribe(name, PRIORITY.video); // TODO use priority from catalog
+		effect.cleanup(() => track.close());
 
 		// Create consumer that reorders groups/frames up to the provided latency.
 		// Container defaults to "legacy" via Zod schema for backward compatibility
 		console.log(`[Video Subscriber] Using container format: ${config.container}`);
-		const consumer = new Frame.Consumer(sub, {
+		const consumer = new Frame.Consumer(track, {
 			latency: this.latency,
 			container: config.container,
 		});
@@ -231,7 +231,7 @@ export class Source {
 			}
 		});
 
-		const decoder = new VideoDecoder({
+		const frameDecoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				// Insert into a queue so we can perform ordered sleeps.
 				// If this were to block, I believe WritableStream is still ordered.
@@ -247,37 +247,37 @@ export class Source {
 				effect.close();
 			},
 		});
-		effect.cleanup(() => decoder.close());
+		effect.cleanup(() => frameDecoder.close());
 
 		effect.spawn(async () => {
 			for (;;) {
-				const { value: frame } = await reader.read();
-				if (!frame) break;
+				const { value: decodedVideoFrame } = await reader.read();
+				if (!decodedVideoFrame) break;
 
 				// Sleep until it's time to decode the next frame.
-				const ref = performance.now() - frame.timestamp / 1000;
+				const frameRelativeTime = performance.now() - decodedVideoFrame.timestamp / 1000;
 
-				let sleep = 0;
-				if (!this.#reference || ref < this.#reference) {
-					this.#reference = ref;
+				let nextFrameDelay = 0;
+				if (!this.#reference || frameRelativeTime < this.#reference) {
+					this.#reference = frameRelativeTime;
 					// Don't sleep so we immediately render this frame.
 				} else {
-					sleep = this.#reference - ref + this.latency.peek();
+					nextFrameDelay = this.#reference - frameRelativeTime + this.latency.peek();
 				}
 
-				if (sleep > MIN_SYNC_WAIT_MS) {
-					this.syncStatus.set({ state: "wait", bufferDuration: sleep });
+				if (nextFrameDelay > MIN_SYNC_WAIT_MS) {
+					this.syncStatus.set({ state: "wait", bufferDuration: nextFrameDelay });
 				}
 
-				if (sleep > 0) {
+				if (nextFrameDelay > 0) {
 					// NOTE: WebCodecs doesn't block on output promises (I think?), so these sleeps will occur concurrently.
 					// TODO: This cause the `syncStatus` to be racey especially
-					await new Promise((resolve) => setTimeout(resolve, sleep));
+					await new Promise((resolve) => setTimeout(resolve, nextFrameDelay));
 				}
 
-				if (sleep > MIN_SYNC_WAIT_MS) {
+				if (nextFrameDelay > MIN_SYNC_WAIT_MS) {
 					// Include how long we slept if it was above the threshold.
-					this.syncStatus.set({ state: "ready", bufferDuration: sleep });
+					this.syncStatus.set({ state: "ready", bufferDuration: nextFrameDelay });
 				} else {
 					this.syncStatus.set({ state: "ready" });
 
@@ -292,12 +292,12 @@ export class Source {
 
 				this.frame.update((prev) => {
 					prev?.close();
-					return frame;
+					return decodedVideoFrame;
 				});
 			}
 		});
 
-		decoder.configure({
+		frameDecoder.configure({
 			...config,
 			description: config.description ? Hex.toBytes(config.description) : undefined,
 			optimizeForLatency: config.optimizeForLatency ?? true,
@@ -307,23 +307,23 @@ export class Source {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await Promise.race([consumer.decode(), effect.cancel]);
-				if (!next) break;
+				const nextFrameInfo = await Promise.race([consumer.decode(), effect.cancel]);
+				if (!nextFrameInfo) break;
 
 				const chunk = new EncodedVideoChunk({
-					type: next.keyframe ? "key" : "delta",
-					data: next.data,
-					timestamp: next.timestamp,
+					type: nextFrameInfo.keyframe ? "key" : "delta",
+					data: nextFrameInfo.data,
+					timestamp: nextFrameInfo.timestamp,
 				});
 
 				// Track both frame count and bytes received for stats in the UI
 				this.#stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + 1,
-					timestamp: next.timestamp,
-					bytesReceived: (current?.bytesReceived ?? 0) + next.data.byteLength,
+					timestamp: nextFrameInfo.timestamp,
+					bytesReceived: (current?.bytesReceived ?? 0) + nextFrameInfo.data.byteLength,
 				}));
 
-				decoder.decode(chunk);
+				frameDecoder.decode(chunk);
 			}
 		});
 	}
