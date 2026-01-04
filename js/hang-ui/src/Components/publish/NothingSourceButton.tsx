@@ -1,3 +1,5 @@
+import Button from "../shared/components/button";
+import Icon from "../shared/components/icon";
 import usePublishUIContext from "./usePublishUIContext";
 
 export default function NothingSourceButton() {
@@ -10,14 +12,13 @@ export default function NothingSourceButton() {
 
 	return (
 		<div class="publishSourceButtonContainer">
-			<button
-				type="button"
+			<Button
 				title="No Source"
-				class={`publishButton publishSourceButton ${context.nothingActive() ? "active" : ""}`}
+				class={`publishSourceButton ${context.nothingActive() ? "active" : ""}`}
 				onClick={onClick}
 			>
-				🚫
-			</button>
+				<Icon name="ban" />
+			</Button>
 		</div>
 	);
 }

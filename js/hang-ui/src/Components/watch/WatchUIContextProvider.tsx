@@ -2,7 +2,7 @@ import type { Time } from "@moq/hang";
 import type * as Catalog from "@moq/hang/catalog";
 import type HangWatch from "@moq/hang/watch/element";
 import type { JSX } from "solid-js";
-import { createContext, createEffect, createSignal } from "solid-js";
+import { createContext, createEffect, createSignal, onCleanup } from "solid-js";
 
 type WatchUIContextProviderProps = {
 	hangWatch: HangWatch;
@@ -34,6 +34,8 @@ type WatchUIContextValues = {
 	setActiveRendition: (name: string | undefined) => void;
 	isStatsPanelVisible: () => boolean;
 	setIsStatsPanelVisible: (visible: boolean) => void;
+	isFullscreen: () => boolean;
+	toggleFullscreen: () => void;
 };
 
 export const WatchUIContext = createContext<WatchUIContextValues>();
@@ -48,9 +50,18 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
 	const [activeRendition, setActiveRendition] = createSignal<string | undefined>(undefined);
 	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
+	const [isFullscreen, setIsFullscreen] = createSignal<boolean>(!!document.fullscreenElement);
 
 	const togglePlayback = () => {
 		props.hangWatch.paused.set(!props.hangWatch.paused.get());
+	};
+
+	const toggleFullscreen = () => {
+		if (document.fullscreenElement) {
+			document.exitFullscreen();
+		} else {
+			props.hangWatch.requestFullscreen();
+		}
 	};
 
 	const setVolume = (volume: number) => {
@@ -89,6 +100,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		setActiveRendition: setActiveRenditionValue,
 		isStatsPanelVisible,
 		setIsStatsPanelVisible,
+		isFullscreen,
+		toggleFullscreen,
 	};
 
 	createEffect(() => {
@@ -161,6 +174,16 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		watch.signals.effect((effect) => {
 			const selected = effect.get(watch.video.source.active);
 			setActiveRendition(selected);
+		});
+
+		const handleFullscreenChange = () => {
+			setIsFullscreen(!!document.fullscreenElement);
+		};
+
+		document.addEventListener("fullscreenchange", handleFullscreenChange);
+
+		onCleanup(() => {
+			document.removeEventListener("fullscreenchange", handleFullscreenChange);
 		});
 	});
 

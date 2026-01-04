@@ -1,5 +1,5 @@
 import { render } from "solid-js/web";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StatsPanel, statsDetailItems } from "../../components/StatsPanel";
 import type { ProviderProps } from "../../types";
 import { createMockProviderProps } from "../utils";
@@ -13,12 +13,19 @@ describe("StatsPanel", () => {
 		container = document.createElement("div");
 		document.body.appendChild(container);
 		mockAudioVideo = createMockProviderProps();
+
+		// Mock fetch to prevent network requests for Icon SVG files
+		global.fetch = vi.fn().mockResolvedValue({
+			ok: true,
+			text: () => Promise.resolve('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
+		});
 	});
 
 	afterEach(() => {
 		dispose?.();
 		dispose = undefined;
 		document.body.removeChild(container);
+		vi.restoreAllMocks();
 	});
 
 	it("renders with correct base class", () => {

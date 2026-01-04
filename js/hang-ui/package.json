@@ -8,7 +8,8 @@
 	"exports": {
 		"./publish/element": "./src/Components/publish/element.tsx",
 		"./watch/element": "./src/Components/watch/element.tsx",
-		"./stats": "./src/Components/stats/index.ts"
+		"./stats": "./src/Components/stats/index.ts",
+		"./utilities": "./src/utilities/index.ts"
 	},
 	"sideEffects": [
 		"./src/Components/publish/element.tsx",
@@ -16,6 +17,7 @@
 		"./src/Components/stats/element.ts"
 	],
 	"scripts": {
+		"prepare": "bun run build",
 		"build": "bun run clean && rollup -c && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
 		"clean": "rimraf dist",
@@ -29,9 +31,12 @@
 	},
 	"devDependencies": {
 		"@rollup/plugin-node-resolve": "^16.0.3",
+		"@solidjs/testing-library": "^0.8.10",
+		"@testing-library/jest-dom": "^6.9.1",
 		"happy-dom": "^20.0.11",
 		"rimraf": "^6.0.1",
 		"rollup": "^4.53.3",
+		"rollup-plugin-copy": "^3.5.0",
 		"rollup-plugin-esbuild": "^6.2.1",
 		"solid-element": "^1.9.1",
 		"solid-js": "^1.9.10",

@@ -1,3 +1,5 @@
+import Button from "../shared/components/button";
+import Icon from "../shared/components/icon";
 import useWatchUIContext from "./useWatchUIContext";
 
 export default function PlayPauseButton() {
@@ -7,13 +9,8 @@ export default function PlayPauseButton() {
 	};
 
 	return (
-		<button
-			type="button"
-			title={context.isPlaying() ? "Pause" : "Play"}
-			class="watchControlButton"
-			onClick={onClick}
-		>
-			{context.isPlaying() ? "⏸️" : "▶️"}
-		</button>
+		<Button title={context.isPlaying() ? "Pause" : "Play"} class="button--playback" onClick={onClick}>
+			<Icon name={context.isPlaying() ? "pause" : "play"} />
+		</Button>
 	);
 }

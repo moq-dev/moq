@@ -1,5 +1,3 @@
-@import "./variables.css";
-
 .stats {
 	display: flex;
 	align-items: center;
@@ -20,13 +18,13 @@
 	justify-content: center;
 	flex-direction: row;
 	flex-wrap: wrap;
-	gap: var(--spacing-md);
+	gap: var(--spacing-12);
 	max-width: 240px;
 	width: 100%;
 	background-color: var(--color-black-alpha-85);
-	border: 1px solid var(--color-gray-light-alpha-25);
+	border: 1px solid var(--color-white-alpha-25);
 	border-radius: 8px;
-	padding: var(--spacing-md);
+	padding: var(--spacing-12);
 	pointer-events: auto;
 	top: 8px;
 }
@@ -34,14 +32,14 @@
 @container (width > 480px) and (width <= 768px) {
 	.stats .stats__panel {
 		max-width: 360px;
-		padding: var(--spacing-xl);
+		padding: var(--spacing-24);
 	}
 }
 
 @container (width > 768px) {
 	.stats .stats__panel {
 		max-width: 600px;
-		padding: var(--spacing-xl);
+		padding: var(--spacing-24);
 	}
 }
 
@@ -51,69 +49,21 @@
 	justify-content: flex-start;
 	flex-direction: row;
 	height: auto;
-	column-gap: var(--spacing-sm);
-	flex-basis: calc(50% - var(--spacing-md));
+	column-gap: var(--spacing-8);
+	flex-basis: calc(50% - var(--spacing-12));
 	flex-grow: 1;
 	flex-shrink: 1;
 }
 
 @container (width > 480px) {
 	.stats .stats__panel .stats__item {
-		flex-basis: calc(25% - var(--spacing-md));
+		flex-basis: calc(25% - var(--spacing-12));
 	}
-}
-
-.stats .stats__panel .stats__item.stats__item--network .stats__icon-wrapper {
-	background-color: var(--color-blue-surface);
-}
-
-.stats .stats__panel .stats__item.stats__item--network .stats__icon {
-	color: var(--color-blue-primary);
-}
-
-.stats .stats__panel .stats__item.stats__item--network .stats__item-data {
-	color: var(--color-blue-primary);
-}
-
-.stats .stats__panel .stats__item.stats__item--video .stats__icon-wrapper {
-	background-color: var(--color-purple-surface);
-}
-
-.stats .stats__panel .stats__item.stats__item--video .stats__icon {
-	color: var(--color-purple-primary);
-}
-
-.stats .stats__panel .stats__item.stats__item--video .stats__item-data {
-	color: var(--color-purple-primary);
-}
-
-.stats .stats__panel .stats__item.stats__item--audio .stats__icon-wrapper {
-	background-color: var(--color-green-surface);
-}
-
-.stats .stats__panel .stats__item.stats__item--audio .stats__icon {
-	color: var(--color-green-primary);
-}
-
-.stats .stats__panel .stats__item.stats__item--audio .stats__item-data {
-	color: var(--color-green-primary);
-}
-
-.stats .stats__panel .stats__item.stats__item--buffer .stats__icon-wrapper {
-	background-color: var(--color-orange-surface);
-}
-
-.stats .stats__panel .stats__item.stats__item--buffer .stats__icon {
-	color: var(--color-orange-primary);
-}
-
-.stats .stats__panel .stats__item.stats__item--buffer .stats__item-data {
-	color: var(--color-orange-primary);
 }
 
 .stats .stats__panel .stats__item .stats__icon-wrapper {
 	display: none;
-	padding: var(--spacing-sm);
+	padding: var(--spacing-8);
 	border-radius: 8px;
 	width: fit-content;
 	height: fit-content;
@@ -122,6 +72,8 @@
 
 @container (width > 480px) {
 	.stats .stats__panel .stats__item .stats__icon-wrapper {
+		width: 24px;
+		height: 24px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -129,18 +81,57 @@
 	}
 }
 
-.stats .stats__panel .stats__item .stats__icon-wrapper .stats__icon {
-	width: 24px;
-	height: 24px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	flex-direction: row;
-}
-
 .stats .stats__panel .stats__item .stats__icon-wrapper svg {
 	width: 100%;
 	height: 100%;
+}
+
+.stats .stats__panel .stats__item.stats__item--network .stats__icon-wrapper {
+	background-color: var(--color-blue-900);
+}
+
+.stats .stats__panel .stats__item.stats__item--network {
+	color: var(--color-blue-400);
+}
+
+.stats .stats__panel .stats__item.stats__item--network .stats__item-data {
+	color: var(--color-blue-400);
+}
+
+.stats .stats__panel .stats__item.stats__item--video .stats__icon-wrapper {
+	background-color: var(--color-purple-900);
+}
+
+.stats .stats__panel .stats__item.stats__item--video {
+	color: var(--color-purple-400);
+}
+
+.stats .stats__panel .stats__item.stats__item--video .stats__item-data {
+	color: var(--color-purple-400);
+}
+
+.stats .stats__panel .stats__item.stats__item--audio .stats__icon-wrapper {
+	background-color: var(--color-green-900);
+}
+
+.stats .stats__panel .stats__item.stats__item--audio {
+	color: var(--color-green-400);
+}
+
+.stats .stats__panel .stats__item.stats__item--audio .stats__item-data {
+	color: var(--color-green-400);
+}
+
+.stats .stats__panel .stats__item.stats__item--buffer .stats__icon-wrapper {
+	background-color: var(--color-orange-900);
+}
+
+.stats .stats__panel .stats__item.stats__item--buffer {
+	color: var(--color-orange-400);
+}
+
+.stats .stats__panel .stats__item.stats__item--buffer .stats__item-data {
+	color: var(--color-orange-400);
 }
 
 .stats .stats__panel .stats__item .stats__item-detail {
@@ -148,14 +139,14 @@
 	align-items: flex-start;
 	justify-content: space-evenly;
 	flex-direction: column;
-	gap: var(--spacing-xs);
+	gap: var(--spacing-4);
 }
 
 .stats .stats__panel .stats__item .stats__item-detail .stats__item-title {
 	font-size: 12px;
 	font-weight: 500;
 	text-transform: capitalize;
-	color: var(--color-gray-light);
+	color: var(--color-gray-100);
 	font-family: "Segoe UI", Roboto, sans-serif;
 	letter-spacing: 1px;
 	line-height: 12px;

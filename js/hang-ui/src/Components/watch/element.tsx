@@ -2,10 +2,10 @@ import type HangWatch from "@moq/hang/watch/element";
 import { customElement } from "solid-element";
 import { createSignal, onMount, useContext } from "solid-js";
 import { Show } from "solid-js/web";
+import { loadStyleIntoShadow } from "../../utilities";
 import { Stats } from "../stats/Stats";
 import type { ProviderProps } from "../stats/types";
 import BufferingIndicator from "./BufferingIndicator";
-import styles from "./styles.css?inline";
 import WatchControls from "./WatchControls";
 import WatchUIContextProvider, { WatchUIContext } from "./WatchUIContextProvider";
 
@@ -13,6 +13,10 @@ customElement("hang-watch-ui", {}, function WatchUIWebComponent(_, { element }) 
 	const [hangWatchEl, setHangWatchEl] = createSignal<HangWatch | undefined>();
 
 	onMount(async () => {
+		// Load CSS into the component (loadStyleIntoShadow handles basePath internally)
+		const rootElement = (element as unknown as HTMLElement).shadowRoot || (element as unknown as HTMLElement);
+		await loadStyleIntoShadow("themes/watch/styles.css", rootElement);
+
 		const watchEl = element.querySelector("hang-watch");
 		await customElements.whenDefined("hang-watch");
 		setHangWatchEl(watchEl);
@@ -22,7 +26,6 @@ customElement("hang-watch-ui", {}, function WatchUIWebComponent(_, { element }) 
 		<Show when={hangWatchEl()} keyed>
 			{(watchEl: HangWatch) => (
 				<WatchUIContextProvider hangWatch={watchEl}>
-					<style>{styles}</style>
 					<div class="watchVideoContainer">
 						<slot />
 						{(() => {

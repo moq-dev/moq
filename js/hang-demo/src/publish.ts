@@ -1,4 +1,8 @@
 import "./highlight";
+import { setBasePath } from "@moq/hang-ui/utilities";
+
+setBasePath(__HANG_UI_ASSETS_PATH__);
+
 import "@moq/hang-ui/publish/element";
 
 // We need to import Web Components with fully-qualified paths because of tree-shaking.

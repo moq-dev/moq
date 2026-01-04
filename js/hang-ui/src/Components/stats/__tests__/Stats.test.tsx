@@ -1,6 +1,6 @@
 import { createContext, createSignal } from "solid-js";
 import { render } from "solid-js/web";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Stats } from "../Stats";
 import type { ProviderProps } from "../types";
 import { createMockProviderProps } from "./utils";
@@ -12,11 +12,18 @@ describe("Stats Component", () => {
 	beforeEach(() => {
 		container = document.createElement("div");
 		document.body.appendChild(container);
+
+		// Mock fetch to prevent network requests for Icon SVG files
+		global.fetch = vi.fn().mockResolvedValue({
+			ok: true,
+			text: () => Promise.resolve('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
+		});
 	});
 
 	afterEach(() => {
 		dispose?.();
 		dispose = undefined;
+		vi.restoreAllMocks();
 	});
 
 	it("renders stats container", () => {
@@ -120,23 +127,6 @@ describe("Stats Component", () => {
 
 		const panel = container.querySelector(".stats__panel");
 		expect(panel).toBeTruthy();
-	});
-
-	it("applies styles inline", () => {
-		const mockProps = createMockProviderProps();
-		const TestContext = createContext<ProviderProps>(mockProps);
-
-		dispose = render(
-			() => (
-				<TestContext.Provider value={mockProps}>
-					<Stats<ProviderProps> context={TestContext} getElement={() => mockProps} />
-				</TestContext.Provider>
-			),
-			container,
-		);
-
-		const style = container.querySelector(".stats style");
-		expect(style).toBeTruthy();
 	});
 
 	it("provides context value to child components", () => {

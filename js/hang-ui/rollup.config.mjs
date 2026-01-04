@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import nodeResolve from "@rollup/plugin-node-resolve";
+import copy from "rollup-plugin-copy";
 import esbuild from "rollup-plugin-esbuild";
 import solid from "unplugin-solid/rollup";
 
@@ -16,7 +17,39 @@ function inlineCss() {
 	};
 }
 
+// Shared plugins used by all build configs
+const sharedPlugins = [
+	inlineCss(),
+	solid({ dev: false, hydratable: false }),
+	esbuild({
+		include: /\.[jt]sx?$/,
+		jsx: "preserve",
+		tsconfig: "tsconfig.json",
+	}),
+	nodeResolve({ extensions: [".js", ".ts", ".tsx"] }),
+];
+
 export default [
+	{
+		input: "src/utilities/index.ts",
+		output: {
+			file: "dist/utilities/index.js",
+			format: "es",
+		},
+		plugins: [
+			esbuild({
+				include: /\.[jt]s$/,
+				tsconfig: "tsconfig.json",
+			}),
+			copy({
+				targets: [
+					{ src: "src/assets/", dest: "dist/" },
+					{ src: "src/themes/", dest: "dist/" },
+				],
+				copyOnce: true,
+			}),
+		],
+	},
 	{
 		input: "src/Components/publish/element.tsx",
 		output: {
@@ -24,16 +57,7 @@ export default [
 			format: "es",
 			sourcemap: true,
 		},
-		plugins: [
-			inlineCss(),
-			solid({ dev: false, hydratable: false }),
-			esbuild({
-				include: /\.[jt]sx?$/,
-				jsx: "preserve",
-				tsconfig: "tsconfig.json",
-			}),
-			nodeResolve({ extensions: [".js", ".ts", ".tsx"] }),
-		],
+		plugins: sharedPlugins,
 	},
 	{
 		input: "src/Components/watch/element.tsx",
@@ -42,15 +66,6 @@ export default [
 			format: "es",
 			sourcemap: true,
 		},
-		plugins: [
-			inlineCss(),
-			solid({ dev: false, hydratable: false }),
-			esbuild({
-				include: /\.[jt]sx?$/,
-				jsx: "preserve",
-				tsconfig: "tsconfig.json",
-			}),
-			nodeResolve({ extensions: [".js", ".ts", ".tsx"] }),
-		],
+		plugins: sharedPlugins,
 	},
 ];
