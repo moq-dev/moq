@@ -167,6 +167,8 @@ impl Hev1 {
 		Ok(())
 	}
 
+	/// Decode a single NAL unit. Only reads the first header byte to extract nal_unit_type,
+	/// Ignores nuh_layer_id and nuh_temporal_id_plus1.
 	fn decode_nal(&mut self, nal: Bytes, pts: Option<hang::Timestamp>) -> anyhow::Result<()> {
 		anyhow::ensure!(nal.len() >= 2, "NAL unit is too short");
 		// u16 header: [forbidden_zero_bit(1) | nal_unit_type(6) | nuh_layer_id(6) | nuh_temporal_id_plus1(3)]
