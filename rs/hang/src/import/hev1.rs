@@ -324,7 +324,7 @@ fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] {
 		| ((profile.frame_only_constraint_flag as u8) << 4);
 
 	// @todo: pack the rest of the optional flags in profile.additional_flags
-	return flags;
+	flags
 }
 
 #[derive(Default)]
