@@ -27,9 +27,8 @@ listen = "[::]:4443"
 public = ""
 
 [iroh]
-# 32 byte secret key for the iroh endpoint. Defines the endpoint ID of the iroh endpoint.
-# The matching endpoint id is set in the justfile as a default for the `pub-iroh` command.
-# Can also be set via MOQ_IROH_SECRET env variable if you don't want to put secrets into the config file.
-# Alternatively, set `secret_key_path` to a path to load the secret key from a file.
+# Path to persist the iroh secret key at.
 # If the file does not exist, a random key will be generated and written to the path.
+# This gives the relay a persistent iroh endpoint id. The secret key can alternatively be set
+# via MOQ_IROH_SECRET environment variable.
 secret_key_path = "./dev/relay-iroh-secret.key"
