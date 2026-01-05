@@ -42,7 +42,7 @@ tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
-web-transport-iroh = { git = "https://github.com/n0-computer/iroh-live", optional = true }
+web-transport-iroh = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true }
 
 [dev-dependencies]
