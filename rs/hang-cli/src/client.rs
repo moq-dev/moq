@@ -14,7 +14,7 @@ pub async fn client(
 	tracing::info!(%url, %name, "connecting");
 	match url.scheme() {
 		#[cfg(feature = "iroh")]
-		"iroh" => {
+		"iroh" | "moql+iroh" | "moqt+iroh" | "h3+iroh" => {
 			let client = iroh.init_client().await?;
 			let session = client.connect(url).await?;
 			run_import_session(session, name, publish).await?;
