@@ -279,6 +279,7 @@ impl Request {
 			}
 			#[cfg(feature = "iroh")]
 			Request::IrohWebTransport(request) => request.close(status).await.map_err(Into::into),
+			#[cfg(feature = "iroh")]
 			Request::IrohQuic(request) => {
 				request.close(status);
 				Ok(())

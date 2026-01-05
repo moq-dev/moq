@@ -32,4 +32,4 @@ public = ""
 # Can also be set via MOQ_IROH_SECRET env variable if you don't want to put secrets into the config file.
 # Alternatively, set `secret_key_path` to a path to load the secret key from a file.
 # If the file does not exist, a random key will be generated and written to the path.
-secret_key = "b724c6a37a004ae3d14c3efed84ccc145ee78f884e40f1b47063bdfd479ebed1"
+secret_key_path = "./dev/relay-iroh-secret.key"

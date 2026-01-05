@@ -164,6 +164,27 @@ just web      # Terminal 3: Start web server
 
 There are more commands: check out the [justfile](justfile), [rs/justfile](rs/justfile), and [js/justfile](js/justfile).
 
+## Iroh support
+
+The `moq-native` and `moq-relay` crates optionally support connecting via [iroh](https://github.com/n0-computer/iroh). The iroh integration is disabled by default, to use it enable the `iroh` feature.
+
+You can run a demo like this:
+
+```sh
+# Terminal 1: Start a relay server
+just relay
+# Copy the endpoint id printed at "iroh listening"
+
+# Terminal 2: Publish via iroh (replace ENDPOINT-ID with the endpoint id)
+just pub-iroh bbb iroh://ENDPOINT-ID
+
+# Terminal 3: Start web server
+just web
+```
+
+Then open [localhost:5173](http://localhost:5173) and watch BBB, pushed from terminal 1 via iroh to the relay running in terminal 2, from where the browser fetches it over regular WebTransport.
+
+There's also `just serve-iroh` which serves a video via iroh. This repo currently does not provide a native viewer, so you can't subscribe to it directly. However, you can use the [watch example from iroh-live](https://github.com/n0-computer/iroh-live/blob/main/iroh-live/examples/watch.rs) to view a video published via `hang-native` (which `just serve-iroh` expands to).
 
 ## License
 

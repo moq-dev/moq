@@ -20,7 +20,7 @@ pub struct EndpointConfig {
 		env = "MOQ_IROH_SECRET_PATH",
 		conflicts_with = "iroh-secret-key"
 	)]
-	secret_key_path: Option<PathBuf>,
+	pub secret_key_path: Option<PathBuf>,
 	/// Secret key for the iroh endpoint.
 	#[arg(
 		id = "iroh-secret-key",
@@ -28,7 +28,7 @@ pub struct EndpointConfig {
 		env = "MOQ_IROH_SECRET",
 		conflicts_with = "iroh-secret-key-path"
 	)]
-	secret_key: Option<String>,
+	pub secret_key: Option<String>,
 	/// Listen for UDP packets on the given address.
 	/// Defaults to `0.0.0.0:0` if not provided.
 	#[arg(id = "iroh-bind-v4", long = "iroh-bind-v4", env = "MOQ_IROH_BIND_V4")]

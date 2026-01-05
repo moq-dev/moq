@@ -15,7 +15,7 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["iroh"]
+default = []
 iroh = ["moq-native/iroh"]
 
 [dependencies]

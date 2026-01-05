@@ -34,7 +34,7 @@ dev:
 # Run a localhost relay server without authentication.
 relay:
 	# Run the relay server overriding the provided configuration file.
-	cargo run --bin moq-relay -- dev/relay.toml
+	cargo run --bin moq-relay --features iroh -- dev/relay.toml
 
 # Run a cluster of relay servers
 cluster:
@@ -45,7 +45,7 @@ cluster:
 	@just auth-token
 
 	# Build the Rust packages so `cargo run` has a head start.
-	cargo build --bin moq-relay
+	cargo build --bin moq-relay --features iroh
 
 	# Then run a BOATLOAD of services to make sure they all work correctly.
 	# Publish the funny bunny to the root node.
@@ -139,7 +139,7 @@ ffmpeg-cmaf input output='-' *args:
 # Publish a video using ffmpeg to the localhost relay server
 # NOTE: The `http` means that we perform insecure certificate verification.
 # Switch it to `https` when you're ready to use a real certificate.
-pub name='bbb' url="http://localhost:4443/anon" *args:
+pub name url="http://localhost:4443/anon" *args:
 	# Download the sample media.
 	just download "{{name}}"
 	# Pre-build the binary so we don't queue media while compiling.
@@ -149,10 +149,10 @@ pub name='bbb' url="http://localhost:4443/anon" *args:
 
 # Publish a video file using ffmpeg to a relay server over iroh
 # NOTE: The default url (iroh endpoint id) matches the secret key set in dev/relay.toml
-pub-iroh name='bbb' url='iroh://a73123fce41108f024a196a399edadbba8060be166c779aa50bf4731931492d3' *args:
-	cargo build --bin hang
+pub-iroh name url *args:
+	cargo build --bin hang --features iroh
 	# Publish the media with the hang cli.
-	just ffmpeg-cmaf "dev/{{name}}.fmp4" | cargo run --bin hang -- publish --url "{{url}}" --name "anon/{{name}}" fmp4 {{args}}
+	just ffmpeg-cmaf "dev/{{name}}.fmp4" | cargo run --bin hang --features iroh -- publish --url "{{url}}" --name "anon/{{name}}" fmp4 {{args}}
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
@@ -259,11 +259,11 @@ serve-iroh name="bbb":
 	just download "{{name}}"
 
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin hang
+	cargo build --bin hang --features iroh
 
 	# Run ffmpeg and pipe the output to hang
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" | \
-		cargo run --bin hang -- serve --iroh --listen "[::]:4443" --tls-generate "localhost" --name "{{name}}" fmp4
+		cargo run --bin hang --features iroh -- serve --iroh --listen "[::]:4443" --tls-generate "localhost" --name "{{name}}" fmp4
 
 # Run the web server
 web url='http://localhost:4443/anon':
