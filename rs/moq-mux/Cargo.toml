@@ -13,11 +13,12 @@ categories = ["multimedia", "network-programming", "web-programming"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["mp4", "h264", "h265", "hls", "aac", "opus"]
+default = ["mp4", "h264", "h265", "hls", "av1", "aac", "opus"]
 mp4 = ["dep:mp4-atom"]
 h264 = ["dep:h264-parser"]
 h265 = ["dep:scuffle-h265"]
 hls = ["dep:m3u8-rs", "dep:reqwest", "mp4"]
+av1 = ["dep:scuffle-av1"]
 # Feature flags for codec support; no gated dependencies yet
 aac = []
 opus = []
@@ -40,6 +41,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 	"rustls-tls",
 	"gzip",
 ], optional = true }
+scuffle-av1 = { version = "0.1.4", optional = true }
 scuffle-h265 = { version = "0.2.2", optional = true }
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = "0.1"
