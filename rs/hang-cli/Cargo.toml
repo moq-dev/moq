@@ -23,13 +23,18 @@ iroh = ["moq-native/iroh"]
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 bytes = "1.10"
 clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
-hyper-serve = { version = "0.6", features = ["tls-rustls"] }
 moq-native = { workspace = true }
-sd-notify = "0.4"
+rustls = { version = "0.23", features = [
+	"aws-lc-rs",
+], default-features = false }
 tokio = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 tracing = "0.1"
 url = "2"
+
+[target.'cfg(unix)'.dependencies]
+sd-notify = "0.4"

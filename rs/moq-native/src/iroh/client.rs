@@ -19,7 +19,12 @@ impl Client {
 		Ok(Self { endpoint })
 	}
 
-	pub async fn connect(&self, url: Url) -> Result<Session> {
+	pub async fn connect(
+		&self,
+		url: Url,
+		publish: impl Into<Option<moq_lite::OriginConsumer>>,
+		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
+	) -> Result<moq_lite::Session> {
 		let alpn = match url.scheme() {
 			"moql+iroh" | "iroh" => moq_lite::lite::ALPN,
 			"moqt+iroh" => moq_lite::ietf::ALPN,
@@ -33,6 +38,7 @@ impl Client {
 			web_transport_iroh::ALPN_H3 => Session::connect_h3(conn, url).await?,
 			_ => Session::raw(conn),
 		};
+		let session = moq_lite::Session::connect(session, publish, subscribe).await?;
 		Ok(session)
 	}
 

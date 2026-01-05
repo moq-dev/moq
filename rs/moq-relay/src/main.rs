@@ -12,13 +12,18 @@ pub use web::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+	// TODO: It would be nice to remove this and rely on feature flags only.
+	// However, some dependency is pulling in `ring` and I don't know why, so meh for now.
+	rustls::crypto::aws_lc_rs::default_provider()
+		.install_default()
+		.expect("failed to install default crypto provider");
+
 	let config = Config::load()?;
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
 	let server = config.server.init()?;
 	let client = config.client.init()?;
 	let auth = config.auth.init()?;
-	let fingerprints = server.fingerprints().to_vec();
 
 	#[cfg(feature = "iroh")]
 	let iroh = config.iroh.init_server().await?;
@@ -32,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
 		WebState {
 			auth: auth.clone(),
 			cluster: cluster.clone(),
-			fingerprints,
+			tls_info: server.tls_info(),
 			conn_id: Default::default(),
 		},
 		config.web,
@@ -44,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(%addr, "listening");
 
+	#[cfg(unix)]
 	// Notify systemd that we're ready after all initialization is complete
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 

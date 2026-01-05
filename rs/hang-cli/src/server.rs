@@ -6,11 +6,11 @@ use axum::{http::Method, routing::get, Router};
 use hang::moq_lite;
 #[cfg(feature = "iroh")]
 use moq_native::iroh::EndpointConfig;
-use moq_native::web_transport_quinn::generic::Session;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::{Arc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
@@ -48,18 +48,17 @@ pub async fn server(
 	#[cfg(not(feature = "iroh"))]
 	let iroh_fut = Box::pin(std::future::pending::<anyhow::Result<()>>()) as Pin<Box<dyn Future<Output = _>>>;
 
-	// Get the first certificate's fingerprint.
-	// TODO serve all of them so we can support multiple signature algorithms.
-	let fingerprint = server.fingerprints().first().context("missing certificate")?.clone();
-
+	#[cfg(unix)]
 	// Notify systemd that we're ready.
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+
+	let tls_info = server.tls_info();
 
 	tokio::select! {
 		res = accept(server, name, publish.consume()) => res,
 		res = iroh_fut => res,
 		res = publish.run() => res,
-		res = web(listen, fingerprint, public) => res,
+		res = web(listen, tls_info, public) => res,
 	}
 }
 
@@ -95,23 +94,12 @@ async fn run_session(
 	name: String,
 	consumer: moq_lite::BroadcastConsumer,
 ) -> anyhow::Result<()> {
-	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
-	let session = session.ok().await.context("failed to accept session")?;
-
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_lite::Origin::produce();
 	origin.producer.publish_broadcast(&name, consumer);
-	match session {
-		moq_native::Session::Quinn(session) => run_session_inner(id, session, origin.consumer).await,
-		#[cfg(feature = "iroh")]
-		moq_native::Session::Iroh(session) => run_session_inner(id, session, origin.consumer).await,
-	}
-}
 
-async fn run_session_inner<S: Session>(id: u64, session: S, consumer: moq_lite::OriginConsumer) -> anyhow::Result<()> {
-	let session = moq_lite::Session::accept(session, consumer, None)
-		.await
-		.context("failed to accept session")?;
+	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
+	let session = session.accept(origin.consumer, None).await?;
 
 	tracing::info!(id, "accepted session");
 
@@ -119,13 +107,29 @@ async fn run_session_inner<S: Session>(id: u64, session: S, consumer: moq_lite::
 }
 
 // Initialize the HTTP server (but don't serve yet).
-async fn web(bind: SocketAddr, fingerprint: String, public: Option<PathBuf>) -> anyhow::Result<()> {
+async fn web(
+	bind: SocketAddr,
+	tls_info: Arc<RwLock<moq_native::TlsInfo>>,
+	public: Option<PathBuf>,
+) -> anyhow::Result<()> {
 	async fn handle_404() -> impl IntoResponse {
 		(StatusCode::NOT_FOUND, "Not found")
 	}
 
+	let fingerprint_handler = move || async move {
+		// Get the first certificate's fingerprint.
+		// TODO serve all of them so we can support multiple signature algorithms.
+		tls_info
+			.read()
+			.expect("tls_info read lock poisoned")
+			.fingerprints
+			.first()
+			.expect("missing certificate")
+			.clone()
+	};
+
 	let mut app = Router::new()
-		.route("/certificate.sha256", get(fingerprint))
+		.route("/certificate.sha256", get(fingerprint_handler))
 		.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]));
 
 	// If a public directory is provided, serve it.
@@ -139,7 +143,7 @@ async fn web(bind: SocketAddr, fingerprint: String, public: Option<PathBuf>) -> 
 		app = app.fallback_service(handle_404.into_service());
 	}
 
-	let server = hyper_serve::bind(bind);
+	let server = axum_server::bind(bind);
 	server.serve(app.into_make_service()).await?;
 
 	Ok(())

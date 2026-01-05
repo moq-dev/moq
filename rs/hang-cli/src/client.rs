@@ -1,7 +1,6 @@
 use crate::Publish;
 
 use hang::moq_lite;
-use moq_native::web_transport_quinn::generic;
 use url::Url;
 
 pub async fn client(
@@ -12,34 +11,32 @@ pub async fn client(
 	publish: Publish,
 ) -> anyhow::Result<()> {
 	tracing::info!(%url, %name, "connecting");
+	// Create an origin producer to publish to the broadcast.
+	let origin = moq_lite::Origin::produce();
+	origin.producer.publish_broadcast(&name, publish.consume());
 	match url.scheme() {
 		#[cfg(feature = "iroh")]
 		"iroh" | "moql+iroh" | "moqt+iroh" | "h3+iroh" => {
 			let client = iroh.init_client().await?;
-			let session = client.connect(url).await?;
-			run_import_session(session, name, publish).await?;
+			tracing::info!(%url, %name, "connecting");
+			// Establish the connection, not providing a subscriber.
+			let session = client.connect(url, origin.consumer, None).await?;
+			run_import_session(session, publish).await?;
 			client.close().await;
 			Ok(())
 		}
 		_ => {
 			let client = config.init()?;
-			let session = client.connect(url).await?;
-			run_import_session(session, name, publish).await
+
+			// Establish the connection, not providing a subscriber.
+			let session = client.connect_with_fallback(url, origin.consumer, None).await?;
+			run_import_session(session, publish).await
 		}
 	}
 }
 
-async fn run_import_session<S>(session: S, name: String, publish: Publish) -> anyhow::Result<()>
-where
-	S: generic::Session,
-{
-	// Create an origin producer to publish to the broadcast.
-	let origin = moq_lite::Origin::produce();
-	origin.producer.publish_broadcast(&name, publish.consume());
-
-	// Establish the connection, not providing a subscriber.
-	let session = moq_lite::Session::connect(session, origin.consumer, None).await?;
-
+async fn run_import_session(session: moq_lite::Session, publish: Publish) -> anyhow::Result<()> {
+	#[cfg(unix)]
 	// Notify systemd that we're ready.
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 
