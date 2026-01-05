@@ -1,8 +1,10 @@
-use std::sync::Arc;
-
+use anyhow::Context;
 use axum::http;
 use moq_lite::{AsPath, Path, PathOwned};
+use moq_token::KeySet;
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum AuthError {
@@ -34,10 +36,16 @@ impl axum::response::IntoResponse for AuthError {
 #[derive(clap::Args, Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AuthConfig {
-	/// The root authentication key.
+	/// Either the root authentication key or a URI to a JWK set.
 	/// If present, all paths will require a token unless they are in the public list.
 	#[arg(long = "auth-key", env = "MOQ_AUTH_KEY")]
 	pub key: Option<String>,
+
+	/// How often to refresh the JWK set (in seconds), will be ignored if the `key` is not a valid URI.
+	/// If not provided, there won't be any refreshing, the JWK set will only be loaded once at startup.
+	/// Minimum value: 30, defaults to None
+	#[arg(long = "jwks-refresh-interval", env = "MOQ_AUTH_JWKS_REFRESH_INTERVAL")]
+	pub jwks_refresh_interval: Option<u64>,
 
 	/// The prefix that will be public for reading and writing.
 	/// If present, unauthorized users will be able to read and write to this prefix ONLY.
@@ -60,16 +68,117 @@ pub struct AuthToken {
 	pub cluster: bool,
 }
 
+const JWKS_REFRESH_ERROR_INTERVAL: Duration = Duration::from_mins(5);
+
 #[derive(Clone)]
 pub struct Auth {
-	key: Option<Arc<moq_token::Key>>,
+	key: Option<Arc<Mutex<KeySet>>>,
 	public: Option<PathOwned>,
+	refresh_task: Option<Arc<tokio::task::JoinHandle<()>>>,
+}
+
+impl Drop for Auth {
+	fn drop(&mut self) {
+		if let Some(handle) = self.refresh_task.as_deref() {
+			handle.abort();
+		}
+	}
 }
 
 impl Auth {
+	fn compare_key_sets(previous: &KeySet, new: &KeySet) {
+		for new_key in new.keys.iter() {
+			if new_key.kid.is_some() && !previous.keys.iter().any(|k| k.kid == new_key.kid) {
+				tracing::info!("Found new JWK \"{}\"", new_key.kid.as_deref().unwrap())
+			}
+		}
+	}
+
+	async fn refresh_key_set(jwks_uri: &str, key_set: &Mutex<KeySet>) -> anyhow::Result<()> {
+		let new_keys = moq_token::load_keys(jwks_uri).await?;
+
+		let mut key_set = key_set.lock().expect("keyset mutex poisoned");
+		Self::compare_key_sets(&key_set, &new_keys);
+		*key_set = new_keys;
+
+		Ok(())
+	}
+
+	fn spawn_refresh_task(
+		interval: Duration,
+		key_set: Arc<Mutex<KeySet>>,
+		jwks_uri: String,
+	) -> tokio::task::JoinHandle<()> {
+		tokio::spawn(async move {
+			loop {
+				if let Err(e) = Self::refresh_key_set(&jwks_uri, key_set.as_ref()).await {
+					if interval > JWKS_REFRESH_ERROR_INTERVAL * 2 {
+						tracing::error!(
+							"failed to load JWKS, will retry in {} seconds: {:?}",
+							JWKS_REFRESH_ERROR_INTERVAL.as_secs(),
+							e
+						);
+						tokio::time::sleep(JWKS_REFRESH_ERROR_INTERVAL).await;
+
+						if let Err(e) = Self::refresh_key_set(&jwks_uri, key_set.as_ref()).await {
+							tracing::error!("failed to load JWKS again, giving up this time: {:?}", e);
+						} else {
+							tracing::info!("successfully loaded JWKS on the second try");
+						}
+					} else {
+						// Don't retry because the next refresh is going to happen very soon
+						tracing::error!("failed to refresh JWKS: {:?}", e);
+					}
+				}
+
+				tokio::time::sleep(interval).await;
+			}
+		})
+	}
+
 	pub fn new(config: AuthConfig) -> anyhow::Result<Self> {
-		let key = match config.key.as_deref() {
-			Some(path) => Some(moq_token::Key::from_file(path)?),
+		let mut refresh_task = None;
+
+		let key = match config.key {
+			Some(uri) if uri.starts_with("http://") || uri.starts_with("https://") => {
+				// Start with an empty KeySet
+				let key_set = Arc::new(Mutex::new(KeySet::default()));
+
+				// TODO Better error handling when initial load fails
+				match config.jwks_refresh_interval {
+					Some(refresh_interval_secs) => {
+						anyhow::ensure!(
+							refresh_interval_secs >= 30,
+							"jwks_refresh_interval cannot be less than 30"
+						);
+
+						refresh_task = Some(Self::spawn_refresh_task(
+							Duration::from_secs(refresh_interval_secs),
+							key_set.clone(),
+							uri,
+						));
+					}
+					None => {
+						let key_set = key_set.clone();
+						tokio::spawn(async move {
+							Self::refresh_key_set(&uri, key_set.as_ref())
+								.await
+								.expect("failed to load key set");
+						});
+					}
+				}
+
+				Some(key_set)
+			}
+
+			Some(key_file) => {
+				let key = moq_token::Key::from_file(&key_file)
+					.with_context(|| format!("cannot load key from {}", &key_file))?;
+				Some(Arc::new(Mutex::new(KeySet {
+					keys: vec![Arc::new(key)],
+				})))
+			}
+
 			None => None,
 		};
 
@@ -82,8 +191,9 @@ impl Auth {
 		}
 
 		Ok(Self {
-			key: key.map(Arc::new),
+			key,
 			public: public.map(|p| p.as_path().to_owned()),
+			refresh_task: refresh_task.map(Arc::new),
 		})
 	}
 
@@ -93,8 +203,11 @@ impl Auth {
 		// Find the token in the query parameters.
 		// ?jwt=...
 		let claims = if let Some(token) = token {
-			if let Some(key) = self.key.as_ref() {
-				key.decode(token).map_err(|_| AuthError::DecodeFailed)?
+			if let Some(key) = self.key.as_deref() {
+				key.lock()
+					.expect("key mutex poisoned")
+					.decode(token)
+					.map_err(|_| AuthError::DecodeFailed)?
 			} else {
 				return Err(AuthError::UnexpectedToken);
 			}
@@ -119,7 +232,7 @@ impl Auth {
 			Some(suffix) => suffix,
 		};
 
-		// If a more specific path is is provided, reduce the permissions.
+		// If a more specific path is provided, reduce the permissions.
 		let subscribe = claims
 			.subscribe
 			.into_iter()
@@ -172,8 +285,8 @@ mod tests {
 	fn test_anonymous_access_with_public_path() -> anyhow::Result<()> {
 		// Test anonymous access to /anon path
 		let auth = Auth::new(AuthConfig {
-			key: None,
 			public: Some("anon".to_string()),
+			..Default::default()
 		})?;
 
 		// Should succeed for anonymous path
@@ -195,8 +308,8 @@ mod tests {
 	fn test_anonymous_access_fully_public() -> anyhow::Result<()> {
 		// Test fully public access (public = "")
 		let auth = Auth::new(AuthConfig {
-			key: None,
 			public: Some("".to_string()),
+			..Default::default()
 		})?;
 
 		// Should succeed for any path
@@ -212,8 +325,8 @@ mod tests {
 	fn test_anonymous_access_denied_wrong_prefix() -> anyhow::Result<()> {
 		// Test anonymous access denied for wrong prefix
 		let auth = Auth::new(AuthConfig {
-			key: None,
 			public: Some("anon".to_string()),
+			..Default::default()
 		})?;
 
 		// Should fail for non-anonymous path
@@ -228,7 +341,7 @@ mod tests {
 		let (key_file, _) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Should fail when no token and no public path
@@ -241,8 +354,8 @@ mod tests {
 	#[test]
 	fn test_token_provided_but_no_key_configured() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			key: None,
 			public: Some("anon".to_string()),
+			..Default::default()
 		})?;
 
 		// Should fail when token provided but no key configured
@@ -257,7 +370,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a token with basic permissions
@@ -283,7 +396,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a token for room/123
@@ -307,7 +420,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a token with specific pub/sub restrictions
@@ -333,7 +446,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a read-only token (no publish permissions)
@@ -357,7 +470,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a write-only token (no subscribe permissions)
@@ -381,7 +494,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Create a token with root at room/123 and unrestricted pub/sub
@@ -410,7 +523,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Token allows publishing only to alice/*
@@ -439,7 +552,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Token allows subscribing only to bob/*
@@ -467,7 +580,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Token allows publishing to alice/* and subscribing to bob/*
@@ -505,7 +618,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Token with nested publish/subscribe paths
@@ -542,7 +655,7 @@ mod tests {
 		let (key_file, key) = create_test_key()?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: None,
+			..Default::default()
 		})?;
 
 		// Read-only token
