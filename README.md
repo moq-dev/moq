@@ -185,8 +185,13 @@ just relay
 # Copy the endpoint id printed at "iroh listening"
 
 # Terminal 2: Publish via moq-lite over raw iroh QUIC
-# (replace ENDPOINT_ID with the relay's endpoint id)
-just pub bbb iroh://ENDPOINT_ID anon
+#
+# Replace ENDPOINT_ID with the relay's endpoint id.
+#
+# We set an `anon/` prefix to match the broadcast name the web ui expects
+# Because moq-lite does not have headers if using raw QUIC, only the hostname
+# in the URL can be used.
+just pub bbb iroh://ENDPOINT_ID anon/
 # Alternatively you can use WebTransport over HTTP/3 over iroh,
 # which allows to set a path prefix in the URL:
 just pub bbb h3+iroh://ENDPOINT_ID/anon
@@ -197,7 +202,7 @@ just web
 
 Then open [localhost:5173](http://localhost:5173) and watch BBB, pushed from terminal 1 via iroh to the relay running in terminal 2, from where the browser fetches it over regular WebTransport.
 
-`just serve` serves a video via iroh alongside regular QUIC (it enables the `iroh` feature). This repo currently does not provide a native viewer, so you can't subscribe to it directly. However, you can use the [watch example from iroh-live](https://github.com/n0-computer/iroh-live/blob/main/iroh-live/examples/watch.rs) to view a video published via `hang-native` (which `just serve-iroh` expands to).
+`just serve` serves a video via iroh alongside regular QUIC (it enables the `iroh` feature). This repo currently does not provide a native viewer, so you can't subscribe to it directly. However, you can use the [watch example from iroh-live](https://github.com/n0-computer/iroh-live/blob/main/iroh-live/examples/watch.rs) to view a video published via `hang-native`.
 
 ## License
 
