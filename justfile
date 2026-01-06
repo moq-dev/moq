@@ -141,22 +141,15 @@ ffmpeg-cmaf input output='-' *args:
 # Publish a video using ffmpeg to the localhost relay server
 # NOTE: The `http` means that we perform insecure certificate verification.
 # Switch it to `https` when you're ready to use a real certificate.
-pub name url="http://localhost:4443/anon" *args:
+pub name url="http://localhost:4443/anon" prefix="" *args:
 	# Download the sample media.
 	just download "{{name}}"
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin hang
-	# Publish the media with the hang cli.
-	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
-
-# Publish a video file using ffmpeg to a relay server over iroh
-# NOTE: The default url (iroh endpoint id) matches the secret key set in dev/relay.toml
-pub-iroh name url *args:
 	cargo build --bin hang --features iroh
 	# Publish the media with the hang cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin hang --features iroh -- publish --url "{{url}}" --name "anon/{{name}}" fmp4 {{args}}
+	cargo run --bin hang --features iroh -- \
+		publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4 {{args}}
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
@@ -262,8 +255,8 @@ serve name:
 
 	# Run ffmpeg and pipe the output to hang
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin hang --features iroh -- serve \
-		--listen "[::]:4443" --tls-generate "localhost" --iroh \
+	cargo run --bin hang --features iroh -- \
+		serve --listen "[::]:4443" --tls-generate "localhost" --iroh \
 		--name "{{name}}" fmp4
 
 # Run the web server

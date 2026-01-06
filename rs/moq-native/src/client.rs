@@ -411,7 +411,12 @@ impl Client {
 		let endpoint_id: iroh::EndpointId = host.parse().context("Invalid URL: host is not an iroh endpoint id")?;
 		let conn = endpoint.connect(endpoint_id, alpn.as_bytes()).await?;
 		let session = match alpn {
-			web_transport_iroh::ALPN_H3 => web_transport_iroh::Session::connect_h3(conn, url).await?,
+			web_transport_iroh::ALPN_H3 => {
+				// We need to change the scheme to `https` because currently web_transport_iroh only
+				// accepts that scheme.
+				let url = url_set_scheme(url, "https")?;
+				web_transport_iroh::Session::connect_h3(conn, url).await?
+			}
 			_ => web_transport_iroh::Session::raw(conn),
 		};
 		Ok(session)
@@ -507,4 +512,20 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
 		self.provider.signature_verification_algorithms.supported_schemes()
 	}
+}
+
+/// Returns a new URL with a changed scheme.
+///
+/// [`Url::set_scheme`] returns an error if the scheme change is not valid according to
+/// [the URL specification's section on legal scheme state overrides](https://url.spec.whatwg.org/#scheme-state).
+///
+/// This function allows all scheme changes, as long as the resulting URL is valid.
+fn url_set_scheme(url: Url, scheme: &str) -> anyhow::Result<Url> {
+	let url = format!(
+		"{}:{}",
+		scheme,
+		url.to_string().split_once(":").context("invalid URL")?.1
+	)
+	.parse()?;
+	Ok(url)
 }
