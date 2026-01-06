@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::path::PathBuf;
 use std::{net, time::Duration};
 
@@ -13,32 +12,13 @@ use std::fs;
 use std::io::{self, Cursor, Read};
 use std::sync::{Arc, RwLock};
 use url::Url;
+#[cfg(feature = "iroh")]
+use web_transport_iroh::iroh;
 use web_transport_quinn::http;
 
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::FutureExt;
-
-/// Abstraction over different implementations of a MoQ server.
-///
-/// This is implemented for [`Server`], and for `crate::iroh::Server` if the `iroh` feature is enabled.
-pub trait MoqServer {
-	/// Returns the next partially established QUIC or WebTransport session.
-	///
-	/// This returns a [Request] instead of a [web_transport_quinn::Session]
-	/// so the connection can be rejected early on an invalid path or missing auth.
-	///
-	/// The [Request] is either a WebTransport or a raw QUIC request.
-	/// Call [Request::ok] or [Request::close] to complete the handshake in case this is
-	/// a WebTransport request.
-	fn accept(&mut self) -> impl Future<Output = Option<Request>> + Send;
-}
-
-impl MoqServer for Server {
-	async fn accept(&mut self) -> Option<Request> {
-		self.accept().await
-	}
-}
 
 #[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -98,8 +78,13 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-	pub fn init(self) -> anyhow::Result<Server> {
-		Server::new(self)
+	pub async fn init(self) -> anyhow::Result<Server> {
+		Server::new(self).await
+	}
+
+	#[cfg(feature = "iroh")]
+	pub async fn init_with_iroh(self, iroh: Option<crate::iroh::EndpointConfig>) -> anyhow::Result<Server> {
+		Server::with_iroh(self, iroh).await
 	}
 }
 
@@ -107,10 +92,33 @@ pub struct Server {
 	quic: quinn::Endpoint,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	certs: Arc<ServeCerts>,
+	#[cfg(feature = "iroh")]
+	iroh_endpoint: Option<iroh::Endpoint>,
 }
 
 impl Server {
-	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
+	pub async fn new(config: ServerConfig) -> anyhow::Result<Self> {
+		Self::new_inner(
+			config,
+			#[cfg(feature = "iroh")]
+			None,
+		)
+		.await
+	}
+
+	#[cfg(feature = "iroh")]
+	pub async fn with_iroh(
+		config: ServerConfig,
+		iroh_config: Option<crate::iroh::EndpointConfig>,
+	) -> anyhow::Result<Self> {
+		Self::new_inner(config, iroh_config).await
+	}
+
+	async fn new_inner(
+		config: ServerConfig,
+
+		#[cfg(feature = "iroh")] iroh_config: Option<crate::iroh::EndpointConfig>,
+	) -> anyhow::Result<Self> {
 		// Enable BBR congestion control
 		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
@@ -158,10 +166,19 @@ impl Server {
 		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime)
 			.context("failed to create QUIC endpoint")?;
 
+		#[cfg(feature = "iroh")]
+		let iroh_endpoint = if let Some(iroh_config) = iroh_config {
+			Some(iroh_config.bind().await?)
+		} else {
+			None
+		};
+
 		Ok(Self {
 			quic: quic.clone(),
 			accept: Default::default(),
 			certs,
+			#[cfg(feature = "iroh")]
+			iroh_endpoint,
 		})
 	}
 
@@ -196,10 +213,33 @@ impl Server {
 	/// a WebTransport request.
 	pub async fn accept(&mut self) -> Option<Request> {
 		loop {
+			// tokio::select! does not support cfg directives on arms, so we need to put the
+			// iroh cfg into a block, and default to a pending future if iroh is disabled.
+			let iroh_accept_fut = async {
+				#[cfg(feature = "iroh")]
+				if let Some(endpoint) = self.iroh_endpoint.as_ref() {
+					endpoint.accept().await
+				} else {
+					std::future::pending::<_>().await
+				}
+
+				#[cfg(not(feature = "iroh"))]
+				std::future::pending::<()>().await
+			};
+
 			tokio::select! {
 				res = self.quic.accept() => {
 					let conn = res?;
 					self.accept.push(Self::accept_session(conn).boxed());
+				}
+				res = iroh_accept_fut => {
+					#[cfg(feature = "iroh")]
+					{
+						let conn = res?;
+						self.accept.push(Self::accept_iroh_session(conn).boxed());
+					}
+					#[cfg(not(feature = "iroh"))]
+					let _: () = res;
 				}
 				Some(res) = self.accept.next() => {
 					match res {
@@ -251,6 +291,32 @@ impl Server {
 			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => Ok(Request::Quic(QuicRequest::accept(conn))),
 			_ => anyhow::bail!("unsupported ALPN: {alpn}"),
 		}
+	}
+
+	#[cfg(feature = "iroh")]
+	async fn accept_iroh_session(conn: iroh::endpoint::Incoming) -> anyhow::Result<Request> {
+		let conn = conn.accept()?.await?;
+		let alpn = String::from_utf8(conn.alpn().to_vec()).context("failed to decode ALPN")?;
+		tracing::Span::current().record("id", conn.stable_id());
+		tracing::debug!(remote = %conn.remote_id().fmt_short(), %alpn, "accepted");
+		match alpn.as_str() {
+			web_transport_iroh::ALPN_H3 => {
+				let request = web_transport_iroh::H3Request::accept(conn)
+					.await
+					.context("failed to receive WebTransport request")?;
+				Ok(Request::IrohWebTransport(request))
+			}
+			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => {
+				let request = IrohQuicRequest::accept(conn);
+				Ok(Request::IrohQuic(request))
+			}
+			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
+		}
+	}
+
+	#[cfg(feature = "iroh")]
+	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
+		self.iroh_endpoint.as_ref()
 	}
 
 	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {

@@ -6,10 +6,8 @@ use axum::{http::Method, routing::get, Router};
 use hang::moq_lite;
 #[cfg(feature = "iroh")]
 use moq_native::iroh::EndpointConfig;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -30,23 +28,11 @@ pub async fn server(
 		.next()
 		.context("invalid listen address")?;
 
-	let server = config.init()?;
-	tracing::info!(addr = ?server.local_addr(), "listening");
-
-	// Init iroh server if enabled.
-	#[cfg(feature = "iroh")]
-	let iroh_fut = if let Some(iroh_config) = iroh_config {
-		let server = iroh_config.init_server().await?;
-		tracing::info!(endpoint_id = %server.endpoint().id(), "iroh listening");
-		Box::pin(accept(server, name.clone(), publish.consume())) as Pin<Box<dyn Future<Output = _>>>
-	} else {
-		Box::pin(std::future::pending::<anyhow::Result<()>>())
-	};
-
-	// tokio::select! does not support feature flags on match arms, thus we set the future to pending
-	// if the iroh feature is disabled.
 	#[cfg(not(feature = "iroh"))]
-	let iroh_fut = Box::pin(std::future::pending::<anyhow::Result<()>>()) as Pin<Box<dyn Future<Output = _>>>;
+	let server = config.init().await?;
+
+	#[cfg(feature = "iroh")]
+	let server = config.init_with_iroh(iroh_config).await?;
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready.
@@ -56,18 +42,19 @@ pub async fn server(
 
 	tokio::select! {
 		res = accept(server, name, publish.consume()) => res,
-		res = iroh_fut => res,
 		res = publish.run() => res,
 		res = web(listen, tls_info, public) => res,
 	}
 }
 
 async fn accept(
-	mut server: impl moq_native::MoqServer,
+	mut server: moq_native::Server,
 	name: String,
 	consumer: moq_lite::BroadcastConsumer,
 ) -> anyhow::Result<()> {
 	let mut conn_id = 0;
+
+	tracing::info!(addr = ?server.local_addr(), "listening");
 
 	while let Some(session) = server.accept().await {
 		let id = conn_id;

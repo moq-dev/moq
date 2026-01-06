@@ -1,12 +1,10 @@
 use std::{net, path::PathBuf, str::FromStr};
 
-use web_transport_iroh::iroh::{Endpoint, SecretKey};
-
-mod client;
-mod server;
-
-pub use self::client::*;
-pub use self::server::*;
+use url::Url;
+use web_transport_iroh::{
+	http,
+	iroh::{self, Endpoint, SecretKey},
+};
 
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -74,12 +72,29 @@ impl EndpointConfig {
 		tracing::info!(endpoint_id = %endpoint.id(), "iroh listening");
 		Ok(endpoint)
 	}
+}
 
-	pub async fn init_server(self) -> anyhow::Result<Server> {
-		Server::new(self).await
+const IROH_SCHEMES: [&str; 4] = ["moql+iroh", "iroh", "moqt+iroh", "h3+iroh"];
+
+pub fn is_iroh_url(url: &Url) -> bool {
+	IROH_SCHEMES.contains(&url.scheme())
+}
+
+pub struct IrohQuicRequest(iroh::endpoint::Connection);
+
+impl IrohQuicRequest {
+	/// Accept a new QUIC-only WebTransport session from a client.
+	pub fn accept(conn: iroh::endpoint::Connection) -> Self {
+		Self(conn)
 	}
 
-	pub async fn init_client(self) -> anyhow::Result<Client> {
-		Client::new(self).await
+	/// Accept the session.
+	pub fn ok(self) -> web_transport_iroh::Session {
+		web_transport_iroh::Session::raw(self.0)
+	}
+
+	/// Reject the session.
+	pub fn close(self, status: http::StatusCode) {
+		self.0.close(status.as_u16().into(), status.as_str().as_bytes());
 	}
 }

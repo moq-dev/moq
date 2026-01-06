@@ -57,7 +57,7 @@ pub enum Command {
 		/// It will be used for URLs with the iroh:// scheme.
 		#[cfg(feature = "iroh")]
 		#[command(flatten)]
-		iroh_config: moq_native::iroh::EndpointConfig,
+		iroh_config: Option<moq_native::iroh::EndpointConfig>,
 
 		/// The URL of the MoQ server.
 		///

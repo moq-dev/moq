@@ -46,7 +46,7 @@ impl Session {
 		callback: &mut ffi::OnStatus,
 	) -> Result<(), Error> {
 		let config = moq_native::ClientConfig::default();
-		let client = config.init().map_err(|err| Error::Connect(Arc::new(err)))?;
+		let client = config.init().await.map_err(|err| Error::Connect(Arc::new(err)))?;
 		let session = client
 			.connect(url, publish, consume)
 			.await

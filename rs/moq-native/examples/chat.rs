@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let config = moq_native::ClientConfig::default();
-	let client = moq_native::Client::new(config)?;
+	let client = moq_native::Client::new(config).await?;
 
 	// For local development, use: http://localhost:4443/anon
 	// The "anon" path is usually configured to bypass authentication; be careful!

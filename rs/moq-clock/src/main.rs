@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
 	let config = Config::parse();
 	config.log.init();
 
-	let client = config.client.init()?;
+	let client = config.client.init().await?;
 
 	tracing::info!(url = ?config.url, "connecting to server");
 
