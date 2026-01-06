@@ -31,6 +31,8 @@ pub enum Command {
 		iroh: bool,
 
 		/// Configuration for the iroh endpoint.
+		///
+		/// Serving over iroh only is enabled effect when `--iroh` is set.
 		#[cfg(feature = "iroh")]
 		#[command(flatten)]
 		iroh_config: moq_native::iroh::EndpointConfig,
@@ -54,10 +56,15 @@ pub enum Command {
 
 		/// Configuration for the iroh endpoint.
 		///
-		/// It will be used for URLs with the iroh:// scheme.
+		/// The settings are optional, the iroh endpoint will always be initiated.
+		/// It will be used for URLs with the schemes
+		///   iroh://<endpoint-id>
+		///   moql+iroh://<endpoint-id>
+		///   moqt+iroh://<endpoint-id>
+		///   h3+iroh://<endpoint-id>/<optional-path>?<optional-query>
 		#[cfg(feature = "iroh")]
 		#[command(flatten)]
-		iroh_config: Option<moq_native::iroh::EndpointConfig>,
+		iroh_config: moq_native::iroh::EndpointConfig,
 
 		/// The URL of the MoQ server.
 		///
@@ -125,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
 			..
 		} => {
 			#[cfg(feature = "iroh")]
-			let config = config.with_iroh(iroh_config);
+			let config = config.with_iroh(Some(iroh_config));
 			client(config, url, name, publish).await
 		}
 	}

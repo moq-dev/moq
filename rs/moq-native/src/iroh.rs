@@ -74,12 +74,15 @@ impl EndpointConfig {
 	}
 }
 
+/// URL schemes supported for connecting to iroh endpoints.
 pub const IROH_SCHEMES: [&str; 4] = ["iroh", "moql+iroh", "moqt+iroh", "h3+iroh"];
 
+/// Returns `true` if `url` has a scheme included in [`IROH_SCHEMES`].
 pub fn is_iroh_url(url: &Url) -> bool {
 	IROH_SCHEMES.contains(&url.scheme())
 }
 
+/// Raw QUIC-only iroh request (not using HTTP/3).
 pub struct IrohQuicRequest(iroh::endpoint::Connection);
 
 impl IrohQuicRequest {

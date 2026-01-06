@@ -253,7 +253,7 @@ sub name url='http://localhost:4443/anon':
 	@echo "Install and use hang-gst directly for GStreamer functionality"
 
 # Publish a video using ffmpeg directly from hang to the localhost
-serve name="bbb":
+serve name:
 	# Download the sample media.
 	just download "{{name}}"
 
@@ -262,7 +262,9 @@ serve name="bbb":
 
 	# Run ffmpeg and pipe the output to hang
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin hang --features iroh -- serve --listen "[::]:4443" --tls-generate "localhost" --name "{{name}}" fmp4
+	cargo run --bin hang --features iroh -- serve \
+		--listen "[::]:4443" --tls-generate "localhost" --iroh \
+		--name "{{name}}" fmp4
 
 # Run the web server
 web url='http://localhost:4443/anon':
