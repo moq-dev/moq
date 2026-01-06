@@ -168,6 +168,15 @@ There are more commands: check out the [justfile](justfile), [rs/justfile](rs/ju
 
 The `moq-native` and `moq-relay` crates optionally support connecting via [iroh](https://github.com/n0-computer/iroh). The iroh integration is disabled by default, to use it enable the `iroh` feature.
 
+When the iroh feature is enabled, you can connect to iroh endpoints with these URLs:
+
+* `iroh://<ENDPOINT_ID>`: Connect via moq-lite over raw QUIC.
+* `moql+iroh://<ENDPOINT_ID>`: Connect via moq-lite over raw QUIC (same as above)
+* `moqt+iroh://<ENDPOINT_ID>`: Connect via IETF MoQ over raw QUIC
+* `h3+iroh://<ENDPOINT_ID>/optional/path?with=query`: Connect via WebTransport over HTTP/3.
+
+`ENDPOINT_ID` must be the hex-encoded iroh endpoint id. It is currently not possible to set direct addresses or iroh relay URLs. The iroh integration in moq-native uses iroh's default discovery mechanisms to discover other endpoints by their endpoint id.
+
 You can run a demo like this:
 
 ```sh
@@ -175,8 +184,12 @@ You can run a demo like this:
 just relay
 # Copy the endpoint id printed at "iroh listening"
 
-# Terminal 2: Publish via iroh (replace ENDPOINT-ID with the endpoint id)
-just pub-iroh bbb iroh://ENDPOINT-ID
+# Terminal 2: Publish via moq-lite over raw iroh QUIC
+# (replace ENDPOINT_ID with the relay's endpoint id)
+just pub bbb iroh://ENDPOINT_ID anon
+# Alternatively you can use WebTransport over HTTP/3 over iroh,
+# which allows to set a path prefix in the URL:
+just pub bbb h3+iroh://ENDPOINT_ID/anon
 
 # Terminal 3: Start web server
 just web
@@ -184,7 +197,7 @@ just web
 
 Then open [localhost:5173](http://localhost:5173) and watch BBB, pushed from terminal 1 via iroh to the relay running in terminal 2, from where the browser fetches it over regular WebTransport.
 
-There's also `just serve` which serves a video via iroh alongside regular QUIC (it enables the `iroh` feature). This repo currently does not provide a native viewer, so you can't subscribe to it directly. However, you can use the [watch example from iroh-live](https://github.com/n0-computer/iroh-live/blob/main/iroh-live/examples/watch.rs) to view a video published via `hang-native` (which `just serve-iroh` expands to).
+`just serve` serves a video via iroh alongside regular QUIC (it enables the `iroh` feature). This repo currently does not provide a native viewer, so you can't subscribe to it directly. However, you can use the [watch example from iroh-live](https://github.com/n0-computer/iroh-live/blob/main/iroh-live/examples/watch.rs) to view a video published via `hang-native` (which `just serve-iroh` expands to).
 
 ## License
 
