@@ -15,12 +15,6 @@ pub struct Config {
 	#[serde(default)]
 	pub client: moq_native::ClientConfig,
 
-	/// Iroh endpoint configuration
-	#[cfg(feature = "iroh")]
-	#[command(flatten)]
-	#[serde(default)]
-	pub iroh: moq_native::iroh::EndpointConfig,
-
 	/// Log configuration.
 	#[command(flatten)]
 	#[serde(default)]

@@ -4,8 +4,6 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{http::Method, routing::get, Router};
 use hang::moq_lite;
-#[cfg(feature = "iroh")]
-use moq_native::iroh::EndpointConfig;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -16,7 +14,6 @@ use crate::Publish;
 
 pub async fn server(
 	config: moq_native::ServerConfig,
-	#[cfg(feature = "iroh")] iroh_config: Option<EndpointConfig>,
 	name: String,
 	public: Option<PathBuf>,
 	publish: Publish,
@@ -28,11 +25,7 @@ pub async fn server(
 		.next()
 		.context("invalid listen address")?;
 
-	#[cfg(not(feature = "iroh"))]
 	let server = config.init().await?;
-
-	#[cfg(feature = "iroh")]
-	let server = config.init_with_iroh(iroh_config).await?;
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready.

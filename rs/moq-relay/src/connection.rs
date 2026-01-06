@@ -12,13 +12,7 @@ pub struct Connection {
 impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let url = match &self.request {
-			Request::WebTransport(request) => Some(request.url()),
-			#[cfg(feature = "iroh")]
-			Request::IrohWebTransport(request) => Some(request.url()),
-			_ => None,
-		};
-		let (path, token) = match url {
+		let (path, token) = match self.request.url() {
 			Some(url) => {
 				// Extract the path and token from the URL.
 				let path = url.path();

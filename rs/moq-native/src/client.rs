@@ -74,6 +74,21 @@ pub struct ClientConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub websocket: ClientWebSocket,
+
+	/// Configuration for the iroh endpoint.
+	///
+	/// If set to `None`, iroh support is disabled.
+	///
+	/// Note that this field is ignored in command-line parsing due to potential conflicts when flattening
+	/// both [`ServerConfig`] and [`ClientConfig`] in the same command. Instead, you need to set
+	/// the [`crate::iroh::EndpointConfig`] on your top-level command, and then set [`Self::iroh`]
+	/// to that.
+	///
+	/// [`ServerConfig`]: crate::ServerConfig
+	#[arg(skip)]
+	#[serde(default)]
+	#[cfg(feature = "iroh")]
+	pub iroh: Option<crate::iroh::EndpointConfig>,
 }
 
 impl Default for ClientConfig {
@@ -82,6 +97,8 @@ impl Default for ClientConfig {
 			bind: "[::]:0".parse().unwrap(),
 			tls: ClientTls::default(),
 			websocket: ClientWebSocket::default(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
 		}
 	}
 }
@@ -92,8 +109,9 @@ impl ClientConfig {
 	}
 
 	#[cfg(feature = "iroh")]
-	pub async fn init_with_iroh(self, iroh: Option<crate::iroh::EndpointConfig>) -> anyhow::Result<Client> {
-		Client::with_iroh(self, iroh).await
+	pub fn with_iroh(mut self, iroh: Option<crate::iroh::EndpointConfig>) -> Self {
+		self.iroh = iroh;
+		self
 	}
 }
 
@@ -109,23 +127,6 @@ pub struct Client {
 
 impl Client {
 	pub async fn new(config: ClientConfig) -> anyhow::Result<Self> {
-		Self::new_inner(
-			config,
-			#[cfg(feature = "iroh")]
-			None,
-		)
-		.await
-	}
-
-	#[cfg(feature = "iroh")]
-	pub async fn with_iroh(config: ClientConfig, iroh: Option<crate::iroh::EndpointConfig>) -> anyhow::Result<Self> {
-		Self::new_inner(config, iroh).await
-	}
-
-	async fn new_inner(
-		config: ClientConfig,
-		#[cfg(feature = "iroh")] iroh_config: Option<crate::iroh::EndpointConfig>,
-	) -> anyhow::Result<Self> {
 		let provider = crypto::provider();
 
 		// Create a list of acceptable root certificates.
@@ -191,7 +192,7 @@ impl Client {
 			quinn::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
 
 		#[cfg(feature = "iroh")]
-		let iroh_endpoint = if let Some(iroh_config) = iroh_config {
+		let iroh_endpoint = if let Some(iroh_config) = config.iroh {
 			Some(iroh_config.bind().await?)
 		} else {
 			None

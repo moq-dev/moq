@@ -74,7 +74,7 @@ impl EndpointConfig {
 	}
 }
 
-const IROH_SCHEMES: [&str; 4] = ["moql+iroh", "iroh", "moqt+iroh", "h3+iroh"];
+pub const IROH_SCHEMES: [&str; 4] = ["iroh", "moql+iroh", "moqt+iroh", "h3+iroh"];
 
 pub fn is_iroh_url(url: &Url) -> bool {
 	IROH_SCHEMES.contains(&url.scheme())

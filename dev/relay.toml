@@ -15,6 +15,13 @@ listen = "[::]:4443"
 # This is used for local development, in conjunction with a fingerprint, or with TLS verification disabled.
 tls.generate = ["localhost"]
 
+[server.iroh]
+# Path to persist the iroh secret key at.
+# If the file does not exist, a random key will be generated and written to the path.
+# This gives the relay a persistent iroh endpoint id. The secret key can alternatively be set
+# via MOQ_IROH_SECRET environment variable.
+secret_key_path = "./dev/relay-iroh-secret.key"
+
 [web.http]
 # Listen for HTTP and WebSocket connections on the given TCP address.
 # This is unfortunately required to serve certificate.sha256 for local development.
@@ -25,10 +32,3 @@ listen = "[::]:4443"
 [auth]
 # Allow anonymous access to everything.
 public = ""
-
-[iroh]
-# Path to persist the iroh secret key at.
-# If the file does not exist, a random key will be generated and written to the path.
-# This gives the relay a persistent iroh endpoint id. The secret key can alternatively be set
-# via MOQ_IROH_SECRET environment variable.
-secret_key_path = "./dev/relay-iroh-secret.key"

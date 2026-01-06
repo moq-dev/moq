@@ -112,15 +112,9 @@ async fn main() -> anyhow::Result<()> {
 			iroh_config,
 			..
 		} => {
-			server(
-				config,
-				#[cfg(feature = "iroh")]
-				iroh.then_some(iroh_config),
-				name,
-				dir,
-				publish,
-			)
-			.await
+			#[cfg(feature = "iroh")]
+			let config = config.with_iroh(iroh.then_some(iroh_config));
+			server(config, name, dir, publish).await
 		}
 		Command::Publish {
 			config,
@@ -130,15 +124,9 @@ async fn main() -> anyhow::Result<()> {
 			name,
 			..
 		} => {
-			client(
-				config,
-				#[cfg(feature = "iroh")]
-				iroh_config,
-				url,
-				name,
-				publish,
-			)
-			.await
+			#[cfg(feature = "iroh")]
+			let config = config.with_iroh(iroh_config);
+			client(config, url, name, publish).await
 		}
 	}
 }

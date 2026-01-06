@@ -5,6 +5,7 @@ use crate::crypto;
 #[cfg(feature = "iroh")]
 use crate::iroh::IrohQuicRequest;
 use anyhow::Context;
+use moq_lite::Session;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -75,6 +76,21 @@ pub struct ServerConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ServerTlsConfig,
+
+	/// Configuration for the iroh endpoint.
+	///
+	/// If set to `None`, iroh support is disabled.
+	///
+	/// Note that this field is ignored in command-line parsing due to potential conflicts when flattening
+	/// both [`ServerConfig`] and [`ClientConfig`] in the same command. Instead, you need to set
+	/// the [`crate::iroh::EndpointConfig`] on your top-level command, and then set [`Self::iroh`]
+	/// to that.
+	///
+	/// [`ClientConfig`]: crate::ClientConfig
+	#[arg(skip)]
+	#[serde(default)]
+	#[cfg(feature = "iroh")]
+	pub iroh: Option<crate::iroh::EndpointConfig>,
 }
 
 impl ServerConfig {
@@ -83,8 +99,9 @@ impl ServerConfig {
 	}
 
 	#[cfg(feature = "iroh")]
-	pub async fn init_with_iroh(self, iroh: Option<crate::iroh::EndpointConfig>) -> anyhow::Result<Server> {
-		Server::with_iroh(self, iroh).await
+	pub fn with_iroh(mut self, iroh: Option<crate::iroh::EndpointConfig>) -> Self {
+		self.iroh = iroh;
+		self
 	}
 }
 
@@ -98,27 +115,6 @@ pub struct Server {
 
 impl Server {
 	pub async fn new(config: ServerConfig) -> anyhow::Result<Self> {
-		Self::new_inner(
-			config,
-			#[cfg(feature = "iroh")]
-			None,
-		)
-		.await
-	}
-
-	#[cfg(feature = "iroh")]
-	pub async fn with_iroh(
-		config: ServerConfig,
-		iroh_config: Option<crate::iroh::EndpointConfig>,
-	) -> anyhow::Result<Self> {
-		Self::new_inner(config, iroh_config).await
-	}
-
-	async fn new_inner(
-		config: ServerConfig,
-
-		#[cfg(feature = "iroh")] iroh_config: Option<crate::iroh::EndpointConfig>,
-	) -> anyhow::Result<Self> {
 		// Enable BBR congestion control
 		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
@@ -167,7 +163,7 @@ impl Server {
 			.context("failed to create QUIC endpoint")?;
 
 		#[cfg(feature = "iroh")]
-		let iroh_endpoint = if let Some(iroh_config) = iroh_config {
+		let iroh_endpoint = if let Some(iroh_config) = config.iroh {
 			Some(iroh_config.bind().await?)
 		} else {
 			None
@@ -341,19 +337,14 @@ impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
 	pub async fn reject(self, status: http::StatusCode) -> anyhow::Result<()> {
 		match self {
-			Self::WebTransport(request) => request.close(status).await.map_err(Into::into),
-			Self::Quic(request) => {
-				request.close(status);
-				Ok(())
-			}
+			Self::WebTransport(request) => request.close(status).await?,
+			Self::Quic(request) => request.close(status),
 			#[cfg(feature = "iroh")]
-			Request::IrohWebTransport(request) => request.close(status).await.map_err(Into::into),
+			Request::IrohWebTransport(request) => request.close(status).await?,
 			#[cfg(feature = "iroh")]
-			Request::IrohQuic(request) => {
-				request.close(status);
-				Ok(())
-			}
+			Request::IrohQuic(request) => request.close(status),
 		}
+		Ok(())
 	}
 
 	/// Accept the session, performing rest of the MoQ handshake.
@@ -361,16 +352,14 @@ impl Request {
 		self,
 		publish: impl Into<Option<moq_lite::OriginConsumer>>,
 		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
-	) -> anyhow::Result<moq_lite::Session> {
+	) -> anyhow::Result<Session> {
 		let session = match self {
-			Request::WebTransport(request) => {
-				moq_lite::Session::accept(request.ok().await?, publish, subscribe).await?
-			}
-			Request::Quic(request) => moq_lite::Session::accept(request.ok(), publish, subscribe).await?,
+			Request::WebTransport(request) => Session::accept(request.ok().await?, publish, subscribe).await?,
+			Request::Quic(request) => Session::accept(request.ok(), publish, subscribe).await?,
 			#[cfg(feature = "iroh")]
-			Request::IrohWebTransport(request) => moq_lite::Session::accept(request.ok().await?, publish, subscribe).await?,
+			Request::IrohWebTransport(request) => Session::accept(request.ok().await?, publish, subscribe).await?,
 			#[cfg(feature = "iroh")]
-			Request::IrohQuic(request) => moq_lite::Session::accept(request.ok(), publish, subscribe).await?,
+			Request::IrohQuic(request) => Session::accept(request.ok(), publish, subscribe).await?,
 		};
 		Ok(session)
 	}

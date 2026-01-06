@@ -21,12 +21,7 @@ async fn main() -> anyhow::Result<()> {
 	let config = Config::load()?;
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
-
-	#[cfg(not(feature = "iroh"))]
 	let mut server = config.server.init().await?;
-	#[cfg(feature = "iroh")]
-	let mut server = config.server.init_with_iroh(Some(config.iroh)).await?;
-
 	let client = config.client.init().await?;
 	let auth = config.auth.init()?;
 
@@ -56,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 
 	let mut conn_id = 0;
+
 	while let Some(request) = server.accept().await {
 		let conn = Connection {
 			id: conn_id,
