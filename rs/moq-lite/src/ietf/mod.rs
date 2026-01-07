@@ -15,6 +15,7 @@ mod setup;
 mod subscribe;
 mod subscribe_namespace;
 mod subscriber;
+mod time;
 mod track;
 mod version;
 

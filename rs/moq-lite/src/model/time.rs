@@ -1,6 +1,6 @@
 use rand::Rng;
 
-use crate::coding::{Decode, DecodeError, Encode, VarInt};
+use crate::coding::VarInt;
 
 use std::sync::LazyLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -229,17 +229,5 @@ impl From<Instant> for Time {
 impl From<tokio::time::Instant> for Time {
 	fn from(instant: tokio::time::Instant) -> Self {
 		instant.into_std().into()
-	}
-}
-
-impl<V> Decode<V> for Time {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		Ok(Self(VarInt::decode(r, version)?))
-	}
-}
-
-impl<V> Encode<V> for Time {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.0.encode(w, version);
 	}
 }

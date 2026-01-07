@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use futures::FutureExt;
+use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use web_async::FuturesExt;
 
 use crate::{
@@ -206,11 +206,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Just to get around ownership issues.
 		let mut delivery = track.delivery().clone();
 
+		// All of the groups we're currently serving.
+		let mut tasks = FuturesUnordered::new();
+
 		loop {
 			let group = tokio::select! {
 				Some(group) = track.next_group().transpose() => group,
-				Some(res) = stream.reader.decode_maybe::<lite::SubscribeUpdate>().transpose() => {
-					let update = res?;
+				update = stream.reader.decode_maybe::<lite::SubscribeUpdate>() => {
+					// The stream is closed, so we're done.
+					// TODO also cancel outstanding groups.
+					let Some(update) = update? else {break};
 
 					let info = Delivery {
 						priority: update.priority,
@@ -218,7 +223,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						ordered: update.ordered,
 					};
 
-					tracing::trace!(subscribe = %subscribe.id, track = %track.name, ?info, "subscribed update");
+					tracing::info!(subscribe = %subscribe.id, track = %track.name, ?info, "subscribed update");
 					track.subscriber().update(info);
 
 					// TODO update the priority of all outstanding groups.
@@ -232,12 +237,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						ordered: update.ordered,
 					};
 
-					tracing::trace!(subscribe = %subscribe.id, track = %track.name, ?info, "subscribed ok");
+					tracing::info!(subscribe = %subscribe.id, track = %track.name, ?info, "subscribed ok");
 					stream.writer.encode(&info).await?;
 
 					continue;
 
 				},
+				// This is a hack to avoid waking up the select! loop each time a group completes.
+				// We poll all of the groups until they're all complete, only matching `else` when all are complete.
+				// We don't use tokio::spawn so we can wait until done, clean up on Drop, and support non-tokio.
+				true = async {
+					// Constantly poll all of the groups until they're all complete.
+					while let Some(_) = tasks.next().await {}
+					// Never match
+					false
+				} => unreachable!("never match"),
 				else => break,
 			}?;
 
@@ -251,8 +265,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// TODO factor in ordered.
 			let priority = priority.insert(track.subscriber().current().priority, group.sequence);
 
-			// Run the group in the background until it's closed or expires.
-			web_async::spawn(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
+			// Run the group until it's closed or expires.
+			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
 		}
 
 		stream.writer.finish()?;

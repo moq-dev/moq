@@ -35,7 +35,6 @@ export class Frame {
 		switch (version) {
 			case Version.DRAFT_03:
 				timestamp = (await r.u53()) as Time.Micro;
-				console.log("timestamp", timestamp);
 				break;
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:

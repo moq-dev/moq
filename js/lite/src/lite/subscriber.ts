@@ -152,9 +152,9 @@ export class Subscriber {
 				await SubscribeOk.decode(stream.reader, this.version);
 				console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${track.name} `);
 
-				const result = await Promise.race([stream.reader.closed, track.closed]);
-				if (result instanceof Error) throw result;
-				if (result) break;
+				const done = await Promise.race([stream.reader.done(), track.closed]);
+				if (done instanceof Error) throw done;
+				if (done !== false) break; // false means a new SubscribeOk
 			}
 
 			track.close();
@@ -197,6 +197,7 @@ export class Subscriber {
 		try {
 			for (;;) {
 				const done = await Promise.race([stream.done(), subscribe.closed, producer.closed]);
+				if (done instanceof Error) throw done;
 				if (done !== false) break;
 
 				const frame = await FrameMessage.decode(stream, this.version);

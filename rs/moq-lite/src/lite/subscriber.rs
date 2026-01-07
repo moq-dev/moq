@@ -233,7 +233,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				max = track.subscribers().changed() => {
 					// Cancel when there are no more subscribers.
 					let max = max.ok_or(Error::Cancel)?;
-					tracing::trace!(subscribe = %id, track = %track.name, ?max, "subscribe update");
+					tracing::info!(subscribe = %id, track = %track.name, ?max, "subscribe update");
 
 					stream
 						.writer
@@ -247,7 +247,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// Wait until the stream is closed
 				update = stream.reader.decode_maybe::<lite::SubscribeOk>() => {
 					let Some(update) = update? else {break};
-					tracing::trace!(subscribe = %id, track = %track.name, ?update, "subscribe ok");
+					tracing::info!(subscribe = %id, track = %track.name, ?update, "subscribe ok");
 
 					track.delivery().update(Delivery {
 						priority: update.priority,
