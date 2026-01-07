@@ -285,7 +285,7 @@ impl From<moq_lite::TrackConsumer> for CatalogConsumer {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{AudioCodec::Opus, AudioConfig, VideoConfig, H264};
+	use crate::catalog::{AudioCodec::Opus, AudioConfig, VideoConfig, H264, Container};
 
 	use super::*;
 
@@ -339,6 +339,7 @@ mod test {
 				bitrate: Some(6_000_000),
 				framerate: Some(30.0),
 				optimize_for_latency: None,
+				container: Container::Legacy,
 			},
 		);
 
@@ -351,6 +352,7 @@ mod test {
 				channel_count: 2,
 				bitrate: Some(128_000),
 				description: None,
+				container: Container::Legacy,
 			},
 		);
 

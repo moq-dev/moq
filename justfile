@@ -147,7 +147,7 @@ pub name url="http://localhost:4443/anon" *args:
 		- | cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
 
 # Generate and ingest an HLS stream from a video file.
-pub-hls name passthrough='false' relay="http://localhost:4443/anon":
+pub-hls name passthrough='' relay="http://localhost:4443/anon":
 	#!/usr/bin/env bash
 	set -euo pipefail
 
@@ -212,10 +212,8 @@ pub-hls name passthrough='false' relay="http://localhost:4443/anon":
 		sleep 0.5
 	done
 
-	echo ">>> Passthrough parameter value: '{{passthrough}}'"
-	# Just may pass the parameter as "passthrough=true" when using passthrough="true"
-	# So we check if it contains "true" (case-insensitive) and is not exactly "false"
-	if echo "{{passthrough}}" | grep -qi "true" && [ "{{passthrough}}" != "false" ]; then
+	# Check if passthrough flag is provided (boolean parameter)
+	if [ -n "{{passthrough}}" ]; then
 		echo ">>> Starting HLS ingest from disk with passthrough mode: $OUT_DIR/master.m3u8"
 		PASSTHROUGH_FLAG="--passthrough"
 	else

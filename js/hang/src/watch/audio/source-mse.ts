@@ -262,7 +262,6 @@ export class SourceMSE {
 		}
 
 		// Read fragments and append to SourceBuffer
-		// MSE works better when appending complete groups (GOPs for video, sample groups for audio)
 		// We group fragments by MOQ group before appending
 		effect.spawn(async () => {
 			let frameCount = 0;
