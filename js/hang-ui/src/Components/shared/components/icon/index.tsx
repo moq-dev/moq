@@ -60,8 +60,7 @@ export default function Icon(props: IconProps): JSX.Element {
 		if (!fetchPromise) {
 			// Start a new fetch for the icon SVG
 			fetchPromise = (async () => {
-				await Settings.whenBasePathReady();
-				const iconPath = Settings.getBasePath(`assets/icons/${iconName}.svg`);
+				const iconPath = Settings.getBasePath(`icons/${iconName}.svg`);
 				const response = await fetch(iconPath);
 
 				if (!response.ok) {

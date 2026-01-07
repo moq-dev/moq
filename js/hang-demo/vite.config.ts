@@ -2,14 +2,24 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import { defineConfig } from "vite";
 import solidPlugin from "vite-plugin-solid";
+import { viteStaticCopy } from "vite-plugin-static-copy";
 
 export default defineConfig({
 	root: "src",
-	plugins: [tailwindcss(), solidPlugin()],
-	define: {
-		// Inject the hang-ui assets path for development
-		__HANG_UI_ASSETS_PATH__: JSON.stringify(`/@fs${path.resolve(__dirname, "../hang-ui/dist")}`),
-	},
+	plugins: [
+		tailwindcss(),
+		solidPlugin(),
+		viteStaticCopy({
+			targets: [
+				{
+					// NOTE: When using the NPM package, you instead use:
+					// src: "node_modules/@moq/hang-ui/dist/assets/*"
+					src: path.resolve(__dirname, "node_modules/@moq/hang-ui/src/assets/*"),
+					dest: "@moq/hang-ui",
+				},
+			],
+		}),
+	],
 	build: {
 		target: "esnext",
 		sourcemap: process.env.NODE_ENV === "production" ? false : "inline",
@@ -23,11 +33,10 @@ export default defineConfig({
 		},
 	},
 	server: {
-		// TODO: properly support HMR
 		hmr: false,
 	},
 	optimizeDeps: {
-		// No idea why this needs to be done, but I don't want to figure it out.
+		include: ["@moq/hang-ui"],
 		exclude: ["@libav.js/variant-opus-af"],
 	},
 });

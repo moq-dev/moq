@@ -12,7 +12,7 @@ customElement("hang-publish-ui", {}, function PublishControlsWebComponent(_, { e
 	onMount(async () => {
 		// Load CSS into the component (loadStyleIntoShadow handles basePath internally)
 		const rootElement = (element as unknown as HTMLElement).shadowRoot || (element as unknown as HTMLElement);
-		await loadStyleIntoShadow("themes/publish/styles.css", rootElement);
+		await loadStyleIntoShadow("styles/publish.css", rootElement);
 
 		const publishEl = element.querySelector("hang-publish");
 		await customElements.whenDefined("hang-publish");
