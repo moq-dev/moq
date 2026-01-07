@@ -6,7 +6,7 @@ import { StatsItem } from "./StatsItem";
 /**
  * Props for stats panel component
  */
-interface StatsPanelProps extends ProviderProps { }
+interface StatsPanelProps extends ProviderProps {}
 
 export const statsDetailItems: { name: string; statProvider: KnownStatsProviders; iconName: string }[] = [
 	{

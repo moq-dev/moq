@@ -56,10 +56,13 @@
             "npm:@tailwindcss/typography@~0.5.16",
             "npm:@tailwindcss/vite@^4.1.13",
             "npm:highlight.js@^11.11.1",
+            "npm:solid-element@^1.9.1",
+            "npm:solid-js@^1.9.10",
             "npm:tailwindcss@^4.1.13",
             "npm:typescript@^5.9.2",
             "npm:vite-plugin-html@^3.2.2",
             "npm:vite-plugin-solid@^2.11.10",
+            "npm:vite-plugin-static-copy@^3.1.4",
             "npm:vite@^6.3.6"
           ]
         }
@@ -67,17 +70,16 @@
       "js/hang-ui": {
         "packageJson": {
           "dependencies": [
-            "npm:@rollup/plugin-node-resolve@^16.0.3",
             "npm:@solidjs/testing-library@~0.8.10",
             "npm:@testing-library/jest-dom@^6.9.1",
             "npm:happy-dom@^20.0.11",
             "npm:rimraf@^6.0.1",
-            "npm:rollup-plugin-copy@^3.5.0",
-            "npm:rollup-plugin-esbuild@^6.2.1",
-            "npm:rollup@^4.53.3",
             "npm:solid-element@^1.9.1",
             "npm:solid-js@^1.9.10",
+            "npm:typescript@^5.9.2",
             "npm:unplugin-solid@1",
+            "npm:vite-plugin-solid@^2.11.10",
+            "npm:vite@^7.3.1",
             "npm:vitest@^3.2.4"
           ]
         }

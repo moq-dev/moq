@@ -35,6 +35,7 @@
 		"solid-element": "^1.9.1",
 		"solid-js": "^1.9.10",
 		"unplugin-solid": "^1.0.0",
+		"typescript": "^5.9.2",
 		"vite": "^7.3.1",
 		"vite-plugin-solid": "^2.11.10",
 		"vitest": "^3.2.4"
