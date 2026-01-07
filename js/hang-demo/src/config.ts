@@ -110,10 +110,12 @@ export default class HangConfig extends HTMLElement {
 	}
 
 	#dispatchChange() {
-		this.dispatchEvent(new CustomEvent("change", {
-			detail: { url: this.url, path: this.path },
-			bubbles: true,
-		}));
+		this.dispatchEvent(
+			new CustomEvent("change", {
+				detail: { url: this.url, path: this.path },
+				bubbles: true,
+			}),
+		);
 	}
 
 	#scheduleDiscovery() {
@@ -159,7 +161,7 @@ export default class HangConfig extends HTMLElement {
 			while (Date.now() - startTime < timeout) {
 				const remaining = Math.max(0, timeout - (Date.now() - startTime));
 				const timeoutPromise = new Promise<undefined>((resolve) =>
-					setTimeout(() => resolve(undefined), remaining)
+					setTimeout(() => resolve(undefined), remaining),
 				);
 
 				const entry = await Promise.race([announced.next(), timeoutPromise]);
@@ -227,4 +229,3 @@ export default class HangConfig extends HTMLElement {
 }
 
 customElements.define("hang-config", HangConfig);
-
