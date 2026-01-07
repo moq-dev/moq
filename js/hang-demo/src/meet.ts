@@ -1,7 +1,8 @@
+import { setBasePath } from "@moq/hang-ui/settings";
 import "./highlight";
-import { Settings } from "@moq/hang-ui";
 
-Settings.setBasePath(__HANG_UI_ASSETS_PATH__);
+// Set basePath for hang-ui assets
+setBasePath("/@moq/hang-ui");
 
 import "@moq/hang-ui/publish/element";
 import HangMeet from "@moq/hang/meet/element";

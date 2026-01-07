@@ -1,6 +1,6 @@
-@import "../variables.css";
-@import "../flex.css";
-@import "../button.css";
+@import "./variables.css";
+@import "./flex.css";
+@import "./button.css";
 
 .publishControlsContainer {
 	display: flex;

@@ -15,7 +15,7 @@ customElement("hang-watch-ui", {}, function WatchUIWebComponent(_, { element }) 
 	onMount(async () => {
 		// Load CSS into the component (loadStyleIntoShadow handles basePath internally)
 		const rootElement = (element as unknown as HTMLElement).shadowRoot || (element as unknown as HTMLElement);
-		await loadStyleIntoShadow("themes/watch/styles.css", rootElement);
+		await loadStyleIntoShadow("styles/watch.css", rootElement);
 
 		const watchEl = element.querySelector("hang-watch");
 		await customElements.whenDefined("hang-watch");
