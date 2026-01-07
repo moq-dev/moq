@@ -3,30 +3,25 @@ use std::{net, path::PathBuf, str::FromStr};
 use url::Url;
 use web_transport_iroh::{
 	http,
-	iroh::{self, Endpoint, SecretKey},
+	iroh::{self, SecretKey},
 };
+
+pub use iroh::Endpoint;
 
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct EndpointConfig {
-	/// Path to a secret key for the iroh endpoint.
+	/// Whether to enable iroh support.
 	///
-	/// If the file doesn't exist, a random key will be generated and stored there.
-	#[arg(
-		id = "iroh-secret-key-path",
-		long = "iroh-secret-key-path",
-		env = "MOQ_IROH_SECRET_PATH",
-		conflicts_with = "iroh-secret-key"
-	)]
-	pub secret_key_path: Option<PathBuf>,
-	/// Secret key for the iroh endpoint.
-	#[arg(
-		id = "iroh-secret-key",
-		long = "iroh-secret-key",
-		env = "MOQ_IROH_SECRET",
-		conflicts_with = "iroh-secret-key-path"
-	)]
-	pub secret_key: Option<String>,
+	/// NOTE: The feature flag `iroh` must also be enabled.
+	#[arg(id = "iroh-enabled", long = "iroh-enabled", env = "MOQ_IROH_ENABLED")]
+	pub enabled: bool,
+
+	/// Secret key for the iroh endpoint, either a hex-encoded string or a path to a file.
+	/// If the file does not exist, a random key will be generated and written to the path.
+	#[arg(id = "iroh-secret", long = "iroh-secret", env = "MOQ_IROH_SECRET")]
+	pub secret: Option<String>,
+
 	/// Listen for UDP packets on the given address.
 	/// Defaults to `0.0.0.0:0` if not provided.
 	#[arg(id = "iroh-bind-v4", long = "iroh-bind-v4", env = "MOQ_IROH_BIND_V4")]
@@ -38,22 +33,29 @@ pub struct EndpointConfig {
 }
 
 impl EndpointConfig {
-	pub async fn bind(self) -> anyhow::Result<Endpoint> {
-		let secret_key = match (self.secret_key, self.secret_key_path) {
-			(Some(key), None) => SecretKey::from_str(&key)?,
-			(None, Some(path)) => {
-				if path.exists() {
-					let key_str = tokio::fs::read_to_string(&path).await?;
-					SecretKey::from_str(&key_str)?
-				} else {
-					let key = SecretKey::generate(&mut rand::rng());
-					let key_str = hex::encode(key.to_bytes());
-					tokio::fs::write(path, key_str).await?;
-					key
-				}
+	pub async fn bind(self) -> anyhow::Result<Option<Endpoint>> {
+		if !self.enabled {
+			return Ok(None);
+		}
+
+		// If the secret matches the expected format (hex encoded), use it directly.
+		let secret_key = if let Some(secret) = self.secret.as_ref().and_then(|s| SecretKey::from_str(s).ok()) {
+			secret
+		} else if let Some(path) = self.secret {
+			let path = PathBuf::from(path);
+			if !path.exists() {
+				// Generate a new random secret and write it to the file.
+				let secret = SecretKey::generate(&mut rand::rng());
+				tokio::fs::write(path, hex::encode(secret.to_bytes())).await?;
+				secret
+			} else {
+				// Otherwise, read the secret from a file.
+				let key_str = tokio::fs::read_to_string(&path).await?;
+				SecretKey::from_str(&key_str)?
 			}
-			(None, None) => SecretKey::generate(&mut rand::rng()),
-			(Some(_), Some(_)) => anyhow::bail!("Setting both secret_key and secret_key_path is invalid"),
+		} else {
+			// Otherwise, generate a new random secret.
+			SecretKey::generate(&mut rand::rng())
 		};
 
 		let mut builder = Endpoint::builder().secret_key(secret_key).alpns(vec![
@@ -70,7 +72,8 @@ impl EndpointConfig {
 
 		let endpoint = builder.bind().await?;
 		tracing::info!(endpoint_id = %endpoint.id(), "iroh listening");
-		Ok(endpoint)
+
+		Ok(Some(endpoint))
 	}
 }
 

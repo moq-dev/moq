@@ -76,32 +76,11 @@ pub struct ServerConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ServerTlsConfig,
-
-	/// Configuration for the iroh endpoint.
-	///
-	/// If set to `None`, iroh support is disabled.
-	///
-	/// Note that this field is ignored in command-line parsing due to potential conflicts when flattening
-	/// both [`ServerConfig`] and [`ClientConfig`] in the same command. Instead, you need to set
-	/// the [`crate::iroh::EndpointConfig`] on your top-level command, and then set [`Self::iroh`]
-	/// to that.
-	///
-	/// [`ClientConfig`]: crate::ClientConfig
-	#[arg(skip)]
-	#[serde(default)]
-	#[cfg(feature = "iroh")]
-	pub iroh: Option<crate::iroh::EndpointConfig>,
 }
 
 impl ServerConfig {
-	pub async fn init(self) -> anyhow::Result<Server> {
-		Server::new(self).await
-	}
-
-	#[cfg(feature = "iroh")]
-	pub fn with_iroh(mut self, iroh: Option<crate::iroh::EndpointConfig>) -> Self {
-		self.iroh = iroh;
-		self
+	pub fn init(self) -> anyhow::Result<Server> {
+		Server::new(self)
 	}
 }
 
@@ -110,11 +89,11 @@ pub struct Server {
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	certs: Arc<ServeCerts>,
 	#[cfg(feature = "iroh")]
-	iroh_endpoint: Option<iroh::Endpoint>,
+	iroh: Option<iroh::Endpoint>,
 }
 
 impl Server {
-	pub async fn new(config: ServerConfig) -> anyhow::Result<Self> {
+	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
 		// Enable BBR congestion control
 		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
@@ -162,20 +141,19 @@ impl Server {
 		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime)
 			.context("failed to create QUIC endpoint")?;
 
-		#[cfg(feature = "iroh")]
-		let iroh_endpoint = if let Some(iroh_config) = config.iroh {
-			Some(iroh_config.bind().await?)
-		} else {
-			None
-		};
-
 		Ok(Self {
 			quic: quic.clone(),
 			accept: Default::default(),
 			certs,
 			#[cfg(feature = "iroh")]
-			iroh_endpoint,
+			iroh: None,
 		})
+	}
+
+	#[cfg(feature = "iroh")]
+	pub fn with_iroh(&mut self, iroh: Option<iroh::Endpoint>) -> &mut Self {
+		self.iroh = iroh;
+		self
 	}
 
 	#[cfg(unix)]
@@ -213,7 +191,7 @@ impl Server {
 			// iroh cfg into a block, and default to a pending future if iroh is disabled.
 			let iroh_accept_fut = async {
 				#[cfg(feature = "iroh")]
-				if let Some(endpoint) = self.iroh_endpoint.as_ref() {
+				if let Some(endpoint) = self.iroh.as_ref() {
 					endpoint.accept().await
 				} else {
 					std::future::pending::<_>().await
@@ -312,7 +290,7 @@ impl Server {
 
 	#[cfg(feature = "iroh")]
 	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
-		self.iroh_endpoint.as_ref()
+		self.iroh.as_ref()
 	}
 
 	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {

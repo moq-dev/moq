@@ -74,21 +74,12 @@ pub struct ClientConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub websocket: ClientWebSocket,
+}
 
-	/// Configuration for the iroh endpoint.
-	///
-	/// If set to `None`, iroh support is disabled.
-	///
-	/// Note that this field is ignored in command-line parsing due to potential conflicts when flattening
-	/// both [`ServerConfig`] and [`ClientConfig`] in the same command. Instead, you need to set
-	/// the [`crate::iroh::EndpointConfig`] on your top-level command, and then set [`Self::iroh`]
-	/// to that.
-	///
-	/// [`ServerConfig`]: crate::ServerConfig
-	#[arg(skip)]
-	#[serde(default)]
-	#[cfg(feature = "iroh")]
-	pub iroh: Option<crate::iroh::EndpointConfig>,
+impl ClientConfig {
+	pub fn init(self) -> anyhow::Result<Client> {
+		Client::new(self)
+	}
 }
 
 impl Default for ClientConfig {
@@ -97,21 +88,7 @@ impl Default for ClientConfig {
 			bind: "[::]:0".parse().unwrap(),
 			tls: ClientTls::default(),
 			websocket: ClientWebSocket::default(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
 		}
-	}
-}
-
-impl ClientConfig {
-	pub async fn init(self) -> anyhow::Result<Client> {
-		Client::new(self).await
-	}
-
-	#[cfg(feature = "iroh")]
-	pub fn with_iroh(mut self, iroh: Option<crate::iroh::EndpointConfig>) -> Self {
-		self.iroh = iroh;
-		self
 	}
 }
 
@@ -122,11 +99,11 @@ pub struct Client {
 	pub transport: Arc<quinn::TransportConfig>,
 	pub websocket_delay: Option<time::Duration>,
 	#[cfg(feature = "iroh")]
-	pub iroh_endpoint: Option<iroh::Endpoint>,
+	pub iroh: Option<iroh::Endpoint>,
 }
 
 impl Client {
-	pub async fn new(config: ClientConfig) -> anyhow::Result<Self> {
+	pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
 		let provider = crypto::provider();
 
 		// Create a list of acceptable root certificates.
@@ -191,21 +168,20 @@ impl Client {
 		let quic =
 			quinn::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
 
-		#[cfg(feature = "iroh")]
-		let iroh_endpoint = if let Some(iroh_config) = config.iroh {
-			Some(iroh_config.bind().await?)
-		} else {
-			None
-		};
-
 		Ok(Self {
 			quic,
 			tls,
 			transport,
 			websocket_delay: config.websocket.delay,
 			#[cfg(feature = "iroh")]
-			iroh_endpoint,
+			iroh: None,
 		})
+	}
+
+	#[cfg(feature = "iroh")]
+	pub fn with_iroh(&mut self, iroh: Option<iroh::Endpoint>) -> &mut Self {
+		self.iroh = iroh;
+		self
 	}
 
 	/// Establish a WebTransport/QUIC connection followed by a MoQ handshake.
@@ -400,7 +376,7 @@ impl Client {
 
 	#[cfg(feature = "iroh")]
 	async fn connect_iroh(&self, url: Url) -> anyhow::Result<web_transport_iroh::Session> {
-		let endpoint = self.iroh_endpoint.as_ref().context("Iroh support is not enabled")?;
+		let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
 		let alpn = match url.scheme() {
 			"moql+iroh" | "iroh" => moq_lite::lite::ALPN,
 			"moqt+iroh" => moq_lite::ietf::ALPN,
@@ -520,6 +496,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 /// [the URL specification's section on legal scheme state overrides](https://url.spec.whatwg.org/#scheme-state).
 ///
 /// This function allows all scheme changes, as long as the resulting URL is valid.
+#[cfg(feature = "iroh")]
 fn url_set_scheme(url: Url, scheme: &str) -> anyhow::Result<Url> {
 	let url = format!(
 		"{}:{}",

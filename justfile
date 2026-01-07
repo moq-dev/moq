@@ -34,9 +34,8 @@ dev:
 
 # Run a localhost relay server without authentication.
 relay:
-	export TOKIO_CONSOLE_BIND=127.0.0.1:6680
 	# Run the relay server overriding the provided configuration file.
-	cargo run --bin moq-relay --features iroh -- dev/relay.toml
+	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- dev/relay.toml
 
 # Run a cluster of relay servers
 cluster:
@@ -47,7 +46,7 @@ cluster:
 	@just auth-token
 
 	# Build the Rust packages so `cargo run` has a head start.
-	cargo build --bin moq-relay --features iroh
+	cargo build --bin moq-relay
 
 	# Then run a BOATLOAD of services to make sure they all work correctly.
 	# Publish the funny bunny to the root node.
@@ -145,10 +144,10 @@ pub name url="http://localhost:4443/anon" prefix="" *args:
 	# Download the sample media.
 	just download "{{name}}"
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin hang --features iroh
+	cargo build --bin hang
 	# Publish the media with the hang cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin hang --features iroh -- \
+	cargo run --bin hang -- \
 		publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4 {{args}}
 
 # Generate and ingest an HLS stream from a video file.
@@ -251,12 +250,12 @@ serve name:
 	just download "{{name}}"
 
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin hang --features iroh
+	cargo build --bin hang
 
 	# Run ffmpeg and pipe the output to hang
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin hang --features iroh -- \
-		serve --listen "[::]:4443" --tls-generate "localhost" --iroh \
+	cargo run --bin hang -- \
+		serve --listen "[::]:4443" --tls-generate "localhost" \
 		--name "{{name}}" fmp4
 
 # Run the web server

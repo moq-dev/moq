@@ -1,10 +1,12 @@
 mod client;
 mod publish;
 mod server;
+mod web;
 
 use client::*;
 use publish::*;
 use server::*;
+use web::*;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -15,6 +17,11 @@ pub struct Cli {
 	#[command(flatten)]
 	log: moq_native::Log,
 
+	/// Iroh configuration
+	#[command(flatten)]
+	#[cfg(feature = "iroh")]
+	iroh: moq_native::iroh::EndpointConfig,
+
 	#[command(subcommand)]
 	command: Command,
 }
@@ -24,18 +31,6 @@ pub enum Command {
 	Serve {
 		#[command(flatten)]
 		config: moq_native::ServerConfig,
-
-		/// Optionally enable serving via iroh.
-		#[cfg(feature = "iroh")]
-		#[clap(long)]
-		iroh: bool,
-
-		/// Configuration for the iroh endpoint.
-		///
-		/// Serving over iroh only is enabled effect when `--iroh` is set.
-		#[cfg(feature = "iroh")]
-		#[command(flatten)]
-		iroh_config: moq_native::iroh::EndpointConfig,
 
 		/// The name of the broadcast to serve.
 		#[arg(long)]
@@ -53,18 +48,6 @@ pub enum Command {
 		/// The MoQ client configuration.
 		#[command(flatten)]
 		config: moq_native::ClientConfig,
-
-		/// Configuration for the iroh endpoint.
-		///
-		/// The settings are optional, the iroh endpoint will always be initiated.
-		/// It will be used for URLs with the schemes
-		///   iroh://<endpoint-id>
-		///   moql+iroh://<endpoint-id>
-		///   moqt+iroh://<endpoint-id>
-		///   h3+iroh://<endpoint-id>/<optional-path>?<optional-query>
-		#[cfg(feature = "iroh")]
-		#[command(flatten)]
-		iroh_config: moq_native::iroh::EndpointConfig,
 
 		/// The URL of the MoQ server.
 		///
@@ -108,32 +91,34 @@ async fn main() -> anyhow::Result<()> {
 	// Initialize the broadcast from stdin before starting any client/server.
 	publish.init().await?;
 
+	#[cfg(feature = "iroh")]
+	let iroh = cli.iroh.bind().await?;
+
 	match cli.command {
-		Command::Serve {
-			config,
-			dir,
-			name,
+		Command::Serve { config, dir, name, .. } => {
+			let web_bind = config.bind.unwrap_or("[::]:443".parse().unwrap());
+
+			#[allow(unused_mut)]
+			let mut server = config.init()?;
 			#[cfg(feature = "iroh")]
-			iroh,
-			#[cfg(feature = "iroh")]
-			iroh_config,
-			..
-		} => {
-			#[cfg(feature = "iroh")]
-			let config = config.with_iroh(iroh.then_some(iroh_config));
-			server(config, name, dir, publish).await
+			server.with_iroh(iroh);
+
+			let web_tls = server.tls_info();
+
+			tokio::select! {
+				res = run_server(server, name, publish.consume()) => res,
+				res = run_web(web_bind, web_tls, dir) => res,
+				res = publish.run() => res,
+			}
 		}
-		Command::Publish {
-			config,
+		Command::Publish { config, url, name, .. } => {
+			#[allow(unused_mut)]
+			let mut client = config.init()?;
+
 			#[cfg(feature = "iroh")]
-			iroh_config,
-			url,
-			name,
-			..
-		} => {
-			#[cfg(feature = "iroh")]
-			let config = config.with_iroh(Some(iroh_config));
-			client(config, url, name, publish).await
+			client.with_iroh(iroh);
+
+			run_client(client, url, name, publish).await
 		}
 	}
 }
