@@ -16,7 +16,7 @@
 		"./src/Components/stats/element.ts"
 	],
 	"scripts": {
-		"build": "bun run clean && vite build && bun ../scripts/package.ts",
+		"build": "bun run clean && bun run build && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
 		"clean": "rimraf dist",
 		"fix": "biome check src --fix",
