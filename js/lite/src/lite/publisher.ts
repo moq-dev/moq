@@ -77,7 +77,7 @@ export class Publisher {
 			active.add(suffix);
 		}
 
-		const init = new AnnounceInit(active.values().toArray());
+		const init = new AnnounceInit([...active]);
 		await init.encode(stream.writer);
 
 		// Wait for updates to the broadcasts.
