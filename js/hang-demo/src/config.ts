@@ -144,8 +144,9 @@ export default class HangConfig extends HTMLElement {
 			const startTime = Date.now();
 
 			while (Date.now() - startTime < timeout) {
+				const remaining = Math.max(0, timeout - (Date.now() - startTime));
 				const timeoutPromise = new Promise<undefined>((resolve) =>
-					setTimeout(() => resolve(undefined), timeout - (Date.now() - startTime))
+					setTimeout(() => resolve(undefined), remaining)
 				);
 
 				const entry = await Promise.race([announced.next(), timeoutPromise]);
@@ -164,6 +165,9 @@ export default class HangConfig extends HTMLElement {
 		} catch (err) {
 			console.error("Discovery error:", err);
 			this.#suggestions.innerHTML = '<span style="color: #666;">Discovery unavailable</span>';
+		} finally {
+			// Close the connection after discovery to avoid resource leaks
+			this.#closeDiscovery();
 		}
 	}
 
