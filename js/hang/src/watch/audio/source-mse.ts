@@ -18,13 +18,13 @@ export class SourceMSE {
 	#audio?: HTMLAudioElement;
 	#mediaSource?: MediaSource;
 	#sourceBuffer?: SourceBuffer;
-	
+
 	// Signal to expose audio element for volume/mute control
 	#audioElement = new Signal<HTMLAudioElement | undefined>(undefined);
 	readonly audioElement = this.#audioElement as Getter<HTMLAudioElement | undefined>;
 
 	#appendQueue: Uint8Array[] = [];
-	static readonly MAX_QUEUE_SIZE = 10; 
+	static readonly MAX_QUEUE_SIZE = 10;
 
 	#stats = new Signal<AudioStats | undefined>(undefined);
 	readonly stats = this.#stats;
@@ -48,7 +48,7 @@ export class SourceMSE {
 		this.#audio.muted = false; // Allow audio playback
 		this.#audio.volume = 1.0; // Set initial volume to 1.0
 		document.body.appendChild(this.#audio);
-		
+
 		this.#audioElement.set(this.#audio);
 
 		this.#mediaSource = new MediaSource();
@@ -88,7 +88,7 @@ export class SourceMSE {
 
 		this.#sourceBuffer.addEventListener("updateend", () => {
 			this.#processAppendQueue();
-	
+
 		});
 
 		this.#sourceBuffer.addEventListener("error", (e) => {
@@ -101,6 +101,10 @@ export class SourceMSE {
 			throw new Error("SourceBuffer not initialized");
 		}
 
+		// Don't queue fragments if MediaSource is closed
+		if (this.#mediaSource.readyState === "closed") {
+			return;
+		}
 
 		if (this.#appendQueue.length >= SourceMSE.MAX_QUEUE_SIZE) {
 			const discarded = this.#appendQueue.shift();
@@ -125,7 +129,7 @@ export class SourceMSE {
 			result.set(fragment, offset);
 			offset += fragment.byteLength;
 		}
-		
+
 		return result;
 	}
 
@@ -135,16 +139,15 @@ export class SourceMSE {
 		}
 
 		if (this.#mediaSource?.readyState !== "open") {
-			console.error(`[MSE Audio] MediaSource not open: ${this.#mediaSource?.readyState}`);
 			return;
 		}
 
 		const fragment = this.#appendQueue.shift()!;
-		
+
 		try {
 			// appendBuffer accepts BufferSource (ArrayBuffer or ArrayBufferView)
 			this.#sourceBuffer.appendBuffer(fragment as BufferSource);
-			
+
 			this.#stats.update((current) => ({
 				bytesReceived: (current?.bytesReceived ?? 0) + fragment.byteLength,
 			}));
@@ -177,19 +180,23 @@ export class SourceMSE {
 			await new Promise<void>((resolve) => {
 				let checkCount = 0;
 				const maxChecks = 100; // 10 seconds max wait
-				
+
 				let hasSeeked = false;
 				const checkReady = () => {
 					checkCount++;
 					if (this.#audio && this.#sourceBuffer) {
-						const bufferedRanges = this.#sourceBuffer.buffered;
 						const audioBuffered = this.#audio.buffered;
-						const hasBufferedData = bufferedRanges.length > 0;
-						
+						const hasBufferedData = this.#sourceBuffer.buffered.length > 0;
+
 						if (hasBufferedData && audioBuffered && audioBuffered.length > 0 && !hasSeeked) {
 							const currentTime = this.#audio.currentTime;
-							const isTimeBuffered = audioBuffered.start(0) <= currentTime && currentTime < audioBuffered.end(audioBuffered.length - 1);
-							
+							let isTimeBuffered = false;
+							for (let i = 0; i < audioBuffered.length; i++) {
+								if (audioBuffered.start(i) <= currentTime && currentTime < audioBuffered.end(i)) {
+									isTimeBuffered = true;
+									break;
+								}
+							}
 							if (!isTimeBuffered) {
 								const seekTime = audioBuffered.start(0);
 								this.#audio.currentTime = seekTime;
@@ -198,7 +205,7 @@ export class SourceMSE {
 								return;
 							}
 						}
-						
+
 						// Try to play if we have buffered data, even if readyState is low
 						// The browser will start playing when it's ready
 						if (hasBufferedData && this.#audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
@@ -268,23 +275,29 @@ export class SourceMSE {
 			let currentGroup: number | undefined = undefined;
 			let groupFragments: Uint8Array[] = []; // Accumulate fragments for current group
 
-			for (;;) {
+			for (; ;) {
 				const frame = await Promise.race([consumer.decode(), effect.cancel]);
 				if (!frame) {
-					if (groupFragments.length > 0 && initSegmentReceived) {
+					if (groupFragments.length > 0 && initSegmentReceived && this.#mediaSource?.readyState === "open") {
 						const groupData = this.#concatenateFragments(groupFragments);
 						await this.appendFragment(groupData);
 						groupFragments = [];
 					}
 					break;
 				}
+
+				// Stop processing if MediaSource is closed
+				if (this.#mediaSource?.readyState === "closed") {
+					break;
+				}
+
 				frameCount++;
 
 				const isMoovAtom = hasMoovAtom(frame.data);
 				const isInitSegment = isMoovAtom && !initSegmentReceived;
-				
+
 				if (isInitSegment) {
-					if (groupFragments.length > 0 && initSegmentReceived) {
+					if (groupFragments.length > 0 && initSegmentReceived && this.#mediaSource?.readyState === "open") {
 						const groupData = this.#concatenateFragments(groupFragments);
 						await this.appendFragment(groupData);
 						groupFragments = [];
@@ -300,7 +313,7 @@ export class SourceMSE {
 				}
 
 				if (currentGroup !== undefined && frame.group !== currentGroup) {
-					if (groupFragments.length > 0) {
+					if (groupFragments.length > 0 && this.#mediaSource?.readyState === "open") {
 						const groupData = this.#concatenateFragments(groupFragments);
 						await this.appendFragment(groupData);
 						groupFragments = [];
@@ -314,12 +327,11 @@ export class SourceMSE {
 
 				groupFragments.push(frame.data);
 
-				if (groupFragments.length >= 1) {
-
+				// Append immediately for low latency audio sync
+				if (groupFragments.length >= 1 && this.#mediaSource?.readyState === "open") {
 					const groupData = this.#concatenateFragments(groupFragments);
 					await this.appendFragment(groupData);
 					groupFragments = [];
-
 				}
 			}
 		});
@@ -327,7 +339,7 @@ export class SourceMSE {
 
 	close(): void {
 		this.#appendQueue = [];
-		
+
 		this.#audioElement.set(undefined);
 
 		if (this.#sourceBuffer && this.#mediaSource) {
