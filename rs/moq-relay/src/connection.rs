@@ -29,7 +29,7 @@ impl Connection {
 		let token = match self.auth.verify(path, token.as_deref()) {
 			Ok(token) => token,
 			Err(err) => {
-				let _ = self.request.close(err.clone().into()).await;
+				let _ = self.request.reject(err.clone().into()).await;
 				return Err(err.into());
 			}
 		};
@@ -51,12 +51,10 @@ impl Connection {
 		}
 
 		// Accept the connection.
-		let session = self.request.ok().await?;
-
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
 		// We subscribe to the tracks the client is allowed to publish.
-		let session = moq_lite::Session::accept(session, subscribe, publish).await?;
+		let session = self.request.accept(subscribe, publish).await?;
 
 		// Wait until the session is closed.
 		session.closed().await.map_err(Into::into)

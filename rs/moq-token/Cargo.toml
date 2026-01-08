@@ -16,7 +16,7 @@ elliptic-curve = "0.13.8"
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 p256 = "0.13.2"
 p384 = "0.13.1"
-rsa = "0.9.9"
+rsa = "0.9.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_with = { version = "3", features = ["base64"] }

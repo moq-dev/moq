@@ -245,7 +245,7 @@ pub enum Request {
 
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn close(self, status: http::StatusCode) -> Result<(), ServerError> {
+	pub async fn reject(self, status: http::StatusCode) -> Result<(), ServerError> {
 		match self {
 			Self::WebTransport(request) => request.close(status).await,
 			Self::Quic(request) => {
@@ -255,15 +255,18 @@ impl Request {
 		}
 	}
 
-	/// Accept the session.
-	///
-	/// For WebTransport, this completes the HTTP handshake (200 OK).
-	/// For raw QUIC, this constructs a raw session.
-	pub async fn ok(self) -> Result<web_transport_quinn::Session, ServerError> {
-		match self {
-			Request::WebTransport(request) => request.ok().await,
-			Request::Quic(request) => Ok(request.ok()),
-		}
+	/// Accept the session, performing rest of the MoQ handshake.
+	pub async fn accept(
+		self,
+		publish: impl Into<Option<moq_lite::OriginConsumer>>,
+		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
+	) -> anyhow::Result<moq_lite::Session> {
+		let session = match self {
+			Request::WebTransport(request) => request.ok().await?,
+			Request::Quic(request) => request.ok(),
+		};
+		let session = moq_lite::Session::accept(session, publish, subscribe).await?;
+		Ok(session)
 	}
 
 	/// Returns the URL provided by the client.

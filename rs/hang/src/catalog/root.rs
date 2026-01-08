@@ -299,7 +299,8 @@ mod test {
 						"codedWidth": 1280,
 						"codedHeight": 720,
 						"bitrate": 6000000,
-						"framerate": 30.0
+						"framerate": 30.0,
+						"container": "legacy"
 					}
 				},
 				"priority": 1
@@ -310,7 +311,8 @@ mod test {
 						"codec": "opus",
 						"sampleRate": 48000,
 						"numberOfChannels": 2,
-						"bitrate": 128000
+						"bitrate": 128000,
+						"container": "legacy"
 					}
 				},
 				"priority": 2

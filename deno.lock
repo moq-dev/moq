@@ -19,8 +19,8 @@
       "doc": {
         "packageJson": {
           "dependencies": [
-            "npm:vitepress@^1.5.0",
-            "npm:wrangler@^3.98.0"
+            "npm:vitepress@^1.6.4",
+            "npm:wrangler@^4.56.0"
           ]
         }
       },

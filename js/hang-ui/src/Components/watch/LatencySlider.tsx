@@ -1,7 +1,7 @@
 import useWatchUIContext from "./useWatchUIContext";
 
 const MIN_RANGE = 0;
-const MAX_RANGE = 200_000;
+const MAX_RANGE = 5_000;
 const RANGE_STEP = 100;
 
 export default function LatencySlider() {

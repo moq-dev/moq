@@ -27,6 +27,7 @@ pub async fn server(
 
 	let server = config.init()?;
 
+	#[cfg(unix)]
 	// Notify systemd that we're ready.
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 
@@ -73,16 +74,12 @@ async fn run_session(
 	name: String,
 	consumer: moq_lite::BroadcastConsumer,
 ) -> anyhow::Result<()> {
-	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
-	let session = session.ok().await.context("failed to accept session")?;
-
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_lite::Origin::produce();
 	origin.producer.publish_broadcast(&name, consumer);
 
-	let session = moq_lite::Session::accept(session, origin.consumer, None)
-		.await
-		.context("failed to accept session")?;
+	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
+	let session = session.accept(origin.consumer, None).await?;
 
 	tracing::info!(id, "accepted session");
 
@@ -126,7 +123,7 @@ async fn web(
 		app = app.fallback_service(handle_404.into_service());
 	}
 
-	let server = hyper_serve::bind(bind);
+	let server = axum_server::bind(bind);
 	server.serve(app.into_make_service()).await?;
 
 	Ok(())

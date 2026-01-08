@@ -47,8 +47,10 @@ impl Session {
 	) -> Result<(), Error> {
 		let config = moq_native::ClientConfig::default();
 		let client = config.init().map_err(|err| Error::Connect(Arc::new(err)))?;
-		let connection = client.connect(url).await.map_err(|err| Error::Connect(Arc::new(err)))?;
-		let session = moq_lite::Session::connect(connection, publish, consume).await?;
+		let session = client
+			.connect(url, publish, consume)
+			.await
+			.map_err(|err| Error::Connect(Arc::new(err)))?;
 		callback.call(());
 
 		session.closed().await?;

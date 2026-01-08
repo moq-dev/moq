@@ -6,16 +6,16 @@ use url::Url;
 pub async fn client(config: moq_native::ClientConfig, url: Url, name: String, publish: Publish) -> anyhow::Result<()> {
 	let client = config.init()?;
 
-	tracing::info!(%url, %name, "connecting");
-	let session = client.connect(url).await?;
-
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_lite::Origin::produce();
 	origin.producer.publish_broadcast(&name, publish.consume());
 
-	// Establish the connection, not providing a subscriber.
-	let session = moq_lite::Session::connect(session, origin.consumer, None).await?;
+	tracing::info!(%url, %name, "connecting");
 
+	// Establish the connection, not providing a subscriber.
+	let session = client.connect_with_fallback(url, origin.consumer, None).await?;
+
+	#[cfg(unix)]
 	// Notify systemd that we're ready.
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 

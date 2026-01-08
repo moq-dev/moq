@@ -34,7 +34,7 @@ dev:
 # Run a localhost relay server without authentication.
 relay:
 	# Run the relay server overriding the provided configuration file.
-	cargo run --bin moq-relay -- dev/relay.toml
+	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- dev/relay.toml
 
 # Run a cluster of relay servers
 cluster:
@@ -144,7 +144,7 @@ pub name url="http://localhost:4443/anon" *args:
 		-i "dev/{{name}}.fmp4" \
 		-c copy \
 		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
-		- | cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
+		- | TOKIO_CONSOLE_BIND=127.0.0.1:6681 cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name passthrough='' relay="http://localhost:4443/anon":
@@ -298,7 +298,7 @@ serve name:
 
 # Run the web server
 web url='http://localhost:4443/anon':
-	VITE_RELAY_URL="{{url}}" bun run --filter='*' dev
+	cd js/hang-demo && VITE_RELAY_URL="{{url}}" bun run dev
 
 # Publish the clock broadcast
 # `action` is either `publish` or `subscribe`
@@ -435,6 +435,14 @@ serve-hls name port="8000":
 	sleep 2
 	echo ">>> HTTP server: http://localhost:{{port}}/"
 	cd "$OUT_DIR" && python3 -m http.server {{port}}
+
+# Connect tokio-console to the relay server (port 6680)
+relay-console:
+	tokio-console http://127.0.0.1:6680
+
+# Connect tokio-console to the publisher (port 6681)
+pub-console:
+	tokio-console http://127.0.0.1:6681
 
 # Serve the documentation locally.
 doc:

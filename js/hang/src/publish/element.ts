@@ -76,12 +76,10 @@ export default class HangPublish extends HTMLElement {
 
 			audio: {
 				enabled: this.#audioEnabled,
-				container: "raw",
 			},
 			video: {
 				hd: {
 					enabled: this.#videoEnabled,
-					container: "raw",
 				},
 			},
 		});
