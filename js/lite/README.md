@@ -24,85 +24,12 @@ yarn add @moq/lite
 # etc
 ```
 
-### Basic Connection
+## Examples
 
-```typescript
-import * as Moq from "@moq/lite";
-
-// Connect to a MoQ relay server
-const connection = await Moq.connect("https://cdn.moq.dev/anon");
-console.log("Connected to MoQ relay!");
-```
-
-### Publishing Data
-
-```typescript
-import * as Moq from "@moq/lite";
-
-const connection = await Moq.connect("https://cdn.moq.dev/anon");
-
-// Create a broadcast, not associated with any connection/name yet.
-const broadcast = new Moq.BroadcastProducer();
-
-// Create a track within the broadcast
-const track = broadcast.createTrack("chat");
-
-// Send data in groups (e.g., keyframe boundaries)
-const group = track.appendGroup();
-group.writeString("Hello, MoQ!");
-group.close();
-
-// Publish the broadcast to the connection
-connection.publish("my-broadcast", broadcast.consume());
-console.log("Published data to my-broadcast");
-```
-
-### Subscribing to Data
-
-```typescript
-import * as Moq from "@moq/lite";
-
-const connection = await Moq.connect("https://cdn.moq.dev/anon");
-
-// Subscribe to a broadcast
-const broadcast = connection.consume("my-broadcast");
-
-// Subscribe to a specific track
-const track = await broadcast.subscribe("chat");
-
-// Read data as it arrives
-for (;;) {
-	const group = await track.nextGroup();
-	if (!group) break;
-
-	for (;;) {
-		const frame = await group.readString();
-		if (!frame) break;
-
-        console.log("Received:", frame);
-    }
-}
-```
-
-### Stream Discovery
-
-```typescript
-import * as Moq from "@moq/lite";
-
-const connection = await Moq.connect("https://cdn.moq.dev/anon");
-
-// Discover broadcasts announced by the server
-let announcement = await connection.announced();
-while (announcement) {
-    console.log("New stream available:", announcement.name);
-
-    // Subscribe to new streams
-    const broadcast = connection.consume(announcement.name);
-    // ... handle the broadcast
-
-    announcement = await announced.next();
-}
-```
+- **[Connection](examples/connection.ts)** - Connect to a MoQ relay server
+- **[Publishing](examples/publish.ts)** - Publish data to a broadcast
+- **[Subscribing](examples/subscribe.ts)** - Subscribe to and receive broadcast data
+- **[Discovery](examples/discovery.ts)** - Discover broadcasts announced by the server
 
 ## License
 
