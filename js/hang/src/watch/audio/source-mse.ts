@@ -158,10 +158,10 @@ export class SourceMSE {
 		broadcast: Moq.Broadcast,
 		name: string,
 		config: Catalog.AudioConfig,
+		catalog: Catalog.Audio,
 	): Promise<void> {
 		await this.initialize(config);
 
-		const catalog = { priority: 128 }; // TODO: Get from actual catalog
 		const sub = broadcast.subscribe(name, catalog.priority);
 		effect.cleanup(() => sub.close());
 

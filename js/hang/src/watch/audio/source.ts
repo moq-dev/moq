@@ -226,7 +226,7 @@ export class Source {
 
 			// Run MSE track - no worklet needed, browser handles everything
 			try {
-				await mseSource.runTrack(effect, broadcast, name, config);
+				await mseSource.runTrack(effect, broadcast, name, config, catalog);
 			} catch (error) {
 				console.error("MSE path error, falling back to WebCodecs:", error);
 				// Fallback to WebCodecs
