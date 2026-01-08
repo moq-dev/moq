@@ -18,6 +18,7 @@ export interface Frame {
 
 export function encode(source: Uint8Array | Source, timestamp: Time.Micro, container?: Catalog.Container): Moq.Frame {
 	// Encode timestamp using the specified container format
+	// TODO This should be delta encoded, not the full timestamp.
 	const timestampBytes = Container.encodeTimestamp(timestamp, container);
 
 	// Allocate buffer for timestamp + payload
@@ -34,15 +35,18 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro, conta
 		source.copyTo(data.subarray(timestampBytes.byteLength));
 	}
 
-	return new Moq.Frame({ payload: data, timestamp: timestamp });
+	// NOTE: We encode the timestamp into the MoQ layer as well, but in milliseconds.
+	// TODO: Once this is widespread enough, we should use it at least as the base.
+	return new Moq.Frame({ payload: data, instant: Time.Milli.fromMicro(timestamp) });
 }
 
 // NOTE: A keyframe is always the first frame in a group, so it's not encoded on the wire.
 export function decode(frame: Moq.Frame, container?: Catalog.Container): { data: Uint8Array; timestamp: Time.Micro } {
 	// Decode timestamp using the specified container format
-	// TODO: Use the timestamp from `frame` instead of the payload once we remove support for draft02.
+	// TODO This should be delta encoded, not the full timestamp.
+	// TODO: Use frame.instant to avoid double encoding the timestamp.
 	const [timestamp, data] = Container.decodeTimestamp(frame.payload, container);
-	return { timestamp: timestamp as Time.Micro, data };
+	return { timestamp, data };
 }
 
 export class Producer {

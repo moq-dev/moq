@@ -8,17 +8,33 @@ use crate::{Error, Result, Time};
 /// A unit of data, representing a point in time.
 ///
 /// This is often a video frame or a packet of audio samples.
-/// The presentation timestamp is when the frame should be rendered, relative to the *broadcast*.
+/// The instant is when the frame was captured and should be rendered, scoped to the *track*.
 ///
 /// The size must be known upfront. If you don't know the size, write a Frame for each chunk.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {
-	/// The presentation timestamp of the frame in microseconds.
-	pub timestamp: Time,
+	/// A timestamp (in milliseconds) when the frame was originally created, scoped to the *track*.
+	///
+	/// This *should* be set as early as possible in the pipeline and proxied through all relays.
+	/// There is no clock synchronization or "zero" value; everything is relative to the track.
+	///
+	/// This may be used by the application as a replacement for "presentation timestamp", even across tracks.
+	/// However, the lack of granularity and inability to go backwards limits its usefulness.
+	pub instant: Time,
 
 	/// The size of the frame in bytes.
 	pub size: usize,
+}
+
+impl Frame {
+	/// A helper to create a frame with the current time.
+	pub fn new(size: usize) -> Self {
+		Self {
+			instant: Time::now(),
+			size,
+		}
+	}
 }
 
 #[derive(Default)]

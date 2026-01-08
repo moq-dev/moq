@@ -242,12 +242,24 @@ export class Publisher {
 			await stream.u8(0); // stream type
 			await msg.encode(stream);
 
+			let instant = Time.Milli.zero;
+
 			try {
 				for (;;) {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
 
-					const msg = new FrameMessage({ payload: frame.payload, timestamp: frame.timestamp });
+					let delta = (frame.instant - instant) as Time.Milli;
+					if (delta < 0) {
+						// TODO We either need to support this at the MoQ layer.
+						// Or we need to prevent this at the hang layer.
+						console.warn("MoQ timestamp went backwards");
+						delta = Time.Milli.zero;
+					} else {
+						instant = frame.instant;
+					}
+
+					const msg = new FrameMessage({ payload: frame.payload, delta });
 					await msg.encode(stream, this.version);
 				}
 

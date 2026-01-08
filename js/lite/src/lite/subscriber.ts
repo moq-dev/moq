@@ -13,7 +13,7 @@ import { Frame as FrameMessage } from "./frame.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import { StreamId } from "./stream.ts";
 import { Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
-import type { Version } from "./version.ts";
+import { Version } from "./version.js";
 
 /**
  * Handles subscribing to broadcasts and managing their lifecycle.
@@ -194,6 +194,8 @@ export class Subscriber {
 		const producer = new Group(group.sequence);
 		subscribe.writeGroup(producer);
 
+		let instant = Time.Milli.zero;
+
 		try {
 			for (;;) {
 				const done = await Promise.race([stream.done(), subscribe.closed, producer.closed]);
@@ -201,7 +203,19 @@ export class Subscriber {
 				if (done !== false) break;
 
 				const frame = await FrameMessage.decode(stream, this.version);
-				producer.writeFrame(new Frame({ payload: frame.payload, timestamp: frame.timestamp }));
+
+				switch (this.version) {
+					case Version.DRAFT_03:
+						instant = (instant + frame.delta) as Time.Milli;
+						break;
+					case Version.DRAFT_02:
+					case Version.DRAFT_01:
+						// Nothing was encoded on the wire, so we use the receive time instead.
+						instant = Time.Milli.now();
+						break;
+				}
+
+				producer.writeFrame(new Frame({ payload: frame.payload, instant }));
 			}
 
 			producer.close();

@@ -4,18 +4,18 @@ import * as Message from "./message.ts";
 import { Version } from "./version.js";
 
 export class Frame {
-	timestamp: Time.Micro;
+	delta: Time.Milli;
 	payload: Uint8Array;
 
-	constructor({ timestamp, payload }: { timestamp: Time.Micro; payload: Uint8Array }) {
+	constructor({ payload, delta }: { delta: Time.Milli; payload: Uint8Array }) {
 		this.payload = payload;
-		this.timestamp = timestamp;
+		this.delta = delta;
 	}
 
 	async #encode(w: Writer, version: Version) {
 		switch (version) {
 			case Version.DRAFT_03:
-				await w.u53(this.timestamp);
+				await w.u53(this.delta);
 				break;
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
@@ -30,15 +30,16 @@ export class Frame {
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Frame> {
-		let timestamp: Time.Micro;
+		let delta: Time.Milli;
 
 		switch (version) {
 			case Version.DRAFT_03:
-				timestamp = (await r.u53()) as Time.Micro;
+				delta = (await r.u53()) as Time.Milli;
 				break;
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
-				timestamp = Time.Micro.now();
+				// NOTE: The caller is responsible for calling Time.Milli.now()
+				delta = Time.Milli.zero;
 				break;
 			default: {
 				const v: never = version;
@@ -47,7 +48,7 @@ export class Frame {
 		}
 
 		const payload = await r.readAll();
-		return new Frame({ timestamp, payload });
+		return new Frame({ delta, payload });
 	}
 
 	async encode(w: Writer, v: Version): Promise<void> {

@@ -7,28 +7,28 @@ use crate::{DeliveryConsumer, Error, Time};
 
 #[derive(Debug, Default)]
 struct State {
-	max_timestamp: Time,
+	max_instant: Time,
 	max_group: u64,
 }
 
 impl State {
-	fn create_frame(&mut self, group: u64, timestamp: Time, max_latency: Time) -> Result<bool, Error> {
+	fn create_frame(&mut self, group: u64, instant: Time, max_latency: Time) -> Result<bool, Error> {
 		let new_group = group > self.max_group;
-		let new_timestamp = timestamp > self.max_timestamp;
+		let new_instant = instant > self.max_instant;
 
 		if new_group {
 			self.max_group = group;
 		}
 
-		if new_timestamp {
-			self.max_timestamp = timestamp;
+		if new_instant {
+			self.max_instant = instant;
 		}
 
-		if !new_group && !new_timestamp && timestamp + max_latency <= self.max_timestamp {
+		if !new_group && !new_instant && instant + max_latency <= self.max_instant {
 			return Err(Error::Expired);
 		}
 
-		Ok(new_group || new_timestamp)
+		Ok(new_group || new_instant)
 	}
 }
 
@@ -57,12 +57,12 @@ impl ExpiresProducer {
 		}
 	}
 
-	pub(super) fn create_frame(&self, group: u64, timestamp: Time) -> Result<(), Error> {
+	pub(super) fn create_frame(&self, group: u64, instant: Time) -> Result<(), Error> {
 		let max_latency = self.delivery.current().max_latency;
 
 		let mut result = Ok(false);
 		self.state.send_if_modified(|state| {
-			result = state.create_frame(group, timestamp, max_latency);
+			result = state.create_frame(group, instant, max_latency);
 			result.as_ref().is_ok_and(|modify| *modify)
 		});
 		result.map(|_| ())
@@ -91,15 +91,15 @@ impl fmt::Debug for ExpiresConsumer {
 }
 
 impl ExpiresConsumer {
-	// Blocks until the given group/max_timestamp is expired.
-	pub async fn wait_expired(&mut self, group: u64, timestamp: Time) -> Error {
+	// Blocks until the given group/instant is expired.
+	pub async fn wait_expired(&mut self, group: u64, instant: Time) -> Error {
 		let mut max_latency = self.delivery.current().max_latency;
 
 		loop {
 			tokio::select! {
 				state = self
 				.state
-				.wait_for(|state| state.max_group > group && state.max_timestamp + max_latency >= timestamp) => match state {
+				.wait_for(|state| state.max_group > group && state.max_instant + max_latency >= instant) => match state {
 					Ok(_) => return Error::Expired,
 					Err(_) => return Error::Cancel,
 				},
@@ -114,6 +114,6 @@ impl ExpiresConsumer {
 	pub fn is_expired(&self, group: u64, timestamp: Time) -> bool {
 		let max_latency = self.delivery.current().max_latency;
 		let state = self.state.borrow();
-		state.max_group > group && state.max_timestamp + max_latency >= timestamp
+		state.max_group > group && state.max_instant + max_latency >= timestamp
 	}
 }

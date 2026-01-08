@@ -8,7 +8,7 @@ use crate::{
 	coding::Writer,
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId, Version},
 	model::GroupConsumer,
-	Delivery, Error, Origin, OriginConsumer, Time, TrackConsumer,
+	Delivery, Error, Time, Origin, OriginConsumer, TrackConsumer,
 };
 
 #[derive(Clone)]

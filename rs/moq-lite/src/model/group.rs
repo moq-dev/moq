@@ -38,8 +38,9 @@ struct GroupState {
 	// Whether the group is closed
 	closed: Option<Result<()>>,
 
-	// The maximum timestamp of the frames in the group.
-	max_timestamp: Option<Time>,
+	// The maximum instant of the frames in the group.
+	// TODO prevent going backwards instead?
+	max_instant: Option<Time>,
 }
 
 impl GroupState {
@@ -48,7 +49,7 @@ impl GroupState {
 			return Err(closed.err().unwrap_or(Error::Cancel));
 		}
 
-		self.max_timestamp = Some(self.max_timestamp.unwrap_or(Time::ZERO).max(frame.timestamp));
+		self.max_instant = Some(self.max_instant.unwrap_or(Time::default()).max(frame.instant));
 
 		self.frames.push(frame);
 
@@ -110,11 +111,11 @@ impl GroupProducer {
 	/// A helper method to write a frame from a single byte buffer.
 	///
 	/// If you want to write multiple chunks, use [Self::create_frame] or [Self::append_frame].
-	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B, timestamp: Time) -> Result<()> {
+	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B, instant: Time) -> Result<()> {
 		let data = frame.into();
 		let frame = Frame {
 			size: data.len(),
-			timestamp,
+			instant,
 		};
 		let mut frame = self.create_frame(frame)?;
 		frame.write_chunk(data)?;
@@ -136,7 +137,7 @@ impl GroupProducer {
 
 		// Add the current frame to the expiration tracker.
 		// NOTE: This might return an error if the current group is expired.
-		self.expires.create_frame(self.info.sequence, frame.timestamp)?;
+		self.expires.create_frame(self.info.sequence, frame.instant)?;
 
 		self.state.send_if_modified(|state| {
 			result = state.append_frame(frame);
@@ -260,13 +261,13 @@ impl GroupConsumer {
 			return Ok(Some(frame));
 		}
 
-		let max_timestamp = self.state.borrow().max_timestamp;
+		let max_instant = self.state.borrow().max_instant;
 
 		let state = tokio::select! {
 			// Wait until a new frame.
 			state = self.state.wait_for(|state| self.index < state.frames.len() || state.closed.is_some()) => state,
-			// Or wait until the maximum timestamp in the group is expired.
-			err = self.expires.wait_expired(self.info.sequence, max_timestamp.unwrap_or_default()), if max_timestamp.is_some() => return Err(err),
+			// Or wait until the maximum instant in the group is expired.
+			err = self.expires.wait_expired(self.info.sequence, max_instant.unwrap_or_default()), if max_instant.is_some() => return Err(err),
 			// NOTE: We don't have to wait for a new maximum, because it will satisfy the wait for the next frame.
 
 		};
@@ -289,14 +290,14 @@ impl GroupConsumer {
 		}
 	}
 
-	/// Returns the first timestamp of a frame in the group, once it is available.
-	pub async fn timestamp(&self) -> Result<Time> {
+	/// Blocks until the first instant of a frame in the group has arrived.
+	pub async fn instant(&self) -> Result<Time> {
 		self.state
 			.clone()
 			.wait_for(|state| !state.frames.is_empty())
 			.await
 			.map_err(|_| Error::Cancel)?;
-		Ok(self.state.borrow().frames[0].timestamp)
+		Ok(self.state.borrow().frames[0].instant)
 	}
 }
 

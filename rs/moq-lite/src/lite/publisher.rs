@@ -11,7 +11,7 @@ use crate::{
 		Version,
 	},
 	model::GroupConsumer,
-	AsPath, BroadcastConsumer, Delivery, Error, OriginConsumer, OriginProducer, Track,
+	AsPath, BroadcastConsumer, Delivery, Error, OriginConsumer, OriginProducer, Time, Track,
 };
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -293,6 +293,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
 
+		// The maximum instant of the frames in the group.
+		let mut instant_max = Time::ZERO;
+
 		loop {
 			let frame = tokio::select! {
 				_ = stream.closed() => return Err(Error::Cancel),
@@ -309,9 +312,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 
+			let delta = match frame.instant.checked_sub(instant_max) {
+				Ok(delta) => {
+					instant_max = frame.instant;
+					delta
+				}
+				Err(_) => {
+					tracing::warn!("frame instant went backwards");
+					Default::default()
+				}
+			};
+
 			stream
 				.encode(&lite::FrameHeader {
-					timestamp: frame.timestamp,
+					delta,
 					size: frame.size,
 				})
 				.await?;

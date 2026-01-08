@@ -1,24 +1,24 @@
 import * as Time from "./time";
 
 export class Frame {
-	timestamp: Time.Micro;
+	instant: Time.Milli;
 	payload: Uint8Array;
 
-	constructor({ payload, timestamp = Time.Micro.now() }: { payload: Uint8Array; timestamp?: Time.Micro }) {
-		this.timestamp = timestamp;
+	constructor({ payload, instant = Time.Milli.now() }: { payload: Uint8Array; instant?: Time.Milli }) {
+		this.instant = instant;
 		this.payload = payload;
 	}
 
-	static fromString(str: string, timestamp = Time.Micro.now()) {
-		return new Frame({ payload: new TextEncoder().encode(str), timestamp });
+	static fromString(str: string, instant = Time.Milli.now()) {
+		return new Frame({ payload: new TextEncoder().encode(str), instant });
 	}
 
-	static fromJson(json: unknown, timestamp = Time.Micro.now()) {
-		return new Frame({ payload: new TextEncoder().encode(JSON.stringify(json)), timestamp });
+	static fromJson(json: unknown, instant = Time.Milli.now()) {
+		return new Frame({ payload: new TextEncoder().encode(JSON.stringify(json)), instant });
 	}
 
-	static fromBool(bool: boolean, timestamp = Time.Micro.now()) {
-		return new Frame({ payload: new Uint8Array([bool ? 1 : 0]), timestamp });
+	static fromBool(bool: boolean, instant = Time.Milli.now()) {
+		return new Frame({ payload: new Uint8Array([bool ? 1 : 0]), instant });
 	}
 
 	toString() {

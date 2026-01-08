@@ -35,7 +35,9 @@ impl Container {
 		let size = self.payload.num_bytes() + header.len();
 		let frame = moq_lite::Frame {
 			size,
-			timestamp: self.timestamp,
+			// NOTE: We encode the timestamp into the MoQ layer as well.
+			// But its in milliseconds, not microseconds.
+			instant: self.timestamp,
 		};
 
 		let mut chunked = group.create_frame(frame)?;

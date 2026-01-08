@@ -551,7 +551,7 @@ impl TrackConsumerOrdered {
 						let first = self.pending.front()?;
 
 						// Wait until it has a timestamp available. (TODO would be nice to make this required)
-						let Ok(timestamp) = first.timestamp().await else {
+						let Ok(instant) = first.instant().await else {
 							self.pending.pop_front();
 							continue;
 						};
@@ -559,7 +559,7 @@ impl TrackConsumerOrdered {
 						// Wait until the first frame of the group would have been expired.
 						// This doesn't mean the entire group is expired, because that uses the max_timestamp.
 						// But even if the group has one frame this will still unstuck the consumer.
-						expires.wait_expired(first.sequence, timestamp).await;
+						expires.wait_expired(first.sequence, instant).await;
 						return self.pending.pop_front()
 					}
 				} => {

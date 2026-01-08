@@ -11,7 +11,6 @@ mod setup;
 mod stream;
 mod subscribe;
 mod subscriber;
-mod time;
 mod version;
 
 pub use announce::*;

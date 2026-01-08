@@ -376,7 +376,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let mut frame = producer.create_frame(Frame {
 						// Use the receive time as the timestamp.
 						// TODO use an extension instead.
-						timestamp: tokio::time::Instant::now().into(),
+						instant: crate::Time::now(),
 						size: 0,
 					})?;
 					frame.close()?;
@@ -390,7 +390,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let mut frame = producer.create_frame(Frame {
 					// Use the receive time as the timestamp.
 					// TODO use an extension instead
-					timestamp: tokio::time::Instant::now().into(),
+					instant: crate::Time::now(),
 					size,
 				})?;
 

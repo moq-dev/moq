@@ -8,7 +8,8 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct FrameHeader {
-	pub timestamp: Time,
+	/// The timestamp delta since the previous frame in the group.
+	pub delta: Time,
 
 	// NOTE: This is the size of the payload that still needs to be read/written.
 	// We do not encode/decode here so we can perform chunking.
@@ -27,7 +28,7 @@ impl Decode<Version> for FrameHeader {
 
 		let r = &mut r.take(size);
 
-		let timestamp = match version {
+		let delta = match version {
 			Version::Draft03 => Time::decode(r, version)?,
 			// If no timestamp is provided for this protocol version, we use the current (receive) time.
 			// NOTE: The (correct) media timestamp is still in the payload for backwards compatibility.
@@ -36,7 +37,7 @@ impl Decode<Version> for FrameHeader {
 
 		let size = r.remaining();
 
-		Ok(Self { timestamp, size })
+		Ok(Self { delta, size })
 	}
 }
 
@@ -48,7 +49,7 @@ impl Encode<Version> for FrameHeader {
 		let mut buf = &mut tmp[..];
 
 		match version {
-			Version::Draft03 => self.timestamp.encode(&mut buf, version),
+			Version::Draft03 => self.delta.encode(&mut buf, version),
 			Version::Draft02 | Version::Draft01 => {}
 		}
 

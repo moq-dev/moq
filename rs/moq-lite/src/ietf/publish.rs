@@ -112,7 +112,7 @@ use crate::{
 		namespace::{decode_namespace, encode_namespace},
 		FilterType, GroupOrder, Location, Message, Parameters, RequestId, SubscribeParameter, Version,
 	},
-	Path, Time,
+	Time, Path,
 };
 
 /// Used to be called SubscribeDone

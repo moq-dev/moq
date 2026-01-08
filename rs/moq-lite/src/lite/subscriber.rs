@@ -302,9 +302,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
 	) -> Result<(), Error> {
+		let mut instant = crate::Time::ZERO;
+
 		while let Some(frame) = stream.decode_maybe::<lite::FrameHeader>().await? {
+			instant = instant.checked_add(frame.delta)?;
+
 			let mut frame = group.create_frame(Frame {
-				timestamp: frame.timestamp,
+				instant,
 				size: frame.size,
 			})?;
 
