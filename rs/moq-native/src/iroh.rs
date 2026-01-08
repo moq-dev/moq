@@ -26,6 +26,7 @@ pub struct EndpointConfig {
 	/// Defaults to `0.0.0.0:0` if not provided.
 	#[arg(id = "iroh-bind-v4", long = "iroh-bind-v4", env = "MOQ_IROH_BIND_V4")]
 	pub bind_v4: Option<net::SocketAddrV4>,
+
 	/// Listen for UDP packets on the given address.
 	/// Defaults to `[::]:0` if not provided.
 	#[arg(id = "iroh-bind-v6", long = "iroh-bind-v6", env = "MOQ_IROH_BIND_V6")]
