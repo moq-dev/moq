@@ -205,7 +205,7 @@ impl Drop for CatalogGuard<'_> {
 
 		// TODO decide if this should return an error, or be impossible to fail
 		let frame = self.catalog.to_string().expect("invalid catalog");
-		
+
 		// Log the catalog JSON to verify container field is included
 		if let Some(video) = &self.catalog.video {
 			for (name, config) in &video.renditions {
@@ -217,10 +217,10 @@ impl Drop for CatalogGuard<'_> {
 				tracing::info!(track = name, container = ?config.container, "publishing catalog with container");
 			}
 		}
-		
+
 		// Log the full catalog JSON to debug serialization
 		tracing::debug!(catalog_json = %frame, "publishing catalog JSON");
-		
+
 		group.write_frame(frame);
 		group.close();
 	}
@@ -285,7 +285,7 @@ impl From<moq_lite::TrackConsumer> for CatalogConsumer {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{AudioCodec::Opus, AudioConfig, VideoConfig, H264, Container};
+	use crate::catalog::{AudioCodec::Opus, AudioConfig, Container, VideoConfig, H264};
 
 	use super::*;
 

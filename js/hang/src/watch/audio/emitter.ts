@@ -69,7 +69,7 @@ export class Emitter {
 					const paused = effect.get(this.paused);
 					mseAudio.volume = volume;
 					mseAudio.muted = muted;
-					
+
 					// Control play/pause state
 					if (paused && !mseAudio.paused) {
 						mseAudio.pause();
@@ -77,10 +77,12 @@ export class Emitter {
 						// Resume if paused - try to play even if readyState is low
 						const tryPlay = () => {
 							if (!paused && mseAudio.paused) {
-								mseAudio.play().catch(err => console.error("[Audio Emitter] Failed to resume audio:", err));
+								mseAudio
+									.play()
+									.catch((err) => console.error("[Audio Emitter] Failed to resume audio:", err));
 							}
 						};
-						
+
 						// Try to play if we have metadata (HAVE_METADATA = 1), browser will start when ready
 						if (mseAudio.readyState >= HTMLMediaElement.HAVE_METADATA) {
 							tryPlay();

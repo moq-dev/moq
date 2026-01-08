@@ -112,7 +112,7 @@ export class Consumer {
 
 	async #run() {
 		// Start fetching groups in the background
-		
+
 		for (;;) {
 			const consumer = await this.#track.nextGroup();
 			if (!consumer) {

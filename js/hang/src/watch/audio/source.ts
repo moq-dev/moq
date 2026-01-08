@@ -40,7 +40,7 @@ export class Source {
 	#worklet = new Signal<AudioWorkletNode | undefined>(undefined);
 	// Downcast to AudioNode so it matches Publish.Audio
 	readonly root = this.#worklet as Getter<AudioNode | undefined>;
-	
+
 	// For MSE path, expose the HTMLAudioElement for direct control
 	#mseAudioElement = new Signal<HTMLAudioElement | undefined>(undefined);
 	readonly mseAudioElement = this.#mseAudioElement as Getter<HTMLAudioElement | undefined>;
@@ -74,7 +74,7 @@ export class Source {
 		this.#signals.effect((effect) => {
 			const audio = effect.get(catalog)?.audio;
 			this.catalog.set(audio);
-			
+
 			if (audio?.renditions) {
 				const first = Object.entries(audio.renditions).at(0);
 				if (first) {

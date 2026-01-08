@@ -2,7 +2,7 @@ import type * as Catalog from "../catalog";
 
 /**
  * Builds a MIME type string for MediaSource from a codec string.
- * 
+ *
  * @param codec - The codec string from the catalog (e.g., "avc1.42E01E", "mp4a.40.2")
  * @param type - "video" or "audio"
  * @returns MIME type string (e.g., "video/mp4; codecs=\"avc1.42E01E\"")
@@ -15,7 +15,7 @@ export function buildMimeType(codec: string, type: "video" | "audio"): string {
 
 /**
  * Checks if a MIME type is supported by MediaSource.
- * 
+ *
  * @param mimeType - The MIME type to check
  * @returns true if supported, false otherwise
  */
@@ -25,7 +25,7 @@ export function isMimeTypeSupported(mimeType: string): boolean {
 
 /**
  * Builds and validates a MIME type for video from catalog config.
- * 
+ *
  * @param config - Video configuration from catalog
  * @returns MIME type string or undefined if not supported
  */
@@ -39,7 +39,7 @@ export function buildVideoMimeType(config: Catalog.VideoConfig): string | undefi
 
 /**
  * Builds and validates a MIME type for audio from catalog config.
- * 
+ *
  * @param config - Audio configuration from catalog
  * @returns MIME type string or undefined if not supported
  */
@@ -50,4 +50,3 @@ export function buildAudioMimeType(config: Catalog.AudioConfig): string | undefi
 	}
 	return undefined;
 }
-

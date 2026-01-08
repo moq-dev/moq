@@ -1,4 +1,6 @@
-use crate::catalog::{AudioCodec, AudioConfig, CatalogProducer, Container, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9};
+use crate::catalog::{
+	AudioCodec, AudioConfig, CatalogProducer, Container, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9,
+};
 use crate::{self as hang, Timestamp};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -54,10 +56,10 @@ pub struct Fmp4 {
 
 	/// When passthrough_mode is enabled, store raw bytes of ftyp (file type box)
 	ftyp_bytes: Option<Bytes>,
-	
+
 	/// When passthrough_mode is enabled, store raw bytes of moov (init segment)
 	moov_bytes: Option<Bytes>,
-	
+
 	/// When passthrough_mode is enabled, store a copy of init segment (ftyp+moov) to send with each keyframe
 	/// This ensures new subscribers can receive the init segment even if group 0 is not available
 	init_segment_bytes_for_keyframes: Option<Bytes>,
@@ -121,7 +123,12 @@ impl Fmp4 {
 								self.ftyp_bytes = Some(bytes.slice(bytes_offset..bytes_offset + size));
 								tracing::debug!(ftyp_size = size, bytes_offset, "captured ftyp bytes for init segment");
 							} else {
-								tracing::warn!(bytes_offset, size, available_len = bytes.len(), "ftyp bytes out of range");
+								tracing::warn!(
+									bytes_offset,
+									size,
+									available_len = bytes.len(),
+									"ftyp bytes out of range"
+								);
 							}
 						} else {
 							tracing::warn!("passthrough mode but available_bytes is None when processing ftyp");
@@ -137,7 +144,12 @@ impl Fmp4 {
 								self.moov_bytes = Some(bytes.slice(bytes_offset..bytes_offset + size));
 								tracing::debug!(moov_size = size, bytes_offset, "captured moov bytes for init segment");
 							} else {
-								tracing::warn!(bytes_offset, size, available_len = bytes.len(), "moov bytes out of range");
+								tracing::warn!(
+									bytes_offset,
+									size,
+									available_len = bytes.len(),
+									"moov bytes out of range"
+								);
 							}
 						} else {
 							tracing::warn!("passthrough mode but available_bytes is None when processing moov");
@@ -185,7 +197,12 @@ impl Fmp4 {
 						fragment_bytes.extend_from_slice(&mdat_bytes);
 						let fragment = fragment_bytes.freeze();
 
-						tracing::info!(moof_size = moof_bytes.len(), mdat_size = mdat_bytes.len(), total_fragment_size = fragment.len(), "processing CMAF fragment (moof+mdat)");
+						tracing::info!(
+							moof_size = moof_bytes.len(),
+							mdat_size = mdat_bytes.len(),
+							total_fragment_size = fragment.len(),
+							"processing CMAF fragment (moof+mdat)"
+						);
 						self.transport_fragment(fragment, moof)?;
 						tracing::info!("finished processing CMAF fragment, ready for next fragment");
 					} else {
@@ -277,7 +294,7 @@ impl Fmp4 {
 		if passthrough_mode {
 			if let Some(moov_bytes) = self.moov_bytes.take() {
 				let timestamp = hang::Timestamp::from_micros(0)?;
-				
+
 				// Build init segment: ftyp (if available) + moov
 				let mut init_segment = BytesMut::new();
 				if let Some(ref ftyp_bytes) = self.ftyp_bytes {
@@ -286,19 +303,24 @@ impl Fmp4 {
 				}
 				init_segment.extend_from_slice(&moov_bytes);
 				let init_segment_bytes = init_segment.freeze();
-				
-				tracing::info!(tracks = self.tracks.len(), init_segment_size = init_segment_bytes.len(), ftyp_included = self.ftyp_bytes.is_some(), "sending init segment to all tracks");
-				
+
+				tracing::info!(
+					tracks = self.tracks.len(),
+					init_segment_size = init_segment_bytes.len(),
+					ftyp_included = self.ftyp_bytes.is_some(),
+					"sending init segment to all tracks"
+				);
+
 				// Verify moov atom signature
 				let moov_offset = self.ftyp_bytes.as_ref().map(|f| f.len()).unwrap_or(0);
 				if moov_offset + 8 <= init_segment_bytes.len() {
 					let atom_type = String::from_utf8_lossy(&init_segment_bytes[moov_offset + 4..moov_offset + 8]);
 					tracing::info!(atom_type = %atom_type, "verifying moov atom signature in init segment");
 				}
-				
+
 				// Store a copy for sending with keyframes
 				self.init_segment_bytes_for_keyframes = Some(init_segment_bytes.clone());
-				
+
 				// Send init segment to all tracks - this creates the first group (sequence 0)
 				for (_track_id, track) in &mut self.tracks {
 					let frame = hang::Frame {
@@ -351,7 +373,11 @@ impl Fmp4 {
 					display_ratio_width: None,
 					display_ratio_height: None,
 					optimize_for_latency: None,
-					container: if passthrough_mode { Container::Fmp4 } else { Container::Legacy },
+					container: if passthrough_mode {
+						Container::Fmp4
+					} else {
+						Container::Legacy
+					},
 				}
 			}
 			mp4_atom::Codec::Hev1(hev1) => Self::init_h265_static(true, &hev1.hvcc, &hev1.visual, passthrough_mode)?,
@@ -367,7 +393,11 @@ impl Fmp4 {
 				display_ratio_width: None,
 				display_ratio_height: None,
 				optimize_for_latency: None,
-				container: if passthrough_mode { Container::Fmp4 } else { Container::Legacy },
+				container: if passthrough_mode {
+					Container::Fmp4
+				} else {
+					Container::Legacy
+				},
 			},
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
@@ -394,7 +424,11 @@ impl Fmp4 {
 					optimize_for_latency: None,
 					bitrate: None,
 					framerate: None,
-					container: if passthrough_mode { Container::Fmp4 } else { Container::Legacy },
+					container: if passthrough_mode {
+						Container::Fmp4
+					} else {
+						Container::Legacy
+					},
 				}
 			}
 			mp4_atom::Codec::Av01(av01) => {
@@ -427,7 +461,11 @@ impl Fmp4 {
 					optimize_for_latency: None,
 					bitrate: None,
 					framerate: None,
-					container: if passthrough_mode { Container::Fmp4 } else { Container::Legacy },
+					container: if passthrough_mode {
+						Container::Fmp4
+					} else {
+						Container::Legacy
+					},
 				}
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
@@ -438,7 +476,12 @@ impl Fmp4 {
 	}
 
 	// There's two almost identical hvcc atoms in the wild.
-	fn init_h265_static(in_band: bool, hvcc: &mp4_atom::Hvcc, visual: &mp4_atom::Visual, passthrough_mode: bool) -> anyhow::Result<VideoConfig> {
+	fn init_h265_static(
+		in_band: bool,
+		hvcc: &mp4_atom::Hvcc,
+		visual: &mp4_atom::Visual,
+		passthrough_mode: bool,
+	) -> anyhow::Result<VideoConfig> {
 		let mut description = BytesMut::new();
 		hvcc.encode_body(&mut description)?;
 
@@ -462,7 +505,11 @@ impl Fmp4 {
 			display_ratio_width: None,
 			display_ratio_height: None,
 			optimize_for_latency: None,
-			container: if passthrough_mode { Container::Fmp4 } else { Container::Legacy },
+			container: if passthrough_mode {
+				Container::Fmp4
+			} else {
+				Container::Legacy
+			},
 		})
 	}
 
@@ -495,7 +542,11 @@ impl Fmp4 {
 					channel_count: mp4a.audio.channel_count as _,
 					bitrate: Some(bitrate.into()),
 					description: None, // TODO?
-					container: if passthrough_mode { Container::Fmp4 } else { Container::Legacy },
+					container: if passthrough_mode {
+						Container::Fmp4
+					} else {
+						Container::Legacy
+					},
 				}
 			}
 			mp4_atom::Codec::Opus(opus) => {
@@ -505,7 +556,11 @@ impl Fmp4 {
 					channel_count: opus.audio.channel_count as _,
 					bitrate: None,
 					description: None, // TODO?
-					container: if passthrough_mode { Container::Fmp4 } else { Container::Legacy },
+					container: if passthrough_mode {
+						Container::Fmp4
+					} else {
+						Container::Legacy
+					},
 				}
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
@@ -657,13 +712,13 @@ impl Fmp4 {
 		if self.moov_bytes.is_some() {
 			tracing::warn!("transporting fragment but moov_bytes is still set - init segment may not have been sent");
 		}
-		
+
 		// Verify fragment starts with moof atom
 		if fragment.len() >= 8 {
 			let atom_type = String::from_utf8_lossy(&fragment[4..8]);
 			tracing::info!(atom_type = %atom_type, fragment_size = fragment.len(), passthrough_mode = self.passthrough_mode, "transporting fragment");
 		}
-		
+
 		// Ensure moov is available (init segment must be processed first)
 		let moov = self.moov.as_ref().ok_or_else(|| {
 			anyhow::anyhow!("missing moov box - init segment must be processed before fragments. Make sure ensure_init_segment() is called first.")
@@ -696,9 +751,7 @@ impl Fmp4 {
 				if let Some(trun) = traf.trun.first() {
 					if let Some(entry) = trun.entries.first() {
 						let tfhd = &traf.tfhd;
-						let flags = entry
-							.flags
-							.unwrap_or(tfhd.default_sample_flags.unwrap_or_default());
+						let flags = entry.flags.unwrap_or(tfhd.default_sample_flags.unwrap_or_default());
 						// https://chromium.googlesource.com/chromium/src/media/+/master/formats/mp4/track_run_iterator.cc#177
 						let keyframe_flag = (flags >> 24) & 0x3 == 0x2; // kSampleDependsOnNoOther
 						let non_sync = (flags >> 16) & 0x1 == 0x1; // kSampleIsNonSyncSample
@@ -742,12 +795,15 @@ impl Fmp4 {
 						track.write(init_frame)?;
 						tracing::info!(track_id, timestamp = ?timestamp, init_segment_size = init_segment_bytes.len(), "sent init segment as first frame of new group (keyframe) for live stream");
 					} else {
-						tracing::warn!(track_id, "is_keyframe=true but init_segment_bytes_for_keyframes is None");
+						tracing::warn!(
+							track_id,
+							"is_keyframe=true but init_segment_bytes_for_keyframes is None"
+						);
 					}
 				} else {
 					tracing::debug!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), "non-keyframe fragment in passthrough mode");
 				}
-				
+
 				// Send fragment as non-keyframe (in same group as init segment if keyframe, or current group if not)
 				let frame = hang::Frame {
 					timestamp,

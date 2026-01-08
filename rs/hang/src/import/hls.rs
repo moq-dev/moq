@@ -198,7 +198,9 @@ impl Hls {
 		// Prime the shared audio track, if any.
 		if let Some(mut track) = self.audio.take() {
 			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
-			let count = self.consume_segments_limited(TrackKind::Audio, &mut track, &playlist, MAX_INIT_SEGMENTS).await?;
+			let count = self
+				.consume_segments_limited(TrackKind::Audio, &mut track, &playlist, MAX_INIT_SEGMENTS)
+				.await?;
 			buffered += count;
 			self.audio = Some(track);
 		}
@@ -328,9 +330,9 @@ impl Hls {
 		let next_seq = track.next_sequence.unwrap_or(0);
 		let playlist_seq = playlist.media_sequence;
 		let total_segments = playlist.segments.len();
-		
+
 		let last_playlist_seq = playlist_seq + total_segments as u64;
-		
+
 		let skip = if next_seq > last_playlist_seq {
 			total_segments
 		} else if next_seq < playlist_seq {
@@ -339,24 +341,25 @@ impl Hls {
 		} else {
 			(next_seq - playlist_seq) as usize
 		};
-		
-		let available = if skip < total_segments {
-			total_segments - skip
-		} else {
-			0
-		};
-		
+
+		let available = total_segments.saturating_sub(skip);
+
 		// Limit how many segments we process
 		let to_process = available.min(max_segments);
-		
+
 		if to_process > 0 {
 			let base_seq = playlist_seq + skip as u64;
-			for (i, segment) in playlist.segments[skip..skip+to_process].iter().enumerate() {
+			for (i, segment) in playlist.segments[skip..skip + to_process].iter().enumerate() {
 				self.push_segment(kind, track, segment, base_seq + i as u64).await?;
 			}
-			info!(?kind, processed = to_process, available = available, "processed limited segments during init");
+			info!(
+				?kind,
+				processed = to_process,
+				available = available,
+				"processed limited segments during init"
+			);
 		}
-		
+
 		Ok(to_process)
 	}
 
@@ -372,10 +375,10 @@ impl Hls {
 		let next_seq = track.next_sequence.unwrap_or(0);
 		let playlist_seq = playlist.media_sequence;
 		let total_segments = playlist.segments.len();
-		
+
 		// Calculate the last sequence number in the playlist
 		let last_playlist_seq = playlist_seq + total_segments as u64;
-		
+
 		// If we've already processed beyond what's in the playlist, wait for new segments
 		let skip = if next_seq > last_playlist_seq {
 			// We're ahead of the playlist - wait for ffmpeg to generate more segments
@@ -401,13 +404,9 @@ impl Hls {
 			// Normal case: next_seq is within playlist range
 			(next_seq - playlist_seq) as usize
 		};
-		
-		let fresh_segments = if skip < total_segments {
-			total_segments - skip
-		} else {
-			0
-		};
-		
+
+		let fresh_segments = total_segments.saturating_sub(skip);
+
 		info!(
 			?kind,
 			playlist_sequence = playlist_seq,
@@ -417,7 +416,7 @@ impl Hls {
 			fresh_segments = fresh_segments,
 			"consuming HLS segments"
 		);
-		
+
 		if fresh_segments > 0 {
 			let base_seq = playlist_seq + skip as u64;
 			for (i, segment) in playlist.segments[skip..].iter().enumerate() {

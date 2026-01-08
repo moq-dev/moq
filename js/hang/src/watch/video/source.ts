@@ -27,7 +27,9 @@ export type Target = {
 // The types in VideoDecoderConfig that cause a hard reload.
 // ex. codedWidth/Height are optional and can be changed in-band, so we don't want to trigger a reload.
 // This way we can keep the current subscription active.
-type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
+// Note: We keep codedWidth/Height as optional for logging, but set them to undefined to avoid reloads.
+type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight"> &
+	Partial<Pick<Catalog.VideoConfig, "codedWidth" | "codedHeight">>;
 
 type BufferStatus = { state: "empty" | "filled" };
 

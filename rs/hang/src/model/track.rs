@@ -92,7 +92,7 @@ impl TrackProducer {
 					tracing::info!(timestamp = ?frame.timestamp, "creating new group for keyframe");
 				}
 				new_group
-			},
+			}
 			// The first frame must be a keyframe.
 			None => return Err(Error::MissingKeyframe),
 		};

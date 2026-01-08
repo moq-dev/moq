@@ -7,7 +7,11 @@ import type * as Time from "../../time";
 import * as Mime from "../../util/mime";
 
 // The types in VideoDecoderConfig that cause a hard reload.
-type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
+// ex. codedWidth/Height are optional and can be changed in-band, so we don't want to trigger a reload.
+// This way we can keep the current subscription active.
+// Note: We keep codedWidth/Height as optional for logging, but set them to undefined to avoid reloads.
+type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight"> &
+	Partial<Pick<Catalog.VideoConfig, "codedWidth" | "codedHeight">>;
 
 type BufferStatus = { state: "empty" | "filled" };
 
@@ -81,13 +85,13 @@ export class SourceMSE {
 			if (!this.#video) return;
 			const videoBuffered = this.#video.buffered;
 			const current = this.#video.currentTime;
-			
+
 			if (videoBuffered && videoBuffered.length > 0) {
 				const lastRange = videoBuffered.length - 1;
 				const end = videoBuffered.end(lastRange);
 				if (current < end) {
 					this.#video.currentTime = current;
-					this.#video.play().catch(err => console.error("[MSE] Failed to resume after ended:", err));
+					this.#video.play().catch((err) => console.error("[MSE] Failed to resume after ended:", err));
 				}
 			}
 		});
@@ -101,7 +105,7 @@ export class SourceMSE {
 				const end = videoBuffered.end(lastRange);
 				const remaining = end - current;
 				if (remaining <= 0.1 && this.#video.paused) {
-					this.#video.play().catch(err => console.error("[MSE] Failed to resume playback:", err));
+					this.#video.play().catch((err) => console.error("[MSE] Failed to resume playback:", err));
 				}
 			}
 		});
@@ -116,12 +120,16 @@ export class SourceMSE {
 				reject(new Error("MediaSource sourceopen timeout"));
 			}, 5000);
 
-			this.#mediaSource!.addEventListener(
+			this.#mediaSource?.addEventListener(
 				"sourceopen",
 				() => {
 					clearTimeout(timeout);
 					try {
-						this.#sourceBuffer = this.#mediaSource!.addSourceBuffer(mimeType);
+						this.#sourceBuffer = this.#mediaSource?.addSourceBuffer(mimeType);
+						if (!this.#sourceBuffer) {
+							reject(new Error("Failed to create SourceBuffer"));
+							return;
+						}
 						this.#setupSourceBuffer();
 						resolve();
 					} catch (error) {
@@ -131,7 +139,7 @@ export class SourceMSE {
 				{ once: true },
 			);
 
-			this.#mediaSource!.addEventListener("error", (e) => {
+			this.#mediaSource?.addEventListener("error", (e) => {
 				clearTimeout(timeout);
 				reject(new Error(`MediaSource error: ${e}`));
 			});
@@ -209,12 +217,14 @@ export class SourceMSE {
 		}
 		if (this.#appendQueue.length >= SourceMSE.MAX_QUEUE_SIZE) {
 			const discarded = this.#appendQueue.shift();
-			console.warn(`[MSE] Queue full (${SourceMSE.MAX_QUEUE_SIZE}), discarding oldest fragment (${discarded?.byteLength ?? 0} bytes)`);
+			console.warn(
+				`[MSE] Queue full (${SourceMSE.MAX_QUEUE_SIZE}), discarding oldest fragment (${discarded?.byteLength ?? 0} bytes)`,
+			);
 		}
 
 		const copy = new Uint8Array(fragment);
 		this.#appendQueue.push(copy);
-	
+
 		this.#processAppendQueue();
 	}
 
@@ -222,7 +232,7 @@ export class SourceMSE {
 		if (fragments.length === 1) {
 			return fragments[0];
 		}
-		
+
 		const totalSize = fragments.reduce((sum, frag) => sum + frag.byteLength, 0);
 		const result = new Uint8Array(totalSize);
 		let offset = 0;
@@ -230,7 +240,7 @@ export class SourceMSE {
 			result.set(fragment, offset);
 			offset += fragment.byteLength;
 		}
-		
+
 		return result;
 	}
 
@@ -244,12 +254,13 @@ export class SourceMSE {
 			return;
 		}
 
-		const fragment = this.#appendQueue.shift()!;
-		
+		const fragment = this.#appendQueue.shift();
+		if (!fragment) return;
+
 		try {
 			// appendBuffer accepts BufferSource (ArrayBuffer or ArrayBufferView)
 			this.#sourceBuffer.appendBuffer(fragment as BufferSource);
-			
+
 			this.#stats.update((current) => ({
 				frameCount: current?.frameCount ?? 0,
 				timestamp: current?.timestamp ?? 0,
@@ -292,15 +303,18 @@ export class SourceMSE {
 				let checkCount = 0;
 				const maxChecks = 100; // 10 seconds max wait
 				let hasSeeked = false;
-				
+
 				const checkReady = () => {
 					checkCount++;
 					if (this.#video) {
 						const videoBuffered = this.#video.buffered;
 						const hasBufferedData = videoBuffered && videoBuffered.length > 0;
 						const currentTime = this.#video.currentTime;
-						const isTimeBuffered = hasBufferedData && videoBuffered.start(0) <= currentTime && currentTime < videoBuffered.end(videoBuffered.length - 1);
-						
+						const isTimeBuffered =
+							hasBufferedData &&
+							videoBuffered.start(0) <= currentTime &&
+							currentTime < videoBuffered.end(videoBuffered.length - 1);
+
 						if (hasBufferedData && !isTimeBuffered && !hasSeeked) {
 							const seekTime = videoBuffered.start(0);
 							this.#video.currentTime = seekTime;
@@ -308,32 +322,41 @@ export class SourceMSE {
 							setTimeout(checkReady, 100);
 							return;
 						}
-						
+
 						if (this.#video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
-							this.#video.play().then(() => {
-								resolve();
-							}).catch((error) => {
-								console.error("[MSE] Video play() failed:", error);
-								resolve();
-							});
+							this.#video
+								.play()
+								.then(() => {
+									resolve();
+								})
+								.catch((error) => {
+									console.error("[MSE] Video play() failed:", error);
+									resolve();
+								});
 						} else if (hasBufferedData && checkCount >= 10) {
 							// If we have buffered data but readyState hasn't advanced, try playing anyway after 1 second
-							this.#video.play().then(() => {
-								resolve();
-							}).catch((error) => {
-								console.error("[MSE] Video play() failed:", error);
-								if (checkCount < maxChecks) {
-									setTimeout(checkReady, 100);
-								} else {
+							this.#video
+								.play()
+								.then(() => {
 									resolve();
-								}
-							});
+								})
+								.catch((error) => {
+									console.error("[MSE] Video play() failed:", error);
+									if (checkCount < maxChecks) {
+										setTimeout(checkReady, 100);
+									} else {
+										resolve();
+									}
+								});
 						} else if (checkCount >= maxChecks) {
-							this.#video.play().then(() => {
-								resolve();
-							}).catch(() => {
-								resolve();
-							});
+							this.#video
+								.play()
+								.then(() => {
+									resolve();
+								})
+								.catch(() => {
+									resolve();
+								});
 						} else {
 							setTimeout(checkReady, 100);
 						}
@@ -350,17 +373,14 @@ export class SourceMSE {
 		// The init segment may start with "ftyp" followed by "moov", or just "moov"
 		function isInitSegmentData(data: Uint8Array): boolean {
 			if (data.length < 8) return false;
-			
+
 			let offset = 0;
 			const len = data.length;
 
 			while (offset + 8 <= len) {
 				// Atom size (big endian)
 				const size =
-					(data[offset] << 24) |
-					(data[offset + 1] << 16) |
-					(data[offset + 2] << 8) |
-					data[offset + 3];
+					(data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
 
 				const type = String.fromCharCode(
 					data[offset + 4],
@@ -378,15 +398,13 @@ export class SourceMSE {
 
 			return false;
 		}
-		
+
 		// Read fragments and append to SourceBuffer
 		// MSE requires complete GOPs to be appended in a single operation
 		// We group fragments by MOQ group (which corresponds to GOPs) before appending
 		effect.spawn(async () => {
-			let frameCount = 0;
-			let currentGroup: number | undefined = undefined;
+			let currentGroup: number | undefined;
 			let gopFragments: Uint8Array[] = []; // Accumulate fragments for current GOP
-
 
 			for (;;) {
 				const frame = await Promise.race([consumer.decode(), effect.cancel]);
@@ -398,11 +416,10 @@ export class SourceMSE {
 					}
 					break;
 				}
-				frameCount++;
 
 				const containsInitSegmentData = isInitSegmentData(frame.data);
 				const isInitSegment = containsInitSegmentData && !initSegmentReceived;
-				
+
 				if (isInitSegment) {
 					if (gopFragments.length > 0 && initSegmentReceived) {
 						const gopData = this.#concatenateFragments(gopFragments);
@@ -438,7 +455,7 @@ export class SourceMSE {
 					const gopData = this.#concatenateFragments(gopFragments);
 					await this.appendFragment(gopData);
 					gopFragments = [];
-				} 
+				}
 			}
 		});
 	}
@@ -496,4 +513,3 @@ export class SourceMSE {
 		return this.#stats;
 	}
 }
-

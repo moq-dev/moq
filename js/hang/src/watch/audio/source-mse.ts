@@ -61,12 +61,16 @@ export class SourceMSE {
 				reject(new Error("MediaSource sourceopen timeout"));
 			}, 5000);
 
-			this.#mediaSource!.addEventListener(
+			this.#mediaSource?.addEventListener(
 				"sourceopen",
 				() => {
 					clearTimeout(timeout);
 					try {
-						this.#sourceBuffer = this.#mediaSource!.addSourceBuffer(mimeType);
+						this.#sourceBuffer = this.#mediaSource?.addSourceBuffer(mimeType);
+						if (!this.#sourceBuffer) {
+							reject(new Error("Failed to create SourceBuffer"));
+							return;
+						}
 						this.#setupSourceBuffer();
 						resolve();
 					} catch (error) {
@@ -76,7 +80,7 @@ export class SourceMSE {
 				{ once: true },
 			);
 
-			this.#mediaSource!.addEventListener("error", (e) => {
+			this.#mediaSource?.addEventListener("error", (e) => {
 				clearTimeout(timeout);
 				reject(new Error(`MediaSource error: ${e}`));
 			});
@@ -88,7 +92,6 @@ export class SourceMSE {
 
 		this.#sourceBuffer.addEventListener("updateend", () => {
 			this.#processAppendQueue();
-
 		});
 
 		this.#sourceBuffer.addEventListener("error", (e) => {
@@ -108,12 +111,14 @@ export class SourceMSE {
 
 		if (this.#appendQueue.length >= SourceMSE.MAX_QUEUE_SIZE) {
 			const discarded = this.#appendQueue.shift();
-			console.warn(`[MSE Audio] Queue full (${SourceMSE.MAX_QUEUE_SIZE}), discarding oldest fragment (${discarded?.byteLength ?? 0} bytes)`);
+			console.warn(
+				`[MSE Audio] Queue full (${SourceMSE.MAX_QUEUE_SIZE}), discarding oldest fragment (${discarded?.byteLength ?? 0} bytes)`,
+			);
 		}
 
 		const copy = new Uint8Array(fragment);
 		this.#appendQueue.push(copy);
-		
+
 		this.#processAppendQueue();
 	}
 
@@ -142,7 +147,8 @@ export class SourceMSE {
 			return;
 		}
 
-		const fragment = this.#appendQueue.shift()!;
+		const fragment = this.#appendQueue.shift();
+		if (!fragment) return;
 
 		try {
 			// appendBuffer accepts BufferSource (ArrayBuffer or ArrayBufferView)
@@ -209,16 +215,19 @@ export class SourceMSE {
 						// Try to play if we have buffered data, even if readyState is low
 						// The browser will start playing when it's ready
 						if (hasBufferedData && this.#audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
-							this.#audio.play().then(() => {
-								resolve();
-							}).catch((error) => {
-								console.error("[MSE Audio] Audio play() failed (initial):", error);
-								if (checkCount < maxChecks) {
-									setTimeout(checkReady, 200);
-								} else {
+							this.#audio
+								.play()
+								.then(() => {
 									resolve();
-								}
-							});
+								})
+								.catch((error) => {
+									console.error("[MSE Audio] Audio play() failed (initial):", error);
+									if (checkCount < maxChecks) {
+										setTimeout(checkReady, 200);
+									} else {
+										resolve();
+									}
+								});
 						} else if (checkCount >= maxChecks) {
 							resolve();
 						} else {
@@ -246,10 +255,7 @@ export class SourceMSE {
 			while (offset + 8 <= len) {
 				// Atom size (big endian)
 				const size =
-					(data[offset] << 24) |
-					(data[offset + 1] << 16) |
-					(data[offset + 2] << 8) |
-					data[offset + 3];
+					(data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
 
 				const type = String.fromCharCode(
 					data[offset + 4],
@@ -271,11 +277,10 @@ export class SourceMSE {
 		// Read fragments and append to SourceBuffer
 		// We group fragments by MOQ group before appending
 		effect.spawn(async () => {
-			let frameCount = 0;
-			let currentGroup: number | undefined = undefined;
+			let currentGroup: number | undefined;
 			let groupFragments: Uint8Array[] = []; // Accumulate fragments for current group
 
-			for (; ;) {
+			for (;;) {
 				const frame = await Promise.race([consumer.decode(), effect.cancel]);
 				if (!frame) {
 					if (groupFragments.length > 0 && initSegmentReceived && this.#mediaSource?.readyState === "open") {
@@ -290,8 +295,6 @@ export class SourceMSE {
 				if (this.#mediaSource?.readyState === "closed") {
 					break;
 				}
-
-				frameCount++;
 
 				const isMoovAtom = hasMoovAtom(frame.data);
 				const isInitSegment = isMoovAtom && !initSegmentReceived;
@@ -372,4 +375,3 @@ export class SourceMSE {
 		this.#signals.close();
 	}
 }
-
