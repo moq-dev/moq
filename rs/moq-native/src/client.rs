@@ -40,7 +40,7 @@ pub struct ClientTls {
 }
 
 /// WebSocket configuration for the client.
-#[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClientWebSocket {
 	/// Delay in milliseconds before attempting WebSocket fallback (default: 200)
@@ -55,6 +55,14 @@ pub struct ClientWebSocket {
 	#[serde(with = "humantime_serde")]
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub delay: Option<time::Duration>,
+}
+
+impl Default for ClientWebSocket {
+	fn default() -> Self {
+		Self {
+			delay: Some(time::Duration::from_millis(200)),
+		}
+	}
 }
 
 /// Configuration for the MoQ client.
