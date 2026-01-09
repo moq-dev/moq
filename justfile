@@ -33,9 +33,9 @@ dev:
 
 
 # Run a localhost relay server without authentication.
-relay:
+relay *args:
 	# Run the relay server overriding the provided configuration file.
-	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- dev/relay.toml
+	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- dev/relay.toml {{args}}
 
 # Run a cluster of relay servers
 cluster:
@@ -150,6 +150,18 @@ pub name url="http://localhost:4443/anon" prefix="" *args:
 	cargo run --bin hang -- \
 		publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4 {{args}}
 
+# Publish a video using ffmpeg to the localhost relay server
+# Enables iroh support so you can use an iroh:// URL of the relay
+pub-iroh name url="http://localhost:4443/anon" prefix="" *args:
+	# Download the sample media.
+	just download "{{name}}"
+	# Pre-build the binary so we don't queue media while compiling.
+	cargo build --bin hang
+	# Publish the media with the hang cli.
+	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
+	cargo run --bin hang -- \
+		--iroh-enabled publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4 {{args}}
+
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
 	#!/usr/bin/env bash
@@ -245,7 +257,8 @@ sub name url='http://localhost:4443/anon':
 	@echo "Install and use hang-gst directly for GStreamer functionality"
 
 # Publish a video using ffmpeg directly from hang to the localhost
-serve name:
+# To also serve via iroh, pass --iroh-enabled as last argument.
+serve name *args:
 	# Download the sample media.
 	just download "{{name}}"
 
@@ -255,7 +268,7 @@ serve name:
 	# Run ffmpeg and pipe the output to hang
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
 	cargo run --bin hang -- \
-		serve --listen "[::]:4443" --tls-generate "localhost" \
+		{{args}} serve --listen "[::]:4443" --tls-generate "localhost" \
 		--name "{{name}}" fmp4
 
 # Run the web server

@@ -181,7 +181,7 @@ You can run a demo like this:
 
 ```sh
 # Terminal 1: Start a relay server
-just relay
+just relay --iroh-enabled
 # Copy the endpoint id printed at "iroh listening"
 
 # Terminal 2: Publish via moq-lite over raw iroh QUIC
@@ -191,10 +191,10 @@ just relay
 # We set an `anon/` prefix to match the broadcast name the web ui expects
 # Because moq-lite does not have headers if using raw QUIC, only the hostname
 # in the URL can be used.
-just pub bbb iroh://ENDPOINT_ID anon/
+just pub-iroh bbb iroh://ENDPOINT_ID anon/
 # Alternatively you can use WebTransport over HTTP/3 over iroh,
 # which allows to set a path prefix in the URL:
-just pub bbb h3+iroh://ENDPOINT_ID/anon
+just pub-iroh bbb h3+iroh://ENDPOINT_ID/anon
 
 # Terminal 3: Start web server
 just web
