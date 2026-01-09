@@ -148,19 +148,7 @@ pub name url="http://localhost:4443/anon" prefix="" *args:
 	# Publish the media with the hang cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
 	cargo run --bin hang -- \
-		publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4 {{args}}
-
-# Publish a video using ffmpeg to the localhost relay server
-# Enables iroh support so you can use an iroh:// URL of the relay
-pub-iroh name url="http://localhost:4443/anon" prefix="" *args:
-	# Download the sample media.
-	just download "{{name}}"
-	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin hang
-	# Publish the media with the hang cli.
-	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin hang -- \
-		--iroh-enabled publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4 {{args}}
+		publish --url "{{url}}" --name "{{prefix}}{{name}}" {{args}} fmp4
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
