@@ -53,7 +53,14 @@ impl Config {
 		// If a file is provided, load it and merge the CLI arguments.
 		if let Some(file) = config.file {
 			config = toml::from_str(&std::fs::read_to_string(file)?)?;
+			// The boolean `iroh.enabled` arg should be preserved if set via the config file.
+			let iroh_enabled = config.iroh.enabled;
+
 			config.update_from(std::env::args());
+
+			if iroh_enabled && !config.iroh.enabled {
+				config.iroh.enabled = iroh_enabled;
+			}
 		}
 
 		config.log.init();
