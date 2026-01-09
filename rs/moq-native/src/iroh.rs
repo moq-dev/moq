@@ -14,8 +14,15 @@ pub struct EndpointConfig {
 	/// Whether to enable iroh support.
 	///
 	/// NOTE: The feature flag `iroh` must also be enabled.
-	#[arg(id = "iroh-enabled", long = "iroh-enabled", env = "MOQ_IROH_ENABLED")]
-	pub enabled: bool,
+	#[arg(
+		id = "iroh-enabled",
+		long = "iroh-enabled",
+		env = "MOQ_IROH_ENABLED",
+		default_missing_value = "true",
+		num_args = 0,
+		value_parser = clap::value_parser!(bool),
+	)]
+	pub enabled: Option<bool>,
 
 	/// Secret key for the iroh endpoint, either a hex-encoded string or a path to a file.
 	/// If the file does not exist, a random key will be generated and written to the path.
@@ -35,7 +42,7 @@ pub struct EndpointConfig {
 
 impl EndpointConfig {
 	pub async fn bind(self) -> anyhow::Result<Option<Endpoint>> {
-		if !self.enabled {
+		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
 		}
 
