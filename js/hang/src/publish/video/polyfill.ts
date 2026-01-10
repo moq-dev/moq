@@ -33,8 +33,6 @@ export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 	}
 
 	let video: HTMLVideoElement;
-	let canvas: HTMLCanvasElement;
-	let ctx: CanvasRenderingContext2D;
 	let last: Time.Milli;
 
 	const frameRate = settings.frameRate ?? 30;
@@ -49,16 +47,7 @@ export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 					video.onloadedmetadata = r;
 				}),
 			]);
-			// TODO use offscreen canvas
-			canvas = document.createElement("canvas");
-			canvas.width = video.videoWidth;
-			canvas.height = video.videoHeight;
 
-			const c = canvas.getContext("2d", { desynchronized: true });
-			if (!c) {
-				throw new Error("failed to create canvas context");
-			}
-			ctx = c;
 			last = performance.now() as Time.Milli;
 		},
 		async pull(controller) {
@@ -70,8 +59,7 @@ export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 				}
 
 				last = now;
-				ctx.drawImage(video, 0, 0);
-				controller.enqueue(new VideoFrame(canvas, { timestamp: Time.Micro.fromMilli(last) }));
+				controller.enqueue(new VideoFrame(video, { timestamp: Time.Micro.fromMilli(last) }));
 			}
 		},
 	});
