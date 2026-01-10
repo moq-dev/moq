@@ -178,8 +178,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer) -> Result<(), Error> {
 		self.subscribes.lock().insert(id, track.clone());
 
-		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe started");
-
 		match self.run_track(id, &broadcast, &mut track).await {
 			Err(Error::Cancel) => {
 				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe cancelled");
@@ -198,11 +196,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_track(&mut self, id: u64, broadcast: &Path<'_>, track: &mut TrackProducer) -> Result<(), Error> {
+		// If None, then the TrackConsumer was already closed.
+		let delivery = track.subscribers().latest().ok_or(Error::Cancel)?;
+
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Subscribe).await?;
 
-		// If None, then the TrackConsumer was already closed.
-		let max = track.subscribers().max().ok_or(Error::Cancel)?;
+		tracing::info!(id, broadcast = %self.log_path(broadcast), track = %track.name, ?delivery, "subscribe started");
 
 		let msg = lite::Subscribe {
 			id,
@@ -210,9 +210,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			broadcast: broadcast.to_owned(),
 			// NOTE: Avoids making a copy because we're cool.
 			track: track.name.as_ref().into(),
-			priority: max.priority,
-			max_latency: max.max_latency,
-			ordered: max.ordered,
+			priority: delivery.priority,
+			max_latency: delivery.max_latency,
+			ordered: delivery.ordered,
 		};
 
 		stream.writer.encode(&msg).await?;
@@ -230,30 +230,32 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			tokio::select! {
 				// Wait until the priority/latency is updated
 				// This is the same result as `track.unused()`
-				max = track.subscribers().changed() => {
+				delivery = track.subscribers().changed() => {
 					// Cancel when there are no more subscribers.
-					let max = max.ok_or(Error::Cancel)?;
-					tracing::info!(subscribe = %id, track = %track.name, ?max, "subscribe update");
+					let delivery = delivery.ok_or(Error::Cancel)?;
+					tracing::info!(subscribe = %id, track = %track.name, ?delivery, "subscribe update");
 
 					stream
 						.writer
 						.encode(&lite::SubscribeUpdate {
-							priority: max.priority,
-							max_latency: max.max_latency,
-							ordered: max.ordered,
+							priority: delivery.priority,
+							max_latency: delivery.max_latency,
+							ordered: delivery.ordered,
 						})
 						.await?;
 				},
 				// Wait until the stream is closed
 				update = stream.reader.decode_maybe::<lite::SubscribeOk>() => {
 					let Some(update) = update? else {break};
-					tracing::info!(subscribe = %id, track = %track.name, ?update, "subscribe ok");
 
-					track.delivery().update(Delivery {
+					let delivery = Delivery {
 						priority: update.priority,
 						max_latency: update.max_latency,
 						ordered: update.ordered,
-					});
+					};
+
+					tracing::info!(subscribe = %id, track = %track.name, ?delivery, "subscribe ok");
+					track.delivery().update(delivery);
 				}
 			};
 		}

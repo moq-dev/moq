@@ -151,8 +151,9 @@ impl Subscribers {
 		}
 	}
 
-	pub fn max(&self) -> Option<Delivery> {
-		let state = self.max.1.borrow();
+	/// Return the latest delivery information, marking it as seen.
+	pub fn latest(&mut self) -> Option<Delivery> {
+		let state = self.max.1.borrow_and_update();
 		Some(Delivery {
 			priority: *state.priority.peek()?.1,
 			max_latency: *state.max_latency.peek()?.1,
@@ -160,9 +161,10 @@ impl Subscribers {
 		})
 	}
 
+	// Wait until the delivery information changes.
 	pub async fn changed(&mut self) -> Option<Delivery> {
 		self.max.1.changed().await.ok()?;
-		self.max()
+		self.latest()
 	}
 
 	pub fn subscribe(&self, delivery: Delivery) -> Subscriber {

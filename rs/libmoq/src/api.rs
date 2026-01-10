@@ -355,7 +355,7 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 	ffi::enter(move || {
 		let media = ffi::parse_id(media)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
-		let timestamp = moq_lite::TimeScale::from_micros(timestamp_us)?;
+		let timestamp = moq_lite::Timescale::from_micros(timestamp_us)?;
 		State::lock().publish.media_frame(media, payload, timestamp)
 	})
 }
@@ -451,7 +451,7 @@ pub unsafe extern "C" fn moq_consume_video_ordered(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
-		let max_latency = moq_lite::TimeScale::from_millis(max_latency_ms)?;
+		let max_latency = moq_lite::Timescale::from_millis(max_latency_ms)?;
 		let on_frame = ffi::OnStatus::new(user_data, on_frame);
 		State::lock()
 			.consume
@@ -490,7 +490,7 @@ pub unsafe extern "C" fn moq_consume_audio_ordered(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
-		let max_latency = moq_lite::TimeScale::from_millis(max_latency_ms)?;
+		let max_latency = moq_lite::Timescale::from_millis(max_latency_ms)?;
 		let on_frame = ffi::OnStatus::new(user_data, on_frame);
 		State::lock()
 			.consume

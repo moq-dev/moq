@@ -123,7 +123,7 @@ export class Subscriber {
 			broadcast,
 			track: track.name,
 			priority: track.priority.peek(),
-			maxLatency: Time.Micro.fromMilli(track.maxLatency.peek()),
+			maxLatency: track.maxLatency.peek(),
 			ordered: track.ordered.peek(),
 		});
 

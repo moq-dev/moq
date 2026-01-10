@@ -4,8 +4,15 @@ use moq_lite::coding::{Decode, Encode};
 
 use crate::Error;
 
+/// A timestamp representing the presentation time in microseconds.
+///
+/// [moq_lite::Time] is in milliseconds, but that's not quiiite precise enough for audio.
+/// (technically you could make it work, but it's a pain in the butt)
+/// We encode microseconds instead to match the WebCodecs API.
+pub type Timestamp = moq_lite::Timescale<1_000_000>;
+
 pub struct Container {
-	pub timestamp: moq_lite::Time,
+	pub timestamp: Timestamp,
 	pub payload: BufList,
 }
 
@@ -22,7 +29,7 @@ impl Container {
 		let payload = frame.read_chunks().await?;
 
 		let mut payload = BufList::from_iter(payload);
-		let timestamp = moq_lite::Time::decode(&mut payload, moq_lite::lite::Version::Draft03)?;
+		let timestamp = Timestamp::decode(&mut payload, moq_lite::lite::Version::Draft03)?;
 		let container = Self { timestamp, payload };
 
 		Ok(Some(container))
@@ -36,8 +43,8 @@ impl Container {
 		let frame = moq_lite::Frame {
 			size,
 			// NOTE: We encode the timestamp into the MoQ layer as well.
-			// But its in milliseconds, not microseconds.
-			instant: self.timestamp,
+			// The MoQ layer uses milliseconds, so we convert from our microsecond timestamp.
+			instant: self.timestamp.convert().expect("timestamp conversion overflow"),
 		};
 
 		let mut chunked = group.create_frame(frame)?;

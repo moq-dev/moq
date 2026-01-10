@@ -272,22 +272,22 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		broadcast: Path<'_>,
 		mut track: TrackProducer,
 	) -> Result<(), Error> {
-		let subscribers = track.subscribers().clone();
-		let max = subscribers.max().unwrap_or_default();
+		let mut subscribers = track.subscribers().clone();
+		let delivery = subscribers.latest().unwrap_or_default();
 
 		self.control.send(ietf::Subscribe {
 			request_id,
 			track_namespace: broadcast.to_owned(),
 			track_name: track.name.as_ref().into(),
-			subscriber_priority: max.priority,
-			group_order: if max.ordered {
+			subscriber_priority: delivery.priority,
+			group_order: if delivery.ordered {
 				GroupOrder::Ascending
 			} else {
 				GroupOrder::Descending
 			},
 			// we want largest group
 			filter_type: FilterType::LargestObject,
-			delivery_timeout: max.max_latency,
+			delivery_timeout: delivery.max_latency,
 		})?;
 
 		// TODO we should send a joining fetch, but it's annoying to implement.

@@ -50,7 +50,7 @@ impl Publish {
 		Ok(id)
 	}
 
-	pub fn media_frame(&mut self, media: Id, mut data: &[u8], timestamp: moq_lite::Time) -> Result<(), Error> {
+	pub fn media_frame(&mut self, media: Id, mut data: &[u8], timestamp: hang::Timestamp) -> Result<(), Error> {
 		let media = self.media.get_mut(media).ok_or(Error::NotFound)?;
 
 		media

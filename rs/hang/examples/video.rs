@@ -61,7 +61,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Encode a simple container that consists of a timestamp and a payload.
 	// NOTE: This will be removed in the future; it's for backwards compatibility.
 	hang::Container {
-		timestamp: moq_lite::Time::from_secs(1).unwrap(),
+		timestamp: hang::Timestamp::from_secs(1).unwrap(),
 		payload: Bytes::from_static(b"keyframe NAL data").into(),
 	}
 	.encode(&mut group)?;
@@ -69,7 +69,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
 	hang::Container {
-		timestamp: moq_lite::Time::from_secs(2).unwrap(),
+		timestamp: hang::Timestamp::from_secs(2).unwrap(),
 		payload: Bytes::from_static(b"delta NAL data").into(),
 	}
 	.encode(&mut group)?;
@@ -81,7 +81,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	let mut group = track.append_group()?;
 
 	hang::Container {
-		timestamp: moq_lite::Time::from_secs(3).unwrap(),
+		timestamp: hang::Timestamp::from_secs(3).unwrap(),
 		payload: Bytes::from_static(b"keyframe NAL data").into(),
 	}
 	.encode(&mut group)?;

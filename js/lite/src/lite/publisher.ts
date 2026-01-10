@@ -143,7 +143,7 @@ export class Publisher {
 		const track = new Track({
 			name: msg.track,
 			priority: msg.priority,
-			maxLatency: Time.Micro.toMilli(msg.maxLatency),
+			maxLatency: msg.maxLatency,
 			ordered: msg.ordered,
 		});
 		broadcast.serve(track);
@@ -152,7 +152,7 @@ export class Publisher {
 		const sendOk = async () => {
 			const msg = new SubscribeOk({
 				priority: track.priority.peek(),
-				maxLatency: Time.Micro.fromMilli(track.maxLatency.peek()),
+				maxLatency: track.maxLatency.peek(),
 				ordered: track.ordered.peek(),
 			});
 			await msg.encode(stream.writer, this.version);

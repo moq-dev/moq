@@ -121,7 +121,7 @@ impl Aac {
 		Ok(())
 	}
 
-	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<moq_lite::Time>) -> anyhow::Result<()> {
+	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 		let track = self.track.as_mut().context("not initialized")?;
 
@@ -148,7 +148,7 @@ impl Aac {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<moq_lite::Time>) -> anyhow::Result<moq_lite::Time> {
+	fn pts(&mut self, hint: Option<hang::Timestamp>) -> anyhow::Result<hang::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}

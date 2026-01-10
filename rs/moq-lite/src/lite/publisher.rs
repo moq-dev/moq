@@ -146,8 +146,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = subscribe.track.clone();
 		let absolute = self.origin.absolute(&subscribe.broadcast).to_owned();
 
-		tracing::info!(%id, broadcast = %absolute, %track, "subscribed started");
-
 		let broadcast = self.origin.consume_broadcast(&subscribe.broadcast);
 		let priority = self.priority.clone();
 		let version = self.version;
@@ -184,13 +182,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		let track = Track::from(subscribe.track.to_string());
 
-		let subscriber = Delivery {
+		let delivery = Delivery {
 			priority: subscribe.priority,
 			max_latency: subscribe.max_latency,
 			ordered: subscribe.ordered,
 		};
 
-		let mut track = broadcast.ok_or(Error::NotFound)?.subscribe_track(track, subscriber);
+		tracing::info!(id = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, ?delivery, "subscribed started");
+
+		let mut track = broadcast.ok_or(Error::NotFound)?.subscribe_track(track, delivery);
 		let delivery = track.delivery().current();
 
 		let info = lite::SubscribeOk {
@@ -199,7 +199,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			ordered: delivery.ordered,
 		};
 
-		tracing::trace!(subscribe = %subscribe.id, track = %track.name, ?info, "subscribed ok");
+		tracing::trace!(subscribe = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, ?delivery, "subscribed ok");
 
 		stream.writer.encode(&info).await?;
 
@@ -217,27 +217,27 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					// TODO also cancel outstanding groups.
 					let Some(update) = update? else {break};
 
-					let info = Delivery {
+					let delivery = Delivery {
 						priority: update.priority,
 						max_latency: update.max_latency,
 						ordered: update.ordered,
 					};
 
-					tracing::info!(subscribe = %subscribe.id, track = %track.name, ?info, "subscribed update");
-					track.subscriber().update(info);
+					tracing::info!(subscribe = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, ?delivery, "subscribed update");
+					track.subscriber().update(delivery);
 
 					// TODO update the priority of all outstanding groups.
 
 					continue;
 				},
-				Some(update) = delivery.changed() => {
+				Some(delivery) = delivery.changed() => {
 					let info = lite::SubscribeOk {
-						priority: update.priority,
-						max_latency: update.max_latency,
-						ordered: update.ordered,
+						priority: delivery.priority,
+						max_latency: delivery.max_latency,
+						ordered: delivery.ordered,
 					};
 
-					tracing::info!(subscribe = %subscribe.id, track = %track.name, ?info, "subscribed ok");
+					tracing::info!(subscribe = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, ?delivery, "subscribed ok");
 					stream.writer.encode(&info).await?;
 
 					continue;
@@ -255,7 +255,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				else => break,
 			}?;
 
-			tracing::debug!(subscribe = %subscribe.id, track = %track.name, group = %group.sequence, "serving group");
+			tracing::debug!(subscribe = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, group = %group.sequence, "serving group");
 
 			let msg = lite::Group {
 				subscribe: subscribe.id,

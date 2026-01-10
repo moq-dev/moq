@@ -72,7 +72,7 @@ export class Subscribe {
 	track: string;
 	priority: number;
 	ordered: boolean;
-	maxLatency: Time.Micro;
+	maxLatency: Time.Milli;
 
 	constructor({
 		id,
@@ -87,7 +87,7 @@ export class Subscribe {
 		track: string;
 		priority: number;
 		ordered: boolean;
-		maxLatency: Time.Micro;
+		maxLatency: Time.Milli;
 	}) {
 		this.id = id;
 		this.broadcast = broadcast;
@@ -123,13 +123,13 @@ export class Subscribe {
 		const broadcast = Path.from(await r.string());
 		const track = await r.string();
 		const priority = await r.u8();
-		let maxLatency = Time.Micro.zero;
+		let maxLatency = Time.Milli.zero;
 		let ordered = false;
 
 		switch (version) {
 			case Version.DRAFT_03:
 				ordered = await r.bool();
-				maxLatency = (await r.u53()) as Time.Micro;
+				maxLatency = (await r.u53()) as Time.Milli;
 				break;
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
@@ -155,9 +155,9 @@ export class Subscribe {
 export class SubscribeOk {
 	priority: number;
 	ordered: boolean;
-	maxLatency: Time.Micro;
+	maxLatency: Time.Milli;
 
-	constructor({ priority, maxLatency, ordered }: { priority: number; maxLatency: Time.Micro; ordered: boolean }) {
+	constructor({ priority, maxLatency, ordered }: { priority: number; maxLatency: Time.Milli; ordered: boolean }) {
 		this.priority = priority;
 		this.maxLatency = maxLatency;
 		this.ordered = ordered;
@@ -185,7 +185,7 @@ export class SubscribeOk {
 	static async #decode(version: Version, r: Reader): Promise<SubscribeOk> {
 		let priority = 0;
 		let ordered = false;
-		let maxLatency = Time.Micro.zero;
+		let maxLatency = Time.Milli.zero;
 
 		switch (version) {
 			case Version.DRAFT_01:
@@ -197,7 +197,7 @@ export class SubscribeOk {
 			case Version.DRAFT_03:
 				priority = await r.u8();
 				ordered = await r.bool();
-				maxLatency = (await r.u53()) as Time.Micro;
+				maxLatency = (await r.u53()) as Time.Milli;
 				break;
 			default: {
 				const v: never = version;
