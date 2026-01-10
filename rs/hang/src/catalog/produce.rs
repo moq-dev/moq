@@ -64,7 +64,7 @@ impl Drop for CatalogGuard<'_> {
 		if let Ok(mut group) = self.track.append_group() {
 			// TODO decide if this should return an error, or be impossible to fail
 			let frame = self.catalog.to_string().expect("invalid catalog");
-			group.write_frame(frame, tokio::time::Instant::now().into()).ok();
+			group.write_frame(frame, moq_lite::Time::now()).ok();
 			group.close().ok();
 		}
 	}

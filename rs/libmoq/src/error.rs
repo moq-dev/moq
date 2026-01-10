@@ -59,8 +59,8 @@ pub enum Error {
 	DecodeFailed(Arc<anyhow::Error>),
 
 	/// Timestamp overflow.
-	#[error("time overflow")]
-	TimeOverflow(#[from] moq_lite::TimeOverflow),
+	#[error("timestamp overflow")]
+	TimestampOverflow(#[from] moq_lite::TimeOverflow),
 
 	/// Log level parsing error.
 	#[error("level error: {0}")]
@@ -112,7 +112,7 @@ impl ffi::ReturnCode for Error {
 			Error::UnknownFormat(_) => -9,
 			Error::InitFailed(_) => -10,
 			Error::DecodeFailed(_) => -11,
-			Error::TimeOverflow(_) => -12,
+			Error::TimestampOverflow(_) => -13,
 			Error::Level(_) => -14,
 			Error::InvalidCode => -15,
 			Error::Panic => -16,

@@ -1,12 +1,7 @@
 import { z } from "zod";
 import { ContainerSchema, DEFAULT_CONTAINER } from "./container";
 import { u53Schema } from "./integers";
-
-// Backwards compatibility: old track schema
-const TrackSchema = z.object({
-	name: z.string(),
-	priority: z.number().int().min(0).max(255),
-});
+import { TrackSchema } from "./track";
 
 // Based on VideoDecoderConfig
 export const VideoConfigSchema = z.object({

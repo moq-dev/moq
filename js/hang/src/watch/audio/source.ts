@@ -164,7 +164,7 @@ export class Source {
 		const active = effect.get(this.active);
 		if (!active) return;
 
-		const sub = broadcast.subscribe({ name: active, priority: PRIORITY.audio });
+		const sub = broadcast.subscribe({ name: active, priority: PRIORITY.audio, maxLatency: this.latency });
 		effect.cleanup(() => sub.close());
 
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.

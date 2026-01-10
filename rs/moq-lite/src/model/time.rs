@@ -165,7 +165,8 @@ impl<const SCALE: u64> Timescale<SCALE> {
 	}
 
 	pub fn now() -> Self {
-		std::time::Instant::now().into()
+		// We use tokio so it can be stubbed for testing.
+		tokio::time::Instant::now().into()
 	}
 
 	/// Convert this timestamp to a different scale.

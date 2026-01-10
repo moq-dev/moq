@@ -272,7 +272,7 @@ impl Hev1 {
 		}
 
 		// Default to the unix timestamp
-		Ok(tokio::time::Instant::now().into())
+		Ok(hang::Timestamp::now())
 	}
 }
 

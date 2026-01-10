@@ -35,7 +35,8 @@ export class Preview {
 		const info = effect.get(this.info);
 		if (!info) return;
 
-		track.writeFrame(Moq.Frame.fromJson(info));
+		const frame = Moq.Frame.fromJson(info);
+		track.writeFrame(frame);
 	}
 
 	close() {

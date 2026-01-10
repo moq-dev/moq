@@ -37,18 +37,18 @@ impl Publish {
 		let decoder = match format {
 			PublishFormat::Avc3 => {
 				let format = DecoderFormat::Avc3;
-				let stream = Decoder::new(broadcast.clone(), catalog.clone(), format);
+				let stream = Decoder::new(broadcast.clone(), catalog, format);
 				PublishDecoder::Decoder(Box::new(stream))
 			}
 			PublishFormat::Fmp4 => {
 				let format = DecoderFormat::Fmp4;
-				let stream = Decoder::new(broadcast.clone(), catalog.clone(), format);
+				let stream = Decoder::new(broadcast.clone(), catalog, format);
 				PublishDecoder::Decoder(Box::new(stream))
 			}
 			PublishFormat::Hls { playlist } => {
 				let hls = hang::import::Hls::new(
 					broadcast.clone(),
-					catalog.clone(),
+					catalog,
 					hang::import::HlsConfig {
 						playlist: playlist.clone(),
 						client: None,

@@ -257,7 +257,7 @@ impl Avc3 {
 		}
 
 		// Default to the unix timestamp
-		Ok(tokio::time::Instant::now().into())
+		Ok(hang::Timestamp::now())
 	}
 }
 

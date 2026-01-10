@@ -32,7 +32,7 @@ impl Decode<Version> for FrameHeader {
 			Version::Draft03 => Time::decode(r, version)?,
 			// If no timestamp is provided for this protocol version, we use the current (receive) time.
 			// NOTE: The (correct) media timestamp is still in the payload for backwards compatibility.
-			Version::Draft02 | Version::Draft01 => tokio::time::Instant::now().into(),
+			Version::Draft02 | Version::Draft01 => Time::now(),
 		};
 
 		let size = r.remaining();

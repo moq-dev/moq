@@ -138,7 +138,7 @@ async function subscribe(config: Config) {
 	console.log("✅ Connected to relay:", config.url);
 
 	const broadcast = connection.consume(Moq.Path.from(config.broadcast));
-	const track = broadcast.subscribe({ name: config.track, priority: 0 });
+	const track = broadcast.subscribe({ name: config.track });
 
 	console.log("✅ Subscribed to track:", config.track);
 

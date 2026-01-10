@@ -32,7 +32,7 @@ pub struct Consume {
 	/// Video track consumer task cancellation channels.
 	video_task: NonZeroSlab<oneshot::Sender<()>>,
 
-	/// Buffered frames ready for consumption.
+	/// Buffered frames ready for consumption, true if a keyframe.
 	frame: NonZeroSlab<(hang::Container, bool)>,
 }
 
