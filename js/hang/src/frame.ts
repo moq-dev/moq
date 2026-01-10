@@ -1,8 +1,8 @@
-import type * as Moq from "@moq/lite";
+import * as Moq from "@moq/lite";
+import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import type * as Catalog from "./catalog";
 import * as Container from "./container";
-import * as Time from "./time";
 
 export interface Source {
 	byteLength: number;
@@ -16,8 +16,9 @@ export interface Frame {
 	group: number;
 }
 
-export function encode(source: Uint8Array | Source, timestamp: Time.Micro, container?: Catalog.Container): Uint8Array {
+export function encode(source: Uint8Array | Source, timestamp: Time.Micro, container?: Catalog.Container): Moq.Frame {
 	// Encode timestamp using the specified container format
+	// TODO This should be delta encoded, not the full timestamp.
 	const timestampBytes = Container.encodeTimestamp(timestamp, container);
 
 	// Allocate buffer for timestamp + payload
@@ -34,14 +35,18 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro, conta
 		source.copyTo(data.subarray(timestampBytes.byteLength));
 	}
 
-	return data;
+	// NOTE: We encode the timestamp into the MoQ layer as well, but in milliseconds.
+	// TODO: Once this is widespread enough, we should use it at least as the base.
+	return new Moq.Frame({ payload: data, instant: Time.Milli.fromMicro(timestamp) });
 }
 
 // NOTE: A keyframe is always the first frame in a group, so it's not encoded on the wire.
-export function decode(buffer: Uint8Array, container?: Catalog.Container): { data: Uint8Array; timestamp: Time.Micro } {
+export function decode(frame: Moq.Frame, container?: Catalog.Container): { data: Uint8Array; timestamp: Time.Micro } {
 	// Decode timestamp using the specified container format
-	const [timestamp, data] = Container.decodeTimestamp(buffer, container);
-	return { timestamp: timestamp as Time.Micro, data };
+	// TODO This should be delta encoded, not the full timestamp.
+	// TODO: Use frame.instant to avoid double encoding the timestamp.
+	const [timestamp, data] = Container.decodeTimestamp(frame.payload, container);
+	return { timestamp, data };
 }
 
 export class Producer {

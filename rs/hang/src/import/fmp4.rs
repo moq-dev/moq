@@ -1,10 +1,11 @@
-use crate::catalog::{AudioCodec, AudioConfig, CatalogProducer, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9};
-use crate::{self as hang, Timestamp};
+use crate::{self as hang};
+use crate::{AudioCodec, AudioConfig, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
-use moq_lite as moq;
 use mp4_atom::{Any, Atom, DecodeMaybe, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
+
+const MAX_GOP: hang::Timestamp = hang::Timestamp::from_secs_unchecked(10);
 
 /// Converts fMP4/CMAF files into hang broadcast streams.
 ///
@@ -25,15 +26,13 @@ use std::collections::HashMap;
 /// - Opus
 pub struct Fmp4 {
 	// The broadcast being produced
-	// This `hang` variant includes a catalog.
-	broadcast: hang::BroadcastProducer,
+	broadcast: moq_lite::BroadcastProducer,
 
-	// A clone of the broadcast's catalog for mutable access.
-	// This is the same underlying catalog (via Arc), just a separate binding.
-	catalog: CatalogProducer,
+	// The catalog being produced
+	catalog: hang::CatalogProducer,
 
-	// A lookup to tracks in the broadcast
-	tracks: HashMap<u32, hang::TrackProducer>,
+	// A map of track id to track/group producer.
+	tracks: HashMap<u32, (moq_lite::TrackProducer, Option<moq_lite::GroupProducer>)>,
 
 	// The timestamp of the last keyframe for each track
 	last_keyframe: HashMap<u32, hang::Timestamp>,
@@ -50,9 +49,8 @@ impl Fmp4 {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the
-	/// fMP4 file. The catalog from the `hang::BroadcastProducer` is used automatically.
-	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
-		let catalog = broadcast.catalog.clone();
+	/// fMP4 file.
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -119,46 +117,40 @@ impl Fmp4 {
 			let track_id = trak.tkhd.track_id;
 			let handler = &trak.mdia.hdlr.handler;
 
-			let track = match handler.as_ref() {
+			let (track, delivery) = match handler.as_ref() {
 				b"vide" => {
 					let config = Self::init_video(trak)?;
 
-					let track = moq::Track {
-						name: self.broadcast.track_name("video"),
+					let track = catalog.video.create("fmp4", config.clone());
+					let delivery = moq_lite::Delivery {
 						priority: 1,
+						max_latency: super::DEFAULT_MAX_LATENCY,
+						ordered: false,
 					};
 
-					tracing::debug!(name = ?track.name, ?config, "starting track");
+					tracing::info!(%track, ?config, "started track");
 
-					let video = catalog.insert_video(track.name.clone(), config);
-					video.priority = 1;
-
-					let track = track.produce();
-					self.broadcast.insert_track(track.consumer);
-					track.producer
+					(track, delivery)
 				}
 				b"soun" => {
 					let config = Self::init_audio(trak)?;
 
-					let track = moq::Track {
-						name: self.broadcast.track_name("audio"),
+					let track = catalog.audio.create("fmp4", config.clone());
+					let delivery = moq_lite::Delivery {
 						priority: 2,
+						max_latency: super::DEFAULT_MAX_LATENCY,
+						ordered: false,
 					};
+					tracing::info!(%track, ?config, "started track");
 
-					tracing::debug!(name = ?track.name, ?config, "starting track");
-
-					let audio = catalog.insert_audio(track.name.clone(), config);
-					audio.priority = 2;
-
-					let track = track.produce();
-					self.broadcast.insert_track(track.consumer);
-					track.producer
+					(track, delivery)
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
 
-			self.tracks.insert(track_id, track.into());
+			let producer = self.broadcast.create_track(track, delivery);
+			self.tracks.insert(track_id, (producer, None));
 		}
 
 		self.moov = Some(moov);
@@ -370,7 +362,7 @@ impl Fmp4 {
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
 			let track_id = traf.tfhd.track_id;
-			let track = self.tracks.get_mut(&track_id).context("unknown track")?;
+			let (track, group) = self.tracks.get_mut(&track_id).context("unknown track")?;
 
 			// Find the track information in the moov
 			let trak = moov
@@ -425,8 +417,7 @@ impl Fmp4 {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let micros = (pts as u128 * 1_000_000 / timescale as u128) as u64;
-					let timestamp = hang::Timestamp::from_micros(micros)?;
+					let timestamp = hang::Timestamp::from_scale(pts, timescale)?;
 
 					if offset + size > mdat.len() {
 						anyhow::bail!("invalid data offset");
@@ -450,23 +441,28 @@ impl Fmp4 {
 					} else {
 						match self.last_keyframe.get(&track_id) {
 							// Force an audio keyframe at least every 10 seconds, but ideally at video keyframes
-							Some(prev) => timestamp - *prev > Timestamp::from_secs(10).unwrap(),
+							Some(prev) => timestamp - *prev > MAX_GOP,
 							None => true,
 						}
 					};
 
 					if keyframe {
 						self.last_keyframe.insert(track_id, timestamp);
+						if let Some(mut group) = group.take() {
+							group.close()?;
+						}
+						*group = Some(track.append_group()?);
 					}
 
 					let payload = mdat.slice(offset..(offset + size));
 
-					let frame = hang::Frame {
+					let container = hang::Container {
 						timestamp,
-						keyframe,
 						payload: payload.into(),
 					};
-					track.write(frame)?;
+
+					let group = group.as_mut().context("group must start with a keyframe")?;
+					container.encode(group)?;
 
 					dts += duration as u64;
 					offset += size;
@@ -484,7 +480,7 @@ impl Fmp4 {
 		if let (Some(min), Some(max)) = (min_timestamp, max_timestamp) {
 			let diff = max - min;
 
-			if diff > Timestamp::from_millis(1).unwrap() {
+			if diff > hang::Timestamp::from_millis(1).unwrap() {
 				tracing::warn!("fMP4 introduced {:?} of latency", diff);
 			}
 		}
@@ -495,14 +491,21 @@ impl Fmp4 {
 
 impl Drop for Fmp4 {
 	fn drop(&mut self) {
-		let mut catalog = self.broadcast.catalog.lock();
+		let mut catalog = self.catalog.lock();
 
-		for track in self.tracks.values() {
-			tracing::debug!(name = ?track.info.name, "ending track");
+		for (_, (mut track, mut group)) in self.tracks.drain() {
+			if let Some(mut group) = group.take() {
+				group.close().ok();
+			}
+
+			track.close().ok();
 
 			// We're too lazy to keep track of if this track is for audio or video, so we just remove both.
-			catalog.remove_video(&track.info.name);
-			catalog.remove_audio(&track.info.name);
+			if let Some(config) = catalog.video.remove(&track) {
+				tracing::info!(track = %track.info(), ?config, "ended track");
+			} else if let Some(config) = catalog.audio.remove(&track) {
+				tracing::info!(track = %track.info(), ?config, "ended track");
+			}
 		}
 	}
 }

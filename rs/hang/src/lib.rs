@@ -14,15 +14,16 @@
 //! - **fMP4 Import**: Convert a fMP4 file into a hang broadcast.
 //! - **HLS Import**: Reusable HLS/fMP4 ingest logic via [`hls`].
 //!
+mod catalog;
+mod container;
 mod error;
 
-pub mod catalog;
 pub mod feedback;
 pub mod import;
-pub mod model;
 
 // export the moq-lite version in use
 pub use moq_lite;
 
+pub use catalog::*;
+pub use container::*;
 pub use error::*;
-pub use model::*;

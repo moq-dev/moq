@@ -8,6 +8,7 @@
 mod audio;
 mod chat;
 mod preview;
+mod produce;
 mod root;
 mod track;
 mod user;
@@ -16,6 +17,7 @@ mod video;
 pub use audio::*;
 pub use chat::*;
 pub use preview::*;
+pub use produce::*;
 pub use root::*;
 pub use track::*;
 pub use user::*;

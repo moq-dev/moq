@@ -2,21 +2,20 @@ use crate as hang;
 use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
-use moq_lite as moq;
 
 /// Opus decoder, initialized via OpusHead.
 pub struct Opus {
-	broadcast: hang::BroadcastProducer,
-	track: Option<hang::TrackProducer>,
-	zero: Option<tokio::time::Instant>,
+	broadcast: moq_lite::BroadcastProducer,
+	catalog: hang::CatalogProducer,
+	track: Option<moq_lite::TrackProducer>,
 }
 
 impl Opus {
-	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer) -> Self {
 		Self {
 			broadcast,
+			catalog,
 			track: None,
-			zero: None,
 		}
 	}
 
@@ -42,29 +41,27 @@ impl Opus {
 			buf.advance(buf.remaining());
 		}
 
-		let track = moq::Track {
-			name: self.broadcast.track_name("audio"),
-			priority: 2,
-		};
+		let mut catalog = self.catalog.lock();
 
-		let config = hang::catalog::AudioConfig {
-			codec: hang::catalog::AudioCodec::Opus,
+		let config = hang::AudioConfig {
+			codec: hang::AudioCodec::Opus,
 			sample_rate,
 			channel_count,
 			bitrate: None,
 			description: None,
 		};
 
-		tracing::debug!(name = ?track.name, ?config, "starting track");
+		let track = catalog.audio.create("opus", config.clone());
+		tracing::info!(%track, ?config, "started track");
 
-		let track = track.produce();
-		self.broadcast.insert_track(track.consumer);
+		let delivery = moq_lite::Delivery {
+			priority: 2,
+			max_latency: super::DEFAULT_MAX_LATENCY,
+			ordered: false,
+		};
 
-		let mut catalog = self.broadcast.catalog.lock();
-		let audio = catalog.insert_audio(track.producer.info.name.clone(), config);
-		audio.priority = 2;
-
-		self.track = Some(track.producer.into());
+		let producer = self.broadcast.create_track(track, delivery);
+		self.track = Some(producer);
 
 		Ok(())
 	}
@@ -79,13 +76,15 @@ impl Opus {
 			payload.push_chunk(buf.copy_to_bytes(buf.chunk().len()));
 		}
 
-		let frame = hang::Frame {
+		let container = hang::Container {
 			timestamp: pts,
-			keyframe: true,
 			payload,
 		};
 
-		track.write(frame)?;
+		// Each audio frame is a single group, because they are independent.
+		let mut group = track.append_group()?;
+		container.encode(&mut group)?;
+		group.close()?;
 
 		Ok(())
 	}
@@ -99,16 +98,17 @@ impl Opus {
 			return Ok(pts);
 		}
 
-		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(hang::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
+		// Default to the unix timestamp
+		Ok(hang::Timestamp::now())
 	}
 }
 
 impl Drop for Opus {
 	fn drop(&mut self) {
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.info.name, "ending track");
-			self.broadcast.catalog.lock().remove_audio(&track.info.name);
-		}
+		let Some(mut track) = self.track.take() else { return };
+		track.close().ok();
+
+		let config = self.catalog.lock().audio.remove(&track).unwrap();
+		tracing::debug!(track = %track.info(), ?config, "ended track");
 	}
 }

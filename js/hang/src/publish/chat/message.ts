@@ -1,7 +1,7 @@
-import type * as Moq from "@moq/lite";
+import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
-import { PRIORITY } from "../priority";
+import { PRIORITY } from "../../priority";
 
 export type MessageProps = {
 	enabled?: boolean | Signal<boolean>;
@@ -37,7 +37,8 @@ export class Message {
 		if (!enabled) return;
 
 		const latest = effect.get(this.latest);
-		track.writeString(latest ?? "");
+		const frame = Moq.Frame.fromString(latest ?? "");
+		track.writeFrame(frame);
 	}
 
 	close() {

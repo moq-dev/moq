@@ -4,36 +4,38 @@ use crate::import::annexb::{NalIterator, START_CODE};
 use anyhow::Context;
 use buf_list::BufList;
 use bytes::{Buf, Bytes};
-use moq_lite as moq;
 
 /// A decoder for H.264 with inline SPS/PPS.
 pub struct Avc3 {
 	// The broadcast being produced.
-	// This `hang` variant includes a catalog.
-	broadcast: hang::BroadcastProducer,
+	broadcast: moq_lite::BroadcastProducer,
+
+	// The catalog being produced.
+	catalog: hang::CatalogProducer,
 
 	// The track being produced.
-	track: Option<hang::TrackProducer>,
+	track: Option<moq_lite::TrackProducer>,
+
+	// The group being built, None if there's no i-frame yet.
+	group: Option<moq_lite::GroupProducer>,
 
 	// Whether the track has been initialized.
 	// If it changes, then we'll reinitialize with a new track.
-	config: Option<hang::catalog::VideoConfig>,
+	config: Option<hang::VideoConfig>,
 
 	// The current frame being built.
 	current: Frame,
-
-	// Used to compute wall clock timestamps if needed.
-	zero: Option<tokio::time::Instant>,
 }
 
 impl Avc3 {
-	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer) -> Self {
 		Self {
 			broadcast,
+			catalog,
 			track: None,
+			group: None,
 			config: None,
 			current: Default::default(),
-			zero: None,
 		}
 	}
 
@@ -45,10 +47,10 @@ impl Avc3 {
 			| ((sps.constraint_set4_flag as u8) << 3)
 			| ((sps.constraint_set5_flag as u8) << 2);
 
-		let config = hang::catalog::VideoConfig {
+		let config = hang::VideoConfig {
 			coded_width: Some(sps.width),
 			coded_height: Some(sps.height),
-			codec: hang::catalog::H264 {
+			codec: hang::H264 {
 				profile: sps.profile_idc,
 				constraints: constraint_flags,
 				level: sps.level_idc,
@@ -70,29 +72,25 @@ impl Avc3 {
 			}
 		}
 
+		let mut catalog = self.catalog.lock();
+
 		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.info.name, "reinitializing track");
-			self.broadcast.catalog.lock().remove_video(&track.info.name);
+			tracing::info!(track = %track.info(), "reinitializing track");
+			catalog.video.remove(&track.info());
 		}
 
-		let track = moq::Track {
-			name: self.broadcast.track_name("video"),
+		let track = catalog.video.create("avc3", config.clone());
+		let delivery = moq_lite::Delivery {
 			priority: 2,
+			max_latency: super::DEFAULT_MAX_LATENCY,
+			ordered: false,
 		};
 
-		tracing::debug!(name = ?track.name, ?config, "starting track");
+		tracing::info!(%track, ?config, "started track");
 
-		{
-			let mut catalog = self.broadcast.catalog.lock();
-			let video = catalog.insert_video(track.name.clone(), config.clone());
-			video.priority = 2;
-		}
-
-		let track = track.produce();
-		self.broadcast.insert_track(track.consumer);
-
+		let track = self.broadcast.create_track(track, delivery);
 		self.config = Some(config);
-		self.track = Some(track.producer.into());
+		self.track = Some(track);
 
 		Ok(())
 	}
@@ -227,13 +225,21 @@ impl Avc3 {
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
-		let frame = hang::Frame {
+
+		if self.current.contains_idr {
+			if let Some(mut group) = self.group.take() {
+				group.close()?;
+			}
+			self.group = Some(track.append_group()?);
+		}
+
+		let container = hang::Container {
 			timestamp: pts,
-			keyframe: self.current.contains_idr,
 			payload,
 		};
 
-		track.write(frame)?;
+		let group = self.group.as_mut().context("expected first frame to be an i-frame")?;
+		container.encode(group)?;
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
@@ -250,17 +256,18 @@ impl Avc3 {
 			return Ok(pts);
 		}
 
-		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(hang::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
+		// Default to the unix timestamp
+		Ok(hang::Timestamp::now())
 	}
 }
 
 impl Drop for Avc3 {
 	fn drop(&mut self) {
-		if let Some(track) = &self.track {
-			tracing::debug!(name = ?track.info.name, "ending track");
-			self.broadcast.catalog.lock().remove_video(&track.info.name);
-		}
+		let Some(mut track) = self.track.take() else { return };
+		track.close().ok();
+
+		let config = self.catalog.lock().video.remove(&track).unwrap();
+		tracing::info!(track = %track.info(), ?config, "ended track");
 	}
 }
 
