@@ -8,7 +8,7 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct FrameHeader {
-	/// The timestamp delta since the previous frame in the group.
+	/// The timestamp delta (in milliseconds) since the previous frame in the group.
 	pub delta: Time,
 
 	// NOTE: This is the size of the payload that still needs to be read/written.

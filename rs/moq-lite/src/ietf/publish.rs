@@ -112,7 +112,7 @@ use crate::{
 		namespace::{decode_namespace, encode_namespace},
 		FilterType, GroupOrder, Location, Message, Parameters, RequestId, SubscribeParameter, Version,
 	},
-	Time, Path,
+	Path, Time,
 };
 
 /// Used to be called SubscribeDone
@@ -181,7 +181,7 @@ impl<'a> Message for Publish<'a> {
 		let mut params = Parameters::default();
 		params.set_int(
 			SubscribeParameter::DeliveryTimeout.into(),
-			self.delivery_timeout.as_millis(),
+			self.delivery_timeout.as_millis() as u64,
 		);
 		params.encode(w, version);
 	}
@@ -244,7 +244,7 @@ impl Message for PublishOk {
 		let mut params = Parameters::default();
 		params.set_int(
 			SubscribeParameter::DeliveryTimeout.into(),
-			self.delivery_timeout.as_millis(),
+			self.delivery_timeout.as_millis() as u64,
 		);
 		params.encode(w, version);
 	}

@@ -248,7 +248,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				// We don't use tokio::spawn so we can wait until done, clean up on Drop, and support non-tokio.
 				true = async {
 					// Constantly poll all of the groups until they're all complete.
-					while let Some(_) = tasks.next().await {}
+					while tasks.next().await.is_some() {}
 					// Never match
 					false
 				} => unreachable!("never match"),

@@ -49,7 +49,7 @@ impl GroupState {
 			return Err(closed.err().unwrap_or(Error::Cancel));
 		}
 
-		self.max_instant = Some(self.max_instant.unwrap_or(Time::default()).max(frame.instant));
+		self.max_instant = Some(self.max_instant.unwrap_or_default().max(frame.instant));
 
 		self.frames.push(frame);
 

@@ -418,7 +418,7 @@ impl Fmp4 {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let timestamp = moq::Time::from_timescale(pts, timescale)?;
+					let timestamp = moq::Time::from_scale(pts, timescale)?;
 
 					if offset + size > mdat.len() {
 						anyhow::bail!("invalid data offset");

@@ -139,7 +139,7 @@ impl Message for SubscribeOk {
 		let mut params = Parameters::default();
 		params.set_int(
 			SubscribeParameter::DeliveryTimeout.into(),
-			self.delivery_timeout.as_millis(),
+			self.delivery_timeout.as_millis() as u64,
 		);
 		params.encode(w, version);
 	}
@@ -258,7 +258,7 @@ impl Message for SubscribeUpdate {
 		let mut params = Parameters::default();
 		params.set_int(
 			SubscribeParameter::DeliveryTimeout.into(),
-			self.delivery_timeout.as_millis(),
+			self.delivery_timeout.as_millis() as u64,
 		);
 		params.encode(w, version);
 	}

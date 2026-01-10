@@ -43,6 +43,14 @@ impl VarInt {
 		}
 	}
 
+	pub const fn from_u128(x: u128) -> Option<Self> {
+		if x <= Self::MAX.0 as u128 {
+			Some(Self(x as u64))
+		} else {
+			None
+		}
+	}
+
 	/// Extract the integer value
 	pub const fn into_inner(self) -> u64 {
 		self.0
