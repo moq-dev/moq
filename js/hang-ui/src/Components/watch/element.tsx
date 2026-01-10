@@ -5,7 +5,7 @@ import { Show } from "solid-js/web";
 import { Stats } from "../stats/element";
 import type { ProviderProps } from "../stats/types";
 import BufferingIndicator from "./BufferingIndicator";
-import style from "./style.css?inline";
+import styles from "./styles.css?inline";
 import WatchControls from "./WatchControls";
 import WatchUIContextProvider, { WatchUIContext } from "./WatchUIContextProvider";
 
@@ -16,7 +16,7 @@ customElement("hang-watch-ui", {}, function WatchUIWebComponent(_, { element }) 
 		// Inject CSS into shadow root
 		const rootElement = (element as unknown as HTMLElement).shadowRoot || (element as unknown as HTMLElement);
 		const styleElement = document.createElement("style");
-		styleElement.textContent = style;
+		styleElement.textContent = styles;
 		rootElement.appendChild(styleElement);
 
 		const watchEl = element.querySelector("hang-watch");

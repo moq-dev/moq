@@ -4,7 +4,7 @@ import { createSignal, onMount } from "solid-js";
 import { Show } from "solid-js/web";
 import PublishControls from "./PublishControls";
 import PublishControlsContextProvider from "./PublishUIContextProvider";
-import style from "./style.css?inline";
+import styles from "./styles.css?inline";
 
 customElement("hang-publish-ui", {}, function PublishControlsWebComponent(_, { element }) {
 	const [hangPublishEl, setHangPublishEl] = createSignal<HangPublish | undefined>();
@@ -13,7 +13,7 @@ customElement("hang-publish-ui", {}, function PublishControlsWebComponent(_, { e
 		// Inject CSS into shadow root
 		const rootElement = (element as unknown as HTMLElement).shadowRoot || (element as unknown as HTMLElement);
 		const styleElement = document.createElement("style");
-		styleElement.textContent = style;
+		styleElement.textContent = styles;
 		rootElement.appendChild(styleElement);
 
 		const publishEl = element.querySelector("hang-publish");
