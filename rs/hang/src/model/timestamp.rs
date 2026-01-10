@@ -40,8 +40,8 @@ impl Timestamp {
 	pub const fn from_micros(micros: u64) -> Result<Self, TimestampOverflow> {
 		// ? isn't allowed in const yet
 		match VarInt::from_u64(micros) {
-			Ok(varint) => Ok(Self(varint)),
-			Err(_) => Err(TimestampOverflow),
+			Some(varint) => Ok(Self(varint)),
+			None => Err(TimestampOverflow),
 		}
 	}
 
