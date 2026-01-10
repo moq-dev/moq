@@ -263,18 +263,14 @@ impl Cluster {
 		tracing::info!(%url, "connecting to remote");
 
 		// Connect to the remote node.
-		let conn = self
+		let publish = Some(self.primary.consume());
+		let subscribe = Some(self.secondary.clone());
+
+		let session = self
 			.client
-			.connect(url.clone())
+			.connect(url.clone(), publish, subscribe)
 			.await
 			.context("failed to connect to remote")?;
-
-		let publish = self.primary.consume();
-		let subscribe = self.secondary.clone();
-
-		let session = moq_lite::Session::connect(conn, publish, subscribe)
-			.await
-			.context("failed to establish session")?;
 
 		session.closed().await.map_err(Into::into)
 	}

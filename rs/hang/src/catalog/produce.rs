@@ -6,8 +6,6 @@ use std::{
 	sync::{Arc, Mutex, MutexGuard},
 };
 
-use moq_lite as moq;
-
 /// Produces a catalog track that describes the available media tracks.
 ///
 /// Use [Self::lock] to update the catalog, publishing any changes on [CatalogGuard::drop].
@@ -19,7 +17,7 @@ pub struct CatalogProducer {
 
 impl CatalogProducer {
 	/// Create a new catalog producer for the given broadcast.
-	pub fn new(mut broadcast: moq::BroadcastProducer) -> Self {
+	pub fn new(mut broadcast: moq_lite::BroadcastProducer) -> Self {
 		let track = broadcast.create_track(Catalog::default_track(), Catalog::default_delivery());
 		Self {
 			current: Arc::new(Mutex::new(Catalog::default())),
@@ -74,14 +72,14 @@ impl Drop for CatalogGuard<'_> {
 
 /// Consumes the catalog track, returning the next catalog update.
 pub struct CatalogConsumer {
-	broadcast: Option<moq::BroadcastConsumer>,
-	track: Option<moq::TrackConsumer>,
-	group: Option<moq::GroupConsumer>,
+	broadcast: Option<moq_lite::BroadcastConsumer>,
+	track: Option<moq_lite::TrackConsumer>,
+	group: Option<moq_lite::GroupConsumer>,
 }
 
 impl CatalogConsumer {
 	/// Create a new catalog consumer from a broadcast.
-	pub fn new(broadcast: moq::BroadcastConsumer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastConsumer) -> Self {
 		Self {
 			broadcast: Some(broadcast),
 			track: None,

@@ -25,13 +25,13 @@ enum PublishDecoder {
 
 pub struct Publish {
 	decoder: PublishDecoder,
-	broadcast: moq::BroadcastProducer,
+	broadcast: moq_lite::BroadcastProducer,
 	buffer: BytesMut,
 }
 
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
-		let broadcast = moq::BroadcastProducer::default();
+		let broadcast = moq_lite::BroadcastProducer::default();
 		let catalog = hang::CatalogProducer::new(broadcast.clone());
 
 		let decoder = match format {
@@ -65,7 +65,7 @@ impl Publish {
 		})
 	}
 
-	pub fn consume(&self) -> moq::BroadcastConsumer {
+	pub fn consume(&self) -> moq_lite::BroadcastConsumer {
 		self.broadcast.consume()
 	}
 }

@@ -1,14 +1,14 @@
 [workspace]
 members = [
-    "rs/hang",
-    "rs/hang-cli",
-    "rs/libmoq",
-    "rs/moq-clock",
-    "rs/moq-lite",
-    "rs/moq-native",
-    "rs/moq-relay",
-    "rs/moq-token",
-    "rs/moq-token-cli",
+	"rs/hang",
+	"rs/hang-cli",
+	"rs/libmoq",
+	"rs/moq-clock",
+	"rs/moq-lite",
+	"rs/moq-native",
+	"rs/moq-relay",
+	"rs/moq-token",
+	"rs/moq-token-cli",
 ]
 resolver = "2"
 
@@ -20,9 +20,8 @@ moq-token = { version = "0.5", path = "rs/moq-token" }
 
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
-web-async = { path = "../web-rs/web-async", version = "0.1.1", features = [
-	"tracing",
-] }
+web-async = { version = "0.1.1", features = ["tracing"] }
+web-transport-iroh = "0.1.1"
 web-transport-quinn = "0.10"
 web-transport-trait = "0.3"
 web-transport-ws = "0.2"

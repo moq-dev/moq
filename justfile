@@ -31,10 +31,11 @@ dev:
 		"sleep 1 && just pub bbb http://localhost:4443/anon" \
 		"sleep 2 && just web http://localhost:4443/anon"
 
+
 # Run a localhost relay server without authentication.
-relay:
+relay *args:
 	# Run the relay server overriding the provided configuration file.
-	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- dev/relay.toml
+	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- dev/relay.toml {{args}}
 
 # Run a cluster of relay servers
 cluster:
@@ -128,23 +129,26 @@ download-url name:
 		*) echo "unknown" && exit 1 ;; \
 	esac
 
+# Convert an h264 input file to CMAF (fmp4) format to stdout.
+ffmpeg-cmaf input output='-' *args:
+	ffmpeg -hide_banner -v quiet \
+		-stream_loop -1 -re \
+		-i "{{input}}" \
+		-c copy \
+		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame {{args}} {{output}}
+
 # Publish a video using ffmpeg to the localhost relay server
 # NOTE: The `http` means that we perform insecure certificate verification.
 # Switch it to `https` when you're ready to use a real certificate.
-pub name url="http://localhost:4443/anon" *args:
+pub name url="http://localhost:4443/anon" prefix="" *args:
 	# Download the sample media.
 	just download "{{name}}"
-
 	# Pre-build the binary so we don't queue media while compiling.
 	cargo build --bin hang
-
-	# Run ffmpeg and pipe the output to hang
-	ffmpeg -hide_banner -v quiet \
-		-stream_loop -1 -re \
-		-i "dev/{{name}}.fmp4" \
-		-c copy \
-		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
-		- | TOKIO_CONSOLE_BIND=127.0.0.1:6681 cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" fmp4 {{args}}
+	# Publish the media with the hang cli.
+	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
+	cargo run --bin hang -- \
+		publish --url "{{url}}" --name "{{prefix}}{{name}}" {{args}} fmp4
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
@@ -241,7 +245,8 @@ sub name url='http://localhost:4443/anon':
 	@echo "Install and use hang-gst directly for GStreamer functionality"
 
 # Publish a video using ffmpeg directly from hang to the localhost
-serve name:
+# To also serve via iroh, pass --iroh-enabled as last argument.
+serve name *args:
 	# Download the sample media.
 	just download "{{name}}"
 
@@ -249,12 +254,10 @@ serve name:
 	cargo build --bin hang
 
 	# Run ffmpeg and pipe the output to hang
-	ffmpeg -hide_banner -v quiet \
-		-stream_loop -1 -re \
-		-i "dev/{{name}}.fmp4" \
-		-c copy \
-		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
-		- | cargo run --bin hang -- serve --listen "[::]:4443" --tls-generate "localhost" --name "{{name}}"
+	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
+	cargo run --bin hang -- \
+		{{args}} serve --listen "[::]:4443" --tls-generate "localhost" \
+		--name "{{name}}" fmp4
 
 # Run the web server
 web url='http://localhost:4443/anon':

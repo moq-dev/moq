@@ -11,6 +11,10 @@ edition = "2021"
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[features]
+default = ["iroh"]
+iroh = ["moq-native/iroh"]
+
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio", "ws"] }

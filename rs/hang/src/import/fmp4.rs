@@ -2,7 +2,6 @@ use crate::{self as hang};
 use crate::{AudioCodec, AudioConfig, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
-use moq_lite as moq;
 use mp4_atom::{Any, Atom, DecodeMaybe, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 
@@ -123,7 +122,7 @@ impl Fmp4 {
 					let config = Self::init_video(trak)?;
 
 					let track = catalog.video.create("fmp4", config.clone());
-					let delivery = moq::Delivery {
+					let delivery = moq_lite::Delivery {
 						priority: 1,
 						max_latency: super::DEFAULT_MAX_LATENCY,
 						ordered: false,
@@ -137,7 +136,7 @@ impl Fmp4 {
 					let config = Self::init_audio(trak)?;
 
 					let track = catalog.audio.create("fmp4", config.clone());
-					let delivery = moq::Delivery {
+					let delivery = moq_lite::Delivery {
 						priority: 2,
 						max_latency: super::DEFAULT_MAX_LATENCY,
 						ordered: false,

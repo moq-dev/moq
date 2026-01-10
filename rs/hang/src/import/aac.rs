@@ -2,7 +2,6 @@ use crate as hang;
 use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
-use moq_lite as moq;
 
 /// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
 pub struct Aac {
@@ -109,7 +108,7 @@ impl Aac {
 		let track = catalog.audio.create("aac", config.clone());
 		tracing::info!(%track, ?config, "started track");
 
-		let delivery = moq::Delivery {
+		let delivery = moq_lite::Delivery {
 			priority: 2,
 			max_latency: super::DEFAULT_MAX_LATENCY,
 			ordered: false,

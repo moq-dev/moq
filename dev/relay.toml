@@ -25,3 +25,14 @@ listen = "[::]:4443"
 [auth]
 # Allow anonymous access to everything.
 public = ""
+
+[iroh]
+# You can optionally enable iroh support for P2P connections.
+# Clients can connect using --iroh-enabled and a `iroh://` URL.
+enabled = false
+
+# Path to persist the iroh secret key.
+# If the file does not exist, a random key will be generated and written to the path.
+# This gives the relay a persistent iroh endpoint id. The secret key can alternatively be set
+# via MOQ_IROH_SECRET environment variable.
+secret = "./dev/relay-iroh-secret.key"

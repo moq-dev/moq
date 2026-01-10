@@ -2,7 +2,7 @@ use std::{fmt, str::FromStr};
 
 use bytes::Buf;
 
-use crate::{self as hang, import::Aac, Error};
+use crate::{self as hang, import::Aac, import::Hev1, import::Opus, Error};
 
 use super::{Avc3, Fmp4};
 
@@ -12,8 +12,12 @@ pub enum DecoderFormat {
 	Avc3,
 	/// fMP4/CMAF container.
 	Fmp4,
+	/// aka H265 with inline SPS/PPS
+	Hev1,
 	/// Raw AAC frames (not ADTS).
 	Aac,
+	/// Raw Opus frames (not Ogg).
+	Opus,
 }
 
 impl FromStr for DecoderFormat {
@@ -26,8 +30,10 @@ impl FromStr for DecoderFormat {
 				tracing::warn!("format '{s}' is deprecated, use 'avc3' instead");
 				Ok(DecoderFormat::Avc3)
 			}
+			"hev1" => Ok(DecoderFormat::Hev1),
 			"fmp4" | "cmaf" => Ok(DecoderFormat::Fmp4),
 			"aac" => Ok(DecoderFormat::Aac),
+			"opus" => Ok(DecoderFormat::Opus),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
 	}
@@ -38,7 +44,9 @@ impl fmt::Display for DecoderFormat {
 		match self {
 			DecoderFormat::Avc3 => write!(f, "avc3"),
 			DecoderFormat::Fmp4 => write!(f, "fmp4"),
+			DecoderFormat::Hev1 => write!(f, "hev1"),
 			DecoderFormat::Aac => write!(f, "aac"),
+			DecoderFormat::Opus => write!(f, "opus"),
 		}
 	}
 }
@@ -49,7 +57,10 @@ enum DecoderKind {
 	Avc3(Avc3),
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<Fmp4>),
+	/// aka H265 with inline SPS/PPS
+	Hev1(Hev1),
 	Aac(Aac),
+	Opus(Opus),
 }
 
 /// A generic interface for importing a stream of media into a hang broadcast.
@@ -66,7 +77,9 @@ impl Decoder {
 		let decoder = match format {
 			DecoderFormat::Avc3 => Avc3::new(broadcast, catalog).into(),
 			DecoderFormat::Fmp4 => Box::new(Fmp4::new(broadcast, catalog)).into(),
+			DecoderFormat::Hev1 => Hev1::new(broadcast, catalog).into(),
 			DecoderFormat::Aac => Aac::new(broadcast, catalog).into(),
+			DecoderFormat::Opus => Opus::new(broadcast, catalog).into(),
 		};
 
 		Self { decoder }
@@ -82,7 +95,9 @@ impl Decoder {
 		match &mut self.decoder {
 			DecoderKind::Avc3(decoder) => decoder.initialize(buf)?,
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
+			DecoderKind::Hev1(decoder) => decoder.initialize(buf)?,
 			DecoderKind::Aac(decoder) => decoder.initialize(buf)?,
+			DecoderKind::Opus(decoder) => decoder.initialize(buf)?,
 		}
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -107,8 +122,10 @@ impl Decoder {
 		match &mut self.decoder {
 			DecoderKind::Avc3(decoder) => decoder.decode_stream(buf, None)?,
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
-			// TODO Fix or make this more type safe.
+			DecoderKind::Hev1(decoder) => decoder.decode_stream(buf, None)?,
+			// TODO Fix or make these more type safe.
 			DecoderKind::Aac(_) => anyhow::bail!("AAC does not support stream decoding"),
+			DecoderKind::Opus(_) => anyhow::bail!("Opus does not support stream decoding"),
 		}
 
 		Ok(())
@@ -132,7 +149,9 @@ impl Decoder {
 		match &mut self.decoder {
 			DecoderKind::Avc3(decoder) => decoder.decode_frame(buf, pts)?,
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
+			DecoderKind::Hev1(decoder) => decoder.decode_frame(buf, pts)?,
 			DecoderKind::Aac(decoder) => decoder.decode(buf, pts)?,
+			DecoderKind::Opus(decoder) => decoder.decode(buf, pts)?,
 		}
 
 		Ok(())
@@ -143,7 +162,9 @@ impl Decoder {
 		match &self.decoder {
 			DecoderKind::Avc3(decoder) => decoder.is_initialized(),
 			DecoderKind::Fmp4(decoder) => decoder.is_initialized(),
+			DecoderKind::Hev1(decoder) => decoder.is_initialized(),
 			DecoderKind::Aac(decoder) => decoder.is_initialized(),
+			DecoderKind::Opus(decoder) => decoder.is_initialized(),
 		}
 	}
 }
