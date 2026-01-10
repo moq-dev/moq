@@ -103,7 +103,8 @@ async function publishTrack(track: Moq.Track) {
 
 		// Send the base timestamp (everything but seconds) - matching Rust format
 		const base = `${now.toISOString().slice(0, 16).replace("T", " ")}:`;
-		group.writeFrame(Moq.Frame.fromString(base));
+		const frame = Moq.Frame.fromString(base);
+		group.writeFrame(frame);
 
 		// Send individual seconds for this minute
 		const currentMinute = now.getMinutes();
@@ -112,7 +113,8 @@ async function publishTrack(track: Moq.Track) {
 			const secondsNow = new Date();
 			const seconds = secondsNow.getSeconds().toString().padStart(2, "0");
 
-			group.writeFrame(Moq.Frame.fromString(seconds));
+			const frame = Moq.Frame.fromString(seconds);
+			group.writeFrame(frame);
 
 			// Wait until next second
 			const nextSecond = new Date(secondsNow);

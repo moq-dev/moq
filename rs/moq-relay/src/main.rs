@@ -8,8 +8,9 @@ pub use auth::*;
 pub use cluster::*;
 pub use config::*;
 pub use connection::*;
-use futures::FutureExt;
 pub use web::*;
+
+use futures::FutureExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

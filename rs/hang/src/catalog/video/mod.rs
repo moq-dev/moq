@@ -8,14 +8,13 @@ pub use av1::*;
 pub use codec::*;
 pub use h264::*;
 pub use h265::*;
-use moq_lite::Track;
 pub use vp9::*;
 
-use std::collections::{btree_map, BTreeMap};
-
 use bytes::Bytes;
+use moq_lite::Track;
 use serde::{Deserialize, Serialize};
 use serde_with::{hex::Hex, DisplayFromStr};
+use std::collections::{btree_map, BTreeMap};
 
 /// Information about a video track in the catalog.
 ///

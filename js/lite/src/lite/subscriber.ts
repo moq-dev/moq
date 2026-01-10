@@ -1,4 +1,3 @@
-import { Effect } from "@moq/signals";
 import { Announced } from "../announced.ts";
 import { Broadcast } from "../broadcast.ts";
 import { Frame } from "../frame.ts";
@@ -29,8 +28,6 @@ export class Subscriber {
 	// Our subscribed tracks.
 	#subscribes = new Map<bigint, Track>();
 	#subscribeNext = 0n;
-
-	#effect = new Effect();
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -233,6 +230,5 @@ export class Subscriber {
 		}
 
 		this.#subscribes.clear();
-		this.#effect.close();
 	}
 }

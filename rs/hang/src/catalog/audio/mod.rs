@@ -3,14 +3,12 @@ mod codec;
 
 pub use aac::*;
 pub use codec::*;
-use moq_lite::Track;
-
-use std::collections::{btree_map, BTreeMap};
 
 use bytes::Bytes;
-
+use moq_lite::Track;
 use serde::{Deserialize, Serialize};
 use serde_with::{hex::Hex, DisplayFromStr};
+use std::collections::{btree_map, BTreeMap};
 
 /// Information about an audio track in the catalog.
 ///

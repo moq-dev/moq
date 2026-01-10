@@ -83,8 +83,8 @@ pub enum Error {
 	#[error("expired")]
 	Expired,
 
-	#[error("duration overflow")]
-	DurationOverflow(#[from] TimeOverflow),
+	#[error("time overflow")]
+	TimeOverflow(#[from] TimeOverflow),
 }
 
 impl Error {
@@ -111,7 +111,7 @@ impl Error {
 			Self::TooManyParameters => 19,
 			Self::InvalidRole => 20,
 			Self::Expired => 22,
-			Self::DurationOverflow(_) => 23,
+			Self::TimeOverflow(_) => 23,
 			Self::App(app) => *app + 64,
 		}
 	}

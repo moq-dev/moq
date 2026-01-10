@@ -54,6 +54,9 @@ pub enum Error {
 	#[error("hex error: {0}")]
 	Hex(#[from] hex::FromHexError),
 
+	#[error("timestamp overflow")]
+	TimestampOverflow(#[from] moq_lite::TimeOverflow),
+
 	/// The track must start with a keyframe.
 	#[error("must start with a keyframe")]
 	MissingKeyframe,
@@ -72,9 +75,6 @@ pub enum Error {
 
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
-
-	#[error("time overflow")]
-	TimeOverflow(#[from] moq_lite::TimeOverflow),
 }
 
 /// A Result type alias for hang operations.
