@@ -56,7 +56,7 @@ pub enum Error {
 
 	/// The timestamp is too large.
 	#[error("timestamp overflow")]
-	TimestampOverflow(#[from] crate::TimestampOverflow),
+	TimestampOverflow(#[from] moq_lite::TimeOverflow),
 
 	/// The track must start with a keyframe.
 	#[error("must start with a keyframe")]

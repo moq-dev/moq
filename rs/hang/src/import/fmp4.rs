@@ -390,7 +390,7 @@ impl Fmp4 {
 
 			let tfdt = traf.tfdt.as_ref().context("missing tfdt box")?;
 			let mut dts = tfdt.base_media_decode_time;
-			let timescale = trak.mdia.mdhd.timescale as u64;
+			let _timescale = trak.mdia.mdhd.timescale as u64;
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
 
@@ -425,8 +425,7 @@ impl Fmp4 {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let micros = (pts as u128 * 1_000_000 / timescale as u128) as u64;
-					let timestamp = hang::Timestamp::from_micros(micros)?;
+					let timestamp = hang::Timestamp::from_scale(pts, 1_000_000)?;
 
 					if offset + size > mdat.len() {
 						anyhow::bail!("invalid data offset");
