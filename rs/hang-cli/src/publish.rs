@@ -2,7 +2,7 @@ use bytes::BytesMut;
 use clap::Subcommand;
 use hang::{
 	import::{Decoder, DecoderFormat},
-	moq_lite as moq,
+	moq_lite,
 };
 use tokio::io::AsyncReadExt;
 
