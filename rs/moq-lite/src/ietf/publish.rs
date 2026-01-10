@@ -110,9 +110,9 @@ use crate::{
 	coding::{Decode, DecodeError, Encode},
 	ietf::{
 		namespace::{decode_namespace, encode_namespace},
-		FilterType, GroupOrder, Location, Message, Parameters, RequestId, Version,
+		FilterType, GroupOrder, Location, Message, Parameters, RequestId, SubscribeParameter, Version,
 	},
-	Path,
+	Path, Time,
 };
 
 /// Used to be called SubscribeDone
@@ -157,8 +157,7 @@ pub struct Publish<'a> {
 	pub track_alias: u64,
 	pub group_order: GroupOrder,
 	pub largest_location: Option<Location>,
-	pub forward: bool,
-	// pub parameters: Parameters,
+	pub delivery_timeout: Time,
 }
 
 impl<'a> Message for Publish<'a> {
@@ -177,9 +176,14 @@ impl<'a> Message for Publish<'a> {
 			false.encode(w, version);
 		}
 
-		self.forward.encode(w, version);
-		// parameters
-		0u8.encode(w, version);
+		true.encode(w, version);
+
+		let mut params = Parameters::default();
+		params.set_int(
+			SubscribeParameter::DeliveryTimeout.into(),
+			self.delivery_timeout.as_millis() as u64,
+		);
+		params.encode(w, version);
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -194,8 +198,15 @@ impl<'a> Message for Publish<'a> {
 			false => None,
 		};
 		let forward = bool::decode(r, version)?;
+		if !forward {
+			return Err(DecodeError::Unsupported);
+		}
+
 		// parameters
-		let _params = Parameters::decode(r, version)?;
+		let params = Parameters::decode(r, version)?;
+		let delivery_timeout = params.get_int(SubscribeParameter::DeliveryTimeout.into()).unwrap_or(0);
+		let delivery_timeout = Time::from_millis(delivery_timeout).map_err(|_| DecodeError::InvalidValue)?;
+
 		Ok(Self {
 			request_id,
 			track_namespace,
@@ -203,7 +214,7 @@ impl<'a> Message for Publish<'a> {
 			track_alias,
 			group_order,
 			largest_location,
-			forward,
+			delivery_timeout,
 		})
 	}
 }
@@ -211,11 +222,10 @@ impl<'a> Message for Publish<'a> {
 #[derive(Debug)]
 pub struct PublishOk {
 	pub request_id: RequestId,
-	pub forward: bool,
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
 	pub filter_type: FilterType,
-	// pub parameters: Parameters,
+	pub delivery_timeout: Time,
 }
 
 impl Message for PublishOk {
@@ -223,21 +233,28 @@ impl Message for PublishOk {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
 		self.request_id.encode(w, version);
-		self.forward.encode(w, version);
+		true.encode(w, version);
 		self.subscriber_priority.encode(w, version);
 		self.group_order.encode(w, version);
 		self.filter_type.encode(w, version);
-		assert!(
-			matches!(self.filter_type, FilterType::LargestObject | FilterType::NextGroup),
-			"absolute subscribe not supported"
+		assert!(matches!(
+			self.filter_type,
+			FilterType::LargestObject | FilterType::NextGroup
+		));
+		let mut params = Parameters::default();
+		params.set_int(
+			SubscribeParameter::DeliveryTimeout.into(),
+			self.delivery_timeout.as_millis() as u64,
 		);
-		// no parameters
-		0u8.encode(w, version);
+		params.encode(w, version);
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let forward = bool::decode(r, version)?;
+		if !forward {
+			return Err(DecodeError::Unsupported);
+		}
 		let subscriber_priority = u8::decode(r, version)?;
 		let group_order = GroupOrder::decode(r, version)?;
 		let filter_type = FilterType::decode(r, version)?;
@@ -253,14 +270,16 @@ impl Message for PublishOk {
 		};
 
 		// no parameters
-		let _params = Parameters::decode(r, version)?;
+		let params = Parameters::decode(r, version)?;
+		let delivery_timeout = params.get_int(SubscribeParameter::DeliveryTimeout.into()).unwrap_or(0);
+		let delivery_timeout = Time::from_millis(delivery_timeout).map_err(|_| DecodeError::InvalidValue)?;
 
 		Ok(Self {
 			request_id,
-			forward,
 			subscriber_priority,
 			group_order,
 			filter_type,
+			delivery_timeout,
 		})
 	}
 }

@@ -250,7 +250,8 @@ export class Writer {
 		await this.write(setInt32(this.#scratch, v));
 	}
 
-	async u53(v: number) {
+	// Returns the number of bytes written
+	async u53(v: number): Promise<number> {
 		if (v < 0) {
 			throw new Error(`underflow, value is negative: ${v.toString()}`);
 		}
@@ -258,10 +259,14 @@ export class Writer {
 			throw new Error(`overflow, value larger than 53-bits: ${v.toString()}`);
 		}
 
-		await this.write(setVint53(this.#scratch, v));
+		const buffer = setVint53(this.#scratch, v);
+
+		await this.write(buffer);
+		return buffer.byteLength;
 	}
 
-	async u62(v: bigint) {
+	// Returns the number of bytes written
+	async u62(v: bigint): Promise<number> {
 		if (v < 0) {
 			throw new Error(`underflow, value is negative: ${v.toString()}`);
 		}
@@ -271,17 +276,21 @@ export class Writer {
 		}
 		*/
 
-		await this.write(setVint62(this.#scratch, v));
+		const buffer = setVint62(this.#scratch, v);
+		await this.write(buffer);
+		return buffer.byteLength;
 	}
 
 	async write(v: Uint8Array) {
 		await this.#writer.write(v);
 	}
 
-	async string(str: string) {
+	// Returns the number of bytes written
+	async string(str: string): Promise<number> {
 		const data = new TextEncoder().encode(str);
-		await this.u53(data.byteLength);
+		const length = await this.u53(data.byteLength);
 		await this.write(data);
+		return length + data.byteLength;
 	}
 
 	close() {

@@ -1,4 +1,4 @@
-use std::{cmp, fmt::Debug, io, sync::Arc};
+use std::{cmp, io, sync::Arc};
 
 use bytes::{Buf, Bytes, BytesMut};
 
@@ -19,7 +19,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
-	pub async fn decode<T: Decode<V> + Debug>(&mut self) -> Result<T, Error>
+	pub async fn decode<T: Decode<V>>(&mut self) -> Result<T, Error>
 	where
 		V: Clone,
 	{
@@ -49,7 +49,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	}
 
 	// Decode optional messages at the end of a stream
-	pub async fn decode_maybe<T: Decode<V> + Debug>(&mut self) -> Result<Option<T>, Error>
+	pub async fn decode_maybe<T: Decode<V>>(&mut self) -> Result<Option<T>, Error>
 	where
 		V: Clone,
 	{
@@ -60,7 +60,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
-	pub async fn decode_peek<T: Decode<V> + Debug>(&mut self) -> Result<T, Error>
+	pub async fn decode_peek<T: Decode<V>>(&mut self) -> Result<T, Error>
 	where
 		V: Clone,
 	{
@@ -143,18 +143,24 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 
 	/// Wait until the stream is closed, erroring if there are any additional bytes.
 	pub async fn closed(&mut self) -> Result<(), Error> {
-		if self.buffer.is_empty()
-			&& self
-				.stream
-				.read_buf(&mut self.buffer)
-				.await
-				.map_err(|e| Error::Transport(Arc::new(e)))?
-				.is_none()
-		{
-			return Ok(());
+		if !self.buffer.is_empty() {
+			return Err(DecodeError::ExpectedEnd.into());
 		}
 
-		Err(DecodeError::ExpectedEnd.into())
+		// Ensure buffer has capacity to avoid read_buf with empty slice
+		if self.buffer.capacity() == 0 {
+			self.buffer.reserve(1024);
+		}
+
+		match self
+			.stream
+			.read_buf(&mut self.buffer)
+			.await
+			.map_err(|e| Error::Transport(Arc::new(e)))?
+		{
+			None => Ok(()),
+			Some(_) => Err(DecodeError::ExpectedEnd.into()),
+		}
 	}
 
 	pub fn abort(&mut self, err: &Error) {

@@ -7,12 +7,12 @@
 //! The reader can be cloned, in which case each reader receives a copy of each frame. (fanout)
 //!
 //! The stream is closed with [ServeError::MoqError] when all writers or readers are dropped.
-use std::future::Future;
+use std::{fmt, future::Future, ops::Deref};
 
 use bytes::Bytes;
 use tokio::sync::watch;
 
-use crate::{Error, Produce, Result};
+use crate::{Error, ExpiresConsumer, ExpiresProducer, Result, Time};
 
 use super::{Frame, FrameConsumer, FrameProducer};
 
@@ -22,51 +22,59 @@ pub struct Group {
 	pub sequence: u64,
 }
 
-impl Group {
-	pub fn produce(self) -> Produce<GroupProducer, GroupConsumer> {
-		let producer = GroupProducer::new(self);
-		let consumer = producer.consume();
-		Produce { producer, consumer }
-	}
-}
-
-impl From<usize> for Group {
-	fn from(sequence: usize) -> Self {
+impl<T: Into<u64>> From<T> for Group {
+	fn from(sequence: T) -> Self {
 		Self {
-			sequence: sequence as u64,
+			sequence: sequence.into(),
 		}
 	}
 }
 
-impl From<u64> for Group {
-	fn from(sequence: u64) -> Self {
-		Self { sequence }
-	}
-}
-
-impl From<u32> for Group {
-	fn from(sequence: u32) -> Self {
-		Self {
-			sequence: sequence as u64,
-		}
-	}
-}
-
-impl From<u16> for Group {
-	fn from(sequence: u16) -> Self {
-		Self {
-			sequence: sequence as u64,
-		}
-	}
-}
-
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct GroupState {
 	// The frames that has been written thus far
-	frames: Vec<FrameConsumer>,
+	frames: Vec<FrameProducer>,
 
 	// Whether the group is closed
 	closed: Option<Result<()>>,
+
+	// The maximum instant of the frames in the group.
+	// TODO prevent going backwards instead?
+	max_instant: Option<Time>,
+}
+
+impl GroupState {
+	fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
+		if let Some(closed) = self.closed.clone() {
+			return Err(closed.err().unwrap_or(Error::Cancel));
+		}
+
+		self.max_instant = Some(self.max_instant.unwrap_or_default().max(frame.instant));
+
+		self.frames.push(frame);
+
+		Ok(())
+	}
+
+	fn close(&mut self) -> Result<()> {
+		if let Some(closed) = self.closed.clone() {
+			return Err(closed.err().unwrap_or(Error::Cancel));
+		}
+
+		self.closed = Some(Ok(()));
+
+		Ok(())
+	}
+
+	fn abort(&mut self, err: Error) -> Result<()> {
+		if let Some(Err(err)) = self.closed.clone() {
+			return Err(err);
+		}
+
+		self.closed = Some(Err(err));
+
+		Ok(())
+	}
 }
 
 /// Create a group, frame-by-frame.
@@ -74,55 +82,92 @@ struct GroupState {
 pub struct GroupProducer {
 	// Mutable stream state.
 	state: watch::Sender<GroupState>,
+	info: Group,
+	expires: ExpiresProducer,
+}
 
-	// Immutable stream state.
-	pub info: Group,
+impl fmt::Debug for GroupProducer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("GroupProducer")
+			.field("info", &self.info)
+			.field("state", &self.state.borrow().deref())
+			.finish()
+	}
 }
 
 impl GroupProducer {
-	fn new(info: Group) -> Self {
+	pub fn new(info: Group, expires: ExpiresProducer) -> Self {
 		Self {
 			info,
 			state: Default::default(),
+			expires,
 		}
+	}
+
+	pub fn info(&self) -> &Group {
+		&self.info
 	}
 
 	/// A helper method to write a frame from a single byte buffer.
 	///
-	/// If you want to write multiple chunks, use [Self::create] or [Self::append].
-	/// But an upfront size is required.
-	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B) {
+	/// If you want to write multiple chunks, use [Self::create_frame] or [Self::append_frame].
+	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B, instant: Time) -> Result<()> {
 		let data = frame.into();
 		let frame = Frame {
-			size: data.len() as u64,
+			size: data.len(),
+			instant,
 		};
-		let mut frame = self.create_frame(frame);
-		frame.write_chunk(data);
-		frame.close();
+		let mut frame = self.create_frame(frame)?;
+		frame.write_chunk(data)?;
+		frame.close()?;
+
+		Ok(())
 	}
 
 	/// Create a frame with an upfront size
-	pub fn create_frame(&mut self, info: Frame) -> FrameProducer {
-		let frame = Frame::produce(info);
-		self.append_frame(frame.consumer);
-		frame.producer
+	pub fn create_frame(&mut self, info: Frame) -> Result<FrameProducer> {
+		let frame = FrameProducer::new(info);
+		self.append_frame(frame.clone())?;
+		Ok(frame)
 	}
 
 	/// Append a frame to the group.
-	pub fn append_frame(&mut self, consumer: FrameConsumer) {
-		self.state.send_modify(|state| {
-			assert!(state.closed.is_none());
-			state.frames.push(consumer)
+	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
+		let mut result = Ok(());
+
+		// Add the current frame to the expiration tracker.
+		// NOTE: This might return an error if the current group is expired.
+		self.expires.create_frame(self.info.sequence, frame.instant)?;
+
+		self.state.send_if_modified(|state| {
+			result = state.append_frame(frame);
+			result.is_ok()
 		});
+
+		result
 	}
 
 	// Clean termination of the group.
-	pub fn close(self) {
-		self.state.send_modify(|state| state.closed = Some(Ok(())));
+	pub fn close(&mut self) -> Result<()> {
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			result = state.close();
+			result.is_ok()
+		});
+
+		result
 	}
 
-	pub fn abort(self, err: Error) {
-		self.state.send_modify(|state| state.closed = Some(Err(err)));
+	pub fn abort(&mut self, err: Error) -> Result<()> {
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			result = state.abort(err);
+			result.is_ok()
+		});
+
+		result
 	}
 
 	/// Create a new consumer for the group.
@@ -132,9 +177,11 @@ impl GroupProducer {
 			state: self.state.subscribe(),
 			index: 0,
 			active: None,
+			expires: self.expires.consume(),
 		}
 	}
 
+	// We don't use the `async` keyword so we don't borrow &self across the await.
 	pub fn unused(&self) -> impl Future<Output = ()> {
 		let state = self.state.clone();
 		async move {
@@ -143,20 +190,24 @@ impl GroupProducer {
 	}
 }
 
-impl From<Group> for GroupProducer {
-	fn from(info: Group) -> Self {
-		GroupProducer::new(info)
+impl Deref for GroupProducer {
+	type Target = Group;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
 	}
 }
 
 /// Consume a group, frame-by-frame.
+///
+/// If the consumer is cloned, it will receive a copy of all unread frames.
 #[derive(Clone)]
 pub struct GroupConsumer {
 	// Modify the stream state.
 	state: watch::Receiver<GroupState>,
 
 	// Immutable stream state.
-	pub info: Group,
+	info: Group,
 
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
@@ -164,9 +215,26 @@ pub struct GroupConsumer {
 
 	// Used to make read_frame cancel safe.
 	active: Option<FrameConsumer>,
+
+	// Used to check if the group is expired early.
+	expires: ExpiresConsumer,
+}
+
+impl fmt::Debug for GroupConsumer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("GroupConsumer")
+			.field("info", &self.info)
+			.field("state", &self.state.borrow().deref())
+			.field("index", &self.index)
+			.finish()
+	}
 }
 
 impl GroupConsumer {
+	pub fn info(&self) -> &Group {
+		&self.info
+	}
+
 	/// Read the next frame.
 	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
 		// In order to be cancel safe, we need to save the active frame.
@@ -193,25 +261,50 @@ impl GroupConsumer {
 			return Ok(Some(frame));
 		}
 
-		loop {
-			{
-				let state = self.state.borrow_and_update();
+		let max_instant = self.state.borrow().max_instant;
 
-				if let Some(frame) = state.frames.get(self.index).cloned() {
-					self.index += 1;
-					return Ok(Some(frame));
-				}
+		let state = tokio::select! {
+			// Wait until a new frame.
+			state = self.state.wait_for(|state| self.index < state.frames.len() || state.closed.is_some()) => state,
+			// Or wait until the maximum instant in the group is expired.
+			err = self.expires.wait_expired(self.info.sequence, max_instant.unwrap_or_default()), if max_instant.is_some() => return Err(err),
+			// NOTE: We don't have to wait for a new maximum, because it will satisfy the wait for the next frame.
 
-				match &state.closed {
-					Some(Ok(_)) => return Ok(None),
-					Some(Err(err)) => return Err(err.clone()),
-					_ => {}
-				}
-			}
+		};
 
-			if self.state.changed().await.is_err() {
-				return Err(Error::Cancel);
-			}
+		let state = state.map_err(|_| Error::Cancel)?;
+
+		if let Some(frame) = state.frames.get(self.index).cloned() {
+			self.index += 1;
+			return Ok(Some(frame.consume()));
 		}
+
+		let closed = state.closed.clone().expect("wait_for returned");
+		closed.map(|_| None)
+	}
+
+	pub async fn closed(&self) -> Result<()> {
+		match self.state.clone().wait_for(|state| state.closed.is_some()).await {
+			Ok(state) => state.closed.clone().unwrap(),
+			Err(_) => Err(Error::Cancel),
+		}
+	}
+
+	/// Blocks until the first instant of a frame in the group has arrived.
+	pub async fn instant(&self) -> Result<Time> {
+		self.state
+			.clone()
+			.wait_for(|state| !state.frames.is_empty())
+			.await
+			.map_err(|_| Error::Cancel)?;
+		Ok(self.state.borrow().frames[0].instant)
+	}
+}
+
+impl Deref for GroupConsumer {
+	type Target = Group;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
 	}
 }

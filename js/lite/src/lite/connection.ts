@@ -125,10 +125,10 @@ export class Connection implements Established {
 	async #runSession() {
 		try {
 			// Receive messages until the connection is closed.
-			for (;;) {
-				const msg = await SessionInfo.decodeMaybe(this.#session.reader);
-				if (!msg) break;
-				// TODO use the session info
+			while (!(await this.#session.reader.done())) {
+				const msg = await SessionInfo.decode(this.#session.reader);
+				// TODO use SessionInfo
+				console.debug("session info", msg);
 			}
 		} finally {
 			console.warn("session stream closed");
@@ -162,7 +162,7 @@ export class Connection implements Established {
 			await this.#publisher.runAnnounce(msg, stream);
 			return;
 		} else if (typ === StreamId.Subscribe) {
-			const msg = await Subscribe.decode(stream.reader);
+			const msg = await Subscribe.decode(stream.reader, this.version);
 			await this.#publisher.runSubscribe(msg, stream);
 			return;
 		} else {
@@ -184,6 +184,7 @@ export class Connection implements Established {
 					stream.stop(new Error("cancel"));
 				})
 				.catch((err: unknown) => {
+					console.warn("error running uni stream", err);
 					stream.stop(err);
 				});
 		}

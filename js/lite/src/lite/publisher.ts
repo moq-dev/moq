@@ -3,9 +3,11 @@ import type { Broadcast } from "../broadcast.ts";
 import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
-import type { Track } from "../track.ts";
+import * as Time from "../time.ts";
+import { Track } from "../track.js";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
+import { Frame as FrameMessage } from "./frame.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import type { Version } from "./version.ts";
@@ -138,26 +140,44 @@ export class Publisher {
 			return;
 		}
 
-		const track = broadcast.subscribe(msg.track, msg.priority);
+		const track = new Track({
+			name: msg.track,
+			priority: msg.priority,
+			maxLatency: msg.maxLatency,
+			ordered: msg.ordered,
+		});
+		broadcast.serve(track);
+
+		// When any of the properties are updated, send the SubscribeOk message
+		const sendOk = async () => {
+			const msg = new SubscribeOk({
+				priority: track.priority.peek(),
+				maxLatency: track.maxLatency.peek(),
+				ordered: track.ordered.peek(),
+			});
+			await msg.encode(stream.writer, this.version);
+		};
+
+		// TODO: There's no backpressure, so this could fail, but I hate javascript.
+		const dispose = track.priority.subscribe(sendOk);
+		const dispose2 = track.maxLatency.subscribe(sendOk);
+		const dispose3 = track.ordered.subscribe(sendOk);
 
 		try {
-			const info = new SubscribeOk({ version: this.version, priority: msg.priority });
-			await info.encode(stream.writer);
+			await sendOk();
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
 			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer);
 
 			for (;;) {
-				const decode = SubscribeUpdate.decodeMaybe(stream.reader);
+				const done = await Promise.any([serving, stream.reader.done()]);
+				if (done) break;
 
-				const result = await Promise.any([serving, decode]);
-				if (!result) break;
-
-				if (result instanceof SubscribeUpdate) {
-					// TODO use the update
-					console.warn("subscribe update not supported", result);
-				}
+				const update = await SubscribeUpdate.decode(stream.reader, this.version);
+				track.priority.set(update.priority);
+				track.maxLatency.set(update.maxLatency);
+				track.ordered.set(update.ordered);
 			}
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -168,6 +188,10 @@ export class Publisher {
 			console.warn(`publish error: broadcast=${msg.broadcast} track=${track.name} error=${e.message}`);
 			track.close(e);
 			stream.abort(e);
+		} finally {
+			dispose();
+			dispose2();
+			dispose3();
 		}
 	}
 
@@ -218,13 +242,25 @@ export class Publisher {
 			await stream.u8(0); // stream type
 			await msg.encode(stream);
 
+			let instant = Time.Milli.zero;
+
 			try {
 				for (;;) {
 					const frame = await Promise.race([group.readFrame(), stream.closed]);
 					if (!frame) break;
 
-					await stream.u53(frame.byteLength);
-					await stream.write(frame);
+					let delta = (frame.instant - instant) as Time.Milli;
+					if (delta < 0) {
+						// TODO We either need to support this at the MoQ layer.
+						// Or we need to prevent this at the hang layer.
+						console.warn("MoQ timestamp went backwards");
+						delta = Time.Milli.zero;
+					} else {
+						instant = frame.instant;
+					}
+
+					const msg = new FrameMessage({ payload: frame.payload, delta });
+					await msg.encode(stream, this.version);
 				}
 
 				stream.close();

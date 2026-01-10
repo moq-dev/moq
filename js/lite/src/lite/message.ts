@@ -52,8 +52,3 @@ export async function decode<T>(reader: Reader, f: (r: Reader) => Promise<T>): P
 
 	return msg;
 }
-
-export async function decodeMaybe<T>(reader: Reader, f: (r: Reader) => Promise<T>): Promise<T | undefined> {
-	if (await reader.done()) return;
-	return await decode(reader, f);
-}

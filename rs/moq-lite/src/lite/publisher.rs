@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
 use web_async::FuturesExt;
 
 use crate::{
@@ -10,7 +11,7 @@ use crate::{
 		Version,
 	},
 	model::GroupConsumer,
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Delivery, Error, OriginConsumer, OriginProducer, Time, Track,
 };
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -23,7 +24,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn new(session: S, origin: Option<OriginConsumer>, version: Version) -> Self {
 		// Default to a dummy origin that is immediately closed.
-		let origin = origin.unwrap_or_else(|| Origin::produce().consumer);
+		let origin = origin.unwrap_or_else(|| OriginProducer::new().consume());
 		Self {
 			session,
 			origin,
@@ -65,10 +66,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		web_async::spawn(async move {
 			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix).await {
 				match &err {
-					Error::Cancel => {
-						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
-					}
-					Error::Transport(_) => {
+					Error::Cancel | Error::Transport(_) => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
 					}
 					err => {
@@ -148,8 +146,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = subscribe.track.clone();
 		let absolute = self.origin.absolute(&subscribe.broadcast).to_owned();
 
-		tracing::info!(%id, broadcast = %absolute, %track, "subscribed started");
-
 		let broadcast = self.origin.consume_broadcast(&subscribe.broadcast);
 		let priority = self.priority.clone();
 		let version = self.version;
@@ -180,116 +176,103 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		stream: &mut Stream<S, Version>,
 		subscribe: &lite::Subscribe<'_>,
-		consumer: Option<BroadcastConsumer>,
+		broadcast: Option<BroadcastConsumer>,
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
-		let track = Track {
-			name: subscribe.track.to_string(),
+		let track = Track::from(subscribe.track.to_string());
+
+		let delivery = Delivery {
 			priority: subscribe.priority,
+			max_latency: subscribe.max_latency,
+			ordered: subscribe.ordered,
 		};
 
-		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track);
+		tracing::info!(id = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, ?delivery, "subscribed started");
 
-		// TODO wait until track.info() to get the *real* priority
+		let mut track = broadcast.ok_or(Error::NotFound)?.subscribe_track(track, delivery);
+		let delivery = track.delivery().current();
 
 		let info = lite::SubscribeOk {
-			priority: track.info.priority,
+			priority: delivery.priority,
+			max_latency: delivery.max_latency,
+			ordered: delivery.ordered,
 		};
+
+		tracing::trace!(subscribe = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, ?delivery, "subscribed ok");
 
 		stream.writer.encode(&info).await?;
 
-		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, version) => res?,
-			res = stream.reader.closed() => res?,
-		}
+		// Just to get around ownership issues.
+		let mut delivery = track.delivery().clone();
 
-		stream.writer.finish()?;
-		stream.writer.closed().await
-	}
+		// All of the groups we're currently serving.
+		let mut tasks = FuturesUnordered::new();
 
-	async fn run_track(
-		session: S,
-		mut track: TrackConsumer,
-		subscribe: &lite::Subscribe<'_>,
-		priority: PriorityQueue,
-		version: Version,
-	) -> Result<(), Error> {
-		// TODO use a BTreeMap serve the latest N groups by sequence.
-		// Until then, we'll implement N=2 manually.
-		// Also, this is more complicated because we can't use tokio because of WASM.
-		// We need to drop futures in order to cancel them and keep polling them with select!
-		let mut old_group = None;
-		let mut new_group = None;
-
-		// Annoying that we can't use a tuple here as we need the compiler to infer the type.
-		// Otherwise we'd have to pick Send or !Send...
-		let mut old_sequence = None;
-		let mut new_sequence = None;
-
-		// Keep reading groups from the track, some of which may arrive out of order.
 		loop {
 			let group = tokio::select! {
-				biased;
 				Some(group) = track.next_group().transpose() => group,
-				Some(_) = async { Some(old_group.as_mut()?.await) } => {
-					old_group = None;
-					old_sequence = None;
+				update = stream.reader.decode_maybe::<lite::SubscribeUpdate>() => {
+					// The stream is closed, so we're done.
+					// TODO also cancel outstanding groups.
+					let Some(update) = update? else {break};
+
+					let delivery = Delivery {
+						priority: update.priority,
+						max_latency: update.max_latency,
+						ordered: update.ordered,
+					};
+
+					tracing::info!(subscribe = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, ?delivery, "subscribed update");
+					track.subscriber().update(delivery);
+
+					// TODO update the priority of all outstanding groups.
+
 					continue;
 				},
-				Some(_) = async { Some(new_group.as_mut()?.await) } => {
-					new_group = old_group;
-					new_sequence = old_sequence;
-					old_group = None;
-					old_sequence = None;
+				Some(delivery) = delivery.changed() => {
+					let info = lite::SubscribeOk {
+						priority: delivery.priority,
+						max_latency: delivery.max_latency,
+						ordered: delivery.ordered,
+					};
+
+					tracing::info!(subscribe = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, ?delivery, "subscribed ok");
+					stream.writer.encode(&info).await?;
+
 					continue;
+
 				},
-				else => return Ok(()),
+				// This is a hack to avoid waking up the select! loop each time a group completes.
+				// We poll all of the groups until they're all complete, only matching `else` when all are complete.
+				// We don't use tokio::spawn so we can wait until done, clean up on Drop, and support non-tokio.
+				true = async {
+					// Constantly poll all of the groups until they're all complete.
+					while tasks.next().await.is_some() {}
+					// Never match
+					false
+				} => unreachable!("never match"),
+				else => break,
 			}?;
 
-			let sequence = group.info.sequence;
-			let latest = new_sequence.as_ref().unwrap_or(&0);
-
-			tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, sequence, latest, "serving group");
-
-			// If this group is older than the oldest group we're serving, skip it.
-			// We always serve at most two groups, but maybe we should serve only sequence >= MAX-1.
-			if sequence < *old_sequence.as_ref().unwrap_or(&0) {
-				tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, old = %sequence, %latest, "skipping group");
-				continue;
-			}
+			tracing::debug!(subscribe = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, group = %group.sequence, "serving group");
 
 			let msg = lite::Group {
 				subscribe: subscribe.id,
-				sequence,
+				sequence: group.sequence,
 			};
 
-			let priority = priority.insert(track.info.priority, sequence);
+			// TODO factor in ordered.
+			let priority = priority.insert(track.subscriber().current().priority, group.sequence);
 
-			// Spawn a task to serve this group, ignoring any errors because they don't really matter.
-			// TODO add some logging at least.
-			let handle = Box::pin(Self::serve_group(session.clone(), msg, priority, group, version));
-
-			// Terminate the old group if it's still running.
-			if let Some(old_sequence) = old_sequence.take() {
-				tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, old = %old_sequence, %latest, "aborting group");
-				old_group.take(); // Drop the future to cancel it.
-			}
-
-			assert!(old_group.is_none());
-
-			if sequence >= *latest {
-				old_group = new_group;
-				old_sequence = new_sequence;
-
-				new_group = Some(handle);
-				new_sequence = Some(sequence);
-			} else {
-				old_group = Some(handle);
-				old_sequence = Some(sequence);
-			}
+			// Run the group until it's closed or expires.
+			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
 		}
+
+		stream.writer.finish()?;
+		stream.writer.closed().await?;
+
+		Ok(())
 	}
 
 	async fn serve_group(
@@ -310,9 +293,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
 
+		// The maximum instant of the frames in the group.
+		let mut instant_max = Time::ZERO;
+
 		loop {
 			let frame = tokio::select! {
-				biased;
 				_ = stream.closed() => return Err(Error::Cancel),
 				frame = group.next_frame() => frame,
 				// Update the priority if it changes.
@@ -327,13 +312,26 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 
-			tracing::trace!(size = %frame.info.size, "writing frame");
+			let delta = match frame.instant.checked_sub(instant_max) {
+				Ok(delta) => {
+					instant_max = frame.instant;
+					delta
+				}
+				Err(_) => {
+					tracing::warn!("frame instant went backwards");
+					Default::default()
+				}
+			};
 
-			stream.encode(&frame.info.size).await?;
+			stream
+				.encode(&lite::FrameHeader {
+					delta,
+					size: frame.size,
+				})
+				.await?;
 
 			loop {
 				let chunk = tokio::select! {
-					biased;
 					_ = stream.closed() => return Err(Error::Cancel),
 					chunk = frame.read_chunk() => chunk,
 					// Update the priority if it changes.
@@ -343,19 +341,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					}
 				};
 
-				match chunk? {
-					Some(mut chunk) => stream.write_all(&mut chunk).await?,
-					None => break,
-				}
+				let Some(mut chunk) = chunk? else {
+					break;
+				};
+				stream.write_all(&mut chunk).await?;
 			}
-
-			tracing::trace!(size = %frame.info.size, "wrote frame");
 		}
 
 		stream.finish()?;
 		stream.closed().await?;
-
-		tracing::debug!(sequence = %msg.sequence, "finished group");
 
 		Ok(())
 	}

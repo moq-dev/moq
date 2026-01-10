@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::sync::Arc;
 
 use crate::{coding::*, Error};
 
@@ -18,7 +18,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		}
 	}
 
-	pub async fn encode<T: Encode<V> + Debug>(&mut self, msg: &T) -> Result<(), Error>
+	pub async fn encode<T: Encode<V>>(&mut self, msg: &T) -> Result<(), Error>
 	where
 		V: Clone,
 	{
@@ -55,7 +55,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		Ok(())
 	}
 
-	/// A clean termination of the stream, waiting for the peer to close.
+	/// Mark the clean termination of the stream.
 	pub fn finish(&mut self) -> Result<(), Error> {
 		self.stream
 			.as_mut()

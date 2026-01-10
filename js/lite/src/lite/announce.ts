@@ -29,10 +29,6 @@ export class Announce {
 	static async decode(r: Reader): Promise<Announce> {
 		return Message.decode(r, Announce.#decode);
 	}
-
-	static async decodeMaybe(r: Reader): Promise<Announce | undefined> {
-		return Message.decodeMaybe(r, Announce.#decode);
-	}
 }
 
 export class AnnounceInterest {

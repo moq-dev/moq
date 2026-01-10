@@ -1,45 +1,39 @@
-use std::future::Future;
+use std::{fmt, ops::Deref};
 
 use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
 
-use crate::{Error, Produce, Result};
+use crate::{Error, Result, Time};
 
+/// A unit of data, representing a point in time.
+///
+/// This is often a video frame or a packet of audio samples.
+/// The instant is when the frame was captured and should be rendered, scoped to the *track*.
+///
+/// The size must be known upfront. If you don't know the size, write a Frame for each chunk.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {
-	pub size: u64,
+	/// A timestamp (in milliseconds) when the frame was originally created, scoped to the *track*.
+	///
+	/// This *should* be set as early as possible in the pipeline and proxied through all relays.
+	/// There is no clock synchronization or "zero" value; everything is relative to the track.
+	///
+	/// This may be used by the application as a replacement for "presentation timestamp", even across tracks.
+	/// However, the lack of granularity and inability to go backwards limits its usefulness.
+	pub instant: Time,
+
+	/// The size of the frame in bytes.
+	pub size: usize,
 }
 
 impl Frame {
-	pub fn produce(self) -> Produce<FrameProducer, FrameConsumer> {
-		let producer = FrameProducer::new(self);
-		let consumer = producer.consume();
-		Produce { producer, consumer }
-	}
-}
-
-impl From<usize> for Frame {
-	fn from(size: usize) -> Self {
-		Self { size: size as u64 }
-	}
-}
-
-impl From<u64> for Frame {
-	fn from(size: u64) -> Self {
-		Self { size }
-	}
-}
-
-impl From<u32> for Frame {
-	fn from(size: u32) -> Self {
-		Self { size: size as u64 }
-	}
-}
-
-impl From<u16> for Frame {
-	fn from(size: u16) -> Self {
-		Self { size: size as u64 }
+	/// A helper to create a frame with the current time.
+	pub fn new(size: usize) -> Self {
+		Self {
+			instant: Time::now(),
+			size,
+		}
 	}
 }
 
@@ -50,48 +44,126 @@ struct FrameState {
 
 	// Set when the writer or all readers are dropped.
 	closed: Option<Result<()>>,
+
+	// Sanity check to ensure we don't write more than the frame size.
+	remaining: usize,
+}
+
+impl fmt::Debug for FrameState {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("FrameState")
+			.field("chunks", &self.chunks.len())
+			.field("size", &self.chunks.iter().map(Bytes::len).sum::<usize>())
+			.field("closed", &self.closed.is_some())
+			.finish()
+	}
+}
+
+impl FrameState {
+	fn new(size: usize) -> Self {
+		Self {
+			chunks: Vec::new(),
+			closed: None,
+			remaining: size,
+		}
+	}
+
+	fn write_chunk(&mut self, chunk: Bytes) -> Result<()> {
+		if let Some(closed) = self.closed.clone() {
+			return Err(closed.err().unwrap_or(Error::Cancel));
+		}
+
+		self.remaining = self.remaining.checked_sub(chunk.len()).ok_or(Error::WrongSize)?;
+
+		self.chunks.push(chunk);
+
+		Ok(())
+	}
+
+	fn close(&mut self) -> Result<()> {
+		if self.remaining != 0 {
+			return Err(Error::WrongSize);
+		}
+
+		if let Some(closed) = self.closed.clone() {
+			return Err(closed.err().unwrap_or(Error::Cancel));
+		}
+
+		self.closed = Some(Ok(()));
+
+		Ok(())
+	}
+
+	fn abort(&mut self, err: Error) -> Result<()> {
+		if let Some(Err(err)) = self.closed.clone() {
+			return Err(err);
+		}
+
+		self.closed = Some(Err(err));
+
+		Ok(())
+	}
 }
 
 /// Used to write a frame's worth of data in chunks.
 #[derive(Clone)]
 pub struct FrameProducer {
-	// Immutable stream state.
-	pub info: Frame,
+	info: Frame,
 
 	// Mutable stream state.
 	state: watch::Sender<FrameState>,
+}
 
-	// Sanity check to ensure we don't write more than the frame size.
-	written: usize,
+impl fmt::Debug for FrameProducer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("FrameProducer")
+			.field("info", &self.info)
+			.field("state", &self.state.borrow().deref())
+			.finish()
+	}
 }
 
 impl FrameProducer {
-	fn new(info: Frame) -> Self {
+	pub fn new(info: Frame) -> Self {
 		Self {
+			state: watch::Sender::new(FrameState::new(info.size)),
 			info,
-			state: Default::default(),
-			written: 0,
 		}
 	}
 
-	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) {
-		let chunk = chunk.into();
-		self.written += chunk.len();
-		assert!(self.written <= self.info.size as usize);
+	pub fn info(&self) -> &Frame {
+		&self.info
+	}
 
-		self.state.send_modify(|state| {
-			assert!(state.closed.is_none());
-			state.chunks.push(chunk);
+	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			result = state.write_chunk(chunk.into());
+			result.is_ok()
 		});
+
+		result
 	}
 
-	pub fn close(self) {
-		assert!(self.written == self.info.size as usize);
-		self.state.send_modify(|state| state.closed = Some(Ok(())));
+	pub fn close(&mut self) -> Result<()> {
+		let mut result = Ok(());
+		self.state.send_if_modified(|state| {
+			result = state.close();
+			result.is_ok()
+		});
+		result
 	}
 
-	pub fn abort(self, err: Error) {
-		self.state.send_modify(|state| state.closed = Some(Err(err)));
+	pub fn abort(&mut self, err: Error) -> Result<()> {
+		let mut result = Ok(());
+
+		self.state.send_if_modified(|state| {
+			result = state.abort(err);
+			result.is_ok()
+		});
+
+		result
 	}
 
 	/// Create a new consumer for the frame.
@@ -102,14 +174,6 @@ impl FrameProducer {
 			index: 0,
 		}
 	}
-
-	// Returns a Future so &self is not borrowed during the future.
-	pub fn unused(&self) -> impl Future<Output = ()> {
-		let state = self.state.clone();
-		async move {
-			state.closed().await;
-		}
-	}
 }
 
 impl From<Frame> for FrameProducer {
@@ -118,11 +182,21 @@ impl From<Frame> for FrameProducer {
 	}
 }
 
+impl Deref for FrameProducer {
+	type Target = Frame;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 /// Used to consume a frame's worth of data in chunks.
+///
+/// If the consumer is cloned, it will receive a copy of all unread chunks.
 #[derive(Clone)]
 pub struct FrameConsumer {
 	// Immutable stream state.
-	pub info: Frame,
+	info: Frame,
 
 	// Modify the stream state.
 	state: watch::Receiver<FrameState>,
@@ -132,7 +206,21 @@ pub struct FrameConsumer {
 	index: usize,
 }
 
+impl fmt::Debug for FrameConsumer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("FrameConsumer")
+			.field("info", &self.info)
+			.field("state", &self.state.borrow().deref())
+			.field("index", &self.index)
+			.finish()
+	}
+}
+
 impl FrameConsumer {
+	pub fn info(&self) -> &Frame {
+		&self.info
+	}
+
 	/// Return the next chunk.
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
 		loop {
@@ -145,8 +233,12 @@ impl FrameConsumer {
 				}
 
 				match &state.closed {
-					Some(Ok(_)) => return Ok(None),
-					Some(Err(err)) => return Err(err.clone()),
+					Some(Ok(_)) => {
+						return Ok(None);
+					}
+					Some(Err(err)) => {
+						return Err(err.clone());
+					}
 					_ => {}
 				}
 			}
@@ -208,5 +300,13 @@ impl FrameConsumer {
 		}
 
 		Ok(buf.freeze())
+	}
+}
+
+impl Deref for FrameConsumer {
+	type Target = Frame;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
 	}
 }

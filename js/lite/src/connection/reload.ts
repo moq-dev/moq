@@ -1,11 +1,12 @@
 import { Effect, Signal } from "@moq/signals";
+import type * as Time from "../time.ts";
 import { type ConnectProps, connect, type WebSocketOptions } from "./connect.ts";
 import type { Established } from "./established.ts";
 
 export type ReloadDelay = {
 	// The delay in milliseconds before reconnecting.
 	// default: 1000
-	initial: DOMHighResTimeStamp;
+	initial: Time.Milli;
 
 	// The multiplier for the delay.
 	// default: 2
@@ -13,7 +14,7 @@ export type ReloadDelay = {
 
 	// The maximum delay in milliseconds.
 	// default: 30000
-	max: DOMHighResTimeStamp;
+	max: Time.Milli;
 };
 
 export type ReloadProps = ConnectProps & {
@@ -48,7 +49,7 @@ export class Reload {
 
 	signals = new Effect();
 
-	#delay: DOMHighResTimeStamp;
+	#delay: Time.Milli;
 
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
@@ -56,7 +57,7 @@ export class Reload {
 	constructor(props?: ReloadProps) {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.delay = props?.delay ?? { initial: 1000, multiplier: 2, max: 30000 };
+		this.delay = props?.delay ?? { initial: 1000 as Time.Milli, multiplier: 2, max: 30000 as Time.Milli };
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
 
@@ -103,7 +104,7 @@ export class Reload {
 				const tick = this.#tick.peek() + 1;
 				effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), this.#delay);
 
-				this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
+				this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max) as Time.Milli;
 			}
 		});
 	}

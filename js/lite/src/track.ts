@@ -1,24 +1,36 @@
 import { Signal } from "@moq/signals";
+import type { Frame } from "./frame.ts";
 import { Group } from "./group.ts";
+import * as Time from "./time.ts";
 
-export class TrackState {
-	groups = new Signal<Group[]>([]);
-	closed = new Signal<boolean | Error>(false);
+export interface TrackProps {
+	name: string;
+	priority?: number | Signal<number>;
+	maxLatency?: Time.Milli | Signal<Time.Milli>;
+	ordered?: boolean;
 }
 
 export class Track {
 	readonly name: string;
 
-	state = new TrackState();
-	#next?: number;
+	#groups = new Signal<Group[]>([]);
+	maxLatency: Signal<Time.Milli>;
+	priority: Signal<number>;
+	ordered: Signal<boolean>;
 
+	#closed = new Signal<boolean | Error>(false);
 	readonly closed: Promise<Error | undefined>;
 
-	constructor(name: string) {
-		this.name = name;
+	#next?: number;
+
+	constructor(props: TrackProps) {
+		this.name = props.name;
+		this.priority = Signal.from(props.priority ?? 0);
+		this.maxLatency = Signal.from(props.maxLatency ?? Time.Milli.zero);
+		this.ordered = Signal.from(props.ordered ?? false);
 
 		this.closed = new Promise((resolve) => {
-			const dispose = this.state.closed.subscribe((closed) => {
+			const dispose = this.#closed.watch((closed) => {
 				if (!closed) return;
 				resolve(closed instanceof Error ? closed : undefined);
 				dispose();
@@ -31,12 +43,12 @@ export class Track {
 	 * @returns A GroupProducer for the new group
 	 */
 	appendGroup(): Group {
-		if (this.state.closed.peek()) throw new Error("track is closed");
+		if (this.#closed.peek()) throw new Error("track is closed");
 
 		const group = new Group(this.#next ?? 0);
 
 		this.#next = group.sequence + 1;
-		this.state.groups.mutate((groups) => {
+		this.#groups.mutate((groups) => {
 			groups.push(group);
 			groups.sort((a, b) => a.sequence - b.sequence);
 		});
@@ -49,7 +61,7 @@ export class Track {
 	 * @param group - The group to insert
 	 */
 	writeGroup(group: Group) {
-		if (this.state.closed.peek()) throw new Error("track is closed");
+		if (this.#closed.peek()) throw new Error("track is closed");
 
 		if (group.sequence < (this.#next ?? 0)) {
 			group.close();
@@ -57,7 +69,7 @@ export class Track {
 		}
 
 		this.#next = group.sequence + 1;
-		this.state.groups.mutate((groups) => {
+		this.#groups.mutate((groups) => {
 			groups.push(group);
 			groups.sort((a, b) => a.sequence - b.sequence);
 		});
@@ -68,61 +80,43 @@ export class Track {
 	 *
 	 * @param frame - The frame to append
 	 */
-	writeFrame(frame: Uint8Array) {
+	writeFrame(frame: Frame) {
 		const group = this.appendGroup();
 		group.writeFrame(frame);
 		group.close();
 	}
 
-	writeString(str: string) {
-		const group = this.appendGroup();
-		group.writeString(str);
-		group.close();
-	}
-
-	writeJson(json: unknown) {
-		const group = this.appendGroup();
-		group.writeJson(json);
-		group.close();
-	}
-
-	writeBool(bool: boolean) {
-		const group = this.appendGroup();
-		group.writeBool(bool);
-		group.close();
-	}
-
 	async nextGroup(): Promise<Group | undefined> {
 		for (;;) {
-			const groups = this.state.groups.peek();
+			const groups = this.#groups.peek();
 			if (groups.length > 0) {
 				return groups.shift();
 			}
 
-			const closed = this.state.closed.peek();
+			const closed = this.#closed.peek();
 			if (closed instanceof Error) throw closed;
 			if (closed) return undefined;
 
-			await Signal.race(this.state.groups, this.state.closed);
+			await Signal.race(this.#groups, this.#closed);
 		}
 	}
 
-	async readFrame(): Promise<Uint8Array | undefined> {
-		return (await this.readFrameSequence())?.data;
+	async readFrame(): Promise<Frame | undefined> {
+		return (await this.readFrameSequence())?.frame;
 	}
 
 	// Returns the sequence number of the group and frame, not just the data.
-	async readFrameSequence(): Promise<{ group: number; frame: number; data: Uint8Array } | undefined> {
+	async readFrameSequence(): Promise<{ group: number; sequence: number; frame: Frame } | undefined> {
 		for (;;) {
-			const groups = this.state.groups.peek();
+			const groups = this.#groups.peek();
 
 			// Discard old groups.
 			while (groups.length > 1) {
 				const frames = groups[0].state.frames.peek();
 				const next = frames.shift();
 				if (next) {
-					const frame = groups[0].state.total.peek() - frames.length - 1;
-					return { group: groups[0].sequence, frame, data: next };
+					const sequence = groups[0].state.total.peek() - frames.length - 1;
+					return { group: groups[0].sequence, sequence, frame: next };
 				}
 
 				// Skip this old group
@@ -131,11 +125,11 @@ export class Track {
 
 			// If there's no groups, wait for a new one.
 			if (groups.length === 0) {
-				const closed = this.state.closed.peek();
+				const closed = this.#closed.peek();
 				if (closed instanceof Error) throw closed;
 				if (closed) return undefined;
 
-				await Signal.race(this.state.groups, this.state.closed);
+				await Signal.race(this.#groups, this.#closed);
 				continue;
 			}
 
@@ -144,46 +138,27 @@ export class Track {
 			const frames = group.state.frames.peek();
 			const next = frames.shift();
 			if (next) {
-				const frame = group.state.total.peek() - frames.length - 1;
-				return { group: group.sequence, frame, data: next };
+				const sequence = group.state.total.peek() - frames.length - 1;
+				return { group: group.sequence, sequence, frame: next };
 			}
 
 			// If the track is closed, return undefined.
-			const closed = this.state.closed.peek();
+			const closed = this.#closed.peek();
 			if (closed instanceof Error) throw closed;
 			if (closed) return undefined;
 
 			// NOTE: We don't care if the latest group was closed or not.
-			await Signal.race(this.state.groups, this.state.closed, group.state.frames);
+			await Signal.race(this.#groups, this.#closed, group.state.frames);
 		}
-	}
-
-	async readString(): Promise<string | undefined> {
-		const next = await this.readFrame();
-		if (!next) return undefined;
-		return new TextDecoder().decode(next);
-	}
-
-	async readJson(): Promise<unknown | undefined> {
-		const next = await this.readString();
-		if (!next) return undefined;
-		return JSON.parse(next);
-	}
-
-	async readBool(): Promise<boolean | undefined> {
-		const next = await this.readFrame();
-		if (!next) return undefined;
-		if (next.byteLength !== 1 || !(next[0] === 0 || next[0] === 1)) throw new Error("invalid bool frame");
-		return next[0] === 1;
 	}
 
 	/**
 	 * Closes the publisher and all associated groups.
 	 */
 	close(abort?: Error) {
-		this.state.closed.set(abort ?? true);
+		this.#closed.set(abort ?? true);
 
-		for (const group of this.state.groups.peek()) {
+		for (const group of this.#groups.peek()) {
 			group.close(abort);
 		}
 	}

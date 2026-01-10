@@ -1,15 +1,19 @@
+import { Effect } from "@moq/signals";
 import { Announced } from "../announced.ts";
-import { Broadcast, type TrackRequest } from "../broadcast.ts";
+import { Broadcast } from "../broadcast.ts";
+import { Frame } from "../frame.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
+import * as Time from "../time.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
+import { Frame as FrameMessage } from "./frame.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import { StreamId } from "./stream.ts";
-import { Subscribe, SubscribeOk } from "./subscribe.ts";
-import type { Version } from "./version.ts";
+import { Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
+import { Version } from "./version.js";
 
 /**
  * Handles subscribing to broadcasts and managing their lifecycle.
@@ -25,6 +29,8 @@ export class Subscriber {
 	// Our subscribed tracks.
 	#subscribes = new Map<bigint, Track>();
 	#subscribeNext = 0n;
+
+	#effect = new Effect();
 
 	/**
 	 * Creates a new Subscriber instance.
@@ -67,10 +73,11 @@ export class Subscriber {
 
 			// Then receive updates
 			for (;;) {
-				const announce = await Promise.race([Announce.decodeMaybe(stream.reader), announced.closed]);
-				if (!announce) break;
-				if (announce instanceof Error) throw announce;
+				const done = await Promise.any([stream.reader.done(), announced.closed]);
+				if (done instanceof Error) throw done;
+				if (done) break;
 
+				const announce = await Announce.decode(stream.reader);
 				const path = Path.join(prefix, announce.suffix);
 
 				console.debug(`announced: broadcast=${path} active=${announce.active}`);
@@ -103,38 +110,67 @@ export class Subscriber {
 		return broadcast;
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: TrackRequest) {
+	async #runSubscribe(broadcast: Path.Valid, track: Track) {
 		const id = this.#subscribeNext++;
 
 		// Save the writer so we can append groups to it.
-		this.#subscribes.set(id, request.track);
+		this.#subscribes.set(id, track);
 
-		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${track.name}`);
 
-		const msg = new Subscribe(id, broadcast, request.track.name, request.priority);
+		const msg = new Subscribe({
+			id,
+			broadcast,
+			track: track.name,
+			priority: track.priority.peek(),
+			maxLatency: track.maxLatency.peek(),
+			ordered: track.ordered.peek(),
+		});
 
 		const stream = await Stream.open(this.#quic);
 		await stream.writer.u53(StreamId.Subscribe);
-		await msg.encode(stream.writer);
+
+		await msg.encode(stream.writer, this.version);
+
+		const sendUpdate = async () => {
+			const msg = new SubscribeUpdate({
+				priority: track.priority.peek(),
+				maxLatency: track.maxLatency.peek(),
+				ordered: track.ordered.peek(),
+			});
+			await msg.encode(stream.writer, this.version);
+		};
+
+		// TODO: There's no backpressure, so this could fail, but I hate javascript.
+		const dispose = track.priority.subscribe(sendUpdate);
+		const dispose2 = track.maxLatency.subscribe(sendUpdate);
+		const dispose3 = track.ordered.subscribe(sendUpdate);
 
 		try {
-			await SubscribeOk.decode(stream.reader, this.version);
-			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+			for (;;) {
+				// TODO do something with the publisher's priority/latency/ordered
+				await SubscribeOk.decode(stream.reader, this.version);
+				console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${track.name} `);
 
-			await Promise.race([stream.reader.closed, request.track.closed]);
+				const done = await Promise.race([stream.reader.done(), track.closed]);
+				if (done instanceof Error) throw done;
+				if (done !== false) break; // false means a new SubscribeOk
+			}
 
-			request.track.close();
+			track.close();
 			stream.close();
-			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${request.track.name}`);
+			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${track.name}`);
 		} catch (err) {
 			const e = error(err);
-			request.track.close(e);
-			console.warn(
-				`subscribe error: id=${id} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
-			);
+			track.close(e);
+			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${track.name} error=${e.message}`);
 			stream.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
+
+			dispose();
+			dispose2();
+			dispose3();
 		}
 	}
 
@@ -158,16 +194,28 @@ export class Subscriber {
 		const producer = new Group(group.sequence);
 		subscribe.writeGroup(producer);
 
+		let instant = Time.Milli.zero;
+
 		try {
 			for (;;) {
 				const done = await Promise.race([stream.done(), subscribe.closed, producer.closed]);
+				if (done instanceof Error) throw done;
 				if (done !== false) break;
 
-				const size = await stream.u53();
-				const payload = await stream.read(size);
-				if (!payload) break;
+				const frame = await FrameMessage.decode(stream, this.version);
 
-				producer.writeFrame(payload);
+				switch (this.version) {
+					case Version.DRAFT_03:
+						instant = (instant + frame.delta) as Time.Milli;
+						break;
+					case Version.DRAFT_02:
+					case Version.DRAFT_01:
+						// Nothing was encoded on the wire, so we use the receive time instead.
+						instant = Time.Milli.now();
+						break;
+				}
+
+				producer.writeFrame(new Frame({ payload: frame.payload, instant }));
 			}
 
 			producer.close();
@@ -185,5 +233,6 @@ export class Subscriber {
 		}
 
 		this.#subscribes.clear();
+		this.#effect.close();
 	}
 }

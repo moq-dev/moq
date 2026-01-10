@@ -7,7 +7,7 @@ use crate::{
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId, Version},
 	model::BroadcastProducer,
-	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
+	Broadcast, Delivery, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
 	TrackProducer,
 };
 
@@ -98,7 +98,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+		tracing::debug!(broadcast = %origin.absolute(&path), "announced");
 
 		let mut this = self.clone();
 		let producer = broadcast.clone();
@@ -143,7 +143,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_subscribe_ok(&mut self, msg: ietf::SubscribeOk) -> Result<(), Error> {
 		// Save the track alias
 		let mut state = self.state.lock();
+
 		if let Some(subscribe) = state.subscribes.get_mut(&msg.request_id) {
+			// Respond that we got an okay.
+			let mut producer = subscribe.producer.clone();
+
+			// Update the track with information we learned from the network.
+			producer.delivery().update(Delivery {
+				priority: 0, // TODO petition to get publisher priority in SubscribeOk
+				max_latency: msg.delivery_timeout,
+				ordered: msg.group_order == GroupOrder::Ascending,
+			});
+
 			subscribe.alias = Some(msg.track_alias);
 			state.aliases.insert(msg.track_alias, msg.request_id);
 		}
@@ -154,8 +165,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_subscribe_error(&mut self, msg: ietf::SubscribeError) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
-		if let Some(track) = state.subscribes.remove(&msg.request_id) {
-			track.producer.abort(Error::Cancel);
+		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
+			track.producer.abort(Error::Cancel)?;
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -167,8 +178,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_publish_done(&mut self, msg: ietf::PublishDone<'_>) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
-		if let Some(track) = state.subscribes.remove(&msg.request_id) {
-			track.producer.close();
+		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
+			track.producer.close()?;
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -224,8 +235,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			// This way we'll clean up the task when the broadcast is no longer needed.
 			let track = tokio::select! {
 				_ = broadcast.unused() => break,
-				producer = broadcast.requested_track() => match producer {
-					Some(producer) => producer,
+				track = broadcast.requested_track() => match track {
+					Some(track) => track,
 					None => break,
 				},
 				_ = self.session.closed() => break,
@@ -259,27 +270,35 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		request_id: RequestId,
 		broadcast: Path<'_>,
-		track: TrackProducer,
+		mut track: TrackProducer,
 	) -> Result<(), Error> {
+		let mut subscribers = track.subscribers().clone();
+		let delivery = subscribers.latest().unwrap_or_default();
+
 		self.control.send(ietf::Subscribe {
 			request_id,
 			track_namespace: broadcast.to_owned(),
-			track_name: (&track.info.name).into(),
-			subscriber_priority: track.info.priority,
-			group_order: GroupOrder::Descending,
+			track_name: track.name.as_ref().into(),
+			subscriber_priority: delivery.priority,
+			group_order: if delivery.ordered {
+				GroupOrder::Ascending
+			} else {
+				GroupOrder::Descending
+			},
 			// we want largest group
 			filter_type: FilterType::LargestObject,
+			delivery_timeout: delivery.max_latency,
 		})?;
 
 		// TODO we should send a joining fetch, but it's annoying to implement.
 		// We hope instead that publisher start subscriptions at group boundaries.
 
-		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe started");
+		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.name, "subscribe started");
 
 		track.unused().await;
-		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
+		tracing::warn!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.name, "subscribe cancelled");
 
-		track.abort(Error::Cancel);
+		track.abort(Error::Cancel)?;
 
 		Ok(())
 	}
@@ -292,7 +311,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, stripping");
 		}
 
-		let producer = {
+		let mut producer = {
 			let mut state = self.state.lock();
 			let request_id = match state.aliases.get(&group.track_alias) {
 				Some(request_id) => *request_id,
@@ -306,7 +325,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let group = Group {
 				sequence: group.group_id,
 			};
-			track.producer.create_group(group).ok_or(Error::Old)?
+			track.producer.create_group(group)?
 		};
 
 		let res = tokio::select! {
@@ -316,16 +335,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
-				tracing::trace!(group = %producer.info.sequence, "group cancelled");
-				producer.abort(Error::Cancel);
+				tracing::trace!(group = %producer.sequence, "group cancelled");
+				producer.abort(Error::Cancel)?;
 			}
 			Err(err) => {
-				tracing::debug!(%err, group = %producer.info.sequence, "group error");
-				producer.abort(err);
+				tracing::debug!(%err, group = %producer.sequence, "group error");
+				producer.abort(err)?;
 			}
 			_ => {
-				tracing::trace!(group = %producer.info.sequence, "group complete");
-				producer.close();
+				tracing::trace!(group = %producer.sequence, "group complete");
+				producer.close()?;
 			}
 		}
 
@@ -348,14 +367,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				stream.skip(size).await?;
 			}
 
-			let size: u64 = stream.decode().await?;
+			let size: usize = stream.decode().await?;
 			if size == 0 {
 				// Have to read the object status.
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
 					// Empty frame
-					let frame = producer.create_frame(Frame { size: 0 });
-					frame.close();
+					let mut frame = producer.create_frame(Frame {
+						// Use the receive time as the timestamp.
+						// TODO use an extension instead.
+						instant: crate::Time::now(),
+						size: 0,
+					})?;
+					frame.close()?;
 				} else if status == 3 && !group.flags.has_end {
 					// End of group
 					break;
@@ -363,21 +387,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				let frame = producer.create_frame(Frame { size });
+				let mut frame = producer.create_frame(Frame {
+					// Use the receive time as the timestamp.
+					// TODO use an extension instead
+					instant: crate::Time::now(),
+					size,
+				})?;
 
-				let res = tokio::select! {
-					_ = frame.unused() => Err(Error::Cancel),
-					res = self.run_frame(stream, frame.clone()) => res,
-				};
-
-				if let Err(err) = res {
-					frame.abort(err.clone());
+				if let Err(err) = self.run_frame(stream, frame.clone()).await {
+					frame.abort(err.clone())?;
 					return Err(err);
 				}
 			}
 		}
-
-		producer.close();
 
 		Ok(())
 	}
@@ -387,19 +409,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut frame: FrameProducer,
 	) -> Result<(), Error> {
-		let mut remain = frame.info.size;
+		let mut remain = frame.size;
 
-		tracing::trace!(size = %frame.info.size, "reading frame");
+		tracing::trace!(size = %frame.size, "reading frame");
 
 		while remain > 0 {
-			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;
-			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
-			frame.write_chunk(chunk);
+			let chunk = stream.read(remain).await?.ok_or(Error::WrongSize)?;
+			remain = remain.checked_sub(chunk.len()).ok_or(Error::WrongSize)?;
+			frame.write_chunk(chunk)?;
 		}
 
-		tracing::trace!(size = %frame.info.size, "read frame");
-
-		frame.close();
+		frame.close()?;
 
 		Ok(())
 	}
@@ -430,10 +450,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		} else {
 			self.control.send(ietf::PublishOk {
 				request_id: msg.request_id,
-				forward: true,
 				subscriber_priority: 0,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
+				// How are you even supposed to use this?
+				delivery_timeout: msg.delivery_timeout,
 			})?;
 		}
 
@@ -443,17 +464,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		let track = Track {
-			name: msg.track_name.to_string(),
+		// Announce our namespace if we haven't already.
+		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
+		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
+
+		let track = Track::from(msg.track_name.to_string());
+		let delivery = Delivery {
+			// TODO petition to get publisher priority in PublishOk
 			priority: 0,
-		}
-		.produce();
+			max_latency: msg.delivery_timeout,
+			ordered: msg.group_order == GroupOrder::Ascending,
+		};
+
+		let track = broadcast.create_track(track, delivery);
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
 			Entry::Vacant(entry) => {
 				entry.insert(TrackState {
-					producer: track.producer,
+					producer: track.clone(),
 					alias: Some(msg.track_alias),
 				});
 			}
@@ -462,16 +491,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Save that we're implicitly announcing this track.
 		state.publishes.insert(request_id, msg.track_namespace.to_owned());
-		drop(state);
-
-		// Announce our namespace if we haven't already.
-		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
-		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-
-		let exists = broadcast.insert_track(track.consumer);
-		if exists {
-			tracing::warn!(track = %msg.track_name, "track already exists, replacing it");
-		}
 
 		Ok(())
 	}
