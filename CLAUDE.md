@@ -62,3 +62,11 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 - Run `just check` to execute all tests and linting.
 - Run `just fix` to automatically fix formating and easy things.
 - Rust tests are integrated within source files
+
+## Workflow
+
+When making changes to the codebase:
+1. Make your code changes
+2. Run `just fix` to auto-format and fix linting issues
+3. Run `just check` to verify everything passes
+4. Commit and push changes

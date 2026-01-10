@@ -1,4 +1,4 @@
-import type * as Time from "../../time";
+import type { Time } from "@moq/lite";
 
 export type Message = Init | Data;
 

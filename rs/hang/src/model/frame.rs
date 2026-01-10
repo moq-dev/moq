@@ -1,8 +1,8 @@
 use derive_more::Debug;
 
-use crate::Timestamp;
-
 pub use buf_list::BufList;
+
+pub type Timestamp = moq_lite::Timescale<1_000_000>;
 
 /// A media frame with a timestamp and codec-specific payload.
 ///
