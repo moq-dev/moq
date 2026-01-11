@@ -1,14 +1,9 @@
-/**
- * Basic connection example
- *
- * This example demonstrates how to connect to a MoQ relay server.
- * Run with: bun run examples/connection.ts
- */
-import * as Moq from "../src/index.ts";
+import * as Moq from "@moq/lite";
 
 async function main() {
-	// Connect to a MoQ relay server
-	const connection = await Moq.Connection.connect(new URL("https://cdn.moq.dev/anon"));
+	const url = new URL("https://cdn.moq.dev/anon");
+	const connection = await Moq.Connection.connect(url);
+
 	console.log("Connected to MoQ relay!");
 
 	// Close the connection when done
