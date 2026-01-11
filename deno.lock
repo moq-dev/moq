@@ -11,7 +11,7 @@
   "workspace": {
     "packageJson": {
       "dependencies": [
-        "npm:@biomejs/biome@^2.3.8",
+        "npm:@biomejs/biome@^2.3.11",
         "npm:concurrently@^9.2.1"
       ]
     },

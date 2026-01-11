@@ -18,7 +18,7 @@
 		"fix": "bun run --filter='*' fix"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.3.8",
+		"@biomejs/biome": "^2.3.11",
 		"concurrently": "^9.2.1"
 	}
 }
