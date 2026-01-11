@@ -222,7 +222,12 @@ describe("StatsItem", () => {
 	it("renders correct class for each icon type", () => {
 		vi.mocked(registry.getStatsInformationProvider).mockReturnValue(undefined);
 
-		const statsProvider = ["network", "video", "audio", "buffer"] as const;
+		const statsProvider = [
+			{ name: "network", Icon: Icon.Network },
+			{ name: "video", Icon: Icon.Video },
+			{ name: "audio", Icon: Icon.Audio },
+			{ name: "buffer", Icon: Icon.Buffer },
+		] as const;
 
 		statsProvider.forEach((provider) => {
 			const testContainer = document.createElement("div");
@@ -231,9 +236,9 @@ describe("StatsItem", () => {
 			const testDispose = render(
 				() => (
 					<StatsItem
-						name={provider.charAt(0).toUpperCase() + provider.slice(1)}
-						statProvider={provider}
-						svg={<Icon name={provider} />}
+						name={provider.name.charAt(0).toUpperCase() + provider.name.slice(1)}
+						statProvider={provider.name}
+						svg={<provider.Icon />}
 						audio={mockAudioVideo.audio}
 						video={mockAudioVideo.video}
 					/>
@@ -242,7 +247,7 @@ describe("StatsItem", () => {
 			);
 
 			const item = testContainer.querySelector(".stats__item");
-			expect(item?.classList.contains(`stats__item--${provider}`)).toBe(true);
+			expect(item?.classList.contains(`stats__item--${provider.name}`)).toBe(true);
 
 			testDispose();
 			document.body.removeChild(testContainer);
@@ -290,7 +295,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name={statProvider().charAt(0).toUpperCase() + statProvider().slice(1)}
 					statProvider={statProvider()}
-					svg={<Icon name={statProvider()} />}
+					svg={statProvider() === "network" ? <Icon.Network /> : <Icon.Video />}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>

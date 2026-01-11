@@ -22,18 +22,15 @@ import volumeLow from "./volume-low.svg?raw";
 import volumeMedium from "./volume-medium.svg?raw";
 
 /**
- * Icon component that renders inlined SVG icons.
+ * Given the SVG source of an icon, return a JSX.Element
  *
- * - Always renders a <span role="img"> with the SVG as innerHTML
- * - Sets aria-hidden to true so icons are ignored by assistive tech (decorative only)
- *
- * @param props - IconProps
  * @returns JSX.Element
  */
 export function Element(src: string): JSX.Element {
 	return <span classList={{ "flex--center": true }} role="img" aria-hidden={true} innerHTML={src} />;
 }
 
+// For each icon, export a function that returns a JSX.Element
 const icon = (src: string) => () => Element(src);
 
 export const ArrowDown = icon(arrowDown);
