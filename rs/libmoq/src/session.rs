@@ -45,8 +45,9 @@ impl Session {
 		consume: Option<moq_lite::OriginProducer>,
 		callback: &mut ffi::OnStatus,
 	) -> Result<(), Error> {
-		let config = moq_native::ClientConfig::default();
-		let client = config.init().map_err(|err| Error::Connect(Arc::new(err)))?;
+		let client = moq_native::ClientConfig::default()
+			.init()
+			.map_err(|err| Error::Connect(Arc::new(err)))?;
 		let session = client
 			.connect(url, publish, consume)
 			.await

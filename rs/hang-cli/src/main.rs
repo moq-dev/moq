@@ -1,10 +1,12 @@
 mod client;
 mod publish;
 mod server;
+mod web;
 
 use client::*;
 use publish::*;
 use server::*;
+use web::*;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -14,6 +16,11 @@ use url::Url;
 pub struct Cli {
 	#[command(flatten)]
 	log: moq_native::Log,
+
+	/// Iroh configuration
+	#[command(flatten)]
+	#[cfg(feature = "iroh")]
+	iroh: moq_native::iroh::EndpointConfig,
 
 	#[command(subcommand)]
 	command: Command,
@@ -84,8 +91,34 @@ async fn main() -> anyhow::Result<()> {
 	// Initialize the broadcast from stdin before starting any client/server.
 	publish.init().await?;
 
+	#[cfg(feature = "iroh")]
+	let iroh = cli.iroh.bind().await?;
+
 	match cli.command {
-		Command::Serve { config, dir, name, .. } => server(config, name, dir, publish).await,
-		Command::Publish { config, url, name, .. } => client(config, url, name, publish).await,
+		Command::Serve { config, dir, name, .. } => {
+			let web_bind = config.bind.unwrap_or("[::]:443".parse().unwrap());
+
+			#[allow(unused_mut)]
+			let mut server = config.init()?;
+			#[cfg(feature = "iroh")]
+			server.with_iroh(iroh);
+
+			let web_tls = server.tls_info();
+
+			tokio::select! {
+				res = run_server(server, name, publish.consume()) => res,
+				res = run_web(web_bind, web_tls, dir) => res,
+				res = publish.run() => res,
+			}
+		}
+		Command::Publish { config, url, name, .. } => {
+			#[allow(unused_mut)]
+			let mut client = config.init()?;
+
+			#[cfg(feature = "iroh")]
+			client.with_iroh(iroh);
+
+			run_client(client, url, name, publish).await
+		}
 	}
 }

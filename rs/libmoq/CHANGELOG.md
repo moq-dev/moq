@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/moq-dev/moq/compare/libmoq-v0.2.2...libmoq-v0.2.3) - 2026-01-10
+
+### Added
+
+- iroh support ([#794](https://github.com/moq-dev/moq/pull/794))
+
+### Other
+
+- Add generic time system with Timescale type ([#824](https://github.com/moq-dev/moq/pull/824))
+- support WebSocket fallback for clients ([#812](https://github.com/moq-dev/moq/pull/812))
+- target_link_libraries ([#802](https://github.com/moq-dev/moq/pull/802))
+
 ## [0.2.2](https://github.com/moq-dev/moq/compare/libmoq-v0.2.1...libmoq-v0.2.2) - 2025-12-19
 
 ### Other

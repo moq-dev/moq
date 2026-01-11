@@ -3,9 +3,7 @@ use crate::Publish;
 use hang::moq_lite;
 use url::Url;
 
-pub async fn client(config: moq_native::ClientConfig, url: Url, name: String, publish: Publish) -> anyhow::Result<()> {
-	let client = config.init()?;
-
+pub async fn run_client(client: moq_native::Client, url: Url, name: String, publish: Publish) -> anyhow::Result<()> {
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_lite::Origin::produce();
 	origin.producer.publish_broadcast(&name, publish.consume());

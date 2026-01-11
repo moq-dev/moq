@@ -13,7 +13,7 @@
 	],
 	"scripts": {
 		"build": "tsc -b",
-		"check": "tsc --noEmit",
+		"check": "tsc --noEmit && tsc -b examples/tsconfig.json",
 		"test": "bun test",
 		"release": "bun ../scripts/release.ts"
 	},

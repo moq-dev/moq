@@ -48,7 +48,7 @@ impl TrackProducer {
 		tracing::trace!(?frame, "write frame");
 
 		let mut header = BytesMut::new();
-		frame.timestamp.as_micros().encode(&mut header, lite::Version::Draft02);
+		frame.timestamp.encode(&mut header, lite::Version::Draft02);
 
 		if frame.keyframe {
 			if let Some(group) = self.group.take() {
@@ -157,10 +157,7 @@ impl TrackConsumer {
 	pub async fn read_frame(&mut self) -> Result<Option<Frame>, Error> {
 		let latency = self.max_latency.try_into()?;
 		loop {
-			let cutoff = self
-				.max_timestamp
-				.checked_add(latency)
-				.ok_or(crate::TimestampOverflow)?;
+			let cutoff = self.max_timestamp.checked_add(latency)?;
 
 			// Keep track of all pending groups, buffering until we detect a timestamp far enough in the future.
 			// This is a race; only the first group will succeed.

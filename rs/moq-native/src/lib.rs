@@ -11,3 +11,6 @@ pub use server::*;
 pub use moq_lite;
 pub use rustls;
 pub use web_transport_quinn;
+
+#[cfg(feature = "iroh")]
+pub mod iroh;

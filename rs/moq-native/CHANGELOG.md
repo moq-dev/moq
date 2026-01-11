@@ -44,6 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/moq-dev/moq/compare/moq-native-v0.10.1...moq-native-v0.11.0) - 2026-01-10
+
+### Added
+
+- iroh support ([#794](https://github.com/moq-dev/moq/pull/794))
+
+### Other
+
+- support WebSocket fallback for clients ([#812](https://github.com/moq-dev/moq/pull/812))
+- Add debug features to moq-native ([#806](https://github.com/moq-dev/moq/pull/806))
+- Certificate reloading ([#774](https://github.com/moq-dev/moq/pull/774))
+
 ## [0.10.1](https://github.com/moq-dev/moq/compare/moq-native-v0.10.0...moq-native-v0.10.1) - 2025-12-13
 
 ### Other

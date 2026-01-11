@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::{net, time::Duration};
 
 use crate::crypto;
+#[cfg(feature = "iroh")]
+use crate::iroh::IrohQuicRequest;
 use anyhow::Context;
+use moq_lite::Session;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -10,7 +13,9 @@ use std::fs;
 use std::io::{self, Cursor, Read};
 use std::sync::{Arc, RwLock};
 use url::Url;
-use web_transport_quinn::{http, ServerError};
+#[cfg(feature = "iroh")]
+use web_transport_iroh::iroh;
+use web_transport_quinn::http;
 
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -83,6 +88,8 @@ pub struct Server {
 	quic: quinn::Endpoint,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	certs: Arc<ServeCerts>,
+	#[cfg(feature = "iroh")]
+	iroh: Option<iroh::Endpoint>,
 }
 
 impl Server {
@@ -138,7 +145,15 @@ impl Server {
 			quic: quic.clone(),
 			accept: Default::default(),
 			certs,
+			#[cfg(feature = "iroh")]
+			iroh: None,
 		})
+	}
+
+	#[cfg(feature = "iroh")]
+	pub fn with_iroh(&mut self, iroh: Option<iroh::Endpoint>) -> &mut Self {
+		self.iroh = iroh;
+		self
 	}
 
 	#[cfg(unix)]
@@ -172,10 +187,33 @@ impl Server {
 	/// a WebTransport request.
 	pub async fn accept(&mut self) -> Option<Request> {
 		loop {
+			// tokio::select! does not support cfg directives on arms, so we need to put the
+			// iroh cfg into a block, and default to a pending future if iroh is disabled.
+			let iroh_accept_fut = async {
+				#[cfg(feature = "iroh")]
+				if let Some(endpoint) = self.iroh.as_ref() {
+					endpoint.accept().await
+				} else {
+					std::future::pending::<_>().await
+				}
+
+				#[cfg(not(feature = "iroh"))]
+				std::future::pending::<()>().await
+			};
+
 			tokio::select! {
 				res = self.quic.accept() => {
 					let conn = res?;
 					self.accept.push(Self::accept_session(conn).boxed());
+				}
+				res = iroh_accept_fut => {
+					#[cfg(feature = "iroh")]
+					{
+						let conn = res?;
+						self.accept.push(Self::accept_iroh_session(conn).boxed());
+					}
+					#[cfg(not(feature = "iroh"))]
+					let _: () = res;
 				}
 				Some(res) = self.accept.next() => {
 					match res {
@@ -229,6 +267,32 @@ impl Server {
 		}
 	}
 
+	#[cfg(feature = "iroh")]
+	async fn accept_iroh_session(conn: iroh::endpoint::Incoming) -> anyhow::Result<Request> {
+		let conn = conn.accept()?.await?;
+		let alpn = String::from_utf8(conn.alpn().to_vec()).context("failed to decode ALPN")?;
+		tracing::Span::current().record("id", conn.stable_id());
+		tracing::debug!(remote = %conn.remote_id().fmt_short(), %alpn, "accepted");
+		match alpn.as_str() {
+			web_transport_iroh::ALPN_H3 => {
+				let request = web_transport_iroh::H3Request::accept(conn)
+					.await
+					.context("failed to receive WebTransport request")?;
+				Ok(Request::IrohWebTransport(request))
+			}
+			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => {
+				let request = IrohQuicRequest::accept(conn);
+				Ok(Request::IrohQuic(request))
+			}
+			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
+		}
+	}
+
+	#[cfg(feature = "iroh")]
+	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
+		self.iroh.as_ref()
+	}
+
 	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
 		self.quic.local_addr().context("failed to get local address")
 	}
@@ -241,18 +305,24 @@ impl Server {
 pub enum Request {
 	WebTransport(web_transport_quinn::Request),
 	Quic(QuicRequest),
+	#[cfg(feature = "iroh")]
+	IrohWebTransport(web_transport_iroh::H3Request),
+	#[cfg(feature = "iroh")]
+	IrohQuic(IrohQuicRequest),
 }
 
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn reject(self, status: http::StatusCode) -> Result<(), ServerError> {
+	pub async fn reject(self, status: http::StatusCode) -> anyhow::Result<()> {
 		match self {
-			Self::WebTransport(request) => request.close(status).await,
-			Self::Quic(request) => {
-				request.close(status);
-				Ok(())
-			}
+			Self::WebTransport(request) => request.close(status).await?,
+			Self::Quic(request) => request.close(status),
+			#[cfg(feature = "iroh")]
+			Request::IrohWebTransport(request) => request.close(status).await?,
+			#[cfg(feature = "iroh")]
+			Request::IrohQuic(request) => request.close(status),
 		}
+		Ok(())
 	}
 
 	/// Accept the session, performing rest of the MoQ handshake.
@@ -260,20 +330,25 @@ impl Request {
 		self,
 		publish: impl Into<Option<moq_lite::OriginConsumer>>,
 		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
-	) -> anyhow::Result<moq_lite::Session> {
+	) -> anyhow::Result<Session> {
 		let session = match self {
-			Request::WebTransport(request) => request.ok().await?,
-			Request::Quic(request) => request.ok(),
+			Request::WebTransport(request) => Session::accept(request.ok().await?, publish, subscribe).await?,
+			Request::Quic(request) => Session::accept(request.ok(), publish, subscribe).await?,
+			#[cfg(feature = "iroh")]
+			Request::IrohWebTransport(request) => Session::accept(request.ok().await?, publish, subscribe).await?,
+			#[cfg(feature = "iroh")]
+			Request::IrohQuic(request) => Session::accept(request.ok(), publish, subscribe).await?,
 		};
-		let session = moq_lite::Session::accept(session, publish, subscribe).await?;
 		Ok(session)
 	}
 
 	/// Returns the URL provided by the client.
-	pub fn url(&self) -> &Url {
+	pub fn url(&self) -> Option<&Url> {
 		match self {
-			Request::WebTransport(request) => request.url(),
-			Request::Quic(request) => request.url(),
+			Request::WebTransport(request) => Some(request.url()),
+			#[cfg(feature = "iroh")]
+			Request::IrohWebTransport(request) => Some(request.url()),
+			_ => None,
 		}
 	}
 }

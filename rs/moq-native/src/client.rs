@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::{fs, io, net, sync::Arc, time};
 use url::Url;
+#[cfg(feature = "iroh")]
+use web_transport_iroh::iroh;
 use web_transport_ws::{tokio_tungstenite, tungstenite};
 
 // Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
@@ -74,6 +76,12 @@ pub struct ClientConfig {
 	pub websocket: ClientWebSocket,
 }
 
+impl ClientConfig {
+	pub fn init(self) -> anyhow::Result<Client> {
+		Client::new(self)
+	}
+}
+
 impl Default for ClientConfig {
 	fn default() -> Self {
 		Self {
@@ -84,18 +92,14 @@ impl Default for ClientConfig {
 	}
 }
 
-impl ClientConfig {
-	pub fn init(self) -> anyhow::Result<Client> {
-		Client::new(self)
-	}
-}
-
 #[derive(Clone)]
 pub struct Client {
 	pub quic: quinn::Endpoint,
 	pub tls: rustls::ClientConfig,
 	pub transport: Arc<quinn::TransportConfig>,
 	pub websocket_delay: Option<time::Duration>,
+	#[cfg(feature = "iroh")]
+	pub iroh: Option<iroh::Endpoint>,
 }
 
 impl Client {
@@ -169,7 +173,15 @@ impl Client {
 			tls,
 			transport,
 			websocket_delay: config.websocket.delay,
+			#[cfg(feature = "iroh")]
+			iroh: None,
 		})
+	}
+
+	#[cfg(feature = "iroh")]
+	pub fn with_iroh(&mut self, iroh: Option<iroh::Endpoint>) -> &mut Self {
+		self.iroh = iroh;
+		self
 	}
 
 	/// Establish a WebTransport/QUIC connection followed by a MoQ handshake.
@@ -179,6 +191,13 @@ impl Client {
 		publish: impl Into<Option<moq_lite::OriginConsumer>>,
 		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
 	) -> anyhow::Result<moq_lite::Session> {
+		#[cfg(feature = "iroh")]
+		if crate::iroh::is_iroh_url(&url) {
+			let session = self.connect_iroh(url).await?;
+			let session = moq_lite::Session::connect(session, publish, subscribe).await?;
+			return Ok(session);
+		}
+
 		let session = self.connect_quic(url).await?;
 		let session = moq_lite::Session::connect(session, publish, subscribe).await?;
 		Ok(session)
@@ -193,6 +212,13 @@ impl Client {
 		publish: impl Into<Option<moq_lite::OriginConsumer>>,
 		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
 	) -> anyhow::Result<moq_lite::Session> {
+		#[cfg(feature = "iroh")]
+		if crate::iroh::is_iroh_url(&url) {
+			let session = self.connect_iroh(url).await?;
+			let session = moq_lite::Session::connect(session, publish, subscribe).await?;
+			return Ok(session);
+		}
+
 		// Create futures for both possible protocols
 		let quic_url = url.clone();
 		let quic_handle = async {
@@ -347,6 +373,30 @@ impl Client {
 
 		Ok(session)
 	}
+
+	#[cfg(feature = "iroh")]
+	async fn connect_iroh(&self, url: Url) -> anyhow::Result<web_transport_iroh::Session> {
+		let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
+		let alpn = match url.scheme() {
+			"moql+iroh" | "iroh" => moq_lite::lite::ALPN,
+			"moqt+iroh" => moq_lite::ietf::ALPN,
+			"h3+iroh" => web_transport_iroh::ALPN_H3,
+			_ => anyhow::bail!("Invalid URL: unknown scheme"),
+		};
+		let host = url.host().context("Invalid URL: missing host")?.to_string();
+		let endpoint_id: iroh::EndpointId = host.parse().context("Invalid URL: host is not an iroh endpoint id")?;
+		let conn = endpoint.connect(endpoint_id, alpn.as_bytes()).await?;
+		let session = match alpn {
+			web_transport_iroh::ALPN_H3 => {
+				// We need to change the scheme to `https` because currently web_transport_iroh only
+				// accepts that scheme.
+				let url = url_set_scheme(url, "https")?;
+				web_transport_iroh::Session::connect_h3(conn, url).await?
+			}
+			_ => web_transport_iroh::Session::raw(conn),
+		};
+		Ok(session)
+	}
 }
 
 #[derive(Debug)]
@@ -438,4 +488,21 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
 		self.provider.signature_verification_algorithms.supported_schemes()
 	}
+}
+
+/// Returns a new URL with a changed scheme.
+///
+/// [`Url::set_scheme`] returns an error if the scheme change is not valid according to
+/// [the URL specification's section on legal scheme state overrides](https://url.spec.whatwg.org/#scheme-state).
+///
+/// This function allows all scheme changes, as long as the resulting URL is valid.
+#[cfg(feature = "iroh")]
+fn url_set_scheme(url: Url, scheme: &str) -> anyhow::Result<Url> {
+	let url = format!(
+		"{}:{}",
+		scheme,
+		url.to_string().split_once(":").context("invalid URL")?.1
+	)
+	.parse()?;
+	Ok(url)
 }

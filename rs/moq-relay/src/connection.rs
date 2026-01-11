@@ -12,18 +12,14 @@ pub struct Connection {
 impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let (path, token) = match &self.request {
-			Request::WebTransport(request) => {
+		let (path, token) = match self.request.url() {
+			Some(url) => {
 				// Extract the path and token from the URL.
-				let path = request.url().path();
-				let token = request
-					.url()
-					.query_pairs()
-					.find(|(k, _)| k == "jwt")
-					.map(|(_, v)| v.to_string());
+				let path = url.path();
+				let token = url.query_pairs().find(|(k, _)| k == "jwt").map(|(_, v)| v.to_string());
 				(path, token)
 			}
-			Request::Quic(_conn) => ("", None),
+			None => ("", None),
 		};
 		// Verify the URL before accepting the connection.
 		let token = match self.auth.verify(path, token.as_deref()) {
