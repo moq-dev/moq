@@ -1,0 +1,23 @@
+{
+	"$schema": "https://json.schemastore.org/claude-code-settings.json",
+	"permissions": {
+		"allow": [
+			"Bash(ls:*)",
+			"Bash(grep:*)",
+			"Bash(find:*)",
+			"Bash(git status:*)",
+			"Bash(git diff:*)",
+			"Bash(git log:*)",
+			"Bash(git add:*)",
+			"Bash(git commit:*)",
+			"Bash(git push:*)",
+			"Bash(git pull:*)",
+			"Bash(git checkout:*)",
+			"Bash(git branch:*)",
+			"Bash(just *)",
+			"Bash(cargo *)",
+			"Bash(bun *)",
+			"WebSearch"
+		]
+	}
+}
