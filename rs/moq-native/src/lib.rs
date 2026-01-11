@@ -1,3 +1,13 @@
+//! Helper library for native applications using MoQ.
+//!
+//! Makes it easy to establish MoQ connections over:
+//! - WebTransport (via HTTP/3)
+//! - QUIC (via ALPN)
+//! - WebSocket (via [web-transport-ws](https://crates.io/crates/web-transport-ws))
+//! - Iroh P2P (requires `iroh` feature)
+//!
+//! Includes optional logging and configuration.
+
 pub mod client;
 mod crypto;
 pub mod log;

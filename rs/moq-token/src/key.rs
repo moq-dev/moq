@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
 
+/// Cryptographic operations that a key can perform.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum KeyOperation {
@@ -20,11 +21,11 @@ pub enum KeyOperation {
 	Encrypt,
 }
 
-/// https://datatracker.ietf.org/doc/html/rfc7518#section-6
+/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6>
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kty")]
 pub enum KeyType {
-	/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.2
+	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.2>
 	EC {
 		#[serde(rename = "crv")]
 		curve: EllipticCurve,
@@ -43,14 +44,14 @@ pub enum KeyType {
 		)]
 		d: Option<Vec<u8>>,
 	},
-	/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.3
+	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3>
 	RSA {
 		#[serde(flatten)]
 		public: RsaPublicKey,
 		#[serde(flatten, skip_serializing_if = "Option::is_none")]
 		private: Option<RsaPrivateKey>,
 	},
-	/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.4
+	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.4>
 	#[serde(rename = "oct")]
 	OCT {
 		/// The secret key as base64url (unpadded).
@@ -62,7 +63,7 @@ pub enum KeyType {
 		)]
 		secret: Vec<u8>,
 	},
-	/// https://datatracker.ietf.org/doc/html/rfc8037#section-2
+	/// <https://datatracker.ietf.org/doc/html/rfc8037#section-2>
 	OKP {
 		#[serde(rename = "crv")]
 		curve: EllipticCurve,
@@ -79,7 +80,9 @@ pub enum KeyType {
 	},
 }
 
-/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.2.1.1
+/// Supported elliptic curves for EC and OKP key types.
+///
+/// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.2.1.1>
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub enum EllipticCurve {
 	#[serde(rename = "P-256")]
@@ -93,7 +96,9 @@ pub enum EllipticCurve {
 	Ed25519,
 }
 
-/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.1
+/// RSA public key parameters.
+///
+/// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.1>
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RsaPublicKey {
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
@@ -102,7 +107,9 @@ pub struct RsaPublicKey {
 	pub e: Vec<u8>,
 }
 
-/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2
+/// RSA private key parameters.
+///
+/// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2>
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RsaPrivateKey {
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
@@ -121,6 +128,7 @@ pub struct RsaPrivateKey {
 	pub oth: Option<Vec<RsaAdditionalPrime>>,
 }
 
+/// Additional prime information for multi-prime RSA keys.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RsaAdditionalPrime {
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
@@ -131,7 +139,7 @@ pub struct RsaAdditionalPrime {
 	pub t: Vec<u8>,
 }
 
-/// JWK, almost to spec (https://datatracker.ietf.org/doc/html/rfc7517) but not quite the same
+/// JWK, almost to spec (<https://datatracker.ietf.org/doc/html/rfc7517>) but not quite the same
 /// because it's annoying to implement.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]

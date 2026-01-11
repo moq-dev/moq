@@ -3,6 +3,7 @@ use std::fmt::{self, Display};
 
 use crate::coding::{Decode, DecodeError, Encode};
 
+/// An owned version of [`Path`] with a `'static` lifetime.
 pub type PathOwned = Path<'static>;
 
 /// A trait for types that can be converted to a `Path`.

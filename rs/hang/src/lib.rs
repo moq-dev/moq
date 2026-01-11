@@ -12,7 +12,7 @@
 //! - **Codec support**: Integration with common audio/video codecs
 //! - **Container**: A simple timestamped container format.
 //! - **fMP4 Import**: Convert a fMP4 file into a hang broadcast.
-//! - **HLS Import**: Reusable HLS/fMP4 ingest logic via [`hls`].
+//! - **HLS Import**: Reusable HLS/fMP4 ingest logic via the `import` module.
 //!
 mod error;
 

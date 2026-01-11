@@ -89,7 +89,7 @@ impl GroupProducer {
 
 	/// A helper method to write a frame from a single byte buffer.
 	///
-	/// If you want to write multiple chunks, use [Self::create] or [Self::append].
+	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
 	/// But an upfront size is required.
 	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B) {
 		let data = frame.into();

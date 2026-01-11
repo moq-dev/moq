@@ -292,6 +292,9 @@ check:
 	cargo clippy --all-targets --all-features -- -D warnings
 	cargo fmt --all --check
 
+	# Check documentation warnings (only workspace crates, not dependencies)
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet
+
 	# requires: cargo install cargo-shear
 	cargo shear
 

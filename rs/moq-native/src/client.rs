@@ -92,6 +92,9 @@ impl Default for ClientConfig {
 	}
 }
 
+/// Client for establishing MoQ connections over QUIC, WebTransport, or WebSocket.
+///
+/// Create via [`ClientConfig::init`] or [`Client::new`].
 #[derive(Clone)]
 pub struct Client {
 	pub quic: quinn::Endpoint,

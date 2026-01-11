@@ -138,7 +138,7 @@ impl Catalog {
 /// Produces a catalog track that describes the available media tracks.
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
-/// You'll have to call [`publish`](Self::publish) once all updates are complete.
+/// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
 #[derive(Clone)]
 pub struct CatalogProducer {
 	/// Access to the underlying track producer.
@@ -163,7 +163,7 @@ impl CatalogProducer {
 		}
 	}
 
-	/// Create a consumer for this catalog, receiving updates as they're [published](Self::publish).
+	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> CatalogConsumer {
 		CatalogConsumer::new(self.track.consume())
 	}
@@ -180,6 +180,9 @@ impl From<moq_lite::TrackProducer> for CatalogProducer {
 	}
 }
 
+/// RAII guard for modifying a catalog with automatic publishing on drop.
+///
+/// Obtained via [`CatalogProducer::lock`].
 pub struct CatalogGuard<'a> {
 	catalog: MutexGuard<'a, Catalog>,
 	track: &'a mut moq_lite::TrackProducer,

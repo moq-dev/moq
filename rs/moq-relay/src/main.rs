@@ -1,3 +1,13 @@
+//! A MoQ relay server, connecting publishers to subscribers across the world.
+//!
+//! Knows nothing about the underlying media contents, so it can be used for any live data.
+//!
+//! Supports:
+//! - Clustering
+//! - Authentication
+//! - WebSocket fallback
+//! - HTTP endpoints
+
 mod auth;
 mod cluster;
 mod config;
