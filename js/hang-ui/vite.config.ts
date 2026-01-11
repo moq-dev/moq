@@ -7,9 +7,9 @@ export default defineConfig({
 	build: {
 		lib: {
 			entry: {
-				publish: resolve(__dirname, "src/Components/publish/index.tsx"),
-				watch: resolve(__dirname, "src/Components/watch/index.tsx"),
-				stats: resolve(__dirname, "src/Components/stats/index.tsx"),
+				publish: resolve(__dirname, "src/publish.tsx"),
+				watch: resolve(__dirname, "src/watch.tsx"),
+				stats: resolve(__dirname, "src/stats.tsx"),
 			},
 			formats: ["es"],
 		},
