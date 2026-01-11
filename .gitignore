@@ -3,6 +3,9 @@
 *.local
 *.log*
 
+# Ignore local Claude Code config
+*.local.json
+
 # IDE
 .idea
 

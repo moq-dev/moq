@@ -12,24 +12,20 @@ pub struct Connection {
 impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let (path, token) = match &self.request {
-			Request::WebTransport(request) => {
+		let (path, token) = match self.request.url() {
+			Some(url) => {
 				// Extract the path and token from the URL.
-				let path = request.url().path();
-				let token = request
-					.url()
-					.query_pairs()
-					.find(|(k, _)| k == "jwt")
-					.map(|(_, v)| v.to_string());
+				let path = url.path();
+				let token = url.query_pairs().find(|(k, _)| k == "jwt").map(|(_, v)| v.to_string());
 				(path, token)
 			}
-			Request::Quic(_conn) => ("", None),
+			None => ("", None),
 		};
 		// Verify the URL before accepting the connection.
 		let token = match self.auth.verify(path, token.as_deref()) {
 			Ok(token) => token,
 			Err(err) => {
-				let _ = self.request.close(err.clone().into()).await;
+				let _ = self.request.reject(err.clone().into()).await;
 				return Err(err.into());
 			}
 		};
@@ -51,12 +47,10 @@ impl Connection {
 		}
 
 		// Accept the connection.
-		let session = self.request.ok().await?;
-
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
 		// We subscribe to the tracks the client is allowed to publish.
-		let session = moq_lite::Session::accept(session, subscribe, publish).await?;
+		let session = self.request.accept(subscribe, publish).await?;
 
 		// Wait until the session is closed.
 		session.closed().await.map_err(Into::into)

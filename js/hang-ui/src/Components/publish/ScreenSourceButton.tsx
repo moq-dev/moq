@@ -1,3 +1,5 @@
+import Button from "../shared/button";
+import * as Icon from "../shared/icon";
 import usePublishUIContext from "./usePublishUIContext";
 
 export default function ScreenSourceButton() {
@@ -10,14 +12,13 @@ export default function ScreenSourceButton() {
 
 	return (
 		<div class="publishSourceButtonContainer">
-			<button
-				type="button"
+			<Button
 				title="Screen"
-				class={`publishButton publishSourceButton ${context.screenActive() ? "active" : ""}`}
+				class={`publishSourceButton ${context.screenActive() ? "active" : ""}`}
 				onClick={onClick}
 			>
-				🖥️
-			</button>
+				<Icon.Screen />
+			</Button>
 		</div>
 	);
 }

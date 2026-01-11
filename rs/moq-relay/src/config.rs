@@ -38,6 +38,11 @@ pub struct Config {
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
 	pub file: Option<String>,
+
+	/// Iroh specific configuration, used for both a client and server.
+	#[command(flatten)]
+	#[cfg(feature = "iroh")]
+	pub iroh: moq_native::iroh::EndpointConfig,
 }
 
 impl Config {

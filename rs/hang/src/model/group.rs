@@ -68,8 +68,7 @@ impl GroupConsumer {
 
 		let mut payload = BufList::from_iter(payload);
 
-		let micros = u64::decode(&mut payload, lite::Version::Draft02)?;
-		let timestamp = Timestamp::from_micros(micros)?;
+		let timestamp = Timestamp::decode(&mut payload, lite::Version::Draft02)?;
 
 		let frame = Frame {
 			keyframe: (self.index == 0),

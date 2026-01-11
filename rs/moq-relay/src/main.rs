@@ -22,7 +22,17 @@ async fn main() -> anyhow::Result<()> {
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
 	let mut server = config.server.init()?;
-	let client = config.client.init()?;
+
+	#[allow(unused_mut)]
+	let mut client = config.client.init()?;
+
+	#[cfg(feature = "iroh")]
+	{
+		let iroh = config.iroh.bind().await?;
+		server.with_iroh(iroh.clone());
+		client.with_iroh(iroh);
+	}
+
 	let auth = config.auth.init()?;
 
 	let cluster = Cluster::new(config.cluster, client);
