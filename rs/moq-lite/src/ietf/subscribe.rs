@@ -113,7 +113,13 @@ impl<'a> Message for Subscribe<'a> {
 		);
 
 		self.filter_type.encode(w, version);
-		0u8.encode(w, version); // no parameters
+
+		let mut params = Parameters::default();
+		params.set_int(
+			SubscribeParameter::DeliveryTimeout.into(),
+			self.delivery_timeout.as_millis() as u64,
+		);
+		params.encode(w, version);
 	}
 }
 

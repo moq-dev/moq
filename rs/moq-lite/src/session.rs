@@ -105,7 +105,7 @@ impl Session {
 	) -> Result<Self, Error> {
 		// Accept with an initial version; we'll switch to the negotiated version later
 		let mut stream = Stream::accept(&session, ()).await?;
-		let client: setup::Client = stream.reader.decode().await?;
+		let mut client: setup::Client = stream.reader.decode().await?;
 		tracing::trace!(?client, "received client setup");
 
 		// Choose the version to use
@@ -126,7 +126,7 @@ impl Session {
 			lite::Parameters::default().encode_bytes(())
 		};
 
-		let mut server = setup::Server { version, parameters };
+		let server = setup::Server { version, parameters };
 		tracing::trace!(?server, "sending server setup");
 
 		let mut stream = stream.with_version(client.kind.reply());
@@ -139,7 +139,7 @@ impl Session {
 			tracing::debug!(?version, "connected");
 		} else if let Ok(version) = ietf::Version::try_from(version) {
 			// Decode the parameters to get the initial request ID.
-			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
+			let parameters = ietf::Parameters::decode(&mut client.parameters, version)?;
 			let request_id_max = parameters
 				.get_int(ietf::SetupParameter::MaxRequestId.into())
 				.map(ietf::RequestId)
