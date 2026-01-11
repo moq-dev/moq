@@ -8,7 +8,7 @@
 	"repository": "github:moq-dev/moq",
 	"scripts": {
 		"dev": "vite --open",
-		"build": "vite",
+		"build": "vite build",
 		"check": "tsc --noEmit"
 	},
 	"dependencies": {
