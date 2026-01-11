@@ -64,6 +64,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.1...moq-relay-v0.10.2) - 2026-01-10
+
+### Added
+
+- iroh support ([#794](https://github.com/moq-dev/moq/pull/794))
+
+### Other
+
+- support WebSocket fallback for clients ([#812](https://github.com/moq-dev/moq/pull/812))
+- Include sd-notify only on unix ([#807](https://github.com/moq-dev/moq/pull/807))
+- Fix a rustls panic causing the HTTPS server to not work. ([#804](https://github.com/moq-dev/moq/pull/804))
+- Certificate reloading ([#774](https://github.com/moq-dev/moq/pull/774))
+
 ## [0.10.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.0...moq-relay-v0.10.1) - 2025-12-19
 
 ### Other
