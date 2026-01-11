@@ -9,8 +9,6 @@ import WatchControls from "./WatchControls";
 import WatchUIContextProvider, { WatchUIContext } from "./WatchUIContextProvider";
 
 export function WatchUI(props: { watch: HangWatch }) {
-	console.log("watch", props.watch);
-
 	return (
 		<WatchUIContextProvider hangWatch={props.watch}>
 			<style>{styles}</style>

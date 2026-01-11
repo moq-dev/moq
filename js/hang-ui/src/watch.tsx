@@ -9,7 +9,7 @@ customElement("hang-watch-ui", (_, { element }) => {
 	onMount(async () => {
 		await customElements.whenDefined("hang-watch");
 		const watchEl = element.querySelector("hang-watch");
-		setNested(watchEl as HangWatch);
+		setNested(watchEl ? watchEl as HangWatch : undefined);
 	});
 
 	return (

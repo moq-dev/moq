@@ -10,7 +10,7 @@ customElement("hang-publish-ui", (_, { element }) => {
 	onMount(async () => {
 		await customElements.whenDefined("hang-publish");
 		const publishEl = element.querySelector("hang-publish");
-		setNested(publishEl as HangPublish);
+		setNested(publishEl ? publishEl as HangPublish : undefined);
 	});
 
 	return (
