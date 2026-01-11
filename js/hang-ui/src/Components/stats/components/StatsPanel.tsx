@@ -1,5 +1,5 @@
-import { For } from "solid-js";
-import Icon from "../../shared/icon";
+import { For, type JSX } from "solid-js";
+import * as Icon from "../../shared/icon";
 import type { KnownStatsProviders, ProviderProps } from "../types";
 import { StatsItem } from "./StatsItem";
 
@@ -8,26 +8,26 @@ import { StatsItem } from "./StatsItem";
  */
 interface StatsPanelProps extends ProviderProps {}
 
-export const statsDetailItems: { name: string; statProvider: KnownStatsProviders; iconName: string }[] = [
+export const statsDetailItems: { name: string; statProvider: KnownStatsProviders; icon: () => JSX.Element }[] = [
 	{
 		name: "Network",
 		statProvider: "network",
-		iconName: "network",
+		icon: () => <Icon.Network />,
 	},
 	{
 		name: "Video",
 		statProvider: "video",
-		iconName: "video",
+		icon: () => <Icon.Video />,
 	},
 	{
 		name: "Audio",
 		statProvider: "audio",
-		iconName: "audio",
+		icon: () => <Icon.Audio />,
 	},
 	{
 		name: "Buffer",
 		statProvider: "buffer",
-		iconName: "buffer",
+		icon: () => <Icon.Buffer />,
 	},
 ];
 
@@ -38,11 +38,11 @@ export const StatsPanel = (props: StatsPanelProps) => {
 	return (
 		<div class="stats__panel">
 			<For each={statsDetailItems}>
-				{({ name, statProvider, iconName }) => (
+				{({ name, statProvider, icon }) => (
 					<StatsItem
 						name={name}
 						statProvider={statProvider}
-						svg={<Icon name={iconName} />}
+						svg={icon()}
 						audio={props.audio}
 						video={props.video}
 					/>

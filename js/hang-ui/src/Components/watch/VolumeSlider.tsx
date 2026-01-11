@@ -1,17 +1,17 @@
 import { createEffect, createSignal } from "solid-js";
 import Button from "../shared/button";
-import Icon from "../shared/icon";
+import * as Icon from "../shared/icon";
 import useWatchUIContext from "./useWatchUIContext";
 
 const getVolumeIcon = (volume: number, isMuted: boolean) => {
 	if (isMuted || volume === 0) {
-		return <Icon name="mute" />;
+		return <Icon.Mute />;
 	} else if (volume > 0 && volume <= 33) {
-		return <Icon name="volume-low" />;
+		return <Icon.VolumeLow />;
 	} else if (volume > 33 && volume <= 66) {
-		return <Icon name="volume-medium" />;
+		return <Icon.VolumeMedium />;
 	} else {
-		return <Icon name="volume-high" />;
+		return <Icon.VolumeHigh />;
 	}
 };
 

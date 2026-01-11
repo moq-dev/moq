@@ -13,8 +13,8 @@ export default function WatchControls() {
 				<PlayPauseButton />
 				<VolumeSlider />
 				<WatchStatusIndicator />
-				<FullscreenButton />
 				<StatsButton />
+				<FullscreenButton />
 			</div>
 			<div class="latencyControlsRow">
 				<LatencySlider />

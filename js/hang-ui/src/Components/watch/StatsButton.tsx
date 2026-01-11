@@ -1,5 +1,5 @@
 import Button from "../shared/button";
-import Icon from "../shared/icon";
+import * as Icon from "../shared/icon";
 import useWatchUIContext from "./useWatchUIContext";
 
 /**
@@ -14,7 +14,7 @@ export default function StatsButton() {
 
 	return (
 		<Button title={context.isStatsPanelVisible() ? "Hide stats" : "Show stats"} onClick={onClick}>
-			<Icon name="stats" />
+			<Icon.Stats />
 		</Button>
 	);
 }

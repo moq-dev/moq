@@ -1,5 +1,6 @@
+import { Show } from "solid-js";
 import Button from "../shared/button";
-import Icon from "../shared/icon";
+import * as Icon from "../shared/icon";
 import useWatchUIContext from "./useWatchUIContext";
 
 export default function PlayPauseButton() {
@@ -10,7 +11,9 @@ export default function PlayPauseButton() {
 
 	return (
 		<Button title={context.isPlaying() ? "Pause" : "Play"} class="button--playback" onClick={onClick}>
-			<Icon name={context.isPlaying() ? "pause" : "play"} />
+			<Show when={context.isPlaying()} fallback={<Icon.Play />}>
+				<Icon.Pause />
+			</Show>
 		</Button>
 	);
 }

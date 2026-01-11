@@ -1,5 +1,6 @@
+import { Show } from "solid-js";
 import Button from "../shared/button";
-import Icon from "../shared/icon";
+import * as Icon from "../shared/icon";
 import useWatchUIContext from "./useWatchUIContext";
 
 export default function FullscreenButton() {
@@ -11,7 +12,9 @@ export default function FullscreenButton() {
 
 	return (
 		<Button title="Fullscreen" onClick={onClick}>
-			<Icon name={context.isFullscreen() ? "fullscreen-exit" : "fullscreen-enter"} />
+			<Show when={context.isFullscreen()} fallback={<Icon.FullscreenEnter />}>
+				<Icon.FullscreenExit />
+			</Show>
 		</Button>
 	);
 }

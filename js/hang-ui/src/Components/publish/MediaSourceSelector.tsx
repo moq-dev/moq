@@ -1,6 +1,6 @@
 import { createSignal, For, Show } from "solid-js";
 import Button from "../shared/button";
-import Icon from "../shared/icon";
+import * as Icon from "../shared/icon";
 
 type MediaSourceSelectorProps = {
 	sources?: MediaDeviceInfo[];
@@ -20,7 +20,9 @@ export default function MediaSourceSelector(props: MediaSourceSelectorProps) {
 				class="mediaSourceVisibilityToggle button--media-source-selector"
 				title={sourcesVisible() ? "Hide Sources" : "Show Sources"}
 			>
-				<Icon name={sourcesVisible() ? "arrow-up" : "arrow-down"} />
+				<Show when={sourcesVisible()} fallback={<Icon.ArrowDown />}>
+					<Icon.ArrowUp />
+				</Show>
 			</Button>
 			<Show when={sourcesVisible()}>
 				<select

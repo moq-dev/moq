@@ -1,6 +1,6 @@
 import { Show } from "solid-js";
 import Button from "../shared/button";
-import Icon from "../shared/icon";
+import * as Icon from "../shared/icon";
 import MediaSourceSourceSelector from "./MediaSourceSelector";
 import usePublishUIContext from "./usePublishUIContext";
 
@@ -30,7 +30,7 @@ export default function MicrophoneSourceButton() {
 				class={`publishSourceButton ${context.microphoneActive() ? "active" : ""}`}
 				onClick={onClick}
 			>
-				<Icon name="microphone" />
+				<Icon.Microphone />
 			</Button>
 			<Show when={context.microphoneActive() && context.microphoneDevices().length}>
 				<MediaSourceSourceSelector

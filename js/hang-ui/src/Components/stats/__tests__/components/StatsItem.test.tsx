@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import Icon from "../../../shared/icon";
+import * as Icon from "../../../shared/icon";
 import { StatsItem } from "../../components/StatsItem";
 import type { BaseProvider } from "../../providers/base";
 import * as registry from "../../providers/registry";
@@ -44,7 +44,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Network"
 					statProvider="network"
-					svg={<Icon name="network" />}
+					svg={<Icon.Network />}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -93,7 +93,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Audio"
 					statProvider="audio"
-					svg={<Icon name="audio" />}
+					svg={<Icon.Audio />}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -113,7 +113,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Buffer"
 					statProvider="buffer"
-					svg={<Icon name="buffer" />}
+					svg={<Icon.Buffer />}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -141,7 +141,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Network"
 					statProvider="network"
-					svg={<Icon name="network" />}
+					svg={<Icon.Network />}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -168,7 +168,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Video"
 					statProvider="video"
-					svg={<Icon name="video" />}
+					svg={<Icon.Video />}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -203,7 +203,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Audio"
 					statProvider="audio"
-					svg={<Icon name="audio" />}
+					svg={<Icon.Audio />}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -314,7 +314,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Network"
 					statProvider="network"
-					svg={<Icon name="network" />}
+					svg={<Icon.Network />}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>
@@ -345,7 +345,7 @@ describe("StatsItem", () => {
 				<StatsItem
 					name="Buffer"
 					statProvider="buffer"
-					svg={<Icon name="buffer" />}
+					svg={<Icon.Buffer />}
 					audio={mockAudioVideo.audio}
 					video={mockAudioVideo.video}
 				/>

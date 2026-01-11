@@ -1,6 +1,6 @@
 import { createSignal } from "solid-js";
 import Button from "../shared/button";
-import Icon from "../shared/icon";
+import * as Icon from "../shared/icon";
 import usePublishUIContext from "./usePublishUIContext";
 
 export default function FileSourceButton() {
@@ -31,7 +31,7 @@ export default function FileSourceButton() {
 				class={`publishSourceButton ${context.fileActive() ? "active" : ""}`}
 				onClick={onClick}
 			>
-				<Icon name="file" />
+				<Icon.File />
 			</Button>
 		</>
 	);
