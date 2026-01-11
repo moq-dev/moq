@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "./catalog";
 import * as Container from "./container";
 
@@ -89,8 +89,11 @@ export class Consumer {
 	#container?: Catalog.Container;
 	#groups: Group[] = [];
 	#activeSequenceNumber?: number; // the active group sequence number
-	earliestBufferTime?: number | undefined = undefined;
-	latestBufferTime?: number | undefined = undefined;
+	#earliestBufferTime = new Signal<number | undefined>(undefined);
+	readonly earliestBufferTime: Getter<number | undefined> = this.#earliestBufferTime;
+
+	#latestBufferTime = new Signal<number | undefined>(undefined);
+	readonly latestBufferTime: Getter<number | undefined> = this.#latestBufferTime;
 
 	// Wake up the consumer when a new frame is available.
 	#notify?: () => void;
@@ -232,14 +235,8 @@ export class Consumer {
 
 	#updateBufferRange() {
 		const { earliestTime, latestTime } = getBufferedRangeForGroup(this.#groups);
-		this.earliestBufferTime = earliestTime;
-		this.latestBufferTime = latestTime;
-
-		const duration = this.latestBufferTime !== undefined && this.earliestBufferTime !== undefined 
-			? this.latestBufferTime - this.earliestBufferTime 
-			: 0;
-			
-		console.log(`Buffer range updated: earliest=${this.earliestBufferTime}, latest=${this.latestBufferTime}, groups=${this.#groups.length}, duration=${duration}`);
+		this.#earliestBufferTime.set(earliestTime);
+		this.#latestBufferTime.set(latestTime);
 	}
 
 	async decode(): Promise<Frame | undefined> {
