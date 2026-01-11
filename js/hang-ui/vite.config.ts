@@ -14,7 +14,7 @@ export default defineConfig({
 			formats: ["es"],
 		},
 		rollupOptions: {
-			external: ["solid-js", "solid-element", "@moq/hang", "@moq/signals"],
+			external: ["@moq/hang", "@moq/lite", "@moq/signals"],
 		},
 		sourcemap: true,
 		target: "esnext",
