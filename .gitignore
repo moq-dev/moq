@@ -3,6 +3,11 @@
 *.local
 *.log*
 
+# Claude Code config (only allow at repository root)
+*.local.json
+*/**/.claude/
+!/.claude/settings.json
+
 # IDE
 .idea
 
