@@ -202,3 +202,61 @@
 	background: #1a1a1a;
 	color: #fff;
 }
+
+/* Buffer Overlay Styles */
+.bufferOverlay {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	background: rgba(0, 0, 0, 0.85);
+	color: #fff;
+	padding: 12px;
+	border-radius: 8px;
+	font-family: monospace;
+	font-size: 12px;
+	z-index: 1000;
+	min-width: 200px;
+	pointer-events: auto;
+}
+
+.bufferOverlayHeader {
+	margin-bottom: 8px;
+	font-weight: bold;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+	padding-bottom: 4px;
+	font-size: 14px;
+}
+
+.bufferOverlaySection {
+	margin-bottom: 8px;
+}
+
+.bufferOverlayLabel {
+	color: #aaa;
+	font-size: 10px;
+	margin-bottom: 2px;
+	text-transform: uppercase;
+}
+
+.bufferOverlayValue {
+	font-size: 13px;
+}
+
+.bufferOverlayLatency {
+	margin-top: 12px;
+	border-top: 1px solid rgba(255, 255, 255, 0.3);
+	padding-top: 8px;
+}
+
+.bufferOverlayLatency .latencySliderContainer {
+	padding: 4px 0;
+	margin: 0;
+}
+
+.bufferOverlayLatency .latencyLabel {
+	font-size: 12px;
+}
+
+.bufferOverlayLatency .latencySlider {
+	accent-color: #4a9eff;
+}

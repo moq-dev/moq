@@ -4,6 +4,7 @@ import { Show } from "solid-js/web";
 import { Stats } from "../stats";
 import type { ProviderProps } from "../stats/types";
 import BufferingIndicator from "./BufferingIndicator";
+import BufferOverlay from "./BufferOverlay";
 import styles from "./index.css?inline";
 import WatchControls from "./WatchControls";
 import WatchUIContextProvider, { WatchUIContext } from "./WatchUIContextProvider";
@@ -18,18 +19,21 @@ export function WatchUI(props: { watch: HangWatch }) {
 					const context = useContext(WatchUIContext);
 					if (!context) return null;
 					return (
-						<Show when={context.isStatsPanelVisible()}>
-							<Stats
-								context={WatchUIContext}
-								getElement={(ctx): ProviderProps | undefined => {
-									if (!ctx?.hangWatch) return undefined;
-									return {
-										audio: { source: ctx.hangWatch.audio.source },
-										video: { source: ctx.hangWatch.video.source },
-									};
-								}}
-							/>
-						</Show>
+						<>
+							<Show when={context.isStatsPanelVisible()}>
+								<Stats
+									context={WatchUIContext}
+									getElement={(ctx): ProviderProps | undefined => {
+										if (!ctx?.hangWatch) return undefined;
+										return {
+											audio: { source: ctx.hangWatch.audio.source },
+											video: { source: ctx.hangWatch.video.source },
+										};
+									}}
+								/>
+							</Show>
+							<BufferOverlay />
+						</>
 					);
 				})()}
 				<BufferingIndicator />

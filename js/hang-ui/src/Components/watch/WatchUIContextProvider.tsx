@@ -34,6 +34,10 @@ type WatchUIContextValues = {
 	setActiveRendition: (name: string | undefined) => void;
 	isStatsPanelVisible: () => boolean;
 	setIsStatsPanelVisible: (visible: boolean) => void;
+	isBufferOverlayVisible: () => boolean;
+	setIsBufferOverlayVisible: (visible: boolean) => void;
+	videoBufferDuration: () => number | undefined;
+	audioBufferDuration: () => number | undefined;
 	isFullscreen: () => boolean;
 	toggleFullscreen: () => void;
 };
@@ -49,7 +53,21 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const [latency, setLatency] = createSignal<number>(0);
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
 	const [activeRendition, setActiveRendition] = createSignal<string | undefined>(undefined);
-	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
+	const [isStatsPanelVisible, setIsStatsPanelVisibleInternal] = createSignal<boolean>(false);
+	const [isBufferOverlayVisible, setIsBufferOverlayVisibleInternal] = createSignal<boolean>(false);
+	const [videoBufferDuration, setVideoBufferDuration] = createSignal<number | undefined>(undefined);
+	const [audioBufferDuration, setAudioBufferDuration] = createSignal<number | undefined>(undefined);
+
+	// Mutual exclusivity: hide buffer overlay when stats panel is shown and vice versa
+	const setIsStatsPanelVisible = (visible: boolean) => {
+		if (visible) setIsBufferOverlayVisibleInternal(false);
+		setIsStatsPanelVisibleInternal(visible);
+	};
+
+	const setIsBufferOverlayVisible = (visible: boolean) => {
+		if (visible) setIsStatsPanelVisibleInternal(false);
+		setIsBufferOverlayVisibleInternal(visible);
+	};
 	const [isFullscreen, setIsFullscreen] = createSignal<boolean>(!!document.fullscreenElement);
 
 	const togglePlayback = () => {
@@ -100,6 +118,10 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		setActiveRendition: setActiveRenditionValue,
 		isStatsPanelVisible,
 		setIsStatsPanelVisible,
+		isBufferOverlayVisible,
+		setIsBufferOverlayVisible,
+		videoBufferDuration,
+		audioBufferDuration,
 		isFullscreen,
 		toggleFullscreen,
 	};
@@ -174,6 +196,30 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	signals.effect((effect) => {
 		const selected = effect.get(watch.video.source.active);
 		setActiveRendition(selected);
+	});
+
+	// Sync video buffer duration from source
+	signals.effect((effect) => {
+		const earliest = effect.get(watch.video.source.bufferEarliest);
+		const latest = effect.get(watch.video.source.bufferLatest);
+		if (earliest !== undefined && latest !== undefined) {
+			// Convert from microseconds to milliseconds
+			setVideoBufferDuration((latest - earliest) / 1000);
+		} else {
+			setVideoBufferDuration(undefined);
+		}
+	});
+
+	// Sync audio buffer duration from source
+	signals.effect((effect) => {
+		const earliest = effect.get(watch.audio.source.bufferEarliest);
+		const latest = effect.get(watch.audio.source.bufferLatest);
+		if (earliest !== undefined && latest !== undefined) {
+			// Convert from microseconds to milliseconds
+			setAudioBufferDuration((latest - earliest) / 1000);
+		} else {
+			setAudioBufferDuration(undefined);
+		}
 	});
 
 	const handleFullscreenChange = () => {
