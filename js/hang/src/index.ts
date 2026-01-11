@@ -1,4 +1,5 @@
 export * as Moq from "@moq/lite";
+export * as Signals from "@moq/signals";
 export * as Catalog from "./catalog";
 export * as Frame from "./frame";
 export * as Publish from "./publish";

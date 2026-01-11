@@ -1,4 +1,4 @@
-import * as Moq from "@moq/lite";
+import { Moq } from "@moq/hang";
 
 /**
  * A simple web component for configuring the relay URL and broadcast name.

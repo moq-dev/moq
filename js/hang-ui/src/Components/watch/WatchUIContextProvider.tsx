@@ -1,7 +1,6 @@
+import { type Moq, Signals } from "@moq/hang";
 import type * as Catalog from "@moq/hang/catalog";
 import type HangWatch from "@moq/hang/watch/element";
-import type { Time } from "@moq/lite";
-import { Effect } from "@moq/signals";
 import type { JSX } from "solid-js";
 import { createContext, createSignal, onCleanup } from "solid-js";
 
@@ -74,7 +73,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	};
 
 	const setLatencyValue = (latency: number) => {
-		props.hangWatch.latency.set(latency as Time.Milli);
+		props.hangWatch.latency.set(latency as Moq.Time.Milli);
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
@@ -106,7 +105,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	};
 
 	const watch = props.hangWatch;
-	const signals = new Effect();
+	const signals = new Signals.Effect();
 
 	signals.effect((effect) => {
 		const url = effect.get(watch.connection.url);
