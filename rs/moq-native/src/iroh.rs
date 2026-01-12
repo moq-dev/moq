@@ -6,11 +6,11 @@ use web_transport_iroh::{
 	iroh::{self, SecretKey},
 };
 
-pub use iroh::Endpoint;
+pub use iroh::Endpoint as IrohEndpoint;
 
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct EndpointConfig {
+pub struct IrohEndpointConfig {
 	/// Whether to enable iroh support.
 	///
 	/// NOTE: The feature flag `iroh` must also be enabled.
@@ -40,8 +40,8 @@ pub struct EndpointConfig {
 	pub bind_v6: Option<net::SocketAddrV6>,
 }
 
-impl EndpointConfig {
-	pub async fn bind(self) -> anyhow::Result<Option<Endpoint>> {
+impl IrohEndpointConfig {
+	pub async fn bind(self) -> anyhow::Result<Option<IrohEndpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
 		}
@@ -66,7 +66,7 @@ impl EndpointConfig {
 			SecretKey::generate(&mut rand::rng())
 		};
 
-		let mut builder = Endpoint::builder().secret_key(secret_key).alpns(vec![
+		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(vec![
 			web_transport_iroh::ALPN_H3.as_bytes().to_vec(),
 			moq_lite::lite::ALPN.as_bytes().to_vec(),
 			moq_lite::ietf::ALPN.as_bytes().to_vec(),

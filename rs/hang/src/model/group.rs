@@ -5,7 +5,6 @@ use crate::Result;
 
 use buf_list::BufList;
 use moq_lite::coding::Decode;
-use moq_lite::lite;
 
 /// A consumer for a group of frames.
 ///
@@ -68,7 +67,7 @@ impl GroupConsumer {
 
 		let mut payload = BufList::from_iter(payload);
 
-		let timestamp = Timestamp::decode(&mut payload, lite::Version::Draft02)?;
+		let timestamp = Timestamp::decode(&mut payload, ())?;
 
 		let frame = Frame {
 			keyframe: (self.index == 0),

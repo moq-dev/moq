@@ -163,7 +163,7 @@ impl Server {
 	}
 
 	// Return the SHA256 fingerprints of all our certificates.
-	pub fn tls_info(&self) -> Arc<RwLock<TlsInfo>> {
+	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
 		self.certs.info.clone()
 	}
 
@@ -291,7 +291,7 @@ impl Server {
 	}
 }
 
-/// An incoming connection request that can be accepted or rejected.
+/// An incoming connection that can be accepted or rejected.
 pub enum Request {
 	WebTransport(web_transport_quinn::Request),
 	Quic(QuicRequest),
@@ -381,21 +381,21 @@ impl QuicRequest {
 
 /// TLS certificate information including fingerprints.
 #[derive(Debug)]
-pub struct TlsInfo {
+pub struct ServerTlsInfo {
 	pub(crate) certs: Vec<Arc<CertifiedKey>>,
 	pub fingerprints: Vec<String>,
 }
 
 #[derive(Debug)]
 struct ServeCerts {
-	info: Arc<RwLock<TlsInfo>>,
+	info: Arc<RwLock<ServerTlsInfo>>,
 	provider: crypto::Provider,
 }
 
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
-			info: Arc::new(RwLock::new(TlsInfo {
+			info: Arc::new(RwLock::new(ServerTlsInfo {
 				certs: Vec::new(),
 				fingerprints: Vec::new(),
 			})),

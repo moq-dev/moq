@@ -1,3 +1,9 @@
+//! An implementation of the IETF MoQ specification.
+//!
+//! Not all features are supported; just to provide compatibility with the crate API.
+//!
+//! You should not use this module directly; see [crate] for the high-level API.
+
 mod control;
 mod fetch;
 mod goaway;

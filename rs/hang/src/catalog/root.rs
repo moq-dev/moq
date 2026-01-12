@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// The catalog format is a JSON file that describes the tracks available in a broadcast.
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{Audio, AudioConfig, Chat, Track, User, Video, VideoConfig};
+use crate::catalog::{Audio, AudioConfig, Chat, User, Video, VideoConfig};
 use crate::Result;
 use moq_lite::Produce;
 
@@ -39,7 +39,7 @@ pub struct Catalog {
 
 	/// Preview information about the broadcast
 	#[serde(default)]
-	pub preview: Option<Track>,
+	pub preview: Option<moq_lite::Track>,
 }
 
 impl Catalog {

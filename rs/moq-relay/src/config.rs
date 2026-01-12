@@ -42,7 +42,7 @@ pub struct Config {
 	/// Iroh specific configuration, used for both a client and server.
 	#[command(flatten)]
 	#[cfg(feature = "iroh")]
-	pub iroh: moq_native::iroh::EndpointConfig,
+	pub iroh: moq_native::IrohEndpointConfig,
 }
 
 impl Config {

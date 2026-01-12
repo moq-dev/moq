@@ -8,10 +8,10 @@
 //!
 //! Includes optional logging and configuration.
 
-pub mod client;
+mod client;
 mod crypto;
-pub mod log;
-pub mod server;
+mod log;
+mod server;
 
 pub use client::*;
 pub use log::*;
@@ -23,4 +23,6 @@ pub use rustls;
 pub use web_transport_quinn;
 
 #[cfg(feature = "iroh")]
-pub mod iroh;
+mod iroh;
+#[cfg(feature = "iroh")]
+pub use iroh::*;

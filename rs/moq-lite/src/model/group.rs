@@ -16,6 +16,9 @@ use crate::{Error, Produce, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
 
+/// A group contains a sequence number because they can arrive out of order.
+///
+/// You can use [crate::TrackProducer::append_group] if you just want to +1 the sequence number.
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Group {

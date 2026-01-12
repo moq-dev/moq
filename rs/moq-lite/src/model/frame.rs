@@ -5,6 +5,7 @@ use tokio::sync::watch;
 
 use crate::{Error, Produce, Result};
 
+/// A chunk of data with an upfront size.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {
@@ -12,6 +13,7 @@ pub struct Frame {
 }
 
 impl Frame {
+	/// Create a new producer and consumer for the frame.
 	pub fn produce(self) -> Produce<FrameProducer, FrameConsumer> {
 		let producer = FrameProducer::new(self);
 		let consumer = producer.consume();

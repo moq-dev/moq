@@ -293,7 +293,7 @@ check:
 	cargo fmt --all --check
 
 	# Check documentation warnings (only workspace crates, not dependencies)
-	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 
 	# requires: cargo install cargo-shear
 	cargo shear

@@ -14,6 +14,7 @@ use web_transport_ws::{tokio_tungstenite, tungstenite};
 // Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
+/// TLS configuration for the client.
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClientTls {
@@ -38,6 +39,7 @@ pub struct ClientTls {
 	pub disable_verify: Option<bool>,
 }
 
+/// WebSocket configuration for the client.
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClientWebSocket {
@@ -55,6 +57,7 @@ pub struct ClientWebSocket {
 	pub delay: Option<time::Duration>,
 }
 
+/// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ClientConfig {

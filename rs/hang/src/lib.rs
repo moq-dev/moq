@@ -1,4 +1,4 @@
-//! # hang: Media over QUIC Library
+//! # hang: WebCodecs compatible media encoding for MoQ
 //!
 //! `hang` is a media-specific library built on top of [`moq_lite`], providing
 //! high-level components for real-time audio and video streaming over QUIC.
@@ -9,15 +9,12 @@
 //!
 //! While [`moq_lite`] provides the generic transport layer, `hang` adds:
 //! - **Catalog**: A list of available tracks and their metadata.
-//! - **Codec support**: Integration with common audio/video codecs
 //! - **Container**: A simple timestamped container format.
-//! - **fMP4 Import**: Convert a fMP4 file into a hang broadcast.
-//! - **HLS Import**: Reusable HLS/fMP4 ingest logic via the `import` module.
+//! - **Import**: Convert existing formats, like fMP4, into a hang broadcast.
 //!
 mod error;
 
 pub mod catalog;
-pub mod feedback;
 pub mod import;
 pub mod model;
 
