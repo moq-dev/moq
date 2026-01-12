@@ -15,25 +15,24 @@
 //! - [Track]: A collection of [Group]s, delivered out-of-order until expired.
 //! - [Group]: A collection of [Frame]s, delivered in order until cancelled.
 //!
-//! For example, a media encoder could create:
-//! - [Origin::produce], using the [OriginConsumer] with [Session::connect] to announce our broadcasts over the network.
-//! - [OriginProducer::create_broadcast] to create one or more [BroadcastProducer]s.
-//! - [BroadcastProducer::create_track] for each track in the broadcast.
-//! - [TrackProducer::append_group] for each Group of Pictures (each I-frame) or audio frame.
-//! - [GroupProducer::write_frame] for each frame in the group.
+//! To publish media, create:
+//! - [Origin::produce] to get an [OriginProducer] and [OriginConsumer] pair.
+//! - [OriginProducer::create_broadcast] to create a [BroadcastProducer].
+//! - [BroadcastProducer::create_track] to create a [TrackProducer] for each track.
+//! - [TrackProducer::append_group] for each Group of Pictures (GOP) or audio frames.
+//! - [GroupProducer::write_frame] to write each encoded frame in the group.
 //!
-//! It's similar but in reverse for consuming media:
-//! - [Origin::produce], using the [OriginProducer] with [Session::connect] to consume broadcasts over the network.
-//! - [OriginConsumer::announced] to discover [BroadcastConsumer]s over the network.
-//! - [BroadcastConsumer::subscribe_track] to subscribe to a [TrackConsumer] for a specific track.
-//! - [TrackConsumer::next_group] to block until the next group is available.
-//! - [GroupConsumer::read_frame] to block until the next frame is available.
+//! To consume media, create:
+//! - [Origin::produce] to get an [OriginProducer] and [OriginConsumer] pair.
+//! - [OriginConsumer::announced] to discover new [BroadcastConsumer]s as they're announced.
+//! - [BroadcastConsumer::subscribe_track] to get a [TrackConsumer] for a specific track.
+//! - [TrackConsumer::next_group] to receive the next available group.
+//! - [GroupConsumer::read_frame] to read each frame in the group.
 //!
-//! There's a boatload of helper methods so your experience will vary.
+//! ## Advanced Usage
 //!
-//! For example, there's actually a [FrameProducer] and [FrameConsumer] for performing chunked writes and reads.
-//! This is useful if you're streaming data over the network (ex. a relay) and don't want to allocate a whole frame at once.
-//! Likewise you can [TrackProducer::create_group] instead of [TrackProducer::append_group] if you want to produce out-of-order.
+//! - Use [FrameProducer] and [FrameConsumer] for chunked frame writes/reads without allocating entire frames (useful for relaying).
+//! - Use [TrackProducer::create_group] instead of [TrackProducer::append_group] to produce groups out-of-order.
 
 mod error;
 mod model;

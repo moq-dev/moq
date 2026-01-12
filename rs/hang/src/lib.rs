@@ -1,16 +1,22 @@
 //! # hang: WebCodecs compatible media encoding for MoQ
 //!
-//! `hang` is a media-specific library built on top of [`moq_lite`], providing
-//! high-level components for real-time audio and video streaming over QUIC.
-//! It implements media containers, codecs, and streaming protocols optimized
-//! for real-time live broadcasting.
+//! Media-specific library built on [`moq_lite`] for streaming audio and video with WebCodecs.
 //!
 //! ## Overview
 //!
-//! While [`moq_lite`] provides the generic transport layer, `hang` adds:
-//! - **Catalog**: A list of available tracks and their metadata.
-//! - **Container**: A simple timestamped container format.
-//! - **Import**: Convert existing formats, like fMP4, into a hang broadcast.
+//! `hang` adds media support to the generic [`moq_lite`] transport:
+//!
+//! - **Catalog**: JSON track containing codec info and track metadata, updated live as tracks change.
+//! - **Container**: Simple frame format consisting of timestamp (microseconds) + codec bitstream payload.
+//! - **Import**: Import fMP4/CMAF files into hang broadcasts via the [`import`] module.
+//!
+//! ## Frame Container
+//!
+//! Each frame consists of:
+//! - Timestamp (u64): presentation time in microseconds
+//! - Payload: raw encoded codec data (H.264, Opus, etc.)
+//!
+//! This simple format works directly with WebCodecs APIs in browsers.
 //!
 mod error;
 
