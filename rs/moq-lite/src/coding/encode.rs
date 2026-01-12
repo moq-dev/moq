@@ -3,10 +3,10 @@ use std::{borrow::Cow, sync::Arc};
 use bytes::{Bytes, BytesMut};
 
 /// Write the value to the buffer using the given version.
-///
-/// This will panic if the [bytes::Buf] does not have enough capacity.
 pub trait Encode<V>: Sized {
 	/// Encode the value to the given writer.
+	///
+	/// This will panic if the [bytes::BufMut] does not have enough capacity.
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V);
 
 	/// Encode the value into a [Bytes] buffer.
