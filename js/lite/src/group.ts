@@ -1,7 +1,8 @@
 import { Signal } from "@moq/signals";
+import type { Frame } from "./frame";
 
 export class GroupState {
-	frames = new Signal<Uint8Array[]>([]);
+	frames = new Signal<Frame[]>([]);
 	closed = new Signal<boolean | Error>(false);
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 }
@@ -29,7 +30,7 @@ export class Group {
 	 * Writes a frame to the group.
 	 * @param frame - The frame to write
 	 */
-	writeFrame(frame: Uint8Array) {
+	writeFrame(frame: Frame) {
 		if (this.state.closed.peek()) throw new Error("group is closed");
 
 		this.state.frames.mutate((frames) => {
@@ -39,23 +40,11 @@ export class Group {
 		this.state.total.update((total) => total + 1);
 	}
 
-	writeString(str: string) {
-		this.writeFrame(new TextEncoder().encode(str));
-	}
-
-	writeJson(json: unknown) {
-		this.writeString(JSON.stringify(json));
-	}
-
-	writeBool(bool: boolean) {
-		this.writeFrame(new Uint8Array([bool ? 1 : 0]));
-	}
-
 	/**
 	 * Reads the next frame from the group.
 	 * @returns A promise that resolves to the next frame or undefined
 	 */
-	async readFrame(): Promise<Uint8Array | undefined> {
+	async readFrame(): Promise<Frame | undefined> {
 		for (;;) {
 			const frames = this.state.frames.peek();
 			const frame = frames.shift();
@@ -69,11 +58,11 @@ export class Group {
 		}
 	}
 
-	async readFrameSequence(): Promise<{ sequence: number; data: Uint8Array } | undefined> {
+	async readFrameSequence(): Promise<{ sequence: number; frame: Frame } | undefined> {
 		for (;;) {
 			const frames = this.state.frames.peek();
 			const frame = frames.shift();
-			if (frame) return { sequence: this.state.total.peek() - frames.length - 1, data: frame };
+			if (frame) return { sequence: this.state.total.peek() - frames.length - 1, frame };
 
 			const closed = this.state.closed.peek();
 			if (closed instanceof Error) throw closed;
@@ -81,21 +70,6 @@ export class Group {
 
 			await Signal.race(this.state.frames, this.state.closed);
 		}
-	}
-
-	async readString(): Promise<string | undefined> {
-		const frame = await this.readFrame();
-		return frame ? new TextDecoder().decode(frame) : undefined;
-	}
-
-	async readJson(): Promise<unknown | undefined> {
-		const frame = await this.readString();
-		return frame ? JSON.parse(frame) : undefined;
-	}
-
-	async readBool(): Promise<boolean | undefined> {
-		const frame = await this.readFrame();
-		return frame ? frame[0] === 1 : undefined;
 	}
 
 	close(abort?: Error) {

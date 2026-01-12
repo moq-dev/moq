@@ -41,5 +41,5 @@ export function decode(raw: Uint8Array): Root {
 export async function fetch(track: Moq.Track): Promise<Root | undefined> {
 	const frame = await track.readFrame();
 	if (!frame) return undefined;
-	return decode(frame);
+	return decode(frame.payload);
 }

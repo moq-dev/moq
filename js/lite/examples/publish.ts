@@ -13,15 +13,15 @@ async function main() {
 
 	// Wait for subscription requests
 	for (;;) {
-		const request = await broadcast.requested();
-		if (!request) break;
+		const track = await broadcast.requested();
+		if (!track) break;
 
 		// Accept the request for the "chat" track
-		if (request.track.name === "chat") {
-			publishTrack(request.track);
+		if (track.name === "chat") {
+			publishTrack(track);
 		} else {
 			// Reject other tracks
-			request.track.close(new Error("track not found"));
+			track.close(new Error("track not found"));
 		}
 	}
 }
@@ -32,10 +32,9 @@ async function publishTrack(track: Moq.Track) {
 	// Create a group (e.g., keyframe boundary)
 	const group = track.appendGroup();
 
-	// Write two frames to the group
-	for (const frame of ["Hello", "MoQ!"]) {
-		group.writeString(frame);
-	}
+	// Write frames to the group
+	const frame = Moq.Frame.fromString("Hello, MoQ!");
+	group.writeFrame(frame);
 
 	// Mark the group as complete
 	group.close();

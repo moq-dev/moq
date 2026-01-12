@@ -1,12 +1,7 @@
 import { z } from "zod";
 import { ContainerSchema, DEFAULT_CONTAINER } from "./container";
 import { u53Schema } from "./integers";
-
-// Backwards compatibility: old track schema
-const TrackSchema = z.object({
-	name: z.string(),
-	priority: z.number().int().min(0).max(255),
-});
+import { TrackSchema } from "./track";
 
 // Based on VideoDecoderConfig
 export const VideoConfigSchema = z.object({
@@ -54,7 +49,8 @@ export const VideoSchema = z
 		renditions: z.record(z.string(), VideoConfigSchema),
 
 		// The priority of the video track, relative to other tracks in the broadcast.
-		priority: z.number().int().min(0).max(255),
+		// TODO: Remove this; it's for backwards compatibility only
+		priority: z.number().int().min(0).max(255).default(0),
 
 		// Render the video at this size in pixels.
 		// This is separate from the display aspect ratio because it does not require reinitialization.

@@ -58,7 +58,7 @@ pub enum Error {
 	#[error("decode failed: {0}")]
 	DecodeFailed(Arc<anyhow::Error>),
 
-	/// Timestamp value overflow.
+	/// Timestamp overflow.
 	#[error("timestamp overflow")]
 	TimestampOverflow(#[from] moq_lite::TimeOverflow),
 

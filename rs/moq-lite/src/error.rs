@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::coding;
+use crate::{coding, TimeOverflow};
 use web_transport_trait::{MaybeSend, MaybeSync};
 
 /// A trait that is Send+Sync except on WASM.
@@ -80,6 +80,12 @@ pub enum Error {
 
 	#[error("invalid role")]
 	InvalidRole,
+
+	#[error("expired")]
+	Expired,
+
+	#[error("time overflow")]
+	TimeOverflow(#[from] TimeOverflow),
 }
 
 impl Error {
@@ -105,6 +111,8 @@ impl Error {
 			Self::TooLarge => 18,
 			Self::TooManyParameters => 19,
 			Self::InvalidRole => 20,
+			Self::Expired => 22,
+			Self::TimeOverflow(_) => 23,
 			Self::App(app) => *app + 64,
 		}
 	}

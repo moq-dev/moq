@@ -153,6 +153,16 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		for (const fn of dispose) fn();
 		return result;
 	}
+
+	// Spawn a promise that resolves when the signal changes.
+	promise(): Promise<T> {
+		return new Promise<T>((resolve) => {
+			const dispose = this.changed((value) => {
+				resolve(value);
+				dispose();
+			});
+		});
+	}
 }
 
 type SetterType<S> = S extends Setter<infer T> ? T : never;

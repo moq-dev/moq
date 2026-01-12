@@ -193,7 +193,7 @@ pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, pa
 		let broadcast = ffi::parse_id(broadcast)?;
 
 		let mut state = State::lock();
-		let broadcast = state.publish.get(broadcast)?.consume();
+		let broadcast = state.publish.get(broadcast)?.0.consume();
 		state.origin.publish(origin, path, broadcast)
 	})
 }
@@ -264,7 +264,7 @@ pub unsafe extern "C" fn moq_origin_consume(origin: u32, path: *const c_char, pa
 
 		let mut state = State::lock();
 		let broadcast = state.origin.consume(origin, path)?;
-		Ok(state.consume.start(broadcast.into()))
+		Ok(state.consume.start(broadcast))
 	})
 }
 
@@ -451,7 +451,7 @@ pub unsafe extern "C" fn moq_consume_video_ordered(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
-		let max_latency = std::time::Duration::from_millis(max_latency_ms);
+		let max_latency = moq_lite::Time::from_millis(max_latency_ms)?;
 		let on_frame = ffi::OnStatus::new(user_data, on_frame);
 		State::lock()
 			.consume
@@ -490,7 +490,7 @@ pub unsafe extern "C" fn moq_consume_audio_ordered(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
-		let max_latency = std::time::Duration::from_millis(max_latency_ms);
+		let max_latency = moq_lite::Time::from_millis(max_latency_ms)?;
 		let on_frame = ffi::OnStatus::new(user_data, on_frame);
 		State::lock()
 			.consume

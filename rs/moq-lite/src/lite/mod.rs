@@ -5,6 +5,7 @@
 //! Specification: [<https://github.com/moq-dev/drafts>]
 
 mod announce;
+mod frame;
 mod group;
 mod info;
 mod message;
@@ -19,6 +20,7 @@ mod subscriber;
 mod version;
 
 pub use announce::*;
+pub use frame::*;
 pub use group::*;
 pub use info::*;
 pub use message::*;

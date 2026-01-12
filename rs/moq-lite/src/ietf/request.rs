@@ -3,7 +3,7 @@ use crate::{
 	ietf::{Message, Version},
 };
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct RequestId(pub u64);
 
 impl RequestId {

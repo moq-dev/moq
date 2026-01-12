@@ -7,8 +7,8 @@ async function main() {
 	// Subscribe to a broadcast
 	const broadcast = connection.consume(Moq.Path.from("my-broadcast"));
 
-	// Subscribe to a specific track (with priority 0)
-	const track = broadcast.subscribe("chat", 0);
+	// Subscribe to a specific track
+	const track = broadcast.subscribe({ name: "chat" });
 
 	// Read data as it arrives
 	for (;;) {
@@ -16,10 +16,10 @@ async function main() {
 		if (!group) break;
 
 		for (;;) {
-			const frame = await group.readString();
+			const frame = await group.readFrame();
 			if (!frame) break;
 
-			console.log("Received:", frame);
+			console.log("Received:", frame.toString());
 		}
 	}
 

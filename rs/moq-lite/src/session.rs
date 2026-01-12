@@ -17,7 +17,8 @@ pub struct Session {
 /// The versions of MoQ that are supported by this implementation.
 ///
 /// Ordered by preference, with the client's preference taking priority.
-pub const VERSIONS: [coding::Version; 3] = [
+pub const VERSIONS: [coding::Version; 4] = [
+	lite::Version::Draft03.coding(),
 	lite::Version::Draft02.coding(),
 	lite::Version::Draft01.coding(),
 	ietf::Version::Draft14.coding(),
@@ -45,8 +46,8 @@ impl Session {
 		let mut stream = Stream::open(&session, setup::ServerKind::Ietf14).await?;
 
 		let mut parameters = ietf::Parameters::default();
-		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
-		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+		parameters.set_int(ietf::SetupParameter::MaxRequestId.into(), u32::MAX as u64);
+		parameters.set_bytes(ietf::SetupParameter::Implementation.into(), b"moq-lite-rs".to_vec());
 		let parameters = parameters.encode_bytes(());
 
 		let client = setup::Client {
@@ -67,11 +68,15 @@ impl Session {
 		if let Ok(version) = lite::Version::try_from(server.version) {
 			let stream = stream.with_version(version);
 			lite::start(session.clone(), stream, publish.into(), subscribe.into(), version).await?;
+
+			tracing::debug!(version = ?server.version, "connected");
 		} else if let Ok(version) = ietf::Version::try_from(server.version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
-			let request_id_max =
-				ietf::RequestId(parameters.get_varint(ietf::ParameterVarInt::MaxRequestId).unwrap_or(0));
+			let request_id_max = parameters
+				.get_int(ietf::SetupParameter::MaxRequestId.into())
+				.map(ietf::RequestId)
+				.unwrap_or_default();
 
 			let stream = stream.with_version(version);
 			ietf::start(
@@ -84,12 +89,12 @@ impl Session {
 				version,
 			)
 			.await?;
+
+			tracing::debug!(version = ?server.version, "connected");
 		} else {
 			// unreachable, but just in case
 			return Err(Error::Version(client.versions, [server.version].into()));
 		}
-
-		tracing::debug!(version = ?server.version, "connected");
 
 		Ok(Self::new(session))
 	}
@@ -105,7 +110,7 @@ impl Session {
 	) -> Result<Self, Error> {
 		// Accept with an initial version; we'll switch to the negotiated version later
 		let mut stream = Stream::accept(&session, ()).await?;
-		let client: setup::Client = stream.reader.decode().await?;
+		let mut client: setup::Client = stream.reader.decode().await?;
 		tracing::trace!(?client, "received client setup");
 
 		// Choose the version to use
@@ -119,14 +124,14 @@ impl Session {
 		// Only encode parameters if we're using the IETF draft because it has max_request_id
 		let parameters = if ietf::Version::try_from(version).is_ok() && client.kind == setup::ClientKind::Ietf14 {
 			let mut parameters = ietf::Parameters::default();
-			parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
-			parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+			parameters.set_int(ietf::SetupParameter::MaxRequestId.into(), u32::MAX as u64);
+			parameters.set_bytes(ietf::SetupParameter::Implementation.into(), b"moq-lite-rs".to_vec());
 			parameters.encode_bytes(())
 		} else {
 			lite::Parameters::default().encode_bytes(())
 		};
 
-		let mut server = setup::Server { version, parameters };
+		let server = setup::Server { version, parameters };
 		tracing::trace!(?server, "sending server setup");
 
 		let mut stream = stream.with_version(client.kind.reply());
@@ -135,11 +140,15 @@ impl Session {
 		if let Ok(version) = lite::Version::try_from(version) {
 			let stream = stream.with_version(version);
 			lite::start(session.clone(), stream, publish.into(), subscribe.into(), version).await?;
+
+			tracing::debug!(?version, "connected");
 		} else if let Ok(version) = ietf::Version::try_from(version) {
 			// Decode the parameters to get the initial request ID.
-			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
-			let request_id_max =
-				ietf::RequestId(parameters.get_varint(ietf::ParameterVarInt::MaxRequestId).unwrap_or(0));
+			let parameters = ietf::Parameters::decode(&mut client.parameters, version)?;
+			let request_id_max = parameters
+				.get_int(ietf::SetupParameter::MaxRequestId.into())
+				.map(ietf::RequestId)
+				.unwrap_or_default();
 
 			let stream = stream.with_version(version);
 			ietf::start(
@@ -152,12 +161,12 @@ impl Session {
 				version,
 			)
 			.await?;
+
+			tracing::debug!(?version, "connected");
 		} else {
 			// unreachable, but just in case
 			return Err(Error::Version(client.versions, VERSIONS.into()));
 		}
-
-		tracing::debug!(?version, "connected");
 
 		Ok(Self::new(session))
 	}

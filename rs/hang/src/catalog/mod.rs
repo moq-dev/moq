@@ -7,6 +7,7 @@
 mod audio;
 mod chat;
 mod preview;
+mod produce;
 mod root;
 mod user;
 mod video;
@@ -14,6 +15,7 @@ mod video;
 pub use audio::*;
 pub use chat::*;
 pub use preview::*;
+pub use produce::*;
 pub use root::*;
 pub use user::*;
 pub use video::*;

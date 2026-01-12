@@ -112,7 +112,7 @@ impl Default for VP9 {
 mod test {
 	use std::str::FromStr;
 
-	use crate::catalog::VideoCodec;
+	use crate::VideoCodec;
 
 	use super::*;
 

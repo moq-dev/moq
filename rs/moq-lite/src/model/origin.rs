@@ -19,6 +19,18 @@ impl ConsumerId {
 	}
 }
 
+pub struct Origin {}
+
+impl Origin {
+	pub fn produce() -> Produce<OriginProducer, OriginConsumer> {
+		let producer = OriginProducer::new();
+		Produce {
+			consumer: producer.consume(),
+			producer,
+		}
+	}
+}
+
 // If there are multiple broadcasts with the same path, we use the most recent one but keep the others around.
 struct OriginBroadcast {
 	path: PathOwned,
@@ -334,17 +346,6 @@ impl Default for OriginNodes {
 /// A broadcast path and its associated consumer, or None if closed.
 pub type OriginAnnounce = (PathOwned, Option<BroadcastConsumer>);
 
-/// A collection of broadcasts that can be published and subscribed to.
-pub struct Origin {}
-
-impl Origin {
-	pub fn produce() -> Produce<OriginProducer, OriginConsumer> {
-		let producer = OriginProducer::default();
-		let consumer = producer.consume();
-		Produce { producer, consumer }
-	}
-}
-
 /// Announces broadcasts to consumers over the network.
 #[derive(Clone, Default)]
 pub struct OriginProducer {
@@ -357,6 +358,10 @@ pub struct OriginProducer {
 }
 
 impl OriginProducer {
+	pub fn new() -> Self {
+		Self::default()
+	}
+
 	/// Create and publish a new broadcast, returning the producer.
 	///
 	/// This is a helper method when you only want to publish a broadcast to a single origin.
@@ -389,7 +394,7 @@ impl OriginProducer {
 		let root = root.clone();
 
 		web_async::spawn(async move {
-			broadcast.closed().await;
+			broadcast.closed().await.ok();
 			root.lock().remove(&full, broadcast, &rest);
 		});
 

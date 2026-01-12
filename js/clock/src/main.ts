@@ -80,13 +80,13 @@ async function publish(config: Config) {
 
 	// Wait until we get a subscription for the track
 	for (;;) {
-		const request = await broadcast.requested();
-		if (!request) break;
+		const track = await broadcast.requested();
+		if (!track) break;
 
-		if (request.track.name === config.track) {
-			publishTrack(request.track);
+		if (track.name === config.track) {
+			publishTrack(track);
 		} else {
-			request.track.close(new Error("not found"));
+			track.close(new Error("not found"));
 		}
 	}
 }
@@ -103,7 +103,8 @@ async function publishTrack(track: Moq.Track) {
 
 		// Send the base timestamp (everything but seconds) - matching Rust format
 		const base = `${now.toISOString().slice(0, 16).replace("T", " ")}:`;
-		group.writeString(base);
+		const frame = Moq.Frame.fromString(base);
+		group.writeFrame(frame);
 
 		// Send individual seconds for this minute
 		const currentMinute = now.getMinutes();
@@ -112,7 +113,8 @@ async function publishTrack(track: Moq.Track) {
 			const secondsNow = new Date();
 			const seconds = secondsNow.getSeconds().toString().padStart(2, "0");
 
-			group.writeString(seconds);
+			const frame = Moq.Frame.fromString(seconds);
+			group.writeFrame(frame);
 
 			// Wait until next second
 			const nextSecond = new Date(secondsNow);
@@ -138,7 +140,7 @@ async function subscribe(config: Config) {
 	console.log("✅ Connected to relay:", config.url);
 
 	const broadcast = connection.consume(Moq.Path.from(config.broadcast));
-	const track = broadcast.subscribe(config.track, 0);
+	const track = broadcast.subscribe({ name: config.track });
 
 	console.log("✅ Subscribed to track:", config.track);
 
@@ -157,16 +159,16 @@ async function subscribe(config: Config) {
 			continue;
 		}
 
-		const base = new TextDecoder().decode(baseFrame);
+		const base = baseFrame.toString();
 
 		// Read individual second frames
 		for (;;) {
-			const frame = await group.readString();
+			const frame = await group.readFrame();
 			if (!frame) {
 				break; // End of group
 			}
 
-			const seconds = parseInt(frame, 10);
+			const seconds = parseInt(frame.toString(), 10);
 
 			// Clock emoji positions
 			const clockEmojis = ["🕛", "🕐", "🕑", "🕒", "🕓", "🕔", "🕕", "🕖", "🕗", "🕘", "🕙", "🕚"];

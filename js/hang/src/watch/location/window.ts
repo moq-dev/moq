@@ -2,6 +2,7 @@ import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
+import { PRIORITY } from "../../priority";
 
 export interface WindowProps {
 	enabled?: boolean | Signal<boolean>;
@@ -50,7 +51,7 @@ export class Window {
 			const updates = effect.get(this.#catalog)?.track;
 			if (!updates) return;
 
-			const track = broadcast.subscribe(updates.name, updates.priority);
+			const track = broadcast.subscribe({ name: updates.name, priority: PRIORITY.location });
 			effect.cleanup(() => track.close());
 
 			effect.spawn(this.#runTrack.bind(this, track));

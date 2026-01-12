@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::{
 	coding::{Decode, DecodeError, Encode},
 	lite::{Message, Version},
-	Path,
+	Path, Time,
 };
 
 /// Sent by the subscriber to request all future objects for the given track.
@@ -15,6 +15,8 @@ pub struct Subscribe<'a> {
 	pub broadcast: Path<'a>,
 	pub track: Cow<'a, str>,
 	pub priority: u8,
+	pub ordered: bool,
+	pub max_latency: Time,
 }
 
 impl<'a> Message for Subscribe<'a> {
@@ -24,11 +26,18 @@ impl<'a> Message for Subscribe<'a> {
 		let track = Cow::<str>::decode(r, version)?;
 		let priority = u8::decode(r, version)?;
 
+		let (ordered, max_latency) = match version {
+			Version::Draft01 | Version::Draft02 => Default::default(),
+			Version::Draft03 => (bool::decode(r, version)?, Time::decode(r, version)?),
+		};
+
 		Ok(Self {
 			id,
 			broadcast,
 			track,
 			priority,
+			ordered,
+			max_latency,
 		})
 	}
 
@@ -37,28 +46,91 @@ impl<'a> Message for Subscribe<'a> {
 		self.broadcast.encode(w, version);
 		self.track.encode(w, version);
 		self.priority.encode(w, version);
+
+		match version {
+			Version::Draft01 | Version::Draft02 => {}
+			Version::Draft03 => {
+				self.ordered.encode(w, version);
+				self.max_latency.encode(w, version);
+			}
+		}
 	}
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SubscribeOk {
 	pub priority: u8,
+	pub ordered: bool,
+	pub max_latency: Time,
 }
 
 impl Message for SubscribeOk {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		if version == Version::Draft01 {
-			self.priority.encode(w, version);
+		match version {
+			Version::Draft01 | Version::Draft03 => self.priority.encode(w, version),
+			Version::Draft02 => {}
+		}
+
+		match version {
+			Version::Draft01 | Version::Draft02 => {}
+			Version::Draft03 => {
+				self.ordered.encode(w, version);
+				self.max_latency.encode(w, version);
+			}
 		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let priority = if version == Version::Draft01 {
-			u8::decode(r, version)?
-		} else {
-			0
+		let priority = match version {
+			Version::Draft01 | Version::Draft03 => u8::decode(r, version)?,
+			Version::Draft02 => 0,
 		};
 
-		Ok(Self { priority })
+		let (ordered, max_latency) = match version {
+			Version::Draft01 | Version::Draft02 => Default::default(),
+			Version::Draft03 => (bool::decode(r, version)?, Time::decode(r, version)?),
+		};
+
+		Ok(Self {
+			priority,
+			max_latency,
+			ordered,
+		})
+	}
+}
+
+#[derive(Clone, Debug)]
+pub struct SubscribeUpdate {
+	pub priority: u8,
+	pub ordered: bool,
+	pub max_latency: Time,
+}
+
+impl Message for SubscribeUpdate {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+		self.priority.encode(w, version);
+
+		match version {
+			Version::Draft01 | Version::Draft02 => {}
+			Version::Draft03 => {
+				self.ordered.encode(w, version);
+				self.max_latency.encode(w, version);
+			}
+		}
+	}
+
+	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let priority = u8::decode(r, version)?;
+
+		let (ordered, max_latency) = match version {
+			Version::Draft01 | Version::Draft02 => Default::default(),
+			Version::Draft03 => (bool::decode(r, version)?, Time::decode(r, version)?),
+		};
+
+		Ok(Self {
+			priority,
+			max_latency,
+			ordered,
+		})
 	}
 }

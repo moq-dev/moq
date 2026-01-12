@@ -1,7 +1,7 @@
-import type * as Moq from "@moq/lite";
+import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import type * as Catalog from "../catalog";
-import { PRIORITY } from "./priority";
+import { PRIORITY } from "../priority";
 
 export type PreviewProps = {
 	enabled?: boolean | Signal<boolean>;
@@ -35,7 +35,8 @@ export class Preview {
 		const info = effect.get(this.info);
 		if (!info) return;
 
-		track.writeJson(info);
+		const frame = Moq.Frame.fromJson(info);
+		track.writeFrame(frame);
 	}
 
 	close() {

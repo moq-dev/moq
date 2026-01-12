@@ -2,10 +2,11 @@ import type { Broadcast } from "../broadcast.ts";
 import type { Group } from "../group.ts";
 import type * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
-import type { Track } from "../track.ts";
+import type * as Time from "../time.ts";
+import { Track } from "../track.js";
 import { error } from "../util/error.ts";
 import type * as Control from "./control.ts";
-import { Frame, Group as GroupMessage } from "./object.ts";
+import { Frame as FrameMessage, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
 import {
 	PublishNamespace,
@@ -94,7 +95,12 @@ export class Publisher {
 			return;
 		}
 
-		const track = broadcast.subscribe(msg.trackName, msg.subscriberPriority);
+		const track = new Track({
+			name: msg.trackName,
+			priority: msg.subscriberPriority,
+			maxLatency: 100 as Time.Milli, // TODO delivery timeout
+		});
+		broadcast.serve(track);
 
 		// Send SUBSCRIBE_OK response on control stream
 		const okMsg = new SubscribeOk(msg.requestId, msg.requestId);
@@ -164,7 +170,8 @@ export class Publisher {
 					if (!frame) break;
 
 					// Write each frame as an object
-					const obj = new Frame(frame);
+					// TODO support timestamps
+					const obj = new FrameMessage(frame.payload);
 					await obj.encode(stream, header.flags);
 				}
 

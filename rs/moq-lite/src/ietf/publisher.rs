@@ -8,7 +8,7 @@ use crate::{
 	coding::Writer,
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId, Version},
 	model::GroupConsumer,
-	Error, Origin, OriginConsumer, Track, TrackConsumer,
+	Delivery, Error, Origin, OriginConsumer, Time, TrackConsumer,
 };
 
 #[derive(Clone)]
@@ -91,21 +91,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		};
 
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: msg.subscriber_priority,
-		};
+		let track = msg.track_name.to_string();
 
-		let track = broadcast.subscribe_track(&track);
+		let delivery = Delivery {
+			priority: msg.subscriber_priority,
+			// TODO Delivery Timeout
+			max_latency: Time::from_millis(100).unwrap(),
+			// TODO Delivery order
+			ordered: false,
+		};
 
 		let (tx, rx) = oneshot::channel();
 		let mut subscribes = self.subscribes.lock();
 		subscribes.insert(request_id, tx);
-
-		self.control.send(ietf::SubscribeOk {
-			request_id,
-			track_alias: request_id.0, // NOTE: using track alias as request id for now
-		})?;
 
 		let session = self.session.clone();
 		let control = self.control.clone();
@@ -114,25 +112,41 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let version = self.version;
 
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_track(session, track, request_id, rx, version).await {
-				control
+			let mut track = broadcast.subscribe_track(track, delivery);
+			let delivery = track.delivery().current();
+
+			// TODO: This is wrong, as we haven't actually gotten a response from the origin yet.
+			control
+				.send(ietf::SubscribeOk {
+					request_id,
+					track_alias: request_id.0, // NOTE: using track alias as request id for now
+					delivery_timeout: delivery.max_latency,
+					group_order: if delivery.ordered {
+						GroupOrder::Ascending
+					} else {
+						GroupOrder::Descending
+					},
+				})
+				.ok();
+
+			match Self::run_track(session, track, request_id, rx, version).await {
+				Err(err) => control
 					.send(ietf::PublishDone {
 						request_id,
 						status_code: 500,
 						stream_count: 0, // TODO send the correct value if we want the peer to block.
 						reason_phrase: err.to_string().into(),
 					})
-					.ok();
-			} else {
-				control
+					.ok(),
+				Ok(_) => control
 					.send(ietf::PublishDone {
 						request_id,
 						status_code: 200,
 						stream_count: 0, // TODO send the correct value if we want the peer to block.
 						reason_phrase: "OK".into(),
 					})
-					.ok();
-			}
+					.ok(),
+			};
 
 			subscribes.lock().remove(&request_id);
 		});
@@ -188,15 +202,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				else => return Ok(()),
 			}?;
 
-			let sequence = group.info.sequence;
+			let sequence = group.sequence;
 			let latest = new_sequence.as_ref().unwrap_or(&0);
 
-			tracing::debug!(subscribe = %request_id, track = %track.info.name, sequence, latest, "serving group");
+			tracing::debug!(subscribe = %request_id, track = %track.name, sequence, latest, "serving group");
 
 			// If this group is older than the oldest group we're serving, skip it.
 			// We always serve at most two groups, but maybe we should serve only sequence >= MAX-1.
 			if sequence < *old_sequence.as_ref().unwrap_or(&0) {
-				tracing::debug!(subscribe = %request_id, track = %track.info.name, old = %sequence, %latest, "skipping group");
+				tracing::debug!(subscribe = %request_id, track = %track.name, old = %sequence, %latest, "skipping group");
 				continue;
 			}
 
@@ -213,14 +227,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let handle = Box::pin(Self::run_group(
 				session.clone(),
 				msg,
-				track.info.priority,
+				track.subscriber().current().priority,
 				group,
 				version,
 			));
 
 			// Terminate the old group if it's still running.
 			if let Some(old_sequence) = old_sequence.take() {
-				tracing::debug!(subscribe = %request_id, track = %track.info.name, old = %old_sequence, %latest, "aborting group");
+				tracing::debug!(subscribe = %request_id, track = %track.name, old = %old_sequence, %latest, "aborting group");
 				old_group.take(); // Drop the future to cancel it.
 			}
 
@@ -281,9 +295,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 
 			// Write the size of the frame.
-			stream.encode(&frame.info.size).await?;
+			stream.encode(&frame.size).await?;
 
-			if frame.info.size == 0 {
+			if frame.size == 0 {
 				// Have to write the object status too.
 				stream.encode(&0u8).await?;
 			} else {

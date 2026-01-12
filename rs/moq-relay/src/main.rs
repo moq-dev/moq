@@ -20,6 +20,8 @@ pub use config::*;
 pub use connection::*;
 pub use web::*;
 
+use futures::FutureExt;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// TODO: It would be nice to remove this and rely on feature flags only.
@@ -46,8 +48,7 @@ async fn main() -> anyhow::Result<()> {
 	let auth = config.auth.init()?;
 
 	let cluster = Cluster::new(config.cluster, client);
-	let cloned = cluster.clone();
-	tokio::spawn(async move { cloned.run().await.expect("cluster failed") });
+	tokio::spawn(cluster.clone().run().boxed());
 
 	// Create a web server too.
 	let web = Web::new(
@@ -60,9 +61,7 @@ async fn main() -> anyhow::Result<()> {
 		config.web,
 	);
 
-	tokio::spawn(async move {
-		web.run().await.expect("failed to run web server");
-	});
+	tokio::spawn(web.run().boxed());
 
 	tracing::info!(%addr, "listening");
 
@@ -81,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
 		};
 
 		conn_id += 1;
+
 		tokio::spawn(async move {
 			let err = conn.run().await;
 			if let Err(err) = err {

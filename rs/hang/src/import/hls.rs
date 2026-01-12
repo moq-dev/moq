@@ -19,8 +19,8 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
+use crate as hang;
 use crate::import::Fmp4;
-use crate::BroadcastProducer;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
@@ -70,7 +70,10 @@ struct StepOutcome {
 /// to run the continuous ingest loop.
 pub struct Hls {
 	/// Broadcast that all CMAF importers write into.
-	broadcast: BroadcastProducer,
+	broadcast: moq_lite::BroadcastProducer,
+
+	/// Catalog being produced.
+	catalog: hang::CatalogProducer,
 
 	/// fMP4 importers for each discovered video rendition.
 	/// Each importer feeds a separate MoQ track but shares the same catalog.
@@ -112,7 +115,11 @@ impl TrackState {
 
 impl Hls {
 	/// Create a new HLS ingest that will write into the given broadcast.
-	pub fn new(broadcast: BroadcastProducer, cfg: HlsConfig) -> anyhow::Result<Self> {
+	pub fn new(
+		broadcast: moq_lite::BroadcastProducer,
+		catalog: hang::CatalogProducer,
+		cfg: HlsConfig,
+	) -> anyhow::Result<Self> {
 		let base_url = cfg.parse_playlist()?;
 		let client = cfg.client.unwrap_or_else(|| {
 			Client::builder()
@@ -122,6 +129,7 @@ impl Hls {
 		});
 		Ok(Self {
 			broadcast,
+			catalog,
 			video_importers: Vec::new(),
 			audio_importer: None,
 			client,
@@ -403,7 +411,7 @@ impl Hls {
 	/// independent while still contributing to the same shared catalog.
 	fn ensure_video_importer_for(&mut self, index: usize) -> &mut Fmp4 {
 		while self.video_importers.len() <= index {
-			let importer = Fmp4::new(self.broadcast.clone());
+			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone());
 			self.video_importers.push(importer);
 		}
 
@@ -413,7 +421,7 @@ impl Hls {
 	/// Create or retrieve the fMP4 importer for the audio rendition.
 	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
 		self.audio_importer
-			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone()))
+			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), self.catalog.clone()))
 	}
 
 	#[cfg(test)]
@@ -543,10 +551,12 @@ mod tests {
 
 	#[test]
 	fn hls_ingest_starts_without_importers() {
-		let broadcast = moq_lite::Broadcast::produce().producer.into();
+		let broadcast = moq_lite::BroadcastProducer::default();
+		let catalog = hang::CatalogProducer::new(broadcast.clone());
+
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);
-		let hls = Hls::new(broadcast, cfg).unwrap();
+		let hls = Hls::new(broadcast, catalog, cfg).unwrap();
 
 		assert!(!hls.has_video_importer());
 		assert!(!hls.has_audio_importer());

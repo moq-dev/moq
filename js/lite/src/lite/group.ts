@@ -26,10 +26,6 @@ export class Group {
 	static async decode(r: Reader): Promise<Group> {
 		return Message.decode(r, Group.#decode);
 	}
-
-	static async decodeMaybe(r: Reader): Promise<Group | undefined> {
-		return Message.decodeMaybe(r, Group.#decode);
-	}
 }
 
 export class GroupDrop {
@@ -59,34 +55,5 @@ export class GroupDrop {
 
 	static async decode(r: Reader): Promise<GroupDrop> {
 		return Message.decode(r, GroupDrop.#decode);
-	}
-
-	static async decodeMaybe(r: Reader): Promise<GroupDrop | undefined> {
-		return Message.decodeMaybe(r, GroupDrop.#decode);
-	}
-}
-
-export class Frame {
-	payload: Uint8Array;
-
-	constructor(payload: Uint8Array) {
-		this.payload = payload;
-	}
-
-	async #encode(w: Writer) {
-		await w.write(this.payload);
-	}
-
-	static async #decode(r: Reader): Promise<Frame> {
-		const payload = await r.readAll();
-		return new Frame(payload);
-	}
-
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader): Promise<Frame> {
-		return Message.decode(r, Frame.#decode);
 	}
 }

@@ -141,8 +141,4 @@ export class SessionInfo {
 	static async decode(r: Reader): Promise<SessionInfo> {
 		return Message.decode(r, SessionInfo.#decode);
 	}
-
-	static async decodeMaybe(r: Reader): Promise<SessionInfo | undefined> {
-		return Message.decodeMaybe(r, SessionInfo.#decode);
-	}
 }

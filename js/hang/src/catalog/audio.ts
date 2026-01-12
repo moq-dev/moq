@@ -1,12 +1,7 @@
 import { z } from "zod";
 import { ContainerSchema, DEFAULT_CONTAINER } from "./container";
 import { u53Schema } from "./integers";
-
-// Backwards compatibility: old track schema
-const TrackSchema = z.object({
-	name: z.string(),
-	priority: z.number().int().min(0).max(255),
-});
+import { TrackSchema } from "./track";
 
 // Mirrors AudioDecoderConfig
 // https://w3c.github.io/webcodecs/#audio-decoder-config
@@ -40,8 +35,9 @@ export const AudioSchema = z
 		// This is not an array so it will work with JSON Merge Patch.
 		renditions: z.record(z.string(), AudioConfigSchema),
 
-		// The priority of the audio track, relative to other tracks in the broadcast.
-		priority: z.number().int().min(0).max(255),
+		// DEPRECATED: The priority of the audio track, relative to other tracks in the broadcast.
+		// The subscriber is expected to choose its own priority, instead of being told.
+		priority: z.number().int().min(0).max(255).default(0),
 	})
 	.or(
 		// Backwards compatibility: transform old {track, config} format to new object format

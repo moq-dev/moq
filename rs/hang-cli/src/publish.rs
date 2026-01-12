@@ -2,8 +2,7 @@ use bytes::BytesMut;
 use clap::Subcommand;
 use hang::{
 	import::{Decoder, DecoderFormat},
-	moq_lite::BroadcastConsumer,
-	BroadcastProducer,
+	moq_lite,
 };
 use tokio::io::AsyncReadExt;
 
@@ -26,28 +25,30 @@ enum PublishDecoder {
 
 pub struct Publish {
 	decoder: PublishDecoder,
-	broadcast: BroadcastProducer,
+	broadcast: moq_lite::BroadcastProducer,
 	buffer: BytesMut,
 }
 
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
-		let broadcast = BroadcastProducer::default();
+		let broadcast = moq_lite::BroadcastProducer::default();
+		let catalog = hang::CatalogProducer::new(broadcast.clone());
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {
 				let format = DecoderFormat::Avc3;
-				let stream = Decoder::new(broadcast.clone(), format);
+				let stream = Decoder::new(broadcast.clone(), catalog, format);
 				PublishDecoder::Decoder(Box::new(stream))
 			}
 			PublishFormat::Fmp4 => {
 				let format = DecoderFormat::Fmp4;
-				let stream = Decoder::new(broadcast.clone(), format);
+				let stream = Decoder::new(broadcast.clone(), catalog, format);
 				PublishDecoder::Decoder(Box::new(stream))
 			}
 			PublishFormat::Hls { playlist } => {
 				let hls = hang::import::Hls::new(
 					broadcast.clone(),
+					catalog,
 					hang::import::HlsConfig {
 						playlist: playlist.clone(),
 						client: None,
@@ -64,7 +65,7 @@ impl Publish {
 		})
 	}
 
-	pub fn consume(&self) -> BroadcastConsumer {
+	pub fn consume(&self) -> moq_lite::BroadcastConsumer {
 		self.broadcast.consume()
 	}
 }

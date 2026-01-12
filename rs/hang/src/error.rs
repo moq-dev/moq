@@ -54,7 +54,6 @@ pub enum Error {
 	#[error("hex error: {0}")]
 	Hex(#[from] hex::FromHexError),
 
-	/// The timestamp is too large.
 	#[error("timestamp overflow")]
 	TimestampOverflow(#[from] moq_lite::TimeOverflow),
 

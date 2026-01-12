@@ -2,6 +2,18 @@ use crate::{
 	coding::*,
 	ietf::{Message, Parameters, Version as IetfVersion},
 };
+use num_enum::IntoPrimitive;
+
+#[derive(Debug, Copy, Clone, IntoPrimitive, Eq, Hash, PartialEq)]
+#[repr(u64)]
+pub enum SetupParameter {
+	Path = 1,
+	MaxRequestId = 2,
+	AuthorizationToken = 3,
+	MaxAuthTokenCacheSize = 4,
+	Authority = 5,
+	Implementation = 7,
+}
 
 /// Sent by the client to setup the session.
 #[derive(Debug, Clone)]
