@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/moq-dev/moq/compare/moq-lite-v0.11.0...moq-lite-v0.11.1) - 2026-01-12
+
+### Other
+
+- Add documentation to Rust public APIs ([#834](https://github.com/moq-dev/moq/pull/834))
+
 ## [0.11.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.10.1...moq-lite-v0.11.0) - 2026-01-10
 
 ### Other
