@@ -118,7 +118,7 @@ impl Deref for TrackProducer {
 /// ## Latency Management
 ///
 /// The consumer can skip groups that are too far behind to maintain low latency.
-/// Use [`set_latency`](Self::set_latency) to configure the maximum acceptable delay.
+/// Configure the maximum acceptable delay through the consumer's latency settings.
 pub struct TrackConsumer {
 	pub inner: moq_lite::TrackConsumer,
 

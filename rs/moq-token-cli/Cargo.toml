@@ -11,6 +11,7 @@ edition = "2021"
 [[bin]]
 name = "moq-token"
 path = "src/bin.rs"
+doc = false
 
 [dependencies]
 anyhow = "1"

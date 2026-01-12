@@ -1,0 +1,29 @@
+.button {
+	color: var(--color-white);
+	cursor: pointer;
+	background-color: var(--color-white-alpha-10);
+	border: var(--spacing-1) solid var(--color-white-alpha-20);
+	border-radius: 50%;
+	width: 2.25rem;
+	height: 2.25rem;
+	transform-origin: center;
+	transition: transform 100ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.button:hover:not(:disabled) {
+	transform: scale(1.02);
+	color: var(--color-white);
+	background-color: var(--color-white-alpha-20);
+	box-shadow: 0 var(--spacing-2) var(--spacing-8) var(--color-black-alpha-10);
+}
+
+.button:active:not(:disabled) {
+	transform: scale(0.98);
+	box-shadow: 0 var(--spacing-1) var(--spacing-4) var(--color-black-alpha-8);
+}
+
+.button:disabled {
+	opacity: 0.5;
+	cursor: default;
+	color: var(--color-gray-100);
+}

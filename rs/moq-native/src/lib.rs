@@ -1,7 +1,17 @@
-pub mod client;
+//! Helper library for native MoQ applications.
+//!
+//! Establishes MoQ connections over:
+//! - WebTransport (HTTP/3)
+//! - Raw QUIC (with ALPN negotiation)
+//! - WebSocket (fallback via [web-transport-ws](https://crates.io/crates/web-transport-ws))
+//! - Iroh P2P (requires `iroh` feature)
+//!
+//! See [`Client`] for connecting to relays and [`Server`] for accepting connections.
+
+mod client;
 mod crypto;
-pub mod log;
-pub mod server;
+mod log;
+mod server;
 
 pub use client::*;
 pub use log::*;
@@ -13,4 +23,6 @@ pub use rustls;
 pub use web_transport_quinn;
 
 #[cfg(feature = "iroh")]
-pub mod iroh;
+mod iroh;
+#[cfg(feature = "iroh")]
+pub use iroh::*;

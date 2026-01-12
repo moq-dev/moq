@@ -266,7 +266,7 @@ impl Drop for Avc3 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive)]
 #[repr(u8)]
-pub enum NalType {
+enum NalType {
 	Unspecified = 0,
 	NonIdrSlice = 1,
 	DataPartitionA = 2,

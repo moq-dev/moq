@@ -23,6 +23,9 @@ struct State {
 	requested: HashMap<String, TrackProducer>,
 }
 
+/// A collection of media tracks that can be published and subscribed to.
+///
+/// Create via [`Broadcast::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
 #[derive(Clone, Default)]
 pub struct Broadcast {
 	// NOTE: Broadcasts have no names because they're often relative.

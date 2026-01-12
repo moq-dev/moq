@@ -1,3 +1,7 @@
+@import "../shared/variables.css";
+@import "../shared/flex.css";
+@import "../shared/button.css";
+
 .publishControlsContainer {
 	display: flex;
 	justify-content: space-around;
@@ -9,15 +13,6 @@
 .publishSourceSelectorContainer {
 	display: flex;
 	gap: 16px;
-}
-
-.publishButton {
-	background: transparent;
-	border: none;
-	cursor: pointer;
-	display: inline-block;
-	font: inherit;
-	color: inherit;
 }
 
 .publishSourceButtonContainer {
@@ -38,6 +33,13 @@
 	font-size: 0.75em;
 	cursor: pointer;
 	padding-left: 4px;
+}
+
+.button.button--media-source-selector,
+.button.button--media-source-selector:hover:not(:disabled) {
+	background-color: unset;
+	box-shadow: none;
+	border: unset;
 }
 
 .mediaSourceSelector {

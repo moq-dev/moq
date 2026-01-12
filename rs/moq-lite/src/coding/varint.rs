@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use super::{Decode, DecodeError, Encode};
 
+/// The number is too large to fit in a VarInt (62 bits).
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
 #[error("value out of range")]
 pub struct BoundsExceeded;

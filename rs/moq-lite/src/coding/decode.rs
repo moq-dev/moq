@@ -1,7 +1,11 @@
 use std::{borrow::Cow, string::FromUtf8Error};
 use thiserror::Error;
 
+/// Read the from the buffer using the given version.
+///
+/// If [DecodeError::Short] is returned, the caller should try again with more data.
 pub trait Decode<V>: Sized {
+	/// Decode the value from the given buffer.
 	fn decode<B: bytes::Buf>(buf: &mut B, version: V) -> Result<Self, DecodeError>;
 }
 

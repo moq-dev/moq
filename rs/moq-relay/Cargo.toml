@@ -11,6 +11,11 @@ edition = "2021"
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[[bin]]
+name = "moq-relay"
+path = "src/main.rs"
+doc = false
+
 [features]
 default = ["iroh"]
 iroh = ["moq-native/iroh"]

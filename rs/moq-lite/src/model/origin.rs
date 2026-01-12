@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use web_async::Lock;
 
 use super::BroadcastConsumer;
-use crate::{AsPath, Path, PathOwned, Produce};
+use crate::{AsPath, Broadcast, BroadcastProducer, Path, PathOwned, Produce};
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -334,6 +334,7 @@ impl Default for OriginNodes {
 /// A broadcast path and its associated consumer, or None if closed.
 pub type OriginAnnounce = (PathOwned, Option<BroadcastConsumer>);
 
+/// A collection of broadcasts that can be published and subscribed to.
 pub struct Origin {}
 
 impl Origin {
@@ -356,6 +357,16 @@ pub struct OriginProducer {
 }
 
 impl OriginProducer {
+	/// Create and publish a new broadcast, returning the producer.
+	///
+	/// This is a helper method when you only want to publish a broadcast to a single origin.
+	/// Returns [None] if the broadcast is not allowed to be published.
+	pub fn create_broadcast(&self, path: impl AsPath) -> Option<BroadcastProducer> {
+		let broadcast = Broadcast::produce();
+		self.publish_broadcast(path, broadcast.consumer)
+			.then_some(broadcast.producer)
+	}
+
 	/// Publish a broadcast, announcing it to all consumers.
 	///
 	/// The broadcast will be unannounced when it is closed.

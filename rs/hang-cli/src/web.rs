@@ -12,7 +12,7 @@ use tower_http::services::ServeDir;
 // Initialize the HTTP server (but don't serve yet).
 pub async fn run_web(
 	bind: SocketAddr,
-	tls_info: Arc<RwLock<moq_native::TlsInfo>>,
+	tls_info: Arc<RwLock<moq_native::ServerTlsInfo>>,
 	public: Option<PathBuf>,
 ) -> anyhow::Result<()> {
 	let listen = tokio::net::lookup_host(bind)

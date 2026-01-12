@@ -2,7 +2,7 @@ use std::{fmt::Debug, sync::Arc};
 
 use crate::{coding::*, Error};
 
-// A wrapper around a SendStream that will reset on Drop
+/// A wrapper around a [web_transport_trait::SendStream] that will reset on Drop.
 pub struct Writer<S: web_transport_trait::SendStream, V> {
 	stream: Option<S>,
 	buffer: bytes::BytesMut,
@@ -10,6 +10,7 @@ pub struct Writer<S: web_transport_trait::SendStream, V> {
 }
 
 impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
+	/// Create a new writer for the given stream and version.
 	pub fn new(stream: S, version: V) -> Self {
 		Self {
 			stream: Some(stream),
@@ -18,6 +19,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		}
 	}
 
+	/// Encode the given message to the stream.
 	pub async fn encode<T: Encode<V> + Debug>(&mut self, msg: &T) -> Result<(), Error>
 	where
 		V: Clone,
@@ -47,7 +49,9 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 			.map_err(|e| Error::Transport(Arc::new(e)))
 	}
 
-	// NOTE: We use Buf so we don't perform a copy when using Quinn.
+	/// Write the entire [Buf] to the stream.
+	///
+	/// NOTE: This can avoid performing a copy when using [Bytes].
 	pub async fn write_all<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<(), Error> {
 		while buf.has_remaining() {
 			self.write(buf).await?;
@@ -55,7 +59,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		Ok(())
 	}
 
-	/// A clean termination of the stream, waiting for the peer to close.
+	/// Mark the stream as finished.
 	pub fn finish(&mut self) -> Result<(), Error> {
 		self.stream
 			.as_mut()
@@ -64,10 +68,12 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 			.map_err(|e| Error::Transport(Arc::new(e)))
 	}
 
+	/// Abort the stream with the given error.
 	pub fn abort(&mut self, err: &Error) {
 		self.stream.as_mut().unwrap().reset(err.to_code());
 	}
 
+	/// Wait for the stream to be closed, or the [Self::finish] to be acknowledged by the peer.
 	pub async fn closed(&mut self) -> Result<(), Error> {
 		self.stream
 			.as_mut()
@@ -78,10 +84,12 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		Ok(())
 	}
 
+	/// Set the priority of the stream.
 	pub fn set_priority(&mut self, priority: u8) {
 		self.stream.as_mut().unwrap().set_priority(priority);
 	}
 
+	/// Cast the writer to a different version, used during version negotiation.
 	pub fn with_version<O>(mut self, version: O) -> Writer<S, O> {
 		Writer {
 			// We need to use an Option so Drop doesn't reset the stream.
