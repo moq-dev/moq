@@ -16,6 +16,9 @@ pub enum PublishFormat {
 		/// URL or file path of an HLS playlist to ingest.
 		#[arg(long)]
 		playlist: String,
+		/// Enable passthrough mode to transport complete CMAF fragments (moof+mdat) without decomposing.
+		#[arg(long)]
+		passthrough: bool,
 	},
 }
 
@@ -45,12 +48,17 @@ impl Publish {
 				let stream = Decoder::new(broadcast.clone(), format);
 				PublishDecoder::Decoder(Box::new(stream))
 			}
-			PublishFormat::Hls { playlist } => {
+			PublishFormat::Hls { playlist, passthrough } => {
+				tracing::info!(
+					passthrough = *passthrough,
+					"HLS publish preserving original container format."
+				);
 				let hls = hang::import::Hls::new(
 					broadcast.clone(),
 					hang::import::HlsConfig {
 						playlist: playlist.clone(),
 						client: None,
+						passthrough: *passthrough,
 					},
 				)?;
 				PublishDecoder::Hls(Box::new(hls))

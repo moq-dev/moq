@@ -62,6 +62,7 @@ impl Avc3 {
 			display_ratio_width: None,
 			display_ratio_height: None,
 			optimize_for_latency: None,
+			container: hang::catalog::Container::Native,
 		};
 
 		if let Some(old) = &self.config {

@@ -14,7 +14,7 @@ export const VideoConfigSchema = z.object({
 	codec: z.string(),
 
 	// Container format for timestamp encoding
-	// Defaults to "legacy" when not specified in catalog (backward compatibility)
+	// Defaults to "native" when not specified in catalog (backward compatibility)
 	container: ContainerSchema.default(DEFAULT_CONTAINER),
 
 	// The description is used for some codecs.

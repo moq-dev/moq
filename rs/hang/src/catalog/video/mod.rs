@@ -16,6 +16,8 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_with::{hex::Hex, DisplayFromStr};
 
+use crate::catalog::container::Container;
+
 /// Information about a video track in the catalog.
 ///
 /// This struct contains a map of renditions (different quality/codec options)
@@ -109,4 +111,8 @@ pub struct VideoConfig {
 	/// Default: true
 	#[serde(default)]
 	pub optimize_for_latency: Option<bool>,
+
+	/// Container format for frame encoding.
+	/// Defaults to "native" for backward compatibility.
+	pub container: Container,
 }

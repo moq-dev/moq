@@ -112,19 +112,18 @@ export class Consumer {
 
 	async #run() {
 		// Start fetching groups in the background
+
 		for (;;) {
 			const consumer = await this.#track.nextGroup();
-			if (!consumer) break;
+			if (!consumer) {
+				break;
+			}
 
-			// To improve TTV, we always start with the first group.
-			// For higher latencies we might need to figure something else out, as its racey.
 			if (this.#active === undefined) {
 				this.#active = consumer.sequence;
 			}
 
 			if (consumer.sequence < this.#active) {
-				console.warn(`skipping old group: ${consumer.sequence} < ${this.#active}`);
-				// Skip old groups.
 				consumer.close();
 				continue;
 			}
@@ -150,7 +149,9 @@ export class Consumer {
 
 			for (;;) {
 				const next = await group.consumer.readFrame();
-				if (!next) break;
+				if (!next) {
+					break;
+				}
 
 				const { data, timestamp } = decode(next, this.#container);
 				const frame = {
@@ -223,8 +224,6 @@ export class Consumer {
 		if (this.#active !== undefined && first.consumer.sequence <= this.#active) {
 			this.#groups.shift();
 
-			console.warn(`skipping slow group: ${first.consumer.sequence} < ${this.#groups[0]?.consumer.sequence}`);
-
 			first.consumer.close();
 			first.frames.length = 0;
 		}
@@ -246,7 +245,9 @@ export class Consumer {
 				this.#groups[0].consumer.sequence <= this.#active
 			) {
 				const frame = this.#groups[0].frames.shift();
-				if (frame) return frame;
+				if (frame) {
+					return frame;
+				}
 
 				// Check if the group is done and then remove it.
 				if (this.#active > this.#groups[0].consumer.sequence) {
@@ -261,7 +262,9 @@ export class Consumer {
 
 			const wait = new Promise<void>((resolve) => {
 				this.#notify = resolve;
-			}).then(() => true);
+			}).then(() => {
+				return true;
+			});
 
 			if (!(await Promise.race([wait, this.#signals.closed]))) {
 				this.#notify = undefined;

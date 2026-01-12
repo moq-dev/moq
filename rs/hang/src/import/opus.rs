@@ -53,6 +53,7 @@ impl Opus {
 			channel_count,
 			bitrate: None,
 			description: None,
+			container: hang::catalog::Container::Native,
 		};
 
 		tracing::debug!(name = ?track.name, ?config, "starting track");

@@ -41,6 +41,10 @@ export class Source {
 	// Downcast to AudioNode so it matches Publish.Audio
 	readonly root = this.#worklet as Getter<AudioNode | undefined>;
 
+	// For MSE path, expose the HTMLAudioElement for direct control
+	#mseAudioElement = new Signal<HTMLAudioElement | undefined>(undefined);
+	readonly mseAudioElement = this.#mseAudioElement as Getter<HTMLAudioElement | undefined>;
+
 	#sampleRate = new Signal<number | undefined>(undefined);
 	readonly sampleRate: Getter<number | undefined> = this.#sampleRate;
 
@@ -94,6 +98,12 @@ export class Source {
 
 		const config = effect.get(this.config);
 		if (!config) return;
+
+		// Don't create worklet for MSE (cmaf) - browser handles playback directly
+		// The worklet is only needed for WebCodecs path
+		if (config.container === "cmaf") {
+			return;
+		}
 
 		const sampleRate = config.sampleRate;
 		const channelCount = config.numberOfChannels;
@@ -149,26 +159,101 @@ export class Source {
 
 	#runDecoder(effect: Effect): void {
 		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
+		if (!enabled) {
+			return;
+		}
 
 		const catalog = effect.get(this.catalog);
-		if (!catalog) return;
+		if (!catalog) {
+			return;
+		}
 
 		const broadcast = effect.get(this.broadcast);
-		if (!broadcast) return;
+		if (!broadcast) {
+			return;
+		}
 
 		const config = effect.get(this.config);
-		if (!config) return;
+		if (!config) {
+			return;
+		}
 
 		const active = effect.get(this.active);
-		if (!active) return;
+		if (!active) {
+			return;
+		}
 
-		const sub = broadcast.subscribe(active, catalog.priority);
+		// Route to MSE for CMAF, WebCodecs for native/raw
+		if (config.container === "cmaf") {
+			this.#runMSEPath(effect, broadcast, active, config, catalog);
+		} else {
+			this.#runWebCodecsPath(effect, broadcast, active, config, catalog);
+		}
+	}
+
+	#runMSEPath(
+		effect: Effect,
+		broadcast: Moq.Broadcast,
+		name: string,
+		config: Catalog.AudioConfig,
+		catalog: Catalog.Audio,
+	): void {
+		console.log("[Audio Stream] Subscribing to track", {
+			name,
+			codec: config.codec,
+			container: config.container,
+			sampleRate: config.sampleRate,
+			channels: config.numberOfChannels,
+		});
+		// Import MSE source dynamically
+		effect.spawn(async () => {
+			const { SourceMSE } = await import("./source-mse.js");
+			const mseSource = new SourceMSE(this.latency);
+			effect.cleanup(() => mseSource.close());
+
+			// Expose HTMLAudioElement for Emitter to control volume/mute
+			// Use effect to reactively get the audio element when it's ready
+			this.#signals.effect((eff) => {
+				const audioElement = eff.get(mseSource.audioElement);
+				eff.set(this.#mseAudioElement, audioElement);
+			});
+
+			// Forward stats
+			this.#signals.effect((eff) => {
+				const stats = eff.get(mseSource.stats);
+				eff.set(this.#stats, stats);
+			});
+
+			// Run MSE track - no worklet needed, browser handles everything
+			try {
+				await mseSource.runTrack(effect, broadcast, name, config, catalog);
+			} catch (error) {
+				console.error("MSE path error, falling back to WebCodecs:", error);
+				// Fallback to WebCodecs
+				this.#runWebCodecsPath(effect, broadcast, name, config, catalog);
+			}
+		});
+	}
+
+	#runWebCodecsPath(
+		effect: Effect,
+		broadcast: Moq.Broadcast,
+		name: string,
+		config: Catalog.AudioConfig,
+		catalog: Catalog.Audio,
+	): void {
+		console.log("[Audio Stream] Subscribing to track", {
+			name,
+			codec: config.codec,
+			container: config.container,
+			sampleRate: config.sampleRate,
+			channels: config.numberOfChannels,
+		});
+		const sub = broadcast.subscribe(name, catalog.priority);
 		effect.cleanup(() => sub.close());
 
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
-		// Container defaults to "legacy" via Zod schema for backward compatibility
-		console.log(`[Audio Subscriber] Using container format: ${config.container}`);
+		// Container defaults to "native" via Zod schema for backward compatibility
 		const consumer = new Frame.Consumer(sub, {
 			latency: Math.max(this.latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
 			container: config.container,

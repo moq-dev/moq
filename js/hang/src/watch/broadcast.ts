@@ -64,6 +64,13 @@ export class Broadcast {
 		this.reload = Signal.from(props?.reload ?? true);
 		this.audio = new Audio.Source(this.#broadcast, this.#catalog, props?.audio);
 		this.video = new Video.Source(this.#broadcast, this.#catalog, props?.video);
+
+		// Connect audio element to video source for synchronization
+		this.signals.effect((eff) => {
+			const audioElement = eff.get(this.audio.mseAudioElement);
+			this.video.setAudioSync?.(audioElement);
+		});
+
 		this.location = new Location.Root(this.#broadcast, this.#catalog, props?.location);
 		this.chat = new Chat(this.#broadcast, this.#catalog, props?.chat);
 		this.preview = new Preview(this.#broadcast, this.#catalog, props?.preview);
