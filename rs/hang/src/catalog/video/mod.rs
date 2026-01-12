@@ -100,7 +100,7 @@ pub struct Display {
 #[serde(rename_all = "camelCase")]
 pub struct VideoConfig {
 	/// The codec, see the registry for details:
-	/// https://w3c.github.io/webcodecs/codec_registry.html
+	/// <https://w3c.github.io/webcodecs/codec_registry.html>
 	#[serde_as(as = "DisplayFromStr")]
 	pub codec: VideoCodec,
 

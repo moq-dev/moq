@@ -4,7 +4,7 @@ use std::fmt;
 ///
 /// The producer and consumer may each be cloned as many times as you want.
 /// However when the number of references reaches zero, the other will receive a signal to close.
-/// A new consumer may be created at any time by calling [T::consume].
+/// A new consumer may be created at any time by calling the producer's `consume()` method.
 #[derive(Clone)]
 pub struct Produce<P, C> {
 	pub producer: P,

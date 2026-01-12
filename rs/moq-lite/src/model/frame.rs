@@ -3,7 +3,7 @@ use std::{fmt, ops::Deref};
 use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
 
-use crate::{Error, Result, Time};
+use crate::{Error, Produce, Result, Time};
 
 /// A unit of data, representing a point in time.
 ///
@@ -33,6 +33,49 @@ impl Frame {
 		Self {
 			instant: Time::now(),
 			size,
+		}
+	}
+
+	/// Create a new producer and consumer for the frame.
+	pub fn produce(self) -> Produce<FrameProducer, FrameConsumer> {
+		let producer = FrameProducer::new(self);
+		let consumer = producer.consume();
+		Produce { producer, consumer }
+	}
+}
+
+impl From<usize> for Frame {
+	fn from(size: usize) -> Self {
+		Self {
+			instant: Time::now(),
+			size,
+		}
+	}
+}
+
+impl From<u64> for Frame {
+	fn from(size: u64) -> Self {
+		Self {
+			instant: Time::now(),
+			size: size as usize,
+		}
+	}
+}
+
+impl From<u32> for Frame {
+	fn from(size: u32) -> Self {
+		Self {
+			instant: Time::now(),
+			size: size as usize,
+		}
+	}
+}
+
+impl From<u16> for Frame {
+	fn from(size: u16) -> Self {
+		Self {
+			instant: Time::now(),
+			size: size as usize,
 		}
 	}
 }

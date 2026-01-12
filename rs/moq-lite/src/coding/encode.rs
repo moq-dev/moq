@@ -2,12 +2,16 @@ use std::{borrow::Cow, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
 
+/// Write the value to the buffer using the given version.
 pub trait Encode<V>: Sized {
-	// Encode the value to the given writer.
-	// This will panic if the Buf is not large enough; use a Vec or encode_size() to check.
+	/// Encode the value to the given writer.
+	///
+	/// This will panic if the [bytes::BufMut] does not have enough capacity.
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V);
 
-	// Encode the value to a Bytes buffer.
+	/// Encode the value into a [Bytes] buffer.
+	///
+	/// NOTE: This will allocate.
 	fn encode_bytes(&self, v: V) -> Bytes {
 		let mut buf = BytesMut::new();
 		self.encode(&mut buf, v);

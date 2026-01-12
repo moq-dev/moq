@@ -1,3 +1,5 @@
+//! Import modules for converting existing formats into a hang broadcast.
+
 mod aac;
 mod annexb;
 mod avc3;

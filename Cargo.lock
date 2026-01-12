@@ -1583,7 +1583,7 @@ checksum = "ab2f85be813ce08f0569fcd816f256c6f4287c975d69a9a14ceacc309f1de967"
 
 [[package]]
 name = "hang"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "buf-list",
@@ -1611,7 +1611,7 @@ dependencies = [
 
 [[package]]
 name = "hang-cli"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -2448,7 +2448,7 @@ checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "libmoq"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "cbindgen",
@@ -2623,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "moq-clock"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2637,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "moq-lite"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "async-channel",
  "bytes",
@@ -2656,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2690,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -2735,7 +2735,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "clap",

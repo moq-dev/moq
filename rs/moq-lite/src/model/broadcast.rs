@@ -15,7 +15,13 @@ struct State {
 	requested: HashMap<String, TrackProducer>,
 }
 
-pub struct Broadcast {}
+/// A collection of media tracks that can be published and subscribed to.
+///
+/// Create via [`Broadcast::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
+#[derive(Clone, Default)]
+pub struct Broadcast {
+	// NOTE: Broadcasts have no names because they're often relative.
+}
 
 impl Broadcast {
 	pub fn produce() -> Produce<BroadcastProducer, BroadcastConsumer> {
@@ -259,14 +265,14 @@ mod test {
 
 		let consumer = producer.consume();
 
-		let mut track1_sub = consumer.subscribe_track(&track1.info(), Delivery::default());
+		let mut track1_sub = consumer.subscribe_track(track1.info(), Delivery::default());
 		track1_sub.assert_group();
 
 		let mut track2 = TrackProducer::new("track2", Delivery::default());
 		producer.publish_track(track2.clone());
 
 		let consumer2 = producer.consume();
-		let mut track2_consumer = consumer2.subscribe_track(&track2.info(), Delivery::default());
+		let mut track2_consumer = consumer2.subscribe_track(track2.info(), Delivery::default());
 		track2_consumer.assert_no_group();
 
 		track2.append_group().unwrap();
@@ -298,7 +304,7 @@ mod test {
 		let consumer3 = producer.consume();
 		producer.assert_used();
 
-		let track1 = consumer3.subscribe_track(&Track::new("track1"), Delivery::default());
+		let track1 = consumer3.subscribe_track(Track::new("track1"), Delivery::default());
 
 		// It doesn't matter if a subscription is alive, we only care about the broadcast handle.
 		// TODO is this the right behavior?
@@ -320,8 +326,8 @@ mod test {
 		track1.append_group().unwrap();
 		producer.publish_track(track1.clone());
 
-		let mut track1c = consumer.subscribe_track(&track1.info(), Delivery::default());
-		let track2 = consumer.subscribe_track(&Track::new("track2"), Delivery::default());
+		let mut track1c = consumer.subscribe_track(track1.info(), Delivery::default());
+		let track2 = consumer.subscribe_track(Track::new("track2"), Delivery::default());
 
 		drop(producer);
 		consumer.assert_closed();
@@ -357,12 +363,12 @@ mod test {
 		let consumer = producer.consume();
 		let consumer2 = consumer.clone();
 
-		let mut track1 = consumer.subscribe_track(&Track::new("track1"), Delivery::default());
+		let mut track1 = consumer.subscribe_track(Track::new("track1"), Delivery::default());
 		track1.assert_not_closed();
 		track1.assert_no_group();
 
 		// Make sure we deduplicate requests while track1 is still active.
-		let mut track2 = consumer2.subscribe_track(&Track::new("track1"), Delivery::default());
+		let mut track2 = consumer2.subscribe_track(Track::new("track1"), Delivery::default());
 		track2.assert_is_clone(&track1);
 
 		// Get the requested track, and there should only be one.
@@ -378,13 +384,13 @@ mod test {
 		track2.assert_group();
 
 		// Make sure that tracks are cancelled when the producer is dropped.
-		let track4 = consumer.subscribe_track(&Track::new("track2"), Delivery::default());
+		let track4 = consumer.subscribe_track(Track::new("track2"), Delivery::default());
 		drop(producer);
 
 		// Make sure the track is errored, not closed.
 		track4.assert_error();
 
-		let track5 = consumer2.subscribe_track(&Track::new("track3"), Delivery::default());
+		let track5 = consumer2.subscribe_track(Track::new("track3"), Delivery::default());
 		track5.assert_error();
 	}
 
@@ -395,7 +401,7 @@ mod test {
 		// Subscribe to a track that doesn't exist - this creates a request
 		let consumer1 = broadcast
 			.consumer
-			.subscribe_track(&Track::new("unknown_track"), Delivery::default());
+			.subscribe_track(Track::new("unknown_track"), Delivery::default());
 
 		// Get the requested track producer
 		let producer1 = broadcast.producer.assert_request();
@@ -409,7 +415,7 @@ mod test {
 		// Making a new consumer will keep the producer alive
 		let consumer2 = broadcast
 			.consumer
-			.subscribe_track(&Track::new("unknown_track"), Delivery::default());
+			.subscribe_track(Track::new("unknown_track"), Delivery::default());
 		consumer2.assert_is_clone(&consumer1);
 
 		// Drop the consumer subscription
@@ -438,7 +444,7 @@ mod test {
 		// Now the cleanup task should have run and we can subscribe again to the unknown track.
 		let consumer3 = broadcast
 			.consumer
-			.subscribe_track(&Track::new("unknown_track"), Delivery::default());
+			.subscribe_track(Track::new("unknown_track"), Delivery::default());
 		let producer2 = broadcast.producer.assert_request();
 
 		// Drop the consumer, now the producer should be unused

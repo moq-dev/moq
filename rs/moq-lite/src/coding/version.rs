@@ -42,7 +42,7 @@ impl fmt::Debug for Version {
 	}
 }
 
-/// A list of versions in arbitrary order.
+/// A list of versions in preferred order.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Versions(Vec<Version>);
 

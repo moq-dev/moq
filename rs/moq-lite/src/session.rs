@@ -5,6 +5,11 @@ use crate::{
 	ietf, lite, setup, Error, OriginConsumer, OriginProducer,
 };
 
+/// A MoQ transport session, wrapping a WebTransport connection.
+///
+/// Created via:
+/// - [`Session::connect`] for clients.
+/// - [`Session::accept`] for servers.
 pub struct Session {
 	session: Arc<dyn SessionInner>,
 }

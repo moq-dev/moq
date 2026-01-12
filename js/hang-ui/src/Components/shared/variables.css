@@ -1,0 +1,32 @@
+:host {
+	--color-white: #ffffff;
+	--color-white-alpha-10: rgba(255, 255, 255, 0.1);
+	--color-white-alpha-20: rgba(255, 255, 255, 0.2);
+	--color-white-alpha-25: rgba(255, 255, 255, 0.25);
+	--color-white-alpha-30: rgba(255, 255, 255, 0.3);
+	--color-gray-100: #9ca3af;
+	--color-blue-400: #00dfff;
+	--color-blue-900: #1b3243;
+	--color-purple-400: #a855f7;
+	--color-purple-900: #31144a;
+	--color-green-400: #65ee2e;
+	--color-green-900: #3d4928;
+	--color-orange-400: #ff9900;
+	--color-orange-500: #f97316;
+	--color-orange-900: #4d301b;
+	--color-amber-600: #d97706;
+	--color-orange-500-alpha-60: rgba(249, 115, 22, 0.6);
+	--color-orange-500-alpha-80: rgba(249, 115, 22, 0.8);
+	--color-red: #e60000;
+	--color-black-alpha-8: rgba(0, 0, 0, 0.08);
+	--color-black-alpha-10: rgba(0, 0, 0, 0.1);
+	--color-black-alpha-85: rgba(0, 0, 0, 0.85);
+	--color-black: #000000;
+	--spacing-1: 0.0625rem; /* 1px */
+	--spacing-2: 0.125rem; /* 2px */
+	--spacing-4: 0.25rem; /* 4px */
+	--spacing-8: 0.5rem; /* 8px */
+	--spacing-12: 0.75rem; /* 12px */
+	--spacing-16: 1rem; /* 16px */
+	--spacing-24: 1.5rem; /* 24px */
+}

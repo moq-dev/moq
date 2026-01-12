@@ -1,9 +1,10 @@
-//! This module contains the structs and functions for the MoQ catalog format
-/// The catalog format is a JSON file that describes the tracks available in a broadcast.
+//! This module contains the structs and functions for the MoQ catalog format.
+//!
+//! The catalog format is a JSON file that describes the tracks available in a broadcast.
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::{Audio, Chat, Track, User, Video};
+use crate::{Audio, Chat, User, Video};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 #[serde_with::serde_as]
@@ -35,7 +36,7 @@ pub struct Catalog {
 
 	/// Preview information about the broadcast
 	#[serde(default)]
-	pub preview: Option<Track>,
+	pub preview: Option<moq_lite::Track>,
 }
 
 impl Catalog {

@@ -1,13 +1,8 @@
-/**
- * Stream discovery example
- *
- * This example demonstrates how to discover broadcasts announced by the server.
- * Run with: bun run examples/discovery.ts
- */
-import * as Moq from "../src/index.ts";
+import * as Moq from "@moq/lite";
 
 async function main() {
-	const connection = await Moq.Connection.connect(new URL("https://cdn.moq.dev/anon"));
+	const url = new URL("https://cdn.moq.dev/anon");
+	const connection = await Moq.Connection.connect(url);
 
 	// Get the announced stream iterator
 	const announced = connection.announced();
@@ -20,11 +15,12 @@ async function main() {
 		console.log("New stream available:", announcement.path);
 
 		// Subscribe to new streams
-		connection.consume(announcement.path);
-		// ... handle the broadcast
+		const _broadcast = connection.consume(announcement.path);
+
+		// Do something with the broadcast
 	}
 
-	await connection.close();
+	connection.close();
 }
 
 main().catch(console.error);

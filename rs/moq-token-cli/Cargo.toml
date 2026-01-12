@@ -5,12 +5,13 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 
 [[bin]]
 name = "moq-token"
 path = "src/bin.rs"
+doc = false
 
 [dependencies]
 anyhow = "1"

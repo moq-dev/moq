@@ -7,6 +7,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 
+/// Tracing log configuration.
 #[serde_with::serde_as]
 #[derive(Clone, clap::Parser, Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields, default)]

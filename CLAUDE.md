@@ -55,7 +55,12 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 1. The project uses `just` as the task runner - check `justfile` for all available commands
 2. For Rust development, the workspace is configured in the `rs/Cargo.toml`
 3. For JS/TS development, bun workspaces are used with configuration in `js/package.json`
-4. Try to keep stuff out of the root unless necessary; scope tools to specific languages.
+
+## Tooling
+
+- **TypeScript**: Always use `bun` for all package management and script execution (not npm, yarn, or pnpm)
+- **Common**: Use `just` for common development tasks
+- **Rust**: Use `cargo` for Rust-specific operations
 
 ## Testing Approach
 

@@ -1,3 +1,13 @@
+//! MoQ relay server connecting publishers to subscribers.
+//!
+//! Content-agnostic relay that works with any live data, not just media.
+//!
+//! Features:
+//! - Clustering: connect multiple relays for global distribution
+//! - Authentication: JWT-based access control via [`moq_token`]
+//! - WebSocket fallback: for restrictive networks
+//! - HTTP API: health checks and metrics via [`Web`]
+
 mod auth;
 mod cluster;
 mod config;

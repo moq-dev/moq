@@ -3,7 +3,7 @@ use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
 
-/// Opus decoder, initialized via OpusHead.
+/// Opus decoder, initialized via a OpusHead. Does not support Ogg.
 pub struct Opus {
 	broadcast: moq_lite::BroadcastProducer,
 	catalog: hang::CatalogProducer,

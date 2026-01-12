@@ -1,8 +1,8 @@
+import { type Moq, Signals } from "@moq/hang";
 import type * as Catalog from "@moq/hang/catalog";
 import type HangWatch from "@moq/hang/watch/element";
-import type { Time } from "@moq/lite";
 import type { JSX } from "solid-js";
-import { createContext, createEffect, createSignal } from "solid-js";
+import { createContext, createSignal, onCleanup } from "solid-js";
 
 type WatchUIContextProviderProps = {
 	hangWatch: HangWatch;
@@ -34,6 +34,8 @@ type WatchUIContextValues = {
 	setActiveRendition: (name: string | undefined) => void;
 	isStatsPanelVisible: () => boolean;
 	setIsStatsPanelVisible: (visible: boolean) => void;
+	isFullscreen: () => boolean;
+	toggleFullscreen: () => void;
 };
 
 export const WatchUIContext = createContext<WatchUIContextValues>();
@@ -48,9 +50,18 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
 	const [activeRendition, setActiveRendition] = createSignal<string | undefined>(undefined);
 	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
+	const [isFullscreen, setIsFullscreen] = createSignal<boolean>(!!document.fullscreenElement);
 
 	const togglePlayback = () => {
 		props.hangWatch.paused.set(!props.hangWatch.paused.get());
+	};
+
+	const toggleFullscreen = () => {
+		if (document.fullscreenElement) {
+			document.exitFullscreen();
+		} else {
+			props.hangWatch.requestFullscreen();
+		}
 	};
 
 	const setVolume = (volume: number) => {
@@ -62,7 +73,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	};
 
 	const setLatencyValue = (latency: number) => {
-		props.hangWatch.latency.set(latency as Time.Milli);
+		props.hangWatch.latency.set(latency as Moq.Time.Milli);
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
@@ -89,80 +100,88 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		setActiveRendition: setActiveRenditionValue,
 		isStatsPanelVisible,
 		setIsStatsPanelVisible,
+		isFullscreen,
+		toggleFullscreen,
 	};
 
-	createEffect(() => {
-		const watch = props.hangWatch;
+	const watch = props.hangWatch;
+	const signals = new Signals.Effect();
 
-		watch.signals.effect((effect) => {
-			const url = effect.get(watch.connection.url);
-			const connection = effect.get(watch.connection.status);
-			const broadcast = effect.get(watch.broadcast.status);
+	signals.effect((effect) => {
+		const url = effect.get(watch.connection.url);
+		const connection = effect.get(watch.connection.status);
+		const broadcast = effect.get(watch.broadcast.status);
 
-			if (!url) {
-				setWatchStatus("no-url");
-			} else if (connection === "disconnected") {
-				setWatchStatus("disconnected");
-			} else if (connection === "connecting") {
-				setWatchStatus("connecting");
-			} else if (broadcast === "offline") {
-				setWatchStatus("offline");
-			} else if (broadcast === "loading") {
-				setWatchStatus("loading");
-			} else if (broadcast === "live") {
-				setWatchStatus("live");
-			} else if (connection === "connected") {
-				setWatchStatus("connected");
-			}
-		});
-
-		watch.signals.effect((effect) => {
-			const paused = effect.get(watch.video.paused);
-			setIsPlaying(!paused);
-		});
-
-		watch.signals.effect((effect) => {
-			const volume = effect.get(watch.audio.volume);
-			setCurrentVolume(volume * 100);
-		});
-
-		watch.signals.effect((effect) => {
-			const muted = effect.get(watch.audio.muted);
-			setIsMuted(muted);
-		});
-
-		watch.signals.effect((effect) => {
-			const syncStatus = effect.get(watch.video.source.syncStatus);
-			const bufferStatus = effect.get(watch.video.source.bufferStatus);
-			const shouldShow = syncStatus.state === "wait" || bufferStatus.state === "empty";
-
-			setBuffering(shouldShow);
-		});
-
-		watch.signals.effect((effect) => {
-			const latency = effect.get(watch.latency);
-			setLatency(latency);
-		});
-
-		watch.signals.effect((effect) => {
-			const rootCatalog = effect.get(watch.broadcast.catalog);
-			const videoCatalog = rootCatalog?.video;
-			const renditions = videoCatalog?.renditions ?? {};
-
-			const renditionsList: Rendition[] = Object.entries(renditions).map(([name, config]) => ({
-				name,
-				width: (config as Catalog.VideoConfig).codedWidth,
-				height: (config as Catalog.VideoConfig).codedHeight,
-			}));
-
-			setAvailableRenditions(renditionsList);
-		});
-
-		watch.signals.effect((effect) => {
-			const selected = effect.get(watch.video.source.active);
-			setActiveRendition(selected);
-		});
+		if (!url) {
+			setWatchStatus("no-url");
+		} else if (connection === "disconnected") {
+			setWatchStatus("disconnected");
+		} else if (connection === "connecting") {
+			setWatchStatus("connecting");
+		} else if (broadcast === "offline") {
+			setWatchStatus("offline");
+		} else if (broadcast === "loading") {
+			setWatchStatus("loading");
+		} else if (broadcast === "live") {
+			setWatchStatus("live");
+		} else if (connection === "connected") {
+			setWatchStatus("connected");
+		}
 	});
+
+	signals.effect((effect) => {
+		const paused = effect.get(watch.video.paused);
+		setIsPlaying(!paused);
+	});
+
+	signals.effect((effect) => {
+		const volume = effect.get(watch.audio.volume);
+		setCurrentVolume(volume * 100);
+	});
+
+	signals.effect((effect) => {
+		const muted = effect.get(watch.audio.muted);
+		setIsMuted(muted);
+	});
+
+	signals.effect((effect) => {
+		const syncStatus = effect.get(watch.video.source.syncStatus);
+		const bufferStatus = effect.get(watch.video.source.bufferStatus);
+		const shouldShow = syncStatus.state === "wait" || bufferStatus.state === "empty";
+
+		setBuffering(shouldShow);
+	});
+
+	signals.effect((effect) => {
+		const latency = effect.get(watch.latency);
+		setLatency(latency);
+	});
+
+	signals.effect((effect) => {
+		const rootCatalog = effect.get(watch.broadcast.catalog);
+		const videoCatalog = rootCatalog?.video;
+		const renditions = videoCatalog?.renditions ?? {};
+
+		const renditionsList: Rendition[] = Object.entries(renditions).map(([name, config]) => ({
+			name,
+			width: (config as Catalog.VideoConfig).codedWidth,
+			height: (config as Catalog.VideoConfig).codedHeight,
+		}));
+
+		setAvailableRenditions(renditionsList);
+	});
+
+	signals.effect((effect) => {
+		const selected = effect.get(watch.video.source.active);
+		setActiveRendition(selected);
+	});
+
+	const handleFullscreenChange = () => {
+		setIsFullscreen(!!document.fullscreenElement);
+	};
+
+	signals.event(document, "fullscreenchange", handleFullscreenChange);
+	onCleanup(() => signals.close());
 
 	return <WatchUIContext.Provider value={value}>{props.children}</WatchUIContext.Provider>;
 }

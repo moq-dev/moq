@@ -4,6 +4,7 @@ use bytes::{Buf, Bytes, BytesMut};
 
 use crate::{coding::*, Error};
 
+/// A reader for decoding messages from a stream.
 pub struct Reader<S: web_transport_trait::RecvStream, V> {
 	stream: S,
 	buffer: BytesMut,
@@ -19,6 +20,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
+	/// Decode the next message from the stream.
 	pub async fn decode<T: Decode<V>>(&mut self) -> Result<T, Error>
 	where
 		V: Clone,
@@ -48,7 +50,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
-	// Decode optional messages at the end of a stream
+	/// Decode the next message unless the stream is closed.
 	pub async fn decode_maybe<T: Decode<V>>(&mut self) -> Result<Option<T>, Error>
 	where
 		V: Clone,
@@ -60,6 +62,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
+	/// Decode the next message from the stream without consuming it.
 	pub async fn decode_peek<T: Decode<V>>(&mut self) -> Result<T, Error>
 	where
 		V: Clone,
@@ -86,7 +89,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
-	// Returns a non-zero chunk of data, or None if the stream is closed
+	/// Returns a non-zero chunk of data, or None if the stream is closed
 	pub async fn read(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
 		if !self.buffer.is_empty() {
 			let size = cmp::min(max, self.buffer.len());
@@ -100,6 +103,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			.map_err(|e| Error::Transport(Arc::new(e)))
 	}
 
+	/// Read exactly the given number of bytes from the stream.
 	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
 		// An optimization to avoid a copy if we have enough data in the buffer
 		if self.buffer.len() >= size {
@@ -123,6 +127,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		Ok(buf.into_inner().freeze())
 	}
 
+	/// Skip the given number of bytes from the stream.
 	pub async fn skip(&mut self, mut size: usize) -> Result<(), Error> {
 		let buffered = self.buffer.len().min(size);
 		self.buffer.advance(buffered);
@@ -163,10 +168,12 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
+	/// Abort the stream with the given error.
 	pub fn abort(&mut self, err: &Error) {
 		self.stream.stop(err.to_code());
 	}
 
+	/// Cast the reader to a different version, used during version negotiation.
 	pub fn with_version<O>(self, version: O) -> Reader<S, O> {
 		Reader {
 			stream: self.stream,

@@ -1,3 +1,8 @@
+//! Example MoQ application that publishes or subscribes to a clock track.
+//!
+//! Demonstrates basic [`moq_lite`] usage by streaming time updates every second.
+//! Useful for testing relay connectivity and latency.
+
 use url::Url;
 
 use anyhow::Context;

@@ -1,6 +1,5 @@
 import { type Context, Show, useContext } from "solid-js";
 import { StatsPanel } from "./components/StatsPanel";
-import styles from "./style.css?inline";
 import type { ProviderProps } from "./types";
 
 interface StatsProps<T = unknown> {
@@ -19,7 +18,6 @@ export const Stats = <T = unknown>(props: StatsProps<T>) => {
 		<Show when={props.getElement(contextValue)}>
 			{(_element) => (
 				<div class="stats">
-					<style>{styles}</style>
 					<StatsPanel audio={_element().audio} video={_element().video} />
 				</div>
 			)}

@@ -1,15 +1,8 @@
-/**
- * Subscribing to data example
- *
- * This example demonstrates how to subscribe to a MoQ broadcast.
- * Run with: bun run examples/subscribe.ts
- *
- * Note: You'll need to run the publish.ts example in another terminal first.
- */
-import * as Moq from "../src/index.ts";
+import * as Moq from "@moq/lite";
 
 async function main() {
-	const connection = await Moq.Connection.connect(new URL("https://cdn.moq.dev/anon"));
+	const url = new URL("https://cdn.moq.dev/anon");
+	const connection = await Moq.Connection.connect(url);
 
 	// Subscribe to a broadcast
 	const broadcast = connection.consume(Moq.Path.from("my-broadcast"));
@@ -30,7 +23,7 @@ async function main() {
 		}
 	}
 
-	await connection.close();
+	connection.close();
 }
 
 main().catch(console.error);

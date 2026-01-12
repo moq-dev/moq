@@ -439,7 +439,7 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_frame` is valid until [moq_consume_video_track_close] is called.
+/// - The caller must ensure that `on_frame` is valid until the track is closed.
 #[no_mangle]
 pub unsafe extern "C" fn moq_consume_video_ordered(
 	broadcast: u32,

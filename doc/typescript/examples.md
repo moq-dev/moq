@@ -262,7 +262,7 @@ function VideoPlayer({ url, path }: { url: string; path: string }) {
 Use `@moq/hang-ui` for native SolidJS components:
 
 ```tsx
-import { HangWatch } from "@moq/hang-ui";
+import { HangWatch } from "@moq/hang-ui/watch";
 
 function VideoPlayer(props) {
     return (

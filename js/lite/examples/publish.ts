@@ -1,13 +1,8 @@
-/**
- * Publishing data example
- *
- * This example demonstrates how to publish data to a MoQ broadcast.
- * Run with: bun run examples/publish.ts
- */
-import * as Moq from "../src/index.ts";
+import * as Moq from "@moq/lite";
 
 async function main() {
-	const connection = await Moq.Connection.connect(new URL("https://cdn.moq.dev/anon"));
+	const url = new URL("https://cdn.moq.dev/anon");
+	const connection = await Moq.Connection.connect(url);
 
 	// Create a broadcast (a collection of tracks)
 	const broadcast = new Moq.Broadcast();
@@ -40,10 +35,12 @@ async function publishTrack(track: Moq.Track) {
 	// Write frames to the group
 	const frame = Moq.Frame.fromString("Hello, MoQ!");
 	group.writeFrame(frame);
+
+	// Mark the group as complete
 	group.close();
 
-	// Keep the track open for more data
-	await new Promise((resolve) => setTimeout(resolve, 10000));
+	// Mark the track as complete (optional)
+	track.close();
 }
 
 main().catch(console.error);

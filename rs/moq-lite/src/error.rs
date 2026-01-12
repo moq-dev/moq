@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::{coding, TimeOverflow};
 use web_transport_trait::{MaybeSend, MaybeSync};
 
+/// A trait that is Send+Sync except on WASM.
 pub trait SendSyncError: std::error::Error + MaybeSend + MaybeSync {}
 
 impl<T> SendSyncError for T where T: std::error::Error + MaybeSend + MaybeSync {}
