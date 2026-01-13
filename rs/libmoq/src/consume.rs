@@ -193,7 +193,7 @@ impl Consume {
 			ordered: false,
 		};
 
-		let track = broadcast.subscribe_track(rendition, delivery).ordered();
+		let track = broadcast.subscribe_track(rendition, delivery)?.ordered();
 
 		let channel = oneshot::channel();
 		let id = self.video_task.insert(channel.0);
@@ -237,7 +237,7 @@ impl Consume {
 			ordered: false,
 		};
 
-		let track = broadcast.subscribe_track(rendition, delivery).ordered();
+		let track = broadcast.subscribe_track(rendition, delivery)?.ordered();
 
 		let channel = oneshot::channel();
 		let id = self.audio_task.insert(channel.0);

@@ -149,7 +149,7 @@ impl Fmp4 {
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
 
-			let producer = self.broadcast.create_track(track, delivery);
+			let producer = self.broadcast.create_track(track, delivery)?;
 			self.tracks.insert(track_id, (producer, None));
 		}
 

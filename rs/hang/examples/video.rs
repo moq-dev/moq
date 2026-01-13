@@ -1,3 +1,4 @@
+use anyhow::Context;
 // cargo run --example video
 use moq_lite::coding::Bytes;
 
@@ -12,17 +13,6 @@ async fn main() -> anyhow::Result<()> {
 	// Create an origin that we can publish to and the session can consume from.
 	let origin = moq_lite::Origin::produce();
 
-	// Run the broadcast production and the session in parallel.
-	// This is a simple example of how you can concurrently run multiple tasks.
-	// tokio::spawn works too.
-	tokio::select! {
-		res = run_broadcast(origin.producer) => res,
-		res = run_session(origin.consumer) => res,
-	}
-}
-
-// Connect to the server and publish our origin of broadcasts.
-async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
@@ -33,71 +23,15 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 	// Establish a WebTransport/QUIC connection and MoQ handshake.
 	// None means we're not consuming anything from the session, otherwise we would provide an OriginProducer.
 	// Optional: Use connect_with_fallback if you also want to support WebSocket.
-	let session = client.connect(url, origin, None).await?;
-
-	// Wait until the session is closed.
-	session.closed().await.map_err(Into::into)
-}
-
-// Produce a broadcast and publish it to the origin.
-async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
-	// Create and publish a broadcast to the origin.
-	let mut broadcast = moq_lite::Broadcast::produce();
-
-	// Create the track and get a producer handle.
-	let mut track = create_track(&mut broadcast.producer);
+	let session = client.connect(url, origin.consumer, None).await?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
-	origin.publish_broadcast("", broadcast.consumer);
+	let mut broadcast = origin.producer.create_broadcast("").context("not allowed to publish")?;
 
-	// Create a group of frames.
-	// Each group must start with a keyframe.
-	let mut group = track.append_group()?;
-
-	// Encode a simple container that consists of a timestamp and a payload.
-	// NOTE: This will be removed in the future; it's for backwards compatibility.
-	hang::Container {
-		timestamp: hang::Timestamp::from_secs(1).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data").into(),
-	}
-	.encode(&mut group)?;
-
-	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-	hang::Container {
-		timestamp: hang::Timestamp::from_secs(2).unwrap(),
-		payload: Bytes::from_static(b"delta NAL data").into(),
-	}
-	.encode(&mut group)?;
-
-	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-	// You can create a new group for each keyframe.
-	group.close()?;
-	let mut group = track.append_group()?;
-
-	hang::Container {
-		timestamp: hang::Timestamp::from_secs(3).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data").into(),
-	}
-	.encode(&mut group)?;
-
-	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-	// You can also abort a group if you want to abandon delivery immediately.
-	group.abort(moq_lite::Error::Expired)?;
-
-	Ok(())
-}
-
-// Create a video track with a catalog that describes it.
-//
-// The catalog can contain multiple tracks, used by the viewer to choose the best track.
-fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> moq_lite::TrackProducer {
 	// We also need a catalog to describe our tracks.
 	// NOTE: You would reuse this for all tracks; we're creating a new one here for simplicity.
-	let mut catalog = hang::CatalogProducer::new(broadcast.clone());
+	let mut catalog = hang::CatalogProducer::new(broadcast.clone())?;
 
 	// Once we unlock (drop) the catalog, it will be published to the broadcast.
 	let mut catalog = catalog.lock();
@@ -139,6 +73,47 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> moq_lite::TrackP
 		ordered: false,
 	};
 
-	// Actually create the media track now and return it
-	broadcast.create_track(track, delivery)
+	let mut track = broadcast.create_track(track, delivery)?;
+
+	// Create a group of frames.
+	// Each group must start with a keyframe.
+	let mut group = track.append_group()?;
+
+	// Encode a simple container that consists of a timestamp and a payload.
+	// NOTE: This will be removed in the future; it's for backwards compatibility.
+	hang::Container {
+		timestamp: hang::Timestamp::from_secs(1).unwrap(),
+		payload: Bytes::from_static(b"keyframe NAL data").into(),
+	}
+	.encode(&mut group)?;
+
+	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+	hang::Container {
+		timestamp: hang::Timestamp::from_secs(2).unwrap(),
+		payload: Bytes::from_static(b"delta NAL data").into(),
+	}
+	.encode(&mut group)?;
+
+	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+	// You can create a new group for each keyframe.
+	group.close()?;
+	let mut group = track.append_group()?;
+
+	hang::Container {
+		timestamp: hang::Timestamp::from_secs(3).unwrap(),
+		payload: Bytes::from_static(b"keyframe NAL data").into(),
+	}
+	.encode(&mut group)?;
+
+	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+	// You can also abort a group if you want to abandon delivery immediately.
+	group.abort(moq_lite::Error::Expired)?;
+
+	// Wait until the session is closed, I guess
+	session.closed().await?;
+
+	Ok(())
 }

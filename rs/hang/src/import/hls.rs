@@ -552,7 +552,7 @@ mod tests {
 	#[test]
 	fn hls_ingest_starts_without_importers() {
 		let broadcast = moq_lite::BroadcastProducer::default();
-		let catalog = hang::CatalogProducer::new(broadcast.clone());
+		let catalog = hang::CatalogProducer::new(broadcast.clone()).unwrap();
 
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);

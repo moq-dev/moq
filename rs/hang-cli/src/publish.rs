@@ -32,7 +32,7 @@ pub struct Publish {
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
 		let broadcast = moq_lite::BroadcastProducer::default();
-		let catalog = hang::CatalogProducer::new(broadcast.clone());
+		let catalog = hang::CatalogProducer::new(broadcast.clone())?;
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {

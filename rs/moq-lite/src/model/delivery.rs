@@ -36,6 +36,14 @@ pub struct DeliveryProducer {
 	state: watch::Sender<Delivery>,
 }
 
+impl fmt::Debug for DeliveryProducer {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("DeliveryProducer")
+			.field("state", &self.state.borrow().deref())
+			.finish()
+	}
+}
+
 impl DeliveryProducer {
 	pub fn new(delivery: Delivery) -> Self {
 		Self {

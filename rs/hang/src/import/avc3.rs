@@ -88,7 +88,7 @@ impl Avc3 {
 
 		tracing::info!(%track, ?config, "started track");
 
-		let track = self.broadcast.create_track(track, delivery);
+		let track = self.broadcast.create_track(track, delivery)?;
 		self.config = Some(config);
 		self.track = Some(track);
 

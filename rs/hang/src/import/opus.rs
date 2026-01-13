@@ -60,7 +60,7 @@ impl Opus {
 			ordered: false,
 		};
 
-		let producer = self.broadcast.create_track(track, delivery);
+		let producer = self.broadcast.create_track(track, delivery)?;
 		self.track = Some(producer);
 
 		Ok(())

@@ -12,10 +12,9 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use tokio::sync::watch;
 use web_async::FuturesExt;
 
-use super::{Group, GroupConsumer, GroupProducer};
+use super::{Consumer, Group, GroupConsumer, GroupProducer, Producer, ProducerWeak};
 use crate::{
 	Delivery, DeliveryConsumer, DeliveryProducer, Error, ExpiresConsumer, ExpiresProducer, Produce, Result, Subscriber,
 	Subscribers,
@@ -115,19 +114,12 @@ struct State {
 	// +1 every time we remove a group from the front.
 	offset: usize,
 
-	// Some if the track is closed
-	closed: Option<Result<()>>,
-
 	// The highest sequence number received.
 	max: Option<u64>,
 }
 
 impl State {
 	fn create_group(&mut self, info: Group, expires: ExpiresProducer) -> Result<GroupProducer> {
-		if let Some(closed) = self.closed.clone() {
-			return Err(closed.err().unwrap_or(Error::Cancel));
-		}
-
 		let group = GroupProducer::new(info.clone(), expires);
 
 		// As a sanity check, make sure this is not a duplicate.
@@ -150,11 +142,7 @@ impl State {
 		Ok(group)
 	}
 
-	fn append_group(&mut self, expires: ExpiresProducer) -> Result<GroupProducer> {
-		if let Some(closed) = self.closed.clone() {
-			return Err(closed.err().unwrap_or(Error::Cancel));
-		}
-
+	fn append_group(&mut self, expires: ExpiresProducer) -> GroupProducer {
 		let sequence = match self.max {
 			Some(sequence) => sequence + 1,
 			None => 0,
@@ -168,48 +156,18 @@ impl State {
 			producer: group.clone(),
 		}));
 
-		Ok(group)
-	}
-
-	fn abort(&mut self, err: Error) -> Result<()> {
-		if let Some(Err(err)) = self.closed.clone() {
-			return Err(err);
-		}
-
-		self.closed = Some(Err(err));
-
-		Ok(())
-	}
-
-	fn close(&mut self) -> Result<()> {
-		if let Some(closed) = self.closed.clone() {
-			return Err(closed.err().unwrap_or(Error::Cancel));
-		}
-
-		self.closed = Some(Ok(()));
-
-		Ok(())
+		group
 	}
 }
 
 /// A producer for a track, used to create new groups.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TrackProducer {
 	info: Track,
-	state: watch::Sender<State>,
+	state: Producer<State>,
 	subscribers: Subscribers,
 	delivery: DeliveryProducer,
 	expires: ExpiresProducer,
-}
-
-impl fmt::Debug for TrackProducer {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("TrackProducer")
-			.field("info", &self.info)
-			.field("state", &self.state.borrow().deref())
-			.field("subscribers", &self.subscribers)
-			.finish()
-	}
 }
 
 impl TrackProducer {
@@ -219,7 +177,7 @@ impl TrackProducer {
 		let delivery = DeliveryProducer::new(delivery);
 
 		Self {
-			state: watch::Sender::new(State::default()),
+			state: Producer::default(),
 			expires: ExpiresProducer::new(delivery.consume()),
 			delivery,
 			subscribers: Default::default(),
@@ -250,55 +208,28 @@ impl TrackProducer {
 	///
 	/// Returns an error if the track is closed.
 	pub fn create_group<T: Into<Group>>(&mut self, info: T) -> Result<GroupProducer> {
-		let mut result = Err(Error::Cancel);
-
-		self.state.send_if_modified(|state| {
-			result = state.create_group(info.into(), self.expires.clone());
-			result.is_ok()
-		});
-
-		result
+		self.state
+			.modify(|state| state.create_group(info.into(), self.expires.clone()))?
 	}
 
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&mut self) -> Result<GroupProducer> {
-		let mut result = Err(Error::Cancel);
-
-		self.state.send_if_modified(|state| {
-			result = state.append_group(self.expires.clone());
-			result.is_ok()
-		});
-
-		result
+		self.state.modify(|state| state.append_group(self.expires.clone()))
 	}
 
 	pub fn close(&mut self) -> Result<()> {
-		let mut result = Ok(());
-
-		self.state.send_if_modified(|state| {
-			result = state.close();
-			result.is_ok()
-		});
-
-		result
+		self.state.close()
 	}
 
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut result = Ok(());
-
-		self.state.send_if_modified(|state| {
-			result = state.abort(err);
-			result.is_ok()
-		});
-
-		result
+		self.state.abort(err)
 	}
 
 	/// Create a new consumer for the track.
 	pub fn subscribe(&self, delivery: Delivery) -> TrackConsumer {
 		TrackConsumer {
 			info: self.info.clone(),
-			state: self.state.subscribe(),
+			state: self.state.consume(),
 			subscriber: self.subscribers.subscribe(delivery),
 			index: 0,
 			expires: self.expires.consume(),
@@ -310,14 +241,22 @@ impl TrackProducer {
 	// We don't use the `async` keyword so we don't borrow &self across the await.
 	pub fn unused(&self) -> impl Future<Output = ()> {
 		let state = self.state.clone();
-		async move {
-			state.closed().await;
-		}
+		async move { state.unused().await }
 	}
 
 	/// Return true if this is the same track.
 	pub fn is_clone(&self, other: &Self) -> bool {
-		self.state.same_channel(&other.state)
+		self.state.is_clone(&other.state)
+	}
+
+	pub fn weak(&self) -> TrackProducerWeak {
+		TrackProducerWeak {
+			info: self.info.clone(),
+			state: self.state.weak(),
+			subscribers: self.subscribers.clone(),
+			delivery: self.delivery.clone(),
+			expires: self.expires.clone(),
+		}
 	}
 }
 
@@ -329,14 +268,35 @@ impl Deref for TrackProducer {
 	}
 }
 
+#[derive(Clone)]
+pub struct TrackProducerWeak {
+	info: Track,
+	state: ProducerWeak<State>,
+	subscribers: Subscribers,
+	delivery: DeliveryProducer,
+	expires: ExpiresProducer,
+}
+
+impl TrackProducerWeak {
+	pub fn upgrade(self) -> Result<TrackProducer> {
+		Ok(TrackProducer {
+			info: self.info,
+			state: self.state.upgrade()?,
+			subscribers: self.subscribers,
+			delivery: self.delivery,
+			expires: self.expires,
+		})
+	}
+}
+
 /// A consumer for a track, used to read groups.
 ///
 /// If the consumer is cloned, it will receive a copy of all unread groups.
-//#[derive(Clone)]
+#[derive(Debug)]
 pub struct TrackConsumer {
 	info: Track,
 
-	state: watch::Receiver<State>,
+	state: Consumer<State>,
 
 	subscriber: Subscriber,
 
@@ -346,18 +306,6 @@ pub struct TrackConsumer {
 	index: usize,
 
 	delivery: DeliveryConsumer,
-}
-
-impl fmt::Debug for TrackConsumer {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("TrackConsumer")
-			.field("name", &self.name)
-			.field("state", &self.state.borrow().deref())
-			.field("subscriber", &self.subscriber)
-			.field("index", &self.index)
-			.field("delivery", &self.delivery)
-			.finish()
-	}
 }
 
 impl TrackConsumer {
@@ -375,9 +323,8 @@ impl TrackConsumer {
 			// Wait until there's a new latest group or the track is closed.
 			let state = self
 				.state
-				.wait_for(|state| state.closed.is_some() || self.index < state.offset + state.groups.len())
-				.await
-				.map_err(|_| Error::Cancel)?;
+				.wait_for(|state| self.index < state.offset + state.groups.len())
+				.await?;
 
 			for i in self.index.saturating_sub(state.offset)..state.groups.len() {
 				// If None, the group has expired out of order.
@@ -394,31 +341,16 @@ impl TrackConsumer {
 					return Ok(Some(group.consumer.clone()));
 				}
 			}
-
-			match &state.closed {
-				Some(Ok(_)) => return Ok(None),
-				Some(Err(err)) => return Err(err.clone()),
-				// There must have been a new None group
-				// This can happen if an immediately expired group is received, or just a race.
-				_ => {}
-			}
 		}
 	}
 
 	/// Block until the track is closed.
-	pub fn closed(&self) -> impl Future<Output = Result<()>> {
-		let mut state = self.state.clone();
-
-		async move {
-			match state.wait_for(|state| state.closed.is_some()).await {
-				Ok(state) => state.closed.clone().unwrap(),
-				Err(_) => Err(Error::Cancel),
-			}
-		}
+	pub async fn closed(&self) -> Result<()> {
+		self.state.closed().await
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {
-		self.state.same_channel(&other.state)
+		self.state.is_clone(&other.state)
 	}
 
 	/// Return a handle allowing you to update the subscriber's priority/max_latency.

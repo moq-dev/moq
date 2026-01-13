@@ -321,7 +321,7 @@ test:
 		bun run --filter='*' test
 	fi
 
-	cargo test --all-targets --all-features
+	RUST_BACKTRACE=1 cargo test --all-targets --all-features
 
 # Automatically fix some issues.
 fix:

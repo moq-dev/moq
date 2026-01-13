@@ -1,9 +1,9 @@
-use std::{fmt, ops::Deref};
+use std::ops::Deref;
 
 use bytes::{Bytes, BytesMut};
-use tokio::sync::watch;
 
-use crate::{Error, Produce, Result, Time};
+use super::{Consumer, Produce, Producer};
+use crate::{Error, Result, Time};
 
 /// A unit of data, representing a point in time.
 ///
@@ -80,96 +80,43 @@ impl From<u16> for Frame {
 	}
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct FrameState {
 	// The chunks that has been written thus far
 	chunks: Vec<Bytes>,
 
-	// Set when the writer or all readers are dropped.
-	closed: Option<Result<()>>,
-
 	// Sanity check to ensure we don't write more than the frame size.
 	remaining: usize,
-}
-
-impl fmt::Debug for FrameState {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("FrameState")
-			.field("chunks", &self.chunks.len())
-			.field("size", &self.chunks.iter().map(Bytes::len).sum::<usize>())
-			.field("closed", &self.closed.is_some())
-			.finish()
-	}
 }
 
 impl FrameState {
 	fn new(size: usize) -> Self {
 		Self {
 			chunks: Vec::new(),
-			closed: None,
 			remaining: size,
 		}
 	}
 
 	fn write_chunk(&mut self, chunk: Bytes) -> Result<()> {
-		if let Some(closed) = self.closed.clone() {
-			return Err(closed.err().unwrap_or(Error::Cancel));
-		}
-
 		self.remaining = self.remaining.checked_sub(chunk.len()).ok_or(Error::WrongSize)?;
-
 		self.chunks.push(chunk);
-
-		Ok(())
-	}
-
-	fn close(&mut self) -> Result<()> {
-		if self.remaining != 0 {
-			return Err(Error::WrongSize);
-		}
-
-		if let Some(closed) = self.closed.clone() {
-			return Err(closed.err().unwrap_or(Error::Cancel));
-		}
-
-		self.closed = Some(Ok(()));
-
-		Ok(())
-	}
-
-	fn abort(&mut self, err: Error) -> Result<()> {
-		if let Some(Err(err)) = self.closed.clone() {
-			return Err(err);
-		}
-
-		self.closed = Some(Err(err));
-
 		Ok(())
 	}
 }
 
 /// Used to write a frame's worth of data in chunks.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FrameProducer {
 	info: Frame,
 
 	// Mutable stream state.
-	state: watch::Sender<FrameState>,
-}
-
-impl fmt::Debug for FrameProducer {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("FrameProducer")
-			.field("info", &self.info)
-			.field("state", &self.state.borrow().deref())
-			.finish()
-	}
+	state: Producer<FrameState>,
 }
 
 impl FrameProducer {
 	pub fn new(info: Frame) -> Self {
 		Self {
-			state: watch::Sender::new(FrameState::new(info.size)),
+			state: Producer::new(FrameState::new(info.size)),
 			info,
 		}
 	}
@@ -179,41 +126,25 @@ impl FrameProducer {
 	}
 
 	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
-		let mut result = Ok(());
-
-		self.state.send_if_modified(|state| {
-			result = state.write_chunk(chunk.into());
-			result.is_ok()
-		});
-
-		result
+		self.state.modify(|state| state.write_chunk(chunk.into()))?
 	}
 
 	pub fn close(&mut self) -> Result<()> {
-		let mut result = Ok(());
-		self.state.send_if_modified(|state| {
-			result = state.close();
-			result.is_ok()
-		});
-		result
+		if self.state.borrow().remaining != 0 {
+			return Err(Error::WrongSize);
+		}
+		self.state.close()
 	}
 
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut result = Ok(());
-
-		self.state.send_if_modified(|state| {
-			result = state.abort(err);
-			result.is_ok()
-		});
-
-		result
+		self.state.abort(err)
 	}
 
 	/// Create a new consumer for the frame.
 	pub fn consume(&self) -> FrameConsumer {
 		FrameConsumer {
 			info: self.info.clone(),
-			state: self.state.subscribe(),
+			state: self.state.consume(),
 			index: 0,
 		}
 	}
@@ -236,27 +167,17 @@ impl Deref for FrameProducer {
 /// Used to consume a frame's worth of data in chunks.
 ///
 /// If the consumer is cloned, it will receive a copy of all unread chunks.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FrameConsumer {
 	// Immutable stream state.
 	info: Frame,
 
 	// Modify the stream state.
-	state: watch::Receiver<FrameState>,
+	state: Consumer<FrameState>,
 
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
 	index: usize,
-}
-
-impl fmt::Debug for FrameConsumer {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("FrameConsumer")
-			.field("info", &self.info)
-			.field("state", &self.state.borrow().deref())
-			.field("index", &self.index)
-			.finish()
-	}
 }
 
 impl FrameConsumer {
@@ -266,29 +187,16 @@ impl FrameConsumer {
 
 	/// Return the next chunk.
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
-		loop {
-			{
-				let state = self.state.borrow_and_update();
+		let state = self
+			.state
+			.wait_for(|state| state.chunks.get(self.index).is_some())
+			.await?;
 
-				if let Some(chunk) = state.chunks.get(self.index).cloned() {
-					self.index += 1;
-					return Ok(Some(chunk));
-				}
-
-				match &state.closed {
-					Some(Ok(_)) => {
-						return Ok(None);
-					}
-					Some(Err(err)) => {
-						return Err(err.clone());
-					}
-					_ => {}
-				}
-			}
-
-			if self.state.changed().await.is_err() {
-				return Err(Error::Cancel);
-			}
+		if let Some(chunk) = state.chunks.get(self.index).cloned() {
+			self.index += 1;
+			Ok(Some(chunk))
+		} else {
+			Ok(None)
 		}
 	}
 
@@ -296,17 +204,10 @@ impl FrameConsumer {
 	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>> {
 		// Wait until the writer is done before even attempting to read.
 		// That way this function can be cancelled without consuming half of the frame.
-		let state = match self.state.wait_for(|state| state.closed.is_some()).await {
-			Ok(state) => {
-				if let Some(Err(err)) = &state.closed {
-					return Err(err.clone());
-				}
-				state
-			}
-			Err(_) => return Err(Error::Cancel),
-		};
+		self.state.closed().await?;
 
 		// Get all of the remaining chunks.
+		let state = self.state.borrow();
 		let chunks = state.chunks[self.index..].to_vec();
 		self.index = state.chunks.len();
 
@@ -317,17 +218,10 @@ impl FrameConsumer {
 	pub async fn read_all(&mut self) -> Result<Bytes> {
 		// Wait until the writer is done before even attempting to read.
 		// That way this function can be cancelled without consuming half of the frame.
-		let state = match self.state.wait_for(|state| state.closed.is_some()).await {
-			Ok(state) => {
-				if let Some(Err(err)) = &state.closed {
-					return Err(err.clone());
-				}
-				state
-			}
-			Err(_) => return Err(Error::Cancel),
-		};
+		self.state.closed().await?;
 
 		// Get all of the remaining chunks.
+		let state = self.state.borrow();
 		let chunks = &state.chunks[self.index..];
 		self.index = state.chunks.len();
 

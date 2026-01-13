@@ -190,7 +190,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::info!(id = %subscribe.id, broadcast = %subscribe.broadcast, track = %track.name, ?delivery, "subscribed started");
 
-		let mut track = broadcast.ok_or(Error::NotFound)?.subscribe_track(track, delivery);
+		let mut track = broadcast.ok_or(Error::NotFound)?.subscribe_track(track, delivery)?;
 		let delivery = track.delivery().current();
 
 		let info = lite::SubscribeOk {

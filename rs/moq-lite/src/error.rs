@@ -86,6 +86,9 @@ pub enum Error {
 
 	#[error("time overflow")]
 	TimeOverflow(#[from] TimeOverflow),
+
+	#[error("dropped")]
+	Dropped,
 }
 
 impl Error {
@@ -114,6 +117,7 @@ impl Error {
 			Self::Expired => 22,
 			Self::TimeOverflow(_) => 23,
 			Self::App(app) => *app + 64,
+			Self::Dropped => 24,
 		}
 	}
 }

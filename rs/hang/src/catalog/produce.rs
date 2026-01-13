@@ -17,12 +17,12 @@ pub struct CatalogProducer {
 
 impl CatalogProducer {
 	/// Create a new catalog producer for the given broadcast.
-	pub fn new(mut broadcast: moq_lite::BroadcastProducer) -> Self {
-		let track = broadcast.create_track(Catalog::default_track(), Catalog::default_delivery());
-		Self {
+	pub fn new(mut broadcast: moq_lite::BroadcastProducer) -> Result<Self, Error> {
+		let track = broadcast.create_track(Catalog::default_track(), Catalog::default_delivery())?;
+		Ok(Self {
 			current: Arc::new(Mutex::new(Catalog::default())),
 			track,
-		}
+		})
 	}
 
 	/// Get mutable access to the catalog, publishing it after any changes.
@@ -93,7 +93,8 @@ impl CatalogConsumer {
 	/// catalog data. If there are no more updates, `None` is returned.
 	pub async fn next(&mut self) -> Result<Option<Catalog>, Error> {
 		if let Some(broadcast) = &mut self.broadcast {
-			self.track = Some(broadcast.subscribe_track(Catalog::default_track(), Catalog::default_delivery()));
+			let track = broadcast.subscribe_track(Catalog::default_track(), Catalog::default_delivery())?;
+			self.track = Some(track);
 			self.broadcast = None;
 		}
 

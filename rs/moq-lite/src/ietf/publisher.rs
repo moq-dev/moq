@@ -111,8 +111,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let subscribes = self.subscribes.clone();
 		let version = self.version;
 
+		let mut track = broadcast.subscribe_track(track, delivery)?;
+
 		web_async::spawn(async move {
-			let mut track = broadcast.subscribe_track(track, delivery);
 			let delivery = track.delivery().current();
 
 			// TODO: This is wrong, as we haven't actually gotten a response from the origin yet.

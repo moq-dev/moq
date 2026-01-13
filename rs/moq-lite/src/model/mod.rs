@@ -5,6 +5,7 @@ mod frame;
 mod group;
 mod origin;
 mod produce;
+mod state;
 mod subscriber;
 mod time;
 mod track;
@@ -19,3 +20,5 @@ pub use produce::*;
 pub use subscriber::*;
 pub use time::*;
 pub use track::*;
+
+use state::*;

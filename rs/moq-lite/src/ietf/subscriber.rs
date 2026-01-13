@@ -476,7 +476,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			ordered: msg.group_order == GroupOrder::Ascending,
 		};
 
-		let track = broadcast.create_track(track, delivery);
+		let track = broadcast.create_track(track, delivery)?;
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
