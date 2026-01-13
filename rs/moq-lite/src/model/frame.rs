@@ -247,3 +247,190 @@ impl Deref for FrameConsumer {
 		&self.info
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_frame_new() {
+		let frame = Frame::new(100);
+		assert_eq!(frame.size, 100);
+		assert!(frame.instant > Time::ZERO);
+	}
+
+	#[test]
+	fn test_frame_from_usize() {
+		let frame: Frame = 100usize.into();
+		assert_eq!(frame.size, 100);
+	}
+
+	#[test]
+	fn test_frame_from_u64() {
+		let frame: Frame = 100u64.into();
+		assert_eq!(frame.size, 100);
+	}
+
+	#[test]
+	fn test_frame_from_u32() {
+		let frame: Frame = 100u32.into();
+		assert_eq!(frame.size, 100);
+	}
+
+	#[test]
+	fn test_frame_from_u16() {
+		let frame: Frame = 100u16.into();
+		assert_eq!(frame.size, 100);
+	}
+
+	#[tokio::test]
+	async fn test_frame_write_read_single_chunk() {
+		let frame = Frame {
+			instant: Time::from_millis(100).unwrap(),
+			size: 10,
+		};
+
+		let mut producer = FrameProducer::new(frame.clone());
+		let mut consumer = producer.consume();
+
+		// Write data
+		producer.write_chunk(Bytes::from("hello world")).unwrap_err(); // Too big
+		producer.write_chunk(Bytes::from("hello")).unwrap();
+		producer.write_chunk(Bytes::from("world")).unwrap();
+		producer.close().unwrap();
+
+		// Read data
+		let chunk1 = consumer.read_chunk().await.unwrap().unwrap();
+		assert_eq!(chunk1, Bytes::from("hello"));
+
+		let chunk2 = consumer.read_chunk().await.unwrap().unwrap();
+		assert_eq!(chunk2, Bytes::from("world"));
+
+		// No more chunks
+		let chunk3 = consumer.read_chunk().await.unwrap();
+		assert!(chunk3.is_none());
+	}
+
+	#[tokio::test]
+	async fn test_frame_read_all() {
+		let frame = Frame {
+			instant: Time::from_millis(100).unwrap(),
+			size: 10,
+		};
+
+		let mut producer = FrameProducer::new(frame);
+		let mut consumer = producer.consume();
+
+		producer.write_chunk(Bytes::from("hello")).unwrap();
+		producer.write_chunk(Bytes::from("world")).unwrap();
+		producer.close().unwrap();
+
+		let all = consumer.read_all().await.unwrap();
+		assert_eq!(all, Bytes::from("helloworld"));
+	}
+
+	#[tokio::test]
+	async fn test_frame_read_chunks() {
+		let frame = Frame {
+			instant: Time::from_millis(100).unwrap(),
+			size: 10,
+		};
+
+		let mut producer = FrameProducer::new(frame);
+		let mut consumer = producer.consume();
+
+		producer.write_chunk(Bytes::from("hello")).unwrap();
+		producer.write_chunk(Bytes::from("world")).unwrap();
+		producer.close().unwrap();
+
+		let chunks = consumer.read_chunks().await.unwrap();
+		assert_eq!(chunks.len(), 2);
+		assert_eq!(chunks[0], Bytes::from("hello"));
+		assert_eq!(chunks[1], Bytes::from("world"));
+	}
+
+	#[tokio::test]
+	async fn test_frame_wrong_size_too_large() {
+		let frame = Frame {
+			instant: Time::from_millis(100).unwrap(),
+			size: 5,
+		};
+
+		let mut producer = FrameProducer::new(frame);
+		producer.write_chunk(Bytes::from("hello")).unwrap();
+
+		// Try to write more than the size
+		let result = producer.write_chunk(Bytes::from("x"));
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn test_frame_wrong_size_too_small() {
+		let frame = Frame {
+			instant: Time::from_millis(100).unwrap(),
+			size: 10,
+		};
+
+		let mut producer = FrameProducer::new(frame);
+		producer.write_chunk(Bytes::from("hello")).unwrap();
+
+		// Try to close before writing all data
+		let result = producer.close();
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn test_frame_multiple_consumers() {
+		let frame = Frame {
+			instant: Time::from_millis(100).unwrap(),
+			size: 10,
+		};
+
+		let mut producer = FrameProducer::new(frame);
+		let mut consumer1 = producer.consume();
+		let mut consumer2 = producer.consume();
+
+		producer.write_chunk(Bytes::from("hello")).unwrap();
+		producer.write_chunk(Bytes::from("world")).unwrap();
+		producer.close().unwrap();
+
+		// Both consumers should get all data
+		let data1 = consumer1.read_all().await.unwrap();
+		let data2 = consumer2.read_all().await.unwrap();
+		assert_eq!(data1, Bytes::from("helloworld"));
+		assert_eq!(data2, Bytes::from("helloworld"));
+	}
+
+	#[tokio::test]
+	async fn test_frame_abort() {
+		let frame = Frame {
+			instant: Time::from_millis(100).unwrap(),
+			size: 10,
+		};
+
+		let mut producer = FrameProducer::new(frame);
+		let mut consumer = producer.consume();
+
+		producer.write_chunk(Bytes::from("hello")).unwrap();
+		producer.abort(Error::Cancel).unwrap();
+
+		// Consumer should get an error
+		let result = consumer.read_all().await;
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn test_frame_produce_helper() {
+		let frame = Frame {
+			instant: Time::from_millis(100).unwrap(),
+			size: 5,
+		};
+
+		let mut pair = frame.produce();
+		pair.producer.write_chunk(Bytes::from("hello")).unwrap();
+		pair.producer.close().unwrap();
+
+		let data = pair.consumer.read_all().await.unwrap();
+		assert_eq!(data, Bytes::from("hello"));
+	}
+}

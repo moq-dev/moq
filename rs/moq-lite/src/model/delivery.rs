@@ -85,3 +85,113 @@ impl DeliveryConsumer {
 		Some(*self.state.borrow_and_update())
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_delivery_max() {
+		let d1 = Delivery {
+			priority: 5,
+			max_latency: Time::from_millis(100).unwrap(),
+			ordered: true,
+		};
+		let d2 = Delivery {
+			priority: 3,
+			max_latency: Time::from_millis(200).unwrap(),
+			ordered: false,
+		};
+
+		let result = d1.max(&d2);
+		assert_eq!(result.priority, 5);
+		assert_eq!(result.max_latency, Time::from_millis(200).unwrap());
+		assert!(!result.ordered); // false if any is false
+	}
+
+	#[test]
+	fn test_delivery_max_all_ordered() {
+		let d1 = Delivery {
+			priority: 5,
+			max_latency: Time::from_millis(100).unwrap(),
+			ordered: true,
+		};
+		let d2 = Delivery {
+			priority: 3,
+			max_latency: Time::from_millis(50).unwrap(),
+			ordered: true,
+		};
+
+		let result = d1.max(&d2);
+		assert!(result.ordered); // true only if all are ordered
+	}
+
+	#[test]
+	fn test_delivery_producer_consumer() {
+		let delivery = Delivery {
+			priority: 10,
+			max_latency: Time::from_millis(500).unwrap(),
+			ordered: false,
+		};
+
+		let producer = DeliveryProducer::new(delivery);
+		let consumer = producer.consume();
+
+		assert_eq!(consumer.current(), delivery);
+	}
+
+	#[tokio::test]
+	async fn test_delivery_update() {
+		let initial = Delivery {
+			priority: 5,
+			max_latency: Time::from_millis(100).unwrap(),
+			ordered: false,
+		};
+
+		let producer = DeliveryProducer::new(initial);
+		let mut consumer = producer.consume();
+
+		assert_eq!(consumer.current(), initial);
+
+		// Update delivery
+		let updated = Delivery {
+			priority: 10,
+			max_latency: Time::from_millis(200).unwrap(),
+			ordered: true,
+		};
+		producer.update(updated);
+
+		// Consumer should receive the update
+		let changed = consumer.changed().await.expect("should receive update");
+		assert_eq!(changed, updated);
+		assert_eq!(consumer.current(), updated);
+	}
+
+	#[tokio::test]
+	async fn test_delivery_multiple_consumers() {
+		let initial = Delivery::default();
+		let producer = DeliveryProducer::new(initial);
+
+		let mut consumer1 = producer.consume();
+		let mut consumer2 = producer.consume();
+
+		let updated = Delivery {
+			priority: 15,
+			max_latency: Time::from_millis(300).unwrap(),
+			ordered: true,
+		};
+		producer.update(updated);
+
+		// Both consumers should receive the update
+		assert_eq!(consumer1.changed().await, Some(updated));
+		assert_eq!(consumer2.changed().await, Some(updated));
+	}
+
+	#[test]
+	fn test_delivery_default() {
+		let d = Delivery::default();
+		assert_eq!(d.priority, 0);
+		assert_eq!(d.max_latency, Time::ZERO);
+		assert!(!d.ordered);
+	}
+}

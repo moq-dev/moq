@@ -249,7 +249,7 @@ impl TrackProducer {
 		self.state.is_clone(&other.state)
 	}
 
-	pub fn weak(&self) -> TrackProducerWeak {
+	pub(super) fn weak(&self) -> TrackProducerWeak {
 		TrackProducerWeak {
 			info: self.info.clone(),
 			state: self.state.weak(),
@@ -269,7 +269,7 @@ impl Deref for TrackProducer {
 }
 
 #[derive(Clone)]
-pub struct TrackProducerWeak {
+pub(super) struct TrackProducerWeak {
 	info: Track,
 	state: ProducerWeak<State>,
 	subscribers: Subscribers,
@@ -326,18 +326,19 @@ impl TrackConsumer {
 				.wait_for(|state| self.index < state.offset + state.groups.len())
 				.await?;
 
-			for i in self.index.saturating_sub(state.offset)..state.groups.len() {
+			let range = self.index.saturating_sub(state.offset)..state.groups.len();
+			if range.is_empty() {
+				// Closed
+				return Ok(None);
+			}
+
+			for i in range {
+				self.index = state.offset + i + 1;
+
 				// If None, the group has expired out of order.
 				if let Some(group) = &state.groups[i] {
-					self.index = state.offset + i + 1;
-
-					let info = self.subscriber.current();
-					if self.expires.is_expired(group.consumer.sequence, info.max_latency) {
-						// Skip expired groups for this consumer
-						continue;
-					}
-
-					// TODO skip if expired
+					// NOTE: This group might be expired from the consumer's perspective.
+					// Return than skip it, we return expires groups because it's still useful information.
 					return Ok(Some(group.consumer.clone()));
 				}
 			}
@@ -458,6 +459,7 @@ impl TrackConsumerOrdered {
 
 		loop {
 			tokio::select! {
+				biased;
 				// Get the next group from the track.
 				Some(group) = self.track.next_group().transpose() => {
 					let group = group?;
@@ -482,17 +484,26 @@ impl TrackConsumerOrdered {
 						// Get the oldest group in the buffered queue.
 						let first = self.pending.front()?;
 
-						// Wait until it has a timestamp available. (TODO would be nice to make this required)
-						let Ok(instant) = first.instant().await else {
-							self.pending.pop_front();
-							continue;
-						};
+						// If the minimum sequence is not what we're looking for, wait until it would be expired.
+						if first.sequence != self.expected {
+							// Wait until the first frame of the group has been received.
+							let Ok(Some(frame)) = first.clone().next_frame().await else {
+								// The group has no frames, just skip it.
+								self.pending.pop_front();
+								continue;
+							};
 
-						// Wait until the first frame of the group would have been expired.
-						// This doesn't mean the entire group is expired, because that uses the max_timestamp.
-						// But even if the group has one frame this will still unstuck the consumer.
-						expires.wait_expired(first.sequence, instant).await;
-						return self.pending.pop_front()
+							// Wait until the first frame of the group would have been expired.
+							// This doesn't mean the entire group is expired, because that uses the max_timestamp.
+							// But even if the group has one frame this will still unstuck the consumer.
+							expires.wait_expired(first.sequence, frame.instant).await;
+						}
+
+						// Return the minimum group and skip over any gap.
+						let first = self.pending.pop_front().unwrap();
+						self.expected = first.sequence + 1;
+
+						return Some(first);
 					}
 				} => {
 					// We found the next group in order, so update the expected sequence number.
@@ -515,5 +526,295 @@ impl Deref for TrackConsumerOrdered {
 impl DerefMut for TrackConsumerOrdered {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		&mut self.track
+	}
+}
+
+#[cfg(test)]
+impl TrackConsumerOrdered {
+	pub fn assert_next_group(&mut self) -> GroupConsumer {
+		use futures::FutureExt;
+		self.next_group()
+			.now_or_never()
+			.expect("next_group blocked")
+			.expect("next_group error")
+			.expect("next_group returned None")
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::Time;
+	use bytes::Bytes;
+
+	#[test]
+	fn test_track_new() {
+		let track = Track::new("test");
+		assert_eq!(track.as_str(), "test");
+	}
+
+	#[test]
+	fn test_track_from_str() {
+		let track: Track = "test".into();
+		assert_eq!(track.as_str(), "test");
+	}
+
+	#[test]
+	fn test_track_from_string() {
+		let track: Track = String::from("test").into();
+		assert_eq!(track.as_str(), "test");
+	}
+
+	#[tokio::test]
+	async fn test_track_append_group() {
+		let mut producer = TrackProducer::new("test", Delivery::default());
+		let mut consumer = producer.subscribe(Delivery::default());
+
+		// Append first group
+		let mut group1 = producer.append_group().unwrap();
+		assert_eq!(group1.sequence, 0);
+
+		// Write a frame to the group
+		let instant = Time::from_millis(100).unwrap();
+		group1.write_frame(Bytes::from("data1"), instant).unwrap();
+		group1.close().unwrap();
+
+		// Consumer should receive the group
+		let mut group1_consumer = consumer.assert_group();
+		assert_eq!(group1_consumer.sequence, 0);
+		let data = group1_consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(data, Bytes::from("data1"));
+
+		// Append second group
+		let mut group2 = producer.append_group().unwrap();
+		assert_eq!(group2.sequence, 1);
+		group2.write_frame(Bytes::from("data2"), instant).unwrap();
+		group2.close().unwrap();
+
+		let mut group2_consumer = consumer.assert_group();
+		assert_eq!(group2_consumer.sequence, 1);
+		let data = group2_consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(data, Bytes::from("data2"));
+	}
+
+	#[tokio::test]
+	async fn test_track_create_group() {
+		let mut producer = TrackProducer::new("test", Delivery::default());
+		let mut consumer = producer.subscribe(Delivery::default());
+
+		// Create a group with specific sequence
+		let mut group = producer.create_group(Group { sequence: 42 }).unwrap();
+		assert_eq!(group.sequence, 42);
+
+		let instant = Time::from_millis(100).unwrap();
+		group.write_frame(Bytes::from("hello"), instant).unwrap();
+		group.close().unwrap();
+
+		let group_consumer = consumer.assert_group();
+		assert_eq!(group_consumer.sequence, 42);
+	}
+
+	#[tokio::test]
+	async fn test_track_duplicate_group() {
+		let mut producer = TrackProducer::new("test", Delivery::default());
+
+		// Create first group with sequence 5
+		let _group1 = producer.create_group(Group { sequence: 5 }).unwrap();
+
+		// Try to create another group with the same sequence
+		let result = producer.create_group(Group { sequence: 5 });
+		assert!(result.is_err());
+	}
+
+	#[tokio::test]
+	async fn test_track_multiple_consumers() {
+		let mut producer = TrackProducer::new("test", Delivery::default());
+		let mut consumer1 = producer.subscribe(Delivery::default());
+		let mut consumer2 = producer.subscribe(Delivery::default());
+
+		let mut group = producer.append_group().unwrap();
+		let instant = Time::from_millis(100).unwrap();
+		group.write_frame(Bytes::from("shared"), instant).unwrap();
+		group.close().unwrap();
+
+		// Both consumers should receive the group
+		let mut g1 = consumer1.assert_group();
+		let mut g2 = consumer2.assert_group();
+
+		assert_eq!(g1.read_frame().await.unwrap().unwrap(), Bytes::from("shared"));
+		assert_eq!(g2.read_frame().await.unwrap().unwrap(), Bytes::from("shared"));
+	}
+
+	#[tokio::test]
+	async fn test_track_close() {
+		let mut producer = TrackProducer::new("test", Delivery::default());
+		let consumer = producer.subscribe(Delivery::default());
+
+		producer.close().unwrap();
+
+		// Consumer should detect the track is closed
+		consumer.assert_closed();
+	}
+
+	#[tokio::test]
+	async fn test_track_abort() {
+		let mut producer = TrackProducer::new("test", Delivery::default());
+		let consumer = producer.subscribe(Delivery::default());
+
+		producer.abort(Error::Cancel).unwrap();
+
+		// Consumer should detect the error
+		consumer.assert_error();
+	}
+
+	#[tokio::test]
+	async fn test_track_info() {
+		let track_info = Track::new("my_track");
+		let producer = TrackProducer::new(track_info.clone(), Delivery::default());
+		let consumer = producer.subscribe(Delivery::default());
+
+		assert_eq!(producer.info().as_str(), "my_track");
+		assert_eq!(consumer.info().as_str(), "my_track");
+	}
+
+	#[tokio::test]
+	async fn test_track_is_clone() {
+		let producer1 = TrackProducer::new("test", Delivery::default());
+		let producer2 = producer1.clone();
+		let producer3 = TrackProducer::new("test", Delivery::default());
+
+		assert!(producer1.is_clone(&producer2));
+		assert!(!producer1.is_clone(&producer3));
+
+		let consumer1 = producer1.subscribe(Delivery::default());
+		let consumer2 = producer1.subscribe(Delivery::default());
+		let consumer3 = producer3.subscribe(Delivery::default());
+
+		consumer1.assert_is_clone(&consumer2);
+		consumer1.assert_not_clone(&consumer3);
+	}
+
+	#[tokio::test]
+	async fn test_track_delivery_updates() {
+		let mut producer = TrackProducer::new("test", Delivery::default());
+		let mut consumer = producer.subscribe(Delivery::default());
+
+		// Update delivery info
+		let new_delivery = Delivery {
+			priority: 10,
+			max_latency: Time::from_millis(500).unwrap(),
+			ordered: true,
+		};
+		producer.delivery().update(new_delivery);
+
+		// Consumer should see the update
+		let updated = consumer.delivery().changed().await.unwrap();
+		assert_eq!(updated.priority, 10);
+		assert_eq!(updated.max_latency, Time::from_millis(500).unwrap());
+		assert!(updated.ordered);
+	}
+
+	#[tokio::test]
+	async fn test_track_ordered_consumer() {
+		// Set max_latency to allow buffering out-of-order groups
+		let delivery = Delivery {
+			max_latency: Time::from_millis(500).unwrap(),
+			..Default::default()
+		};
+		let mut producer = TrackProducer::new("test", delivery);
+		let consumer = producer.subscribe(delivery);
+		let mut ordered = consumer.ordered();
+
+		// Create groups out of order
+		let mut group2 = producer.create_group(Group { sequence: 1 }).unwrap();
+		let mut group3 = producer.create_group(Group { sequence: 2 }).unwrap();
+		let mut group1 = producer.create_group(Group { sequence: 0 }).unwrap();
+
+		// Use timestamps that correspond to when each group was created
+		// Group 0 has timestamp 0ms, group 1 has 100ms, group 2 has 200ms
+		let t0 = Time::from_millis(0).unwrap();
+		let t1 = Time::from_millis(100).unwrap();
+		let t2 = Time::from_millis(200).unwrap();
+
+		// Write and close in reverse order (groups arrive out of order)
+		group3.write_frame(Bytes::from("g3"), t2).unwrap();
+		group3.close().unwrap();
+
+		group1.write_frame(Bytes::from("g1"), t0).unwrap();
+		group1.close().unwrap();
+
+		group2.write_frame(Bytes::from("g2"), t1).unwrap();
+		group2.close().unwrap();
+
+		// Ordered consumer should return them in order despite arriving out of order
+		let g = ordered.assert_next_group();
+		assert_eq!(g.sequence, 0);
+
+		let g = ordered.assert_next_group();
+		assert_eq!(g.sequence, 1);
+
+		let g = ordered.assert_next_group();
+		assert_eq!(g.sequence, 2);
+	}
+
+	#[tokio::test]
+	async fn test_track_ordered_consumer_skip_expired() {
+		// Set max_latency to allow some buffering but not infinite
+		let delivery = Delivery {
+			max_latency: Time::from_millis(150).unwrap(),
+			..Default::default()
+		};
+		let mut producer = TrackProducer::new("test", delivery);
+		let consumer = producer.subscribe(delivery);
+		let mut ordered = consumer.ordered();
+
+		// Create groups where we'll skip group 1
+		let mut group0 = producer.create_group(Group { sequence: 0 }).unwrap();
+		let mut group2 = producer.create_group(Group { sequence: 2 }).unwrap();
+		let mut group3 = producer.create_group(Group { sequence: 3 }).unwrap();
+
+		// Timestamps need to satisfy: group2_instant + max_latency <= max_instant
+		// So: 100ms + 150ms <= 300ms ✓ (250 <= 300)
+		let t0 = Time::from_millis(0).unwrap();
+		let t2 = Time::from_millis(100).unwrap();
+		let t3 = Time::from_millis(300).unwrap();
+
+		// Write groups 0, 2, 3 (skip group 1)
+		group0.write_frame(Bytes::from("g0"), t0).unwrap();
+		group0.close().unwrap();
+
+		group2.write_frame(Bytes::from("g2"), t2).unwrap();
+		group2.close().unwrap();
+
+		group3.write_frame(Bytes::from("g3"), t3).unwrap();
+		group3.close().unwrap();
+
+		// Should get group 0 immediately
+		let g = ordered.assert_next_group();
+		assert_eq!(g.sequence, 0);
+
+		// Should skip group 1 (missing) and get group 2
+		// The ordered consumer waits for the first buffered group (group 2) to expire:
+		// - group 2 sequence (2) < max_group (3) ✓
+		// - group 2 instant (100ms) + max_latency (150ms) = 250ms <= max_instant (300ms) ✓
+		// So group 2 should be expired and returned immediately, skipping group 1
+		let g = ordered.assert_next_group();
+		assert_eq!(g.sequence, 2);
+
+		// Then get group 3
+		let g = ordered.assert_next_group();
+		assert_eq!(g.sequence, 3);
+	}
+
+	#[tokio::test]
+	async fn test_track_unused() {
+		let producer = TrackProducer::new("test", Delivery::default());
+
+		// Create and drop a consumer
+		let consumer = producer.subscribe(Delivery::default());
+		drop(consumer);
+
+		// Producer should eventually become unused
+		producer.unused().await;
 	}
 }

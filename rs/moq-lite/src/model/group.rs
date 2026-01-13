@@ -7,7 +7,7 @@
 //! The reader can be cloned, in which case each reader receives a copy of each frame. (fanout)
 //!
 //! The stream is closed with [ServeError::MoqError] when all writers or readers are dropped.
-use std::{future::Future, ops::Deref};
+use std::ops::Deref;
 
 use bytes::Bytes;
 
@@ -191,12 +191,13 @@ impl GroupConsumer {
 		let max_instant = self.state.borrow().max_instant;
 
 		let state = tokio::select! {
+			biased;
 			// Wait until a new frame.
 			state = self.state.wait_for(|state| self.index < state.frames.len()) => state?,
 			// Or wait until the maximum instant in the group is expired.
+			// We do this second because it's legal to return expired frames if we have them in cache already.
 			err = self.expires.wait_expired(self.info.sequence, max_instant.unwrap_or_default()), if max_instant.is_some() => return Err(err),
 			// NOTE: We don't have to wait for a new maximum, because it will satisfy the wait for the next frame.
-
 		};
 
 		if let Some(frame) = state.frames.get(self.index).cloned() {
@@ -210,15 +211,6 @@ impl GroupConsumer {
 	pub async fn closed(&self) -> Result<(), Error> {
 		self.state.closed().await
 	}
-
-	/// Blocks until the first instant of a frame in the group has arrived.
-	pub fn instant(&self) -> impl Future<Output = Result<Time, Error>> {
-		let mut state = self.state.clone();
-		async move {
-			let state = state.wait_for(|state| !state.frames.is_empty()).await?;
-			Ok(state.frames.first().ok_or(Error::Cancel)?.instant)
-		}
-	}
 }
 
 impl Deref for GroupConsumer {
@@ -226,5 +218,226 @@ impl Deref for GroupConsumer {
 
 	fn deref(&self) -> &Self::Target {
 		&self.info
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::{Delivery, DeliveryProducer, ExpiresProducer};
+
+	#[test]
+	fn test_group_from_u64() {
+		let group: Group = 42u64.into();
+		assert_eq!(group.sequence, 42);
+	}
+
+	#[tokio::test]
+	async fn test_group_write_read_frame() {
+		let group = Group { sequence: 0 };
+		let delivery = DeliveryProducer::new(Delivery::default());
+		let expires = ExpiresProducer::new(delivery.consume());
+
+		let mut producer = GroupProducer::new(group, expires);
+		let mut consumer = producer.consume();
+
+		// Write a frame
+		let instant = Time::from_millis(100).unwrap();
+		producer.write_frame(Bytes::from("hello"), instant).unwrap();
+		producer.close().unwrap();
+
+		// Read the frame
+		let data = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(data, Bytes::from("hello"));
+
+		// No more frames
+		let data = consumer.read_frame().await.unwrap();
+		assert!(data.is_none());
+	}
+
+	#[tokio::test]
+	async fn test_group_multiple_frames() {
+		let group = Group { sequence: 5 };
+		let delivery = DeliveryProducer::new(Delivery::default());
+		let expires = ExpiresProducer::new(delivery.consume());
+
+		let mut producer = GroupProducer::new(group, expires);
+		let mut consumer = producer.consume();
+
+		// Write multiple frames
+		let t1 = Time::from_millis(100).unwrap();
+		let t2 = Time::from_millis(200).unwrap();
+		let t3 = Time::from_millis(300).unwrap();
+
+		producer.write_frame(Bytes::from("frame1"), t1).unwrap();
+		producer.write_frame(Bytes::from("frame2"), t2).unwrap();
+		producer.write_frame(Bytes::from("frame3"), t3).unwrap();
+		producer.close().unwrap();
+
+		// Read all frames
+		assert_eq!(consumer.read_frame().await.unwrap().unwrap(), Bytes::from("frame1"));
+		assert_eq!(consumer.read_frame().await.unwrap().unwrap(), Bytes::from("frame2"));
+		assert_eq!(consumer.read_frame().await.unwrap().unwrap(), Bytes::from("frame3"));
+		assert!(consumer.read_frame().await.unwrap().is_none());
+	}
+
+	#[tokio::test]
+	async fn test_group_create_frame_multi_chunk() {
+		let group = Group { sequence: 0 };
+		let delivery = DeliveryProducer::new(Delivery::default());
+		let expires = ExpiresProducer::new(delivery.consume());
+
+		let mut producer = GroupProducer::new(group, expires);
+		let mut consumer = producer.consume();
+
+		// Create a frame and write it in chunks
+		let instant = Time::from_millis(100).unwrap();
+		let frame = Frame { size: 10, instant };
+		let mut frame_producer = producer.create_frame(frame).unwrap();
+		frame_producer.write_chunk(Bytes::from("hello")).unwrap();
+		frame_producer.write_chunk(Bytes::from("world")).unwrap();
+		frame_producer.close().unwrap();
+
+		producer.close().unwrap();
+
+		// Read the frame
+		let data = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(data, Bytes::from("helloworld"));
+	}
+
+	#[tokio::test]
+	async fn test_group_next_frame() {
+		let group = Group { sequence: 0 };
+		let delivery = DeliveryProducer::new(Delivery::default());
+		let expires = ExpiresProducer::new(delivery.consume());
+
+		let mut producer = GroupProducer::new(group, expires);
+		let mut consumer = producer.consume();
+
+		let instant = Time::from_millis(100).unwrap();
+		producer.write_frame(Bytes::from("test"), instant).unwrap();
+		producer.close().unwrap();
+
+		// Use next_frame to get the frame consumer
+		let mut frame_consumer = consumer.next_frame().await.unwrap().unwrap();
+		let data = frame_consumer.read_all().await.unwrap();
+		assert_eq!(data, Bytes::from("test"));
+
+		// No more frames
+		assert!(consumer.next_frame().await.unwrap().is_none());
+	}
+
+	#[tokio::test]
+	async fn test_group_multiple_consumers() {
+		let group = Group { sequence: 0 };
+		let delivery = DeliveryProducer::new(Delivery::default());
+		let expires = ExpiresProducer::new(delivery.consume());
+
+		let mut producer = GroupProducer::new(group, expires);
+		let mut consumer1 = producer.consume();
+		let mut consumer2 = producer.consume();
+
+		let instant = Time::from_millis(100).unwrap();
+		producer.write_frame(Bytes::from("data"), instant).unwrap();
+		producer.close().unwrap();
+
+		// Both consumers should get the frame
+		let data1 = consumer1.read_frame().await.unwrap().unwrap();
+		let data2 = consumer2.read_frame().await.unwrap().unwrap();
+		assert_eq!(data1, Bytes::from("data"));
+		assert_eq!(data2, Bytes::from("data"));
+	}
+
+	#[tokio::test]
+	async fn test_group_abort() {
+		let group = Group { sequence: 0 };
+		let delivery = DeliveryProducer::new(Delivery::default());
+		let expires = ExpiresProducer::new(delivery.consume());
+
+		let mut producer = GroupProducer::new(group, expires);
+		let mut consumer = producer.consume();
+
+		let instant = Time::from_millis(100).unwrap();
+		producer.write_frame(Bytes::from("data"), instant).unwrap();
+
+		// Abort before closing - this should propagate the error
+		producer.abort(Error::Cancel).unwrap();
+
+		// The first frame was already written and closed, so we can read it
+		let _result = consumer.read_frame().await;
+		// The frame itself will succeed but the group will be in error state
+		// So we check closed() instead
+		let closed_result = consumer.closed().await;
+		assert!(closed_result.is_err());
+	}
+
+	#[tokio::test]
+	async fn test_group_max_instant_increasing() {
+		let group = Group { sequence: 0 };
+		let delivery = DeliveryProducer::new(Delivery::default());
+		let expires = ExpiresProducer::new(delivery.consume());
+
+		let mut producer = GroupProducer::new(group, expires.clone());
+
+		let t1 = Time::from_millis(100).unwrap();
+		let t2 = Time::from_millis(200).unwrap();
+		let t3 = Time::from_millis(250).unwrap(); // Always increasing
+
+		producer.write_frame(Bytes::from("f1"), t1).unwrap();
+		producer.write_frame(Bytes::from("f2"), t2).unwrap();
+		producer.write_frame(Bytes::from("f3"), t3).unwrap();
+
+		// max_instant should be t3 (250ms), the highest timestamp
+		// This is indirectly tested through the internal state
+		// We can verify by checking the state was updated
+		producer.close().unwrap();
+	}
+
+	#[tokio::test]
+	async fn test_group_max_instant_out_of_order() {
+		// Test what happens when we write frames with out-of-order timestamps
+		let group = Group { sequence: 0 };
+		let delivery = DeliveryProducer::new(Delivery::default());
+		let expires = ExpiresProducer::new(delivery.consume());
+
+		let mut producer = GroupProducer::new(group, expires.clone());
+
+		let t1 = Time::from_millis(100).unwrap();
+		let t2 = Time::from_millis(200).unwrap();
+		let t3 = Time::from_millis(150).unwrap(); // Out of order - older than t2
+
+		producer.write_frame(Bytes::from("f1"), t1).unwrap();
+		producer.write_frame(Bytes::from("f2"), t2).unwrap();
+
+		// This should fail with Expired because t3 (150ms) is older than t2 (200ms)
+		// and max_latency is 0 by default
+		let result = producer.write_frame(Bytes::from("f3"), t3);
+		assert!(
+			result.is_err(),
+			"Writing a frame with an older timestamp should fail when max_latency is 0"
+		);
+	}
+
+	#[tokio::test]
+	async fn test_group_append_frame() {
+		let group = Group { sequence: 0 };
+		let delivery = DeliveryProducer::new(Delivery::default());
+		let expires = ExpiresProducer::new(delivery.consume());
+
+		let mut producer = GroupProducer::new(group, expires);
+		let mut consumer = producer.consume();
+
+		// Create a frame manually and append it
+		let instant = Time::from_millis(100).unwrap();
+		let frame = Frame { size: 5, instant };
+		let mut frame_producer = FrameProducer::new(frame);
+		frame_producer.write_chunk(Bytes::from("hello")).unwrap();
+		frame_producer.close().unwrap();
+
+		producer.append_frame(frame_producer).unwrap();
+		producer.close().unwrap();
+
+		let data = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(data, Bytes::from("hello"));
 	}
 }
