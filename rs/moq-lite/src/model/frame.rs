@@ -53,33 +53,6 @@ impl From<usize> for Frame {
 	}
 }
 
-impl From<u64> for Frame {
-	fn from(size: u64) -> Self {
-		Self {
-			instant: Time::now(),
-			size: size as usize,
-		}
-	}
-}
-
-impl From<u32> for Frame {
-	fn from(size: u32) -> Self {
-		Self {
-			instant: Time::now(),
-			size: size as usize,
-		}
-	}
-}
-
-impl From<u16> for Frame {
-	fn from(size: u16) -> Self {
-		Self {
-			instant: Time::now(),
-			size: size as usize,
-		}
-	}
-}
-
 #[derive(Default, Debug)]
 struct FrameState {
 	// The chunks that has been written thus far
@@ -262,24 +235,6 @@ mod tests {
 	#[test]
 	fn test_frame_from_usize() {
 		let frame: Frame = 100usize.into();
-		assert_eq!(frame.size, 100);
-	}
-
-	#[test]
-	fn test_frame_from_u64() {
-		let frame: Frame = 100u64.into();
-		assert_eq!(frame.size, 100);
-	}
-
-	#[test]
-	fn test_frame_from_u32() {
-		let frame: Frame = 100u32.into();
-		assert_eq!(frame.size, 100);
-	}
-
-	#[test]
-	fn test_frame_from_u16() {
-		let frame: Frame = 100u16.into();
 		assert_eq!(frame.size, 100);
 	}
 

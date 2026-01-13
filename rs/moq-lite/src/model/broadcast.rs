@@ -162,25 +162,24 @@ impl BroadcastConsumer {
 		self.consumer.modify(|state| {
 			if let Some(existing) = state.get(track.name.as_ref()).cloned() {
 				if let Ok(existing) = existing.upgrade() {
-					return existing.subscribe(delivery);
+					return Ok(existing.subscribe(delivery));
 				}
 			}
 
 			// Create a new track producer using this first request's delivery information.
 			// The publisher SHOULD replace them with their own settigns on OK.
-			let mut track = TrackProducer::new(track, delivery);
+			let track = TrackProducer::new(track, delivery);
 
+			// Need to make the consumer before sending to avoid unused.
 			let consumer = track.subscribe(delivery);
 
 			if self.requested.try_send(track.clone()).is_err() {
-				track.abort(Error::Cancel).ok();
-				return consumer;
+				return Err(Error::Cancel);
 			}
 
 			state.insert(track.name.to_string(), track.weak());
 
 			let state = self.consumer.clone();
-
 			web_async::spawn(async move {
 				track.unused().await;
 				let _ = state.modify(|state| {
@@ -188,8 +187,8 @@ impl BroadcastConsumer {
 				});
 			});
 
-			consumer
-		})
+			Ok(consumer)
+		})?
 	}
 
 	pub async fn closed(&self) -> Result<(), Error> {

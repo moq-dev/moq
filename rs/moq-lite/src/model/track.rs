@@ -22,7 +22,7 @@ use crate::{
 
 use std::{
 	borrow::Cow,
-	collections::VecDeque,
+	collections::{HashSet, VecDeque},
 	fmt,
 	future::Future,
 	ops::{Deref, DerefMut},
@@ -111,6 +111,10 @@ struct State {
 	// If None, the group has expired but was not in the front of the queue.
 	groups: VecDeque<Option<Produce<GroupProducer, GroupConsumer>>>,
 
+	// Sequences that have been seen, for sanity checking.
+	// NOTE: This is not exhaustive, as gaps are valid and we don't care enough to track them.
+	duplicates: HashSet<u64>,
+
 	// +1 every time we remove a group from the front.
 	offset: usize,
 
@@ -123,12 +127,7 @@ impl State {
 		let group = GroupProducer::new(info.clone(), expires);
 
 		// As a sanity check, make sure this is not a duplicate.
-		if self
-			.groups
-			.iter()
-			.filter_map(|g| g.as_ref())
-			.any(|g| g.producer.sequence == group.sequence)
-		{
+		if !self.duplicates.insert(group.sequence) {
 			return Err(Error::Duplicate);
 		}
 
@@ -148,6 +147,8 @@ impl State {
 			None => 0,
 		};
 		self.max = Some(sequence);
+
+		self.duplicates.insert(sequence);
 
 		let group = GroupProducer::new(Group { sequence }, expires);
 

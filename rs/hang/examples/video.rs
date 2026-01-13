@@ -75,6 +75,9 @@ async fn main() -> anyhow::Result<()> {
 
 	let mut track = broadcast.create_track(track, delivery)?;
 
+	// Publish the catalog after we've fully created the track.
+	drop(catalog);
+
 	// Create a group of frames.
 	// Each group must start with a keyframe.
 	let mut group = track.append_group()?;

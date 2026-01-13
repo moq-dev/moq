@@ -162,8 +162,9 @@ impl Drop for Aac {
 		let Some(mut track) = self.track.take() else { return };
 		track.close().ok();
 
-		let config = self.catalog.lock().audio.remove(&track).unwrap();
-		tracing::debug!(track = %track.info(), ?config, "ended track");
+		if let Some(config) = self.catalog.lock().audio.remove(&track) {
+			tracing::info!(track = %track.info(), ?config, "ended track");
+		}
 	}
 }
 

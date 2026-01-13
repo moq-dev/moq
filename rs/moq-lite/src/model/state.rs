@@ -129,10 +129,12 @@ impl<T> Clone for Producer<T> {
 
 impl<T> Drop for Producer<T> {
 	fn drop(&mut self) {
-		let active = self.active.fetch_sub(1, atomic::Ordering::Relaxed);
+		let active = self.active.fetch_sub(1, atomic::Ordering::Release);
 		if active != 1 {
 			return;
 		}
+
+		atomic::fence(atomic::Ordering::Acquire);
 
 		self.state.send_if_modified(|state| {
 			if state.closed.is_some() {
@@ -268,9 +270,10 @@ impl<T> Consumer<T> {
 
 impl<T: fmt::Debug> fmt::Debug for Consumer<T> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let inner = self.inner.borrow();
 		f.debug_struct("Consumer")
-			.field("state", &self.inner.borrow().value)
-			.field("closed", &self.inner.borrow().closed)
+			.field("state", &inner.value)
+			.field("closed", &inner.closed)
 			.finish()
 	}
 }
