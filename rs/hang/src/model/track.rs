@@ -57,10 +57,10 @@ impl TrackProducer {
 
 			// Make sure this frame's timestamp doesn't go backwards relative to the last keyframe.
 			// We can't really enforce this for frames generally because b-frames suck.
-			if let Some(keyframe) = self.keyframe {
-				if frame.timestamp < keyframe {
-					return Err(Error::TimestampBackwards);
-				}
+			if let Some(keyframe) = self.keyframe
+				&& frame.timestamp < keyframe
+			{
+				return Err(Error::TimestampBackwards);
 			}
 
 			self.keyframe = Some(frame.timestamp);

@@ -64,10 +64,10 @@ impl Avc3 {
 			optimize_for_latency: None,
 		};
 
-		if let Some(old) = &self.config {
-			if old == &config {
-				return Ok(());
-			}
+		if let Some(old) = &self.config
+			&& old == &config
+		{
+			return Ok(());
 		}
 
 		if let Some(track) = &self.track.take() {
