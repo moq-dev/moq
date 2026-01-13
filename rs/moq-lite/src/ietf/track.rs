@@ -5,9 +5,9 @@ use std::borrow::Cow;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
+	Path,
 	coding::*,
 	ietf::{FilterType, GroupOrder, Message, Parameters, RequestId, Version},
-	Path,
 };
 
 use super::namespace::{decode_namespace, encode_namespace};

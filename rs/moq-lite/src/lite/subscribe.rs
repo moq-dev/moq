@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 
 use crate::{
+	Path,
 	coding::{Decode, DecodeError, Encode},
 	lite::{Message, Version},
-	Path,
 };
 
 /// Sent by the subscriber to request all future objects for the given track.

@@ -1,9 +1,9 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
+	Path,
 	coding::*,
 	lite::{Message, Version},
-	Path,
 };
 
 /// Sent by the publisher to announce the availability of a track.

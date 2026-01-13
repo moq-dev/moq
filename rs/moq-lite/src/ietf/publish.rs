@@ -107,12 +107,12 @@ The namespace or track is not of interest to the endpoint.
 use std::borrow::Cow;
 
 use crate::{
+	Path,
 	coding::{Decode, DecodeError, Encode},
 	ietf::{
-		namespace::{decode_namespace, encode_namespace},
 		FilterType, GroupOrder, Location, Message, Parameters, RequestId, Version,
+		namespace::{decode_namespace, encode_namespace},
 	},
-	Path,
 };
 
 /// Used to be called SubscribeDone

@@ -1,11 +1,11 @@
 use std::{
 	ops::{Deref, DerefMut},
-	sync::{atomic, Arc},
+	sync::{Arc, atomic},
 };
 
 use crate::{
-	catalog::{Catalog, CatalogConsumer, CatalogProducer},
 	TrackConsumer,
+	catalog::{Catalog, CatalogConsumer, CatalogProducer},
 };
 
 #[derive(Clone)]

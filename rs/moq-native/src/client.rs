@@ -1,7 +1,7 @@
 use crate::crypto;
 use anyhow::Context;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::RootCertStore;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};

@@ -6,7 +6,7 @@ repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
 version = "0.5.7"
-edition = "2021"
+edition = "2024"
 
 [[bin]]
 name = "moq-token"

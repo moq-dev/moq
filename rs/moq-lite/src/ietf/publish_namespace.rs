@@ -3,9 +3,9 @@
 use std::borrow::Cow;
 
 use crate::{
+	Path,
 	coding::*,
 	ietf::{Message, Parameters, RequestId, Version},
-	Path,
 };
 
 use super::namespace::{decode_namespace, encode_namespace};

@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
-use crate::model::{Frame, Timestamp};
 use crate::Result;
+use crate::model::{Frame, Timestamp};
 
 use buf_list::BufList;
 use moq_lite::coding::Decode;

@@ -4,20 +4,20 @@ use std::{
 	path::PathBuf,
 	pin::Pin,
 	sync::{
-		atomic::{AtomicU64, Ordering},
 		Arc,
+		atomic::{AtomicU64, Ordering},
 	},
-	task::{ready, Context, Poll},
+	task::{Context, Poll, ready},
 };
 use web_transport_ws::tungstenite;
 
 use axum::{
+	Router,
 	body::Body,
 	extract::{Path, Query, State, WebSocketUpgrade},
 	http::{Method, StatusCode},
 	response::{IntoResponse, Response},
 	routing::{any, get},
-	Router,
 };
 use bytes::Bytes;
 use clap::Parser;
@@ -139,7 +139,7 @@ impl Web {
 
 #[cfg(unix)]
 async fn reload_certs(config: axum_server::tls_rustls::RustlsConfig, cert: PathBuf, key: PathBuf) {
-	use tokio::signal::unix::{signal, SignalKind};
+	use tokio::signal::unix::{SignalKind, signal};
 
 	// Dunno why we wouldn't be allowed to listen for signals, but just in case.
 	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");

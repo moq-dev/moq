@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// The catalog format is a JSON file that describes the tracks available in a broadcast.
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{Audio, AudioConfig, Chat, User, Video, VideoConfig};
 use crate::Result;
+use crate::catalog::{Audio, AudioConfig, Chat, User, Video, VideoConfig};
 use moq_lite::Produce;
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -272,7 +272,7 @@ impl From<moq_lite::TrackConsumer> for CatalogConsumer {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{AudioCodec::Opus, AudioConfig, VideoConfig, H264};
+	use crate::catalog::{AudioCodec::Opus, AudioConfig, H264, VideoConfig};
 
 	use super::*;
 

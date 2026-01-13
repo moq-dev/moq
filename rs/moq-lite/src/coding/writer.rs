@@ -1,6 +1,6 @@
 use std::{fmt::Debug, sync::Arc};
 
-use crate::{coding::*, Error};
+use crate::{Error, coding::*};
 
 /// A wrapper around a [web_transport_trait::SendStream] that will reset on Drop.
 pub struct Writer<S: web_transport_trait::SendStream, V> {

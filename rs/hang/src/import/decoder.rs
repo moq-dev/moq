@@ -2,7 +2,7 @@ use std::{fmt, str::FromStr};
 
 use bytes::Buf;
 
-use crate::{self as hang, import::Aac, import::Hev1, import::Opus, Error};
+use crate::{self as hang, Error, import::Aac, import::Hev1, import::Opus};
 
 use super::{Avc3, Fmp4};
 

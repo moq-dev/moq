@@ -121,11 +121,7 @@ impl OriginNode {
 		let (dir, rest) = path.next_part().expect("leaf called with empty path");
 
 		let next = self.entry(dir);
-		if rest.is_empty() {
-			next
-		} else {
-			next.lock().leaf(&rest)
-		}
+		if rest.is_empty() { next } else { next.lock().leaf(&rest) }
 	}
 
 	fn entry(&mut self, dir: &str) -> Lock<OriginNode> {

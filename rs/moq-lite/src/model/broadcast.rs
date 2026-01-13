@@ -2,8 +2,8 @@ use std::{
 	collections::HashMap,
 	future::Future,
 	sync::{
-		atomic::{AtomicUsize, Ordering},
 		Arc,
+		atomic::{AtomicUsize, Ordering},
 	},
 };
 
@@ -111,7 +111,7 @@ impl BroadcastProducer {
 	/// Block until there are no more consumers.
 	///
 	/// A new consumer can be created by calling [Self::consume] and this will block again.
-	pub fn unused(&self) -> impl Future<Output = ()> {
+	pub fn unused(&self) -> impl Future<Output = ()> + use<> {
 		let closed = self.closed.clone();
 		async move { closed.closed().await }
 	}

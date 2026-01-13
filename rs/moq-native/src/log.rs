@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
-use tracing::level_filters::LevelFilter;
 use tracing::Level;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// Tracing log configuration.
 #[serde_with::serde_as]

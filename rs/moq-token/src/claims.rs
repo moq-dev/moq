@@ -1,5 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_with::{serde_as, TimestampSeconds};
+use serde_with::{TimestampSeconds, serde_as};
 
 fn is_false(value: &bool) -> bool {
 	!value
@@ -118,10 +118,12 @@ mod tests {
 
 		let result = claims.validate();
 		assert!(result.is_err());
-		assert!(result
-			.unwrap_err()
-			.to_string()
-			.contains("no publish or subscribe allowed; token is useless"));
+		assert!(
+			result
+				.unwrap_err()
+				.to_string()
+				.contains("no publish or subscribe allowed; token is useless")
+		);
 	}
 
 	#[test]

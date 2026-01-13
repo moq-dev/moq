@@ -1,6 +1,6 @@
 use std::mem::MaybeUninit;
 
-use bytes::{buf::UninitSlice, Buf, BufMut};
+use bytes::{Buf, BufMut, buf::UninitSlice};
 
 /// A [BufMut] implementation that only counts the size of the buffer.
 ///

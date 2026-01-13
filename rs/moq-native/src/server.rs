@@ -17,9 +17,9 @@ use url::Url;
 use web_transport_iroh::iroh;
 use web_transport_quinn::http;
 
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
-use futures::FutureExt;
 
 /// TLS configuration for the server.
 ///
@@ -148,7 +148,7 @@ impl Server {
 
 	#[cfg(unix)]
 	async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
-		use tokio::signal::unix::{signal, SignalKind};
+		use tokio::signal::unix::{SignalKind, signal};
 
 		// Dunno why we wouldn't be allowed to listen for signals, but just in case.
 		let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");

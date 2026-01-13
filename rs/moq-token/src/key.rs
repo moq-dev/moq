@@ -1,12 +1,12 @@
 use crate::generate::generate;
 use crate::{Algorithm, Claims};
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use base64::Engine;
-use elliptic_curve::pkcs8::EncodePrivateKey;
 use elliptic_curve::SecretKey;
+use elliptic_curve::pkcs8::EncodePrivateKey;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header};
-use rsa::pkcs1::EncodeRsaPrivateKey;
 use rsa::BigUint;
+use rsa::pkcs1::EncodeRsaPrivateKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
@@ -630,10 +630,12 @@ mod tests {
 
 		let result = key.encode(&invalid_claims);
 		assert!(result.is_err());
-		assert!(result
-			.unwrap_err()
-			.to_string()
-			.contains("no publish or subscribe allowed; token is useless"));
+		assert!(
+			result
+				.unwrap_err()
+				.to_string()
+				.contains("no publish or subscribe allowed; token is useless")
+		);
 	}
 
 	#[test]
@@ -656,10 +658,12 @@ mod tests {
 
 		let result = key.decode("some.jwt.token");
 		assert!(result.is_err());
-		assert!(result
-			.unwrap_err()
-			.to_string()
-			.contains("key does not support verification"));
+		assert!(
+			result
+				.unwrap_err()
+				.to_string()
+				.contains("key does not support verification")
+		);
 	}
 
 	#[test]

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::coding::{Reader, Writer};
 use crate::Error;
+use crate::coding::{Reader, Writer};
 
 /// A [Writer] and [Reader] pair for a single stream.
 pub struct Stream<S: web_transport_trait::Session, V> {

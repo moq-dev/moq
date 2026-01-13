@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::ops::Deref;
 
-use crate::model::{Frame, GroupConsumer, Timestamp};
 use crate::Error;
-use futures::{stream::FuturesUnordered, StreamExt};
+use crate::model::{Frame, GroupConsumer, Timestamp};
+use futures::{StreamExt, stream::FuturesUnordered};
 
 use moq_lite::{coding::*, lite};
 

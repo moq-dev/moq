@@ -1,4 +1,4 @@
-use crate::catalog::{AudioCodec, AudioConfig, CatalogProducer, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9};
+use crate::catalog::{AAC, AV1, AudioCodec, AudioConfig, CatalogProducer, H264, H265, VP9, VideoCodec, VideoConfig};
 use crate::{self as hang, Timestamp};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};

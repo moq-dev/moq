@@ -2,7 +2,7 @@ use std::{cmp, fmt::Debug, io, sync::Arc};
 
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::{coding::*, Error};
+use crate::{Error, coding::*};
 
 /// A reader for decoding messages from a stream.
 pub struct Reader<S: web_transport_trait::RecvStream, V> {
