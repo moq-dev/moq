@@ -79,16 +79,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::info!(id = %request_id, broadcast = %absolute, %track, "subscribed started");
 
-		let broadcast = match self.origin.consume_broadcast(&msg.track_namespace) {
-			Some(consumer) => consumer,
-			None => {
-				self.control.send(ietf::SubscribeError {
-					request_id,
-					error_code: 404,
-					reason_phrase: "Broadcast not found".into(),
-				})?;
-				return Ok(());
-			}
+		let Some(broadcast) = self.origin.consume_broadcast(&msg.track_namespace) else {
+			self.control.send(ietf::SubscribeError {
+				request_id,
+				error_code: 404,
+				reason_phrase: "Broadcast not found".into(),
+			})?;
+			return Ok(());
 		};
 
 		let track = Track {

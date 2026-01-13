@@ -232,9 +232,8 @@ async fn serve_announced(
 	};
 
 	let token = state.auth.verify(&prefix, params.jwt.as_deref())?;
-	let mut origin = match state.cluster.subscriber(&token) {
-		Some(origin) => origin,
-		None => return Err(StatusCode::UNAUTHORIZED.into()),
+	let Some(mut origin) = state.cluster.subscriber(&token) else {
+		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
 	let mut broadcasts = Vec::new();
@@ -266,9 +265,8 @@ async fn serve_fetch(
 	let broadcast = path.join("/");
 	let token = state.auth.verify(&broadcast, params.jwt.as_deref())?;
 
-	let origin = match state.cluster.subscriber(&token) {
-		Some(origin) => origin,
-		None => return Err(StatusCode::UNAUTHORIZED.into()),
+	let Some(origin) = state.cluster.subscriber(&token) else {
+		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
 	tracing::info!(%broadcast, %track, "fetching track");
@@ -282,10 +280,11 @@ async fn serve_fetch(
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
 	let mut track = broadcast.subscribe_track(&track);
 
-	let group = match track.next_group().await {
-		Ok(Some(group)) => group,
-		Ok(None) => return Err(StatusCode::NOT_FOUND.into()),
-		Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR.into()),
+	let Ok(group) = track.next_group().await else {
+		return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+	};
+	let Some(group) = group else {
+		return Err(StatusCode::NOT_FOUND.into());
 	};
 
 	Ok(ServeGroup::new(group))

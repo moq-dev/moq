@@ -163,15 +163,12 @@ impl FrameConsumer {
 	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>> {
 		// Wait until the writer is done before even attempting to read.
 		// That way this function can be cancelled without consuming half of the frame.
-		let state = match self.state.wait_for(|state| state.closed.is_some()).await {
-			Ok(state) => {
-				if let Some(Err(err)) = &state.closed {
-					return Err(err.clone());
-				}
-				state
-			}
-			Err(_) => return Err(Error::Cancel),
+		let Ok(state) = self.state.wait_for(|state| state.closed.is_some()).await else {
+			return Err(Error::Cancel);
 		};
+		if let Some(Err(err)) = &state.closed {
+			return Err(err.clone());
+		}
 
 		// Get all of the remaining chunks.
 		let chunks = state.chunks[self.index..].to_vec();
@@ -184,15 +181,12 @@ impl FrameConsumer {
 	pub async fn read_all(&mut self) -> Result<Bytes> {
 		// Wait until the writer is done before even attempting to read.
 		// That way this function can be cancelled without consuming half of the frame.
-		let state = match self.state.wait_for(|state| state.closed.is_some()).await {
-			Ok(state) => {
-				if let Some(Err(err)) = &state.closed {
-					return Err(err.clone());
-				}
-				state
-			}
-			Err(_) => return Err(Error::Cancel),
+		let Ok(state) = self.state.wait_for(|state| state.closed.is_some()).await else {
+			return Err(Error::Cancel);
 		};
+		if let Some(Err(err)) = &state.closed {
+			return Err(err.clone());
+		}
 
 		// Get all of the remaining chunks.
 		let chunks = &state.chunks[self.index..];

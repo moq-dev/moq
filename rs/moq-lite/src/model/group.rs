@@ -179,10 +179,10 @@ impl GroupConsumer {
 		};
 
 		// Read the frame in one go, which is cancel safe.
-		let frame = match self.active.as_mut() {
-			Some(frame) => frame.read_all().await?,
-			None => return Ok(None),
+		let Some(frame) = self.active.as_mut() else {
+			return Ok(None);
 		};
+		let frame = frame.read_all().await?;
 
 		self.active = None;
 

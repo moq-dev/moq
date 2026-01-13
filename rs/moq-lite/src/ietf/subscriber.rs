@@ -76,9 +76,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	fn start_announce(&mut self, path: PathOwned) -> Result<BroadcastProducer, Error> {
-		let origin = match &self.origin {
-			Some(origin) => origin,
-			None => return Err(Error::InvalidRole),
+		let Some(origin) = &self.origin else {
+			return Err(Error::InvalidRole);
 		};
 
 		let mut state = self.state.lock();
@@ -114,9 +113,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	fn stop_announce(&mut self, path: PathOwned) -> Result<(), Error> {
-		let origin = match &self.origin {
-			Some(origin) => origin,
-			None => return Err(Error::InvalidRole),
+		let Some(origin) = &self.origin else {
+			return Err(Error::InvalidRole);
 		};
 
 		let mut state = self.state.lock();

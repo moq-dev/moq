@@ -18,10 +18,12 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
 	pub fn flush(self) -> anyhow::Result<Option<Bytes>> {
 		let start = match self.start {
 			Some(start) => start,
-			None => match after_start_code(self.buf.as_ref())? {
-				Some(start) => start,
-				None => return Ok(None),
-			},
+			None => {
+				let Some(start) = after_start_code(self.buf.as_ref())? else {
+					return Ok(None);
+				};
+				start
+			}
 		};
 
 		self.buf.advance(start);

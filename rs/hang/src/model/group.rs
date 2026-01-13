@@ -60,10 +60,10 @@ impl GroupConsumer {
 	}
 
 	async fn read_unbuffered(&mut self) -> Result<Option<Frame>> {
-		let payload = match self.group.next_frame().await? {
-			Some(mut frame) => frame.read_chunks().await?,
-			None => return Ok(None),
+		let Some(mut frame) = self.group.next_frame().await? else {
+			return Ok(None);
 		};
+		let payload = frame.read_chunks().await?;
 
 		let mut payload = BufList::from_iter(payload);
 
