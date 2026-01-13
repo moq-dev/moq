@@ -133,7 +133,7 @@ pub unsafe extern "C" fn moq_session_connect(
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
-		let url = ffi::parse_url(url, url_len)?;
+		let url = unsafe { ffi::parse_url(url, url_len)? };
 
 		let mut state = State::lock();
 		let publish = ffi::parse_id_optional(origin_publish)?
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn moq_session_connect(
 			.transpose()?
 			.cloned();
 
-		let on_status = ffi::OnStatus::new(user_data, on_status);
+		let on_status = unsafe { ffi::OnStatus::new(user_data, on_status) };
 		state.session.connect(url, publish, consume, on_status)
 	})
 }
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn moq_origin_announced(
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
-		let on_announce = ffi::OnStatus::new(user_data, on_announce);
+		let on_announce = unsafe { ffi::OnStatus::new(user_data, on_announce) };
 		State::lock().origin.announced(origin, on_announce)
 	})
 }
@@ -234,7 +234,7 @@ pub unsafe extern "C" fn moq_origin_announced(
 pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq_announced) -> i32 {
 	ffi::enter(move || {
 		let announced = ffi::parse_id(announced)?;
-		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().origin.announced_info(announced, dst)
 	})
 }
@@ -377,7 +377,7 @@ pub unsafe extern "C" fn moq_consume_catalog(
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let on_catalog = ffi::OnStatus::new(user_data, on_catalog);
+		let on_catalog = unsafe { ffi::OnStatus::new(user_data, on_catalog) };
 		State::lock().consume.catalog(broadcast, on_catalog)
 	})
 }
@@ -407,7 +407,7 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.video_config(catalog, index, dst)
 	})
 }
@@ -426,7 +426,7 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.audio_config(catalog, index, dst)
 	})
 }
@@ -452,7 +452,7 @@ pub unsafe extern "C" fn moq_consume_video_ordered(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
-		let on_frame = ffi::OnStatus::new(user_data, on_frame);
+		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock()
 			.consume
 			.video_ordered(broadcast, index, max_latency, on_frame)
@@ -491,7 +491,7 @@ pub unsafe extern "C" fn moq_consume_audio_ordered(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
-		let on_frame = ffi::OnStatus::new(user_data, on_frame);
+		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock()
 			.consume
 			.audio_ordered(broadcast, index, max_latency, on_frame)
@@ -523,7 +523,7 @@ pub unsafe extern "C" fn moq_consume_frame_chunk(frame: u32, index: u32, dst: *m
 	ffi::enter(move || {
 		let frame = ffi::parse_id(frame)?;
 		let index = index as usize;
-		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.frame_chunk(frame, index, dst)
 	})
 }

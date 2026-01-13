@@ -168,7 +168,7 @@ pub fn parse_url(url: *const c_char, url_len: usize) -> Result<Url, Error> {
 /// # Safety
 /// The caller must ensure that cstr is valid for 'a.
 pub unsafe fn parse_str<'a>(cstr: *const c_char, cstr_len: usize) -> Result<&'a str, Error> {
-	let slice = parse_slice(cstr as *const u8, cstr_len)?;
+	let slice = unsafe { parse_slice(cstr as *const u8, cstr_len)? };
 	let string = std::str::from_utf8(slice)?;
 	Ok(string)
 }
