@@ -178,10 +178,10 @@ impl<'de> Deserialize<'de> for Key {
 		// Normally the "kty" parameter is required in a JWK: https://datatracker.ietf.org/doc/html/rfc7517#section-4.1
 		// But for backwards compatibility we need to default to "oct" because in a previous
 		// implementation the parameter was omitted, and we want to keep previously generated tokens valid
-		if let Some(obj) = value.as_object_mut() {
-			if !obj.contains_key("kty") {
-				obj.insert("kty".to_string(), serde_json::Value::String("oct".to_string()));
-			}
+		if let Some(obj) = value.as_object_mut()
+			&& !obj.contains_key("kty")
+		{
+			obj.insert("kty".to_string(), serde_json::Value::String("oct".to_string()));
 		}
 
 		Self::deserialize(value).map_err(serde::de::Error::custom)

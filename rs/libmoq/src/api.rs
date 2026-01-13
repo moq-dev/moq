@@ -133,7 +133,7 @@ pub unsafe extern "C" fn moq_session_connect(
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
-		let url = unsafe { ffi::parse_url(url, url_len)? };
+		let url = ffi::parse_url(url, url_len)?;
 
 		let mut state = State::lock();
 		let publish = ffi::parse_id_optional(origin_publish)?

@@ -96,7 +96,7 @@ impl Auth {
 			&& let Some(key) = self.key.as_ref()
 		{
 			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
-		} else if let Some(token) = token {
+		} else if let Some(_token) = token {
 			return Err(AuthError::UnexpectedToken);
 		} else if let Some(public) = &self.public {
 			moq_token::Claims {

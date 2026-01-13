@@ -204,6 +204,7 @@ impl<const SCALE: u64> From<Timescale<SCALE>> for std::time::Duration {
 }
 
 impl<const SCALE: u64> std::fmt::Debug for Timescale<SCALE> {
+	#[allow(clippy::manual_is_multiple_of)] // is_multiple_of is unstable in Rust 1.85
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let nanos = self.as_nanos();
 
