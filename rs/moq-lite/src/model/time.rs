@@ -209,11 +209,11 @@ impl<const SCALE: u64> std::fmt::Debug for Timescale<SCALE> {
 
 		// Choose the largest unit where we don't need decimal places
 		// Check from largest to smallest unit
-		if nanos.is_multiple_of(1_000_000_000) {
+		if nanos % 1_000_000_000 == 0 {
 			write!(f, "{}s", nanos / 1_000_000_000)
-		} else if nanos.is_multiple_of(1_000_000) {
+		} else if nanos % 1_000_000 == 0 {
 			write!(f, "{}ms", nanos / 1_000_000)
-		} else if nanos.is_multiple_of(1_000) {
+		} else if nanos % 1_000 == 0 {
 			write!(f, "{}µs", nanos / 1_000)
 		} else {
 			write!(f, "{}ns", nanos)

@@ -138,7 +138,7 @@ impl GroupProducer {
 		}
 	}
 
-	pub fn unused(&self) -> impl Future<Output = ()> {
+	pub fn unused(&self) -> impl Future<Output = ()> + use<> {
 		let state = self.state.clone();
 		async move {
 			state.closed().await;

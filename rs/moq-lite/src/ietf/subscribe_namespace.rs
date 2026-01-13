@@ -17,7 +17,7 @@ pub struct SubscribeNamespace<'a> {
 	pub namespace: Path<'a>,
 }
 
-impl<'a> Message for SubscribeNamespace<'a> {
+impl Message for SubscribeNamespace<'_> {
 	const ID: u64 = 0x11;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
@@ -63,7 +63,7 @@ pub struct SubscribeNamespaceError<'a> {
 	pub reason_phrase: Cow<'a, str>,
 }
 
-impl<'a> Message for SubscribeNamespaceError<'a> {
+impl Message for SubscribeNamespaceError<'_> {
 	const ID: u64 = 0x13;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {

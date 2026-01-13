@@ -21,7 +21,7 @@ pub enum Announce<'a> {
 	},
 }
 
-impl<'a> Message for Announce<'a> {
+impl Message for Announce<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		Ok(match AnnounceStatus::decode(r, version)? {
 			AnnounceStatus::Active => Self::Active {
@@ -54,7 +54,7 @@ pub struct AnnouncePlease<'a> {
 	pub prefix: Path<'a>,
 }
 
-impl<'a> Message for AnnouncePlease<'a> {
+impl Message for AnnouncePlease<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
 		Ok(Self { prefix })
@@ -95,7 +95,7 @@ pub struct AnnounceInit<'a> {
 	pub suffixes: Vec<Path<'a>>,
 }
 
-impl<'a> Message for AnnounceInit<'a> {
+impl Message for AnnounceInit<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let count = u64::decode(r, version)?;
 

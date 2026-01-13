@@ -128,7 +128,7 @@ impl<V> Decode<V> for bytes::Bytes {
 }
 
 // TODO Support borrowed strings.
-impl<'a, V> Decode<V> for Cow<'a, str> {
+impl<V> Decode<V> for Cow<'_, str> {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let s = String::decode(r, version)?;
 		Ok(Cow::Owned(s))

@@ -124,7 +124,7 @@ pub struct PublishDone<'a> {
 	pub reason_phrase: Cow<'a, str>,
 }
 
-impl<'a> Message for PublishDone<'a> {
+impl Message for PublishDone<'_> {
 	const ID: u64 = 0x0b;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
@@ -161,7 +161,7 @@ pub struct Publish<'a> {
 	// pub parameters: Parameters,
 }
 
-impl<'a> Message for Publish<'a> {
+impl Message for Publish<'_> {
 	const ID: u64 = 0x1D;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
@@ -271,7 +271,7 @@ pub struct PublishError<'a> {
 	pub error_code: u64,
 	pub reason_phrase: Cow<'a, str>,
 }
-impl<'a> Message for PublishError<'a> {
+impl Message for PublishError<'_> {
 	const ID: u64 = 0x1F;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {

@@ -27,7 +27,7 @@ impl<'a> AsPath for &'a Path<'a> {
 	}
 }
 
-impl<'a> AsPath for Path<'a> {
+impl AsPath for Path<'_> {
 	fn as_path(&self) -> Path<'_> {
 		Path(Cow::Borrowed(self.0.as_ref()))
 	}
@@ -247,13 +247,13 @@ impl<'a> From<&'a String> for Path<'a> {
 	}
 }
 
-impl<'a> Default for Path<'a> {
+impl Default for Path<'_> {
 	fn default() -> Self {
 		Self(Cow::Borrowed(""))
 	}
 }
 
-impl<'a> From<String> for Path<'a> {
+impl From<String> for Path<'_> {
 	fn from(s: String) -> Self {
 		// It's annoying that this logic is duplicated, but I couldn't figure out how to reuse Path::new.
 		let trimmed = s.trim_start_matches('/').trim_end_matches('/');
@@ -277,25 +277,25 @@ impl<'a> From<String> for Path<'a> {
 	}
 }
 
-impl<'a> AsRef<str> for Path<'a> {
+impl AsRef<str> for Path<'_> {
 	fn as_ref(&self) -> &str {
 		&self.0
 	}
 }
 
-impl<'a> Display for Path<'a> {
+impl Display for Path<'_> {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{}", self.0)
 	}
 }
 
-impl<'a, V> Decode<V> for Path<'a> {
+impl<V> Decode<V> for Path<'_> {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		Ok(String::decode(r, version)?.into())
 	}
 }
 
-impl<'a, V> Encode<V> for Path<'a> {
+impl<V> Encode<V> for Path<'_> {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
 		self.as_str().encode(w, version)
 	}
