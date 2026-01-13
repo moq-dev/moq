@@ -37,25 +37,25 @@ Here's how you can use them (see also @moq/hang-demo for a complete example):
 ```
 
 ```html
-<hang-publish-ui>
-	<hang-publish url="<MOQ relay URL>" path="<relay path>">
-		<video
-			style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;"
-			muted
-			autoplay
-		></video>
-	</hang-publish>
-</hang-publish-ui>
+	<hang-publish-ui>
+		<hang-publish url="<MOQ relay URL>" path="<relay path>">
+			<video
+				style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;"
+				muted
+				autoplay
+			></video>
+		</hang-publish>
+	</hang-publish-ui>
 ```
 
 ## Project Structure
 The `@moq/hang-ui` package is organized into modular components and utilities:
 
-```
+```text
 src/
 ├── publish/             # Publishing UI components
 │   ├── components/      # UI controls for publishing
-│   ├── hooks/           # Custom React/Solid hooks for publish UI
+│   ├── hooks/           # Custom Solid hooks for publish UI
 │   ├── styles/          # CSS styles for publish UI
 │   ├── context.tsx      # Context provider for publish state
 │   ├── element.tsx      # Main publish UI component
@@ -63,7 +63,7 @@ src/
 │
 ├── watch/               # Watching/playback UI components
 │   ├── components/      # UI controls for watching
-│   ├── hooks/           # Custom React/Solid hooks for watch UI
+│   ├── hooks/           # Custom Solid hooks for watch UI
 │   ├── styles/          # CSS styles for watch UI
 │   ├── context.tsx      # Context provider for watch state
 │   ├── element.tsx      # Main watch UI component
