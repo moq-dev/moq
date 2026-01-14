@@ -16,7 +16,11 @@ export default function BufferOverlay() {
 					<div class="bufferOverlayLabel">Video</div>
 					<div
 						class="bufferOverlayValue"
-						title={context.videoBufferDuration() === undefined ? "Video may be paused or not available" : undefined}
+						title={
+							context.videoBufferDuration() === undefined
+								? "Video may be paused or not available"
+								: undefined
+						}
 					>
 						{context.videoBufferDuration() !== undefined
 							? `${context.videoBufferDuration()?.toFixed(1)}ms buffered`
@@ -27,7 +31,11 @@ export default function BufferOverlay() {
 					<div class="bufferOverlayLabel">Audio</div>
 					<div
 						class="bufferOverlayValue"
-						title={context.audioBufferDuration() === undefined ? "Audio may be muted or not available" : undefined}
+						title={
+							context.audioBufferDuration() === undefined
+								? "Audio may be muted or not available"
+								: undefined
+						}
 					>
 						{context.audioBufferDuration() !== undefined
 							? `${context.audioBufferDuration()?.toFixed(1)}ms buffered`

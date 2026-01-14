@@ -309,8 +309,14 @@ export function getBufferedRangeForGroup(groups: Group[]) {
 	return { earliestTime, latestTime };
 }
 
+declare global {
+	interface Window {
+		simulateLatency?: boolean;
+	}
+}
+
 async function simulateLatency(amount: number): Promise<void> {
-	if ((window as any).simulateLatency === true) {
+	if (window.simulateLatency === true) {
 		return new Promise((resolve) => setTimeout(resolve, amount));
 	}
 
