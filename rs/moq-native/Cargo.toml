@@ -50,7 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true }
-web-transport-ws = { workspace = true }
+web-transport-ws = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 anyhow = "1"

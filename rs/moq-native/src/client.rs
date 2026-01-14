@@ -351,21 +351,31 @@ impl Client {
 		}
 
 		// Convert URL scheme: http:// -> ws://, https:// -> wss://
-		match url.scheme() {
+		let needs_tls = match url.scheme() {
 			"http" => {
 				url.set_scheme("ws").expect("failed to set scheme");
+				false
 			}
 			"https" | "moql" | "moqt" => {
 				url.set_scheme("wss").expect("failed to set scheme");
+				true
 			}
-			"ws" | "wss" => {}
+			"ws" => false,
+			"wss" => true,
 			_ => anyhow::bail!("unsupported URL scheme for WebSocket: {}", url.scheme()),
 		};
 
 		tracing::debug!(%url, "connecting via WebSocket");
 
+		// Use the existing TLS config (which respects tls-disable-verify) for secure connections
+		let connector = if needs_tls {
+			Some(tokio_tungstenite::Connector::Rustls(Arc::new(self.tls.clone())))
+		} else {
+			None
+		};
+
 		// Connect using tokio-tungstenite
-		let (ws_stream, _response) = tokio_tungstenite::connect_async_with_config(
+		let (ws_stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
 			url.as_str(),
 			Some(tungstenite::protocol::WebSocketConfig {
 				max_message_size: Some(64 << 20), // 64 MB
@@ -374,6 +384,7 @@ impl Client {
 				..Default::default()
 			}),
 			false, // disable_nagle
+			connector,
 		)
 		.await
 		.context("failed to connect WebSocket")?;
