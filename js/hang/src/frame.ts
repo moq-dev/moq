@@ -38,7 +38,10 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro, conta
 }
 
 // NOTE: A keyframe is always the first frame in a group, so it's not encoded on the wire.
-export function getFrameData(buffer: Uint8Array, container?: Catalog.Container): { data: Uint8Array; timestamp: Time.Micro } {
+export function getFrameData(
+	buffer: Uint8Array,
+	container?: Catalog.Container,
+): { data: Uint8Array; timestamp: Time.Micro } {
 	// Decode timestamp using the specified container format
 	const [timestamp, data] = Container.decodeTimestamp(buffer, container);
 	return { timestamp: timestamp as Time.Micro, data };
@@ -182,12 +185,11 @@ export class Consumer {
 					this.#checkLatency();
 				}
 			}
-
 		} catch (_err) {
 			// Ignore errors, we close groups on purpose to skip them.
 		} finally {
 			this.#updateBufferRange();
-			
+
 			if (group.consumer.sequence === this.#activeSequenceNumber) {
 				// Advance to the next group.
 				this.#activeSequenceNumber += 1;
@@ -205,20 +207,23 @@ export class Consumer {
 		if (this.#groups.length < 2) return;
 
 		const { earliestTime, latestTime } = getBufferedRangeForGroup(this.#groups);
-		
+
 		if (earliestTime === undefined || latestTime === undefined) return;
-		
+
 		const latency = latestTime - earliestTime;
-		
+
 		if (latency < Time.Micro.fromMilli(this.#latency.peek())) return;
-			
+
 		const firstGroup = this.#groups[0];
-		const isSlowGroup = this.#activeSequenceNumber !== undefined && firstGroup.consumer.sequence <= this.#activeSequenceNumber;
+		const isSlowGroup =
+			this.#activeSequenceNumber !== undefined && firstGroup.consumer.sequence <= this.#activeSequenceNumber;
 
 		if (isSlowGroup) {
 			this.#groups.shift();
 
-			console.warn(`skipping slow group: ${firstGroup.consumer.sequence} < ${this.#groups[0]?.consumer.sequence}`);
+			console.warn(
+				`skipping slow group: ${firstGroup.consumer.sequence} < ${this.#groups[0]?.consumer.sequence}`,
+			);
 
 			firstGroup.consumer.close();
 			firstGroup.frames.length = 0;
@@ -250,7 +255,7 @@ export class Consumer {
 				if (frame) return frame;
 
 				const isGroupDone = this.#activeSequenceNumber > this.#groups[0].consumer.sequence;
-				
+
 				if (isGroupDone) {
 					this.#groups.shift();
 					continue;
@@ -260,7 +265,7 @@ export class Consumer {
 			if (this.#notify) {
 				throw new Error("multiple calls to decode not supported");
 			}
-			
+
 			const wait = new Promise<void>((resolve) => {
 				this.#notify = () => {
 					this.#updateBufferRange();
@@ -291,21 +296,21 @@ export class Consumer {
 export function getBufferedRangeForGroup(groups: Group[]) {
 	let earliestTime: number | undefined;
 	let latestTime: number | undefined;
-	
+
 	for (const group of groups) {
 		if (!group.latest) continue;
-		
+
 		// Use the earliest unconsumed frame in the group.
 		const frame = group.frames.at(0)?.timestamp ?? group.latest;
 		if (earliestTime === undefined || frame < earliestTime) {
 			earliestTime = frame;
 		}
-		
+
 		if (latestTime === undefined || group.latest > latestTime) {
 			latestTime = group.latest;
 		}
 	}
-	
+
 	return { earliestTime, latestTime };
 }
 
