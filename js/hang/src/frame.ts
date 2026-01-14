@@ -298,7 +298,12 @@ export function getBufferedRangeForGroup(groups: Group[]) {
 	let latestTime: number | undefined;
 
 	for (const group of groups) {
-		if (!group.latest) continue;
+		if (
+			!group.latest ||
+			// skip fully consumed groups
+			group.frames.length === 0
+		)
+			continue;
 
 		// Use the earliest unconsumed frame in the group.
 		const frame = group.frames.at(0)?.timestamp ?? group.latest;
