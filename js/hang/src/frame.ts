@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
 import type * as Catalog from "./catalog";
 import * as Container from "./container";
 
@@ -92,11 +92,8 @@ export class Consumer {
 	#container?: Catalog.Container;
 	#groups: Group[] = [];
 	#activeSequenceNumber?: number; // the active group sequence number
-	#earliestBufferTime = new Signal<number | undefined>(undefined);
-	readonly earliestBufferTime: Getter<number | undefined> = this.#earliestBufferTime;
-
-	#latestBufferTime = new Signal<number | undefined>(undefined);
-	readonly latestBufferTime: Getter<number | undefined> = this.#latestBufferTime;
+	earliestBufferTime = new Signal<number | undefined>(undefined);
+	latestBufferTime = new Signal<number | undefined>(undefined);
 
 	// Wake up the consumer when a new frame is available.
 	#notify?: () => void;
@@ -156,7 +153,10 @@ export class Consumer {
 		try {
 			let isKeyframe = true;
 
-			await simulateLatency(2500);
+			if (window.simulateLatency === true) {
+				await applySimulatedLatency(2500);
+			}
+
 			for (;;) {
 				const nextFrame = await group.consumer.readFrame();
 				if (!nextFrame) break;
@@ -240,8 +240,8 @@ export class Consumer {
 
 	#updateBufferRange() {
 		const { earliestTime, latestTime } = getBufferedRangeForGroup(this.#groups);
-		this.#earliestBufferTime.set(earliestTime);
-		this.#latestBufferTime.set(latestTime);
+		this.earliestBufferTime.set(earliestTime);
+		this.latestBufferTime.set(latestTime);
 	}
 
 	async decode(): Promise<Frame | undefined> {
@@ -252,6 +252,7 @@ export class Consumer {
 				this.#groups[0].consumer.sequence <= this.#activeSequenceNumber
 			) {
 				const frame = this.#groups[0].frames.shift();
+
 				if (frame) return frame;
 
 				const isGroupDone = this.#activeSequenceNumber > this.#groups[0].consumer.sequence;
@@ -293,7 +294,7 @@ export class Consumer {
 	}
 }
 
-export function getBufferedRangeForGroup(groups: Group[]) {
+function getBufferedRangeForGroup(groups: Group[]) {
 	let earliestTime: number | undefined;
 	let latestTime: number | undefined;
 
@@ -325,10 +326,9 @@ declare global {
 	}
 }
 
-async function simulateLatency(amount: number): Promise<void> {
-	if (window.simulateLatency === true) {
-		return new Promise((resolve) => setTimeout(resolve, amount));
-	}
+async function applySimulatedLatency(amount: number): Promise<void> {
+	// not sure if we should allow this in production too?
+	if (!import.meta.env.DEV) return Promise.resolve();
 
-	return Promise.resolve();
+	return new Promise((resolve) => setTimeout(resolve, amount));
 }
