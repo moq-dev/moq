@@ -328,7 +328,7 @@ declare global {
 
 async function applySimulatedLatency(amount: number): Promise<void> {
 	// not sure if we should allow this in production too?
-	if (!import.meta.env.DEV) return Promise.resolve();
+	if (!import.meta?.env?.DEV) return Promise.resolve();
 
 	return new Promise((resolve) => setTimeout(resolve, amount));
 }
