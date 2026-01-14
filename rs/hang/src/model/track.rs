@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::ops::Deref;
 
-use crate::model::{Frame, GroupConsumer, Timestamp};
 use crate::Error;
-use futures::{stream::FuturesUnordered, StreamExt};
+use crate::model::{Frame, GroupConsumer, Timestamp};
+use futures::{StreamExt, stream::FuturesUnordered};
 
 use moq_lite::{coding::*, lite};
 
@@ -57,10 +57,10 @@ impl TrackProducer {
 
 			// Make sure this frame's timestamp doesn't go backwards relative to the last keyframe.
 			// We can't really enforce this for frames generally because b-frames suck.
-			if let Some(keyframe) = self.keyframe {
-				if frame.timestamp < keyframe {
-					return Err(Error::TimestampBackwards);
-				}
+			if let Some(keyframe) = self.keyframe
+				&& frame.timestamp < keyframe
+			{
+				return Err(Error::TimestampBackwards);
 			}
 
 			self.keyframe = Some(frame.timestamp);
@@ -118,7 +118,7 @@ impl Deref for TrackProducer {
 /// ## Latency Management
 ///
 /// The consumer can skip groups that are too far behind to maintain low latency.
-/// Use [`set_latency`](Self::set_latency) to configure the maximum acceptable delay.
+/// Configure the maximum acceptable delay through the consumer's latency settings.
 pub struct TrackConsumer {
 	pub inner: moq_lite::TrackConsumer,
 

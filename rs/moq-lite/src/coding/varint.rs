@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use super::{Decode, DecodeError, Encode};
 
+/// The number is too large to fit in a VarInt (62 bits).
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
 #[error("value out of range")]
 pub struct BoundsExceeded;
@@ -36,11 +37,7 @@ impl VarInt {
 	}
 
 	pub const fn from_u64(x: u64) -> Option<Self> {
-		if x <= Self::MAX.0 {
-			Some(Self(x))
-		} else {
-			None
-		}
+		if x <= Self::MAX.0 { Some(Self(x)) } else { None }
 	}
 
 	pub const fn from_u128(x: u128) -> Option<Self> {
@@ -99,11 +96,7 @@ impl TryFrom<u64> for VarInt {
 	/// Succeeds iff `x` < 2^62
 	fn try_from(x: u64) -> Result<Self, BoundsExceeded> {
 		let x = Self(x);
-		if x <= Self::MAX {
-			Ok(x)
-		} else {
-			Err(BoundsExceeded)
-		}
+		if x <= Self::MAX { Ok(x) } else { Err(BoundsExceeded) }
 	}
 }
 

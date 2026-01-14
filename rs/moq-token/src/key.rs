@@ -1,16 +1,17 @@
 use crate::generate::generate;
 use crate::{Algorithm, Claims};
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use base64::Engine;
-use elliptic_curve::pkcs8::EncodePrivateKey;
 use elliptic_curve::SecretKey;
+use elliptic_curve::pkcs8::EncodePrivateKey;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header};
-use rsa::pkcs1::EncodeRsaPrivateKey;
 use rsa::BigUint;
+use rsa::pkcs1::EncodeRsaPrivateKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
 
+/// Cryptographic operations that a key can perform.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum KeyOperation {
@@ -20,11 +21,11 @@ pub enum KeyOperation {
 	Encrypt,
 }
 
-/// https://datatracker.ietf.org/doc/html/rfc7518#section-6
+/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6>
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kty")]
 pub enum KeyType {
-	/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.2
+	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.2>
 	EC {
 		#[serde(rename = "crv")]
 		curve: EllipticCurve,
@@ -43,14 +44,14 @@ pub enum KeyType {
 		)]
 		d: Option<Vec<u8>>,
 	},
-	/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.3
+	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3>
 	RSA {
 		#[serde(flatten)]
 		public: RsaPublicKey,
 		#[serde(flatten, skip_serializing_if = "Option::is_none")]
 		private: Option<RsaPrivateKey>,
 	},
-	/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.4
+	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.4>
 	#[serde(rename = "oct")]
 	OCT {
 		/// The secret key as base64url (unpadded).
@@ -62,7 +63,7 @@ pub enum KeyType {
 		)]
 		secret: Vec<u8>,
 	},
-	/// https://datatracker.ietf.org/doc/html/rfc8037#section-2
+	/// <https://datatracker.ietf.org/doc/html/rfc8037#section-2>
 	OKP {
 		#[serde(rename = "crv")]
 		curve: EllipticCurve,
@@ -79,7 +80,9 @@ pub enum KeyType {
 	},
 }
 
-/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.2.1.1
+/// Supported elliptic curves for EC and OKP key types.
+///
+/// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.2.1.1>
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub enum EllipticCurve {
 	#[serde(rename = "P-256")]
@@ -93,7 +96,9 @@ pub enum EllipticCurve {
 	Ed25519,
 }
 
-/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.1
+/// RSA public key parameters.
+///
+/// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.1>
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RsaPublicKey {
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
@@ -102,7 +107,9 @@ pub struct RsaPublicKey {
 	pub e: Vec<u8>,
 }
 
-/// https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2
+/// RSA private key parameters.
+///
+/// See <https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2>
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RsaPrivateKey {
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
@@ -121,6 +128,7 @@ pub struct RsaPrivateKey {
 	pub oth: Option<Vec<RsaAdditionalPrime>>,
 }
 
+/// Additional prime information for multi-prime RSA keys.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RsaAdditionalPrime {
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
@@ -131,7 +139,7 @@ pub struct RsaAdditionalPrime {
 	pub t: Vec<u8>,
 }
 
-/// JWK, almost to spec (https://datatracker.ietf.org/doc/html/rfc7517) but not quite the same
+/// JWK, almost to spec (<https://datatracker.ietf.org/doc/html/rfc7517>) but not quite the same
 /// because it's annoying to implement.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]
@@ -170,10 +178,10 @@ impl<'de> Deserialize<'de> for Key {
 		// Normally the "kty" parameter is required in a JWK: https://datatracker.ietf.org/doc/html/rfc7517#section-4.1
 		// But for backwards compatibility we need to default to "oct" because in a previous
 		// implementation the parameter was omitted, and we want to keep previously generated tokens valid
-		if let Some(obj) = value.as_object_mut() {
-			if !obj.contains_key("kty") {
-				obj.insert("kty".to_string(), serde_json::Value::String("oct".to_string()));
-			}
+		if let Some(obj) = value.as_object_mut()
+			&& !obj.contains_key("kty")
+		{
+			obj.insert("kty".to_string(), serde_json::Value::String("oct".to_string()));
 		}
 
 		Self::deserialize(value).map_err(serde::de::Error::custom)
@@ -622,10 +630,12 @@ mod tests {
 
 		let result = key.encode(&invalid_claims);
 		assert!(result.is_err());
-		assert!(result
-			.unwrap_err()
-			.to_string()
-			.contains("no publish or subscribe allowed; token is useless"));
+		assert!(
+			result
+				.unwrap_err()
+				.to_string()
+				.contains("no publish or subscribe allowed; token is useless")
+		);
 	}
 
 	#[test]
@@ -648,10 +658,12 @@ mod tests {
 
 		let result = key.decode("some.jwt.token");
 		assert!(result.is_err());
-		assert!(result
-			.unwrap_err()
-			.to_string()
-			.contains("key does not support verification"));
+		assert!(
+			result
+				.unwrap_err()
+				.to_string()
+				.contains("key does not support verification")
+		);
 	}
 
 	#[test]

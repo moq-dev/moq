@@ -24,7 +24,7 @@ web-async = { version = "0.1.1", features = ["tracing"] }
 web-transport-iroh = "0.1.1"
 web-transport-quinn = "0.10"
 web-transport-trait = "0.3"
-web-transport-ws = "0.2"
+web-transport-ws = "0.2.2"
 
 [profile.dev]
 panic = "abort"

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;
 
-use crate::{ffi, Error, Id, NonZeroSlab, State};
+use crate::{Error, Id, NonZeroSlab, State, ffi};
 
 #[derive(Default)]
 pub struct Session {

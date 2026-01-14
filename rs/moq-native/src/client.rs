@@ -1,7 +1,7 @@
 use crate::crypto;
 use anyhow::Context;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::RootCertStore;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
@@ -14,6 +14,7 @@ use web_transport_ws::{tokio_tungstenite, tungstenite};
 // Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
+/// TLS configuration for the client.
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClientTls {
@@ -38,7 +39,8 @@ pub struct ClientTls {
 	pub disable_verify: Option<bool>,
 }
 
-#[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+/// WebSocket configuration for the client.
+#[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClientWebSocket {
 	/// Delay in milliseconds before attempting WebSocket fallback (default: 200)
@@ -55,6 +57,15 @@ pub struct ClientWebSocket {
 	pub delay: Option<time::Duration>,
 }
 
+impl Default for ClientWebSocket {
+	fn default() -> Self {
+		Self {
+			delay: Some(time::Duration::from_millis(200)),
+		}
+	}
+}
+
+/// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ClientConfig {
@@ -92,6 +103,9 @@ impl Default for ClientConfig {
 	}
 }
 
+/// Client for establishing MoQ connections over QUIC, WebTransport, or WebSocket.
+///
+/// Create via [`ClientConfig::init`] or [`Client::new`].
 #[derive(Clone)]
 pub struct Client {
 	pub quic: quinn::Endpoint,
@@ -337,21 +351,31 @@ impl Client {
 		}
 
 		// Convert URL scheme: http:// -> ws://, https:// -> wss://
-		match url.scheme() {
+		let needs_tls = match url.scheme() {
 			"http" => {
 				url.set_scheme("ws").expect("failed to set scheme");
+				false
 			}
 			"https" | "moql" | "moqt" => {
 				url.set_scheme("wss").expect("failed to set scheme");
+				true
 			}
-			"ws" | "wss" => {}
+			"ws" => false,
+			"wss" => true,
 			_ => anyhow::bail!("unsupported URL scheme for WebSocket: {}", url.scheme()),
 		};
 
 		tracing::debug!(%url, "connecting via WebSocket");
 
+		// Use the existing TLS config (which respects tls-disable-verify) for secure connections
+		let connector = if needs_tls {
+			Some(tokio_tungstenite::Connector::Rustls(Arc::new(self.tls.clone())))
+		} else {
+			None
+		};
+
 		// Connect using tokio-tungstenite
-		let (ws_stream, _response) = tokio_tungstenite::connect_async_with_config(
+		let (ws_stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
 			url.as_str(),
 			Some(tungstenite::protocol::WebSocketConfig {
 				max_message_size: Some(64 << 20), // 64 MB
@@ -360,6 +384,7 @@ impl Client {
 				..Default::default()
 			}),
 			false, // disable_nagle
+			connector,
 		)
 		.await
 		.context("failed to connect WebSocket")?;

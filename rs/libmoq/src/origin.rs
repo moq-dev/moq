@@ -3,7 +3,7 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{moq_announced, Error, Id, NonZeroSlab, State};
+use crate::{Error, Id, NonZeroSlab, State, moq_announced};
 
 /// Global state managing all active resources.
 ///

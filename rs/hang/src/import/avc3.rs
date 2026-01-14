@@ -64,10 +64,10 @@ impl Avc3 {
 			optimize_for_latency: None,
 		};
 
-		if let Some(old) = &self.config {
-			if old == &config {
-				return Ok(());
-			}
+		if let Some(old) = &self.config
+			&& old == &config
+		{
+			return Ok(());
 		}
 
 		if let Some(track) = &self.track.take() {
@@ -266,7 +266,7 @@ impl Drop for Avc3 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive)]
 #[repr(u8)]
-pub enum NalType {
+enum NalType {
 	Unspecified = 0,
 	NonIdrSlice = 1,
 	DataPartitionA = 2,

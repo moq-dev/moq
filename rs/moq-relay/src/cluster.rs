@@ -116,15 +116,17 @@ impl Cluster {
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
-		let root = match self.config.root.clone() {
-			// If we're using a root node, then we have to connect to it.
-			Some(connect) if Some(&connect) != self.config.node.as_ref() => connect,
-			// Otherwise, we're the root node so we wait for other nodes to connect to us.
-			_ => {
-				tracing::info!("running as root, accepting leaf nodes");
-				self.run_combined().await?;
-				anyhow::bail!("combined connection closed");
-			}
+		// If we're using a root node, then we have to connect to it.
+		// Otherwise, we're the root node so we wait for other nodes to connect to us.
+		let Some(root) = self
+			.config
+			.root
+			.clone()
+			.filter(|connect| Some(connect) != self.config.node.as_ref())
+		else {
+			tracing::info!("running as root, accepting leaf nodes");
+			self.run_combined().await?;
+			anyhow::bail!("combined connection closed");
 		};
 
 		// Subscribe to available origins.
@@ -199,13 +201,10 @@ impl Cluster {
 				continue;
 			}
 
-			let origin = match origin {
-				Some(origin) => origin,
-				None => {
-					tracing::info!(%node, "origin cancelled");
-					active.remove(node.as_str()).unwrap().abort();
-					continue;
-				}
+			let Some(origin) = origin else {
+				tracing::info!(%node, "origin cancelled");
+				active.remove(node.as_str()).unwrap().abort();
+				continue;
 			};
 
 			tracing::info!(%node, "discovered origin");

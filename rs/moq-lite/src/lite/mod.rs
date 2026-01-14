@@ -1,3 +1,9 @@
+//! The low-level encoding for the moq-lite specification.
+//!
+//! You should not use this module directly; see [crate] for the high-level API.
+//!
+//! Specification: [<https://github.com/moq-dev/drafts>]
+
 mod announce;
 mod group;
 mod info;

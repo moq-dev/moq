@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_with::{hex::Hex, DisplayFromStr};
+use serde_with::{DisplayFromStr, hex::Hex};
 
 /// Information about a video track in the catalog.
 ///
@@ -69,7 +69,7 @@ pub struct Display {
 #[serde(rename_all = "camelCase")]
 pub struct VideoConfig {
 	/// The codec, see the registry for details:
-	/// https://w3c.github.io/webcodecs/codec_registry.html
+	/// <https://w3c.github.io/webcodecs/codec_registry.html>
 	#[serde_as(as = "DisplayFromStr")]
 	pub codec: VideoCodec,
 

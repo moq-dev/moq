@@ -1,10 +1,16 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
+	Error, OriginConsumer, OriginProducer,
 	coding::{self, Decode, Encode, Stream},
-	ietf, lite, setup, Error, OriginConsumer, OriginProducer,
+	ietf, lite, setup,
 };
 
+/// A MoQ transport session, wrapping a WebTransport connection.
+///
+/// Created via:
+/// - [`Session::connect`] for clients.
+/// - [`Session::accept`] for servers.
 pub struct Session {
 	session: Arc<dyn SessionInner>,
 }

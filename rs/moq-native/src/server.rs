@@ -17,28 +17,14 @@ use url::Url;
 use web_transport_iroh::iroh;
 use web_transport_quinn::http;
 
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
-use futures::FutureExt;
 
-#[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServerTlsCert {
-	pub chain: PathBuf,
-	pub key: PathBuf,
-}
-
-impl ServerTlsCert {
-	// A crude colon separated string parser just for clap support.
-	pub fn parse(s: &str) -> anyhow::Result<Self> {
-		let (chain, key) = s.split_once(':').context("invalid certificate")?;
-		Ok(Self {
-			chain: PathBuf::from(chain),
-			key: PathBuf::from(key),
-		})
-	}
-}
-
+/// TLS configuration for the server.
+///
+/// Certificate and keys must currently be files on disk.
+/// Alternatively, you can generate a self-signed certificate given a list of hostnames.
 #[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerTlsConfig {
@@ -64,6 +50,7 @@ pub struct ServerTlsConfig {
 	pub generate: Vec<String>,
 }
 
+/// Configuration for the MoQ server.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ServerConfig {
@@ -84,6 +71,9 @@ impl ServerConfig {
 	}
 }
 
+/// Server for accepting MoQ connections over QUIC.
+///
+/// Create via [`ServerConfig::init`] or [`Server::new`].
 pub struct Server {
 	quic: quinn::Endpoint,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
@@ -158,7 +148,7 @@ impl Server {
 
 	#[cfg(unix)]
 	async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
-		use tokio::signal::unix::{signal, SignalKind};
+		use tokio::signal::unix::{SignalKind, signal};
 
 		// Dunno why we wouldn't be allowed to listen for signals, but just in case.
 		let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
@@ -173,7 +163,7 @@ impl Server {
 	}
 
 	// Return the SHA256 fingerprints of all our certificates.
-	pub fn tls_info(&self) -> Arc<RwLock<TlsInfo>> {
+	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
 		self.certs.info.clone()
 	}
 
@@ -183,8 +173,7 @@ impl Server {
 	/// so the connection can be rejected early on an invalid path or missing auth.
 	///
 	/// The [Request] is either a WebTransport or a raw QUIC request.
-	/// Call [Request::ok] or [Request::close] to complete the handshake in case this is
-	/// a WebTransport request.
+	/// Call [Request::accept] or [Request::reject] to complete the handshake.
 	pub async fn accept(&mut self) -> Option<Request> {
 		loop {
 			// tokio::select! does not support cfg directives on arms, so we need to put the
@@ -302,6 +291,7 @@ impl Server {
 	}
 }
 
+/// An incoming connection that can be accepted or rejected.
 pub enum Request {
 	WebTransport(web_transport_quinn::Request),
 	Quic(QuicRequest),
@@ -353,6 +343,9 @@ impl Request {
 	}
 }
 
+/// A raw QUIC connection request without WebTransport framing.
+///
+/// Used to accept/reject QUIC connections.
 pub struct QuicRequest {
 	connection: quinn::Connection,
 	url: Url,
@@ -386,22 +379,23 @@ impl QuicRequest {
 	}
 }
 
+/// TLS certificate information including fingerprints.
 #[derive(Debug)]
-pub struct TlsInfo {
+pub struct ServerTlsInfo {
 	pub(crate) certs: Vec<Arc<CertifiedKey>>,
 	pub fingerprints: Vec<String>,
 }
 
 #[derive(Debug)]
 struct ServeCerts {
-	info: Arc<RwLock<TlsInfo>>,
+	info: Arc<RwLock<ServerTlsInfo>>,
 	provider: crypto::Provider,
 }
 
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
-			info: Arc::new(RwLock::new(TlsInfo {
+			info: Arc::new(RwLock::new(ServerTlsInfo {
 				certs: Vec::new(),
 				fingerprints: Vec::new(),
 			})),

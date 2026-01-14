@@ -5,7 +5,7 @@ use moq_lite::coding::Buf;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{moq_audio_config, moq_frame, moq_video_config, Error, Id, NonZeroSlab, State};
+use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_video_config};
 
 struct ConsumeCatalog {
 	broadcast: hang::BroadcastConsumer,

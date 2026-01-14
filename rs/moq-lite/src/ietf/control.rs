@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
 use crate::{
+	Error,
 	coding::{Encode, Writer},
 	ietf::{Message, RequestId, Version},
-	Error,
 };
 
 struct ControlState {

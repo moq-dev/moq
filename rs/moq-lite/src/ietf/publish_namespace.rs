@@ -3,9 +3,9 @@
 use std::borrow::Cow;
 
 use crate::{
+	Path,
 	coding::*,
 	ietf::{Message, Parameters, RequestId, Version},
-	Path,
 };
 
 use super::namespace::{decode_namespace, encode_namespace};
@@ -18,7 +18,7 @@ pub struct PublishNamespace<'a> {
 	pub track_namespace: Path<'a>,
 }
 
-impl<'a> Message for PublishNamespace<'a> {
+impl Message for PublishNamespace<'_> {
 	const ID: u64 = 0x06;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
@@ -68,7 +68,7 @@ pub struct PublishNamespaceError<'a> {
 	pub reason_phrase: Cow<'a, str>,
 }
 
-impl<'a> Message for PublishNamespaceError<'a> {
+impl Message for PublishNamespaceError<'_> {
 	const ID: u64 = 0x08;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
@@ -95,7 +95,7 @@ pub struct PublishNamespaceDone<'a> {
 	pub track_namespace: Path<'a>,
 }
 
-impl<'a> Message for PublishNamespaceDone<'a> {
+impl Message for PublishNamespaceDone<'_> {
 	const ID: u64 = 0x09;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
@@ -116,7 +116,7 @@ pub struct PublishNamespaceCancel<'a> {
 	pub reason_phrase: Cow<'a, str>,
 }
 
-impl<'a> Message for PublishNamespaceCancel<'a> {
+impl Message for PublishNamespaceCancel<'_> {
 	const ID: u64 = 0x0c;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
