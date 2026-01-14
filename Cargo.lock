@@ -5296,9 +5296,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-ws"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cbd8d2d2a57b83ba70523e6a8df268a5bfe9f43aabba2d01b16389181f4a8ea"
+checksum = "aee7ae0f2a6f3596dc2842e20f2ad0cf046211414979d67e445760348b60becf"
 dependencies = [
  "bytes",
  "futures",
