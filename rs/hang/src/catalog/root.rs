@@ -342,6 +342,7 @@ mod test {
 				framerate: Some(30.0),
 				optimize_for_latency: None,
 				container: Container::Native,
+				init_segment: None,
 			},
 		);
 
@@ -355,6 +356,7 @@ mod test {
 				bitrate: Some(128_000),
 				description: None,
 				container: Container::Native,
+				init_segment: None,
 			},
 		);
 

@@ -20,6 +20,16 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro, conta
 	// Encode timestamp using the specified container format
 	const timestampBytes = Container.encodeTimestamp(timestamp, container);
 
+	// For CMAF, timestampBytes will be empty, so we just return the source
+	if (container === "cmaf") {
+		if (source instanceof Uint8Array) {
+			return source;
+		} 
+		const data = new Uint8Array(source.byteLength);
+		source.copyTo(data);
+		return data;
+	}
+
 	// Allocate buffer for timestamp + payload
 	const payloadSize = source instanceof Uint8Array ? source.byteLength : source.byteLength;
 	const data = new Uint8Array(timestampBytes.byteLength + payloadSize);

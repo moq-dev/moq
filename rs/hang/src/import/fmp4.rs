@@ -40,6 +40,9 @@ pub struct Fmp4 {
 	// The timestamp of the last keyframe for each track
 	last_keyframe: HashMap<u32, hang::Timestamp>,
 
+	// Track if we've sent the first frame for each track (needed for passthrough mode)
+	first_frame_sent: HashMap<u32, bool>,
+
 	// The moov atom at the start of the file.
 	moov: Option<Moov>,
 
@@ -59,10 +62,6 @@ pub struct Fmp4 {
 
 	/// When passthrough_mode is enabled, store raw bytes of moov (init segment)
 	moov_bytes: Option<Bytes>,
-
-	/// When passthrough_mode is enabled, store a copy of init segment (ftyp+moov) to send with each keyframe
-	/// This ensures new subscribers can receive the init segment even if group 0 is not available
-	init_segment_bytes_for_keyframes: Option<Bytes>,
 }
 
 impl Fmp4 {
@@ -77,6 +76,7 @@ impl Fmp4 {
 			catalog,
 			tracks: HashMap::default(),
 			last_keyframe: HashMap::default(),
+			first_frame_sent: HashMap::default(),
 			moov: None,
 			moof: None,
 			moof_size: 0,
@@ -84,7 +84,6 @@ impl Fmp4 {
 			moof_bytes: None,
 			ftyp_bytes: None,
 			moov_bytes: None,
-			init_segment_bytes_for_keyframes: None,
 		}
 	}
 
@@ -252,12 +251,12 @@ impl Fmp4 {
 
 					tracing::debug!(name = ?track.name, ?config, "starting track");
 
-					let video = catalog.insert_video(track.name.clone(), config);
+					let video = catalog.insert_video(track.name.clone(), config.clone());
 					video.priority = 1;
 
 					let track = track.produce();
 					self.broadcast.insert_track(track.consumer);
-					track.producer
+					hang::TrackProducer::new(track.producer, config.container)
 				}
 				b"soun" => {
 					let config = Self::init_audio_static(trak, passthrough_mode)?;
@@ -270,45 +269,60 @@ impl Fmp4 {
 
 					tracing::debug!(name = ?track.name, ?config, "starting track");
 
-					let audio = catalog.insert_audio(track.name.clone(), config);
+					let audio = catalog.insert_audio(track.name.clone(), config.clone());
 					audio.priority = 2;
 
 					let track = track.produce();
 					self.broadcast.insert_track(track.consumer);
-					track.producer
+					hang::TrackProducer::new(track.producer, config.container)
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
 
-			self.tracks.insert(track_id, track.into());
+			self.tracks.insert(track_id, track);
 		}
 
+		// Verify that the moov atom contains all expected tracks BEFORE moving it
+		let moov_track_count = moov.trak.len();
+		let has_video = moov.trak.iter().any(|t| t.mdia.hdlr.handler.as_ref() == b"vide");
+		let has_audio = moov.trak.iter().any(|t| t.mdia.hdlr.handler.as_ref() == b"soun");
+		
 		self.moov = Some(moov);
 
-		// In passthrough mode, send the init segment (ftyp+moov) as a special frame
-		// This must be sent before any fragments for MSE to work
-		// NOTE: We send this AFTER creating tracks so that the tracks exist
-		// when we try to write to them. The init segment will create the first
-		// group (sequence 0), and fragments will create subsequent groups.
+		// In passthrough mode, store the init segment (ftyp+moov) in the catalog
+		// instead of sending it over the data tracks. This allows clients to
+		// reconstruct init segments from the catalog.
+		//
+		// Note: Init segments are embedded in the catalog.
+		// A future optimization could build init segments from the description field
+		// (e.g., avcC box for H.264) along with other catalog metadata, but for now
+		// we store the complete init segment for simplicity and correctness.
 		if passthrough_mode {
-			if let Some(moov_bytes) = self.moov_bytes.take() {
-				let timestamp = hang::Timestamp::from_micros(0)?;
-
+			if let Some(moov_bytes) = self.moov_bytes.as_ref() {
 				// Build init segment: ftyp (if available) + moov
 				let mut init_segment = BytesMut::new();
 				if let Some(ref ftyp_bytes) = self.ftyp_bytes {
 					init_segment.extend_from_slice(ftyp_bytes);
 					tracing::debug!(ftyp_size = ftyp_bytes.len(), "including ftyp in init segment");
 				}
-				init_segment.extend_from_slice(&moov_bytes);
+				init_segment.extend_from_slice(moov_bytes);
 				let init_segment_bytes = init_segment.freeze();
 
+				// Verify that the moov atom contains all expected tracks
+				let expected_video_tracks = catalog.video.as_ref().map(|v| v.renditions.len()).unwrap_or(0);
+				let expected_audio_tracks = catalog.audio.as_ref().map(|a| a.renditions.len()).unwrap_or(0);
+				
 				tracing::info!(
-					tracks = self.tracks.len(),
+					tracks_in_moov = moov_track_count,
+					expected_video = expected_video_tracks,
+					expected_audio = expected_audio_tracks,
+					tracks_processed = self.tracks.len(),
 					init_segment_size = init_segment_bytes.len(),
 					ftyp_included = self.ftyp_bytes.is_some(),
-					"sending init segment to all tracks"
+					has_video = has_video,
+					has_audio = has_audio,
+					"storing init segment in catalog"
 				);
 
 				// Verify moov atom signature
@@ -318,22 +332,96 @@ impl Fmp4 {
 					tracing::info!(atom_type = %atom_type, "verifying moov atom signature in init segment");
 				}
 
-				// Store a copy for sending with keyframes
-				self.init_segment_bytes_for_keyframes = Some(init_segment_bytes.clone());
-
-				// Send init segment to all tracks - this creates the first group (sequence 0)
-				for (_track_id, track) in &mut self.tracks {
-					let frame = hang::Frame {
-						timestamp,
-						keyframe: true, // Init segment is always a keyframe - this creates a new group
-						payload: init_segment_bytes.clone().into(),
-					};
-					track.write(frame)?;
-					tracing::debug!(track_id = ?_track_id, timestamp = ?timestamp, "wrote init segment frame to track");
+				// Warn if moov doesn't contain expected tracks.
+				// For HLS, inits are per-track (video-only or audio-only), so skip cross-track warnings.
+				let video_only = has_video && !has_audio;
+				let audio_only = has_audio && !has_video;
+				if expected_video_tracks > 0 && !has_video && !audio_only {
+					tracing::error!(
+						"moov atom does not contain video track but video configs exist! This will cause client-side errors."
+					);
 				}
-				tracing::info!("init segment (ftyp+moov) sent to all tracks - should create groups with sequence 0");
+				if expected_audio_tracks > 0 && !has_audio && !video_only {
+					tracing::error!(
+						"moov atom does not contain audio track but audio configs exist! This will cause client-side errors."
+					);
+				}
+
+				// Store init segment in catalog for the relevant track type
+				// For HLS, each track has its own init segment (video init segment only has video,
+				// audio init segment only has audio). For direct fMP4 files, the init segment
+				// contains all tracks. We store track-specific init segments in their respective configs.
+				
+				if has_video {
+					if let Some(video) = catalog.video.as_mut() {
+						for (name, config) in video.renditions.iter_mut() {
+							config.init_segment = Some(init_segment_bytes.clone());
+							tracing::debug!(
+								video_track = %name,
+								init_segment_size = init_segment_bytes.len(),
+								has_video_track = has_video,
+								has_audio_track = has_audio,
+								"stored init segment in video config"
+							);
+						}
+					}
+				}
+				
+				if has_audio {
+					if let Some(audio) = catalog.audio.as_mut() {
+						for (name, config) in audio.renditions.iter_mut() {
+							config.init_segment = Some(init_segment_bytes.clone());
+							tracing::debug!(
+								audio_track = %name,
+								init_segment_size = init_segment_bytes.len(),
+								has_video_track = has_video,
+								has_audio_track = has_audio,
+								"stored init segment in audio config"
+							);
+						}
+					}
+				}
+				
+				// If the init segment contains both tracks (e.g., from a direct fMP4 file),
+				// also store it in the other config type for convenience
+				if has_video && has_audio {
+					// Full init segment with both tracks - store in both configs
+					if let Some(video) = catalog.video.as_mut() {
+						for (name, config) in video.renditions.iter_mut() {
+							if config.init_segment.is_none() {
+								config.init_segment = Some(init_segment_bytes.clone());
+								tracing::debug!(
+									video_track = %name,
+									"stored full init segment (with both tracks) in video config"
+								);
+							}
+						}
+					}
+					if let Some(audio) = catalog.audio.as_mut() {
+						for (name, config) in audio.renditions.iter_mut() {
+							if config.init_segment.is_none() {
+								config.init_segment = Some(init_segment_bytes.clone());
+								tracing::debug!(
+									audio_track = %name,
+									"stored full init segment (with both tracks) in audio config"
+								);
+							}
+						}
+					}
+				}
+
+				tracing::info!(
+					has_video = has_video,
+					has_audio = has_audio,
+					tracks_in_moov = moov_track_count,
+					"init segment (ftyp+moov) stored in catalog for all tracks"
+				);
+
+				// Init has been stored; clear cached moov/ftyp to avoid repeated warnings later.
+				self.moov_bytes = None;
+				self.ftyp_bytes = None;
 			} else {
-				tracing::warn!("passthrough mode enabled but moov_bytes is None - init segment will not be sent");
+				tracing::warn!("passthrough mode enabled but moov_bytes is None - init segment will not be stored in catalog");
 			}
 		}
 
@@ -378,6 +466,7 @@ impl Fmp4 {
 					} else {
 						Container::Native
 					},
+					init_segment: None,
 				}
 			}
 			mp4_atom::Codec::Hev1(hev1) => Self::init_h265_static(true, &hev1.hvcc, &hev1.visual, passthrough_mode)?,
@@ -398,6 +487,7 @@ impl Fmp4 {
 				} else {
 					Container::Native
 				},
+				init_segment: None,
 			},
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
@@ -429,6 +519,7 @@ impl Fmp4 {
 					} else {
 						Container::Native
 					},
+					init_segment: None,
 				}
 			}
 			mp4_atom::Codec::Av01(av01) => {
@@ -466,6 +557,7 @@ impl Fmp4 {
 					} else {
 						Container::Native
 					},
+					init_segment: None,
 				}
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
@@ -501,6 +593,7 @@ impl Fmp4 {
 			coded_height: Some(visual.height as _),
 			// TODO: populate these fields
 			bitrate: None,
+			init_segment: None,
 			framerate: None,
 			display_ratio_width: None,
 			display_ratio_height: None,
@@ -547,6 +640,7 @@ impl Fmp4 {
 					} else {
 						Container::Native
 					},
+					init_segment: None,
 				}
 			}
 			mp4_atom::Codec::Opus(opus) => {
@@ -561,6 +655,7 @@ impl Fmp4 {
 					} else {
 						Container::Native
 					},
+					init_segment: None,
 				}
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
@@ -778,41 +873,26 @@ impl Fmp4 {
 				self.last_keyframe.insert(track_id, timestamp);
 			}
 
-			// In passthrough mode, create new groups periodically (every keyframe) to allow
-			// new subscribers to join at the most recent point. Each group starts with init segment.
-			// This makes it behave like a live stream where new subscribers start from recent content.
+			// In passthrough mode, send fragments directly without init segments
+			// Init segments are stored in the catalog and reconstructed on the client side
 			if self.passthrough_mode {
-				// For keyframes, send init segment to create a new group (every keyframe creates a new group)
-				// This allows new subscribers to receive the init segment and start from recent content
-				if is_keyframe {
-					tracing::info!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), "KEYFRAME DETECTED - creating new group");
-					if let Some(ref init_segment_bytes) = self.init_segment_bytes_for_keyframes {
-						let init_frame = hang::Frame {
-							timestamp,
-							keyframe: true, // Send as keyframe to create a new group
-							payload: init_segment_bytes.clone().into(),
-						};
-						track.write(init_frame)?;
-						tracing::info!(track_id, timestamp = ?timestamp, init_segment_size = init_segment_bytes.len(), "sent init segment as first frame of new group (keyframe) for live stream");
-					} else {
-						tracing::warn!(
-							track_id,
-							"is_keyframe=true but init_segment_bytes_for_keyframes is None"
-						);
-					}
-				} else {
-					tracing::debug!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), "non-keyframe fragment in passthrough mode");
+				// The first frame must be a keyframe to create the initial group
+				// After that, we can send fragments based on their actual keyframe status
+				let is_first_frame = !self.first_frame_sent.get(&track_id).copied().unwrap_or(false);
+				let should_be_keyframe = is_first_frame || is_keyframe;
+				
+				if is_first_frame {
+					self.first_frame_sent.insert(track_id, true);
 				}
 
-				// Send fragment as non-keyframe (in same group as init segment if keyframe, or current group if not)
 				let frame = hang::Frame {
 					timestamp,
-					keyframe: false, // Send as non-keyframe so it goes in the same group as init segment (if keyframe) or current group
+					keyframe: should_be_keyframe,
 					payload: fragment.clone().into(),
 				};
 				track.write(frame)?;
-				if is_keyframe {
-					tracing::info!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), "sent keyframe fragment in passthrough mode (new group created)");
+				if should_be_keyframe {
+					tracing::info!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), is_first = is_first_frame, "sent fragment in passthrough mode (keyframe - creates group)");
 				} else {
 					tracing::debug!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), "sent non-keyframe fragment in passthrough mode");
 				}

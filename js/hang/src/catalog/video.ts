@@ -43,6 +43,12 @@ export const VideoConfigSchema = z.object({
 	// If true, the decoder will optimize for latency.
 	// Default: true
 	optimizeForLatency: z.boolean().optional(),
+
+	// Init segment (ftyp+moov) for CMAF/fMP4 containers.
+	// This is the initialization segment needed for MSE playback.
+	// Stored as base64-encoded bytes. If not provided, init segments
+	// will be sent over the data track (legacy behavior).
+	initSegment: z.string().optional(), // base64-encoded
 });
 
 // Mirrors VideoDecoderConfig

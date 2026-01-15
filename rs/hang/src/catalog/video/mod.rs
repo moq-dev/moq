@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_with::{hex::Hex, DisplayFromStr};
+use serde_with::{base64::Base64, hex::Hex, DisplayFromStr};
 
 use crate::catalog::container::Container;
 
@@ -115,4 +115,18 @@ pub struct VideoConfig {
 	/// Container format for frame encoding.
 	/// Defaults to "native" for backward compatibility.
 	pub container: Container,
+
+	/// Init segment (ftyp+moov) for CMAF/fMP4 containers.
+	///
+	/// This is the initialization segment needed for MSE playback.
+	/// Stored as base64-encoded bytes and embedded in the catalog (as suggested
+	/// in feedback). Init segments should not be sent over data tracks or at the
+	/// start of each group.
+	///
+	/// Note: A future optimization could build init segments from the description
+	/// field (e.g., avcC box for H.264) along with other catalog metadata, but
+	/// for now we store the complete init segment for simplicity and correctness.
+	#[serde(default)]
+	#[serde_as(as = "Option<Base64>")]
+	pub init_segment: Option<Bytes>,
 }

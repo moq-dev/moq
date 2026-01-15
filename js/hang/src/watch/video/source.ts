@@ -99,8 +99,14 @@ export class Source {
 
 	#signals = new Effect();
 
-	// Optional method set by MSE path for audio synchronization
-	setAudioSync?(audioElement: HTMLAudioElement | undefined): void;
+	// Expose MediaSource for audio to use
+	#mseMediaSource = new Signal<MediaSource | undefined>(undefined);
+	readonly mseMediaSource = this.#mseMediaSource as Getter<MediaSource | undefined>;
+
+	// Expose mseSource instance for audio to access coordination methods
+	#mseSource = new Signal<any>(undefined);
+	readonly mseSource = this.#mseSource as Getter<any>;
+
 
 	constructor(
 		broadcast: Signal<Moq.Broadcast | undefined>,
@@ -223,7 +229,7 @@ export class Source {
 		});
 		// Import MSE source dynamically to avoid loading if not needed
 		effect.spawn(async () => {
-			const { SourceMSE } = await import("./source-mse.js");
+			const { SourceMSE } = await import("../source-mse.js");
 			const mseSource = new SourceMSE(this.latency);
 			effect.cleanup(() => mseSource.close());
 
@@ -249,15 +255,19 @@ export class Source {
 			});
 
 			this.#signals.effect((eff) => {
+				const mediaSource = eff.get(mseSource.mediaSource);
+				eff.set(this.#mseMediaSource, mediaSource);
+			});
+
+			// Expose mseSource for audio to access
+			this.#signals.effect((eff) => {
+				eff.set(this.#mseSource, mseSource);
+			});
+			
+			this.#signals.effect((eff) => {
 				const stats = eff.get(mseSource.stats);
 				eff.set(this.#stats, stats);
 			});
-
-			// Expose method to set audio element for synchronization
-			this.setAudioSync = (audioElement: HTMLAudioElement | undefined) => {
-				mseSource.setAudioSync(audioElement);
-			};
-
 			// Run MSE track
 			try {
 				await mseSource.runTrack(effect, broadcast, name, config);

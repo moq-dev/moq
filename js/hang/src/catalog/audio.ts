@@ -32,6 +32,12 @@ export const AudioConfigSchema = z.object({
 	// The bitrate of the audio in bits per second
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: u53Schema.optional(),
+
+	// Init segment (ftyp+moov) for CMAF/fMP4 containers.
+	// This is the initialization segment needed for MSE playback.
+	// Stored as base64-encoded bytes. If not provided, init segments
+	// will be sent over the data track (legacy behavior).
+	initSegment: z.string().optional(), // base64-encoded
 });
 
 export const AudioSchema = z

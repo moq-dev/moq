@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::ops::Deref;
 
+use crate::catalog::Container;
 use crate::model::{Frame, GroupConsumer, Timestamp};
 use crate::Error;
 use futures::{stream::FuturesUnordered, StreamExt};
@@ -26,16 +27,18 @@ pub struct TrackProducer {
 	/// Track if the current group is the init segment group (timestamp 0)
 	/// We keep this group open so new subscribers can receive the init segment
 	is_init_segment_group: bool,
+	container: Container
 }
 
 impl TrackProducer {
 	/// Create a new TrackProducer wrapping the given moq-lite producer.
-	pub fn new(inner: moq_lite::TrackProducer) -> Self {
+	pub fn new(inner: moq_lite::TrackProducer, container: Container) -> Self {
 		Self {
 			inner,
 			group: None,
 			keyframe: None,
 			is_init_segment_group: false,
+			container,
 		}
 	}
 
@@ -52,7 +55,9 @@ impl TrackProducer {
 		tracing::trace!(?frame, "write frame");
 
 		let mut header = BytesMut::new();
-		frame.timestamp.as_micros().encode(&mut header, lite::Version::Draft02);
+		if self.container != Container::Cmaf {
+			frame.timestamp.as_micros().encode(&mut header, lite::Version::Draft02);
+		}
 
 		if frame.keyframe {
 			if let Some(group) = self.group.take() {
@@ -100,10 +105,14 @@ impl TrackProducer {
 		let size = header.len() + frame.payload.remaining();
 
 		let mut chunked = group.create_frame(size.into());
-		chunked.write_chunk(header.freeze());
+		if !header.is_empty() {
+			chunked.write_chunk(header.freeze());
+		}
+
 		for chunk in frame.payload {
 			chunked.write_chunk(chunk);
 		}
+		
 		chunked.close();
 
 		self.group.replace(group);
@@ -122,7 +131,7 @@ impl TrackProducer {
 
 impl From<moq_lite::TrackProducer> for TrackProducer {
 	fn from(inner: moq_lite::TrackProducer) -> Self {
-		Self::new(inner)
+		Self::new(inner, Container::Native)
 	}
 }
 

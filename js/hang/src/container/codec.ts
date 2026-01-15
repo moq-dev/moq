@@ -16,8 +16,8 @@ export function encodeTimestamp(timestamp: Time.Micro, container: Catalog.Contai
 		case "raw":
 			return encodeU64(timestamp);
 		case "cmaf": {
-			// For CMAF fragments, use raw encoding (8 bytes) for timestamp header
-			return encodeU64(timestamp);
+			// CMAF fragments contain timestamps in moof atoms, no header needed
+			return new Uint8Array(0);
 		}
 	}
 }
@@ -43,12 +43,7 @@ export function decodeTimestamp(
 			return [value as Time.Micro, remaining];
 		}
 		case "cmaf": {
-			// For CMAF fragments, timestamp is in the moof atom, but we still need to decode
-			// the header to get to the fragment. The server uses VarInt encoding (same as native)
-			// for the timestamp header, so we use VarInt decoding here.
-			// The actual media timestamp will be extracted by MSE from the moof.
-			const [value, remaining] = decodeVarInt(buffer);
-			return [value as Time.Micro, remaining];
+			return [0 as Time.Micro, buffer];
 		}
 	}
 }
