@@ -1,7 +1,7 @@
 @import "../../shared/variables.css";
 @import "../../shared/flex.css";
 @import "../../shared/components/button/button.css";
-@import "../../stats/styles/index.css";
+@import "../../shared/components/stats/styles/index.css";
 
 .watchVideoContainer {
 	display: block;

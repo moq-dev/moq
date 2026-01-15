@@ -1,5 +1,5 @@
 import { For, type JSX } from "solid-js";
-import * as Icon from "../../shared/components/icon/icon";
+import * as Icon from "../../icon/icon";
 import type { KnownStatsProviders, ProviderProps } from "../types";
 import { StatsItem } from "./StatsItem";
 

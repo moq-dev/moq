@@ -69,18 +69,11 @@ src/
 │   ├── element.tsx      # Main watch UI component
 │   └── index.tsx        # Entry point for watch UI
 │
-├── stats/               # Statistics and monitoring components
-│   ├── components/      # Stats UI components
-│   ├── providers/       # Stats data providers
-│   ├── styles/          # CSS styles for stats UI
-│   ├── element.tsx      # Main stats UI component
-│   ├── index.tsx        # Entry point for stats UI
-│   └── types.ts         # TypeScript type definitions
-│
 └── shared/              # Shared components and utilities
     ├── components/      # Reusable UI components
     │   ├── button/      # Button component
-    │   └── icon/        # Icon component
+    │   ├── icon/        # Icon component
+	|	└── stats/		 # Statistics and monitoring components
     ├── flex.css         # Flexbox utilities
     └── variables.css    # CSS variables and theme
 
@@ -108,17 +101,10 @@ Implements the video player UI with controls for watching live streams. Includes
 - **BufferingIndicator**: Visual feedback during buffering
 - **StatsButton**: Toggle statistics panel
 
-#### **stats/**
-Provides real-time statistics monitoring for both audio and video streams. Uses a provider pattern to collect and display metrics.
-
-- **StatsPanel**: Main panel displaying all statistics
-- **Providers**: Modular statistics collectors for audio, video, network, and buffer metrics
-- **Registry**: Manages and coordinates different stats providers
-- Types for statistics data structures
-
 #### **shared/**
 Common components and utilities used across the package.
 
 - **Button**: Reusable button component with consistent styling
 - **Icon**: Icon wrapper component
+- **Stats**: Provides real-time statistics monitoring for both audio and video streams. Uses a provider pattern to collect and display metrics.
 - **CSS utilities**: Shared styles, variables, and flexbox utilities

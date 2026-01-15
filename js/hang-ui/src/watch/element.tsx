@@ -1,8 +1,8 @@
 import type HangWatch from "@moq/hang/watch/element";
 import { useContext } from "solid-js";
 import { Show } from "solid-js/web";
-import { Stats } from "../stats";
-import type { ProviderProps } from "../stats/types";
+import { Stats } from "../shared/components/stats";
+import type { ProviderProps } from "../shared/components/stats/types";
 import BufferingIndicator from "./components/BufferingIndicator";
 import WatchControls from "./components/WatchControls";
 import WatchUIContextProvider, { WatchUIContext } from "./context";
