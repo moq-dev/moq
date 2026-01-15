@@ -27,7 +27,7 @@ pub struct TrackProducer {
 	/// Track if the current group is the init segment group (timestamp 0)
 	/// We keep this group open so new subscribers can receive the init segment
 	is_init_segment_group: bool,
-	container: Container
+	container: Container,
 }
 
 impl TrackProducer {
@@ -112,7 +112,7 @@ impl TrackProducer {
 		for chunk in frame.payload {
 			chunked.write_chunk(chunk);
 		}
-		
+
 		chunked.close();
 
 		self.group.replace(group);

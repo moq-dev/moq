@@ -47,7 +47,6 @@ export class Emitter {
 
 		this.#signals.effect((effect) => {
 			const paused = effect.get(this.paused);
-			const muted = effect.get(this.muted);
 			const enabled = !paused;
 			this.source.enabled.set(enabled);
 		});

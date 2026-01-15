@@ -24,7 +24,7 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro, conta
 	if (container === "cmaf") {
 		if (source instanceof Uint8Array) {
 			return source;
-		} 
+		}
 		const data = new Uint8Array(source.byteLength);
 		source.copyTo(data);
 		return data;

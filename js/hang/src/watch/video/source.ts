@@ -5,6 +5,7 @@ import * as Frame from "../../frame";
 import { PRIORITY } from "../../publish/priority";
 import type * as Time from "../../time";
 import * as Hex from "../../util/hex";
+import type { SourceMSE } from "../source-mse";
 
 export type SourceProps = {
 	enabled?: boolean | Signal<boolean>;
@@ -104,9 +105,8 @@ export class Source {
 	readonly mseMediaSource = this.#mseMediaSource as Getter<MediaSource | undefined>;
 
 	// Expose mseSource instance for audio to access coordination methods
-	#mseSource = new Signal<any>(undefined);
-	readonly mseSource = this.#mseSource as Getter<any>;
-
+	#mseSource = new Signal<SourceMSE | undefined>(undefined);
+	readonly mseSource = this.#mseSource as Getter<SourceMSE | undefined>;
 
 	constructor(
 		broadcast: Signal<Moq.Broadcast | undefined>,
@@ -263,7 +263,7 @@ export class Source {
 			this.#signals.effect((eff) => {
 				eff.set(this.#mseSource, mseSource);
 			});
-			
+
 			this.#signals.effect((eff) => {
 				const stats = eff.get(mseSource.stats);
 				eff.set(this.#stats, stats);

@@ -235,6 +235,10 @@ impl Fmp4 {
 		tracing::info!(passthrough_mode, "initializing fMP4 with passthrough mode");
 		let mut catalog = self.catalog.lock();
 
+		// Track which specific tracks were created in this init call
+		let mut created_video_tracks = Vec::new();
+		let mut created_audio_tracks = Vec::new();
+
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
 			let handler = &trak.mdia.hdlr.handler;
@@ -254,6 +258,9 @@ impl Fmp4 {
 					let video = catalog.insert_video(track.name.clone(), config.clone());
 					video.priority = 1;
 
+					// Record this track name
+					created_video_tracks.push(track.name.clone());
+
 					let track = track.produce();
 					self.broadcast.insert_track(track.consumer);
 					hang::TrackProducer::new(track.producer, config.container)
@@ -272,6 +279,9 @@ impl Fmp4 {
 					let audio = catalog.insert_audio(track.name.clone(), config.clone());
 					audio.priority = 2;
 
+					// Record this track name
+					created_audio_tracks.push(track.name.clone());
+
 					let track = track.produce();
 					self.broadcast.insert_track(track.consumer);
 					hang::TrackProducer::new(track.producer, config.container)
@@ -287,7 +297,7 @@ impl Fmp4 {
 		let moov_track_count = moov.trak.len();
 		let has_video = moov.trak.iter().any(|t| t.mdia.hdlr.handler.as_ref() == b"vide");
 		let has_audio = moov.trak.iter().any(|t| t.mdia.hdlr.handler.as_ref() == b"soun");
-		
+
 		self.moov = Some(moov);
 
 		// In passthrough mode, store the init segment (ftyp+moov) in the catalog
@@ -312,7 +322,7 @@ impl Fmp4 {
 				// Verify that the moov atom contains all expected tracks
 				let expected_video_tracks = catalog.video.as_ref().map(|v| v.renditions.len()).unwrap_or(0);
 				let expected_audio_tracks = catalog.audio.as_ref().map(|a| a.renditions.len()).unwrap_or(0);
-				
+
 				tracing::info!(
 					tracks_in_moov = moov_track_count,
 					expected_video = expected_video_tracks,
@@ -350,78 +360,48 @@ impl Fmp4 {
 				// Store init segment in catalog for the relevant track type
 				// For HLS, each track has its own init segment (video init segment only has video,
 				// audio init segment only has audio). For direct fMP4 files, the init segment
-				// contains all tracks. We store track-specific init segments in their respective configs.
-				
+				// contains all tracks. We store track-specific init segments only in the tracks
+				// created in this init call, not all renditions of that type.
+
 				if has_video {
 					if let Some(video) = catalog.video.as_mut() {
-						for (name, config) in video.renditions.iter_mut() {
-							config.init_segment = Some(init_segment_bytes.clone());
-							tracing::debug!(
-								video_track = %name,
-								init_segment_size = init_segment_bytes.len(),
-								has_video_track = has_video,
-								has_audio_track = has_audio,
-								"stored init segment in video config"
-							);
-						}
-					}
-				}
-				
-				if has_audio {
-					if let Some(audio) = catalog.audio.as_mut() {
-						for (name, config) in audio.renditions.iter_mut() {
-							config.init_segment = Some(init_segment_bytes.clone());
-							tracing::debug!(
-								audio_track = %name,
-								init_segment_size = init_segment_bytes.len(),
-								has_video_track = has_video,
-								has_audio_track = has_audio,
-								"stored init segment in audio config"
-							);
-						}
-					}
-				}
-				
-				// If the init segment contains both tracks (e.g., from a direct fMP4 file),
-				// also store it in the other config type for convenience
-				if has_video && has_audio {
-					// Full init segment with both tracks - store in both configs
-					if let Some(video) = catalog.video.as_mut() {
-						for (name, config) in video.renditions.iter_mut() {
-							if config.init_segment.is_none() {
+						for track_name in &created_video_tracks {
+							if let Some(config) = video.renditions.get_mut(track_name) {
 								config.init_segment = Some(init_segment_bytes.clone());
 								tracing::debug!(
-									video_track = %name,
-									"stored full init segment (with both tracks) in video config"
-								);
-							}
-						}
-					}
-					if let Some(audio) = catalog.audio.as_mut() {
-						for (name, config) in audio.renditions.iter_mut() {
-							if config.init_segment.is_none() {
-								config.init_segment = Some(init_segment_bytes.clone());
-								tracing::debug!(
-									audio_track = %name,
-									"stored full init segment (with both tracks) in audio config"
+									video_track = %track_name,
+									init_segment_size = init_segment_bytes.len(),
+									has_audio_track = has_audio,
+									"stored init segment in video config"
 								);
 							}
 						}
 					}
 				}
 
-				tracing::info!(
-					has_video = has_video,
-					has_audio = has_audio,
-					tracks_in_moov = moov_track_count,
-					"init segment (ftyp+moov) stored in catalog for all tracks"
-				);
+				if has_audio {
+					if let Some(audio) = catalog.audio.as_mut() {
+						for track_name in &created_audio_tracks {
+							if let Some(config) = audio.renditions.get_mut(track_name) {
+								config.init_segment = Some(init_segment_bytes.clone());
+								tracing::debug!(
+									audio_track = %track_name,
+									init_segment_size = init_segment_bytes.len(),
+									has_video_track = has_video,
+									"stored init segment in audio config"
+								);
+							}
+						}
+					}
+				}
 
 				// Init has been stored; clear cached moov/ftyp to avoid repeated warnings later.
 				self.moov_bytes = None;
 				self.ftyp_bytes = None;
 			} else {
-				tracing::warn!("passthrough mode enabled but moov_bytes is None - init segment will not be stored in catalog");
+				tracing::warn!(
+					"passthrough mode enabled but moov_bytes is None - init segment will not be stored in catalog"
+				);
 			}
 		}
 
@@ -880,7 +860,7 @@ impl Fmp4 {
 				// After that, we can send fragments based on their actual keyframe status
 				let is_first_frame = !self.first_frame_sent.get(&track_id).copied().unwrap_or(false);
 				let should_be_keyframe = is_first_frame || is_keyframe;
-				
+
 				if is_first_frame {
 					self.first_frame_sent.insert(track_id, true);
 				}

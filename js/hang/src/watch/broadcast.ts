@@ -62,15 +62,13 @@ export class Broadcast {
 		this.path = Signal.from(props?.path);
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? true);
-		
+
 		// Create video first so audio can use its MediaSource
 		this.video = new Video.Source(this.#broadcast, this.#catalog, props?.video);
-		
+
 		// Create audio and pass video reference for coordination
 		this.audio = new Audio.Source(this.#broadcast, this.#catalog, props?.audio);
 		this.audio.video = this.video; // Pass video reference for coordination
-
-		
 
 		this.location = new Location.Root(this.#broadcast, this.#catalog, props?.location);
 		this.chat = new Chat(this.#broadcast, this.#catalog, props?.chat);

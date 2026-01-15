@@ -35,7 +35,7 @@ export class SourceMSE {
 	#audioSourceBufferSetup = false; // Track if audio SourceBuffer has been set up
 
 	readonly mediaSource = new Signal<MediaSource | undefined>(undefined);
-	
+
 	// Expose video element for audio control (audio plays through video element)
 	readonly videoElement = new Signal<HTMLVideoElement | undefined>(undefined);
 
@@ -83,41 +83,40 @@ export class SourceMSE {
 		return false;
 	}
 
-
 	async initializeVideo(config: RequiredDecoderConfig): Promise<void> {
 		const mimeType = Mime.buildVideoMimeType(config);
 		if (!mimeType) {
 			throw new Error(`Unsupported codec for MSE: ${config.codec}`);
 		}
-	
+
 		console.log("[MSE] Initializing video, MIME type:", mimeType);
-	
+
 		// Create video element
 		this.#video = document.createElement("video");
 		this.#video.style.display = "none";
 		this.#video.playsInline = true;
 		this.#video.muted = false; // Don't mute - audio plays through video element
 		document.body.appendChild(this.#video);
-		
+
 		// Expose video element
 		this.videoElement.set(this.#video);
-	
+
 		// Create MediaSource
 		this.#mediaSource = new MediaSource();
 		this.mediaSource.set(this.#mediaSource);
 		console.log("[MSE] Video initialization: MediaSource signal set, state:", this.#mediaSource.readyState);
-		
+
 		// Attach MediaSource to video element
 		const url = URL.createObjectURL(this.#mediaSource);
 		this.#video.src = url;
 		console.log("[MSE] MediaSource created and attached to video element");
-		
+
 		// Wait for sourceopen event
 		await new Promise<void>((resolve, reject) => {
 			const timeout = setTimeout(() => {
 				reject(new Error("MediaSource sourceopen timeout"));
 			}, 5000);
-	
+
 			this.#mediaSource?.addEventListener(
 				"sourceopen",
 				() => {
@@ -143,14 +142,18 @@ export class SourceMSE {
 				},
 				{ once: true },
 			);
-	
-			this.#mediaSource?.addEventListener("error", (e) => {
-				clearTimeout(timeout);
-				console.error("[MSE] MediaSource error event:", e);
-				reject(new Error(`MediaSource error: ${e}`));
-			}, { once: true });
+
+			this.#mediaSource?.addEventListener(
+				"error",
+				(e) => {
+					clearTimeout(timeout);
+					console.error("[MSE] MediaSource error event:", e);
+					reject(new Error(`MediaSource error: ${e}`));
+				},
+				{ once: true },
+			);
 		});
-	
+
 		console.log("[MSE] Video initialization complete, starting frame capture");
 		this.#startFrameCapture();
 	}
@@ -168,19 +171,25 @@ export class SourceMSE {
 		}
 
 		console.log("[MSE] Initializing audio, MIME type:", mimeType);
-		
+
 		// Get MediaSource from signal (most up-to-date)
 		// Use a small delay to ensure signal updates have propagated
-		await new Promise(resolve => setTimeout(resolve, 10));
+		await new Promise((resolve) => setTimeout(resolve, 10));
 		let mediaSource = this.mediaSource.peek();
-		console.log("[MSE] Audio initialization: MediaSource from signal:", mediaSource ? `readyState=${mediaSource.readyState}` : "not set");
-		
+		console.log(
+			"[MSE] Audio initialization: MediaSource from signal:",
+			mediaSource ? `readyState=${mediaSource.readyState}` : "not set",
+		);
+
 		// Also check private field as fallback
 		if (!mediaSource && this.#mediaSource) {
-			console.log("[MSE] Audio initialization: Using private MediaSource field, state:", this.#mediaSource.readyState);
+			console.log(
+				"[MSE] Audio initialization: Using private MediaSource field, state:",
+				this.#mediaSource.readyState,
+			);
 			mediaSource = this.#mediaSource;
 		}
-		
+
 		// Quick check: if MediaSource is ready, proceed immediately
 		if (mediaSource && mediaSource.readyState === "open") {
 			console.log("[MSE] Audio initialization: MediaSource is already open, proceeding");
@@ -193,22 +202,26 @@ export class SourceMSE {
 				const maxWait = 5000; // 5 seconds max wait
 				const startTime = Date.now();
 				const checkInterval = 50; // Check every 50ms for responsiveness
-				
+
 				const timeout = setTimeout(() => {
 					const waited = ((Date.now() - startTime) / 1000).toFixed(1);
-					reject(new Error(`MediaSource not ready after ${waited}s (current state: ${mediaSource?.readyState || "not created"})`));
+					reject(
+						new Error(
+							`MediaSource not ready after ${waited}s (current state: ${mediaSource?.readyState || "not created"})`,
+						),
+					);
 				}, maxWait);
 
 				const checkReady = () => {
 					// Get latest MediaSource from signal (always get fresh value)
 					const signalValue = this.mediaSource.peek();
 					mediaSource = signalValue;
-					
+
 					// Also check private field if signal is not set
 					if (!mediaSource && this.#mediaSource) {
 						mediaSource = this.#mediaSource;
 					}
-					
+
 					// Check if MediaSource exists and is open
 					if (mediaSource && mediaSource.readyState === "open") {
 						clearTimeout(timeout);
@@ -224,7 +237,9 @@ export class SourceMSE {
 					if (elapsed % 500 < checkInterval) {
 						const signalState = this.mediaSource.peek()?.readyState || "not set";
 						const privateState = this.#mediaSource?.readyState || "not set";
-						console.log(`[MSE] Audio initialization: Waiting for MediaSource (${(elapsed / 1000).toFixed(1)}s, signal: ${signalState}, private: ${privateState})`);
+						console.log(
+							`[MSE] Audio initialization: Waiting for MediaSource (${(elapsed / 1000).toFixed(1)}s, signal: ${signalState}, private: ${privateState})`,
+						);
 					}
 
 					// If MediaSource exists but is closed, it's from an old instance - wait for new one
@@ -243,7 +258,11 @@ export class SourceMSE {
 						const waited = (elapsed / 1000).toFixed(1);
 						const finalSignalState = this.mediaSource.peek()?.readyState || "not set";
 						const finalPrivateState = this.#mediaSource?.readyState || "not set";
-						reject(new Error(`MediaSource not ready after ${waited}s (signal: ${finalSignalState}, private: ${finalPrivateState})`));
+						reject(
+							new Error(
+								`MediaSource not ready after ${waited}s (signal: ${finalSignalState}, private: ${finalPrivateState})`,
+							),
+						);
 					}
 				};
 
@@ -256,7 +275,7 @@ export class SourceMSE {
 		if (!mediaSource || mediaSource.readyState !== "open") {
 			throw new Error(`MediaSource not ready (state: ${mediaSource?.readyState || "not created"})`);
 		}
-		
+
 		// Update private field
 		this.#mediaSource = mediaSource;
 
@@ -264,7 +283,7 @@ export class SourceMSE {
 		// (could be added by a previous call to initializeAudio)
 		if (this.#mediaSource.sourceBuffers.length >= 2) {
 			const sourceBuffers = Array.from(this.#mediaSource.sourceBuffers);
-			
+
 			// If we already have an audio SourceBuffer set, use it
 			if (this.#audioSourceBuffer && sourceBuffers.includes(this.#audioSourceBuffer)) {
 				return; // Already have it
@@ -272,9 +291,7 @@ export class SourceMSE {
 
 			// If we have exactly 2 SourceBuffers and one is video, the other must be audio
 			if (sourceBuffers.length === 2 && this.#videoSourceBuffer) {
-				const otherBuffer = sourceBuffers.find(
-					(sb) => sb !== this.#videoSourceBuffer
-				);
+				const otherBuffer = sourceBuffers.find((sb) => sb !== this.#videoSourceBuffer);
 				if (otherBuffer) {
 					// This must be the audio SourceBuffer
 					this.#audioSourceBuffer = otherBuffer;
@@ -288,7 +305,9 @@ export class SourceMSE {
 			// Fallback: If we have 2 SourceBuffers but don't know which is video
 			// Assume the second one is audio (video is usually added first)
 			if (sourceBuffers.length === 2 && !this.#videoSourceBuffer) {
-				console.log("[MSE] Video SourceBuffer not set yet, using fallback: assuming second SourceBuffer is audio");
+				console.log(
+					"[MSE] Video SourceBuffer not set yet, using fallback: assuming second SourceBuffer is audio",
+				);
 				this.#audioSourceBuffer = sourceBuffers[1];
 				if (!this.#audioSourceBufferSetup) {
 					this.#setupAudioSourceBuffer();
@@ -310,10 +329,18 @@ export class SourceMSE {
 		if (this.#videoSourceBuffer?.updating) {
 			console.log("[MSE] Waiting for video SourceBuffer to finish updating before adding audio");
 			await new Promise<void>((resolve) => {
-				this.#videoSourceBuffer!.addEventListener("updateend", () => {
-					console.log("[MSE] Video SourceBuffer finished updating");
+				if (!this.#videoSourceBuffer) {
 					resolve();
-				}, { once: true });
+					return;
+				}
+				this.#videoSourceBuffer.addEventListener(
+					"updateend",
+					() => {
+						console.log("[MSE] Video SourceBuffer finished updating");
+						resolve();
+					},
+					{ once: true },
+				);
 			});
 		}
 
@@ -325,7 +352,7 @@ export class SourceMSE {
 		// Check again if MediaSource now has 2 SourceBuffers (race condition)
 		if (this.#mediaSource.sourceBuffers.length >= 2) {
 			const sourceBuffers = Array.from(this.#mediaSource.sourceBuffers);
-			
+
 			// If we already have audio SourceBuffer set, use it
 			if (this.#audioSourceBuffer && sourceBuffers.includes(this.#audioSourceBuffer)) {
 				return;
@@ -333,9 +360,7 @@ export class SourceMSE {
 
 			// If we have exactly 2 and one is video, use the other
 			if (sourceBuffers.length === 2 && this.#videoSourceBuffer) {
-				const otherBuffer = sourceBuffers.find(
-					(sb) => sb !== this.#videoSourceBuffer
-				);
+				const otherBuffer = sourceBuffers.find((sb) => sb !== this.#videoSourceBuffer);
 				if (otherBuffer) {
 					this.#audioSourceBuffer = otherBuffer;
 					if (!this.#audioSourceBufferSetup) {
@@ -360,7 +385,9 @@ export class SourceMSE {
 
 		// Final check before adding - verify MediaSource is still open
 		if (this.#mediaSource.readyState !== "open") {
-			throw new Error(`MediaSource readyState changed to "${this.#mediaSource.readyState}" before adding audio SourceBuffer`);
+			throw new Error(
+				`MediaSource readyState changed to "${this.#mediaSource.readyState}" before adding audio SourceBuffer`,
+			);
 		}
 
 		// Ensure we're using the MediaSource from signal (most up-to-date)
@@ -368,7 +395,7 @@ export class SourceMSE {
 		if (!mediaSource) {
 			throw new Error("MediaSource is not available");
 		}
-		
+
 		// Update private field to match signal
 		this.#mediaSource = mediaSource;
 
@@ -382,11 +409,20 @@ export class SourceMSE {
 					console.log("[MSE] Video SourceBuffer update timeout, proceeding");
 					resolve();
 				}, 500); // Only wait 500ms max
-				
-				this.#videoSourceBuffer!.addEventListener("updateend", () => {
+
+				if (!this.#videoSourceBuffer) {
 					clearTimeout(timeout);
 					resolve();
-				}, { once: true });
+					return;
+				}
+				this.#videoSourceBuffer.addEventListener(
+					"updateend",
+					() => {
+						clearTimeout(timeout);
+						resolve();
+					},
+					{ once: true },
+				);
 			});
 		}
 
@@ -444,9 +480,7 @@ export class SourceMSE {
 
 				// If we have exactly 2 SourceBuffers and one is video, the other must be audio
 				if (sourceBuffers.length === 2 && this.#videoSourceBuffer) {
-					const otherBuffer = sourceBuffers.find(
-						(sb) => sb !== this.#videoSourceBuffer
-					);
+					const otherBuffer = sourceBuffers.find((sb) => sb !== this.#videoSourceBuffer);
 					if (otherBuffer) {
 						console.log("[MSE] Found audio SourceBuffer by exclusion (other than video)");
 						this.#audioSourceBuffer = otherBuffer;
@@ -464,10 +498,10 @@ export class SourceMSE {
 					// But if one of them was added by a previous call to initializeAudio, we should use it
 					// For now, if we have 2 SourceBuffers and can't identify, assume the first non-video one is audio
 					// This is a fallback - ideally video should initialize first
-					const nonVideoBuffer = this.#videoSourceBuffer 
-						? sourceBuffers.find(sb => sb !== this.#videoSourceBuffer)
+					const nonVideoBuffer = this.#videoSourceBuffer
+						? sourceBuffers.find((sb) => sb !== this.#videoSourceBuffer)
 						: sourceBuffers[1]; // If video not set, assume second one is audio (video is usually first)
-					
+
 					if (nonVideoBuffer) {
 						console.log("[MSE] Using fallback: assuming non-video SourceBuffer is audio");
 						this.#audioSourceBuffer = nonVideoBuffer;
@@ -486,25 +520,34 @@ export class SourceMSE {
 						readyState: mediaSource.readyState,
 						videoSourceBufferUpdating: this.#videoSourceBuffer.updating,
 					});
-					
+
 					// Wait for video SourceBuffer to finish if it's updating (with timeout)
 					if (this.#videoSourceBuffer.updating) {
 						await new Promise<void>((resolve) => {
 							const timeout = setTimeout(() => resolve(), 200); // Max 200ms wait
-							this.#videoSourceBuffer!.addEventListener("updateend", () => {
+							if (!this.#videoSourceBuffer) {
 								clearTimeout(timeout);
 								resolve();
-							}, { once: true });
+								return;
+							}
+							this.#videoSourceBuffer.addEventListener(
+								"updateend",
+								() => {
+									clearTimeout(timeout);
+									resolve();
+								},
+								{ once: true },
+							);
 						});
 					} else {
 						// Brief wait for MediaSource to stabilize
-						await new Promise(resolve => setTimeout(resolve, 10));
+						await new Promise((resolve) => setTimeout(resolve, 10));
 					}
-					
+
 					// Quick retry - check if another call added it first
 					const currentSourceBuffers = Array.from(mediaSource.sourceBuffers);
 					if (currentSourceBuffers.length >= 2) {
-						const otherBuffer = currentSourceBuffers.find(sb => sb !== this.#videoSourceBuffer);
+						const otherBuffer = currentSourceBuffers.find((sb) => sb !== this.#videoSourceBuffer);
 						if (otherBuffer) {
 							console.log("[MSE] Found audio SourceBuffer after retry");
 							this.#audioSourceBuffer = otherBuffer;
@@ -514,7 +557,7 @@ export class SourceMSE {
 							return;
 						}
 					}
-					
+
 					// Try adding again
 					try {
 						if (mediaSource.readyState !== "open") {
@@ -559,17 +602,17 @@ export class SourceMSE {
 				const buffered = sourceBuffer.buffered;
 				const start = buffered.start(0);
 				const end = buffered.end(0);
-				
+
 				// Seek to start of buffered range if needed
 				if (
 					video.currentTime + SEEK_HYSTERESIS < start ||
 					video.currentTime >= end - SEEK_HYSTERESIS ||
-					isNaN(video.currentTime)
+					Number.isNaN(video.currentTime)
 				) {
 					console.log(`[MSE] Seeking video to buffered range start: ${start.toFixed(2)}`);
 					video.currentTime = start;
 				}
-				
+
 				// Try to play if paused
 				if (video.paused && video.readyState >= HTMLMediaElement.HAVE_METADATA) {
 					console.log("[MSE] Attempting to play video after SourceBuffer updateend");
@@ -578,7 +621,7 @@ export class SourceMSE {
 					});
 				}
 			}
-			
+
 			this.#processVideoQueue();
 		});
 
@@ -615,7 +658,9 @@ export class SourceMSE {
 
 				captureCount++;
 				if (captureCount === 1 || captureCount % 30 === 0) {
-					console.log(`[MSE] Captured frame ${captureCount}, currentTime: ${this.#video.currentTime.toFixed(2)}, readyState: ${this.#video.readyState}, paused: ${this.#video.paused}, buffered: ${this.#video.buffered.length > 0 ? `${this.#video.buffered.start(0).toFixed(2)}-${this.#video.buffered.end(0).toFixed(2)}` : "none"}`);
+					console.log(
+						`[MSE] Captured frame ${captureCount}, currentTime: ${this.#video.currentTime.toFixed(2)}, readyState: ${this.#video.readyState}, paused: ${this.#video.paused}, buffered: ${this.#video.buffered.length > 0 ? `${this.#video.buffered.start(0).toFixed(2)}-${this.#video.buffered.end(0).toFixed(2)}` : "none"}`,
+					);
 				}
 
 				this.#stats.update((current) => ({
@@ -669,7 +714,7 @@ export class SourceMSE {
 		if (!this.#videoSourceBuffer || !this.#mediaSource) {
 			throw new Error("Video SourceBuffer not initialized");
 		}
-		
+
 		if (this.#videoAppendQueue.length >= SourceMSE.MAX_QUEUE_SIZE) {
 			const discarded = this.#videoAppendQueue.shift();
 			console.warn(
@@ -713,20 +758,21 @@ export class SourceMSE {
 		let ftypAtom: Uint8Array | null = null;
 		let moovOffset = 0;
 		let moovSize = 0;
-		
+
 		// Find ftyp and moov atoms
 		while (offset + 8 <= fullInitSegment.length) {
-			const size = (fullInitSegment[offset] << 24) | 
-			             (fullInitSegment[offset + 1] << 16) | 
-			             (fullInitSegment[offset + 2] << 8) | 
-			             fullInitSegment[offset + 3];
+			const size =
+				(fullInitSegment[offset] << 24) |
+				(fullInitSegment[offset + 1] << 16) |
+				(fullInitSegment[offset + 2] << 8) |
+				fullInitSegment[offset + 3];
 			const type = String.fromCharCode(
 				fullInitSegment[offset + 4],
 				fullInitSegment[offset + 5],
 				fullInitSegment[offset + 6],
 				fullInitSegment[offset + 7],
 			);
-			
+
 			if (type === "ftyp") {
 				ftypAtom = fullInitSegment.slice(offset, offset + size);
 				offset += size;
@@ -739,23 +785,24 @@ export class SourceMSE {
 				offset += size;
 			}
 		}
-		
+
 		if (moovSize === 0) {
 			throw new Error("moov atom not found in init segment");
 		}
-		
+
 		// Parse moov atom to find the relevant track
 		const moovAtom = fullInitSegment.slice(moovOffset, moovOffset + moovSize);
 		const targetHandler = trackType === "video" ? "vide" : "soun";
-		
+
 		// Count tracks in moov
 		let moov_track_count = 0;
 		let moov_offset_temp = 8;
 		while (moov_offset_temp + 8 <= moovAtom.length) {
-			const size = (moovAtom[moov_offset_temp] << 24) | 
-			             (moovAtom[moov_offset_temp + 1] << 16) | 
-			             (moovAtom[moov_offset_temp + 2] << 8) | 
-			             moovAtom[moov_offset_temp + 3];
+			const size =
+				(moovAtom[moov_offset_temp] << 24) |
+				(moovAtom[moov_offset_temp + 1] << 16) |
+				(moovAtom[moov_offset_temp + 2] << 8) |
+				moovAtom[moov_offset_temp + 3];
 			const type = String.fromCharCode(
 				moovAtom[moov_offset_temp + 4],
 				moovAtom[moov_offset_temp + 5],
@@ -768,12 +815,12 @@ export class SourceMSE {
 			if (size < 8 || size === 0) break;
 			moov_offset_temp += size;
 		}
-		
+
 		// If only one track, use directly
 		if (moov_track_count === 1) {
 			return fullInitSegment;
 		}
-		
+
 		// Multiple tracks - need to extract
 		const trakAtom = this.#findTrackInMoov(moovAtom, targetHandler);
 		if (!trakAtom) {
@@ -785,26 +832,26 @@ export class SourceMSE {
 					return this.#extractTrackInitSegmentWithHandler(fullInitSegment, ftypAtom, moovAtom, alt);
 				}
 			}
-			
+
 			const foundTracks = this.#getAllTracksInMoov(moovAtom);
-			const foundHandlers = foundTracks.map(t => t.handler || "unknown").join(", ");
+			const foundHandlers = foundTracks.map((t) => t.handler || "unknown").join(", ");
 			throw new Error(
 				`${trackType} track not found in moov atom. ` +
-				`Looking for handler: "${targetHandler}", but found: [${foundHandlers}]. ` +
-				`The init segment should contain all tracks.`
+					`Looking for handler: "${targetHandler}", but found: [${foundHandlers}]. ` +
+					`The init segment should contain all tracks.`,
 			);
 		}
-		
+
 		// Reconstruct moov atom with only the target track
 		const newMoov = this.#rebuildMoovWithSingleTrack(moovAtom, trakAtom, targetHandler);
-		
+
 		// Combine ftyp (if present) + new moov
 		const result: Uint8Array[] = [];
 		if (ftypAtom) {
 			result.push(ftypAtom);
 		}
 		result.push(newMoov);
-		
+
 		const totalSize = result.reduce((sum, arr) => sum + arr.length, 0);
 		const combined = new Uint8Array(totalSize);
 		let writeOffset = 0;
@@ -812,24 +859,29 @@ export class SourceMSE {
 			combined.set(arr, writeOffset);
 			writeOffset += arr.length;
 		}
-		
+
 		return combined;
 	}
-	
-	#extractTrackInitSegmentWithHandler(_fullInitSegment: Uint8Array, ftypAtom: Uint8Array | null, moovAtom: Uint8Array, handlerType: string): Uint8Array {
+
+	#extractTrackInitSegmentWithHandler(
+		_fullInitSegment: Uint8Array,
+		ftypAtom: Uint8Array | null,
+		moovAtom: Uint8Array,
+		handlerType: string,
+	): Uint8Array {
 		const trakAtom = this.#findTrackInMoov(moovAtom, handlerType);
 		if (!trakAtom) {
 			throw new Error(`Track with handler "${handlerType}" not found`);
 		}
-		
+
 		const newMoov = this.#rebuildMoovWithSingleTrack(moovAtom, trakAtom, handlerType);
-		
+
 		const result: Uint8Array[] = [];
 		if (ftypAtom) {
 			result.push(ftypAtom);
 		}
 		result.push(newMoov);
-		
+
 		const totalSize = result.reduce((sum, arr) => sum + arr.length, 0);
 		const combined = new Uint8Array(totalSize);
 		let writeOffset = 0;
@@ -837,69 +889,72 @@ export class SourceMSE {
 			combined.set(arr, writeOffset);
 			writeOffset += arr.length;
 		}
-		
+
 		return combined;
 	}
-	
-	#getAllTracksInMoov(moovAtom: Uint8Array): Array<{handler: string | null}> {
-		const tracks: Array<{handler: string | null}> = [];
+
+	#getAllTracksInMoov(moovAtom: Uint8Array): Array<{ handler: string | null }> {
+		const tracks: Array<{ handler: string | null }> = [];
 		let offset = 8; // Skip moov header
-		
+
 		while (offset + 8 <= moovAtom.length) {
-			const size = (moovAtom[offset] << 24) | 
-			             (moovAtom[offset + 1] << 16) | 
-			             (moovAtom[offset + 2] << 8) | 
-			             moovAtom[offset + 3];
+			const size =
+				(moovAtom[offset] << 24) |
+				(moovAtom[offset + 1] << 16) |
+				(moovAtom[offset + 2] << 8) |
+				moovAtom[offset + 3];
 			const type = String.fromCharCode(
 				moovAtom[offset + 4],
 				moovAtom[offset + 5],
 				moovAtom[offset + 6],
 				moovAtom[offset + 7],
 			);
-			
+
 			if (type === "trak") {
 				const trakAtom = moovAtom.slice(offset, offset + size);
 				const handler = this.#getHandlerType(trakAtom);
-				tracks.push({handler: handler || null});
+				tracks.push({ handler: handler || null });
 			}
-			
+
 			if (size < 8 || size === 0) break;
 			offset += size;
 		}
-		
+
 		return tracks;
 	}
-	
+
 	#getHandlerType(trakAtom: Uint8Array): string | null {
 		let offset = 8; // Skip trak header
-		
+
 		while (offset + 8 <= trakAtom.length) {
-			const size = (trakAtom[offset] << 24) | 
-			             (trakAtom[offset + 1] << 16) | 
-			             (trakAtom[offset + 2] << 8) | 
-			             trakAtom[offset + 3];
+			const size =
+				(trakAtom[offset] << 24) |
+				(trakAtom[offset + 1] << 16) |
+				(trakAtom[offset + 2] << 8) |
+				trakAtom[offset + 3];
 			const type = String.fromCharCode(
 				trakAtom[offset + 4],
 				trakAtom[offset + 5],
 				trakAtom[offset + 6],
 				trakAtom[offset + 7],
 			);
-			
+
 			if (type === "mdia") {
 				const mdiaAtom = trakAtom.slice(offset, offset + size);
 				let mdiaOffset = 8;
 				while (mdiaOffset + 8 <= mdiaAtom.length) {
-					const hdlrSize = (mdiaAtom[mdiaOffset] << 24) | 
-					                (mdiaAtom[mdiaOffset + 1] << 16) | 
-					                (mdiaAtom[mdiaOffset + 2] << 8) | 
-					                mdiaAtom[mdiaOffset + 3];
+					const hdlrSize =
+						(mdiaAtom[mdiaOffset] << 24) |
+						(mdiaAtom[mdiaOffset + 1] << 16) |
+						(mdiaAtom[mdiaOffset + 2] << 8) |
+						mdiaAtom[mdiaOffset + 3];
 					const hdlrType = String.fromCharCode(
 						mdiaAtom[mdiaOffset + 4],
 						mdiaAtom[mdiaOffset + 5],
 						mdiaAtom[mdiaOffset + 6],
 						mdiaAtom[mdiaOffset + 7],
 					);
-					
+
 					if (hdlrType === "hdlr") {
 						if (mdiaOffset + 24 <= mdiaAtom.length) {
 							const handlerTypeBytes = String.fromCharCode(
@@ -911,71 +966,73 @@ export class SourceMSE {
 							return handlerTypeBytes;
 						}
 					}
-					
+
 					if (hdlrSize < 8 || hdlrSize === 0) break;
 					mdiaOffset += hdlrSize;
 				}
 			}
-			
+
 			if (size < 8 || size === 0) break;
 			offset += size;
 		}
-		
+
 		return null;
 	}
-	
+
 	#findTrackInMoov(moovAtom: Uint8Array, handlerType: string): Uint8Array | null {
 		let offset = 8; // Skip moov header
-		
+
 		while (offset + 8 <= moovAtom.length) {
-			const size = (moovAtom[offset] << 24) | 
-			             (moovAtom[offset + 1] << 16) | 
-			             (moovAtom[offset + 2] << 8) | 
-			             moovAtom[offset + 3];
+			const size =
+				(moovAtom[offset] << 24) |
+				(moovAtom[offset + 1] << 16) |
+				(moovAtom[offset + 2] << 8) |
+				moovAtom[offset + 3];
 			const type = String.fromCharCode(
 				moovAtom[offset + 4],
 				moovAtom[offset + 5],
 				moovAtom[offset + 6],
 				moovAtom[offset + 7],
 			);
-			
+
 			if (type === "trak") {
 				const trakAtom = moovAtom.slice(offset, offset + size);
 				if (this.#trakHasHandler(trakAtom, handlerType)) {
 					return trakAtom;
 				}
 			}
-			
+
 			if (size < 8 || size === 0) break;
 			offset += size;
 		}
-		
+
 		return null;
 	}
-	
+
 	#trakHasHandler(trakAtom: Uint8Array, handlerType: string): boolean {
 		const foundHandler = this.#getHandlerType(trakAtom);
 		return foundHandler === handlerType;
 	}
-	
+
 	#rebuildMoovWithSingleTrack(moovAtom: Uint8Array, trakAtom: Uint8Array, targetHandler: string): Uint8Array {
 		const parts: Uint8Array[] = [];
 		let offset = 8; // Skip moov header
-		
+
 		const trackId = this.#getTrackId(trakAtom);
-		
+
 		while (offset + 8 <= moovAtom.length) {
-			const size = (moovAtom[offset] << 24) | 
-			             (moovAtom[offset + 1] << 16) | 
-			             (moovAtom[offset + 2] << 8) | 
-			             moovAtom[offset + 3];
+			const size =
+				(moovAtom[offset] << 24) |
+				(moovAtom[offset + 1] << 16) |
+				(moovAtom[offset + 2] << 8) |
+				moovAtom[offset + 3];
 			const type = String.fromCharCode(
 				moovAtom[offset + 4],
 				moovAtom[offset + 5],
 				moovAtom[offset + 6],
 				moovAtom[offset + 7],
 			);
-			
+
 			if (type === "mvhd") {
 				parts.push(moovAtom.slice(offset, offset + size));
 			} else if (type === "trak") {
@@ -990,136 +1047,125 @@ export class SourceMSE {
 					parts.push(rebuiltMvex);
 				}
 			}
-			
+
 			if (size < 8 || size === 0) break;
 			offset += size;
 		}
-		
+
 		const totalSize = 8 + parts.reduce((sum, arr) => sum + arr.length, 0);
 		const newMoov = new Uint8Array(totalSize);
-		
-		newMoov[0] = (totalSize >>> 24) & 0xFF;
-		newMoov[1] = (totalSize >>> 16) & 0xFF;
-		newMoov[2] = (totalSize >>> 8) & 0xFF;
-		newMoov[3] = totalSize & 0xFF;
-		newMoov[4] = 0x6D; // 'm'
-		newMoov[5] = 0x6F; // 'o'
-		newMoov[6] = 0x6F; // 'o'
+
+		newMoov[0] = (totalSize >>> 24) & 0xff;
+		newMoov[1] = (totalSize >>> 16) & 0xff;
+		newMoov[2] = (totalSize >>> 8) & 0xff;
+		newMoov[3] = totalSize & 0xff;
+		newMoov[4] = 0x6d; // 'm'
+		newMoov[5] = 0x6f; // 'o'
+		newMoov[6] = 0x6f; // 'o'
 		newMoov[7] = 0x76; // 'v'
-		
+
 		let writeOffset = 8;
 		for (const part of parts) {
 			newMoov.set(part, writeOffset);
 			writeOffset += part.length;
 		}
-		
+
 		return newMoov;
 	}
-	
+
 	#getTrackId(trakAtom: Uint8Array): number {
 		let offset = 8; // Skip trak header
-		
+
 		while (offset + 8 <= trakAtom.length) {
-			const size = (trakAtom[offset] << 24) | 
-			             (trakAtom[offset + 1] << 16) | 
-			             (trakAtom[offset + 2] << 8) | 
-			             trakAtom[offset + 3];
+			const size =
+				(trakAtom[offset] << 24) |
+				(trakAtom[offset + 1] << 16) |
+				(trakAtom[offset + 2] << 8) |
+				trakAtom[offset + 3];
 			const type = String.fromCharCode(
 				trakAtom[offset + 4],
 				trakAtom[offset + 5],
 				trakAtom[offset + 6],
 				trakAtom[offset + 7],
 			);
-			
+
 			if (type === "tkhd") {
 				const version = trakAtom[offset + 8];
 				const trackIdOffset = version === 1 ? 24 : 16;
 				if (offset + trackIdOffset + 4 <= trakAtom.length) {
-					return (trakAtom[offset + trackIdOffset] << 24) |
-					       (trakAtom[offset + trackIdOffset + 1] << 16) |
-					       (trakAtom[offset + trackIdOffset + 2] << 8) |
-					       trakAtom[offset + trackIdOffset + 3];
+					return (
+						(trakAtom[offset + trackIdOffset] << 24) |
+						(trakAtom[offset + trackIdOffset + 1] << 16) |
+						(trakAtom[offset + trackIdOffset + 2] << 8) |
+						trakAtom[offset + trackIdOffset + 3]
+					);
 				}
 			}
-			
+
 			if (size < 8 || size === 0) break;
 			offset += size;
 		}
-		
+
 		return 0;
 	}
-	
+
 	#rebuildMvexWithSingleTrack(mvexAtom: Uint8Array, trackId: number): Uint8Array | null {
 		const parts: Uint8Array[] = [];
 		let offset = 8; // Skip mvex header
-		
+
 		while (offset + 8 <= mvexAtom.length) {
-			const size = (mvexAtom[offset] << 24) | 
-			             (mvexAtom[offset + 1] << 16) | 
-			             (mvexAtom[offset + 2] << 8) | 
-			             mvexAtom[offset + 3];
+			const size =
+				(mvexAtom[offset] << 24) |
+				(mvexAtom[offset + 1] << 16) |
+				(mvexAtom[offset + 2] << 8) |
+				mvexAtom[offset + 3];
 			const type = String.fromCharCode(
 				mvexAtom[offset + 4],
 				mvexAtom[offset + 5],
 				mvexAtom[offset + 6],
 				mvexAtom[offset + 7],
 			);
-			
+
 			if (type === "trex") {
 				if (offset + 16 <= mvexAtom.length) {
-					const trexTrackId = (mvexAtom[offset + 12] << 24) |
-					                   (mvexAtom[offset + 13] << 16) |
-					                   (mvexAtom[offset + 14] << 8) |
-					                   mvexAtom[offset + 15];
+					const trexTrackId =
+						(mvexAtom[offset + 12] << 24) |
+						(mvexAtom[offset + 13] << 16) |
+						(mvexAtom[offset + 14] << 8) |
+						mvexAtom[offset + 15];
 					if (trexTrackId === trackId) {
 						parts.push(mvexAtom.slice(offset, offset + size));
 					}
 				}
 			}
-			
+
 			if (size < 8 || size === 0) break;
 			offset += size;
 		}
-		
+
 		if (parts.length === 0) {
 			return null;
 		}
-		
+
 		const totalSize = 8 + parts.reduce((sum, arr) => sum + arr.length, 0);
 		const newMvex = new Uint8Array(totalSize);
-		
-		newMvex[0] = (totalSize >>> 24) & 0xFF;
-		newMvex[1] = (totalSize >>> 16) & 0xFF;
-		newMvex[2] = (totalSize >>> 8) & 0xFF;
-		newMvex[3] = totalSize & 0xFF;
-		newMvex[4] = 0x6D; // 'm'
+
+		newMvex[0] = (totalSize >>> 24) & 0xff;
+		newMvex[1] = (totalSize >>> 16) & 0xff;
+		newMvex[2] = (totalSize >>> 8) & 0xff;
+		newMvex[3] = totalSize & 0xff;
+		newMvex[4] = 0x6d; // 'm'
 		newMvex[5] = 0x76; // 'v'
 		newMvex[6] = 0x65; // 'e'
 		newMvex[7] = 0x78; // 'x'
-		
+
 		let writeOffset = 8;
 		for (const part of parts) {
 			newMvex.set(part, writeOffset);
 			writeOffset += part.length;
 		}
-		
+
 		return newMvex;
-	}
-
-	#concatenateFragments(fragments: Uint8Array[]): Uint8Array {
-		if (fragments.length === 1) {
-			return fragments[0];
-		}
-
-		const totalSize = fragments.reduce((sum, frag) => sum + frag.byteLength, 0);
-		const result = new Uint8Array(totalSize);
-		let offset = 0;
-		for (const fragment of fragments) {
-			result.set(fragment, offset);
-			offset += fragment.byteLength;
-		}
-
-		return result;
 	}
 
 	#processVideoQueue(): void {
@@ -1210,12 +1256,13 @@ export class SourceMSE {
 
 		// Briefly wait for audio SourceBuffer so we don't hit Chrome's quota race.
 		console.log("[MSE] Checking if audio SourceBuffer will be added...");
-		for (let i = 0; i < 10; i++) { // up to ~1s
+		for (let i = 0; i < 10; i++) {
+			// up to ~1s
 			if (this.#audioSourceBuffer || (this.#mediaSource && this.#mediaSource.sourceBuffers.length >= 2)) {
 				console.log("[MSE] Audio SourceBuffer detected, proceeding with video");
 				break;
 			}
-			await new Promise(resolve => setTimeout(resolve, 100));
+			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
 
 		const sub = broadcast.subscribe(name, PRIORITY.video);
@@ -1247,6 +1294,7 @@ export class SourceMSE {
 			throw new Error("Video SourceBuffer not available");
 		}
 
+		const videoSourceBuffer = this.#videoSourceBuffer;
 		console.log("[MSE] Appending video init segment, size:", videoInitSegment.byteLength, "bytes");
 		await new Promise<void>((resolve, reject) => {
 			const onUpdateEnd = () => {
@@ -1255,7 +1303,7 @@ export class SourceMSE {
 				console.log("[MSE] Video init segment appended successfully");
 				resolve();
 			};
-			
+
 			const onError = (e: Event) => {
 				videoSourceBuffer.removeEventListener("updateend", onUpdateEnd);
 				videoSourceBuffer.removeEventListener("error", onError);
@@ -1263,11 +1311,10 @@ export class SourceMSE {
 				console.error("[MSE] Video SourceBuffer error appending init segment:", error);
 				reject(new Error(`Video SourceBuffer error: ${error.message || "unknown error"}`));
 			};
-			
-			const videoSourceBuffer = this.#videoSourceBuffer!;
+
 			videoSourceBuffer.addEventListener("updateend", onUpdateEnd, { once: true });
 			videoSourceBuffer.addEventListener("error", onError, { once: true });
-			
+
 			try {
 				videoSourceBuffer.appendBuffer(videoInitSegment as BufferSource);
 			} catch (error) {
@@ -1306,20 +1353,16 @@ export class SourceMSE {
 		}
 
 		// Read fragments and append to SourceBuffer
+		// Each fragment is already a complete CMAF segment (moof+mdat), so we can append individually
+		// This reduces latency and memory usage compared to batching by group
 		console.log("[MSE] Starting to read video fragments from track");
 		effect.spawn(async () => {
-			let currentGroup: number | undefined;
-			let gopFragments: Uint8Array[] = [];
 			let frameCount = 0;
 
 			for (;;) {
 				const frame = await Promise.race([consumer.decode(), effect.cancel]);
 				if (!frame) {
 					console.log(`[MSE] Video track ended, processed ${frameCount} frames`);
-					if (gopFragments.length > 0) {
-						const gopData = this.#concatenateFragments(gopFragments);
-						await this.appendVideoFragment(gopData);
-					}
 					break;
 				}
 
@@ -1333,21 +1376,8 @@ export class SourceMSE {
 					continue;
 				}
 
-				// Check if we've moved to a new group
-				if (currentGroup !== undefined && frame.group !== currentGroup) {
-					if (gopFragments.length > 0) {
-						const gopData = this.#concatenateFragments(gopFragments);
-						await this.appendVideoFragment(gopData);
-						gopFragments = [];
-					}
-					currentGroup = frame.group;
-				}
-
-				if (currentGroup === undefined) {
-					currentGroup = frame.group;
-				}
-
-				gopFragments.push(frame.data);
+				// Append fragment immediately - each fragment is a complete CMAF segment
+				await this.appendVideoFragment(frame.data);
 			}
 		});
 	}
@@ -1404,8 +1434,14 @@ export class SourceMSE {
 			let offset = 0;
 			const len = data.length;
 			while (offset + 8 <= len) {
-				const size = (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
-				const type = String.fromCharCode(data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7]);
+				const size =
+					(data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
+				const type = String.fromCharCode(
+					data[offset + 4],
+					data[offset + 5],
+					data[offset + 6],
+					data[offset + 7],
+				);
 				if (type === "moov") return true;
 				if (size < 8 || size === 0) break;
 				offset += size;
@@ -1414,21 +1450,11 @@ export class SourceMSE {
 		}
 
 		effect.spawn(async () => {
-			let currentGroup: number | undefined;
-			let groupFragments: Uint8Array[] = [];
-			let frameCount = 0;
-
 			for (;;) {
 				const frame = await Promise.race([consumer.decode(), effect.cancel]);
 				if (!frame) {
-					if (groupFragments.length > 0 && this.#mediaSource?.readyState === "open") {
-						const groupData = this.#concatenateFragments(groupFragments);
-						await this.appendAudioFragment(groupData);
-					}
 					break;
 				}
-
-				frameCount++;
 
 				if (this.#mediaSource?.readyState === "closed") {
 					break;
@@ -1439,20 +1465,10 @@ export class SourceMSE {
 					continue;
 				}
 
-				if (currentGroup !== undefined && frame.group !== currentGroup) {
-					if (groupFragments.length > 0 && this.#mediaSource?.readyState === "open") {
-						const groupData = this.#concatenateFragments(groupFragments);
-						await this.appendAudioFragment(groupData);
-						groupFragments = [];
-					}
-					currentGroup = frame.group;
+				// Append fragment immediately - each fragment is a complete CMAF segment
+				if (this.#mediaSource?.readyState === "open") {
+					await this.appendAudioFragment(frame.data);
 				}
-
-				if (currentGroup === undefined) {
-					currentGroup = frame.group;
-				}
-
-				groupFragments.push(frame.data);
 			}
 		});
 	}
@@ -1461,12 +1477,12 @@ export class SourceMSE {
 		this.#videoAppendQueue = [];
 		this.#audioAppendQueue = [];
 		this.#audioSourceBufferSetup = false;
-		
+
 		// Store references before resetting
 		const audioSourceBuffer = this.#audioSourceBuffer;
 		const videoSourceBuffer = this.#videoSourceBuffer;
 		const mediaSource = this.#mediaSource;
-		
+
 		this.#audioSourceBuffer = undefined; // Reset audio SourceBuffer reference
 
 		this.mediaSource.set(undefined);
