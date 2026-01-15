@@ -45,10 +45,13 @@ const key = await generate('HS256');
 or as a CLI
 ```bash
 # generate secret key
-moq-token --key key.jwk generate
+moq-token generate --key key.jwk
 ```
 
-The default is HS256, you can choose other algorithms with `--algorithm`
+The default is HS256, you can choose other algorithms with `--algorithm`:
+```bash
+moq-token generate --key key.jwk --algorithm ES256
+```
 
 #### Signing
 
@@ -74,7 +77,7 @@ const token = await sign(key, claims);
 Or you can sign as a CLI
 
 ```bash
-moq-token --key "root.jwk" sign \
+moq-token sign --key "root.jwk" \
   --root "rooms/meeting-123" \
   --subscribe "" \
   --publish "alice" \
