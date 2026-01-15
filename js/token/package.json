@@ -9,13 +9,15 @@
 		".": "./src/index.ts"
 	},
 	"bin": {
-		"moq-token": "./src/cli.ts"
+		"moq-token": "./dist/cli"
 	},
 	"files": [
-		"./src"
+		"./src",
+		"./dist"
 	],
 	"scripts": {
 		"build": "tsc -b",
+		"build-cli": "bun build src/cli.ts --compile --outfile=dist/cli",
 		"check": "tsc --noEmit && tsc -b examples/tsconfig.json",
 		"test": "bun test",
 		"release": "bun ../scripts/release.ts"
