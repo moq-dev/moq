@@ -1,7 +1,7 @@
 {
 	"name": "@moq/token",
 	"type": "module",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Media over QUIC - Token Generation and Validation",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
