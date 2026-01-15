@@ -1,12 +1,21 @@
 # moq-token
 
-A simple JWT and JWK based authentication scheme for moq-relay.
+A Javascript/Typescript library and CLI for implementing authentication with a MoQ relay. For comprehensive documentation including token structure, authorization rules, and examples, see the [Authentication Documentation](../../doc/concepts/authentication.md)
 
 ## Installation
 
+For general installation:
+
 ```bash
-npm add moq-token
+npm add @moq/token
 ```
+
+To use as a CLI
+
+```bash
+npm install -g @moq/token
+```
+
 
 ## Usage
 
