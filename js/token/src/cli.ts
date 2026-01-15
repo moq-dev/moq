@@ -13,7 +13,7 @@ const program = new Command();
 program
 	.name("moq-token")
 	.description("Generate, sign, and verify tokens for moq-relay")
-	.version("0.1.0");
+	.version("0.1.1");
 
 program
 	.command("generate")

@@ -55,7 +55,7 @@ The default is HS256, you can choose other algorithms with `--algorithm`
 You can sign a token as shown below:
 
 ```typescript
-import { type Claims, load, sign, verify } from "../src/index.ts";
+import { type Claims, load, sign, verify } from "@moq/token";
 
 const key = load(keyString); // See generate example above
 // Create claims
