@@ -32,6 +32,9 @@ export async function generate(algorithm: Algorithm, kid?: string): Promise<Key>
 	}
 }
 
+/**
+ * Generate an HMAC symmetric key
+ */
 async function generateHmacKey(alg: Algorithm, byteLength: number, kid?: string): Promise<Key> {
 	const bytes = new Uint8Array(byteLength);
 	crypto.getRandomValues(bytes);
@@ -47,6 +50,9 @@ async function generateHmacKey(alg: Algorithm, byteLength: number, kid?: string)
 	};
 }
 
+/**
+ * Generate an RSA asymmetric key pair
+ */
 async function generateRsaKey(
 	alg: Algorithm,
 	name: "RSASSA-PKCS1-v1_5" | "RSA-PSS",
@@ -91,6 +97,9 @@ async function generateRsaKey(
 	};
 }
 
+/**
+ * Generate an elliptic curve asymmetric key pair
+ */
 async function generateEcKey(alg: "ES256" | "ES384", namedCurve: "P-256" | "P-384", kid?: string): Promise<Key> {
 	const keyPair = await crypto.subtle.generateKey(
 		{
@@ -121,6 +130,9 @@ async function generateEcKey(alg: "ES256" | "ES384", namedCurve: "P-256" | "P-38
 	};
 }
 
+/**
+ * Generate an EdDSA key pair using Ed25519
+ */
 async function generateEdDsaKey(alg: "EdDSA", kid?: string): Promise<Key> {
 	const keyPair = await crypto.subtle.generateKey(
 		{
@@ -148,6 +160,9 @@ async function generateEdDsaKey(alg: "EdDSA", kid?: string): Promise<Key> {
 	};
 }
 
+/**
+ * Get the hash algorithm for a given JWT algorithm
+ */
 function getHashForAlgorithm(alg: Algorithm): "SHA-256" | "SHA-384" | "SHA-512" {
 	if (alg.endsWith("256")) return "SHA-256";
 	if (alg.endsWith("384")) return "SHA-384";
