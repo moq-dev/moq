@@ -15,7 +15,7 @@
 		"./src"
 	],
 	"scripts": {
-		"build": "tsc -b",
+		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
 		"check": "tsc --noEmit && tsc -b examples/tsconfig.json",
 		"test": "bun test",
 		"release": "bun ../scripts/release.ts"

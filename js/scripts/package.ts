@@ -2,8 +2,8 @@
 // This creates a dist/ folder with the correct paths and dependencies for publishing
 // Split from release.ts to allow building packages without publishing
 
-import { copyFileSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { extname, join } from "node:path";
+import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 console.log("✍️  Rewriting package.json...");
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
@@ -73,38 +73,6 @@ pkg.scripts = undefined;
 
 // Write the rewritten package.json
 writeFileSync("dist/package.json", JSON.stringify(pkg, null, 2));
-
-// Fix ESM imports in compiled JS files to include .js extensions
-// e.g. from "./cli" => from "./cli.js", required for node compatability
-function fixImportsInDir(dir: string) {
-	const files = readdirSync(dir, { withFileTypes: true });
-	for (const file of files) {
-		const filePath = join(dir, file.name);
-		if (file.isDirectory()) {
-			fixImportsInDir(filePath);
-		} else if (file.name.endsWith(".js")) {
-			let content = readFileSync(filePath, "utf8");
-
-			// Unified regex for all import types: from, import(), and side-effect imports
-			// Matches: from "./foo", from '../foo', import("./foo"), import './foo'
-			const importRegex =
-				/((?:from|import)\s*\(\s*['"]|from\s+['"]|import\s+['"])(\.\.[/\\][^'"]*|\.\/[^'"]*)['"]/g;
-
-			content = content.replace(importRegex, (match, prefix, path) => {
-				const ext = extname(path);
-				// Only add .js if there's no extension
-				if (!ext) {
-					return `${prefix}${path}.js"`;
-				}
-				// Leave existing extensions unchanged (.json, .css, etc.)
-				return match;
-			});
-
-			writeFileSync(filePath, content);
-		}
-	}
-}
-fixImportsInDir("dist");
 
 // Copy static files
 console.log("📄 Copying README.md...");

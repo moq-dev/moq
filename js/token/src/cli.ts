@@ -3,11 +3,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import * as base64 from "@hexagon/base64";
 import { Command } from "commander";
-import type { Algorithm } from "./algorithm";
-import type { Claims } from "./claims";
-import { generate } from "./generate";
-import type { Key, PublicKey } from "./key";
-import { load, loadPublic, sign, toPublicKey, verify } from "./key";
+import type { Algorithm } from "./algorithm.ts";
+import type { Claims } from "./claims.ts";
+import { generate } from "./generate.ts";
+import type { Key, PublicKey } from "./key.ts";
+import { load, loadPublic, sign, toPublicKey, verify } from "./key.ts";
 
 const program = new Command();
 

@@ -1,8 +1,8 @@
 import * as base64 from "@hexagon/base64";
 import * as jose from "jose";
 import { z } from "zod";
-import { type Algorithm, AlgorithmSchema } from "./algorithm";
-import { type Claims, ClaimsSchema, validateClaims } from "./claims";
+import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
+import { type Claims, ClaimsSchema, validateClaims } from "./claims.ts";
 
 /**
  * Key operations that can be performed
