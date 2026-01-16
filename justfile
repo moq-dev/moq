@@ -413,3 +413,15 @@ pub-console:
 # Serve the documentation locally.
 doc:
 	cd doc && bun run dev
+
+# Start the optional observability stack (Prometheus, Grafana, OTel Collector).
+observability:
+	cd observability && docker compose up -d
+
+# Stop the optional observability stack.
+observability-stop:
+	cd observability && docker compose down
+
+# Follow observability stack logs.
+observability-logs:
+	cd observability && docker compose logs -f
