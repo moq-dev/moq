@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
-use crate::{coding::Stream, lite::{SessionInfo, Version}, Error, OriginConsumer, OriginProducer, Stats};
+use crate::{
+	Error, OriginConsumer, OriginProducer, Stats,
+	coding::Stream,
+	lite::{SessionInfo, Version},
+};
 
 use super::{Publisher, Subscriber};
 

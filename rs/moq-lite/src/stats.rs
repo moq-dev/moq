@@ -27,4 +27,3 @@ impl Stats for NoopStats {
 	fn add_rx_bytes(&self, _bytes: u64) {}
 	fn add_tx_bytes(&self, _bytes: u64) {}
 }
-

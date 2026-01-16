@@ -68,7 +68,15 @@ impl Session {
 
 		if let Ok(version) = lite::Version::try_from(server.version) {
 			let stream = stream.with_version(version);
-			lite::start(session.clone(), stream, publish.into(), subscribe.into(), stats, version).await?;
+			lite::start(
+				session.clone(),
+				stream,
+				publish.into(),
+				subscribe.into(),
+				stats,
+				version,
+			)
+			.await?;
 		} else if let Ok(version) = ietf::Version::try_from(server.version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
@@ -147,7 +155,15 @@ impl Session {
 
 		if let Ok(version) = lite::Version::try_from(version) {
 			let stream = stream.with_version(version);
-			lite::start(session.clone(), stream, publish.into(), subscribe.into(), stats, version).await?;
+			lite::start(
+				session.clone(),
+				stream,
+				publish.into(),
+				subscribe.into(),
+				stats,
+				version,
+			)
+			.await?;
 		} else if let Ok(version) = ietf::Version::try_from(version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;

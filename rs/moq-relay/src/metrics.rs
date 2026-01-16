@@ -62,9 +62,7 @@ impl MetricsTracker {
 
 	pub fn record_app_bytes_received(&self, transport: Transport, bytes: u64) {
 		match transport {
-			Transport::WebTransport => self
-				.app_bytes_received_webtransport
-				.fetch_add(bytes, Ordering::Relaxed),
+			Transport::WebTransport => self.app_bytes_received_webtransport.fetch_add(bytes, Ordering::Relaxed),
 			Transport::WebSocket => self.app_bytes_received_websocket.fetch_add(bytes, Ordering::Relaxed),
 		};
 	}
@@ -112,4 +110,3 @@ impl moq_lite::Stats for TransportStats {
 		self.metrics.record_app_bytes_sent(self.transport, bytes);
 	}
 }
-

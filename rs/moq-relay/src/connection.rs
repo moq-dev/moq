@@ -70,10 +70,7 @@ impl Connection {
 		// We subscribe to the tracks the client is allowed to publish.
 		let stats: Arc<dyn moq_lite::Stats> =
 			Arc::new(crate::TransportStats::new(metrics, crate::Transport::WebTransport));
-		let session = self
-			.request
-			.accept_with_stats(subscribe, publish, Some(stats))
-			.await?;
+		let session = self.request.accept_with_stats(subscribe, publish, Some(stats)).await?;
 
 		// Wait until the session is closed.
 		session.closed().await.map_err(Into::into)

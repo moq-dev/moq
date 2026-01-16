@@ -382,9 +382,7 @@ impl Request {
 				moq_lite::Session::accept_with_stats(request.ok().await?, publish, subscribe, stats).await?
 			}
 			#[cfg(feature = "iroh")]
-			Request::IrohQuic(request) => {
-				moq_lite::Session::accept_with_stats(request.ok(), publish, subscribe, stats).await?
-			}
+			Request::IrohQuic(request) => moq_lite::Session::accept_with_stats(request.ok(), publish, subscribe, stats).await?,
 		};
 
 		Ok(session)

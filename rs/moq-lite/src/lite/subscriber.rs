@@ -4,12 +4,11 @@ use std::{
 };
 
 use crate::{
-	AsPath, Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
+	AsPath, Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Stats,
 	TrackProducer,
 	coding::{Reader, Stream},
 	lite::{self, Version},
 	model::BroadcastProducer,
-	Stats,
 };
 
 use tokio::sync::oneshot;

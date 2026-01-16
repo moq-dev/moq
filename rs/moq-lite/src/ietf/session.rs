@@ -1,7 +1,12 @@
-use crate::{coding::{Reader, Stream}, ietf::{self, Control, Message, RequestId, Version}, Error, OriginConsumer, OriginProducer, Stats};
+use crate::{
+	Error, OriginConsumer, OriginProducer, Stats,
+	coding::{Reader, Stream},
+	ietf::{self, Control, Message, RequestId, Version},
+};
 
 use super::{Publisher, Subscriber};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn start<S: web_transport_trait::Session>(
 	session: S,
 	setup: Stream<S, Version>,
@@ -43,6 +48,7 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 	Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run<S: web_transport_trait::Session>(
 	session: S,
 	setup: Stream<S, Version>,

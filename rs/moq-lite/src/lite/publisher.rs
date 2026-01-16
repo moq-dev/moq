@@ -3,14 +3,13 @@ use std::sync::Arc;
 use web_async::FuturesExt;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Stats, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self, Version,
 		priority::{PriorityHandle, PriorityQueue},
 	},
 	model::GroupConsumer,
-	Stats,
 };
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
