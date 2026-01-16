@@ -10,7 +10,6 @@ import { metrics } from "@opentelemetry/api";
 import type { Counter, Histogram, Meter } from "@opentelemetry/api";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
-import { Resource } from "@opentelemetry/resources";
 
 let initialized = false;
 let sessionId: string | undefined;
@@ -44,12 +43,6 @@ export function initObservability(config: ObservabilityConfig = {}): void {
 
 	if (!enabled) return;
 
-	const resource = new Resource({
-		"service.name": serviceName,
-		"service.instance.id": sessionId,
-		"moq.player.session_id": sessionId,
-	});
-
 	const exporterHeaders = { "Content-Type": "application/json" };
 	const metricExporter = new OTLPMetricExporter({
 		url: `${endpoint}/v1/metrics`,
@@ -62,7 +55,6 @@ export function initObservability(config: ObservabilityConfig = {}): void {
 	});
 
 	const meterProvider = new MeterProvider({
-		resource,
 		readers: [reader],
 	});
 
