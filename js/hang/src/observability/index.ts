@@ -120,4 +120,3 @@ export function recordMetric(fn: (metrics: ClientMetrics) => void): void {
 	const m = getClientMetrics();
 	if (m) fn(m);
 }
-

@@ -1,9 +1,9 @@
 import WebTransportWs from "@moq/web-transport-ws";
-import type { Established } from "./established.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
+import type { Established } from "./established.ts";
 
 // Connection type tracking for observability
 let connectionTypeCallback: ((type: "webtransport" | "websocket") => void) | undefined;
