@@ -206,35 +206,35 @@
 /* Buffer Overlay Styles */
 .bufferOverlay {
 	position: absolute;
-	top: 8px;
-	right: 8px;
-	background: rgba(0, 0, 0, 0.85);
-	color: #fff;
-	padding: 12px;
-	border-radius: 8px;
+	top: var(--spacing-8);
+	right: var(--spacing-8);
+	background: var(--color-black-alpha-85);
+	color: var(--color-white);
+	padding: var(--spacing-12);
+	border-radius: var(--spacing-8);
 	font-family: monospace;
-	font-size: 12px;
+	font-size: var(--spacing-12);
 	z-index: 1000;
 	min-width: 200px;
 	pointer-events: auto;
 }
 
 .bufferOverlayHeader {
-	margin-bottom: 8px;
+	margin-bottom: var(--spacing-8);
 	font-weight: bold;
-	border-bottom: 1px solid rgba(255, 255, 255, 0.3);
-	padding-bottom: 4px;
-	font-size: 14px;
+	border-bottom: 1px solid var(--color-white-alpha-30);
+	padding-bottom: var(--spacing-4);
+	font-size: var(--spacing-14);
 }
 
 .bufferOverlaySection {
-	margin-bottom: 8px;
+	margin-bottom: var(--spacing-8);
 }
 
 .bufferOverlayLabel {
-	color: #aaa;
-	font-size: 10px;
-	margin-bottom: 2px;
+	color: var(--color-gray-100);
+	font-size: var(--spacing-10);
+	margin-bottom: var(--spacing-2);
 }
 
 .bufferOverlayValue {
@@ -242,20 +242,20 @@
 }
 
 .bufferOverlayLatency {
-	margin-top: 12px;
+	margin-top: var(--spacing-12);
 	border-top: 1px solid rgba(255, 255, 255, 0.3);
-	padding-top: 8px;
+	padding-top: var(--spacing-8);
 }
 
 .bufferOverlayLatency .latencySliderContainer {
-	padding: 4px 0;
+	padding: var(--spacing-4) 0;
 	margin: 0;
 }
 
 .bufferOverlayLatency .latencyLabel {
-	font-size: 12px;
+	font-size: var(--spacing-12);
 }
 
 .bufferOverlayLatency .latencySlider {
-	accent-color: #4a9eff;
+	accent-color: var(--color-blue-400);
 }
