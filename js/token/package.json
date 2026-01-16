@@ -22,7 +22,7 @@
 	},
 	"dependencies": {
 		"@hexagon/base64": "^2.0.4",
-		"commander": "^12.1.0",
+		"commander": "^14.0.2",
 		"jose": "^6.1.0",
 		"zod": "^4.1.5"
 	},
