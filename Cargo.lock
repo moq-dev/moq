@@ -2632,7 +2632,6 @@ name = "moq-native"
 version = "0.11.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
  "bytes",
  "clap",
  "console-subscriber",

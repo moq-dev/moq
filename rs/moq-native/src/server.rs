@@ -5,7 +5,6 @@ use crate::crypto;
 #[cfg(feature = "iroh")]
 use crate::iroh::IrohQuicRequest;
 use anyhow::Context;
-use base64::Engine;
 use moq_lite::Session;
 use rand::Rng;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -22,31 +21,6 @@ use web_transport_quinn::http;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
-
-/// Server ID for QUIC-LB support.
-#[serde_with::serde_as]
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct QuicLbServerId(#[serde_as(as = "serde_with::base64::Base64")] Vec<u8>);
-
-impl QuicLbServerId {
-	fn len(&self) -> usize {
-		self.0.len()
-	}
-}
-
-impl std::fmt::Debug for QuicLbServerId {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_tuple("QuicLbServerId").field(&hex::encode(&self.0)).finish()
-	}
-}
-
-impl std::str::FromStr for QuicLbServerId {
-	type Err = base64::DecodeError;
-
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		base64::engine::general_purpose::STANDARD.decode(s.as_bytes()).map(Self)
-	}
-}
 
 /// TLS configuration for the server.
 ///
@@ -91,18 +65,18 @@ pub struct ServerConfig {
 	/// If set, connection IDs will be derived semi-deterministically.
 	#[arg(id = "server-quic-lb-id", long = "server-quic-lb-id", env = "MOQ_SERVER_QUIC_LB_ID")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub quic_lb_id: Option<QuicLbServerId>,
+	pub quic_lb_id: Option<ServerId>,
 
-	/// Connection ID length when QUIC-LB support is enabled
-	/// Defaults to 16 if not specfied.
+	/// Number of random nonce bytes in QUIC-LB connection IDs.
+	/// Must be at least 4, and server_id + nonce + 1 must not exceed 20.
 	#[arg(
-		id = "server-connection-id-len",
-		long = "server-connection-id-len",
+		id = "server-quic-lb-nonce",
+		long = "server-quic-lb-nonce",
 		requires = "server-quic-lb-id",
-		env = "MOQ_SERVER_CONNECTION_ID_LEN"
+		env = "MOQ_SERVER_QUIC_LB_NONCE"
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub connection_id_len: Option<u8>,
+	pub quic_lb_nonce: Option<usize>,
 
 	#[command(flatten)]
 	#[serde(default)]
@@ -112,59 +86,6 @@ pub struct ServerConfig {
 impl ServerConfig {
 	pub fn init(self) -> anyhow::Result<Server> {
 		Server::new(self)
-	}
-}
-
-/// Connection ID generator that embeds a fixed server ID for QUIC-LB support.
-///
-/// This enables stateless load balancing where the load balancer can route
-/// packets to the correct server by parsing the connection ID. As of Jan 2026,
-/// AWS NLB imposes some specific requirements which have been determined
-/// empirically to be the following:
-/// - The server ID must be exactly 8 bytes long.
-/// - The connection ID must be exactly 16 bytes in total.
-/// - Only the "plaintext" mode is supported.
-///
-/// See: https://datatracker.ietf.org/doc/draft-ietf-quic-load-balancers/
-struct QuicLbConnectionIdGenerator {
-	server_id: QuicLbServerId,
-	connection_id_len: u8,
-}
-
-impl QuicLbConnectionIdGenerator {
-	fn new(server_id: QuicLbServerId, connection_id_len: u8) -> Self {
-		Self {
-			server_id,
-			connection_id_len,
-		}
-	}
-}
-
-impl quinn::ConnectionIdGenerator for QuicLbConnectionIdGenerator {
-	fn generate_cid(&mut self) -> quinn::ConnectionId {
-		let mut cid = Vec::with_capacity(self.connection_id_len as usize);
-		// First byte has "self-encoded length" of server ID + nonce
-		cid.push(self.connection_id_len - 1);
-		cid.extend(self.server_id.0.iter());
-		cid.extend(
-			rand::rng()
-				.random_iter::<u8>()
-				.take(self.connection_id_len as usize - self.server_id.len() - 1),
-		);
-		assert_eq!(
-			cid.len(),
-			self.connection_id_len as usize,
-			"connection ID length should match requested length"
-		);
-		quinn::ConnectionId::new(cid.as_slice())
-	}
-
-	fn cid_len(&self) -> usize {
-		self.connection_id_len as usize
-	}
-
-	fn cid_lifetime(&self) -> Option<Duration> {
-		None
 	}
 }
 
@@ -223,19 +144,18 @@ impl Server {
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = quinn::EndpointConfig::default();
 		if let Some(server_id) = config.quic_lb_id {
-			let connection_id_len = config.connection_id_len.unwrap_or(16);
-			anyhow::ensure!(
-				connection_id_len as usize >= server_id.len() + 5,
-				format!(
-					"connection ID length of {connection_id_len} too small for server ID of length {}: \
-					(need config byte & at least 4 bytes for nonce)",
-					server_id.len()
-				),
+			let nonce_len = config.quic_lb_nonce.unwrap_or(8);
+			anyhow::ensure!(nonce_len >= 4, "quic_lb_nonce must be at least 4");
+
+			let cid_len = 1 + server_id.len() + nonce_len;
+			anyhow::ensure!(cid_len <= 20, "connection ID length ({cid_len}) exceeds maximum of 20");
+
+			tracing::info!(
+				?server_id,
+				nonce_len,
+				"using QUIC-LB compatible connection ID generation"
 			);
-			tracing::info!("using server ID {server_id:?} for QUIC-LB compatible connection ID generation");
-			endpoint_config.cid_generator(move || {
-				Box::new(QuicLbConnectionIdGenerator::new(server_id.clone(), connection_id_len))
-			});
+			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
 		}
 
 		let listen = config.bind.unwrap_or("[::]:443".parse().unwrap());
@@ -642,5 +562,72 @@ impl ResolvesServerCert for ServeCerts {
 			.certs
 			.first()
 			.cloned()
+	}
+}
+
+/// Server ID for QUIC-LB support.
+#[serde_with::serde_as]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] Vec<u8>);
+
+impl ServerId {
+	fn len(&self) -> usize {
+		self.0.len()
+	}
+}
+
+impl std::fmt::Debug for ServerId {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_tuple("QuicLbServerId").field(&hex::encode(&self.0)).finish()
+	}
+}
+
+impl std::str::FromStr for ServerId {
+	type Err = hex::FromHexError;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		hex::decode(s).map(Self)
+	}
+}
+
+/// Connection ID generator that embeds a fixed server ID for QUIC-LB support.
+///
+/// This enables stateless load balancing where the load balancer can route
+/// packets to the correct server by parsing the connection ID. As of Jan 2026,
+/// AWS NLB imposes some specific requirements which have been determined
+/// empirically to be the following:
+/// - The server ID must be exactly 8 bytes long.
+/// - The connection ID must be exactly 16 bytes in total.
+/// - Only the "plaintext" mode is supported.
+///
+/// See: https://datatracker.ietf.org/doc/draft-ietf-quic-load-balancers/
+struct ServerIdGenerator {
+	server_id: ServerId,
+	nonce_len: usize,
+}
+
+impl ServerIdGenerator {
+	fn new(server_id: ServerId, nonce_len: usize) -> Self {
+		Self { server_id, nonce_len }
+	}
+}
+
+impl quinn::ConnectionIdGenerator for ServerIdGenerator {
+	fn generate_cid(&mut self) -> quinn::ConnectionId {
+		let cid_len = self.cid_len();
+		let mut cid = Vec::with_capacity(cid_len);
+		// First byte has "self-encoded length" of server ID + nonce
+		cid.push((cid_len - 1) as u8);
+		cid.extend(self.server_id.0.iter());
+		cid.extend(rand::rng().random_iter::<u8>().take(self.nonce_len));
+		quinn::ConnectionId::new(cid.as_slice())
+	}
+
+	fn cid_len(&self) -> usize {
+		1 + self.server_id.len() + self.nonce_len
+	}
+
+	fn cid_lifetime(&self) -> Option<Duration> {
+		None
 	}
 }
