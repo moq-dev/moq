@@ -67,6 +67,9 @@ pub struct Cluster {
 
 	// Broadcasts announced by local clients and remote servers.
 	pub combined: Arc<moq_lite::Produce<OriginProducer, OriginConsumer>>,
+
+	/// Minimal metrics for the relay.
+	pub metrics: crate::MetricsTracker,
 }
 
 impl Cluster {
@@ -78,6 +81,7 @@ impl Cluster {
 			primary: Arc::new(Origin::produce()),
 			secondary: Arc::new(Origin::produce()),
 			combined: Arc::new(Origin::produce()),
+			metrics: crate::MetricsTracker::new(),
 		}
 	}
 

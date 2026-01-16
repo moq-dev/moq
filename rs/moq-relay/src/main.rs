@@ -12,12 +12,14 @@ mod auth;
 mod cluster;
 mod config;
 mod connection;
+mod metrics;
 mod web;
 
 pub use auth::*;
 pub use cluster::*;
 pub use config::*;
 pub use connection::*;
+pub use metrics::*;
 pub use web::*;
 
 #[tokio::main]

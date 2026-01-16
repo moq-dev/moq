@@ -93,6 +93,7 @@ impl Web {
 	pub async fn run(self) -> anyhow::Result<()> {
 		let app = Router::new()
 			.route("/certificate.sha256", get(serve_fingerprint))
+			.route("/metrics", get(serve_metrics))
 			.route("/announced", get(serve_announced))
 			.route("/announced/{*prefix}", get(serve_announced))
 			.route("/fetch/{*path}", get(serve_fetch));
@@ -166,6 +167,54 @@ async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
 		.clone()
 }
 
+async fn serve_metrics(State(state): State<Arc<WebState>>) -> String {
+	// Minimal Prometheus text exposition.
+	let m = &state.cluster.metrics;
+
+	let wt = crate::Transport::WebTransport;
+	let ws = crate::Transport::WebSocket;
+
+	let mut out = String::new();
+
+	out.push_str("# TYPE moq_relay_active_sessions gauge\n");
+	out.push_str(&format!(
+		"moq_relay_active_sessions{{transport=\"{}\"}} {}\n",
+		wt.as_str(),
+		m.active_sessions(wt)
+	));
+	out.push_str(&format!(
+		"moq_relay_active_sessions{{transport=\"{}\"}} {}\n",
+		ws.as_str(),
+		m.active_sessions(ws)
+	));
+
+	out.push_str("# TYPE moq_relay_app_bytes_sent_total counter\n");
+	out.push_str(&format!(
+		"moq_relay_app_bytes_sent_total{{transport=\"{}\"}} {}\n",
+		wt.as_str(),
+		m.app_bytes_sent(wt)
+	));
+	out.push_str(&format!(
+		"moq_relay_app_bytes_sent_total{{transport=\"{}\"}} {}\n",
+		ws.as_str(),
+		m.app_bytes_sent(ws)
+	));
+
+	out.push_str("# TYPE moq_relay_app_bytes_received_total counter\n");
+	out.push_str(&format!(
+		"moq_relay_app_bytes_received_total{{transport=\"{}\"}} {}\n",
+		wt.as_str(),
+		m.app_bytes_received(wt)
+	));
+	out.push_str(&format!(
+		"moq_relay_app_bytes_received_total{{transport=\"{}\"}} {}\n",
+		ws.as_str(),
+		m.app_bytes_received(ws)
+	));
+
+	out
+}
+
 async fn serve_ws(
 	ws: WebSocketUpgrade,
 	Path(path): Path<String>,
@@ -177,6 +226,7 @@ async fn serve_ws(
 	let token = state.auth.verify(&path, params.jwt.as_deref())?;
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
+	let metrics = state.cluster.metrics.clone();
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
@@ -196,7 +246,7 @@ async fn serve_ws(
 				tungstenite::Error::ConnectionClosed
 			})
 			.with(tungstenite_to_axum);
-		let _ = handle_socket(id, socket, publish, subscribe).await;
+		let _ = handle_socket(id, socket, publish, subscribe, metrics).await;
 	}))
 }
 
@@ -206,6 +256,7 @@ async fn handle_socket<T>(
 	socket: T,
 	publish: Option<OriginProducer>,
 	subscribe: Option<OriginConsumer>,
+	metrics: crate::MetricsTracker,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
@@ -214,9 +265,24 @@ where
 		+ Unpin
 		+ 'static,
 {
+	metrics.inc_active_sessions(crate::Transport::WebSocket);
+	struct SessionGuard {
+		metrics: crate::MetricsTracker,
+	}
+	impl Drop for SessionGuard {
+		fn drop(&mut self) {
+			self.metrics.dec_active_sessions(crate::Transport::WebSocket);
+		}
+	}
+	let _guard = SessionGuard {
+		metrics: metrics.clone(),
+	};
+
 	// Wrap the WebSocket in a WebTransport compatibility layer.
 	let ws = web_transport_ws::Session::new(socket, true);
-	let session = moq_lite::Session::accept(ws, subscribe, publish).await?;
+	let stats: std::sync::Arc<dyn moq_lite::Stats> =
+		std::sync::Arc::new(crate::TransportStats::new(metrics, crate::Transport::WebSocket));
+	let session = moq_lite::Session::accept_with_stats(ws, subscribe, publish, Some(stats)).await?;
 	session.closed().await.map_err(Into::into)
 }
 

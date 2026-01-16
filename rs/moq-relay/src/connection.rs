@@ -1,6 +1,7 @@
 use crate::{Auth, Cluster};
 
 use moq_native::Request;
+use std::sync::Arc;
 
 pub struct Connection {
 	pub id: u64,
@@ -12,6 +13,23 @@ pub struct Connection {
 impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
+		// Track WebTransport sessions.
+		let metrics = self.cluster.metrics.clone();
+		metrics.inc_active_sessions(crate::Transport::WebTransport);
+		struct SessionGuard {
+			metrics: crate::MetricsTracker,
+			transport: crate::Transport,
+		}
+		impl Drop for SessionGuard {
+			fn drop(&mut self) {
+				self.metrics.dec_active_sessions(self.transport);
+			}
+		}
+		let _guard = SessionGuard {
+			metrics: metrics.clone(),
+			transport: crate::Transport::WebTransport,
+		};
+
 		let (path, token) = match self.request.url() {
 			Some(url) => {
 				// Extract the path and token from the URL.
@@ -50,7 +68,12 @@ impl Connection {
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
 		// We subscribe to the tracks the client is allowed to publish.
-		let session = self.request.accept(subscribe, publish).await?;
+		let stats: Arc<dyn moq_lite::Stats> =
+			Arc::new(crate::TransportStats::new(metrics, crate::Transport::WebTransport));
+		let session = self
+			.request
+			.accept_with_stats(subscribe, publish, Some(stats))
+			.await?;
 
 		// Wait until the session is closed.
 		session.closed().await.map_err(Into::into)
