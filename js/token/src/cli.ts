@@ -6,6 +6,7 @@ import { Command } from "commander";
 import type { Algorithm } from "./algorithm";
 import type { Claims } from "./claims";
 import { generate } from "./generate";
+import type {Key, PublicKey} from "./key";
 import { load, loadPublic, sign, toPublicKey, verify } from "./key";
 
 const program = new Command();
@@ -92,7 +93,7 @@ program
 			const keyEncoded = readFileSync(options.key, "utf-8");
 
 			// Try to load as public key first (for asymmetric), fall back to symmetric key
-			let key;
+			let key: Key | PublicKey| undefined	;
 			try {
 				key = loadPublic(keyEncoded);
 			} catch {
