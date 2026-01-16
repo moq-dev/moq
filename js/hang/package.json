@@ -34,6 +34,9 @@
 		"@moq/lite": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"@libav.js/variant-opus-af": "^6.8.8",
+		"@opentelemetry/api": "^1.8.0",
+		"@opentelemetry/sdk-metrics": "^1.25.0",
+		"@opentelemetry/exporter-metrics-otlp-http": "^0.52.0",
 		"async-mutex": "^0.5.0",
 		"comlink": "^4.4.2",
 		"zod": "^4.1.5"
