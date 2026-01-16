@@ -3,7 +3,7 @@
 // Split from release.ts to allow building packages without publishing
 
 import { copyFileSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 
 console.log("✍️  Rewriting package.json...");
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
@@ -84,19 +84,22 @@ function fixImportsInDir(dir: string) {
 			fixImportsInDir(filePath);
 		} else if (file.name.endsWith(".js")) {
 			let content = readFileSync(filePath, "utf8");
-			// Fix relative imports: from "./foo" or from '../foo' -> add .js
-			content = content.replace(/from\s+['"](\.\.[/\\].*?)['"]/g, (match, path) => {
-				if (!path.endsWith(".js")) {
-					return match.replace(path, `${path}.js`);
+
+			// Unified regex for all import types: from, import(), and side-effect imports
+			// Matches: from "./foo", from '../foo', import("./foo"), import './foo'
+			const importRegex =
+				/((?:from|import)\s*\(\s*['"]|from\s+['"]|import\s+['"])(\.\.[/\\][^'"]*|\.\/[^'"]*)['"]/g;
+
+			content = content.replace(importRegex, (match, prefix, path) => {
+				const ext = extname(path);
+				// Only add .js if there's no extension
+				if (!ext) {
+					return `${prefix}${path}.js"`;
 				}
+				// Leave existing extensions unchanged (.json, .css, etc.)
 				return match;
 			});
-			content = content.replace(/from\s+['"](\.\/.*?)['"]/g, (match, path) => {
-				if (!path.endsWith(".js")) {
-					return match.replace(path, `${path}.js`);
-				}
-				return match;
-			});
+
 			writeFileSync(filePath, content);
 		}
 	}
