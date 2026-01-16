@@ -9,11 +9,10 @@
 		".": "./src/index.ts"
 	},
 	"bin": {
-		"moq-token": "./dist/cli"
+		"moq-token": "./src/cli"
 	},
 	"files": [
-		"./src",
-		"./dist"
+		"./src"
 	],
 	"scripts": {
 		"build": "tsc -b",
