@@ -55,10 +55,23 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 1. The project uses `just` as the task runner - check `justfile` for all available commands
 2. For Rust development, the workspace is configured in the `rs/Cargo.toml`
 3. For JS/TS development, bun workspaces are used with configuration in `js/package.json`
-4. Try to keep stuff out of the root unless necessary; scope tools to specific languages.
+
+## Tooling
+
+- **TypeScript**: Always use `bun` for all package management and script execution (not npm, yarn, or pnpm)
+- **Common**: Use `just` for common development tasks
+- **Rust**: Use `cargo` for Rust-specific operations
 
 ## Testing Approach
 
 - Run `just check` to execute all tests and linting.
 - Run `just fix` to automatically fix formating and easy things.
 - Rust tests are integrated within source files
+
+## Workflow
+
+When making changes to the codebase:
+1. Make your code changes
+2. Run `just fix` to auto-format and fix linting issues
+3. Run `just check` to verify everything passes
+4. Commit and push changes

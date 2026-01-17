@@ -5,9 +5,9 @@ use std::borrow::Cow;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
+	Path,
 	coding::*,
 	ietf::{GroupOrder, Location, Message, Parameters, RequestId, Version},
-	Path,
 };
 
 use super::namespace::{decode_namespace, encode_namespace};
@@ -45,7 +45,7 @@ pub struct Subscribe<'a> {
 	pub filter_type: FilterType,
 }
 
-impl<'a> Message for Subscribe<'a> {
+impl Message for Subscribe<'_> {
 	const ID: u64 = 0x03;
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -162,7 +162,7 @@ pub struct SubscribeError<'a> {
 	pub reason_phrase: Cow<'a, str>,
 }
 
-impl<'a> Message for SubscribeError<'a> {
+impl Message for SubscribeError<'_> {
 	const ID: u64 = 0x05;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {

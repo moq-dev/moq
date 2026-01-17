@@ -1,15 +1,17 @@
 use serde::{Deserialize, Serialize};
 use serde_with::DisplayFromStr;
-use tracing::level_filters::LevelFilter;
 use tracing::Level;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
+/// Tracing log configuration.
 #[serde_with::serde_as]
 #[derive(Clone, clap::Parser, Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct Log {
 	/// The level filter to use.
 	#[serde_as(as = "DisplayFromStr")]
@@ -24,6 +26,10 @@ impl Default for Log {
 }
 
 impl Log {
+	pub fn new(level: Level) -> Self {
+		Self { level }
+	}
+
 	pub fn level(&self) -> LevelFilter {
 		LevelFilter::from_level(self.level)
 	}

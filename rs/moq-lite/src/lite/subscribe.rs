@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 
 use crate::{
+	Path,
 	coding::{Decode, DecodeError, Encode},
 	lite::{Message, Version},
-	Path,
 };
 
 /// Sent by the subscriber to request all future objects for the given track.
@@ -17,7 +17,7 @@ pub struct Subscribe<'a> {
 	pub priority: u8,
 }
 
-impl<'a> Message for Subscribe<'a> {
+impl Message for Subscribe<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let id = u64::decode(r, version)?;
 		let broadcast = Path::decode(r, version)?;

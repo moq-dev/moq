@@ -1,12 +1,12 @@
 use std::borrow::Cow;
 
 use crate::{
+	Path,
 	coding::{Decode, DecodeError, Encode},
 	ietf::{
-		namespace::{decode_namespace, encode_namespace},
 		GroupOrder, Location, Message, Parameters, RequestId, Version,
+		namespace::{decode_namespace, encode_namespace},
 	},
-	Path,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub enum FetchType<'a> {
 	},
 }
 
-impl<'a, V: Copy> Encode<V> for FetchType<'a> {
+impl<V: Copy> Encode<V> for FetchType<'_> {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
 		match self {
 			FetchType::Standalone {
@@ -63,7 +63,7 @@ impl<'a, V: Copy> Encode<V> for FetchType<'a> {
 	}
 }
 
-impl<'a, V: Copy> Decode<V> for FetchType<'a> {
+impl<V: Copy> Decode<V> for FetchType<'_> {
 	fn decode<B: bytes::Buf>(buf: &mut B, version: V) -> Result<Self, DecodeError> {
 		let fetch_type = u64::decode(buf, version)?;
 		Ok(match fetch_type {
@@ -110,7 +110,7 @@ pub struct Fetch<'a> {
 	// parameters
 }
 
-impl<'a> Message for Fetch<'a> {
+impl Message for Fetch<'_> {
 	const ID: u64 = 0x16;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
@@ -181,7 +181,7 @@ pub struct FetchError<'a> {
 	pub reason_phrase: Cow<'a, str>,
 }
 
-impl<'a> Message for FetchError<'a> {
+impl Message for FetchError<'_> {
 	const ID: u64 = 0x19;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {

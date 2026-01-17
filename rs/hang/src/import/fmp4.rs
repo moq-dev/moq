@@ -1,4 +1,4 @@
-use crate::catalog::{AudioCodec, AudioConfig, CatalogProducer, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9};
+use crate::catalog::{AAC, AV1, AudioCodec, AudioConfig, CatalogProducer, H264, H265, VP9, VideoCodec, VideoConfig};
 use crate::{self as hang, Timestamp};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
@@ -425,8 +425,7 @@ impl Fmp4 {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let micros = (pts as u128 * 1_000_000 / timescale as u128) as u64;
-					let timestamp = hang::Timestamp::from_micros(micros)?;
+					let timestamp = hang::Timestamp::from_scale(pts, timescale)?;
 
 					if offset + size > mdat.len() {
 						anyhow::bail!("invalid data offset");

@@ -5,9 +5,9 @@ use std::borrow::Cow;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
+	Path,
 	coding::*,
 	ietf::{FilterType, GroupOrder, Message, Parameters, RequestId, Version},
-	Path,
 };
 
 use super::namespace::{decode_namespace, encode_namespace};
@@ -20,7 +20,7 @@ pub struct TrackStatus<'a> {
 	pub track_name: Cow<'a, str>,
 }
 
-impl<'a> Message for TrackStatus<'a> {
+impl Message for TrackStatus<'_> {
 	const ID: u64 = 0x0d;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {

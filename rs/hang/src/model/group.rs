@@ -1,11 +1,10 @@
 use std::collections::VecDeque;
 
-use crate::model::{Frame, Timestamp};
 use crate::Result;
+use crate::model::{Frame, Timestamp};
 
 use buf_list::BufList;
 use moq_lite::coding::Decode;
-use moq_lite::lite;
 
 /// A consumer for a group of frames.
 ///
@@ -61,15 +60,14 @@ impl GroupConsumer {
 	}
 
 	async fn read_unbuffered(&mut self) -> Result<Option<Frame>> {
-		let payload = match self.group.next_frame().await? {
-			Some(mut frame) => frame.read_chunks().await?,
-			None => return Ok(None),
+		let Some(mut frame) = self.group.next_frame().await? else {
+			return Ok(None);
 		};
+		let payload = frame.read_chunks().await?;
 
 		let mut payload = BufList::from_iter(payload);
 
-		let micros = u64::decode(&mut payload, lite::Version::Draft02)?;
-		let timestamp = Timestamp::from_micros(micros)?;
+		let timestamp = Timestamp::decode(&mut payload, ())?;
 
 		let frame = Frame {
 			keyframe: (self.index == 0),

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 
 use serde::{Deserialize, Serialize};
-use serde_with::{hex::Hex, DisplayFromStr};
+use serde_with::{DisplayFromStr, hex::Hex};
 
 /// Information about an audio track in the catalog.
 ///

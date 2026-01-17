@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6](https://github.com/moq-dev/moq/compare/moq-token-v0.5.5...moq-token-v0.5.6) - 2026-01-10
+
+### Other
+
+- Bump rsa from 0.9.9 to 0.9.10 in the cargo group across 1 directory ([#817](https://github.com/moq-dev/moq/pull/817))
+
 ## [0.5.4](https://github.com/moq-dev/moq/compare/moq-token-v0.5.3...moq-token-v0.5.4) - 2025-10-18
 
 ### Other

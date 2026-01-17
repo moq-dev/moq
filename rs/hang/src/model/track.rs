@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::ops::Deref;
 
-use crate::model::{Frame, GroupConsumer, Timestamp};
 use crate::Error;
-use futures::{stream::FuturesUnordered, StreamExt};
+use crate::model::{Frame, GroupConsumer, Timestamp};
+use futures::{StreamExt, stream::FuturesUnordered};
 
 use moq_lite::{coding::*, lite};
 
@@ -48,7 +48,7 @@ impl TrackProducer {
 		tracing::trace!(?frame, "write frame");
 
 		let mut header = BytesMut::new();
-		frame.timestamp.as_micros().encode(&mut header, lite::Version::Draft02);
+		frame.timestamp.encode(&mut header, lite::Version::Draft02);
 
 		if frame.keyframe {
 			if let Some(group) = self.group.take() {
@@ -57,10 +57,10 @@ impl TrackProducer {
 
 			// Make sure this frame's timestamp doesn't go backwards relative to the last keyframe.
 			// We can't really enforce this for frames generally because b-frames suck.
-			if let Some(keyframe) = self.keyframe {
-				if frame.timestamp < keyframe {
-					return Err(Error::TimestampBackwards);
-				}
+			if let Some(keyframe) = self.keyframe
+				&& frame.timestamp < keyframe
+			{
+				return Err(Error::TimestampBackwards);
 			}
 
 			self.keyframe = Some(frame.timestamp);
@@ -118,7 +118,7 @@ impl Deref for TrackProducer {
 /// ## Latency Management
 ///
 /// The consumer can skip groups that are too far behind to maintain low latency.
-/// Use [`set_latency`](Self::set_latency) to configure the maximum acceptable delay.
+/// Configure the maximum acceptable delay through the consumer's latency settings.
 pub struct TrackConsumer {
 	pub inner: moq_lite::TrackConsumer,
 
@@ -157,10 +157,7 @@ impl TrackConsumer {
 	pub async fn read_frame(&mut self) -> Result<Option<Frame>, Error> {
 		let latency = self.max_latency.try_into()?;
 		loop {
-			let cutoff = self
-				.max_timestamp
-				.checked_add(latency)
-				.ok_or(crate::TimestampOverflow)?;
+			let cutoff = self.max_timestamp.checked_add(latency)?;
 
 			// Keep track of all pending groups, buffering until we detect a timestamp far enough in the future.
 			// This is a race; only the first group will succeed.

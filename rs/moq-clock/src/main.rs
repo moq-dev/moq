@@ -1,3 +1,8 @@
+//! Example MoQ application that publishes or subscribes to a clock track.
+//!
+//! Demonstrates basic [`moq_lite`] usage by streaming time updates every second.
+//! Useful for testing relay connectivity and latency.
+
 use url::Url;
 
 use anyhow::Context;
@@ -48,12 +53,12 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(url = ?config.url, "connecting to server");
 
-	let session = client.connect(config.url).await?;
-
 	let track = Track {
 		name: config.track,
 		priority: 0,
 	};
+
+	let origin = moq_lite::Origin::produce();
 
 	match config.role {
 		Command::Publish => {
@@ -61,19 +66,19 @@ async fn main() -> anyhow::Result<()> {
 			let track = broadcast.producer.create_track(track);
 			let clock = clock::Publisher::new(track);
 
-			let origin = moq_lite::Origin::produce();
 			origin.producer.publish_broadcast(&config.broadcast, broadcast.consumer);
 
-			let session = moq_lite::Session::connect(session, origin.consumer, None).await?;
+			let session = client
+				.connect_with_fallback(config.url, Some(origin.consumer), None)
+				.await?;
 
 			tokio::select! {
-				res = session.closed() => res.map_err(Into::into),
+				res = session.closed() => res.context("session closed"),
 				_ = clock.run() => Ok(()),
 			}
 		}
 		Command::Subscribe => {
-			let origin = moq_lite::Origin::produce();
-			let session = moq_lite::Session::connect(session, None, Some(origin.producer)).await?;
+			let session = client.connect_with_fallback(config.url, None, origin.producer).await?;
 
 			// NOTE: We could just call `session.consume_broadcast(&config.broadcast)` instead,
 			// However that won't work with IETF MoQ and the current OriginConsumer API the moment.

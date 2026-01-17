@@ -4,20 +4,20 @@ use std::{
 	path::PathBuf,
 	pin::Pin,
 	sync::{
-		atomic::{AtomicU64, Ordering},
 		Arc,
+		atomic::{AtomicU64, Ordering},
 	},
-	task::{ready, Context, Poll},
+	task::{Context, Poll, ready},
 };
 use web_transport_ws::tungstenite;
 
 use axum::{
+	Router,
 	body::Body,
 	extract::{Path, Query, State, WebSocketUpgrade},
 	http::{Method, StatusCode},
 	response::{IntoResponse, Response},
 	routing::{any, get},
-	Router,
 };
 use bytes::Bytes;
 use clap::Parser;
@@ -75,7 +75,7 @@ pub struct HttpsConfig {
 pub struct WebState {
 	pub auth: Auth,
 	pub cluster: Cluster,
-	pub tls_info: Arc<std::sync::RwLock<moq_native::TlsInfo>>,
+	pub tls_info: Arc<std::sync::RwLock<moq_native::ServerTlsInfo>>,
 	pub conn_id: AtomicU64,
 }
 
@@ -139,7 +139,7 @@ impl Web {
 
 #[cfg(unix)]
 async fn reload_certs(config: axum_server::tls_rustls::RustlsConfig, cert: PathBuf, key: PathBuf) {
-	use tokio::signal::unix::{signal, SignalKind};
+	use tokio::signal::unix::{SignalKind, signal};
 
 	// Dunno why we wouldn't be allowed to listen for signals, but just in case.
 	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
@@ -232,9 +232,8 @@ async fn serve_announced(
 	};
 
 	let token = state.auth.verify(&prefix, params.jwt.as_deref())?;
-	let mut origin = match state.cluster.subscriber(&token) {
-		Some(origin) => origin,
-		None => return Err(StatusCode::UNAUTHORIZED.into()),
+	let Some(mut origin) = state.cluster.subscriber(&token) else {
+		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
 	let mut broadcasts = Vec::new();
@@ -266,9 +265,8 @@ async fn serve_fetch(
 	let broadcast = path.join("/");
 	let token = state.auth.verify(&broadcast, params.jwt.as_deref())?;
 
-	let origin = match state.cluster.subscriber(&token) {
-		Some(origin) => origin,
-		None => return Err(StatusCode::UNAUTHORIZED.into()),
+	let Some(origin) = state.cluster.subscriber(&token) else {
+		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
 	tracing::info!(%broadcast, %track, "fetching track");
@@ -282,10 +280,11 @@ async fn serve_fetch(
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
 	let mut track = broadcast.subscribe_track(&track);
 
-	let group = match track.next_group().await {
-		Ok(Some(group)) => group,
-		Ok(None) => return Err(StatusCode::NOT_FOUND.into()),
-		Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR.into()),
+	let Ok(group) = track.next_group().await else {
+		return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+	};
+	let Some(group) = group else {
+		return Err(StatusCode::NOT_FOUND.into());
 	};
 
 	Ok(ServeGroup::new(group))

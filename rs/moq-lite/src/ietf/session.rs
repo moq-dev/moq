@@ -1,7 +1,7 @@
 use crate::{
+	Error, OriginConsumer, OriginProducer,
 	coding::{Reader, Stream},
 	ietf::{self, Control, Message, RequestId, Version},
-	Error, OriginConsumer, OriginProducer,
 };
 
 use super::{Publisher, Subscriber};

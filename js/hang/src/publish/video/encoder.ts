@@ -1,9 +1,9 @@
 import type * as Moq from "@moq/lite";
+import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import { DEFAULT_CONTAINER, u53 } from "../../catalog";
 import * as Frame from "../../frame";
-import * as Time from "../../time";
 import { isFirefox } from "../../util/hacks";
 import type { Source } from "./types";
 

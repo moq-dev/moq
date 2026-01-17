@@ -202,15 +202,15 @@ impl Auth {
 	pub fn verify(&self, path: &str, token: Option<&str>) -> Result<AuthToken, AuthError> {
 		// Find the token in the query parameters.
 		// ?jwt=...
-		let claims = if let Some(token) = token {
-			if let Some(key) = self.key.as_deref() {
-				key.lock()
-					.expect("key mutex poisoned")
-					.decode(token)
-					.map_err(|_| AuthError::DecodeFailed)?
-			} else {
-				return Err(AuthError::UnexpectedToken);
-			}
+		let claims = if let Some(token) = token
+			&& let Some(key) = self.key.as_deref()
+		{
+			key.lock()
+				.expect("key mutex poisoned")
+				.decode(token)
+				.map_err(|_| AuthError::DecodeFailed)?
+		} else if let Some(_token) = token {
+			return Err(AuthError::UnexpectedToken);
 		} else if let Some(public) = &self.public {
 			moq_token::Claims {
 				root: public.to_string(),
@@ -227,9 +227,8 @@ impl Auth {
 		let root = Path::new(path);
 
 		// Make sure the URL path matches the root path.
-		let suffix = match root.strip_prefix(&claims.root) {
-			None => return Err(AuthError::IncorrectRoot),
-			Some(suffix) => suffix,
+		let Some(suffix) = root.strip_prefix(&claims.root) else {
+			return Err(AuthError::IncorrectRoot);
 		};
 
 		// If a more specific path is provided, reduce the permissions.

@@ -1,4 +1,4 @@
-//! This module contains encoding and decoding helpers.
+//! Contains encoding and decoding helpers.
 
 mod decode;
 mod encode;

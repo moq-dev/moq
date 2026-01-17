@@ -1,13 +1,23 @@
 use crate::crypto;
 use anyhow::Context;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::RootCertStore;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 use std::{fs, io, net, sync::Arc, time};
 use url::Url;
+#[cfg(feature = "iroh")]
+use web_transport_iroh::iroh;
+use web_transport_ws::{tokio_tungstenite, tungstenite};
 
+// Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
+static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// TLS configuration for the client.
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ClientTls {
 	/// Use the TLS root at this path, encoded as PEM.
 	///
@@ -30,8 +40,37 @@ pub struct ClientTls {
 	pub disable_verify: Option<bool>,
 }
 
+/// WebSocket configuration for the client.
+#[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ClientWebSocket {
+	/// Delay in milliseconds before attempting WebSocket fallback (default: 200)
+	/// If WebSocket won the previous race for a given server, this will be 0.
+	#[arg(
+		id = "websocket-delay",
+		long = "websocket-delay",
+		env = "MOQ_CLIENT_WEBSOCKET_DELAY",
+		default_value = "200ms",
+		value_parser = humantime::parse_duration,
+	)]
+	#[serde(with = "humantime_serde")]
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub delay: Option<time::Duration>,
+}
+
+impl Default for ClientWebSocket {
+	fn default() -> Self {
+		Self {
+			delay: Some(time::Duration::from_millis(200)),
+		}
+	}
+}
+
+/// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ClientConfig {
 	/// Listen for UDP packets on the given address.
 	#[arg(
@@ -45,15 +84,10 @@ pub struct ClientConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ClientTls,
-}
 
-impl Default for ClientConfig {
-	fn default() -> Self {
-		Self {
-			bind: "[::]:0".parse().unwrap(),
-			tls: ClientTls::default(),
-		}
-	}
+	#[command(flatten)]
+	#[serde(default)]
+	pub websocket: ClientWebSocket,
 }
 
 impl ClientConfig {
@@ -62,11 +96,27 @@ impl ClientConfig {
 	}
 }
 
+impl Default for ClientConfig {
+	fn default() -> Self {
+		Self {
+			bind: "[::]:0".parse().unwrap(),
+			tls: ClientTls::default(),
+			websocket: ClientWebSocket::default(),
+		}
+	}
+}
+
+/// Client for establishing MoQ connections over QUIC, WebTransport, or WebSocket.
+///
+/// Create via [`ClientConfig::init`] or [`Client::new`].
 #[derive(Clone)]
 pub struct Client {
 	pub quic: quinn::Endpoint,
 	pub tls: rustls::ClientConfig,
 	pub transport: Arc<quinn::TransportConfig>,
+	pub websocket_delay: Option<time::Duration>,
+	#[cfg(feature = "iroh")]
+	pub iroh: Option<iroh::Endpoint>,
 }
 
 impl Client {
@@ -135,10 +185,89 @@ impl Client {
 		let quic =
 			quinn::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
 
-		Ok(Self { quic, tls, transport })
+		Ok(Self {
+			quic,
+			tls,
+			transport,
+			websocket_delay: config.websocket.delay,
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		})
 	}
 
-	pub async fn connect(&self, mut url: Url) -> anyhow::Result<web_transport_quinn::Session> {
+	#[cfg(feature = "iroh")]
+	pub fn with_iroh(&mut self, iroh: Option<iroh::Endpoint>) -> &mut Self {
+		self.iroh = iroh;
+		self
+	}
+
+	/// Establish a WebTransport/QUIC connection followed by a MoQ handshake.
+	pub async fn connect(
+		&self,
+		url: Url,
+		publish: impl Into<Option<moq_lite::OriginConsumer>>,
+		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
+	) -> anyhow::Result<moq_lite::Session> {
+		#[cfg(feature = "iroh")]
+		if crate::iroh::is_iroh_url(&url) {
+			let session = self.connect_iroh(url).await?;
+			let session = moq_lite::Session::connect(session, publish, subscribe).await?;
+			return Ok(session);
+		}
+
+		let session = self.connect_quic(url).await?;
+		let session = moq_lite::Session::connect(session, publish, subscribe).await?;
+		Ok(session)
+	}
+
+	/// Establish a WebTransport/QUIC connection or a WebSocket connection, whichever is available first.
+	///
+	/// Establishes a MoQ handshake on the winning transport.
+	pub async fn connect_with_fallback(
+		&self,
+		url: Url,
+		publish: impl Into<Option<moq_lite::OriginConsumer>>,
+		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
+	) -> anyhow::Result<moq_lite::Session> {
+		#[cfg(feature = "iroh")]
+		if crate::iroh::is_iroh_url(&url) {
+			let session = self.connect_iroh(url).await?;
+			let session = moq_lite::Session::connect(session, publish, subscribe).await?;
+			return Ok(session);
+		}
+
+		// Create futures for both possible protocols
+		let quic_url = url.clone();
+		let quic_handle = async {
+			match self.connect_quic(quic_url).await {
+				Ok(session) => Some(session),
+				Err(err) => {
+					tracing::warn!(%err, "QUIC connection failed");
+					None
+				}
+			}
+		};
+
+		let ws_handle = async {
+			match self.connect_websocket(url).await {
+				Ok(session) => Some(session),
+				Err(err) => {
+					tracing::warn!(%err, "WebSocket connection failed");
+					None
+				}
+			}
+		};
+
+		// Race the connection futures
+		Ok(tokio::select! {
+			Some(quic) = quic_handle => moq_lite::Session::connect(quic, publish, subscribe).await?,
+			Some(ws) = ws_handle => moq_lite::Session::connect(ws, publish, subscribe).await?,
+			// If both attempts fail, return an error
+			else => anyhow::bail!("failed to connect to server"),
+		})
+	}
+
+	async fn connect_quic(&self, mut url: Url) -> anyhow::Result<web_transport_quinn::Session> {
 		let mut config = self.tls.clone();
 
 		let host = url.host().context("invalid DNS name")?.to_string();
@@ -201,6 +330,99 @@ impl Client {
 			_ => unreachable!("ALPN was checked above"),
 		};
 
+		Ok(session)
+	}
+
+	async fn connect_websocket(&self, mut url: Url) -> anyhow::Result<web_transport_ws::Session> {
+		let host = url.host_str().context("missing hostname")?.to_string();
+		let port = url.port().unwrap_or_else(|| match url.scheme() {
+			"https" | "wss" | "moql" | "moqt" => 443,
+			"http" | "ws" => 80,
+			_ => 443,
+		});
+		let key = (host, port);
+
+		// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
+		// unless we've already had to fall back to WebSockets for this server.
+		// TODO if let chain
+		match self.websocket_delay {
+			Some(delay) if !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
+				tokio::time::sleep(delay).await;
+				tracing::debug!(%url, delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
+			}
+			_ => {}
+		}
+
+		// Convert URL scheme: http:// -> ws://, https:// -> wss://
+		let needs_tls = match url.scheme() {
+			"http" => {
+				url.set_scheme("ws").expect("failed to set scheme");
+				false
+			}
+			"https" | "moql" | "moqt" => {
+				url.set_scheme("wss").expect("failed to set scheme");
+				true
+			}
+			"ws" => false,
+			"wss" => true,
+			_ => anyhow::bail!("unsupported URL scheme for WebSocket: {}", url.scheme()),
+		};
+
+		tracing::debug!(%url, "connecting via WebSocket");
+
+		// Use the existing TLS config (which respects tls-disable-verify) for secure connections
+		let connector = if needs_tls {
+			Some(tokio_tungstenite::Connector::Rustls(Arc::new(self.tls.clone())))
+		} else {
+			None
+		};
+
+		// Connect using tokio-tungstenite
+		let (ws_stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
+			url.as_str(),
+			Some(tungstenite::protocol::WebSocketConfig {
+				max_message_size: Some(64 << 20), // 64 MB
+				max_frame_size: Some(16 << 20),   // 16 MB
+				accept_unmasked_frames: false,
+				..Default::default()
+			}),
+			false, // disable_nagle
+			connector,
+		)
+		.await
+		.context("failed to connect WebSocket")?;
+
+		// Wrap WebSocket in WebTransport compatibility layer
+		// Similar to what the relay does: web_transport_ws::Session::new(socket, true)
+		let session = web_transport_ws::Session::new(ws_stream, false);
+
+		tracing::warn!(%url, "using WebSocket fallback");
+		WEBSOCKET_WON.lock().unwrap().insert(key);
+
+		Ok(session)
+	}
+
+	#[cfg(feature = "iroh")]
+	async fn connect_iroh(&self, url: Url) -> anyhow::Result<web_transport_iroh::Session> {
+		let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
+		let alpn = match url.scheme() {
+			"moql+iroh" | "iroh" => moq_lite::lite::ALPN,
+			"moqt+iroh" => moq_lite::ietf::ALPN,
+			"h3+iroh" => web_transport_iroh::ALPN_H3,
+			_ => anyhow::bail!("Invalid URL: unknown scheme"),
+		};
+		let host = url.host().context("Invalid URL: missing host")?.to_string();
+		let endpoint_id: iroh::EndpointId = host.parse().context("Invalid URL: host is not an iroh endpoint id")?;
+		let conn = endpoint.connect(endpoint_id, alpn.as_bytes()).await?;
+		let session = match alpn {
+			web_transport_iroh::ALPN_H3 => {
+				// We need to change the scheme to `https` because currently web_transport_iroh only
+				// accepts that scheme.
+				let url = url_set_scheme(url, "https")?;
+				web_transport_iroh::Session::connect_h3(conn, url).await?
+			}
+			_ => web_transport_iroh::Session::raw(conn),
+		};
 		Ok(session)
 	}
 }
@@ -294,4 +516,21 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
 		self.provider.signature_verification_algorithms.supported_schemes()
 	}
+}
+
+/// Returns a new URL with a changed scheme.
+///
+/// [`Url::set_scheme`] returns an error if the scheme change is not valid according to
+/// [the URL specification's section on legal scheme state overrides](https://url.spec.whatwg.org/#scheme-state).
+///
+/// This function allows all scheme changes, as long as the resulting URL is valid.
+#[cfg(feature = "iroh")]
+fn url_set_scheme(url: Url, scheme: &str) -> anyhow::Result<Url> {
+	let url = format!(
+		"{}:{}",
+		scheme,
+		url.to_string().split_once(":").context("invalid URL")?.1
+	)
+	.parse()?;
+	Ok(url)
 }

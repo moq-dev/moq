@@ -1,5 +1,5 @@
 import "./highlight";
-import "@moq/hang-ui/publish/element";
+import "@moq/hang-ui/publish";
 
 // We need to import Web Components with fully-qualified paths because of tree-shaking.
 import HangPublish from "@moq/hang/publish/element";

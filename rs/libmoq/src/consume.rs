@@ -5,7 +5,7 @@ use moq_lite::coding::Buf;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{moq_audio_config, moq_frame, moq_video_config, Error, Id, NonZeroSlab, State};
+use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_video_config};
 
 struct ConsumeCatalog {
 	broadcast: hang::BroadcastConsumer,
@@ -277,10 +277,16 @@ impl Consume {
 		let frame = self.frame.get(frame).ok_or(Error::NotFound)?;
 		let chunk = frame.payload.get_chunk(index).ok_or(Error::NoIndex)?;
 
+		let timestamp_us = frame
+			.timestamp
+			.as_micros()
+			.try_into()
+			.map_err(|_| moq_lite::TimeOverflow)?;
+
 		*dst = moq_frame {
 			payload: chunk.as_ptr(),
 			payload_size: chunk.len(),
-			timestamp_us: frame.timestamp.as_micros(),
+			timestamp_us,
 			keyframe: frame.keyframe,
 		};
 

@@ -3,10 +3,7 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_native to configure a logger.
-	moq_native::Log {
-		level: tracing::Level::DEBUG,
-	}
-	.init();
+	moq_native::Log::new(tracing::Level::DEBUG).init();
 
 	// Create an origin that we can publish to and the session can consume from.
 	let origin = moq_lite::Origin::produce();
@@ -23,19 +20,16 @@ async fn main() -> anyhow::Result<()> {
 // Connect to the server and publish our origin of broadcasts.
 async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
-	let config = moq_native::ClientConfig::default();
-	let client = moq_native::Client::new(config)?;
+	let client = moq_native::ClientConfig::default().init()?;
 
 	// For local development, use: http://localhost:4443/anon
 	// The "anon" path is usually configured to bypass authentication; be careful!
 	let url = url::Url::parse("https://cdn.moq.dev/anon/chat-example").unwrap();
 
-	// Establish a WebTransport/QUIC connection.
-	let connection = client.connect(url).await?;
-
-	// Perform the MoQ handshake.
-	// None means we're not consuming anything from the session, otherwise we would provide an OriginProducer.
-	let session = moq_lite::Session::connect(connection, origin, None).await?;
+	// Establish a WebTransport/QUIC connection and MoQ handshake.
+	// Optional: You could do this as two separate steps, but this is more convenient.
+	// Optional: Use connect_with_fallback if you also want to support WebSocket too.
+	let session = client.connect(url, origin, None).await?;
 
 	// Wait until the session is closed.
 	session.closed().await.map_err(Into::into)

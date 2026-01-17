@@ -1,4 +1,4 @@
-use crate::{coding::*, Path};
+use crate::{Path, coding::*};
 
 /// Helper function to encode namespace as tuple of strings
 pub fn encode_namespace<W: bytes::BufMut, V: Clone>(w: &mut W, namespace: &Path, version: V) {

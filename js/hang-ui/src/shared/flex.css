@@ -1,0 +1,9 @@
+:is(.flex--center) {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+}
+
+:is(.flex--align-center) {
+	align-items: center;
+}
