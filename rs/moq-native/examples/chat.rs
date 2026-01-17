@@ -3,10 +3,7 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_native to configure a logger.
-	moq_native::Log {
-		level: tracing::Level::DEBUG,
-	}
-	.init();
+	moq_native::Log::new(tracing::Level::DEBUG).init();
 
 	// Create an origin that we can publish to and the session can consume from.
 	let origin = moq_lite::Origin::produce();

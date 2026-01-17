@@ -17,6 +17,7 @@ static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(||
 /// TLS configuration for the client.
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ClientTls {
 	/// Use the TLS root at this path, encoded as PEM.
 	///
@@ -42,6 +43,7 @@ pub struct ClientTls {
 /// WebSocket configuration for the client.
 #[derive(Clone, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ClientWebSocket {
 	/// Delay in milliseconds before attempting WebSocket fallback (default: 200)
 	/// If WebSocket won the previous race for a given server, this will be 0.
@@ -68,6 +70,7 @@ impl Default for ClientWebSocket {
 /// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ClientConfig {
 	/// Listen for UDP packets on the given address.
 	#[arg(

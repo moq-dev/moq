@@ -10,6 +10,7 @@ pub use iroh::Endpoint as IrohEndpoint;
 
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct IrohEndpointConfig {
 	/// Whether to enable iroh support.
 	///

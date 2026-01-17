@@ -95,9 +95,7 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 	ffi::enter(move || {
 		match unsafe { ffi::parse_str(level, level_len)? } {
 			"" => moq_native::Log::default(),
-			level => moq_native::Log {
-				level: Level::from_str(level)?,
-			},
+			level => moq_native::Log::new(Level::from_str(level)?),
 		}
 		.init();
 
