@@ -79,7 +79,9 @@ pub struct Auth {
 
 impl Drop for Auth {
 	fn drop(&mut self) {
-		if let Some(handle) = self.refresh_task.as_deref() {
+		if let Some(handle) = self.refresh_task.as_ref()
+			&& Arc::strong_count(handle) == 1
+		{
 			handle.abort();
 		}
 	}

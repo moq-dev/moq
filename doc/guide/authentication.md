@@ -13,7 +13,7 @@ The MoQ Relay authenticates via JWT-based tokens. Generally there are two differ
 
 1. Generate a secret key:
 ```bash
-moq-token --key root.jwk generate --algorithm RS256
+moq-token --key root.jwk generate --algorithm HS256
 ```
 :::details You can also choose a different algorithm
 - HS256
@@ -79,7 +79,7 @@ moq-token --key private.jwk sign \
 
 ## JWK set authentication
 
-Instead of storing a public key locally in a file, it may also be retrieved from a server hosting a JWK set. This can be a very simple static site serving a JSON file, or a fully OIDC compliant Identity Provider. That way you can easily implement automatic key rotation.
+Instead of storing a public key locally in a file, it may also be retrieved from a server hosting a JWK set. This can be a simple static site serving a JSON file, or a fully OIDC compliant Identity Provider. That way you can easily implement automatic key rotation.
 
 ::: info
 This approach only works with asymmetric authentication.

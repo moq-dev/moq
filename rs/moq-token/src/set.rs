@@ -3,6 +3,7 @@ use anyhow::Context;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// JWK Set to spec <https://datatracker.ietf.org/doc/html/rfc7517#section-5>
 #[derive(Default, Clone)]
@@ -120,8 +121,14 @@ impl KeySet {
 
 #[cfg(feature = "jwks-loader")]
 pub async fn load_keys(jwks_uri: &str) -> anyhow::Result<KeySet> {
-	// Fetch the JWKS JSON
-	let jwks_json = reqwest::get(jwks_uri)
+	let client = reqwest::Client::builder()
+		.timeout(Duration::from_secs(10))
+		.build()
+		.context("failed to build reqwest client")?;
+
+	let jwks_json = client
+		.get(jwks_uri)
+		.send()
 		.await
 		.with_context(|| format!("failed to GET JWKS from {}", jwks_uri))?
 		.error_for_status()
