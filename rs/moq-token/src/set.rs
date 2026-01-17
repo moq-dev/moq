@@ -81,10 +81,7 @@ impl KeySet {
 	}
 
 	pub fn find_key(&self, kid: &str) -> Option<Arc<Key>> {
-		self.keys
-			.iter()
-			.find(|k| k.kid.is_some() && k.kid.as_deref().unwrap() == kid)
-			.cloned()
+		self.keys.iter().find(|k| k.kid.as_deref() == Some(kid)).cloned()
 	}
 
 	pub fn find_supported_key(&self, operation: &KeyOperation) -> Option<Arc<Key>> {

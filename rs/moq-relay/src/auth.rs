@@ -94,6 +94,11 @@ impl Auth {
 				tracing::info!("found new JWK \"{}\"", new_key.kid.as_deref().unwrap())
 			}
 		}
+		for old_key in previous.keys.iter() {
+			if old_key.kid.is_some() && !new.keys.iter().any(|k| k.kid == old_key.kid) {
+				tracing::info!("removed JWK \"{}\"", old_key.kid.as_deref().unwrap())
+			}
+		}
 	}
 
 	async fn refresh_key_set(jwks_uri: &str, key_set: &Mutex<KeySet>) -> anyhow::Result<()> {
