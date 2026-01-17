@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
 		client.with_iroh(iroh);
 	}
 
-	let auth = config.auth.init()?;
+	let auth = config.auth.init().await?;
 
 	let cluster = Cluster::new(config.cluster, client);
 	let cloned = cluster.clone();
