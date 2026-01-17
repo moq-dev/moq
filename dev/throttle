@@ -16,26 +16,60 @@ PF_ANCHOR="moq-throttle"
 PF_CONF="/etc/pf.conf"
 PF_BACKUP="/tmp/pf.conf.backup"
 
+# State tracking
+PF_WAS_ENABLED=""
+CLEANUP_DONE=""
+
+capture_pf_state() {
+    if sudo pfctl -s info 2>/dev/null | grep -q "Status: Enabled"; then
+        PF_WAS_ENABLED="yes"
+    else
+        PF_WAS_ENABLED="no"
+    fi
+}
+
 cleanup() {
+    local exit_code=$?
+
+    # Guard against running cleanup multiple times
+    [ -n "$CLEANUP_DONE" ] && return
+    CLEANUP_DONE="yes"
+
     echo ""
     echo "Stopping network throttle..."
+
+    # Flush anchor rules
     sudo pfctl -a "$PF_ANCHOR" -F all 2>/dev/null || true
+
+    # Delete dummynet pipe
     sudo dnctl pipe $PIPE_NUM delete 2>/dev/null || true
+
+    # Restore original PF config
     if [ -f "$PF_BACKUP" ]; then
         sudo cp "$PF_BACKUP" "$PF_CONF"
         sudo pfctl -f "$PF_CONF" 2>/dev/null || true
         sudo rm "$PF_BACKUP"
     fi
+
+    # Restore PF enabled/disabled state (only disable if we enabled it)
+    if [ "$PF_WAS_ENABLED" = "no" ]; then
+        sudo pfctl -d 2>/dev/null || true
+    fi
+
     echo "Throttling disabled."
-    exit 0
+    exit "$exit_code"
 }
 
-trap cleanup SIGINT SIGTERM
+# Register cleanup for all exit paths
+trap cleanup EXIT
 
 echo "Starting network throttle..."
 echo "  Bandwidth: $BANDWIDTH"
 echo "  Delay: $DELAY"
 echo "  Queue: $QUEUE packets"
+
+# Capture PF state before any changes
+capture_pf_state
 
 # Back up pf.conf
 sudo cp "$PF_CONF" "$PF_BACKUP"
@@ -50,9 +84,13 @@ sudo cp "$PF_CONF" "$PF_BACKUP"
 # Configure dummynet pipe
 sudo dnctl pipe $PIPE_NUM config bw "$BANDWIDTH" delay "$DELAY" queue "$QUEUE"
 
-# Load modified pf config and enable
+# Load modified pf config
 sudo pfctl -f "$PF_CONF" 2>/dev/null
-sudo pfctl -E 2>/dev/null || true
+
+# Enable PF if it wasn't already enabled
+if [ "$PF_WAS_ENABLED" = "no" ]; then
+    sudo pfctl -E 2>/dev/null || true
+fi
 
 # Add throttling rules for outbound UDP only
 echo "dummynet out proto udp all pipe $PIPE_NUM" | sudo pfctl -a "$PF_ANCHOR" -f -
