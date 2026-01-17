@@ -26,7 +26,7 @@ yarn add @moq/lite
 # etc
 ```
 
-## Server side usage
+## Server-side usage
 
 `@moq/lite` works on both browsers and servers, however in JS/TS server environments (Node, Bun, Deno) WebTransport is not yet available, so `@moq/lite` will default to WebSockets communication with the relay.
 
