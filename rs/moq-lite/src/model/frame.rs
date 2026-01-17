@@ -1,9 +1,12 @@
-use std::ops::Deref;
+use std::{ops::Deref, task::Poll};
 
 use bytes::{Bytes, BytesMut};
 
 use super::{Consumer, Produce, Producer};
-use crate::{Error, Result, Time};
+use crate::{
+	model::waiter::{waiter_fn, Waiter},
+	Error, Time,
+};
 
 /// A unit of data, representing a point in time.
 ///
@@ -21,7 +24,7 @@ pub struct Frame {
 	///
 	/// This may be used by the application as a replacement for "presentation timestamp", even across tracks.
 	/// However, the lack of granularity and inability to go backwards limits its usefulness.
-	pub instant: Time,
+	pub timestamp: Time,
 
 	/// The size of the frame in bytes.
 	pub size: usize,
@@ -31,7 +34,7 @@ impl Frame {
 	/// A helper to create a frame with the current time.
 	pub fn new(size: usize) -> Self {
 		Self {
-			instant: Time::now(),
+			timestamp: Time::now(),
 			size,
 		}
 	}
@@ -47,7 +50,7 @@ impl Frame {
 impl From<usize> for Frame {
 	fn from(size: usize) -> Self {
 		Self {
-			instant: Time::now(),
+			timestamp: Time::now(),
 			size,
 		}
 	}
@@ -58,7 +61,7 @@ struct FrameState {
 	// The chunks that has been written thus far
 	chunks: Vec<Bytes>,
 
-	// Sanity check to ensure we don't write more than the frame size.
+	// The remaining size to write.
 	remaining: usize,
 }
 
@@ -70,10 +73,58 @@ impl FrameState {
 		}
 	}
 
-	fn write_chunk(&mut self, chunk: Bytes) -> Result<()> {
+	fn write_chunk(&mut self, chunk: Bytes) -> Result<(), Error> {
 		self.remaining = self.remaining.checked_sub(chunk.len()).ok_or(Error::WrongSize)?;
 		self.chunks.push(chunk);
 		Ok(())
+	}
+
+	fn read_chunk(&self, index: &mut usize) -> Poll<Option<Bytes>> {
+		if let Some(chunk) = self.chunks.get(*index).cloned() {
+			*index += 1;
+			return Poll::Ready(Some(chunk));
+		}
+
+		if self.remaining == 0 {
+			return Poll::Ready(None);
+		}
+
+		Poll::Pending
+	}
+
+	// Read all of the remaining chunks into a vector.
+	fn read_chunks(&self, index: &mut usize) -> Poll<Vec<Bytes>> {
+		if self.remaining != 0 {
+			return Poll::Pending;
+		}
+
+		// Get all of the remaining chunks.
+		let chunks = &self.chunks[*index..];
+		*index = self.chunks.len();
+
+		Poll::Ready(chunks.to_vec())
+	}
+
+	fn read_all(&self, index: &mut usize) -> Poll<Bytes> {
+		if self.remaining != 0 {
+			return Poll::Pending;
+		}
+
+		let chunks = &self.chunks[*index..];
+		*index = self.chunks.len();
+
+		// We know the final size so we can allocate the buffer upfront.
+		let size = chunks.iter().map(Bytes::len).sum();
+
+		// We know the final size so we can allocate the buffer upfront.
+		let mut buf = BytesMut::with_capacity(size);
+
+		// Copy the chunks into the buffer.
+		for chunk in chunks {
+			buf.extend_from_slice(chunk);
+		}
+
+		Poll::Ready(buf.freeze())
 	}
 }
 
@@ -98,19 +149,20 @@ impl FrameProducer {
 		&self.info
 	}
 
-	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
-		self.state.modify(|state| state.write_chunk(chunk.into()))?
+	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<(), Error> {
+		self.state.modify()?.write_chunk(chunk.into())
 	}
 
-	pub fn close(&mut self) -> Result<()> {
+	/// Optional: Sanity check to ensure that all data has been written.
+	pub fn final_chunk(&mut self) -> Result<(), Error> {
 		if self.state.borrow().remaining != 0 {
 			return Err(Error::WrongSize);
 		}
-		self.state.close()
+		Ok(())
 	}
 
-	pub fn abort(&mut self, err: Error) -> Result<()> {
-		self.state.abort(err)
+	pub fn abort(self, err: Error) -> Result<(), Error> {
+		self.state.close(err)
 	}
 
 	/// Create a new consumer for the frame.
@@ -159,57 +211,30 @@ impl FrameConsumer {
 	}
 
 	/// Return the next chunk.
-	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
-		let state = self
-			.state
-			.wait_for(|state| state.chunks.get(self.index).is_some())
-			.await?;
+	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>, Error> {
+		waiter_fn(move |waiter| self.poll_read_chunk(waiter)).await
+	}
 
-		if let Some(chunk) = state.chunks.get(self.index).cloned() {
-			self.index += 1;
-			Ok(Some(chunk))
-		} else {
-			Ok(None)
-		}
+	pub fn poll_read_chunk(&mut self, waiter: &Waiter<'_>) -> Poll<Result<Option<Bytes>, Error>> {
+		self.state.poll(waiter, |state| state.read_chunk(&mut self.index))
 	}
 
 	/// Read all of the remaining chunks into a vector.
-	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>> {
-		// Wait until the writer is done before even attempting to read.
-		// That way this function can be cancelled without consuming half of the frame.
-		self.state.closed().await?;
+	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>, Error> {
+		waiter_fn(move |waiter| self.poll_read_chunks(waiter)).await
+	}
 
-		// Get all of the remaining chunks.
-		let state = self.state.borrow();
-		let chunks = state.chunks[self.index..].to_vec();
-		self.index = state.chunks.len();
-
-		Ok(chunks)
+	pub fn poll_read_chunks(&mut self, waiter: &Waiter<'_>) -> Poll<Result<Vec<Bytes>, Error>> {
+		self.state.poll(waiter, |state| state.read_chunks(&mut self.index))
 	}
 
 	/// Return all of the remaining chunks concatenated together.
-	pub async fn read_all(&mut self) -> Result<Bytes> {
-		// Wait until the writer is done before even attempting to read.
-		// That way this function can be cancelled without consuming half of the frame.
-		self.state.closed().await?;
+	pub async fn read_all(&mut self) -> Result<Bytes, Error> {
+		waiter_fn(move |waiter| self.poll_read_all(waiter)).await
+	}
 
-		// Get all of the remaining chunks.
-		let state = self.state.borrow();
-		let chunks = &state.chunks[self.index..];
-		self.index = state.chunks.len();
-
-		// We know the final size so we can allocate the buffer upfront.
-		let size = chunks.iter().map(Bytes::len).sum();
-
-		// We know the final size so we can allocate the buffer upfront.
-		let mut buf = BytesMut::with_capacity(size);
-
-		// Copy the chunks into the buffer.
-		for chunk in chunks {
-			buf.extend_from_slice(chunk);
-		}
-
-		Ok(buf.freeze())
+	pub fn poll_read_all(&mut self, waiter: &Waiter<'_>) -> Poll<Result<Bytes, Error>> {
+		self.state.poll(waiter, |state| state.read_all(&mut self.index))
 	}
 }
 
@@ -229,7 +254,7 @@ mod tests {
 	fn test_frame_new() {
 		let frame = Frame::new(100);
 		assert_eq!(frame.size, 100);
-		assert!(frame.instant > Time::ZERO);
+		assert!(frame.timestamp > Time::ZERO);
 	}
 
 	#[test]
@@ -241,7 +266,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_frame_write_read_single_chunk() {
 		let frame = Frame {
-			instant: Time::from_millis(100).unwrap(),
+			timestamp: Time::from_millis(100).unwrap(),
 			size: 10,
 		};
 
@@ -252,7 +277,7 @@ mod tests {
 		producer.write_chunk(Bytes::from("hello world")).unwrap_err(); // Too big
 		producer.write_chunk(Bytes::from("hello")).unwrap();
 		producer.write_chunk(Bytes::from("world")).unwrap();
-		producer.close().unwrap();
+		producer.final_chunk().unwrap();
 
 		// Read data
 		let chunk1 = consumer.read_chunk().await.unwrap().unwrap();
@@ -269,7 +294,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_frame_read_all() {
 		let frame = Frame {
-			instant: Time::from_millis(100).unwrap(),
+			timestamp: Time::from_millis(100).unwrap(),
 			size: 10,
 		};
 
@@ -278,7 +303,7 @@ mod tests {
 
 		producer.write_chunk(Bytes::from("hello")).unwrap();
 		producer.write_chunk(Bytes::from("world")).unwrap();
-		producer.close().unwrap();
+		producer.final_chunk().unwrap();
 
 		let all = consumer.read_all().await.unwrap();
 		assert_eq!(all, Bytes::from("helloworld"));
@@ -287,7 +312,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_frame_read_chunks() {
 		let frame = Frame {
-			instant: Time::from_millis(100).unwrap(),
+			timestamp: Time::from_millis(100).unwrap(),
 			size: 10,
 		};
 
@@ -296,7 +321,7 @@ mod tests {
 
 		producer.write_chunk(Bytes::from("hello")).unwrap();
 		producer.write_chunk(Bytes::from("world")).unwrap();
-		producer.close().unwrap();
+		producer.final_chunk().unwrap();
 
 		let chunks = consumer.read_chunks().await.unwrap();
 		assert_eq!(chunks.len(), 2);
@@ -307,7 +332,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_frame_wrong_size_too_large() {
 		let frame = Frame {
-			instant: Time::from_millis(100).unwrap(),
+			timestamp: Time::from_millis(100).unwrap(),
 			size: 5,
 		};
 
@@ -322,7 +347,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_frame_wrong_size_too_small() {
 		let frame = Frame {
-			instant: Time::from_millis(100).unwrap(),
+			timestamp: Time::from_millis(100).unwrap(),
 			size: 10,
 		};
 
@@ -330,14 +355,14 @@ mod tests {
 		producer.write_chunk(Bytes::from("hello")).unwrap();
 
 		// Try to close before writing all data
-		let result = producer.close();
+		let result = producer.final_chunk();
 		assert!(result.is_err());
 	}
 
 	#[tokio::test]
 	async fn test_frame_multiple_consumers() {
 		let frame = Frame {
-			instant: Time::from_millis(100).unwrap(),
+			timestamp: Time::from_millis(100).unwrap(),
 			size: 10,
 		};
 
@@ -347,7 +372,7 @@ mod tests {
 
 		producer.write_chunk(Bytes::from("hello")).unwrap();
 		producer.write_chunk(Bytes::from("world")).unwrap();
-		producer.close().unwrap();
+		producer.final_chunk().unwrap();
 
 		// Both consumers should get all data
 		let data1 = consumer1.read_all().await.unwrap();
@@ -359,7 +384,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_frame_abort() {
 		let frame = Frame {
-			instant: Time::from_millis(100).unwrap(),
+			timestamp: Time::from_millis(100).unwrap(),
 			size: 10,
 		};
 
@@ -377,13 +402,13 @@ mod tests {
 	#[tokio::test]
 	async fn test_frame_produce_helper() {
 		let frame = Frame {
-			instant: Time::from_millis(100).unwrap(),
+			timestamp: Time::from_millis(100).unwrap(),
 			size: 5,
 		};
 
 		let mut pair = frame.produce();
 		pair.producer.write_chunk(Bytes::from("hello")).unwrap();
-		pair.producer.close().unwrap();
+		pair.producer.final_chunk().unwrap();
 
 		let data = pair.consumer.read_all().await.unwrap();
 		assert_eq!(data, Bytes::from("hello"));

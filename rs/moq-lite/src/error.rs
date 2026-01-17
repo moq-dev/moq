@@ -89,6 +89,9 @@ pub enum Error {
 
 	#[error("dropped")]
 	Dropped,
+
+	#[error("closed")]
+	Closed,
 }
 
 impl Error {
@@ -118,6 +121,7 @@ impl Error {
 			Self::TimeOverflow(_) => 23,
 			Self::App(app) => *app + 64,
 			Self::Dropped => 24,
+			Self::Closed => 25,
 		}
 	}
 }

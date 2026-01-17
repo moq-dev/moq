@@ -211,7 +211,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		loop {
 			let group = tokio::select! {
-				Some(group) = track.next_group().transpose() => group,
+				Some(group) = track.any_group().transpose() => group,
 				update = stream.reader.decode_maybe::<lite::SubscribeUpdate>() => {
 					// The stream is closed, so we're done.
 					// TODO also cancel outstanding groups.
@@ -312,9 +312,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 
-			let delta = match frame.instant.checked_sub(instant_max) {
+			let delta = match frame.timestamp.checked_sub(instant_max) {
 				Ok(delta) => {
-					instant_max = frame.instant;
+					instant_max = frame.timestamp;
 					delta
 				}
 				Err(_) => {

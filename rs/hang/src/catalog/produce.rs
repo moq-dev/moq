@@ -101,7 +101,7 @@ impl CatalogConsumer {
 		loop {
 			tokio::select! {
 				biased;
-				Some(track) = async { self.track.as_mut()?.next_group().await.transpose() } => {
+				Some(track) = async { self.track.as_mut()?.any_group().await.transpose() } => {
 					self.group = Some(track?);
 				}
 				Some(frame) = async { self.group.as_mut()?.read_frame().await.transpose() } => {

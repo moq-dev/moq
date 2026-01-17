@@ -376,10 +376,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let mut frame = producer.create_frame(Frame {
 						// Use the receive time as the timestamp.
 						// TODO use an extension instead.
-						instant: crate::Time::now(),
+						timestamp: crate::Time::now(),
 						size: 0,
 					})?;
-					frame.close()?;
+					frame.fin()?;
 				} else if status == 3 && !group.flags.has_end {
 					// End of group
 					break;
@@ -390,7 +390,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let mut frame = producer.create_frame(Frame {
 					// Use the receive time as the timestamp.
 					// TODO use an extension instead
-					instant: crate::Time::now(),
+					timestamp: crate::Time::now(),
 					size,
 				})?;
 
@@ -419,7 +419,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			frame.write_chunk(chunk)?;
 		}
 
-		frame.close()?;
+		frame.fin()?;
 
 		Ok(())
 	}

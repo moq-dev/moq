@@ -84,7 +84,7 @@ impl Subscriber {
 	}
 
 	pub async fn run(mut self) -> anyhow::Result<()> {
-		while let Some(mut group) = self.track.next_group().await? {
+		while let Some(mut group) = self.track.any_group().await? {
 			let base = group
 				.read_frame()
 				.await

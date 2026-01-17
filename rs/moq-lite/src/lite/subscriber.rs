@@ -310,7 +310,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			instant = instant.checked_add(frame.delta)?;
 
 			let mut frame = group.create_frame(Frame {
-				instant,
+				timestamp: instant,
 				size: frame.size,
 			})?;
 
@@ -340,7 +340,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			frame.write_chunk(chunk)?;
 		}
 
-		frame.close()?;
+		frame.fin()?;
 
 		Ok(())
 	}

@@ -9,6 +9,7 @@ mod state;
 mod subscriber;
 mod time;
 mod track;
+mod waiter;
 
 pub use broadcast::*;
 pub use delivery::*;
@@ -21,4 +22,5 @@ pub use subscriber::*;
 pub use time::*;
 pub use track::*;
 
-use state::*;
+pub(crate) use state::*;
+pub(crate) use waiter::*;

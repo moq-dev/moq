@@ -44,7 +44,7 @@ impl Container {
 			size,
 			// NOTE: We encode the timestamp into the MoQ layer as well.
 			// The MoQ layer uses milliseconds, so we convert from our microsecond timestamp.
-			instant: self.timestamp.convert().expect("timestamp conversion overflow"),
+			timestamp: self.timestamp.convert().expect("timestamp conversion overflow"),
 		};
 
 		let mut chunked = group.create_frame(frame)?;
@@ -52,7 +52,7 @@ impl Container {
 		for chunk in &self.payload {
 			chunked.write_chunk(chunk.clone())?;
 		}
-		chunked.close()?;
+		chunked.fin()?;
 
 		Ok(())
 	}

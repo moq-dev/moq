@@ -1,299 +1,320 @@
 use std::{
-	fmt,
-	future::Future,
-	ops::Deref,
-	sync::{
-		atomic::{self, AtomicUsize},
-		Arc,
-	},
+	ops::{Deref, DerefMut},
+	sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+	task::Poll,
 };
 
-use tokio::sync::watch;
+use crate::{
+	model::waiter::{waiter_fn, Waiter, WaiterList},
+	Error,
+};
 
-use crate::Error;
-
-#[derive(Default)]
+#[derive(Debug)]
 struct State<T> {
 	value: T,
-	closed: Option<Result<(), Error>>,
+	waiters: WaiterList,
+	closed: Result<(), Error>,
+	producers: usize,
+	consumers: usize,
 }
 
-pub struct Producer<T> {
-	state: watch::Sender<State<T>>,
-	active: Arc<AtomicUsize>,
-}
-
-impl<T> Producer<T> {
-	pub fn new(value: T) -> Self {
-		Self {
-			state: watch::Sender::new(State { value, closed: None }),
-			active: Arc::new(AtomicUsize::new(1)),
-		}
-	}
-
-	pub fn consume(&self) -> Consumer<T> {
-		Consumer::new(self.state.subscribe())
-	}
-
-	pub fn close(&mut self) -> Result<(), Error> {
-		let mut res = Ok(());
-
-		self.state.send_if_modified(|state| {
-			if let Some(Err(err)) = state.closed.clone() {
-				res = Err(err);
-				return false;
-			}
-
-			state.closed = Some(Ok(()));
-			true
-		});
-
-		res
-	}
-
-	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
-		let mut res = Ok(());
-
-		self.state.send_if_modified(|state| {
-			if let Some(Err(closed)) = state.closed.clone() {
-				res = Err(closed);
-				return false;
-			}
-
-			state.closed = Some(Err(err));
-			true
-		});
-
-		res
-	}
-
-	pub fn modify<F, R>(&self, modify: F) -> Result<R, Error>
-	where
-		F: FnOnce(&mut T) -> R,
-	{
-		// Will be overwritten.
-		let mut result = Err(Error::Cancel);
-
-		self.state.send_if_modified(|state| {
-			if let Some(Err(err)) = state.closed.clone() {
-				result = Err(err);
-				false
-			} else {
-				result = Ok(modify(&mut state.value));
-				true
-			}
-		});
-
-		result
-	}
-
-	pub fn borrow(&self) -> Ref<'_, T> {
-		Ref {
-			inner: self.state.borrow(),
-		}
-	}
-
-	/// Block until there are no more consumers
-	pub fn unused(&self) -> impl Future<Output = ()> {
-		let state = self.state.clone();
-		async move { state.closed().await }
-	}
-
-	pub fn weak(&self) -> ProducerWeak<T> {
-		ProducerWeak {
-			state: self.state.clone(),
-			active: self.active.clone(),
-		}
-	}
-
-	pub fn is_clone(&self, other: &Self) -> bool {
-		self.state.same_channel(&other.state)
-	}
-}
-
-impl<T: Default> Default for Producer<T> {
+impl<T: Default> Default for State<T> {
 	fn default() -> Self {
 		Self::new(Default::default())
 	}
 }
 
+impl<T> State<T> {
+	pub fn new(value: T) -> Self {
+		Self {
+			value,
+			closed: Ok(()),
+			producers: 1,
+			consumers: 0,
+			waiters: WaiterList::new(),
+		}
+	}
+
+	pub fn closed(&self) -> Result<(), Error> {
+		self.closed.clone()
+	}
+
+	pub fn is_closed(&self) -> bool {
+		self.closed.is_err()
+	}
+}
+
+impl<T> Deref for State<T> {
+	type Target = T;
+
+	fn deref(&self) -> &Self::Target {
+		&self.value
+	}
+}
+
+impl<T> DerefMut for State<T> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		&mut self.value
+	}
+}
+
+#[derive(Default, Debug)]
+pub struct Producer<T> {
+	state: Arc<RwLock<State<T>>>,
+}
+
+impl<T> Producer<T> {
+	pub fn new(value: T) -> Self {
+		Self {
+			state: Arc::new(RwLock::new(State::new(value))),
+		}
+	}
+
+	pub fn consume(&self) -> Consumer<T> {
+		let mut state = self.state.write().unwrap();
+		state.consumers += 1; // TODO atomic instead?
+
+		Consumer {
+			state: self.state.clone(),
+		}
+	}
+
+	pub fn close(self, err: Error) -> Result<(), Error> {
+		let mut state = self.modify()?;
+		state.closed = Err(err);
+		state.waiters.notify();
+
+		Ok(())
+	}
+
+	pub fn modify(&self) -> Result<ProducerState<'_, T>, Error> {
+		let state = self.state.write().unwrap();
+		state.closed.clone()?;
+		Ok(ProducerState {
+			state: Some(state),
+			modified: false,
+		})
+	}
+
+	/*
+	pub fn poll_modify<F, R>(&self, waiter: &Waiter<'_>, mut f: F) -> Poll<Result<R, Error>>
+	where
+		F: FnMut(&mut ProducerState<'_, T>) -> Poll<R>,
+	{
+		let mut state = self.modify()?;
+		if let Poll::Ready(res) = f(&mut state) {
+			return Poll::Ready(Ok(res));
+		}
+
+		if let Err(err) = state.closed.clone() {
+			return Poll::Ready(Err(err));
+		}
+
+		waiter.register(&state.waiters);
+
+		Poll::Pending
+	}
+	*/
+
+	pub fn poll_closed(&self, waiter: &Waiter<'_>) -> Poll<Error> {
+		let state = self.borrow();
+		if let Err(err) = state.closed.clone() {
+			return Poll::Ready(err);
+		}
+
+		waiter.register(&state.waiters);
+		Poll::Pending
+	}
+
+	pub async fn closed(&self) -> Error {
+		waiter_fn(move |waiter| self.poll_closed(waiter)).await
+	}
+
+	pub fn poll_unused(&self, waiter: &Waiter<'_>) -> Poll<Result<(), Error>> {
+		let state = self.borrow();
+		if state.consumers == 0 {
+			return Poll::Ready(Ok(()));
+		}
+
+		if let Err(err) = state.closed.clone() {
+			return Poll::Ready(Err(err));
+		}
+
+		waiter.register(&state.waiters);
+		Poll::Pending
+	}
+
+	pub async fn unused(&self) -> Result<(), Error> {
+		waiter_fn(move |waiter| self.poll_unused(waiter)).await
+	}
+
+	pub fn borrow(&self) -> ConsumerState<'_, T> {
+		ConsumerState {
+			state: self.state.read().unwrap(),
+		}
+	}
+}
+
+#[derive(Debug)]
+pub struct ProducerState<'a, T> {
+	// Its an option so we can drop it before notifying consumers.
+	state: Option<RwLockWriteGuard<'a, State<T>>>,
+	modified: bool,
+}
+
+impl<'a, T> Deref for ProducerState<'a, T> {
+	type Target = State<T>;
+
+	fn deref(&self) -> &Self::Target {
+		self.state.as_ref().unwrap()
+	}
+}
+
+impl<'a, T> DerefMut for ProducerState<'a, T> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		// If we use the &mut then notify on Drop.
+		self.modified = true;
+		self.state.as_mut().unwrap()
+	}
+}
+
+impl<T> Drop for ProducerState<'_, T> {
+	fn drop(&mut self) {
+		let state = self.state.take().unwrap();
+
+		// Notify that the state was changed after this guard is dropped.
+		if self.modified {
+			state.waiters.notify();
+		}
+	}
+}
+
 impl<T> Clone for Producer<T> {
 	fn clone(&self) -> Self {
-		self.active.fetch_add(1, atomic::Ordering::Relaxed);
+		self.state.write().unwrap().producers += 1;
+
 		Self {
 			state: self.state.clone(),
-			active: self.active.clone(),
 		}
 	}
 }
 
 impl<T> Drop for Producer<T> {
 	fn drop(&mut self) {
-		let active = self.active.fetch_sub(1, atomic::Ordering::Release);
-		if active != 1 {
+		let mut state = self.state.write().unwrap();
+		state.producers -= 1;
+
+		if state.producers > 0 || state.closed.is_ok() {
 			return;
 		}
 
-		atomic::fence(atomic::Ordering::Acquire);
-
-		self.state.send_if_modified(|state| {
-			if state.closed.is_some() {
-				return false;
-			}
-
-			state.closed = Some(Err(Error::Dropped));
-			true
-		});
+		state.closed = Err(Error::Dropped);
+		state.waiters.notify();
 	}
 }
 
-impl<T: fmt::Debug> fmt::Debug for Producer<T> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let state = self.state.borrow();
-		f.debug_struct("Producer")
-			.field("state", &state.value)
-			.field("closed", &state.closed)
-			.finish()
-	}
-}
-
-pub struct ProducerWeak<T> {
-	state: watch::Sender<State<T>>,
-	active: Arc<AtomicUsize>,
-}
-
-impl<T> ProducerWeak<T> {
-	pub fn upgrade(&self) -> Result<Producer<T>, Error> {
-		if let Some(Err(err)) = self.state.borrow().closed.clone() {
-			return Err(err);
-		}
-
-		// Minor race; we could have been closed between the check and the fetch_add.
-		// It doesn't matter though, Producer needs to be responsible for other handles closing at random times.
-		self.active.fetch_add(1, atomic::Ordering::Relaxed);
-
-		let producer = Producer {
-			state: self.state.clone(),
-			active: self.active.clone(),
-		};
-
-		Ok(producer)
-	}
-
-	/*
-	pub fn closed(&self) -> impl Future<Output = Result<(), Error>> {
-		let mut state = self.state.subscribe();
-
-		async move {
-			match state.wait_for(|state| state.closed.is_some()).await {
-				Ok(state) => state.closed.clone().unwrap(),
-				Err(_) => Err(Error::Cancel),
-			}
-		}
-	}
-	*/
-}
-
-impl<T: fmt::Debug> fmt::Debug for ProducerWeak<T> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let state = self.state.borrow();
-		f.debug_struct("ProducerWeak")
-			.field("state", &state.value)
-			.field("closed", &state.closed)
-			.finish()
-	}
-}
-
-impl<T> Clone for ProducerWeak<T> {
-	fn clone(&self) -> Self {
-		Self {
-			state: self.state.clone(),
-			active: self.active.clone(),
-		}
-	}
-}
-
+#[derive(Debug)]
 pub struct Consumer<T> {
-	inner: watch::Receiver<State<T>>,
+	state: Arc<RwLock<State<T>>>,
 }
 
 impl<T> Consumer<T> {
-	fn new(inner: watch::Receiver<State<T>>) -> Self {
-		Self { inner }
-	}
-
-	pub fn closed(&self) -> impl Future<Output = Result<(), Error>> {
-		// TODO Make a more efficient closed() that doesn't clone the inner.
-		let mut inner = self.inner.clone();
-		async move {
-			match inner.wait_for(|state| state.closed.is_some()).await {
-				Ok(state) => state.closed.clone().unwrap(),
-				Err(_) => unreachable!(),
-			}
+	pub fn borrow(&self) -> ConsumerState<'_, T> {
+		ConsumerState {
+			state: self.state.read().unwrap(),
 		}
 	}
 
-	// TODO Make a non-mut wait_for
-	// Returns when the function returns true or we're closed.
-	pub async fn wait_for(&mut self, mut f: impl FnMut(&T) -> bool) -> Result<Ref<'_, T>, Error> {
-		let mut matched = false;
-
-		let state = self
-			.inner
-			.wait_for(|state| {
-				// We always want to check the function first, only returning closed if false.
-				matched = f(&state.value);
-				matched || state.closed.is_some()
-			})
-			.await
-			.expect("not closed properly");
-
-		if !matched {
-			if let Some(Err(err)) = state.closed.clone() {
-				return Err(err);
-			}
+	pub fn poll<F, R>(&self, waiter: &Waiter<'_>, mut f: F) -> Poll<Result<R, Error>>
+	where
+		F: FnMut(&ConsumerState<'_, T>) -> Poll<R>,
+	{
+		let state = self.borrow();
+		if let Poll::Ready(res) = f(&state) {
+			return Poll::Ready(Ok(res));
 		}
 
-		Ok(Ref { inner: state })
-	}
-
-	pub fn borrow(&self) -> Ref<'_, T> {
-		Ref {
-			inner: self.inner.borrow(),
+		if let Err(err) = state.closed.clone() {
+			return Poll::Ready(Err(err));
 		}
+
+		waiter.register(&state.waiters);
+
+		Poll::Pending
 	}
 
-	pub fn is_clone(&self, other: &Self) -> bool {
-		self.inner.same_channel(&other.inner)
+	pub fn poll_closed(&self, waiter: &Waiter<'_>) -> Poll<Error> {
+		let state = self.borrow();
+		if let Err(err) = state.closed.clone() {
+			return Poll::Ready(err);
+		}
+
+		waiter.register(&state.waiters);
+		Poll::Pending
+	}
+
+	pub async fn closed(&self) -> Error {
+		waiter_fn(move |waiter| self.poll_closed(waiter)).await
 	}
 }
 
-impl<T: fmt::Debug> fmt::Debug for Consumer<T> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		let inner = self.inner.borrow();
-		f.debug_struct("Consumer")
-			.field("state", &inner.value)
-			.field("closed", &inner.closed)
-			.finish()
+impl<T> Drop for Consumer<T> {
+	fn drop(&mut self) {
+		let mut state = self.state.write().unwrap();
+
+		state.consumers -= 1;
+		if state.consumers == 0 {
+			state.waiters.notify();
+		}
 	}
 }
 
 impl<T> Clone for Consumer<T> {
 	fn clone(&self) -> Self {
+		self.state.write().unwrap().consumers += 1;
 		Self {
-			inner: self.inner.clone(),
+			state: self.state.clone(),
 		}
 	}
 }
 
-pub struct Ref<'a, T> {
-	inner: tokio::sync::watch::Ref<'a, State<T>>,
+#[derive(Debug)]
+pub struct ConsumerState<'a, T> {
+	state: RwLockReadGuard<'a, State<T>>,
 }
 
-impl<'a, T> Deref for Ref<'a, T> {
-	type Target = T;
+impl<'a, T> Deref for ConsumerState<'a, T> {
+	type Target = State<T>;
 
 	fn deref(&self) -> &Self::Target {
-		&self.inner.value
+		&self.state
+	}
+}
+
+pub struct ProducerConsumer<T> {
+	pub producer: Producer<T>,
+	pub consumer: Consumer<T>,
+}
+
+impl<T> ProducerConsumer<T> {
+	pub fn new(value: T) -> Self {
+		let producer = Producer::new(value);
+		let consumer = producer.consume();
+		Self { producer, consumer }
+	}
+}
+
+impl<T: Default> Default for ProducerConsumer<T> {
+	fn default() -> Self {
+		Self::new(Default::default())
+	}
+}
+
+impl<T> Clone for ProducerConsumer<T> {
+	fn clone(&self) -> Self {
+		Self {
+			producer: self.producer.clone(),
+			consumer: self.consumer.clone(),
+		}
 	}
 }

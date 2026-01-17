@@ -280,7 +280,7 @@ async fn serve_fetch(
 		.subscribe_track(track, moq_lite::Delivery::default())
 		.map_err(|_| StatusCode::NOT_FOUND)?;
 
-	let group = match track.next_group().await {
+	let group = match track.any_group().await {
 		Ok(Some(group)) => group,
 		_ => return Err(StatusCode::NOT_FOUND.into()),
 	};

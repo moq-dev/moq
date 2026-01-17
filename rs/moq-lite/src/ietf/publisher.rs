@@ -187,7 +187,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let group = tokio::select! {
 				biased;
 				_ = &mut cancel => return Ok(()),
-				Some(group) = track.next_group().transpose() => group,
+				Some(group) = track.any_group().transpose() => group,
 				Some(_) = async { Some(old_group.as_mut()?.await) } => {
 					old_group = None;
 					old_sequence = None;
