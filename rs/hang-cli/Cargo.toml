@@ -19,6 +19,7 @@ doc = false
 [features]
 default = ["iroh"]
 iroh = ["moq-native/iroh"]
+playback = ["hang/playback"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]

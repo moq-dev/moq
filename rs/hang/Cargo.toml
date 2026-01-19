@@ -42,6 +42,24 @@ url = "2"
 version = "2"
 features = ["from", "display", "debug"]
 
+[features]
+default = []
+decode = ["dep:ffmpeg-next"]
+render = ["dep:wgpu", "dep:raw-window-handle"]
+playback = ["decode", "render"]
+
+[dependencies.ffmpeg-next]
+version = "7"
+optional = true
+
+[dependencies.wgpu]
+version = "23"
+optional = true
+
+[dependencies.raw-window-handle]
+version = "0.6"
+optional = true
+
 [dev-dependencies]
 anyhow = "1"
 moq-native = { workspace = true }

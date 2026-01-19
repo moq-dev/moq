@@ -19,6 +19,21 @@ We most of the implement the [WebCodecs specification](https://www.w3.org/TR/web
 - **Video:** H.264, H.265, VP8, VP9, AV1
 - **Audio:** AAC, Opus
 
+## Native Playback (Optional)
+
+`hang` now supports native playback through optional feature flags:
+
+- **`decode`**: Decode compressed frames using FFmpeg (requires system FFmpeg)
+- **`render`**: GPU-accelerated video rendering using wgpu
+- **`playback`**: Both decode and render features
+
+```toml
+[dependencies]
+hang = { version = "0.10", features = ["playback"] }
+```
+
+See [PLAYBACK.md](PLAYBACK.md) for detailed documentation on native playback support.
+
 ## CMAF Import
 There's also a `cmaf` module that can import fMP4/CMAF files into a hang broadcast.
 It's crude and doesn't support all features, but it's a good starting point to ingest existing content.
