@@ -2,6 +2,8 @@
 
 The `hang` crate now includes optional native playback support through the `decode` and `render` modules.
 
+> **⚠️ Integration in Progress**: This module is being enhanced with production-ready encoding/decoding from [moq-media](https://github.com/n0-computer/iroh-live/tree/main/moq-media). The current implementation provides basic functionality. See [MOQ_MEDIA_INTEGRATION.md](MOQ_MEDIA_INTEGRATION.md) for details on upcoming improvements including hardware acceleration, encoding support, and better performance.
+
 ## Features
 
 ### `decode` - Frame Decoding (FFmpeg)

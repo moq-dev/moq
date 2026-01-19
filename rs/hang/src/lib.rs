@@ -32,8 +32,14 @@ pub mod catalog;
 pub mod import;
 pub mod model;
 
+#[cfg(any(feature = "decode", feature = "encode"))]
+pub mod av;
+
 #[cfg(feature = "decode")]
 pub mod decode;
+
+#[cfg(feature = "encode")]
+pub mod encode;
 
 #[cfg(feature = "render")]
 pub mod render;

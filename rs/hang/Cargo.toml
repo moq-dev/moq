@@ -44,13 +44,21 @@ features = ["from", "display", "debug"]
 
 [features]
 default = []
-decode = ["dep:ffmpeg-next"]
+decode = ["dep:ffmpeg-next", "dep:image"]
+encode = ["dep:ffmpeg-next", "dep:image"]
 render = ["dep:wgpu", "dep:raw-window-handle"]
 playback = ["decode", "render"]
+full = ["encode", "decode", "render"]
 
 [dependencies.ffmpeg-next]
-version = "7"
+version = "8"
 optional = true
+
+[dependencies.image]
+version = "0.25"
+optional = true
+default-features = false
+features = ["png"]
 
 [dependencies.wgpu]
 version = "23"
