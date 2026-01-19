@@ -9,6 +9,7 @@ use crate::Error;
 /// Supported video codec mimetypes.
 // TODO implement serde for convience
 #[derive(Debug, Clone, PartialEq, Eq, Display, From)]
+#[non_exhaustive]
 pub enum VideoCodec {
 	/// H.264/AVC codec with profile and level information
 	H264(H264),

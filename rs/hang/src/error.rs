@@ -67,6 +67,7 @@ pub enum Error {
 	TimestampBackwards,
 
 	/// An error from the HTTP client.
+	#[cfg(feature = "hls")]
 	#[error("http error: {0}")]
 	Http(Arc<reqwest::Error>),
 
@@ -91,6 +92,7 @@ impl From<serde_json::Error> for Error {
 	}
 }
 
+#[cfg(feature = "hls")]
 impl From<reqwest::Error> for Error {
 	fn from(err: reqwest::Error) -> Self {
 		Error::Http(Arc::new(err))

@@ -11,7 +11,7 @@ default:
 # Install any dependencies.
 install:
 	bun install
-	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit
+	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-hack
 
 # Alias for dev.
 all: dev
@@ -306,6 +306,20 @@ check:
 
 	# Only run the nix checks if nix is installed.
 	if command -v nix &> /dev/null; then nix flake check; fi
+
+# Run comprehensive CI checks including all feature combinations (requires cargo-hack)
+check-all:
+	#!/usr/bin/env bash
+	set -euo pipefail
+
+	# Run the standard checks first
+	just check
+
+	# Test all feature combinations for the hang crate
+	# requires: cargo install cargo-hack
+	echo "Testing all feature combinations for hang..."
+	cargo hack check --package hang --each-feature --no-dev-deps
+	cargo hack test --package hang --each-feature
 
 
 # Run the unit tests
