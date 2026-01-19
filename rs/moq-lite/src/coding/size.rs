@@ -1,8 +1,10 @@
 use std::mem::MaybeUninit;
 
-use bytes::{buf::UninitSlice, Buf, BufMut};
+use bytes::{Buf, BufMut, buf::UninitSlice};
 
-// A BufMut implementation that only counts the size of the buffer
+/// A [BufMut] implementation that only counts the size of the buffer.
+///
+/// Used to calculate the size of a message before encoding it.
 #[derive(Default)]
 pub struct Sizer {
 	pub size: usize,

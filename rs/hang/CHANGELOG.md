@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/moq-dev/moq/compare/hang-v0.9.1...hang-v0.10.0) - 2026-01-10
+
+### Added
+
+- iroh support ([#794](https://github.com/moq-dev/moq/pull/794))
+
+### Other
+
+- Add generic time system with Timescale type ([#824](https://github.com/moq-dev/moq/pull/824))
+- hev1 decoder ([#813](https://github.com/moq-dev/moq/pull/813))
+- support WebSocket fallback for clients ([#812](https://github.com/moq-dev/moq/pull/812))
+- Add Opus decoder ([#811](https://github.com/moq-dev/moq/pull/811))
+
 ## [0.9.1](https://github.com/moq-dev/moq/compare/hang-v0.9.0...hang-v0.9.1) - 2025-12-19
 
 ### Other

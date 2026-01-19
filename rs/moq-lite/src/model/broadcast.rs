@@ -2,8 +2,8 @@ use std::{
 	collections::HashMap,
 	future::Future,
 	sync::{
-		atomic::{AtomicUsize, Ordering},
 		Arc,
+		atomic::{AtomicUsize, Ordering},
 	},
 };
 
@@ -23,6 +23,9 @@ struct State {
 	requested: HashMap<String, TrackProducer>,
 }
 
+/// A collection of media tracks that can be published and subscribed to.
+///
+/// Create via [`Broadcast::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
 #[derive(Clone, Default)]
 pub struct Broadcast {
 	// NOTE: Broadcasts have no names because they're often relative.
@@ -108,7 +111,7 @@ impl BroadcastProducer {
 	/// Block until there are no more consumers.
 	///
 	/// A new consumer can be created by calling [Self::consume] and this will block again.
-	pub fn unused(&self) -> impl Future<Output = ()> {
+	pub fn unused(&self) -> impl Future<Output = ()> + use<> {
 		let closed = self.closed.clone();
 		async move { closed.closed().await }
 	}

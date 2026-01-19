@@ -1,5 +1,5 @@
 use crate::catalog::{
-	AudioCodec, AudioConfig, CatalogProducer, Container, VideoCodec, VideoConfig, AAC, AV1, H264, H265, VP9,
+	AAC, AV1, AudioCodec, AudioConfig, CatalogProducer, Container, H264, H265, VP9, VideoCodec, VideoConfig,
 };
 use crate::{self as hang, Timestamp};
 use anyhow::Context;
@@ -120,7 +120,6 @@ impl Fmp4 {
 						if let Some(ref bytes) = available_bytes {
 							if bytes_offset + size <= bytes.len() {
 								self.ftyp_bytes = Some(bytes.slice(bytes_offset..bytes_offset + size));
-								tracing::debug!(ftyp_size = size, bytes_offset, "captured ftyp bytes for init segment");
 							} else {
 								tracing::warn!(
 									bytes_offset,
@@ -141,7 +140,6 @@ impl Fmp4 {
 						if let Some(ref bytes) = available_bytes {
 							if bytes_offset + size <= bytes.len() {
 								self.moov_bytes = Some(bytes.slice(bytes_offset..bytes_offset + size));
-								tracing::debug!(moov_size = size, bytes_offset, "captured moov bytes for init segment");
 							} else {
 								tracing::warn!(
 									bytes_offset,
@@ -167,10 +165,10 @@ impl Fmp4 {
 					self.moof_size = size;
 
 					// If passthrough mode, extract and store raw bytes of moof
-					if let Some(ref bytes) = available_bytes {
-						if bytes_offset + size <= bytes.len() {
-							self.moof_bytes = Some(bytes.slice(bytes_offset..bytes_offset + size));
-						}
+					if let Some(ref bytes) = available_bytes
+						&& bytes_offset + size <= bytes.len()
+					{
+						self.moof_bytes = Some(bytes.slice(bytes_offset..bytes_offset + size));
 					}
 				}
 				Any::Mdat(mdat) => {
@@ -196,14 +194,7 @@ impl Fmp4 {
 						fragment_bytes.extend_from_slice(&mdat_bytes);
 						let fragment = fragment_bytes.freeze();
 
-						tracing::info!(
-							moof_size = moof_bytes.len(),
-							mdat_size = mdat_bytes.len(),
-							total_fragment_size = fragment.len(),
-							"processing CMAF fragment (moof+mdat)"
-						);
 						self.transport_fragment(fragment, moof)?;
-						tracing::info!("finished processing CMAF fragment, ready for next fragment");
 					} else {
 						// Extract the samples from the mdat atom (existing behavior)
 						let header_size = size - mdat.data.len();
@@ -213,7 +204,6 @@ impl Fmp4 {
 				_ => {
 					// Skip unknown atoms (e.g., sidx, which is optional and used for segment indexing)
 					// These are safe to ignore and don't affect playback
-					tracing::debug!(?atom, "skipping optional atom")
 				}
 			}
 
@@ -232,7 +222,6 @@ impl Fmp4 {
 
 	fn init(&mut self, moov: Moov) -> anyhow::Result<()> {
 		let passthrough_mode = self.passthrough_mode;
-		tracing::info!(passthrough_mode, "initializing fMP4 with passthrough mode");
 		let mut catalog = self.catalog.lock();
 
 		// Track which specific tracks were created in this init call
@@ -246,14 +235,11 @@ impl Fmp4 {
 			let track = match handler.as_ref() {
 				b"vide" => {
 					let config = Self::init_video_static(trak, passthrough_mode)?;
-					tracing::info!(container = ?config.container, "created video config with container");
 
 					let track = moq::Track {
 						name: self.broadcast.track_name("video"),
 						priority: 1,
 					};
-
-					tracing::debug!(name = ?track.name, ?config, "starting track");
 
 					let video = catalog.insert_video(track.name.clone(), config.clone());
 					video.priority = 1;
@@ -267,14 +253,11 @@ impl Fmp4 {
 				}
 				b"soun" => {
 					let config = Self::init_audio_static(trak, passthrough_mode)?;
-					tracing::info!(container = ?config.container, "created audio config with container");
 
 					let track = moq::Track {
 						name: self.broadcast.track_name("audio"),
 						priority: 2,
 					};
-
-					tracing::debug!(name = ?track.name, ?config, "starting track");
 
 					let audio = catalog.insert_audio(track.name.clone(), config.clone());
 					audio.priority = 2;
@@ -294,7 +277,6 @@ impl Fmp4 {
 		}
 
 		// Verify that the moov atom contains all expected tracks BEFORE moving it
-		let moov_track_count = moov.trak.len();
 		let has_video = moov.trak.iter().any(|t| t.mdia.hdlr.handler.as_ref() == b"vide");
 		let has_audio = moov.trak.iter().any(|t| t.mdia.hdlr.handler.as_ref() == b"soun");
 
@@ -314,7 +296,6 @@ impl Fmp4 {
 				let mut init_segment = BytesMut::new();
 				if let Some(ref ftyp_bytes) = self.ftyp_bytes {
 					init_segment.extend_from_slice(ftyp_bytes);
-					tracing::debug!(ftyp_size = ftyp_bytes.len(), "including ftyp in init segment");
 				}
 				init_segment.extend_from_slice(moov_bytes);
 				let init_segment_bytes = init_segment.freeze();
@@ -322,25 +303,6 @@ impl Fmp4 {
 				// Verify that the moov atom contains all expected tracks
 				let expected_video_tracks = catalog.video.as_ref().map(|v| v.renditions.len()).unwrap_or(0);
 				let expected_audio_tracks = catalog.audio.as_ref().map(|a| a.renditions.len()).unwrap_or(0);
-
-				tracing::info!(
-					tracks_in_moov = moov_track_count,
-					expected_video = expected_video_tracks,
-					expected_audio = expected_audio_tracks,
-					tracks_processed = self.tracks.len(),
-					init_segment_size = init_segment_bytes.len(),
-					ftyp_included = self.ftyp_bytes.is_some(),
-					has_video = has_video,
-					has_audio = has_audio,
-					"storing init segment in catalog"
-				);
-
-				// Verify moov atom signature
-				let moov_offset = self.ftyp_bytes.as_ref().map(|f| f.len()).unwrap_or(0);
-				if moov_offset + 8 <= init_segment_bytes.len() {
-					let atom_type = String::from_utf8_lossy(&init_segment_bytes[moov_offset + 4..moov_offset + 8]);
-					tracing::info!(atom_type = %atom_type, "verifying moov atom signature in init segment");
-				}
 
 				// Warn if moov doesn't contain expected tracks.
 				// For HLS, inits are per-track (video-only or audio-only), so skip cross-track warnings.
@@ -358,39 +320,18 @@ impl Fmp4 {
 				}
 
 				// Store init segment in catalog for the relevant track type
-				// For HLS, each track has its own init segment (video init segment only has video,
-				// audio init segment only has audio). For direct fMP4 files, the init segment
-				// contains all tracks. We store track-specific init segments only in the tracks
-				// created in this init call, not all renditions of that type.
-
-				if has_video {
-					if let Some(video) = catalog.video.as_mut() {
-						for track_name in &created_video_tracks {
-							if let Some(config) = video.renditions.get_mut(track_name) {
-								config.init_segment = Some(init_segment_bytes.clone());
-								tracing::debug!(
-									video_track = %track_name,
-									init_segment_size = init_segment_bytes.len(),
-									has_audio_track = has_audio,
-									"stored init segment in video config"
-								);
-							}
+				if has_video && let Some(video) = catalog.video.as_mut() {
+					for track_name in &created_video_tracks {
+						if let Some(config) = video.renditions.get_mut(track_name) {
+							config.init_segment = Some(init_segment_bytes.clone());
 						}
 					}
 				}
 
-				if has_audio {
-					if let Some(audio) = catalog.audio.as_mut() {
-						for track_name in &created_audio_tracks {
-							if let Some(config) = audio.renditions.get_mut(track_name) {
-								config.init_segment = Some(init_segment_bytes.clone());
-								tracing::debug!(
-									audio_track = %track_name,
-									init_segment_size = init_segment_bytes.len(),
-									has_video_track = has_video,
-									"stored init segment in audio config"
-								);
-							}
+				if has_audio && let Some(audio) = catalog.audio.as_mut() {
+					for track_name in &created_audio_tracks {
+						if let Some(config) = audio.renditions.get_mut(track_name) {
+							config.init_segment = Some(init_segment_bytes.clone());
 						}
 					}
 				}
@@ -714,8 +655,7 @@ impl Fmp4 {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let micros = (pts as u128 * 1_000_000 / timescale as u128) as u64;
-					let timestamp = hang::Timestamp::from_micros(micros)?;
+					let timestamp = hang::Timestamp::from_scale(pts, timescale)?;
 
 					if offset + size > mdat.len() {
 						anyhow::bail!("invalid data offset");
@@ -789,10 +729,6 @@ impl Fmp4 {
 		}
 
 		// Verify fragment starts with moof atom
-		if fragment.len() >= 8 {
-			let atom_type = String::from_utf8_lossy(&fragment[4..8]);
-			tracing::info!(atom_type = %atom_type, fragment_size = fragment.len(), passthrough_mode = self.passthrough_mode, "transporting fragment");
-		}
 
 		// Ensure moov is available (init segment must be processed first)
 		let moov = self.moov.as_ref().ok_or_else(|| {
@@ -823,20 +759,20 @@ impl Fmp4 {
 			let is_keyframe = if trak.mdia.hdlr.handler == b"vide".into() {
 				// For video, check sample flags in trun entries
 				let mut is_keyframe = false;
-				if let Some(trun) = traf.trun.first() {
-					if let Some(entry) = trun.entries.first() {
-						let tfhd = &traf.tfhd;
-						let flags = entry.flags.unwrap_or(tfhd.default_sample_flags.unwrap_or_default());
-						// https://chromium.googlesource.com/chromium/src/media/+/master/formats/mp4/track_run_iterator.cc#177
-						let keyframe_flag = (flags >> 24) & 0x3 == 0x2; // kSampleDependsOnNoOther
-						let non_sync = (flags >> 16) & 0x1 == 0x1; // kSampleIsNonSyncSample
-						is_keyframe = keyframe_flag && !non_sync;
+				if let Some(trun) = traf.trun.first()
+					&& let Some(entry) = trun.entries.first()
+				{
+					let tfhd = &traf.tfhd;
+					let flags = entry.flags.unwrap_or(tfhd.default_sample_flags.unwrap_or_default());
+					// https://chromium.googlesource.com/chromium/src/media/+/master/formats/mp4/track_run_iterator.cc#177
+					let keyframe_flag = (flags >> 24) & 0x3 == 0x2; // kSampleDependsOnNoOther
+					let non_sync = (flags >> 16) & 0x1 == 0x1; // kSampleIsNonSyncSample
+					is_keyframe = keyframe_flag && !non_sync;
 
-						if is_keyframe {
-							// Force an audio keyframe on video keyframes
-							for audio in moov.trak.iter().filter(|t| t.mdia.hdlr.handler == b"soun".into()) {
-								self.last_keyframe.remove(&audio.tkhd.track_id);
-							}
+					if is_keyframe {
+						// Force an audio keyframe on video keyframes
+						for audio in moov.trak.iter().filter(|t| t.mdia.hdlr.handler == b"soun".into()) {
+							self.last_keyframe.remove(&audio.tkhd.track_id);
 						}
 					}
 				}
@@ -871,11 +807,6 @@ impl Fmp4 {
 					payload: fragment.clone().into(),
 				};
 				track.write(frame)?;
-				if should_be_keyframe {
-					tracing::info!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), is_first = is_first_frame, "sent fragment in passthrough mode (keyframe - creates group)");
-				} else {
-					tracing::debug!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), "sent non-keyframe fragment in passthrough mode");
-				}
 			} else {
 				// For non-passthrough mode, just write the frame normally
 				let frame = hang::Frame {
@@ -884,7 +815,6 @@ impl Fmp4 {
 					payload: fragment.clone().into(),
 				};
 				track.write(frame)?;
-				tracing::info!(track_id, timestamp = ?timestamp, fragment_size = fragment.len(), is_keyframe = is_keyframe, "sent fragment (non-passthrough mode)");
 			}
 		}
 
@@ -897,8 +827,6 @@ impl Drop for Fmp4 {
 		let mut catalog = self.broadcast.catalog.lock();
 
 		for track in self.tracks.values() {
-			tracing::debug!(name = ?track.info.name, "ending track");
-
 			// We're too lazy to keep track of if this track is for audio or video, so we just remove both.
 			catalog.remove_video(&track.info.name);
 			catalog.remove_audio(&track.info.name);

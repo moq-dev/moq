@@ -5,8 +5,8 @@
 //! independent of any particular HTTP client; callers provide an implementation
 //! of [`Fetcher`] to perform the actual network I/O.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -19,8 +19,8 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::import::Fmp4;
 use crate::BroadcastProducer;
+use crate::import::Fmp4;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
@@ -535,12 +535,11 @@ impl Hls {
 
 	/// Create or retrieve the fMP4 importer for the audio rendition.
 	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
-		let importer = self.audio_importer.get_or_insert_with(|| {
+		self.audio_importer.get_or_insert_with(|| {
 			let mut imp = Fmp4::new(self.broadcast.clone());
 			imp.set_passthrough_mode(self.passthrough);
 			imp
-		});
-		importer
+		})
 	}
 
 	#[cfg(test)]

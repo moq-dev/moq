@@ -383,10 +383,7 @@ mod tests {
 		assert_eq!(overflow_item.current(), u8::MAX);
 
 		// Spawn task to wait for promotion from overflow
-		let task = tokio::spawn(async move {
-			let new_priority = overflow_item.next().await;
-			new_priority
-		});
+		let task = tokio::spawn(async move { overflow_item.next().await });
 
 		// Give the task time to start waiting
 		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

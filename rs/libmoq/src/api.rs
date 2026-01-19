@@ -1,4 +1,4 @@
-use crate::{ffi, Error, State};
+use crate::{Error, State, ffi};
 
 use std::ffi::c_char;
 use std::ffi::c_void;
@@ -90,7 +90,7 @@ pub struct moq_announced {
 ///
 /// # Safety
 /// - The caller must ensure that level is a valid pointer to level_len bytes of data.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -> i32 {
 	ffi::enter(move || {
 		match unsafe { ffi::parse_str(level, level_len)? } {
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 /// # Safety
 /// - The caller must ensure that url is a valid pointer to url_len bytes of data.
 /// - The caller must ensure that `on_status` is valid until [moq_session_close] is called.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_session_connect(
 	url: *const c_char,
 	url_len: usize,
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn moq_session_connect(
 			.transpose()?
 			.cloned();
 
-		let on_status = ffi::OnStatus::new(user_data, on_status);
+		let on_status = unsafe { ffi::OnStatus::new(user_data, on_status) };
 		state.session.connect(url, publish, consume, on_status)
 	})
 }
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn moq_session_connect(
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// The [moq_session_connect] `on_status` callback will be called with [Error::Closed].
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_session_close(session: u32) -> i32 {
 	ffi::enter(move || {
 		let session = ffi::parse_id(session)?;
@@ -172,7 +172,7 @@ pub extern "C" fn moq_session_close(session: u32) -> i32 {
 /// This is extremely useful for discovering what is available on the server to [moq_origin_consume].
 ///
 /// Returns a non-zero handle to the origin on success.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_origin_create() -> i32 {
 	ffi::enter(move || State::lock().origin.create())
 }
@@ -185,7 +185,7 @@ pub extern "C" fn moq_origin_create() -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, path_len: usize, broadcast: u32) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
@@ -209,7 +209,7 @@ pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, pa
 ///
 /// # Safety
 /// - The caller must ensure that `on_announce` is valid until [moq_origin_announced_close] is called.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_announced(
 	origin: u32,
 	on_announce: Option<extern "C" fn(user_data: *mut c_void, announced: i32)>,
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn moq_origin_announced(
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
-		let on_announce = ffi::OnStatus::new(user_data, on_announce);
+		let on_announce = unsafe { ffi::OnStatus::new(user_data, on_announce) };
 		State::lock().origin.announced(origin, on_announce)
 	})
 }
@@ -230,11 +230,11 @@ pub unsafe extern "C" fn moq_origin_announced(
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_announced] struct.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq_announced) -> i32 {
 	ffi::enter(move || {
 		let announced = ffi::parse_id(announced)?;
-		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().origin.announced_info(announced, dst)
 	})
 }
@@ -242,7 +242,7 @@ pub unsafe extern "C" fn moq_origin_announced_info(announced: u32, dst: *mut moq
 /// Stop receiving announcements for broadcasts published to an origin.
 ///
 /// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_origin_announced_close(announced: u32) -> i32 {
 	ffi::enter(move || {
 		let announced = ffi::parse_id(announced)?;
@@ -256,7 +256,7 @@ pub extern "C" fn moq_origin_announced_close(announced: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that path is a valid pointer to path_len bytes of data.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_consume(origin: u32, path: *const c_char, path_len: usize) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
@@ -271,7 +271,7 @@ pub unsafe extern "C" fn moq_origin_consume(origin: u32, path: *const c_char, pa
 /// Close an origin and clean up its resources.
 ///
 /// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
@@ -282,7 +282,7 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 /// Create a new broadcast for publishing media tracks.
 ///
 /// Returns a non-zero handle to the broadcast on success, or a negative code on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_create() -> i32 {
 	ffi::enter(move || State::lock().publish.create())
 }
@@ -290,7 +290,7 @@ pub extern "C" fn moq_publish_create() -> i32 {
 /// Close a broadcast and clean up its resources.
 ///
 /// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
@@ -308,7 +308,7 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 /// # Safety
 /// - The caller must ensure that format is a valid pointer to format_len bytes of data.
 /// - The caller must ensure that init is a valid pointer to init_size bytes of data.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_media_ordered(
 	broadcast: u32,
 	format: *const c_char,
@@ -328,7 +328,7 @@ pub unsafe extern "C" fn moq_publish_media_ordered(
 /// Remove a track from a broadcast.
 ///
 /// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_media_close(export: u32) -> i32 {
 	ffi::enter(move || {
 		let export = ffi::parse_id(export)?;
@@ -345,7 +345,7 @@ pub extern "C" fn moq_publish_media_close(export: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_media_frame(
 	media: u32,
 	payload: *const u8,
@@ -369,7 +369,7 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 ///
 /// # Safety
 /// - The caller must ensure that `on_catalog` is valid until [moq_consume_catalog_close] is called.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_catalog(
 	broadcast: u32,
 	on_catalog: Option<extern "C" fn(user_data: *mut c_void, catalog: i32)>,
@@ -377,7 +377,7 @@ pub unsafe extern "C" fn moq_consume_catalog(
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		let on_catalog = ffi::OnStatus::new(user_data, on_catalog);
+		let on_catalog = unsafe { ffi::OnStatus::new(user_data, on_catalog) };
 		State::lock().consume.catalog(broadcast, on_catalog)
 	})
 }
@@ -385,7 +385,7 @@ pub unsafe extern "C" fn moq_consume_catalog(
 /// Close a catalog consumer and clean up its resources.
 ///
 /// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_catalog_close(catalog: u32) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
@@ -402,12 +402,12 @@ pub extern "C" fn moq_consume_catalog_close(catalog: u32) -> i32 {
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_video_config] struct.
 /// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst: *mut moq_video_config) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.video_config(catalog, index, dst)
 	})
 }
@@ -421,12 +421,12 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_audio_config] struct.
 /// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst: *mut moq_audio_config) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.audio_config(catalog, index, dst)
 	})
 }
@@ -439,8 +439,8 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_frame` is valid until [moq_consume_video_track_close] is called.
-#[no_mangle]
+/// - The caller must ensure that `on_frame` is valid until the track is closed.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video_ordered(
 	broadcast: u32,
 	index: u32,
@@ -452,7 +452,7 @@ pub unsafe extern "C" fn moq_consume_video_ordered(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
-		let on_frame = ffi::OnStatus::new(user_data, on_frame);
+		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock()
 			.consume
 			.video_ordered(broadcast, index, max_latency, on_frame)
@@ -462,7 +462,7 @@ pub unsafe extern "C" fn moq_consume_video_ordered(
 /// Close a video track consumer and clean up its resources.
 ///
 /// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
@@ -479,7 +479,7 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that `on_frame` is valid until [moq_consume_audio_close] is called.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio_ordered(
 	broadcast: u32,
 	index: u32,
@@ -491,7 +491,7 @@ pub unsafe extern "C" fn moq_consume_audio_ordered(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let index = index as usize;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
-		let on_frame = ffi::OnStatus::new(user_data, on_frame);
+		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock()
 			.consume
 			.audio_ordered(broadcast, index, max_latency, on_frame)
@@ -501,7 +501,7 @@ pub unsafe extern "C" fn moq_consume_audio_ordered(
 /// Close an audio track consumer and clean up its resources.
 ///
 /// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_audio_close(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
@@ -518,12 +518,12 @@ pub extern "C" fn moq_consume_audio_close(track: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_frame] struct.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_frame_chunk(frame: u32, index: u32, dst: *mut moq_frame) -> i32 {
 	ffi::enter(move || {
 		let frame = ffi::parse_id(frame)?;
 		let index = index as usize;
-		let dst = dst.as_mut().ok_or(Error::InvalidPointer)?;
+		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().consume.frame_chunk(frame, index, dst)
 	})
 }
@@ -531,7 +531,7 @@ pub unsafe extern "C" fn moq_consume_frame_chunk(frame: u32, index: u32, dst: *m
 /// Close a frame and clean up its resources.
 ///
 /// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_frame_close(frame: u32) -> i32 {
 	ffi::enter(move || {
 		let frame = ffi::parse_id(frame)?;
@@ -542,7 +542,7 @@ pub extern "C" fn moq_consume_frame_close(frame: u32) -> i32 {
 /// Close a broadcast consumer and clean up its resources.
 ///
 /// Returns a zero on success, or a negative code on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 	ffi::enter(move || {
 		let consume = ffi::parse_id(consume)?;

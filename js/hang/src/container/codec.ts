@@ -1,6 +1,6 @@
+import type { Time } from "@moq/lite";
 import type * as Catalog from "../catalog";
 import { DEFAULT_CONTAINER } from "../catalog";
-import type * as Time from "../time";
 
 /**
  * Encodes a timestamp according to the specified container format.

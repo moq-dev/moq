@@ -13,7 +13,7 @@ pub struct GoAway<'a> {
 	pub new_session_uri: Cow<'a, str>,
 }
 
-impl<'a> Message for GoAway<'a> {
+impl Message for GoAway<'_> {
 	const ID: u64 = 0x10;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {

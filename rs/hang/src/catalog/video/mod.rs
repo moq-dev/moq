@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_with::{base64::Base64, hex::Hex, DisplayFromStr};
+use serde_with::{DisplayFromStr, base64::Base64, hex::Hex};
 
 use crate::catalog::container::Container;
 
@@ -71,7 +71,7 @@ pub struct Display {
 #[serde(rename_all = "camelCase")]
 pub struct VideoConfig {
 	/// The codec, see the registry for details:
-	/// https://w3c.github.io/webcodecs/codec_registry.html
+	/// <https://w3c.github.io/webcodecs/codec_registry.html>
 	#[serde_as(as = "DisplayFromStr")]
 	pub codec: VideoCodec,
 

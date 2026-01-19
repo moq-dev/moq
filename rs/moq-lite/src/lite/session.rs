@@ -1,9 +1,9 @@
 use tokio::sync::oneshot;
 
 use crate::{
+	Error, OriginConsumer, OriginProducer,
 	coding::Stream,
 	lite::{SessionInfo, Version},
-	Error, OriginConsumer, OriginProducer,
 };
 
 use super::{Publisher, Subscriber};

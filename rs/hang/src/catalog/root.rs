@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// The catalog format is a JSON file that describes the tracks available in a broadcast.
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{Audio, AudioConfig, Chat, Track, User, Video, VideoConfig};
 use crate::Result;
+use crate::catalog::{Audio, AudioConfig, Chat, User, Video, VideoConfig};
 use moq_lite::Produce;
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -39,7 +39,7 @@ pub struct Catalog {
 
 	/// Preview information about the broadcast
 	#[serde(default)]
-	pub preview: Option<Track>,
+	pub preview: Option<moq_lite::Track>,
 }
 
 impl Catalog {
@@ -138,7 +138,7 @@ impl Catalog {
 /// Produces a catalog track that describes the available media tracks.
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
-/// You'll have to call [`publish`](Self::publish) once all updates are complete.
+/// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
 #[derive(Clone)]
 pub struct CatalogProducer {
 	/// Access to the underlying track producer.
@@ -163,7 +163,7 @@ impl CatalogProducer {
 		}
 	}
 
-	/// Create a consumer for this catalog, receiving updates as they're [published](Self::publish).
+	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> CatalogConsumer {
 		CatalogConsumer::new(self.track.consume())
 	}
@@ -180,6 +180,9 @@ impl From<moq_lite::TrackProducer> for CatalogProducer {
 	}
 }
 
+/// RAII guard for modifying a catalog with automatic publishing on drop.
+///
+/// Obtained via [`CatalogProducer::lock`].
 pub struct CatalogGuard<'a> {
 	catalog: MutexGuard<'a, Catalog>,
 	track: &'a mut moq_lite::TrackProducer,
@@ -285,7 +288,7 @@ impl From<moq_lite::TrackConsumer> for CatalogConsumer {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{AudioCodec::Opus, AudioConfig, Container, VideoConfig, H264};
+	use crate::catalog::{AudioCodec::Opus, AudioConfig, Container, H264, VideoConfig};
 
 	use super::*;
 

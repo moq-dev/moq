@@ -1,3 +1,13 @@
+//! MoQ relay server connecting publishers to subscribers.
+//!
+//! Content-agnostic relay that works with any live data, not just media.
+//!
+//! Features:
+//! - Clustering: connect multiple relays for global distribution
+//! - Authentication: JWT-based access control via [`moq_token`]
+//! - WebSocket fallback: for restrictive networks
+//! - HTTP API: health checks and metrics via [`Web`]
+
 mod auth;
 mod cluster;
 mod config;
@@ -22,7 +32,17 @@ async fn main() -> anyhow::Result<()> {
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
 	let mut server = config.server.init()?;
-	let client = config.client.init()?;
+
+	#[allow(unused_mut)]
+	let mut client = config.client.init()?;
+
+	#[cfg(feature = "iroh")]
+	{
+		let iroh = config.iroh.bind().await?;
+		server.with_iroh(iroh.clone());
+		client.with_iroh(iroh);
+	}
+
 	let auth = config.auth.init()?;
 
 	let cluster = Cluster::new(config.cluster, client);

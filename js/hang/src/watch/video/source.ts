@@ -1,9 +1,9 @@
 import type * as Moq from "@moq/lite";
+import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import { PRIORITY } from "../../publish/priority";
-import type * as Time from "../../time";
 import * as Hex from "../../util/hex";
 import type { SourceMSE } from "../source-mse";
 
@@ -121,14 +121,6 @@ export class Source {
 			const c = effect.get(catalog)?.video;
 			effect.set(this.catalog, c);
 			effect.set(this.flip, c?.flip);
-
-			if (c) {
-				console.log("[Video Catalog]", {
-					renditions: Object.keys(c.renditions ?? {}),
-					renditionCount: Object.keys(c.renditions ?? {}).length,
-					flip: c.flip,
-				});
-			}
 		});
 
 		this.#signals.effect(this.#runSupported.bind(this));
@@ -220,18 +212,15 @@ export class Source {
 	}
 
 	#runMSEPath(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
-		console.log("[Video Stream] Subscribing to track", {
-			name,
-			codec: config.codec,
-			container: config.container,
-			width: config.codedWidth,
-			height: config.codedHeight,
-		});
 		// Import MSE source dynamically to avoid loading if not needed
 		effect.spawn(async () => {
 			const { SourceMSE } = await import("../source-mse.js");
 			const mseSource = new SourceMSE(this.latency);
 			effect.cleanup(() => mseSource.close());
+
+			// IMPORTANT: Set mseSource immediately so audio can track it
+			// This must be set synchronously, not in an effect, so the signal updates immediately
+			this.#mseSource.set(mseSource);
 
 			// Forward signals using effects
 			this.#signals.effect((eff) => {
@@ -259,11 +248,6 @@ export class Source {
 				eff.set(this.#mseMediaSource, mediaSource);
 			});
 
-			// Expose mseSource for audio to access
-			this.#signals.effect((eff) => {
-				eff.set(this.#mseSource, mseSource);
-			});
-
 			this.#signals.effect((eff) => {
 				const stats = eff.get(mseSource.stats);
 				eff.set(this.#stats, stats);
@@ -274,19 +258,18 @@ export class Source {
 			} catch (error) {
 				console.error("MSE path error, falling back to WebCodecs:", error);
 				// Fallback to WebCodecs
+				this.#mseSource.set(undefined);
 				this.#runWebCodecsPath(effect, broadcast, name, config);
 			}
+		});
+
+		// Clean up mseSource when the effect closes (track switches)
+		effect.cleanup(() => {
+			this.#mseSource.set(undefined);
 		});
 	}
 
 	#runWebCodecsPath(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
-		console.log("[Video Stream] Subscribing to track", {
-			name,
-			codec: config.codec,
-			container: config.container,
-			width: config.codedWidth,
-			height: config.codedHeight,
-		});
 		const sub = broadcast.subscribe(name, PRIORITY.video); // TODO use priority from catalog
 		effect.cleanup(() => sub.close());
 

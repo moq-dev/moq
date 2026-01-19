@@ -1,8 +1,8 @@
 import type * as Moq from "@moq/lite";
+import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import type * as Catalog from "./catalog";
 import * as Container from "./container";
-import * as Time from "./time";
 
 export interface Source {
 	byteLength: number;

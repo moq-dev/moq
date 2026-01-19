@@ -2,7 +2,11 @@ use std::path::PathBuf;
 use std::{net, time::Duration};
 
 use crate::crypto;
+#[cfg(feature = "iroh")]
+use crate::iroh::IrohQuicRequest;
 use anyhow::Context;
+use moq_lite::Session;
+use rand::Rng;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -10,30 +14,18 @@ use std::fs;
 use std::io::{self, Cursor, Read};
 use std::sync::{Arc, RwLock};
 use url::Url;
-use web_transport_quinn::{http, ServerError};
+#[cfg(feature = "iroh")]
+use web_transport_iroh::iroh;
+use web_transport_quinn::http;
 
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
-use futures::FutureExt;
 
-#[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServerTlsCert {
-	pub chain: PathBuf,
-	pub key: PathBuf,
-}
-
-impl ServerTlsCert {
-	// A crude colon separated string parser just for clap support.
-	pub fn parse(s: &str) -> anyhow::Result<Self> {
-		let (chain, key) = s.split_once(':').context("invalid certificate")?;
-		Ok(Self {
-			chain: PathBuf::from(chain),
-			key: PathBuf::from(key),
-		})
-	}
-}
-
+/// TLS configuration for the server.
+///
+/// Certificate and keys must currently be files on disk.
+/// Alternatively, you can generate a self-signed certificate given a list of hostnames.
 #[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerTlsConfig {
@@ -59,6 +51,7 @@ pub struct ServerTlsConfig {
 	pub generate: Vec<String>,
 }
 
+/// Configuration for the MoQ server.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ServerConfig {
@@ -67,6 +60,23 @@ pub struct ServerConfig {
 	#[serde(alias = "listen")]
 	#[arg(id = "server-bind", long = "server-bind", alias = "listen", env = "MOQ_SERVER_BIND")]
 	pub bind: Option<net::SocketAddr>,
+
+	/// Server ID to embed in connection IDs for QUIC-LB compatibility.
+	/// If set, connection IDs will be derived semi-deterministically.
+	#[arg(id = "server-quic-lb-id", long = "server-quic-lb-id", env = "MOQ_SERVER_QUIC_LB_ID")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub quic_lb_id: Option<ServerId>,
+
+	/// Number of random nonce bytes in QUIC-LB connection IDs.
+	/// Must be at least 4, and server_id + nonce + 1 must not exceed 20.
+	#[arg(
+		id = "server-quic-lb-nonce",
+		long = "server-quic-lb-nonce",
+		requires = "server-quic-lb-id",
+		env = "MOQ_SERVER_QUIC_LB_NONCE"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub quic_lb_nonce: Option<usize>,
 
 	#[command(flatten)]
 	#[serde(default)]
@@ -79,10 +89,15 @@ impl ServerConfig {
 	}
 }
 
+/// Server for accepting MoQ connections over QUIC.
+///
+/// Create via [`ServerConfig::init`] or [`Server::new`].
 pub struct Server {
 	quic: quinn::Endpoint,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	certs: Arc<ServeCerts>,
+	#[cfg(feature = "iroh")]
+	iroh: Option<iroh::Endpoint>,
 }
 
 impl Server {
@@ -125,7 +140,23 @@ impl Server {
 
 		// There's a bit more boilerplate to make a generic endpoint.
 		let runtime = quinn::default_runtime().context("no async runtime")?;
-		let endpoint_config = quinn::EndpointConfig::default();
+
+		// Configure connection ID generator with server ID if provided
+		let mut endpoint_config = quinn::EndpointConfig::default();
+		if let Some(server_id) = config.quic_lb_id {
+			let nonce_len = config.quic_lb_nonce.unwrap_or(8);
+			anyhow::ensure!(nonce_len >= 4, "quic_lb_nonce must be at least 4");
+
+			let cid_len = 1 + server_id.len() + nonce_len;
+			anyhow::ensure!(cid_len <= 20, "connection ID length ({cid_len}) exceeds maximum of 20");
+
+			tracing::info!(
+				?server_id,
+				nonce_len,
+				"using QUIC-LB compatible connection ID generation"
+			);
+			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
+		}
 
 		let listen = config.bind.unwrap_or("[::]:443".parse().unwrap());
 		let socket = std::net::UdpSocket::bind(listen).context("failed to bind UDP socket")?;
@@ -138,12 +169,20 @@ impl Server {
 			quic: quic.clone(),
 			accept: Default::default(),
 			certs,
+			#[cfg(feature = "iroh")]
+			iroh: None,
 		})
+	}
+
+	#[cfg(feature = "iroh")]
+	pub fn with_iroh(&mut self, iroh: Option<iroh::Endpoint>) -> &mut Self {
+		self.iroh = iroh;
+		self
 	}
 
 	#[cfg(unix)]
 	async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
-		use tokio::signal::unix::{signal, SignalKind};
+		use tokio::signal::unix::{SignalKind, signal};
 
 		// Dunno why we wouldn't be allowed to listen for signals, but just in case.
 		let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
@@ -158,7 +197,7 @@ impl Server {
 	}
 
 	// Return the SHA256 fingerprints of all our certificates.
-	pub fn tls_info(&self) -> Arc<RwLock<TlsInfo>> {
+	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
 		self.certs.info.clone()
 	}
 
@@ -168,14 +207,36 @@ impl Server {
 	/// so the connection can be rejected early on an invalid path or missing auth.
 	///
 	/// The [Request] is either a WebTransport or a raw QUIC request.
-	/// Call [Request::ok] or [Request::close] to complete the handshake in case this is
-	/// a WebTransport request.
+	/// Call [Request::accept] or [Request::reject] to complete the handshake.
 	pub async fn accept(&mut self) -> Option<Request> {
 		loop {
+			// tokio::select! does not support cfg directives on arms, so we need to put the
+			// iroh cfg into a block, and default to a pending future if iroh is disabled.
+			let iroh_accept_fut = async {
+				#[cfg(feature = "iroh")]
+				if let Some(endpoint) = self.iroh.as_ref() {
+					endpoint.accept().await
+				} else {
+					std::future::pending::<_>().await
+				}
+
+				#[cfg(not(feature = "iroh"))]
+				std::future::pending::<()>().await
+			};
+
 			tokio::select! {
 				res = self.quic.accept() => {
 					let conn = res?;
 					self.accept.push(Self::accept_session(conn).boxed());
+				}
+				res = iroh_accept_fut => {
+					#[cfg(feature = "iroh")]
+					{
+						let conn = res?;
+						self.accept.push(Self::accept_iroh_session(conn).boxed());
+					}
+					#[cfg(not(feature = "iroh"))]
+					let _: () = res;
 				}
 				Some(res) = self.accept.next() => {
 					match res {
@@ -229,6 +290,32 @@ impl Server {
 		}
 	}
 
+	#[cfg(feature = "iroh")]
+	async fn accept_iroh_session(conn: iroh::endpoint::Incoming) -> anyhow::Result<Request> {
+		let conn = conn.accept()?.await?;
+		let alpn = String::from_utf8(conn.alpn().to_vec()).context("failed to decode ALPN")?;
+		tracing::Span::current().record("id", conn.stable_id());
+		tracing::debug!(remote = %conn.remote_id().fmt_short(), %alpn, "accepted");
+		match alpn.as_str() {
+			web_transport_iroh::ALPN_H3 => {
+				let request = web_transport_iroh::H3Request::accept(conn)
+					.await
+					.context("failed to receive WebTransport request")?;
+				Ok(Request::IrohWebTransport(request))
+			}
+			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => {
+				let request = IrohQuicRequest::accept(conn);
+				Ok(Request::IrohQuic(request))
+			}
+			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
+		}
+	}
+
+	#[cfg(feature = "iroh")]
+	pub fn iroh_endpoint(&self) -> Option<&iroh::Endpoint> {
+		self.iroh.as_ref()
+	}
+
 	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
 		self.quic.local_addr().context("failed to get local address")
 	}
@@ -238,21 +325,28 @@ impl Server {
 	}
 }
 
+/// An incoming connection that can be accepted or rejected.
 pub enum Request {
 	WebTransport(web_transport_quinn::Request),
 	Quic(QuicRequest),
+	#[cfg(feature = "iroh")]
+	IrohWebTransport(web_transport_iroh::H3Request),
+	#[cfg(feature = "iroh")]
+	IrohQuic(IrohQuicRequest),
 }
 
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn reject(self, status: http::StatusCode) -> Result<(), ServerError> {
+	pub async fn reject(self, status: http::StatusCode) -> anyhow::Result<()> {
 		match self {
-			Self::WebTransport(request) => request.close(status).await,
-			Self::Quic(request) => {
-				request.close(status);
-				Ok(())
-			}
+			Self::WebTransport(request) => request.close(status).await?,
+			Self::Quic(request) => request.close(status),
+			#[cfg(feature = "iroh")]
+			Request::IrohWebTransport(request) => request.close(status).await?,
+			#[cfg(feature = "iroh")]
+			Request::IrohQuic(request) => request.close(status),
 		}
+		Ok(())
 	}
 
 	/// Accept the session, performing rest of the MoQ handshake.
@@ -260,24 +354,32 @@ impl Request {
 		self,
 		publish: impl Into<Option<moq_lite::OriginConsumer>>,
 		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
-	) -> anyhow::Result<moq_lite::Session> {
+	) -> anyhow::Result<Session> {
 		let session = match self {
-			Request::WebTransport(request) => request.ok().await?,
-			Request::Quic(request) => request.ok(),
+			Request::WebTransport(request) => Session::accept(request.ok().await?, publish, subscribe).await?,
+			Request::Quic(request) => Session::accept(request.ok(), publish, subscribe).await?,
+			#[cfg(feature = "iroh")]
+			Request::IrohWebTransport(request) => Session::accept(request.ok().await?, publish, subscribe).await?,
+			#[cfg(feature = "iroh")]
+			Request::IrohQuic(request) => Session::accept(request.ok(), publish, subscribe).await?,
 		};
-		let session = moq_lite::Session::accept(session, publish, subscribe).await?;
 		Ok(session)
 	}
 
 	/// Returns the URL provided by the client.
-	pub fn url(&self) -> &Url {
+	pub fn url(&self) -> Option<&Url> {
 		match self {
-			Request::WebTransport(request) => request.url(),
-			Request::Quic(request) => request.url(),
+			Request::WebTransport(request) => Some(request.url()),
+			#[cfg(feature = "iroh")]
+			Request::IrohWebTransport(request) => Some(request.url()),
+			_ => None,
 		}
 	}
 }
 
+/// A raw QUIC connection request without WebTransport framing.
+///
+/// Used to accept/reject QUIC connections.
 pub struct QuicRequest {
 	connection: quinn::Connection,
 	url: Url,
@@ -311,22 +413,23 @@ impl QuicRequest {
 	}
 }
 
+/// TLS certificate information including fingerprints.
 #[derive(Debug)]
-pub struct TlsInfo {
+pub struct ServerTlsInfo {
 	pub(crate) certs: Vec<Arc<CertifiedKey>>,
 	pub fingerprints: Vec<String>,
 }
 
 #[derive(Debug)]
 struct ServeCerts {
-	info: Arc<RwLock<TlsInfo>>,
+	info: Arc<RwLock<ServerTlsInfo>>,
 	provider: crypto::Provider,
 }
 
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
-			info: Arc::new(RwLock::new(TlsInfo {
+			info: Arc::new(RwLock::new(ServerTlsInfo {
 				certs: Vec::new(),
 				fingerprints: Vec::new(),
 			})),
@@ -459,5 +562,72 @@ impl ResolvesServerCert for ServeCerts {
 			.certs
 			.first()
 			.cloned()
+	}
+}
+
+/// Server ID for QUIC-LB support.
+#[serde_with::serde_as]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] Vec<u8>);
+
+impl ServerId {
+	fn len(&self) -> usize {
+		self.0.len()
+	}
+}
+
+impl std::fmt::Debug for ServerId {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_tuple("QuicLbServerId").field(&hex::encode(&self.0)).finish()
+	}
+}
+
+impl std::str::FromStr for ServerId {
+	type Err = hex::FromHexError;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		hex::decode(s).map(Self)
+	}
+}
+
+/// Connection ID generator that embeds a fixed server ID for QUIC-LB support.
+///
+/// This enables stateless load balancing where the load balancer can route
+/// packets to the correct server by parsing the connection ID. As of Jan 2026,
+/// AWS NLB imposes some specific requirements which have been determined
+/// empirically to be the following:
+/// - The server ID must be exactly 8 bytes long.
+/// - The connection ID must be exactly 16 bytes in total.
+/// - Only the "plaintext" mode is supported.
+///
+/// See: https://datatracker.ietf.org/doc/draft-ietf-quic-load-balancers/
+struct ServerIdGenerator {
+	server_id: ServerId,
+	nonce_len: usize,
+}
+
+impl ServerIdGenerator {
+	fn new(server_id: ServerId, nonce_len: usize) -> Self {
+		Self { server_id, nonce_len }
+	}
+}
+
+impl quinn::ConnectionIdGenerator for ServerIdGenerator {
+	fn generate_cid(&mut self) -> quinn::ConnectionId {
+		let cid_len = self.cid_len();
+		let mut cid = Vec::with_capacity(cid_len);
+		// First byte has "self-encoded length" of server ID + nonce
+		cid.push((cid_len - 1) as u8);
+		cid.extend(self.server_id.0.iter());
+		cid.extend(rand::rng().random_iter::<u8>().take(self.nonce_len));
+		quinn::ConnectionId::new(cid.as_slice())
+	}
+
+	fn cid_len(&self) -> usize {
+		1 + self.server_id.len() + self.nonce_len
+	}
+
+	fn cid_lifetime(&self) -> Option<Duration> {
+		None
 	}
 }

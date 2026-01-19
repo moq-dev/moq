@@ -75,14 +75,8 @@ echo "Packaging $NAME..."
 rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR/include" "$PACKAGE_DIR/lib"
 
-# Copy header (generated in target/include/ by build.rs)
-HEADER_FILE="$WORKSPACE_DIR/target/include/moq.h"
-if [[ -f "$HEADER_FILE" ]]; then
-    cp "$HEADER_FILE" "$PACKAGE_DIR/include/"
-else
-    echo "Error: moq.h not found at $HEADER_FILE" >&2
-    exit 1
-fi
+# Copy header (generated in target/$TARGET/include/ by build.rs)
+cp "$WORKSPACE_DIR/target/$TARGET/include/moq.h" "$PACKAGE_DIR/include/"
 
 # Copy static library
 case "$TARGET" in
@@ -95,10 +89,10 @@ case "$TARGET" in
         ;;
 esac
 
-# Copy pkg-config file (generated in target/ by build.rs, not for Windows)
+# Copy pkg-config file (generated in target/$TARGET/pkgconfig/ by build.rs, not for Windows)
 if [[ "$TARGET" != *"-windows-"* ]]; then
     mkdir -p "$PACKAGE_DIR/lib/pkgconfig"
-    cp "$WORKSPACE_DIR/target/moq.pc" "$PACKAGE_DIR/lib/pkgconfig/"
+    cp "$WORKSPACE_DIR/target/$TARGET/pkgconfig/moq.pc" "$PACKAGE_DIR/lib/pkgconfig/"
 fi
 
 # Generate CMake config files from templates

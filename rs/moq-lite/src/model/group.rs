@@ -16,6 +16,9 @@ use crate::{Error, Produce, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
 
+/// A group contains a sequence number because they can arrive out of order.
+///
+/// You can use [crate::TrackProducer::append_group] if you just want to +1 the sequence number.
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Group {
@@ -89,7 +92,7 @@ impl GroupProducer {
 
 	/// A helper method to write a frame from a single byte buffer.
 	///
-	/// If you want to write multiple chunks, use [Self::create] or [Self::append].
+	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
 	/// But an upfront size is required.
 	pub fn write_frame<B: Into<Bytes>>(&mut self, frame: B) {
 		let data = frame.into();
@@ -135,7 +138,7 @@ impl GroupProducer {
 		}
 	}
 
-	pub fn unused(&self) -> impl Future<Output = ()> {
+	pub fn unused(&self) -> impl Future<Output = ()> + use<> {
 		let state = self.state.clone();
 		async move {
 			state.closed().await;
@@ -176,10 +179,10 @@ impl GroupConsumer {
 		};
 
 		// Read the frame in one go, which is cancel safe.
-		let frame = match self.active.as_mut() {
-			Some(frame) => frame.read_all().await?,
-			None => return Ok(None),
+		let Some(frame) = self.active.as_mut() else {
+			return Ok(None);
 		};
+		let frame = frame.read_all().await?;
 
 		self.active = None;
 

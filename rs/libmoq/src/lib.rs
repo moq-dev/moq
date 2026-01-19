@@ -1,17 +1,20 @@
-//! C FFI bindings for MoQ (Media over QUIC).
+//! C FFI bindings for [`moq_lite`].
 //!
-//! This library provides a C-compatible API for working with MoQ broadcasts,
-//! enabling real-time media delivery with low latency at scale.
+//! Provides a C-compatible API for real-time pub/sub over QUIC.
 //!
-//! The API is organized around several key concepts:
-//! - **Sessions**: Network connections to MoQ servers
-//! - **Origins**: Collections of broadcasts that can be published or consumed
-//! - **Broadcasts**: Container for media tracks
-//! - **Tracks**: Individual audio or video streams
-//! - **Frames**: Individual media samples with timestamps
+//! ## Concepts
 //!
-//! All functions return negative error codes on failure, or non-negative values on success.
-//! Most resources are managed through opaque integer handles that must be explicitly closed.
+//! - **Session**: Network connection to a MoQ relay
+//! - **Origin**: Collection of broadcasts
+//! - **Broadcast**: Container for tracks
+//! - **Track**: Named stream of groups
+//! - **Group**: Collection of frames
+//! - **Frame**: Sized payload with timestamp
+//!
+//! ## Error Handling
+//!
+//! All functions return negative error codes on failure or non-negative values on success.
+//! Resources are managed through opaque integer handles that must be explicitly closed.
 
 mod api;
 mod consume;

@@ -3,12 +3,12 @@
 //! A [TrackProducer] creates streams with a sequence number and priority.
 //! The sequest number is used to determine the order of streams, while the priority is used to determine which stream to transmit first.
 //! This may seem counter-intuitive, but is designed for live streaming where the newest streams may be higher priority.
-//! A cloned [Producer] can be used to create streams in parallel, but will error if a duplicate sequence number is used.
+//! A cloned [TrackProducer] can be used to create streams in parallel, but will error if a duplicate sequence number is used.
 //!
 //! A [TrackConsumer] may not receive all streams in order or at all.
 //! These streams are meant to be transmitted over congested networks and the key to MoQ Tranport is to not block on them.
 //! streams will be cached for a potentially limited duration added to the unreliable nature.
-//! A cloned [Consumer] will receive a copy of all new stream going forward (fanout).
+//! A cloned [TrackConsumer] will receive a copy of all new stream going forward (fanout).
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
@@ -132,7 +132,7 @@ impl TrackProducer {
 	}
 
 	/// Block until there are no active consumers.
-	pub fn unused(&self) -> impl Future<Output = ()> {
+	pub fn unused(&self) -> impl Future<Output = ()> + use<> {
 		let state = self.state.clone();
 		async move {
 			state.closed().await;
@@ -165,15 +165,14 @@ impl TrackConsumer {
 	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
 		// Wait until there's a new latest group or the track is closed.
-		let state = match self
+		let Ok(state) = self
 			.state
 			.wait_for(|state| {
 				state.latest.as_ref().map(|group| group.info.sequence) > self.prev || state.closed.is_some()
 			})
 			.await
-		{
-			Ok(state) => state,
-			Err(_) => return Err(Error::Cancel),
+		else {
+			return Err(Error::Cancel);
 		};
 
 		match &state.closed {

@@ -1,8 +1,8 @@
 import type * as Moq from "@moq/lite";
+import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
-import type * as Time from "../../time";
 import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
 import type { SourceMSE } from "../source-mse";
@@ -63,6 +63,10 @@ export class Source {
 	active = new Signal<string | undefined>(undefined);
 
 	#signals = new Effect();
+
+	// Track active audio track subscription to prevent double subscription
+	// Similar to video's #active pattern - tracks the current running subscription
+	#activeAudioTrack?: Effect;
 
 	// Reference to video source for coordination
 	video?: Video.Source;
@@ -166,18 +170,9 @@ export class Source {
 		const enabled = effect.get(this.enabled);
 		const config = effect.get(this.config);
 
-		// For CMAF, we need to add the SourceBuffer even if audio is disabled
-		// This ensures the MediaSource has both SourceBuffers before video starts appending
-		// We'll just not append audio data if disabled
-		if (config?.container === "cmaf") {
-			// Always initialize MSE for CMAF, even if disabled
-			// The SourceBuffer needs to be added before video starts appending
-		} else if (!enabled) {
-			// For non-CMAF, if disabled, don't initialize
-			return;
-		}
-
-		if (!enabled && config?.container !== "cmaf") {
+		// For CMAF, always initialize (even if disabled) to add SourceBuffer before video starts
+		// For non-CMAF, only initialize if enabled
+		if (config?.container !== "cmaf" && !enabled) {
 			return;
 		}
 
@@ -200,20 +195,43 @@ export class Source {
 			return;
 		}
 
+		// For CMAF, watch video.mseSource reactively so we re-run when video creates a new SourceMSE
+		// This ensures audio re-initializes when video resolution changes
+		// IMPORTANT: effect.get() must be called unconditionally for the effect to track the signal
+		if (config.container === "cmaf" && this.video) {
+			// Always call effect.get() unconditionally - the effect system will track this signal
+			// and re-run #runDecoder when mseSource changes (e.g., new SourceMSE created on resolution change)
+			const mseSource = effect.get(this.video.mseSource);
+			// If mseSource is not available yet, wait for it (effect will re-run when it's set)
+			if (!mseSource) {
+				return;
+			}
+		}
+
+		// Close previous subscription if exists
+		if (this.#activeAudioTrack) {
+			this.#activeAudioTrack.close();
+		}
+
 		// Route to MSE for CMAF, WebCodecs for native/raw
 		// For CMAF, ALWAYS initialize MSE (even if disabled) to add SourceBuffer
 		// This ensures MediaSource has both SourceBuffers before video starts appending
 		// The SourceBuffer will be added, but fragments won't be appended if disabled
-		console.log(`[Audio Source] Routing audio: container=${config.container}, enabled=${enabled}`);
 		if (config.container === "cmaf") {
 			// Always initialize for CMAF - SourceBuffer must be added before video starts
-			console.log("[Audio Source] Using MSE path for CMAF");
-			this.#runMSEPath(effect, broadcast, active, config, catalog);
+			// Create a new effect for this subscription (like video does with #pending)
+			const trackEffect = new Effect();
+			this.#activeAudioTrack = trackEffect;
+			effect.cleanup(() => trackEffect.close());
+			this.#runMSEPath(trackEffect, broadcast, active, config, catalog);
 		} else {
 			// For non-CMAF, only run if enabled
-			console.log(`[Audio Source] Using WebCodecs path (container=${config.container})`);
 			if (enabled) {
-				this.#runWebCodecsPath(effect, broadcast, active, config, catalog);
+				// Create a new effect for this subscription (like video does with #pending)
+				const trackEffect = new Effect();
+				this.#activeAudioTrack = trackEffect;
+				effect.cleanup(() => trackEffect.close());
+				this.#runWebCodecsPath(trackEffect, broadcast, active, config, catalog);
 			}
 		}
 	}
@@ -227,10 +245,16 @@ export class Source {
 	): void {
 		// Use the unified SourceMSE from video - it manages both video and audio SourceBuffers
 		// Use a reactive effect to always get the latest SourceMSE instance
+		effect.cleanup(() => {
+			// Clear tracking when effect is cleaned up
+			if (this.#activeAudioTrack === effect) {
+				this.#activeAudioTrack = undefined;
+			}
+		});
+
 		effect.spawn(async () => {
 			// Wait for video's MSE source to be available
 			// Video creates it asynchronously, and may recreate it when restarting
-			// So we need to get it reactively each time
 			let videoMseSource: SourceMSE | undefined;
 			if (this.video?.mseSource) {
 				// Wait up to 2 seconds for video MSE source to be available
@@ -250,20 +274,13 @@ export class Source {
 				return;
 			}
 
-			// For MSE path, audio plays through the video element
 			// Expose video element as "audioElement" for compatibility with emitter
-			// Use reactive effect to always get the latest video element
 			this.#signals.effect((eff) => {
-				// Get latest SourceMSE instance in case video restarted
-				const latestMseSource = this.video?.mseSource ? eff.get(this.video.mseSource) : undefined;
-				const mseSource = latestMseSource || videoMseSource;
-				const videoElement = mseSource?.videoElement ? eff.get(mseSource.videoElement) : undefined;
-				// Expose as audioElement for emitter compatibility (HTMLVideoElement works the same as HTMLAudioElement for volume/mute)
+				const videoElement = videoMseSource.videoElement ? eff.get(videoMseSource.videoElement) : undefined;
 				eff.set(this.#mseAudioElement, videoElement as HTMLAudioElement | undefined);
 			});
 
-			// Forward stats (audio stats are not currently tracked in unified SourceMSE, but we can add them later)
-			// For now, just set empty stats
+			// Forward stats
 			this.#signals.effect((eff) => {
 				eff.set(this.#stats, { bytesReceived: 0 });
 			});
@@ -272,148 +289,27 @@ export class Source {
 			const isEnabled = effect.get(this.enabled);
 
 			// Only subscribe to track and initialize SourceBuffer if enabled
-			// When disabled, we don't need to do anything - video can play without audio
 			if (!isEnabled) {
-				console.log(
-					`[Audio Source] Audio disabled, skipping SourceBuffer initialization and track subscription - video will play without audio`,
-				);
 				return;
 			}
 
-			// Audio is enabled - subscribe to track and initialize SourceBuffer
-			// Wait a bit for video to stabilize if it's restarting
-			// Get the latest SourceMSE instance and verify it's stable
-			let latestMseSource: SourceMSE | undefined;
-			let retryCount = 0;
-			const maxRetries = 3;
-
-			while (retryCount < maxRetries) {
-				// Get the latest SourceMSE instance (in case video restarted)
-				latestMseSource = this.video?.mseSource ? effect.get(this.video.mseSource) : videoMseSource;
-				if (!latestMseSource) {
-					// Wait a bit for video to create SourceMSE
-					await new Promise((resolve) => setTimeout(resolve, 100));
-					retryCount++;
-					continue;
+			// Wait for MediaSource to be ready
+			const maxWait = 5000;
+			const startTime = Date.now();
+			while (Date.now() - startTime < maxWait) {
+				const ms = videoMseSource.mediaSource ? effect.get(videoMseSource.mediaSource) : undefined;
+				if (ms && typeof ms === "object" && "readyState" in ms && (ms as MediaSource).readyState === "open") {
+					break;
 				}
-
-				// Check if MediaSource is ready (not closed)
-				const mediaSource = latestMseSource.mediaSource ? effect.get(latestMseSource.mediaSource) : undefined;
-				if (
-					mediaSource &&
-					typeof mediaSource === "object" &&
-					"readyState" in mediaSource &&
-					(mediaSource as MediaSource).readyState === "closed"
-				) {
-					// MediaSource is closed, video might be restarting - wait and retry
-					console.log("[Audio Source] MediaSource is closed, waiting for video to stabilize");
-					await new Promise((resolve) => setTimeout(resolve, 200));
-					retryCount++;
-					continue;
-				}
-
-				// SourceMSE instance looks good, proceed
-				break;
+				await new Promise((resolve) => setTimeout(resolve, 50));
 			}
 
-			if (!latestMseSource) {
-				console.warn("[Audio Source] SourceMSE instance not available after retries, skipping audio");
-				return;
-			}
-
-			console.log("[Audio Stream] Subscribing to track", {
-				name,
-				codec: config.codec,
-				container: config.container,
-				sampleRate: config.sampleRate,
-				channels: config.numberOfChannels,
-			});
-
-			// Retry a few times for transient MSE states / QuotaExceeded
-			for (let attempt = 0; attempt < 5; attempt++) {
-				try {
-					// Resolve freshest SourceMSE and wait for MediaSource to be open (up to ~5s).
-					const resolveOpenMediaSource = async (): Promise<SourceMSE> => {
-						const start = Date.now();
-						let current = latestMseSource;
-						for (;;) {
-							// Follow any video restart by re-reading the signal
-							const candidate = this.video?.mseSource ? effect.get(this.video.mseSource) : current;
-							if (candidate && candidate !== current) {
-								console.log("[Audio Source] Video restarted, using new SourceMSE instance");
-								current = candidate;
-							}
-
-							if (!current) {
-								if (Date.now() - start > 5000) {
-									throw new Error("SourceMSE not available");
-								}
-								await new Promise((resolve) => setTimeout(resolve, 50));
-								continue;
-							}
-
-							const ms = current.mediaSource ? effect.get(current.mediaSource) : undefined;
-							if (
-								ms &&
-								typeof ms === "object" &&
-								"readyState" in ms &&
-								(ms as MediaSource).readyState === "open"
-							) {
-								return current;
-							}
-
-							if (Date.now() - start > 5000) {
-								throw new Error("MediaSource not ready for audio SourceBuffer");
-							}
-							await new Promise((resolve) => setTimeout(resolve, 50));
-						}
-					};
-
-					const readyMseSource = await resolveOpenMediaSource();
-					latestMseSource = readyMseSource;
-
-					console.log(
-						`[Audio Source] Initializing audio SourceBuffer on unified SourceMSE (attempt ${attempt + 1})`,
-					);
-					await latestMseSource.initializeAudio(config);
-
-					// Verify we're still using the current instance after initialization
-					const verifyMseSource = this.video?.mseSource ? effect.get(this.video.mseSource) : latestMseSource;
-					if (verifyMseSource && verifyMseSource !== latestMseSource) {
-						// Video restarted during initialization, get new instance and retry
-						console.log("[Audio Source] Video restarted during initialization, retrying with new instance");
-						await verifyMseSource.initializeAudio(config);
-						latestMseSource = verifyMseSource;
-					}
-
-					console.log(`[Audio Source] Audio SourceBuffer initialization completed`);
-
-					// Get latest instance again before running track (video might have restarted)
-					const finalMseSource = this.video?.mseSource ? effect.get(this.video.mseSource) : latestMseSource;
-					if (!finalMseSource) {
-						throw new Error("SourceMSE instance not available");
-					}
-
-					// Run audio track - use the latest instance
-					console.log(`[Audio Source] Starting MSE track on unified SourceMSE`);
-					await finalMseSource.runAudioTrack(effect, broadcast, name, config, catalog, this.enabled);
-					console.log("[Audio Source] MSE track completed successfully");
-					return; // success
-				} catch (error) {
-					const retriable = error instanceof DOMException && error.name === "QuotaExceededError";
-					if (!retriable || attempt === 4) {
-						console.warn(
-							"[Audio Source] Failed to initialize audio SourceBuffer, video will continue without audio:",
-							error,
-						);
-						return;
-					}
-					const delay = 150 + attempt * 150;
-					console.warn(
-						`[Audio Source] Audio init attempt ${attempt + 1} failed (${(error as Error).message}); retrying in ${delay}ms`,
-					);
-					await new Promise((resolve) => setTimeout(resolve, delay));
-				}
+			// Initialize audio SourceBuffer and run track
+			try {
+				await videoMseSource.initializeAudio(config);
+				await videoMseSource.runAudioTrack(effect, broadcast, name, config, catalog, this.enabled);
+			} catch (error) {
+				console.warn("[Audio Source] Failed to initialize audio:", error);
 			}
 		});
 	}
@@ -425,13 +321,6 @@ export class Source {
 		config: Catalog.AudioConfig,
 		catalog: Catalog.Audio,
 	): void {
-		console.log("[Audio Stream] Subscribing to track", {
-			name,
-			codec: config.codec,
-			container: config.container,
-			sampleRate: config.sampleRate,
-			channels: config.numberOfChannels,
-		});
 		const sub = broadcast.subscribe(name, catalog.priority);
 		effect.cleanup(() => sub.close());
 
@@ -512,6 +401,9 @@ export class Source {
 	}
 
 	close() {
+		// Close active audio track subscription
+		this.#activeAudioTrack?.close();
+		this.#activeAudioTrack = undefined;
 		this.#signals.close();
 	}
 }
