@@ -4,7 +4,7 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../catalog";
 import * as Frame from "../frame";
 import { PRIORITY } from "../publish/priority";
-import * as Mime from "../util/mime";
+import * as Mime from "../util/mp4-mime";
 
 // The types in VideoDecoderConfig that cause a hard reload.
 type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight"> &
@@ -71,7 +71,7 @@ export class SourceMSE {
 	}
 
 	async initializeVideo(config: RequiredDecoderConfig): Promise<void> {
-		const mimeType = Mime.buildVideoMimeType(config);
+		const mimeType = Mime.buildMp4VideoMimeType(config);
 		if (!mimeType) {
 			throw new Error(`Unsupported codec for MSE: ${config.codec}`);
 		}
@@ -136,7 +136,7 @@ export class SourceMSE {
 			return;
 		}
 
-		const mimeType = Mime.buildAudioMimeType(config);
+		const mimeType = Mime.buildMp4AudioMimeType(config);
 		if (!mimeType) {
 			throw new Error(`Unsupported codec for MSE: ${config.codec}`);
 		}
