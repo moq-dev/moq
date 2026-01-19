@@ -413,3 +413,7 @@ pub-console:
 # Serve the documentation locally.
 doc:
 	cd doc && bun run dev
+
+# Throttle UDP traffic for testing (macOS only, requires sudo)
+throttle:
+	dev/throttle

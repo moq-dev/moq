@@ -22,7 +22,7 @@ hex = "0.4"
 lazy_static = "1"
 m3u8-rs = "5"
 moq-lite = { workspace = true, features = ["serde"] }
-mp4-atom = { version = "0.9.2", features = ["tokio", "bytes", "serde"] }
+mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"] }
 num_enum = "0.7"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = [

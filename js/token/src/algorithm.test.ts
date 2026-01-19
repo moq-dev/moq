@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import test from "node:test";
-import { AlgorithmSchema } from "./algorithm";
+import { AlgorithmSchema } from "./algorithm.ts";
 
 test("algorithm schema - valid algorithms", () => {
 	const validAlgorithms = [

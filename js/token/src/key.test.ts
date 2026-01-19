@@ -2,9 +2,9 @@ import assert from "node:assert";
 import test from "node:test";
 import * as base64 from "@hexagon/base64";
 import { exportJWK, generateKeyPair } from "jose";
-import type { Algorithm } from "./algorithm";
-import type { Claims } from "./claims";
-import { type Key, load, loadPublic, sign, toPublicKey, verify } from "./key";
+import type { Algorithm } from "./algorithm.ts";
+import type { Claims } from "./claims.ts";
+import { type Key, load, loadPublic, sign, toPublicKey, verify } from "./key.ts";
 
 // Helper function to encode JSON to base64url
 function encodeJwk(obj: unknown): string {
