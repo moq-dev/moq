@@ -315,12 +315,10 @@ check-all:
 	# Run the standard checks first
 	just check
 
-	# Test all feature combinations for the hang crate
+	# Check all feature combinations for the hang crate
 	# requires: cargo install cargo-hack
-	echo "Testing all feature combinations for hang..."
+	echo "Checking all feature combinations for hang..."
 	cargo hack check --package hang --each-feature --no-dev-deps
-	cargo hack test --package hang --each-feature
-
 
 # Run the unit tests
 test:
@@ -336,6 +334,19 @@ test:
 	fi
 
 	cargo test --all-targets --all-features
+
+# Run comprehensive tests including all feature combinations (requires cargo-hack)
+test-all:
+	#!/usr/bin/env bash
+	set -euo pipefail
+
+	# Run the standard tests first
+	just test
+
+	# Test all feature combinations for the hang crate
+	# requires: cargo install cargo-hack
+	echo "Testing all feature combinations for hang..."
+	cargo hack test --package hang --each-feature
 
 # Automatically fix some issues.
 fix:
