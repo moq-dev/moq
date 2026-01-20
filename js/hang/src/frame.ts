@@ -13,7 +13,7 @@ export interface Frame {
 	data: Uint8Array;
 	timestamp: Time.Micro;
 	keyframe: boolean;
-	groupSequenceNumber: number;
+	group: number;
 }
 
 export function encode(source: Uint8Array | Source, timestamp: Time.Micro, container?: Catalog.Container): Uint8Array {
@@ -38,7 +38,7 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro, conta
 }
 
 // NOTE: A keyframe is always the first frame in a group, so it's not encoded on the wire.
-export function getFrameData(
+export function decode(
 	buffer: Uint8Array,
 	container?: Catalog.Container,
 ): { data: Uint8Array; timestamp: Time.Micro } {
@@ -91,7 +91,7 @@ export class Consumer {
 	#latency: Signal<Time.Milli>;
 	#container?: Catalog.Container;
 	#groups: Group[] = [];
-	#activeSequenceNumber?: number; // the active group sequence number
+	#active?: number; // the active group sequence number
 	earliestBufferTime = new Signal<number | undefined>(undefined);
 	latestBufferTime = new Signal<number | undefined>(undefined);
 
@@ -123,12 +123,12 @@ export class Consumer {
 
 			// To improve TTV, we always start with the first group.
 			// For higher latencies we might need to figure something else out, as its racey.
-			if (this.#activeSequenceNumber === undefined) {
-				this.#activeSequenceNumber = consumer.sequence;
+			if (this.#active === undefined) {
+				this.#active = consumer.sequence;
 			}
 
-			if (consumer.sequence < this.#activeSequenceNumber) {
-				console.warn(`skipping old group: ${consumer.sequence} < ${this.#activeSequenceNumber}`);
+			if (consumer.sequence < this.#active) {
+				console.warn(`skipping old group: ${consumer.sequence} < ${this.#active}`);
 				// Skip old groups.
 				consumer.close();
 				continue;
@@ -151,33 +151,33 @@ export class Consumer {
 
 	async #runGroup(group: Group) {
 		try {
-			let isKeyframe = true;
+			let keyframe = true;
 
 			if (window.simulateLatency === true) {
 				await applySimulatedLatency(2500);
 			}
 
 			for (;;) {
-				const nextFrame = await group.consumer.readFrame();
-				if (!nextFrame) break;
+				const next = await group.consumer.readFrame();
+				if (!next) break;
 
-				const { data, timestamp } = getFrameData(nextFrame, this.#container);
-				const frameInfo = {
+				const { data, timestamp } = decode(next, this.#container);
+				const frame = {
 					data,
 					timestamp,
-					keyframe: isKeyframe,
-					groupSequenceNumber: group.consumer.sequence,
+					keyframe,
+					group: group.consumer.sequence,
 				};
 
-				isKeyframe = false;
+				keyframe = false;
 
-				group.frames.push(frameInfo);
+				group.frames.push(frame);
 
 				if (!group.latest || timestamp > group.latest) {
 					group.latest = timestamp;
 				}
 
-				if (group.consumer.sequence === this.#activeSequenceNumber) {
+				if (group.consumer.sequence === this.#active) {
 					this.#notify?.();
 					this.#notify = undefined;
 				} else {
@@ -190,9 +190,9 @@ export class Consumer {
 		} finally {
 			this.#updateBufferRange();
 
-			if (group.consumer.sequence === this.#activeSequenceNumber) {
+			if (group.consumer.sequence === this.#active) {
 				// Advance to the next group.
-				this.#activeSequenceNumber += 1;
+				this.#active += 1;
 
 				this.#notify?.();
 				this.#notify = undefined;
@@ -214,24 +214,19 @@ export class Consumer {
 
 		if (latency < Time.Micro.fromMilli(this.#latency.peek())) return;
 
-		const firstGroup = this.#groups[0];
-		const isSlowGroup =
-			this.#activeSequenceNumber !== undefined && firstGroup.consumer.sequence <= this.#activeSequenceNumber;
-
-		if (isSlowGroup) {
+		const first = this.#groups[0];
+		if (this.#active !== undefined && first.consumer.sequence <= this.#active) {
 			this.#groups.shift();
 
-			console.warn(
-				`skipping slow group: ${firstGroup.consumer.sequence} < ${this.#groups[0]?.consumer.sequence}`,
-			);
+			console.warn(`skipping slow group: ${first.consumer.sequence} < ${this.#groups[0]?.consumer.sequence}`);
 
-			firstGroup.consumer.close();
-			firstGroup.frames.length = 0;
+			first.consumer.close();
+			first.frames.length = 0;
 		}
 
 		// Advance to the next known group.
 		// NOTE: Can't be undefined, because we checked above.
-		this.#activeSequenceNumber = this.#groups[0]?.consumer.sequence;
+		this.#active = this.#groups[0]?.consumer.sequence;
 
 		// Wake up any consumers waiting for a new frame.
 		this.#notify?.();
@@ -248,16 +243,15 @@ export class Consumer {
 		for (;;) {
 			if (
 				this.#groups.length > 0 &&
-				this.#activeSequenceNumber !== undefined &&
-				this.#groups[0].consumer.sequence <= this.#activeSequenceNumber
+				this.#active !== undefined &&
+				this.#groups[0].consumer.sequence <= this.#active
 			) {
 				const frame = this.#groups[0].frames.shift();
 
 				if (frame) return frame;
 
-				const isGroupDone = this.#activeSequenceNumber > this.#groups[0].consumer.sequence;
-
-				if (isGroupDone) {
+				// Check if the group is done and then remove it.
+				if (this.#active > this.#groups[0].consumer.sequence) {
 					this.#groups.shift();
 					continue;
 				}
