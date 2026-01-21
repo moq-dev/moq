@@ -189,7 +189,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track, None);
+		let track = broadcast.subscribe_track(&track, subscribe.delivery_timeout);
 
 		// TODO wait until track.info() to get the *real* priority
 
@@ -268,7 +268,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			// Spawn a task to serve this group, ignoring any errors because they don't really matter.
 			// TODO add some logging at least.
-			let handle = Box::pin(Self::serve_group(session.clone(), msg, priority, group, version));
+			let handle = Box::pin(Self::serve_group(session.clone(), msg, priority, group, delivery_timeout, version));
 
 			// Terminate the old group if it's still running.
 			if let Some(old_sequence) = old_sequence.take() {
@@ -296,6 +296,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: lite::Group,
 		mut priority: PriorityHandle,
 		mut group: GroupConsumer,
+		delivery_timeout: Option<u64>,
 		version: Version,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
@@ -341,6 +342,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						continue;
 					}
 				};
+
+				// Check delivery timeout before writing chunk
+				if let Some(timeout) = delivery_timeout {
+					let now = tokio::time::Instant::now();
+					if now.duration_since(frame.arrival_time).as_millis() > timeout as u128 {
+						tracing::warn!(
+							"Delivery timeout exceeded. Arrival: {:?}, now: {:?}. Dropping group {}",
+							frame.arrival_time,
+							now,
+							group.info.sequence
+						);
+						return Err(Error::DeliveryTimeout);
+					}
+				}
 
 				match chunk? {
 					Some(mut chunk) => stream.write_all(&mut chunk).await?,

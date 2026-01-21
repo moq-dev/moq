@@ -102,6 +102,7 @@ impl FrameProducer {
 			info: self.info.clone(),
 			state: self.state.subscribe(),
 			index: 0,
+			arrival_time: tokio::time::Instant::now(),
 		}
 	}
 
@@ -132,6 +133,9 @@ pub struct FrameConsumer {
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
 	index: usize,
+
+	// Track when the frame arrived for delivery timeout checks
+	pub arrival_time: tokio::time::Instant,
 }
 
 impl FrameConsumer {

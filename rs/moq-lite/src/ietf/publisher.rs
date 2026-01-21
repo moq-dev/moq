@@ -93,7 +93,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: msg.subscriber_priority,
 		};
 
-		let track = broadcast.subscribe_track(&track, None);
+		let track = broadcast.subscribe_track(&track, msg.delivery_timeout);
 
 		let (tx, rx) = oneshot::channel();
 		let mut subscribes = self.subscribes.lock();
@@ -109,9 +109,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let request_id = msg.request_id;
 		let subscribes = self.subscribes.clone();
 		let version = self.version;
+		let delivery_timeout = msg.delivery_timeout;
 
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_track(session, track, request_id, rx, version).await {
+			if let Err(err) = Self::run_track(session, track, request_id, delivery_timeout, rx, version).await {
 				control
 					.send(ietf::PublishDone {
 						request_id,
@@ -149,6 +150,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		mut track: TrackConsumer,
 		request_id: RequestId,
+		delivery_timeout: Option<u64>,
 		mut cancel: oneshot::Receiver<()>,
 		version: Version,
 	) -> Result<(), Error> {
@@ -212,8 +214,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				msg,
 				track.info.priority,
 				group,
-				version,
-			));
+			delivery_timeout,
+			version,
+		));
 
 			// Terminate the old group if it's still running.
 			if let Some(old_sequence) = old_sequence.take() {
@@ -241,6 +244,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: GroupConsumer,
+		delivery_timeout: Option<u64>,
 		version: Version,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
@@ -291,6 +295,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						_ = stream.closed() => return Err(Error::Cancel),
 						chunk = frame.read_chunk() => chunk,
 					};
+
+					// Check delivery timeout before writing chunk
+					if let Some(timeout) = delivery_timeout {
+						let now = tokio::time::Instant::now();
+						if now.duration_since(frame.arrival_time).as_millis() > timeout as u128 {
+							tracing::warn!(
+								"Delivery timeout exceeded. Arrival: {:?}, now: {:?}. Dropping group {}",
+								frame.arrival_time,
+								now,
+								group.info.sequence
+							);
+							return Err(Error::DeliveryTimeout);
+						}
+					}
 
 					match chunk? {
 						Some(mut chunk) => stream.write_all(&mut chunk).await?,
