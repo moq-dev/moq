@@ -265,6 +265,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = priority.insert(track.info.priority, sequence);
+			let delivery_timeout = subscribe.delivery_timeout;
 
 			// Spawn a task to serve this group, ignoring any errors because they don't really matter.
 			// TODO add some logging at least.
@@ -310,6 +311,39 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
 
+		let result = Self::serve_group_inner(&mut stream, &mut priority, &mut group, delivery_timeout).await;
+
+		// Handle errors specially
+		match result {
+			Err(Error::DeliveryTimeout) => {
+				tracing::warn!(sequence = %msg.sequence, "group delivery timeout - resetting stream");
+				// Reset the stream on delivery timeout
+				stream.abort(&Error::DeliveryTimeout);
+				return Err(Error::DeliveryTimeout);
+			}
+			Err(Error::Cancel) => {
+				tracing::debug!(sequence = %msg.sequence, "group cancelled");
+				return Err(Error::Cancel);
+			}
+			Err(err) => {
+				tracing::debug!(?err, sequence = %msg.sequence, "group error");
+				return Err(err);
+			}
+			Ok(()) => {
+				stream.finish()?;
+				stream.closed().await?;
+				tracing::debug!(sequence = %msg.sequence, "finished group");
+				Ok(())
+			}
+		}
+	}
+
+	async fn serve_group_inner(
+		stream: &mut Writer<S::SendStream, Version>,
+		priority: &mut PriorityHandle,
+		group: &mut GroupConsumer,
+		delivery_timeout: Option<u64>,
+	) -> Result<(), Error> {
 		loop {
 			let frame = tokio::select! {
 				biased;
@@ -365,11 +399,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			tracing::trace!(size = %frame.info.size, "wrote frame");
 		}
-
-		stream.finish()?;
-		stream.closed().await?;
-
-		tracing::debug!(sequence = %msg.sequence, "finished group");
 
 		Ok(())
 	}

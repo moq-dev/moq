@@ -214,9 +214,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				msg,
 				track.info.priority,
 				group,
-			delivery_timeout,
-			version,
-		));
+				delivery_timeout,
+				version,
+			));
 
 			// Terminate the old group if it's still running.
 			if let Some(old_sequence) = old_sequence.take() {
@@ -261,6 +261,39 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::trace!(?msg, "sending group header");
 
+		let result = Self::run_group_inner(&mut stream, &msg, &mut group, delivery_timeout).await;
+
+		// Handle errors specially
+		match result {
+			Err(Error::DeliveryTimeout) => {
+				tracing::warn!(sequence = %msg.group_id, "group delivery timeout - resetting stream");
+				// Reset the stream on delivery timeout
+				stream.abort(&Error::DeliveryTimeout);
+				return Err(Error::DeliveryTimeout);
+			}
+			Err(Error::Cancel) => {
+				tracing::debug!(sequence = %msg.group_id, "group cancelled");
+				return Err(Error::Cancel);
+			}
+			Err(err) => {
+				tracing::debug!(?err, sequence = %msg.group_id, "group error");
+				return Err(err);
+			}
+			Ok(()) => {
+				stream.finish()?;
+				stream.closed().await?;
+				tracing::debug!(sequence = %msg.group_id, "finished group");
+				Ok(())
+			}
+		}
+	}
+
+	async fn run_group_inner(
+		stream: &mut Writer<S::SendStream, Version>,
+		msg: &ietf::GroupHeader,
+		group: &mut GroupConsumer,
+		delivery_timeout: Option<u64>,
+	) -> Result<(), Error> {
 		loop {
 			let frame = tokio::select! {
 				biased;
@@ -317,13 +350,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 			}
 		}
-
-		stream.finish()?;
-
-		// Wait until everything is acknowledged by the peer so we can still cancel the stream.
-		stream.closed().await?;
-
-		tracing::debug!(sequence = %msg.group_id, "finished group");
 
 		Ok(())
 	}
