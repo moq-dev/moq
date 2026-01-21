@@ -66,6 +66,9 @@ pub enum Error {
 	#[error("unauthorized")]
 	Unauthorized,
 
+	#[error("delivery timeout exceeded")]
+	DeliveryTimeout,
+
 	#[error("unexpected message")]
 	UnexpectedMessage,
 
@@ -105,6 +108,7 @@ impl Error {
 			Self::TooLarge => 18,
 			Self::TooManyParameters => 19,
 			Self::InvalidRole => 20,
+			Self::DeliveryTimeout => 21,
 			Self::App(app) => *app + 64,
 		}
 	}

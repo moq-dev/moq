@@ -93,7 +93,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: msg.subscriber_priority,
 		};
 
-		let track = broadcast.subscribe_track(&track);
+		let track = broadcast.subscribe_track(&track, None);
 
 		let (tx, rx) = oneshot::channel();
 		let mut subscribes = self.subscribes.lock();

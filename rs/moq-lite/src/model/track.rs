@@ -53,6 +53,7 @@ struct TrackState {
 pub struct TrackProducer {
 	pub info: Track,
 	state: watch::Sender<TrackState>,
+	pub delivery_timeout: Option<u64>,
 }
 
 impl TrackProducer {
@@ -60,6 +61,7 @@ impl TrackProducer {
 		Self {
 			info,
 			state: Default::default(),
+			delivery_timeout: None,
 		}
 	}
 
