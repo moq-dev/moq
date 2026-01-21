@@ -124,7 +124,7 @@ export class Renderer {
 		ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
 		// Apply horizontal flip if specified in the video config
-		const flip = this.source.catalog.peek()?.flip;
+		const flip = this.source.flip.peek();
 		if (flip) {
 			ctx.scale(-1, 1);
 			ctx.translate(-ctx.canvas.width, 0);

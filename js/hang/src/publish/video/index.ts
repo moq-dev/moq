@@ -1,6 +1,6 @@
 import { Effect, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import { PRIORITY } from "../priority";
+import { PRIORITY } from "../../catalog/priority";
 import { Encoder, type EncoderProps } from "./encoder";
 import { TrackProcessor } from "./polyfill";
 import type { Source } from "./types";

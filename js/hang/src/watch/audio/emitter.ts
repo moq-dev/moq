@@ -46,8 +46,7 @@ export class Emitter {
 		});
 
 		this.#signals.effect((effect) => {
-			const paused = effect.get(this.paused);
-			const enabled = !paused;
+			const enabled = !effect.get(this.paused) && !effect.get(this.muted);
 			this.source.enabled.set(enabled);
 		});
 
@@ -57,44 +56,7 @@ export class Emitter {
 			this.muted.set(volume === 0);
 		});
 
-		// Handle MSE path (HTMLAudioElement) vs WebCodecs path (AudioWorklet)
 		this.#signals.effect((effect) => {
-			const mseAudio = effect.get(this.source.mseAudioElement);
-			if (mseAudio) {
-				// MSE path: control HTMLAudioElement directly
-				effect.effect(() => {
-					const volume = effect.get(this.volume);
-					const muted = effect.get(this.muted);
-					const paused = effect.get(this.paused);
-					mseAudio.volume = volume;
-					mseAudio.muted = muted;
-
-					// Control play/pause state
-					if (paused && !mseAudio.paused) {
-						mseAudio.pause();
-					} else if (!paused && mseAudio.paused) {
-						// Resume if paused - try to play even if readyState is low
-						const tryPlay = () => {
-							if (!paused && mseAudio.paused) {
-								mseAudio
-									.play()
-									.catch((err) => console.error("[Audio Emitter] Failed to resume audio:", err));
-							}
-						};
-
-						// Try to play if we have metadata (HAVE_METADATA = 1), browser will start when ready
-						if (mseAudio.readyState >= HTMLMediaElement.HAVE_METADATA) {
-							tryPlay();
-						} else {
-							// Wait for loadedmetadata event if not ready yet
-							mseAudio.addEventListener("loadedmetadata", tryPlay, { once: true });
-						}
-					}
-				});
-				return;
-			}
-
-			// WebCodecs path: use AudioWorklet with GainNode
 			const root = effect.get(this.source.root);
 			if (!root) return;
 
@@ -114,10 +76,9 @@ export class Emitter {
 			});
 		});
 
-		// Only apply gain transitions for WebCodecs path (when gain node exists)
 		this.#signals.effect((effect) => {
 			const gain = effect.get(this.#gain);
-			if (!gain) return; // MSE path doesn't use gain node
+			if (!gain) return;
 
 			// Cancel any scheduled transitions on change.
 			effect.cleanup(() => gain.gain.cancelScheduledValues(gain.context.currentTime));

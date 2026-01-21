@@ -1,13 +1,14 @@
 import type * as Moq from "@moq/lite";
 import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
-import { PRIORITY } from "../../publish/priority";
+import { PRIORITY } from "../../catalog/priority";
 import * as Hex from "../../util/hex";
-import type { SourceMSE } from "../source-mse";
+import * as Catalog from "../../catalog";
 
 export type SourceProps = {
+	catalog: Catalog.Source | Signal<Catalog.Source | undefined>,
+
 	enabled?: boolean | Signal<boolean>;
 
 	// Jitter buffer size in milliseconds (default: 100ms)
@@ -28,9 +29,7 @@ export type Target = {
 // The types in VideoDecoderConfig that cause a hard reload.
 // ex. codedWidth/Height are optional and can be changed in-band, so we don't want to trigger a reload.
 // This way we can keep the current subscription active.
-// Note: We keep codedWidth/Height as optional for logging, but set them to undefined to avoid reloads.
-type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight"> &
-	Partial<Pick<Catalog.VideoConfig, "codedWidth" | "codedHeight">>;
+type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
 
 type BufferStatus = { state: "empty" | "filled" };
 
@@ -55,10 +54,10 @@ const MAX_BFRAMES = 10;
 
 // Responsible for switching between video tracks and buffering frames.
 export class Source {
-	broadcast: Signal<Moq.Broadcast | undefined>;
+	catalog: Signal<Catalog.Source | undefined>;
 	enabled: Signal<boolean>; // Don't download any longer
 
-	catalog = new Signal<Catalog.Video | undefined>(undefined);
+	#catalog = new Signal<Catalog.Video | undefined>(undefined);
 
 	// The tracks supported by our video decoder.
 	#supported = new Signal<Record<string, Catalog.VideoConfig>>({});
@@ -100,27 +99,19 @@ export class Source {
 
 	#signals = new Effect();
 
-	// Expose MediaSource for audio to use
-	#mseMediaSource = new Signal<MediaSource | undefined>(undefined);
-	readonly mseMediaSource = this.#mseMediaSource as Getter<MediaSource | undefined>;
-
-	// Expose mseSource instance for audio to access coordination methods
-	#mseSource = new Signal<SourceMSE | undefined>(undefined);
-	readonly mseSource = this.#mseSource as Getter<SourceMSE | undefined>;
-
 	constructor(
-		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
 		props?: SourceProps,
 	) {
-		this.broadcast = broadcast;
+		this.catalog = Signal.from(props?.catalog);
 		this.latency = Signal.from(props?.latency ?? (100 as Time.Milli));
 		this.enabled = Signal.from(props?.enabled ?? false);
 
 		this.#signals.effect((effect) => {
-			const c = effect.get(catalog)?.video;
-			effect.set(this.catalog, c);
-			effect.set(this.flip, c?.flip);
+			const catalog = effect.get(this.catalog);
+			if (!catalog) return;
+			const parsed = effect.get(catalog.parsed)?.video;
+			effect.set(this.#catalog, parsed);
+			effect.set(this.flip, parsed?.flip);
 		});
 
 		this.#signals.effect(this.#runSupported.bind(this));
@@ -131,12 +122,14 @@ export class Source {
 	}
 
 	#runSupported(effect: Effect): void {
-		const renditions = effect.get(this.catalog)?.renditions ?? {};
+		const renditions = effect.get(this.#catalog)?.renditions ?? {};
 
 		effect.spawn(async () => {
 			const supported: Record<string, Catalog.VideoConfig> = {};
 
 			for (const [name, rendition] of Object.entries(renditions)) {
+				if (rendition.container !== "legacy") continue;
+
 				const description = rendition.description ? Hex.toBytes(rendition.description) : undefined;
 
 				const { supported: valid } = await VideoDecoder.isConfigSupported({
@@ -174,12 +167,13 @@ export class Source {
 	}
 
 	#runPending(effect: Effect): void {
-		const broadcast = effect.get(this.broadcast);
+		const catalog = effect.get(this.catalog);
 		const enabled = effect.get(this.enabled);
 		const selected = effect.get(this.#selected);
 		const config = effect.get(this.#selectedConfig);
+		const broadcast = catalog ? effect.get(catalog.broadcast) : undefined;
 
-		if (!broadcast || !selected || !config || !enabled) {
+		if (!catalog || !selected || !config || !enabled || !broadcast) {
 			// Stop the active track.
 			this.#active?.close();
 			this.#active = undefined;
@@ -203,78 +197,12 @@ export class Source {
 	}
 
 	#runTrack(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
-		// Route to MSE for CMAF, WebCodecs for native/raw
-		if (config.container === "cmaf") {
-			this.#runMSEPath(effect, broadcast, name, config);
-		} else {
-			this.#runWebCodecsPath(effect, broadcast, name, config);
-		}
-	}
-
-	#runMSEPath(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
-		// Import MSE source dynamically to avoid loading if not needed
-		effect.spawn(async () => {
-			const { SourceMSE } = await import("../source-mse.js");
-			const mseSource = new SourceMSE(this.latency);
-			effect.cleanup(() => mseSource.close());
-
-			// IMPORTANT: Set mseSource immediately so audio can track it
-			// This must be set synchronously, not in an effect, so the signal updates immediately
-			this.#mseSource.set(mseSource);
-
-			// Forward signals using effects
-			this.#signals.effect((eff) => {
-				const frame = eff.get(mseSource.frame);
-				eff.set(this.frame, frame);
-			});
-
-			this.#signals.effect((eff) => {
-				const display = eff.get(mseSource.display);
-				eff.set(this.display, display);
-			});
-
-			this.#signals.effect((eff) => {
-				const status = eff.get(mseSource.bufferStatus);
-				eff.set(this.bufferStatus, status, { state: "empty" });
-			});
-
-			this.#signals.effect((eff) => {
-				const status = eff.get(mseSource.syncStatus);
-				eff.set(this.syncStatus, status, { state: "ready" });
-			});
-
-			this.#signals.effect((eff) => {
-				const mediaSource = eff.get(mseSource.mediaSource);
-				eff.set(this.#mseMediaSource, mediaSource);
-			});
-
-			this.#signals.effect((eff) => {
-				const stats = eff.get(mseSource.stats);
-				eff.set(this.#stats, stats);
-			});
-			// Run MSE track
-			try {
-				await mseSource.runTrack(effect, broadcast, name, config);
-			} catch (error) {
-				console.error("MSE path error, falling back to WebCodecs:", error);
-				// Fallback to WebCodecs
-				this.#mseSource.set(undefined);
-				this.#runWebCodecsPath(effect, broadcast, name, config);
-			}
-		});
-
-		// Clean up mseSource when the effect closes (track switches)
-		effect.cleanup(() => {
-			this.#mseSource.set(undefined);
-		});
-	}
-
-	#runWebCodecsPath(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
 		const sub = broadcast.subscribe(name, PRIORITY.video); // TODO use priority from catalog
 		effect.cleanup(() => sub.close());
 
 		// Create consumer that reorders groups/frames up to the provided latency.
-		// Container defaults to "native" via Zod schema for backward compatibility
+		// Container defaults to "legacy" via Zod schema for backward compatibility
+		console.log(`[Video Subscriber] Using container format: ${config.container}`);
 		const consumer = new Frame.Consumer(sub, {
 			latency: this.latency,
 			container: config.container,
@@ -442,7 +370,7 @@ export class Source {
 	}
 
 	#runDisplay(effect: Effect): void {
-		const catalog = effect.get(this.catalog);
+		const catalog = effect.get(this.#catalog);
 		if (!catalog) return;
 
 		const display = catalog.display;

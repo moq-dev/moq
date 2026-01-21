@@ -1,8 +1,9 @@
 import type { Path } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
-import { type Moq, type Publish, Watch } from "..";
+import { type Moq, type Publish} from "..";
+import * as Catalog from "../catalog";
 
-export type Broadcast = Watch.Broadcast | Publish.Broadcast;
+export type Source = Catalog.Source | Publish.Broadcast;
 
 export type RoomProps = {
 	connection: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
@@ -17,10 +18,10 @@ export class Room {
 	path: Signal<Path.Valid | undefined>;
 
 	// The active broadcasts, sorted by announcement time.
-	active = new Map<Path.Valid, Broadcast>();
+	active = new Map<Path.Valid, Source>();
 
 	// All of the remote broadcasts.
-	remotes = new Map<Path.Valid, Watch.Broadcast>();
+	remotes = new Map<Path.Valid, Catalog.Source>();
 
 	// The local broadcasts.
 	locals = new Map<Path.Valid, Publish.Broadcast>();
@@ -28,8 +29,8 @@ export class Room {
 	// Optional callbacks to learn when individual broadcasts are added/removed.
 	// We avoid using signals because we don't want to re-render everything on every update.
 	// One day I'll figure out how to handle collections elegantly.
-	#onActive?: (path: Path.Valid, broadcast: Broadcast | undefined) => void;
-	#onRemote?: (path: Path.Valid, broadcast: Watch.Broadcast | undefined) => void;
+	#onActive?: (path: Path.Valid, source: Source | undefined) => void;
+	#onRemote?: (path: Path.Valid, source: Catalog.Source | undefined) => void;
 	#onLocal?: (path: Path.Valid, broadcast: Publish.Broadcast | undefined) => void;
 
 	#signals = new Effect();
@@ -53,7 +54,7 @@ export class Room {
 	}
 
 	// Register a callback when a broadcast has been added/removed.
-	onActive(callback?: (path: Path.Valid, broadcast: Broadcast | undefined) => void) {
+	onActive(callback?: (path: Path.Valid, source: Source | undefined) => void) {
 		this.#onActive = callback;
 		if (!callback) return;
 
@@ -62,7 +63,7 @@ export class Room {
 		}
 	}
 
-	onRemote(callback?: (path: Path.Valid, broadcast: Watch.Broadcast | undefined) => void) {
+	onRemote(callback?: (path: Path.Valid, source: Catalog.Source | undefined) => void) {
 		this.#onRemote = callback;
 		if (!callback) return;
 
@@ -120,7 +121,7 @@ export class Room {
 
 		if (update.active) {
 			// NOTE: If you were implementing this yourself, you could use the <hang-watch> element instead.
-			const watch = new Watch.Broadcast({
+			const source = new Catalog.Source({
 				connection: this.connection,
 				// NOTE: You're responsible for setting enabled to true if you want to download the broadcast.
 				enabled: false,
@@ -128,11 +129,11 @@ export class Room {
 				reload: false,
 			});
 
-			this.remotes.set(update.path, watch);
-			this.active.set(update.path, watch);
+			this.remotes.set(update.path, source);
+			this.active.set(update.path, source);
 
-			this.#onRemote?.(update.path, watch);
-			this.#onActive?.(update.path, watch);
+			this.#onRemote?.(update.path, source);
+			this.#onActive?.(update.path, source);
 		} else {
 			const existing = this.remotes.get(update.path);
 			if (!existing) throw new Error(`broadcast not found: ${update.path}`);

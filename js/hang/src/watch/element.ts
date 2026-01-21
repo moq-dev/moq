@@ -2,8 +2,9 @@ import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import { Broadcast } from "./broadcast";
+import * as Catalog from "../catalog";
 import * as Video from "./video";
+import * as MSE from "./mse";
 
 // TODO remove name; replaced with path
 const OBSERVED = ["url", "name", "path", "paused", "volume", "muted", "reload", "latency"] as const;
@@ -22,13 +23,7 @@ export default class HangWatch extends HTMLElement {
 	connection: Moq.Connection.Reload;
 
 	// The broadcast being watched.
-	broadcast: Broadcast;
-
-	// Responsible for rendering the video.
-	video: Video.Renderer;
-
-	// Responsible for emitting the audio.
-	audio: Audio.Emitter;
+	catalog: Catalog.Source;
 
 	// The URL of the moq-relay server
 	url = new Signal<URL | undefined>(undefined);
@@ -58,8 +53,10 @@ export default class HangWatch extends HTMLElement {
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
-	// The canvas element to render the video to.
-	canvas = new Signal<HTMLCanvasElement | undefined>(undefined);
+	// The canvas/video element to render the video to.
+	// When set to a <canvas>, WebCodecs is used for rendering.
+	// When set to a <video>, MSE is used for rendering.
+	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 
 	// Expose the Effect class, so users can easily create effects scoped to this element.
 	signals = new Effect();
@@ -75,38 +72,59 @@ export default class HangWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.connection.close());
 
-		this.broadcast = new Broadcast({
+		this.catalog = new Catalog.Source({
 			connection: this.connection.established,
 			path: this.path,
 			enabled: this.#enabled,
 			reload: this.reload,
-			audio: {
-				latency: this.latency,
-			},
-			video: {
-				latency: this.latency,
-			},
 		});
-		this.signals.cleanup(() => this.broadcast.close());
-
-		this.video = new Video.Renderer(this.broadcast.video, { canvas: this.canvas, paused: this.paused });
-		this.signals.cleanup(() => this.video.close());
-
-		this.audio = new Audio.Emitter(this.broadcast.audio, {
-			volume: this.volume,
-			muted: this.muted,
-			paused: this.paused,
-		});
-		this.signals.cleanup(() => this.audio.close());
+		this.signals.cleanup(() => this.catalog.close());
 
 		// Watch to see if the canvas element is added or removed.
-		const setCanvas = () => {
-			this.canvas.set(this.querySelector("canvas") as HTMLCanvasElement | undefined);
+		const setElement = () => {
+			const canvas = this.querySelector("canvas") as HTMLCanvasElement | undefined;
+			const video = this.querySelector("video") as HTMLVideoElement | undefined;
+			if (canvas && video) {
+				throw new Error("Cannot have both canvas and video elements");
+			}
+			this.element.set(canvas ?? video);
 		};
-		const observer = new MutationObserver(setCanvas);
+
+		const observer = new MutationObserver(setElement);
 		observer.observe(this, { childList: true, subtree: true });
 		this.signals.cleanup(() => observer.disconnect());
-		setCanvas();
+		setElement();
+
+		this.signals.effect((effect) => {
+			const element = effect.get(this.element);
+			if (!element) return;
+
+			if (element instanceof HTMLCanvasElement) {
+				const videoSource = new Video.Source({ catalog: this.catalog, latency: this.latency });
+				const audioSource = new Audio.Source({ catalog: this.catalog, latency: this.latency });
+
+				const audioEmitter = new Audio.Emitter(audioSource, {
+					volume: this.volume,
+					muted: this.muted,
+					paused: this.paused,
+				});
+
+				const videoRenderer = new Video.Renderer(videoSource, { canvas: element, paused: this.paused });
+
+				this.signals.cleanup(() => {
+					videoSource.close();
+					audioSource.close();
+					audioEmitter.close();
+					videoRenderer.close();
+				});
+			} else if (element instanceof HTMLVideoElement) {
+				const source = new MSE.Source({ catalog: this.catalog, latency: this.latency });
+				this.signals.cleanup(() => source.close());
+			} else {
+				const _exhaustive: never = element;
+				throw new Error(`Invalid element: ${_exhaustive}`);
+			}
+		});
 
 		// Optionally update attributes to match the library state.
 		// This is kind of dangerous because it can create loops.

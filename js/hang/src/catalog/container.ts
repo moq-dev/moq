@@ -7,7 +7,7 @@ import { z } from "zod";
  * - "raw": Uses fixed u64 encoding (8 bytes, big-endian)
  * - "cmaf": Fragmented MP4 container (future)
  */
-export const ContainerSchema = z.enum(["native", "raw", "cmaf"]);
+export const ContainerSchema = z.enum(["legacy", "cmaf"]);
 
 export type Container = z.infer<typeof ContainerSchema>;
 
@@ -15,4 +15,4 @@ export type Container = z.infer<typeof ContainerSchema>;
  * Default container format when not specified.
  * Set to native for backward compatibility.
  */
-export const DEFAULT_CONTAINER: Container = "native";
+export const DEFAULT_CONTAINER: Container = "legacy";

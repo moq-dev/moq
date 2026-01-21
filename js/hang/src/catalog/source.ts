@@ -1,16 +1,9 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import * as Catalog from "../catalog";
-import { PRIORITY } from "../publish/priority";
-import * as Audio from "./audio";
-import { Chat, type ChatProps } from "./chat";
-import * as Location from "./location";
-import { Preview, type PreviewProps } from "./preview";
-import type { SourceMSE } from "./source-mse";
-import * as User from "./user";
-import * as Video from "./video";
+import * as Catalog from ".";
+import { PRIORITY } from "./priority";
 
-export interface BroadcastProps {
+export interface SourceProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
 
 	// Whether to start downloading the broadcast.
@@ -22,17 +15,10 @@ export interface BroadcastProps {
 
 	// You can disable reloading if you don't want to wait for an announcement.
 	reload?: boolean | Signal<boolean>;
-
-	video?: Video.SourceProps;
-	audio?: Audio.SourceProps;
-	location?: Location.Props;
-	chat?: ChatProps;
-	preview?: PreviewProps;
-	user?: User.Props;
 }
 
-// A broadcast that (optionally) reloads automatically when live/offline.
-export class Broadcast {
+// A catalog source that (optionally) reloads automatically when live/offline.
+export class Source {
 	connection: Signal<Moq.Connection.Established | undefined>;
 
 	enabled: Signal<boolean>;
@@ -40,17 +26,11 @@ export class Broadcast {
 	status = new Signal<"offline" | "loading" | "live">("offline");
 	reload: Signal<boolean>;
 
-	audio: Audio.Source;
-	video: Video.Source;
-	location: Location.Root;
-	chat: Chat;
-	preview: Preview;
-	user: User.Info;
-
 	#broadcast = new Signal<Moq.Broadcast | undefined>(undefined);
+	readonly broadcast: Getter<Moq.Broadcast | undefined> = this.#broadcast;
 
-	#catalog = new Signal<Catalog.Root | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Root | undefined> = this.#catalog;
+	#parsed = new Signal<Catalog.Root | undefined>(undefined);
+	readonly parsed: Getter<Catalog.Root | undefined> = this.#parsed;
 
 	// This signal is true when the broadcast has been announced, unless reloading is disabled.
 	#active = new Signal(false);
@@ -58,28 +38,15 @@ export class Broadcast {
 
 	signals = new Effect();
 
-	constructor(props?: BroadcastProps) {
+	constructor(props?: SourceProps) {
 		this.connection = Signal.from(props?.connection);
 		this.path = Signal.from(props?.path);
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? true);
 
-		// Create video first so audio can use its MediaSource
-		this.video = new Video.Source(this.#broadcast, this.#catalog, props?.video);
-
-		// Create audio and pass video reference for coordination
-		this.audio = new Audio.Source(this.#broadcast, this.#catalog, props?.audio);
-		this.audio.video = this.video; // Pass video reference for coordination
-
-		this.location = new Location.Root(this.#broadcast, this.#catalog, props?.location);
-		this.chat = new Chat(this.#broadcast, this.#catalog, props?.chat);
-		this.preview = new Preview(this.#broadcast, this.#catalog, props?.preview);
-		this.user = new User.Info(this.#catalog, props?.user);
-
 		this.signals.effect(this.#runReload.bind(this));
 		this.signals.effect(this.#runBroadcast.bind(this));
 		this.signals.effect(this.#runCatalog.bind(this));
-		this.signals.effect(this.#restartAudioOnVideoChange.bind(this));
 	}
 
 	#runReload(effect: Effect): void {
@@ -153,67 +120,18 @@ export class Broadcast {
 
 				console.debug("received catalog", this.path.peek(), update);
 
-				this.#catalog.set(update);
+				this.#parsed.set(update);
 				this.status.set("live");
 			}
 		} catch (err) {
 			console.warn("error fetching catalog", this.path.peek(), err);
 		} finally {
-			this.#catalog.set(undefined);
+			this.#parsed.set(undefined);
 			this.status.set("offline");
 		}
 	}
 
-	// Track the previous SourceMSE instance to detect changes
-	#previousMseSource?: SourceMSE;
-
-	// Restart audio when video resolution/track changes
-	// This ensures audio re-subscribes with the new SourceMSE instance
-	// NOTE: This is now redundant since audio.#runDecoder watches video.mseSource directly,
-	// but keeping it as a backup mechanism
-	#restartAudioOnVideoChange(effect: Effect): void {
-		const mseSource = effect.get(this.video.mseSource);
-		if (!mseSource) {
-			this.#previousMseSource = undefined;
-			return;
-		}
-
-		// Check if SourceMSE instance changed (new instance = resolution change)
-		if (mseSource === this.#previousMseSource) {
-			return; // Same instance, no change
-		}
-
-		const wasInitialized = this.#previousMseSource !== undefined;
-		this.#previousMseSource = mseSource;
-
-		// Skip on initial setup (when previous is undefined)
-		if (!wasInitialized) {
-			return;
-		}
-
-		// Only restart audio if it's enabled and using CMAF (MSE path)
-		const audioEnabled = effect.get(this.audio.enabled);
-		const audioConfig = effect.get(this.audio.config);
-		if (!audioEnabled || audioConfig?.container !== "cmaf") {
-			return;
-		}
-
-		// Restart audio by toggling enabled (mimics pause/unpause that fixes the issue)
-		// NOTE: This is now redundant since audio.#runDecoder watches video.mseSource directly
-		this.audio.enabled.set(false);
-		queueMicrotask(() => {
-			this.audio.enabled.set(true);
-		});
-	}
-
 	close() {
 		this.signals.close();
-
-		this.audio.close();
-		this.video.close();
-		this.location.close();
-		this.chat.close();
-		this.preview.close();
-		this.user.close();
 	}
 }

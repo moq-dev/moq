@@ -10,3 +10,5 @@ export * from "./root";
 export * from "./track";
 export * from "./user";
 export * from "./video";
+export * from "./source";
+export * from "./priority";

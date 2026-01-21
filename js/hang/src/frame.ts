@@ -21,7 +21,7 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro, conta
 	const timestampBytes = Container.encodeTimestamp(timestamp, container);
 
 	// For CMAF, timestampBytes will be empty, so we just return the source
-	if (container === "cmaf") {
+	if (timestampBytes.length === 0) {
 		if (source instanceof Uint8Array) {
 			return source;
 		}

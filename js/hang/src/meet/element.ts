@@ -1,9 +1,10 @@
 import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
-import { type Publish, Watch } from "..";
+import { Catalog, type Publish, Watch } from "..";
 import HangPublish from "../publish/element";
 import { Room } from "./room";
+
 
 const OBSERVED = ["url", "name", "path"] as const;
 type Observed = (typeof OBSERVED)[number];
@@ -154,8 +155,8 @@ export default class HangMeet extends HTMLElement {
 		this.#container.appendChild(video);
 	}
 
-	#onRemote(name: Moq.Path.Valid, broadcast?: Watch.Broadcast) {
-		if (!broadcast) {
+	#onRemote(name: Moq.Path.Valid, catalog?: Catalog.Source) {
+		if (!catalog) {
 			const existing = this.#remotes.get(name);
 			if (!existing) return;
 
@@ -168,8 +169,8 @@ export default class HangMeet extends HTMLElement {
 			return;
 		}
 
-		// We're reponsible for signalling that we want to download this broadcast.
-		broadcast.enabled.set(true);
+		// We're reponsible for signalling that we want to download this catalog/broadcast.
+		catalog.enabled.set(true);
 
 		// Create a canvas to render the video to.
 		const canvas = DOM.create("canvas", {
@@ -180,8 +181,11 @@ export default class HangMeet extends HTMLElement {
 			},
 		});
 
-		const renderer = new Watch.Video.Renderer(broadcast.video, { canvas });
-		const emitter = new Watch.Audio.Emitter(broadcast.audio);
+		const videoSource = new Watch.Video.Source({ catalog });
+		const audioSource = new Watch.Audio.Source({ catalog });
+
+		const renderer = new Watch.Video.Renderer(videoSource, { canvas });
+		const emitter = new Watch.Audio.Emitter(audioSource);
 
 		this.#remotes.set(name, { canvas, renderer, emitter });
 
