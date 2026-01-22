@@ -40,6 +40,10 @@
             "rust-src"
             "rust-analyzer"
           ];
+          targets = pkgs.lib.optionals pkgs.stdenv.isDarwin [
+            "x86_64-apple-darwin"
+            "aarch64-apple-darwin"
+          ];
         };
 
         # Rust dependencies
