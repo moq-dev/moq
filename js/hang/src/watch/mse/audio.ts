@@ -112,7 +112,7 @@ export class Audio implements Backend {
 
 		let init: Moq.Track | undefined;
 		if (selected.config.container.kind === "cmaf") {
-			init = active.subscribe(selected.config.container.init.name, Catalog.PRIORITY.audio);
+			init = active.subscribe(selected.config.container.init_track.name, Catalog.PRIORITY.audio);
 			effect.cleanup(() => init?.close());
 		}
 

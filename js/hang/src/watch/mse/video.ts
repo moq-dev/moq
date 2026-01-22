@@ -110,7 +110,7 @@ export class Video implements Backend {
 		// If this is CMAF, we also need to subscribe to the init track.
 		let init: Moq.Track | undefined;
 		if (selected.config.container.kind === "cmaf") {
-			init = active.subscribe(selected.config.container.init.name, Catalog.PRIORITY.video);
+			init = active.subscribe(selected.config.container.init_track.name, Catalog.PRIORITY.video);
 			effect.cleanup(() => init?.close());
 		}
 

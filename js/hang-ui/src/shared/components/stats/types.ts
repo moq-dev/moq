@@ -1,6 +1,7 @@
 export type KnownStatsProviders = "network" | "video" | "audio" | "buffer";
 
-import type * as Watch from "@moq/hang/watch";
+import type * as Hang from "@moq/hang";
+import type * as Moq from "@moq/lite";
 
 /**
  * Context passed to providers for updating display data
@@ -17,69 +18,15 @@ export interface VideoResolution {
 	height: number;
 }
 
-/**
- * Stream sync status with buffer information
- */
-export interface SyncStatus {
-	state: "ready" | "wait";
-	bufferDuration?: number;
-}
+// TODO Don't re-export these types?
+export type Signal<T> = Moq.Signals.Getter<T>;
+export type AudioStats = Hang.Watch.Audio.Stats;
+export type AudioSource = Hang.Watch.Audio.Backend;
+export type AudioConfig = Hang.Catalog.AudioConfig;
+export type VideoStats = Hang.Watch.Video.Stats;
 
-/**
- * Stream buffer fill status
- */
-export interface BufferStatus {
-	state: "empty" | "filled";
-}
-
-/**
- * Generic reactive signal interface for accessing stream data
- */
-export interface Signal<T> {
-	peek(): T | undefined;
-	changed?(callback: (value: T | undefined) => void): () => void;
-	subscribe?(callback: () => void): () => void;
-}
-
-/**
- * Audio stream statistics
- */
-export type AudioStats = {
-	bytesReceived: number;
+// TODO use Hang.Watch.Backend instead?
+export type ProviderProps = {
+	audio: Hang.Watch.Audio.Backend;
+	video: Hang.Watch.Video.Backend;
 };
-
-/**
- * Audio stream source with reactive properties
- */
-export interface AudioSource {
-	active: Signal<string>;
-	config: Signal<AudioConfig>;
-	stats: Signal<AudioStats>;
-}
-
-/**
- * Audio stream configuration properties
- */
-export interface AudioConfig {
-	sampleRate: number;
-	numberOfChannels: number;
-	bitrate?: number;
-	codec: string;
-}
-
-/**
- * Video stream statistics
- */
-export type VideoStats = {
-	frameCount: number;
-	timestamp: number;
-	bytesReceived: number;
-};
-
-/**
- * Props passed to metric providers containing stream sources
- */
-export interface ProviderProps {
-	audio: Watch.Audio.Backend;
-	video: Watch.Video.Backend;
-}

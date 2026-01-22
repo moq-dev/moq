@@ -12,7 +12,7 @@ export const ContainerSchema = z
 		// The default hang container
 		z.object({ kind: z.literal("legacy") }),
 		// Contains the name of the init track
-		z.object({ kind: z.literal("cmaf"), init: TrackSchema }),
+		z.object({ kind: z.literal("cmaf"), init_track: TrackSchema }),
 	])
 	.default({ kind: "legacy" });
 
@@ -20,5 +20,5 @@ export type Container = z.infer<typeof ContainerSchema>;
 
 export const CONTAINER = {
 	legacy: { kind: "legacy" },
-	cmaf: { kind: "cmaf", init: TrackSchema },
+	cmaf: { kind: "cmaf", init_track: TrackSchema },
 } as const;

@@ -168,7 +168,7 @@ export default class HangMeet extends HTMLElement {
 			return;
 		}
 
-		// We're reponsible for signalling that we want to download this catalog/broadcast.
+		// We're reponsible for signalling that we want to download this broadcast.
 		broadcast.enabled.set(true);
 
 		// Create a canvas to render the video to.

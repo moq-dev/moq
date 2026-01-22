@@ -18,6 +18,6 @@ pub enum Container {
 	#[default]
 	Legacy,
 	Cmaf {
-		init: moq_lite::Track,
+		init_track: moq_lite::Track,
 	},
 }

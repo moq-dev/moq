@@ -1,8 +1,8 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../catalog";
-import type { Broadcast } from "../catalog";
 import * as Audio from "./audio";
+import type { Broadcast } from "./broadcast";
 import * as MSE from "./mse";
 import * as Video from "./video";
 

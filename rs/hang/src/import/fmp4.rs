@@ -232,7 +232,7 @@ impl Fmp4 {
 
 		self.init = Some(init_track);
 
-		Ok(Container::Cmaf { init: init_name })
+		Ok(Container::Cmaf { init_track: init_name })
 	}
 
 	fn init_video(&mut self, trak: &Trak, container: Container) -> anyhow::Result<VideoConfig> {

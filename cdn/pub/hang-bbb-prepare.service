@@ -15,7 +15,7 @@ ExecStart=/bin/bash -c '\
   /var/lib/moq/result-bin/bin/ffmpeg \
     -y -loglevel error -i /var/lib/moq/tmp.mp4 \
     -c copy \
-    -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame+negative_cts_offsets \
+    -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
     /var/lib/moq/fragmented.mp4 && \
   rm -f /var/lib/moq/tmp.mp4'
 

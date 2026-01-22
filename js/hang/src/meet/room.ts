@@ -28,8 +28,8 @@ export class Room {
 	// Optional callbacks to learn when individual broadcasts are added/removed.
 	// We avoid using signals because we don't want to re-render everything on every update.
 	// One day I'll figure out how to handle collections elegantly.
-	#onActive?: (path: Path.Valid, source: Broadcast | undefined) => void;
-	#onRemote?: (path: Path.Valid, source: Watch.Broadcast | undefined) => void;
+	#onActive?: (path: Path.Valid, broadcast: Broadcast | undefined) => void;
+	#onRemote?: (path: Path.Valid, broadcast: Watch.Broadcast | undefined) => void;
 	#onLocal?: (path: Path.Valid, broadcast: Publish.Broadcast | undefined) => void;
 
 	#signals = new Effect();
@@ -120,7 +120,7 @@ export class Room {
 
 		if (update.active) {
 			// NOTE: If you were implementing this yourself, you could use the <hang-watch> element instead.
-			const broadcast = new Watch.Broadcast({
+			const watch = new Watch.Broadcast({
 				connection: this.connection,
 				// NOTE: You're responsible for setting enabled to true if you want to download the broadcast.
 				enabled: false,
@@ -128,11 +128,11 @@ export class Room {
 				reload: false,
 			});
 
-			this.remotes.set(update.path, broadcast);
-			this.active.set(update.path, broadcast);
+			this.remotes.set(update.path, watch);
+			this.active.set(update.path, watch);
 
-			this.#onRemote?.(update.path, broadcast);
-			this.#onActive?.(update.path, broadcast);
+			this.#onRemote?.(update.path, watch);
+			this.#onActive?.(update.path, watch);
 		} else {
 			const existing = this.remotes.get(update.path);
 			if (!existing) throw new Error(`broadcast not found: ${update.path}`);

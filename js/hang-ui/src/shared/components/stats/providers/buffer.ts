@@ -1,5 +1,5 @@
 import type { Getter } from "@moq/signals";
-import type { BufferStatus, ProviderContext, SyncStatus } from "../types";
+import type { ProviderContext } from "../types";
 import { BaseProvider } from "./base";
 
 /**

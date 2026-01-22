@@ -13,6 +13,9 @@ export const VideoConfigSchema = z.object({
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
 
+	// The container format, used to decode the timestamp and more.
+	container: ContainerSchema,
+
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.
 	// Otherwise, the initialization information is (repeated) before each key-frame.
@@ -39,9 +42,6 @@ export const VideoConfigSchema = z.object({
 	// If true, the decoder will optimize for latency.
 	// Default: true
 	optimizeForLatency: z.boolean().optional(),
-
-	// The container format, used to decode the timestamp and more.
-	container: ContainerSchema,
 });
 
 // Mirrors VideoDecoderConfig
@@ -55,7 +55,7 @@ export const VideoSchema = z
 		// The priority of the video track, relative to other tracks in the broadcast.
 		priority: z.number().int().min(0).max(255),
 
-		// The original width/height of the video in pixels.
+		// Render the video at this size in pixels.
 		// This is separate from the display aspect ratio because it does not require reinitialization.
 		display: z
 			.object({

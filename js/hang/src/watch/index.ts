@@ -1,4 +1,5 @@
 export * as Audio from "./audio";
+export * from "./backend";
 export * from "./broadcast";
 export * as Chat from "./chat";
 export * as Location from "./location";

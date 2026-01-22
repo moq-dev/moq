@@ -14,6 +14,9 @@ export const AudioConfigSchema = z.object({
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
 
+	// The container format, used to decode the timestamp and more.
+	container: ContainerSchema,
+
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.
 	// Otherwise, the initialization information is in-band.
@@ -28,9 +31,6 @@ export const AudioConfigSchema = z.object({
 	// The bitrate of the audio in bits per second
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: u53Schema.optional(),
-
-	// The container format, used to decode the timestamp and more.
-	container: ContainerSchema,
 });
 
 export const AudioSchema = z
