@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ContainerSchema, DEFAULT_CONTAINER } from "./container";
+import { ContainerSchema } from "./container";
 import { u53Schema } from "./integers";
 
 // Backwards compatibility: old track schema
@@ -12,10 +12,6 @@ const TrackSchema = z.object({
 export const VideoConfigSchema = z.object({
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
-
-	// Container format for timestamp encoding
-	// Defaults to "native" when not specified in catalog (backward compatibility)
-	container: ContainerSchema.default(DEFAULT_CONTAINER),
 
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.
@@ -44,11 +40,8 @@ export const VideoConfigSchema = z.object({
 	// Default: true
 	optimizeForLatency: z.boolean().optional(),
 
-	// Init segment (ftyp+moov) for CMAF/fMP4 containers.
-	// This is the initialization segment needed for MSE playback.
-	// Stored as base64-encoded bytes. If not provided, init segments
-	// will be sent over the data track (legacy behavior).
-	initSegment: z.string().optional(), // base64-encoded
+	// The container format, used to decode the timestamp and more.
+	container: ContainerSchema,
 });
 
 // Mirrors VideoDecoderConfig
@@ -62,7 +55,7 @@ export const VideoSchema = z
 		// The priority of the video track, relative to other tracks in the broadcast.
 		priority: z.number().int().min(0).max(255),
 
-		// Render the video at this size in pixels.
+		// The original width/height of the video in pixels.
 		// This is separate from the display aspect ratio because it does not require reinitialization.
 		display: z
 			.object({

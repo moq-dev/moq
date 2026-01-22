@@ -554,4 +554,8 @@ export class Effect {
 	get cancel(): Promise<void> {
 		return this.#stopped;
 	}
+
+	proxy<T>(dst: Setter<T>, src: Getter<T>): void {
+		this.subscribe(src, (value) => dst.set(value));
+	}
 }

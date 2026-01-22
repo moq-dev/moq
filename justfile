@@ -115,7 +115,7 @@ download name:
 	@if [ ! -f "dev/{{name}}.fmp4" ]; then \
 		ffmpeg -loglevel error -i "dev/{{name}}.mp4" \
 			-c:v copy \
-			-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
+			-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame+negative_cts_offsets -avoid_negative_ts make_zero \
 			"dev/{{name}}.fmp4"; \
 	fi
 
@@ -135,7 +135,7 @@ ffmpeg-cmaf input output='-' *args:
 		-stream_loop -1 -re \
 		-i "{{input}}" \
 		-c copy \
-		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame {{args}} {{output}}
+		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame+negative_cts_offsets -avoid_negative_ts make_zero {{args}} {{output}}
 
 # Publish a video using ffmpeg to the localhost relay server
 # NOTE: The `http` means that we perform insecure certificate verification.
@@ -151,7 +151,7 @@ pub name url="http://localhost:4443/anon" prefix="" *args:
 		publish --url "{{url}}" --name "{{prefix}}{{name}}" {{args}} fmp4
 
 # Generate and ingest an HLS stream from a video file.
-pub-hls name passthrough='' relay="http://localhost:4443/anon":
+pub-hls name relay="http://localhost:4443/anon":
 	#!/usr/bin/env bash
 	set -euo pipefail
 
@@ -216,15 +216,6 @@ pub-hls name passthrough='' relay="http://localhost:4443/anon":
 		sleep 0.5
 	done
 
-	# Check if passthrough flag is provided (boolean parameter)
-	if [ -n "{{passthrough}}" ]; then
-		echo ">>> Starting HLS ingest from disk with passthrough mode: $OUT_DIR/master.m3u8"
-		PASSTHROUGH_FLAG="--passthrough"
-	else
-		echo ">>> Starting HLS ingest from disk (non-passthrough mode): $OUT_DIR/master.m3u8"
-		PASSTHROUGH_FLAG=""
-	fi
-
 	# Trap to clean up ffmpeg on exit
 	CLEANUP_CALLED=false
 	cleanup() {
@@ -242,13 +233,8 @@ pub-hls name passthrough='' relay="http://localhost:4443/anon":
 	trap cleanup SIGINT SIGTERM EXIT
 
 	# Run hang to ingest from local files
-	if [ -n "$PASSTHROUGH_FLAG" ]; then
-		echo ">>> Running with --passthrough flag"
-		cargo run --bin hang -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
-	else
-		echo ">>> Running without --passthrough flag"
-		cargo run --bin hang -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8"
-	fi
+	echo ">>> Running with --passthrough flag"
+	cargo run --bin hang -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
 	EXIT_CODE=$?
 
 	# Cleanup after cargo run completes (success or failure)

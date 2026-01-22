@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 
 use serde::{Deserialize, Serialize};
-use serde_with::{DisplayFromStr, base64::Base64, hex::Hex};
+use serde_with::{DisplayFromStr, hex::Hex};
 
-use crate::catalog::container::Container;
+use crate::catalog::Container;
 
 /// Information about an audio track in the catalog.
 ///
@@ -64,16 +64,6 @@ pub struct AudioConfig {
 	pub description: Option<Bytes>,
 
 	/// Container format for frame encoding.
-	/// Defaults to "native" for backward compatibility.
+	/// Defaults to "legacy" for backward compatibility.
 	pub container: Container,
-
-	/// Init segment (ftyp+moov) for CMAF/fMP4 containers.
-	///
-	/// This is the initialization segment needed for MSE playback.
-	/// Stored as base64-encoded bytes and embedded in the catalog (as suggested
-	/// in feedback). Init segments should not be sent over data tracks or at the
-	/// start of each group.
-	#[serde(default)]
-	#[serde_as(as = "Option<Base64>")]
-	pub init_segment: Option<Bytes>,
 }

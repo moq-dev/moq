@@ -4,6 +4,7 @@ import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
+import type { Broadcast } from "../broadcast";
 import type * as Render from "./render";
 
 // We want some extra overhead to avoid starving the render worklet.
@@ -12,28 +13,37 @@ import type * as Render from "./render";
 const JITTER_UNDERHEAD = 25 as Time.Milli;
 
 export type SourceProps = {
-	catalog?: Catalog.Source | Signal<Catalog.Source | undefined>,
+	broadcast: Broadcast | Signal<Broadcast | undefined>;
 
 	// Enable to download the audio track.
 	enabled?: boolean | Signal<boolean>;
 
 	// Jitter buffer size in milliseconds (default: 100ms)
 	latency?: Time.Milli | Signal<Time.Milli>;
+
+	// The desired rendition/bitrate of the audio.
+	// TODO finish implementing this
+	target?: Target | Signal<Target | undefined>;
 };
 
 export interface AudioStats {
 	bytesReceived: number;
 }
 
+import { PRIORITY } from "../../catalog/priority";
+import type { Target } from "../video/backend";
 // Unfortunately, we need to use a Vite-exclusive import for now.
 import RenderWorklet from "./render-worklet.ts?worker&url";
-import { PRIORITY } from "../../catalog/priority";
 
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
 export class Source {
-	catalog: Getter<Catalog.Source | undefined>;
+	broadcast: Signal<Broadcast | undefined>;
 	enabled: Signal<boolean>;
+	target: Signal<Target | undefined>;
+
+	#catalog = new Signal<Catalog.Audio | undefined>(undefined);
+	readonly catalog: Getter<Catalog.Audio | undefined> = this.#catalog;
 
 	#context = new Signal<AudioContext | undefined>(undefined);
 	readonly context: Getter<AudioContext | undefined> = this.#context;
@@ -55,43 +65,45 @@ export class Source {
 	readonly latency: Signal<Time.Milli>;
 
 	// The name of the active rendition.
-	active = new Signal<string | undefined>(undefined);
+	rendition = new Signal<string | undefined>(undefined);
 
 	#signals = new Effect();
 
-	constructor(
-		props?: SourceProps,
-	) {
-		this.catalog = Signal.from(props?.catalog);
+	constructor(props?: SourceProps) {
+		this.broadcast = Signal.from(props?.broadcast);
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.latency = Signal.from(props?.latency ?? (100 as Time.Milli)); // TODO Reduce this once fMP4 stuttering is fixed.
+		this.target = Signal.from(props?.target);
 
-		this.#signals.effect(this.#runRendition.bind(this));
+		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runWorklet.bind(this));
 		this.#signals.effect(this.#runEnabled.bind(this));
 		this.#signals.effect(this.#runDecoder.bind(this));
 	}
 
-	#runRendition(effect: Effect): void {
-		const catalog = effect.get(this.catalog);
+	#runCatalog(effect: Effect): void {
+		const broadcast = effect.get(this.broadcast);
+		if (!broadcast) return;
+
+		const catalog = effect.get(broadcast.catalog);
 		if (!catalog) return;
 
-		const parsed = effect.get(catalog.parsed);
-		if (!parsed) return;
-
-		const audio = parsed.audio;
+		const audio = catalog.audio;
 		if (!audio) return;
+
+		effect.set(this.#catalog, audio);
 
 		const rendition = this.#selectRendition(audio);
 		if (!rendition) return;
 
-		effect.set(this.active, rendition.track);
+		effect.set(this.rendition, rendition.track);
 		effect.set(this.config, rendition.config);
 	}
 
-	#selectRendition(audio: Catalog.Audio): { track:string , config: Catalog.AudioConfig } | undefined {
+	#selectRendition(audio: Catalog.Audio): { track: string; config: Catalog.AudioConfig } | undefined {
 		for (const [track, config] of Object.entries(audio.renditions)) {
-			if (config.container === "legacy") {
+			// TODO support cmaf
+			if (config.container.kind === "legacy") {
 				return { track, config };
 			}
 		}
@@ -168,21 +180,23 @@ export class Source {
 		const catalog = effect.get(this.catalog);
 		if (!catalog) return;
 
-		const broadcast = effect.get(catalog.broadcast);
+		const broadcast = effect.get(this.broadcast);
 		if (!broadcast) return;
+
+		const active = broadcast ? effect.get(broadcast.active) : undefined;
+		if (!active) return;
 
 		const config = effect.get(this.config);
 		if (!config) return;
 
-		const active = effect.get(this.active);
-		if (!active) return;
+		const rendition = effect.get(this.rendition);
+		if (!rendition) return;
 
-		const sub = broadcast.subscribe(active, PRIORITY.audio);
+		const sub = active.subscribe(rendition, PRIORITY.audio);
 		effect.cleanup(() => sub.close());
 
 		const consumer = new Frame.Consumer(sub, {
 			latency: Math.max(this.latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
-			container: config.container,
 		});
 		effect.cleanup(() => consumer.close());
 

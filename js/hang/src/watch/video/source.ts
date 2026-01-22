@@ -1,29 +1,28 @@
 import type * as Moq from "@moq/lite";
 import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import * as Frame from "../../frame";
+import type * as Catalog from "../../catalog";
 import { PRIORITY } from "../../catalog/priority";
+import * as Frame from "../../frame";
 import * as Hex from "../../util/hex";
-import * as Catalog from "../../catalog";
+import type { Broadcast } from "../broadcast";
+import type { Backend, Stats, Target } from "./backend";
+
+// Only count it as buffering if we had to sleep for 200ms or more before rendering the next frame.
+// Unfortunately, this has to be quite high because of b-frames.
+// TODO Maybe we need to detect b-frames and make this dynamic?
+const BUFFERING_MS = 200 as Time.Milli;
 
 export type SourceProps = {
-	catalog: Catalog.Source | Signal<Catalog.Source | undefined>,
+	broadcast: Broadcast | Signal<Broadcast | undefined>;
 
 	enabled?: boolean | Signal<boolean>;
 
 	// Jitter buffer size in milliseconds (default: 100ms)
 	// When using b-frames, this should to be larger than the frame duration.
 	latency?: Time.Milli | Signal<Time.Milli>;
-};
 
-export type Target = {
-	// The desired size of the video in pixels.
-	pixels?: number;
-
-	// Optional manual override for the selected rendition name.
-	rendition?: string;
-
-	// TODO bitrate
+	target?: Target | Signal<Target | undefined>;
 };
 
 // The types in VideoDecoderConfig that cause a hard reload.
@@ -31,33 +30,16 @@ export type Target = {
 // This way we can keep the current subscription active.
 type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
 
-type BufferStatus = { state: "empty" | "filled" };
-
-type SyncStatus = {
-	state: "ready" | "wait";
-	bufferDuration?: number;
-};
-
-export interface VideoStats {
-	frameCount: number;
-	timestamp: number;
-	bytesReceived: number;
-}
-
-// Only count it as buffering if we had to sleep for 200ms or more before rendering the next frame.
-// Unfortunately, this has to be quite high because of b-frames.
-// TODO Maybe we need to detect b-frames and make this dynamic?
-const MIN_SYNC_WAIT_MS = 200 as Time.Milli;
-
 // The maximum number of concurrent b-frames that we support.
 const MAX_BFRAMES = 10;
 
 // Responsible for switching between video tracks and buffering frames.
-export class Source {
-	catalog: Signal<Catalog.Source | undefined>;
+export class Source implements Backend {
+	broadcast: Signal<Broadcast | undefined>;
 	enabled: Signal<boolean>; // Don't download any longer
 
 	#catalog = new Signal<Catalog.Video | undefined>(undefined);
+	readonly catalog: Getter<Catalog.Video | undefined> = this.#catalog;
 
 	// The tracks supported by our video decoder.
 	#supported = new Signal<Record<string, Catalog.VideoConfig>>({});
@@ -67,58 +49,64 @@ export class Source {
 	#selectedConfig = new Signal<RequiredDecoderConfig | undefined>(undefined);
 
 	// The name of the active rendition.
-	active = new Signal<string | undefined>(undefined);
+	#rendition = new Signal<string | undefined>(undefined);
+	readonly rendition: Signal<string | undefined> = this.#rendition;
+
+	// The config of the active rendition.
+	#config = new Signal<Catalog.VideoConfig | undefined>(undefined);
+	config: Getter<Catalog.VideoConfig | undefined> = this.#config;
 
 	// The current track running, held so we can cancel it when the new track is ready.
 	#pending?: Effect;
 	#active?: Effect;
 
 	// Used as a tiebreaker when there are multiple tracks (HD vs SD).
-	target = new Signal<Target | undefined>(undefined);
+	target: Signal<Target | undefined>;
 
 	// Expose the current frame to render as a signal
-	frame = new Signal<VideoFrame | undefined>(undefined);
+	#frame = new Signal<VideoFrame | undefined>(undefined);
+	readonly frame: Getter<VideoFrame | undefined> = this.#frame;
 
 	// The target latency in milliseconds.
 	latency: Signal<Time.Milli>;
 
 	// The display size of the video in pixels, ideally sourced from the catalog.
-	display = new Signal<{ width: number; height: number } | undefined>(undefined);
-
-	// Whether to flip the video horizontally.
-	flip = new Signal<boolean | undefined>(undefined);
+	#display = new Signal<{ width: number; height: number } | undefined>(undefined);
+	readonly display: Getter<{ width: number; height: number } | undefined> = this.#display;
 
 	// Used to convert PTS to wall time.
 	#reference: DOMHighResTimeStamp | undefined;
 
-	bufferStatus = new Signal<BufferStatus>({ state: "empty" });
-	syncStatus = new Signal<SyncStatus>({ state: "ready" });
+	#buffering = new Signal<boolean>(false);
+	readonly buffering: Getter<boolean> = this.#buffering;
 
-	#stats = new Signal<VideoStats | undefined>(undefined);
-	readonly stats: Getter<VideoStats | undefined> = this.#stats;
+	#stats = new Signal<Stats | undefined>(undefined);
+	readonly stats: Getter<Stats | undefined> = this.#stats;
 
 	#signals = new Effect();
 
-	constructor(
-		props?: SourceProps,
-	) {
-		this.catalog = Signal.from(props?.catalog);
+	constructor(props?: SourceProps) {
+		this.broadcast = Signal.from(props?.broadcast);
 		this.latency = Signal.from(props?.latency ?? (100 as Time.Milli));
 		this.enabled = Signal.from(props?.enabled ?? false);
+		this.target = Signal.from(props?.target);
 
-		this.#signals.effect((effect) => {
-			const catalog = effect.get(this.catalog);
-			if (!catalog) return;
-			const parsed = effect.get(catalog.parsed)?.video;
-			effect.set(this.#catalog, parsed);
-			effect.set(this.flip, parsed?.flip);
-		});
-
+		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runSupported.bind(this));
 		this.#signals.effect(this.#runSelected.bind(this));
 		this.#signals.effect(this.#runPending.bind(this));
 		this.#signals.effect(this.#runDisplay.bind(this));
-		this.#signals.effect(this.#runBuffer.bind(this));
+		this.#signals.effect(this.#runBuffering.bind(this));
+	}
+
+	#runCatalog(effect: Effect): void {
+		const broadcast = effect.get(this.broadcast);
+		if (!broadcast) return;
+
+		const catalog = effect.get(broadcast.catalog);
+		if (!catalog) return;
+
+		effect.set(this.#catalog, catalog.video);
 	}
 
 	#runSupported(effect: Effect): void {
@@ -128,7 +116,8 @@ export class Source {
 			const supported: Record<string, Catalog.VideoConfig> = {};
 
 			for (const [name, rendition] of Object.entries(renditions)) {
-				if (rendition.container !== "legacy") continue;
+				// TODO support cmaf
+				if (rendition.container.kind !== "legacy") continue;
 
 				const description = rendition.description ? Hex.toBytes(rendition.description) : undefined;
 
@@ -155,7 +144,7 @@ export class Source {
 		const supported = effect.get(this.#supported);
 		const target = effect.get(this.target);
 
-		const manual = target?.rendition;
+		const manual = target?.name;
 		const selected = manual && manual in supported ? manual : this.#selectRendition(supported, target);
 		if (!selected) return;
 
@@ -167,18 +156,18 @@ export class Source {
 	}
 
 	#runPending(effect: Effect): void {
-		const catalog = effect.get(this.catalog);
+		const broadcast = effect.get(this.broadcast);
 		const enabled = effect.get(this.enabled);
 		const selected = effect.get(this.#selected);
 		const config = effect.get(this.#selectedConfig);
-		const broadcast = catalog ? effect.get(catalog.broadcast) : undefined;
+		const active = broadcast ? effect.get(broadcast.active) : undefined;
 
-		if (!catalog || !selected || !config || !enabled || !broadcast) {
+		if (!active || !selected || !config || !enabled) {
 			// Stop the active track.
 			this.#active?.close();
 			this.#active = undefined;
 
-			this.frame.update((prev) => {
+			this.#frame.update((prev) => {
 				prev?.close();
 				return undefined;
 			});
@@ -193,7 +182,7 @@ export class Source {
 		// We use #pending here on purpose so we only close it when it hasn't caught up yet.
 		effect.cleanup(() => this.#pending?.close());
 
-		this.#runTrack(this.#pending, broadcast, selected, config);
+		this.#runTrack(this.#pending, active, selected, config);
 	}
 
 	#runTrack(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
@@ -205,7 +194,6 @@ export class Source {
 		console.log(`[Video Subscriber] Using container format: ${config.container}`);
 		const consumer = new Frame.Consumer(sub, {
 			latency: this.latency,
-			container: config.container,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -270,32 +258,23 @@ export class Source {
 					sleep = this.#reference - ref + this.latency.peek();
 				}
 
-				if (sleep > MIN_SYNC_WAIT_MS) {
-					this.syncStatus.set({ state: "wait", bufferDuration: sleep });
-				}
-
 				if (sleep > 0) {
 					// NOTE: WebCodecs doesn't block on output promises (I think?), so these sleeps will occur concurrently.
 					// TODO: This cause the `syncStatus` to be racey especially
 					await new Promise((resolve) => setTimeout(resolve, sleep));
 				}
 
-				if (sleep > MIN_SYNC_WAIT_MS) {
-					// Include how long we slept if it was above the threshold.
-					this.syncStatus.set({ state: "ready", bufferDuration: sleep });
-				} else {
-					this.syncStatus.set({ state: "ready" });
-
+				if (sleep <= BUFFERING_MS) {
 					// If the track switch was pending, complete it now.
 					if (this.#pending === effect) {
 						this.#active?.close();
 						this.#active = effect;
 						this.#pending = undefined;
-						effect.set(this.active, name);
+						effect.set(this.rendition, name);
 					}
 				}
 
-				this.frame.update((prev) => {
+				this.#frame.update((prev) => {
 					prev?.close();
 					return frame;
 				});
@@ -375,7 +354,7 @@ export class Source {
 
 		const display = catalog.display;
 		if (display) {
-			effect.set(this.display, {
+			effect.set(this.#display, {
 				width: display.width,
 				height: display.height,
 			});
@@ -385,26 +364,31 @@ export class Source {
 		const frame = effect.get(this.frame);
 		if (!frame) return;
 
-		effect.set(this.display, {
+		effect.set(this.#display, {
 			width: frame.displayWidth,
 			height: frame.displayHeight,
 		});
 	}
 
-	#runBuffer(effect: Effect): void {
-		const frame = effect.get(this.frame);
+	#runBuffering(effect: Effect): void {
 		const enabled = effect.get(this.enabled);
+		if (!enabled) return;
 
-		const isBufferEmpty = enabled && !frame;
-		if (isBufferEmpty) {
-			this.bufferStatus.set({ state: "empty" });
-		} else {
-			this.bufferStatus.set({ state: "filled" });
+		const frame = effect.get(this.frame);
+		if (!frame) {
+			this.#buffering.set(true);
+			return;
 		}
+
+		this.#buffering.set(false);
+
+		effect.timer(() => {
+			this.#buffering.set(true);
+		}, BUFFERING_MS);
 	}
 
 	close() {
-		this.frame.update((prev) => {
+		this.#frame.update((prev) => {
 			prev?.close();
 			return undefined;
 		});

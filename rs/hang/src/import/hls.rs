@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::BroadcastProducer;
-use crate::import::Fmp4;
+use crate::import::{Fmp4, Fmp4Config};
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
@@ -95,7 +95,6 @@ pub struct Hls {
 	video: Vec<TrackState>,
 	/// Optional audio track shared across variants.
 	audio: Option<TrackState>,
-	/// Passthrough mode setting for fMP4 importers.
 	passthrough: bool,
 }
 
@@ -525,8 +524,12 @@ impl Hls {
 	/// independent while still contributing to the same shared catalog.
 	fn ensure_video_importer_for(&mut self, index: usize) -> &mut Fmp4 {
 		while self.video_importers.len() <= index {
-			let mut importer = Fmp4::new(self.broadcast.clone());
-			importer.set_passthrough_mode(self.passthrough);
+			let importer = Fmp4::new(
+				self.broadcast.clone(),
+				Fmp4Config {
+					passthrough: self.passthrough,
+				},
+			);
 			self.video_importers.push(importer);
 		}
 
@@ -536,9 +539,12 @@ impl Hls {
 	/// Create or retrieve the fMP4 importer for the audio rendition.
 	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
 		self.audio_importer.get_or_insert_with(|| {
-			let mut imp = Fmp4::new(self.broadcast.clone());
-			imp.set_passthrough_mode(self.passthrough);
-			imp
+			Fmp4::new(
+				self.broadcast.clone(),
+				Fmp4Config {
+					passthrough: self.passthrough,
+				},
+			)
 		})
 	}
 

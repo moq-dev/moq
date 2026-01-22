@@ -1,10 +1,10 @@
 import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
-import { Effect, Signal } from "@moq/signals";
-import * as Audio from "./audio";
-import * as Catalog from "../catalog";
-import * as Video from "./video";
-import * as MSE from "./mse";
+import { Effect, type Getter, Signal } from "@moq/signals";
+import type * as Audio from "./audio";
+import { type Backend, Combined } from "./backend";
+import { Broadcast } from "./broadcast";
+import type * as Video from "./video";
 
 // TODO remove name; replaced with path
 const OBSERVED = ["url", "name", "path", "paused", "volume", "muted", "reload", "latency"] as const;
@@ -16,47 +16,20 @@ type Observed = (typeof OBSERVED)[number];
 const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 
 // An optional web component that wraps a <canvas>
-export default class HangWatch extends HTMLElement {
+export default class HangWatch extends HTMLElement implements Backend {
 	static observedAttributes = OBSERVED;
 
 	// The connection to the moq-relay server.
 	connection: Moq.Connection.Reload;
 
 	// The broadcast being watched.
-	catalog: Catalog.Source;
+	broadcast: Broadcast;
 
-	// The URL of the moq-relay server
-	url = new Signal<URL | undefined>(undefined);
-
-	// The path of the broadcast relative to the URL (may be empty).
-	path = new Signal<Moq.Path.Valid | undefined>(undefined);
-
-	// Whether audio/video playback is paused.
-	paused = new Signal(false);
-
-	// The volume of the audio, between 0 and 1.
-	volume = new Signal(0.5);
-
-	// Whether the audio is muted.
-	muted = new Signal(false);
-
-	// Whether the controls are shown.
-	controls = new Signal(false);
-
-	// Don't automatically reload the broadcast.
-	// TODO: Temporarily defaults to false because Cloudflare doesn't support it yet.
-	reload = new Signal(false);
-
-	// Delay playing audio and video for up to 100ms
-	latency = new Signal(100 as Time.Milli);
+	// The backend that powers this element.
+	#backend: Combined;
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
-
-	// The canvas/video element to render the video to.
-	// When set to a <canvas>, WebCodecs is used for rendering.
-	// When set to a <video>, MSE is used for rendering.
-	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 
 	// Expose the Effect class, so users can easily create effects scoped to this element.
 	signals = new Effect();
@@ -67,18 +40,19 @@ export default class HangWatch extends HTMLElement {
 		cleanup.register(this, this.signals);
 
 		this.connection = new Moq.Connection.Reload({
-			url: this.url,
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.connection.close());
 
-		this.catalog = new Catalog.Source({
+		this.broadcast = new Broadcast({
 			connection: this.connection.established,
-			path: this.path,
 			enabled: this.#enabled,
-			reload: this.reload,
 		});
-		this.signals.cleanup(() => this.catalog.close());
+		this.signals.cleanup(() => this.broadcast.close());
+
+		this.#backend = new Combined({
+			broadcast: this.broadcast,
+		});
 
 		// Watch to see if the canvas element is added or removed.
 		const setElement = () => {
@@ -87,44 +61,13 @@ export default class HangWatch extends HTMLElement {
 			if (canvas && video) {
 				throw new Error("Cannot have both canvas and video elements");
 			}
-			this.element.set(canvas ?? video);
+			this.#backend.element.set(canvas ?? video);
 		};
 
 		const observer = new MutationObserver(setElement);
 		observer.observe(this, { childList: true, subtree: true });
 		this.signals.cleanup(() => observer.disconnect());
 		setElement();
-
-		this.signals.effect((effect) => {
-			const element = effect.get(this.element);
-			if (!element) return;
-
-			if (element instanceof HTMLCanvasElement) {
-				const videoSource = new Video.Source({ catalog: this.catalog, latency: this.latency });
-				const audioSource = new Audio.Source({ catalog: this.catalog, latency: this.latency });
-
-				const audioEmitter = new Audio.Emitter(audioSource, {
-					volume: this.volume,
-					muted: this.muted,
-					paused: this.paused,
-				});
-
-				const videoRenderer = new Video.Renderer(videoSource, { canvas: element, paused: this.paused });
-
-				this.signals.cleanup(() => {
-					videoSource.close();
-					audioSource.close();
-					audioEmitter.close();
-					videoRenderer.close();
-				});
-			} else if (element instanceof HTMLVideoElement) {
-				const source = new MSE.Source({ catalog: this.catalog, latency: this.latency });
-				this.signals.cleanup(() => source.close());
-			} else {
-				const _exhaustive: never = element;
-				throw new Error(`Invalid element: ${_exhaustive}`);
-			}
-		});
 
 		// Optionally update attributes to match the library state.
 		// This is kind of dangerous because it can create loops.
@@ -149,7 +92,7 @@ export default class HangWatch extends HTMLElement {
 		});
 
 		this.signals.effect((effect) => {
-			const muted = effect.get(this.muted);
+			const muted = effect.get(this.audio.muted);
 			if (muted) {
 				this.setAttribute("muted", "");
 			} else {
@@ -167,17 +110,8 @@ export default class HangWatch extends HTMLElement {
 		});
 
 		this.signals.effect((effect) => {
-			const volume = effect.get(this.volume);
+			const volume = effect.get(this.audio.volume);
 			this.setAttribute("volume", volume.toString());
-		});
-
-		this.signals.effect((effect) => {
-			const controls = effect.get(this.controls);
-			if (controls) {
-				this.setAttribute("controls", "");
-			} else {
-				this.removeAttribute("controls");
-			}
 		});
 
 		this.signals.effect((effect) => {
@@ -212,17 +146,45 @@ export default class HangWatch extends HTMLElement {
 			this.paused.set(newValue !== null);
 		} else if (name === "volume") {
 			const volume = newValue ? Number.parseFloat(newValue) : 0.5;
-			this.volume.set(volume);
+			this.audio.volume.set(volume);
 		} else if (name === "muted") {
-			this.muted.set(newValue !== null);
+			this.audio.muted.set(newValue !== null);
 		} else if (name === "reload") {
-			this.reload.set(newValue !== null);
+			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "latency") {
 			this.latency.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
 		}
+	}
+
+	get url(): Signal<URL | undefined> {
+		return this.connection.url;
+	}
+
+	get path(): Signal<Moq.Path.Valid | undefined> {
+		return this.broadcast.path;
+	}
+
+	get latency(): Signal<Time.Milli> {
+		return this.#backend.latency;
+	}
+
+	get paused(): Signal<boolean> {
+		return this.#backend.paused;
+	}
+
+	get audio(): Audio.Backend {
+		return this.#backend.audio;
+	}
+
+	get video(): Video.Backend {
+		return this.#backend.video;
+	}
+
+	get buffering(): Getter<boolean> {
+		return this.#backend.buffering;
 	}
 }
 

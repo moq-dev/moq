@@ -28,10 +28,14 @@
 
 		NOTE: `reload` will detect when the broadcast goes offline/online and automatically reconnect.
 		TODO: Cloudflare doesn't support it yet (SUBSCRIBE_NAMESPACE), so make sure you remove it if you're using Cloudflare.
+
+		NOTE: You can use a <video> element instead of a <canvas> element to use the MSE backend.
+		This is not as well tested as has higher latency, but will support more devices.
 	-->
 	<hang-watch-ui>
 		<hang-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted latency="100" reload>
-			<canvas style="width: 100%; height: auto;"></canvas>
+			<!--<canvas style="width: 100%; height: auto;"></canvas>-->
+			<!--<video style="width: 100%; height: auto;" autoplay muted></video>-->
 		</hang-watch>
 	</hang-watch-ui>
 
@@ -117,8 +121,8 @@ function Volume(hang: Watch) {
 		</code></pre>
 	</p>
 	<p>
-		Using something more niche? There's also a <code
-			class="language-typescript">subscribe()</code> method to trigger a callback on change.
+		Using something more niche? There's also a <code class="language-typescript">subscribe()</code> method to
+		trigger a callback on change.
 
 	<pre><code class="language-typescript">
 const cleanup = hang.volume.subscribe((volume) => {

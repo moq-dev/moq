@@ -2,7 +2,10 @@ use std::{fmt, str::FromStr};
 
 use bytes::Buf;
 
-use crate::{self as hang, Error, import::Aac, import::Hev1, import::Opus};
+use crate::{
+	self as hang, Error,
+	import::{Aac, Fmp4Config, Hev1, Opus},
+};
 
 use super::{Avc3, Fmp4};
 
@@ -77,7 +80,7 @@ impl Decoder {
 	pub fn new(broadcast: hang::BroadcastProducer, format: DecoderFormat) -> Self {
 		let decoder = match format {
 			DecoderFormat::Avc3 => Avc3::new(broadcast).into(),
-			DecoderFormat::Fmp4 => Box::new(Fmp4::new(broadcast)).into(),
+			DecoderFormat::Fmp4 => Box::new(Fmp4::new(broadcast, Fmp4Config::default())).into(),
 			DecoderFormat::Hev1 => Hev1::new(broadcast).into(),
 			DecoderFormat::Aac => Aac::new(broadcast).into(),
 			DecoderFormat::Opus => Opus::new(broadcast).into(),

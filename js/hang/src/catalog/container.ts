@@ -1,18 +1,24 @@
 import { z } from "zod";
+import { TrackSchema } from "./track";
 
 /**
- * Container format for frame timestamp encoding.
+ * Container format for frame timestamp encoding and frame payload structure.
  *
- * - "native": Uses QUIC VarInt encoding (1-8 bytes, variable length)
- * - "raw": Uses fixed u64 encoding (8 bytes, big-endian)
- * - "cmaf": Fragmented MP4 container (future)
+ * - "legacy": Uses QUIC VarInt encoding (1-8 bytes, variable length), raw frame payloads
+ * - "cmaf": Fragmented MP4 container - frames contain complete moof+mdat fragments and an init track
  */
-export const ContainerSchema = z.enum(["legacy", "cmaf"]);
+export const ContainerSchema = z
+	.discriminatedUnion("kind", [
+		// The default hang container
+		z.object({ kind: z.literal("legacy") }),
+		// Contains the name of the init track
+		z.object({ kind: z.literal("cmaf"), init: TrackSchema }),
+	])
+	.default({ kind: "legacy" });
 
 export type Container = z.infer<typeof ContainerSchema>;
 
-/**
- * Default container format when not specified.
- * Set to native for backward compatibility.
- */
-export const DEFAULT_CONTAINER: Container = "legacy";
+export const CONTAINER = {
+	legacy: { kind: "legacy" },
+	cmaf: { kind: "cmaf", init: TrackSchema },
+} as const;

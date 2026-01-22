@@ -1,39 +1,65 @@
 import * as Moq from "@moq/lite";
-import { Effect, Signal } from "@moq/signals";
-import * as Catalog from "../../catalog";
-import * as Frame from "../../frame";
+import { Effect, type Getter, Signal } from "@moq/signals";
+import type { Backend } from "../backend";
+import type { Broadcast } from "../broadcast";
+import { Audio, type AudioProps } from "./audio";
+import { Video, type VideoProps } from "./video";
 
 export type SourceProps = {
-	catalog: Catalog.Source | Signal<Catalog.Source | undefined>,
+	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 	latency?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
-	element?: HTMLVideoElement | Signal<HTMLVideoElement | undefined>;
+	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
+	paused?: boolean | Signal<boolean>;
+
+	video?: VideoProps;
+	audio?: AudioProps;
 };
 
 /**
  * MSE-based video source for CMAF/fMP4 fragments.
  * Uses Media Source Extensions to handle complete moof+mdat fragments.
  */
-export class Source {
-	catalog: Signal<Catalog.Source | undefined>;
+export class Source implements Backend {
+	broadcast: Signal<Broadcast | undefined>;
 
 	#mediaSource = new Signal<MediaSource | undefined>(undefined);
 
-	element: Signal<HTMLVideoElement | undefined>;
-
+	element: Signal<HTMLMediaElement | undefined>;
 	latency: Signal<Moq.Time.Milli>;
-	display = new Signal<{ width: number; height: number } | undefined>(undefined);
-	flip = new Signal<boolean | undefined>(undefined);
+	paused: Signal<boolean>;
+
+	video: Video;
+	audio: Audio;
+
+	#buffering = new Signal<boolean>(false);
+	readonly buffering: Getter<boolean> = this.#buffering;
 
 	#signals = new Effect();
 
 	constructor(props?: SourceProps) {
-		this.catalog = Signal.from(props?.catalog);
+		this.broadcast = Signal.from(props?.broadcast);
 		this.latency = Signal.from(props?.latency ?? (100 as Moq.Time.Milli));
 		this.element = Signal.from(props?.element);
+		this.paused = Signal.from(props?.paused ?? false);
+
+		this.video = new Video({
+			broadcast: this.broadcast,
+			element: this.element,
+			mediaSource: this.#mediaSource,
+			...props?.video,
+		});
+		this.audio = new Audio({
+			broadcast: this.broadcast,
+			element: this.element,
+			mediaSource: this.#mediaSource,
+			...props?.audio,
+		});
 
 		this.#signals.effect(this.#runMediaSource.bind(this));
-		this.#signals.effect(this.#runVideo.bind(this));
-		this.#signals.effect(this.#runAudio.bind(this));
+		this.#signals.effect(this.#runSkip.bind(this));
+		this.#signals.effect(this.#runTrim.bind(this));
+		this.#signals.effect(this.#runBuffering.bind(this));
+		this.#signals.effect(this.#runPaused.bind(this));
 	}
 
 	#runMediaSource(effect: Effect): void {
@@ -45,110 +71,93 @@ export class Source {
 		element.src = URL.createObjectURL(mediaSource);
 		effect.cleanup(() => URL.revokeObjectURL(element.src));
 
-		effect.set(this.#mediaSource, mediaSource);
+		effect.event(
+			mediaSource,
+			"sourceopen",
+			() => {
+				effect.set(this.#mediaSource, mediaSource);
+			},
+			{ once: true },
+		);
 
-		effect.event(element, "sourceopen", () => {
-			effect.set(this.#mediaSource, mediaSource);
-		}, { once: true });
-
-		effect.event(element, "error", (e) => {
+		effect.event(mediaSource, "error", (e) => {
 			console.error("[MSE] MediaSource error event:", e);
 		});
 	}
 
-	#runVideo(effect: Effect): void {
-		const mediaSource = effect.get(this.#mediaSource);
-		if (!mediaSource) return;
+	#runSkip(effect: Effect): void {
+		const element = effect.get(this.element);
+		if (!element) return;
 
-		const catalog = effect.get(this.catalog);
-		if (!catalog) return;
+		// Don't skip when paused, otherwise we'll keep jerking forward.
+		const paused = effect.get(this.paused);
+		if (paused) return;
 
-		const broadcast = effect.get(catalog.broadcast);
-		if (!broadcast) return;
+		const latency = Moq.Time.Second.fromMilli(effect.get(this.latency));
 
-		const video = effect.get(catalog.parsed)?.video;
-		if (!video) return;
+		effect.interval(() => {
+			// Skip over gaps based on the latency.
+			const buffered = element.buffered;
+			if (buffered.length === 0) return;
 
-		const rendition = this.#selectRendition("video", video.renditions);
-		if (!rendition) return;
+			const last = buffered.end(buffered.length - 1);
+			const diff = last - element.currentTime;
 
-		const sourceBuffer = mediaSource.addSourceBuffer(rendition.mime);
-		effect.cleanup(() => {
-			mediaSource.removeSourceBuffer(sourceBuffer);
-			sourceBuffer.abort();
-		});
-
-		const sub = broadcast.subscribe(rendition.track, Catalog.PRIORITY.video);
-		console.log(`[MSE] Subscribing to video track: ${rendition.track}`);
-		effect.cleanup(() => sub.close());
-
-		this.#startSource(effect, sourceBuffer, sub);
+			// We seek an extra 100ms because seeking isn't free/instant.
+			if (diff > latency && diff > 0.1) {
+				console.warn("skipping ahead", diff, "seconds");
+				element.currentTime += diff + 0.1;
+			}
+		}, 100);
 	}
 
-	#runAudio(effect: Effect): void {
-		const catalog = effect.get(this.catalog);
-		if (!catalog) return;
-
-		const broadcast = effect.get(catalog.broadcast);
-		if (!broadcast) return;
+	#runTrim(effect: Effect): void {
+		const element = effect.get(this.element);
+		if (!element) return;
 
 		const mediaSource = effect.get(this.#mediaSource);
 		if (!mediaSource) return;
 
-		const audio = effect.get(catalog.parsed)?.audio;
-		if (!audio) return;
-
-		const rendition = this.#selectRendition("audio", audio.renditions);
-		if (!rendition) return;
-
-		const sourceBuffer = mediaSource.addSourceBuffer(rendition.mime);
-		effect.cleanup(() => {
-			mediaSource.removeSourceBuffer(sourceBuffer);
-			sourceBuffer.abort();
-		});
-
-		const sub = broadcast.subscribe(rendition.track, Catalog.PRIORITY.audio);
-		console.log(`[MSE] Subscribing to audio track: ${rendition.track}`);
-		effect.cleanup(() => sub.close());
-
-		this.#startSource(effect, sourceBuffer, sub);
-	}
-
-	#selectRendition(type: "video" | "audio", renditions: Record<string, Catalog.VideoConfig | Catalog.AudioConfig>): { track: string, mime: string } | undefined {
-		for (const [track, config] of Object.entries(renditions)) {
-			const mime = `${type}/mp4; codecs="${config.codec}"`;
-			if (!MediaSource.isTypeSupported(mime)) continue;
-
-			return { track, mime };
-		}
-
-		console.warn(`[MSE] No supported ${type} rendition found:`, renditions);
-		return undefined;
-	}
-
-	#startSource(effect: Effect, sourceBuffer: SourceBuffer, track: Moq.Track): void {
-		const consumer = new Frame.Consumer(track, {
-			latency: this.latency,
-			container: "cmaf",
-		});
-		effect.cleanup(() => consumer.close());
-
-		effect.spawn(async () => {
-			for (;;) {
-				const frame = await consumer.decode();
-				if (!frame) return;
-
-				if (sourceBuffer.updating) {
+		// Periodically clean up old buffered data.
+		effect.interval(async () => {
+			for (const sourceBuffer of mediaSource.sourceBuffers) {
+				while (sourceBuffer.updating) {
 					await new Promise((resolve) => sourceBuffer.addEventListener("updateend", resolve, { once: true }));
 				}
 
-				sourceBuffer.appendBuffer(frame.data as BufferSource);
+				// Keep at least 1 second of buffered data.
+				sourceBuffer.remove(0, Math.max(0, element.currentTime - 1));
 			}
-		});
+		}, 1000);
+	}
 
-		effect.event(sourceBuffer, "error", (e) => {
-			console.error("[MSE] SourceBuffer error:", e);
-		});
+	#runBuffering(effect: Effect): void {
+		const element = effect.get(this.element);
+		if (!element) return;
+
+		const update = () => {
+			this.#buffering.set(element.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA);
+		};
+
+		// TODO Are these the correct events to use?
+		effect.event(element, "waiting", update);
+		effect.event(element, "playing", update);
+		effect.event(element, "seeking", update);
+	}
+
+	#runPaused(effect: Effect): void {
+		const element = effect.get(this.element);
+		if (!element) return;
+
+		const paused = effect.get(this.paused);
+		if (paused && !element.paused) {
+			element.pause();
+		} else if (!paused && element.paused) {
+			element.play().catch((e) => {
+				console.error("[MSE] MediaElement play error:", e);
+				this.paused.set(false);
+			});
+		}
 	}
 
 	close(): void {

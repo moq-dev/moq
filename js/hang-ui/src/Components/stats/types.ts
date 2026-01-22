@@ -1,5 +1,7 @@
 export type KnownStatsProviders = "network" | "video" | "audio" | "buffer";
 
+import type * as Watch from "@moq/hang/watch";
+
 /**
  * Context passed to providers for updating display data
  */
@@ -50,11 +52,9 @@ export type AudioStats = {
  * Audio stream source with reactive properties
  */
 export interface AudioSource {
-	source: {
-		active: Signal<string>;
-		config: Signal<AudioConfig>;
-		stats: Signal<AudioStats>;
-	};
+	active: Signal<string>;
+	config: Signal<AudioConfig>;
+	stats: Signal<AudioStats>;
 }
 
 /**
@@ -77,22 +77,9 @@ export type VideoStats = {
 };
 
 /**
- * Video stream source with reactive properties
- */
-export interface VideoSource {
-	source: {
-		display: Signal<VideoResolution>;
-		syncStatus: Signal<SyncStatus>;
-		bufferStatus: Signal<BufferStatus>;
-		latency: Signal<number>;
-		stats: Signal<VideoStats>;
-	};
-}
-
-/**
  * Props passed to metric providers containing stream sources
  */
 export interface ProviderProps {
-	audio?: AudioSource;
-	video?: VideoSource;
+	audio: Watch.Audio.Backend;
+	video: Watch.Video.Backend;
 }

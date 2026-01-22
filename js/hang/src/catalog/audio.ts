@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ContainerSchema, DEFAULT_CONTAINER } from "./container";
+import { ContainerSchema } from "./container";
 import { u53Schema } from "./integers";
 
 // Backwards compatibility: old track schema
@@ -13,10 +13,6 @@ const TrackSchema = z.object({
 export const AudioConfigSchema = z.object({
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
-
-	// Container format for timestamp encoding
-	// Defaults to "native" when not specified in catalog (backward compatibility)
-	container: ContainerSchema.default(DEFAULT_CONTAINER),
 
 	// The description is used for some codecs.
 	// If provided, we can initialize the decoder based on the catalog alone.
@@ -33,11 +29,8 @@ export const AudioConfigSchema = z.object({
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: u53Schema.optional(),
 
-	// Init segment (ftyp+moov) for CMAF/fMP4 containers.
-	// This is the initialization segment needed for MSE playback.
-	// Stored as base64-encoded bytes. If not provided, init segments
-	// will be sent over the data track (legacy behavior).
-	initSegment: z.string().optional(), // base64-encoded
+	// The container format, used to decode the timestamp and more.
+	container: ContainerSchema,
 });
 
 export const AudioSchema = z

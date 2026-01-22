@@ -65,11 +65,11 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	};
 
 	const setVolume = (volume: number) => {
-		props.hangWatch.volume.set(volume / 100);
+		props.hangWatch.audio.volume.set(volume / 100);
 	};
 
 	const toggleMuted = () => {
-		props.hangWatch.muted.update((muted) => !muted);
+		props.hangWatch.audio.muted.update((muted) => !muted);
 	};
 
 	const setLatencyValue = (latency: number) => {
@@ -77,9 +77,9 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
-		props.hangWatch.video.source.target.update((prev) => ({
+		props.hangWatch.video.target.update((prev) => ({
 			...prev,
-			rendition: name,
+			name: name,
 		}));
 	};
 
@@ -130,7 +130,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const paused = effect.get(watch.video.paused);
+		const paused = effect.get(watch.paused);
 		setIsPlaying(!paused);
 	});
 
@@ -145,11 +145,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const syncStatus = effect.get(watch.video.source.syncStatus);
-		const bufferStatus = effect.get(watch.video.source.bufferStatus);
-		const shouldShow = syncStatus.state === "wait" || bufferStatus.state === "empty";
-
-		setBuffering(shouldShow);
+		const buffering = effect.get(watch.buffering);
+		setBuffering(buffering);
 	});
 
 	signals.effect((effect) => {
@@ -158,21 +155,20 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const rootCatalog = effect.get(watch.broadcast.catalog);
-		const videoCatalog = rootCatalog?.video;
+		const videoCatalog = effect.get(watch.video.catalog);
 		const renditions = videoCatalog?.renditions ?? {};
 
 		const renditionsList: Rendition[] = Object.entries(renditions).map(([name, config]) => ({
 			name,
-			width: (config as Catalog.VideoConfig).codedWidth,
-			height: (config as Catalog.VideoConfig).codedHeight,
+			width: config.codedWidth,
+			height: config.codedHeight,
 		}));
 
 		setAvailableRenditions(renditionsList);
 	});
 
 	signals.effect((effect) => {
-		const selected = effect.get(watch.video.source.active);
+		const selected = effect.get(watch.video.rendition);
 		setActiveRendition(selected);
 	});
 

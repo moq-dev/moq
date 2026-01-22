@@ -1,9 +1,9 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import * as Catalog from ".";
-import { PRIORITY } from "./priority";
+import * as Catalog from "../catalog";
+import { PRIORITY } from "../catalog/priority";
 
-export interface SourceProps {
+export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
 
 	// Whether to start downloading the broadcast.
@@ -18,7 +18,7 @@ export interface SourceProps {
 }
 
 // A catalog source that (optionally) reloads automatically when live/offline.
-export class Source {
+export class Broadcast {
 	connection: Signal<Moq.Connection.Established | undefined>;
 
 	enabled: Signal<boolean>;
@@ -26,19 +26,18 @@ export class Source {
 	status = new Signal<"offline" | "loading" | "live">("offline");
 	reload: Signal<boolean>;
 
-	#broadcast = new Signal<Moq.Broadcast | undefined>(undefined);
-	readonly broadcast: Getter<Moq.Broadcast | undefined> = this.#broadcast;
+	#active = new Signal<Moq.Broadcast | undefined>(undefined);
+	readonly active: Getter<Moq.Broadcast | undefined> = this.#active;
 
-	#parsed = new Signal<Catalog.Root | undefined>(undefined);
-	readonly parsed: Getter<Catalog.Root | undefined> = this.#parsed;
+	#catalog = new Signal<Catalog.Root | undefined>(undefined);
+	readonly catalog: Getter<Catalog.Root | undefined> = this.#catalog;
 
 	// This signal is true when the broadcast has been announced, unless reloading is disabled.
-	#active = new Signal(false);
-	readonly active: Getter<boolean> = this.#active;
+	#announced = new Signal(false);
 
 	signals = new Effect();
 
-	constructor(props?: SourceProps) {
+	constructor(props?: BroadcastProps) {
 		this.connection = Signal.from(props?.connection);
 		this.path = Signal.from(props?.path);
 		this.enabled = Signal.from(props?.enabled ?? false);
@@ -56,7 +55,7 @@ export class Source {
 		const reload = effect.get(this.reload);
 		if (!reload) {
 			// Mark as active without waiting for an announcement.
-			effect.set(this.#active, true, false);
+			effect.set(this.#announced, true, false);
 			return;
 		}
 
@@ -80,7 +79,7 @@ export class Source {
 					continue;
 				}
 
-				effect.set(this.#active, update.active, false);
+				effect.set(this.#announced, update.active, false);
 			}
 		});
 	}
@@ -89,19 +88,19 @@ export class Source {
 		const conn = effect.get(this.connection);
 		const enabled = effect.get(this.enabled);
 		const path = effect.get(this.path);
-		const active = effect.get(this.#active);
-		if (!conn || !enabled || path === undefined || !active) return;
+		const announced = effect.get(this.#announced);
+		if (!conn || !enabled || path === undefined || !announced) return;
 
 		const broadcast = conn.consume(path);
 		effect.cleanup(() => broadcast.close());
 
-		effect.set(this.#broadcast, broadcast);
+		effect.set(this.#active, broadcast);
 	}
 
 	#runCatalog(effect: Effect): void {
 		if (!effect.get(this.enabled)) return;
 
-		const broadcast = effect.get(this.#broadcast);
+		const broadcast = effect.get(this.active);
 		if (!broadcast) return;
 
 		this.status.set("loading");
@@ -120,13 +119,13 @@ export class Source {
 
 				console.debug("received catalog", this.path.peek(), update);
 
-				this.#parsed.set(update);
+				this.#catalog.set(update);
 				this.status.set("live");
 			}
 		} catch (err) {
 			console.warn("error fetching catalog", this.path.peek(), err);
 		} finally {
-			this.#parsed.set(undefined);
+			this.#catalog.set(undefined);
 			this.status.set("offline");
 		}
 	}
