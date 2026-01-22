@@ -6,6 +6,7 @@ use std::str::FromStr;
 
 /// Supported audio codec mimetypes.
 #[derive(Debug, Clone, PartialEq, Eq, Display, From)]
+#[non_exhaustive]
 pub enum AudioCodec {
 	/// AAC codec with profile information
 	AAC(AAC),

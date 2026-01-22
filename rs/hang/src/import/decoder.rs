@@ -4,19 +4,28 @@ use bytes::Buf;
 
 use crate::{
 	self as hang, Error,
-	import::{Aac, Fmp4Config, Hev1, Opus},
+	import::{Aac, Fmp4Config, Opus},
 };
 
-use super::{Avc3, Fmp4};
+#[cfg(feature = "h264")]
+use crate::import::Avc3;
+#[cfg(feature = "mp4")]
+use crate::import::Fmp4;
+#[cfg(feature = "h265")]
+use crate::import::Hev1;
 
 /// The supported decoder formats.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum DecoderFormat {
 	/// aka H264 with inline SPS/PPS
+	#[cfg(feature = "h264")]
 	Avc3,
 	/// fMP4/CMAF container.
+	#[cfg(feature = "mp4")]
 	Fmp4,
 	/// aka H265 with inline SPS/PPS
+	#[cfg(feature = "h265")]
 	Hev1,
 	/// Raw AAC frames (not ADTS).
 	Aac,
@@ -29,12 +38,16 @@ impl FromStr for DecoderFormat {
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
+			#[cfg(feature = "h264")]
 			"avc3" => Ok(DecoderFormat::Avc3),
+			#[cfg(feature = "h264")]
 			"h264" | "annex-b" => {
 				tracing::warn!("format '{s}' is deprecated, use 'avc3' instead");
 				Ok(DecoderFormat::Avc3)
 			}
+			#[cfg(feature = "h265")]
 			"hev1" => Ok(DecoderFormat::Hev1),
+			#[cfg(feature = "mp4")]
 			"fmp4" | "cmaf" => Ok(DecoderFormat::Fmp4),
 			"aac" => Ok(DecoderFormat::Aac),
 			"opus" => Ok(DecoderFormat::Opus),
@@ -46,8 +59,11 @@ impl FromStr for DecoderFormat {
 impl fmt::Display for DecoderFormat {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
+			#[cfg(feature = "h264")]
 			DecoderFormat::Avc3 => write!(f, "avc3"),
+			#[cfg(feature = "mp4")]
 			DecoderFormat::Fmp4 => write!(f, "fmp4"),
+			#[cfg(feature = "h265")]
 			DecoderFormat::Hev1 => write!(f, "hev1"),
 			DecoderFormat::Aac => write!(f, "aac"),
 			DecoderFormat::Opus => write!(f, "opus"),
@@ -58,10 +74,13 @@ impl fmt::Display for DecoderFormat {
 #[derive(derive_more::From)]
 enum DecoderKind {
 	/// aka H264 with inline SPS/PPS
+	#[cfg(feature = "h264")]
 	Avc3(Avc3),
 	// Boxed because it's a large struct and clippy complains about the size.
+	#[cfg(feature = "mp4")]
 	Fmp4(Box<Fmp4>),
 	/// aka H265 with inline SPS/PPS
+	#[cfg(feature = "h265")]
 	Hev1(Hev1),
 	Aac(Aac),
 	Opus(Opus),
@@ -79,8 +98,11 @@ impl Decoder {
 	/// Create a new decoder with the given format.
 	pub fn new(broadcast: hang::BroadcastProducer, format: DecoderFormat) -> Self {
 		let decoder = match format {
+			#[cfg(feature = "h264")]
 			DecoderFormat::Avc3 => Avc3::new(broadcast).into(),
+			#[cfg(feature = "mp4")]
 			DecoderFormat::Fmp4 => Box::new(Fmp4::new(broadcast, Fmp4Config::default())).into(),
+			#[cfg(feature = "h265")]
 			DecoderFormat::Hev1 => Hev1::new(broadcast).into(),
 			DecoderFormat::Aac => Aac::new(broadcast).into(),
 			DecoderFormat::Opus => Opus::new(broadcast).into(),
@@ -97,8 +119,11 @@ impl Decoder {
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
 		match &mut self.decoder {
+			#[cfg(feature = "h264")]
 			DecoderKind::Avc3(decoder) => decoder.initialize(buf)?,
+			#[cfg(feature = "mp4")]
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
+			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.initialize(buf)?,
 			DecoderKind::Aac(decoder) => decoder.initialize(buf)?,
 			DecoderKind::Opus(decoder) => decoder.initialize(buf)?,
@@ -124,8 +149,11 @@ impl Decoder {
 	/// If the buffer is not fully consumed, more data is needed.
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
 		match &mut self.decoder {
+			#[cfg(feature = "h264")]
 			DecoderKind::Avc3(decoder) => decoder.decode_stream(buf, None)?,
+			#[cfg(feature = "mp4")]
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
+			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.decode_stream(buf, None)?,
 			// TODO Fix or make these more type safe.
 			DecoderKind::Aac(_) => anyhow::bail!("AAC does not support stream decoding"),
@@ -151,8 +179,11 @@ impl Decoder {
 		pts: Option<hang::Timestamp>,
 	) -> anyhow::Result<()> {
 		match &mut self.decoder {
+			#[cfg(feature = "h264")]
 			DecoderKind::Avc3(decoder) => decoder.decode_frame(buf, pts)?,
+			#[cfg(feature = "mp4")]
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
+			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.decode_frame(buf, pts)?,
 			DecoderKind::Aac(decoder) => decoder.decode(buf, pts)?,
 			DecoderKind::Opus(decoder) => decoder.decode(buf, pts)?,
@@ -164,8 +195,11 @@ impl Decoder {
 	/// Check if the decoder has read enough data to be initialized.
 	pub fn is_initialized(&self) -> bool {
 		match &self.decoder {
+			#[cfg(feature = "h264")]
 			DecoderKind::Avc3(decoder) => decoder.is_initialized(),
+			#[cfg(feature = "mp4")]
 			DecoderKind::Fmp4(decoder) => decoder.is_initialized(),
+			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.is_initialized(),
 			DecoderKind::Aac(decoder) => decoder.is_initialized(),
 			DecoderKind::Opus(decoder) => decoder.is_initialized(),

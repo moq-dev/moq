@@ -28,6 +28,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 /// Alternatively, you can generate a self-signed certificate given a list of hostnames.
 #[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ServerTlsConfig {
 	/// Load the given certificate from disk.
 	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
@@ -54,6 +55,7 @@ pub struct ServerTlsConfig {
 /// Configuration for the MoQ server.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct ServerConfig {
 	/// Listen for UDP packets on the given address.
 	/// Defaults to `[::]:443` if not provided.

@@ -38,6 +38,16 @@ if (pkg.files) {
 	pkg.files = pkg.files.map(rewritePath);
 }
 
+if (pkg.bin) {
+	if (typeof pkg.bin === "string") {
+		pkg.bin = rewritePath(pkg.bin);
+	} else if (typeof pkg.bin === "object") {
+		for (const key in pkg.bin) {
+			pkg.bin[key] = rewritePath(pkg.bin[key]);
+		}
+	}
+}
+
 function rewriteWorkspaceDependency(dependencies?: Record<string, string>) {
 	if (!dependencies) return;
 	for (const [name, version] of Object.entries(dependencies)) {

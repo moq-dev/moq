@@ -11,6 +11,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 #[serde_with::serde_as]
 #[derive(Clone, clap::Parser, Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct Log {
 	/// The level filter to use.
 	#[serde_as(as = "DisplayFromStr")]
@@ -25,6 +26,10 @@ impl Default for Log {
 }
 
 impl Log {
+	pub fn new(level: Level) -> Self {
+		Self { level }
+	}
+
 	pub fn level(&self) -> LevelFilter {
 		LevelFilter::from_level(self.level)
 	}

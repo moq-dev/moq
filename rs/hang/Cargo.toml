@@ -12,28 +12,35 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = ["mp4", "h264", "h265", "hls"]
+mp4 = ["dep:mp4-atom"]
+h264 = ["dep:h264-parser"]
+h265 = ["dep:scuffle-h265"]
+hls = ["dep:m3u8-rs", "dep:reqwest", "mp4"]
+
 [dependencies]
 anyhow = "1"
 buf-list = "1"
 bytes = "1"
 futures = "0.3"
-h264-parser = "0.4.0"
+h264-parser = { version = "0.4.0", optional = true }
 hex = "0.4"
 lazy_static = "1"
-m3u8-rs = "5"
+m3u8-rs = { version = "5", optional = true }
 moq-lite = { workspace = true, features = ["serde"] }
 mp4-atom = { version = "0.10.0", features = [
 	"tokio",
 	"bytes",
 	"serde",
-], path = "../../../mp4-atom" }
+], optional = true }
 num_enum = "0.7"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = [
 	"rustls-tls",
 	"gzip",
-] }
-scuffle-h265 = "0.2.2"
+], optional = true }
+scuffle-h265 = { version = "0.2.2", optional = true }
 serde = { workspace = true }
 serde_json = "1"
 serde_with = { version = "3", features = ["hex"] }
