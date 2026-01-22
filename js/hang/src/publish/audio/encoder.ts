@@ -2,7 +2,6 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import { PRIORITY } from "../../catalog/priority";
 import * as Frame from "../../frame";
 import * as libav from "../../util/libav";
 import type * as Capture from "./capture";
@@ -31,7 +30,7 @@ export type EncoderProps = {
 
 export class Encoder {
 	static readonly TRACK = "audio/data";
-	static readonly PRIORITY = PRIORITY.audio;
+	static readonly PRIORITY = Catalog.PRIORITY.audio;
 
 	enabled: Signal<boolean>;
 
@@ -129,8 +128,6 @@ export class Encoder {
 			numberOfChannels: Catalog.u53(worklet.channelCount),
 			bitrate: Catalog.u53(worklet.channelCount * 32_000),
 			container: Catalog.CONTAINER.legacy,
-			// The timestamps are in microseconds.
-			timescale: Catalog.u53(1_000_000),
 		};
 
 		effect.set(this.#config, config);

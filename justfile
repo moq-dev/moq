@@ -115,7 +115,7 @@ download name:
 	@if [ ! -f "dev/{{name}}.fmp4" ]; then \
 		ffmpeg -loglevel error -i "dev/{{name}}.mp4" \
 			-c:v copy \
-			-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame+negative_cts_offsets -avoid_negative_ts make_zero \
+			-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
 			"dev/{{name}}.fmp4"; \
 	fi
 
@@ -135,7 +135,7 @@ ffmpeg-cmaf input output='-' *args:
 		-stream_loop -1 -re \
 		-i "{{input}}" \
 		-c copy \
-		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame+negative_cts_offsets -avoid_negative_ts make_zero {{args}} {{output}}
+		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame {{args}} {{output}}
 
 # Publish a video using ffmpeg to the localhost relay server
 # NOTE: The `http` means that we perform insecure certificate verification.

@@ -1,11 +1,15 @@
 import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
+import * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
 import type { Broadcast } from "../broadcast";
+import type { Target } from "../video/backend";
 import type * as Render from "./render";
+
+// Unfortunately, we need to use a Vite-exclusive import for now.
+import RenderWorklet from "./render-worklet.ts?worker&url";
 
 // We want some extra overhead to avoid starving the render worklet.
 // The default Opus frame duration is 20ms.
@@ -29,11 +33,6 @@ export type SourceProps = {
 export interface AudioStats {
 	bytesReceived: number;
 }
-
-import { PRIORITY } from "../../catalog/priority";
-import type { Target } from "../video/backend";
-// Unfortunately, we need to use a Vite-exclusive import for now.
-import RenderWorklet from "./render-worklet.ts?worker&url";
 
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
@@ -192,7 +191,7 @@ export class Source {
 		const rendition = effect.get(this.rendition);
 		if (!rendition) return;
 
-		const sub = active.subscribe(rendition, PRIORITY.audio);
+		const sub = active.subscribe(rendition, Catalog.PRIORITY.audio);
 		effect.cleanup(() => sub.close());
 
 		const consumer = new Frame.Consumer(sub, {

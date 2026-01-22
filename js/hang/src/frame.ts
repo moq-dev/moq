@@ -18,16 +18,6 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro): Uint
 	// Encode timestamp using the specified container format
 	const timestampBytes = encodeTimestamp(timestamp);
 
-	// For CMAF, timestampBytes will be empty, so we just return the source
-	if (timestampBytes.length === 0) {
-		if (source instanceof Uint8Array) {
-			return source;
-		}
-		const data = new Uint8Array(source.byteLength);
-		source.copyTo(data);
-		return data;
-	}
-
 	// Allocate buffer for timestamp + payload
 	const payloadSize = source instanceof Uint8Array ? source.byteLength : source.byteLength;
 	const data = new Uint8Array(timestampBytes.byteLength + payloadSize);
@@ -115,12 +105,9 @@ export class Consumer {
 
 	async #run() {
 		// Start fetching groups in the background
-
 		for (;;) {
 			const consumer = await this.#track.nextGroup();
-			if (!consumer) {
-				break;
-			}
+			if (!consumer) break;
 
 			// To improve TTV, we always start with the first group.
 			// For higher latencies we might need to figure something else out, as its racey.

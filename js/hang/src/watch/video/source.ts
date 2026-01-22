@@ -1,8 +1,7 @@
 import type * as Moq from "@moq/lite";
 import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
-import { PRIORITY } from "../../catalog/priority";
+import * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import * as Hex from "../../util/hex";
 import type { Broadcast } from "../broadcast";
@@ -186,7 +185,7 @@ export class Source implements Backend {
 	}
 
 	#runTrack(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
-		const sub = broadcast.subscribe(name, PRIORITY.video); // TODO use priority from catalog
+		const sub = broadcast.subscribe(name, Catalog.PRIORITY.video);
 		effect.cleanup(() => sub.close());
 
 		// Create consumer that reorders groups/frames up to the provided latency.
