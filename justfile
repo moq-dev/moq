@@ -439,6 +439,13 @@ pub-console:
 doc:
 	cd doc && bun run dev
 
+# Start the optional observability stack, then run the full dev demo.
+observability:
+	@echo ">>> Starting observability stack..."
+	(cd observability && docker compose up -d)
+	@echo ">>> Starting demo (just dev)..."
+	just dev
+
 # Throttle UDP traffic for testing (macOS only, requires sudo)
 throttle:
 	dev/throttle

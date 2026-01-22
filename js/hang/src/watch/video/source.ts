@@ -3,6 +3,7 @@ import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
+import { recordMetric } from "../../observability";
 import { PRIORITY } from "../../publish/priority";
 import * as Hex from "../../util/hex";
 
@@ -40,6 +41,7 @@ export interface VideoStats {
 	frameCount: number;
 	timestamp: number;
 	bytesReceived: number;
+	framesDecoded: number;
 }
 
 // Only count it as buffering if we had to sleep for 200ms or more before rendering the next frame.
@@ -192,6 +194,10 @@ export class Source {
 	}
 
 	#runTrack(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
+		// Track time-to-first-frame from subscription start
+		const trackStartTime = performance.now();
+		let firstFrameRendered = false;
+
 		const sub = broadcast.subscribe(name, PRIORITY.video); // TODO use priority from catalog
 		effect.cleanup(() => sub.close());
 
@@ -233,6 +239,14 @@ export class Source {
 
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
+				// Count actual decoded frames here (not per encoded chunk).
+				this.#stats.update((current) => ({
+					frameCount: current?.frameCount ?? 0,
+					timestamp: current?.timestamp ?? 0,
+					bytesReceived: current?.bytesReceived ?? 0,
+					framesDecoded: (current?.framesDecoded ?? 0) + 1,
+				}));
+
 				// Insert into a queue so we can perform ordered sleeps.
 				// If this were to block, I believe WritableStream is still ordered.
 				try {
@@ -265,6 +279,10 @@ export class Source {
 					sleep = this.#reference - ref + this.latency.peek();
 				}
 
+				// Record buffer length: sleep > 0 means we have data buffered ahead
+				// The sleep time represents how far ahead of playback position we are
+				// Note: Large sleep means we're AHEAD (have buffer), not rebuffering
+				// Rebuffering is detected in the consumer.decode() wait below
 				if (sleep > MIN_SYNC_WAIT_MS) {
 					this.syncStatus.set({ state: "wait", bufferDuration: sleep });
 				}
@@ -288,6 +306,14 @@ export class Source {
 						this.#pending = undefined;
 						effect.set(this.active, name);
 					}
+				}
+
+				// Record time-to-first-frame on the first rendered frame
+				if (!firstFrameRendered) {
+					firstFrameRendered = true;
+					const ttffSeconds = (performance.now() - trackStartTime) / 1000;
+					recordMetric((m) => m.recordStartupTime(ttffSeconds, { codec: config.codec, track_type: "video" }));
+					console.log(`[Video] Time-to-first-frame: ${(ttffSeconds * 1000).toFixed(0)}ms`);
 				}
 
 				this.frame.update((prev) => {
@@ -316,14 +342,15 @@ export class Source {
 					timestamp: next.timestamp,
 				});
 
+				decoder.decode(chunk);
+
 				// Track both frame count and bytes received for stats in the UI
 				this.#stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + 1,
 					timestamp: next.timestamp,
 					bytesReceived: (current?.bytesReceived ?? 0) + next.data.byteLength,
+					framesDecoded: current?.framesDecoded ?? 0,
 				}));
-
-				decoder.decode(chunk);
 			}
 		});
 	}

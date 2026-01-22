@@ -34,14 +34,15 @@ impl Session {
 		}
 	}
 
-	/// Perform the MoQ handshake as a client, negotiating the version.
+	/// Perform the MoQ handshake as a client, negotiating the version, with optional stats hooks.
 	///
-	/// Publishing is performed with [OriginConsumer] and subscribing with [OriginProducer].
-	/// The connection remains active until the session is closed.
-	pub async fn connect<S: web_transport_trait::Session>(
+	/// This is equivalent to [`Session::connect`] but allows providing a [`crate::Stats`] sink
+	/// for application-level byte accounting (ignores transport retransmissions).
+	pub async fn connect_with_stats<S: web_transport_trait::Session>(
 		session: S,
 		publish: impl Into<Option<OriginConsumer>>,
 		subscribe: impl Into<Option<OriginProducer>>,
+		stats: Option<Arc<dyn crate::Stats>>,
 	) -> Result<Self, Error> {
 		let mut stream = Stream::open(&session, setup::ServerKind::Ietf14).await?;
 
@@ -67,7 +68,15 @@ impl Session {
 
 		if let Ok(version) = lite::Version::try_from(server.version) {
 			let stream = stream.with_version(version);
-			lite::start(session.clone(), stream, publish.into(), subscribe.into(), version).await?;
+			lite::start(
+				session.clone(),
+				stream,
+				publish.into(),
+				subscribe.into(),
+				stats,
+				version,
+			)
+			.await?;
 		} else if let Ok(version) = ietf::Version::try_from(server.version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
@@ -82,6 +91,7 @@ impl Session {
 				true,
 				publish.into(),
 				subscribe.into(),
+				stats,
 				version,
 			)
 			.await?;
@@ -95,14 +105,24 @@ impl Session {
 		Ok(Self::new(session))
 	}
 
-	/// Perform the MoQ handshake as a server.
+	/// Perform the MoQ handshake as a client, negotiating the version.
 	///
 	/// Publishing is performed with [OriginConsumer] and subscribing with [OriginProducer].
 	/// The connection remains active until the session is closed.
-	pub async fn accept<S: web_transport_trait::Session>(
+	pub async fn connect<S: web_transport_trait::Session>(
 		session: S,
 		publish: impl Into<Option<OriginConsumer>>,
 		subscribe: impl Into<Option<OriginProducer>>,
+	) -> Result<Self, Error> {
+		Self::connect_with_stats(session, publish, subscribe, None).await
+	}
+
+	/// Perform the MoQ handshake as a server with optional stats hooks.
+	pub async fn accept_with_stats<S: web_transport_trait::Session>(
+		session: S,
+		publish: impl Into<Option<OriginConsumer>>,
+		subscribe: impl Into<Option<OriginProducer>>,
+		stats: Option<Arc<dyn crate::Stats>>,
 	) -> Result<Self, Error> {
 		// Accept with an initial version; we'll switch to the negotiated version later
 		let mut stream = Stream::accept(&session, ()).await?;
@@ -135,7 +155,15 @@ impl Session {
 
 		if let Ok(version) = lite::Version::try_from(version) {
 			let stream = stream.with_version(version);
-			lite::start(session.clone(), stream, publish.into(), subscribe.into(), version).await?;
+			lite::start(
+				session.clone(),
+				stream,
+				publish.into(),
+				subscribe.into(),
+				stats,
+				version,
+			)
+			.await?;
 		} else if let Ok(version) = ietf::Version::try_from(version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
@@ -150,6 +178,7 @@ impl Session {
 				false,
 				publish.into(),
 				subscribe.into(),
+				stats,
 				version,
 			)
 			.await?;
@@ -161,6 +190,18 @@ impl Session {
 		tracing::debug!(?version, "connected");
 
 		Ok(Self::new(session))
+	}
+
+	/// Perform the MoQ handshake as a server.
+	///
+	/// Publishing is performed with [OriginConsumer] and subscribing with [OriginProducer].
+	/// The connection remains active until the session is closed.
+	pub async fn accept<S: web_transport_trait::Session>(
+		session: S,
+		publish: impl Into<Option<OriginConsumer>>,
+		subscribe: impl Into<Option<OriginProducer>>,
+	) -> Result<Self, Error> {
+		Self::accept_with_stats(session, publish, subscribe, None).await
 	}
 
 	/// Close the underlying transport session.

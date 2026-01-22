@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
+	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Stats, Track,
 	TrackProducer,
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId, Version},
@@ -47,17 +47,25 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	origin: Option<OriginProducer>,
 	state: Lock<State>,
 	control: Control,
+	stats: Option<Arc<dyn Stats>>,
 
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: Option<OriginProducer>, control: Control, version: Version) -> Self {
+	pub fn new(
+		session: S,
+		origin: Option<OriginProducer>,
+		control: Control,
+		stats: Option<Arc<dyn Stats>>,
+		version: Version,
+	) -> Self {
 		Self {
 			session,
 			origin,
 			state: Default::default(),
 			control,
+			stats,
 			version,
 		}
 	}
@@ -391,6 +399,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		while remain > 0 {
 			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;
+			if let Some(stats) = &self.stats {
+				stats.add_rx_bytes(chunk.len() as u64);
+			}
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
 			frame.write_chunk(chunk);
 		}

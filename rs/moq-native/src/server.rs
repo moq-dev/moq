@@ -357,14 +357,36 @@ impl Request {
 		publish: impl Into<Option<moq_lite::OriginConsumer>>,
 		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
 	) -> anyhow::Result<Session> {
+		self.accept_with_stats(publish, subscribe, None).await
+	}
+
+	/// Accept the session, performing rest of the MoQ handshake, with optional stats hooks.
+	///
+	/// The stats sink is forwarded into `moq-lite` to account application-level payload bytes.
+	pub async fn accept_with_stats(
+		self,
+		publish: impl Into<Option<moq_lite::OriginConsumer>>,
+		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
+		stats: Option<std::sync::Arc<dyn moq_lite::Stats>>,
+	) -> anyhow::Result<Session> {
+		let publish = publish.into();
+		let subscribe = subscribe.into();
+
 		let session = match self {
-			Request::WebTransport(request) => Session::accept(request.ok().await?, publish, subscribe).await?,
-			Request::Quic(request) => Session::accept(request.ok(), publish, subscribe).await?,
+			Request::WebTransport(request) => {
+				moq_lite::Session::accept_with_stats(request.ok().await?, publish, subscribe, stats).await?
+			}
+			Request::Quic(request) => {
+				moq_lite::Session::accept_with_stats(request.ok(), publish, subscribe, stats).await?
+			}
 			#[cfg(feature = "iroh")]
-			Request::IrohWebTransport(request) => Session::accept(request.ok().await?, publish, subscribe).await?,
+			Request::IrohWebTransport(request) => {
+				moq_lite::Session::accept_with_stats(request.ok().await?, publish, subscribe, stats).await?
+			}
 			#[cfg(feature = "iroh")]
-			Request::IrohQuic(request) => Session::accept(request.ok(), publish, subscribe).await?,
+			Request::IrohQuic(request) => moq_lite::Session::accept_with_stats(request.ok(), publish, subscribe, stats).await?,
 		};
+
 		Ok(session)
 	}
 

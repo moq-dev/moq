@@ -39,6 +39,7 @@ mod model;
 mod path;
 mod session;
 mod setup;
+mod stats;
 
 pub mod coding;
 pub mod ietf;
@@ -48,3 +49,4 @@ pub use error::*;
 pub use model::*;
 pub use path::*;
 pub use session::*;
+pub use stats::*;

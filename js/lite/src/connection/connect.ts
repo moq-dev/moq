@@ -5,6 +5,17 @@ import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
 import type { Established } from "./established.ts";
 
+// Connection type tracking for observability
+let connectionTypeCallback: ((type: "webtransport" | "websocket") => void) | undefined;
+
+/**
+ * Register a callback to be notified of connection type.
+ * Used by observability to track WebTransport vs WebSocket usage.
+ */
+export function onConnectionType(callback: (type: "webtransport" | "websocket") => void) {
+	connectionTypeCallback = callback;
+}
+
 export interface WebSocketOptions {
 	// If true (default), enable the WebSocket fallback.
 	enabled?: boolean;
@@ -64,10 +75,18 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	if (!quic) throw new Error("no transport available");
 
+	// Track connection type for observability
+	const transportType = quic instanceof WebTransportWs ? "websocket" : "webtransport";
+
 	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
-	if (quic instanceof WebTransportWs) {
+	if (transportType === "websocket") {
 		console.warn(url.toString(), "using WebSocket fallback; the user experience may be degraded");
 		websocketWon.add(url.toString());
+	}
+
+	// Notify observability of connection type
+	if (connectionTypeCallback) {
+		connectionTypeCallback(transportType);
 	}
 
 	// moq-rs currently requires the ROLE extension to be set.
