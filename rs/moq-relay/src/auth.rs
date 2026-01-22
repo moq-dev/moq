@@ -44,8 +44,8 @@ pub struct AuthConfig {
 	/// How often to refresh the JWK set (in seconds), will be ignored if the `key` is not a valid URI.
 	/// If not provided, there won't be any refreshing, the JWK set will only be loaded once at startup.
 	/// Minimum value: 30, defaults to None
-	#[arg(long = "jwks-refresh-interval", env = "MOQ_AUTH_JWKS_REFRESH_INTERVAL")]
-	pub jwks_refresh_interval: Option<u64>,
+	#[arg(long = "auth-refresh-interval", env = "MOQ_AUTH_REFRESH_INTERVAL")]
+	pub refresh_interval: Option<u64>,
 
 	/// The prefix that will be public for reading and writing.
 	/// If present, unauthorized users will be able to read and write to this prefix ONLY.
@@ -68,7 +68,7 @@ pub struct AuthToken {
 	pub cluster: bool,
 }
 
-const JWKS_REFRESH_ERROR_INTERVAL: Duration = Duration::from_mins(5);
+const REFRESH_ERROR_INTERVAL: Duration = Duration::from_mins(5);
 
 #[derive(Clone)]
 pub struct Auth {
@@ -111,89 +111,91 @@ impl Auth {
 		Ok(())
 	}
 
-	fn spawn_refresh_task(
-		interval: Duration,
-		key_set: Arc<Mutex<KeySet>>,
-		jwks_uri: String,
-	) -> tokio::task::JoinHandle<()> {
-		tokio::spawn(async move {
-			loop {
-				tokio::time::sleep(interval).await;
+	async fn refresh_task(interval: Duration, key_set: Arc<Mutex<KeySet>>, jwks_uri: String) {
+		loop {
+			tokio::time::sleep(interval).await;
 
-				if let Err(e) = Self::refresh_key_set(&jwks_uri, key_set.as_ref()).await {
-					if interval > JWKS_REFRESH_ERROR_INTERVAL * 2 {
-						tracing::error!(
-							"failed to load JWKS, will retry in {} seconds: {:?}",
-							JWKS_REFRESH_ERROR_INTERVAL.as_secs(),
-							e
-						);
-						tokio::time::sleep(JWKS_REFRESH_ERROR_INTERVAL).await;
+			if let Err(e) = Self::refresh_key_set(&jwks_uri, key_set.as_ref()).await {
+				if interval > REFRESH_ERROR_INTERVAL * 2 {
+					tracing::error!(
+						"failed to load JWKS, will retry in {} seconds: {:?}",
+						REFRESH_ERROR_INTERVAL.as_secs(),
+						e
+					);
+					tokio::time::sleep(REFRESH_ERROR_INTERVAL).await;
 
-						if let Err(e) = Self::refresh_key_set(&jwks_uri, key_set.as_ref()).await {
-							tracing::error!("failed to load JWKS again, giving up this time: {:?}", e);
-						} else {
-							tracing::info!("successfully loaded JWKS on the second try");
-						}
+					if let Err(e) = Self::refresh_key_set(&jwks_uri, key_set.as_ref()).await {
+						tracing::error!("failed to load JWKS again, giving up this time: {:?}", e);
 					} else {
-						// Don't retry because the next refresh is going to happen very soon
-						tracing::error!("failed to refresh JWKS: {:?}", e);
+						tracing::info!("successfully loaded JWKS on the second try");
 					}
+				} else {
+					// Don't retry because the next refresh is going to happen very soon
+					tracing::error!("failed to refresh JWKS: {:?}", e);
 				}
 			}
-		})
+		}
 	}
 
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
-		let mut refresh_task = None;
-
-		let key = match config.key {
-			Some(uri) if uri.starts_with("http://") || uri.starts_with("https://") => {
-				// Start with an empty KeySet
-				let key_set = Arc::new(Mutex::new(KeySet::default()));
-
-				tracing::info!("loading JWK set from {}", &uri);
-
-				Self::refresh_key_set(&uri, key_set.as_ref()).await?;
-
-				if let Some(refresh_interval_secs) = config.jwks_refresh_interval {
-					anyhow::ensure!(
-						refresh_interval_secs >= 30,
-						"jwks_refresh_interval cannot be less than 30"
-					);
-
-					refresh_task = Some(Self::spawn_refresh_task(
-						Duration::from_secs(refresh_interval_secs),
-						key_set.clone(),
-						uri,
-					));
-				}
-
-				Some(key_set)
+		if let Some(key) = config.key {
+			if config.public.is_some() {
+				anyhow::bail!("root key and public path cannot be configured together");
 			}
 
-			Some(key_file) => {
-				let key = moq_token::Key::from_file(&key_file)
-					.with_context(|| format!("cannot load key from {}", &key_file))?;
-				Some(Arc::new(Mutex::new(KeySet {
-					keys: vec![Arc::new(key)],
-				})))
+			if key.starts_with("http://") || key.starts_with("https://") {
+				Self::new_remote(key, config.refresh_interval).await
+			} else {
+				Self::new_local(key)
 			}
+		} else if let Some(public) = config.public {
+			Ok(Self {
+				key: None,
+				public: Some(public.as_path().to_owned()),
+				refresh_task: None,
+			})
+		} else {
+			anyhow::bail!("no root key or public path configured");
+		}
+	}
 
-			None => None,
+	async fn new_remote(uri: String, refresh_interval: Option<u64>) -> anyhow::Result<Self> {
+		// Start with an empty KeySet
+		let key_set = Arc::new(Mutex::new(KeySet::default()));
+
+		tracing::info!(%uri, "loading JWK set");
+
+		Self::refresh_key_set(&uri, key_set.as_ref()).await?;
+
+		let refresh_task = if let Some(refresh_interval_secs) = refresh_interval {
+			anyhow::ensure!(refresh_interval_secs >= 30, "refresh_interval cannot be less than 30");
+
+			Some(Arc::new(tokio::spawn(Self::refresh_task(
+				Duration::from_secs(refresh_interval_secs),
+				key_set.clone(),
+				uri,
+			))))
+		} else {
+			None
 		};
 
-		let public = config.public;
+		Ok(Self {
+			key: Some(key_set),
+			public: None,
+			refresh_task,
+		})
+	}
 
-		match (&key, &public) {
-			(None, None) => anyhow::bail!("no root key or public path configured"),
-			(Some(_), Some(public)) if public.is_empty() => anyhow::bail!("root key but fully public access"),
-			_ => (),
-		}
+	fn new_local(key: String) -> anyhow::Result<Self> {
+		let key = moq_token::Key::from_file(&key).context("cannot load key")?;
+		let key_set = Arc::new(Mutex::new(KeySet {
+			keys: vec![Arc::new(key)],
+		}));
 
 		Ok(Self {
-			key,
-			public: public.map(|p| p.as_path().to_owned()),
-			refresh_task: refresh_task.map(Arc::new),
+			key: Some(key_set),
+			public: None,
+			refresh_task: None,
 		})
 	}
 
