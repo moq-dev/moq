@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.7](https://github.com/moq-dev/moq/compare/moq-token-v0.5.6...moq-token-v0.5.7) - 2026-01-23
+
+### Other
+
+- JWK sets ([#809](https://github.com/moq-dev/moq/pull/809))
+- Fix link to auth docs ([#842](https://github.com/moq-dev/moq/pull/842))
+- upgrade to Rust edition 2024 ([#838](https://github.com/moq-dev/moq/pull/838))
+
 ## [0.5.6](https://github.com/moq-dev/moq/compare/moq-token-v0.5.5...moq-token-v0.5.6) - 2026-01-10
 
 ### Other

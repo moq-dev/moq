@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4](https://github.com/moq-dev/moq/compare/hang-cli-v0.7.3...hang-cli-v0.7.4) - 2026-01-23
+
+### Other
+
+- Add a builder pattern for constructing clients/servers ([#862](https://github.com/moq-dev/moq/pull/862))
+- upgrade to Rust edition 2024 ([#838](https://github.com/moq-dev/moq/pull/838))
+
 ## [0.7.3](https://github.com/moq-dev/moq/compare/hang-cli-v0.7.2...hang-cli-v0.7.3) - 2026-01-10
 
 ### Added
