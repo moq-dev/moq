@@ -56,11 +56,8 @@ export class Source {
 	// The name of the active rendition.
 	active = new Signal<string | undefined>(undefined);
 
-	#bufferEarliest = new Signal<number | undefined>(undefined);
-	readonly bufferEarliest: Getter<number | undefined> = this.#bufferEarliest;
-
-	#bufferLatest = new Signal<number | undefined>(undefined);
-	readonly bufferLatest: Getter<number | undefined> = this.#bufferLatest;
+	#bufferedRanges = new Signal<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]>([]);
+	readonly bufferedRanges: Getter<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]> = this.#bufferedRanges;
 
 	#signals = new Effect();
 
@@ -183,12 +180,7 @@ export class Source {
 
 		// Sync buffer signals from consumer to source
 		effect.effect((e) => {
-			e.set(this.#bufferEarliest, e.get(consumer.earliestBufferTime));
-			e.set(this.#bufferLatest, e.get(consumer.latestBufferTime));
-		});
-		effect.cleanup(() => {
-			this.#bufferEarliest.set(undefined);
-			this.#bufferLatest.set(undefined);
+			e.set(this.#bufferedRanges, e.get(consumer.buffered), []);
 		});
 
 		effect.spawn(async () => {

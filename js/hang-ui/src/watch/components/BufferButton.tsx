@@ -1,6 +1,6 @@
-import Button from "../shared/button";
-import * as Icon from "../shared/icon";
-import useWatchUIContext from "./useWatchUIContext";
+import Button from "../../shared/components/button/button";
+import * as Icon from "../../shared/components/icon/icon";
+import useWatchUIContext from "../hooks/use-watch-ui";
 
 /**
  * Toggle button for showing/hiding buffer overlay

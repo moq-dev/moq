@@ -3,6 +3,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import type HangWatch from "@moq/hang/watch/element";
 import type { JSX } from "solid-js";
 import { createContext, createSignal, onCleanup } from "solid-js";
+import type { Time } from "@moq/lite";
 
 type WatchUIContextProviderProps = {
 	hangWatch: HangWatch;
@@ -17,7 +18,7 @@ export type Rendition = {
 	height?: number;
 };
 
-type WatchUIContextValues = {
+export type WatchUIContextValues = {
 	hangWatch: HangWatch;
 	watchStatus: () => WatchStatus;
 	isPlaying: () => boolean;
@@ -36,8 +37,9 @@ type WatchUIContextValues = {
 	setIsStatsPanelVisible: (visible: boolean) => void;
 	isBufferOverlayVisible: () => boolean;
 	setIsBufferOverlayVisible: (visible: boolean) => void;
-	videoBufferDuration: () => number | undefined;
-	audioBufferDuration: () => number | undefined;
+	videoBufferedRanges: () => { start: Time.Micro | undefined, end: Time.Micro | undefined }[];
+	audioBufferedRanges: () => { start: Time.Micro | undefined, end: Time.Micro | undefined }[];
+	videoCurrentTime: () => Time.Micro | undefined;
 	isFullscreen: () => boolean;
 	toggleFullscreen: () => void;
 };
@@ -55,8 +57,9 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const [activeRendition, setActiveRendition] = createSignal<string | undefined>(undefined);
 	const [isStatsPanelVisible, setIsStatsPanelVisibleInternal] = createSignal<boolean>(false);
 	const [isBufferOverlayVisible, setIsBufferOverlayVisibleInternal] = createSignal<boolean>(false);
-	const [videoBufferDuration, setVideoBufferDuration] = createSignal<number | undefined>(undefined);
-	const [audioBufferDuration, setAudioBufferDuration] = createSignal<number | undefined>(undefined);
+	const [videoBufferedRanges, setVideoBufferedRanges] = createSignal<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]>([]);
+	const [audioBufferedRanges, setAudioBufferedRanges] = createSignal<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]>([]);
+	const [videoCurrentTime, setVideoCurrentTime] = createSignal<Time.Micro | undefined>(undefined);
 
 	// Mutual exclusivity: hide buffer overlay when stats panel is shown and vice versa
 	const setIsStatsPanelVisible = (visible: boolean) => {
@@ -120,8 +123,9 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		setIsStatsPanelVisible,
 		isBufferOverlayVisible,
 		setIsBufferOverlayVisible,
-		videoBufferDuration,
-		audioBufferDuration,
+		videoBufferedRanges,
+		audioBufferedRanges,
+		videoCurrentTime,
 		isFullscreen,
 		toggleFullscreen,
 	};
@@ -198,28 +202,20 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		setActiveRendition(selected);
 	});
 
-	// Sync video buffer duration from source
 	signals.effect((effect) => {
-		const earliest = effect.get(watch.video.source.bufferEarliest);
-		const latest = effect.get(watch.video.source.bufferLatest);
-		if (earliest !== undefined && latest !== undefined) {
-			// Convert from microseconds to milliseconds
-			setVideoBufferDuration((latest - earliest) / 1000);
-		} else {
-			setVideoBufferDuration(undefined);
-		}
+		const bufferedRanges = effect.get(watch.video.source.bufferedRanges);
+		setVideoBufferedRanges(bufferedRanges);
+	});
+	
+	signals.effect((effect) => {
+		const bufferedRanges = effect.get(watch.audio.source.bufferedRanges);
+		setAudioBufferedRanges(bufferedRanges);
 	});
 
-	// Sync audio buffer duration from source
 	signals.effect((effect) => {
-		const earliest = effect.get(watch.audio.source.bufferEarliest);
-		const latest = effect.get(watch.audio.source.bufferLatest);
-		if (earliest !== undefined && latest !== undefined) {
-			// Convert from microseconds to milliseconds
-			setAudioBufferDuration((latest - earliest) / 1000);
-		} else {
-			setAudioBufferDuration(undefined);
-		}
+		const stats = effect.get(watch.video.source.stats);
+		// Use stats.timestamp directly - buffers are positioned relative to decoded frame time
+		setVideoCurrentTime(stats?.timestamp as Time.Micro | undefined);
 	});
 
 	const handleFullscreenChange = () => {

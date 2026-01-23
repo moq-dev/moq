@@ -215,7 +215,7 @@
 	font-family: monospace;
 	font-size: var(--spacing-12);
 	z-index: 1000;
-	min-width: 200px;
+	min-width: 400px;
 	pointer-events: auto;
 }
 
@@ -234,7 +234,7 @@
 .bufferOverlayLabel {
 	color: var(--color-gray-100);
 	font-size: var(--spacing-10);
-	margin-bottom: var(--spacing-2);
+	margin-bottom: 0;
 }
 
 .bufferOverlayValue {
@@ -258,4 +258,64 @@
 
 .bufferOverlayLatency .latencySlider {
 	accent-color: var(--color-blue-400);
+}
+
+/* Buffer Timeline Styles */
+.bufferTimeline {
+	margin-top: var(--spacing-4);
+	padding-bottom: 16px;
+}
+
+.bufferTimelinePlayheadLabel {
+	font-size: var(--spacing-8);
+	color: var(--color-white);
+	margin-bottom: var(--spacing-16);
+}
+
+.bufferTimelineBehindLive {
+	color: var(--color-gray-100);
+}
+
+.bufferTimelineTrack {
+	position: relative;
+	height: 16px;
+	background: rgba(255, 255, 255, 0.1);
+	border-radius: var(--spacing-4);
+}
+
+.bufferTimelineRange {
+	position: absolute;
+	top: 0;
+	height: 100%;
+	background: var(--color-blue-400);
+	border-radius: 3px;
+	opacity: 0.8;
+	transition: width 0.15s ease-out;
+}
+
+.bufferTimelineStartLabel {
+	position: absolute;
+	bottom: -14px;
+	left: 0;
+	font-size: 9px;
+	color: var(--color-gray-100);
+	white-space: nowrap;
+}
+
+.bufferTimelineEndLabel {
+	position: absolute;
+	top: -14px;
+	left: 100%;
+	font-size: 9px;
+	color: var(--color-gray-100);
+	white-space: nowrap;
+}
+
+.bufferTimelineWindowLabel {
+	position: absolute;
+	right: 0;
+	bottom: -14px;
+	font-size: 9px;
+	color: var(--color-gray-100);
+	white-space: nowrap;
 }

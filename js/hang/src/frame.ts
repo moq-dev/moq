@@ -92,9 +92,7 @@ export class Consumer {
 	#container?: Catalog.Container;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
-	earliestBufferTime = new Signal<number | undefined>(undefined);
-	latestBufferTime = new Signal<number | undefined>(undefined);
-
+	buffered = new Signal<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]>([]);
 	// Wake up the consumer when a new frame is available.
 	#notify?: () => void;
 
@@ -153,10 +151,6 @@ export class Consumer {
 		try {
 			let keyframe = true;
 
-			if (window.simulateLatency === true) {
-				await applySimulatedLatency(2500);
-			}
-
 			for (;;) {
 				const next = await group.consumer.readFrame();
 				if (!next) break;
@@ -188,7 +182,7 @@ export class Consumer {
 		} catch (_err) {
 			// Ignore errors, we close groups on purpose to skip them.
 		} finally {
-			this.#updateBufferRange();
+			// this.#updateBufferedRanges(group);
 
 			if (group.consumer.sequence === this.#active) {
 				// Advance to the next group.
@@ -206,15 +200,31 @@ export class Consumer {
 		// We can only skip if there are at least two groups.
 		if (this.#groups.length < 2) return;
 
-		const { earliestTime, latestTime } = getBufferedRangeForGroup(this.#groups);
+		const first = this.#groups[0];
 
-		if (earliestTime === undefined || latestTime === undefined) return;
+		// Check the difference between the earliest known frame and the latest known frame
+		let min: number | undefined;
+		let max: number | undefined;
 
-		const latency = latestTime - earliestTime;
+		for (const group of this.#groups) {
+			if (!group.latest) continue;
 
+			// Use the earliest unconsumed frame in the group.
+			const frame = group.frames.at(0)?.timestamp ?? group.latest;
+			if (min === undefined || frame < min) {
+				min = frame;
+			}
+
+			if (max === undefined || group.latest > max) {
+				max = group.latest;
+			}
+		}
+
+		if (min === undefined || max === undefined) return;
+
+		const latency = max - min;
 		if (latency < Time.Micro.fromMilli(this.#latency.peek())) return;
 
-		const first = this.#groups[0];
 		if (this.#active !== undefined && first.consumer.sequence <= this.#active) {
 			this.#groups.shift();
 
@@ -233,10 +243,8 @@ export class Consumer {
 		this.#notify = undefined;
 	}
 
-	#updateBufferRange() {
-		const { earliestTime, latestTime } = getBufferedRangeForGroup(this.#groups);
-		this.earliestBufferTime.set(earliestTime);
-		this.latestBufferTime.set(latestTime);
+	#updateBufferedRanges() {
+		this.buffered.set(getBufferedRanges(this.#groups));
 	}
 
 	async decode(): Promise<Frame | undefined> {
@@ -263,7 +271,7 @@ export class Consumer {
 
 			const wait = new Promise<void>((resolve) => {
 				this.#notify = () => {
-					this.#updateBufferRange();
+					this.#updateBufferedRanges();
 					resolve();
 				};
 			}).then(() => true);
@@ -288,38 +296,11 @@ export class Consumer {
 	}
 }
 
-function getBufferedRangeForGroup(groups: Group[]) {
-	let earliestTime: number | undefined;
-	let latestTime: number | undefined;
-
-	for (const group of groups) {
-		if (
-			!group.latest ||
-			// skip fully consumed groups
-			group.frames.length === 0
-		)
-			continue;
-
-		// Use the earliest unconsumed frame in the group.
-		const frame = group.frames.at(0)?.timestamp ?? group.latest;
-		if (earliestTime === undefined || frame < earliestTime) {
-			earliestTime = frame;
-		}
-
-		if (latestTime === undefined || group.latest > latestTime) {
-			latestTime = group.latest;
-		}
-	}
-
-	return { earliestTime, latestTime };
-}
-
-declare global {
-	interface Window {
-		simulateLatency?: boolean;
-	}
-}
-
-async function applySimulatedLatency(amount: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, amount));
+function getBufferedRanges(groups: Group[]) {
+	return groups
+		.map(group => ({
+			start: group.frames.at(0)?.timestamp ?? group.latest,
+			end: group.latest,
+		}))
+		.filter(range => range.start !== range.end);
 }
