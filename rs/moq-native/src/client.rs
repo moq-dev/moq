@@ -45,6 +45,15 @@ pub struct ClientTls {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ClientWebSocket {
+	/// Whether to enable WebSocket support.
+	#[arg(
+		id = "websocket-enabled",
+		long = "websocket-enabled",
+		env = "MOQ_CLIENT_WEBSOCKET_ENABLED",
+		default_value = "true"
+	)]
+	pub enabled: bool,
+
 	/// Delay in milliseconds before attempting WebSocket fallback (default: 200)
 	/// If WebSocket won the previous race for a given server, this will be 0.
 	#[arg(
@@ -62,6 +71,7 @@ pub struct ClientWebSocket {
 impl Default for ClientWebSocket {
 	fn default() -> Self {
 		Self {
+			enabled: true,
 			delay: Some(time::Duration::from_millis(200)),
 		}
 	}
@@ -110,11 +120,13 @@ impl Default for ClientConfig {
 ///
 /// Create via [`ClientConfig::init`] or [`Client::new`].
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct Client {
+	pub moq: moq_lite::Client,
 	pub quic: quinn::Endpoint,
 	pub tls: rustls::ClientConfig,
 	pub transport: Arc<quinn::TransportConfig>,
-	pub websocket_delay: Option<time::Duration>,
+	pub websocket: ClientWebSocket,
 	#[cfg(feature = "iroh")]
 	pub iroh: Option<iroh::Endpoint>,
 }
@@ -186,82 +198,73 @@ impl Client {
 			quinn::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
 
 		Ok(Self {
+			moq: moq_lite::Client::new(),
 			quic,
 			tls,
 			transport,
-			websocket_delay: config.websocket.delay,
+			websocket: config.websocket,
 			#[cfg(feature = "iroh")]
 			iroh: None,
 		})
 	}
 
 	#[cfg(feature = "iroh")]
-	pub fn with_iroh(&mut self, iroh: Option<iroh::Endpoint>) -> &mut Self {
+	pub fn with_iroh(mut self, iroh: Option<iroh::Endpoint>) -> Self {
 		self.iroh = iroh;
 		self
 	}
 
-	/// Establish a WebTransport/QUIC connection followed by a MoQ handshake.
-	pub async fn connect(
-		&self,
-		url: Url,
-		publish: impl Into<Option<moq_lite::OriginConsumer>>,
-		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
-	) -> anyhow::Result<moq_lite::Session> {
-		#[cfg(feature = "iroh")]
-		if crate::iroh::is_iroh_url(&url) {
-			let session = self.connect_iroh(url).await?;
-			let session = moq_lite::Session::connect(session, publish, subscribe).await?;
-			return Ok(session);
-		}
-
-		let session = self.connect_quic(url).await?;
-		let session = moq_lite::Session::connect(session, publish, subscribe).await?;
-		Ok(session)
+	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {
+		self.moq = self.moq.with_publish(publish);
+		self
 	}
 
-	/// Establish a WebTransport/QUIC connection or a WebSocket connection, whichever is available first.
-	///
-	/// Establishes a MoQ handshake on the winning transport.
-	pub async fn connect_with_fallback(
-		&self,
-		url: Url,
-		publish: impl Into<Option<moq_lite::OriginConsumer>>,
-		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
-	) -> anyhow::Result<moq_lite::Session> {
+	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
+		self.moq = self.moq.with_consume(consume);
+		self
+	}
+
+	// TODO: Uncomment when observability feature is merged
+	// pub fn with_stats(mut self, stats: impl Into<Option<Arc<dyn moq_lite::Stats>>>) -> Self {
+	// 	self.moq = self.moq.with_stats(stats);
+	// 	self
+	// }
+
+	/// Establish a WebTransport/QUIC connection followed by a MoQ handshake.
+	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
 		#[cfg(feature = "iroh")]
 		if crate::iroh::is_iroh_url(&url) {
 			let session = self.connect_iroh(url).await?;
-			let session = moq_lite::Session::connect(session, publish, subscribe).await?;
+			let session = self.moq.connect(session).await?;
 			return Ok(session);
 		}
 
 		// Create futures for both possible protocols
 		let quic_url = url.clone();
 		let quic_handle = async {
-			match self.connect_quic(quic_url).await {
-				Ok(session) => Some(session),
-				Err(err) => {
-					tracing::warn!(%err, "QUIC connection failed");
-					None
-				}
+			let res = self.connect_quic(quic_url).await;
+			if let Err(err) = &res {
+				tracing::warn!(%err, "QUIC connection failed");
 			}
+			res
 		};
 
 		let ws_handle = async {
-			match self.connect_websocket(url).await {
-				Ok(session) => Some(session),
-				Err(err) => {
-					tracing::warn!(%err, "WebSocket connection failed");
-					None
-				}
+			if !self.websocket.enabled {
+				return None;
 			}
+
+			let res = self.connect_websocket(url).await;
+			if let Err(err) = &res {
+				tracing::warn!(%err, "WebSocket connection failed");
+			}
+			Some(res)
 		};
 
 		// Race the connection futures
 		Ok(tokio::select! {
-			Some(quic) = quic_handle => moq_lite::Session::connect(quic, publish, subscribe).await?,
-			Some(ws) = ws_handle => moq_lite::Session::connect(ws, publish, subscribe).await?,
+			Ok(quic) = quic_handle => self.moq.connect(quic).await?,
+			Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
 			// If both attempts fail, return an error
 			else => anyhow::bail!("failed to connect to server"),
 		})
@@ -334,6 +337,8 @@ impl Client {
 	}
 
 	async fn connect_websocket(&self, mut url: Url) -> anyhow::Result<web_transport_ws::Session> {
+		anyhow::ensure!(self.websocket.enabled, "WebSocket support is disabled");
+
 		let host = url.host_str().context("missing hostname")?.to_string();
 		let port = url.port().unwrap_or_else(|| match url.scheme() {
 			"https" | "wss" | "moql" | "moqt" => 443,
@@ -345,7 +350,7 @@ impl Client {
 		// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
 		// unless we've already had to fall back to WebSockets for this server.
 		// TODO if let chain
-		match self.websocket_delay {
+		match self.websocket.delay {
 			Some(delay) if !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
 				tokio::time::sleep(delay).await;
 				tracing::debug!(%url, delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");

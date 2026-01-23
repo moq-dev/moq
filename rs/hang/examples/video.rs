@@ -30,7 +30,7 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 	// Establish a WebTransport/QUIC connection and MoQ handshake.
 	// None means we're not consuming anything from the session, otherwise we would provide an OriginProducer.
 	// Optional: Use connect_with_fallback if you also want to support WebSocket.
-	let session = client.connect(url, origin, None).await?;
+	let session = client.with_publish(origin).connect(url).await?;
 
 	// Wait until the session is closed.
 	session.closed().await.map_err(Into::into)

@@ -262,13 +262,12 @@ impl Cluster {
 	async fn run_remote_once(&mut self, url: &Url) -> anyhow::Result<()> {
 		tracing::info!(%url, "connecting to remote");
 
-		// Connect to the remote node.
-		let publish = Some(self.primary.consumer.consume());
-		let subscribe = Some(self.secondary.producer.clone());
-
 		let session = self
 			.client
-			.connect(url.clone(), publish, subscribe)
+			.clone()
+			.with_publish(self.primary.consumer.consume())
+			.with_consume(self.secondary.producer.clone())
+			.connect(url.clone())
 			.await
 			.context("failed to connect to remote")?;
 
