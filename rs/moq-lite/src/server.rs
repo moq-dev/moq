@@ -106,6 +106,6 @@ impl Server {
 
 		tracing::debug!(?version, "connected");
 
-		Ok(Session::new(session.clone()))
+		Ok(Session::new(session))
 	}
 }
