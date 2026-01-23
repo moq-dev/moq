@@ -48,10 +48,14 @@ impl Session {
 		let client = moq_native::ClientConfig::default()
 			.init()
 			.map_err(|err| Error::Connect(Arc::new(err)))?;
+
 		let session = client
-			.connect(url, publish, consume)
+			.with_publish(publish)
+			.with_consume(consume)
+			.connect(url)
 			.await
 			.map_err(|err| Error::Connect(Arc::new(err)))?;
+
 		callback.call(());
 
 		session.closed().await?;

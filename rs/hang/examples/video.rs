@@ -27,10 +27,10 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 	// The "anon" path is usually configured to bypass authentication; be careful!
 	let url = url::Url::parse("https://cdn.moq.dev/anon/video-example").unwrap();
 
-	// Establish a WebTransport/QUIC connection and MoQ handshake.
-	// None means we're not consuming anything from the session, otherwise we would provide an OriginProducer.
-	// Optional: Use connect_with_fallback if you also want to support WebSocket.
-	let session = client.connect(url, origin, None).await?;
+	// Establish a WebTransport/QUIC connection and MoQ handshake for publishing.
+	// with_publish() registers an OriginConsumer for outgoing data.
+	// Use with_consume() if you also want to subscribe/consume from the session.
+	let session = client.with_publish(origin).connect(url).await?;
 
 	// Wait until the session is closed.
 	session.closed().await.map_err(Into::into)

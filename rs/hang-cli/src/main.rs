@@ -98,10 +98,9 @@ async fn main() -> anyhow::Result<()> {
 		Command::Serve { config, dir, name, .. } => {
 			let web_bind = config.bind.unwrap_or("[::]:443".parse().unwrap());
 
-			#[allow(unused_mut)]
-			let mut server = config.init()?;
+			let server = config.init()?;
 			#[cfg(feature = "iroh")]
-			server.with_iroh(iroh);
+			let server = server.with_iroh(iroh);
 
 			let web_tls = server.tls_info();
 
@@ -112,11 +111,10 @@ async fn main() -> anyhow::Result<()> {
 			}
 		}
 		Command::Publish { config, url, name, .. } => {
-			#[allow(unused_mut)]
-			let mut client = config.init()?;
+			let client = config.init()?;
 
 			#[cfg(feature = "iroh")]
-			client.with_iroh(iroh);
+			let client = client.with_iroh(iroh);
 
 			run_client(client, url, name, publish).await
 		}

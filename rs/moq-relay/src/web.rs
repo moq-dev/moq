@@ -216,7 +216,13 @@ where
 {
 	// Wrap the WebSocket in a WebTransport compatibility layer.
 	let ws = web_transport_ws::Session::new(socket, true);
-	let session = moq_lite::Session::accept(ws, subscribe, publish).await?;
+	let session = moq_lite::Server::new()
+		.with_publish(subscribe)
+		.with_consume(publish)
+		// TODO: Uncomment when observability feature is merged
+		// .with_stats(stats)
+		.accept(ws)
+		.await?;
 	session.closed().await.map_err(Into::into)
 }
 

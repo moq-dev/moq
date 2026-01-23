@@ -43,7 +43,7 @@ async fn run_session(
 	origin.producer.publish_broadcast(&name, consumer);
 
 	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.
-	let session = session.accept(origin.consumer, None).await?;
+	let session = session.with_publish(origin.consumer).accept().await?;
 
 	tracing::info!(id, "accepted session");
 

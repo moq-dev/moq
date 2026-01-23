@@ -68,9 +68,7 @@ async fn main() -> anyhow::Result<()> {
 
 			origin.producer.publish_broadcast(&config.broadcast, broadcast.consumer);
 
-			let session = client
-				.connect_with_fallback(config.url, Some(origin.consumer), None)
-				.await?;
+			let session = client.with_publish(origin.consumer).connect(config.url).await?;
 
 			tokio::select! {
 				res = session.closed() => res.context("session closed"),
@@ -78,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
 			}
 		}
 		Command::Subscribe => {
-			let session = client.connect_with_fallback(config.url, None, origin.producer).await?;
+			let session = client.with_consume(origin.producer).connect(config.url).await?;
 
 			// NOTE: We could just call `session.consume_broadcast(&config.broadcast)` instead,
 			// However that won't work with IETF MoQ and the current OriginConsumer API the moment.
