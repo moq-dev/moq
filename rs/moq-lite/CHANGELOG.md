@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.11.0...moq-lite-v0.12.0) - 2026-01-24
+
+### Other
+
+- Add a builder pattern for constructing clients/servers ([#862](https://github.com/moq-dev/moq/pull/862))
+- simplify match statements using let-else syntax ([#840](https://github.com/moq-dev/moq/pull/840))
+- upgrade to Rust edition 2024 ([#838](https://github.com/moq-dev/moq/pull/838))
+- Add documentation to Rust public APIs ([#834](https://github.com/moq-dev/moq/pull/834))
+
 ## [0.11.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.10.1...moq-lite-v0.11.0) - 2026-01-10
 
 ### Other
