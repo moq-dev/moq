@@ -7,8 +7,9 @@ import * as MSE from "./mse";
 import * as Video from "./video";
 
 export interface Backend {
-	// Delay playing audio and video by this amount, skipping frames if necessary.
-	latency: Signal<Moq.Time.Milli>;
+	// Additional buffer in milliseconds on top of the catalog's minBuffer.
+	// The effective latency = catalog.minBuffer + buffer.
+	buffer: Signal<Moq.Time.Milli>;
 
 	// Whether audio/video playback is paused.
 	paused: Signal<boolean>;
@@ -27,7 +28,8 @@ export interface CombinedProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
-	latency?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
+	// Additional buffer in milliseconds on top of the catalog's minBuffer.
+	buffer?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
 	paused?: boolean | Signal<boolean>;
 }
 
@@ -79,7 +81,7 @@ class AudioSignals implements Audio.Backend {
 export class Combined implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;
-	latency: Signal<Moq.Time.Milli>;
+	buffer: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
 	video = new VideoSignals();
@@ -94,7 +96,7 @@ export class Combined implements Backend {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
 
-		this.latency = Signal.from(props?.latency ?? (100 as Moq.Time.Milli));
+		this.buffer = Signal.from(props?.buffer ?? (100 as Moq.Time.Milli));
 		this.paused = Signal.from(props?.paused ?? false);
 
 		this.signals.effect(this.#runElement.bind(this));
@@ -114,12 +116,12 @@ export class Combined implements Backend {
 	#runWebcodecs(effect: Effect, element: HTMLCanvasElement): void {
 		const videoSource = new Video.Source({
 			broadcast: this.broadcast,
-			latency: this.latency,
+			buffer: this.buffer,
 			target: this.video.target,
 		});
 		const audioSource = new Audio.Source({
 			broadcast: this.broadcast,
-			latency: this.latency,
+			buffer: this.buffer,
 			target: this.audio.target,
 		});
 
@@ -153,7 +155,7 @@ export class Combined implements Backend {
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
 		const source = new MSE.Source({
 			broadcast: this.broadcast,
-			latency: this.latency,
+			buffer: this.buffer,
 			element,
 			paused: this.paused,
 			video: { target: this.video.target },

@@ -5,6 +5,7 @@ import * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import * as Mp4 from "../../mp4";
 import * as Hex from "../../util/hex";
+import { Latency } from "../../util/latency";
 import type { Broadcast } from "../broadcast";
 import type { Backend, Stats, Target } from "./backend";
 
@@ -18,9 +19,10 @@ export type SourceProps = {
 
 	enabled?: boolean | Signal<boolean>;
 
-	// Jitter buffer size in milliseconds (default: 100ms)
-	// When using b-frames, this should to be larger than the frame duration.
-	latency?: Time.Milli | Signal<Time.Milli>;
+	// Additional buffer in milliseconds on top of the catalog's minBuffer (default: 100ms).
+	// The effective latency = catalog.minBuffer + buffer
+	// Increase this if experiencing stuttering due to network jitter.
+	buffer?: Time.Milli | Signal<Time.Milli>;
 
 	target?: Target | Signal<Target | undefined>;
 };
@@ -67,8 +69,8 @@ export class Source implements Backend {
 	#frame = new Signal<VideoFrame | undefined>(undefined);
 	readonly frame: Getter<VideoFrame | undefined> = this.#frame;
 
-	// The target latency in milliseconds.
-	latency: Signal<Time.Milli>;
+	// Additional buffer in milliseconds (on top of catalog's minBuffer).
+	buffer: Signal<Time.Milli>;
 
 	// The display size of the video in pixels, ideally sourced from the catalog.
 	#display = new Signal<{ width: number; height: number } | undefined>(undefined);
@@ -83,13 +85,22 @@ export class Source implements Backend {
 	#stats = new Signal<Stats | undefined>(undefined);
 	readonly stats: Getter<Stats | undefined> = this.#stats;
 
+	#latency: Latency;
+	readonly latency: Getter<Time.Milli>;
+
 	#signals = new Effect();
 
 	constructor(props?: SourceProps) {
 		this.broadcast = Signal.from(props?.broadcast);
-		this.latency = Signal.from(props?.latency ?? (100 as Time.Milli));
+		this.buffer = Signal.from(props?.buffer ?? (100 as Time.Milli));
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.target = Signal.from(props?.target);
+
+		this.#latency = new Latency({
+			buffer: this.buffer,
+			config: this.#config,
+		});
+		this.latency = this.#latency.combined;
 
 		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runSupported.bind(this));
@@ -162,6 +173,7 @@ export class Source implements Backend {
 		// Remove the codedWidth/Height from the config to avoid a hard reload if nothing else has changed.
 		const config = { ...supported[selected], codedWidth: undefined, codedHeight: undefined };
 		effect.set(this.#selectedConfig, config);
+		effect.set(this.#config, config);
 	}
 
 	#runPending(effect: Effect): void {
@@ -257,7 +269,8 @@ export class Source implements Backend {
 					this.#reference = ref;
 					// Don't sleep so we immediately render this frame.
 				} else {
-					sleep = this.#reference - ref + this.latency.peek();
+					const latency = this.latency.peek() ?? 0;
+					sleep = this.#reference - ref + latency;
 				}
 
 				if (sleep > 0) {
@@ -294,7 +307,7 @@ export class Source implements Backend {
 	#runLegacyTrack(effect: Effect, sub: Moq.Track, config: RequiredDecoderConfig, decoder: VideoDecoder): void {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Frame.Consumer(sub, {
-			latency: this.latency,
+			latency: this.#latency.combined,
 		});
 		effect.cleanup(() => consumer.close());
 

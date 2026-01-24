@@ -115,4 +115,14 @@ pub struct VideoConfig {
 	/// Container format for frame encoding.
 	/// Defaults to "legacy" for backward compatibility.
 	pub container: Container,
+
+	/// Minimum buffer size in milliseconds required for smooth playback.
+	///
+	/// This represents the minimum time the player should buffer before starting playback.
+	/// For HLS imports, this is typically the segment duration.
+	/// For fMP4 imports, this is detected from the fragment duration.
+	///
+	/// The player should add additional jitter buffer on top of this value.
+	#[serde(default)]
+	pub min_buffer: Option<moq_lite::Time>,
 }

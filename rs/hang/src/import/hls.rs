@@ -538,14 +538,9 @@ impl Hls {
 
 	/// Create or retrieve the fMP4 importer for the audio rendition.
 	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
-		self.audio_importer.get_or_insert_with(|| {
-			Fmp4::new(
-				self.broadcast.clone(),
-				Fmp4Config {
-					passthrough: self.passthrough,
-				},
-			)
-		})
+		let passthrough = self.passthrough;
+		self.audio_importer
+			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), Fmp4Config { passthrough }))
 	}
 
 	#[cfg(test)]

@@ -160,6 +160,7 @@ impl CatalogProducer {
 		CatalogGuard {
 			catalog: self.current.lock().unwrap(),
 			track: &mut self.track,
+			updated: false,
 		}
 	}
 
@@ -186,6 +187,7 @@ impl From<moq_lite::TrackProducer> for CatalogProducer {
 pub struct CatalogGuard<'a> {
 	catalog: MutexGuard<'a, Catalog>,
 	track: &'a mut moq_lite::TrackProducer,
+	updated: bool,
 }
 
 impl<'a> Deref for CatalogGuard<'a> {
@@ -198,12 +200,18 @@ impl<'a> Deref for CatalogGuard<'a> {
 
 impl<'a> DerefMut for CatalogGuard<'a> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.updated = true;
 		&mut self.catalog
 	}
 }
 
 impl Drop for CatalogGuard<'_> {
 	fn drop(&mut self) {
+		// Avoid publishing if we didn't use `&mut self` at all.
+		if !self.updated {
+			return;
+		}
+
 		let mut group = self.track.append_group();
 
 		// TODO decide if this should return an error, or be impossible to fail
@@ -329,6 +337,7 @@ mod test {
 				framerate: Some(30.0),
 				optimize_for_latency: None,
 				container: Container::Legacy,
+				min_buffer: None,
 			},
 		);
 
@@ -342,6 +351,7 @@ mod test {
 				bitrate: Some(128_000),
 				description: None,
 				container: Container::Legacy,
+				min_buffer: None,
 			},
 		);
 

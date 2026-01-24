@@ -7,7 +7,8 @@ import { Broadcast } from "./broadcast";
 import type * as Video from "./video";
 
 // TODO remove name; replaced with path
-const OBSERVED = ["url", "name", "path", "paused", "volume", "muted", "reload", "latency"] as const;
+// TODO remove latency; replaced with buffer
+const OBSERVED = ["url", "name", "path", "paused", "volume", "muted", "reload", "buffer", "latency"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -115,8 +116,8 @@ export default class HangWatch extends HTMLElement implements Backend {
 		});
 
 		this.signals.effect((effect) => {
-			const latency = Math.floor(effect.get(this.latency));
-			this.setAttribute("latency", latency.toString());
+			const buffer = Math.floor(effect.get(this.buffer));
+			this.setAttribute("buffer", buffer.toString());
 		});
 	}
 
@@ -151,8 +152,9 @@ export default class HangWatch extends HTMLElement implements Backend {
 			this.audio.muted.set(newValue !== null);
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
-		} else if (name === "latency") {
-			this.latency.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
+		} else if (name === "buffer" || name === "latency") {
+			// "latency" is a legacy alias for "buffer"
+			this.buffer.set((newValue ? Number.parseFloat(newValue) : 0) as Time.Milli);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -167,8 +169,8 @@ export default class HangWatch extends HTMLElement implements Backend {
 		return this.broadcast.path;
 	}
 
-	get latency(): Signal<Time.Milli> {
-		return this.#backend.latency;
+	get buffer(): Signal<Time.Milli> {
+		return this.#backend.buffer;
 	}
 
 	get paused(): Signal<boolean> {

@@ -5,18 +5,17 @@ import * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import * as Mp4 from "../../mp4";
 import * as Hex from "../../util/hex";
+import { Latency } from "../../util/latency";
 import * as libav from "../../util/libav";
 import type { Broadcast } from "../broadcast";
 import type { Target } from "../video/backend";
 import type * as Render from "./render";
-
 // Unfortunately, we need to use a Vite-exclusive import for now.
 import RenderWorklet from "./render-worklet.ts?worker&url";
 
-// We want some extra overhead to avoid starving the render worklet.
-// The default Opus frame duration is 20ms.
-// TODO: Put it in the catalog so we don't have to guess.
-const JITTER_UNDERHEAD = 25 as Time.Milli;
+// Extra overhead subtracted from effective latency to avoid starving the render worklet.
+// The audio worklet needs some buffer to avoid underruns.
+const BUFFER_UNDERHEAD = 25 as Time.Milli;
 
 export type SourceProps = {
 	broadcast: Broadcast | Signal<Broadcast | undefined>;
@@ -24,8 +23,10 @@ export type SourceProps = {
 	// Enable to download the audio track.
 	enabled?: boolean | Signal<boolean>;
 
-	// Jitter buffer size in milliseconds (default: 100ms)
-	latency?: Time.Milli | Signal<Time.Milli>;
+	// Additional buffer in milliseconds on top of the catalog's minBuffer (default: 100ms).
+	// The effective latency = catalog.minBuffer + buffer
+	// Increase this if experiencing stuttering due to network jitter.
+	buffer?: Time.Milli | Signal<Time.Milli>;
 
 	// The desired rendition/bitrate of the audio.
 	// TODO finish implementing this
@@ -62,8 +63,11 @@ export class Source {
 
 	config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 
-	// Not a signal because I'm lazy.
-	readonly latency: Signal<Time.Milli>;
+	// Additional buffer in milliseconds (on top of catalog's minBuffer).
+	buffer: Signal<Time.Milli>;
+
+	#latency: Latency;
+	readonly latency: Getter<Time.Milli>;
 
 	// The name of the active rendition.
 	rendition = new Signal<string | undefined>(undefined);
@@ -73,8 +77,14 @@ export class Source {
 	constructor(props?: SourceProps) {
 		this.broadcast = Signal.from(props?.broadcast);
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.latency = Signal.from(props?.latency ?? (100 as Time.Milli)); // TODO Reduce this once fMP4 stuttering is fixed.
+		this.buffer = Signal.from(props?.buffer ?? (100 as Time.Milli));
 		this.target = Signal.from(props?.target);
+
+		this.#latency = new Latency({
+			buffer: this.buffer,
+			config: this.config,
+		});
+		this.latency = this.#latency.combined;
 
 		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runWorklet.bind(this));
@@ -134,7 +144,7 @@ export class Source {
 		// This way we can process the audio for visualizations.
 
 		const context = new AudioContext({
-			latencyHint: "interactive", // We don't use real-time because of the jitter buffer.
+			latencyHint: "interactive", // We don't use real-time because of the buffer.
 			sampleRate,
 		});
 		effect.set(this.#context, context);
@@ -209,8 +219,12 @@ export class Source {
 	}
 
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
+		// Subtract audio worklet overhead from latency to avoid starving the render worklet
+		// TODO Make latency reactive
+		const latency = Math.max(this.latency.peek() - BUFFER_UNDERHEAD, 0) as Time.Milli;
+
 		const consumer = new Frame.Consumer(sub, {
-			latency: Math.max(this.latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
+			latency,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -344,5 +358,6 @@ export class Source {
 
 	close() {
 		this.#signals.close();
+		this.#latency.close();
 	}
 }

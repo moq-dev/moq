@@ -1,4 +1,4 @@
-import * as Moq from "@moq/lite";
+import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Backend } from "../backend";
 import type { Broadcast } from "../broadcast";
@@ -7,7 +7,8 @@ import { Video, type VideoProps } from "./video";
 
 export type SourceProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
-	latency?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
+	// Additional buffer in milliseconds on top of the catalog's minBuffer.
+	buffer?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
 	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
 	paused?: boolean | Signal<boolean>;
 
@@ -25,7 +26,7 @@ export class Source implements Backend {
 	#mediaSource = new Signal<MediaSource | undefined>(undefined);
 
 	element: Signal<HTMLMediaElement | undefined>;
-	latency: Signal<Moq.Time.Milli>;
+	buffer: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
 	video: Video;
@@ -38,7 +39,7 @@ export class Source implements Backend {
 
 	constructor(props?: SourceProps) {
 		this.broadcast = Signal.from(props?.broadcast);
-		this.latency = Signal.from(props?.latency ?? (100 as Moq.Time.Milli));
+		this.buffer = Signal.from(props?.buffer ?? (100 as Moq.Time.Milli));
 		this.element = Signal.from(props?.element);
 		this.paused = Signal.from(props?.paused ?? false);
 
@@ -46,14 +47,14 @@ export class Source implements Backend {
 			broadcast: this.broadcast,
 			element: this.element,
 			mediaSource: this.#mediaSource,
-			latency: this.latency,
+			buffer: this.buffer,
 			...props?.video,
 		});
 		this.audio = new Audio({
 			broadcast: this.broadcast,
 			element: this.element,
 			mediaSource: this.#mediaSource,
-			latency: this.latency,
+			buffer: this.buffer,
 			...props?.audio,
 		});
 
@@ -95,10 +96,11 @@ export class Source implements Backend {
 		const paused = effect.get(this.paused);
 		if (paused) return;
 
-		const latency = Moq.Time.Second.fromMilli(effect.get(this.latency));
+		// Use video's computed latency (catalog minBuffer + user buffer)
+		const latency = effect.get(this.video.latency);
 
 		effect.interval(() => {
-			// Skip over gaps based on the latency.
+			// Skip over gaps based on the effective latency.
 			const buffered = element.buffered;
 			if (buffered.length === 0) return;
 

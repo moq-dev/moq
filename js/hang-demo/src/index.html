@@ -24,8 +24,6 @@
 
 		The broadcast path is overwritten by the ?path query parameter in index.ts.
 
-		TODO: There's a bug with Big Buck Bunny causing audio to stutter, so we need to increase the latency to 100ms.
-
 		NOTE: `reload` will detect when the broadcast goes offline/online and automatically reconnect.
 		TODO: Cloudflare doesn't support it yet (SUBSCRIBE_NAMESPACE), so make sure you remove it if you're using Cloudflare.
 
@@ -33,7 +31,7 @@
 		This is not as well tested as has higher latency, but will support more devices.
 	-->
 	<hang-watch-ui>
-		<hang-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted latency="100" reload>
+		<hang-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted buffer="50" reload>
 			<canvas style="width: 100%; height: auto;"></canvas>
 			<!-- <video style="width: 100%; height: auto;" autoplay muted></video> -->
 		</hang-watch>

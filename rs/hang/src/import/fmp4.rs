@@ -38,13 +38,7 @@ pub struct Fmp4 {
 	broadcast: hang::BroadcastProducer,
 
 	// A lookup to tracks in the broadcast
-	tracks: HashMap<u32, hang::TrackProducer>,
-
-	// The timestamp of the last keyframe for each track
-	last_keyframe: HashMap<u32, hang::Timestamp>,
-
-	// The ftyp/styp atom at the start of the file.
-	ftyp: Option<Bytes>,
+	tracks: HashMap<u32, Fmp4Track>,
 
 	// The moov atom at the start of the file.
 	moov: Option<Moov>,
@@ -58,13 +52,34 @@ pub struct Fmp4 {
 
 	// -- PASSTHROUGH ONLY --
 	moof_raw: Option<Bytes>,
+}
+
+struct Fmp4Track {
+	producer: hang::TrackProducer,
 
 	// The current group being written, only used for passthrough mode.
-	// TODO: Use this for non-passthrough mode as well, instead of hang::TrackProducer.
 	group: Option<moq_lite::GroupProducer>,
 
-	// Send the init segment over a track
-	init: Option<moq_lite::TrackProducer>,
+	// The minimum buffer required for the track.
+	min_buffer: Option<Timestamp>,
+
+	// The last timestamp seen for this track.
+	last_timestamp: Option<Timestamp>,
+
+	// The minimum duration between frames for this track.
+	min_duration: Option<Timestamp>,
+}
+
+impl Fmp4Track {
+	fn new(producer: hang::TrackProducer) -> Self {
+		Self {
+			producer,
+			group: None,
+			min_buffer: None,
+			last_timestamp: None,
+			min_duration: None,
+		}
+	}
 }
 
 impl Fmp4 {
@@ -72,23 +87,14 @@ impl Fmp4 {
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the
 	/// fMP4 file. The catalog from the `hang::BroadcastProducer` is used automatically.
-	pub fn new(mut broadcast: hang::BroadcastProducer, config: Fmp4Config) -> Self {
-		let init = config.passthrough.then(|| {
-			let track = broadcast.track_name("init").into();
-			broadcast.create_track(track)
-		});
-
+	pub fn new(broadcast: hang::BroadcastProducer, config: Fmp4Config) -> Self {
 		Self {
 			tracks: HashMap::default(),
-			last_keyframe: HashMap::default(),
 			moov: None,
 			moof: None,
 			moof_size: 0,
 			broadcast,
 			config,
-			group: None,
-			init,
-			ftyp: None,
 			moof_raw: None,
 		}
 	}
@@ -116,11 +122,9 @@ impl Fmp4 {
 			let raw = &cursor.get_ref().as_ref()[position..position + size];
 
 			match atom {
-				Any::Ftyp(_) | Any::Styp(_) => {
-					self.ftyp.replace(Bytes::copy_from_slice(raw));
-				}
+				Any::Ftyp(_) | Any::Styp(_) => {}
 				Any::Moov(moov) => {
-					self.init(moov, raw)?;
+					self.init(moov)?;
 				}
 				Any::Moof(moof) => {
 					anyhow::ensure!(self.moof.is_none(), "duplicate moof box");
@@ -153,7 +157,7 @@ impl Fmp4 {
 		self.moov.is_some()
 	}
 
-	fn init(&mut self, moov: Moov, moov_raw: &[u8]) -> anyhow::Result<()> {
+	fn init(&mut self, moov: Moov) -> anyhow::Result<()> {
 		// Make a clone to avoid the borrow checker.
 		let mut catalog = self.broadcast.catalog.clone();
 		let mut catalog = catalog.lock();
@@ -161,8 +165,6 @@ impl Fmp4 {
 		// Track which specific tracks were created in this init call
 		let mut created_video_tracks = Vec::new();
 		let mut created_audio_tracks = Vec::new();
-
-		self.init_container(moov_raw)?;
 
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
@@ -209,28 +211,10 @@ impl Fmp4 {
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
 
-			self.tracks.insert(track_id, track);
+			self.tracks.insert(track_id, Fmp4Track::new(track));
 		}
 
 		self.moov = Some(moov);
-
-		Ok(())
-	}
-
-	fn init_container(&mut self, moov_raw: &[u8]) -> anyhow::Result<()> {
-		if !self.config.passthrough {
-			return Ok(());
-		}
-
-		let mut init = BytesMut::new();
-		init.extend_from_slice(self.ftyp.as_ref().context("missing ftyp box")?);
-		init.extend_from_slice(moov_raw);
-
-		let init_name: moq_lite::Track = self.broadcast.track_name("init").into();
-		let mut init_track = self.broadcast.create_track(init_name.clone());
-		init_track.write_frame(init.freeze());
-
-		self.init = Some(init_track);
 
 		Ok(())
 	}
@@ -280,6 +264,7 @@ impl Fmp4 {
 					display_ratio_height: None,
 					optimize_for_latency: None,
 					container,
+					min_buffer: None,
 				}
 			}
 			mp4_atom::Codec::Hev1(hev1) => self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
@@ -296,6 +281,7 @@ impl Fmp4 {
 				display_ratio_height: None,
 				optimize_for_latency: None,
 				container,
+				min_buffer: None,
 			},
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
@@ -323,6 +309,7 @@ impl Fmp4 {
 					bitrate: None,
 					framerate: None,
 					container,
+					min_buffer: None,
 				}
 			}
 			mp4_atom::Codec::Av01(av01) => {
@@ -356,6 +343,7 @@ impl Fmp4 {
 					bitrate: None,
 					framerate: None,
 					container,
+					min_buffer: None,
 				}
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
@@ -397,6 +385,7 @@ impl Fmp4 {
 			display_ratio_height: None,
 			optimize_for_latency: None,
 			container,
+			min_buffer: None,
 		})
 	}
 
@@ -431,6 +420,7 @@ impl Fmp4 {
 					bitrate: Some(bitrate.into()),
 					description: None, // TODO?
 					container,
+					min_buffer: None,
 				}
 			}
 			mp4_atom::Codec::Opus(opus) => {
@@ -441,6 +431,7 @@ impl Fmp4 {
 					bitrate: None,
 					description: None, // TODO?
 					container,
+					min_buffer: None,
 				}
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
@@ -456,14 +447,6 @@ impl Fmp4 {
 		let moof = self.moof.take().context("missing moof box")?;
 		let moof_size = self.moof_size;
 		let header_size = mdat_raw.len() - mdat.data.len();
-
-		// Keep track of the minimum and maximum timestamp so we can scold the user.
-		// Ideally these should both be the same value.
-		let mut min_timestamp = None;
-		let mut max_timestamp = None;
-
-		// If any of the frames in this fragment are keyframes.
-		let mut contains_keyframe = false;
 
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
@@ -495,6 +478,13 @@ impl Fmp4 {
 			if traf.trun.is_empty() {
 				anyhow::bail!("missing trun box");
 			}
+
+			// Keep track of the minimum and maximum timestamp for this track to compute the min_buffer.
+			// Ideally these should both be the same value (a single frame lul).
+			let mut min_timestamp = None;
+			let mut max_timestamp = None;
+			let mut contains_keyframe = false;
+
 			for trun in &traf.trun {
 				let tfhd = &traf.tfhd;
 
@@ -506,6 +496,7 @@ impl Fmp4 {
 					if data_offset < moof_size {
 						anyhow::bail!("invalid data offset");
 					}
+
 					// Reset offset if the TRUN has a data offset
 					offset = base_offset + data_offset - moof_size - header_size;
 				}
@@ -534,28 +525,13 @@ impl Fmp4 {
 						let keyframe = (flags >> 24) & 0x3 == 0x2; // kSampleDependsOnNoOther
 						let non_sync = (flags >> 16) & 0x1 == 0x1; // kSampleIsNonSyncSample
 
-						if keyframe && !non_sync {
-							for audio in moov.trak.iter().filter(|t| t.mdia.hdlr.handler == b"soun".into()) {
-								// Force an audio keyframe on video keyframes
-								self.last_keyframe.remove(&audio.tkhd.track_id);
-							}
-
-							true
-						} else {
-							false
-						}
+						keyframe && !non_sync
 					} else {
-						match self.last_keyframe.get(&track_id) {
-							// Force an audio keyframe at least every 10 seconds, but ideally at video keyframes
-							Some(prev) => timestamp - *prev > Timestamp::from_secs(10).unwrap(),
-							None => true,
-						}
+						// Audio frames are always keyframes.
+						true
 					};
 
-					if keyframe {
-						self.last_keyframe.insert(track_id, timestamp);
-						contains_keyframe = true;
-					}
+					contains_keyframe |= keyframe;
 
 					if !self.config.passthrough {
 						// TODO Avoid a copy if mp4-atom uses Bytes?
@@ -566,54 +542,81 @@ impl Fmp4 {
 							keyframe,
 							payload: payload.into(),
 						};
-						track.write(frame)?;
-
-						dts += duration as u64;
-						offset += size;
-
-						if timestamp >= max_timestamp.unwrap_or_default() {
-							max_timestamp = Some(timestamp);
-						}
-						if timestamp <= min_timestamp.unwrap_or_default() {
-							min_timestamp = Some(timestamp);
-						}
+						track.producer.write(frame)?;
 					}
+
+					if timestamp >= max_timestamp.unwrap_or(Timestamp::ZERO) {
+						max_timestamp = Some(timestamp);
+					}
+					if timestamp <= min_timestamp.unwrap_or(Timestamp::MAX) {
+						min_timestamp = Some(timestamp);
+					}
+
+					if let Some(last_timestamp) = track.last_timestamp
+						&& let Ok(duration) = timestamp.checked_sub(last_timestamp)
+						&& duration < track.min_duration.unwrap_or(Timestamp::MAX)
+					{
+						track.min_duration = Some(duration);
+					}
+
+					track.last_timestamp = Some(timestamp);
+
+					dts += duration as u64;
+					offset += size;
 				}
 			}
-		}
 
-		// If we're doing passthrough mode, then we write one giant fragment instead of individual frames.
-		if self.config.passthrough {
-			let traf = match &moof.traf[..] {
-				[] => anyhow::bail!("missing traf box"),
-				[traf] => traf,
-				_ => anyhow::bail!("moof must be demuxed"),
-			};
+			// If we're doing passthrough mode, then we write one giant fragment instead of individual frames.
+			if self.config.passthrough {
+				let mut group = if contains_keyframe {
+					if let Some(group) = track.group.take() {
+						group.close();
+					}
 
-			let track = self.tracks.get_mut(&traf.tfhd.track_id).context("unknown track")?;
-			if contains_keyframe {
-				self.group = Some(track.inner.append_group());
-			};
+					track.producer.inner.append_group()
+				} else {
+					track.group.take().context("no keyframe at start")?
+				};
 
-			let group = self.group.as_mut().context("no keyframe at start")?;
+				let moof_raw = self.moof_raw.as_ref().context("missing moof box")?;
 
-			let moof_raw = self.moof_raw.as_ref().context("missing moof box")?;
+				// To avoid an extra allocation, we use the chunked API to write the moof and mdat atoms separately.
+				let mut frame = group.create_frame(moq_lite::Frame {
+					size: moof_raw.len() as u64 + mdat_raw.len() as u64,
+				});
 
-			// To avoid an extra allocation, we use the chunked API to write the moof and mdat atoms separately.
-			let mut frame = group.create_frame(moq_lite::Frame {
-				size: moof_raw.len() as u64 + mdat_raw.len() as u64,
-			});
+				frame.write_chunk(moof_raw.clone());
+				frame.write_chunk(Bytes::copy_from_slice(mdat_raw));
+				frame.close();
 
-			frame.write_chunk(moof_raw.clone());
-			frame.write_chunk(Bytes::copy_from_slice(mdat_raw));
-			frame.close();
-		}
+				track.group = Some(group);
+			}
 
-		if let (Some(min), Some(max)) = (min_timestamp, max_timestamp) {
-			let diff = max - min;
+			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
+				// We report the minimum buffer required as the difference between the min and max frames.
+				// We also add the duration between frames to account for the frame rate.
+				// ex. for 2s fragments, this should be exactly 2s if we did everything correctly.
+				let min_buffer = max - min + min_duration;
 
-			if diff > Timestamp::from_millis(1).unwrap() {
-				tracing::warn!("fMP4 introduced {:?} of latency", diff);
+				if min_buffer < track.min_buffer.unwrap_or(Timestamp::MAX) {
+					track.min_buffer = Some(min_buffer);
+
+					// Update the catalog with the new min_buffer
+					let mut catalog = self.broadcast.catalog.lock();
+
+					// We're lazy and don't keep track if this track is for audio or video, so just try to update both.
+					if let Some(video) = catalog.video.as_mut()
+						&& let Some(config) = video.renditions.get_mut(&track.producer.info.name)
+					{
+						config.min_buffer = Some(min_buffer.convert()?);
+					}
+
+					if let Some(audio) = catalog.audio.as_mut()
+						&& let Some(config) = audio.renditions.get_mut(&track.producer.info.name)
+					{
+						config.min_buffer = Some(min_buffer.convert()?);
+					}
+				}
 			}
 		}
 
@@ -627,8 +630,8 @@ impl Drop for Fmp4 {
 
 		for track in self.tracks.values() {
 			// We're too lazy to keep track of if this track is for audio or video, so we just remove both.
-			catalog.remove_video(&track.info.name);
-			catalog.remove_audio(&track.info.name);
+			catalog.remove_video(&track.producer.info.name);
+			catalog.remove_audio(&track.producer.info.name);
 		}
 	}
 }

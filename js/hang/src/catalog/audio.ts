@@ -31,6 +31,11 @@ export const AudioConfigSchema = z.object({
 	// The bitrate of the audio in bits per second
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: u53Schema.optional(),
+
+	// Minimum buffer size in milliseconds required for smooth playback.
+	// This represents the minimum time the player should buffer before starting playback.
+	// The player should add additional buffer on top of this value.
+	minBuffer: u53Schema.optional(),
 });
 
 export const AudioSchema = z
