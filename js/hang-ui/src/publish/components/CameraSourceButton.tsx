@@ -24,10 +24,10 @@ export default function CameraSourceButton() {
 	};
 
 	return (
-		<div class="publishSourceButtonContainer">
+		<div class="publish-ui__source-button-wrapper flex--center">
 			<Button
 				title="Camera"
-				class={`publishSourceButton ${context.cameraActive() ? "active" : ""}`}
+				class={`publish-ui__source-button flex--center ${context.cameraActive() ? "publish-ui__source-button--active" : ""}`}
 				onClick={onClick}
 			>
 				<Icon.Camera />

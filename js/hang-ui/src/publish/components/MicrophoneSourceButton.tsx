@@ -24,10 +24,10 @@ export default function MicrophoneSourceButton() {
 	};
 
 	return (
-		<div class="publishSourceButtonContainer">
+		<div class="publish-ui__source-button-wrapper flex--center">
 			<Button
 				title="Microphone"
-				class={`publishSourceButton ${context.microphoneActive() ? "active" : ""}`}
+				class={`publish-ui__source-button flex--center ${context.microphoneActive() ? "publish-ui__source-button--active" : ""}`}
 				onClick={onClick}
 			>
 				<Icon.Microphone />

@@ -7,9 +7,9 @@ import ScreenSourceButton from "./ScreenSourceButton";
 
 export default function PublishControls() {
 	return (
-		<div class="publishControlsContainer">
-			<div class="publishSourceSelectorContainer">
-				Source:
+		<div class="publish-ui__controls flex--center flex--space-between">
+			<div class="publish-ui__source-selector flex--center">
+				<span class="publish-ui__source-label">Source:</span>
 				<MicrophoneSourceButton />
 				<CameraSourceButton />
 				<ScreenSourceButton />

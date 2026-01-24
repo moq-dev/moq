@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.10.2"
+version = "0.10.3"
 edition = "2024"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
@@ -30,7 +30,7 @@ futures = "0.3"
 http-body = "1"
 moq-lite = { workspace = true, features = ["serde"] }
 moq-native = { workspace = true, features = ["aws-lc-rs"] }
-moq-token = { workspace = true }
+moq-token = { workspace = true, features = ["jwks-loader"] }
 rustls = { version = "0.23", features = [
 	"aws-lc-rs",
 ], default-features = false }

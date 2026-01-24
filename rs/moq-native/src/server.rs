@@ -95,6 +95,7 @@ impl ServerConfig {
 ///
 /// Create via [`ServerConfig::init`] or [`Server::new`].
 pub struct Server {
+	moq: moq_lite::Server,
 	quic: quinn::Endpoint,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	certs: Arc<ServeCerts>,
@@ -171,16 +172,33 @@ impl Server {
 			quic: quic.clone(),
 			accept: Default::default(),
 			certs,
+			moq: moq_lite::Server::new(),
 			#[cfg(feature = "iroh")]
 			iroh: None,
 		})
 	}
 
 	#[cfg(feature = "iroh")]
-	pub fn with_iroh(&mut self, iroh: Option<iroh::Endpoint>) -> &mut Self {
+	pub fn with_iroh(mut self, iroh: Option<iroh::Endpoint>) -> Self {
 		self.iroh = iroh;
 		self
 	}
+
+	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {
+		self.moq = self.moq.with_publish(publish);
+		self
+	}
+
+	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
+		self.moq = self.moq.with_consume(consume);
+		self
+	}
+
+	// TODO: Uncomment when observability feature is merged
+	// pub fn with_stats(mut self, stats: impl Into<Option<Arc<dyn moq_lite::Stats>>>) -> Self {
+	// 	self.moq = self.moq.with_stats(stats);
+	// 	self
+	// }
 
 	#[cfg(unix)]
 	async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
@@ -229,13 +247,13 @@ impl Server {
 			tokio::select! {
 				res = self.quic.accept() => {
 					let conn = res?;
-					self.accept.push(Self::accept_session(conn).boxed());
+					self.accept.push(Self::accept_session(self.moq.clone(), conn).boxed());
 				}
 				res = iroh_accept_fut => {
 					#[cfg(feature = "iroh")]
 					{
 						let conn = res?;
-						self.accept.push(Self::accept_iroh_session(conn).boxed());
+						self.accept.push(Self::accept_iroh_session(self.moq.clone(), conn).boxed());
 					}
 					#[cfg(not(feature = "iroh"))]
 					let _: () = res;
@@ -257,7 +275,7 @@ impl Server {
 		}
 	}
 
-	async fn accept_session(conn: quinn::Incoming) -> anyhow::Result<Request> {
+	async fn accept_session(server: moq_lite::Server, conn: quinn::Incoming) -> anyhow::Result<Request> {
 		let mut conn = conn.accept()?;
 
 		let handshake = conn
@@ -285,15 +303,21 @@ impl Server {
 				let request = web_transport_quinn::Request::accept(conn)
 					.await
 					.context("failed to receive WebTransport request")?;
-				Ok(Request::WebTransport(request))
+				Ok(Request {
+					server: server.clone(),
+					kind: RequestKind::WebTransport(request),
+				})
 			}
-			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => Ok(Request::Quic(QuicRequest::accept(conn))),
+			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => Ok(Request {
+				server: server.clone(),
+				kind: RequestKind::Quic(QuicRequest::accept(conn)),
+			}),
 			_ => anyhow::bail!("unsupported ALPN: {alpn}"),
 		}
 	}
 
 	#[cfg(feature = "iroh")]
-	async fn accept_iroh_session(conn: iroh::endpoint::Incoming) -> anyhow::Result<Request> {
+	async fn accept_iroh_session(server: moq_lite::Server, conn: iroh::endpoint::Incoming) -> anyhow::Result<Request> {
 		let conn = conn.accept()?.await?;
 		let alpn = String::from_utf8(conn.alpn().to_vec()).context("failed to decode ALPN")?;
 		tracing::Span::current().record("id", conn.stable_id());
@@ -303,11 +327,17 @@ impl Server {
 				let request = web_transport_iroh::H3Request::accept(conn)
 					.await
 					.context("failed to receive WebTransport request")?;
-				Ok(Request::IrohWebTransport(request))
+				Ok(Request {
+					server: server.clone(),
+					kind: RequestKind::IrohWebTransport(request),
+				})
 			}
 			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => {
 				let request = IrohQuicRequest::accept(conn);
-				Ok(Request::IrohQuic(request))
+				Ok(Request {
+					server: server.clone(),
+					kind: RequestKind::IrohQuic(request),
+				})
 			}
 			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
 		}
@@ -328,7 +358,7 @@ impl Server {
 }
 
 /// An incoming connection that can be accepted or rejected.
-pub enum Request {
+enum RequestKind {
 	WebTransport(web_transport_quinn::Request),
 	Quic(QuicRequest),
 	#[cfg(feature = "iroh")]
@@ -337,43 +367,60 @@ pub enum Request {
 	IrohQuic(IrohQuicRequest),
 }
 
+pub struct Request {
+	server: moq_lite::Server,
+	kind: RequestKind,
+}
+
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
 	pub async fn reject(self, status: http::StatusCode) -> anyhow::Result<()> {
-		match self {
-			Self::WebTransport(request) => request.close(status).await?,
-			Self::Quic(request) => request.close(status),
+		match self.kind {
+			RequestKind::WebTransport(request) => request.close(status).await?,
+			RequestKind::Quic(request) => request.close(status),
 			#[cfg(feature = "iroh")]
-			Request::IrohWebTransport(request) => request.close(status).await?,
+			RequestKind::IrohWebTransport(request) => request.close(status).await?,
 			#[cfg(feature = "iroh")]
-			Request::IrohQuic(request) => request.close(status),
+			RequestKind::IrohQuic(request) => request.close(status),
 		}
 		Ok(())
 	}
 
+	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {
+		self.server = self.server.with_publish(publish);
+		self
+	}
+
+	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
+		self.server = self.server.with_consume(consume);
+		self
+	}
+
+	// TODO: Uncomment when observability feature is merged
+	// pub fn with_stats(mut self, stats: impl Into<Option<Arc<dyn moq_lite::Stats>>>) -> Self {
+	// 	self.server = self.server.with_stats(stats);
+	// 	self
+	// }
+
 	/// Accept the session, performing rest of the MoQ handshake.
-	pub async fn accept(
-		self,
-		publish: impl Into<Option<moq_lite::OriginConsumer>>,
-		subscribe: impl Into<Option<moq_lite::OriginProducer>>,
-	) -> anyhow::Result<Session> {
-		let session = match self {
-			Request::WebTransport(request) => Session::accept(request.ok().await?, publish, subscribe).await?,
-			Request::Quic(request) => Session::accept(request.ok(), publish, subscribe).await?,
+	pub async fn accept(self) -> anyhow::Result<Session> {
+		let session = match self.kind {
+			RequestKind::WebTransport(request) => self.server.accept(request.ok().await?).await?,
+			RequestKind::Quic(request) => self.server.accept(request.ok()).await?,
 			#[cfg(feature = "iroh")]
-			Request::IrohWebTransport(request) => Session::accept(request.ok().await?, publish, subscribe).await?,
+			RequestKind::IrohWebTransport(request) => self.server.accept(request.ok().await?).await?,
 			#[cfg(feature = "iroh")]
-			Request::IrohQuic(request) => Session::accept(request.ok(), publish, subscribe).await?,
+			RequestKind::IrohQuic(request) => self.server.accept(request.ok()).await?,
 		};
 		Ok(session)
 	}
 
 	/// Returns the URL provided by the client.
 	pub fn url(&self) -> Option<&Url> {
-		match self {
-			Request::WebTransport(request) => Some(request.url()),
+		match &self.kind {
+			RequestKind::WebTransport(request) => Some(request.url()),
 			#[cfg(feature = "iroh")]
-			Request::IrohWebTransport(request) => Some(request.url()),
+			RequestKind::IrohWebTransport(request) => Some(request.url()),
 			_ => None,
 		}
 	}

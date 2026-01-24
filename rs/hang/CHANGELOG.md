@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/moq-dev/moq/compare/hang-v0.10.0...hang-v0.11.0) - 2026-01-24
+
+### Added
+
+- *(hang)* add feature flags for third-party dependencies ([#854](https://github.com/moq-dev/moq/pull/854))
+
+### Other
+
+- Add a builder pattern for constructing clients/servers ([#862](https://github.com/moq-dev/moq/pull/862))
+- Add #[non_exhaustive] to moq-native configuration. ([#850](https://github.com/moq-dev/moq/pull/850))
+- bump mp4-atom to 0.10.0 ([#846](https://github.com/moq-dev/moq/pull/846))
+- simplify match statements using let-else syntax ([#840](https://github.com/moq-dev/moq/pull/840))
+- upgrade to Rust edition 2024 ([#838](https://github.com/moq-dev/moq/pull/838))
+
 ## [0.10.0](https://github.com/moq-dev/moq/compare/hang-v0.9.1...hang-v0.10.0) - 2026-01-10
 
 ### Added

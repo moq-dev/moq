@@ -50,7 +50,14 @@ impl Connection {
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
 		// We subscribe to the tracks the client is allowed to publish.
-		let session = self.request.accept(subscribe, publish).await?;
+		let session = self
+			.request
+			.with_publish(subscribe)
+			.with_consume(publish)
+			// TODO: Uncomment when observability feature is merged
+			// .with_stats(stats)
+			.accept()
+			.await?;
 
 		// Wait until the session is closed.
 		session.closed().await.map_err(Into::into)

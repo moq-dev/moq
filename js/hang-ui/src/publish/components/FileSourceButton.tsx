@@ -23,12 +23,12 @@ export default function FileSourceButton() {
 				ref={setFileInputRef}
 				onChange={onChange}
 				type="file"
-				class="hidden"
+				style="display: none;"
 				accept="video/*,audio/*,image/*"
 			/>
 			<Button
 				title="Upload File"
-				class={`publishSourceButton ${context.fileActive() ? "active" : ""}`}
+				class={`publish-ui__source-button flex--center ${context.fileActive() ? "publish-ui__source-button--active" : ""}`}
 				onClick={onClick}
 			>
 				<Icon.File />

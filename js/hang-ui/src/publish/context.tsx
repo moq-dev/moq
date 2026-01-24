@@ -2,7 +2,14 @@ import type HangPublish from "@moq/hang/publish/element";
 import type { JSX } from "solid-js";
 import { createContext, createEffect, createSignal } from "solid-js";
 
-type PublishStatus = "no-url" | "disconnected" | "connecting" | "live" | "audio-only" | "video-only" | "select-source";
+export type PublishStatus =
+	| "no-url"
+	| "disconnected"
+	| "connecting"
+	| "live"
+	| "audio-only"
+	| "video-only"
+	| "select-source";
 
 type PublishUIContextValue = {
 	hangPublish: HangPublish;
@@ -43,7 +50,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 	const setFile = (file: File) => {
 		props.hangPublish.source.set(file);
 		props.hangPublish.invisible.set(false);
-		props.hangPublish.muted.set(false);
+		props.hangPublish.muted.set(true);
 	};
 
 	const value: PublishUIContextValue = {
@@ -63,6 +70,11 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 
 	createEffect(() => {
 		const publish = props.hangPublish;
+
+		// Initialize with "nothing" active on page load
+		publish.muted.set(true);
+		publish.invisible.set(true);
+		publish.source.set(undefined);
 
 		publish.signals.effect((effect) => {
 			const clearCameraDevices = () => setCameraMediaDevices([]);
@@ -107,8 +119,11 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 		});
 
 		publish.signals.effect((effect) => {
-			const selectedSource = effect.get(publish.source);
-			setNothingActive(selectedSource === undefined);
+			const source = effect.get(publish.source);
+			const muted = effect.get(publish.muted);
+			const invisible = effect.get(publish.invisible);
+
+			setNothingActive(source === undefined && muted && invisible);
 		});
 
 		publish.signals.effect((effect) => {
@@ -153,8 +168,13 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 		publish.signals.effect((effect) => {
 			const url = effect.get(publish.connection.url);
 			const status = effect.get(publish.connection.status);
-			const audio = effect.get(publish.broadcast.audio.source);
-			const video = effect.get(publish.broadcast.video.source);
+			const audioSource = effect.get(publish.broadcast.audio.source);
+			const videoSource = effect.get(publish.broadcast.video.source);
+			const muted = effect.get(publish.muted);
+			const invisible = effect.get(publish.invisible);
+
+			const audio = audioSource && !muted;
+			const video = videoSource && !invisible;
 
 			if (!url) {
 				setPublishStatus("no-url");

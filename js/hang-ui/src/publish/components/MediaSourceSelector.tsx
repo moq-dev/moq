@@ -14,10 +14,10 @@ export default function MediaSourceSelector(props: MediaSourceSelectorProps) {
 	const toggleSourcesVisible = () => setSourcesVisible((visible) => !visible);
 
 	return (
-		<>
+		<div class="publish-ui__media-selector-wrapper flex--center">
 			<Button
 				onClick={toggleSourcesVisible}
-				class="mediaSourceVisibilityToggle button--media-source-selector"
+				class="publish-ui__media-selector-toggle button"
 				title={sourcesVisible() ? "Hide Sources" : "Show Sources"}
 			>
 				<Show when={sourcesVisible()} fallback={<Icon.ArrowDown />}>
@@ -27,14 +27,17 @@ export default function MediaSourceSelector(props: MediaSourceSelectorProps) {
 			<Show when={sourcesVisible()}>
 				<select
 					value={props.selectedSource}
-					class="mediaSourceSelector"
-					onChange={(e) => props.onSelected?.(e.currentTarget.value as MediaDeviceInfo["deviceId"])}
+					class="publish-ui__media-selector-dropdown"
+					onChange={(e) => {
+						props.onSelected?.(e.currentTarget.value as MediaDeviceInfo["deviceId"]);
+						setSourcesVisible(false);
+					}}
 				>
 					<For each={props.sources}>
 						{(source) => <option value={source.deviceId}>{source.label}</option>}
 					</For>
 				</select>
 			</Show>
-		</>
+		</div>
 	);
 }

@@ -1,0 +1,77 @@
+.publish-ui__source-button-wrapper {
+	position: relative;
+}
+
+.publish-ui__source-button {
+	width: 44px;
+	height: 44px;
+	border-radius: var(--border-radius-md);
+	background: var(--color-white-alpha-05);
+	backdrop-filter: blur(6px);
+	border: var(--spacing-1) solid var(--color-white-alpha-10);
+	transition:
+		background-color 0.2s ease,
+		border-color 0.2s ease,
+		box-shadow 0.2s ease,
+		transform 0.15s ease;
+}
+
+.publish-ui__source-button:hover {
+	border-color: var(--color-white-alpha-20);
+}
+
+.publish-ui__source-button svg {
+	color: var(--color-white-alpha-70);
+	transition: color 0.2s ease;
+	position: relative;
+	z-index: 1;
+}
+
+.publish-ui__source-button--active {
+	background: linear-gradient(135deg, var(--color-orange-500-alpha-30), var(--color-amber-600-alpha-30));
+	border: var(--spacing-1) solid var(--color-orange-500-alpha-50);
+	box-shadow: 0 0 24px var(--color-orange-500-alpha-40);
+}
+
+.publish-ui__source-button--active svg {
+	color: var(--color-orange-300);
+}
+
+.publish-ui__source-button--active::before {
+	content: "";
+	position: absolute;
+	inset: 0;
+	border-radius: var(--border-radius-md);
+	background: linear-gradient(135deg, var(--color-orange-400-alpha-20), var(--color-amber-600-alpha-20));
+	filter: blur(16px);
+	z-index: 0;
+}
+
+.publish-ui__source-button--no-source {
+	background: var(--color-white-alpha-05);
+	border: var(--spacing-1) solid var(--color-white-alpha-10);
+}
+
+.publish-ui__source-button--no-source svg {
+	color: var(--color-white-alpha-50);
+}
+
+.publish-ui__source-button--no-source-active {
+	background: linear-gradient(135deg, var(--color-red-500-alpha-25), var(--color-red-900-alpha-35));
+	border: var(--spacing-1) solid var(--color-red-500-alpha-60);
+	box-shadow: 0 0 18px var(--color-red-500-alpha-45);
+}
+
+.publish-ui__source-button--no-source-active svg {
+	color: var(--color-red-300);
+}
+
+.publish-ui__source-button--no-source-active::before {
+	content: "";
+	position: absolute;
+	inset: 0;
+	border-radius: var(--border-radius-md);
+	background: linear-gradient(135deg, var(--color-red-400-alpha-25), var(--color-red-600-alpha-25));
+	filter: blur(16px);
+	z-index: 0;
+}

@@ -1,0 +1,116 @@
+.publish-ui__status-indicator {
+	gap: var(--spacing-12);
+	padding: var(--spacing-12) var(--spacing-24);
+	border-radius: 12px;
+	background: var(--color-black-alpha-60);
+	backdrop-filter: blur(16px);
+	border: var(--spacing-1) solid var(--color-white-alpha-10);
+}
+
+.publish-ui__status-indicator-dot {
+	position: relative;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	flex-shrink: 0;
+	z-index: 1;
+}
+
+.publish-ui__status-indicator-dot::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	border-radius: 50%;
+	background: currentColor;
+	transform: scale(1);
+	opacity: 0.5;
+	animation: status-pulse 1.5s ease-out infinite;
+	z-index: -1;
+}
+
+.publish-ui__status-indicator-dot::after {
+	display: none;
+}
+
+.publish-ui__status-indicator-dot--live::after,
+.publish-ui__status-indicator-dot--warning::after,
+.publish-ui__status-indicator-dot--connecting::after,
+.publish-ui__status-indicator-dot--audio-only::after,
+.publish-ui__status-indicator-dot--video-only::after {
+	display: block;
+}
+
+.publish-ui__status-indicator-dot--error {
+	background: var(--color-gray-100);
+	color: var(--color-gray-100);
+}
+
+.publish-ui__status-indicator-text--error {
+	color: var(--color-gray-100);
+}
+
+.publish-ui__status-indicator-dot--warning {
+	background: var(--color-yellow-400);
+	color: var(--color-yellow-400);
+}
+
+.publish-ui__status-indicator-text--warning {
+	color: var(--color-yellow-400);
+}
+
+.publish-ui__status-indicator-dot--live {
+	background: var(--color-green-400);
+	color: var(--color-green-400);
+}
+
+.publish-ui__status-indicator-text--live {
+	color: var(--color-green-400);
+}
+
+.publish-ui__status-indicator-dot--audio-only {
+	background: var(--color-blue-500);
+	color: var(--color-blue-500);
+}
+
+.publish-ui__status-indicator-text--audio-only {
+	color: var(--color-blue-500);
+}
+
+.publish-ui__status-indicator-dot--video-only {
+	background: var(--color-purple-500);
+	color: var(--color-purple-500);
+}
+
+.publish-ui__status-indicator-text--video-only {
+	color: var(--color-purple-500);
+}
+
+.publish-ui__status-indicator-dot--connecting {
+	background: var(--color-gray-100);
+	color: var(--color-gray-100);
+}
+
+.publish-ui__status-indicator-text--connecting {
+	color: var(--color-gray-100);
+}
+
+.publish-ui__status-indicator-text {
+	font-size: 1rem;
+	letter-spacing: 0.1rem;
+}
+
+@keyframes status-pulse {
+	0% {
+		transform: scale(1);
+		opacity: 0.5;
+	}
+
+	70% {
+		opacity: 0.25;
+	}
+
+	100% {
+		transform: scale(2.5);
+		opacity: 0;
+	}
+}

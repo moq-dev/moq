@@ -7,3 +7,7 @@
 :is(.flex--align-center) {
 	align-items: center;
 }
+
+:is(.flex--space-between) {
+	justify-content: space-between;
+}

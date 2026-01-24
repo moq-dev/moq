@@ -11,14 +11,12 @@ export default function NothingSourceButton() {
 	};
 
 	return (
-		<div class="publishSourceButtonContainer">
-			<Button
-				title="No Source"
-				class={`publishSourceButton ${context.nothingActive() ? "active" : ""}`}
-				onClick={onClick}
-			>
-				<Icon.Ban />
-			</Button>
-		</div>
+		<Button
+			title="No Source"
+			class={`publish-ui__source-button flex--center publish-ui__source-button--no-source ${context.nothingActive() ? "publish-ui__source-button--no-source-active" : ""}`}
+			onClick={onClick}
+		>
+			<Icon.Ban />
+		</Button>
 	);
 }
