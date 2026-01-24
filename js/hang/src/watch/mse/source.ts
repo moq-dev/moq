@@ -46,12 +46,14 @@ export class Source implements Backend {
 			broadcast: this.broadcast,
 			element: this.element,
 			mediaSource: this.#mediaSource,
+			latency: this.latency,
 			...props?.video,
 		});
 		this.audio = new Audio({
 			broadcast: this.broadcast,
 			element: this.element,
 			mediaSource: this.#mediaSource,
+			latency: this.latency,
 			...props?.audio,
 		});
 
@@ -126,7 +128,9 @@ export class Source implements Backend {
 				}
 
 				// Keep at least 1 second of buffered data.
-				sourceBuffer.remove(0, Math.max(0, element.currentTime - 1));
+				if (element.currentTime > 1) {
+					sourceBuffer.remove(0, element.currentTime - 1);
+				}
 			}
 		}, 1000);
 	}

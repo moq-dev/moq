@@ -3,6 +3,7 @@ import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
+import * as Mp4 from "../../mp4";
 import * as Hex from "../../util/hex";
 import type { Broadcast } from "../broadcast";
 import type { Backend, Stats, Target } from "./backend";
@@ -115,9 +116,18 @@ export class Source implements Backend {
 			const supported: Record<string, Catalog.VideoConfig> = {};
 
 			for (const [name, rendition] of Object.entries(renditions)) {
-				// TODO support cmaf
-				if (rendition.container.kind !== "legacy") continue;
+				// For CMAF, we get description from init segment, so skip validation here
+				// and just check if the codec is supported
+				if (rendition.container.kind === "cmaf") {
+					const { supported: valid } = await VideoDecoder.isConfigSupported({
+						codec: rendition.codec,
+						optimizeForLatency: rendition.optimizeForLatency ?? true,
+					});
+					if (valid) supported[name] = rendition;
+					continue;
+				}
 
+				// Legacy container: validate with description from catalog
 				const description = rendition.description ? Hex.toBytes(rendition.description) : undefined;
 
 				const { supported: valid } = await VideoDecoder.isConfigSupported({
@@ -188,14 +198,6 @@ export class Source implements Backend {
 		const sub = broadcast.subscribe(name, Catalog.PRIORITY.video);
 		effect.cleanup(() => sub.close());
 
-		// Create consumer that reorders groups/frames up to the provided latency.
-		// Container defaults to "legacy" via Zod schema for backward compatibility
-		console.log(`[Video Subscriber] Using container format: ${config.container}`);
-		const consumer = new Frame.Consumer(sub, {
-			latency: this.latency,
-		});
-		effect.cleanup(() => consumer.close());
-
 		// We need a queue because VideoDecoder doesn't block on a Promise returned by output.
 		// NOTE: We will drain this queue almost immediately, so the highWaterMark is just a safety net.
 		const queue = new TransformStream<VideoFrame, VideoFrame>(
@@ -241,6 +243,7 @@ export class Source implements Backend {
 		});
 		effect.cleanup(() => decoder.close());
 
+		// Output processing - same for both container types
 		effect.spawn(async () => {
 			for (;;) {
 				const { value: frame } = await reader.read();
@@ -280,6 +283,21 @@ export class Source implements Backend {
 			}
 		});
 
+		// Input processing - depends on container type
+		if (config.container.kind === "cmaf") {
+			this.#runCmafTrack(effect, broadcast, sub, config, decoder);
+		} else {
+			this.#runLegacyTrack(effect, sub, config, decoder);
+		}
+	}
+
+	#runLegacyTrack(effect: Effect, sub: Moq.Track, config: RequiredDecoderConfig, decoder: VideoDecoder): void {
+		// Create consumer that reorders groups/frames up to the provided latency.
+		const consumer = new Frame.Consumer(sub, {
+			latency: this.latency,
+		});
+		effect.cleanup(() => consumer.close());
+
 		decoder.configure({
 			...config,
 			description: config.description ? Hex.toBytes(config.description) : undefined,
@@ -307,6 +325,67 @@ export class Source implements Backend {
 				}));
 
 				decoder.decode(chunk);
+			}
+		});
+	}
+
+	#runCmafTrack(
+		effect: Effect,
+		_broadcast: Moq.Broadcast,
+		sub: Moq.Track,
+		config: RequiredDecoderConfig,
+		decoder: VideoDecoder,
+	): void {
+		if (config.container.kind !== "cmaf") return;
+
+		const { timescale } = config.container;
+		const description = config.description ? Hex.toBytes(config.description) : undefined;
+
+		// Configure decoder with description from catalog
+		decoder.configure({
+			codec: config.codec,
+			description,
+			optimizeForLatency: config.optimizeForLatency ?? true,
+			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
+			flip: false,
+		});
+
+		effect.spawn(async () => {
+			// Process data segments
+			// TODO: Use a consumer wrapper for CMAF to support latency control
+			for (;;) {
+				const group = await sub.nextGroup();
+				if (!group) break;
+
+				effect.spawn(async () => {
+					try {
+						for (;;) {
+							const segment = await group.readFrame();
+							if (!segment) break;
+
+							const samples = Mp4.decodeDataSegment(segment, timescale);
+
+							for (const sample of samples) {
+								const chunk = new EncodedVideoChunk({
+									type: sample.keyframe ? "key" : "delta",
+									data: sample.data,
+									timestamp: sample.timestamp,
+								});
+
+								// Track stats
+								this.#stats.update((current) => ({
+									frameCount: (current?.frameCount ?? 0) + 1,
+									timestamp: sample.timestamp,
+									bytesReceived: (current?.bytesReceived ?? 0) + sample.data.byteLength,
+								}));
+
+								decoder.decode(chunk);
+							}
+						}
+					} finally {
+						group.close();
+					}
+				});
 			}
 		});
 	}

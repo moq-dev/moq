@@ -1,6 +1,8 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
+import * as Frame from "../../frame";
+import * as Mp4 from "../../mp4";
 import type { Broadcast } from "../broadcast";
 import type { Backend, Stats, Target } from "../video/backend";
 
@@ -9,6 +11,7 @@ export type VideoProps = {
 	mediaSource?: MediaSource | Signal<MediaSource | undefined>;
 	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
 
+	latency?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
 	target?: Target | Signal<Target | undefined>;
 };
 
@@ -23,6 +26,7 @@ export class Video implements Backend {
 
 	// TODO Modify #select to use this signal.
 	target: Signal<Target | undefined>;
+	latency: Signal<Moq.Time.Milli>;
 
 	#catalog = new Signal<Catalog.Video | undefined>(undefined);
 	readonly catalog: Getter<Catalog.Video | undefined> = this.#catalog;
@@ -47,6 +51,7 @@ export class Video implements Backend {
 		this.mediaSource = Signal.from(props?.mediaSource);
 		this.target = Signal.from(props?.target);
 		this.element = Signal.from(props?.element);
+		this.latency = Signal.from(props?.latency ?? (100 as Moq.Time.Milli));
 
 		this.signals.effect(this.#runCatalog.bind(this));
 		this.signals.effect(this.#runSelected.bind(this));
@@ -73,8 +78,7 @@ export class Video implements Backend {
 			const mime = `video/mp4; codecs="${config.codec}"`;
 			if (!MediaSource.isTypeSupported(mime)) continue;
 
-			// TODO support legacy
-			if (config.container.kind !== "cmaf") continue;
+			// Support both CMAF and legacy containers
 			if (target?.name && track !== target.name) continue;
 
 			effect.set(this.#selected, { track, mime, config });
@@ -107,23 +111,45 @@ export class Video implements Backend {
 			sourceBuffer.abort();
 		});
 
-		// If this is CMAF, we also need to subscribe to the init track.
-		let init: Moq.Track | undefined;
+		effect.event(sourceBuffer, "error", (e) => {
+			console.error("[MSE] SourceBuffer error:", e);
+		});
+
 		if (selected.config.container.kind === "cmaf") {
-			init = active.subscribe(selected.config.container.init_track.name, Catalog.PRIORITY.video);
-			effect.cleanup(() => init?.close());
+			this.#runCmafMedia(effect, active, selected, sourceBuffer, element);
+		} else {
+			this.#runLegacyMedia(effect, active, selected, sourceBuffer, element);
 		}
+	}
+
+	async #appendBuffer(sourceBuffer: SourceBuffer, buffer: Uint8Array): Promise<void> {
+		while (sourceBuffer.updating) {
+			await new Promise((resolve) => sourceBuffer.addEventListener("updateend", resolve, { once: true }));
+		}
+
+		sourceBuffer.appendBuffer(buffer as BufferSource);
+
+		while (sourceBuffer.updating) {
+			await new Promise((resolve) => sourceBuffer.addEventListener("updateend", resolve, { once: true }));
+		}
+	}
+
+	#runCmafMedia(
+		effect: Effect,
+		active: Moq.Broadcast,
+		selected: { track: string; mime: string; config: Catalog.VideoConfig },
+		sourceBuffer: SourceBuffer,
+		element: HTMLMediaElement,
+	): void {
+		if (selected.config.container.kind !== "cmaf") return;
 
 		const data = active.subscribe(selected.track, Catalog.PRIORITY.video);
 		effect.cleanup(() => data.close());
 
 		effect.spawn(async () => {
-			if (init) {
-				const frame = await init.readFrame();
-				if (!frame) throw new Error("no init frame");
-
-				sourceBuffer.appendBuffer(frame as BufferSource);
-			}
+			// Generate init segment from catalog config (always uses track_id=1)
+			const initSegment = Mp4.createVideoInitSegment(selected.config);
+			await this.#appendBuffer(sourceBuffer, initSegment);
 
 			for (;;) {
 				// TODO: Use Frame.Consumer for CMAF so we can support higher latencies.
@@ -131,17 +157,9 @@ export class Video implements Backend {
 				const frame = await data.readFrame();
 				if (!frame) return;
 
-				// Wait until we can append the next frame.
-				while (sourceBuffer.updating) {
-					await new Promise((resolve) => sourceBuffer.addEventListener("updateend", resolve, { once: true }));
-				}
-
-				sourceBuffer.appendBuffer(frame as BufferSource);
-
-				// Wait until until that append is complete before continuing.
-				while (sourceBuffer.updating) {
-					await new Promise((resolve) => sourceBuffer.addEventListener("updateend", resolve, { once: true }));
-				}
+				// Rewrite track_id to 1 to match our generated init segment
+				Mp4.rewriteTrackId(frame);
+				await this.#appendBuffer(sourceBuffer, frame);
 
 				// Seek to the start of the buffer if we're behind it (for startup).
 				if (element.buffered.length > 0 && element.currentTime < element.buffered.start(0)) {
@@ -149,9 +167,64 @@ export class Video implements Backend {
 				}
 			}
 		});
+	}
 
-		effect.event(sourceBuffer, "error", (e) => {
-			console.error("[MSE] SourceBuffer error:", e);
+	#runLegacyMedia(
+		effect: Effect,
+		active: Moq.Broadcast,
+		selected: { track: string; mime: string; config: Catalog.VideoConfig },
+		sourceBuffer: SourceBuffer,
+		element: HTMLMediaElement,
+	): void {
+		const data = active.subscribe(selected.track, Catalog.PRIORITY.video);
+		effect.cleanup(() => data.close());
+
+		// Create consumer that reorders groups/frames up to the provided latency.
+		// Legacy container uses microsecond timescale implicitly.
+		const consumer = new Frame.Consumer(data, {
+			latency: this.latency,
+		});
+		effect.cleanup(() => consumer.close());
+
+		effect.spawn(async () => {
+			// Generate init segment from catalog config (timescale = 1,000,000 = microseconds)
+			const initSegment = Mp4.createVideoInitSegment(selected.config);
+			await this.#appendBuffer(sourceBuffer, initSegment);
+
+			let sequence = 1;
+			let duration;
+
+			// Buffer one frame so we can compute accurate duration from the next frame's timestamp
+			let pending = await consumer.decode();
+			if (!pending) return;
+
+			for (;;) {
+				const next = await consumer.decode();
+
+				// Compute duration from next frame's timestamp, or use last known duration if stream ended
+				if (next) {
+					duration = next.timestamp - pending.timestamp;
+				}
+
+				// Wrap raw frame in moof+mdat
+				const segment = Mp4.encodeDataSegment({
+					data: pending.data,
+					timestamp: pending.timestamp,
+					duration: duration ?? 0, // Default to 0 duration if there's literally one frame then stream FIN.
+					keyframe: pending.keyframe,
+					sequence: sequence++,
+				});
+
+				await this.#appendBuffer(sourceBuffer, segment);
+
+				// Seek to the start of the buffer if we're behind it (for startup).
+				if (element.buffered.length > 0 && element.currentTime < element.buffered.start(0)) {
+					element.currentTime = element.buffered.start(0);
+				}
+
+				if (!next) return;
+				pending = next;
+			}
 		});
 	}
 

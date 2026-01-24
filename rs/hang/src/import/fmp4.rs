@@ -162,7 +162,7 @@ impl Fmp4 {
 		let mut created_video_tracks = Vec::new();
 		let mut created_audio_tracks = Vec::new();
 
-		let container = self.init_container(moov_raw)?;
+		self.init_container(moov_raw)?;
 
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
@@ -170,7 +170,7 @@ impl Fmp4 {
 
 			let track = match handler.as_ref() {
 				b"vide" => {
-					let config = self.init_video(trak, container.clone())?;
+					let config = self.init_video(trak)?;
 
 					let track = moq::Track {
 						name: self.broadcast.track_name("video"),
@@ -188,7 +188,7 @@ impl Fmp4 {
 					hang::TrackProducer::new(track.producer)
 				}
 				b"soun" => {
-					let config = self.init_audio(trak, container.clone())?;
+					let config = self.init_audio(trak)?;
 
 					let track = moq::Track {
 						name: self.broadcast.track_name("audio"),
@@ -217,9 +217,9 @@ impl Fmp4 {
 		Ok(())
 	}
 
-	fn init_container(&mut self, moov_raw: &[u8]) -> anyhow::Result<Container> {
+	fn init_container(&mut self, moov_raw: &[u8]) -> anyhow::Result<()> {
 		if !self.config.passthrough {
-			return Ok(Container::Legacy);
+			return Ok(());
 		}
 
 		let mut init = BytesMut::new();
@@ -232,10 +232,21 @@ impl Fmp4 {
 
 		self.init = Some(init_track);
 
-		Ok(Container::Cmaf { init_track: init_name })
+		Ok(())
 	}
 
-	fn init_video(&mut self, trak: &Trak, container: Container) -> anyhow::Result<VideoConfig> {
+	fn container(&self, trak: &Trak) -> Container {
+		if self.config.passthrough {
+			Container::Cmaf {
+				timescale: trak.mdia.mdhd.timescale as u64,
+			}
+		} else {
+			Container::Legacy
+		}
+	}
+
+	fn init_video(&mut self, trak: &Trak) -> anyhow::Result<VideoConfig> {
+		let container = self.container(trak);
 		let stsd = &trak.mdia.minf.stbl.stsd;
 
 		let codec = match stsd.codecs.len() {
@@ -389,7 +400,8 @@ impl Fmp4 {
 		})
 	}
 
-	fn init_audio(&mut self, trak: &Trak, container: Container) -> anyhow::Result<AudioConfig> {
+	fn init_audio(&mut self, trak: &Trak) -> anyhow::Result<AudioConfig> {
+		let container = self.container(trak);
 		let stsd = &trak.mdia.minf.stbl.stsd;
 
 		let codec = match stsd.codecs.len() {

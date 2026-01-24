@@ -127,7 +127,7 @@ export class Encoder {
 			sampleRate: Catalog.u53(worklet.context.sampleRate),
 			numberOfChannels: Catalog.u53(worklet.channelCount),
 			bitrate: Catalog.u53(worklet.channelCount * 32_000),
-			container: Catalog.CONTAINER.legacy,
+			container: { kind: "legacy" } as const,
 		};
 
 		effect.set(this.#config, config);

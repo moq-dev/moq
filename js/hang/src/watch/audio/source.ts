@@ -1,7 +1,9 @@
+import type * as Moq from "@moq/lite";
 import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
+import * as Mp4 from "../../mp4";
 import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
 import type { Broadcast } from "../broadcast";
@@ -100,14 +102,19 @@ export class Source {
 	}
 
 	#selectRendition(audio: Catalog.Audio): { track: string; config: Catalog.AudioConfig } | undefined {
+		// Prefer legacy container if available, but support CMAF as well
+		let cmafRendition: { track: string; config: Catalog.AudioConfig } | undefined;
+
 		for (const [track, config] of Object.entries(audio.renditions)) {
-			// TODO support cmaf
 			if (config.container.kind === "legacy") {
 				return { track, config };
 			}
+			if (config.container.kind === "cmaf" && !cmafRendition) {
+				cmafRendition = { track, config };
+			}
 		}
 
-		return undefined;
+		return cmafRendition;
 	}
 
 	#runWorklet(effect: Effect): void {
@@ -194,6 +201,14 @@ export class Source {
 		const sub = active.subscribe(rendition, Catalog.PRIORITY.audio);
 		effect.cleanup(() => sub.close());
 
+		if (config.container.kind === "cmaf") {
+			this.#runCmafDecoder(effect, active, sub, config);
+		} else {
+			this.#runLegacyDecoder(effect, sub, config);
+		}
+	}
+
+	#runLegacyDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
 		const consumer = new Frame.Consumer(sub, {
 			latency: Math.max(this.latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
 		});
@@ -230,6 +245,66 @@ export class Source {
 				});
 
 				decoder.decode(chunk);
+			}
+		});
+	}
+
+	#runCmafDecoder(effect: Effect, _broadcast: Moq.Broadcast, sub: Moq.Track, config: Catalog.AudioConfig): void {
+		if (config.container.kind !== "cmaf") return;
+
+		const { timescale } = config.container;
+		const description = config.description ? Hex.toBytes(config.description) : undefined;
+
+		effect.spawn(async () => {
+			const loaded = await libav.polyfill();
+			if (!loaded) return; // cancelled
+
+			const decoder = new AudioDecoder({
+				output: (data) => this.#emit(data),
+				error: (error) => console.error(error),
+			});
+			effect.cleanup(() => decoder.close());
+
+			// Configure decoder with description from catalog
+			decoder.configure({
+				codec: config.codec,
+				sampleRate: config.sampleRate,
+				numberOfChannels: config.numberOfChannels,
+				description,
+			});
+
+			// Process data segments
+			// TODO: Use a consumer wrapper for CMAF to support latency control
+			for (;;) {
+				const group = await sub.nextGroup();
+				if (!group) break;
+
+				effect.spawn(async () => {
+					try {
+						for (;;) {
+							const segment = await group.readFrame();
+							if (!segment) break;
+
+							const samples = Mp4.decodeDataSegment(segment, timescale);
+
+							for (const sample of samples) {
+								this.#stats.update((stats) => ({
+									bytesReceived: (stats?.bytesReceived ?? 0) + sample.data.byteLength,
+								}));
+
+								const chunk = new EncodedAudioChunk({
+									type: sample.keyframe ? "key" : "delta",
+									data: sample.data,
+									timestamp: sample.timestamp,
+								});
+
+								decoder.decode(chunk);
+							}
+						}
+					} finally {
+						group.close();
+					}
+				});
 			}
 		});
 	}

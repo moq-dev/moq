@@ -143,7 +143,7 @@ export class Encoder {
 			codedWidth: Catalog.u53(config.width),
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
-			container: Catalog.CONTAINER.legacy,
+			container: { kind: "legacy" } as const,
 		};
 
 		effect.set(this.#catalog, catalog);
