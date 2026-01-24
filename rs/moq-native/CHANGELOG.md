@@ -48,6 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Manually run release-plz ([#864](https://github.com/moq-dev/moq/pull/864))
+- Add a builder pattern for constructing clients/servers ([#862](https://github.com/moq-dev/moq/pull/862))
+- Add #[non_exhaustive] to moq-native configuration. ([#850](https://github.com/moq-dev/moq/pull/850))
+- moq-native: Implement QUIC-LB compatible CID generation ([#848](https://github.com/moq-dev/moq/pull/848))
+- Fix bugs with WebSocket fallback ([#844](https://github.com/moq-dev/moq/pull/844))
+- upgrade to Rust edition 2024 ([#838](https://github.com/moq-dev/moq/pull/838))
+
+## [0.12.0](https://github.com/moq-dev/moq/compare/moq-native-v0.11.0...moq-native-v0.12.0) - 2026-01-24
+
+### Other
+
 - Add a builder pattern for constructing clients/servers ([#862](https://github.com/moq-dev/moq/pull/862))
 - Add #[non_exhaustive] to moq-native configuration. ([#850](https://github.com/moq-dev/moq/pull/850))
 - moq-native: Implement QUIC-LB compatible CID generation ([#848](https://github.com/moq-dev/moq/pull/848))
