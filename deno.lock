@@ -37,6 +37,7 @@
           "dependencies": [
             "npm:@kixelated/libavjs-webcodecs-polyfill@~0.5.5",
             "npm:@libav.js/variant-opus-af@^6.8.8",
+            "npm:@svta/cml-iso-bmff@^1.0.0-alpha.9",
             "npm:@types/audioworklet@^0.0.77",
             "npm:@types/web@^0.0.241",
             "npm:async-mutex@0.5",

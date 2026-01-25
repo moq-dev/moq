@@ -180,8 +180,11 @@ export default class HangMeet extends HTMLElement {
 			},
 		});
 
-		const renderer = new Watch.Video.Renderer(broadcast.video, { canvas });
-		const emitter = new Watch.Audio.Emitter(broadcast.audio);
+		const videoSource = new Watch.Video.Source({ broadcast });
+		const audioSource = new Watch.Audio.Source({ broadcast });
+
+		const renderer = new Watch.Video.Renderer(videoSource, { canvas });
+		const emitter = new Watch.Audio.Emitter(audioSource);
 
 		this.#remotes.set(name, { canvas, renderer, emitter });
 

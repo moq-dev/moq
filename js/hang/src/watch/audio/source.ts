@@ -1,11 +1,15 @@
-import type * as Moq from "@moq/lite";
 import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
+import * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
+import type { Broadcast } from "../broadcast";
+import type { Target } from "../video/backend";
 import type * as Render from "./render";
+
+// Unfortunately, we need to use a Vite-exclusive import for now.
+import RenderWorklet from "./render-worklet.ts?worker&url";
 
 // We want some extra overhead to avoid starving the render worklet.
 // The default Opus frame duration is 20ms.
@@ -13,25 +17,32 @@ import type * as Render from "./render";
 const JITTER_UNDERHEAD = 25 as Time.Milli;
 
 export type SourceProps = {
+	broadcast: Broadcast | Signal<Broadcast | undefined>;
+
 	// Enable to download the audio track.
 	enabled?: boolean | Signal<boolean>;
 
 	// Jitter buffer size in milliseconds (default: 100ms)
 	latency?: Time.Milli | Signal<Time.Milli>;
+
+	// The desired rendition/bitrate of the audio.
+	// TODO finish implementing this
+	target?: Target | Signal<Target | undefined>;
 };
 
 export interface AudioStats {
 	bytesReceived: number;
 }
 
-// Unfortunately, we need to use a Vite-exclusive import for now.
-import RenderWorklet from "./render-worklet.ts?worker&url";
-
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
 export class Source {
-	broadcast: Getter<Moq.Broadcast | undefined>;
+	broadcast: Signal<Broadcast | undefined>;
 	enabled: Signal<boolean>;
+	target: Signal<Target | undefined>;
+
+	#catalog = new Signal<Catalog.Audio | undefined>(undefined);
+	readonly catalog: Getter<Catalog.Audio | undefined> = this.#catalog;
 
 	#context = new Signal<AudioContext | undefined>(undefined);
 	readonly context: Getter<AudioContext | undefined> = this.#context;
@@ -47,42 +58,56 @@ export class Source {
 	#stats = new Signal<AudioStats | undefined>(undefined);
 	readonly stats: Getter<AudioStats | undefined> = this.#stats;
 
-	catalog = new Signal<Catalog.Audio | undefined>(undefined);
 	config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 
 	// Not a signal because I'm lazy.
 	readonly latency: Signal<Time.Milli>;
 
 	// The name of the active rendition.
-	active = new Signal<string | undefined>(undefined);
+	rendition = new Signal<string | undefined>(undefined);
 
 	#signals = new Effect();
 
-	constructor(
-		broadcast: Getter<Moq.Broadcast | undefined>,
-		catalog: Getter<Catalog.Root | undefined>,
-		props?: SourceProps,
-	) {
-		this.broadcast = broadcast;
+	constructor(props?: SourceProps) {
+		this.broadcast = Signal.from(props?.broadcast);
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.latency = Signal.from(props?.latency ?? (100 as Time.Milli)); // TODO Reduce this once fMP4 stuttering is fixed.
+		this.target = Signal.from(props?.target);
 
-		this.#signals.effect((effect) => {
-			const audio = effect.get(catalog)?.audio;
-			this.catalog.set(audio);
-
-			if (audio?.renditions) {
-				const first = Object.entries(audio.renditions).at(0);
-				if (first) {
-					effect.set(this.active, first[0]);
-					effect.set(this.config, first[1]);
-				}
-			}
-		});
-
+		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runWorklet.bind(this));
 		this.#signals.effect(this.#runEnabled.bind(this));
 		this.#signals.effect(this.#runDecoder.bind(this));
+	}
+
+	#runCatalog(effect: Effect): void {
+		const broadcast = effect.get(this.broadcast);
+		if (!broadcast) return;
+
+		const catalog = effect.get(broadcast.catalog);
+		if (!catalog) return;
+
+		const audio = catalog.audio;
+		if (!audio) return;
+
+		effect.set(this.#catalog, audio);
+
+		const rendition = this.#selectRendition(audio);
+		if (!rendition) return;
+
+		effect.set(this.rendition, rendition.track);
+		effect.set(this.config, rendition.config);
+	}
+
+	#selectRendition(audio: Catalog.Audio): { track: string; config: Catalog.AudioConfig } | undefined {
+		for (const [track, config] of Object.entries(audio.renditions)) {
+			// TODO support cmaf
+			if (config.container.kind === "legacy") {
+				return { track, config };
+			}
+		}
+
+		return undefined;
 	}
 
 	#runWorklet(effect: Effect): void {
@@ -157,21 +182,20 @@ export class Source {
 		const broadcast = effect.get(this.broadcast);
 		if (!broadcast) return;
 
+		const active = broadcast ? effect.get(broadcast.active) : undefined;
+		if (!active) return;
+
 		const config = effect.get(this.config);
 		if (!config) return;
 
-		const active = effect.get(this.active);
-		if (!active) return;
+		const rendition = effect.get(this.rendition);
+		if (!rendition) return;
 
-		const sub = broadcast.subscribe(active, catalog.priority);
+		const sub = active.subscribe(rendition, Catalog.PRIORITY.audio);
 		effect.cleanup(() => sub.close());
 
-		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
-		// Container defaults to "legacy" via Zod schema for backward compatibility
-		console.log(`[Audio Subscriber] Using container format: ${config.container}`);
 		const consumer = new Frame.Consumer(sub, {
 			latency: Math.max(this.latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
-			container: config.container,
 		});
 		effect.cleanup(() => consumer.close());
 

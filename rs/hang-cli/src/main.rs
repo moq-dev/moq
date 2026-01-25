@@ -83,13 +83,10 @@ async fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 	cli.log.init();
 
-	let mut publish = Publish::new(match &cli.command {
+	let publish = Publish::new(match &cli.command {
 		Command::Serve { format, .. } => format,
 		Command::Publish { format, .. } => format,
 	})?;
-
-	// Initialize the broadcast from stdin before starting any client/server.
-	publish.init().await?;
 
 	#[cfg(feature = "iroh")]
 	let iroh = cli.iroh.bind().await?;

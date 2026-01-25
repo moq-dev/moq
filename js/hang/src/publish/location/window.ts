@@ -2,7 +2,6 @@ import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
 import { Effect, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import { PRIORITY } from "../priority";
 
 export type WindowProps = {
 	// If true, then we'll publish our position to the broadcast.
@@ -17,7 +16,7 @@ export type WindowProps = {
 
 export class Window {
 	static readonly TRACK = "location/window.json";
-	static readonly PRIORITY = PRIORITY.location;
+	static readonly PRIORITY = Catalog.PRIORITY.location;
 
 	enabled: Signal<boolean>;
 	position: Signal<Catalog.Position | undefined>;

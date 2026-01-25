@@ -1,6 +1,5 @@
 import { Effect, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import { PRIORITY } from "../priority";
 import { Encoder, type EncoderProps } from "./encoder";
 import { TrackProcessor } from "./polyfill";
 import type { Source } from "./types";
@@ -18,7 +17,7 @@ export type Props = {
 export class Root {
 	static readonly TRACK_HD = "video/hd";
 	static readonly TRACK_SD = "video/sd";
-	static readonly PRIORITY = PRIORITY.video;
+	static readonly PRIORITY = Catalog.PRIORITY.video;
 
 	source: Signal<Source | undefined>;
 	hd: Encoder;

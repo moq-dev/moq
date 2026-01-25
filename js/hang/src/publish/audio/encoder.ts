@@ -1,12 +1,9 @@
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
-import { DEFAULT_CONTAINER } from "../../catalog";
-import { u53 } from "../../catalog/integers";
+import * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import * as libav from "../../util/libav";
-import { PRIORITY } from "../priority";
 import type * as Capture from "./capture";
 import type { Source } from "./types";
 
@@ -33,14 +30,13 @@ export type EncoderProps = {
 
 export class Encoder {
 	static readonly TRACK = "audio/data";
-	static readonly PRIORITY = PRIORITY.audio;
+	static readonly PRIORITY = Catalog.PRIORITY.audio;
 
 	enabled: Signal<boolean>;
 
 	muted: Signal<boolean>;
 	volume: Signal<number>;
 	maxLatency: Time.Milli;
-	#container: Catalog.Container;
 
 	source: Signal<Source | undefined>;
 
@@ -65,7 +61,6 @@ export class Encoder {
 		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.maxLatency = props?.maxLatency ?? (100 as Time.Milli); // Default is a group every 100ms
-		this.#container = props?.container ?? DEFAULT_CONTAINER;
 
 		this.#signals.effect(this.#runSource.bind(this));
 		this.#signals.effect(this.#runConfig.bind(this));
@@ -129,10 +124,10 @@ export class Encoder {
 
 		const config = {
 			codec: "opus",
-			sampleRate: u53(worklet.context.sampleRate),
-			numberOfChannels: u53(worklet.channelCount),
-			bitrate: u53(worklet.channelCount * 32_000),
-			container: this.#container,
+			sampleRate: Catalog.u53(worklet.context.sampleRate),
+			numberOfChannels: Catalog.u53(worklet.channelCount),
+			bitrate: Catalog.u53(worklet.channelCount * 32_000),
+			container: Catalog.CONTAINER.legacy,
 		};
 
 		effect.set(this.#config, config);
@@ -176,8 +171,6 @@ export class Encoder {
 			// We're using an async polyfill temporarily for Safari support.
 			await libav.polyfill();
 
-			console.log(`[Audio Publisher] Using container format: ${this.#container}`);
-
 			const encoder = new AudioEncoder({
 				output: (frame) => {
 					if (frame.type !== "key") {
@@ -192,7 +185,7 @@ export class Encoder {
 						groupTimestamp = frame.timestamp as Time.Micro;
 					}
 
-					const buffer = Frame.encode(frame, frame.timestamp as Time.Micro, this.#container);
+					const buffer = Frame.encode(frame, frame.timestamp as Time.Micro);
 					group.writeFrame(buffer);
 				},
 				error: (err) => {

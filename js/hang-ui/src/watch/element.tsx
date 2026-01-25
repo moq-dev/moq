@@ -2,7 +2,7 @@ import type HangWatch from "@moq/hang/watch/element";
 import { useContext } from "solid-js";
 import { Show } from "solid-js/web";
 import { Stats } from "../shared/components/stats";
-import type { ProviderProps } from "../shared/components/stats/types";
+
 import BufferingIndicator from "./components/BufferingIndicator";
 import WatchControls from "./components/WatchControls";
 import WatchUIContextProvider, { WatchUIContext } from "./context";
@@ -21,12 +21,8 @@ export function WatchUI(props: { watch: HangWatch }) {
 						<Show when={context.isStatsPanelVisible()}>
 							<Stats
 								context={WatchUIContext}
-								getElement={(ctx): ProviderProps | undefined => {
-									if (!ctx?.hangWatch) return undefined;
-									return {
-										audio: { source: ctx.hangWatch.audio.source },
-										video: { source: ctx.hangWatch.video.source },
-									};
+								getElement={(ctx): HangWatch | undefined => {
+									return ctx?.hangWatch;
 								}}
 							/>
 						</Show>

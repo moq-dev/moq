@@ -1,7 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
-import { PRIORITY } from "../priority";
+import * as Catalog from "../../catalog";
 
 export type MessageProps = {
 	enabled?: boolean | Signal<boolean>;
@@ -9,7 +8,7 @@ export type MessageProps = {
 
 export class Message {
 	static readonly TRACK = "chat/message.txt";
-	static readonly PRIORITY = PRIORITY.chat;
+	static readonly PRIORITY = Catalog.PRIORITY.chat;
 
 	enabled: Signal<boolean>;
 

@@ -1,8 +1,7 @@
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
-import { DEFAULT_CONTAINER, u53 } from "../../catalog";
+import * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import { isFirefox } from "../../util/hacks";
 import type { Source } from "./types";
@@ -40,7 +39,6 @@ export class Encoder {
 	enabled: Signal<boolean>;
 	source: Signal<Source | undefined>;
 	frame: Getter<VideoFrame | undefined>;
-	#container: Catalog.Container;
 
 	#catalog = new Signal<Catalog.VideoConfig | undefined>(undefined);
 	readonly catalog: Getter<Catalog.VideoConfig | undefined> = this.#catalog;
@@ -64,7 +62,6 @@ export class Encoder {
 		this.source = source;
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.config = Signal.from(props?.config);
-		this.#container = props?.container ?? DEFAULT_CONTAINER;
 
 		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runConfig.bind(this));
@@ -78,8 +75,6 @@ export class Encoder {
 		effect.set(this.active, true, false);
 
 		effect.spawn(async () => {
-			console.log(`[Video Publisher] Using container format: ${this.#container}`);
-
 			let group: Moq.Group | undefined;
 			effect.cleanup(() => group?.close());
 
@@ -95,7 +90,7 @@ export class Encoder {
 						throw new Error("no keyframe");
 					}
 
-					const buffer = Frame.encode(frame, frame.timestamp as Time.Micro, this.#container);
+					const buffer = Frame.encode(frame, frame.timestamp as Time.Micro);
 					group?.writeFrame(buffer);
 				},
 				error: (err: Error) => {
@@ -143,12 +138,12 @@ export class Encoder {
 
 		const catalog: Catalog.VideoConfig = {
 			codec: config.codec,
-			bitrate: config.bitrate ? u53(config.bitrate) : undefined,
+			bitrate: config.bitrate ? Catalog.u53(config.bitrate) : undefined,
 			framerate: config.framerate,
-			codedWidth: u53(config.width),
-			codedHeight: u53(config.height),
+			codedWidth: Catalog.u53(config.width),
+			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
-			container: this.#container,
+			container: Catalog.CONTAINER.legacy,
 		};
 
 		effect.set(this.#catalog, catalog);

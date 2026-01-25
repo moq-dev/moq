@@ -178,7 +178,7 @@ pub-hls name relay="http://localhost:4443/anon":
 		-c:v:1 libx264 -profile:v:1 high -level:v:1 4.1 -pix_fmt:v:1 yuv420p -tag:v:1 avc1 \
 		-b:v:1 300k -maxrate:v:1 330k -bufsize:v:1 600k \
 		-c:a aac -b:a 128k \
-		-f hls -hls_time 2 -hls_list_size 12 \
+		-f hls -hls_time 2 -hls_list_size 6 \
 		-hls_flags independent_segments+delete_segments \
 		-hls_segment_type fmp4 \
 		-master_pl_name master.m3u8 \
@@ -204,18 +204,44 @@ pub-hls name relay="http://localhost:4443/anon":
 		exit 1
 	fi
 
-	echo ">>> Starting HLS ingest from disk: $OUT_DIR/master.m3u8"
+	# Wait for individual playlists to be generated (they're referenced in master.m3u8)
+	# Give ffmpeg a bit more time to generate the variant playlists
+	echo ">>> Waiting for variant playlists..."
+	sleep 2
+	for i in {1..20}; do
+		# Check if at least one variant playlist exists
+		if [ -f "$OUT_DIR/v0/stream.m3u8" ] || [ -f "$OUT_DIR/v720/stream.m3u8" ] || [ -f "$OUT_DIR/v144/stream.m3u8" ] || [ -f "$OUT_DIR/vaudio/stream.m3u8" ]; then
+			break
+		fi
+		sleep 0.5
+	done
 
 	# Trap to clean up ffmpeg on exit
+	CLEANUP_CALLED=false
 	cleanup() {
+		if [ "$CLEANUP_CALLED" = "true" ]; then
+			return
+		fi
+		CLEANUP_CALLED=true
 		echo "Shutting down..."
 		kill $FFMPEG_PID 2>/dev/null || true
-		exit 0
+		# Wait a bit for ffmpeg to finish
+		sleep 0.5
+		# Force kill if still running
+		kill -9 $FFMPEG_PID 2>/dev/null || true
 	}
-	trap cleanup SIGINT SIGTERM
+	trap cleanup SIGINT SIGTERM EXIT
 
 	# Run hang to ingest from local files
-	cargo run --bin hang -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8"
+	echo ">>> Running with --passthrough flag"
+	cargo run --bin hang -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
+	EXIT_CODE=$?
+
+	# Cleanup after cargo run completes (success or failure)
+	cleanup
+
+	# Exit with the same code as cargo run
+	exit $EXIT_CODE
 
 # Publish a video using H.264 Annex B format to the localhost relay server
 pub-h264 name url="http://localhost:4443/anon" *args:

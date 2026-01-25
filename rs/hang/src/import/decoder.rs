@@ -2,7 +2,10 @@ use std::{fmt, str::FromStr};
 
 use bytes::Buf;
 
-use crate::{self as hang, Error, import::Aac, import::Opus};
+use crate::{
+	self as hang, Error,
+	import::{Aac, Fmp4Config, Opus},
+};
 
 #[cfg(feature = "h264")]
 use crate::import::Avc3;
@@ -98,7 +101,7 @@ impl Decoder {
 			#[cfg(feature = "h264")]
 			DecoderFormat::Avc3 => Avc3::new(broadcast).into(),
 			#[cfg(feature = "mp4")]
-			DecoderFormat::Fmp4 => Box::new(Fmp4::new(broadcast)).into(),
+			DecoderFormat::Fmp4 => Box::new(Fmp4::new(broadcast, Fmp4Config::default())).into(),
 			#[cfg(feature = "h265")]
 			DecoderFormat::Hev1 => Hev1::new(broadcast).into(),
 			DecoderFormat::Aac => Aac::new(broadcast).into(),

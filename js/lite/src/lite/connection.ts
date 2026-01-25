@@ -131,7 +131,7 @@ export class Connection implements Established {
 				// TODO use the session info
 			}
 		} finally {
-			console.warn("session stream closed");
+			console.debug("session stream closed");
 		}
 	}
 

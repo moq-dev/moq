@@ -107,6 +107,7 @@ impl Aac {
 			channel_count,
 			bitrate: None,
 			description: None,
+			container: hang::catalog::Container::Legacy,
 		};
 
 		tracing::debug!(name = ?track.name, ?config, "starting track");

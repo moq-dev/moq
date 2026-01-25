@@ -1,8 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
-import type * as Catalog from "./catalog";
-import * as Container from "./container";
 
 export interface Source {
 	byteLength: number;
@@ -16,9 +14,9 @@ export interface Frame {
 	group: number;
 }
 
-export function encode(source: Uint8Array | Source, timestamp: Time.Micro, container?: Catalog.Container): Uint8Array {
+export function encode(source: Uint8Array | Source, timestamp: Time.Micro): Uint8Array {
 	// Encode timestamp using the specified container format
-	const timestampBytes = Container.encodeTimestamp(timestamp, container);
+	const timestampBytes = encodeTimestamp(timestamp);
 
 	// Allocate buffer for timestamp + payload
 	const payloadSize = source instanceof Uint8Array ? source.byteLength : source.byteLength;
@@ -38,20 +36,18 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro, conta
 }
 
 // NOTE: A keyframe is always the first frame in a group, so it's not encoded on the wire.
-export function decode(buffer: Uint8Array, container?: Catalog.Container): { data: Uint8Array; timestamp: Time.Micro } {
+export function decode(buffer: Uint8Array): { data: Uint8Array; timestamp: Time.Micro } {
 	// Decode timestamp using the specified container format
-	const [timestamp, data] = Container.decodeTimestamp(buffer, container);
+	const [timestamp, data] = decodeTimestamp(buffer);
 	return { timestamp: timestamp as Time.Micro, data };
 }
 
 export class Producer {
 	#track: Moq.Track;
 	#group?: Moq.Group;
-	#container?: Catalog.Container;
 
-	constructor(track: Moq.Track, container?: Catalog.Container) {
+	constructor(track: Moq.Track) {
 		this.#track = track;
-		this.#container = container;
 	}
 
 	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
@@ -62,7 +58,7 @@ export class Producer {
 			throw new Error("must start with a keyframe");
 		}
 
-		this.#group?.writeFrame(encode(data, timestamp, this.#container));
+		this.#group?.writeFrame(encode(data, timestamp));
 	}
 
 	close() {
@@ -74,7 +70,6 @@ export class Producer {
 export interface ConsumerProps {
 	// Target latency in milliseconds (default: 0)
 	latency?: Signal<Time.Milli> | Time.Milli;
-	container?: Catalog.Container;
 }
 
 interface Group {
@@ -86,7 +81,6 @@ interface Group {
 export class Consumer {
 	#track: Moq.Track;
 	#latency: Signal<Time.Milli>;
-	#container?: Catalog.Container;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
 
@@ -98,7 +92,6 @@ export class Consumer {
 	constructor(track: Moq.Track, props?: ConsumerProps) {
 		this.#track = track;
 		this.#latency = Signal.from(props?.latency ?? Time.Milli.zero);
-		this.#container = props?.container;
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -152,7 +145,7 @@ export class Consumer {
 				const next = await group.consumer.readFrame();
 				if (!next) break;
 
-				const { data, timestamp } = decode(next, this.#container);
+				const { data, timestamp } = decode(next);
 				const frame = {
 					data,
 					timestamp,
@@ -281,4 +274,87 @@ export class Consumer {
 
 		this.#groups.length = 0;
 	}
+}
+
+/**
+ * Encodes a varint timestamp
+ *
+ * @param timestamp - The timestamp in microseconds
+ * @returns The encoded timestamp as a Uint8Array
+ */
+function encodeTimestamp(timestamp: Time.Micro): Uint8Array {
+	return encodeVarInt(timestamp);
+}
+
+/**
+ * Decodes a timestamp from a buffer according to the specified container format.
+ *
+ * @param buffer - The buffer containing the encoded timestamp
+ * @param container - The container format to use
+ * @returns [timestamp in microseconds, remaining buffer after timestamp]
+ */
+function decodeTimestamp(buffer: Uint8Array): [Time.Micro, Uint8Array] {
+	const [value, remaining] = decodeVarInt(buffer);
+	return [value as Time.Micro, remaining];
+}
+
+// ============================================================================
+// LEGACY VARINT IMPLEMENTATION
+// ============================================================================
+
+const MAX_U6 = 2 ** 6 - 1;
+const MAX_U14 = 2 ** 14 - 1;
+const MAX_U30 = 2 ** 30 - 1;
+const MAX_U53 = Number.MAX_SAFE_INTEGER;
+
+function decodeVarInt(buf: Uint8Array): [number, Uint8Array] {
+	const size = 1 << ((buf[0] & 0xc0) >> 6);
+
+	const view = new DataView(buf.buffer, buf.byteOffset, size);
+	const remain = new Uint8Array(buf.buffer, buf.byteOffset + size, buf.byteLength - size);
+	let v: number;
+
+	if (size === 1) {
+		v = buf[0] & 0x3f;
+	} else if (size === 2) {
+		v = view.getUint16(0) & 0x3fff;
+	} else if (size === 4) {
+		v = view.getUint32(0) & 0x3fffffff;
+	} else if (size === 8) {
+		// NOTE: Precision loss above 2^52
+		v = Number(view.getBigUint64(0) & 0x3fffffffffffffffn);
+	} else {
+		throw new Error("impossible");
+	}
+
+	return [v, remain];
+}
+
+function encodeVarInt(v: number): Uint8Array {
+	const dst = new Uint8Array(8);
+
+	if (v <= MAX_U6) {
+		dst[0] = v;
+		return new Uint8Array(dst.buffer, dst.byteOffset, 1);
+	}
+
+	if (v <= MAX_U14) {
+		const view = new DataView(dst.buffer, dst.byteOffset, 2);
+		view.setUint16(0, v | 0x4000);
+		return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+	}
+
+	if (v <= MAX_U30) {
+		const view = new DataView(dst.buffer, dst.byteOffset, 4);
+		view.setUint32(0, v | 0x80000000);
+		return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+	}
+
+	if (v <= MAX_U53) {
+		const view = new DataView(dst.buffer, dst.byteOffset, 8);
+		view.setBigUint64(0, BigInt(v) | 0xc000000000000000n);
+		return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+	}
+
+	throw new Error(`overflow, value larger than 53-bits: ${v}`);
 }
