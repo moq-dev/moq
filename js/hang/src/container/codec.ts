@@ -1,6 +1,5 @@
 import type { Time } from "@moq/lite";
 import type * as Catalog from "../catalog";
-import { DEFAULT_CONTAINER } from "../catalog";
 
 /**
  * Encodes a timestamp according to the specified container format.
@@ -9,14 +8,14 @@ import { DEFAULT_CONTAINER } from "../catalog";
  * @param container - The container format to use
  * @returns The encoded timestamp as a Uint8Array
  */
-export function encodeTimestamp(timestamp: Time.Micro, container: Catalog.Container = DEFAULT_CONTAINER): Uint8Array {
-	switch (container) {
+export function encodeTimestamp(timestamp: Time.Micro, container: Catalog.Container = { kind: "legacy" }): Uint8Array {
+	switch (container.kind) {
 		case "legacy":
 			return encodeVarInt(timestamp);
-		case "raw":
-			return encodeU64(timestamp);
-		case "fmp4":
-			throw new Error("fmp4 container not yet implemented");
+		case "cmaf":
+			throw new Error("cmaf container uses moof+mdat, not direct timestamp encoding");
+		default:
+			throw new Error(`unsupported container kind: ${(container as { kind: string }).kind}`);
 	}
 }
 
@@ -29,19 +28,17 @@ export function encodeTimestamp(timestamp: Time.Micro, container: Catalog.Contai
  */
 export function decodeTimestamp(
 	buffer: Uint8Array,
-	container: Catalog.Container = DEFAULT_CONTAINER,
+	container: Catalog.Container = { kind: "legacy" },
 ): [Time.Micro, Uint8Array] {
-	switch (container) {
+	switch (container.kind) {
 		case "legacy": {
 			const [value, remaining] = decodeVarInt(buffer);
 			return [value as Time.Micro, remaining];
 		}
-		case "raw": {
-			const [value, remaining] = decodeU64(buffer);
-			return [value as Time.Micro, remaining];
-		}
-		case "fmp4":
-			throw new Error("fmp4 container not yet implemented");
+		case "cmaf":
+			throw new Error("cmaf container uses moof+mdat, not direct timestamp decoding");
+		default:
+			throw new Error(`unsupported container kind: ${(container as { kind: string }).kind}`);
 	}
 }
 
@@ -52,14 +49,14 @@ export function decodeTimestamp(
  * @param container - The container format
  * @returns Size in bytes
  */
-export function getTimestampSize(container: Catalog.Container = DEFAULT_CONTAINER): number {
-	switch (container) {
+export function getTimestampSize(container: Catalog.Container = { kind: "legacy" }): number {
+	switch (container.kind) {
 		case "legacy":
 			return 8; // VarInt maximum size
-		case "raw":
-			return 8; // u64 fixed size
-		case "fmp4":
-			throw new Error("fmp4 container not yet implemented");
+		case "cmaf":
+			throw new Error("cmaf container uses moof+mdat, not direct timestamp encoding");
+		default:
+			throw new Error(`unsupported container kind: ${(container as { kind: string }).kind}`);
 	}
 }
 
@@ -122,34 +119,4 @@ function encodeVarInt(v: number): Uint8Array {
 	}
 
 	throw new Error(`overflow, value larger than 53-bits: ${v}`);
-}
-
-// ============================================================================
-// RAW U64 IMPLEMENTATION
-// ============================================================================
-
-/**
- * Decodes a fixed 8-byte big-endian unsigned 64-bit integer.
- */
-function decodeU64(buf: Uint8Array): [number, Uint8Array] {
-	if (buf.byteLength < 8) {
-		throw new Error("Buffer too short for u64 decode");
-	}
-
-	const view = new DataView(buf.buffer, buf.byteOffset, 8);
-	const value = Number(view.getBigUint64(0));
-	const remain = new Uint8Array(buf.buffer, buf.byteOffset + 8, buf.byteLength - 8);
-
-	return [value, remain];
-}
-
-/**
- * Encodes a number as a fixed 8-byte big-endian unsigned 64-bit integer.
- * Much simpler than VarInt!
- */
-function encodeU64(v: number): Uint8Array {
-	const dst = new Uint8Array(8);
-	const view = new DataView(dst.buffer, dst.byteOffset, 8);
-	view.setBigUint64(0, BigInt(v));
-	return dst;
 }

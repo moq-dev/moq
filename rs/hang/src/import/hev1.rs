@@ -62,6 +62,8 @@ impl Hev1 {
 			display_ratio_width: vui_data.display_ratio_width,
 			display_ratio_height: vui_data.display_ratio_height,
 			optimize_for_latency: None,
+			container: hang::catalog::Container::Legacy,
+			min_buffer: None,
 		};
 
 		if let Some(old) = &self.config

@@ -66,6 +66,8 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 		display_ratio_width: None,
 		display_ratio_height: None,
 		optimize_for_latency: None,
+		container: hang::catalog::Container::Legacy,
+		min_buffer: None,
 	};
 
 	// Create a map of video renditions

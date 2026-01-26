@@ -6,7 +6,7 @@ import { Broadcast } from "./broadcast";
 import * as Video from "./video";
 
 // TODO remove name; replaced with path
-const OBSERVED = ["url", "name", "path", "paused", "volume", "muted", "reload", "latency"] as const;
+const OBSERVED = ["url", "name", "path", "paused", "volume", "muted", "reload", "buffer"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -52,8 +52,9 @@ export default class HangWatch extends HTMLElement {
 	// TODO: Temporarily defaults to false because Cloudflare doesn't support it yet.
 	reload = new Signal(false);
 
-	// Delay playing audio and video for up to 100ms
-	latency = new Signal(100 as Time.Milli);
+	// Additional buffer in milliseconds on top of the catalog's minBuffer (default: 100ms).
+	// The effective latency = catalog.minBuffer + buffer
+	buffer = new Signal(100 as Time.Milli);
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
@@ -81,10 +82,10 @@ export default class HangWatch extends HTMLElement {
 			enabled: this.#enabled,
 			reload: this.reload,
 			audio: {
-				latency: this.latency,
+				buffer: this.buffer,
 			},
 			video: {
-				latency: this.latency,
+				buffer: this.buffer,
 			},
 		});
 		this.signals.cleanup(() => this.broadcast.close());
@@ -163,8 +164,8 @@ export default class HangWatch extends HTMLElement {
 		});
 
 		this.signals.effect((effect) => {
-			const latency = Math.floor(effect.get(this.latency));
-			this.setAttribute("latency", latency.toString());
+			const buffer = Math.floor(effect.get(this.buffer));
+			this.setAttribute("buffer", buffer.toString());
 		});
 	}
 
@@ -199,8 +200,8 @@ export default class HangWatch extends HTMLElement {
 			this.muted.set(newValue !== null);
 		} else if (name === "reload") {
 			this.reload.set(newValue !== null);
-		} else if (name === "latency") {
-			this.latency.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
+		} else if (name === "buffer") {
+			this.buffer.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);

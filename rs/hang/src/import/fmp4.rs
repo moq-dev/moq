@@ -1,10 +1,20 @@
-use crate::catalog::{AAC, AV1, AudioCodec, AudioConfig, CatalogProducer, H264, H265, VP9, VideoCodec, VideoConfig};
+use crate::catalog::{AAC, AV1, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use crate::{self as hang, Timestamp};
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
 use moq_lite as moq;
 use mp4_atom::{Any, Atom, DecodeMaybe, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
+use tokio::io::{AsyncRead, AsyncReadExt};
+
+/// Configuration for the fMP4 importer.
+#[derive(Clone, Default)]
+pub struct Fmp4Config {
+	/// When true, transport fMP4 fragments directly (passthrough mode)
+	///
+	/// This requires a player that can decode the fragments directly.
+	pub passthrough: bool,
+}
 
 /// Converts fMP4/CMAF files into hang broadcast streams.
 ///
@@ -25,18 +35,10 @@ use std::collections::HashMap;
 /// - Opus
 pub struct Fmp4 {
 	// The broadcast being produced
-	// This `hang` variant includes a catalog.
 	broadcast: hang::BroadcastProducer,
 
-	// A clone of the broadcast's catalog for mutable access.
-	// This is the same underlying catalog (via Arc), just a separate binding.
-	catalog: CatalogProducer,
-
 	// A lookup to tracks in the broadcast
-	tracks: HashMap<u32, hang::TrackProducer>,
-
-	// The timestamp of the last keyframe for each track
-	last_keyframe: HashMap<u32, hang::Timestamp>,
+	tracks: HashMap<u32, Fmp4Track>,
 
 	// The moov atom at the start of the file.
 	moov: Option<Moov>,
@@ -44,6 +46,40 @@ pub struct Fmp4 {
 	// The latest moof header
 	moof: Option<Moof>,
 	moof_size: usize,
+
+	/// Configuration for the fMP4 importer.
+	config: Fmp4Config,
+
+	// -- PASSTHROUGH ONLY --
+	moof_raw: Option<Bytes>,
+}
+
+struct Fmp4Track {
+	producer: hang::TrackProducer,
+
+	// The current group being written, only used for passthrough mode.
+	group: Option<moq_lite::GroupProducer>,
+
+	// The minimum buffer required for the track.
+	min_buffer: Option<Timestamp>,
+
+	// The last timestamp seen for this track.
+	last_timestamp: Option<Timestamp>,
+
+	// The minimum duration between frames for this track.
+	min_duration: Option<Timestamp>,
+}
+
+impl Fmp4Track {
+	fn new(producer: hang::TrackProducer) -> Self {
+		Self {
+			producer,
+			group: None,
+			min_buffer: None,
+			last_timestamp: None,
+			min_duration: None,
+		}
+	}
 }
 
 impl Fmp4 {
@@ -51,19 +87,29 @@ impl Fmp4 {
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the
 	/// fMP4 file. The catalog from the `hang::BroadcastProducer` is used automatically.
-	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
-		let catalog = broadcast.catalog.clone();
+	pub fn new(broadcast: hang::BroadcastProducer, config: Fmp4Config) -> Self {
 		Self {
-			broadcast,
-			catalog,
 			tracks: HashMap::default(),
-			last_keyframe: HashMap::default(),
 			moov: None,
 			moof: None,
 			moof_size: 0,
+			broadcast,
+			config,
+			moof_raw: None,
 		}
 	}
 
+	/// Decode from an asynchronous reader.
+	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> anyhow::Result<()> {
+		let mut buffer = BytesMut::new();
+		while reader.read_buf(&mut buffer).await? > 0 {
+			self.decode(&mut buffer)?;
+		}
+
+		Ok(())
+	}
+
+	/// Decode a buffer of bytes.
 	pub fn decode<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
 		let mut cursor = std::io::Cursor::new(buf);
 		let mut position = 0;
@@ -71,35 +117,34 @@ impl Fmp4 {
 		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
 			// Process the parsed atom.
 			let size = cursor.position() as usize - position;
-			position = cursor.position() as usize;
+
+			// The raw bytes of the atom we just parsed (not copied).
+			let raw = &cursor.get_ref().as_ref()[position..position + size];
 
 			match atom {
-				Any::Ftyp(_) | Any::Styp(_) => {
-					// Skip
-				}
+				Any::Ftyp(_) | Any::Styp(_) => {}
 				Any::Moov(moov) => {
-					// Create the broadcast.
 					self.init(moov)?;
 				}
 				Any::Moof(moof) => {
-					if self.moof.is_some() {
-						// Two moof boxes in a row.
-						anyhow::bail!("duplicate moof box");
-					}
-
-					self.moof = Some(moof);
+					anyhow::ensure!(self.moof.is_none(), "duplicate moof box");
+					self.moof.replace(moof);
 					self.moof_size = size;
+
+					if self.config.passthrough {
+						self.moof_raw.replace(Bytes::copy_from_slice(raw));
+					}
 				}
 				Any::Mdat(mdat) => {
-					// Extract the samples from the mdat atom.
-					let header_size = size - mdat.data.len();
-					self.extract(mdat, header_size)?;
+					self.extract(mdat, raw)?;
 				}
 				_ => {
-					// Skip unknown atoms
-					tracing::warn!(?atom, "skipping")
+					// Skip unknown atoms (e.g., sidx, which is optional and used for segment indexing)
+					// These are safe to ignore and don't affect playback
 				}
 			}
+
+			position = cursor.position() as usize;
 		}
 
 		// Advance the buffer by the amount of data that was processed.
@@ -113,7 +158,13 @@ impl Fmp4 {
 	}
 
 	fn init(&mut self, moov: Moov) -> anyhow::Result<()> {
-		let mut catalog = self.catalog.lock();
+		// Make a clone to avoid the borrow checker.
+		let mut catalog = self.broadcast.catalog.clone();
+		let mut catalog = catalog.lock();
+
+		// Track which specific tracks were created in this init call
+		let mut created_video_tracks = Vec::new();
+		let mut created_audio_tracks = Vec::new();
 
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
@@ -121,44 +172,46 @@ impl Fmp4 {
 
 			let track = match handler.as_ref() {
 				b"vide" => {
-					let config = Self::init_video(trak)?;
+					let config = self.init_video(trak)?;
 
 					let track = moq::Track {
 						name: self.broadcast.track_name("video"),
 						priority: 1,
 					};
 
-					tracing::debug!(name = ?track.name, ?config, "starting track");
-
-					let video = catalog.insert_video(track.name.clone(), config);
+					let video = catalog.insert_video(track.name.clone(), config.clone());
 					video.priority = 1;
+
+					// Record this track name
+					created_video_tracks.push(track.name.clone());
 
 					let track = track.produce();
 					self.broadcast.insert_track(track.consumer);
-					track.producer
+					hang::TrackProducer::new(track.producer)
 				}
 				b"soun" => {
-					let config = Self::init_audio(trak)?;
+					let config = self.init_audio(trak)?;
 
 					let track = moq::Track {
 						name: self.broadcast.track_name("audio"),
 						priority: 2,
 					};
 
-					tracing::debug!(name = ?track.name, ?config, "starting track");
-
-					let audio = catalog.insert_audio(track.name.clone(), config);
+					let audio = catalog.insert_audio(track.name.clone(), config.clone());
 					audio.priority = 2;
+
+					// Record this track name
+					created_audio_tracks.push(track.name.clone());
 
 					let track = track.produce();
 					self.broadcast.insert_track(track.consumer);
-					track.producer
+					hang::TrackProducer::new(track.producer)
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
 
-			self.tracks.insert(track_id, track.into());
+			self.tracks.insert(track_id, Fmp4Track::new(track));
 		}
 
 		self.moov = Some(moov);
@@ -166,7 +219,19 @@ impl Fmp4 {
 		Ok(())
 	}
 
-	fn init_video(trak: &Trak) -> anyhow::Result<VideoConfig> {
+	fn container(&self, trak: &Trak) -> Container {
+		if self.config.passthrough {
+			Container::Cmaf {
+				timescale: trak.mdia.mdhd.timescale as u64,
+				track_id: trak.tkhd.track_id,
+			}
+		} else {
+			Container::Legacy
+		}
+	}
+
+	fn init_video(&mut self, trak: &Trak) -> anyhow::Result<VideoConfig> {
+		let container = self.container(trak);
 		let stsd = &trak.mdia.minf.stbl.stsd;
 
 		let codec = match stsd.codecs.len() {
@@ -199,10 +264,12 @@ impl Fmp4 {
 					display_ratio_width: None,
 					display_ratio_height: None,
 					optimize_for_latency: None,
+					container,
+					min_buffer: None,
 				}
 			}
-			mp4_atom::Codec::Hev1(hev1) => Self::init_h265(true, &hev1.hvcc, &hev1.visual)?,
-			mp4_atom::Codec::Hvc1(hvc1) => Self::init_h265(false, &hvc1.hvcc, &hvc1.visual)?,
+			mp4_atom::Codec::Hev1(hev1) => self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
+			mp4_atom::Codec::Hvc1(hvc1) => self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
 			mp4_atom::Codec::Vp08(vp08) => VideoConfig {
 				codec: VideoCodec::VP8,
 				description: Default::default(),
@@ -214,6 +281,8 @@ impl Fmp4 {
 				display_ratio_width: None,
 				display_ratio_height: None,
 				optimize_for_latency: None,
+				container,
+				min_buffer: None,
 			},
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
@@ -240,6 +309,8 @@ impl Fmp4 {
 					optimize_for_latency: None,
 					bitrate: None,
 					framerate: None,
+					container,
+					min_buffer: None,
 				}
 			}
 			mp4_atom::Codec::Av01(av01) => {
@@ -272,6 +343,8 @@ impl Fmp4 {
 					optimize_for_latency: None,
 					bitrate: None,
 					framerate: None,
+					container,
+					min_buffer: None,
 				}
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
@@ -282,7 +355,13 @@ impl Fmp4 {
 	}
 
 	// There's two almost identical hvcc atoms in the wild.
-	fn init_h265(in_band: bool, hvcc: &mp4_atom::Hvcc, visual: &mp4_atom::Visual) -> anyhow::Result<VideoConfig> {
+	fn init_h265(
+		&mut self,
+		in_band: bool,
+		hvcc: &mp4_atom::Hvcc,
+		visual: &mp4_atom::Visual,
+		container: Container,
+	) -> anyhow::Result<VideoConfig> {
 		let mut description = BytesMut::new();
 		hvcc.encode_body(&mut description)?;
 
@@ -306,10 +385,13 @@ impl Fmp4 {
 			display_ratio_width: None,
 			display_ratio_height: None,
 			optimize_for_latency: None,
+			container,
+			min_buffer: None,
 		})
 	}
 
-	fn init_audio(trak: &Trak) -> anyhow::Result<AudioConfig> {
+	fn init_audio(&mut self, trak: &Trak) -> anyhow::Result<AudioConfig> {
+		let container = self.container(trak);
 		let stsd = &trak.mdia.minf.stbl.stsd;
 
 		let codec = match stsd.codecs.len() {
@@ -338,6 +420,8 @@ impl Fmp4 {
 					channel_count: mp4a.audio.channel_count as _,
 					bitrate: Some(bitrate.into()),
 					description: None, // TODO?
+					container,
+					min_buffer: None,
 				}
 			}
 			mp4_atom::Codec::Opus(opus) => {
@@ -347,6 +431,8 @@ impl Fmp4 {
 					channel_count: opus.audio.channel_count as _,
 					bitrate: None,
 					description: None, // TODO?
+					container,
+					min_buffer: None,
 				}
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
@@ -357,15 +443,11 @@ impl Fmp4 {
 	}
 
 	// Extract all frames out of an mdat atom.
-	fn extract(&mut self, mdat: Mdat, header_size: usize) -> anyhow::Result<()> {
-		let mdat = Bytes::from(mdat.data);
+	fn extract(&mut self, mdat: Mdat, mdat_raw: &[u8]) -> anyhow::Result<()> {
 		let moov = self.moov.as_ref().context("missing moov box")?;
 		let moof = self.moof.take().context("missing moof box")?;
-
-		// Keep track of the minimum and maximum timestamp so we can scold the user.
-		// Ideally these should both be the same value.
-		let mut min_timestamp = None;
-		let mut max_timestamp = None;
+		let moof_size = self.moof_size;
+		let header_size = mdat_raw.len() - mdat.data.len();
 
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
@@ -397,6 +479,13 @@ impl Fmp4 {
 			if traf.trun.is_empty() {
 				anyhow::bail!("missing trun box");
 			}
+
+			// Keep track of the minimum and maximum timestamp for this track to compute the min_buffer.
+			// Ideally these should both be the same value (a single frame lul).
+			let mut min_timestamp = None;
+			let mut max_timestamp = None;
+			let mut contains_keyframe = false;
+
 			for trun in &traf.trun {
 				let tfhd = &traf.tfhd;
 
@@ -405,11 +494,12 @@ impl Fmp4 {
 					// This is relative to the start of the MOOF, not the MDAT.
 					// Note: The trun data offset can be negative, but... that's not supported here.
 					let data_offset: usize = data_offset.try_into().context("invalid data offset")?;
-					if data_offset < self.moof_size {
+					if data_offset < moof_size {
 						anyhow::bail!("invalid data offset");
 					}
+
 					// Reset offset if the TRUN has a data offset
-					offset = base_offset + data_offset - self.moof_size - header_size;
+					offset = base_offset + data_offset - moof_size - header_size;
 				}
 
 				for entry in &trun.entries {
@@ -427,7 +517,7 @@ impl Fmp4 {
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
 					let timestamp = hang::Timestamp::from_scale(pts, timescale)?;
 
-					if offset + size > mdat.len() {
+					if offset + size > mdat.data.len() {
 						anyhow::bail!("invalid data offset");
 					}
 
@@ -436,55 +526,98 @@ impl Fmp4 {
 						let keyframe = (flags >> 24) & 0x3 == 0x2; // kSampleDependsOnNoOther
 						let non_sync = (flags >> 16) & 0x1 == 0x1; // kSampleIsNonSyncSample
 
-						if keyframe && !non_sync {
-							for audio in moov.trak.iter().filter(|t| t.mdia.hdlr.handler == b"soun".into()) {
-								// Force an audio keyframe on video keyframes
-								self.last_keyframe.remove(&audio.tkhd.track_id);
-							}
-
-							true
-						} else {
-							false
-						}
+						keyframe && !non_sync
 					} else {
-						match self.last_keyframe.get(&track_id) {
-							// Force an audio keyframe at least every 10 seconds, but ideally at video keyframes
-							Some(prev) => timestamp - *prev > Timestamp::from_secs(10).unwrap(),
-							None => true,
-						}
+						// Audio frames are always keyframes.
+						true
 					};
 
-					if keyframe {
-						self.last_keyframe.insert(track_id, timestamp);
+					contains_keyframe |= keyframe;
+
+					if !self.config.passthrough {
+						// TODO Avoid a copy if mp4-atom uses Bytes?
+						let payload = Bytes::copy_from_slice(&mdat.data[offset..(offset + size)]);
+
+						let frame = hang::Frame {
+							timestamp,
+							keyframe,
+							payload: payload.into(),
+						};
+						track.producer.write(frame)?;
 					}
 
-					let payload = mdat.slice(offset..(offset + size));
+					if timestamp >= max_timestamp.unwrap_or(Timestamp::ZERO) {
+						max_timestamp = Some(timestamp);
+					}
+					if timestamp <= min_timestamp.unwrap_or(Timestamp::MAX) {
+						min_timestamp = Some(timestamp);
+					}
 
-					let frame = hang::Frame {
-						timestamp,
-						keyframe,
-						payload: payload.into(),
-					};
-					track.write(frame)?;
+					if let Some(last_timestamp) = track.last_timestamp
+						&& let Ok(duration) = timestamp.checked_sub(last_timestamp)
+						&& duration < track.min_duration.unwrap_or(Timestamp::MAX)
+					{
+						track.min_duration = Some(duration);
+					}
+
+					track.last_timestamp = Some(timestamp);
 
 					dts += duration as u64;
 					offset += size;
-
-					if timestamp >= max_timestamp.unwrap_or_default() {
-						max_timestamp = Some(timestamp);
-					}
-					if timestamp <= min_timestamp.unwrap_or_default() {
-						min_timestamp = Some(timestamp);
-					}
 				}
 			}
-		}
 
-		if let (Some(min), Some(max)) = (min_timestamp, max_timestamp) {
-			let diff = max - min;
+			// If we're doing passthrough mode, then we write one giant fragment instead of individual frames.
+			if self.config.passthrough {
+				let mut group = if contains_keyframe {
+					if let Some(group) = track.group.take() {
+						group.close();
+					}
 
-			if diff > Timestamp::from_millis(1).unwrap() {
-				tracing::warn!("fMP4 introduced {:?} of latency", diff);
+					track.producer.inner.append_group()
+				} else {
+					track.group.take().context("no keyframe at start")?
+				};
+
+				let moof_raw = self.moof_raw.as_ref().context("missing moof box")?;
+
+				// To avoid an extra allocation, we use the chunked API to write the moof and mdat atoms separately.
+				let mut frame = group.create_frame(moq_lite::Frame {
+					size: moof_raw.len() as u64 + mdat_raw.len() as u64,
+				});
+
+				frame.write_chunk(moof_raw.clone());
+				frame.write_chunk(Bytes::copy_from_slice(mdat_raw));
+				frame.close();
+
+				track.group = Some(group);
+			}
+
+			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
+				// We report the minimum buffer required as the difference between the min and max frames.
+				// We also add the duration between frames to account for the frame rate.
+				// ex. for 2s fragments, this should be exactly 2s if we did everything correctly.
+				let min_buffer = max - min + min_duration;
+
+				if min_buffer < track.min_buffer.unwrap_or(Timestamp::MAX) {
+					track.min_buffer = Some(min_buffer);
+
+					// Update the catalog with the new min_buffer
+					let mut catalog = self.broadcast.catalog.lock();
+
+					// We're lazy and don't keep track if this track is for audio or video, so just try to update both.
+					if let Some(video) = catalog.video.as_mut()
+						&& let Some(config) = video.renditions.get_mut(&track.producer.info.name)
+					{
+						config.min_buffer = Some(min_buffer.convert()?);
+					}
+
+					if let Some(audio) = catalog.audio.as_mut()
+						&& let Some(config) = audio.renditions.get_mut(&track.producer.info.name)
+					{
+						config.min_buffer = Some(min_buffer.convert()?);
+					}
+				}
 			}
 		}
 
@@ -497,11 +630,9 @@ impl Drop for Fmp4 {
 		let mut catalog = self.broadcast.catalog.lock();
 
 		for track in self.tracks.values() {
-			tracing::debug!(name = ?track.info.name, "ending track");
-
 			// We're too lazy to keep track of if this track is for audio or video, so we just remove both.
-			catalog.remove_video(&track.info.name);
-			catalog.remove_audio(&track.info.name);
+			catalog.remove_video(&track.producer.info.name);
+			catalog.remove_audio(&track.producer.info.name);
 		}
 	}
 }

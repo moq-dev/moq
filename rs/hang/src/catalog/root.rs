@@ -160,6 +160,7 @@ impl CatalogProducer {
 		CatalogGuard {
 			catalog: self.current.lock().unwrap(),
 			track: &mut self.track,
+			updated: false,
 		}
 	}
 
@@ -186,6 +187,7 @@ impl From<moq_lite::TrackProducer> for CatalogProducer {
 pub struct CatalogGuard<'a> {
 	catalog: MutexGuard<'a, Catalog>,
 	track: &'a mut moq_lite::TrackProducer,
+	updated: bool,
 }
 
 impl<'a> Deref for CatalogGuard<'a> {
@@ -198,12 +200,18 @@ impl<'a> Deref for CatalogGuard<'a> {
 
 impl<'a> DerefMut for CatalogGuard<'a> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.updated = true;
 		&mut self.catalog
 	}
 }
 
 impl Drop for CatalogGuard<'_> {
 	fn drop(&mut self) {
+		// Avoid publishing if we didn't use `&mut self` at all.
+		if !self.updated {
+			return;
+		}
+
 		let mut group = self.track.append_group();
 
 		// TODO decide if this should return an error, or be impossible to fail
@@ -272,7 +280,7 @@ impl From<moq_lite::TrackConsumer> for CatalogConsumer {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{AudioCodec::Opus, AudioConfig, H264, VideoConfig};
+	use crate::catalog::{AudioCodec::Opus, AudioConfig, Container, H264, VideoConfig};
 
 	use super::*;
 
@@ -286,7 +294,8 @@ mod test {
 						"codedWidth": 1280,
 						"codedHeight": 720,
 						"bitrate": 6000000,
-						"framerate": 30.0
+						"framerate": 30.0,
+						"container": "legacy"
 					}
 				},
 				"priority": 1
@@ -297,7 +306,8 @@ mod test {
 						"codec": "opus",
 						"sampleRate": 48000,
 						"numberOfChannels": 2,
-						"bitrate": 128000
+						"bitrate": 128000,
+						"container": "legacy"
 					}
 				},
 				"priority": 2
@@ -326,6 +336,8 @@ mod test {
 				bitrate: Some(6_000_000),
 				framerate: Some(30.0),
 				optimize_for_latency: None,
+				container: Container::Legacy,
+				min_buffer: None,
 			},
 		);
 
@@ -338,6 +350,8 @@ mod test {
 				channel_count: 2,
 				bitrate: Some(128_000),
 				description: None,
+				container: Container::Legacy,
+				min_buffer: None,
 			},
 		);
 

@@ -73,7 +73,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	};
 
 	const setLatencyValue = (latency: number) => {
-		props.hangWatch.latency.set(latency as Moq.Time.Milli);
+		props.hangWatch.buffer.set(latency as Moq.Time.Milli);
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
@@ -153,7 +153,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const latency = effect.get(watch.latency);
+		// Use the computed latency from the video source (minBuffer + buffer)
+		const latency = effect.get(watch.video.source.latency);
 		setLatency(latency);
 	});
 

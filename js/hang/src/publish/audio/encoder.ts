@@ -2,7 +2,6 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
-import { DEFAULT_CONTAINER } from "../../catalog";
 import { u53 } from "../../catalog/integers";
 import * as Frame from "../../frame";
 import * as libav from "../../util/libav";
@@ -65,7 +64,7 @@ export class Encoder {
 		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.maxLatency = props?.maxLatency ?? (100 as Time.Milli); // Default is a group every 100ms
-		this.#container = props?.container ?? DEFAULT_CONTAINER;
+		this.#container = props?.container ?? { kind: "legacy" };
 
 		this.#signals.effect(this.#runSource.bind(this));
 		this.#signals.effect(this.#runConfig.bind(this));

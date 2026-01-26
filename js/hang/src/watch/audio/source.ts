@@ -3,7 +3,9 @@ import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
+import * as Mp4 from "../../mp4";
 import * as Hex from "../../util/hex";
+import { Latency } from "../../util/latency";
 import * as libav from "../../util/libav";
 import type * as Render from "./render";
 
@@ -16,8 +18,10 @@ export type SourceProps = {
 	// Enable to download the audio track.
 	enabled?: boolean | Signal<boolean>;
 
-	// Jitter buffer size in milliseconds (default: 100ms)
-	latency?: Time.Milli | Signal<Time.Milli>;
+	// Additional buffer in milliseconds on top of the catalog's minBuffer (default: 100ms).
+	// The effective latency = catalog.minBuffer + buffer
+	// Increase this if experiencing stuttering due to network jitter.
+	buffer?: Time.Milli | Signal<Time.Milli>;
 };
 
 export interface AudioStats {
@@ -50,8 +54,12 @@ export class Source {
 	catalog = new Signal<Catalog.Audio | undefined>(undefined);
 	config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 
-	// Not a signal because I'm lazy.
-	readonly latency: Signal<Time.Milli>;
+	// Additional buffer in milliseconds (on top of catalog's minBuffer).
+	buffer: Signal<Time.Milli>;
+
+	// Computed latency = catalog.minBuffer + buffer
+	#latency: Latency;
+	readonly latency: Getter<Time.Milli>;
 
 	// The name of the active rendition.
 	active = new Signal<string | undefined>(undefined);
@@ -65,7 +73,14 @@ export class Source {
 	) {
 		this.broadcast = broadcast;
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.latency = Signal.from(props?.latency ?? (100 as Time.Milli)); // TODO Reduce this once fMP4 stuttering is fixed.
+		this.buffer = Signal.from(props?.buffer ?? (100 as Time.Milli));
+
+		// Compute effective latency from catalog.minBuffer + buffer
+		this.#latency = new Latency({
+			buffer: this.buffer,
+			config: this.config,
+		});
+		this.latency = this.#latency.combined;
 
 		this.#signals.effect((effect) => {
 			const audio = effect.get(catalog)?.audio;
@@ -127,7 +142,7 @@ export class Source {
 				type: "init",
 				rate: sampleRate,
 				channels: channelCount,
-				latency: this.latency.peek(), // TODO make it reactive
+				latency: this.#latency.peek(), // TODO make it reactive
 			};
 			worklet.port.postMessage(init);
 
@@ -166,12 +181,17 @@ export class Source {
 		const sub = broadcast.subscribe(active, catalog.priority);
 		effect.cleanup(() => sub.close());
 
+		if (config.container.kind === "cmaf") {
+			this.#runCmafDecoder(effect, sub, config);
+		} else {
+			this.#runLegacyDecoder(effect, sub, config);
+		}
+	}
+
+	#runLegacyDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
-		// Container defaults to "legacy" via Zod schema for backward compatibility
-		console.log(`[Audio Subscriber] Using container format: ${config.container}`);
 		const consumer = new Frame.Consumer(sub, {
-			latency: Math.max(this.latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
-			container: config.container,
+			latency: Math.max(this.#latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -210,6 +230,66 @@ export class Source {
 		});
 	}
 
+	#runCmafDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
+		if (config.container.kind !== "cmaf") return;
+
+		const { timescale } = config.container;
+		const description = config.description ? Hex.toBytes(config.description) : undefined;
+
+		effect.spawn(async () => {
+			const loaded = await libav.polyfill();
+			if (!loaded) return; // cancelled
+
+			const decoder = new AudioDecoder({
+				output: (data) => this.#emit(data),
+				error: (error) => console.error(error),
+			});
+			effect.cleanup(() => decoder.close());
+
+			// Configure decoder with description from catalog
+			decoder.configure({
+				codec: config.codec,
+				sampleRate: config.sampleRate,
+				numberOfChannels: config.numberOfChannels,
+				description,
+			});
+
+			// Process data segments
+			// TODO: Use a consumer wrapper for CMAF to support latency control
+			for (;;) {
+				const group = await sub.nextGroup();
+				if (!group) break;
+
+				effect.spawn(async () => {
+					try {
+						for (;;) {
+							const segment = await group.readFrame();
+							if (!segment) break;
+
+							const samples = Mp4.decodeDataSegment(segment, timescale);
+
+							for (const sample of samples) {
+								this.#stats.update((stats) => ({
+									bytesReceived: (stats?.bytesReceived ?? 0) + sample.data.byteLength,
+								}));
+
+								const chunk = new EncodedAudioChunk({
+									type: sample.keyframe ? "key" : "delta",
+									data: sample.data,
+									timestamp: sample.timestamp,
+								});
+
+								decoder.decode(chunk);
+							}
+						}
+					} finally {
+						group.close();
+					}
+				});
+			}
+		});
+	}
+
 	#emit(sample: AudioData) {
 		const timestamp = sample.timestamp as Time.Micro;
 
@@ -244,6 +324,7 @@ export class Source {
 	}
 
 	close() {
+		this.#latency.close();
 		this.#signals.close();
 	}
 }

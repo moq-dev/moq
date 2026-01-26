@@ -3,15 +3,18 @@ import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
+import * as Mp4 from "../../mp4";
 import { PRIORITY } from "../../publish/priority";
 import * as Hex from "../../util/hex";
+import { Latency } from "../../util/latency";
 
 export type SourceProps = {
 	enabled?: boolean | Signal<boolean>;
 
-	// Jitter buffer size in milliseconds (default: 100ms)
-	// When using b-frames, this should to be larger than the frame duration.
-	latency?: Time.Milli | Signal<Time.Milli>;
+	// Additional buffer in milliseconds on top of the catalog's minBuffer (default: 100ms).
+	// The effective latency = catalog.minBuffer + buffer
+	// Increase this if experiencing stuttering due to network jitter.
+	buffer?: Time.Milli | Signal<Time.Milli>;
 };
 
 export type Target = {
@@ -64,6 +67,10 @@ export class Source {
 	#selected = new Signal<string | undefined>(undefined);
 	#selectedConfig = new Signal<RequiredDecoderConfig | undefined>(undefined);
 
+	// The config of the active rendition.
+	#config = new Signal<Catalog.VideoConfig | undefined>(undefined);
+	readonly config: Getter<Catalog.VideoConfig | undefined> = this.#config;
+
 	// The name of the active rendition.
 	active = new Signal<string | undefined>(undefined);
 
@@ -77,8 +84,12 @@ export class Source {
 	// Expose the current frame to render as a signal
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
-	// The target latency in milliseconds.
-	latency: Signal<Time.Milli>;
+	// Additional buffer in milliseconds (on top of catalog's minBuffer).
+	buffer: Signal<Time.Milli>;
+
+	// Computed latency = catalog.minBuffer + buffer
+	#latency: Latency;
+	readonly latency: Getter<Time.Milli>;
 
 	// The display size of the video in pixels, ideally sourced from the catalog.
 	display = new Signal<{ width: number; height: number } | undefined>(undefined);
@@ -103,8 +114,15 @@ export class Source {
 		props?: SourceProps,
 	) {
 		this.broadcast = broadcast;
-		this.latency = Signal.from(props?.latency ?? (100 as Time.Milli));
+		this.buffer = Signal.from(props?.buffer ?? (100 as Time.Milli));
 		this.enabled = Signal.from(props?.enabled ?? false);
+
+		// Compute effective latency from catalog.minBuffer + buffer
+		this.#latency = new Latency({
+			buffer: this.buffer,
+			config: this.#config,
+		});
+		this.latency = this.#latency.combined;
 
 		this.#signals.effect((effect) => {
 			const c = effect.get(catalog)?.video;
@@ -126,6 +144,18 @@ export class Source {
 			const supported: Record<string, Catalog.VideoConfig> = {};
 
 			for (const [name, rendition] of Object.entries(renditions)) {
+				// For CMAF, we get description from init segment, so skip validation here
+				// and just check if the codec is supported
+				if (rendition.container.kind === "cmaf") {
+					const { supported: valid } = await VideoDecoder.isConfigSupported({
+						codec: rendition.codec,
+						optimizeForLatency: rendition.optimizeForLatency ?? true,
+					});
+					if (valid) supported[name] = rendition;
+					continue;
+				}
+
+				// Legacy container: validate with description from catalog
 				const description = rendition.description ? Hex.toBytes(rendition.description) : undefined;
 
 				const { supported: valid } = await VideoDecoder.isConfigSupported({
@@ -156,6 +186,9 @@ export class Source {
 		if (!selected) return;
 
 		effect.set(this.#selected, selected);
+
+		// Store the full config for latency computation
+		effect.set(this.#config, supported[selected]);
 
 		// Remove the codedWidth/Height from the config to avoid a hard reload if nothing else has changed.
 		const config = { ...supported[selected], codedWidth: undefined, codedHeight: undefined };
@@ -194,15 +227,6 @@ export class Source {
 	#runTrack(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
 		const sub = broadcast.subscribe(name, PRIORITY.video); // TODO use priority from catalog
 		effect.cleanup(() => sub.close());
-
-		// Create consumer that reorders groups/frames up to the provided latency.
-		// Container defaults to "legacy" via Zod schema for backward compatibility
-		console.log(`[Video Subscriber] Using container format: ${config.container}`);
-		const consumer = new Frame.Consumer(sub, {
-			latency: this.latency,
-			container: config.container,
-		});
-		effect.cleanup(() => consumer.close());
 
 		// We need a queue because VideoDecoder doesn't block on a Promise returned by output.
 		// NOTE: We will drain this queue almost immediately, so the highWaterMark is just a safety net.
@@ -249,6 +273,7 @@ export class Source {
 		});
 		effect.cleanup(() => decoder.close());
 
+		// Output processing - same for both container types
 		effect.spawn(async () => {
 			for (;;) {
 				const { value: frame } = await reader.read();
@@ -262,7 +287,7 @@ export class Source {
 					this.#reference = ref;
 					// Don't sleep so we immediately render this frame.
 				} else {
-					sleep = this.#reference - ref + this.latency.peek();
+					sleep = this.#reference - ref + this.#latency.peek();
 				}
 
 				if (sleep > MIN_SYNC_WAIT_MS) {
@@ -297,6 +322,21 @@ export class Source {
 			}
 		});
 
+		// Input processing - depends on container type
+		if (config.container.kind === "cmaf") {
+			this.#runCmafTrack(effect, sub, config, decoder);
+		} else {
+			this.#runLegacyTrack(effect, sub, config, decoder);
+		}
+	}
+
+	#runLegacyTrack(effect: Effect, sub: Moq.Track, config: RequiredDecoderConfig, decoder: VideoDecoder): void {
+		// Create consumer that reorders groups/frames up to the provided latency.
+		const consumer = new Frame.Consumer(sub, {
+			latency: this.#latency.combined,
+		});
+		effect.cleanup(() => consumer.close());
+
 		decoder.configure({
 			...config,
 			description: config.description ? Hex.toBytes(config.description) : undefined,
@@ -324,6 +364,61 @@ export class Source {
 				}));
 
 				decoder.decode(chunk);
+			}
+		});
+	}
+
+	#runCmafTrack(effect: Effect, sub: Moq.Track, config: RequiredDecoderConfig, decoder: VideoDecoder): void {
+		if (config.container.kind !== "cmaf") return;
+
+		const { timescale } = config.container;
+		const description = config.description ? Hex.toBytes(config.description) : undefined;
+
+		// Configure decoder with description from catalog
+		decoder.configure({
+			codec: config.codec,
+			description,
+			optimizeForLatency: config.optimizeForLatency ?? true,
+			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
+			flip: false,
+		});
+
+		effect.spawn(async () => {
+			// Process data segments
+			// TODO: Use a consumer wrapper for CMAF to support latency control
+			for (;;) {
+				const group = await sub.nextGroup();
+				if (!group) break;
+
+				effect.spawn(async () => {
+					try {
+						for (;;) {
+							const segment = await group.readFrame();
+							if (!segment) break;
+
+							const samples = Mp4.decodeDataSegment(segment, timescale);
+
+							for (const sample of samples) {
+								const chunk = new EncodedVideoChunk({
+									type: sample.keyframe ? "key" : "delta",
+									data: sample.data,
+									timestamp: sample.timestamp,
+								});
+
+								// Track stats
+								this.#stats.update((current) => ({
+									frameCount: (current?.frameCount ?? 0) + 1,
+									timestamp: sample.timestamp,
+									bytesReceived: (current?.bytesReceived ?? 0) + sample.data.byteLength,
+								}));
+
+								decoder.decode(chunk);
+							}
+						}
+					} finally {
+						group.close();
+					}
+				});
 			}
 		});
 	}
@@ -404,6 +499,7 @@ export class Source {
 			return undefined;
 		});
 
+		this.#latency.close();
 		this.#signals.close();
 	}
 }

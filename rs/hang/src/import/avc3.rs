@@ -3,8 +3,9 @@ use crate::import::annexb::{NalIterator, START_CODE};
 
 use anyhow::Context;
 use buf_list::BufList;
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use moq_lite as moq;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// A decoder for H.264 with inline SPS/PPS.
 pub struct Avc3 {
@@ -62,6 +63,8 @@ impl Avc3 {
 			display_ratio_width: None,
 			display_ratio_height: None,
 			optimize_for_latency: None,
+			container: hang::catalog::Container::Legacy,
+			min_buffer: None,
 		};
 
 		if let Some(old) = &self.config
@@ -107,6 +110,16 @@ impl Avc3 {
 
 		if let Some(nal) = nals.flush()? {
 			self.decode_nal(nal, None)?;
+		}
+
+		Ok(())
+	}
+
+	/// Decode from an asynchronous reader.
+	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> anyhow::Result<()> {
+		let mut buffer = BytesMut::new();
+		while reader.read_buf(&mut buffer).await? > 0 {
+			self.decode_stream(&mut buffer, None)?;
 		}
 
 		Ok(())

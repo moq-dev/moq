@@ -2,7 +2,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
-import { DEFAULT_CONTAINER, u53 } from "../../catalog";
+import { u53 } from "../../catalog";
 import * as Frame from "../../frame";
 import { isFirefox } from "../../util/hacks";
 import type { Source } from "./types";
@@ -64,7 +64,7 @@ export class Encoder {
 		this.source = source;
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.config = Signal.from(props?.config);
-		this.#container = props?.container ?? DEFAULT_CONTAINER;
+		this.#container = props?.container ?? { kind: "legacy" };
 
 		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runConfig.bind(this));
