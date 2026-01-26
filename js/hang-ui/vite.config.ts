@@ -1,18 +1,9 @@
 import { resolve } from "path";
 import { defineConfig } from "vite";
-import dts from "vite-plugin-dts";
 import solidPlugin from "vite-plugin-solid";
 
 export default defineConfig({
-	plugins: [
-		solidPlugin(),
-		dts({
-			include: ["src"],
-			exclude: ["src/vite-env.d.ts"],
-			entryRoot: "src",
-			copyDtsFiles: true,
-		}),
-	],
+	plugins: [solidPlugin()],
 	build: {
 		lib: {
 			entry: {

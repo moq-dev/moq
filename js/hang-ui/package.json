@@ -5,16 +5,9 @@
 	"description": "Media over QUIC library UI components",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
-	"types": "./src/types/global.d.ts",
 	"exports": {
-		"./publish": {
-			"types": "./src/publish/index.d.ts",
-			"import": "./src/publish/index.tsx"
-		},
-		"./watch": {
-			"types": "./src/watch/index.d.ts",
-			"import": "./src/watch/index.tsx"
-		}
+		"./publish": "./src/publish/index.tsx",
+		"./watch": "./src/watch/index.tsx"
 	},
 	"sideEffects": [
 		"./src/publish/index.tsx",
