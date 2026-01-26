@@ -494,12 +494,17 @@ impl Fmp4 {
 					// This is relative to the start of the MOOF, not the MDAT.
 					// Note: The trun data offset can be negative, but... that's not supported here.
 					let data_offset: usize = data_offset.try_into().context("invalid data offset")?;
-					if data_offset < moof_size {
-						anyhow::bail!("invalid data offset");
-					}
+
+					// Use checked arithmetic to prevent underflow
+					let relative_offset = data_offset
+						.checked_sub(moof_size)
+						.and_then(|v| v.checked_sub(header_size))
+						.context("invalid data offset: underflow")?;
 
 					// Reset offset if the TRUN has a data offset
-					offset = base_offset + data_offset - moof_size - header_size;
+					offset = base_offset
+						.checked_add(relative_offset)
+						.context("invalid data offset: overflow")?;
 				}
 
 				for entry in &trun.entries {

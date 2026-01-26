@@ -237,6 +237,13 @@ export function decodeDataSegment(segment: Uint8Array, timescale: number): Sampl
 	}
 
 	const samples: Sample[] = [];
+
+	// trun.dataOffset is an offset from the base data offset (typically moof start) to the first sample.
+	// For simple CMAF segments where moof is followed immediately by mdat, this equals moof.size + 8.
+	// Since mdat.data is the mdat payload (excluding the 8-byte header), we need to compute the
+	// offset within mdatData. For now, we assume samples start at the beginning of mdat.data
+	// when dataOffset is not specified or when it points to the start of mdat payload.
+	// TODO: For complex cases with base_data_offset in tfhd, this needs additional handling.
 	let dataOffset = 0;
 	let decodeTime = baseDecodeTime;
 
@@ -245,6 +252,24 @@ export function decodeDataSegment(segment: Uint8Array, timescale: number): Sampl
 
 		const sampleSize = sample.sampleSize ?? defaultSize;
 		const sampleDuration = sample.sampleDuration ?? defaultDuration;
+
+		// Validate sample size - must be positive to produce valid data
+		if (sampleSize <= 0) {
+			throw new Error(`Invalid sample size ${sampleSize} for sample ${i} in trun`);
+		}
+
+		// Validate sample duration - must be positive for proper timing
+		if (sampleDuration <= 0) {
+			throw new Error(`Invalid sample duration ${sampleDuration} for sample ${i} in trun`);
+		}
+
+		// Bounds check before slicing to prevent reading past mdat data
+		if (dataOffset + sampleSize > mdatData.length) {
+			throw new Error(
+				`Sample ${i} would overflow mdat: offset=${dataOffset}, size=${sampleSize}, mdatLength=${mdatData.length}`,
+			);
+		}
+
 		const sampleFlags =
 			i === 0 && trun.firstSampleFlags !== undefined
 				? trun.firstSampleFlags

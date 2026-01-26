@@ -38,7 +38,7 @@ export class Latency {
 
 		// Use minBuffer from catalog if available, otherwise estimate from framerate
 		let minBuffer: number | undefined = config?.minBuffer;
-		if (!minBuffer && config?.framerate) {
+		if (minBuffer === undefined && config?.framerate !== undefined && config.framerate > 0) {
 			// Estimate minBuffer as one frame duration if framerate is available
 			minBuffer = 1000 / config.framerate;
 		}
