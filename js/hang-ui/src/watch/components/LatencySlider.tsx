@@ -9,13 +9,13 @@ export default function LatencySlider() {
 	const onInputChange = (event: Event) => {
 		const target = event.currentTarget as HTMLInputElement;
 		const latency = parseFloat(target.value);
-		context.setLatencyValue(latency);
+		context.setBuffer(latency);
 	};
 
 	return (
 		<div class="latencySliderContainer">
 			<label for="latency-slider" class="latencyLabel">
-				Latency:{" "}
+				Buffer:{" "}
 			</label>
 			<input
 				id="latency-slider"
@@ -25,9 +25,9 @@ export default function LatencySlider() {
 				min={MIN_RANGE}
 				max={MAX_RANGE}
 				step={RANGE_STEP}
-				value={context.latency()}
+				value={context.buffer()}
 			/>
-			<span>{typeof context.latency() !== "undefined" ? `${Math.round(context.latency())}ms` : ""}</span>
+			<span>{typeof context.buffer() !== "undefined" ? `${Math.round(context.buffer())}ms` : ""}</span>
 		</div>
 	);
 }
