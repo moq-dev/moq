@@ -1,5 +1,6 @@
 import type { Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
+import type { BufferedRanges } from "../backend";
 
 // Video specific signals that work regardless of the backend source (mse vs webcodecs).
 export interface Backend {
@@ -17,6 +18,9 @@ export interface Backend {
 
 	// The config of the active rendition.
 	config: Getter<Catalog.VideoConfig | undefined>;
+
+	// Buffered time ranges (for MSE backend).
+	buffered: Getter<BufferedRanges>;
 }
 
 export type Target = {

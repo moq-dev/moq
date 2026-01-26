@@ -1,6 +1,7 @@
 import { type Moq, Signals } from "@moq/hang";
-import type * as Catalog from "@moq/hang/catalog";
+import type { BufferedRanges } from "@moq/hang/watch";
 import type HangWatch from "@moq/hang/watch/element";
+import solid from "@moq/signals/solid";
 import type { JSX } from "solid-js";
 import { createContext, createSignal, onCleanup } from "solid-js";
 
@@ -36,6 +37,9 @@ type WatchUIContextValues = {
 	setIsStatsPanelVisible: (visible: boolean) => void;
 	isFullscreen: () => boolean;
 	toggleFullscreen: () => void;
+	timestamp: () => number;
+	videoBuffered: () => BufferedRanges;
+	audioBuffered: () => BufferedRanges;
 };
 
 export const WatchUIContext = createContext<WatchUIContextValues>();
@@ -83,6 +87,11 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		}));
 	};
 
+	// Use solid helper for the new signals
+	const timestamp = solid(props.hangWatch.timestamp);
+	const videoBuffered = solid(props.hangWatch.video.buffered);
+	const audioBuffered = solid(props.hangWatch.audio.buffered);
+
 	const value: WatchUIContextValues = {
 		hangWatch: props.hangWatch,
 		watchStatus,
@@ -102,6 +111,9 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		setIsStatsPanelVisible,
 		isFullscreen,
 		toggleFullscreen,
+		timestamp,
+		videoBuffered,
+		audioBuffered,
 	};
 
 	const watch = props.hangWatch;

@@ -35,6 +35,9 @@ export class Source implements Backend {
 	#buffering = new Signal<boolean>(false);
 	readonly buffering: Getter<boolean> = this.#buffering;
 
+	#timestamp = new Signal<number>(0);
+	readonly timestamp: Getter<number> = this.#timestamp;
+
 	#signals = new Effect();
 
 	constructor(props?: SourceProps) {
@@ -63,6 +66,7 @@ export class Source implements Backend {
 		this.#signals.effect(this.#runTrim.bind(this));
 		this.#signals.effect(this.#runBuffering.bind(this));
 		this.#signals.effect(this.#runPaused.bind(this));
+		this.#signals.effect(this.#runTimestamp.bind(this));
 	}
 
 	#runMediaSource(effect: Effect): void {
@@ -162,6 +166,28 @@ export class Source implements Backend {
 			element.play().catch((e) => {
 				console.error("[MSE] MediaElement play error:", e);
 				this.paused.set(false);
+			});
+		}
+	}
+
+	#runTimestamp(effect: Effect): void {
+		const element = effect.get(this.element);
+		if (!element) return;
+
+		// Use requestVideoFrameCallback if available (frame-accurate)
+		if ("requestVideoFrameCallback" in element) {
+			const video = element as HTMLVideoElement;
+			let handle: number;
+			const onFrame = () => {
+				this.#timestamp.set(video.currentTime);
+				handle = video.requestVideoFrameCallback(onFrame);
+			};
+			handle = video.requestVideoFrameCallback(onFrame);
+			effect.cleanup(() => video.cancelVideoFrameCallback(handle));
+		} else {
+			// Fallback to timeupdate event
+			effect.event(element, "timeupdate", () => {
+				this.#timestamp.set(element.currentTime);
 			});
 		}
 	}

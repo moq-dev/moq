@@ -6,6 +6,7 @@ import * as Frame from "../../frame";
 import * as Mp4 from "../../mp4";
 import * as Hex from "../../util/hex";
 import { Latency } from "../../util/latency";
+import type { BufferedRanges } from "../backend";
 import type { Broadcast } from "../broadcast";
 import type { Backend, Stats, Target } from "./backend";
 
@@ -84,6 +85,10 @@ export class Source implements Backend {
 
 	#stats = new Signal<Stats | undefined>(undefined);
 	readonly stats: Getter<Stats | undefined> = this.#stats;
+
+	// Empty stub for WebCodecs (no traditional buffering)
+	#buffered = new Signal<BufferedRanges>([]);
+	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	#latency: Latency;
 	readonly latency: Getter<Time.Milli>;

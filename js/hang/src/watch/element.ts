@@ -188,6 +188,10 @@ export default class HangWatch extends HTMLElement implements Backend {
 	get buffering(): Getter<boolean> {
 		return this.#backend.buffering;
 	}
+
+	get timestamp(): Getter<number> {
+		return this.#backend.timestamp;
+	}
 }
 
 customElements.define("hang-watch", HangWatch);

@@ -7,6 +7,7 @@ import * as Mp4 from "../../mp4";
 import * as Hex from "../../util/hex";
 import { Latency } from "../../util/latency";
 import * as libav from "../../util/libav";
+import type { BufferedRanges } from "../backend";
 import type { Broadcast } from "../broadcast";
 import type { Target } from "../video/backend";
 import type * as Render from "./render";
@@ -60,6 +61,10 @@ export class Source {
 
 	#stats = new Signal<AudioStats | undefined>(undefined);
 	readonly stats: Getter<AudioStats | undefined> = this.#stats;
+
+	// Empty stub for WebCodecs (no traditional buffering)
+	#buffered = new Signal<BufferedRanges>([]);
+	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 

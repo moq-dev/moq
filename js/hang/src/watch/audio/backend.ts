@@ -1,5 +1,6 @@
 import type { Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
+import type { BufferedRanges } from "../backend";
 
 // Audio specific signals that work regardless of the backend source (mse vs webcodecs).
 export interface Backend {
@@ -23,6 +24,9 @@ export interface Backend {
 
 	// The stats of the audio.
 	stats: Getter<Stats | undefined>;
+
+	// Buffered time ranges (for MSE backend).
+	buffered: Getter<BufferedRanges>;
 }
 
 export interface Stats {

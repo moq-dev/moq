@@ -6,6 +6,22 @@ import type { Broadcast } from "./broadcast";
 import * as MSE from "./mse";
 import * as Video from "./video";
 
+// Serializable representation of TimeRanges
+export interface BufferedRange {
+	start: number; // seconds
+	end: number; // seconds
+}
+export type BufferedRanges = BufferedRange[];
+
+// Helper to convert DOM TimeRanges
+export function timeRangesToArray(ranges: TimeRanges): BufferedRanges {
+	const result: BufferedRange[] = [];
+	for (let i = 0; i < ranges.length; i++) {
+		result.push({ start: ranges.start(i), end: ranges.end(i) });
+	}
+	return result;
+}
+
 export interface Backend {
 	// Additional buffer in milliseconds on top of the catalog's minBuffer.
 	// The effective latency = catalog.minBuffer + buffer.
@@ -16,6 +32,9 @@ export interface Backend {
 
 	// Whether the video is currently buffering, false when paused.
 	buffering: Getter<boolean>;
+
+	// Current playback position in seconds.
+	timestamp: Getter<number>;
 
 	// Video specific signals.
 	video: Video.Backend;
@@ -49,6 +68,9 @@ class VideoSignals implements Video.Backend {
 
 	// The config of the active rendition.
 	config = new Signal<Catalog.VideoConfig | undefined>(undefined);
+
+	// Buffered time ranges for MSE backend.
+	buffered = new Signal<BufferedRanges>([]);
 }
 
 // Audio specific signals that work regardless of the backend source (mse vs webcodecs).
@@ -73,6 +95,9 @@ class AudioSignals implements Audio.Backend {
 
 	// The stats of the audio.
 	stats = new Signal<Audio.Stats | undefined>(undefined);
+
+	// Buffered time ranges for MSE backend.
+	buffered = new Signal<BufferedRanges>([]);
 }
 
 /// A generic backend that supports either MSE or WebCodecs based on the provided element.
@@ -89,6 +114,9 @@ export class Combined implements Backend {
 
 	#buffering = new Signal<boolean>(false);
 	readonly buffering: Getter<boolean> = this.#buffering;
+
+	#timestamp = new Signal<number>(0);
+	readonly timestamp: Getter<number> = this.#timestamp;
 
 	signals = new Effect();
 
@@ -145,11 +173,21 @@ export class Combined implements Backend {
 		effect.proxy(this.video.rendition, videoSource.rendition);
 		effect.proxy(this.video.config, videoSource.config);
 		effect.proxy(this.video.stats, videoSource.stats);
+		effect.proxy(this.video.buffered, videoSource.buffered);
 
 		effect.proxy(this.audio.catalog, audioSource.catalog);
 		effect.proxy(this.audio.rendition, audioSource.rendition);
 		effect.proxy(this.audio.config, audioSource.config);
 		effect.proxy(this.audio.stats, audioSource.stats);
+		effect.proxy(this.audio.buffered, audioSource.buffered);
+
+		// Derive timestamp from video stats (in lock-step with frame signal)
+		effect.effect((e) => {
+			const stats = e.get(videoSource.stats);
+			if (stats) {
+				this.#timestamp.set(stats.timestamp / 1_000_000); // microseconds to seconds
+			}
+		});
 	}
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
@@ -168,10 +206,14 @@ export class Combined implements Backend {
 		effect.proxy(this.video.rendition, source.video.rendition);
 		effect.proxy(this.video.config, source.video.config);
 		effect.proxy(this.video.stats, source.video.stats);
+		effect.proxy(this.video.buffered, source.video.buffered);
 
 		effect.proxy(this.audio.catalog, source.audio.catalog);
 		effect.proxy(this.audio.rendition, source.audio.rendition);
 		effect.proxy(this.audio.config, source.audio.config);
 		effect.proxy(this.audio.stats, source.audio.stats);
+		effect.proxy(this.audio.buffered, source.audio.buffered);
+
+		effect.proxy(this.#timestamp, source.timestamp);
 	}
 }

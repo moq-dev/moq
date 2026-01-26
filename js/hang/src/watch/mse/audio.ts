@@ -5,6 +5,7 @@ import * as Frame from "../../frame";
 import * as Mp4 from "../../mp4";
 import { Latency } from "../../util/latency";
 import type { Backend, Stats, Target } from "../audio/backend";
+import { type BufferedRanges, timeRangesToArray } from "../backend";
 import type { Broadcast } from "../broadcast";
 
 export type AudioProps = {
@@ -40,6 +41,9 @@ export class Audio implements Backend {
 
 	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 	readonly config: Signal<Catalog.AudioConfig | undefined> = this.#config;
+
+	#buffered = new Signal<BufferedRanges>([]);
+	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	#selected = new Signal<{ track: string; mime: string; config: Catalog.AudioConfig } | undefined>(undefined);
 
@@ -127,6 +131,10 @@ export class Audio implements Backend {
 
 		effect.event(sourceBuffer, "error", (e) => {
 			console.error("[MSE] SourceBuffer error:", e);
+		});
+
+		effect.event(sourceBuffer, "updateend", () => {
+			this.#buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
 		if (selected.config.container.kind === "cmaf") {

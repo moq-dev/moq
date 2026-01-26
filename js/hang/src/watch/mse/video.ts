@@ -4,6 +4,7 @@ import * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import * as Mp4 from "../../mp4";
 import { Latency } from "../../util/latency";
+import { type BufferedRanges, timeRangesToArray } from "../backend";
 import type { Broadcast } from "../broadcast";
 import type { Backend, Stats, Target } from "../video/backend";
 
@@ -42,6 +43,9 @@ export class Video implements Backend {
 
 	#config = new Signal<Catalog.VideoConfig | undefined>(undefined);
 	readonly config: Signal<Catalog.VideoConfig | undefined> = this.#config;
+
+	#buffered = new Signal<BufferedRanges>([]);
+	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	// The selected rendition as a separate signal so we don't resubscribe until it changes.
 	#selected = new Signal<{ track: string; mime: string; config: Catalog.VideoConfig } | undefined>(undefined);
@@ -124,6 +128,10 @@ export class Video implements Backend {
 
 		effect.event(sourceBuffer, "error", (e) => {
 			console.error("[MSE] SourceBuffer error:", e);
+		});
+
+		effect.event(sourceBuffer, "updateend", () => {
+			this.#buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
 		if (selected.config.container.kind === "cmaf") {
