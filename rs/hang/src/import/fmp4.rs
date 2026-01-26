@@ -223,6 +223,7 @@ impl Fmp4 {
 		if self.config.passthrough {
 			Container::Cmaf {
 				timescale: trak.mdia.mdhd.timescale as u64,
+				track_id: trak.tkhd.track_id,
 			}
 		} else {
 			Container::Legacy

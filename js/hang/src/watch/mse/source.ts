@@ -133,9 +133,9 @@ export class Source implements Backend {
 					await new Promise((resolve) => sourceBuffer.addEventListener("updateend", resolve, { once: true }));
 				}
 
-				// Keep at least 1 second of buffered data.
-				if (element.currentTime > 1) {
-					sourceBuffer.remove(0, element.currentTime - 1);
+				// Keep at least 10 seconds of buffered data to avoid removing I-frames.
+				if (element.currentTime > 10) {
+					sourceBuffer.remove(0, element.currentTime - 10);
 				}
 			}
 		}, 1000);

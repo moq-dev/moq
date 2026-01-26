@@ -167,7 +167,7 @@ export class Audio implements Backend {
 		effect.cleanup(() => data.close());
 
 		effect.spawn(async () => {
-			// Generate init segment from catalog config (always uses track_id=1)
+			// Generate init segment from catalog config (uses track_id from container)
 			const initSegment = Mp4.createAudioInitSegment(selected.config);
 			await this.#appendBuffer(sourceBuffer, initSegment);
 
@@ -177,8 +177,6 @@ export class Audio implements Backend {
 				const frame = await data.readFrame();
 				if (!frame) return;
 
-				// Rewrite track_id to 1 to match our generated init segment
-				Mp4.rewriteTrackId(frame);
 				await this.#appendBuffer(sourceBuffer, frame);
 
 				// Seek to the start of the buffer if we're behind it (for startup).

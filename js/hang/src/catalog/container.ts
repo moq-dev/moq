@@ -18,6 +18,8 @@ export const ContainerSchema = z
 			kind: z.literal("cmaf"),
 			// Time units per second
 			timescale: u53Schema,
+			// Track ID used in the moof/mdat fragments
+			trackId: u53Schema,
 		}),
 	])
 	.default({ kind: "legacy" });

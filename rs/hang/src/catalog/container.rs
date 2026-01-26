@@ -22,5 +22,8 @@ pub enum Container {
 	Cmaf {
 		/// Time units per second
 		timescale: u64,
+		/// Track ID used in the moof/mdat fragments
+		#[serde(rename = "trackId")]
+		track_id: u32,
 	},
 }
