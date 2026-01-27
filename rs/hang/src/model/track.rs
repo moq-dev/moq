@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::ops::Deref;
 
 use crate::Error;
+use crate::catalog::Container;
 use crate::model::{Frame, GroupConsumer, Timestamp};
 use futures::{StreamExt, stream::FuturesUnordered};
 
@@ -23,15 +24,21 @@ pub struct TrackProducer {
 	pub inner: moq_lite::TrackProducer,
 	group: Option<moq_lite::GroupProducer>,
 	keyframe: Option<Timestamp>,
+	/// Track if the current group is the init segment group (timestamp 0)
+	/// We keep this group open so new subscribers can receive the init segment
+	is_init_segment_group: bool,
+	container: Container,
 }
 
 impl TrackProducer {
 	/// Create a new TrackProducer wrapping the given moq-lite producer.
-	pub fn new(inner: moq_lite::TrackProducer) -> Self {
+	pub fn new(inner: moq_lite::TrackProducer, container: Container) -> Self {
 		Self {
 			inner,
 			group: None,
 			keyframe: None,
+			is_init_segment_group: false,
+			container,
 		}
 	}
 
@@ -48,11 +55,22 @@ impl TrackProducer {
 		tracing::trace!(?frame, "write frame");
 
 		let mut header = BytesMut::new();
-		frame.timestamp.encode(&mut header, lite::Version::Draft02);
+		if self.container != Container::Cmaf {
+			frame.timestamp.encode(&mut header, lite::Version::Draft02);
+		}
 
 		if frame.keyframe {
 			if let Some(group) = self.group.take() {
-				group.close();
+				// Don't close the init segment group - keep it open for new subscribers
+				if self.is_init_segment_group {
+					tracing::debug!("keeping init segment group open for new subscribers");
+					// Don't close it, just drop it (the group remains open)
+					drop(group);
+				} else {
+					tracing::info!(timestamp = ?frame.timestamp, "closing group and creating new one for keyframe");
+					group.close();
+				}
+				self.is_init_segment_group = false;
 			}
 
 			// Make sure this frame's timestamp doesn't go backwards relative to the last keyframe.
@@ -68,7 +86,18 @@ impl TrackProducer {
 
 		let mut group = match self.group.take() {
 			Some(group) => group,
-			None if frame.keyframe => self.inner.append_group(),
+			None if frame.keyframe => {
+				let new_group = self.inner.append_group();
+				// Log when creating a new group, especially for init segment (timestamp 0)
+				if frame.timestamp.as_micros() == 0 {
+					tracing::info!(timestamp = ?frame.timestamp, "creating new group for init segment (timestamp 0)");
+					// Mark this as the init segment group so we can keep it open
+					self.is_init_segment_group = true;
+				} else {
+					tracing::info!(timestamp = ?frame.timestamp, "creating new group for keyframe");
+				}
+				new_group
+			}
 			// The first frame must be a keyframe.
 			None => return Err(Error::MissingKeyframe),
 		};
@@ -76,10 +105,14 @@ impl TrackProducer {
 		let size = header.len() + frame.payload.remaining();
 
 		let mut chunked = group.create_frame(size.into());
-		chunked.write_chunk(header.freeze());
+		if !header.is_empty() {
+			chunked.write_chunk(header.freeze());
+		}
+
 		for chunk in frame.payload {
 			chunked.write_chunk(chunk);
 		}
+
 		chunked.close();
 
 		self.group.replace(group);
@@ -98,7 +131,7 @@ impl TrackProducer {
 
 impl From<moq_lite::TrackProducer> for TrackProducer {
 	fn from(inner: moq_lite::TrackProducer) -> Self {
-		Self::new(inner)
+		Self::new(inner, Container::Native)
 	}
 }
 

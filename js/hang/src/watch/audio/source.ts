@@ -5,6 +5,8 @@ import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
+import type { SourceMSE } from "../source-mse";
+import type * as Video from "../video";
 import type * as Render from "./render";
 
 // We want some extra overhead to avoid starving the render worklet.
@@ -41,6 +43,10 @@ export class Source {
 	// Downcast to AudioNode so it matches Publish.Audio
 	readonly root = this.#worklet as Getter<AudioNode | undefined>;
 
+	// For MSE path, expose the HTMLAudioElement for direct control
+	#mseAudioElement = new Signal<HTMLAudioElement | undefined>(undefined);
+	readonly mseAudioElement = this.#mseAudioElement as Getter<HTMLAudioElement | undefined>;
+
 	#sampleRate = new Signal<number | undefined>(undefined);
 	readonly sampleRate: Getter<number | undefined> = this.#sampleRate;
 
@@ -57,6 +63,13 @@ export class Source {
 	active = new Signal<string | undefined>(undefined);
 
 	#signals = new Effect();
+
+	// Track active audio track subscription to prevent double subscription
+	// Similar to video's #active pattern - tracks the current running subscription
+	#activeAudioTrack?: Effect;
+
+	// Reference to video source for coordination
+	video?: Video.Source;
 
 	constructor(
 		broadcast: Getter<Moq.Broadcast | undefined>,
@@ -94,6 +107,12 @@ export class Source {
 
 		const config = effect.get(this.config);
 		if (!config) return;
+
+		// Don't create worklet for MSE (cmaf) - browser handles playback directly
+		// The worklet is only needed for WebCodecs path
+		if (config.container === "cmaf") {
+			return;
+		}
 
 		const sampleRate = config.sampleRate;
 		const channelCount = config.numberOfChannels;
@@ -149,26 +168,164 @@ export class Source {
 
 	#runDecoder(effect: Effect): void {
 		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
+		const config = effect.get(this.config);
+
+		// For CMAF, always initialize (even if disabled) to add SourceBuffer before video starts
+		// For non-CMAF, only initialize if enabled
+		if (config?.container !== "cmaf" && !enabled) {
+			return;
+		}
 
 		const catalog = effect.get(this.catalog);
-		if (!catalog) return;
+		if (!catalog) {
+			return;
+		}
 
 		const broadcast = effect.get(this.broadcast);
-		if (!broadcast) return;
+		if (!broadcast) {
+			return;
+		}
 
-		const config = effect.get(this.config);
-		if (!config) return;
+		if (!config) {
+			return;
+		}
 
 		const active = effect.get(this.active);
-		if (!active) return;
+		if (!active) {
+			return;
+		}
 
-		const sub = broadcast.subscribe(active, catalog.priority);
+		// For CMAF, watch video.mseSource reactively so we re-run when video creates a new SourceMSE
+		// This ensures audio re-initializes when video resolution changes
+		// IMPORTANT: effect.get() must be called unconditionally for the effect to track the signal
+		if (config.container === "cmaf" && this.video) {
+			// Always call effect.get() unconditionally - the effect system will track this signal
+			// and re-run #runDecoder when mseSource changes (e.g., new SourceMSE created on resolution change)
+			const mseSource = effect.get(this.video.mseSource);
+			// If mseSource is not available yet, wait for it (effect will re-run when it's set)
+			if (!mseSource) {
+				return;
+			}
+		}
+
+		// Close previous subscription if exists
+		if (this.#activeAudioTrack) {
+			this.#activeAudioTrack.close();
+		}
+
+		// Route to MSE for CMAF, WebCodecs for native/raw
+		// For CMAF, ALWAYS initialize MSE (even if disabled) to add SourceBuffer
+		// This ensures MediaSource has both SourceBuffers before video starts appending
+		// The SourceBuffer will be added, but fragments won't be appended if disabled
+		if (config.container === "cmaf") {
+			// Always initialize for CMAF - SourceBuffer must be added before video starts
+			// Create a new effect for this subscription (like video does with #pending)
+			const trackEffect = new Effect();
+			this.#activeAudioTrack = trackEffect;
+			effect.cleanup(() => trackEffect.close());
+			this.#runMSEPath(trackEffect, broadcast, active, config, catalog);
+		} else {
+			// For non-CMAF, only run if enabled
+			if (enabled) {
+				// Create a new effect for this subscription (like video does with #pending)
+				const trackEffect = new Effect();
+				this.#activeAudioTrack = trackEffect;
+				effect.cleanup(() => trackEffect.close());
+				this.#runWebCodecsPath(trackEffect, broadcast, active, config, catalog);
+			}
+		}
+	}
+
+	#runMSEPath(
+		effect: Effect,
+		broadcast: Moq.Broadcast,
+		name: string,
+		config: Catalog.AudioConfig,
+		catalog: Catalog.Audio,
+	): void {
+		// Use the unified SourceMSE from video - it manages both video and audio SourceBuffers
+		// Use a reactive effect to always get the latest SourceMSE instance
+		effect.cleanup(() => {
+			// Clear tracking when effect is cleaned up
+			if (this.#activeAudioTrack === effect) {
+				this.#activeAudioTrack = undefined;
+			}
+		});
+
+		effect.spawn(async () => {
+			// Wait for video's MSE source to be available
+			// Video creates it asynchronously, and may recreate it when restarting
+			let videoMseSource: SourceMSE | undefined;
+			if (this.video?.mseSource) {
+				// Wait up to 2 seconds for video MSE source to be available
+				const maxWait = 2000;
+				const startTime = Date.now();
+				while (!videoMseSource && Date.now() - startTime < maxWait) {
+					videoMseSource = effect.get(this.video.mseSource);
+					if (!videoMseSource) {
+						await new Promise((resolve) => setTimeout(resolve, 50)); // Check more frequently
+					}
+				}
+			}
+
+			if (!videoMseSource) {
+				console.error("[Audio Source] Video MSE source not available, falling back to WebCodecs");
+				this.#runWebCodecsPath(effect, broadcast, name, config, catalog);
+				return;
+			}
+
+			// Expose video element as "audioElement" for compatibility with emitter
+			this.#signals.effect((eff) => {
+				const videoElement = videoMseSource.videoElement ? eff.get(videoMseSource.videoElement) : undefined;
+				eff.set(this.#mseAudioElement, videoElement as HTMLAudioElement | undefined);
+			});
+
+			// Forward stats
+			this.#signals.effect((eff) => {
+				eff.set(this.#stats, { bytesReceived: 0 });
+			});
+
+			// Check if audio is enabled
+			const isEnabled = effect.get(this.enabled);
+
+			// Only subscribe to track and initialize SourceBuffer if enabled
+			if (!isEnabled) {
+				return;
+			}
+
+			// Wait for MediaSource to be ready
+			const maxWait = 5000;
+			const startTime = Date.now();
+			while (Date.now() - startTime < maxWait) {
+				const ms = videoMseSource.mediaSource ? effect.get(videoMseSource.mediaSource) : undefined;
+				if (ms && typeof ms === "object" && "readyState" in ms && (ms as MediaSource).readyState === "open") {
+					break;
+				}
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+
+			// Initialize audio SourceBuffer and run track
+			try {
+				await videoMseSource.initializeAudio(config);
+				await videoMseSource.runAudioTrack(effect, broadcast, name, config, catalog, this.enabled);
+			} catch (error) {
+				console.warn("[Audio Source] Failed to initialize audio:", error);
+			}
+		});
+	}
+
+	#runWebCodecsPath(
+		effect: Effect,
+		broadcast: Moq.Broadcast,
+		name: string,
+		config: Catalog.AudioConfig,
+		catalog: Catalog.Audio,
+	): void {
+		const sub = broadcast.subscribe(name, catalog.priority);
 		effect.cleanup(() => sub.close());
 
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
-		// Container defaults to "legacy" via Zod schema for backward compatibility
-		console.log(`[Audio Subscriber] Using container format: ${config.container}`);
+		// Container defaults to "native" via Zod schema for backward compatibility
 		const consumer = new Frame.Consumer(sub, {
 			latency: Math.max(this.latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
 			container: config.container,
@@ -244,6 +401,9 @@ export class Source {
 	}
 
 	close() {
+		// Close active audio track subscription
+		this.#activeAudioTrack?.close();
+		this.#activeAudioTrack = undefined;
 		this.#signals.close();
 	}
 }

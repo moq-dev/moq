@@ -11,12 +11,14 @@ import { DEFAULT_CONTAINER } from "../catalog";
  */
 export function encodeTimestamp(timestamp: Time.Micro, container: Catalog.Container = DEFAULT_CONTAINER): Uint8Array {
 	switch (container) {
-		case "legacy":
+		case "native":
 			return encodeVarInt(timestamp);
 		case "raw":
 			return encodeU64(timestamp);
-		case "fmp4":
-			throw new Error("fmp4 container not yet implemented");
+		case "cmaf": {
+			// CMAF fragments contain timestamps in moof atoms, no header needed
+			return new Uint8Array(0);
+		}
 	}
 }
 
@@ -32,7 +34,7 @@ export function decodeTimestamp(
 	container: Catalog.Container = DEFAULT_CONTAINER,
 ): [Time.Micro, Uint8Array] {
 	switch (container) {
-		case "legacy": {
+		case "native": {
 			const [value, remaining] = decodeVarInt(buffer);
 			return [value as Time.Micro, remaining];
 		}
@@ -40,8 +42,9 @@ export function decodeTimestamp(
 			const [value, remaining] = decodeU64(buffer);
 			return [value as Time.Micro, remaining];
 		}
-		case "fmp4":
-			throw new Error("fmp4 container not yet implemented");
+		case "cmaf": {
+			return [0 as Time.Micro, buffer];
+		}
 	}
 }
 
@@ -54,12 +57,12 @@ export function decodeTimestamp(
  */
 export function getTimestampSize(container: Catalog.Container = DEFAULT_CONTAINER): number {
 	switch (container) {
-		case "legacy":
+		case "native":
 			return 8; // VarInt maximum size
 		case "raw":
 			return 8; // u64 fixed size
-		case "fmp4":
-			throw new Error("fmp4 container not yet implemented");
+		case "cmaf":
+			return 8; // VarInt maximum size (same as native)
 	}
 }
 

@@ -5,6 +5,7 @@ import type * as Catalog from "../../catalog";
 import * as Frame from "../../frame";
 import { PRIORITY } from "../../publish/priority";
 import * as Hex from "../../util/hex";
+import type { SourceMSE } from "../source-mse";
 
 export type SourceProps = {
 	enabled?: boolean | Signal<boolean>;
@@ -27,7 +28,9 @@ export type Target = {
 // The types in VideoDecoderConfig that cause a hard reload.
 // ex. codedWidth/Height are optional and can be changed in-band, so we don't want to trigger a reload.
 // This way we can keep the current subscription active.
-type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
+// Note: We keep codedWidth/Height as optional for logging, but set them to undefined to avoid reloads.
+type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight"> &
+	Partial<Pick<Catalog.VideoConfig, "codedWidth" | "codedHeight">>;
 
 type BufferStatus = { state: "empty" | "filled" };
 
@@ -96,6 +99,14 @@ export class Source {
 	readonly stats: Getter<VideoStats | undefined> = this.#stats;
 
 	#signals = new Effect();
+
+	// Expose MediaSource for audio to use
+	#mseMediaSource = new Signal<MediaSource | undefined>(undefined);
+	readonly mseMediaSource = this.#mseMediaSource as Getter<MediaSource | undefined>;
+
+	// Expose mseSource instance for audio to access coordination methods
+	#mseSource = new Signal<SourceMSE | undefined>(undefined);
+	readonly mseSource = this.#mseSource as Getter<SourceMSE | undefined>;
 
 	constructor(
 		broadcast: Signal<Moq.Broadcast | undefined>,
@@ -192,12 +203,78 @@ export class Source {
 	}
 
 	#runTrack(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
+		// Route to MSE for CMAF, WebCodecs for native/raw
+		if (config.container === "cmaf") {
+			this.#runMSEPath(effect, broadcast, name, config);
+		} else {
+			this.#runWebCodecsPath(effect, broadcast, name, config);
+		}
+	}
+
+	#runMSEPath(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
+		// Import MSE source dynamically to avoid loading if not needed
+		effect.spawn(async () => {
+			const { SourceMSE } = await import("../source-mse.js");
+			const mseSource = new SourceMSE(this.latency);
+			effect.cleanup(() => mseSource.close());
+
+			// IMPORTANT: Set mseSource immediately so audio can track it
+			// This must be set synchronously, not in an effect, so the signal updates immediately
+			this.#mseSource.set(mseSource);
+
+			// Forward signals using effects
+			this.#signals.effect((eff) => {
+				const frame = eff.get(mseSource.frame);
+				eff.set(this.frame, frame);
+			});
+
+			this.#signals.effect((eff) => {
+				const display = eff.get(mseSource.display);
+				eff.set(this.display, display);
+			});
+
+			this.#signals.effect((eff) => {
+				const status = eff.get(mseSource.bufferStatus);
+				eff.set(this.bufferStatus, status, { state: "empty" });
+			});
+
+			this.#signals.effect((eff) => {
+				const status = eff.get(mseSource.syncStatus);
+				eff.set(this.syncStatus, status, { state: "ready" });
+			});
+
+			this.#signals.effect((eff) => {
+				const mediaSource = eff.get(mseSource.mediaSource);
+				eff.set(this.#mseMediaSource, mediaSource);
+			});
+
+			this.#signals.effect((eff) => {
+				const stats = eff.get(mseSource.stats);
+				eff.set(this.#stats, stats);
+			});
+			// Run MSE track
+			try {
+				await mseSource.runTrack(effect, broadcast, name, config);
+			} catch (error) {
+				console.error("MSE path error, falling back to WebCodecs:", error);
+				// Fallback to WebCodecs
+				this.#mseSource.set(undefined);
+				this.#runWebCodecsPath(effect, broadcast, name, config);
+			}
+		});
+
+		// Clean up mseSource when the effect closes (track switches)
+		effect.cleanup(() => {
+			this.#mseSource.set(undefined);
+		});
+	}
+
+	#runWebCodecsPath(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
 		const sub = broadcast.subscribe(name, PRIORITY.video); // TODO use priority from catalog
 		effect.cleanup(() => sub.close());
 
 		// Create consumer that reorders groups/frames up to the provided latency.
-		// Container defaults to "legacy" via Zod schema for backward compatibility
-		console.log(`[Video Subscriber] Using container format: ${config.container}`);
+		// Container defaults to "native" via Zod schema for backward compatibility
 		const consumer = new Frame.Consumer(sub, {
 			latency: this.latency,
 			container: config.container,

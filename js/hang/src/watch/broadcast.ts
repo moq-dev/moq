@@ -6,6 +6,7 @@ import * as Audio from "./audio";
 import { Chat, type ChatProps } from "./chat";
 import * as Location from "./location";
 import { Preview, type PreviewProps } from "./preview";
+import type { SourceMSE } from "./source-mse";
 import * as User from "./user";
 import * as Video from "./video";
 
@@ -62,8 +63,14 @@ export class Broadcast {
 		this.path = Signal.from(props?.path);
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? true);
-		this.audio = new Audio.Source(this.#broadcast, this.#catalog, props?.audio);
+
+		// Create video first so audio can use its MediaSource
 		this.video = new Video.Source(this.#broadcast, this.#catalog, props?.video);
+
+		// Create audio and pass video reference for coordination
+		this.audio = new Audio.Source(this.#broadcast, this.#catalog, props?.audio);
+		this.audio.video = this.video; // Pass video reference for coordination
+
 		this.location = new Location.Root(this.#broadcast, this.#catalog, props?.location);
 		this.chat = new Chat(this.#broadcast, this.#catalog, props?.chat);
 		this.preview = new Preview(this.#broadcast, this.#catalog, props?.preview);
@@ -72,6 +79,7 @@ export class Broadcast {
 		this.signals.effect(this.#runReload.bind(this));
 		this.signals.effect(this.#runBroadcast.bind(this));
 		this.signals.effect(this.#runCatalog.bind(this));
+		this.signals.effect(this.#restartAudioOnVideoChange.bind(this));
 	}
 
 	#runReload(effect: Effect): void {
@@ -154,6 +162,48 @@ export class Broadcast {
 			this.#catalog.set(undefined);
 			this.status.set("offline");
 		}
+	}
+
+	// Track the previous SourceMSE instance to detect changes
+	#previousMseSource?: SourceMSE;
+
+	// Restart audio when video resolution/track changes
+	// This ensures audio re-subscribes with the new SourceMSE instance
+	// NOTE: This is now redundant since audio.#runDecoder watches video.mseSource directly,
+	// but keeping it as a backup mechanism
+	#restartAudioOnVideoChange(effect: Effect): void {
+		const mseSource = effect.get(this.video.mseSource);
+		if (!mseSource) {
+			this.#previousMseSource = undefined;
+			return;
+		}
+
+		// Check if SourceMSE instance changed (new instance = resolution change)
+		if (mseSource === this.#previousMseSource) {
+			return; // Same instance, no change
+		}
+
+		const wasInitialized = this.#previousMseSource !== undefined;
+		this.#previousMseSource = mseSource;
+
+		// Skip on initial setup (when previous is undefined)
+		if (!wasInitialized) {
+			return;
+		}
+
+		// Only restart audio if it's enabled and using CMAF (MSE path)
+		const audioEnabled = effect.get(this.audio.enabled);
+		const audioConfig = effect.get(this.audio.config);
+		if (!audioEnabled || audioConfig?.container !== "cmaf") {
+			return;
+		}
+
+		// Restart audio by toggling enabled (mimics pause/unpause that fixes the issue)
+		// NOTE: This is now redundant since audio.#runDecoder watches video.mseSource directly
+		this.audio.enabled.set(false);
+		queueMicrotask(() => {
+			this.audio.enabled.set(true);
+		});
 	}
 
 	close() {

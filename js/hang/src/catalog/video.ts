@@ -14,7 +14,7 @@ export const VideoConfigSchema = z.object({
 	codec: z.string(),
 
 	// Container format for timestamp encoding
-	// Defaults to "legacy" when not specified in catalog (backward compatibility)
+	// Defaults to "native" when not specified in catalog (backward compatibility)
 	container: ContainerSchema.default(DEFAULT_CONTAINER),
 
 	// The description is used for some codecs.
@@ -43,6 +43,12 @@ export const VideoConfigSchema = z.object({
 	// If true, the decoder will optimize for latency.
 	// Default: true
 	optimizeForLatency: z.boolean().optional(),
+
+	// Init segment (ftyp+moov) for CMAF/fMP4 containers.
+	// This is the initialization segment needed for MSE playback.
+	// Stored as base64-encoded bytes. If not provided, init segments
+	// will be sent over the data track (legacy behavior).
+	initSegment: z.string().optional(), // base64-encoded
 });
 
 // Mirrors VideoDecoderConfig

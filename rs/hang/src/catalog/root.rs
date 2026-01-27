@@ -208,6 +208,22 @@ impl Drop for CatalogGuard<'_> {
 
 		// TODO decide if this should return an error, or be impossible to fail
 		let frame = self.catalog.to_string().expect("invalid catalog");
+
+		// Log the catalog JSON to verify container field is included
+		if let Some(video) = &self.catalog.video {
+			for (name, config) in &video.renditions {
+				tracing::info!(track = name, container = ?config.container, "publishing catalog with container");
+			}
+		}
+		if let Some(audio) = &self.catalog.audio {
+			for (name, config) in &audio.renditions {
+				tracing::info!(track = name, container = ?config.container, "publishing catalog with container");
+			}
+		}
+
+		// Log the full catalog JSON to debug serialization
+		tracing::debug!(catalog_json = %frame, "publishing catalog JSON");
+
 		group.write_frame(frame);
 		group.close();
 	}
@@ -272,7 +288,7 @@ impl From<moq_lite::TrackConsumer> for CatalogConsumer {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{AudioCodec::Opus, AudioConfig, H264, VideoConfig};
+	use crate::catalog::{AudioCodec::Opus, AudioConfig, Container, H264, VideoConfig};
 
 	use super::*;
 
@@ -286,7 +302,8 @@ mod test {
 						"codedWidth": 1280,
 						"codedHeight": 720,
 						"bitrate": 6000000,
-						"framerate": 30.0
+						"framerate": 30.0,
+						"container": "native"
 					}
 				},
 				"priority": 1
@@ -297,7 +314,8 @@ mod test {
 						"codec": "opus",
 						"sampleRate": 48000,
 						"numberOfChannels": 2,
-						"bitrate": 128000
+						"bitrate": 128000,
+						"container": "native"
 					}
 				},
 				"priority": 2
@@ -326,6 +344,8 @@ mod test {
 				bitrate: Some(6_000_000),
 				framerate: Some(30.0),
 				optimize_for_latency: None,
+				container: Container::Native,
+				init_segment: None,
 			},
 		);
 
@@ -338,6 +358,8 @@ mod test {
 				channel_count: 2,
 				bitrate: Some(128_000),
 				description: None,
+				container: Container::Native,
+				init_segment: None,
 			},
 		);
 
