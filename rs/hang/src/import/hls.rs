@@ -239,7 +239,9 @@ impl Hls {
 			if target_duration.is_none() {
 				target_duration = Some(playlist.target_duration);
 			}
-			let count = self.consume_segments(TrackKind::Audio, &mut track, &playlist, None).await?;
+			let count = self
+				.consume_segments(TrackKind::Audio, &mut track, &playlist, None)
+				.await?;
 			wrote += count;
 			self.audio = Some(track);
 		}

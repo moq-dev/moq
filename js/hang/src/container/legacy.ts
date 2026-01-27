@@ -14,7 +14,6 @@ export interface Frame {
 	group: number;
 }
 
-
 // A Helper class to encode frames into a track.
 export class Producer {
 	#track: Moq.Track;
