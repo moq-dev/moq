@@ -7,6 +7,7 @@ import BufferingIndicator from "./components/BufferingIndicator";
 import WatchControls from "./components/WatchControls";
 import WatchUIContextProvider, { WatchUIContext } from "./context";
 import styles from "./styles/index.css?inline";
+import BufferOverlay from "./components/BufferOverlay";
 
 export function WatchUI(props: { watch: HangWatch }) {
 	return (
@@ -18,18 +19,21 @@ export function WatchUI(props: { watch: HangWatch }) {
 					const context = useContext(WatchUIContext);
 					if (!context) return null;
 					return (
-						<Show when={context.isStatsPanelVisible()}>
-							<Stats
-								context={WatchUIContext}
-								getElement={(ctx): ProviderProps | undefined => {
-									if (!ctx?.hangWatch) return undefined;
-									return {
-										audio: { source: ctx.hangWatch.audio.source },
-										video: { source: ctx.hangWatch.video.source },
-									};
-								}}
-							/>
-						</Show>
+						<>
+							<Show when={context.isStatsPanelVisible()}>
+								<Stats
+									context={WatchUIContext}
+									getElement={(ctx): ProviderProps | undefined => {
+										if (!ctx?.hangWatch) return undefined;
+										return {
+											audio: { source: ctx.hangWatch.audio.source },
+											video: { source: ctx.hangWatch.video.source },
+										};
+									}}
+								/>
+							</Show>
+							<BufferOverlay />
+						</>
 					);
 				})()}
 				<BufferingIndicator />

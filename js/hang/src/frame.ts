@@ -38,7 +38,10 @@ export function encode(source: Uint8Array | Source, timestamp: Time.Micro, conta
 }
 
 // NOTE: A keyframe is always the first frame in a group, so it's not encoded on the wire.
-export function decode(buffer: Uint8Array, container?: Catalog.Container): { data: Uint8Array; timestamp: Time.Micro } {
+export function decode(
+	buffer: Uint8Array,
+	container?: Catalog.Container,
+): { data: Uint8Array; timestamp: Time.Micro } {
 	// Decode timestamp using the specified container format
 	const [timestamp, data] = Container.decodeTimestamp(buffer, container);
 	return { timestamp: timestamp as Time.Micro, data };
@@ -79,7 +82,7 @@ export interface ConsumerProps {
 
 interface Group {
 	consumer: Moq.Group;
-	frames: Frame[]; // decode order
+	frames: Frame[]; // decode order, FIFO queue
 	latest?: Time.Micro; // The timestamp of the latest known frame
 }
 
@@ -89,7 +92,7 @@ export class Consumer {
 	#container?: Catalog.Container;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
-
+	buffered = new Signal<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]>([]);
 	// Wake up the consumer when a new frame is available.
 	#notify?: () => void;
 
@@ -179,6 +182,8 @@ export class Consumer {
 		} catch (_err) {
 			// Ignore errors, we close groups on purpose to skip them.
 		} finally {
+			// this.#updateBufferedRanges(group);
+
 			if (group.consumer.sequence === this.#active) {
 				// Advance to the next group.
 				this.#active += 1;
@@ -238,6 +243,10 @@ export class Consumer {
 		this.#notify = undefined;
 	}
 
+	#updateBufferedRanges() {
+		this.buffered.set(getBufferedRanges(this.#groups));
+	}
+
 	async decode(): Promise<Frame | undefined> {
 		for (;;) {
 			if (
@@ -246,6 +255,7 @@ export class Consumer {
 				this.#groups[0].consumer.sequence <= this.#active
 			) {
 				const frame = this.#groups[0].frames.shift();
+
 				if (frame) return frame;
 
 				// Check if the group is done and then remove it.
@@ -260,7 +270,10 @@ export class Consumer {
 			}
 
 			const wait = new Promise<void>((resolve) => {
-				this.#notify = resolve;
+				this.#notify = () => {
+					this.#updateBufferedRanges();
+					resolve();
+				};
 			}).then(() => true);
 
 			if (!(await Promise.race([wait, this.#signals.closed]))) {
@@ -281,4 +294,13 @@ export class Consumer {
 
 		this.#groups.length = 0;
 	}
+}
+
+function getBufferedRanges(groups: Group[]) {
+	return groups
+		.map(group => ({
+			start: group.frames.at(0)?.timestamp ?? group.latest,
+			end: group.latest,
+		}))
+		.filter(range => range.start !== range.end);
 }

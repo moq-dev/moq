@@ -95,6 +95,9 @@ export class Source {
 	#stats = new Signal<VideoStats | undefined>(undefined);
 	readonly stats: Getter<VideoStats | undefined> = this.#stats;
 
+	#bufferedRanges = new Signal<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]>([]);
+	readonly bufferedRanges: Getter<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]> = this.#bufferedRanges;
+
 	#signals = new Effect();
 
 	constructor(
@@ -203,6 +206,11 @@ export class Source {
 			container: config.container,
 		});
 		effect.cleanup(() => consumer.close());
+
+		// Sync buffer signals from consumer to source
+		effect.effect((e) => {
+			e.set(this.#bufferedRanges, e.get(consumer.buffered), []);
+		});
 
 		// We need a queue because VideoDecoder doesn't block on a Promise returned by output.
 		// NOTE: We will drain this queue almost immediately, so the highWaterMark is just a safety net.

@@ -3,6 +3,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import type HangWatch from "@moq/hang/watch/element";
 import type { JSX } from "solid-js";
 import { createContext, createSignal, onCleanup } from "solid-js";
+import type { Time } from "@moq/lite";
 
 type WatchUIContextProviderProps = {
 	hangWatch: HangWatch;
@@ -17,7 +18,7 @@ export type Rendition = {
 	height?: number;
 };
 
-type WatchUIContextValues = {
+export type WatchUIContextValues = {
 	hangWatch: HangWatch;
 	watchStatus: () => WatchStatus;
 	isPlaying: () => boolean;
@@ -34,6 +35,11 @@ type WatchUIContextValues = {
 	setActiveRendition: (name: string | undefined) => void;
 	isStatsPanelVisible: () => boolean;
 	setIsStatsPanelVisible: (visible: boolean) => void;
+	isBufferOverlayVisible: () => boolean;
+	setIsBufferOverlayVisible: (visible: boolean) => void;
+	videoBufferedRanges: () => { start: Time.Micro | undefined, end: Time.Micro | undefined }[];
+	audioBufferedRanges: () => { start: Time.Micro | undefined, end: Time.Micro | undefined }[];
+	videoCurrentTime: () => Time.Micro | undefined;
 	isFullscreen: () => boolean;
 	toggleFullscreen: () => void;
 };
@@ -49,7 +55,22 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const [latency, setLatency] = createSignal<number>(0);
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
 	const [activeRendition, setActiveRendition] = createSignal<string | undefined>(undefined);
-	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
+	const [isStatsPanelVisible, setIsStatsPanelVisibleInternal] = createSignal<boolean>(false);
+	const [isBufferOverlayVisible, setIsBufferOverlayVisibleInternal] = createSignal<boolean>(false);
+	const [videoBufferedRanges, setVideoBufferedRanges] = createSignal<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]>([]);
+	const [audioBufferedRanges, setAudioBufferedRanges] = createSignal<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]>([]);
+	const [videoCurrentTime, setVideoCurrentTime] = createSignal<Time.Micro | undefined>(undefined);
+
+	// Mutual exclusivity: hide buffer overlay when stats panel is shown and vice versa
+	const setIsStatsPanelVisible = (visible: boolean) => {
+		if (visible) setIsBufferOverlayVisibleInternal(false);
+		setIsStatsPanelVisibleInternal(visible);
+	};
+
+	const setIsBufferOverlayVisible = (visible: boolean) => {
+		if (visible) setIsStatsPanelVisibleInternal(false);
+		setIsBufferOverlayVisibleInternal(visible);
+	};
 	const [isFullscreen, setIsFullscreen] = createSignal<boolean>(!!document.fullscreenElement);
 
 	const togglePlayback = () => {
@@ -100,6 +121,11 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		setActiveRendition: setActiveRenditionValue,
 		isStatsPanelVisible,
 		setIsStatsPanelVisible,
+		isBufferOverlayVisible,
+		setIsBufferOverlayVisible,
+		videoBufferedRanges,
+		audioBufferedRanges,
+		videoCurrentTime,
 		isFullscreen,
 		toggleFullscreen,
 	};
@@ -174,6 +200,22 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	signals.effect((effect) => {
 		const selected = effect.get(watch.video.source.active);
 		setActiveRendition(selected);
+	});
+
+	signals.effect((effect) => {
+		const bufferedRanges = effect.get(watch.video.source.bufferedRanges);
+		setVideoBufferedRanges(bufferedRanges);
+	});
+	
+	signals.effect((effect) => {
+		const bufferedRanges = effect.get(watch.audio.source.bufferedRanges);
+		setAudioBufferedRanges(bufferedRanges);
+	});
+
+	signals.effect((effect) => {
+		const stats = effect.get(watch.video.source.stats);
+		// Use stats.timestamp directly - buffers are positioned relative to decoded frame time
+		setVideoCurrentTime(stats?.timestamp as Time.Micro | undefined);
 	});
 
 	const handleFullscreenChange = () => {

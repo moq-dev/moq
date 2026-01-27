@@ -56,6 +56,9 @@ export class Source {
 	// The name of the active rendition.
 	active = new Signal<string | undefined>(undefined);
 
+	#bufferedRanges = new Signal<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]>([]);
+	readonly bufferedRanges: Getter<{ start: Time.Micro | undefined, end: Time.Micro | undefined }[]> = this.#bufferedRanges;
+
 	#signals = new Effect();
 
 	constructor(
@@ -174,6 +177,11 @@ export class Source {
 			container: config.container,
 		});
 		effect.cleanup(() => consumer.close());
+
+		// Sync buffer signals from consumer to source
+		effect.effect((e) => {
+			e.set(this.#bufferedRanges, e.get(consumer.buffered), []);
+		});
 
 		effect.spawn(async () => {
 			const loaded = await libav.polyfill();
