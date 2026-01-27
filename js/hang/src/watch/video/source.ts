@@ -2,8 +2,7 @@ import type * as Moq from "@moq/lite";
 import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
-import * as Frame from "../../frame";
-import * as Mp4 from "../../mp4";
+import * as Container from "../../container";
 import { PRIORITY } from "../../publish/priority";
 import * as Hex from "../../util/hex";
 import { Latency } from "../../util/latency";
@@ -332,7 +331,7 @@ export class Source {
 
 	#runLegacyTrack(effect: Effect, sub: Moq.Track, config: RequiredDecoderConfig, decoder: VideoDecoder): void {
 		// Create consumer that reorders groups/frames up to the provided latency.
-		const consumer = new Frame.Consumer(sub, {
+		const consumer = new Container.Legacy.Consumer(sub, {
 			latency: this.#latency.combined,
 		});
 		effect.cleanup(() => consumer.close());
@@ -396,7 +395,7 @@ export class Source {
 							const segment = await group.readFrame();
 							if (!segment) break;
 
-							const samples = Mp4.decodeDataSegment(segment, timescale);
+							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
 
 							for (const sample of samples) {
 								const chunk = new EncodedVideoChunk({

@@ -2,8 +2,7 @@ import type * as Moq from "@moq/lite";
 import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
-import * as Frame from "../../frame";
-import * as Mp4 from "../../mp4";
+import * as Container from "../../container";
 import * as Hex from "../../util/hex";
 import { Latency } from "../../util/latency";
 import * as libav from "../../util/libav";
@@ -190,7 +189,7 @@ export class Source {
 
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
-		const consumer = new Frame.Consumer(sub, {
+		const consumer = new Container.Legacy.Consumer(sub, {
 			latency: Math.max(this.#latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
 		});
 		effect.cleanup(() => consumer.close());
@@ -266,7 +265,7 @@ export class Source {
 							const segment = await group.readFrame();
 							if (!segment) break;
 
-							const samples = Mp4.decodeDataSegment(segment, timescale);
+							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
 
 							for (const sample of samples) {
 								this.#stats.update((stats) => ({
