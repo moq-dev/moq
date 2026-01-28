@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::Context;
 use moq_lite::{Broadcast, BroadcastConsumer, BroadcastProducer, Origin, OriginConsumer, OriginProducer};
@@ -60,13 +60,13 @@ pub struct Cluster {
 	noop: BroadcastProducer,
 
 	// Broadcasts announced by local clients (users).
-	pub primary: Arc<OriginProducer>,
+	pub primary: OriginProducer,
 
 	// Broadcasts announced by remote servers (cluster).
-	pub secondary: Arc<OriginProducer>,
+	pub secondary: OriginProducer,
 
 	// Broadcasts announced by local clients and remote servers.
-	pub combined: Arc<OriginProducer>,
+	pub combined: OriginProducer,
 }
 
 impl Cluster {
@@ -75,9 +75,9 @@ impl Cluster {
 			config,
 			client,
 			noop: Broadcast::produce(),
-			primary: Arc::new(Origin::produce()),
-			secondary: Arc::new(Origin::produce()),
-			combined: Arc::new(Origin::produce()),
+			primary: Origin::produce(),
+			secondary: Origin::produce(),
+			combined: Origin::produce(),
 		}
 	}
 
@@ -110,9 +110,8 @@ impl Cluster {
 
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
 		self.primary
-			.consume()
 			.consume_broadcast(broadcast)
-			.or_else(|| self.secondary.consume().consume_broadcast(broadcast))
+			.or_else(|| self.secondary.consume_broadcast(broadcast))
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
@@ -268,7 +267,7 @@ impl Cluster {
 			.client
 			.clone()
 			.with_publish(self.primary.consume())
-			.with_consume((*self.secondary).clone())
+			.with_consume(self.secondary.clone())
 			.connect(url.clone())
 			.await
 			.context("failed to connect to remote")?;

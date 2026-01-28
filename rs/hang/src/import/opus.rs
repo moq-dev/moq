@@ -59,8 +59,7 @@ impl Opus {
 
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
-		let track = track.produce();
-		self.broadcast.insert_track(track.consume());
+		let track = self.broadcast.create_track(track);
 
 		let mut catalog = self.broadcast.catalog.lock();
 		let audio = catalog.insert_audio(track.info.name.clone(), config);

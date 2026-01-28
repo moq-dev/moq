@@ -335,7 +335,7 @@ pub struct Origin {}
 
 impl Origin {
 	pub fn produce() -> OriginProducer {
-		OriginProducer::default()
+		OriginProducer::new()
 	}
 }
 
@@ -351,6 +351,10 @@ pub struct OriginProducer {
 }
 
 impl OriginProducer {
+	pub fn new() -> Self {
+		Self::default()
+	}
+
 	/// Create and publish a new broadcast, returning the producer.
 	///
 	/// This is a helper method when you only want to publish a broadcast to a single origin.
@@ -411,6 +415,16 @@ impl OriginProducer {
 	/// Returns None if there are no legal prefixes.
 	pub fn consume_only(&self, prefixes: &[Path]) -> Option<OriginConsumer> {
 		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(prefixes)?))
+	}
+
+	/// Subscribe to a specific broadcast.
+	///
+	/// Returns None if the broadcast is not found.
+	pub fn consume_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
+		let path = path.as_path();
+		let (root, rest) = self.nodes.get(&path)?;
+		let state = root.lock();
+		state.consume_broadcast(&rest)
 	}
 
 	/// Returns a new OriginProducer that automatically strips out the provided prefix.
@@ -669,7 +683,6 @@ mod tests {
 	#[tokio::test]
 	async fn test_duplicate() {
 		let origin = Origin::produce();
-		let mut consumer = origin.consume();
 
 		let broadcast1 = Broadcast::produce();
 		let broadcast2 = Broadcast::produce();
@@ -683,6 +696,7 @@ mod tests {
 		origin.publish_broadcast("test", consumer2.clone());
 		origin.publish_broadcast("test", consumer3.clone());
 
+		let mut consumer = origin.consume();
 		assert!(consumer.consume_broadcast("test").is_some());
 
 		consumer.assert_next("test", &consumer1);
@@ -724,58 +738,56 @@ mod tests {
 	#[tokio::test]
 	async fn test_duplicate_reverse() {
 		let origin = Origin::produce();
-		let consumer = origin.consume();
 		let broadcast1 = Broadcast::produce();
 		let broadcast2 = Broadcast::produce();
 
 		origin.publish_broadcast("test", broadcast1.consume());
 		origin.publish_broadcast("test", broadcast2.consume());
-		assert!(consumer.consume_broadcast("test").is_some());
+		assert!(origin.consume_broadcast("test").is_some());
 
 		// This is harder, dropping the new broadcast first.
 		drop(broadcast2);
 
 		// Wait for the cleanup async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		assert!(consumer.consume_broadcast("test").is_some());
+		assert!(origin.consume_broadcast("test").is_some());
 
 		drop(broadcast1);
 
 		// Wait for the cleanup async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		assert!(consumer.consume_broadcast("test").is_none());
+		assert!(origin.consume_broadcast("test").is_none());
 	}
 
 	#[tokio::test]
 	async fn test_double_publish() {
 		let origin = Origin::produce();
-		let consumer = origin.consume();
 		let broadcast = Broadcast::produce();
 
 		// Ensure it doesn't crash.
 		origin.publish_broadcast("test", broadcast.consume());
 		origin.publish_broadcast("test", broadcast.consume());
 
-		assert!(consumer.consume_broadcast("test").is_some());
+		assert!(origin.consume_broadcast("test").is_some());
 
 		drop(broadcast);
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		assert!(consumer.consume_broadcast("test").is_none());
+		assert!(origin.consume_broadcast("test").is_none());
 	}
 	// There was a tokio bug where only the first 127 broadcasts would be received instantly.
 	#[tokio::test]
 	#[should_panic]
 	async fn test_128() {
 		let origin = Origin::produce();
-		let mut consumer = origin.consume();
 		let broadcast = Broadcast::produce();
 
 		for i in 0..256 {
 			origin.publish_broadcast(format!("test{i}"), broadcast.consume());
 		}
 
+		let mut consumer = origin.consume();
 		for i in 0..256 {
 			consumer.assert_next(format!("test{i}"), &broadcast.consume());
 		}
@@ -784,13 +796,13 @@ mod tests {
 	#[tokio::test]
 	async fn test_128_fix() {
 		let origin = Origin::produce();
-		let mut consumer = origin.consume();
 		let broadcast = Broadcast::produce();
 
 		for i in 0..256 {
 			origin.publish_broadcast(format!("test{i}"), broadcast.consume());
 		}
 
+		let mut consumer = origin.consume();
 		for i in 0..256 {
 			// try_next does not have the same issue because it's synchronous.
 			consumer.assert_try_next(format!("test{i}"), &broadcast.consume());
@@ -800,7 +812,6 @@ mod tests {
 	#[tokio::test]
 	async fn test_with_root_basic() {
 		let origin = Origin::produce();
-		let mut consumer = origin.consume();
 		let broadcast = Broadcast::produce();
 
 		// Create a producer with root "/foo"
@@ -810,6 +821,7 @@ mod tests {
 		// When publishing to "bar/baz", it should actually publish to "foo/bar/baz"
 		assert!(foo_producer.publish_broadcast("bar/baz", broadcast.consume()));
 
+		let mut consumer = origin.consume();
 		// The original consumer should see the full path
 		consumer.assert_next("foo/bar/baz", &broadcast.consume());
 
@@ -821,7 +833,6 @@ mod tests {
 	#[tokio::test]
 	async fn test_with_root_nested() {
 		let origin = Origin::produce();
-		let mut consumer = origin.consume();
 		let broadcast = Broadcast::produce();
 
 		// Create nested roots
@@ -832,6 +843,7 @@ mod tests {
 		// Publishing to "baz" should actually publish to "foo/bar/baz"
 		assert!(foo_bar_producer.publish_broadcast("baz", broadcast.consume()));
 
+		let mut consumer = origin.consume();
 		// The original consumer sees the full path
 		consumer.assert_next("foo/bar/baz", &broadcast.consume());
 
@@ -872,7 +884,6 @@ mod tests {
 	#[tokio::test]
 	async fn test_consume_only_filters() {
 		let origin = Origin::produce();
-		let mut consumer = origin.consume();
 		let broadcast1 = Broadcast::produce();
 		let broadcast2 = Broadcast::produce();
 		let broadcast3 = Broadcast::produce();
@@ -883,7 +894,7 @@ mod tests {
 		origin.publish_broadcast("notallowed", broadcast3.consume());
 
 		// Create a consumer that only sees "allowed" paths
-		let mut limited_consumer = consumer
+		let mut limited_consumer = origin
 			.consume_only(&["allowed".into()])
 			.expect("should create limited consumer");
 
@@ -892,7 +903,8 @@ mod tests {
 		limited_consumer.assert_next("allowed/nested", &broadcast2.consume());
 		limited_consumer.assert_next_wait(); // Should not see "notallowed"
 
-		// Original consumer should see all
+		// Unscoped consumer should see all
+		let mut consumer = origin.consume();
 		consumer.assert_next("allowed", &broadcast1.consume());
 		consumer.assert_next("allowed/nested", &broadcast2.consume());
 		consumer.assert_next("notallowed", &broadcast3.consume());
@@ -901,7 +913,6 @@ mod tests {
 	#[tokio::test]
 	async fn test_consume_only_multiple_prefixes() {
 		let origin = Origin::produce();
-		let consumer = origin.consume();
 		let broadcast1 = Broadcast::produce();
 		let broadcast2 = Broadcast::produce();
 		let broadcast3 = Broadcast::produce();
@@ -911,7 +922,7 @@ mod tests {
 		origin.publish_broadcast("baz/test", broadcast3.consume());
 
 		// Consumer that only sees "foo" and "bar" paths
-		let mut limited_consumer = consumer
+		let mut limited_consumer = origin
 			.consume_only(&["foo".into(), "bar".into()])
 			.expect("should create limited consumer");
 
@@ -923,7 +934,6 @@ mod tests {
 	#[tokio::test]
 	async fn test_with_root_and_publish_only() {
 		let origin = Origin::produce();
-		let mut consumer = origin.consume();
 		let broadcast = Broadcast::produce();
 
 		// User connects to /foo root
@@ -946,6 +956,7 @@ mod tests {
 		assert!(!limited_producer.publish_broadcast("goop/other", broadcast.consume()));
 
 		// Original consumer sees full paths
+		let mut consumer = origin.consume();
 		consumer.assert_next("foo/bar", &broadcast.consume());
 		consumer.assert_next("foo/bar/nested", &broadcast.consume());
 		consumer.assert_next("foo/goop/pee", &broadcast.consume());
@@ -1017,7 +1028,6 @@ mod tests {
 	#[tokio::test]
 	async fn test_consume_broadcast_with_permissions() {
 		let origin = Origin::produce();
-		let consumer = origin.consume();
 		let broadcast1 = Broadcast::produce();
 		let broadcast2 = Broadcast::produce();
 
@@ -1025,7 +1035,7 @@ mod tests {
 		origin.publish_broadcast("notallowed/test", broadcast2.consume());
 
 		// Create limited consumer
-		let limited_consumer = consumer
+		let limited_consumer = origin
 			.consume_only(&["allowed".into()])
 			.expect("should create limited consumer");
 
@@ -1038,6 +1048,7 @@ mod tests {
 		assert!(limited_consumer.consume_broadcast("notallowed/test").is_none());
 
 		// Original consumer can get both
+		let consumer = origin.consume();
 		assert!(consumer.consume_broadcast("allowed/test").is_some());
 		assert!(consumer.consume_broadcast("notallowed/test").is_some());
 	}
@@ -1066,7 +1077,6 @@ mod tests {
 	#[tokio::test]
 	async fn test_multiple_consumers_with_different_permissions() {
 		let origin = Origin::produce();
-		let consumer = origin.consume();
 		let broadcast1 = Broadcast::produce();
 		let broadcast2 = Broadcast::produce();
 		let broadcast3 = Broadcast::produce();
@@ -1077,15 +1087,15 @@ mod tests {
 		origin.publish_broadcast("baz/test", broadcast3.consume());
 
 		// Create consumers with different permissions
-		let mut foo_consumer = consumer
+		let mut foo_consumer = origin
 			.consume_only(&["foo".into()])
 			.expect("should create foo consumer");
 
-		let mut bar_consumer = consumer
+		let mut bar_consumer = origin
 			.consume_only(&["bar".into()])
 			.expect("should create bar consumer");
 
-		let mut foobar_consumer = consumer
+		let mut foobar_consumer = origin
 			.consume_only(&["foo".into(), "bar".into()])
 			.expect("should create foobar consumer");
 

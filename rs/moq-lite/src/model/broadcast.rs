@@ -55,7 +55,7 @@ impl Default for BroadcastProducer {
 }
 
 impl BroadcastProducer {
-	fn new() -> Self {
+	pub fn new() -> Self {
 		Self {
 			state: Lock::new(State {
 				published: HashMap::new(),

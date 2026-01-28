@@ -209,7 +209,6 @@ export class Source {
 			output: async (frame: VideoFrame) => {
 				try {
 					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-
 					if (timestamp < (this.#timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
 						return;

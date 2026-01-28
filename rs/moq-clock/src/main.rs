@@ -86,7 +86,6 @@ async fn main() -> anyhow::Result<()> {
 
 			let path: moq_lite::Path<'_> = config.broadcast.into();
 			let mut origin = origin
-				.consume()
 				.consume_only(&[path])
 				.context("not allowed to consume broadcast")?;
 

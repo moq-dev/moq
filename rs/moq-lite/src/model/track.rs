@@ -54,7 +54,7 @@ pub struct TrackProducer {
 }
 
 impl TrackProducer {
-	fn new(info: Track) -> Self {
+	pub fn new(info: Track) -> Self {
 		Self {
 			info,
 			state: Default::default(),

@@ -90,8 +90,7 @@ impl Hev1 {
 			video.priority = 2;
 		}
 
-		let track = track.produce();
-		self.broadcast.insert_track(track.consume());
+		let track = self.broadcast.create_track(track);
 
 		self.config = Some(config);
 		self.track = Some(track.into());

@@ -66,7 +66,7 @@ pub struct FrameProducer {
 }
 
 impl FrameProducer {
-	fn new(info: Frame) -> Self {
+	pub fn new(info: Frame) -> Self {
 		Self {
 			info,
 			state: Default::default(),

@@ -8,14 +8,13 @@ async fn main() -> anyhow::Result<()> {
 
 	// Create an origin that we can publish to and the session can consume from.
 	let origin = moq_lite::Origin::produce();
-	let consumer = origin.consume();
 
 	// Run the broadcast production and the session in parallel.
 	// This is a simple example of how you can concurrently run multiple tasks.
 	// tokio::spawn works too.
 	tokio::select! {
+		res = run_session(origin.consume()) => res,
 		res = run_broadcast(origin) => res,
-		res = run_session(consumer) => res,
 	}
 }
 

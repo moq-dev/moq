@@ -81,7 +81,7 @@ pub struct GroupProducer {
 }
 
 impl GroupProducer {
-	fn new(info: Group) -> Self {
+	pub fn new(info: Group) -> Self {
 		Self {
 			info,
 			state: Default::default(),
