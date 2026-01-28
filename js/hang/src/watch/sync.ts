@@ -1,4 +1,4 @@
-import { Time } from "@moq/lite";
+import type { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import type * as Catalog from "../catalog";
 
@@ -87,9 +87,7 @@ export class Sync {
 	// Sleep until it's time to render this frame.
 	//
 	// Returns the amount of time we tried to sleep.
-	async wait(timestamp: Time.Milli): Promise<Time.Milli> {
-		let slept = Time.Milli.zero;
-
+	async wait(timestamp: Time.Milli): Promise<void> {
 		if (!this.#reference) {
 			throw new Error("reference not set; call update() first");
 		}
@@ -101,13 +99,15 @@ export class Sync {
 			const ref = (now - timestamp) as Time.Milli;
 
 			const sleep = this.#reference - ref + this.#latency.peek();
-			if (sleep <= 0) return slept;
+			if (sleep <= 0) return;
 			const wait = new Promise((resolve) => setTimeout(resolve, sleep)).then(() => true);
 
 			const ok = await Promise.race([this.#update, wait]);
-			slept = (slept + sleep) as Time.Milli;
-
-			if (ok) return slept;
+			if (ok) return;
 		}
+	}
+
+	close() {
+		this.signals.close();
 	}
 }

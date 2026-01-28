@@ -224,6 +224,12 @@ export class Source {
 					const ok = await Promise.race([wait, effect.cancel]);
 					if (!ok) return;
 
+					if (timestamp < (this.#timestamp.peek() ?? 0)) {
+						// Late frame, don't render it.
+						// NOTE: This can happen when the ref is updated, such as on playback start.
+						return;
+					}
+
 					this.#timestamp.set(timestamp);
 
 					this.frame.update((prev) => {

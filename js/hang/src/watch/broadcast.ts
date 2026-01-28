@@ -169,5 +169,6 @@ export class Broadcast {
 		this.chat.close();
 		this.preview.close();
 		this.user.close();
+		this.sync.close();
 	}
 }
