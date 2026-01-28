@@ -75,17 +75,17 @@ impl BroadcastProducer {
 	/// Produce a new track and insert it into the broadcast.
 	pub fn create_track(&mut self, track: Track) -> TrackProducer {
 		let track = TrackProducer::new(track);
-		self.insert_track(&track);
+		self.insert_track(track.clone());
 		track
 	}
 
 	/// Insert a track into the lookup, returning true if it was unique.
 	///
-	/// This takes a ref just so it's more clear that you're supposed to keep publishing to the TrackProducer.
-	pub fn insert_track(&mut self, track: &TrackProducer) -> bool {
+	/// NOTE: You probably want to [TrackProducer::clone] to keep publishing to the track.
+	pub fn insert_track(&mut self, track: TrackProducer) -> bool {
 		let mut state = self.state.lock();
 		state.consumers.insert(track.info.name.clone(), track.consume());
-		state.producers.insert(track.info.name.clone(), track.clone()).is_none()
+		state.producers.insert(track.info.name.clone(), track).is_none()
 	}
 
 	/// Remove a track from the lookup.
@@ -255,6 +255,32 @@ impl BroadcastConsumer {
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	#[tokio::test]
+	async fn insert() {
+		let mut producer = BroadcastProducer::new();
+		let mut track1 = Track::new("track1").produce();
+
+		// Make sure we can insert before a consumer is created.
+		producer.insert_track(track1.clone());
+		track1.append_group();
+
+		let consumer = producer.consume();
+
+		let mut track1_sub = consumer.subscribe_track(&Track::new("track1"));
+		track1_sub.assert_group();
+
+		let mut track2 = Track::new("track2").produce();
+		producer.insert_track(track2.clone());
+
+		let consumer2 = producer.consume();
+		let mut track2_consumer = consumer2.subscribe_track(&Track::new("track2"));
+		track2_consumer.assert_no_group();
+
+		track2.append_group();
+
+		track2_consumer.assert_group();
+	}
 
 	#[tokio::test]
 	async fn unused() {

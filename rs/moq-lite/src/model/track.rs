@@ -99,7 +99,7 @@ impl TrackProducer {
 	///
 	/// If the sequence number is not the latest, this method will return None.
 	pub fn create_group(&mut self, info: Group) -> Option<GroupProducer> {
-		let group = info.producer();
+		let group = info.produce();
 		self.insert_group(group.consume()).then_some(group)
 	}
 
@@ -114,7 +114,7 @@ impl TrackProducer {
 			state.trim(now);
 
 			let sequence = state.max_sequence.map_or(0, |sequence| sequence + 1);
-			let group = Group { sequence }.producer();
+			let group = Group { sequence }.produce();
 			state.groups.push_back((now, group.consume()));
 			state.max_sequence = Some(sequence);
 

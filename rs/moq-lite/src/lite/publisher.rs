@@ -22,7 +22,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn new(session: S, origin: Option<OriginConsumer>, version: Version) -> Self {
-		// Default to a dummy origin that is empty/closed.
+		// Default to a dummy origin that is immediately closed.
 		let origin = origin.unwrap_or_else(|| Origin::produce().consume());
 		Self {
 			session,

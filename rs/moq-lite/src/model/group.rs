@@ -26,7 +26,7 @@ pub struct Group {
 }
 
 impl Group {
-	pub fn producer(self) -> GroupProducer {
+	pub fn produce(self) -> GroupProducer {
 		GroupProducer::new(self)
 	}
 }

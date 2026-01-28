@@ -6,6 +6,7 @@ import * as Audio from "./audio";
 import { Chat, type ChatProps } from "./chat";
 import * as Location from "./location";
 import { Preview, type PreviewProps } from "./preview";
+import { Sync, type SyncProps } from "./sync";
 import * as User from "./user";
 import * as Video from "./video";
 
@@ -28,6 +29,7 @@ export interface BroadcastProps {
 	chat?: ChatProps;
 	preview?: PreviewProps;
 	user?: User.Props;
+	sync?: SyncProps;
 }
 
 // A broadcast that (optionally) reloads automatically when live/offline.
@@ -45,6 +47,7 @@ export class Broadcast {
 	chat: Chat;
 	preview: Preview;
 	user: User.Info;
+	sync: Sync;
 
 	#broadcast = new Signal<Moq.Broadcast | undefined>(undefined);
 
@@ -62,8 +65,9 @@ export class Broadcast {
 		this.path = Signal.from(props?.path);
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? true);
-		this.audio = new Audio.Source(this.#broadcast, this.#catalog, props?.audio);
-		this.video = new Video.Source(this.#broadcast, this.#catalog, props?.video);
+		this.sync = new Sync(props?.sync);
+		this.audio = new Audio.Source(this.#broadcast, this.#catalog, this.sync, props?.audio);
+		this.video = new Video.Source(this.#broadcast, this.#catalog, this.sync, props?.video);
 		this.location = new Location.Root(this.#broadcast, this.#catalog, props?.location);
 		this.chat = new Chat(this.#broadcast, this.#catalog, props?.chat);
 		this.preview = new Preview(this.#broadcast, this.#catalog, props?.preview);
@@ -165,5 +169,6 @@ export class Broadcast {
 		this.chat.close();
 		this.preview.close();
 		this.user.close();
+		this.sync.close();
 	}
 }

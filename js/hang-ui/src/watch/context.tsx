@@ -146,10 +146,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const syncStatus = effect.get(watch.video.source.syncStatus);
 		const bufferStatus = effect.get(watch.video.source.bufferStatus);
-		const shouldShow = syncStatus.state === "wait" || bufferStatus.state === "empty";
-
+		const shouldShow = bufferStatus.state === "empty";
 		setBuffering(shouldShow);
 	});
 

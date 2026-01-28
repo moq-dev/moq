@@ -82,9 +82,7 @@ export type VideoStats = {
 export interface VideoSource {
 	source: {
 		display: Signal<VideoResolution>;
-		syncStatus: Signal<SyncStatus>;
 		bufferStatus: Signal<BufferStatus>;
-		latency: Signal<number>;
 		stats: Signal<VideoStats>;
 	};
 }

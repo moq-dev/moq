@@ -5,15 +5,10 @@ import type * as Catalog from "../../catalog";
 import * as Container from "../../container";
 import { PRIORITY } from "../../publish/priority";
 import * as Hex from "../../util/hex";
-import { Latency } from "../../util/latency";
+import type { Sync } from "../sync";
 
 export type SourceProps = {
 	enabled?: boolean | Signal<boolean>;
-
-	// Additional buffer in milliseconds on top of the catalog's minBuffer (default: 100ms).
-	// The effective latency = catalog.minBuffer + buffer
-	// Increase this if experiencing stuttering due to network jitter.
-	buffer?: Time.Milli | Signal<Time.Milli>;
 };
 
 export type Target = {
@@ -33,21 +28,11 @@ type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeig
 
 type BufferStatus = { state: "empty" | "filled" };
 
-type SyncStatus = {
-	state: "ready" | "wait";
-	bufferDuration?: number;
-};
-
 export interface VideoStats {
 	frameCount: number;
 	timestamp: number;
 	bytesReceived: number;
 }
-
-// Only count it as buffering if we had to sleep for 200ms or more before rendering the next frame.
-// Unfortunately, this has to be quite high because of b-frames.
-// TODO Maybe we need to detect b-frames and make this dynamic?
-const MIN_SYNC_WAIT_MS = 200 as Time.Milli;
 
 // Responsible for switching between video tracks and buffering frames.
 export class Source {
@@ -85,11 +70,7 @@ export class Source {
 	readonly timestamp: Getter<Time.Milli | undefined> = this.#timestamp;
 
 	// Additional buffer in milliseconds (on top of catalog's minBuffer).
-	buffer: Signal<Time.Milli>;
-
-	// Computed latency = catalog.minBuffer + buffer
-	#latency: Latency;
-	readonly latency: Getter<Time.Milli>;
+	sync: Sync;
 
 	// The display size of the video in pixels, ideally sourced from the catalog.
 	display = new Signal<{ width: number; height: number } | undefined>(undefined);
@@ -97,11 +78,7 @@ export class Source {
 	// Whether to flip the video horizontally.
 	flip = new Signal<boolean | undefined>(undefined);
 
-	// Used to convert PTS to wall time.
-	#reference: DOMHighResTimeStamp | undefined;
-
 	bufferStatus = new Signal<BufferStatus>({ state: "empty" });
-	syncStatus = new Signal<SyncStatus>({ state: "ready" });
 
 	#stats = new Signal<VideoStats | undefined>(undefined);
 	readonly stats: Getter<VideoStats | undefined> = this.#stats;
@@ -111,18 +88,12 @@ export class Source {
 	constructor(
 		broadcast: Signal<Moq.Broadcast | undefined>,
 		catalog: Signal<Catalog.Root | undefined>,
+		sync: Sync,
 		props?: SourceProps,
 	) {
 		this.broadcast = broadcast;
-		this.buffer = Signal.from(props?.buffer ?? (100 as Time.Milli));
 		this.enabled = Signal.from(props?.enabled ?? false);
-
-		// Compute effective latency from catalog.minBuffer + buffer
-		this.#latency = new Latency({
-			buffer: this.buffer,
-			config: this.#config,
-		});
-		this.latency = this.#latency.combined;
+		this.sync = sync;
 
 		this.#signals.effect((effect) => {
 			const c = effect.get(catalog)?.video;
@@ -243,39 +214,19 @@ export class Source {
 						return;
 					}
 
-					// Sleep until it's time to decode the next frame.
-					// NOTE: This function runs in parallel for each frame.
-					const ref = performance.now() - timestamp;
-
-					let sleep = 0;
-					if (!this.#reference || ref < this.#reference) {
-						this.#reference = ref;
-						// Don't sleep so we immediately render this frame.
-					} else {
-						sleep = this.#reference - ref + this.#latency.peek();
+					if (this.frame.peek() === undefined) {
+						// Render something while we wait for the sync to catch up.
+						this.frame.set(frame.clone());
 					}
 
-					// TODO this syncStatus stuff is racey
-					if (sleep > MIN_SYNC_WAIT_MS) {
-						this.syncStatus.set({ state: "wait", bufferDuration: sleep });
-					}
-
-					if (sleep > 0) {
-						// NOTE: WebCodecs doesn't block on output promises (I think?), so these sleeps will occur concurrently.
-						// TODO: This cause the `syncStatus` to be racey especially
-						await new Promise((resolve) => setTimeout(resolve, sleep));
-					}
+					const wait = this.sync.wait(timestamp).then(() => true);
+					const ok = await Promise.race([wait, effect.cancel]);
+					if (!ok) return;
 
 					if (timestamp < (this.#timestamp.peek() ?? 0)) {
-						// Late frame (after sleeping), don't render it.
+						// Late frame, don't render it.
+						// NOTE: This can happen when the ref is updated, such as on playback start.
 						return;
-					}
-
-					if (sleep > MIN_SYNC_WAIT_MS) {
-						// Include how long we slept if it was above the threshold.
-						this.syncStatus.set({ state: "ready", bufferDuration: sleep });
-					} else {
-						this.syncStatus.set({ state: "ready" });
 					}
 
 					this.#timestamp.set(timestamp);
@@ -315,7 +266,7 @@ export class Source {
 	#runLegacyTrack(effect: Effect, sub: Moq.Track, config: RequiredDecoderConfig, decoder: VideoDecoder): void {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Legacy.Consumer(sub, {
-			latency: this.#latency.combined,
+			latency: this.sync.latency,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -331,6 +282,9 @@ export class Source {
 			for (;;) {
 				const next = await Promise.race([consumer.decode(), effect.cancel]);
 				if (!next) break;
+
+				// Mark that we received this frame right now.
+				this.sync.update(Time.Milli.fromMicro(next.timestamp as Time.Micro));
 
 				const chunk = new EncodedVideoChunk({
 					type: next.keyframe ? "key" : "delta",
@@ -386,6 +340,9 @@ export class Source {
 									data: sample.data,
 									timestamp: sample.timestamp,
 								});
+
+								// Mark that we received this frame right now.
+								this.sync.update(Time.Milli.fromMicro(sample.timestamp as Time.Micro));
 
 								// Track stats
 								this.#stats.update((current) => ({
@@ -481,7 +438,6 @@ export class Source {
 			return undefined;
 		});
 
-		this.#latency.close();
 		this.#signals.close();
 	}
 }

@@ -229,7 +229,10 @@ impl Cluster {
 
 	#[tracing::instrument("remote", skip_all, err, fields(%node))]
 	async fn run_remote(mut self, node: &str, token: String, origin: BroadcastConsumer) -> anyhow::Result<()> {
-		let url = Url::parse(&format!("https://{node}/?jwt={token}"))?;
+		let url = match token.is_empty() {
+			true => Url::parse(&format!("https://{node}/"))?,
+			false => Url::parse(&format!("https://{node}/?jwt={token}"))?,
+		};
 		let mut backoff = 1;
 
 		loop {
