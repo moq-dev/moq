@@ -5,8 +5,6 @@ use crate::Error;
 use crate::model::{Frame, GroupConsumer, Timestamp};
 use futures::{StreamExt, stream::FuturesUnordered};
 
-use moq_lite::{coding::*, lite};
-
 /// A producer for media tracks.
 ///
 /// This wraps a `moq_lite::TrackProducer` and adds hang-specific functionality
@@ -47,9 +45,6 @@ impl TrackProducer {
 	pub fn write(&mut self, frame: Frame) -> Result<(), Error> {
 		tracing::trace!(?frame, "write frame");
 
-		let mut header = BytesMut::new();
-		frame.timestamp.encode(&mut header, lite::Version::Draft02);
-
 		if frame.keyframe {
 			if let Some(group) = self.group.take() {
 				group.close();
@@ -73,14 +68,7 @@ impl TrackProducer {
 			None => return Err(Error::MissingKeyframe),
 		};
 
-		let size = header.len() + frame.payload.remaining();
-
-		let mut chunked = group.create_frame(size.into());
-		chunked.write_chunk(header.freeze());
-		for chunk in frame.payload {
-			chunked.write_chunk(chunk);
-		}
-		chunked.close();
+		frame.encode(&mut group)?;
 
 		self.group.replace(group);
 
