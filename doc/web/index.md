@@ -294,20 +294,40 @@ watch.addEventListener("error", (e) => {
 });
 ```
 
-## Examples
+## Browser Compatibility
 
-See the [hang-demo](https://github.com/moq-dev/moq/tree/main/js/hang-demo) for complete examples:
+Requires modern browser features:
 
-- Basic video player
-- Video conferencing
-- Screen sharing
-- Chat integration
+- **WebTransport** - Chromium-based browsers (Chrome, Edge, Brave)
+- **WebCodecs** - For media encoding/decoding
+- **WebAudio** - For audio playback
 
-[View more examples →](/typescript/examples)
+**Supported browsers:**
+- Chrome 97+
+- Edge 97+
+- Brave (recent versions)
+
+**Experimental support:**
+- Firefox (behind flag)
+- Safari (future support planned)
+
+## Production Deployment
+
+For production, you'll want to:
+
+1. Use a production relay ([moq-relay](/relay/))
+2. Set up proper [authentication](/relay/auth)
+3. Use a bundler like [Vite](https://vite.dev/)
+
+Currently, you need to use a bundler and [Vite](https://vite.dev/) is the only supported option for `@moq/hang`.
+It makes me very sad and we're working on a more universal solution, contributions welcome!
+
+**NOTE** both of these libraries are intended for client-side.
+However, `@moq/lite` can run on the server side using [Deno](https://deno.com/) or a [WebTransport polyfill](https://github.com/moq-dev/web-transport/tree/main/web-transport-ws).
+Don't even try to run `@moq/hang` on the server side or you'll run into a ton of issues, *especially* with Next.js.
 
 ## Next Steps
 
-- Try the [JavaScript API](/typescript/hang)
-- View [@moq/hang-ui](https://www.npmjs.com/package/@moq/hang-ui) for SolidJS components
-- Read [code examples](/typescript/examples)
-- Learn about [@moq/lite](/typescript/lite) for custom protocols
+- Learn about [@moq/hang](/ts/hang/)
+- Use [@moq/lite](/ts/lite) for custom protocols
+- View [code examples](/ts/examples)

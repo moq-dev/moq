@@ -22,7 +22,7 @@ The core pub/sub transport protocol implementing the [moq-lite specification](ht
 - QUIC stream management
 - Prioritization and backpressure
 
-[Learn more →](/rust/moq-lite)
+[Learn more](/rust/lite)
 
 ### hang
 
@@ -37,24 +37,13 @@ Media-specific encoding/streaming library built on top of `moq-lite`.
 - Support for H.264/265, VP8/9, AV1, AAC, Opus
 - CMAF/fMP4 import
 
-[Learn more →](/rust/hang)
+[Learn more](/rust/hang)
 
-## Server Tools
-
-### moq-relay
-
-A stateless relay server that routes broadcasts between publishers and subscribers.
-
-**Features:**
-- Fan-out to multiple subscribers
-- Cross-region clustering
-- JWT-based authentication
-- HTTP debugging endpoints
-
-[Learn more →](/rust/moq-relay)
+## Authentication
 
 ### moq-token
 
+[![crates.io](https://img.shields.io/crates/v/moq-token)](https://crates.io/crates/moq-token)
 [![docs.rs](https://docs.rs/moq-token/badge.svg)](https://docs.rs/moq-token)
 
 JWT authentication library and CLI tool for generating tokens.
@@ -65,9 +54,21 @@ JWT authentication library and CLI tool for generating tokens.
 - Token generation and verification
 - Available as library and CLI
 
-See [Authentication guide](/guide/authentication)
+[Learn more](/rust/token)
 
-## Utilities
+## Networking
+
+### web-transport
+
+QUIC and WebTransport implementation for Rust.
+
+**Features:**
+- Quinn-based QUIC
+- WebTransport protocol support
+- TLS certificate management
+- Server and client modes
+
+[Learn more](/rust/web-transport)
 
 ### moq-native
 
@@ -79,21 +80,6 @@ Opinionated helpers to configure a Quinn QUIC endpoint.
 - TLS certificate management
 - QUIC transport configuration
 - Connection setup helpers
-
-### moq-clock
-
-Timing and clock utilities for synchronization.
-
-### libmoq
-
-[![docs.rs](https://docs.rs/libmoq/badge.svg)](https://docs.rs/libmoq)
-
-C bindings for `moq-lite` via FFI.
-
-**Use cases:**
-- Integrate with C/C++ applications
-- Bindings for other languages
-- Legacy system integration
 
 ## CLI Tools
 
@@ -120,6 +106,8 @@ hang publish video.mp4
 ffmpeg -i input.mp4 -f mpegts - | hang publish -
 ```
 
+[Learn more](/ffmpeg/)
+
 ### moq-token-cli
 
 Command-line tool for JWT token management (binary name: `moq-token`).
@@ -141,7 +129,24 @@ moq-token --key root.jwk sign \
   --expires 1735689600
 ```
 
-See [Authentication guide](/guide/authentication) for details.
+See [Authentication guide](/relay/auth) for details.
+
+## Utilities
+
+### moq-clock
+
+Timing and clock utilities for synchronization.
+
+### libmoq
+
+[![docs.rs](https://docs.rs/libmoq/badge.svg)](https://docs.rs/libmoq)
+
+C bindings for `moq-lite` via FFI.
+
+**Use cases:**
+- Integrate with C/C++ applications
+- Bindings for other languages
+- Legacy system integration
 
 ## Installation
 
@@ -242,20 +247,9 @@ Full API documentation is available on [docs.rs](https://docs.rs):
 - [moq-native API](https://docs.rs/moq-native)
 - [libmoq API](https://docs.rs/libmoq)
 
-## Examples
-
-The repository includes several examples:
-
-- [Chat track](https://github.com/moq-dev/moq/blob/main/rs/moq-native/examples/chat.rs) - Publishing and subscribing to text
-- [Clock track](https://github.com/moq-dev/moq/tree/main/rs/moq-clock) - Timestamp synchronization
-- [Video track](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) - Publishing video frames
-
-[View more examples →](/rust/examples)
-
 ## Next Steps
 
-- Explore [moq-lite](/rust/moq-lite) - Core protocol
+- Explore [moq-lite](/rust/lite) - Core protocol
 - Explore [hang](/rust/hang) - Media library
-- Deploy [moq-relay](/rust/moq-relay) - Relay server
+- Deploy [moq-relay](/relay/) - Relay server
 - View [code examples](/rust/examples)
-- Read [API reference](/api/rust)

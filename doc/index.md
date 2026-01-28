@@ -4,11 +4,11 @@ layout: home
 hero:
   actions:
     - theme: brand
-      text: Setup
-      link: /setup/
+      text: Quick Start
+      link: /dev/
     - theme: alt
-      text: Usage
-      link: /usage/
+      text: Relay
+      link: /relay/
     - theme: alt
       text: Concepts
       link: /concepts/
@@ -48,11 +48,11 @@ features:
 Built using modern web technologies, MoQ delivers WebRTC-like latency *on the web* without the constraints of WebRTC.
 The core networking is delegated to QUIC while your application gets full control over the rest.
 
-**NOTE**: This project uses [moq-lite](/concepts/moq-lite) and [hang](/concepts/hang) instead of the *official* [IETF drafts](https://datatracker.ietf.org/group/moq/documents/).
-See the [IETF standards](/concept/standards) page for a justification!
+**NOTE**: This project uses [moq-lite](/concepts/protocol#moq-lite) and [hang](/concepts/protocol#hang) instead of the *official* [IETF drafts](https://datatracker.ietf.org/group/moq/documents/).
+See the [IETF standards](/concepts/standards) page for a justification!
 
 ## Quick Start
-Get up and running in seconds with [Nix](https://nixos.org/download.html), or use an [alternative method](/setup).
+Get up and running in seconds with [Nix](https://nixos.org/download.html), or use an [alternative method](/dev/).
 
 ```bash
 # Runs a relay, media publisher, and the web server
@@ -62,13 +62,13 @@ nix develop -c just dev
 ## Usage
 There are a bunch of MoQ binaries and plugins, here are some highlights:
 
-- **[moq-relay](/usage/relay)** - A server connecting publisher to subscribers, able to form a self-hosted CDN mesh.
-- **[moq-cli](/usage/cli)** - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc).
-- **[moq/obs](/usage/obs)** - A dope OBS plugin for publishing and consuming MoQ broadcasts.
-- **[moq/gstreamer](/usage/gstreamer)** - A dope gstreamer plugin for publishing and consuming MoQ broadcasts.
+- **[moq-relay](/relay/)** - A server connecting publishers to subscribers, able to form a self-hosted CDN mesh.
+- **[hang-cli](/ffmpeg/)** - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc).
+- **[OBS Plugin](/obs/)** - A dope OBS plugin for publishing and consuming MoQ broadcasts.
+- **[GStreamer Plugin](/gstreamer/)** - A dope gstreamer plugin for publishing and consuming MoQ broadcasts.
 
 Looking for a library instead?
 We have implementations in two languages:
 
-- **[Rust](/usage/rust)** - Rust libraries primarily targetting native. 🦀
-- **[Typescript](/usage/typescript)** - Typescript libraries primarily targetting web.
+- **[Rust](/rust/)** - Rust libraries primarily targeting native. 🦀
+- **[TypeScript](/ts/)** - TypeScript libraries primarily targeting web.

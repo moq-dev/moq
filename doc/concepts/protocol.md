@@ -197,7 +197,7 @@ The TypeScript implementation for browsers:
 - **@moq/lite** - [npm](https://www.npmjs.com/package/@moq/lite)
 - **@moq/hang** - [npm](https://www.npmjs.com/package/@moq/hang)
 
-See [TypeScript libraries](/typescript/) for details.
+See [TypeScript libraries](/ts/) for details.
 
 ### C Bindings
 
@@ -226,7 +226,7 @@ Contributions welcome:
 
 ## Next Steps
 
-- Understand the [Architecture](/guide/architecture)
-- Learn about [Authentication](/guide/authentication)
-- Try the [Rust libraries](/rust/) or [TypeScript libraries](/typescript/)
-- Deploy with the [Deployment guide](/guide/deployment)
+- Understand the [Concepts](/concepts/)
+- Learn about [Authentication](/concepts/authentication)
+- Try the [Rust libraries](/rust/) or [TypeScript libraries](/ts/)
+- Deploy with the [Relay guide](/relay/)

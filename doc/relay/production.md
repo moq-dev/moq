@@ -1,14 +1,15 @@
 ---
-title: Production Setup
-description: Setting up your production environment
+title: Production Deployment
+description: Deploying moq-relay to production
 ---
 
-# Production Setup
+# Production Deployment
 
-Here's a quick guide on how to get MoQ running in production.
+Here's a guide on how to get moq-relay running in production.
 
-## Relay
-[moq-relay](/rust/moq-relay) is the core of the MoQ stack.
+## Overview
+
+[moq-relay](/relay/) is the core of the MoQ stack.
 It's responsible for routing live tracks (payload agnostic) from 1 client to N clients.
 The relay accepts WebTransport connections from clients, but it can also connect to other relays to fetch upstream.
 Think of the relay as a HTTP web server like [Nginx](https://nginx.org/), but for live content.
@@ -16,8 +17,9 @@ Think of the relay as a HTTP web server like [Nginx](https://nginx.org/), but fo
 There are multiple companies working on MoQ CDNs (like [Cloudflare](https://moq.dev/blog/first-cdn)) so eventually it won't be necessary to self-host.
 However, you do unlock some powerful features by self-hosting, such as running relays within your internal network.
 
-### QUIC Requirements
-Before we get carried away, we need to cover the [QUIC](/guide/quic) requirements:
+## QUIC Requirements
+
+Before we get carried away, we need to cover the QUIC requirements:
 
 1. QUIC is a client-server protocol, so you **MUST** have a server with a static IP address.
 2. QUIC requires TLS, so you **MUST** have a TLS certificate, even if it's self-signed.
@@ -26,7 +28,8 @@ Before we get carried away, we need to cover the [QUIC](/guide/quic) requirement
 
 These make it a bit more difficult to deploy, but don't worry we have you covered.
 
-### EZ Mode
+## EZ Mode
+
 `https://cdn.moq.dev` is a free, public MoQ relay.
 Check out the [cdn](https://github.com/moq-dev/moq/tree/main/cdn) directory for the source code.
 
@@ -50,9 +53,10 @@ Any EC2-like cloud provider will work; we just need a VM with a public IP addres
 The old setup used to use [GCP](https://cloud.google.com/) but was double the cost.
 We're still using [GCP](https://cloud.google.com/blog/products/networking/dns-routing-policies-for-geo-location--weighted-round-robin) for GeoDNS because there aren't many other options and it's virtually free (unlike Cloudflare).
 
-Read the [moq-relay](/rust/moq-relay) documentation for more details on how to configure the relay server.
+Read the [moq-relay](/relay/) documentation for more details on how to configure the relay server.
 
-### Hard Mode
+## Hard Mode
+
 If you don't want to use the EZ Mode, don't worry you can build your own stack.
 MoQ should work just fine inside your own network or infrastructure provided you understand the QUIC requirements.
 
@@ -71,39 +75,36 @@ TLS is where most people get stuck.
 And of course, make sure UDP is allowed on your firewall.
 The default WebTransport port is UDP/443 but anything will work if you put it in the URL.
 
-## Web
-Whew, the hard part is over.
-The web client is pretty standard:
+## systemd Service
 
-- [@moq/lite](/typescript/moq): generic network transport
-- [@moq/hang](/typescript/hang): media library and WebComponents
-- [@moq/hang-ui](/typescript/hang-ui): optional UI components
+Create a systemd service file:
 
-Currently, you need to use a bundler and [Vite](https://vite.dev/) is the only supported option for `@moq/hang`.
-It makes me very sad and we're working on a more universal solution, contributions welcome!
+```ini
+# /etc/systemd/system/moq-relay.service
+[Unit]
+Description=MoQ Relay Server
+After=network.target
 
-**NOTE** both of these libraries are intended for client-side.
-However, `@moq/lite` can run on the server side using [Deno](https://deno.com/) or a [WebTransport polyfill](https://github.com/moq-dev/web-transport/tree/main/web-transport-ws).
-Don't even try to run `@moq/hang` on the server side or you'll run into a ton of issues, *especially* with Next.js.
+[Service]
+Type=simple
+User=moq
+ExecStart=/usr/local/bin/moq-relay /etc/moq-relay/relay.toml
+Restart=always
+RestartSec=5
 
-## Native
-Native clients are the easiest to get running, but also the most limited.
+[Install]
+WantedBy=multi-user.target
+```
 
-We have a few integrations with popular libraries:
-- [obs](/rust/obs): OBS Studio plugin for publishing or consuming media
-- [gstreamer](/rust/gstreamer): GStreamer plugin for publishing or consuming media
-- [hang-cli](/rust/hang-cli): command-line tool for publishing media (from stdin/ffmpeg)
+Enable and start:
 
-Or you can use the core libraries directly:
-- [moq-lite](/rust/moq-lite): generic network transport
-- [hang](/rust/hang): media library (no encoding/decoding support yet)
-- [libmoq](/rust/libmoq): C bindings for [moq-lite](/rust/moq-lite) and [hang](/rust/hang)
+```bash
+sudo systemctl enable moq-relay
+sudo systemctl start moq-relay
+```
 
-You just need to make sure UDP is allowed on your firewall.
-If the server is using a non-standard TLS certificate, you'll need to configure the client to accept it.
+## Next Steps
 
-## What's Next?
-Grats on getting MoQ running in production!
-I knew you could do it.
-
-Check out the [concepts](/concepts/) and [API](/api/) docs to dive deeper.
+- Set up [Authentication](/relay/auth)
+- Configure [Clustering](/relay/cluster)
+- Learn about [Concepts](/concepts/)

@@ -13,20 +13,18 @@ export default defineConfig({
 		logo: "/icon.svg",
 
 		nav: [
-			{ text: "Setup", link: "/setup/" },
+			{ text: "Dev", link: "/dev/" },
+			{ text: "Relay", link: "/relay/" },
+			{ text: "Rust", link: "/rust/" },
+			{ text: "TypeScript", link: "/ts/" },
 			{ text: "Concepts", link: "/concepts/" },
-			{ text: "API", link: "/api/" },
 		],
 
 		sidebar: {
-			"/setup/": [
+			"/dev/": [
 				{
-					text: "Setup",
-					items: [
-						{ text: "Quick Start", link: "/setup/" },
-						{ text: "Development", link: "/setup/development" },
-						{ text: "Production", link: "/setup/production" },
-					],
+					text: "Getting Started",
+					items: [{ text: "Quick Start", link: "/dev/" }],
 				},
 			],
 
@@ -35,9 +33,58 @@ export default defineConfig({
 					text: "Concepts",
 					items: [
 						{ text: "Layers", link: "/concepts/" },
-						{ text: "Latency", link: "/concepts/latency" },
+						{ text: "Protocol", link: "/concepts/protocol" },
+						{ text: "Authentication", link: "/concepts/authentication" },
 						{ text: "Standards", link: "/concepts/standards" },
 					],
+				},
+				{
+					text: "Comparisons",
+					items: [
+						{ text: "vs RTMP/SRT", link: "/concepts/contribution" },
+						{ text: "vs HLS/DASH", link: "/concepts/distribution" },
+						{ text: "vs WebRTC", link: "/concepts/conferencing" },
+					],
+				},
+			],
+
+			"/relay/": [
+				{
+					text: "Relay Server",
+					items: [
+						{ text: "Overview", link: "/relay/" },
+						{ text: "Authentication", link: "/relay/auth" },
+						{ text: "Clustering", link: "/relay/cluster" },
+						{ text: "Production", link: "/relay/production" },
+					],
+				},
+			],
+
+			"/web/": [
+				{
+					text: "Web",
+					items: [{ text: "Overview", link: "/web/" }],
+				},
+			],
+
+			"/obs/": [
+				{
+					text: "OBS",
+					items: [{ text: "Overview", link: "/obs/" }],
+				},
+			],
+
+			"/gstreamer/": [
+				{
+					text: "GStreamer",
+					items: [{ text: "Overview", link: "/gstreamer/" }],
+				},
+			],
+
+			"/ffmpeg/": [
+				{
+					text: "FFmpeg",
+					items: [{ text: "Overview", link: "/ffmpeg/" }],
 				},
 			],
 
@@ -46,23 +93,33 @@ export default defineConfig({
 					text: "Rust Libraries",
 					items: [
 						{ text: "Overview", link: "/rust/" },
-						{ text: "moq-lite", link: "/rust/moq-lite" },
+						{ text: "moq-lite", link: "/rust/lite" },
 						{ text: "hang", link: "/rust/hang" },
-						{ text: "moq-relay", link: "/rust/moq-relay" },
+						{ text: "moq-token", link: "/rust/token" },
+						{ text: "web-transport", link: "/rust/web-transport" },
 						{ text: "Examples", link: "/rust/examples" },
 					],
 				},
 			],
 
-			"/typescript/": [
+			"/ts/": [
 				{
 					text: "TypeScript Libraries",
 					items: [
-						{ text: "Overview", link: "/typescript/" },
-						{ text: "@moq/lite", link: "/typescript/lite" },
-						{ text: "@moq/hang", link: "/typescript/hang" },
-						{ text: "Web Components", link: "/typescript/web-components" },
-						{ text: "Examples", link: "/typescript/examples" },
+						{ text: "Overview", link: "/ts/" },
+						{ text: "@moq/lite", link: "/ts/lite" },
+						{
+							text: "@moq/hang",
+							link: "/ts/hang/",
+							items: [
+								{ text: "Watch", link: "/ts/hang/watch" },
+								{ text: "Publish", link: "/ts/hang/publish" },
+							],
+						},
+						{ text: "@moq/hang-ui", link: "/ts/hang-ui" },
+						{ text: "@moq/token", link: "/ts/token" },
+						{ text: "@moq/signals", link: "/ts/signals" },
+						{ text: "Examples", link: "/ts/examples" },
 					],
 				},
 			],
@@ -96,7 +153,4 @@ export default defineConfig({
 		theme: "github-dark",
 		lineNumbers: true,
 	},
-
-	// TODO: Remove this
-	ignoreDeadLinks: true,
 });

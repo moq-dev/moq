@@ -20,7 +20,7 @@ Core pub/sub transport protocol for browsers. Implements the [moq-lite specifica
 - Broadcasts, tracks, groups, frames
 - Browser and Deno support
 
-[Learn more →](/typescript/lite)
+[Learn more](/ts/lite)
 
 ### @moq/hang
 
@@ -34,7 +34,7 @@ High-level media library with Web Components for streaming audio and video.
 - WebCodecs-based encoding/decoding
 - Reactive state management
 
-[Learn more →](/typescript/hang)
+[Learn more](/ts/hang/)
 
 ## UI Components
 
@@ -50,11 +50,15 @@ SolidJS UI components that interact with hang Web Components.
 - Chat interface
 - Network statistics
 
+[Learn more](/ts/hang-ui)
+
 ## Utilities
 
 ### @moq/signals
 
 Reactive signals library used by hang for state management.
+
+[Learn more](/ts/signals)
 
 ### @moq/clock
 
@@ -64,16 +68,18 @@ Clock utilities for timestamp synchronization.
 
 JWT token generation and verification for browsers.
 
+[Learn more](/ts/token)
+
 ## Installation
 
 ```bash
-npm add @moq/lite
-npm add @moq/hang
-npm add @moq/hang-ui
+bun add @moq/lite
+bun add @moq/hang
+bun add @moq/hang-ui
 
 # or with other package managers
-pnpm add @moq/lite
-bun add @moq/hang
+npm add @moq/lite
+pnpm add @moq/hang
 yarn add @moq/hang
 ```
 
@@ -112,7 +118,7 @@ The easiest way to add MoQ to your web page:
 </html>
 ```
 
-[Learn more about Web Components →](/typescript/web-components)
+[Learn more about Web Components](/web/)
 
 ### Using JavaScript API
 
@@ -135,7 +141,7 @@ group.close();
 connection.publish("my-broadcast", broadcast.consume());
 ```
 
-[Learn more about @moq/lite →](/typescript/lite)
+[Learn more about @moq/lite](/ts/lite)
 
 ## Browser Compatibility
 
@@ -197,7 +203,7 @@ Check out the [hang-demo](https://github.com/moq-dev/moq/tree/main/js/hang-demo)
 
 ## Next Steps
 
-- Explore [@moq/lite](/typescript/lite) - Core protocol
-- Explore [@moq/hang](/typescript/hang) - Media library
-- Learn about [Web Components](/typescript/web-components)
-- View [code examples](/typescript/examples)
+- Explore [@moq/lite](/ts/lite) - Core protocol
+- Explore [@moq/hang](/ts/hang/) - Media library
+- Learn about [Web Components](/web/)
+- View [code examples](/ts/examples)

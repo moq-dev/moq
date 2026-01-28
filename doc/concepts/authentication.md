@@ -1,10 +1,15 @@
+---
+title: Authentication
+description: Authentication concepts for MoQ
+---
+
 # Authentication
 
-[moq-relay](/rust/moq-relay) uses JWT tokens in the URL for authentication and authorization.
+[moq-relay](/relay/) uses JWT tokens in the URL for authentication and authorization.
 This scopes sessions to a selected root path with additional rules for publishing and subscribing.
 
 Note that this authentication only applies when using the relay.
-The application is responsible for authentication when using [moq-lite](/rust/moq-lite) directly,
+The application is responsible for authentication when using [moq-lite](/rust/lite) directly.
 
 
 ## Overview
@@ -17,128 +22,96 @@ The authentication system supports:
 - **Anonymous access** for public content
 - **Cluster authentication** for relay-to-relay communication
 
-## Usage
+## How It Works
 
-## Anonymous Access
-If you don't care about security, anonymous access is supported.
-The relay can be configured with a single public prefix, usually "anon".
-This is obviously not recommended in production especially because broadcast paths are not unique and can be hijacked.
+### Token-Based Access
 
-**Example URL**: `https://cdn.moq.dev/anon`
+Clients pass a JWT token via the `?jwt=` query parameter:
 
-**Example Configuration:**
-```toml
-# relay.toml
-[auth]
-public = "anon"  # Allow anonymous access to anon/**
-key = "root.jwk" # Require a token for all other paths
+```
+https://cdn.moq.dev/room/123?jwt=<base64-jwt-token>
 ```
 
-If you really, really just don't care, then you can allow all paths.
+The token contains claims that define:
+- **Root path** - The base path for all operations
+- **Publish permissions** - What paths can be published to
+- **Subscribe permissions** - What paths can be subscribed to
+- **Expiration** - When the token becomes invalid
 
-**Fully Unauthenticated**
-```toml
-# relay.toml
-[auth]
-public = ""  # Allow anonymous access to everything
+### Path Scoping
+
+All operations are relative to the connection URL path:
+
+```
+Connection URL: https://cdn.moq.dev/room/123
+Token root: "room/123"
 ```
 
-And if you want to require an auth token, you can omit the `public` field entirely.
-**Fully Authenticated**
-```toml
-# relay.toml
-[auth]
-key = "root.jwk" # Require a token for all paths
-```
+The client can then:
+- `SUBSCRIBE alice` → subscribes to `room/123/alice`
+- `ANNOUNCE bob/video` → announces `room/123/bob/video`
 
+### Token Claims
 
-### Authenticated Tokens
-An token can be passed via the `?jwt=` query parameter in the connection URL:
-
-**Example URL**: `https://cdn.moq.dev/demo?jwt=<base64-jwt-token>`
-
-**WARNING**: These tokens are only as secure as the delivery.
-Make sure that any secrets are securely transmitted (ex. via HTTPS) and stored (ex. secrets manager).
-Avoid logging this query parameter if possible; we'll switch to an `Authentication` header once WebTransport supports it.
-
-The token contains permissions that apply to the session.
-It can also be used to prevent publishing (read-only) or subscribing (write-only) on a per-path basis.
-
-**Example Token (unsigned)**
 ```json
 {
-  "root": "room/123",  // Root path for all operations
-  "pub": "alice",      // Publishing permissions (optional)
-  "sub": "",           // Subscription permissions (optional)
-  "cluster": false,    // Cluster node flag
-  "exp": 1703980800,   // Expiration (unix timestamp)
-  "iat": 1703977200    // Issued at (unix timestamp)
+  "root": "room/123",     // Base path
+  "pub": "alice",         // Can publish under alice/**
+  "sub": "",              // Can subscribe to anything
+  "cluster": false,       // Not a cluster node
+  "exp": 1703980800,      // Expiration timestamp
+  "iat": 1703977200       // Issued at timestamp
 }
 ```
 
-This token allows:
-- ✅ Connect to `https://cdn.moq.dev/room/123`
-- ❌ Connect to: `https://cdn.moq.dev/secret` (wrong root)
-- ✅ Publish to `alice/camera`
-- ❌ Publish to: `bob/camera` (only alice)
-- ✅ Subscribe to `bob/screen`
-- ❌ Subscribe to: `../secret` (scope enforced)
+## Anonymous Access
 
-A token may omit either the `pub` or `sub` field to make a read-only or write-only token respectively.
-An empty string means no restrictions.
+For development or public content, the relay can allow anonymous access:
 
-Note that there are implicit `/` delimiters added when joining paths (except for empty strings).
-Leading and trailing slashes are ignored within a token.
-
-All subscriptions and announcements are relative to the connection URL.
-These would all resolves to the same broadcast:
-- `CONNECT https://cdn.moq.dev/room/123` could `SUBSCRIBE alice`.
-- `CONNECT https://cdn.moq.dev/room` could `SUBSCRIBE 123/alice`.
-- `CONNECT https://cdn.moq.dev` could `SUBSCRIBE room/123/alice`.
-
-
-The connection URL must contain the root path within the token.
-It's possible use a more specific path, potentially losing permissions in the process.
-
-Our example token from above:
-- 🔴 Connect to `http://cdn.moq.dev/room` (must contain room/123)
-- 🟢 Connect to `http://cdn.moq.dev/room/123`
-- 🟡 Connect to `http://cdn.moq.dev/room/123/alice` (can't subscribe to `bob`)
-- 🟡 Connect to `http://cdn.moq.dev/room/123/bob` (can't publish to `alice`)
-
-
-### Generating Tokens
-
-`moq-token` is available as a Rust crate ([docs.rs](https://docs.rs/moq-token)), JS library ([@moq/token](https://www.npmjs.com/package/@moq/token)), and CLI.
-This documentation focuses on the CLI but the same concepts apply to all.
-
-**Installation**:
-```bash
-# Install the `moq-token` binary
-cargo install moq-token-cli
-```
-
-**Generate a key**:
-```bash
-moq-token --key "root.jwk" generate
-```
-
-**Sign a token**:
-```bash
-moq-token --key "root.jwk" sign \
-  --root "rooms/meeting-123" \
-  --subscribe "" \
-  --publish "alice" \
-  --expires 1703980800 > "alice.jwt"
-```
-
-
-And of course, the relay has to be configured with the same key to verify tokens.
-We currently only support symmetric keys.
-
-**Example Configuration:**
 ```toml
-# config.toml
 [auth]
-key = "root.jwk" # Path to the key we generated.
+public = "anon"  # Allow unauthenticated access to anon/**
 ```
+
+This is useful for:
+- Development and testing
+- Public broadcasts
+- Demo applications
+
+::: warning
+Anonymous paths can be hijacked by anyone. Don't use for sensitive content.
+:::
+
+## Security Considerations
+
+### Token Delivery
+
+- Always transmit tokens over HTTPS
+- Avoid logging the `jwt` query parameter
+- Use short expiration times
+- Consider using asymmetric keys
+
+### Key Management
+
+- **Symmetric keys**: Simpler but requires secure distribution
+- **Asymmetric keys**: More secure, relay only needs public key
+- **JWK sets**: Enable key rotation without relay restart
+
+### Path Design
+
+- Use unique, unpredictable paths for private content
+- Scope tokens to minimum necessary permissions
+- Separate publish and subscribe tokens when possible
+
+## Implementation
+
+For practical setup, see:
+- [Relay Authentication](/relay/auth) - Configuration guide
+- [moq-token library](/rust/token) - Rust implementation
+- [@moq/token library](/ts/token) - TypeScript implementation
+
+## Next Steps
+
+- Configure [Relay Authentication](/relay/auth)
+- Understand [Protocol concepts](/concepts/protocol)
+- Deploy a [Relay server](/relay/)

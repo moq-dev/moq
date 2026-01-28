@@ -8,7 +8,7 @@ description: Media library with Web Components
 [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-High-level media library for real-time streaming using [Media over QUIC](https://moq.dev), built on top of [@moq/lite](/typescript/lite).
+High-level media library for real-time streaming using [Media over QUIC](https://moq.dev), built on top of [@moq/lite](/ts/lite).
 
 ## Overview
 
@@ -22,15 +22,15 @@ High-level media library for real-time streaming using [Media over QUIC](https:/
 ## Installation
 
 ```bash
-npm add @moq/hang
-# or
-pnpm add @moq/hang
 bun add @moq/hang
+# or
+npm add @moq/hang
+pnpm add @moq/hang
 ```
 
 ## Web Components
 
-The fastest way to add MoQ to your web page. See [Web Components](/typescript/web-components) for details.
+The fastest way to add MoQ to your web page. See [Web Components](/web/) for full details.
 
 ### Publishing
 
@@ -48,6 +48,8 @@ The fastest way to add MoQ to your web page. See [Web Components](/typescript/we
 </hang-publish>
 ```
 
+[Learn more about publishing](/ts/hang/publish)
+
 ### Watching
 
 ```html
@@ -64,6 +66,8 @@ The fastest way to add MoQ to your web page. See [Web Components](/typescript/we
 </hang-watch>
 ```
 
+[Learn more about watching](/ts/hang/watch)
+
 ### Video Conferencing
 
 ```html
@@ -77,8 +81,6 @@ The fastest way to add MoQ to your web page. See [Web Components](/typescript/we
     audio video controls>
 </hang-meet>
 ```
-
-[Learn more about Web Components →](/typescript/web-components)
 
 ## JavaScript API
 
@@ -220,7 +222,7 @@ Check out [hang-demo](https://github.com/moq-dev/moq/tree/main/js/hang-demo) for
 - Chat integration
 - Quality selection UI
 
-[View more examples →](/typescript/examples)
+[View more examples](/ts/examples)
 
 ## Framework Integration
 
@@ -237,7 +239,8 @@ See the [hang specification](https://moq-dev.github.io/drafts/draft-lcurley-moq-
 
 ## Next Steps
 
-- Learn about [Web Components](/typescript/web-components)
-- Use [@moq/lite](/typescript/lite) for custom protocols
-- View [code examples](/typescript/examples)
-- Deploy with the [Deployment guide](/guide/deployment)
+- Learn about [watching streams](/ts/hang/watch)
+- Learn about [publishing streams](/ts/hang/publish)
+- Use [Web Components](/web/)
+- Use [@moq/lite](/ts/lite) for custom protocols
+- View [code examples](/ts/examples)

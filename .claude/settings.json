@@ -16,7 +16,9 @@
 			"Bash(git branch:*)",
 			"Bash(just *)",
 			"Bash(cargo *)",
-			"Bash(bun *)",
+			"Bash(bun run *)",
+			"Bash(ffprobe:*)",
+			"Bash(rs/libmoq/build.sh:*)",
 			"WebSearch"
 		]
 	}

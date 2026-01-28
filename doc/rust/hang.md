@@ -9,7 +9,7 @@ description: Media library built on moq-lite
 [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
 
-A media library built on top of [moq-lite](/rust/moq-lite) for streaming audio and video.
+A media library built on top of [moq-lite](/rust/lite) for streaming audio and video.
 
 ## Overview
 
@@ -240,12 +240,6 @@ group.finalize()?;
 
 This is handled automatically based on frame metadata.
 
-## Examples
-
-The repository includes examples:
-
-- [Video track](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) - Publishing video frames
-
 ## CLI Tool
 
 The `hang-cli` package provides a command-line tool (binary name: `hang`):
@@ -264,7 +258,7 @@ ffmpeg -i input.mp4 -f mpegts - | hang publish -
 hang publish --codec h264 --bitrate 2000000 video.mp4
 ```
 
-See `hang --help` for all options.
+See `hang --help` for all options, or [FFmpeg documentation](/ffmpeg/).
 
 ## API Reference
 
@@ -284,7 +278,7 @@ See the [hang specification](https://moq-dev.github.io/drafts/draft-lcurley-moq-
 
 ## Next Steps
 
-- Use the [moq-lite](/rust/moq-lite) transport layer
-- Deploy a [relay server](/rust/moq-relay)
-- Read the [Architecture guide](/guide/architecture)
+- Use the [moq-lite](/rust/lite) transport layer
+- Deploy a [relay server](/relay/)
+- Read the [Concepts guide](/concepts/)
 - View [code examples](/rust/examples)

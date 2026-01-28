@@ -264,7 +264,8 @@ The generic design supports:
 
 ## Next Steps
 
-- Dive into the [Architecture](/guide/architecture)
-- Read the [Protocol specs](/guide/protocol)
+- Read the [Protocol specs](/concepts/protocol)
+- Learn about [Authentication](/concepts/authentication)
+- Compare with [other protocols](/concepts/contribution)
 - Try the [Rust libraries](/rust/)
-- Try the [TypeScript libraries](/typescript/)
+- Try the [TypeScript libraries](/ts/)

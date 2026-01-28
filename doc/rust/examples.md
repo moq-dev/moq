@@ -343,7 +343,6 @@ For more examples, see the repository:
 
 ## Next Steps
 
-- Read the [moq-lite API](/rust/moq-lite)
+- Read the [moq-lite API](/rust/lite)
 - Read the [hang API](/rust/hang)
-- View [API reference](/api/rust)
-- Check out [TypeScript examples](/typescript/examples)
+- Check out [TypeScript examples](/ts/examples)

@@ -172,7 +172,7 @@ let url = format!("https://relay.example.com/demo?jwt={}", token);
 let connection = Connection::connect(&url).await?;
 ```
 
-See [Authentication guide](/guide/authentication) for details.
+See [Authentication guide](/relay/auth) for details.
 
 ## Error Handling
 
@@ -213,13 +213,6 @@ let mut track = broadcast.create_track("video");
 track.set_metadata("codec", "h264");
 ```
 
-## Examples
-
-The repository includes several examples:
-
-- [Chat track](https://github.com/moq-dev/moq/blob/main/rs/moq-native/examples/chat.rs) - Text messaging
-- [Clock track](https://github.com/moq-dev/moq/tree/main/rs/moq-clock) - Timestamp synchronization
-
 ## API Reference
 
 Full API documentation: [docs.rs/moq-lite](https://docs.rs/moq-lite)
@@ -239,6 +232,6 @@ See the [moq-lite specification](https://moq-dev.github.io/drafts/draft-lcurley-
 ## Next Steps
 
 - Build media apps with [hang](/rust/hang)
-- Deploy a [relay server](/rust/moq-relay)
-- Read the [Architecture guide](/guide/architecture)
+- Deploy a [relay server](/relay/)
+- Read the [Concepts guide](/concepts/)
 - View [code examples](/rust/examples)

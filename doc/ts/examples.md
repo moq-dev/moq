@@ -377,7 +377,7 @@ Features:
 
 ## Next Steps
 
-- Learn about [Web Components](/typescript/web-components)
-- Read the [@moq/hang API](/typescript/hang)
-- Read the [@moq/lite API](/typescript/lite)
+- Learn about [Web Components](/web/)
+- Read the [@moq/hang API](/ts/hang/)
+- Read the [@moq/lite API](/ts/lite)
 - View [Rust examples](/rust/examples)
