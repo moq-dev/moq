@@ -209,8 +209,7 @@ export class Consumer {
 		if (this.#active !== undefined && first.consumer.sequence <= this.#active) {
 			this.#groups.shift();
 
-			// TODO Debug why this fires?
-			// console.warn(`skipping slow group: ${first.consumer.sequence} < ${this.#groups[0]?.consumer.sequence}`);
+			console.warn(`skipping slow group: ${first.consumer.sequence} < ${this.#groups[0]?.consumer.sequence}`);
 
 			first.consumer.close();
 			first.frames.length = 0;

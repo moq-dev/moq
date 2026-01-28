@@ -1,6 +1,10 @@
+use bytes::{Buf, BytesMut};
 use derive_more::Debug;
 
 pub use buf_list::BufList;
+use moq_lite::{coding::Encode, lite};
+
+use crate::Error;
 
 pub type Timestamp = moq_lite::Timescale<1_000_000>;
 
@@ -31,4 +35,23 @@ pub struct Frame {
 	/// The debug implementation shows only the payload length for brevity.
 	#[debug("{} bytes", payload.num_bytes())]
 	pub payload: BufList,
+}
+
+impl Frame {
+	/// Encode the frame to the given group.
+	pub fn encode(&self, group: &mut moq_lite::GroupProducer) -> Result<(), Error> {
+		let mut header = BytesMut::new();
+		self.timestamp.encode(&mut header, lite::Version::Draft02);
+
+		let size = header.len() + self.payload.remaining();
+
+		let mut chunked = group.create_frame(size.into());
+		chunked.write_chunk(header.freeze());
+		for chunk in &self.payload {
+			chunked.write_chunk(chunk.clone());
+		}
+		chunked.close();
+
+		Ok(())
+	}
 }

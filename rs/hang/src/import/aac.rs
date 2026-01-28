@@ -7,7 +7,7 @@ use moq_lite as moq;
 /// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
 pub struct Aac {
 	broadcast: hang::BroadcastProducer,
-	track: Option<hang::TrackProducer>,
+	track: Option<moq_lite::TrackProducer>,
 	zero: Option<tokio::time::Instant>,
 }
 
@@ -119,7 +119,7 @@ impl Aac {
 		let audio = catalog.insert_audio(track.info.name.clone(), config);
 		audio.priority = 2;
 
-		self.track = Some(track.into());
+		self.track = Some(track);
 
 		Ok(())
 	}
@@ -140,7 +140,9 @@ impl Aac {
 			payload,
 		};
 
-		track.write(frame)?;
+		let mut group = track.append_group();
+		frame.encode(&mut group)?;
+		group.close();
 
 		Ok(())
 	}

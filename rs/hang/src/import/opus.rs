@@ -7,7 +7,7 @@ use moq_lite as moq;
 /// Opus decoder, initialized via a OpusHead. Does not support Ogg.
 pub struct Opus {
 	broadcast: hang::BroadcastProducer,
-	track: Option<hang::TrackProducer>,
+	track: Option<moq_lite::TrackProducer>,
 	zero: Option<tokio::time::Instant>,
 }
 
@@ -65,7 +65,7 @@ impl Opus {
 		let audio = catalog.insert_audio(track.info.name.clone(), config);
 		audio.priority = 2;
 
-		self.track = Some(track.into());
+		self.track = Some(track);
 
 		Ok(())
 	}
@@ -86,7 +86,9 @@ impl Opus {
 			payload,
 		};
 
-		track.write(frame)?;
+		let mut group = track.append_group();
+		frame.encode(&mut group)?;
+		group.close();
 
 		Ok(())
 	}
