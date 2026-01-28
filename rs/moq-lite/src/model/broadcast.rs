@@ -7,7 +7,7 @@ use std::{
 	},
 };
 
-use crate::{Error, Produce, TrackConsumer, TrackProducer};
+use crate::{Error, TrackConsumer, TrackProducer};
 use tokio::sync::watch;
 use web_async::Lock;
 
@@ -16,11 +16,11 @@ use super::Track;
 struct State {
 	// When explicitly publishing, we hold a reference to the consumer.
 	// This prevents the track from being marked as "unused".
-	published: HashMap<String, TrackConsumer>,
+	consumers: HashMap<String, TrackConsumer>,
 
 	// When requesting, we hold a reference to the producer for dynamic tracks.
 	// The track will be marked as "unused" when the last consumer is dropped.
-	requested: HashMap<String, TrackProducer>,
+	producers: HashMap<String, TrackProducer>,
 }
 
 /// A collection of media tracks that can be published and subscribed to.
@@ -32,10 +32,8 @@ pub struct Broadcast {
 }
 
 impl Broadcast {
-	pub fn produce() -> Produce<BroadcastProducer, BroadcastConsumer> {
-		let producer = BroadcastProducer::new();
-		let consumer = producer.consume();
-		Produce { producer, consumer }
+	pub fn produce() -> BroadcastProducer {
+		BroadcastProducer::new()
 	}
 }
 
@@ -57,11 +55,11 @@ impl Default for BroadcastProducer {
 }
 
 impl BroadcastProducer {
-	fn new() -> Self {
+	pub fn new() -> Self {
 		Self {
 			state: Lock::new(State {
-				published: HashMap::new(),
-				requested: HashMap::new(),
+				consumers: HashMap::new(),
+				producers: HashMap::new(),
 			}),
 			closed: Default::default(),
 			requested: async_channel::unbounded(),
@@ -76,24 +74,24 @@ impl BroadcastProducer {
 
 	/// Produce a new track and insert it into the broadcast.
 	pub fn create_track(&mut self, track: Track) -> TrackProducer {
-		let track = track.clone().produce();
-		self.insert_track(track.consumer);
-		track.producer
+		let track = TrackProducer::new(track);
+		self.insert_track(&track);
+		track
 	}
 
 	/// Insert a track into the lookup, returning true if it was unique.
-	pub fn insert_track(&mut self, track: TrackConsumer) -> bool {
+	///
+	/// This takes a ref just so it's more clear that you're supposed to keep publishing to the TrackProducer.
+	pub fn insert_track(&mut self, track: &TrackProducer) -> bool {
 		let mut state = self.state.lock();
-		let unique = state.published.insert(track.info.name.clone(), track.clone()).is_none();
-		let removed = state.requested.remove(&track.info.name).is_some();
-
-		unique && !removed
+		state.consumers.insert(track.info.name.clone(), track.consume());
+		state.producers.insert(track.info.name.clone(), track.clone()).is_none()
 	}
 
 	/// Remove a track from the lookup.
 	pub fn remove_track(&mut self, name: &str) -> bool {
 		let mut state = self.state.lock();
-		state.published.remove(name).is_some() || state.requested.remove(name).is_some()
+		state.consumers.remove(name).is_some() || state.producers.remove(name).is_some()
 	}
 
 	pub fn consume(&self) -> BroadcastConsumer {
@@ -152,8 +150,8 @@ impl Drop for BroadcastProducer {
 		let mut state = self.state.lock();
 
 		// Cleanup any published tracks.
-		state.published.clear();
-		state.requested.clear();
+		state.consumers.clear();
+		state.producers.clear();
 	}
 }
 
@@ -194,20 +192,13 @@ impl BroadcastConsumer {
 	pub fn subscribe_track(&self, track: &Track) -> TrackConsumer {
 		let mut state = self.state.lock();
 
-		// Return any explictly published track.
-		if let Some(consumer) = state.published.get(&track.name).cloned() {
-			return consumer;
-		}
-
-		// Return any requested tracks.
-		if let Some(producer) = state.requested.get(&track.name) {
+		if let Some(producer) = state.producers.get(&track.name) {
 			return producer.consume();
 		}
 
 		// Otherwise we have never seen this track before and need to create a new producer.
-		let track = track.clone().produce();
-		let producer = track.producer;
-		let consumer = track.consumer;
+		let producer = track.clone().produce();
+		let consumer = producer.consume();
 
 		// Insert the producer into the lookup so we will deduplicate requests.
 		// This is not a subscriber so it doesn't count towards "used" subscribers.
@@ -222,13 +213,13 @@ impl BroadcastConsumer {
 		}
 
 		// Insert the producer into the lookup so we will deduplicate requests.
-		state.requested.insert(producer.info.name.clone(), producer.clone());
+		state.producers.insert(producer.info.name.clone(), producer.clone());
 
 		// Remove the track from the lookup when it's unused.
 		let state = self.state.clone();
 		web_async::spawn(async move {
 			producer.unused().await;
-			state.lock().requested.remove(&producer.info.name);
+			state.lock().producers.remove(&producer.info.name);
 		});
 
 		consumer
@@ -264,32 +255,6 @@ impl BroadcastConsumer {
 #[cfg(test)]
 mod test {
 	use super::*;
-
-	#[tokio::test]
-	async fn insert() {
-		let mut producer = BroadcastProducer::new();
-		let mut track1 = Track::new("track1").produce();
-
-		// Make sure we can insert before a consumer is created.
-		producer.insert_track(track1.consumer);
-		track1.producer.append_group();
-
-		let consumer = producer.consume();
-
-		let mut track1_sub = consumer.subscribe_track(&track1.producer.info);
-		track1_sub.assert_group();
-
-		let mut track2 = Track::new("track2").produce();
-		producer.insert_track(track2.consumer);
-
-		let consumer2 = producer.consume();
-		let mut track2_consumer = consumer2.subscribe_track(&track2.producer.info);
-		track2_consumer.assert_no_group();
-
-		track2.producer.append_group();
-
-		track2_consumer.assert_group();
-	}
 
 	#[tokio::test]
 	async fn unused() {
@@ -333,11 +298,10 @@ mod test {
 		consumer.assert_not_closed();
 
 		// Create a new track and insert it into the broadcast.
-		let mut track1 = Track::new("track1").produce();
-		track1.producer.append_group();
-		producer.insert_track(track1.consumer);
+		let mut track1 = producer.create_track(Track::new("track1"));
+		track1.append_group();
 
-		let mut track1c = consumer.subscribe_track(&track1.producer.info);
+		let mut track1c = consumer.subscribe_track(&track1.info);
 		let track2 = consumer.subscribe_track(&Track::new("track2"));
 
 		drop(producer);
@@ -352,7 +316,7 @@ mod test {
 		track1c.assert_not_closed();
 
 		// TODO: We should probably cascade the closed state.
-		drop(track1.producer);
+		drop(track1);
 		track1c.assert_closed();
 	}
 
@@ -410,10 +374,10 @@ mod test {
 		let mut broadcast = Broadcast::produce();
 
 		// Subscribe to a track that doesn't exist - this creates a request
-		let consumer1 = broadcast.consumer.subscribe_track(&Track::new("unknown_track"));
+		let consumer1 = broadcast.consume().subscribe_track(&Track::new("unknown_track"));
 
 		// Get the requested track producer
-		let producer1 = broadcast.producer.assert_request();
+		let producer1 = broadcast.assert_request();
 
 		// The track producer should NOT be unused yet because there's a consumer
 		assert!(
@@ -422,7 +386,7 @@ mod test {
 		);
 
 		// Making a new consumer will keep the producer alive
-		let consumer2 = broadcast.consumer.subscribe_track(&Track::new("unknown_track"));
+		let consumer2 = broadcast.consume().subscribe_track(&Track::new("unknown_track"));
 		consumer2.assert_is_clone(&consumer1);
 
 		// Drop the consumer subscription
@@ -449,8 +413,8 @@ mod test {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
 		// Now the cleanup task should have run and we can subscribe again to the unknown track.
-		let consumer3 = broadcast.consumer.subscribe_track(&Track::new("unknown_track"));
-		let producer2 = broadcast.producer.assert_request();
+		let consumer3 = broadcast.consume().subscribe_track(&Track::new("unknown_track"));
+		let producer2 = broadcast.assert_request();
 
 		// Drop the consumer, now the producer should be unused
 		drop(consumer3);

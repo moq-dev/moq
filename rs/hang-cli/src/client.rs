@@ -6,12 +6,12 @@ use url::Url;
 pub async fn run_client(client: moq_native::Client, url: Url, name: String, publish: Publish) -> anyhow::Result<()> {
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_lite::Origin::produce();
-	origin.producer.publish_broadcast(&name, publish.consume());
+	origin.publish_broadcast(&name, publish.consume());
 
 	tracing::info!(%url, %name, "connecting");
 
 	// Establish the connection, not providing a subscriber.
-	let session = client.with_publish(origin.consumer).connect(url).await?;
+	let session = client.with_publish(origin.consume()).connect(url).await?;
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready.

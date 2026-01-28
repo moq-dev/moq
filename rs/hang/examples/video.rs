@@ -13,8 +13,8 @@ async fn main() -> anyhow::Result<()> {
 	// This is a simple example of how you can concurrently run multiple tasks.
 	// tokio::spawn works too.
 	tokio::select! {
-		res = run_broadcast(origin.producer) => res,
-		res = run_session(origin.consumer) => res,
+		res = run_session(origin.consume()) => res,
+		res = run_broadcast(origin) => res,
 	}
 }
 
@@ -93,7 +93,7 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 	.produce();
 
 	// Publish the catalog track to the broadcast.
-	broadcast.insert_track(catalog.consumer.track);
+	broadcast.insert_track(&catalog.track);
 
 	// Actually create the media track now.
 	let track = broadcast.create_track(video_track);
@@ -106,11 +106,11 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin.
 	let mut broadcast = moq_lite::Broadcast::produce();
-	let mut track = create_track(&mut broadcast.producer);
+	let mut track = create_track(&mut broadcast);
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
-	origin.publish_broadcast("", broadcast.consumer);
+	origin.publish_broadcast("", broadcast.consume());
 
 	// Not real frames of course.
 	track.write(hang::Frame {

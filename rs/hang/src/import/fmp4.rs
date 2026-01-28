@@ -185,9 +185,8 @@ impl Fmp4 {
 					// Record this track name
 					created_video_tracks.push(track.name.clone());
 
-					let track = track.produce();
-					self.broadcast.insert_track(track.consumer);
-					hang::TrackProducer::new(track.producer)
+					let track = self.broadcast.create_track(track);
+					hang::TrackProducer::new(track)
 				}
 				b"soun" => {
 					let config = self.init_audio(trak)?;
@@ -203,9 +202,8 @@ impl Fmp4 {
 					// Record this track name
 					created_audio_tracks.push(track.name.clone());
 
-					let track = track.produce();
-					self.broadcast.insert_track(track.consumer);
-					hang::TrackProducer::new(track.producer)
+					let track = self.broadcast.create_track(track);
+					hang::TrackProducer::new(track)
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
