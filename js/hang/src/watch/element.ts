@@ -81,10 +81,7 @@ export default class HangWatch extends HTMLElement {
 			path: this.path,
 			enabled: this.#enabled,
 			reload: this.reload,
-			audio: {
-				buffer: this.buffer,
-			},
-			video: {
+			sync: {
 				buffer: this.buffer,
 			},
 		});

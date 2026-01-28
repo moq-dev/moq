@@ -19,6 +19,8 @@ export interface Getter<T> {
 
 	// Receive a notification each time the value changes.
 	subscribe(fn: Subscriber<T>): Dispose;
+
+	promise(): Promise<T>;
 }
 
 export interface Setter<T> {
@@ -137,6 +139,12 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		const dispose = this.subscribe(fn);
 		queueMicrotask(() => fn(this.#value));
 		return dispose;
+	}
+
+	async promise(): Promise<T> {
+		return new Promise((resolve) => {
+			this.changed(resolve);
+		});
 	}
 
 	static async race<T extends readonly unknown[]>(

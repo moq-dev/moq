@@ -4,29 +4,19 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Catalog from "../../catalog";
 import * as Container from "../../container";
 import * as Hex from "../../util/hex";
-import { Latency } from "../../util/latency";
 import * as libav from "../../util/libav";
 import type * as Render from "./render";
-
-// We want some extra overhead to avoid starving the render worklet.
-// The default Opus frame duration is 20ms.
-// TODO: Put it in the catalog so we don't have to guess.
-const JITTER_UNDERHEAD = 25 as Time.Milli;
 
 export type SourceProps = {
 	// Enable to download the audio track.
 	enabled?: boolean | Signal<boolean>;
-
-	// Additional buffer in milliseconds on top of the catalog's minBuffer (default: 100ms).
-	// The effective latency = catalog.minBuffer + buffer
-	// Increase this if experiencing stuttering due to network jitter.
-	buffer?: Time.Milli | Signal<Time.Milli>;
 };
 
 export interface AudioStats {
 	bytesReceived: number;
 }
 
+import type { Sync } from "../sync";
 // Unfortunately, we need to use a Vite-exclusive import for now.
 import RenderWorklet from "./render-worklet.ts?worker&url";
 
@@ -53,12 +43,7 @@ export class Source {
 	catalog = new Signal<Catalog.Audio | undefined>(undefined);
 	config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 
-	// Additional buffer in milliseconds (on top of catalog's minBuffer).
-	buffer: Signal<Time.Milli>;
-
-	// Computed latency = catalog.minBuffer + buffer
-	#latency: Latency;
-	readonly latency: Getter<Time.Milli>;
+	sync: Sync;
 
 	// The name of the active rendition.
 	active = new Signal<string | undefined>(undefined);
@@ -68,18 +53,12 @@ export class Source {
 	constructor(
 		broadcast: Getter<Moq.Broadcast | undefined>,
 		catalog: Getter<Catalog.Root | undefined>,
+		sync: Sync,
 		props?: SourceProps,
 	) {
 		this.broadcast = broadcast;
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.buffer = Signal.from(props?.buffer ?? (100 as Time.Milli));
-
-		// Compute effective latency from catalog.minBuffer + buffer
-		this.#latency = new Latency({
-			buffer: this.buffer,
-			config: this.config,
-		});
-		this.latency = this.#latency.combined;
+		this.sync = sync;
 
 		this.#signals.effect((effect) => {
 			const audio = effect.get(catalog)?.audio;
@@ -141,7 +120,7 @@ export class Source {
 				type: "init",
 				rate: sampleRate,
 				channels: channelCount,
-				latency: this.#latency.peek(), // TODO make it reactive
+				latency: this.sync.latency.peek(), // TODO make it reactive
 			};
 			worklet.port.postMessage(init);
 
@@ -189,8 +168,9 @@ export class Source {
 
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
+		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Legacy.Consumer(sub, {
-			latency: Math.max(this.#latency.peek() - JITTER_UNDERHEAD, 0) as Time.Milli,
+			latency: this.sync.latency,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -323,7 +303,6 @@ export class Source {
 	}
 
 	close() {
-		this.#latency.close();
 		this.#signals.close();
 	}
 }

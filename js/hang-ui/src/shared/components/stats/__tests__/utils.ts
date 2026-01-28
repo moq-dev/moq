@@ -68,18 +68,8 @@ export const createMockProviderProps = (options?: MockProviderPropsOptions): Pro
 						subscribe: vi.fn(() => vi.fn()),
 						changed: vi.fn(() => vi.fn()),
 					},
-					syncStatus: {
-						peek: () => ({ state: "ready" as const }),
-						subscribe: vi.fn(() => vi.fn()),
-						changed: vi.fn(() => vi.fn()),
-					},
 					bufferStatus: {
 						peek: () => ({ state: "filled" as const }),
-						subscribe: vi.fn(() => vi.fn()),
-						changed: vi.fn(() => vi.fn()),
-					},
-					latency: {
-						peek: () => 100,
 						subscribe: vi.fn(() => vi.fn()),
 						changed: vi.fn(() => vi.fn()),
 					},
