@@ -7,11 +7,11 @@ hero:
       text: Setup
       link: /setup/
     - theme: alt
+      text: Usage
+      link: /usage/
+    - theme: alt
       text: Concepts
       link: /concepts/
-    - theme: alt
-      text: API
-      link: /api/
     - theme: alt
       text: Demo
       link: https://moq.dev/
@@ -44,14 +44,14 @@ features:
 
 ## What is MoQ?
 
-[Media over QUIC](https://moq.dev) (MoQ) is a next-generation live media protocol that provides **real-time latency** at **massive scale**. Built using modern web technologies, MoQ delivers WebRTC-like latency without the constraints of WebRTC. The core networking is delegated to a QUIC library but the rest is in application-space, giving you full control over your media pipeline.
+[Media over QUIC](https://moq.dev) (MoQ) is a next-generation live media protocol that provides **real-time latency** at **massive scale**.
+Built using modern web technologies, MoQ delivers WebRTC-like latency *on the web* without the constraints of WebRTC.
+The core networking is delegated to QUIC while your application gets full control over the rest.
 
-**NOTE**: This project uses [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) and [hang](https://datatracker.ietf.org/doc/draft-lcurley-moq-hang/) instead of the *official* [IETF drafts](https://datatracker.ietf.org/group/moq/documents/).
-The focus is on simplicity and deployability, avoiding the bloat and politics experimental protocols designed by committee.
-We support compatibility with a subset of the latest IETF drafts, but it's *not recommended* given the ongoing standardization churn.
+**NOTE**: This project uses [moq-lite](/concepts/moq-lite) and [hang](/concepts/hang) instead of the *official* [IETF drafts](https://datatracker.ietf.org/group/moq/documents/).
+See the [IETF standards](/concept/standards) page for a justification!
 
 ## Quick Start
-
 Get up and running in seconds with [Nix](https://nixos.org/download.html), or use an [alternative method](/setup).
 
 ```bash
@@ -59,21 +59,16 @@ Get up and running in seconds with [Nix](https://nixos.org/download.html), or us
 nix develop -c just dev
 ```
 
-## Rust
-The Rust libraries are intended for native platforms, such as desktop applications or servers.
+## Usage
+There are a bunch of MoQ binaries and plugins, here are some highlights:
 
-- **[moq-lite](/rust/moq-lite)** - The core pub/sub transport protocol; media agnostic.
-- **[moq-relay](/rust/moq-relay)** - A clusterable relay server that can form a CDN.
-- **[hang](/rust/hang)** - The media library: provides codecs, containers, etc.
-- **[hang-cli](/rust/hang-cli)** - A CLI tool for publishing media from a variety of sources.
+- **[moq-relay](/usage/relay)** - A server connecting publisher to subscribers, able to form a self-hosted CDN mesh.
+- **[moq-cli](/usage/cli)** - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc).
+- **[moq/obs](/usage/obs)** - A dope OBS plugin for publishing and consuming MoQ broadcasts.
+- **[moq/gstreamer](/usage/gstreamer)** - A dope gstreamer plugin for publishing and consuming MoQ broadcasts.
 
-[Full Rust Documentation →](/rust/)
+Looking for a library instead?
+We have implementations in two languages:
 
-## TypeScript
-The TypeScript libraries are intended for web browsers, but also work on [Deno](https://deno.com/) with its experimental WebTransport support.
-
-- **[@moq/lite](/typescript/lite)** - The core pub/sub transport protocol; media agnostic.
-- **[@moq/hang](/typescript/hang)** - The media library; provides codecs, containers, etc.
-- **[@moq/hang-ui](https://www.npmjs.com/package/@moq/hang-ui)** - Optional UI controls layered on top of `@moq/hang`.
-
-[Full TypeScript Documentation →](/typescript/)
+- **[Rust](/usage/rust)** - Rust libraries primarily targetting native. 🦀
+- **[Typescript](/usage/typescript)** - Typescript libraries primarily targetting web.
