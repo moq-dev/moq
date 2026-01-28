@@ -22,18 +22,12 @@ use axum::{
 use bytes::Bytes;
 use clap::Parser;
 use moq_lite::{OriginConsumer, OriginProducer};
-use serde::{Deserialize, Serialize};
 use std::future::Future;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{Auth, Cluster};
 
-#[derive(Debug, Deserialize)]
-struct Params {
-	jwt: Option<String>,
-}
-
-#[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
+#[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct WebConfig {
 	#[command(flatten)]
@@ -166,10 +160,70 @@ async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
 		.clone()
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct AuthParams {
+	jwt: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FetchParams {
+	#[serde(flatten)]
+	auth: AuthParams,
+
+	#[serde(default)]
+	group: FetchGroup,
+
+	#[serde(default)]
+	frame: FetchFrame,
+}
+
+#[derive(Debug, Default)]
+enum FetchGroup {
+	// Return the group at the given sequence number.
+	Num(u64),
+
+	// Return the latest group.
+	#[default]
+	Latest,
+}
+
+impl<'de> serde::Deserialize<'de> for FetchGroup {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let s = String::deserialize(deserializer)?;
+		if let Ok(num) = s.parse::<u64>() {
+			Ok(FetchGroup::Num(num))
+		} else if s == "latest" {
+			Ok(FetchGroup::Latest)
+		} else {
+			Err(serde::de::Error::custom(format!("invalid group value: {s}")))
+		}
+	}
+}
+
+#[derive(Debug, Default)]
+enum FetchFrame {
+	Num(usize),
+	#[default]
+	Chunked,
+}
+
+impl<'de> serde::Deserialize<'de> for FetchFrame {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let s = String::deserialize(deserializer)?;
+		if let Ok(num) = s.parse::<usize>() {
+			Ok(FetchFrame::Num(num))
+		} else if s == "chunked" {
+			Ok(FetchFrame::Chunked)
+		} else {
+			Err(serde::de::Error::custom(format!("invalid frame value: {s}")))
+		}
+	}
+}
+
 async fn serve_ws(
 	ws: WebSocketUpgrade,
 	Path(path): Path<String>,
-	Query(params): Query<Params>,
+	Query(params): Query<AuthParams>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	let ws = ws.protocols(["webtransport"]);
@@ -229,7 +283,7 @@ where
 /// Serve the announced broadcasts for a given prefix.
 async fn serve_announced(
 	path: Option<Path<String>>,
-	Query(params): Query<Params>,
+	Query(params): Query<AuthParams>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<String> {
 	let prefix = match path {
@@ -253,10 +307,10 @@ async fn serve_announced(
 	Ok(broadcasts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("\n"))
 }
 
-/// Serve the latest group for a given track
+/// Serve the given group for a given track
 async fn serve_fetch(
 	Path(path): Path<String>,
-	Query(params): Query<Params>,
+	Query(params): Query<FetchParams>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<ServeGroup> {
 	// The path containts a broadcast/track
@@ -269,7 +323,7 @@ async fn serve_fetch(
 	}
 
 	let broadcast = path.join("/");
-	let token = state.auth.verify(&broadcast, params.jwt.as_deref())?;
+	let token = state.auth.verify(&broadcast, params.auth.jwt.as_deref())?;
 
 	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
@@ -286,39 +340,76 @@ async fn serve_fetch(
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
 	let mut track = broadcast.subscribe_track(&track);
 
-	let Ok(group) = track.next_group().await else {
-		return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
-	};
-	let Some(group) = group else {
-		return Err(StatusCode::NOT_FOUND.into());
-	};
+	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
-	Ok(ServeGroup::new(group))
+	let result = tokio::time::timeout_at(deadline, async {
+		let group = match params.group {
+			FetchGroup::Latest => track.next_group().await,
+			FetchGroup::Num(sequence) => track.get_group(sequence).await,
+		};
+
+		let group = match group {
+			Ok(Some(group)) => group,
+			Ok(None) => return Err(StatusCode::NOT_FOUND),
+			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+		};
+
+		tracing::info!(track = %track.info.name, group = %group.info.sequence, "serving group");
+
+		match params.frame {
+			FetchFrame::Num(index) => match group.get_frame(index).await {
+				Ok(Some(frame)) => Ok(ServeGroup {
+					group: None,
+					frame: Some(frame),
+					deadline,
+				}),
+				Ok(None) => Err(StatusCode::NOT_FOUND),
+				Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+			},
+			FetchFrame::Chunked => Ok(ServeGroup {
+				group: Some(group),
+				frame: None,
+				deadline,
+			}),
+		}
+	})
+	.await;
+
+	match result {
+		Ok(Ok(serve)) => Ok(serve),
+		Ok(Err(status)) => Err(status.into()),
+		Err(_) => Err(StatusCode::GATEWAY_TIMEOUT.into()),
+	}
 }
 
 struct ServeGroup {
-	group: moq_lite::GroupConsumer,
+	group: Option<moq_lite::GroupConsumer>,
 	frame: Option<moq_lite::FrameConsumer>,
+	deadline: tokio::time::Instant,
 }
 
 impl ServeGroup {
-	fn new(group: moq_lite::GroupConsumer) -> Self {
-		Self { group, frame: None }
-	}
-
 	async fn next(&mut self) -> moq_lite::Result<Option<Bytes>> {
-		loop {
+		while self.group.is_some() || self.frame.is_some() {
 			if let Some(frame) = self.frame.as_mut() {
-				let data = frame.read_all().await?;
+				let data = tokio::time::timeout_at(self.deadline, frame.read_all())
+					.await
+					.map_err(|_| moq_lite::Error::Timeout)?;
 				self.frame.take();
-				return Ok(Some(data));
+				return Ok(Some(data?));
 			}
 
-			self.frame = self.group.next_frame().await?;
-			if self.frame.is_none() {
-				return Ok(None);
+			if let Some(group) = self.group.as_mut() {
+				self.frame = tokio::time::timeout_at(self.deadline, group.next_frame())
+					.await
+					.map_err(|_| moq_lite::Error::Timeout)??;
+				if self.frame.is_none() {
+					self.group.take();
+				}
 			}
 		}
+
+		Ok(None)
 	}
 }
 
