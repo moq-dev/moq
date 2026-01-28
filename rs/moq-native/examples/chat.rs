@@ -7,13 +7,14 @@ async fn main() -> anyhow::Result<()> {
 
 	// Create an origin that we can publish to and the session can consume from.
 	let origin = moq_lite::Origin::produce();
+	let consumer = origin.consume();
 
 	// Run the broadcast production and the session in parallel.
 	// This is a simple example of how you can concurrently run multiple tasks.
 	// tokio::spawn works too.
 	tokio::select! {
-		res = run_broadcast(origin.producer) => res,
-		res = run_session(origin.consumer) => res,
+		res = run_broadcast(origin) => res,
+		res = run_session(consumer) => res,
 	}
 }
 
@@ -41,7 +42,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.
-	let mut track = broadcast.producer.create_track(moq_lite::Track {
+	let mut track = broadcast.create_track(moq_lite::Track {
 		name: "chat".to_string(),
 		priority: 0,
 	});
@@ -49,7 +50,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// If you put "alice" here, it would be published as "anon/chat-example/alice".
 	// OPTIONAL: We publish after inserting the track just to avoid a nearly impossible race condition.
-	origin.publish_broadcast("", broadcast.consumer);
+	origin.publish_broadcast("", broadcast.consume());
 
 	// Create a group.
 	// Each group is independent and the newest group(s) will be prioritized.

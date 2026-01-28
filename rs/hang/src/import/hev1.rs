@@ -91,10 +91,10 @@ impl Hev1 {
 		}
 
 		let track = track.produce();
-		self.broadcast.insert_track(track.consumer);
+		self.broadcast.insert_track(track.consume());
 
 		self.config = Some(config);
-		self.track = Some(track.producer.into());
+		self.track = Some(track.into());
 
 		Ok(())
 	}

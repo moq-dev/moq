@@ -60,13 +60,13 @@ impl Opus {
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
 		let track = track.produce();
-		self.broadcast.insert_track(track.consumer);
+		self.broadcast.insert_track(track.consume());
 
 		let mut catalog = self.broadcast.catalog.lock();
-		let audio = catalog.insert_audio(track.producer.info.name.clone(), config);
+		let audio = catalog.insert_audio(track.info.name.clone(), config);
 		audio.priority = 2;
 
-		self.track = Some(track.producer);
+		self.track = Some(track);
 
 		Ok(())
 	}

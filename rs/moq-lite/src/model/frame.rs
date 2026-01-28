@@ -3,7 +3,7 @@ use std::future::Future;
 use bytes::{Bytes, BytesMut};
 use tokio::sync::watch;
 
-use crate::{Error, Produce, Result};
+use crate::{Error, Result};
 
 /// A chunk of data with an upfront size.
 #[derive(Clone, Debug)]
@@ -13,11 +13,9 @@ pub struct Frame {
 }
 
 impl Frame {
-	/// Create a new producer and consumer for the frame.
-	pub fn produce(self) -> Produce<FrameProducer, FrameConsumer> {
-		let producer = FrameProducer::new(self);
-		let consumer = producer.consume();
-		Produce { producer, consumer }
+	/// Create a new producer for the frame.
+	pub fn produce(self) -> FrameProducer {
+		FrameProducer::new(self)
 	}
 }
 

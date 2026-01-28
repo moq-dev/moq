@@ -63,12 +63,12 @@ async fn main() -> anyhow::Result<()> {
 	match config.role {
 		Command::Publish => {
 			let mut broadcast = moq_lite::Broadcast::produce();
-			let track = broadcast.producer.create_track(track);
+			let track = broadcast.create_track(track);
 			let clock = clock::Publisher::new(track);
 
-			origin.producer.publish_broadcast(&config.broadcast, broadcast.consumer);
+			origin.publish_broadcast(&config.broadcast, broadcast.consume());
 
-			let session = client.with_publish(origin.consumer).connect(config.url).await?;
+			let session = client.with_publish(origin.consume()).connect(config.url).await?;
 
 			tokio::select! {
 				res = session.closed() => res.context("session closed"),
@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
 			}
 		}
 		Command::Subscribe => {
-			let session = client.with_consume(origin.producer).connect(config.url).await?;
+			let session = client.with_consume(origin.clone()).connect(config.url).await?;
 
 			// NOTE: We could just call `session.consume_broadcast(&config.broadcast)` instead,
 			// However that won't work with IETF MoQ and the current OriginConsumer API the moment.
@@ -86,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
 
 			let path: moq_lite::Path<'_> = config.broadcast.into();
 			let mut origin = origin
-				.consumer
+				.consume()
 				.consume_only(&[path])
 				.context("not allowed to consume broadcast")?;
 
