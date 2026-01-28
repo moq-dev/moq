@@ -29,13 +29,19 @@ dev:
 	bun run concurrently --kill-others --names srv,bbb,web --prefix-colors auto \
 		"just relay" \
 		"sleep 1 && just pub bbb http://localhost:4443/anon" \
-		"sleep 2 && just web http://localhost:4443/anon"
-
+		"sleep 2 && just web auto"
 
 # Run a localhost relay server without authentication.
 relay *args:
-	# Run the relay server overriding the provided configuration file.
-	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- dev/relay.toml {{args}}
+	@if [ -n "${WSL_DISTRO_NAME:-}" ]; then \
+		ip="$(hostname -I | awk '{print $1}')"; \
+		TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- dev/relay.toml \
+			--server-bind "0.0.0.0:4443" \
+			--tls-generate "localhost,$ip" \
+			{{args}}; \
+	else \
+		TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- dev/relay.toml {{args}}; \
+	fi
 
 # Run a cluster of relay servers
 cluster:
@@ -260,8 +266,17 @@ serve name *args:
 		--name "{{name}}" fmp4
 
 # Run the web server
-web url='http://localhost:4443/anon':
-	cd js/hang-demo && VITE_RELAY_URL="{{url}}" bun run dev
+web url="auto":
+	@url="{{url}}"; \
+	if [ "$url" = "auto" ]; then \
+		if [ -n "${WSL_DISTRO_NAME:-}" ]; then \
+			ip="$(hostname -I | awk '{print $1}')"; \
+			url="http://$ip:4443/anon"; \
+		else \
+			url="http://localhost:4443/anon"; \
+		fi; \
+	fi; \
+	cd js/hang-demo && VITE_RELAY_URL="$url" bun run dev -- --host 0.0.0.0
 
 # Publish the clock broadcast
 # `action` is either `publish` or `subscribe`
