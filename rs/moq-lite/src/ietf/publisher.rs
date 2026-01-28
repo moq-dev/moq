@@ -93,7 +93,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: msg.subscriber_priority,
 		};
 
-		let track = broadcast.subscribe_track(&track);
+		let track = broadcast.subscribe_track(&track, msg.delivery_timeout);
 
 		let (tx, rx) = oneshot::channel();
 		let mut subscribes = self.subscribes.lock();
@@ -109,9 +109,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let request_id = msg.request_id;
 		let subscribes = self.subscribes.clone();
 		let version = self.version;
+		let delivery_timeout = msg.delivery_timeout;
 
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_track(session, track, request_id, rx, version).await {
+			if let Err(err) = Self::run_track(session, track, request_id, delivery_timeout, rx, version).await {
 				control
 					.send(ietf::PublishDone {
 						request_id,
@@ -149,6 +150,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		session: S,
 		mut track: TrackConsumer,
 		request_id: RequestId,
+		delivery_timeout: Option<u64>,
 		mut cancel: oneshot::Receiver<()>,
 		version: Version,
 	) -> Result<(), Error> {
@@ -212,6 +214,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				msg,
 				track.info.priority,
 				group,
+				delivery_timeout,
 				version,
 			));
 
@@ -241,6 +244,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: ietf::GroupHeader,
 		priority: u8,
 		mut group: GroupConsumer,
+		delivery_timeout: Option<u64>,
 		version: Version,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
@@ -257,6 +261,39 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::trace!(?msg, "sending group header");
 
+		let result = Self::run_group_inner(&mut stream, &msg, &mut group, delivery_timeout).await;
+
+		// Handle errors specially
+		match result {
+			Err(Error::DeliveryTimeout) => {
+				tracing::warn!(sequence = %msg.group_id, "group delivery timeout - resetting stream");
+				// Reset the stream on delivery timeout
+				stream.abort(&Error::DeliveryTimeout);
+				return Err(Error::DeliveryTimeout);
+			}
+			Err(Error::Cancel) => {
+				tracing::debug!(sequence = %msg.group_id, "group cancelled");
+				return Err(Error::Cancel);
+			}
+			Err(err) => {
+				tracing::debug!(?err, sequence = %msg.group_id, "group error");
+				return Err(err);
+			}
+			Ok(()) => {
+				stream.finish()?;
+				stream.closed().await?;
+				tracing::debug!(sequence = %msg.group_id, "finished group");
+				Ok(())
+			}
+		}
+	}
+
+	async fn run_group_inner(
+		stream: &mut Writer<S::SendStream, Version>,
+		msg: &ietf::GroupHeader,
+		group: &mut GroupConsumer,
+		delivery_timeout: Option<u64>,
+	) -> Result<(), Error> {
 		loop {
 			let frame = tokio::select! {
 				biased;
@@ -292,6 +329,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						chunk = frame.read_chunk() => chunk,
 					};
 
+					// Check delivery timeout before writing chunk
+					if let Some(timeout) = delivery_timeout {
+						let now = tokio::time::Instant::now();
+						if now.duration_since(frame.arrival_time).as_millis() > timeout as u128 {
+							tracing::warn!(
+								"Delivery timeout exceeded. Arrival: {:?}, now: {:?}. Dropping group {}",
+								frame.arrival_time,
+								now,
+								group.info.sequence
+							);
+							return Err(Error::DeliveryTimeout);
+						}
+					}
+
 					match chunk? {
 						Some(mut chunk) => stream.write_all(&mut chunk).await?,
 						None => break,
@@ -299,13 +350,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 			}
 		}
-
-		stream.finish()?;
-
-		// Wait until everything is acknowledged by the peer so we can still cancel the stream.
-		stream.closed().await?;
-
-		tracing::debug!(sequence = %msg.group_id, "finished group");
 
 		Ok(())
 	}

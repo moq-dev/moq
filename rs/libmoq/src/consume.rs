@@ -182,7 +182,7 @@ impl Consume {
 		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: video.priority,
-		});
+		}, None);
 		let track = TrackConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
@@ -216,7 +216,7 @@ impl Consume {
 		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: audio.priority,
-		});
+		}, None);
 		let track = TrackConsumer::new(track, latency);
 
 		let channel = oneshot::channel();

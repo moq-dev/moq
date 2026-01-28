@@ -44,8 +44,8 @@ pub struct BroadcastProducer {
 	state: Lock<State>,
 	closed: watch::Sender<bool>,
 	requested: (
-		async_channel::Sender<TrackProducer>,
-		async_channel::Receiver<TrackProducer>,
+		async_channel::Sender<(TrackProducer, Option<u64>)>,
+		async_channel::Receiver<(TrackProducer, Option<u64>)>,
 	),
 	cloned: Arc<AtomicUsize>,
 }
@@ -70,7 +70,7 @@ impl BroadcastProducer {
 	}
 
 	/// Return the next requested track.
-	pub async fn requested_track(&mut self) -> Option<TrackProducer> {
+	pub async fn requested_track(&mut self) -> Option<(TrackProducer, Option<u64>)> {
 		self.requested.1.recv().await.ok()
 	}
 
@@ -145,7 +145,7 @@ impl Drop for BroadcastProducer {
 		self.requested.0.close();
 
 		// Drain any remaining requests.
-		while let Ok(producer) = self.requested.1.try_recv() {
+		while let Ok((producer, _)) = self.requested.1.try_recv() {
 			producer.abort(Error::Cancel);
 		}
 
@@ -175,6 +175,7 @@ impl BroadcastProducer {
 			.now_or_never()
 			.expect("should not have blocked")
 			.expect("should be a request")
+			.0
 	}
 
 	pub fn assert_no_request(&mut self) {
@@ -187,11 +188,11 @@ impl BroadcastProducer {
 pub struct BroadcastConsumer {
 	state: Lock<State>,
 	closed: watch::Receiver<bool>,
-	requested: async_channel::Sender<TrackProducer>,
+	requested: async_channel::Sender<(TrackProducer, Option<u64>)>,
 }
 
 impl BroadcastConsumer {
-	pub fn subscribe_track(&self, track: &Track) -> TrackConsumer {
+	pub fn subscribe_track(&self, track: &Track, delivery_timeout: Option<u64>) -> TrackConsumer {
 		let mut state = self.state.lock();
 
 		// Return any explictly published track.
@@ -206,12 +207,15 @@ impl BroadcastConsumer {
 
 		// Otherwise we have never seen this track before and need to create a new producer.
 		let track = track.clone().produce();
-		let producer = track.producer;
+		let mut producer = track.producer;
 		let consumer = track.consumer;
+
+		// Set the delivery timeout on the producer
+		producer.delivery_timeout = delivery_timeout;
 
 		// Insert the producer into the lookup so we will deduplicate requests.
 		// This is not a subscriber so it doesn't count towards "used" subscribers.
-		match self.requested.try_send(producer.clone()) {
+		match self.requested.try_send((producer.clone(), delivery_timeout)) {
 			Ok(()) => {}
 			Err(_) => {
 				// If the BroadcastProducer is closed, immediately close the track.
@@ -276,14 +280,14 @@ mod test {
 
 		let consumer = producer.consume();
 
-		let mut track1_sub = consumer.subscribe_track(&track1.producer.info);
+		let mut track1_sub = consumer.subscribe_track(&track1.producer.info, None);
 		track1_sub.assert_group();
 
 		let mut track2 = Track::new("track2").produce();
 		producer.insert_track(track2.consumer);
 
 		let consumer2 = producer.consume();
-		let mut track2_consumer = consumer2.subscribe_track(&track2.producer.info);
+		let mut track2_consumer = consumer2.subscribe_track(&track2.producer.info, None);
 		track2_consumer.assert_no_group();
 
 		track2.producer.append_group();
@@ -315,7 +319,7 @@ mod test {
 		let consumer3 = producer.consume();
 		producer.assert_used();
 
-		let track1 = consumer3.subscribe_track(&Track::new("track1"));
+		let track1 = consumer3.subscribe_track(&Track::new("track1"), None);
 
 		// It doesn't matter if a subscription is alive, we only care about the broadcast handle.
 		// TODO is this the right behavior?
@@ -337,8 +341,8 @@ mod test {
 		track1.producer.append_group();
 		producer.insert_track(track1.consumer);
 
-		let mut track1c = consumer.subscribe_track(&track1.producer.info);
-		let track2 = consumer.subscribe_track(&Track::new("track2"));
+		let mut track1c = consumer.subscribe_track(&track1.producer.info, None);
+		let track2 = consumer.subscribe_track(&Track::new("track2"), None);
 
 		drop(producer);
 		consumer.assert_closed();
@@ -374,12 +378,12 @@ mod test {
 		let consumer = producer.consume();
 		let consumer2 = consumer.clone();
 
-		let mut track1 = consumer.subscribe_track(&Track::new("track1"));
+		let mut track1 = consumer.subscribe_track(&Track::new("track1"), None);
 		track1.assert_not_closed();
 		track1.assert_no_group();
 
 		// Make sure we deduplicate requests while track1 is still active.
-		let mut track2 = consumer2.subscribe_track(&Track::new("track1"));
+		let mut track2 = consumer2.subscribe_track(&Track::new("track1"), None);
 		track2.assert_is_clone(&track1);
 
 		// Get the requested track, and there should only be one.
@@ -395,13 +399,13 @@ mod test {
 		track2.assert_group();
 
 		// Make sure that tracks are cancelled when the producer is dropped.
-		let track4 = consumer.subscribe_track(&Track::new("track2"));
+		let track4 = consumer.subscribe_track(&Track::new("track2"), None);
 		drop(producer);
 
 		// Make sure the track is errored, not closed.
 		track4.assert_error();
 
-		let track5 = consumer2.subscribe_track(&Track::new("track3"));
+		let track5 = consumer2.subscribe_track(&Track::new("track3"), None);
 		track5.assert_error();
 	}
 
@@ -410,7 +414,7 @@ mod test {
 		let mut broadcast = Broadcast::produce();
 
 		// Subscribe to a track that doesn't exist - this creates a request
-		let consumer1 = broadcast.consumer.subscribe_track(&Track::new("unknown_track"));
+		let consumer1 = broadcast.consumer.subscribe_track(&Track::new("unknown_track"), None);
 
 		// Get the requested track producer
 		let producer1 = broadcast.producer.assert_request();
@@ -422,7 +426,7 @@ mod test {
 		);
 
 		// Making a new consumer will keep the producer alive
-		let consumer2 = broadcast.consumer.subscribe_track(&Track::new("unknown_track"));
+		let consumer2 = broadcast.consumer.subscribe_track(&Track::new("unknown_track"), None);
 		consumer2.assert_is_clone(&consumer1);
 
 		// Drop the consumer subscription
@@ -449,7 +453,7 @@ mod test {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
 		// Now the cleanup task should have run and we can subscribe again to the unknown track.
-		let consumer3 = broadcast.consumer.subscribe_track(&Track::new("unknown_track"));
+		let consumer3 = broadcast.consumer.subscribe_track(&Track::new("unknown_track"), None);
 		let producer2 = broadcast.producer.assert_request();
 
 		// Drop the consumer, now the producer should be unused

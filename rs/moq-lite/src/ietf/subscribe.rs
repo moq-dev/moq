@@ -43,6 +43,7 @@ pub struct Subscribe<'a> {
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
 	pub filter_type: FilterType,
+	pub delivery_timeout: Option<u64>,
 }
 
 impl Message for Subscribe<'_> {
@@ -79,6 +80,12 @@ impl Message for Subscribe<'_> {
 		// Ignore parameters, who cares.
 		let _params = Parameters::decode(r, version)?;
 
+		let delivery_timeout = if u8::decode(r, version)? == 1 {
+			Some(u64::decode(r, version)?)
+		} else {
+			None
+		};
+
 		Ok(Self {
 			request_id,
 			track_namespace,
@@ -86,6 +93,7 @@ impl Message for Subscribe<'_> {
 			subscriber_priority,
 			group_order,
 			filter_type,
+			delivery_timeout,
 		})
 	}
 
@@ -104,6 +112,13 @@ impl Message for Subscribe<'_> {
 
 		self.filter_type.encode(w, version);
 		0u8.encode(w, version); // no parameters
+
+		if let Some(timeout) = self.delivery_timeout {
+			1u8.encode(w, version);
+			timeout.encode(w, version);
+		} else {
+			0u8.encode(w, version);
+		}
 	}
 }
 
@@ -283,6 +298,7 @@ mod tests {
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			filter_type: FilterType::LargestObject,
+			delivery_timeout: None,
 		};
 
 		let encoded = encode_message(&msg);
@@ -303,6 +319,7 @@ mod tests {
 			subscriber_priority: 255,
 			group_order: GroupOrder::Descending,
 			filter_type: FilterType::LargestObject,
+			delivery_timeout: None,
 		};
 
 		let encoded = encode_message(&msg);

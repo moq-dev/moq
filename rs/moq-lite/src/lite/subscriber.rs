@@ -153,27 +153,31 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
-			let track = tokio::select! {
+			let (track, delivery_timeout) = tokio::select! {
 				_ = broadcast.unused() => break,
 				producer = broadcast.requested_track() => match producer {
-					Some(producer) => producer,
+					Some((track, timeout)) => (track, timeout),
 					None => break,
 				},
 				_ = self.session.closed() => break,
 			};
+
+			// Set this track subscription to carry the delivery timeout
+			let mut track_with_timeout = track.clone();
+			track_with_timeout.delivery_timeout = delivery_timeout;
 
 			let id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 			let mut this = self.clone();
 
 			let path = path.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(id, path, track).await;
+				this.run_subscribe(id, path, track_with_timeout, delivery_timeout).await;
 				this.subscribes.lock().remove(&id);
 			});
 		}
 	}
 
-	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, track: TrackProducer) {
+	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, track: TrackProducer, delivery_timeout: Option<u64>) {
 		self.subscribes.lock().insert(id, track.clone());
 
 		let msg = lite::Subscribe {
@@ -181,6 +185,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			broadcast: broadcast.to_owned(),
 			track: (&track.info.name).into(),
 			priority: track.info.priority,
+			delivery_timeout,
 		};
 
 		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe started");
@@ -238,9 +243,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
+		let delivery_timeout;
 		let group = {
 			let mut subs = self.subscribes.lock();
 			let track = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
+			delivery_timeout = track.delivery_timeout;
 
 			let group = Group { sequence: hdr.sequence };
 			track.create_group(group).ok_or(Error::Old)?
@@ -248,13 +255,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let res = tokio::select! {
 			_ = group.unused() => Err(Error::Cancel),
-			res = self.run_group(stream, group.clone()) => res,
+			res = self.run_group(stream, group.clone(), delivery_timeout) => res,
 		};
 
 		match res {
 			Err(Error::Cancel) | Err(Error::Transport(_)) => {
 				tracing::trace!(group = %group.info.sequence, "group cancelled");
 				group.abort(Error::Cancel);
+			}
+			Err(Error::DeliveryTimeout) => {
+				tracing::info!(group = %group.info.sequence, "group delivery timeout");
+				group.close();
 			}
 			Err(err) => {
 				tracing::debug!(%err, group = %group.info.sequence, "group error");
@@ -273,16 +284,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
+		delivery_timeout: Option<u64>,
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
 			let frame = group.create_frame(Frame { size });
 
 			let res = tokio::select! {
 				_ = frame.unused() => Err(Error::Cancel),
-				res = self.run_frame(stream, frame.clone()) => res,
+				res = self.run_frame(stream, frame.clone(), delivery_timeout) => res,
 			};
 
 			if let Err(err) = res {
+				if matches!(err, Error::DeliveryTimeout) {
+					// Simply break out of the frame writing loop
+					return Err(Error::DeliveryTimeout);
+				}
 				frame.abort(err.clone());
 				return Err(err);
 			}
@@ -297,10 +313,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut frame: FrameProducer,
+		_delivery_timeout: Option<u64>,
 	) -> Result<(), Error> {
 		let mut remain = frame.info.size;
 
 		tracing::trace!(size = %frame.info.size, "reading frame");
+
+		// TODO: Implement delivery timeout check here using frame.info.sent_timestamp if available
 
 		const MAX_CHUNK: usize = 1024 * 1024; // 1 MiB
 		while remain > 0 {

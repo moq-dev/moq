@@ -75,12 +75,12 @@ pub struct BroadcastConsumer {
 
 impl BroadcastConsumer {
 	pub fn new(inner: moq_lite::BroadcastConsumer) -> Self {
-		let catalog = inner.subscribe_track(&Catalog::default_track()).into();
+		let catalog = inner.subscribe_track(&Catalog::default_track(), None).into();
 		Self { inner, catalog }
 	}
 
 	pub fn subscribe(&self, track: &moq_lite::Track, latency: std::time::Duration) -> TrackConsumer {
-		TrackConsumer::new(self.inner.subscribe_track(track), latency)
+		TrackConsumer::new(self.inner.subscribe_track(track, None), latency)
 	}
 }
 

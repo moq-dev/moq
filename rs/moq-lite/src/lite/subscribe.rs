@@ -15,6 +15,7 @@ pub struct Subscribe<'a> {
 	pub broadcast: Path<'a>,
 	pub track: Cow<'a, str>,
 	pub priority: u8,
+	pub delivery_timeout: Option<u64>,
 }
 
 impl Message for Subscribe<'_> {
@@ -23,12 +24,18 @@ impl Message for Subscribe<'_> {
 		let broadcast = Path::decode(r, version)?;
 		let track = Cow::<str>::decode(r, version)?;
 		let priority = u8::decode(r, version)?;
+		let delivery_timeout = if u8::decode(r, version)? == 1 {
+			Some(u64::decode(r, version)?)
+		} else {
+			None
+		};
 
 		Ok(Self {
 			id,
 			broadcast,
 			track,
 			priority,
+			delivery_timeout,
 		})
 	}
 
@@ -37,6 +44,12 @@ impl Message for Subscribe<'_> {
 		self.broadcast.encode(w, version);
 		self.track.encode(w, version);
 		self.priority.encode(w, version);
+		if let Some(timeout) = self.delivery_timeout {
+			1u8.encode(w, version);
+			timeout.encode(w, version);
+		} else {
+			0u8.encode(w, version);
+		}
 	}
 }
 

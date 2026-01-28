@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
 					Some(announce) = origin.announced() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(&track);
+							let track = broadcast.subscribe_track(&track, None);
 							clock = Some(clock::Subscriber::new(track));
 						}
 						(path, None) => {
