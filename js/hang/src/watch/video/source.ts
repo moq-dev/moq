@@ -69,7 +69,7 @@ export class Source {
 	#timestamp = new Signal<Time.Milli | undefined>(undefined);
 	readonly timestamp: Getter<Time.Milli | undefined> = this.#timestamp;
 
-	// Additional buffer in milliseconds (on top of catalog's minBuffer).
+	// Used to target a latency and synchronize playback of video with audio.
 	sync: Sync;
 
 	// The display size of the video in pixels, ideally sourced from the catalog.
@@ -206,6 +206,10 @@ export class Source {
 		});
 
 		const decoder = new VideoDecoder({
+			// NOTE: This function runs in parallel for each frame.
+			// This is an easy way to support b-frames without needing to reorder them, but it introduces some race conditions.
+			// VideoDecoder has some backpressure to avoid too many open VideoFrame objects, so we do need to close them.
+			// At the time of writing, Firefox only allows 2? open VideoFrames at a time.
 			output: async (frame: VideoFrame) => {
 				try {
 					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
@@ -214,12 +218,16 @@ export class Source {
 						return;
 					}
 
+					// If there's no frame, then use the current one so we're rendering at least something.
 					if (this.frame.peek() === undefined) {
-						// Render something while we wait for the sync to catch up.
+						// NOTE: We don't set timestamp here to avoid dropping "old" frames.
 						this.frame.set(frame.clone());
 					}
 
+					// Wait until we should render this timestamp given the target latency.
+					// TODO We should have an async way to check if we should drop this frame, to reduce backpressure.
 					const wait = this.sync.wait(timestamp).then(() => true);
+
 					const ok = await Promise.race([wait, effect.cancel]);
 					if (!ok) return;
 
@@ -229,6 +237,7 @@ export class Source {
 						return;
 					}
 
+					// Update the timestamp of the current frame.
 					this.#timestamp.set(timestamp);
 
 					this.frame.update((prev) => {
@@ -284,6 +293,7 @@ export class Source {
 				if (!next) break;
 
 				// Mark that we received this frame right now.
+				// This is used to detect the live playhead position, so we can have exactly x milliseconds of buffer.
 				this.sync.update(Time.Milli.fromMicro(next.timestamp as Time.Micro));
 
 				const chunk = new EncodedVideoChunk({
@@ -342,6 +352,7 @@ export class Source {
 								});
 
 								// Mark that we received this frame right now.
+								// This is used to detect the live playhead position, so we can have exactly x milliseconds of buffer.
 								this.sync.update(Time.Milli.fromMicro(sample.timestamp as Time.Micro));
 
 								// Track stats

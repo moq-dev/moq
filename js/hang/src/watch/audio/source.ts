@@ -43,6 +43,7 @@ export class Source {
 	catalog = new Signal<Catalog.Audio | undefined>(undefined);
 	config = new Signal<Catalog.AudioConfig | undefined>(undefined);
 
+	// Used to target a latency and synchronize playback of video with audio.
 	sync: Sync;
 
 	// The name of the active rendition.
