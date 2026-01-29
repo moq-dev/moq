@@ -3,119 +3,64 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
 import * as Container from "../../container";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
-import type { Broadcast } from "../broadcast";
-import { Sync } from "../sync";
-import type { Backend, Stats, Target } from "./backend";
+import type { Muxer } from "../mse";
+import type { Backend, Stats } from "./backend";
+import type { Source } from "./source";
 
 export type MseProps = {
-	broadcast?: Broadcast | Signal<Broadcast | undefined>;
-	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
-	mediaSource?: MediaSource | Signal<MediaSource | undefined>;
-	sync?: Sync;
-
 	volume?: number | Signal<number>;
 	muted?: boolean | Signal<boolean>;
-	target?: Target | Signal<Target | undefined>;
 };
 
 export class Mse implements Backend {
-	broadcast: Signal<Broadcast | undefined>;
-	element: Signal<HTMLMediaElement | undefined>;
-	mediaSource: Signal<MediaSource | undefined>;
+	muxer: Muxer;
+	source: Source;
 
 	volume: Signal<number>;
 	muted: Signal<boolean>;
-	target: Signal<Target | undefined>;
-
-	#catalog = new Signal<Catalog.Audio | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Audio | undefined> = this.#catalog;
-
-	#rendition = new Signal<string | undefined>(undefined);
-	readonly rendition: Signal<string | undefined> = this.#rendition;
 
 	#stats = new Signal<Stats | undefined>(undefined);
-	readonly stats: Signal<Stats | undefined> = this.#stats;
-
-	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
-	readonly config: Signal<Catalog.AudioConfig | undefined> = this.#config;
+	readonly stats: Getter<Stats | undefined> = this.#stats;
 
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
-	#selected = new Signal<{ track: string; mime: string; config: Catalog.AudioConfig } | undefined>(undefined);
-
-	sync: Sync;
-
 	#signals = new Effect();
 
-	constructor(props?: MseProps) {
-		this.broadcast = Signal.from(props?.broadcast);
-		this.element = Signal.from(props?.element);
-		this.mediaSource = Signal.from(props?.mediaSource);
-		this.sync = props?.sync ?? new Sync();
+	constructor(muxer: Muxer, source: Source, props?: MseProps) {
+		this.muxer = muxer;
+		this.source = source;
+		this.source.supported.set(supported); // super hacky
 
 		this.volume = Signal.from(props?.volume ?? 0.5);
 		this.muted = Signal.from(props?.muted ?? false);
-		this.target = Signal.from(props?.target);
 
-		this.#signals.effect(this.#runCatalog.bind(this));
-		this.#signals.effect(this.#runSelected.bind(this));
 		this.#signals.effect(this.#runMedia.bind(this));
 		this.#signals.effect(this.#runVolume.bind(this));
 	}
 
-	#runCatalog(effect: Effect): void {
-		const broadcast = effect.get(this.broadcast);
-		if (!broadcast) return;
-
-		const active = effect.get(broadcast.active);
-		if (!active) return;
-
-		const catalog = effect.get(broadcast.catalog)?.audio;
-		if (!catalog) return;
-
-		effect.set(this.#catalog, catalog);
-	}
-
-	#runSelected(effect: Effect): void {
-		const catalog = effect.get(this.#catalog);
-		if (!catalog) return;
-
-		const target = effect.get(this.target);
-
-		for (const [track, config] of Object.entries(catalog.renditions)) {
-			const mime = `audio/mp4; codecs="${config.codec}"`;
-			if (!MediaSource.isTypeSupported(mime)) continue;
-
-			// Support both CMAF and legacy containers
-			if (target?.name && track !== target.name) continue;
-
-			effect.set(this.#selected, { track, mime, config });
-			effect.set(this.sync.audio, config.delay as Moq.Time.Milli | undefined);
-
-			return;
-		}
-
-		console.warn(`[MSE] No supported audio rendition found:`, catalog.renditions);
-	}
-
 	#runMedia(effect: Effect): void {
-		const element = effect.get(this.element);
+		const element = effect.get(this.muxer.element);
 		if (!element) return;
 
-		const mediaSource = effect.get(this.mediaSource);
+		const mediaSource = effect.get(this.muxer.mediaSource);
 		if (!mediaSource) return;
 
-		const broadcast = effect.get(this.broadcast);
+		const broadcast = effect.get(this.source.broadcast);
 		if (!broadcast) return;
 
 		const active = effect.get(broadcast.active);
 		if (!active) return;
 
-		const selected = effect.get(this.#selected);
-		if (!selected) return;
+		const track = effect.get(this.source.track);
+		if (!track) return;
 
-		const sourceBuffer = mediaSource.addSourceBuffer(selected.mime);
+		const config = effect.get(this.source.config);
+		if (!config) return;
+
+		const mime = `audio/mp4; codecs="${config.codec}"`;
+
+		const sourceBuffer = mediaSource.addSourceBuffer(mime);
 		effect.cleanup(() => {
 			mediaSource.removeSourceBuffer(sourceBuffer);
 			sourceBuffer.abort();
@@ -129,10 +74,13 @@ export class Mse implements Backend {
 			this.#buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
-		if (selected.config.container.kind === "cmaf") {
-			this.#runCmafMedia(effect, active, selected, sourceBuffer, element);
+		const sub = active.subscribe(track, Catalog.PRIORITY.audio);
+		effect.cleanup(() => sub.close());
+
+		if (config.container.kind === "cmaf") {
+			this.#runCmafMedia(effect, sub, config, sourceBuffer, element);
 		} else {
-			this.#runLegacyMedia(effect, active, selected, sourceBuffer, element);
+			this.#runLegacyMedia(effect, sub, config, sourceBuffer, element);
 		}
 	}
 
@@ -148,25 +96,22 @@ export class Mse implements Backend {
 
 	#runCmafMedia(
 		effect: Effect,
-		active: Moq.Broadcast,
-		selected: { track: string; mime: string; config: Catalog.AudioConfig },
+		sub: Moq.Track,
+		config: Catalog.AudioConfig,
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
 	): void {
-		if (selected.config.container.kind !== "cmaf") return;
-
-		const data = active.subscribe(selected.track, Catalog.PRIORITY.audio);
-		effect.cleanup(() => data.close());
+		if (config.container.kind !== "cmaf") throw new Error("unreachable");
 
 		effect.spawn(async () => {
 			// Generate init segment from catalog config (uses track_id from container)
-			const initSegment = Container.Cmaf.createAudioInitSegment(selected.config);
+			const initSegment = Container.Cmaf.createAudioInitSegment(config);
 			await this.#appendBuffer(sourceBuffer, initSegment);
 
 			for (;;) {
 				// TODO: Use Frame.Consumer for CMAF so we can support higher latencies.
 				// It requires extracting the timestamp from the frame payload.
-				const frame = await data.readFrame();
+				const frame = await sub.readFrame();
 				if (!frame) return;
 
 				await this.#appendBuffer(sourceBuffer, frame);
@@ -181,24 +126,21 @@ export class Mse implements Backend {
 
 	#runLegacyMedia(
 		effect: Effect,
-		active: Moq.Broadcast,
-		selected: { track: string; mime: string; config: Catalog.AudioConfig },
+		sub: Moq.Track,
+		config: Catalog.AudioConfig,
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
 	): void {
-		const data = active.subscribe(selected.track, Catalog.PRIORITY.audio);
-		effect.cleanup(() => data.close());
-
 		// Create consumer that reorders groups/frames up to the provided latency.
 		// Legacy container uses microsecond timescale implicitly.
-		const consumer = new Container.Legacy.Consumer(data, {
-			latency: this.sync.latency,
+		const consumer = new Container.Legacy.Consumer(sub, {
+			latency: this.source.sync.latency,
 		});
 		effect.cleanup(() => consumer.close());
 
 		effect.spawn(async () => {
 			// Generate init segment from catalog config (timescale = 1,000,000 = microseconds)
-			const initSegment = Container.Cmaf.createAudioInitSegment(selected.config);
+			const initSegment = Container.Cmaf.createAudioInitSegment(config);
 			await this.#appendBuffer(sourceBuffer, initSegment);
 
 			let sequence = 1;
@@ -239,7 +181,7 @@ export class Mse implements Backend {
 	}
 
 	#runVolume(effect: Effect): void {
-		const element = effect.get(this.element);
+		const element = effect.get(this.muxer.element);
 		if (!element) return;
 
 		const volume = effect.get(this.volume);
@@ -263,4 +205,8 @@ export class Mse implements Backend {
 	close(): void {
 		this.#signals.close();
 	}
+}
+
+async function supported(config: Catalog.AudioConfig): Promise<boolean> {
+	return MediaSource.isTypeSupported(`audio/mp4; codecs="${config.codec}"`);
 }

@@ -46,7 +46,7 @@ export class VideoProvider extends BaseProvider {
 			return;
 		}
 
-		const catalog = this.props.video.catalog.peek();
+		const catalog = this.props.video.source.catalog.peek();
 		const stats = this.props.video.stats.peek();
 		const now = performance.now();
 

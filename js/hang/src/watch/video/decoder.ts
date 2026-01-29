@@ -5,21 +5,14 @@ import * as Catalog from "../../catalog";
 import * as Container from "../../container";
 import * as Hex from "../../util/hex";
 import type { BufferedRanges } from "../backend";
-import type { Broadcast } from "../broadcast";
-import { Sync } from "../sync";
-import type { Backend, Stats, Target } from "./backend";
+import type { Backend, Stats } from "./backend";
+import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = 500 as Time.Milli;
 
 export type DecoderProps = {
-	broadcast: Broadcast | Signal<Broadcast | undefined>;
-
 	enabled?: boolean | Signal<boolean>;
-
-	target?: Target | Signal<Target | undefined>;
-
-	sync?: Sync;
 };
 
 // The types in VideoDecoderConfig that cause a hard reload.
@@ -28,33 +21,12 @@ export type DecoderProps = {
 type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
 
 export class Decoder implements Backend {
-	broadcast: Signal<Broadcast | undefined>;
 	enabled: Signal<boolean>; // Don't download any longer
-
-	#catalog = new Signal<Catalog.Video | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Video | undefined> = this.#catalog;
-
-	// The tracks supported by our video decoder.
-	#supported = new Signal<Record<string, Catalog.VideoConfig>>({});
-
-	// The track we chose from the supported tracks.
-	#selected = new Signal<string | undefined>(undefined);
-	#selectedConfig = new Signal<RequiredDecoderConfig | undefined>(undefined);
-
-	// The config of the active rendition.
-	#config = new Signal<Catalog.VideoConfig | undefined>(undefined);
-	readonly config: Getter<Catalog.VideoConfig | undefined> = this.#config;
-
-	// The name of the active rendition.
-	#rendition = new Signal<string | undefined>(undefined);
-	readonly rendition: Getter<string | undefined> = this.#rendition;
+	source: Source;
 
 	// The current track running, held so we can cancel it when the new track is ready.
 	#pending?: Effect;
 	#active?: Effect;
-
-	// Used as a tiebreaker when there are multiple tracks (HD vs SD).
-	target: Signal<Target | undefined>;
 
 	// Expose the current frame to render as a signal
 	#frame = new Signal<VideoFrame | undefined>(undefined);
@@ -78,106 +50,27 @@ export class Decoder implements Backend {
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
-	// Used to sync video playback with the audio playback.
-	sync: Sync;
-
 	#signals = new Effect();
 
-	constructor(props?: DecoderProps) {
-		this.broadcast = Signal.from(props?.broadcast);
+	constructor(source: Source, props?: DecoderProps) {
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.target = Signal.from(props?.target);
 
-		// TODO Close any newly constructed sync.
-		this.sync = props?.sync ?? new Sync();
+		this.source = source;
+		this.source.supported.set(supported); // super hacky
 
-		this.#signals.effect(this.#runCatalog.bind(this));
-		this.#signals.effect(this.#runSupported.bind(this));
-		this.#signals.effect(this.#runSelected.bind(this));
 		this.#signals.effect(this.#runPending.bind(this));
 		this.#signals.effect(this.#runDisplay.bind(this));
 		this.#signals.effect(this.#runBuffering.bind(this));
 	}
 
-	#runCatalog(effect: Effect): void {
-		const broadcast = effect.get(this.broadcast);
-		if (!broadcast) return;
-
-		const catalog = effect.get(broadcast.catalog);
-		if (!catalog) return;
-
-		effect.set(this.#catalog, catalog.video);
-	}
-
-	#runSupported(effect: Effect): void {
-		const renditions = effect.get(this.#catalog)?.renditions ?? {};
-
-		effect.spawn(async () => {
-			const supported: Record<string, Catalog.VideoConfig> = {};
-
-			for (const [name, rendition] of Object.entries(renditions)) {
-				// For CMAF, we get description from init segment, so skip validation here
-				// and just check if the codec is supported
-				if (rendition.container.kind === "cmaf") {
-					const { supported: valid } = await VideoDecoder.isConfigSupported({
-						codec: rendition.codec,
-						optimizeForLatency: rendition.optimizeForLatency ?? true,
-					});
-					if (valid) supported[name] = rendition;
-					continue;
-				}
-
-				// Legacy container: validate with description from catalog
-				const description = rendition.description ? Hex.toBytes(rendition.description) : undefined;
-
-				const { supported: valid } = await VideoDecoder.isConfigSupported({
-					...rendition,
-					description,
-					optimizeForLatency: rendition.optimizeForLatency ?? true,
-				});
-				if (valid) supported[name] = rendition;
-			}
-
-			if (Object.keys(supported).length === 0 && Object.keys(renditions).length > 0) {
-				console.warn("no supported renditions found, available: ", renditions);
-			}
-
-			this.#supported.set(supported);
-		});
-	}
-
-	#runSelected(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const supported = effect.get(this.#supported);
-		const target = effect.get(this.target);
-
-		const manual = target?.name;
-		const selected = manual && manual in supported ? manual : this.#selectRendition(supported, target);
-		if (!selected) return;
-
-		effect.set(this.#selected, selected);
-
-		// Store the full config for latency computation
-		effect.set(this.#config, supported[selected]);
-
-		// Remove the codedWidth/Height from the config to avoid a hard reload if nothing else has changed.
-		const config = { ...supported[selected], codedWidth: undefined, codedHeight: undefined };
-		effect.set(this.#selectedConfig, config);
-		effect.set(this.#config, config);
-
-		effect.set(this.sync.video, config.delay as Time.Milli | undefined);
-	}
-
 	#runPending(effect: Effect): void {
-		const broadcast = effect.get(this.broadcast);
+		const broadcast = effect.get(this.source.broadcast);
 		const enabled = effect.get(this.enabled);
-		const selected = effect.get(this.#selected);
-		const config = effect.get(this.#selectedConfig);
+		const track = effect.get(this.source.track);
+		const config = effect.get(this.source.config);
 		const active = broadcast ? effect.get(broadcast.active) : undefined;
 
-		if (!active || !selected || !config || !enabled) {
+		if (!active || !config || !track || !enabled) {
 			// Stop the active track.
 			this.#active?.close();
 			this.#active = undefined;
@@ -197,7 +90,10 @@ export class Decoder implements Backend {
 		// We use #pending here on purpose so we only close it when it hasn't caught up yet.
 		effect.cleanup(() => this.#pending?.close());
 
-		this.#runTrack(this.#pending, active, selected, config);
+		// Remove the codedWidth/Height from the config to avoid a hard reload if nothing else has changed.
+		const { codedWidth: _, codedHeight: __, ...minConfig } = config;
+
+		this.#runTrack(this.#pending, active, track, minConfig);
 	}
 
 	#runTrack(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
@@ -224,7 +120,7 @@ export class Decoder implements Backend {
 						this.#frame.set(frame.clone());
 					}
 
-					const wait = this.sync.wait(timestamp).then(() => true);
+					const wait = this.source.sync.wait(timestamp).then(() => true);
 					const ok = await Promise.race([wait, effect.cancel]);
 					if (!ok) return;
 
@@ -246,7 +142,6 @@ export class Decoder implements Backend {
 						this.#active?.close();
 						this.#active = effect;
 						this.#pending = undefined;
-						effect.set(this.#rendition, name);
 					}
 				} finally {
 					frame.close();
@@ -271,7 +166,7 @@ export class Decoder implements Backend {
 	#runLegacyTrack(effect: Effect, sub: Moq.Track, config: RequiredDecoderConfig, decoder: VideoDecoder): void {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Legacy.Consumer(sub, {
-			latency: this.sync.latency,
+			latency: this.source.sync.latency,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -289,7 +184,7 @@ export class Decoder implements Backend {
 				if (!next) break;
 
 				// Mark that we received this frame right now.
-				this.sync.received(Time.Milli.fromMicro(next.timestamp as Time.Micro));
+				this.source.sync.received(Time.Milli.fromMicro(next.timestamp as Time.Micro));
 
 				const chunk = new EncodedVideoChunk({
 					type: next.keyframe ? "key" : "delta",
@@ -347,7 +242,7 @@ export class Decoder implements Backend {
 								});
 
 								// Mark that we received this frame right now.
-								this.sync.received(Time.Milli.fromMicro(sample.timestamp as Time.Micro));
+								this.source.sync.received(Time.Milli.fromMicro(sample.timestamp as Time.Micro));
 
 								// Track stats
 								this.#stats.update((current) => ({
@@ -367,44 +262,8 @@ export class Decoder implements Backend {
 		});
 	}
 
-	#selectRendition(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
-		const entries = Object.entries(renditions);
-		if (entries.length <= 1) return entries.at(0)?.[0];
-
-		// If we have no target, then choose the largest supported rendition.
-		// This is kind of a hack to use MAX_SAFE_INTEGER / 2 - 1 but IF IT WORKS, IT WORKS.
-		const pixels = target?.pixels ?? Number.MAX_SAFE_INTEGER / 2 - 1;
-
-		// Round up to the closest rendition.
-		// Also keep track of the 2nd closest, just in case there's nothing larger.
-
-		let larger: string | undefined;
-		let largerSize: number | undefined;
-
-		let smaller: string | undefined;
-		let smallerSize: number | undefined;
-
-		for (const [name, rendition] of entries) {
-			if (!rendition.codedHeight || !rendition.codedWidth) continue;
-
-			const size = rendition.codedHeight * rendition.codedWidth;
-			if (size > pixels && (!largerSize || size < largerSize)) {
-				larger = name;
-				largerSize = size;
-			} else if (size < pixels && (!smallerSize || size > smallerSize)) {
-				smaller = name;
-				smallerSize = size;
-			}
-		}
-		if (larger) return larger;
-		if (smaller) return smaller;
-
-		console.warn("no width/height information, choosing the first supported rendition");
-		return entries[0][0];
-	}
-
 	#runDisplay(effect: Effect): void {
-		const catalog = effect.get(this.#catalog);
+		const catalog = effect.get(this.source.catalog);
 		if (!catalog) return;
 
 		const display = catalog.display;
@@ -450,4 +309,15 @@ export class Decoder implements Backend {
 
 		this.#signals.close();
 	}
+}
+
+async function supported(config: Catalog.VideoConfig): Promise<boolean> {
+	const description = config.description ? Hex.toBytes(config.description) : undefined;
+	const { supported } = await VideoDecoder.isConfigSupported({
+		codec: config.codec,
+		description,
+		optimizeForLatency: config.optimizeForLatency ?? true,
+	});
+
+	return supported ?? false;
 }

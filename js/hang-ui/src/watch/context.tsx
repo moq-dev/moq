@@ -81,7 +81,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
-		props.hangWatch.video.target.update((prev) => ({
+		props.hangWatch.video.source.target.update((prev) => ({
 			...prev,
 			name: name,
 		}));
@@ -167,7 +167,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const videoCatalog = effect.get(watch.video.catalog);
+		const videoCatalog = effect.get(watch.video.source.catalog);
 		const renditions = videoCatalog?.renditions ?? {};
 
 		const renditionsList: Rendition[] = Object.entries(renditions).map(([name, config]) => ({
@@ -180,7 +180,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const selected = effect.get(watch.video.rendition);
+		const selected = effect.get(watch.video.source.track);
 		setActiveRendition(selected);
 	});
 

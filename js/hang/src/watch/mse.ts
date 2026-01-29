@@ -1,38 +1,27 @@
 import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import * as Audio from "./audio";
-import type { Backend } from "./backend";
-import type { Broadcast } from "./broadcast";
-import { Sync } from "./sync";
-import * as Video from "./video";
+import type { Sync } from "./sync";
 
-export type SourceProps = {
-	broadcast?: Broadcast | Signal<Broadcast | undefined>;
+export type MuxerProps = {
 	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
 	paused?: boolean | Signal<boolean>;
 	delay?: Time.Milli | Signal<Time.Milli>;
-
-	video?: Video.MseProps;
-	audio?: Audio.MseProps;
 };
 
 /**
  * MSE-based video source for CMAF/fMP4 fragments.
  * Uses Media Source Extensions to handle complete moof+mdat fragments.
  */
-export class Source implements Backend {
-	broadcast: Signal<Broadcast | undefined>;
-
-	#mediaSource = new Signal<MediaSource | undefined>(undefined);
-
+export class Muxer {
 	element: Signal<HTMLMediaElement | undefined>;
+
 	paused: Signal<boolean>;
 	delay: Signal<Time.Milli>;
 
-	video: Video.Mse;
-	audio: Audio.Mse;
-
 	#sync: Sync;
+
+	#mediaSource = new Signal<MediaSource | undefined>(undefined);
+	readonly mediaSource: Getter<MediaSource | undefined> = this.#mediaSource;
 
 	#buffering = new Signal<boolean>(false);
 	readonly buffering: Getter<boolean> = this.#buffering;
@@ -42,27 +31,11 @@ export class Source implements Backend {
 
 	#signals = new Effect();
 
-	constructor(props?: SourceProps) {
-		this.broadcast = Signal.from(props?.broadcast);
+	constructor(sync: Sync, props?: MuxerProps) {
 		this.element = Signal.from(props?.element);
 		this.paused = Signal.from(props?.paused ?? false);
 		this.delay = Signal.from(props?.delay ?? (100 as Time.Milli));
-		this.#sync = new Sync({ delay: this.delay });
-
-		this.video = new Video.Mse({
-			broadcast: this.broadcast,
-			element: this.element,
-			mediaSource: this.#mediaSource,
-			sync: this.#sync,
-			...props?.video,
-		});
-		this.audio = new Audio.Mse({
-			broadcast: this.broadcast,
-			element: this.element,
-			mediaSource: this.#mediaSource,
-			sync: this.#sync,
-			...props?.audio,
-		});
+		this.#sync = sync;
 
 		this.#signals.effect(this.#runMediaSource.bind(this));
 		this.#signals.effect(this.#runSkip.bind(this));
@@ -126,12 +99,12 @@ export class Source implements Backend {
 		const element = effect.get(this.element);
 		if (!element) return;
 
-		const mediaSource = effect.get(this.#mediaSource);
-		if (!mediaSource) return;
+		const media = effect.get(this.mediaSource);
+		if (!media) return;
 
 		// Periodically clean up old buffered data.
 		effect.interval(async () => {
-			for (const sourceBuffer of mediaSource.sourceBuffers) {
+			for (const sourceBuffer of media.sourceBuffers) {
 				while (sourceBuffer.updating) {
 					await new Promise((resolve) => sourceBuffer.addEventListener("updateend", resolve, { once: true }));
 				}

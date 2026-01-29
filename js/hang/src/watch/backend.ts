@@ -1,9 +1,8 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../catalog";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
-import * as MSE from "./mse";
+import { Muxer } from "./mse";
 import { Sync } from "./sync";
 import * as Video from "./video";
 
@@ -34,10 +33,10 @@ export interface Backend {
 	timestamp: Getter<number>;
 
 	// Video specific signals.
-	video: Video.Backend;
+	video?: Video.Backend;
 
 	// Audio specific signals.
-	audio: Audio.Backend;
+	audio?: Audio.Backend;
 
 	// The delay in milliseconds required for smooth playback.
 	delay: Signal<Moq.Time.Milli>;
@@ -54,51 +53,40 @@ export interface MultiBackendProps {
 }
 
 // We have to proxy some of these signals because we support both the MSE and WebCodecs.
-class VideoSignals implements Video.Backend {
-	// The desired size/rendition/bitrate of the video.
-	target = new Signal<Video.Target | undefined>(undefined);
-
-	// The catalog of the video.
-	catalog = new Signal<Catalog.Video | undefined>(undefined);
-
-	// The name of the active rendition.
-	rendition = new Signal<string | undefined>(undefined);
+class VideoBackend implements Video.Backend {
+	// The source of the video.
+	source: Video.Source;
 
 	// The stats of the video.
 	stats = new Signal<Video.Stats | undefined>(undefined);
 
-	// The config of the active rendition.
-	config = new Signal<Catalog.VideoConfig | undefined>(undefined);
-
-	// Buffered time ranges for MSE backend.
+	// Buffered time ranges (for MSE backend).
 	buffered = new Signal<BufferedRanges>([]);
+
+	constructor(source: Video.Source) {
+		this.source = source;
+	}
 }
 
 // Audio specific signals that work regardless of the backend source (mse vs webcodecs).
-class AudioSignals implements Audio.Backend {
+class AudioBackend implements Audio.Backend {
+	source: Audio.Source;
+
 	// The volume of the audio, between 0 and 1.
-	volume = new Signal(0.5);
+	volume = new Signal<number>(0.5);
 
 	// Whether the audio is muted.
-	muted = new Signal(false);
-
-	// The desired rendition/bitrate of the audio.
-	target = new Signal<Audio.Target | undefined>(undefined);
-
-	// The catalog of the audio.
-	catalog = new Signal<Catalog.Audio | undefined>(undefined);
-
-	// The name of the active rendition.
-	rendition = new Signal<string | undefined>(undefined);
-
-	// The config of the active rendition.
-	config = new Signal<Catalog.AudioConfig | undefined>(undefined);
+	muted = new Signal<boolean>(false);
 
 	// The stats of the audio.
 	stats = new Signal<Audio.Stats | undefined>(undefined);
 
-	// Buffered time ranges for MSE backend.
+	// Buffered time ranges (for MSE backend).
 	buffered = new Signal<BufferedRanges>([]);
+
+	constructor(source: Audio.Source) {
+		this.source = source;
+	}
 }
 
 /// A generic backend that supports either MSE or WebCodecs based on the provided element.
@@ -110,8 +98,11 @@ export class MultiBackend implements Backend {
 	delay: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
-	video = new VideoSignals();
-	audio = new AudioSignals();
+	video: VideoBackend;
+	#videoSource: Video.Source;
+
+	audio: AudioBackend;
+	#audioSource: Audio.Source;
 
 	// Used to sync audio and video playback at a target delay.
 	#sync: Sync;
@@ -128,8 +119,17 @@ export class MultiBackend implements Backend {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
 		this.delay = Signal.from(props?.delay ?? (100 as Moq.Time.Milli));
-
 		this.#sync = new Sync({ delay: this.delay });
+
+		this.#videoSource = new Video.Source(this.#sync, {
+			broadcast: this.broadcast,
+		});
+		this.#audioSource = new Audio.Source(this.#sync, {
+			broadcast: this.broadcast,
+		});
+
+		this.video = new VideoBackend(this.#videoSource);
+		this.audio = new AudioBackend(this.#audioSource);
 
 		this.paused = Signal.from(props?.paused ?? false);
 
@@ -148,16 +148,8 @@ export class MultiBackend implements Backend {
 	}
 
 	#runWebcodecs(effect: Effect, element: HTMLCanvasElement): void {
-		const videoSource = new Video.Decoder({
-			broadcast: this.broadcast,
-			target: this.video.target,
-			sync: this.#sync,
-		});
-		const audioSource = new Audio.Decoder({
-			broadcast: this.broadcast,
-			target: this.audio.target,
-			sync: this.#sync,
-		});
+		const videoSource = new Video.Decoder(this.#videoSource);
+		const audioSource = new Audio.Decoder(this.#audioSource);
 
 		const audioEmitter = new Audio.Emitter(audioSource, {
 			volume: this.audio.volume,
@@ -175,15 +167,9 @@ export class MultiBackend implements Backend {
 		});
 
 		// Proxy the read only signals to the backend.
-		effect.proxy(this.video.catalog, videoSource.catalog);
-		effect.proxy(this.video.rendition, videoSource.rendition);
-		effect.proxy(this.video.config, videoSource.config);
 		effect.proxy(this.video.stats, videoSource.stats);
 		effect.proxy(this.video.buffered, videoSource.buffered);
 
-		effect.proxy(this.audio.catalog, audioSource.catalog);
-		effect.proxy(this.audio.rendition, audioSource.rendition);
-		effect.proxy(this.audio.config, audioSource.config);
 		effect.proxy(this.audio.stats, audioSource.stats);
 		effect.proxy(this.audio.buffered, audioSource.buffered);
 
@@ -197,29 +183,26 @@ export class MultiBackend implements Backend {
 	}
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
-		const source = new MSE.Source({
-			broadcast: this.broadcast,
+		const mse = new Muxer(this.#sync, {
 			delay: this.delay,
-			element,
 			paused: this.paused,
-			video: { target: this.video.target },
-			audio: { volume: this.audio.volume, muted: this.audio.muted },
+			element,
 		});
-		effect.cleanup(() => source.close());
+		effect.cleanup(() => mse.close());
+
+		const video = new Video.Mse(mse, this.#videoSource);
+		const audio = new Audio.Mse(mse, this.#audioSource, {
+			volume: this.audio.volume,
+			muted: this.audio.muted,
+		});
 
 		// Proxy the read only signals to the backend.
-		effect.proxy(this.video.catalog, source.video.catalog);
-		effect.proxy(this.video.rendition, source.video.rendition);
-		effect.proxy(this.video.config, source.video.config);
-		effect.proxy(this.video.stats, source.video.stats);
-		effect.proxy(this.video.buffered, source.video.buffered);
+		effect.proxy(this.video.stats, video.stats);
+		effect.proxy(this.video.buffered, video.buffered);
 
-		effect.proxy(this.audio.catalog, source.audio.catalog);
-		effect.proxy(this.audio.rendition, source.audio.rendition);
-		effect.proxy(this.audio.config, source.audio.config);
-		effect.proxy(this.audio.stats, source.audio.stats);
-		effect.proxy(this.audio.buffered, source.audio.buffered);
+		effect.proxy(this.audio.stats, audio.stats);
+		effect.proxy(this.audio.buffered, audio.buffered);
 
-		effect.proxy(this.#timestamp, source.timestamp);
+		effect.proxy(this.#timestamp, mse.timestamp);
 	}
 }

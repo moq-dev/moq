@@ -84,6 +84,10 @@ export default function BufferControl(props: BufferControlProps) {
 				onMouseDown={onMouseDown}
 				role="slider"
 				tabIndex={0}
+				aria-valuenow={context.delay()}
+				aria-valuemin={MIN_RANGE}
+				aria-valuemax={maxRange()}
+				aria-label="Buffer delay"
 			>
 				{/* Playhead (left edge = current time) */}
 				<div class="bufferPlayhead" />

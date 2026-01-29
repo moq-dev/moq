@@ -74,35 +74,6 @@ Subscribe to and render a MoQ broadcast.
 </hang-watch>
 ```
 
-### `<hang-meet>`
-
-Video conferencing component that discovers and renders multiple broadcasts.
-
-**Attributes:**
-- `url` (required) - Relay server URL
-- `path` (required) - Room path prefix
-- `audio` - Enable audio (boolean)
-- `video` - Enable video (boolean)
-- `controls` - Show controls (boolean)
-
-**Example:**
-
-```html
-<script type="module">
-    import "@moq/hang/meet/element";
-</script>
-
-<hang-meet
-    url="https://relay.example.com/anon"
-    path="room123"
-    audio video controls>
-    <!-- Optional: add local publish component -->
-    <hang-publish path="room123/me" audio video></hang-publish>
-</hang-meet>
-```
-
-This discovers any broadcasts starting with `room123/` and renders them in a grid.
-
 ### `<hang-support>`
 
 Display browser support information.

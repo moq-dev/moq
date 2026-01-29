@@ -152,27 +152,6 @@ Publishes a microphone/camera or screen as a hang broadcast.
 </hang-publish>
 ```
 
-### `<hang-meet>`
-
-Downloads multiple hang broadcasts and renders them in a grid.
-Very crude and best as an example; use the JS API instead.
-
-```html
-<script type="module">
-    import "@moq/hang/meet/element";
-</script>
-
-<hang-meet
-    url="https://cdn.moq.dev/anon"
-	path="room123"
-    audio video
-    controls>
-</hang-meet>
-```
-
-This will discover any broadcasts that start with `room123/` and render them.
-You can also specify a `<hang-publish>` child element to publish your own broadcast, using a local preview instead of downloading it.
-
 ### `<hang-support>`
 
 A simple element that displays browser support.

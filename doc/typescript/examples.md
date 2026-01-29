@@ -121,38 +121,6 @@ for await (const group of chatTrack) {
 </html>
 ```
 
-### Video Conference
-
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <script type="module">
-        import "@moq/hang/meet/element";
-    </script>
-    <style>
-        hang-meet {
-            display: block;
-            width: 100%;
-            height: 100vh;
-        }
-    </style>
-</head>
-<body>
-    <hang-meet
-        url="https://relay.example.com/anon"
-        path="conference/room-123"
-        audio video controls>
-        <!-- Publish your own camera -->
-        <hang-publish
-            path="conference/room-123/alice"
-            audio video>
-        </hang-publish>
-    </hang-meet>
-</body>
-</html>
-```
-
 ### Dynamic Controls
 
 ```html

@@ -6,26 +6,14 @@ import * as Container from "../../container";
 import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
 import type { BufferedRanges } from "../backend";
-import type { Broadcast } from "../broadcast";
-import { Sync } from "../sync";
-import type { Target } from "../video/backend";
 import type * as Render from "./render";
-
 // Unfortunately, we need to use a Vite-exclusive import for now.
 import RenderWorklet from "./render-worklet.ts?worker&url";
+import type { Source } from "./source";
 
 export type DecoderProps = {
-	broadcast: Broadcast | Signal<Broadcast | undefined>;
-
 	// Enable to download the audio track.
 	enabled?: boolean | Signal<boolean>;
-
-	// The desired rendition/bitrate of the audio.
-	// TODO finish implementing this
-	target?: Target | Signal<Target | undefined>;
-
-	// Used to sync audio and video playback.
-	sync?: Sync;
 };
 
 export interface AudioStats {
@@ -35,12 +23,8 @@ export interface AudioStats {
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
 export class Decoder {
-	broadcast: Signal<Broadcast | undefined>;
+	source: Source;
 	enabled: Signal<boolean>;
-	target: Signal<Target | undefined>;
-
-	#catalog = new Signal<Catalog.Audio | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Audio | undefined> = this.#catalog;
 
 	#context = new Signal<AudioContext | undefined>(undefined);
 	readonly context: Getter<AudioContext | undefined> = this.#context;
@@ -60,64 +44,17 @@ export class Decoder {
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
-	config = new Signal<Catalog.AudioConfig | undefined>(undefined);
-
-	sync: Sync;
-
-	// The name of the active rendition.
-	rendition = new Signal<string | undefined>(undefined);
-
 	#signals = new Effect();
 
-	constructor(props?: DecoderProps) {
-		this.broadcast = Signal.from(props?.broadcast);
+	constructor(source: Source, props?: DecoderProps) {
+		this.source = source;
+		this.source.supported.set(supported); // super hacky
+
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.target = Signal.from(props?.target);
 
-		// TODO Close any newly constructed sync.
-		this.sync = props?.sync ?? new Sync();
-
-		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runWorklet.bind(this));
 		this.#signals.effect(this.#runEnabled.bind(this));
 		this.#signals.effect(this.#runDecoder.bind(this));
-	}
-
-	#runCatalog(effect: Effect): void {
-		const broadcast = effect.get(this.broadcast);
-		if (!broadcast) return;
-
-		const catalog = effect.get(broadcast.catalog);
-		if (!catalog) return;
-
-		const audio = catalog.audio;
-		if (!audio) return;
-
-		effect.set(this.#catalog, audio);
-
-		const rendition = this.#selectRendition(audio);
-		if (!rendition) return;
-
-		effect.set(this.rendition, rendition.track);
-		effect.set(this.config, rendition.config);
-
-		effect.set(this.sync.audio, rendition.config.delay as Time.Milli | undefined);
-	}
-
-	#selectRendition(audio: Catalog.Audio): { track: string; config: Catalog.AudioConfig } | undefined {
-		// Prefer legacy container if available, but support CMAF as well
-		let cmafRendition: { track: string; config: Catalog.AudioConfig } | undefined;
-
-		for (const [track, config] of Object.entries(audio.renditions)) {
-			if (config.container.kind === "legacy") {
-				return { track, config };
-			}
-			if (config.container.kind === "cmaf" && !cmafRendition) {
-				cmafRendition = { track, config };
-			}
-		}
-
-		return cmafRendition;
 	}
 
 	#runWorklet(effect: Effect): void {
@@ -127,7 +64,7 @@ export class Decoder {
 		//const enabled = effect.get(this.enabled);
 		//if (!enabled) return;
 
-		const config = effect.get(this.config);
+		const config = effect.get(this.source.config);
 		if (!config) return;
 
 		const sampleRate = config.sampleRate;
@@ -162,7 +99,7 @@ export class Decoder {
 				type: "init",
 				rate: sampleRate,
 				channels: channelCount,
-				latency: this.sync.latency.peek(), // TODO make it reactive
+				latency: this.source.sync.latency.peek(), // TODO make it reactive
 			};
 			worklet.port.postMessage(init);
 
@@ -186,22 +123,19 @@ export class Decoder {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
-		const catalog = effect.get(this.catalog);
-		if (!catalog) return;
-
-		const broadcast = effect.get(this.broadcast);
+		const broadcast = effect.get(this.source.broadcast);
 		if (!broadcast) return;
 
 		const active = broadcast ? effect.get(broadcast.active) : undefined;
 		if (!active) return;
 
-		const config = effect.get(this.config);
+		const track = effect.get(this.source.track);
+		if (!track) return;
+
+		const config = effect.get(this.source.config);
 		if (!config) return;
 
-		const rendition = effect.get(this.rendition);
-		if (!rendition) return;
-
-		const sub = active.subscribe(rendition, Catalog.PRIORITY.audio);
+		const sub = active.subscribe(track, Catalog.PRIORITY.audio);
 		effect.cleanup(() => sub.close());
 
 		if (config.container.kind === "cmaf") {
@@ -215,7 +149,7 @@ export class Decoder {
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Legacy.Consumer(sub, {
-			latency: this.sync.latency,
+			latency: this.source.sync.latency,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -350,4 +284,13 @@ export class Decoder {
 	close() {
 		this.#signals.close();
 	}
+}
+
+async function supported(config: Catalog.AudioConfig): Promise<boolean> {
+	const description = config.description ? Hex.toBytes(config.description) : undefined;
+	const res = await AudioDecoder.isConfigSupported({
+		...config,
+		description,
+	});
+	return res.supported ?? false;
 }

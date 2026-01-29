@@ -3,116 +3,57 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
 import * as Container from "../../container";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
-import type { Broadcast } from "../broadcast";
-import { Sync } from "../sync";
-import type { Backend, Stats, Target } from "./backend";
-
-export type MseProps = {
-	broadcast?: Broadcast | Signal<Broadcast | undefined>;
-	mediaSource?: MediaSource | Signal<MediaSource | undefined>;
-	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
-	target?: Target | Signal<Target | undefined>;
-	sync?: Sync;
-};
+import type { Muxer } from "../mse";
+import type { Backend, Stats } from "./backend";
+import type { Source } from "./source";
 
 /**
  * MSE-based video source for CMAF/fMP4 fragments.
  * Uses Media Source Extensions to handle complete moof+mdat fragments.
  */
 export class Mse implements Backend {
-	broadcast: Signal<Broadcast | undefined>;
-	element: Signal<HTMLMediaElement | undefined>;
-	mediaSource: Signal<MediaSource | undefined>;
-
-	// TODO Modify #select to use this signal.
-	target: Signal<Target | undefined>;
-
-	#catalog = new Signal<Catalog.Video | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Video | undefined> = this.#catalog;
-
-	#rendition = new Signal<string | undefined>(undefined);
-	readonly rendition: Getter<string | undefined> = this.#rendition;
+	muxer: Muxer;
+	source: Source;
 
 	// TODO implement stats
 	#stats = new Signal<Stats | undefined>(undefined);
 	readonly stats: Getter<Stats | undefined> = this.#stats;
 
-	#config = new Signal<Catalog.VideoConfig | undefined>(undefined);
-	readonly config: Signal<Catalog.VideoConfig | undefined> = this.#config;
-
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
-	// The selected rendition as a separate signal so we don't resubscribe until it changes.
-	#selected = new Signal<{ track: string; mime: string; config: Catalog.VideoConfig } | undefined>(undefined);
-
-	sync: Sync;
-
 	signals = new Effect();
 
-	constructor(props?: MseProps) {
-		this.broadcast = Signal.from(props?.broadcast);
-		this.mediaSource = Signal.from(props?.mediaSource);
-		this.target = Signal.from(props?.target);
-		this.element = Signal.from(props?.element);
+	constructor(muxer: Muxer, source: Source) {
+		this.muxer = muxer;
+		this.source = source;
+		this.source.supported.set(supported); // super hacky
 
-		this.sync = props?.sync ?? new Sync();
-
-		this.signals.effect(this.#runCatalog.bind(this));
-		this.signals.effect(this.#runSelected.bind(this));
 		this.signals.effect(this.#runMedia.bind(this));
 	}
 
-	#runCatalog(effect: Effect): void {
-		const broadcast = effect.get(this.broadcast);
-		if (!broadcast) return;
-
-		const catalog = effect.get(broadcast.catalog)?.video;
-		if (!catalog) return;
-
-		effect.set(this.#catalog, catalog);
-	}
-
-	#runSelected(effect: Effect): void {
-		const catalog = effect.get(this.#catalog);
-		if (!catalog) return;
-
-		const target = effect.get(this.target);
-
-		for (const [track, config] of Object.entries(catalog.renditions)) {
-			const mime = `video/mp4; codecs="${config.codec}"`;
-			if (!MediaSource.isTypeSupported(mime)) continue;
-
-			// Support both CMAF and legacy containers
-			if (target?.name && track !== target.name) continue;
-
-			effect.set(this.#selected, { track, mime, config });
-			effect.set(this.sync.video, config.delay as Moq.Time.Milli | undefined);
-
-			return;
-		}
-
-		console.warn(`[MSE] No supported video rendition found:`, catalog.renditions);
-	}
-
 	#runMedia(effect: Effect): void {
-		const element = effect.get(this.element);
+		const element = effect.get(this.muxer.element);
 		if (!element) return;
 
-		const mediaSource = effect.get(this.mediaSource);
+		const mediaSource = effect.get(this.muxer.mediaSource);
 		if (!mediaSource) return;
 
-		const broadcast = effect.get(this.broadcast);
+		const broadcast = effect.get(this.source.broadcast);
 		if (!broadcast) return;
 
 		const active = effect.get(broadcast.active);
 		if (!active) return;
 
-		// TODO Don't do a hard effect reload when this doesn't change the outcome.
-		const selected = effect.get(this.#selected);
-		if (!selected) return;
+		const track = effect.get(this.source.track);
+		if (!track) return;
 
-		const sourceBuffer = mediaSource.addSourceBuffer(selected.mime);
+		const config = effect.get(this.source.config);
+		if (!config) return;
+
+		const mime = `video/mp4; codecs="${config.codec}"`;
+
+		const sourceBuffer = mediaSource.addSourceBuffer(mime);
 		effect.cleanup(() => {
 			mediaSource.removeSourceBuffer(sourceBuffer);
 			sourceBuffer.abort();
@@ -126,10 +67,10 @@ export class Mse implements Backend {
 			this.#buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
-		if (selected.config.container.kind === "cmaf") {
-			this.#runCmafMedia(effect, active, selected, sourceBuffer, element);
+		if (config.container.kind === "cmaf") {
+			this.#runCmafMedia(effect, active, track, config, sourceBuffer, element);
 		} else {
-			this.#runLegacyMedia(effect, active, selected, sourceBuffer, element);
+			this.#runLegacyMedia(effect, active, track, config, sourceBuffer, element);
 		}
 	}
 
@@ -148,18 +89,19 @@ export class Mse implements Backend {
 	#runCmafMedia(
 		effect: Effect,
 		active: Moq.Broadcast,
-		selected: { track: string; mime: string; config: Catalog.VideoConfig },
+		track: string,
+		config: Catalog.VideoConfig,
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
 	): void {
-		if (selected.config.container.kind !== "cmaf") return;
+		if (config.container.kind !== "cmaf") throw new Error("unreachable");
 
-		const data = active.subscribe(selected.track, Catalog.PRIORITY.video);
+		const data = active.subscribe(track, Catalog.PRIORITY.video);
 		effect.cleanup(() => data.close());
 
 		effect.spawn(async () => {
 			// Generate init segment from catalog config (uses track_id from container)
-			const initSegment = Container.Cmaf.createVideoInitSegment(selected.config);
+			const initSegment = Container.Cmaf.createVideoInitSegment(config);
 			await this.#appendBuffer(sourceBuffer, initSegment);
 
 			for (;;) {
@@ -181,23 +123,24 @@ export class Mse implements Backend {
 	#runLegacyMedia(
 		effect: Effect,
 		active: Moq.Broadcast,
-		selected: { track: string; mime: string; config: Catalog.VideoConfig },
+		track: string,
+		config: Catalog.VideoConfig,
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
 	): void {
-		const data = active.subscribe(selected.track, Catalog.PRIORITY.video);
+		const data = active.subscribe(track, Catalog.PRIORITY.video);
 		effect.cleanup(() => data.close());
 
 		// Create consumer that reorders groups/frames up to the provided latency.
 		// Legacy container uses microsecond timescale implicitly.
 		const consumer = new Container.Legacy.Consumer(data, {
-			latency: this.sync.latency,
+			latency: this.source.sync.latency,
 		});
 		effect.cleanup(() => consumer.close());
 
 		effect.spawn(async () => {
 			// Generate init segment from catalog config (timescale = 1,000,000 = microseconds)
-			const initSegment = Container.Cmaf.createVideoInitSegment(selected.config);
+			const initSegment = Container.Cmaf.createVideoInitSegment(config);
 			await this.#appendBuffer(sourceBuffer, initSegment);
 
 			let sequence = 1;
@@ -238,6 +181,11 @@ export class Mse implements Backend {
 	}
 
 	close(): void {
+		this.source.close();
 		this.signals.close();
 	}
+}
+
+async function supported(config: Catalog.VideoConfig): Promise<boolean> {
+	return MediaSource.isTypeSupported(`video/mp4; codecs="${config.codec}"`);
 }

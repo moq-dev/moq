@@ -42,11 +42,11 @@ export class AudioProvider extends BaseProvider {
 			return;
 		}
 
-		const rendition = this.props.audio.rendition.peek();
-		const config = this.props.audio.config.peek();
+		const track = this.props.audio.source.track.peek();
+		const config = this.props.audio.source.config.peek();
 		const stats = this.props.audio.stats.peek();
 
-		if (!rendition || !config) {
+		if (!track || !config) {
 			this.context.setDisplayData("N/A");
 			return;
 		}
