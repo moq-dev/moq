@@ -35,7 +35,8 @@ export class Window {
 		});
 
 		this.signals.effect((effect) => {
-			if (!effect.get(this.enabled)) return;
+			const enabled = effect.get(this.enabled);
+			if (!enabled) return;
 			this.#position.set(effect.get(this.#catalog)?.initial);
 		});
 

@@ -129,7 +129,8 @@ export class Source {
 	}
 
 	#runEnabled(effect: Effect): void {
-		if (!effect.get(this.enabled)) return;
+		const enabled = effect.get(this.enabled);
+		if (!enabled) return;
 
 		const context = effect.get(this.#context);
 		if (!context) return;
@@ -140,7 +141,8 @@ export class Source {
 	}
 
 	#runDecoder(effect: Effect): void {
-		if (!effect.get(this.enabled)) return;
+		const enabled = effect.get(this.enabled);
+		if (!enabled) return;
 
 		const values = effect.getAll([this.catalog, this.broadcast, this.config, this.active]);
 		if (!values) return;

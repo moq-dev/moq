@@ -19,7 +19,8 @@ export class Info {
 		this.enabled = Signal.from(props?.enabled ?? false);
 
 		this.signals.effect((effect) => {
-			if (!effect.get(this.enabled)) return;
+			const enabled = effect.get(this.enabled);
+			if (!enabled) return;
 
 			this.#id.set(effect.get(catalog)?.user?.id);
 			this.#name.set(effect.get(catalog)?.user?.name);

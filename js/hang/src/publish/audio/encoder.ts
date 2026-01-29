@@ -153,7 +153,8 @@ export class Encoder {
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		if (!effect.get(this.enabled)) return;
+		const enabled = effect.get(this.enabled);
+		if (!enabled) return;
 
 		const values = effect.getAll([this.#worklet, this.#config]);
 		if (!values) return;

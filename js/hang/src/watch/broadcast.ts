@@ -128,7 +128,8 @@ export class Broadcast {
 	}
 
 	#runCatalog(effect: Effect): void {
-		if (!effect.get(this.enabled)) return;
+		const enabled = effect.get(this.enabled);
+		if (!enabled) return;
 
 		const broadcast = effect.get(this.#broadcast);
 		if (!broadcast) return;

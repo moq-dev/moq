@@ -24,13 +24,16 @@ export class Preview {
 		this.info = Signal.from(props?.info);
 
 		this.signals.effect((effect) => {
-			if (!effect.get(this.enabled)) return;
+			const enabled = effect.get(this.enabled);
+			if (!enabled) return;
+
 			effect.set(this.catalog, { name: Preview.TRACK, priority: Preview.PRIORITY });
 		});
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		if (!effect.get(this.enabled)) return;
+		const enabled = effect.get(this.enabled);
+		if (!enabled) return;
 
 		const info = effect.get(this.info);
 		if (!info) return;

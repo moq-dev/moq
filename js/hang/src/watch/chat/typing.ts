@@ -29,7 +29,8 @@ export class Typing {
 
 		// Grab the chat section from the catalog (if it's changed).
 		this.#signals.effect((effect) => {
-			if (!effect.get(this.enabled)) return;
+			const enabled = effect.get(this.enabled);
+			if (!enabled) return;
 			this.#catalog.set(effect.get(catalog)?.chat?.typing);
 		});
 
@@ -37,7 +38,8 @@ export class Typing {
 	}
 
 	#run(effect: Effect) {
-		if (!effect.get(this.enabled)) return;
+		const enabled = effect.get(this.enabled);
+		if (!enabled) return;
 
 		const catalog = effect.get(this.#catalog);
 		if (!catalog) return;
