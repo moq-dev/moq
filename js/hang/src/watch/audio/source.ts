@@ -129,11 +129,9 @@ export class Source {
 	}
 
 	#runEnabled(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const context = effect.get(this.#context);
-		if (!context) return;
+		const values = effect.getAll([this.enabled, this.#context]);
+		if (!values) return;
+		const [_, context] = values;
 
 		context.resume();
 
@@ -141,20 +139,9 @@ export class Source {
 	}
 
 	#runDecoder(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const catalog = effect.get(this.catalog);
-		if (!catalog) return;
-
-		const broadcast = effect.get(this.broadcast);
-		if (!broadcast) return;
-
-		const config = effect.get(this.config);
-		if (!config) return;
-
-		const active = effect.get(this.active);
-		if (!active) return;
+		const values = effect.getAll([this.enabled, this.catalog, this.broadcast, this.config, this.active]);
+		if (!values) return;
+		const [_, catalog, broadcast, config, active] = values;
 
 		const sub = broadcast.subscribe(active, catalog.priority);
 		effect.cleanup(() => sub.close());
