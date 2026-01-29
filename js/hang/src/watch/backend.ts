@@ -4,7 +4,7 @@ import type * as Catalog from "../catalog";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
 import * as MSE from "./mse";
-import { Sync, type SyncProps } from "./sync";
+import { Sync } from "./sync";
 import * as Video from "./video";
 
 // Serializable representation of TimeRanges
@@ -24,10 +24,6 @@ export function timeRangesToArray(ranges: TimeRanges): BufferedRanges {
 }
 
 export interface Backend {
-	// Additional buffer in milliseconds on top of the catalog's minBuffer.
-	// The effective latency = catalog.minBuffer + buffer.
-	buffer: Signal<Moq.Time.Milli>;
-
 	// Whether audio/video playback is paused.
 	paused: Signal<boolean>;
 
@@ -42,17 +38,19 @@ export interface Backend {
 
 	// Audio specific signals.
 	audio: Audio.Backend;
+
+	// The delay in milliseconds required for smooth playback.
+	delay: Signal<Moq.Time.Milli>;
 }
 
 export interface MultiBackendProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
-	// Additional buffer in milliseconds on top of the catalog's minBuffer.
-	buffer?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
-	paused?: boolean | Signal<boolean>;
+	// Additional delay in milliseconds on top of catalog delay.
+	delay?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
 
-	sync?: SyncProps;
+	paused?: boolean | Signal<boolean>;
 }
 
 // We have to proxy some of these signals because we support both the MSE and WebCodecs.
@@ -109,12 +107,14 @@ class AudioSignals implements Audio.Backend {
 export class MultiBackend implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;
-	buffer: Signal<Moq.Time.Milli>;
+	delay: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
-	sync: Sync;
 	video = new VideoSignals();
 	audio = new AudioSignals();
+
+	// Used to sync audio and video playback at a target delay.
+	#sync: Sync;
 
 	#buffering = new Signal<boolean>(false);
 	readonly buffering: Getter<boolean> = this.#buffering;
@@ -127,9 +127,10 @@ export class MultiBackend implements Backend {
 	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
-		this.sync = new Sync(props?.sync);
+		this.delay = Signal.from(props?.delay ?? (100 as Moq.Time.Milli));
 
-		this.buffer = Signal.from(props?.buffer ?? (100 as Moq.Time.Milli));
+		this.#sync = new Sync({ delay: this.delay });
+
 		this.paused = Signal.from(props?.paused ?? false);
 
 		this.signals.effect(this.#runElement.bind(this));
@@ -147,15 +148,15 @@ export class MultiBackend implements Backend {
 	}
 
 	#runWebcodecs(effect: Effect, element: HTMLCanvasElement): void {
-		const videoSource = new Video.Source({
+		const videoSource = new Video.Decoder({
 			broadcast: this.broadcast,
 			target: this.video.target,
-			sync: this.sync,
+			sync: this.#sync,
 		});
-		const audioSource = new Audio.Source({
+		const audioSource = new Audio.Decoder({
 			broadcast: this.broadcast,
 			target: this.audio.target,
-			sync: this.sync,
+			sync: this.#sync,
 		});
 
 		const audioEmitter = new Audio.Emitter(audioSource, {
@@ -198,7 +199,7 @@ export class MultiBackend implements Backend {
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
 		const source = new MSE.Source({
 			broadcast: this.broadcast,
-			buffer: this.buffer,
+			delay: this.delay,
 			element,
 			paused: this.paused,
 			video: { target: this.video.target },

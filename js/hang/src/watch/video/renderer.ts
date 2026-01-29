@@ -1,5 +1,5 @@
 import { Effect, Signal } from "@moq/signals";
-import type { Source } from "./source";
+import type { Decoder } from "./decoder";
 
 export type RendererProps = {
 	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
@@ -8,7 +8,7 @@ export type RendererProps = {
 
 // An component to render a video to a canvas.
 export class Renderer {
-	source: Source;
+	source: Decoder;
 
 	// The canvas to render the video to.
 	canvas: Signal<HTMLCanvasElement | undefined>;
@@ -22,7 +22,7 @@ export class Renderer {
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
 	#signals = new Effect();
 
-	constructor(source: Source, props?: RendererProps) {
+	constructor(source: Decoder, props?: RendererProps) {
 		this.source = source;
 		this.canvas = Signal.from(props?.canvas);
 		this.paused = Signal.from(props?.paused ?? false);

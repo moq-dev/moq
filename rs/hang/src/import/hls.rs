@@ -320,50 +320,6 @@ impl Hls {
 		Ok(())
 	}
 
-	async fn consume_segments_limited(
-		&mut self,
-		kind: TrackKind,
-		track: &mut TrackState,
-		playlist: &MediaPlaylist,
-		max_segments: usize,
-	) -> anyhow::Result<usize> {
-		// Calculate segments to process
-		let next_seq = track.next_sequence.unwrap_or(0);
-		let playlist_seq = playlist.media_sequence;
-		let total_segments = playlist.segments.len();
-
-		let last_playlist_seq = playlist_seq + total_segments as u64;
-
-		let skip = if next_seq > last_playlist_seq {
-			total_segments
-		} else if next_seq < playlist_seq {
-			track.next_sequence = None;
-			0
-		} else {
-			(next_seq - playlist_seq) as usize
-		};
-
-		let available = total_segments.saturating_sub(skip);
-
-		// Limit how many segments we process
-		let to_process = available.min(max_segments);
-
-		if to_process > 0 {
-			let base_seq = playlist_seq + skip as u64;
-			for (i, segment) in playlist.segments[skip..skip + to_process].iter().enumerate() {
-				self.push_segment(kind, track, segment, base_seq + i as u64).await?;
-			}
-			info!(
-				?kind,
-				processed = to_process,
-				available = available,
-				"processed limited segments during init"
-			);
-		}
-
-		Ok(to_process)
-	}
-
 	async fn consume_segments(
 		&mut self,
 		kind: TrackKind,

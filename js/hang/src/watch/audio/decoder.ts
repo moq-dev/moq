@@ -14,7 +14,7 @@ import type * as Render from "./render";
 // Unfortunately, we need to use a Vite-exclusive import for now.
 import RenderWorklet from "./render-worklet.ts?worker&url";
 
-export type SourceProps = {
+export type DecoderProps = {
 	broadcast: Broadcast | Signal<Broadcast | undefined>;
 
 	// Enable to download the audio track.
@@ -34,7 +34,7 @@ export interface AudioStats {
 
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
-export class Source {
+export class Decoder {
 	broadcast: Signal<Broadcast | undefined>;
 	enabled: Signal<boolean>;
 	target: Signal<Target | undefined>;
@@ -69,7 +69,7 @@ export class Source {
 
 	#signals = new Effect();
 
-	constructor(props?: SourceProps) {
+	constructor(props?: DecoderProps) {
 		this.broadcast = Signal.from(props?.broadcast);
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.target = Signal.from(props?.target);
@@ -100,6 +100,8 @@ export class Source {
 
 		effect.set(this.rendition, rendition.track);
 		effect.set(this.config, rendition.config);
+
+		effect.set(this.sync.audio, rendition.config.delay as Time.Milli | undefined);
 	}
 
 	#selectRendition(audio: Catalog.Audio): { track: string; config: Catalog.AudioConfig } | undefined {

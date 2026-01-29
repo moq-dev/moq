@@ -1,22 +1,19 @@
-import type * as Moq from "@moq/lite";
+import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type { Backend } from "../backend";
-import type { Broadcast } from "../broadcast";
-import { Sync } from "../sync";
-import { Audio, type AudioProps } from "./audio";
-import { Video, type VideoProps } from "./video";
+import * as Audio from "./audio";
+import type { Backend } from "./backend";
+import type { Broadcast } from "./broadcast";
+import { Sync } from "./sync";
+import * as Video from "./video";
 
 export type SourceProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
-	// Additional buffer in milliseconds on top of the catalog's minBuffer.
-	buffer?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
 	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
 	paused?: boolean | Signal<boolean>;
+	delay?: Time.Milli | Signal<Time.Milli>;
 
-	video?: VideoProps;
-	audio?: AudioProps;
-
-	sync?: Sync;
+	video?: Video.MseProps;
+	audio?: Audio.MseProps;
 };
 
 /**
@@ -29,12 +26,13 @@ export class Source implements Backend {
 	#mediaSource = new Signal<MediaSource | undefined>(undefined);
 
 	element: Signal<HTMLMediaElement | undefined>;
-	buffer: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
+	delay: Signal<Time.Milli>;
 
-	video: Video;
-	audio: Audio;
-	sync: Sync;
+	video: Video.Mse;
+	audio: Audio.Mse;
+
+	#sync: Sync;
 
 	#buffering = new Signal<boolean>(false);
 	readonly buffering: Getter<boolean> = this.#buffering;
@@ -46,23 +44,23 @@ export class Source implements Backend {
 
 	constructor(props?: SourceProps) {
 		this.broadcast = Signal.from(props?.broadcast);
-		this.buffer = Signal.from(props?.buffer ?? (100 as Moq.Time.Milli));
 		this.element = Signal.from(props?.element);
 		this.paused = Signal.from(props?.paused ?? false);
-		this.sync = props?.sync ?? new Sync();
+		this.delay = Signal.from(props?.delay ?? (100 as Time.Milli));
+		this.#sync = new Sync({ delay: this.delay });
 
-		this.video = new Video({
+		this.video = new Video.Mse({
 			broadcast: this.broadcast,
 			element: this.element,
 			mediaSource: this.#mediaSource,
-			sync: this.sync,
+			sync: this.#sync,
 			...props?.video,
 		});
-		this.audio = new Audio({
+		this.audio = new Audio.Mse({
 			broadcast: this.broadcast,
 			element: this.element,
 			mediaSource: this.#mediaSource,
-			sync: this.sync,
+			sync: this.#sync,
 			...props?.audio,
 		});
 
@@ -105,8 +103,8 @@ export class Source implements Backend {
 		const paused = effect.get(this.paused);
 		if (paused) return;
 
-		// Use the computed latency (catalog minBuffer + user buffer)
-		const latency = effect.get(this.sync.latency);
+		// Use the computed latency (catalog delay + user delay)
+		const latency = effect.get(this.#sync.latency);
 
 		effect.interval(() => {
 			// Skip over gaps based on the effective latency.

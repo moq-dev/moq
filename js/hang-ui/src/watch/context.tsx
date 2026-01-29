@@ -28,8 +28,8 @@ type WatchUIContextValues = {
 	togglePlayback: () => void;
 	toggleMuted: () => void;
 	buffering: () => boolean;
-	buffer: () => number;
-	setBuffer: (value: number) => void;
+	delay: () => number;
+	setDelay: (value: number) => void;
 	availableRenditions: () => Rendition[];
 	activeRendition: () => string | undefined;
 	setActiveRendition: (name: string | undefined) => void;
@@ -50,7 +50,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const [isMuted, setIsMuted] = createSignal<boolean>(false);
 	const [currentVolume, setCurrentVolume] = createSignal<number>(0);
 	const [buffering, setBuffering] = createSignal<boolean>(false);
-	const buffer = solid(props.hangWatch.buffer);
+	const delay = solid(props.hangWatch.delay);
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
 	const [activeRendition, setActiveRendition] = createSignal<string | undefined>(undefined);
 	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
@@ -76,8 +76,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		props.hangWatch.audio.muted.update((muted) => !muted);
 	};
 
-	const setBuffer = (latency: number) => {
-		props.hangWatch.buffer.set(latency as Moq.Time.Milli);
+	const setDelay = (latency: number) => {
+		props.hangWatch.delay.set(latency as Moq.Time.Milli);
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
@@ -102,8 +102,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		currentVolume,
 		toggleMuted,
 		buffering,
-		buffer,
-		setBuffer,
+		delay,
+		setDelay,
 		availableRenditions,
 		activeRendition,
 		setActiveRendition: setActiveRenditionValue,
@@ -162,8 +162,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const buffer = effect.get(watch.buffer);
-		setBuffer(buffer);
+		const delay = effect.get(watch.delay);
+		setDelay(delay);
 	});
 
 	signals.effect((effect) => {

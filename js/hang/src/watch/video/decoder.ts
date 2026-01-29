@@ -12,7 +12,7 @@ import type { Backend, Stats, Target } from "./backend";
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = 500 as Time.Milli;
 
-export type SourceProps = {
+export type DecoderProps = {
 	broadcast: Broadcast | Signal<Broadcast | undefined>;
 
 	enabled?: boolean | Signal<boolean>;
@@ -27,8 +27,7 @@ export type SourceProps = {
 // This way we can keep the current subscription active.
 type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
 
-// Responsible for switching between video tracks and buffering frames.
-export class Source implements Backend {
+export class Decoder implements Backend {
 	broadcast: Signal<Broadcast | undefined>;
 	enabled: Signal<boolean>; // Don't download any longer
 
@@ -65,9 +64,6 @@ export class Source implements Backend {
 	#timestamp = new Signal<Time.Milli | undefined>(undefined);
 	readonly timestamp: Getter<Time.Milli | undefined> = this.#timestamp;
 
-	// Additional buffer in milliseconds (on top of catalog's minBuffer).
-	sync: Sync;
-
 	// The display size of the video in pixels, ideally sourced from the catalog.
 	#display = new Signal<{ width: number; height: number } | undefined>(undefined);
 	readonly display: Getter<{ width: number; height: number } | undefined> = this.#display;
@@ -82,9 +78,12 @@ export class Source implements Backend {
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
+	// Used to sync video playback with the audio playback.
+	sync: Sync;
+
 	#signals = new Effect();
 
-	constructor(props?: SourceProps) {
+	constructor(props?: DecoderProps) {
 		this.broadcast = Signal.from(props?.broadcast);
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.target = Signal.from(props?.target);
@@ -167,6 +166,8 @@ export class Source implements Backend {
 		const config = { ...supported[selected], codedWidth: undefined, codedHeight: undefined };
 		effect.set(this.#selectedConfig, config);
 		effect.set(this.#config, config);
+
+		effect.set(this.sync.video, config.delay as Time.Milli | undefined);
 	}
 
 	#runPending(effect: Effect): void {
@@ -288,7 +289,7 @@ export class Source implements Backend {
 				if (!next) break;
 
 				// Mark that we received this frame right now.
-				this.sync.update(Time.Milli.fromMicro(next.timestamp as Time.Micro));
+				this.sync.received(Time.Milli.fromMicro(next.timestamp as Time.Micro));
 
 				const chunk = new EncodedVideoChunk({
 					type: next.keyframe ? "key" : "delta",
@@ -346,7 +347,7 @@ export class Source implements Backend {
 								});
 
 								// Mark that we received this frame right now.
-								this.sync.update(Time.Milli.fromMicro(sample.timestamp as Time.Micro));
+								this.sync.received(Time.Milli.fromMicro(sample.timestamp as Time.Micro));
 
 								// Track stats
 								this.#stats.update((current) => ({

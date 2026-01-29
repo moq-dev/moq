@@ -125,5 +125,5 @@ pub struct VideoConfig {
 	///
 	/// The player should add additional jitter buffer on top of this value.
 	#[serde(default)]
-	pub min_buffer: Option<moq_lite::Time>,
+	pub delay: Option<moq_lite::Time>,
 }

@@ -4,11 +4,12 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Audio from "./audio";
 import { type Backend, MultiBackend } from "./backend";
 import { Broadcast } from "./broadcast";
+import { Sync } from "./sync";
 import type * as Video from "./video";
 
 // TODO remove name; replaced with path
 // TODO remove latency; replaced with buffer
-const OBSERVED = ["url", "name", "path", "paused", "volume", "muted", "reload", "buffer", "latency"] as const;
+const OBSERVED = ["url", "name", "path", "paused", "volume", "muted", "reload", "delay", "latency"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -25,6 +26,9 @@ export default class HangWatch extends HTMLElement implements Backend {
 
 	// The broadcast being watched.
 	broadcast: Broadcast;
+
+	// Used to sync audio and video playback at a target latency.
+	sync = new Sync();
 
 	// The backend that powers this element.
 	#backend: MultiBackend;
@@ -116,8 +120,8 @@ export default class HangWatch extends HTMLElement implements Backend {
 		});
 
 		this.signals.effect((effect) => {
-			const buffer = Math.floor(effect.get(this.buffer));
-			this.setAttribute("buffer", buffer.toString());
+			const delay = Math.floor(effect.get(this.delay));
+			this.setAttribute("delay", delay.toString());
 		});
 	}
 
@@ -152,9 +156,10 @@ export default class HangWatch extends HTMLElement implements Backend {
 			this.audio.muted.set(newValue !== null);
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
-		} else if (name === "buffer" || name === "latency") {
-			// "latency" is a legacy alias for "buffer"
-			this.#backend.sync.buffer.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
+		} else if (name === "delay" || name === "latency") {
+			// "latency" is a legacy alias for "delay"
+			// While similar, latency typically refers to the end-to-end delay.
+			this.sync.delay.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -169,8 +174,8 @@ export default class HangWatch extends HTMLElement implements Backend {
 		return this.broadcast.path;
 	}
 
-	get buffer(): Signal<Time.Milli> {
-		return this.#backend.buffer;
+	get delay(): Signal<Time.Milli> {
+		return this.#backend.delay;
 	}
 
 	get paused(): Signal<boolean> {

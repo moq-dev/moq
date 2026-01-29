@@ -1,11 +1,10 @@
 import type { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
-import type * as Catalog from "../catalog";
 
 export interface SyncProps {
-	buffer?: Time.Milli | Signal<Time.Milli>;
-	audio?: Catalog.AudioConfig | Signal<Catalog.AudioConfig | undefined>;
-	video?: Catalog.VideoConfig | Signal<Catalog.VideoConfig | undefined>;
+	delay?: Time.Milli | Signal<Time.Milli>;
+	audio?: Time.Milli | Signal<Time.Milli | undefined>;
+	video?: Time.Milli | Signal<Time.Milli | undefined>;
 }
 
 export class Sync {
@@ -14,11 +13,14 @@ export class Sync {
 	// TODO Update this when RTT changes
 	#reference?: Time.Milli;
 
-	audio: Signal<Catalog.AudioConfig | undefined>;
-	video: Signal<Catalog.VideoConfig | undefined>;
+	// The minimum buffer size, to account for network jitter.
+	delay: Signal<Time.Milli>;
 
-	buffer: Signal<Time.Milli>;
+	// Any additional delay required for audio or video.
+	audio: Signal<Time.Milli | undefined>;
+	video: Signal<Time.Milli | undefined>;
 
+	// The buffer required, based on both audio and video.
 	#latency = new Signal<Time.Milli>(0 as Time.Milli);
 	readonly latency: Signal<Time.Milli> = this.#latency;
 
@@ -30,7 +32,7 @@ export class Sync {
 	signals = new Effect();
 
 	constructor(props?: SyncProps) {
-		this.buffer = Signal.from(props?.buffer ?? (100 as Time.Milli));
+		this.delay = Signal.from(props?.delay ?? (100 as Time.Milli));
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
 
@@ -42,24 +44,11 @@ export class Sync {
 	}
 
 	#runLatency(effect: Effect): void {
-		const buffer = effect.get(this.buffer);
+		const delay = effect.get(this.delay);
+		const video = effect.get(this.video) ?? 0;
+		const audio = effect.get(this.audio) ?? 0;
 
-		// Compute the latency based on the catalog's minBuffer and the user's buffer.
-		const video = effect.get(this.video);
-
-		// Use minBuffer from catalog if available, otherwise estimate from framerate
-		let videoBuffer: number | undefined = video?.minBuffer;
-		if (videoBuffer === undefined && video?.framerate !== undefined && video.framerate > 0) {
-			// Estimate minBuffer as one frame duration if framerate is available
-			videoBuffer = 1000 / video.framerate;
-		}
-		videoBuffer ??= 0;
-
-		const audio = effect.get(this.audio);
-		// TODO if there's no explicit buffer, estimate the audio buffer based on the sample rate and codec?
-		const audioBuffer = audio?.minBuffer ?? 0;
-
-		const latency = (Math.max(videoBuffer, audioBuffer) + buffer) as Time.Milli;
+		const latency = (Math.max(video, audio) + delay) as Time.Milli;
 		this.#latency.set(latency);
 
 		this.#resolve();
@@ -70,7 +59,7 @@ export class Sync {
 	}
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
-	update(timestamp: Time.Milli): void {
+	received(timestamp: Time.Milli): void {
 		const ref = (performance.now() - timestamp) as Time.Milli;
 
 		if (this.#reference && ref >= this.#reference) {
@@ -85,8 +74,6 @@ export class Sync {
 	}
 
 	// Sleep until it's time to render this frame.
-	//
-	// Returns the amount of time we tried to sleep.
 	async wait(timestamp: Time.Milli): Promise<void> {
 		if (!this.#reference) {
 			throw new Error("reference not set; call update() first");

@@ -43,10 +43,10 @@ export const VideoConfigSchema = z.object({
 	// Default: true
 	optimizeForLatency: z.boolean().optional(),
 
-	// Minimum buffer size in milliseconds required for smooth playback.
-	// This represents the minimum time the player should buffer before starting playback.
-	// The player should add additional buffer on top of this value.
-	minBuffer: u53Schema.optional(),
+	// This represents the minimum duration the player should buffer before starting playback.
+	// The player should add additional delay on top of this value.
+	// ex. this would be 2s if the segment duration is 2s.
+	delay: u53Schema.optional(),
 });
 
 // Mirrors VideoDecoderConfig

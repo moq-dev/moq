@@ -68,7 +68,7 @@ pub struct AuthToken {
 	pub cluster: bool,
 }
 
-const REFRESH_ERROR_INTERVAL: Duration = Duration::from_secs(300);
+const REFRESH_ERROR_INTERVAL: Duration = Duration::from_mins(5);
 
 #[derive(Clone)]
 pub struct Auth {

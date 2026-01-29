@@ -40,18 +40,6 @@ impl Track {
 	}
 }
 
-impl From<String> for Track {
-	fn from(name: String) -> Self {
-		Self::new(name)
-	}
-}
-
-impl From<&str> for Track {
-	fn from(name: &str) -> Self {
-		Self::new(name)
-	}
-}
-
 #[derive(Default)]
 struct TrackState {
 	latest: Option<GroupConsumer>,

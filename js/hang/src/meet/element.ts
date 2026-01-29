@@ -180,8 +180,8 @@ export default class HangMeet extends HTMLElement {
 			},
 		});
 
-		const videoSource = new Watch.Video.Source({ broadcast });
-		const audioSource = new Watch.Audio.Source({ broadcast });
+		const videoSource = new Watch.Video.Decoder({ broadcast });
+		const audioSource = new Watch.Audio.Decoder({ broadcast });
 
 		const renderer = new Watch.Video.Renderer(videoSource, { canvas });
 		const emitter = new Watch.Audio.Emitter(audioSource);
