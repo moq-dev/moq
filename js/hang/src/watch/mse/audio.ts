@@ -1,7 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import * as Mp4 from "../../mp4";
 import * as Container from "../../container";
 import type { Backend, Stats, Target } from "../audio/backend";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
@@ -160,7 +159,7 @@ export class Audio implements Backend {
 
 		effect.spawn(async () => {
 			// Generate init segment from catalog config (uses track_id from container)
-			const initSegment = Mp4.createAudioInitSegment(selected.config);
+			const initSegment = Container.Cmaf.createAudioInitSegment(selected.config);
 			await this.#appendBuffer(sourceBuffer, initSegment);
 
 			for (;;) {
@@ -198,7 +197,7 @@ export class Audio implements Backend {
 
 		effect.spawn(async () => {
 			// Generate init segment from catalog config (timescale = 1,000,000 = microseconds)
-			const initSegment = Mp4.createAudioInitSegment(selected.config);
+			const initSegment = Container.Cmaf.createAudioInitSegment(selected.config);
 			await this.#appendBuffer(sourceBuffer, initSegment);
 
 			let sequence = 1;
@@ -217,7 +216,7 @@ export class Audio implements Backend {
 				}
 
 				// Wrap raw frame in moof+mdat
-				const segment = Mp4.encodeDataSegment({
+				const segment = Container.Cmaf.encodeDataSegment({
 					data: pending.data,
 					timestamp: pending.timestamp,
 					duration: duration ?? 0, // Default to 0 duration if there's literally one frame then stream FIN.

@@ -52,8 +52,8 @@ import {
 	writeVmhd,
 } from "@svta/cml-iso-bmff";
 
-import type * as Catalog from "../catalog";
-import * as Hex from "../util/hex";
+import type * as Catalog from "../../catalog";
+import * as Hex from "../../util/hex";
 
 // Identity matrix for tkhd/mvhd (stored as 16.16 fixed point)
 const IDENTITY_MATRIX = [0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000];

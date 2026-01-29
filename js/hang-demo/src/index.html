@@ -14,30 +14,29 @@
 	<!-- Show if this browser supports everything we need. -->
 	<hang-support mode="watch" show="partial"></hang-support>
 
-	<!--
-		There's a simple, web component to set up the provided canvas, including some basic controls.
-		Note that the path is optional, and can be set via query parameters in index.ts.
-
-		The relay url is loaded from an environment as it contains a generated JWT authentication token.
-		Feel free to hard-code it if you have public access configured, like `url="https://cdn.moq.dev/anon"`
-		NOTE: `http` performs an insecure certificate check. You must use `https` in production.
-
-		The broadcast path is overwritten by the ?path query parameter in index.ts.
-
-		NOTE: `reload` will detect when the broadcast goes offline/online and automatically reconnect.
-		TODO: Cloudflare doesn't support it yet (SUBSCRIBE_NAMESPACE), so make sure you remove it if you're using Cloudflare.
-
-		NOTE: You can use a <video> element instead of a <canvas> element to use the MSE backend.
-		This is not as well tested as has higher latency, but will support more devices.
-	-->
+	<!-- This optional component shows some simple controls for the inner <hang-watch> component. -->
 	<hang-watch-ui>
+		<!--
+			Some supported attributes are:
+			- `url`: The URL of the (relay) server; feel free to use `https://cdn.moq.dev/anon` for public access.
+			- `path`: The broadcast name, otherwise we use the last part of the URL.
+			- `paused`: Video and audio are paused.
+			- `muted`: Audio is muted.
+			- `volume`: The audio volume (0-1).
+			- `buffer`: The (additional) buffer size in milliseconds.
+			- `reload`: Whether to automatically reconnect when the broadcast goes offline/online.
+
+			NOTE: Cloudflare doesn't support reload yet.
+		-->
 		<hang-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted buffer="100" reload>
+			<!-- Provide a canvas element to render the video via WebCodecs. -->
 			<canvas style="width: 100%; height: auto;"></canvas>
+			<!-- Or provide a video element to use the (higher latency) MSE backend. -->
 			<!-- <video style="width: 100%; height: auto;" autoplay muted></video> -->
 		</hang-watch>
 	</hang-watch-ui>
 
-	<!-- Configure the relay URL and broadcast name. Auto-discovers available broadcasts. -->
+	<!-- (optional) Configure the relay URL and broadcast name. Auto-discovers available broadcasts. -->
 	<hang-config id="config" url="%VITE_RELAY_URL%" path="bbb"></hang-config>
 
 	<h3>Other demos:</h3>

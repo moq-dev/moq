@@ -11,29 +11,20 @@
 </head>
 
 <body class="dark:bg-black p-4">
-	<!-- Show if this browser supports everything we need. -->
-	<hang-support mode="watch" show="partial"></hang-support>
-
 	<!--
 		This demo uses MSE (Media Source Extensions) instead of WebCodecs.
 		MSE has broader device support but higher latency compared to the WebCodecs canvas renderer.
 
-		The relay url is loaded from an environment as it contains a generated JWT authentication token.
-		Feel free to hard-code it if you have public access configured, like `url="https://cdn.moq.dev/anon"`
-		NOTE: `http` performs an insecure certificate check. You must use `https` in production.
-
-		The broadcast path is overwritten by the ?path query parameter in index.ts.
-
-		NOTE: `reload` will detect when the broadcast goes offline/online and automatically reconnect.
-		TODO: Cloudflare doesn't support it yet (SUBSCRIBE_NAMESPACE), so make sure you remove it if you're using Cloudflare.
+		See index.html for more details on these components.
 	-->
+	<hang-support mode="watch" show="partial"></hang-support>
+
 	<hang-watch-ui>
 		<hang-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted buffer="150" reload>
 			<video style="width: 100%; height: auto;" autoplay muted></video>
 		</hang-watch>
 	</hang-watch-ui>
 
-	<!-- Configure the relay URL and broadcast name. Auto-discovers available broadcasts. -->
 	<hang-config id="config" url="%VITE_RELAY_URL%" path="bbb"></hang-config>
 
 	<h3>Other demos:</h3>
