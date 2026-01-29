@@ -220,13 +220,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		loop {
 			let group = tokio::select! {
-				biased;
-				Some(group) = track.next_group().transpose() => group,
 				// Poll all active group futures; never matches but keeps them running.
 				true = async {
 					while tasks.next().await.is_some() {}
 					false
 				} => unreachable!(),
+				Some(group) = track.next_group().transpose() => group,
 				else => return Ok(()),
 			}?;
 
