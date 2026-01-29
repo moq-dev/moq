@@ -28,8 +28,7 @@ export class Preview {
 		});
 
 		this.#signals.effect((effect) => {
-			const enabled = effect.get(this.enabled);
-			if (!enabled) return;
+			if (!effect.get(this.enabled)) return;
 
 			const broadcast = effect.get(this.broadcast);
 			if (!broadcast) return;

@@ -29,8 +29,7 @@ export class Info {
 		this.color = Signal.from(props?.color);
 
 		this.signals.effect((effect) => {
-			const enabled = effect.get(this.enabled);
-			if (!enabled) return;
+			if (!effect.get(this.enabled)) return;
 
 			effect.set(this.catalog, {
 				id: effect.get(this.id),
