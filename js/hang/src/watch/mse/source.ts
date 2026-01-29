@@ -2,9 +2,9 @@ import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Backend } from "../backend";
 import type { Broadcast } from "../broadcast";
+import { Sync } from "../sync";
 import { Audio, type AudioProps } from "./audio";
 import { Video, type VideoProps } from "./video";
-import { Sync } from "../sync";
 
 export type SourceProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;

@@ -2,12 +2,12 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
+import * as Container from "../../container";
 import * as Hex from "../../util/hex";
 import type { BufferedRanges } from "../backend";
 import type { Broadcast } from "../broadcast";
-import * as Container from "../../container";
-import type { Backend, Stats, Target } from "./backend";
 import { Sync } from "../sync";
+import type { Backend, Stats, Target } from "./backend";
 
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = 500 as Time.Milli;

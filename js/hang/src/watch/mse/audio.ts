@@ -58,7 +58,6 @@ export class Audio implements Backend {
 		this.muted = Signal.from(props?.muted ?? false);
 		this.target = Signal.from(props?.target);
 
-
 		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runSelected.bind(this));
 		this.#signals.effect(this.#runMedia.bind(this));

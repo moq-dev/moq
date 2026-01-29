@@ -4,8 +4,8 @@ import type * as Catalog from "../catalog";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
 import * as MSE from "./mse";
+import { Sync, type SyncProps } from "./sync";
 import * as Video from "./video";
-import { Sync, SyncProps } from "./sync";
 
 // Serializable representation of TimeRanges
 export interface BufferedRange {

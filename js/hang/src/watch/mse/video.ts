@@ -4,8 +4,8 @@ import * as Catalog from "../../catalog";
 import * as Container from "../../container";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
 import type { Broadcast } from "../broadcast";
-import type { Backend, Stats, Target } from "../video/backend";
 import { Sync } from "../sync";
+import type { Backend, Stats, Target } from "../video/backend";
 
 export type VideoProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;

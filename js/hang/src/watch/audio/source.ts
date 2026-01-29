@@ -7,9 +7,9 @@ import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
 import type { BufferedRanges } from "../backend";
 import type { Broadcast } from "../broadcast";
+import { Sync } from "../sync";
 import type { Target } from "../video/backend";
 import type * as Render from "./render";
-import { Sync } from "../sync";
 
 // Unfortunately, we need to use a Vite-exclusive import for now.
 import RenderWorklet from "./render-worklet.ts?worker&url";
@@ -31,7 +31,6 @@ export type SourceProps = {
 export interface AudioStats {
 	bytesReceived: number;
 }
-
 
 // Downloads audio from a track and emits it to an AudioContext.
 // The user is responsible for hooking up audio to speakers, an analyzer, etc.
