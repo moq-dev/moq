@@ -88,12 +88,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Entry::Vacant(entry) => {
 				let broadcast = Broadcast::produce();
-				origin.publish_broadcast(path.clone(), broadcast.consumer);
+				origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
-					producer: broadcast.producer.clone(),
+					producer: broadcast.clone(),
 					count: 1,
 				});
-				broadcast.producer
+				broadcast
 			}
 		};
 
@@ -451,7 +451,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match state.subscribes.entry(request_id) {
 			Entry::Vacant(entry) => {
 				entry.insert(TrackState {
-					producer: track.producer,
+					producer: track.clone(),
 					alias: Some(msg.track_alias),
 				});
 			}
@@ -466,7 +466,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
 
-		let exists = broadcast.insert_track(track.consumer);
+		let exists = broadcast.insert_track(track.consume());
 		if exists {
 			tracing::warn!(track = %msg.track_name, "track already exists, replacing it");
 		}

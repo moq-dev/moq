@@ -1,40 +1,31 @@
 import type * as Moq from "@moq/lite";
-import type { Time } from "@moq/lite";
+import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import * as Frame from "../../frame";
-import * as Mp4 from "../../mp4";
 import * as Hex from "../../util/hex";
-import { Latency } from "../../util/latency";
 import type { BufferedRanges } from "../backend";
 import type { Broadcast } from "../broadcast";
+import * as Container from "../../container";
 import type { Backend, Stats, Target } from "./backend";
+import { Sync } from "../sync";
 
-// Only count it as buffering if we had to sleep for 200ms or more before rendering the next frame.
-// Unfortunately, this has to be quite high because of b-frames.
-// TODO Maybe we need to detect b-frames and make this dynamic?
-const BUFFERING_MS = 200 as Time.Milli;
+// The amount of time to wait before considering the video to be buffering.
+const BUFFERING = 500 as Time.Milli;
 
 export type SourceProps = {
 	broadcast: Broadcast | Signal<Broadcast | undefined>;
 
 	enabled?: boolean | Signal<boolean>;
 
-	// Additional buffer in milliseconds on top of the catalog's minBuffer (default: 100ms).
-	// The effective latency = catalog.minBuffer + buffer
-	// Increase this if experiencing stuttering due to network jitter.
-	buffer?: Time.Milli | Signal<Time.Milli>;
-
 	target?: Target | Signal<Target | undefined>;
+
+	sync?: Sync;
 };
 
 // The types in VideoDecoderConfig that cause a hard reload.
 // ex. codedWidth/Height are optional and can be changed in-band, so we don't want to trigger a reload.
 // This way we can keep the current subscription active.
 type RequiredDecoderConfig = Omit<Catalog.VideoConfig, "codedWidth" | "codedHeight">;
-
-// The maximum number of concurrent b-frames that we support.
-const MAX_BFRAMES = 10;
 
 // Responsible for switching between video tracks and buffering frames.
 export class Source implements Backend {
@@ -51,13 +42,13 @@ export class Source implements Backend {
 	#selected = new Signal<string | undefined>(undefined);
 	#selectedConfig = new Signal<RequiredDecoderConfig | undefined>(undefined);
 
-	// The name of the active rendition.
-	#rendition = new Signal<string | undefined>(undefined);
-	readonly rendition: Signal<string | undefined> = this.#rendition;
-
 	// The config of the active rendition.
 	#config = new Signal<Catalog.VideoConfig | undefined>(undefined);
-	config: Getter<Catalog.VideoConfig | undefined> = this.#config;
+	readonly config: Getter<Catalog.VideoConfig | undefined> = this.#config;
+
+	// The name of the active rendition.
+	#rendition = new Signal<string | undefined>(undefined);
+	readonly rendition: Getter<string | undefined> = this.#rendition;
 
 	// The current track running, held so we can cancel it when the new track is ready.
 	#pending?: Effect;
@@ -70,15 +61,16 @@ export class Source implements Backend {
 	#frame = new Signal<VideoFrame | undefined>(undefined);
 	readonly frame: Getter<VideoFrame | undefined> = this.#frame;
 
+	// The timestamp of the current frame.
+	#timestamp = new Signal<Time.Milli | undefined>(undefined);
+	readonly timestamp: Getter<Time.Milli | undefined> = this.#timestamp;
+
 	// Additional buffer in milliseconds (on top of catalog's minBuffer).
-	buffer: Signal<Time.Milli>;
+	sync: Sync;
 
 	// The display size of the video in pixels, ideally sourced from the catalog.
 	#display = new Signal<{ width: number; height: number } | undefined>(undefined);
 	readonly display: Getter<{ width: number; height: number } | undefined> = this.#display;
-
-	// Used to convert PTS to wall time.
-	#reference: DOMHighResTimeStamp | undefined;
 
 	#buffering = new Signal<boolean>(false);
 	readonly buffering: Getter<boolean> = this.#buffering;
@@ -90,22 +82,15 @@ export class Source implements Backend {
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
-	#latency: Latency;
-	readonly latency: Getter<Time.Milli>;
-
 	#signals = new Effect();
 
 	constructor(props?: SourceProps) {
 		this.broadcast = Signal.from(props?.broadcast);
-		this.buffer = Signal.from(props?.buffer ?? (100 as Time.Milli));
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.target = Signal.from(props?.target);
 
-		this.#latency = new Latency({
-			buffer: this.buffer,
-			config: this.#config,
-		});
-		this.latency = this.#latency.combined;
+		// TODO Close any newly constructed sync.
+		this.sync = props?.sync ?? new Sync();
 
 		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runSupported.bind(this));
@@ -175,6 +160,9 @@ export class Source implements Backend {
 
 		effect.set(this.#selected, selected);
 
+		// Store the full config for latency computation
+		effect.set(this.#config, supported[selected]);
+
 		// Remove the codedWidth/Height from the config to avoid a hard reload if nothing else has changed.
 		const config = { ...supported[selected], codedWidth: undefined, codedHeight: undefined };
 		effect.set(this.#selectedConfig, config);
@@ -215,40 +203,51 @@ export class Source implements Backend {
 		const sub = broadcast.subscribe(name, Catalog.PRIORITY.video);
 		effect.cleanup(() => sub.close());
 
-		// We need a queue because VideoDecoder doesn't block on a Promise returned by output.
-		// NOTE: We will drain this queue almost immediately, so the highWaterMark is just a safety net.
-		const queue = new TransformStream<VideoFrame, VideoFrame>(
-			undefined,
-			{ highWaterMark: MAX_BFRAMES },
-			{ highWaterMark: MAX_BFRAMES },
-		);
-
-		const writer = queue.writable.getWriter();
-		effect.cleanup(() => writer.close());
-
-		const reader = queue.readable.getReader();
-		effect.cleanup(async () => {
-			// Drain any remaining frames in the queue to prevent memory leaks
-			try {
-				let result = await reader.read();
-				while (!result.done) {
-					result.value?.close();
-					result = await reader.read();
-				}
-			} catch (error) {
-				console.error("Error during frame draining:", error);
-			} finally {
-				await reader.cancel();
+		effect.cleanup(() => {
+			if (this.#active === effect) {
+				this.#timestamp.set(undefined);
 			}
 		});
 
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
-				// Insert into a queue so we can perform ordered sleeps.
-				// If this were to block, I believe WritableStream is still ordered.
 				try {
-					await writer.write(frame);
-				} catch {
+					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
+					if (timestamp < (this.#timestamp.peek() ?? 0)) {
+						// Late frame, don't render it.
+						return;
+					}
+
+					if (this.#frame.peek() === undefined) {
+						// Render something while we wait for the sync to catch up.
+						this.#frame.set(frame.clone());
+					}
+
+					const wait = this.sync.wait(timestamp).then(() => true);
+					const ok = await Promise.race([wait, effect.cancel]);
+					if (!ok) return;
+
+					if (timestamp < (this.#timestamp.peek() ?? 0)) {
+						// Late frame, don't render it.
+						// NOTE: This can happen when the ref is updated, such as on playback start.
+						return;
+					}
+
+					this.#timestamp.set(timestamp);
+
+					this.#frame.update((prev) => {
+						prev?.close();
+						return frame.clone(); // avoid closing the frame here
+					});
+
+					// If the track switch was pending, complete it now.
+					if (this.#pending === effect) {
+						this.#active?.close();
+						this.#active = effect;
+						this.#pending = undefined;
+						effect.set(this.#rendition, name);
+					}
+				} finally {
 					frame.close();
 				}
 			},
@@ -260,50 +259,9 @@ export class Source implements Backend {
 		});
 		effect.cleanup(() => decoder.close());
 
-		// Output processing - same for both container types
-		effect.spawn(async () => {
-			for (;;) {
-				const { value: frame } = await reader.read();
-				if (!frame) break;
-
-				// Sleep until it's time to decode the next frame.
-				const ref = performance.now() - frame.timestamp / 1000;
-
-				let sleep = 0;
-				if (!this.#reference || ref < this.#reference) {
-					this.#reference = ref;
-					// Don't sleep so we immediately render this frame.
-				} else {
-					const latency = this.latency.peek() ?? 0;
-					sleep = this.#reference - ref + latency;
-				}
-
-				if (sleep > 0) {
-					// NOTE: WebCodecs doesn't block on output promises (I think?), so these sleeps will occur concurrently.
-					// TODO: This cause the `syncStatus` to be racey especially
-					await new Promise((resolve) => setTimeout(resolve, sleep));
-				}
-
-				if (sleep <= BUFFERING_MS) {
-					// If the track switch was pending, complete it now.
-					if (this.#pending === effect) {
-						this.#active?.close();
-						this.#active = effect;
-						this.#pending = undefined;
-						effect.set(this.rendition, name);
-					}
-				}
-
-				this.#frame.update((prev) => {
-					prev?.close();
-					return frame;
-				});
-			}
-		});
-
 		// Input processing - depends on container type
 		if (config.container.kind === "cmaf") {
-			this.#runCmafTrack(effect, broadcast, sub, config, decoder);
+			this.#runCmafTrack(effect, sub, config, decoder);
 		} else {
 			this.#runLegacyTrack(effect, sub, config, decoder);
 		}
@@ -311,8 +269,8 @@ export class Source implements Backend {
 
 	#runLegacyTrack(effect: Effect, sub: Moq.Track, config: RequiredDecoderConfig, decoder: VideoDecoder): void {
 		// Create consumer that reorders groups/frames up to the provided latency.
-		const consumer = new Frame.Consumer(sub, {
-			latency: this.#latency.combined,
+		const consumer = new Container.Legacy.Consumer(sub, {
+			latency: this.sync.latency,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -328,6 +286,9 @@ export class Source implements Backend {
 			for (;;) {
 				const next = await Promise.race([consumer.decode(), effect.cancel]);
 				if (!next) break;
+
+				// Mark that we received this frame right now.
+				this.sync.update(Time.Milli.fromMicro(next.timestamp as Time.Micro));
 
 				const chunk = new EncodedVideoChunk({
 					type: next.keyframe ? "key" : "delta",
@@ -347,13 +308,7 @@ export class Source implements Backend {
 		});
 	}
 
-	#runCmafTrack(
-		effect: Effect,
-		_broadcast: Moq.Broadcast,
-		sub: Moq.Track,
-		config: RequiredDecoderConfig,
-		decoder: VideoDecoder,
-	): void {
+	#runCmafTrack(effect: Effect, sub: Moq.Track, config: RequiredDecoderConfig, decoder: VideoDecoder): void {
 		if (config.container.kind !== "cmaf") return;
 
 		const { timescale } = config.container;
@@ -381,7 +336,7 @@ export class Source implements Backend {
 							const segment = await group.readFrame();
 							if (!segment) break;
 
-							const samples = Mp4.decodeDataSegment(segment, timescale);
+							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
 
 							for (const sample of samples) {
 								const chunk = new EncodedVideoChunk({
@@ -389,6 +344,9 @@ export class Source implements Backend {
 									data: sample.data,
 									timestamp: sample.timestamp,
 								});
+
+								// Mark that we received this frame right now.
+								this.sync.update(Time.Milli.fromMicro(sample.timestamp as Time.Micro));
 
 								// Track stats
 								this.#stats.update((current) => ({
@@ -480,7 +438,7 @@ export class Source implements Backend {
 
 		effect.timer(() => {
 			this.#buffering.set(true);
-		}, BUFFERING_MS);
+		}, BUFFERING);
 	}
 
 	close() {

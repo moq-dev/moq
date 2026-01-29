@@ -1,7 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../catalog";
-import { PRIORITY } from "../catalog/priority";
 
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
@@ -105,7 +104,7 @@ export class Broadcast {
 
 		this.status.set("loading");
 
-		const catalog = broadcast.subscribe("catalog.json", PRIORITY.catalog);
+		const catalog = broadcast.subscribe("catalog.json", Catalog.PRIORITY.catalog);
 		effect.cleanup(() => catalog.close());
 
 		effect.spawn(this.#fetchCatalog.bind(this, catalog));

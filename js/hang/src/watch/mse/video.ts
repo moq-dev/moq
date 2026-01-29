@@ -1,20 +1,18 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import * as Frame from "../../frame";
+import * as Container from "../../container";
 import * as Mp4 from "../../mp4";
-import { Latency } from "../../util/latency";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
 import type { Broadcast } from "../broadcast";
 import type { Backend, Stats, Target } from "../video/backend";
+import { Sync } from "../sync";
 
 export type VideoProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 	mediaSource?: MediaSource | Signal<MediaSource | undefined>;
 	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
-
-	// Additional buffer in milliseconds on top of the catalog's minBuffer.
-	buffer?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
+	sync?: Sync;
 	target?: Target | Signal<Target | undefined>;
 };
 
@@ -29,7 +27,6 @@ export class Video implements Backend {
 
 	// TODO Modify #select to use this signal.
 	target: Signal<Target | undefined>;
-	buffer: Signal<Moq.Time.Milli>;
 
 	#catalog = new Signal<Catalog.Video | undefined>(undefined);
 	readonly catalog: Getter<Catalog.Video | undefined> = this.#catalog;
@@ -50,8 +47,7 @@ export class Video implements Backend {
 	// The selected rendition as a separate signal so we don't resubscribe until it changes.
 	#selected = new Signal<{ track: string; mime: string; config: Catalog.VideoConfig } | undefined>(undefined);
 
-	#latency: Latency;
-	readonly latency: Getter<Moq.Time.Milli>;
+	sync: Sync;
 
 	signals = new Effect();
 
@@ -60,13 +56,8 @@ export class Video implements Backend {
 		this.mediaSource = Signal.from(props?.mediaSource);
 		this.target = Signal.from(props?.target);
 		this.element = Signal.from(props?.element);
-		this.buffer = Signal.from(props?.buffer ?? (100 as Moq.Time.Milli));
 
-		this.#latency = new Latency({
-			buffer: this.buffer,
-			config: this.config,
-		});
-		this.latency = this.#latency.combined;
+		this.sync = props?.sync ?? new Sync();
 
 		this.signals.effect(this.#runCatalog.bind(this));
 		this.signals.effect(this.#runSelected.bind(this));
@@ -198,8 +189,8 @@ export class Video implements Backend {
 
 		// Create consumer that reorders groups/frames up to the provided latency.
 		// Legacy container uses microsecond timescale implicitly.
-		const consumer = new Frame.Consumer(data, {
-			latency: this.#latency.combined,
+		const consumer = new Container.Legacy.Consumer(data, {
+			latency: this.sync.latency,
 		});
 		effect.cleanup(() => consumer.close());
 

@@ -188,7 +188,7 @@ impl Hls {
 		for (index, mut track) in video_tracks.into_iter().enumerate() {
 			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
 			let count = self
-				.consume_segments_limited(TrackKind::Video(index), &mut track, &playlist, MAX_INIT_SEGMENTS)
+				.consume_segments(TrackKind::Video(index), &mut track, &playlist, Some(MAX_INIT_SEGMENTS))
 				.await?;
 			buffered += count;
 			self.video.push(track);
@@ -198,7 +198,7 @@ impl Hls {
 		if let Some(mut track) = self.audio.take() {
 			let playlist = self.fetch_media_playlist(track.playlist.clone()).await?;
 			let count = self
-				.consume_segments_limited(TrackKind::Audio, &mut track, &playlist, MAX_INIT_SEGMENTS)
+				.consume_segments(TrackKind::Audio, &mut track, &playlist, Some(MAX_INIT_SEGMENTS))
 				.await?;
 			buffered += count;
 			self.audio = Some(track);
@@ -227,7 +227,7 @@ impl Hls {
 				target_duration = Some(playlist.target_duration);
 			}
 			let count = self
-				.consume_segments(TrackKind::Video(index), &mut track, &playlist)
+				.consume_segments(TrackKind::Video(index), &mut track, &playlist, None)
 				.await?;
 			wrote += count;
 			self.video.push(track);
@@ -239,7 +239,9 @@ impl Hls {
 			if target_duration.is_none() {
 				target_duration = Some(playlist.target_duration);
 			}
-			let count = self.consume_segments(TrackKind::Audio, &mut track, &playlist).await?;
+			let count = self
+				.consume_segments(TrackKind::Audio, &mut track, &playlist, None)
+				.await?;
 			wrote += count;
 			self.audio = Some(track);
 		}
@@ -367,20 +369,16 @@ impl Hls {
 		kind: TrackKind,
 		track: &mut TrackState,
 		playlist: &MediaPlaylist,
+		limit: Option<usize>,
 	) -> anyhow::Result<usize> {
 		self.ensure_init_segment(kind, track, playlist).await?;
 
-		// Calculate how many segments to skip (already processed)
 		let next_seq = track.next_sequence.unwrap_or(0);
 		let playlist_seq = playlist.media_sequence;
 		let total_segments = playlist.segments.len();
-
-		// Calculate the last sequence number in the playlist
 		let last_playlist_seq = playlist_seq + total_segments as u64;
 
-		// If we've already processed beyond what's in the playlist, wait for new segments
 		let skip = if next_seq > last_playlist_seq {
-			// We're ahead of the playlist - wait for ffmpeg to generate more segments
 			warn!(
 				?kind,
 				next_sequence = next_seq,
@@ -388,9 +386,8 @@ impl Hls {
 				last_playlist_sequence = last_playlist_seq,
 				"imported ahead of playlist, waiting for new segments"
 			);
-			total_segments // Skip all segments in playlist
+			total_segments
 		} else if next_seq < playlist_seq {
-			// We're behind - reset and start from the beginning of the playlist
 			warn!(
 				?kind,
 				next_sequence = next_seq,
@@ -400,11 +397,14 @@ impl Hls {
 			track.next_sequence = None;
 			0
 		} else {
-			// Normal case: next_seq is within playlist range
 			(next_seq - playlist_seq) as usize
 		};
 
-		let fresh_segments = total_segments.saturating_sub(skip);
+		let available = total_segments.saturating_sub(skip);
+		let to_process = match limit {
+			Some(max) => available.min(max),
+			None => available,
+		};
 
 		info!(
 			?kind,
@@ -412,21 +412,21 @@ impl Hls {
 			next_sequence = next_seq,
 			skip = skip,
 			total_segments = total_segments,
-			fresh_segments = fresh_segments,
+			to_process = to_process,
 			"consuming HLS segments"
 		);
 
-		if fresh_segments > 0 {
+		if to_process > 0 {
 			let base_seq = playlist_seq + skip as u64;
-			for (i, segment) in playlist.segments[skip..].iter().enumerate() {
+			for (i, segment) in playlist.segments[skip..skip + to_process].iter().enumerate() {
 				self.push_segment(kind, track, segment, base_seq + i as u64).await?;
 			}
-			info!(?kind, consumed = fresh_segments, "consumed HLS segments");
+			info!(?kind, consumed = to_process, "consumed HLS segments");
 		} else {
 			debug!(?kind, "no fresh HLS segments available");
 		}
 
-		Ok(fresh_segments)
+		Ok(to_process)
 	}
 
 	async fn ensure_init_segment(
@@ -670,7 +670,7 @@ mod tests {
 
 	#[test]
 	fn hls_ingest_starts_without_importers() {
-		let broadcast = moq_lite::Broadcast::produce().producer.into();
+		let broadcast = moq_lite::Broadcast::produce().into();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);
 		let hls = Hls::new(broadcast, cfg).unwrap();

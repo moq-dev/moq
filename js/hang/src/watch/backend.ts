@@ -5,6 +5,7 @@ import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
 import * as MSE from "./mse";
 import * as Video from "./video";
+import { Sync, SyncProps } from "./sync";
 
 // Serializable representation of TimeRanges
 export interface BufferedRange {
@@ -43,13 +44,15 @@ export interface Backend {
 	audio: Audio.Backend;
 }
 
-export interface CombinedProps {
+export interface MultiBackendProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
 	// Additional buffer in milliseconds on top of the catalog's minBuffer.
 	buffer?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
 	paused?: boolean | Signal<boolean>;
+
+	sync?: SyncProps;
 }
 
 // We have to proxy some of these signals because we support both the MSE and WebCodecs.
@@ -103,12 +106,13 @@ class AudioSignals implements Audio.Backend {
 /// A generic backend that supports either MSE or WebCodecs based on the provided element.
 ///
 /// This is primarily what backs the <hang-watch> web component, but it's useful as a standalone for other use cases.
-export class Combined implements Backend {
+export class MultiBackend implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;
 	buffer: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
+	sync: Sync;
 	video = new VideoSignals();
 	audio = new AudioSignals();
 
@@ -120,9 +124,10 @@ export class Combined implements Backend {
 
 	signals = new Effect();
 
-	constructor(props?: CombinedProps) {
+	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
+		this.sync = new Sync(props?.sync);
 
 		this.buffer = Signal.from(props?.buffer ?? (100 as Moq.Time.Milli));
 		this.paused = Signal.from(props?.paused ?? false);
@@ -144,13 +149,13 @@ export class Combined implements Backend {
 	#runWebcodecs(effect: Effect, element: HTMLCanvasElement): void {
 		const videoSource = new Video.Source({
 			broadcast: this.broadcast,
-			buffer: this.buffer,
 			target: this.video.target,
+			sync: this.sync,
 		});
 		const audioSource = new Audio.Source({
 			broadcast: this.broadcast,
-			buffer: this.buffer,
 			target: this.audio.target,
+			sync: this.sync,
 		});
 
 		const audioEmitter = new Audio.Emitter(audioSource, {

@@ -4,6 +4,7 @@ import type { Backend } from "../backend";
 import type { Broadcast } from "../broadcast";
 import { Audio, type AudioProps } from "./audio";
 import { Video, type VideoProps } from "./video";
+import { Sync } from "../sync";
 
 export type SourceProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
@@ -14,6 +15,8 @@ export type SourceProps = {
 
 	video?: VideoProps;
 	audio?: AudioProps;
+
+	sync?: Sync;
 };
 
 /**
@@ -31,6 +34,7 @@ export class Source implements Backend {
 
 	video: Video;
 	audio: Audio;
+	sync: Sync;
 
 	#buffering = new Signal<boolean>(false);
 	readonly buffering: Getter<boolean> = this.#buffering;
@@ -45,19 +49,20 @@ export class Source implements Backend {
 		this.buffer = Signal.from(props?.buffer ?? (100 as Moq.Time.Milli));
 		this.element = Signal.from(props?.element);
 		this.paused = Signal.from(props?.paused ?? false);
+		this.sync = props?.sync ?? new Sync();
 
 		this.video = new Video({
 			broadcast: this.broadcast,
 			element: this.element,
 			mediaSource: this.#mediaSource,
-			buffer: this.buffer,
+			sync: this.sync,
 			...props?.video,
 		});
 		this.audio = new Audio({
 			broadcast: this.broadcast,
 			element: this.element,
 			mediaSource: this.#mediaSource,
-			buffer: this.buffer,
+			sync: this.sync,
 			...props?.audio,
 		});
 
@@ -100,8 +105,8 @@ export class Source implements Backend {
 		const paused = effect.get(this.paused);
 		if (paused) return;
 
-		// Use video's computed latency (catalog minBuffer + user buffer)
-		const latency = effect.get(this.video.latency);
+		// Use the computed latency (catalog minBuffer + user buffer)
+		const latency = effect.get(this.sync.latency);
 
 		effect.interval(() => {
 			// Skip over gaps based on the effective latency.

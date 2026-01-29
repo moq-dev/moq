@@ -2,7 +2,7 @@ import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Audio from "./audio";
-import { type Backend, Combined } from "./backend";
+import { type Backend, MultiBackend } from "./backend";
 import { Broadcast } from "./broadcast";
 import type * as Video from "./video";
 
@@ -27,7 +27,7 @@ export default class HangWatch extends HTMLElement implements Backend {
 	broadcast: Broadcast;
 
 	// The backend that powers this element.
-	#backend: Combined;
+	#backend: MultiBackend;
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
@@ -51,7 +51,7 @@ export default class HangWatch extends HTMLElement implements Backend {
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
-		this.#backend = new Combined({
+		this.#backend = new MultiBackend({
 			broadcast: this.broadcast,
 		});
 
@@ -154,7 +154,7 @@ export default class HangWatch extends HTMLElement implements Backend {
 			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "buffer" || name === "latency") {
 			// "latency" is a legacy alias for "buffer"
-			this.buffer.set((newValue ? Number.parseFloat(newValue) : 0) as Time.Milli);
+			this.#backend.sync.buffer.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);

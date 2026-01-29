@@ -134,16 +134,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Make sure the peer doesn't double announce.
 		match producers.entry(path.to_owned()) {
 			Entry::Occupied(_) => return Err(Error::Duplicate),
-			Entry::Vacant(entry) => entry.insert(broadcast.producer.clone()),
+			Entry::Vacant(entry) => entry.insert(broadcast.clone()),
 		};
 
 		// Run the broadcast in the background until all consumers are dropped.
 		self.origin
 			.as_mut()
 			.unwrap()
-			.publish_broadcast(path.clone(), broadcast.consumer);
+			.publish_broadcast(path.clone(), broadcast.consume());
 
-		web_async::spawn(self.clone().run_broadcast(path, broadcast.producer));
+		web_async::spawn(self.clone().run_broadcast(path, broadcast));
 
 		Ok(())
 	}

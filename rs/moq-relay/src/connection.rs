@@ -16,7 +16,10 @@ impl Connection {
 			Some(url) => {
 				// Extract the path and token from the URL.
 				let path = url.path();
-				let token = url.query_pairs().find(|(k, _)| k == "jwt").map(|(_, v)| v.to_string());
+				let token = url
+					.query_pairs()
+					.find(|(k, v)| k == "jwt" && !v.is_empty())
+					.map(|(_, v)| v.to_string());
 				(path, token)
 			}
 			None => ("", None),

@@ -2,7 +2,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import * as Frame from "../../frame";
+import * as Container from "../../container";
 import { isFirefox } from "../../util/hacks";
 import type { Source } from "./types";
 
@@ -72,30 +72,24 @@ export class Encoder {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
+		const producer = new Container.Legacy.Producer(track);
+		effect.cleanup(() => producer.close());
+
+		let lastKeyframe: Time.Micro | undefined;
+
 		effect.set(this.active, true, false);
 
 		effect.spawn(async () => {
-			let group: Moq.Group | undefined;
-			effect.cleanup(() => group?.close());
-
-			let groupTimestamp: Time.Micro | undefined;
-
 			const encoder = new VideoEncoder({
 				output: (frame: EncodedVideoChunk) => {
 					if (frame.type === "key") {
-						groupTimestamp = frame.timestamp as Time.Micro;
-						group?.close();
-						group = track.appendGroup();
-					} else if (!group) {
-						throw new Error("no keyframe");
+						lastKeyframe = frame.timestamp as Time.Micro;
 					}
 
-					const buffer = Frame.encode(frame, frame.timestamp as Time.Micro);
-					group?.writeFrame(buffer);
+					producer.encode(frame, frame.timestamp as Time.Micro, frame.type === "key");
 				},
 				error: (err: Error) => {
-					track.close(err);
-					group?.close(err);
+					producer.close(err);
 				},
 			});
 
@@ -118,9 +112,9 @@ export class Encoder {
 				const interval = this.config.peek()?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
 
 				// Force a keyframe if this is the first frame (no group yet), or GOP elapsed.
-				const keyFrame = !groupTimestamp || groupTimestamp + Time.Micro.fromMilli(interval) <= frame.timestamp;
+				const keyFrame = !lastKeyframe || lastKeyframe + Time.Micro.fromMilli(interval) <= frame.timestamp;
 				if (keyFrame) {
-					groupTimestamp = frame.timestamp as Time.Micro;
+					lastKeyframe = frame.timestamp as Time.Micro;
 				}
 
 				encoder.encode(frame, { keyFrame });

@@ -2,7 +2,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import * as Frame from "../../frame";
+import * as Container from "../../container";
 import * as libav from "../../util/libav";
 import type * as Capture from "./capture";
 import type { Source } from "./types";
@@ -162,10 +162,10 @@ export class Encoder {
 
 		effect.set(this.active, true, false);
 
-		let group: Moq.Group = track.appendGroup();
-		effect.cleanup(() => group.close());
+		const producer = new Container.Legacy.Producer(track);
+		effect.cleanup(() => producer.close());
 
-		let groupTimestamp: Time.Micro | undefined;
+		let lastKeyframe: Time.Micro | undefined;
 
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
@@ -177,20 +177,17 @@ export class Encoder {
 						throw new Error("only key frames are supported");
 					}
 
-					if (!groupTimestamp) {
-						groupTimestamp = frame.timestamp as Time.Micro;
-					} else if (frame.timestamp - groupTimestamp >= Time.Micro.fromMilli(this.maxLatency)) {
-						group.close();
-						group = track.appendGroup();
-						groupTimestamp = frame.timestamp as Time.Micro;
+					let keyframe = false;
+					if (!lastKeyframe || lastKeyframe + Time.Micro.fromMilli(this.maxLatency) <= frame.timestamp) {
+						lastKeyframe = frame.timestamp as Time.Micro;
+						keyframe = true;
 					}
 
-					const buffer = Frame.encode(frame, frame.timestamp as Time.Micro);
-					group.writeFrame(buffer);
+					producer.encode(frame, frame.timestamp as Time.Micro, keyframe);
 				},
 				error: (err) => {
 					console.error("encoder error", err);
-					group.close(err);
+					producer.close(err);
 					worklet.port.onmessage = null;
 				},
 			});

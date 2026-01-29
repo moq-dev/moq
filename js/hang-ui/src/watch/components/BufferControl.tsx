@@ -38,7 +38,7 @@ export default function BufferControl(props: BufferControlProps) {
 		return "#4ade80"; // green
 	};
 
-	const bufferTargetPct = createMemo(() => (context.latency() / maxRange()) * 100);
+	const bufferTargetPct = createMemo(() => (context.buffer() / maxRange()) * 100);
 
 	// Handle mouse interaction to set buffer via clicking/dragging on the visualization
 	let containerRef: HTMLDivElement | undefined;
@@ -53,7 +53,7 @@ export default function BufferControl(props: BufferControlProps) {
 		const ms = (x / trackWidth) * maxRange();
 		const snapped = Math.round(ms / RANGE_STEP) * RANGE_STEP;
 		const clamped = Math.max(MIN_RANGE, Math.min(maxRange(), snapped));
-		context.setLatencyValue(clamped);
+		context.setBuffer(clamped);
 	};
 
 	const onMouseDown = (e: MouseEvent) => {
@@ -127,7 +127,7 @@ export default function BufferControl(props: BufferControlProps) {
 				{/* Buffer target line (draggable) - wrapped in track-area container */}
 				<div class="bufferTargetArea">
 					<div class="bufferTargetLine" style={{ left: `${bufferTargetPct()}%` }}>
-						<span class="bufferTargetLabel">{`${Math.round(context.latency())}ms`}</span>
+						<span class="bufferTargetLabel">{`${Math.round(context.buffer())}ms`}</span>
 					</div>
 				</div>
 			</div>

@@ -1,20 +1,19 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import * as Frame from "../../frame";
 import * as Mp4 from "../../mp4";
-import { Latency } from "../../util/latency";
+import * as Container from "../../container";
 import type { Backend, Stats, Target } from "../audio/backend";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
 import type { Broadcast } from "../broadcast";
+import { Sync } from "../sync";
 
 export type AudioProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
 	mediaSource?: MediaSource | Signal<MediaSource | undefined>;
+	sync?: Sync;
 
-	// Additional buffer in milliseconds on top of the catalog's minBuffer.
-	buffer?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
 	volume?: number | Signal<number>;
 	muted?: boolean | Signal<boolean>;
 	target?: Target | Signal<Target | undefined>;
@@ -28,7 +27,6 @@ export class Audio implements Backend {
 	volume: Signal<number>;
 	muted: Signal<boolean>;
 	target: Signal<Target | undefined>;
-	buffer: Signal<Moq.Time.Milli>;
 
 	#catalog = new Signal<Catalog.Audio | undefined>(undefined);
 	readonly catalog: Getter<Catalog.Audio | undefined> = this.#catalog;
@@ -47,8 +45,7 @@ export class Audio implements Backend {
 
 	#selected = new Signal<{ track: string; mime: string; config: Catalog.AudioConfig } | undefined>(undefined);
 
-	#latency: Latency;
-	readonly latency: Getter<Moq.Time.Milli>;
+	sync: Sync;
 
 	#signals = new Effect();
 
@@ -56,17 +53,12 @@ export class Audio implements Backend {
 		this.broadcast = Signal.from(props?.broadcast);
 		this.element = Signal.from(props?.element);
 		this.mediaSource = Signal.from(props?.mediaSource);
+		this.sync = props?.sync ?? new Sync();
 
-		this.buffer = Signal.from(props?.buffer ?? (100 as Moq.Time.Milli));
 		this.volume = Signal.from(props?.volume ?? 0.5);
 		this.muted = Signal.from(props?.muted ?? false);
 		this.target = Signal.from(props?.target);
 
-		this.#latency = new Latency({
-			buffer: this.buffer,
-			config: this.config,
-		});
-		this.latency = this.#latency.combined;
 
 		this.#signals.effect(this.#runCatalog.bind(this));
 		this.#signals.effect(this.#runSelected.bind(this));
@@ -199,8 +191,8 @@ export class Audio implements Backend {
 
 		// Create consumer that reorders groups/frames up to the provided latency.
 		// Legacy container uses microsecond timescale implicitly.
-		const consumer = new Frame.Consumer(data, {
-			latency: this.#latency.combined,
+		const consumer = new Container.Legacy.Consumer(data, {
+			latency: this.sync.latency,
 		});
 		effect.cleanup(() => consumer.close());
 
