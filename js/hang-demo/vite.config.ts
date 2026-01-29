@@ -13,7 +13,6 @@ export default defineConfig({
 				watch: "index.html",
 				publish: "publish.html",
 				support: "support.html",
-				meet: "meet.html",
 			},
 		},
 	},
