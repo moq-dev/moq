@@ -414,14 +414,14 @@ export class Effect {
 		this.#dispose.push(() => effect.close());
 	}
 
-	// Get the values of multiple signals, returning undefined if any are falsy.
+	// Get the values of multiple signals, returning undefined if any are null/undefined.
 	getAll<S extends readonly Getter<unknown>[]>(
 		signals: [...S],
 	): { [K in keyof S]: NonNullable<GetterType<S[K]>> } | undefined {
 		const values: unknown[] = [];
 		for (const signal of signals) {
 			const value = this.get(signal);
-			if (!value) return undefined;
+			if (value == null) return undefined;
 			values.push(value);
 		}
 		return values as { [K in keyof S]: NonNullable<GetterType<S[K]>> };

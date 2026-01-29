@@ -129,9 +129,10 @@ export class Source {
 	}
 
 	#runEnabled(effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#context]);
-		if (!values) return;
-		const [_, context] = values;
+		if (!effect.get(this.enabled)) return;
+
+		const context = effect.get(this.#context);
+		if (!context) return;
 
 		context.resume();
 
@@ -139,9 +140,11 @@ export class Source {
 	}
 
 	#runDecoder(effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.catalog, this.broadcast, this.config, this.active]);
+		if (!effect.get(this.enabled)) return;
+
+		const values = effect.getAll([this.catalog, this.broadcast, this.config, this.active]);
 		if (!values) return;
-		const [_, catalog, broadcast, config, active] = values;
+		const [catalog, broadcast, config, active] = values;
 
 		const sub = broadcast.subscribe(active, catalog.priority);
 		effect.cleanup(() => sub.close());

@@ -153,9 +153,11 @@ export class Encoder {
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#worklet, this.#config]);
+		if (!effect.get(this.enabled)) return;
+
+		const values = effect.getAll([this.#worklet, this.#config]);
 		if (!values) return;
-		const [_, worklet, config] = values;
+		const [worklet, config] = values;
 
 		effect.set(this.active, true, false);
 
