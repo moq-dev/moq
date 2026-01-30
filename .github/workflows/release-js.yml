@@ -30,5 +30,4 @@ jobs:
         run: nix develop --command bun install --frozen-lockfile
 
       - name: Release packages
-        working-directory: js
-        run: nix develop ../ --command bun --filter '*' run release
+        run: nix develop --command bun --filter '*' release
