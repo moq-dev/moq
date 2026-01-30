@@ -287,10 +287,9 @@ export class Source {
 
 		// Send audio data to worklet via postMessage
 		// TODO: At some point, use SharedArrayBuffer to avoid dropping samples.
-		worklet.port.postMessage(
-			msg,
-			msg.data.map((data) => data.buffer),
-		);
+		worklet.port.postMessage(msg, {
+			transfer: msg.data.map((data) => data.buffer),
+		});
 
 		sample.close();
 	}

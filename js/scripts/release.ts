@@ -25,7 +25,7 @@ execSync("bun run build", { stdio: "inherit" });
 
 console.log(`🚀 Publishing ${name}@${version}...`);
 // Use npm for publishing to support OIDC trusted publishing
-execSync("npm publish --provenance --access public", {
+execSync("npm publish --access public", {
 	stdio: "inherit",
 	cwd: "dist",
 });
