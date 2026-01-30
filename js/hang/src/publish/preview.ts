@@ -30,10 +30,9 @@ export class Preview {
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		if (!effect.get(this.enabled)) return;
-
-		const info = effect.get(this.info);
-		if (!info) return;
+		const values = effect.getAll([this.enabled, this.info]);
+		if (!values) return;
+		const [_, info] = values;
 
 		track.writeJson(info);
 	}

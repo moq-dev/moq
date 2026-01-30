@@ -127,11 +127,9 @@ export class Encoder {
 
 	// Returns the catalog for the configured settings.
 	#runCatalog(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const config = effect.get(this.#config);
-		if (!config) return;
+		const values = effect.getAll([this.enabled, this.#config]);
+		if (!values) return;
+		const [_, config] = values;
 
 		const catalog: Catalog.VideoConfig = {
 			codec: config.codec,
@@ -147,14 +145,11 @@ export class Encoder {
 	}
 
 	#runConfig(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
 		// NOTE: dimensions already factors in user provided maxPixels.
 		// It's a separate effect in order to deduplicate.
-		const values = effect.getAll([this.source, this.#dimensions]);
+		const values = effect.getAll([this.enabled, this.source, this.#dimensions]);
 		if (!values) return;
-		const [source, dimensions] = values;
+		const [_, source, dimensions] = values;
 
 		const settings = source.getSettings();
 		const framerate = settings.frameRate ?? 30;

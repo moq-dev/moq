@@ -73,11 +73,9 @@ export class Encoder {
 	}
 
 	#runSource(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const source = effect.get(this.source);
-		if (!source) return;
+		const values = effect.getAll([this.enabled, this.source]);
+		if (!values) return;
+		const [_, source] = values;
 
 		const settings = source.getSettings();
 
@@ -153,12 +151,9 @@ export class Encoder {
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const values = effect.getAll([this.#worklet, this.#config]);
+		const values = effect.getAll([this.enabled, this.#worklet, this.#config]);
 		if (!values) return;
-		const [worklet, config] = values;
+		const [_, worklet, config] = values;
 
 		effect.set(this.active, true, false);
 

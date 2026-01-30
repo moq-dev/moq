@@ -158,6 +158,10 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 type SetterType<S> = S extends Setter<infer T> ? T : never;
 type GetterType<G> = G extends Getter<infer T> ? T : never;
 
+// Excludes common falsy values from a type
+type Falsy = false | 0 | "" | null | undefined;
+type Truthy<T> = Exclude<T, Falsy>;
+
 // TODO Make this a single instance of an Effect, so close() can work correctly from async code.
 export class Effect {
 	// Sanity check to make sure roots are being disposed on dev.
@@ -414,17 +418,17 @@ export class Effect {
 		this.#dispose.push(() => effect.close());
 	}
 
-	// Get the values of multiple signals, returning undefined if any are null/undefined.
+	// Get the values of multiple signals, returning undefined if any are falsy.
 	getAll<S extends readonly Getter<unknown>[]>(
 		signals: [...S],
-	): { [K in keyof S]: NonNullable<GetterType<S[K]>> } | undefined {
+	): { [K in keyof S]: Truthy<GetterType<S[K]>> } | undefined {
 		const values: unknown[] = [];
 		for (const signal of signals) {
 			const value = this.get(signal);
-			if (value == null) return undefined;
+			if (!value) return undefined;
 			values.push(value);
 		}
-		return values as { [K in keyof S]: NonNullable<GetterType<S[K]>> };
+		return values as { [K in keyof S]: Truthy<GetterType<S[K]>> };
 	}
 
 	// A helper to call a function when a signal changes.

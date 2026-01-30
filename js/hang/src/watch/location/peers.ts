@@ -32,14 +32,9 @@ export class Peers {
 	}
 
 	#run(effect: Effect) {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const catalog = effect.get(this.#catalog);
-		if (!catalog) return;
-
-		const broadcast = effect.get(this.broadcast);
-		if (!broadcast) return;
+		const values = effect.getAll([this.enabled, this.#catalog, this.broadcast]);
+		if (!values) return;
+		const [_, catalog, broadcast] = values;
 
 		const track = broadcast.subscribe(catalog.name, catalog.priority);
 		effect.cleanup(() => track.close());
