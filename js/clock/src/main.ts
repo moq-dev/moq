@@ -1,5 +1,3 @@
-#!/usr/bin/env bun
-
 import { quicheLoaded, WebTransport } from "@fails-components/webtransport";
 import { parseArgs } from "util";
 
@@ -49,7 +47,7 @@ ENVIRONMENT VARIABLES:
 		process.exit(0);
 	}
 
-	const role = positionals[0] as string;
+	const role = positionals[0];
 	if (!role || (role !== "publish" && role !== "subscribe")) {
 		console.error("Error: Must specify 'publish' or 'subscribe' command");
 		process.exit(1);
@@ -67,7 +65,7 @@ ENVIRONMENT VARIABLES:
 	return {
 		url,
 		broadcast,
-		track: values.track ?? "seconds",
+		track: values.track,
 		role: role as "publish" | "subscribe",
 	};
 }
