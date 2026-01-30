@@ -2,7 +2,6 @@ import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
 import { Effect, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
-import { PRIORITY } from "../priority";
 
 export interface PeersProps {
 	enabled?: boolean | Signal<boolean>;
@@ -11,7 +10,7 @@ export interface PeersProps {
 
 export class Peers {
 	static readonly TRACK = "location/peers.json";
-	static readonly PRIORITY = PRIORITY.location;
+	static readonly PRIORITY = Catalog.PRIORITY.location;
 
 	enabled: Signal<boolean>;
 	positions = new Signal<Record<string, Catalog.Position>>({});

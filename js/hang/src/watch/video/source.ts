@@ -1,9 +1,8 @@
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
+import * as Catalog from "../../catalog";
 import * as Container from "../../container";
-import { PRIORITY } from "../../publish/priority";
 import * as Hex from "../../util/hex";
 import type { Sync } from "../sync";
 
@@ -196,7 +195,7 @@ export class Source {
 	}
 
 	#runTrack(effect: Effect, broadcast: Moq.Broadcast, name: string, config: RequiredDecoderConfig): void {
-		const sub = broadcast.subscribe(name, PRIORITY.video); // TODO use priority from catalog
+		const sub = broadcast.subscribe(name, Catalog.PRIORITY.video); // TODO use priority from catalog
 		effect.cleanup(() => sub.close());
 
 		effect.cleanup(() => {

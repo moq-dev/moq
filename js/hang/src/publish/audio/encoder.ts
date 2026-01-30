@@ -1,11 +1,10 @@
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
+import * as Catalog from "../../catalog";
 import { u53 } from "../../catalog/integers";
 import * as Container from "../../container";
 import * as libav from "../../util/libav";
-import { PRIORITY } from "../priority";
 import type * as Capture from "./capture";
 import type { Source } from "./types";
 
@@ -32,7 +31,7 @@ export type EncoderProps = {
 
 export class Encoder {
 	static readonly TRACK = "audio/data";
-	static readonly PRIORITY = PRIORITY.audio;
+	static readonly PRIORITY = Catalog.PRIORITY.audio;
 
 	enabled: Signal<boolean>;
 

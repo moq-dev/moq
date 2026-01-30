@@ -1,7 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../catalog";
-import { PRIORITY } from "../publish/priority";
 import * as Audio from "./audio";
 import { Chat, type ChatProps } from "./chat";
 import * as Location from "./location";
@@ -135,7 +134,7 @@ export class Broadcast {
 
 		this.status.set("loading");
 
-		const catalog = broadcast.subscribe("catalog.json", PRIORITY.catalog);
+		const catalog = broadcast.subscribe("catalog.json", Catalog.PRIORITY.catalog);
 		effect.cleanup(() => catalog.close());
 
 		effect.spawn(this.#fetchCatalog.bind(this, catalog));
