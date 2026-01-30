@@ -2,7 +2,7 @@ import type { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 
 export interface SyncProps {
-	delay?: Time.Milli | Signal<Time.Milli>;
+	jitter?: Time.Milli | Signal<Time.Milli>;
 	audio?: Time.Milli | Signal<Time.Milli | undefined>;
 	video?: Time.Milli | Signal<Time.Milli | undefined>;
 }
@@ -14,7 +14,7 @@ export class Sync {
 	#reference?: Time.Milli;
 
 	// The minimum buffer size, to account for network jitter.
-	delay: Signal<Time.Milli>;
+	jitter: Signal<Time.Milli>;
 
 	// Any additional delay required for audio or video.
 	audio: Signal<Time.Milli | undefined>;
@@ -32,7 +32,7 @@ export class Sync {
 	signals = new Effect();
 
 	constructor(props?: SyncProps) {
-		this.delay = Signal.from(props?.delay ?? (100 as Time.Milli));
+		this.jitter = Signal.from(props?.jitter ?? (100 as Time.Milli));
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
 
@@ -44,11 +44,11 @@ export class Sync {
 	}
 
 	#runLatency(effect: Effect): void {
-		const delay = effect.get(this.delay);
+		const jitter = effect.get(this.jitter);
 		const video = effect.get(this.video) ?? 0;
 		const audio = effect.get(this.audio) ?? 0;
 
-		const latency = (Math.max(video, audio) + delay) as Time.Milli;
+		const latency = (Math.max(video, audio) + jitter) as Time.Milli;
 		this.#latency.set(latency);
 
 		this.#resolve();

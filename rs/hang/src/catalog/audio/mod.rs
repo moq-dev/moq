@@ -76,5 +76,5 @@ pub struct AudioConfig {
 	///
 	/// The player should add additional jitter buffer on top of this value.
 	#[serde(default)]
-	pub delay: Option<moq_lite::Time>,
+	pub jitter: Option<moq_lite::Time>,
 }

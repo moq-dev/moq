@@ -108,11 +108,9 @@ export class Decoder {
 	}
 
 	#runEnabled(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const context = effect.get(this.#context);
-		if (!context) return;
+		const values = effect.getAll([this.enabled, this.#context]);
+		if (!values) return;
+		const [_, context] = values;
 
 		context.resume();
 

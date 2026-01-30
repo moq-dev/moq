@@ -53,12 +53,9 @@ export class Broadcast {
 	}
 
 	#run(effect: Effect) {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const values = effect.getAll([this.connection, this.path]);
+		const values = effect.getAll([this.enabled, this.connection, this.path]);
 		if (!values) return;
-		const [connection, path] = values;
+		const [_, connection, path] = values;
 
 		const broadcast = new Moq.Broadcast();
 		effect.cleanup(() => broadcast.close());

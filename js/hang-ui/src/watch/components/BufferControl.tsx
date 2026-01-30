@@ -38,7 +38,7 @@ export default function BufferControl(props: BufferControlProps) {
 		return "#4ade80"; // green
 	};
 
-	const bufferTargetPct = createMemo(() => (context.delay() / maxRange()) * 100);
+	const bufferTargetPct = createMemo(() => (context.jitter() / maxRange()) * 100);
 
 	// Handle mouse interaction to set buffer via clicking/dragging on the visualization
 	let containerRef: HTMLDivElement | undefined;
@@ -53,7 +53,7 @@ export default function BufferControl(props: BufferControlProps) {
 		const ms = (x / trackWidth) * maxRange();
 		const snapped = Math.round(ms / RANGE_STEP) * RANGE_STEP;
 		const clamped = Math.max(MIN_RANGE, Math.min(maxRange(), snapped));
-		context.setDelay(clamped);
+		context.setJitter(clamped);
 	};
 
 	const onMouseDown = (e: MouseEvent) => {
@@ -84,10 +84,10 @@ export default function BufferControl(props: BufferControlProps) {
 				onMouseDown={onMouseDown}
 				role="slider"
 				tabIndex={0}
-				aria-valuenow={context.delay()}
+				aria-valuenow={context.jitter()}
 				aria-valuemin={MIN_RANGE}
 				aria-valuemax={maxRange()}
-				aria-label="Buffer delay"
+				aria-label="Buffer jitter"
 			>
 				{/* Playhead (left edge = current time) */}
 				<div class="bufferPlayhead" />
@@ -131,7 +131,7 @@ export default function BufferControl(props: BufferControlProps) {
 				{/* Buffer target line (draggable) - wrapped in track-area container */}
 				<div class="bufferTargetArea">
 					<div class="bufferTargetLine" style={{ left: `${bufferTargetPct()}%` }}>
-						<span class="bufferTargetLabel">{`${Math.round(context.delay())}ms`}</span>
+						<span class="bufferTargetLabel">{`${Math.round(context.jitter())}ms`}</span>
 					</div>
 				</div>
 			</div>

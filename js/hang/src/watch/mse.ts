@@ -5,7 +5,7 @@ import type { Sync } from "./sync";
 export type MuxerProps = {
 	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
 	paused?: boolean | Signal<boolean>;
-	delay?: Time.Milli | Signal<Time.Milli>;
+	jitter?: Time.Milli | Signal<Time.Milli>;
 };
 
 /**
@@ -16,7 +16,7 @@ export class Muxer {
 	element: Signal<HTMLMediaElement | undefined>;
 
 	paused: Signal<boolean>;
-	delay: Signal<Time.Milli>;
+	jitter: Signal<Time.Milli>;
 
 	#sync: Sync;
 
@@ -34,7 +34,7 @@ export class Muxer {
 	constructor(sync: Sync, props?: MuxerProps) {
 		this.element = Signal.from(props?.element);
 		this.paused = Signal.from(props?.paused ?? false);
-		this.delay = Signal.from(props?.delay ?? (100 as Time.Milli));
+		this.jitter = Signal.from(props?.jitter ?? (100 as Time.Milli));
 		this.#sync = sync;
 
 		this.#signals.effect(this.#runMediaSource.bind(this));
@@ -76,7 +76,7 @@ export class Muxer {
 		const paused = effect.get(this.paused);
 		if (paused) return;
 
-		// Use the computed latency (catalog delay + user delay)
+		// Use the computed latency (catalog jitter + user jitter)
 		const latency = effect.get(this.#sync.latency);
 
 		effect.interval(() => {

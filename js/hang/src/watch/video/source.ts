@@ -109,7 +109,7 @@ export class Source {
 
 		effect.set(this.#track, selected);
 		effect.set(this.#config, config);
-		effect.set(this.sync.video, config.delay as Moq.Time.Milli | undefined);
+		effect.set(this.sync.video, config.jitter as Moq.Time.Milli | undefined);
 	}
 
 	/**

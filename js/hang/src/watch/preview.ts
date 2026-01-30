@@ -28,13 +28,9 @@ export class Preview {
 		});
 
 		this.#signals.effect((effect) => {
-			if (!effect.get(this.enabled)) return;
-
-			const broadcast = effect.get(this.broadcast);
-			if (!broadcast) return;
-
-			const catalog = effect.get(this.#catalog);
-			if (!catalog) return;
+			const values = effect.getAll([this.enabled, this.broadcast, this.#catalog]);
+			if (!values) return;
+			const [_, broadcast, catalog] = values;
 
 			// Subscribe to the preview.json track directly
 			const track = broadcast.subscribe(catalog.name, catalog.priority);

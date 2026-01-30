@@ -38,16 +38,16 @@ export interface Backend {
 	// Audio specific signals.
 	audio?: Audio.Backend;
 
-	// The delay in milliseconds required for smooth playback.
-	delay: Signal<Moq.Time.Milli>;
+	// The jitter in milliseconds required for smooth playback.
+	jitter: Signal<Moq.Time.Milli>;
 }
 
 export interface MultiBackendProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
-	// Additional delay in milliseconds on top of catalog delay.
-	delay?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
+	// Additional jitter in milliseconds on top of catalog jitter.
+	jitter?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
 
 	paused?: boolean | Signal<boolean>;
 }
@@ -95,7 +95,7 @@ class AudioBackend implements Audio.Backend {
 export class MultiBackend implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;
-	delay: Signal<Moq.Time.Milli>;
+	jitter: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
 	video: VideoBackend;
@@ -118,8 +118,8 @@ export class MultiBackend implements Backend {
 	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
-		this.delay = Signal.from(props?.delay ?? (100 as Moq.Time.Milli));
-		this.#sync = new Sync({ delay: this.delay });
+		this.jitter = Signal.from(props?.jitter ?? (100 as Moq.Time.Milli));
+		this.#sync = new Sync({ jitter: this.jitter });
 
 		this.#videoSource = new Video.Source(this.#sync, {
 			broadcast: this.broadcast,
@@ -184,7 +184,7 @@ export class MultiBackend implements Backend {
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
 		const mse = new Muxer(this.#sync, {
-			delay: this.delay,
+			jitter: this.jitter,
 			paused: this.paused,
 			element,
 		});

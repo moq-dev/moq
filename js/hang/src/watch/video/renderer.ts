@@ -38,11 +38,9 @@ export class Renderer {
 	}
 
 	#runResize(effect: Effect) {
-		const canvas = effect.get(this.canvas);
-		if (!canvas) return;
-
-		const display = effect.get(this.decoder.display);
-		if (!display) return; // Keep current canvas size until we have new dimensions
+		const values = effect.getAll([this.canvas, this.decoder.display]);
+		if (!values) return; // Keep current canvas size until we have new dimensions
+		const [canvas, display] = values;
 
 		// Only update if dimensions actually changed (setting canvas.width/height clears the canvas)
 		// TODO I thought the signals library would prevent this, but I'm too lazy to investigate.

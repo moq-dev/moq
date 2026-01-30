@@ -44,11 +44,9 @@ export class Window {
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const position = effect.get(this.position);
-		if (!position) return;
+		const values = effect.getAll([this.enabled, this.position]);
+		if (!values) return;
+		const [_, position] = values;
 
 		Zod.write(track, position, Catalog.PositionSchema);
 	}

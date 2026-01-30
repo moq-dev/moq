@@ -69,7 +69,7 @@ struct Fmp4Track {
 	group: Option<moq_lite::GroupProducer>,
 
 	// The minimum buffer required for the track.
-	delay: Option<Timestamp>,
+	jitter: Option<Timestamp>,
 
 	// The last timestamp seen for this track.
 	last_timestamp: Option<Timestamp>,
@@ -84,7 +84,7 @@ impl Fmp4Track {
 			kind,
 			producer,
 			group: None,
-			delay: None,
+			jitter: None,
 			last_timestamp: None,
 			min_duration: None,
 		}
@@ -272,7 +272,7 @@ impl Fmp4 {
 					display_ratio_height: None,
 					optimize_for_latency: None,
 					container,
-					delay: None,
+					jitter: None,
 				}
 			}
 			mp4_atom::Codec::Hev1(hev1) => self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
@@ -289,7 +289,7 @@ impl Fmp4 {
 				display_ratio_height: None,
 				optimize_for_latency: None,
 				container,
-				delay: None,
+				jitter: None,
 			},
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
@@ -317,7 +317,7 @@ impl Fmp4 {
 					bitrate: None,
 					framerate: None,
 					container,
-					delay: None,
+					jitter: None,
 				}
 			}
 			mp4_atom::Codec::Av01(av01) => {
@@ -351,7 +351,7 @@ impl Fmp4 {
 					bitrate: None,
 					framerate: None,
 					container,
-					delay: None,
+					jitter: None,
 				}
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
@@ -393,7 +393,7 @@ impl Fmp4 {
 			display_ratio_height: None,
 			optimize_for_latency: None,
 			container,
-			delay: None,
+			jitter: None,
 		})
 	}
 
@@ -428,7 +428,7 @@ impl Fmp4 {
 					bitrate: Some(bitrate.into()),
 					description: None, // TODO?
 					container,
-					delay: None,
+					jitter: None,
 				}
 			}
 			mp4_atom::Codec::Opus(opus) => {
@@ -439,7 +439,7 @@ impl Fmp4 {
 					bitrate: None,
 					description: None, // TODO?
 					container,
-					delay: None,
+					jitter: None,
 				}
 			}
 			mp4_atom::Codec::Unknown(unknown) => anyhow::bail!("unknown codec: {:?}", unknown),
@@ -487,7 +487,7 @@ impl Fmp4 {
 				anyhow::bail!("missing trun box");
 			}
 
-			// Keep track of the minimum and maximum timestamp for this track to compute the delay.
+			// Keep track of the minimum and maximum timestamp for this track to compute the jitter.
 			// Ideally these should both be the same value (a single frame lul).
 			let mut min_timestamp = None;
 			let mut max_timestamp = None;
@@ -643,12 +643,12 @@ impl Fmp4 {
 				// We report the minimum buffer required as the difference between the min and max frames.
 				// We also add the duration between frames to account for the frame rate.
 				// ex. for 2s fragments, this should be exactly 2s if we did everything correctly.
-				let delay = max - min + min_duration;
+				let jitter = max - min + min_duration;
 
-				if delay < track.delay.unwrap_or(Timestamp::MAX) {
-					track.delay = Some(delay);
+				if jitter < track.jitter.unwrap_or(Timestamp::MAX) {
+					track.jitter = Some(jitter);
 
-					// Update the catalog with the new delay
+					// Update the catalog with the new jitter
 					let mut catalog = self.broadcast.catalog.lock();
 
 					match track.kind {
@@ -658,7 +658,7 @@ impl Fmp4 {
 								.renditions
 								.get_mut(&track.producer.info.name)
 								.context("missing video config")?;
-							config.delay = Some(delay.convert()?);
+							config.jitter = Some(jitter.convert()?);
 						}
 						TrackKind::Audio => {
 							let audio = catalog.audio.as_mut().context("missing audio")?;
@@ -666,7 +666,7 @@ impl Fmp4 {
 								.renditions
 								.get_mut(&track.producer.info.name)
 								.context("missing audio config")?;
-							config.delay = Some(delay.convert()?);
+							config.jitter = Some(jitter.convert()?);
 						}
 					}
 				}
