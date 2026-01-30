@@ -1,14 +1,31 @@
-// ChatGPT made a script that rewrites package.json file to use the correct paths.
-// The problem is that I want paths to reference `src` during development, but `dist` during release.
-// It's not pretty but nothing in NPM is.
-
 import { execSync } from "node:child_process";
 
-console.log("📦 Building package...");
+// Read package.json to get name and version
+const pkg = JSON.parse(await Bun.file("package.json").text());
+const { name, version } = pkg;
+
+// Check if this version is already published
+let published = "0.0.0";
+try {
+	published = execSync(`npm view ${name} version`, {
+		encoding: "utf8",
+		stdio: ["pipe", "pipe", "pipe"],
+	}).trim();
+} catch {
+	// Package not published yet
+}
+
+if (version === published) {
+	console.log(`⏭️  ${name}@${version} already published, skipping`);
+	process.exit(0);
+}
+
+console.log(`📦 Building ${name}@${version}...`);
 execSync("bun run build", { stdio: "inherit" });
 
-console.log("🚀 Publishing...");
-execSync("bun publish --access=public", {
+console.log(`🚀 Publishing ${name}@${version}...`);
+// Use npm for publishing to support OIDC trusted publishing
+execSync("npm publish --provenance --access public", {
 	stdio: "inherit",
 	cwd: "dist",
 });

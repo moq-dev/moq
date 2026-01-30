@@ -1,0 +1,34 @@
+name: Release JS
+
+permissions:
+  contents: read
+  id-token: write
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'js/**'
+      - '.github/workflows/release-js.yml'
+
+concurrency:
+  group: release-js
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release JS Packages
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'moq-dev'
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Install dependencies
+        run: nix develop --command bun install --frozen-lockfile
+
+      - name: Release packages
+        working-directory: js
+        run: nix develop ../ --command bun --filter '*' run release
