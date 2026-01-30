@@ -1,11 +1,9 @@
-import type { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Sync } from "./sync";
 
 export type MuxerProps = {
 	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
 	paused?: boolean | Signal<boolean>;
-	jitter?: Time.Milli | Signal<Time.Milli>;
 };
 
 /**
@@ -16,7 +14,6 @@ export class Muxer {
 	element: Signal<HTMLMediaElement | undefined>;
 
 	paused: Signal<boolean>;
-	jitter: Signal<Time.Milli>;
 
 	#sync: Sync;
 
@@ -34,7 +31,6 @@ export class Muxer {
 	constructor(sync: Sync, props?: MuxerProps) {
 		this.element = Signal.from(props?.element);
 		this.paused = Signal.from(props?.paused ?? false);
-		this.jitter = Signal.from(props?.jitter ?? (100 as Time.Milli));
 		this.#sync = sync;
 
 		this.#signals.effect(this.#runMediaSource.bind(this));
@@ -87,10 +83,10 @@ export class Muxer {
 			const last = buffered.end(buffered.length - 1);
 			const diff = last - element.currentTime;
 
-			// We seek an extra 100ms because seeking isn't free/instant.
+			// Seek to maintain the target latency from the buffer end.
 			if (diff > latency && diff > 0.1) {
 				console.warn("skipping ahead", diff, "seconds");
-				element.currentTime += diff + 0.1;
+				element.currentTime = last - latency;
 			}
 		}, 100);
 	}
@@ -141,7 +137,7 @@ export class Muxer {
 		} else if (!paused && element.paused) {
 			element.play().catch((e) => {
 				console.error("[MSE] MediaElement play error:", e);
-				this.paused.set(false);
+				this.paused.set(true);
 			});
 		}
 	}

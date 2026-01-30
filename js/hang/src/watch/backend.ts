@@ -184,16 +184,20 @@ export class MultiBackend implements Backend {
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
 		const mse = new Muxer(this.#sync, {
-			jitter: this.jitter,
 			paused: this.paused,
 			element,
 		});
-		effect.cleanup(() => mse.close());
 
 		const video = new Video.Mse(mse, this.#videoSource);
 		const audio = new Audio.Mse(mse, this.#audioSource, {
 			volume: this.audio.volume,
 			muted: this.audio.muted,
+		});
+
+		effect.cleanup(() => {
+			video.close();
+			audio.close();
+			mse.close();
 		});
 
 		// Proxy the read only signals to the backend.

@@ -223,13 +223,13 @@ export class Decoder implements Backend {
 			// Process data segments
 			// TODO: Use a consumer wrapper for CMAF to support latency control
 			for (;;) {
-				const group = await sub.nextGroup();
+				const group = await Promise.race([sub.nextGroup(), effect.cancel]);
 				if (!group) break;
 
 				effect.spawn(async () => {
 					try {
 						for (;;) {
-							const segment = await group.readFrame();
+							const segment = await Promise.race([group.readFrame(), effect.cancel]);
 							if (!segment) break;
 
 							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);

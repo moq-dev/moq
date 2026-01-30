@@ -58,6 +58,7 @@ export default class HangWatch extends HTMLElement implements Backend {
 		this.#backend = new MultiBackend({
 			broadcast: this.broadcast,
 		});
+		this.signals.cleanup(() => this.#backend.signals.close());
 
 		// Watch to see if the canvas element is added or removed.
 		const setElement = () => {
@@ -158,7 +159,7 @@ export default class HangWatch extends HTMLElement implements Backend {
 			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "jitter" || name === "latency") {
 			// "latency" is a legacy alias for "jitter"
-			this.sync.jitter.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
+			this.jitter.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
