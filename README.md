@@ -67,7 +67,7 @@ just install
 just dev
 ```
 
-Then visit [https://localhost:8080](https://localhost:8080) to see the demo.
+Then visit [http://localhost:5173](http://localhost:5173) to see the demo.
 
 
 ## Architecture
