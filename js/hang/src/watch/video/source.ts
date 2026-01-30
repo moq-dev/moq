@@ -1,7 +1,8 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
-import type { Broadcast } from "../broadcast";
+import * as Catalog from "../../catalog";
+import * as Container from "../../container";
+import * as Hex from "../../util/hex";
 import type { Sync } from "../sync";
 
 /**

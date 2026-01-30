@@ -32,16 +32,12 @@ export const AudioConfigSchema = z.object({
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: u53Schema.optional(),
 
-	// This represents the maximum jitter before the next frame is emitted in milliseconds.
+	// The maximum jitter before the next frame is emitted in milliseconds.
 	// The player's jitter buffer should be larger than this value.
 	// If not provided, the player should assume each frame is flushed immediately.
 	//
-	// ex:
-	// - If each frame is flushed immediately, this would be 1000/fps.
-	// - If frames are buffered into 2s segments, this would be 2s.
-	//
 	// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
-	// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 23ms.
+	// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 23ms
 	jitter: u53Schema.optional(),
 });
 

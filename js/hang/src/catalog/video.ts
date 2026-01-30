@@ -43,7 +43,7 @@ export const VideoConfigSchema = z.object({
 	// Default: true
 	optimizeForLatency: z.boolean().optional(),
 
-	// This represents the maximum jitter before the next frame is emitted in milliseconds.
+	// The maximum jitter before the next frame is emitted in milliseconds.
 	// The player's jitter buffer should be larger than this value.
 	// If not provided, the player should assume each frame is flushed immediately.
 	//

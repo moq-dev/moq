@@ -117,13 +117,14 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// Minimum buffer size in milliseconds required for smooth playback.
+	/// The maximum jitter before the next frame is emitted in milliseconds.
+	/// The player's jitter buffer should be larger than this value.
+	/// If not provided, the player should assume each frame is flushed immediately.
 	///
-	/// This represents the minimum time the player should buffer before starting playback.
-	/// For HLS imports, this is typically the segment duration.
-	/// For fMP4 imports, this is detected from the fragment duration.
-	///
-	/// The player should add additional jitter buffer on top of this value.
+	/// ex:
+	/// - If each frame is flushed immediately, this would be 1000/fps.
+	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
+	/// - If frames are buffered into 2s segments, this would be 2s.
 	#[serde(default)]
 	pub jitter: Option<moq_lite::Time>,
 }

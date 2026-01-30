@@ -239,7 +239,7 @@ import "@moq/hang";
 Full TypeScript support with type definitions:
 
 ```typescript
-import type { HangWatch, HangPublish, HangMeet } from "@moq/hang";
+import type { HangWatch, HangPublish } from "@moq/hang";
 
 const watch: HangWatch = document.querySelector("hang-watch")!;
 const publish: HangPublish = document.querySelector("hang-publish")!;
