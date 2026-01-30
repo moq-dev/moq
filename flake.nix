@@ -64,7 +64,6 @@
         # JavaScript dependencies
         jsDeps = with pkgs; [
           bun
-          deno
         ];
 
         # CDN/deployment dependencies

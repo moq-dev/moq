@@ -18,7 +18,7 @@ Core pub/sub transport protocol for browsers. Implements the [moq-lite specifica
 **Features:**
 - WebTransport-based QUIC
 - Broadcasts, tracks, groups, frames
-- Browser and Deno support
+- Browser and server-side support (with polyfill)
 
 [Learn more →](/typescript/lite)
 
