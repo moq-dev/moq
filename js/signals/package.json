@@ -1,7 +1,7 @@
 {
 	"name": "@moq/signals",
 	"type": "module",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "Reactive and safe signals",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",

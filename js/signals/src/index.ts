@@ -158,8 +158,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 type SetterType<S> = S extends Setter<infer T> ? T : never;
 type GetterType<G> = G extends Getter<infer T> ? T : never;
 
-// A type that excludes falsy values (null, undefined, false, 0, "", NaN)
-type Truthy<T> = T extends false | 0 | "" | null | undefined ? never : T;
+// Excludes common falsy values from a type
+type Falsy = false | 0 | "" | null | undefined;
+type Truthy<T> = Exclude<T, Falsy>;
 
 // TODO Make this a single instance of an Effect, so close() can work correctly from async code.
 export class Effect {

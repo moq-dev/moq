@@ -31,11 +31,9 @@ export class Peers {
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const positions = effect.get(this.positions);
-		if (!positions) return;
+		const values = effect.getAll([this.enabled, this.positions]);
+		if (!values) return;
+		const [_, positions] = values;
 
 		Zod.write(track, positions, Catalog.PeersSchema);
 	}
