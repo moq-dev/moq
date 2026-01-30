@@ -44,20 +44,20 @@ export class Sync {
 	#runLatency(effect: Effect): void {
 		const buffer = effect.get(this.buffer);
 
-		// Compute the latency based on the catalog's minBuffer and the user's buffer.
+		// Compute the latency based on the catalog's jitter and the user's buffer.
 		const video = effect.get(this.video);
 
-		// Use minBuffer from catalog if available, otherwise estimate from framerate
-		let videoBuffer: number | undefined = video?.minBuffer;
+		// Use jitter from catalog if available, otherwise estimate from framerate
+		let videoBuffer: number | undefined = video?.jitter;
 		if (videoBuffer === undefined && video?.framerate !== undefined && video.framerate > 0) {
-			// Estimate minBuffer as one frame duration if framerate is available
+			// Estimate jitter as one frame duration if framerate is available
 			videoBuffer = 1000 / video.framerate;
 		}
 		videoBuffer ??= 0;
 
 		const audio = effect.get(this.audio);
 		// TODO if there's no explicit buffer, estimate the audio buffer based on the sample rate and codec?
-		const audioBuffer = audio?.minBuffer ?? 0;
+		const audioBuffer = audio?.jitter ?? 0;
 
 		const latency = (Math.max(videoBuffer, audioBuffer) + buffer) as Time.Milli;
 		this.#latency.set(latency);

@@ -108,7 +108,7 @@ impl Aac {
 			bitrate: None,
 			description: None,
 			container: hang::catalog::Container::Legacy,
-			min_buffer: None,
+			jitter: None,
 		};
 
 		tracing::debug!(name = ?track.name, ?config, "starting track");

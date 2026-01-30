@@ -64,7 +64,7 @@ impl Avc3 {
 			display_ratio_height: None,
 			optimize_for_latency: None,
 			container: hang::catalog::Container::Legacy,
-			min_buffer: None,
+			jitter: None,
 		};
 
 		if let Some(old) = &self.config

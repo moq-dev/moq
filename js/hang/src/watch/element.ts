@@ -52,8 +52,8 @@ export default class HangWatch extends HTMLElement {
 	// TODO: Temporarily defaults to false because Cloudflare doesn't support it yet.
 	reload = new Signal(false);
 
-	// Additional buffer in milliseconds on top of the catalog's minBuffer (default: 100ms).
-	// The effective latency = catalog.minBuffer + buffer
+	// Additional buffer in milliseconds on top of the catalog's jitter (default: 100ms).
+	// The effective latency = catalog.jitter + buffer
 	buffer = new Signal(100 as Time.Milli);
 
 	// Set when the element is connected to the DOM.

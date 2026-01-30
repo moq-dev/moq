@@ -1,22 +1,22 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
-type ConfigWithMinBuffer = { minBuffer?: number; framerate?: number };
+type ConfigWithJitter = { jitter?: number; framerate?: number };
 
 export interface LatencyProps {
 	buffer: Signal<Moq.Time.Milli>;
-	config: Getter<ConfigWithMinBuffer | undefined>;
+	config: Getter<ConfigWithJitter | undefined>;
 }
 
 /**
- * A helper class that computes the final latency based on the catalog's minBuffer and the user's buffer.
- * If the minBuffer is not present, then we use framerate to estimate a default.
+ * A helper class that computes the final latency based on the catalog's jitter and the user's buffer.
+ * If the jitter is not present, then we use framerate to estimate a default.
  *
- * Effective latency = catalog.minBuffer + buffer
+ * Effective latency = catalog.jitter + buffer
  */
 export class Latency {
 	buffer: Signal<Moq.Time.Milli>;
-	config: Getter<ConfigWithMinBuffer | undefined>;
+	config: Getter<ConfigWithJitter | undefined>;
 
 	signals = new Effect();
 
@@ -33,18 +33,18 @@ export class Latency {
 	#run(effect: Effect): void {
 		const buffer = effect.get(this.buffer);
 
-		// Compute the latency based on the catalog's minBuffer and the user's buffer.
+		// Compute the latency based on the catalog's jitter and the user's buffer.
 		const config = effect.get(this.config);
 
-		// Use minBuffer from catalog if available, otherwise estimate from framerate
-		let minBuffer: number | undefined = config?.minBuffer;
-		if (minBuffer === undefined && config?.framerate !== undefined && config.framerate > 0) {
-			// Estimate minBuffer as one frame duration if framerate is available
-			minBuffer = 1000 / config.framerate;
+		// Use jitter from catalog if available, otherwise estimate from framerate
+		let jitter: number | undefined = config?.jitter;
+		if (jitter === undefined && config?.framerate !== undefined && config.framerate > 0) {
+			// Estimate jitter as one frame duration if framerate is available
+			jitter = 1000 / config.framerate;
 		}
-		minBuffer ??= 0;
+		jitter ??= 0;
 
-		const latency = (minBuffer + buffer) as Moq.Time.Milli;
+		const latency = (jitter + buffer) as Moq.Time.Milli;
 		this.#combined.set(latency);
 	}
 

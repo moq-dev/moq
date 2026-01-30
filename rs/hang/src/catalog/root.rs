@@ -332,7 +332,7 @@ mod test {
 				framerate: Some(30.0),
 				optimize_for_latency: None,
 				container: Container::Legacy,
-				min_buffer: None,
+				jitter: None,
 			},
 		);
 
@@ -346,7 +346,7 @@ mod test {
 				bitrate: Some(128_000),
 				description: None,
 				container: Container::Legacy,
-				min_buffer: None,
+				jitter: None,
 			},
 		);
 
