@@ -64,20 +64,6 @@ The fastest way to add MoQ to your web page. See [Web Components](/typescript/we
 </hang-watch>
 ```
 
-### Video Conferencing
-
-```html
-<script type="module">
-    import "@moq/hang/meet/element";
-</script>
-
-<hang-meet
-    url="https://relay.example.com/anon"
-    path="room123"
-    audio video controls>
-</hang-meet>
-```
-
 [Learn more about Web Components →](/typescript/web-components)
 
 ## JavaScript API
