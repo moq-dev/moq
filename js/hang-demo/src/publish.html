@@ -24,11 +24,7 @@
 	-->
 	<hang-publish-ui>
 		<hang-publish url="%VITE_RELAY_URL%" path="me">
-			<video
-				style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;"
-				muted
-				autoplay
-			></video>
+			<video style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;" muted autoplay></video>
 		</hang-publish>
 	</hang-publish-ui>
 
@@ -37,7 +33,6 @@
 		<li><a href="index.html?path=me" target="_blank" rel="noreferrer" id="watch">Watch your broadcast: <span
 					id="watch-name"></span></a></li>
 		<li><a href="mse.html">Watch a broadcast (MSE).</a></li>
-		<li><a href="meet.html">Watch a room of broadcasts.</a></li>
 		<li><a href="support.html">Check browser support.</a></li>
 	</ul>
 
@@ -61,7 +56,8 @@
 	<p>
 		You can create a broadcaster via the provided <code class="language-html">&lt;hang-publish&gt;</code> <a
 			href="https://developer.mozilla.org/en-US/docs/Web/API/Web_components">Web Component</a>.
-		Either modify HTML attributes like <code class="language-html">&lt;hang-publish source="camera" audio /&gt;</code>
+		Either modify HTML attributes like <code
+			class="language-html">&lt;hang-publish source="camera" audio /&gt;</code>
 		or access the element's Javascript API:
 	<pre><code class="language-typescript">const publish = document.getElementById("publish");
 publish.broadcast.audio.enabled.set(true);</code></pre>

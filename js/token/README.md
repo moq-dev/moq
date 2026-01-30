@@ -23,11 +23,10 @@ And then run
 moq-token generate ...
 ```
 
-You can also just directly use it via deno or bun as:
+You can also just directly use it via bun as:
 
 ```bash
 bunx @moq/token generate ...
-deno run -A npm:@moq/token/cli generate ...
 ```
 
 

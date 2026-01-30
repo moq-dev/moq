@@ -197,13 +197,17 @@ connection.addEventListener("close", () => {
 });
 ```
 
-## Running on Deno
+## Running Server-Side
 
-`@moq/lite` can also run server-side using [Deno](https://deno.com/):
+`@moq/lite` can also run server-side using a [WebTransport polyfill](https://github.com/fails-components/webtransport):
 
 ```typescript
-import * as Moq from "npm:@moq/lite";
+import { WebTransport, quicheLoaded } from "@fails-components/webtransport";
+globalThis.WebTransport = WebTransport;
 
+import * as Moq from "@moq/lite";
+
+await quicheLoaded;
 const connection = await Moq.connect("https://relay.example.com/anon");
 // Same API as browser
 ```

@@ -39,6 +39,7 @@ export class Source {
 	#available = new Signal<Record<string, Catalog.VideoConfig>>({});
 	readonly available: Getter<Record<string, Catalog.VideoConfig>> = this.#available;
 
+	// The name of the active rendition.
 	#track = new Signal<string | undefined>(undefined);
 	readonly track: Getter<string | undefined> = this.#track;
 
@@ -101,7 +102,7 @@ export class Source {
 
 		// Manual selection by name
 		const manual = target?.name;
-		const selected = manual && manual in available ? manual : this.#selectByPixels(available, target);
+		const selected = manual && manual in available ? manual : this.#select(available, target);
 		if (!selected) return;
 
 		const config = available[selected];
@@ -115,7 +116,7 @@ export class Source {
 	 * Select the best rendition based on target pixel count.
 	 * Rounds up to the closest larger rendition, or falls back to the largest smaller one.
 	 */
-	#selectByPixels(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
+	#select(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
 		const entries = Object.entries(renditions);
 		if (entries.length === 0) return undefined;
 		if (entries.length === 1) return entries[0][0];

@@ -83,7 +83,7 @@ Currently, you need to use a bundler and [Vite](https://vite.dev/) is the only s
 It makes me very sad and we're working on a more universal solution, contributions welcome!
 
 **NOTE** both of these libraries are intended for client-side.
-However, `@moq/lite` can run on the server side using [Deno](https://deno.com/) or a [WebTransport polyfill](https://github.com/moq-dev/web-transport/tree/main/web-transport-ws).
+However, `@moq/lite` can run on the server side using a [WebTransport polyfill](https://github.com/fails-components/webtransport).
 Don't even try to run `@moq/hang` on the server side or you'll run into a ton of issues, *especially* with Next.js.
 
 ## Native

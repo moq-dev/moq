@@ -1,7 +1,9 @@
-#!/usr/bin/env -S deno run --allow-net --allow-env --unstable-net --unstable-sloppy-imports
+import { quicheLoaded, WebTransport } from "@fails-components/webtransport";
+import { parseArgs } from "util";
 
-// @ts-ignore Deno import.
-import { parseArgs } from "jsr:@std/cli/parse-args";
+// Polyfill WebTransport for Bun/Node environments
+// @ts-ignore - assigning to globalThis
+globalThis.WebTransport = WebTransport;
 
 import * as Moq from "@moq/lite";
 
@@ -13,20 +15,21 @@ interface Config {
 }
 
 function parseConfig(): Config {
-	const args = parseArgs(Deno.args, {
-		string: ["url", "broadcast", "track"],
-		boolean: ["help"],
-		default: {
-			track: "seconds",
+	const { values, positionals } = parseArgs({
+		args: process.argv.slice(2),
+		options: {
+			url: { type: "string" },
+			broadcast: { type: "string" },
+			track: { type: "string", default: "seconds" },
+			help: { type: "boolean", short: "h" },
 		},
-		alias: {
-			h: "help",
-		},
+		allowPositionals: true,
 	});
 
-	if (args.help) {
+	if (values.help) {
 		console.log(`
-Usage: ./main.ts [OPTIONS] <publish|subscribe>
+Usage: bun run main.ts [OPTIONS] <publish|subscribe>
+   or: npx tsx main.ts [OPTIONS] <publish|subscribe>
 
 OPTIONS:
     --url <URL>         Connect to the given URL starting with https://
@@ -42,28 +45,28 @@ ENVIRONMENT VARIABLES:
     MOQ_URL     Default URL to connect to
     MOQ_NAME    Default broadcast name
 		`);
-		Deno.exit(0);
+		process.exit(0);
 	}
 
-	const role = args._[0] as string;
+	const role = positionals[0];
 	if (!role || (role !== "publish" && role !== "subscribe")) {
 		console.error("Error: Must specify 'publish' or 'subscribe' command");
-		Deno.exit(1);
+		process.exit(1);
 	}
 
-	const url = args.url || Deno.env.get("MOQ_URL");
-	const broadcast = args.broadcast || Deno.env.get("MOQ_NAME");
+	const url = values.url || process.env.MOQ_URL;
+	const broadcast = values.broadcast || process.env.MOQ_NAME;
 
 	if (!url || !broadcast) {
 		console.error("Error: --url and --broadcast are required");
 		console.error("Provide them as arguments or set MOQ_URL and MOQ_NAME environment variables");
-		Deno.exit(1);
+		process.exit(1);
 	}
 
 	return {
 		url,
 		broadcast,
-		track: args.track,
+		track: values.track,
 		role: role as "publish" | "subscribe",
 	};
 }
@@ -180,6 +183,9 @@ async function subscribe(config: Config) {
 	}
 }
 
+// Wait for the WebTransport polyfill to be ready
+await quicheLoaded;
+
 try {
 	const config = parseConfig();
 
@@ -190,5 +196,5 @@ try {
 	}
 } catch (error) {
 	console.error("❌ Error:", error);
-	Deno.exit(1);
+	process.exit(1);
 }

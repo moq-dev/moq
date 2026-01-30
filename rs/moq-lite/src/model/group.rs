@@ -215,4 +215,24 @@ impl GroupConsumer {
 			}
 		}
 	}
+
+	pub async fn get_frame(&self, index: usize) -> Result<Option<FrameConsumer>> {
+		let mut state = self.state.clone();
+		let Ok(state) = state
+			.wait_for(|state| index < state.frames.len() || state.closed.is_some())
+			.await
+		else {
+			return Err(Error::Cancel);
+		};
+
+		if let Some(frame) = state.frames.get(index).cloned() {
+			return Ok(Some(frame));
+		}
+
+		match &state.closed {
+			Some(Ok(_)) => Ok(None),
+			Some(Err(err)) => Err(err.clone()),
+			_ => unreachable!(),
+		}
+	}
 }

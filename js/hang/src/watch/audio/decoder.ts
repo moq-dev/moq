@@ -126,14 +126,14 @@ export class Decoder {
 		const broadcast = effect.get(this.source.broadcast);
 		if (!broadcast) return;
 
-		const active = broadcast ? effect.get(broadcast.active) : undefined;
-		if (!active) return;
-
 		const track = effect.get(this.source.track);
 		if (!track) return;
 
 		const config = effect.get(this.source.config);
 		if (!config) return;
+
+		const active = effect.get(broadcast.active);
+		if (!active) return;
 
 		const sub = active.subscribe(track, Catalog.PRIORITY.audio);
 		effect.cleanup(() => sub.close());

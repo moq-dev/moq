@@ -45,6 +45,8 @@ export class Source {
 	readonly config: Getter<Catalog.AudioConfig | undefined> = this.#config;
 
 	supported: Signal<Supported | undefined>;
+
+	// Used to target a latency and synchronize playback of video with audio.
 	sync: Sync;
 
 	#signals = new Effect();

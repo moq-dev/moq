@@ -64,7 +64,8 @@
         # JavaScript dependencies
         jsDeps = with pkgs; [
           bun
-          deno
+          # Only for NPM publishing
+          nodejs_24
         ];
 
         # CDN/deployment dependencies

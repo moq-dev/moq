@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_async::FuturesExt;
 
 use crate::{
@@ -215,49 +216,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
-		// TODO use a BTreeMap serve the latest N groups by sequence.
-		// Until then, we'll implement N=2 manually.
-		// Also, this is more complicated because we can't use tokio because of WASM.
-		// We need to drop futures in order to cancel them and keep polling them with select!
-		let mut old_group = None;
-		let mut new_group = None;
+		let mut tasks = FuturesUnordered::new();
 
-		// Annoying that we can't use a tuple here as we need the compiler to infer the type.
-		// Otherwise we'd have to pick Send or !Send...
-		let mut old_sequence = None;
-		let mut new_sequence = None;
-
-		// Keep reading groups from the track, some of which may arrive out of order.
 		loop {
 			let group = tokio::select! {
-				biased;
+				// Poll all active group futures; never matches but keeps them running.
+				true = async {
+					while tasks.next().await.is_some() {}
+					false
+				} => unreachable!(),
 				Some(group) = track.next_group().transpose() => group,
-				Some(_) = async { Some(old_group.as_mut()?.await) } => {
-					old_group = None;
-					old_sequence = None;
-					continue;
-				},
-				Some(_) = async { Some(new_group.as_mut()?.await) } => {
-					new_group = old_group;
-					new_sequence = old_sequence;
-					old_group = None;
-					old_sequence = None;
-					continue;
-				},
 				else => return Ok(()),
 			}?;
 
 			let sequence = group.info.sequence;
-			let latest = new_sequence.as_ref().unwrap_or(&0);
-
-			tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, sequence, latest, "serving group");
-
-			// If this group is older than the oldest group we're serving, skip it.
-			// We always serve at most two groups, but maybe we should serve only sequence >= MAX-1.
-			if sequence < *old_sequence.as_ref().unwrap_or(&0) {
-				tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, old = %sequence, %latest, "skipping group");
-				continue;
-			}
+			tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, sequence, "serving group");
 
 			let msg = lite::Group {
 				subscribe: subscribe.id,
@@ -265,29 +238,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = priority.insert(track.info.priority, sequence);
-
-			// Spawn a task to serve this group, ignoring any errors because they don't really matter.
-			// TODO add some logging at least.
-			let handle = Box::pin(Self::serve_group(session.clone(), msg, priority, group, version));
-
-			// Terminate the old group if it's still running.
-			if let Some(old_sequence) = old_sequence.take() {
-				tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, old = %old_sequence, %latest, "aborting group");
-				old_group.take(); // Drop the future to cancel it.
-			}
-
-			assert!(old_group.is_none());
-
-			if sequence >= *latest {
-				old_group = new_group;
-				old_sequence = new_sequence;
-
-				new_group = Some(handle);
-				new_sequence = Some(sequence);
-			} else {
-				old_group = Some(handle);
-				old_sequence = Some(sequence);
-			}
+			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
 		}
 	}
 

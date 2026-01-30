@@ -147,13 +147,11 @@ export class Encoder {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
-		const source = effect.get(this.source);
-		if (!source) return;
-
-		// NOTE: These already factor in user provided maxPixels.
+		// NOTE: dimensions already factors in user provided maxPixels.
 		// It's a separate effect in order to deduplicate.
-		const dimensions = effect.get(this.#dimensions);
-		if (!dimensions) return;
+		const values = effect.getAll([this.source, this.#dimensions]);
+		if (!values) return;
+		const [source, dimensions] = values;
 
 		const settings = source.getSettings();
 		const framerate = settings.frameRate ?? 30;
