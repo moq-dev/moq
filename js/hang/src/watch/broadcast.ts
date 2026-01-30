@@ -115,9 +115,12 @@ export class Broadcast {
 	}
 
 	#runBroadcast(effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#active, this.connection, this.path]);
+		const values = effect.getAll([this.enabled, this.#active, this.connection]);
 		if (!values) return;
-		const [_enabled, _active, conn, path] = values;
+		const [_enabled, _active, conn] = values;
+
+		const path = effect.get(this.path);
+		if (path === undefined) return;
 
 		const broadcast = conn.consume(path);
 		effect.cleanup(() => broadcast.close());
