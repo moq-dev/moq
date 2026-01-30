@@ -2,6 +2,8 @@
 
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
 
+set windows-shell := ["C:\\Program Files\\Git\\bin\\sh.exe","-c"]
+
 set quiet
 
 # List all of the available commands.
