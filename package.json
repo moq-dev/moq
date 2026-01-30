@@ -3,6 +3,9 @@
 	"version": "0.0.0",
 	"private": true,
 	"type": "module",
+	"trustedDependencies": [
+		"@fails-components/webtransport-transport-http3-quiche"
+	],
 	"workspaces": [
 		"doc",
 		"js/lite",

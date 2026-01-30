@@ -28,7 +28,8 @@ function parseConfig(): Config {
 
 	if (values.help) {
 		console.log(`
-Usage: ./main.ts [OPTIONS] <publish|subscribe>
+Usage: bun run main.ts [OPTIONS] <publish|subscribe>
+   or: npx tsx main.ts [OPTIONS] <publish|subscribe>
 
 OPTIONS:
     --url <URL>         Connect to the given URL starting with https://
