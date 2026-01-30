@@ -70,7 +70,7 @@ The Rust libraries are intended for native platforms, such as desktop applicatio
 [Full Rust Documentation →](/rust/)
 
 ## TypeScript
-The TypeScript libraries are intended for web browsers, but also work on [Deno](https://deno.com/) with its experimental WebTransport support.
+The TypeScript libraries are intended for web browsers, but also work server-side with a [WebTransport polyfill](https://github.com/fails-components/webtransport).
 
 - **[@moq/lite](/typescript/lite)** - The core pub/sub transport protocol; media agnostic.
 - **[@moq/hang](/typescript/hang)** - The media library; provides codecs, containers, etc.

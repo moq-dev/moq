@@ -3,7 +3,7 @@
 A TypeScript implementation of a simple clock protocol over MoQ.
 This has no practical value; it's just an example of how to support non-media payloads.
 
-Currently, this only works in the browser or when run using [Deno](https://deno.land).
+This works in the browser or when run using [Bun](https://bun.sh) with a WebTransport polyfill.
 In theory it should work for any Javascript runtime that supports WebTransport.
 
 ## Usage
@@ -12,10 +12,10 @@ The TypeScript implementation mirrors the Rust CLI interface:
 
 ```bash
 # Publish a clock broadcast
-./src/main.ts --url https://cdn.moq.dev/anon --broadcast myclock publish
+bun ./src/main.ts --url https://cdn.moq.dev/anon --broadcast myclock publish
 
 # Subscribe to a clock broadcast
-./src/main.ts --url https://cdn.moq.dev/anon --broadcast myclock subscribe
+bun ./src/main.ts --url https://cdn.moq.dev/anon --broadcast myclock subscribe
 ```
 
 If you're running a relay server locally, use `http://localhost:4443/anon` instead.
