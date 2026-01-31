@@ -1,6 +1,6 @@
 import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
 
 export interface Source {
 	byteLength: number;
@@ -11,7 +11,6 @@ export interface Frame {
 	data: Uint8Array;
 	timestamp: Time.Micro;
 	keyframe: boolean;
-	group: number;
 }
 
 // A Helper class to encode frames into a track.
@@ -65,6 +64,13 @@ export interface ConsumerProps {
 	latency?: Signal<Time.Milli> | Time.Milli;
 }
 
+export interface BufferedRange {
+	start: Time.Milli;
+	end: Time.Milli;
+}
+
+export type BufferedRanges = BufferedRange[];
+
 interface Group {
 	consumer: Moq.Group;
 	frames: Frame[]; // decode order
@@ -79,6 +85,9 @@ export class Consumer {
 
 	// Wake up the consumer when a new frame is available.
 	#notify?: () => void;
+
+	#buffered = new Signal<BufferedRanges>([]);
+	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	#signals = new Effect();
 
@@ -143,7 +152,6 @@ export class Consumer {
 					data,
 					timestamp,
 					keyframe,
-					group: group.consumer.sequence,
 				};
 
 				keyframe = false;
@@ -153,6 +161,8 @@ export class Consumer {
 				if (!group.latest || timestamp > group.latest) {
 					group.latest = timestamp;
 				}
+
+				this.#updateBuffered();
 
 				if (group.consumer.sequence === this.#active) {
 					this.#notify?.();
@@ -219,12 +229,16 @@ export class Consumer {
 		// NOTE: Can't be undefined, because we checked above.
 		this.#active = this.#groups[0]?.consumer.sequence;
 
+		this.#updateBuffered();
+
 		// Wake up any consumers waiting for a new frame.
 		this.#notify?.();
 		this.#notify = undefined;
 	}
 
-	async decode(): Promise<Frame | undefined> {
+	// Returns the next frame in order, along with the group number.
+	// If frame is undefined, the group is done.
+	async next(): Promise<{ frame: Frame | undefined; group: number } | undefined> {
 		for (;;) {
 			if (
 				this.#groups.length > 0 &&
@@ -232,12 +246,19 @@ export class Consumer {
 				this.#groups[0].consumer.sequence <= this.#active
 			) {
 				const frame = this.#groups[0].frames.shift();
-				if (frame) return frame;
+				if (frame) {
+					this.#updateBuffered();
+					return { frame, group: this.#groups[0].consumer.sequence };
+				}
 
 				// Check if the group is done and then remove it.
 				if (this.#active > this.#groups[0].consumer.sequence) {
-					this.#groups.shift();
-					continue;
+					const group = this.#groups.shift();
+					if (group) {
+						this.#updateBuffered();
+						// Always true
+						return { frame: undefined, group: group.consumer.sequence };
+					}
 				}
 			}
 
@@ -261,6 +282,30 @@ export class Consumer {
 	static #decode(buffer: Uint8Array): { data: Uint8Array; timestamp: Time.Micro } {
 		const [timestamp, data] = Moq.Varint.decode(buffer);
 		return { timestamp: timestamp as Time.Micro, data };
+	}
+
+	#updateBuffered(): void {
+		// Compute buffered ranges from all groups
+		// Each contiguous sequence of groups forms a buffered range
+		const ranges: BufferedRanges = [];
+
+		for (const group of this.#groups) {
+			const first = group.frames.at(0);
+			if (!first || !group.latest) continue;
+
+			const start = Moq.Time.Milli.fromMicro(first.timestamp);
+			const end = Moq.Time.Milli.fromMicro(group.latest);
+
+			// Try to merge with the last range if contiguous
+			const last = ranges.at(-1);
+			if (last && last.end >= start) {
+				last.end = Math.max(last.end, end) as Time.Milli;
+			} else {
+				ranges.push({ start, end });
+			}
+		}
+
+		this.#buffered.set(ranges);
 	}
 
 	close(): void {

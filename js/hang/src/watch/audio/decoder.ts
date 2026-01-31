@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/lite";
-import type { Time } from "@moq/lite";
+import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
 import * as Container from "../../container";
@@ -7,6 +7,7 @@ import * as Hex from "../../util/hex";
 import * as libav from "../../util/libav";
 import type { BufferedRanges } from "../backend";
 import type * as Render from "./render";
+import type { ToMain } from "./render";
 // Unfortunately, we need to use a Vite-exclusive import for now.
 import RenderWorklet from "./render-worklet.ts?worker&url";
 import type { Source } from "./source";
@@ -40,7 +41,18 @@ export class Decoder {
 	#stats = new Signal<AudioStats | undefined>(undefined);
 	readonly stats: Getter<AudioStats | undefined> = this.#stats;
 
-	// Empty stub for WebCodecs (no traditional buffering)
+	// Current playback timestamp from worklet
+	#timestamp = new Signal<Time.Milli | undefined>(undefined);
+	readonly timestamp: Getter<Time.Milli | undefined> = this.#timestamp;
+
+	// Whether the audio buffer is stalled (waiting to fill)
+	#stalled = new Signal<boolean>(true);
+	readonly stalled: Getter<boolean> = this.#stalled;
+
+	// Decode buffer: audio sent to worklet but not yet played
+	#decodeBuffered = new Signal<BufferedRanges>([]);
+
+	// Combined buffered ranges (network jitter + decode buffer)
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
@@ -54,6 +66,7 @@ export class Decoder {
 
 		this.#signals.effect(this.#runWorklet.bind(this));
 		this.#signals.effect(this.#runEnabled.bind(this));
+		this.#signals.effect(this.#runLatency.bind(this));
 		this.#signals.effect(this.#runDecoder.bind(this));
 	}
 
@@ -99,9 +112,19 @@ export class Decoder {
 				type: "init",
 				rate: sampleRate,
 				channels: channelCount,
-				latency: this.source.sync.latency.peek(), // TODO make it reactive
+				latency: this.source.sync.latency.peek(), // Updated reactively via #runLatency
 			};
 			worklet.port.postMessage(init);
+
+			// Listen for state updates from worklet
+			worklet.port.onmessage = (event: MessageEvent<ToMain>) => {
+				if (event.data.type === "state") {
+					const timestamp = Time.Milli.fromMicro(event.data.timestamp);
+					this.#timestamp.set(timestamp);
+					this.#stalled.set(event.data.stalled);
+					this.#trimDecodeBuffered(timestamp);
+				}
+			};
 
 			effect.set(this.#worklet, worklet);
 		});
@@ -115,6 +138,19 @@ export class Decoder {
 		context.resume();
 
 		// NOTE: You should disconnect/reconnect the worklet to save power when disabled.
+	}
+
+	#runLatency(effect: Effect): void {
+		const worklet = effect.get(this.#worklet);
+		if (!worklet) return;
+
+		const latency = effect.get(this.source.sync.latency);
+
+		const msg: Render.Latency = {
+			type: "latency",
+			latency,
+		};
+		worklet.port.postMessage(msg);
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -151,6 +187,13 @@ export class Decoder {
 		});
 		effect.cleanup(() => consumer.close());
 
+		// Combine network jitter buffer with decode buffer
+		effect.effect((inner) => {
+			const network = inner.get(consumer.buffered);
+			const decode = inner.get(this.#decodeBuffered);
+			this.#buffered.set(mergeBufferedRanges(network, decode));
+		});
+
 		effect.spawn(async () => {
 			const loaded = await libav.polyfill();
 			if (!loaded) return; // cancelled
@@ -168,8 +211,11 @@ export class Decoder {
 			});
 
 			for (;;) {
-				const frame = await consumer.decode();
-				if (!frame) break;
+				const next = await consumer.next();
+				if (!next) break;
+
+				const { frame } = next;
+				if (!frame) continue; // Skip over group done notifications.
 
 				this.#stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
@@ -191,6 +237,13 @@ export class Decoder {
 
 		const { timescale } = config.container;
 		const description = config.description ? Hex.toBytes(config.description) : undefined;
+
+		// For CMAF, just use decode buffer (no network jitter buffer yet)
+		// TODO: Add CMAF consumer wrapper for latency control
+		effect.effect((inner) => {
+			const decode = inner.get(this.#decodeBuffered);
+			this.#buffered.set(decode);
+		});
 
 		effect.spawn(async () => {
 			const loaded = await libav.polyfill();
@@ -248,6 +301,7 @@ export class Decoder {
 
 	#emit(sample: AudioData) {
 		const timestamp = sample.timestamp as Time.Micro;
+		const timestampMilli = Time.Milli.fromMicro(timestamp);
 
 		const worklet = this.#worklet.peek();
 		if (!worklet) {
@@ -255,6 +309,14 @@ export class Decoder {
 			sample.close();
 			return;
 		}
+
+		// Calculate end time from sample duration
+		const durationMicro = ((sample.numberOfFrames / sample.sampleRate) * 1_000_000) as Time.Micro;
+		const durationMilli = Time.Milli.fromMicro(durationMicro);
+		const end = (timestampMilli + durationMilli) as Time.Milli;
+
+		// Add to decode buffer
+		this.#addDecodeBuffered(timestampMilli, end);
 
 		const channelData: Float32Array[] = [];
 		for (let channel = 0; channel < sample.numberOfChannels; channel++) {
@@ -279,6 +341,36 @@ export class Decoder {
 		sample.close();
 	}
 
+	#addDecodeBuffered(start: Time.Milli, end: Time.Milli): void {
+		if (start > end) return;
+
+		this.#decodeBuffered.mutate((current) => {
+			for (const range of current) {
+				// Extend range if new sample overlaps or is adjacent (1ms tolerance for float precision)
+				if (start <= range.end + 1 && end >= range.start) {
+					range.start = Math.min(range.start, start) as Time.Milli;
+					range.end = Math.max(range.end, end) as Time.Milli;
+					return;
+				}
+			}
+
+			current.push({ start, end });
+			current.sort((a, b) => a.start - b.start);
+		});
+	}
+
+	#trimDecodeBuffered(timestamp: Time.Milli): void {
+		this.#decodeBuffered.mutate((current) => {
+			while (current.length > 0) {
+				if (current[0].end >= timestamp) {
+					current[0].start = Math.max(current[0].start, timestamp) as Time.Milli;
+					break;
+				}
+				current.shift();
+			}
+		});
+	}
+
 	close() {
 		this.#signals.close();
 	}
@@ -291,4 +383,25 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 		description,
 	});
 	return res.supported ?? false;
+}
+
+// Merge two sets of buffered ranges into one sorted list
+function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges {
+	if (a.length === 0) return b;
+	if (b.length === 0) return a;
+
+	const result: BufferedRanges = [];
+	const all = [...a, ...b].sort((x, y) => x.start - y.start);
+
+	for (const range of all) {
+		const last = result.at(-1);
+		if (last && last.end >= range.start) {
+			// Merge overlapping ranges
+			last.end = Math.max(last.end, range.end) as Time.Milli;
+		} else {
+			result.push({ ...range });
+		}
+	}
+
+	return result;
 }

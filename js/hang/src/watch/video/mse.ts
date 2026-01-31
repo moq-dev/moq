@@ -1,4 +1,4 @@
-import type * as Moq from "@moq/lite";
+import * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
 import * as Container from "../../container";
@@ -22,6 +22,12 @@ export class Mse implements Backend {
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
+	#stalled = new Signal<boolean>(false);
+	readonly stalled: Getter<boolean> = this.#stalled;
+
+	#timestamp = new Signal<Moq.Time.Milli>(Moq.Time.Milli.zero);
+	readonly timestamp: Getter<Moq.Time.Milli> = this.#timestamp;
+
 	signals = new Effect();
 
 	constructor(muxer: Muxer, source: Source) {
@@ -30,6 +36,8 @@ export class Mse implements Backend {
 		this.source.supported.set(supported); // super hacky
 
 		this.signals.effect(this.#runMedia.bind(this));
+		this.signals.effect(this.#runStalled.bind(this));
+		this.signals.effect(this.#runTimestamp.bind(this));
 	}
 
 	#runMedia(effect: Effect): void {
@@ -147,15 +155,24 @@ export class Mse implements Backend {
 			let duration: Moq.Time.Micro | undefined;
 
 			// Buffer one frame so we can compute accurate duration from the next frame's timestamp
-			let pending = await consumer.decode();
-			if (!pending) return;
+			let pending: Container.Legacy.Frame;
+			for (;;) {
+				const next = await consumer.next();
+				if (!next) return;
+				if (!next.frame) continue; // Skip over group done notifications.
+
+				pending = next.frame;
+				break;
+			}
 
 			for (;;) {
-				const next = await consumer.decode();
+				const next = await consumer.next();
+				if (next && !next.frame) continue; // Skip over group done notifications.
+				const frame = next?.frame;
 
 				// Compute duration from next frame's timestamp, or use last known duration if stream ended
-				if (next) {
-					duration = (next.timestamp - pending.timestamp) as Moq.Time.Micro;
+				if (frame) {
+					duration = (frame.timestamp - pending.timestamp) as Moq.Time.Micro;
 				}
 
 				// Wrap raw frame in moof+mdat
@@ -174,10 +191,50 @@ export class Mse implements Backend {
 					element.currentTime = element.buffered.start(0);
 				}
 
-				if (!next) return;
-				pending = next;
+				if (!frame) return;
+				pending = frame;
 			}
 		});
+	}
+
+	#runStalled(effect: Effect): void {
+		const element = effect.get(this.muxer.element);
+		if (!element) return;
+
+		const update = () => {
+			this.#stalled.set(element.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA);
+		};
+
+		// TODO Are these the correct events to use?
+		effect.event(element, "waiting", update);
+		effect.event(element, "playing", update);
+		effect.event(element, "seeking", update);
+	}
+
+	#runTimestamp(effect: Effect): void {
+		const element = effect.get(this.muxer.element);
+		if (!element) return;
+
+		// Use requestVideoFrameCallback if available (frame-accurate)
+		if ("requestVideoFrameCallback" in element) {
+			const video = element as HTMLVideoElement;
+
+			let handle: number;
+			const onFrame = () => {
+				const timestamp = Moq.Time.Milli.fromSecond(video.currentTime as Moq.Time.Second);
+				this.#timestamp.set(timestamp);
+				handle = video.requestVideoFrameCallback(onFrame);
+			};
+			handle = video.requestVideoFrameCallback(onFrame);
+
+			effect.cleanup(() => video.cancelVideoFrameCallback(handle));
+		} else {
+			// Fallback to timeupdate event
+			effect.event(element, "timeupdate", () => {
+				const timestamp = Moq.Time.Milli.fromSecond(element.currentTime as Moq.Time.Second);
+				this.#timestamp.set(timestamp);
+			});
+		}
 	}
 
 	close(): void {

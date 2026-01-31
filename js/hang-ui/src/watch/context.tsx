@@ -18,7 +18,7 @@ export type Rendition = {
 	height?: number;
 };
 
-type WatchUIContextValues = {
+export type WatchUIContextValues = {
 	hangWatch: HangWatch;
 	watchStatus: () => WatchStatus;
 	isPlaying: () => boolean;
@@ -28,8 +28,8 @@ type WatchUIContextValues = {
 	togglePlayback: () => void;
 	toggleMuted: () => void;
 	buffering: () => boolean;
-	jitter: () => number;
-	setJitter: (value: number) => void;
+	jitter: () => Moq.Time.Milli;
+	setJitter: (value: Moq.Time.Milli) => void;
 	availableRenditions: () => Rendition[];
 	activeRendition: () => string | undefined;
 	setActiveRendition: (name: string | undefined) => void;
@@ -37,7 +37,7 @@ type WatchUIContextValues = {
 	setIsStatsPanelVisible: (visible: boolean) => void;
 	isFullscreen: () => boolean;
 	toggleFullscreen: () => void;
-	timestamp: () => number;
+	timestamp: () => Moq.Time.Milli | undefined;
 	videoBuffered: () => BufferedRanges;
 	audioBuffered: () => BufferedRanges;
 };
@@ -76,8 +76,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		props.hangWatch.audio.muted.update((muted) => !muted);
 	};
 
-	const setJitter = (latency: number) => {
-		props.hangWatch.jitter.set(latency as Moq.Time.Milli);
+	const setJitter = (latency: Moq.Time.Milli) => {
+		props.hangWatch.jitter.set(latency);
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
@@ -88,7 +88,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	};
 
 	// Use solid helper for the new signals
-	const timestamp = solid(props.hangWatch.timestamp);
+	const timestamp = solid(props.hangWatch.video.timestamp);
 	const videoBuffered = solid(props.hangWatch.video.buffered);
 	const audioBuffered = solid(props.hangWatch.audio.buffered);
 
@@ -157,8 +157,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const buffering = effect.get(watch.buffering);
-		setBuffering(buffering);
+		const stalled = effect.get(watch.video.stalled);
+		setBuffering(stalled);
 	});
 
 	signals.effect((effect) => {

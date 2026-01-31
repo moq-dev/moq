@@ -147,15 +147,25 @@ export class Mse implements Backend {
 			let duration: Moq.Time.Micro | undefined;
 
 			// Buffer one frame so we can compute accurate duration from the next frame's timestamp
-			let pending = await consumer.decode();
-			if (!pending) return;
+			let pending: Container.Legacy.Frame;
+			for (;;) {
+				const next = await consumer.next();
+				if (!next) return;
+				if (!next.frame) continue; // Skip over group done notifications.
+
+				pending = next.frame;
+				break;
+			}
 
 			for (;;) {
-				const next = await consumer.decode();
+				const next = await consumer.next();
+				if (next && !next.frame) continue; // Skip over group done notifications.
+
+				const frame = next?.frame;
 
 				// Compute duration from next frame's timestamp, or use last known duration if stream ended
-				if (next) {
-					duration = (next.timestamp - pending.timestamp) as Moq.Time.Micro;
+				if (frame) {
+					duration = (frame.timestamp - pending.timestamp) as Moq.Time.Micro;
 				}
 
 				// Wrap raw frame in moof+mdat
@@ -174,8 +184,8 @@ export class Mse implements Backend {
 					element.currentTime = element.buffered.start(0);
 				}
 
-				if (!next) return;
-				pending = next;
+				if (!frame) return;
+				pending = frame;
 			}
 		});
 	}

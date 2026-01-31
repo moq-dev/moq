@@ -1,5 +1,5 @@
-import type * as Moq from "@moq/lite";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import * as Moq from "@moq/lite";
+import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
 import { Muxer } from "./mse";
@@ -8,16 +8,20 @@ import * as Video from "./video";
 
 // Serializable representation of TimeRanges
 export interface BufferedRange {
-	start: number; // seconds
-	end: number; // seconds
+	start: Moq.Time.Milli;
+	end: Moq.Time.Milli;
 }
 export type BufferedRanges = BufferedRange[];
 
 // Helper to convert DOM TimeRanges
 export function timeRangesToArray(ranges: TimeRanges): BufferedRanges {
 	const result: BufferedRange[] = [];
+
 	for (let i = 0; i < ranges.length; i++) {
-		result.push({ start: ranges.start(i), end: ranges.end(i) });
+		const start = Moq.Time.Milli.fromSecond(ranges.start(i) as Moq.Time.Second);
+		const end = Moq.Time.Milli.fromSecond(ranges.end(i) as Moq.Time.Second);
+
+		result.push({ start, end });
 	}
 	return result;
 }
@@ -25,12 +29,6 @@ export function timeRangesToArray(ranges: TimeRanges): BufferedRanges {
 export interface Backend {
 	// Whether audio/video playback is paused.
 	paused: Signal<boolean>;
-
-	// Whether the video is currently buffering, false when paused.
-	buffering: Getter<boolean>;
-
-	// Current playback position in seconds.
-	timestamp: Getter<number>;
 
 	// Video specific signals.
 	video?: Video.Backend;
@@ -60,8 +58,14 @@ class VideoBackend implements Video.Backend {
 	// The stats of the video.
 	stats = new Signal<Video.Stats | undefined>(undefined);
 
-	// Buffered time ranges (for MSE backend).
+	// We're currently stalled waiting for the next frame
+	stalled = new Signal<boolean>(false);
+
+	// Buffered time ranges
 	buffered = new Signal<BufferedRanges>([]);
+
+	// The timestamp of the current frame
+	timestamp = new Signal<Moq.Time.Milli>(Moq.Time.Milli.zero);
 
 	constructor(source: Video.Source) {
 		this.source = source;
@@ -81,7 +85,7 @@ class AudioBackend implements Audio.Backend {
 	// The stats of the audio.
 	stats = new Signal<Audio.Stats | undefined>(undefined);
 
-	// Buffered time ranges (for MSE backend).
+	// Buffered time ranges
 	buffered = new Signal<BufferedRanges>([]);
 
 	constructor(source: Audio.Source) {
@@ -106,12 +110,6 @@ export class MultiBackend implements Backend {
 
 	// Used to sync audio and video playback at a target delay.
 	#sync: Sync;
-
-	#buffering = new Signal<boolean>(false);
-	readonly buffering: Getter<boolean> = this.#buffering;
-
-	#timestamp = new Signal<number>(0);
-	readonly timestamp: Getter<number> = this.#timestamp;
 
 	signals = new Effect();
 
@@ -169,17 +167,11 @@ export class MultiBackend implements Backend {
 		// Proxy the read only signals to the backend.
 		effect.proxy(this.video.stats, videoSource.stats);
 		effect.proxy(this.video.buffered, videoSource.buffered);
+		effect.proxy(this.video.stalled, videoSource.stalled);
+		effect.proxy(this.video.timestamp, videoSource.timestamp);
 
 		effect.proxy(this.audio.stats, audioSource.stats);
 		effect.proxy(this.audio.buffered, audioSource.buffered);
-
-		// Derive timestamp from video stats (in lock-step with frame signal)
-		effect.effect((e) => {
-			const stats = e.get(videoSource.stats);
-			if (stats) {
-				this.#timestamp.set(stats.timestamp / 1_000_000); // microseconds to seconds
-			}
-		});
 	}
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
@@ -187,6 +179,7 @@ export class MultiBackend implements Backend {
 			paused: this.paused,
 			element,
 		});
+		effect.cleanup(() => mse.close());
 
 		const video = new Video.Mse(mse, this.#videoSource);
 		const audio = new Audio.Mse(mse, this.#audioSource, {
@@ -203,10 +196,14 @@ export class MultiBackend implements Backend {
 		// Proxy the read only signals to the backend.
 		effect.proxy(this.video.stats, video.stats);
 		effect.proxy(this.video.buffered, video.buffered);
+		effect.proxy(this.video.stalled, video.stalled);
+		effect.proxy(this.video.timestamp, video.timestamp);
 
 		effect.proxy(this.audio.stats, audio.stats);
 		effect.proxy(this.audio.buffered, audio.buffered);
+	}
 
-		effect.proxy(this.#timestamp, mse.timestamp);
+	close(): void {
+		this.signals.close();
 	}
 }

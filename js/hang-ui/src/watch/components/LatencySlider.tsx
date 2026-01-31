@@ -1,14 +1,15 @@
+import type { Moq } from "@moq/hang";
 import useWatchUIContext from "../hooks/use-watch-ui";
 
-const MIN_RANGE = 0;
-const MAX_RANGE = 5_000;
-const RANGE_STEP = 100;
+const MIN_RANGE = 0 as Moq.Time.Milli;
+const MAX_RANGE = 5_000 as Moq.Time.Milli;
+const RANGE_STEP = 100 as Moq.Time.Milli;
 
 export default function LatencySlider() {
 	const context = useWatchUIContext();
 	const onInputChange = (event: Event) => {
 		const target = event.currentTarget as HTMLInputElement;
-		const latency = parseFloat(target.value);
+		const latency = parseFloat(target.value) as Moq.Time.Milli;
 		context.setJitter(latency);
 	};
 
