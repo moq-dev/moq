@@ -1,3 +1,4 @@
+import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Sync } from "./sync";
 
@@ -20,12 +21,6 @@ export class Muxer {
 	#mediaSource = new Signal<MediaSource | undefined>(undefined);
 	readonly mediaSource: Getter<MediaSource | undefined> = this.#mediaSource;
 
-	#buffering = new Signal<boolean>(false);
-	readonly buffering: Getter<boolean> = this.#buffering;
-
-	#timestamp = new Signal<number>(0);
-	readonly timestamp: Getter<number> = this.#timestamp;
-
 	#signals = new Effect();
 
 	constructor(sync: Sync, props?: MuxerProps) {
@@ -36,9 +31,8 @@ export class Muxer {
 		this.#signals.effect(this.#runMediaSource.bind(this));
 		this.#signals.effect(this.#runSkip.bind(this));
 		this.#signals.effect(this.#runTrim.bind(this));
-		this.#signals.effect(this.#runBuffering.bind(this));
 		this.#signals.effect(this.#runPaused.bind(this));
-		this.#signals.effect(this.#runTimestamp.bind(this));
+		this.#signals.effect(this.#runSync.bind(this));
 	}
 
 	#runMediaSource(effect: Effect): void {
@@ -113,20 +107,6 @@ export class Muxer {
 		}, 1000);
 	}
 
-	#runBuffering(effect: Effect): void {
-		const element = effect.get(this.element);
-		if (!element) return;
-
-		const update = () => {
-			this.#buffering.set(element.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA);
-		};
-
-		// TODO Are these the correct events to use?
-		effect.event(element, "waiting", update);
-		effect.event(element, "playing", update);
-		effect.event(element, "seeking", update);
-	}
-
 	#runPaused(effect: Effect): void {
 		const element = effect.get(this.element);
 		if (!element) return;
@@ -137,31 +117,31 @@ export class Muxer {
 		} else if (!paused && element.paused) {
 			element.play().catch((e) => {
 				console.error("[MSE] MediaElement play error:", e);
-				this.paused.set(true);
 			});
 		}
 	}
 
-	#runTimestamp(effect: Effect): void {
+	// Seek to the target position based on the reference and latency.
+	#runSync(effect: Effect): void {
 		const element = effect.get(this.element);
 		if (!element) return;
 
-		// Use requestVideoFrameCallback if available (frame-accurate)
-		if ("requestVideoFrameCallback" in element) {
-			const video = element as HTMLVideoElement;
-			let handle: number;
-			const onFrame = () => {
-				this.#timestamp.set(video.currentTime);
-				handle = video.requestVideoFrameCallback(onFrame);
-			};
-			handle = video.requestVideoFrameCallback(onFrame);
-			effect.cleanup(() => video.cancelVideoFrameCallback(handle));
-		} else {
-			// Fallback to timeupdate event
-			effect.event(element, "timeupdate", () => {
-				this.#timestamp.set(element.currentTime);
-			});
-		}
+		// Don't seek when paused, otherwise we'll keep jerking around.
+		const paused = effect.get(this.paused);
+		if (paused) return;
+
+		const reference = effect.get(this.#sync.reference);
+		if (reference === undefined) return;
+
+		const latency = effect.get(this.#sync.latency);
+
+		// Compute the target currentTime based on reference and latency.
+		// reference = performance.now() - frameTimestamp (in ms) when we received the earliest frame
+		// So the target media timestamp (in ms) at time `now` is: now - reference - latency
+		const target = (performance.now() - reference - latency) as Time.Milli;
+
+		// Seek to the target position.
+		element.currentTime = Time.Milli.toSecond(target);
 	}
 
 	close(): void {

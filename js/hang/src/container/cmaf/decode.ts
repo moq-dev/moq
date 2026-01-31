@@ -3,6 +3,7 @@
  * Used by WebCodecs to extract raw frames from CMAF container.
  */
 
+import type { Time } from "@moq/lite";
 import {
 	type MediaHeaderBox,
 	type ParsedIsoBox,
@@ -194,6 +195,25 @@ function extractDescription(entry: any): Uint8Array | undefined {
 	}
 
 	return undefined;
+}
+
+/**
+ * Extract just the base media decode time from a data segment (moof + mdat).
+ * This is a lighter-weight function when you only need the timestamp.
+ *
+ * @param segment - The moof + mdat data
+ * @param timescale - Time units per second (from init segment)
+ * @returns The base media decode time in microseconds
+ */
+export function decodeTimestamp(segment: Uint8Array, timescale: number): Time.Micro {
+	const boxes = readIsoBoxes(toArrayBuffer(segment), { readers: DATA_READERS }) as ParsedIsoBox[];
+
+	// Find moof > traf > tfdt for base media decode time
+	const tfdt = findBox(boxes, isBoxType<TrackFragmentBaseMediaDecodeTimeBox & ParsedIsoBox>("tfdt"));
+	const baseDecodeTime = tfdt?.baseMediaDecodeTime ?? 0;
+
+	// Convert to microseconds
+	return ((baseDecodeTime * 1_000_000) / timescale) as Time.Micro;
 }
 
 /**

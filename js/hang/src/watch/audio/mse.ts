@@ -1,4 +1,4 @@
-import type * as Moq from "@moq/lite";
+import * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
 import * as Container from "../../container";
@@ -103,6 +103,8 @@ export class Mse implements Backend {
 	): void {
 		if (config.container.kind !== "cmaf") throw new Error("unreachable");
 
+		const timescale = config.container.timescale;
+
 		effect.spawn(async () => {
 			// Generate init segment from catalog config (uses track_id from container)
 			const initSegment = Container.Cmaf.createAudioInitSegment(config);
@@ -113,6 +115,10 @@ export class Mse implements Backend {
 				// It requires extracting the timestamp from the frame payload.
 				const frame = await sub.readFrame();
 				if (!frame) return;
+
+				// Extract the timestamp from the CMAF segment and mark when we received it.
+				const timestamp = Container.Cmaf.decodeTimestamp(frame, timescale);
+				this.source.sync.received(Moq.Time.Milli.fromMicro(timestamp));
 
 				await this.#appendBuffer(sourceBuffer, frame);
 
@@ -147,15 +153,25 @@ export class Mse implements Backend {
 			let duration: Moq.Time.Micro | undefined;
 
 			// Buffer one frame so we can compute accurate duration from the next frame's timestamp
-			let pending = await consumer.decode();
-			if (!pending) return;
+			let pending: Container.Legacy.Frame;
+			for (;;) {
+				const next = await consumer.next();
+				if (!next) return;
+				if (!next.frame) continue; // Skip over group done notifications.
+
+				pending = next.frame;
+				break;
+			}
 
 			for (;;) {
-				const next = await consumer.decode();
+				const next = await consumer.next();
+				if (next && !next.frame) continue; // Skip over group done notifications.
+
+				const frame = next?.frame;
 
 				// Compute duration from next frame's timestamp, or use last known duration if stream ended
-				if (next) {
-					duration = (next.timestamp - pending.timestamp) as Moq.Time.Micro;
+				if (frame) {
+					duration = (frame.timestamp - pending.timestamp) as Moq.Time.Micro;
 				}
 
 				// Wrap raw frame in moof+mdat
@@ -174,8 +190,8 @@ export class Mse implements Backend {
 					element.currentTime = element.buffered.start(0);
 				}
 
-				if (!next) return;
-				pending = next;
+				if (!frame) return;
+				pending = frame;
 			}
 		});
 	}

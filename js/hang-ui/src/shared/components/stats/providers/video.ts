@@ -14,8 +14,6 @@ export class VideoProvider extends BaseProvider {
 	/** Bound callback for display updates */
 	/** Previous frame count for FPS calculation */
 	private previousFrameCount = 0;
-	/** Previous timestamp for FPS calculation */
-	private previousTimestamp = 0;
 	/** Previous bytes received for bitrate calculation */
 	private previousBytesReceived = 0;
 	/** Previous timestamp for accurate elapsed time calculation in bitrate */
@@ -50,14 +48,15 @@ export class VideoProvider extends BaseProvider {
 		const stats = this.props.video.stats.peek();
 		const now = performance.now();
 
+		const elapsedMs = now - this.previousWhen;
+
 		// Calculate FPS from frame count delta and timestamp delta
 		let fps: number | undefined;
-		if (stats && this.previousTimestamp > 0) {
+		if (stats && this.previousFrameCount > 0) {
 			const frameCountDelta = stats.frameCount - this.previousFrameCount;
-			const timestampDeltaUs = stats.timestamp - this.previousTimestamp;
 
-			if (timestampDeltaUs > 0 && frameCountDelta > 0) {
-				const elapsedSeconds = timestampDeltaUs / 1_000_000;
+			if (elapsedMs > 0 && frameCountDelta > 0) {
+				const elapsedSeconds = elapsedMs / 1_000;
 				fps = frameCountDelta / elapsedSeconds;
 			}
 		}
@@ -66,18 +65,15 @@ export class VideoProvider extends BaseProvider {
 		if (stats && this.previousBytesReceived > 0) {
 			const bytesDelta = stats.bytesReceived - this.previousBytesReceived;
 			// Only calculate bitrate if there's actual data change
-			if (bytesDelta > 0) {
-				const elapsedMs = now - this.previousWhen;
-				if (elapsedMs > 0) {
-					const bitsPerSecond = bytesDelta * 8 * (1000 / elapsedMs);
+			if (bytesDelta > 0 && elapsedMs > 0) {
+				const bitsPerSecond = bytesDelta * 8 * (1000 / elapsedMs);
 
-					if (bitsPerSecond >= 1_000_000) {
-						bitrate = `${(bitsPerSecond / 1_000_000).toFixed(1)}Mbps`;
-					} else if (bitsPerSecond >= 1_000) {
-						bitrate = `${(bitsPerSecond / 1_000).toFixed(0)}kbps`;
-					} else {
-						bitrate = `${bitsPerSecond.toFixed(0)}bps`;
-					}
+				if (bitsPerSecond >= 1_000_000) {
+					bitrate = `${(bitsPerSecond / 1_000_000).toFixed(1)}Mbps`;
+				} else if (bitsPerSecond >= 1_000) {
+					bitrate = `${(bitsPerSecond / 1_000).toFixed(0)}kbps`;
+				} else {
+					bitrate = `${bitsPerSecond.toFixed(0)}bps`;
 				}
 			}
 		}
@@ -85,7 +81,6 @@ export class VideoProvider extends BaseProvider {
 		// Always update previous values for next calculation, even on first call
 		if (stats) {
 			this.previousFrameCount = stats.frameCount;
-			this.previousTimestamp = stats.timestamp;
 			this.previousBytesReceived = stats.bytesReceived;
 			this.previousWhen = now;
 		}

@@ -1,6 +1,6 @@
 import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
-import { Effect, type Getter, Signal } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
 import type * as Audio from "./audio";
 import { type Backend, MultiBackend } from "./backend";
 import { Broadcast } from "./broadcast";
@@ -58,7 +58,7 @@ export default class HangWatch extends HTMLElement implements Backend {
 		this.#backend = new MultiBackend({
 			broadcast: this.broadcast,
 		});
-		this.signals.cleanup(() => this.#backend.signals.close());
+		this.signals.cleanup(() => this.#backend.close());
 
 		// Watch to see if the canvas element is added or removed.
 		const setElement = () => {
@@ -188,14 +188,6 @@ export default class HangWatch extends HTMLElement implements Backend {
 
 	get video(): Video.Backend {
 		return this.#backend.video;
-	}
-
-	get buffering(): Getter<boolean> {
-		return this.#backend.buffering;
-	}
-
-	get timestamp(): Getter<number> {
-		return this.#backend.timestamp;
 	}
 }
 

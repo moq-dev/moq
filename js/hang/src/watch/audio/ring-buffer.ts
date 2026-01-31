@@ -7,7 +7,7 @@ export class AudioRingBuffer {
 
 	readonly rate: number;
 	readonly channels: number;
-	#refill = true;
+	#stalled = true;
 
 	constructor(props: { rate: number; channels: number; latency: Time.Milli }) {
 		if (props.channels <= 0) throw new Error("invalid channels");
@@ -26,8 +26,12 @@ export class AudioRingBuffer {
 		}
 	}
 
-	get refilling(): boolean {
-		return this.#refill;
+	get stalled(): boolean {
+		return this.#stalled;
+	}
+
+	get timestamp(): Time.Micro {
+		return Time.Micro.fromSecond((this.#readIndex / this.rate) as Time.Second);
 	}
 
 	get length(): number {
@@ -36,6 +40,38 @@ export class AudioRingBuffer {
 
 	get capacity(): number {
 		return this.#buffer[0]?.length;
+	}
+
+	resize(latency: Time.Milli): void {
+		const newCapacity = Math.ceil(this.rate * Time.Second.fromMilli(latency));
+		if (newCapacity === this.capacity) return;
+		if (newCapacity === 0) throw new Error("empty buffer");
+
+		const newBuffer: Float32Array[] = [];
+		for (let i = 0; i < this.channels; i++) {
+			newBuffer[i] = new Float32Array(newCapacity);
+		}
+
+		// Copy existing data, preserving the most recent samples
+		const samplesToKeep = Math.min(this.length, newCapacity);
+		if (samplesToKeep > 0) {
+			// Copy the most recent samples (closest to writeIndex)
+			const copyStart = this.#writeIndex - samplesToKeep;
+			for (let channel = 0; channel < this.channels; channel++) {
+				const src = this.#buffer[channel];
+				const dst = newBuffer[channel];
+				for (let i = 0; i < samplesToKeep; i++) {
+					const srcPos = (copyStart + i) % src.length;
+					const dstPos = i % dst.length;
+					dst[dstPos] = src[srcPos];
+				}
+			}
+		}
+
+		// Update state for the new buffer and trigger stall to refill
+		this.#buffer = newBuffer;
+		this.#readIndex = this.#writeIndex - samplesToKeep;
+		this.#stalled = true;
 	}
 
 	write(timestamp: Time.Micro, data: Float32Array[]): void {
@@ -62,8 +98,8 @@ export class AudioRingBuffer {
 		// Check if we need to discard old samples to prevent overflow
 		const overflow = end - this.#readIndex - this.#buffer[0].length;
 		if (overflow >= 0) {
-			// Discard old samples and exit refill mode
-			this.#refill = false;
+			// Discard old samples and exit stalled mode
+			this.#stalled = false;
 			this.#readIndex += overflow;
 		}
 
@@ -105,7 +141,7 @@ export class AudioRingBuffer {
 
 	read(output: Float32Array[]): number {
 		if (output.length !== this.channels) throw new Error("wrong number of channels");
-		if (this.#refill) return 0;
+		if (this.#stalled) return 0;
 
 		const samples = Math.min(this.#writeIndex - this.#readIndex, output[0].length);
 		if (samples === 0) return 0;

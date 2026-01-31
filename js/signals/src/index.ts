@@ -23,6 +23,7 @@ export interface Getter<T> {
 
 export interface Setter<T> {
 	set(value: T | ((prev: T) => T)): void;
+	update(fn: (prev: T) => T): void;
 }
 
 export class Signal<T> implements Getter<T>, Setter<T> {
@@ -574,6 +575,6 @@ export class Effect {
 	}
 
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void {
-		this.subscribe(src, (value) => dst.set(value));
+		this.subscribe(src, (value) => dst.update(() => value));
 	}
 }
