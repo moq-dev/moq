@@ -11,7 +11,8 @@ export class Sync {
 	// The earliest time we've received a frame, relative to its timestamp.
 	// This will keep being updated as we catch up to the live playhead then will be relatively static.
 	// TODO Update this when RTT changes
-	#reference?: Time.Milli;
+	#reference = new Signal<Time.Milli | undefined>(undefined);
+	readonly reference: Signal<Time.Milli | undefined> = this.#reference;
 
 	// The minimum buffer size, to account for network jitter.
 	jitter: Signal<Time.Milli>;
@@ -61,11 +62,12 @@ export class Sync {
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
 	received(timestamp: Time.Milli): void {
 		const ref = (performance.now() - timestamp) as Time.Milli;
+		const current = this.#reference.peek();
 
-		if (this.#reference && ref >= this.#reference) {
+		if (current !== undefined && ref >= current) {
 			return;
 		}
-		this.#reference = ref;
+		this.#reference.set(ref);
 		this.#resolve();
 
 		this.#update = new Promise((resolve) => {
@@ -75,7 +77,8 @@ export class Sync {
 
 	// Sleep until it's time to render this frame.
 	async wait(timestamp: Time.Milli): Promise<void> {
-		if (!this.#reference) {
+		const reference = this.#reference.peek();
+		if (reference === undefined) {
 			throw new Error("reference not set; call update() first");
 		}
 
@@ -85,7 +88,10 @@ export class Sync {
 			const now = performance.now();
 			const ref = (now - timestamp) as Time.Milli;
 
-			const sleep = this.#reference - ref + this.#latency.peek();
+			const currentRef = this.#reference.peek();
+			if (currentRef === undefined) return;
+
+			const sleep = currentRef - ref + this.#latency.peek();
 			if (sleep <= 0) return;
 			const wait = new Promise((resolve) => setTimeout(resolve, sleep)).then(() => true);
 

@@ -1,4 +1,4 @@
-import type * as Moq from "@moq/lite";
+import * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
 import * as Container from "../../container";
@@ -103,6 +103,8 @@ export class Mse implements Backend {
 	): void {
 		if (config.container.kind !== "cmaf") throw new Error("unreachable");
 
+		const timescale = config.container.timescale;
+
 		effect.spawn(async () => {
 			// Generate init segment from catalog config (uses track_id from container)
 			const initSegment = Container.Cmaf.createAudioInitSegment(config);
@@ -113,6 +115,10 @@ export class Mse implements Backend {
 				// It requires extracting the timestamp from the frame payload.
 				const frame = await sub.readFrame();
 				if (!frame) return;
+
+				// Extract the timestamp from the CMAF segment and mark when we received it.
+				const timestamp = Container.Cmaf.decodeTimestamp(frame, timescale);
+				this.source.sync.received(Moq.Time.Milli.fromMicro(timestamp));
 
 				await this.#appendBuffer(sourceBuffer, frame);
 

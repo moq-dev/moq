@@ -107,6 +107,8 @@ export class Mse implements Backend {
 		const data = active.subscribe(track, Catalog.PRIORITY.video);
 		effect.cleanup(() => data.close());
 
+		const timescale = config.container.timescale;
+
 		effect.spawn(async () => {
 			// Generate init segment from catalog config (uses track_id from container)
 			const initSegment = Container.Cmaf.createVideoInitSegment(config);
@@ -117,6 +119,10 @@ export class Mse implements Backend {
 				// It requires extracting the timestamp from the frame payload.
 				const frame = await data.readFrame();
 				if (!frame) return;
+
+				// Extract the timestamp from the CMAF segment and mark when we received it.
+				const timestamp = Container.Cmaf.decodeTimestamp(frame, timescale);
+				this.source.sync.received(Moq.Time.Milli.fromMicro(timestamp));
 
 				await this.#appendBuffer(sourceBuffer, frame);
 
@@ -162,6 +168,10 @@ export class Mse implements Backend {
 				if (!next.frame) continue; // Skip over group done notifications.
 
 				pending = next.frame;
+
+				// Mark that we received this frame right now.
+				this.source.sync.received(Moq.Time.Milli.fromMicro(pending.timestamp as Moq.Time.Micro));
+
 				break;
 			}
 
@@ -173,6 +183,9 @@ export class Mse implements Backend {
 				// Compute duration from next frame's timestamp, or use last known duration if stream ended
 				if (frame) {
 					duration = (frame.timestamp - pending.timestamp) as Moq.Time.Micro;
+
+					// Mark that we received this frame right now for latency calculation.
+					this.source.sync.received(Moq.Time.Milli.fromMicro(frame.timestamp as Moq.Time.Micro));
 				}
 
 				// Wrap raw frame in moof+mdat

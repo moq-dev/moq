@@ -219,15 +219,12 @@ export class Consumer {
 		if (this.#active !== undefined && first.consumer.sequence <= this.#active) {
 			this.#groups.shift();
 
-			console.warn(`skipping slow group: ${first.consumer.sequence} < ${this.#groups[0]?.consumer.sequence}`);
+			this.#active = this.#groups[0]?.consumer.sequence;
+			console.warn(`skipping slow group: ${first.consumer.sequence} < ${this.#active}`);
 
 			first.consumer.close();
 			first.frames.length = 0;
 		}
-
-		// Advance to the next known group.
-		// NOTE: Can't be undefined, because we checked above.
-		this.#active = this.#groups[0]?.consumer.sequence;
 
 		this.#updateBuffered();
 
