@@ -1,4 +1,4 @@
-import type { Time } from "@moq/lite";
+import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 
 export interface SyncProps {
@@ -48,7 +48,7 @@ export class Sync {
 		const video = effect.get(this.video) ?? 0;
 		const audio = effect.get(this.audio) ?? 0;
 
-		const latency = (Math.max(video, audio) + jitter) as Time.Milli;
+		const latency = Time.Milli.add(Math.max(video, audio) as Time.Milli, jitter);
 		this.#latency.set(latency);
 
 		this.#resolve();
@@ -60,7 +60,7 @@ export class Sync {
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
 	received(timestamp: Time.Milli): void {
-		const ref = (performance.now() - timestamp) as Time.Milli;
+		const ref = Time.Milli.sub(Time.Milli.now(), timestamp);
 
 		if (this.#reference && ref >= this.#reference) {
 			return;
@@ -83,7 +83,7 @@ export class Sync {
 			// Sleep until it's time to decode the next frame.
 			// NOTE: This function runs in parallel for each frame.
 			const now = performance.now();
-			const ref = (now - timestamp) as Time.Milli;
+			const ref = Time.Milli.sub(now as Time.Milli, timestamp);
 
 			const sleep = this.#reference - ref + this.#latency.peek();
 			if (sleep <= 0) return;

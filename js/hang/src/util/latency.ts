@@ -1,4 +1,4 @@
-import type * as Moq from "@moq/lite";
+import * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
 type ConfigWithJitter = { jitter?: number; framerate?: number };
@@ -44,7 +44,7 @@ export class Latency {
 		}
 		jitter ??= 0;
 
-		const latency = (jitter + buffer) as Moq.Time.Milli;
+		const latency = Moq.Time.Milli.add(jitter as Moq.Time.Milli, buffer);
 		this.#combined.set(latency);
 	}
 

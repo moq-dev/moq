@@ -1,4 +1,4 @@
-import type * as Moq from "@moq/lite";
+import * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "../../catalog";
 import * as Container from "../../container";
@@ -155,7 +155,7 @@ export class Mse implements Backend {
 
 				// Compute duration from next frame's timestamp, or use last known duration if stream ended
 				if (next) {
-					duration = (next.timestamp - pending.timestamp) as Moq.Time.Micro;
+					duration = Moq.Time.Micro.sub(next.timestamp, pending.timestamp);
 				}
 
 				// Wrap raw frame in moof+mdat
