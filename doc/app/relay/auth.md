@@ -54,7 +54,7 @@ moq-token --key root.jwk sign --root demo --publish my-stream --subscribe ""
 ```
 
 The client connects with the token:
-```
+```text
 https://relay.example.com/demo/my-stream?jwt=eyJhbGciOiJIUzI1NiIs...
 ```
 
@@ -74,7 +74,7 @@ The JWT payload contains these claims:
 
 The `root` claim sets a base path. The `pub` and `sub` claims are suffixes:
 
-```
+```text
 Full publish path = root + "/" + pub
 Full subscribe path = root + "/" + sub
 ```

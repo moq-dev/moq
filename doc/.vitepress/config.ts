@@ -56,11 +56,11 @@ export default defineConfig({
 						},
 						{
 							text: "Use Cases",
-							link: "/concept/use-cases/",
+							link: "/concept/use-case/",
 							items: [
-								{ text: "Contribution", link: "/concept/use-cases/contribution" },
-								{ text: "Distribution", link: "/concept/use-cases/distribution" },
-								{ text: "Conferencing", link: "/concept/use-cases/conferencing" },
+								{ text: "Contribution", link: "/concept/use-case/contribution" },
+								{ text: "Distribution", link: "/concept/use-case/distribution" },
+								{ text: "Conferencing", link: "/concept/use-case/conferencing" },
 							],
 						},
 					],
@@ -127,7 +127,7 @@ export default defineConfig({
 						{ text: "@moq/lite", link: "/js/@moq/lite" },
 						{
 							text: "@moq/hang",
-							link: "/js/hang/",
+							link: "/js/@moq/hang/",
 							items: [
 								{ text: "Watch", link: "/js/@moq/hang/watch" },
 								{ text: "Publish", link: "/js/@moq/hang/publish" },

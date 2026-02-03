@@ -12,7 +12,7 @@ We also want to benefit from economies of scale (like HTTP), utilizing generic l
 
 To accomplish this, MoQ is broken into layers:
 
-```
+```text
 ┌─────────────────┐
 │   Application   │   🏢 Your business logic
 │                 │    - authentication, non-media tracks, etc.

@@ -17,7 +17,7 @@ The OBS plugin allows you to:
 - **Subscribe** to MoQ broadcasts as an OBS source
 
 ## Repository
-The plugin is maintained in a separate repository:
+The plugin is maintained in a separate repository: [moq-dev/obs](https://github.com/moq-dev/obs)
 
 ## Usage
 ### Publishing

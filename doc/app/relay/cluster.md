@@ -45,7 +45,7 @@ node = "https://us-east.relay.example.com"  # This node's address
 
 ## Example Topology
 
-```
+```text
                     ┌─────────────┐
                     │  Root Node  │
                     │   (US-C)    │

@@ -36,7 +36,7 @@ WebRTC was designed for **bidirectional, low-latency communication** between pee
 
 ### WebRTC Architecture
 
-```
+```text
 ┌────────┐     ┌────────┐
 │ Peer A │◄───►│ Peer B │  (Peer-to-Peer)
 └────────┘     └────────┘
@@ -56,7 +56,7 @@ WebRTC was designed for **bidirectional, low-latency communication** between pee
 
 ### MoQ Architecture
 
-```
+```text
 ┌───────────┐     ┌───────┐     ┌────────────┐
 │ Publisher │────►│ Relay │────►│ Subscriber │
 └───────────┘     └───────┘     └────────────┘
