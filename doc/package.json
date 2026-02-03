@@ -5,6 +5,7 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vitepress dev",
+		"check": "vitepress build",
 		"build": "vitepress build",
 		"preview": "vitepress preview",
 		"deploy": "vitepress build && wrangler deploy"

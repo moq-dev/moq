@@ -10,7 +10,7 @@ Everything runs on localhost in development, but in production of course you'll 
 
 Start by cloning the repo:
 ```bash
-git clone \<TODO\>
+git clone https://github.com/moq-dev/moq
 cd moq
 ```
 
