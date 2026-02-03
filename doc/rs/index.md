@@ -35,9 +35,23 @@ Media-specific encoding/streaming library built on top of `moq-lite`.
 - Catalog for track discovery
 - Container format (timestamp + codec bitstream)
 - Support for H.264/265, VP8/9, AV1, AAC, Opus
-- CMAF/fMP4 import
 
 [Learn more](/rs/crate/hang)
+
+### moq-mux
+
+[![crates.io](https://img.shields.io/crates/v/moq-mux)](https://crates.io/crates/moq-mux)
+[![docs.rs](https://docs.rs/moq-mux/badge.svg)](https://docs.rs/moq-mux)
+
+Media muxers and demuxers for importing existing formats into MoQ.
+
+**Features:**
+- fMP4/CMAF import
+- HLS playlist import
+- H.264/H.265 Annex B parsing
+- AAC and Opus codec support
+
+[Learn more](/rs/crate/moq-mux)
 
 ## Authentication
 
@@ -243,6 +257,7 @@ Full API documentation is available on [docs.rs](https://docs.rs):
 
 - [moq-lite API](https://docs.rs/moq-lite)
 - [hang API](https://docs.rs/hang)
+- [moq-mux API](https://docs.rs/moq-mux)
 - [moq-token API](https://docs.rs/moq-token)
 - [moq-native API](https://docs.rs/moq-native)
 - [libmoq API](https://docs.rs/libmoq)
@@ -251,5 +266,6 @@ Full API documentation is available on [docs.rs](https://docs.rs):
 
 - Explore [moq-lite](/rs/crate/moq-lite) - Core protocol
 - Explore [hang](/rs/crate/hang) - Media library
+- Explore [moq-mux](/rs/crate/moq-mux) - Media import
 - Deploy [moq-relay](/app/relay/) - Relay server
 - View [code examples](https://github.com/moq-dev/moq/tree/main/rs)

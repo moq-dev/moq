@@ -269,7 +269,7 @@ Key types:
 - `Catalog` - Track metadata
 - `VideoConfig` / `AudioConfig` - Track configuration
 - `Frame` - Timestamp + codec bitstream
-- `cmaf` module - CMAF/fMP4 import
+- [moq-mux](/rs/crate/moq-mux) - CMAF/fMP4/HLS import
 
 ## Protocol Specification
 

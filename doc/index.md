@@ -101,7 +101,8 @@ The main focus is [native](/rs/env/native), but there's also some [WASM support]
 
 Some highlights:
 - [moq-lite](/rs/crate/moq-lite) - Performs the core asynchronous networking, caching, and fanout.
-- [hang](/rs/crate/hang) - Performs any media stuff: currently only transmuxing.
+- [hang](/rs/crate/hang) - Media-specific encoding and streaming (catalog, container format).
+- [moq-mux](/rs/crate/moq-mux) - Media muxers/demuxers for fMP4, CMAF, and HLS import.
 - [libmoq](/rs/crate/libmoq) - C bindings for the above, no finagling Rust into your build system.
 - [web-transport](/rs/crate/web-transport) - A suite of crates required to get QUIC access in the browser, plus some polyfills.
 - [...and more](/rs/)
