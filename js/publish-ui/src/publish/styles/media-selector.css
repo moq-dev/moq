@@ -1,0 +1,31 @@
+.publish-ui__media-selector-wrapper {
+	position: relative;
+	gap: var(--spacing-8);
+}
+
+.publish-ui__media-selector-toggle {
+	font-size: 0.75rem;
+	cursor: pointer;
+}
+
+.publish-ui__media-selector-toggle.button,
+.publish-ui__media-selector-toggle.button:hover:not(:disabled) {
+	background-color: unset;
+	box-shadow: none;
+	border: unset;
+}
+
+.publish-ui__media-selector-dropdown {
+	position: absolute;
+	top: var(--spacing-48);
+	right: var(--spacing-8);
+	padding: var(--spacing-12) var(--spacing-16);
+	background: var(--color-black-alpha-85);
+	border: var(--spacing-1) solid var(--color-white-alpha-10);
+	border-radius: var(--border-radius-sm);
+	color: var(--color-white);
+	cursor: pointer;
+	z-index: 1;
+	outline: none;
+	box-shadow: none;
+}

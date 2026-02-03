@@ -12,7 +12,10 @@
 		"js/clock",
 		"js/token",
 		"js/hang",
-		"js/hang-ui",
+		"js/publish",
+		"js/watch",
+		"js/publish-ui",
+		"js/watch-ui",
 		"js/hang-demo",
 		"js/signals"
 	],

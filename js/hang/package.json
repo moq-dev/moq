@@ -2,22 +2,20 @@
 	"name": "@moq/hang",
 	"type": "module",
 	"version": "0.1.2",
-	"description": "Media over QUIC library",
+	"description": "Media over QUIC library - catalog and container",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
 	"exports": {
 		".": "./src/index.ts",
-		"./publish": "./src/publish/index.ts",
-		"./publish/element": "./src/publish/element.ts",
-		"./watch": "./src/watch/index.ts",
-		"./watch/element": "./src/watch/element.ts",
 		"./catalog": "./src/catalog/index.ts",
+		"./container": "./src/container/index.ts",
 		"./support": "./src/support/index.ts",
-		"./support/element": "./src/support/element.ts"
+		"./support/element": "./src/support/element.ts",
+		"./util/hacks": "./src/util/hacks.ts",
+		"./util/hex": "./src/util/hex.ts",
+		"./util/libav": "./src/util/libav.ts"
 	},
 	"sideEffects": [
-		"./src/publish/element.ts",
-		"./src/watch/element.ts",
 		"./src/support/element.ts"
 	],
 	"scripts": {
