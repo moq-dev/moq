@@ -271,6 +271,6 @@ function VideoPlayer(props) {
 
 ## Next Steps
 
-- Learn about [publishing streams](/ts/hang/publish)
-- View [code examples](/ts/examples)
-- Learn about [Web Components](/web/)
+- Learn about [publishing streams](/js/@moq/hang/publish)
+- View [code examples](https://github.com/moq-dev/moq/tree/main/js)
+- Learn about [Web Components](/js/env/web)

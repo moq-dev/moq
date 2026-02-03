@@ -214,6 +214,6 @@ batch(() => {
 
 ## Next Steps
 
-- Use with [@moq/hang](/ts/hang/)
-- View [code examples](/ts/examples)
-- Learn about [Web Components](/web/)
+- Use with [@moq/hang](/js/@moq/hang/)
+- View [code examples](https://github.com/moq-dev/moq/tree/main/js)
+- Learn about [Web Components](/js/env/web)

@@ -22,7 +22,7 @@ The core pub/sub transport protocol implementing the [moq-lite specification](ht
 - QUIC stream management
 - Prioritization and backpressure
 
-[Learn more](/rust/lite)
+[Learn more](/rs/crate/moq-lite)
 
 ### hang
 
@@ -37,7 +37,7 @@ Media-specific encoding/streaming library built on top of `moq-lite`.
 - Support for H.264/265, VP8/9, AV1, AAC, Opus
 - CMAF/fMP4 import
 
-[Learn more](/rust/hang)
+[Learn more](/rs/crate/hang)
 
 ## Authentication
 
@@ -54,7 +54,7 @@ JWT authentication library and CLI tool for generating tokens.
 - Token generation and verification
 - Available as library and CLI
 
-[Learn more](/rust/token)
+[Learn more](/rs/crate/moq-token)
 
 ## Networking
 
@@ -68,7 +68,7 @@ QUIC and WebTransport implementation for Rust.
 - TLS certificate management
 - Server and client modes
 
-[Learn more](/rust/web-transport)
+[Learn more](/rs/crate/web-transport)
 
 ### moq-native
 
@@ -106,7 +106,7 @@ hang publish video.mp4
 ffmpeg -i input.mp4 -f mpegts - | hang publish -
 ```
 
-[Learn more](/ffmpeg/)
+[Learn more](/app/cli)
 
 ### moq-token-cli
 
@@ -129,7 +129,7 @@ moq-token --key root.jwk sign \
   --expires 1735689600
 ```
 
-See [Authentication guide](/relay/auth) for details.
+See [Authentication guide](/app/relay/auth) for details.
 
 ## Utilities
 
@@ -249,7 +249,7 @@ Full API documentation is available on [docs.rs](https://docs.rs):
 
 ## Next Steps
 
-- Explore [moq-lite](/rust/lite) - Core protocol
-- Explore [hang](/rust/hang) - Media library
-- Deploy [moq-relay](/relay/) - Relay server
-- View [code examples](/rust/examples)
+- Explore [moq-lite](/rs/crate/moq-lite) - Core protocol
+- Explore [hang](/rs/crate/hang) - Media library
+- Deploy [moq-relay](/app/relay/) - Relay server
+- View [code examples](https://github.com/moq-dev/moq/tree/main/rs)

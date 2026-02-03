@@ -163,6 +163,6 @@ async function connectWithAuth(key: CryptoKey, room: string, user: string) {
 
 ## Next Steps
 
-- Set up [Relay Authentication](/relay/auth)
-- Learn about [Authentication concepts](/concept/authentication)
-- Use [@moq/lite](/ts/lite) for connections
+- Set up [Relay Authentication](/app/relay/auth)
+- Learn about [Authentication concepts](/app/relay/auth)
+- Use [@moq/lite](/js/@moq/lite) for connections

@@ -297,7 +297,7 @@ Each frame sent as soon as encoded.
 
 ## Next Steps
 
-- Compare with [contribution protocols](/concept/contribution) (RTMP/SRT)
-- Compare with [conferencing protocols](/concept/conferencing) (WebRTC)
-- Read the [Protocol specification](/concept/protocol)
-- Try the [Quick Start](/dev/)
+- Compare with [contribution protocols](/concept/use-case/contribution) (RTMP/SRT)
+- Compare with [conferencing protocols](/concept/use-case/conferencing) (WebRTC)
+- Read the [Protocol specification](/concept/layer/)
+- Try the [Quick Start](/setup/)

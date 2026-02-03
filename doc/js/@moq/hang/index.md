@@ -8,7 +8,7 @@ description: Media library with Web Components
 [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-High-level media library for real-time streaming using [Media over QUIC](https://moq.dev), built on top of [@moq/lite](/ts/lite).
+High-level media library for real-time streaming using [Media over QUIC](https://moq.dev), built on top of [@moq/lite](/js/@moq/lite).
 
 ## Overview
 
@@ -30,7 +30,7 @@ pnpm add @moq/hang
 
 ## Web Components
 
-The fastest way to add MoQ to your web page. See [Web Components](/web/) for full details.
+The fastest way to add MoQ to your web page. See [Web Components](/js/env/web) for full details.
 
 ### Publishing
 
@@ -48,7 +48,7 @@ The fastest way to add MoQ to your web page. See [Web Components](/web/) for ful
 </hang-publish>
 ```
 
-[Learn more about publishing](/ts/hang/publish)
+[Learn more about publishing](/js/@moq/hang/publish)
 
 ### Watching
 
@@ -206,7 +206,7 @@ Check out [hang-demo](https://github.com/moq-dev/moq/tree/main/js/hang-demo) for
 - Chat integration
 - Quality selection UI
 
-[View more examples](/ts/examples)
+[View more examples](https://github.com/moq-dev/moq/tree/main/js)
 
 ## Framework Integration
 
@@ -223,8 +223,8 @@ See the [hang specification](https://moq-dev.github.io/drafts/draft-lcurley-moq-
 
 ## Next Steps
 
-- Learn about [watching streams](/ts/hang/watch)
-- Learn about [publishing streams](/ts/hang/publish)
-- Use [Web Components](/web/)
-- Use [@moq/lite](/ts/lite) for custom protocols
-- View [code examples](/ts/examples)
+- Learn about [watching streams](/js/@moq/hang/watch)
+- Learn about [publishing streams](/js/@moq/hang/publish)
+- Use [Web Components](/js/env/web)
+- Use [@moq/lite](/js/@moq/lite) for custom protocols
+- View [code examples](https://github.com/moq-dev/moq/tree/main/js)

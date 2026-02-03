@@ -9,7 +9,7 @@ Here's a guide on how to get moq-relay running in production.
 
 ## Overview
 
-[moq-relay](/relay/) is the core of the MoQ stack.
+[moq-relay](/app/relay/) is the core of the MoQ stack.
 It's responsible for routing live tracks (payload agnostic) from 1 client to N clients.
 The relay accepts WebTransport connections from clients, but it can also connect to other relays to fetch upstream.
 Think of the relay as a HTTP web server like [Nginx](https://nginx.org/), but for live content.
@@ -53,7 +53,7 @@ Any EC2-like cloud provider will work; we just need a VM with a public IP addres
 The old setup used to use [GCP](https://cloud.google.com/) but was double the cost.
 We're still using [GCP](https://cloud.google.com/blog/products/networking/dns-routing-policies-for-geo-location--weighted-round-robin) for GeoDNS because there aren't many other options and it's virtually free (unlike Cloudflare).
 
-Read the [moq-relay](/relay/) documentation for more details on how to configure the relay server.
+Read the [moq-relay](/app/relay/) documentation for more details on how to configure the relay server.
 
 ## Hard Mode
 
@@ -105,6 +105,6 @@ sudo systemctl start moq-relay
 
 ## Next Steps
 
-- Set up [Authentication](/relay/auth)
-- Configure [Clustering](/relay/cluster)
+- Set up [Authentication](/app/relay/auth)
+- Configure [Clustering](/app/relay/cluster)
 - Learn about [Concepts](/concept/)

@@ -17,7 +17,7 @@ export default defineConfig({
 			{ text: "Concepts", link: "/concept/" },
 			{ text: "Apps", link: "/app/" },
 			{ text: "Rust", link: "/rs/" },
-			{ text: "TypeScript", link: "/ts/" },
+			{ text: "TypeScript", link: "/js/" },
 		],
 
 		sidebar: {
@@ -170,4 +170,9 @@ export default defineConfig({
 		theme: "github-dark",
 		lineNumbers: true,
 	},
+
+	ignoreDeadLinks: [
+		// Localhost URLs are intentional for development
+		"http://localhost:5173",
+	],
 });

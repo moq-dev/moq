@@ -12,7 +12,7 @@ A TypeScript implementation of [Media over QUIC](https://moq.dev/) providing rea
 
 ## Overview
 
-`@moq/lite` is the browser equivalent of the Rust `moq-lite` crate, providing the core networking layer for MoQ. For higher-level media functionality, use [@moq/hang](/ts/hang/).
+`@moq/lite` is the browser equivalent of the Rust `moq-lite` crate, providing the core networking layer for MoQ. For higher-level media functionality, use [@moq/hang](/js/@moq/hang/).
 
 ## Installation
 
@@ -157,7 +157,7 @@ const connection = await Moq.connect(
 );
 ```
 
-See [Authentication guide](/relay/auth) for details.
+See [Authentication guide](/app/relay/auth) for details.
 
 ### Priority
 
@@ -237,7 +237,7 @@ Firefox and Safari support is experimental or planned.
 ## Examples
 
 For more examples, see:
-- [TypeScript examples](/ts/examples)
+- [TypeScript examples](https://github.com/moq-dev/moq/tree/main/js)
 - [hang-demo](https://github.com/moq-dev/moq/tree/main/js/hang-demo)
 
 ## Protocol Specification
@@ -246,7 +246,7 @@ See the [moq-lite specification](https://moq-dev.github.io/drafts/draft-lcurley-
 
 ## Next Steps
 
-- Build media apps with [@moq/hang](/ts/hang/)
-- Learn about [Web Components](/web/)
-- View [code examples](/ts/examples)
+- Build media apps with [@moq/hang](/js/@moq/hang/)
+- Learn about [Web Components](/js/env/web)
+- View [code examples](https://github.com/moq-dev/moq/tree/main/js)
 - Read the [Concepts guide](/concept/)

@@ -215,5 +215,5 @@ let connection = Connection::from_session(session);
 ## Next Steps
 
 - Check the [GitHub repository](https://github.com/moq-dev/web-transport)
-- Use [moq-lite](/rust/lite) for MoQ protocol
-- Deploy a [relay server](/relay/)
+- Use [moq-lite](/rs/crate/moq-lite) for MoQ protocol
+- Deploy a [relay server](/app/relay/)

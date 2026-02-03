@@ -106,7 +106,7 @@ Pass a JWT token via the URL:
 hang publish video.mp4 "https://relay.example.com/room/123?jwt=<token>"
 ```
 
-See [Authentication](/relay/auth) for token generation.
+See [Authentication](/app/relay/auth) for token generation.
 
 ## Test Videos
 
@@ -157,15 +157,15 @@ curl http://relay.example.com:4443/announced/
 ### "Invalid certificate"
 - The relay needs a valid TLS certificate
 - For development, use the fingerprint method
-- See [TLS Setup](/relay/#tls-setup)
+- See [TLS Setup](/app/relay/#tls-setup)
 
 ### "Permission denied"
 - Check your JWT token is valid
 - Verify the token allows publishing to that path
-- See [Authentication](/relay/auth)
+- See [Authentication](/app/relay/auth)
 
 ## Next Steps
 
-- Deploy a [relay server](/relay/)
-- Use [Web Components](/web/) for playback
-- Try the [Rust libraries](/rust/) for custom apps
+- Deploy a [relay server](/app/relay/)
+- Use [Web Components](/js/env/web) for playback
+- Try the [Rust libraries](/rs/) for custom apps

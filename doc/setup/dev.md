@@ -115,8 +115,8 @@ Please don't submit a vibe coded PR unless you understand it.
 Learn how to run them [in production](/setup/prod).
 
 Or take a detour and:
-- Brush up on the [concepts](/concept).
-- Discover the other [apps](/app).
-- `use` the [Rust crates](/rs).
-- `import` the [Typescript packages](/js).
+- Brush up on the [concepts](/concept/).
+- Discover the other [apps](/app/).
+- `use` the [Rust crates](/rs/).
+- `import` the [Typescript packages](/js/).
 - or IDK, go take a shower or something while Claude parses the docs.

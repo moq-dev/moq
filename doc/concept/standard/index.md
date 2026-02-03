@@ -119,7 +119,7 @@ Contributions welcome:
 
 ## Next Steps
 
-- Read the [Protocol details](/concept/protocol)
-- Understand [Authentication](/concept/authentication)
-- Try the [Rust libraries](/rust/)
-- Try the [TypeScript libraries](/ts/)
+- Read the [Protocol details](/concept/layer/)
+- Understand [Authentication](/app/relay/auth)
+- Try the [Rust libraries](/rs/)
+- Try the [TypeScript libraries](/js/)

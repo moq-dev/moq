@@ -315,10 +315,10 @@ Include JWT token in the URL:
 </hang-publish>
 ```
 
-See [Authentication](/relay/auth) for token generation.
+See [Authentication](/app/relay/auth) for token generation.
 
 ## Next Steps
 
-- Learn about [watching streams](/ts/hang/watch)
-- View [code examples](/ts/examples)
-- Learn about [Web Components](/web/)
+- Learn about [watching streams](/js/@moq/hang/watch)
+- View [code examples](https://github.com/moq-dev/moq/tree/main/js)
+- Learn about [Web Components](/js/env/web)

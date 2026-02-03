@@ -70,7 +70,7 @@ It adds some features, mostly in the form of the HTTP handshake, but its primari
 Think of it like WebSocket but for QUIC instead of TCP.
 
 In my opinion, it's not particularly well designed but also harmless.
-Most of the complexity can be abstracted away if you use my [web-transport](rs/crate/web-transport) libraries.
+Most of the complexity can be abstracted away if you use my [web-transport](/rs/crate/web-transport) libraries.
 Native MoQ clients can also skip WebTransport entirely and use QUIC directly via an ALPN.
 
 But why doesn't MoQ use HTTP/3 instead of WebTransport?
@@ -79,7 +79,7 @@ It's certainly possible but HTTP semantics make it more difficult:
 - **With WebTransport**: both sides can create streams whenever and immediately write new frames.
 - **With HTTP/3**: only the client can create a stream (HTTP request), as HTTP push is gone and a mistake anyway. It gets awkward because the client needs to know when the server wants to write a new stream.
 
-[moq-relay](/app/relay) does provide a HTTP endpoint so a client can still request content on-demand instead of subscribing.
+[moq-relay](/app/relay/) does provide a HTTP endpoint so a client can still request content on-demand instead of subscribing.
 This is useful for backwards compatibility with HLS, but the long-term goal is to make publishing and subscribing symettrical via WebTransport.
 
 

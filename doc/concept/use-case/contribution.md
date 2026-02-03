@@ -212,11 +212,11 @@ OBS → MoQ → Relay → Browser
 Latency: <1 second (or lower)
 ```
 
-Note: MoQ OBS plugin is in development. See [OBS Plugin](/obs/).
+Note: MoQ OBS plugin is in development. See [OBS Plugin](/app/obs).
 
 ## Next Steps
 
-- Compare with [distribution protocols](/concept/distribution) (HLS/DASH)
-- Compare with [conferencing protocols](/concept/conferencing) (WebRTC)
-- Read the [Protocol specification](/concept/protocol)
-- Try the [Quick Start](/dev/)
+- Compare with [distribution protocols](/concept/use-case/distribution) (HLS/DASH)
+- Compare with [conferencing protocols](/concept/use-case/conferencing) (WebRTC)
+- Read the [Protocol specification](/concept/layer/)
+- Try the [Quick Start](/setup/)

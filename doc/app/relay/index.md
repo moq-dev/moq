@@ -200,8 +200,8 @@ Check:
 
 ## Next Steps
 
-- Set up [Authentication](/relay/auth)
-- Configure [Clustering](/relay/cluster)
-- Deploy to [Production](/relay/production)
-- Use [moq-lite](/rust/lite) client library
-- Build media apps with [hang](/rust/hang)
+- Set up [Authentication](/app/relay/auth)
+- Configure [Clustering](/app/relay/cluster)
+- Deploy to [Production](/app/relay/prod)
+- Use [moq-lite](/rs/crate/moq-lite) client library
+- Build media apps with [hang](/rs/crate/hang)

@@ -76,6 +76,6 @@ Clients use GeoDNS to connect to the nearest relay automatically.
 
 ## Next Steps
 
-- Deploy to [Production](/relay/production)
-- Set up [Authentication](/relay/auth)
-- Learn about [Protocol concepts](/concept/protocol)
+- Deploy to [Production](/app/relay/prod)
+- Set up [Authentication](/app/relay/auth)
+- Learn about [Protocol concepts](/concept/layer/)

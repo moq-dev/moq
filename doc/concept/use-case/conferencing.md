@@ -333,7 +333,7 @@ MoQ excels at **scalable live delivery** from publishers to viewers.
 
 ## Next Steps
 
-- Compare with [contribution protocols](/concept/contribution) (RTMP/SRT)
-- Compare with [distribution protocols](/concept/distribution) (HLS/DASH)
-- Read the [Protocol specification](/concept/protocol)
-- Try the [Quick Start](/dev/)
+- Compare with [contribution protocols](/concept/use-case/contribution) (RTMP/SRT)
+- Compare with [distribution protocols](/concept/use-case/distribution) (HLS/DASH)
+- Read the [Protocol specification](/concept/layer/)
+- Try the [Quick Start](/setup/)

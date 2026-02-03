@@ -20,7 +20,7 @@ Core pub/sub transport protocol for browsers. Implements the [moq-lite specifica
 - Broadcasts, tracks, groups, frames
 - Browser and server-side support (with polyfill)
 
-[Learn more](/ts/lite)
+[Learn more](/js/@moq/lite)
 
 ### @moq/hang
 
@@ -34,7 +34,7 @@ High-level media library with Web Components for streaming audio and video.
 - WebCodecs-based encoding/decoding
 - Reactive state management
 
-[Learn more](/ts/hang/)
+[Learn more](/js/@moq/hang/)
 
 ## UI Components
 
@@ -50,7 +50,7 @@ SolidJS UI components that interact with hang Web Components.
 - Chat interface
 - Network statistics
 
-[Learn more](/ts/hang-ui)
+[Learn more](/js/@moq/hang-ui)
 
 ## Utilities
 
@@ -58,7 +58,7 @@ SolidJS UI components that interact with hang Web Components.
 
 Reactive signals library used by hang for state management.
 
-[Learn more](/ts/signals)
+[Learn more](/js/@moq/signals)
 
 ### @moq/clock
 
@@ -68,7 +68,7 @@ Clock utilities for timestamp synchronization.
 
 JWT token generation and verification for browsers.
 
-[Learn more](/ts/token)
+[Learn more](/js/@moq/token)
 
 ## Installation
 
@@ -118,7 +118,7 @@ The easiest way to add MoQ to your web page:
 </html>
 ```
 
-[Learn more about Web Components](/web/)
+[Learn more about Web Components](/js/env/web)
 
 ### Using JavaScript API
 
@@ -141,7 +141,7 @@ group.close();
 connection.publish("my-broadcast", broadcast.consume());
 ```
 
-[Learn more about @moq/lite](/ts/lite)
+[Learn more about @moq/lite](/js/@moq/lite)
 
 ## Browser Compatibility
 
@@ -203,7 +203,7 @@ Check out the [hang-demo](https://github.com/moq-dev/moq/tree/main/js/hang-demo)
 
 ## Next Steps
 
-- Explore [@moq/lite](/ts/lite) - Core protocol
-- Explore [@moq/hang](/ts/hang/) - Media library
-- Learn about [Web Components](/web/)
-- View [code examples](/ts/examples)
+- Explore [@moq/lite](/js/@moq/lite) - Core protocol
+- Explore [@moq/hang](/js/@moq/hang/) - Media library
+- Learn about [Web Components](/js/env/web)
+- View [code examples](https://github.com/moq-dev/moq/tree/main/js)

@@ -286,8 +286,8 @@ Requires modern browser features:
 
 For production, you'll want to:
 
-1. Use a production relay ([moq-relay](/relay/))
-2. Set up proper [authentication](/relay/auth)
+1. Use a production relay ([moq-relay](/app/relay/))
+2. Set up proper [authentication](/app/relay/auth)
 3. Use a bundler like [Vite](https://vite.dev/)
 
 Currently, you need to use a bundler and [Vite](https://vite.dev/) is the only supported option for `@moq/hang`.
@@ -299,6 +299,6 @@ Don't even try to run `@moq/hang` on the server side or you'll run into a ton of
 
 ## Next Steps
 
-- Learn about [@moq/hang](/ts/hang/)
-- Use [@moq/lite](/ts/lite) for custom protocols
-- View [code examples](/ts/examples)
+- Learn about [@moq/hang](/js/@moq/hang/)
+- Use [@moq/lite](/js/@moq/lite) for custom protocols
+- View [code examples](https://github.com/moq-dev/moq/tree/main/js)

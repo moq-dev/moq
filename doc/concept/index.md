@@ -263,8 +263,8 @@ The generic design supports:
 
 ## Next Steps
 
-- Read the [Protocol specs](/concept/protocol)
-- Learn about [Authentication](/concept/authentication)
-- Compare with [other protocols](/concept/contribution)
-- Try the [Rust libraries](/rust/)
-- Try the [TypeScript libraries](/ts/)
+- Read the [Protocol specs](/concept/layer/)
+- Learn about [Authentication](/app/relay/auth)
+- Compare with [other protocols](/concept/use-case/contribution)
+- Try the [Rust libraries](/rs/)
+- Try the [TypeScript libraries](/js/)

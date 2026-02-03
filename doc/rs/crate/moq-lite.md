@@ -13,7 +13,7 @@ The core pub/sub transport protocol implementing the [moq-lite specification](ht
 
 ## Overview
 
-`moq-lite` provides the networking layer for MoQ, implementing broadcasts, tracks, groups, and frames on top of QUIC. Live media is built on top of this layer using something like [hang](/rust/hang).
+`moq-lite` provides the networking layer for MoQ, implementing broadcasts, tracks, groups, and frames on top of QUIC. Live media is built on top of this layer using something like [hang](/rs/crate/hang).
 
 ## Core Concepts
 
@@ -172,7 +172,7 @@ let url = format!("https://relay.example.com/demo?jwt={}", token);
 let connection = Connection::connect(&url).await?;
 ```
 
-See [Authentication guide](/relay/auth) for details.
+See [Authentication guide](/app/relay/auth) for details.
 
 ## Error Handling
 
@@ -231,7 +231,7 @@ See the [moq-lite specification](https://moq-dev.github.io/drafts/draft-lcurley-
 
 ## Next Steps
 
-- Build media apps with [hang](/rust/hang)
-- Deploy a [relay server](/relay/)
+- Build media apps with [hang](/rs/crate/hang)
+- Deploy a [relay server](/app/relay/)
 - Read the [Concepts guide](/concept/)
-- View [code examples](/rust/examples)
+- View [code examples](https://github.com/moq-dev/moq/tree/main/rs)

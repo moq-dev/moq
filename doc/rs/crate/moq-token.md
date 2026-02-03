@@ -153,7 +153,7 @@ key = "root.jwk"
 public = "anon"  # Optional: anonymous access
 ```
 
-See [Relay Authentication](/relay/auth) for details.
+See [Relay Authentication](/app/relay/auth) for details.
 
 ## Security Considerations
 
@@ -195,6 +195,6 @@ Full API documentation: [docs.rs/moq-token](https://docs.rs/moq-token)
 
 ## Next Steps
 
-- Configure [Relay Authentication](/relay/auth)
-- Deploy a [Relay Server](/relay/)
-- Learn about [Authentication concepts](/concept/authentication)
+- Configure [Relay Authentication](/app/relay/auth)
+- Deploy a [Relay Server](/app/relay/)
+- Learn about [Authentication](/app/relay/auth)
