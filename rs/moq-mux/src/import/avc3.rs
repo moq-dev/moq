@@ -1,14 +1,13 @@
-use crate::annexb::{NalIterator, START_CODE};
+use super::annexb::{NalIterator, START_CODE};
 
 use anyhow::Context;
 use buf_list::BufList;
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use moq_lite as moq;
-use scuffle_h265::{NALUnitType, SpsNALUnit};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// A decoder for H.265 with inline SPS/PPS.
-/// Only supports single layer streams, ignores VPS.
-pub struct Hev1 {
+/// A decoder for H.264 with inline SPS/PPS.
+pub struct Avc3 {
 	// The broadcast being produced.
 	// This `hang` variant includes a catalog.
 	broadcast: hang::BroadcastProducer,
@@ -27,7 +26,7 @@ pub struct Hev1 {
 	zero: Option<tokio::time::Instant>,
 }
 
-impl Hev1 {
+impl Avc3 {
 	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
 		Self {
 			broadcast,
@@ -38,28 +37,30 @@ impl Hev1 {
 		}
 	}
 
-	fn init(&mut self, sps: &SpsNALUnit) -> anyhow::Result<()> {
-		let profile = &sps.rbsp.profile_tier_level.general_profile;
-		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
+	fn init(&mut self, sps: &h264_parser::Sps) -> anyhow::Result<()> {
+		let constraint_flags: u8 = ((sps.constraint_set0_flag as u8) << 7)
+			| ((sps.constraint_set1_flag as u8) << 6)
+			| ((sps.constraint_set2_flag as u8) << 5)
+			| ((sps.constraint_set3_flag as u8) << 4)
+			| ((sps.constraint_set4_flag as u8) << 3)
+			| ((sps.constraint_set5_flag as u8) << 2);
 
 		let config = hang::catalog::VideoConfig {
-			coded_width: Some(sps.rbsp.cropped_width() as u32),
-			coded_height: Some(sps.rbsp.cropped_height() as u32),
-			codec: hang::catalog::H265 {
-				in_band: true, // We only support `hev1` with inline SPS/PPS for now
-				profile_space: profile.profile_space,
-				profile_idc: profile.profile_idc,
-				profile_compatibility_flags: profile.profile_compatibility_flag.bits().to_be_bytes(),
-				tier_flag: profile.tier_flag,
-				level_idc: profile.level_idc.context("missing level_idc in SPS")?,
-				constraint_flags: pack_constraint_flags(profile),
+			coded_width: Some(sps.width),
+			coded_height: Some(sps.height),
+			codec: hang::catalog::H264 {
+				profile: sps.profile_idc,
+				constraints: constraint_flags,
+				level: sps.level_idc,
+				inline: true,
 			}
 			.into(),
 			description: None,
-			framerate: vui_data.framerate,
+			// TODO: populate these fields
+			framerate: None,
 			bitrate: None,
-			display_ratio_width: vui_data.display_ratio_width,
-			display_ratio_height: vui_data.display_ratio_height,
+			display_ratio_width: None,
+			display_ratio_height: None,
 			optimize_for_latency: None,
 			container: hang::catalog::Container::Legacy,
 			jitter: None,
@@ -107,6 +108,16 @@ impl Hev1 {
 
 		if let Some(nal) = nals.flush()? {
 			self.decode_nal(nal, None)?;
+		}
+
+		Ok(())
+	}
+
+	/// Decode from an asynchronous reader.
+	pub async fn decode_from<T: AsyncRead + Unpin>(&mut self, reader: &mut T) -> anyhow::Result<()> {
+		let mut buffer = BytesMut::new();
+		while reader.read_buf(&mut buffer).await? > 0 {
+			self.decode_stream(&mut buffer, None)?;
 		}
 
 		Ok(())
@@ -167,61 +178,46 @@ impl Hev1 {
 		Ok(())
 	}
 
-	/// Decode a single NAL unit. Only reads the first header byte to extract nal_unit_type,
-	/// Ignores nuh_layer_id and nuh_temporal_id_plus1.
 	fn decode_nal(&mut self, nal: Bytes, pts: Option<hang::Timestamp>) -> anyhow::Result<()> {
-		anyhow::ensure!(nal.len() >= 2, "NAL unit is too short");
-		// u16 header: [forbidden_zero_bit(1) | nal_unit_type(6) | nuh_layer_id(6) | nuh_temporal_id_plus1(3)]
 		let header = nal.first().context("NAL unit is too short")?;
-
 		let forbidden_zero_bit = (header >> 7) & 1;
 		anyhow::ensure!(forbidden_zero_bit == 0, "forbidden zero bit is not zero");
 
-		// Bits 1-6: nal_unit_type
-		let nal_unit_type = (header >> 1) & 0b111111;
-		let nal_type = NALUnitType::from(nal_unit_type);
+		let nal_unit_type = header & 0b11111;
+		let nal_type = NalType::try_from(nal_unit_type).ok();
 
 		match nal_type {
-			NALUnitType::SpsNut => {
+			Some(NalType::Sps) => {
 				self.maybe_start_frame(pts)?;
 
 				// Try to reinitialize the track if the SPS has changed.
-				let sps = SpsNALUnit::parse(&mut &nal[..]).context("failed to parse SPS NAL unit")?;
+				let nal = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
+				let sps = h264_parser::Sps::parse(&nal)?;
 				self.init(&sps)?;
 			}
 			// TODO parse the SPS again and reinitialize the track if needed
-			NALUnitType::AudNut | NALUnitType::PpsNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
+			Some(NalType::Aud) | Some(NalType::Pps) | Some(NalType::Sei) => {
 				self.maybe_start_frame(pts)?;
 			}
-			// Keyframe containing slices
-			NALUnitType::IdrWRadl
-			| NALUnitType::IdrNLp
-			| NALUnitType::BlaNLp
-			| NALUnitType::BlaWRadl
-			| NALUnitType::BlaWLp
-			| NALUnitType::CraNut => {
+			Some(NalType::IdrSlice) => {
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
 			}
-			// All other slice types (both N and R variants)
-			NALUnitType::TrailN
-			| NALUnitType::TrailR
-			| NALUnitType::TsaN
-			| NALUnitType::TsaR
-			| NALUnitType::StsaN
-			| NALUnitType::StsaR
-			| NALUnitType::RadlN
-			| NALUnitType::RadlR
-			| NALUnitType::RaslN
-			| NALUnitType::RaslR => {
-				// Check first_slice_segment_in_pic_flag (bit 7 of third byte, after 2-byte header)
-				if nal.get(2).context("NAL unit is too short")? & 0x80 != 0 {
+			Some(NalType::NonIdrSlice)
+			| Some(NalType::DataPartitionA)
+			| Some(NalType::DataPartitionB)
+			| Some(NalType::DataPartitionC) => {
+				// first_mb_in_slice flag, means this is the first frame of a slice.
+				if nal.get(1).context("NAL unit is too short")? & 0x80 != 0 {
 					self.maybe_start_frame(pts)?;
 				}
+
 				self.current.contains_slice = true;
 			}
 			_ => {}
 		}
+
+		tracing::trace!(kind = ?nal_type, "parsed NAL");
 
 		// Rather than keeping the original size of the start code, we replace it with a 4 byte start code.
 		// It's just marginally easier and potentially more efficient down the line (JS player with MSE).
@@ -270,7 +266,7 @@ impl Hev1 {
 	}
 }
 
-impl Drop for Hev1 {
+impl Drop for Avc3 {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
 			tracing::debug!(name = ?track.info.name, "ending track");
@@ -279,16 +275,26 @@ impl Drop for Hev1 {
 	}
 }
 
-// Packs the constraint flags from ITU H.265 V10 Section 7.3.3 Profile, tier and level syntax
-fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] {
-	let mut flags = [0u8; 6];
-	flags[0] = ((profile.progressive_source_flag as u8) << 7)
-		| ((profile.interlaced_source_flag as u8) << 6)
-		| ((profile.non_packed_constraint_flag as u8) << 5)
-		| ((profile.frame_only_constraint_flag as u8) << 4);
-
-	// @todo: pack the rest of the optional flags in profile.additional_flags
-	flags
+#[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive)]
+#[repr(u8)]
+enum NalType {
+	Unspecified = 0,
+	NonIdrSlice = 1,
+	DataPartitionA = 2,
+	DataPartitionB = 3,
+	DataPartitionC = 4,
+	IdrSlice = 5,
+	Sei = 6,
+	Sps = 7,
+	Pps = 8,
+	Aud = 9,
+	EndOfSeq = 10,
+	EndOfStream = 11,
+	Filler = 12,
+	SpsExt = 13,
+	Prefix = 14,
+	SubsetSps = 15,
+	DepthParameterSet = 16,
 }
 
 #[derive(Default)]
@@ -296,62 +302,4 @@ struct Frame {
 	chunks: BufList,
 	contains_idr: bool,
 	contains_slice: bool,
-}
-
-#[derive(Default)]
-struct VuiData {
-	framerate: Option<f64>,
-	display_ratio_width: Option<u32>,
-	display_ratio_height: Option<u32>,
-}
-
-impl VuiData {
-	fn new(vui: &scuffle_h265::VuiParameters) -> Self {
-		// FPS = time_scale / num_units_in_tick
-		let framerate = vui
-			.vui_timing_info
-			.as_ref()
-			.map(|t| t.time_scale.get() as f64 / t.num_units_in_tick.get() as f64);
-
-		let (display_ratio_width, display_ratio_height) = match &vui.aspect_ratio_info {
-			// Extended SAR has explicit arbitrary values for width and height.
-			scuffle_h265::AspectRatioInfo::ExtendedSar { sar_width, sar_height } => {
-				(Some(*sar_width as u32), Some(*sar_height as u32))
-			}
-			// Predefined map to known values.
-			scuffle_h265::AspectRatioInfo::Predefined(idc) => aspect_ratio_from_idc(*idc)
-				.map(|(w, h)| (Some(w), Some(h)))
-				.unwrap_or((None, None)),
-		};
-
-		VuiData {
-			framerate,
-			display_ratio_width,
-			display_ratio_height,
-		}
-	}
-}
-
-fn aspect_ratio_from_idc(idc: scuffle_h265::AspectRatioIdc) -> Option<(u32, u32)> {
-	match idc {
-		scuffle_h265::AspectRatioIdc::Unspecified => None,
-		scuffle_h265::AspectRatioIdc::Square => Some((1, 1)),
-		scuffle_h265::AspectRatioIdc::Aspect12_11 => Some((12, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect10_11 => Some((10, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect16_11 => Some((16, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect40_33 => Some((40, 33)),
-		scuffle_h265::AspectRatioIdc::Aspect24_11 => Some((24, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect20_11 => Some((20, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect32_11 => Some((32, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect80_33 => Some((80, 33)),
-		scuffle_h265::AspectRatioIdc::Aspect18_11 => Some((18, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect15_11 => Some((15, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect64_33 => Some((64, 33)),
-		scuffle_h265::AspectRatioIdc::Aspect160_99 => Some((160, 99)),
-		scuffle_h265::AspectRatioIdc::Aspect4_3 => Some((4, 3)),
-		scuffle_h265::AspectRatioIdc::Aspect3_2 => Some((3, 2)),
-		scuffle_h265::AspectRatioIdc::Aspect2_1 => Some((2, 1)),
-		scuffle_h265::AspectRatioIdc::ExtendedSar => None,
-		_ => None, // Reserved
-	}
 }

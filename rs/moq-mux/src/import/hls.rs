@@ -19,7 +19,7 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use crate::{Fmp4, Fmp4Config};
+use super::{Fmp4, Fmp4Config};
 use hang::BroadcastProducer;
 
 /// Configuration for the single-rendition HLS ingest loop.

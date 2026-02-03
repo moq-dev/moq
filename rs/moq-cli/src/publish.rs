@@ -1,5 +1,6 @@
 use clap::Subcommand;
 use hang::{BroadcastProducer, moq_lite::BroadcastConsumer};
+use moq_mux::import;
 
 #[derive(Subcommand, Clone)]
 pub enum PublishFormat {
@@ -22,9 +23,9 @@ pub enum PublishFormat {
 }
 
 enum PublishDecoder {
-	Avc3(Box<moq_mux::Avc3>),
-	Fmp4(Box<moq_mux::Fmp4>),
-	Hls(Box<moq_mux::Hls>),
+	Avc3(Box<import::Avc3>),
+	Fmp4(Box<import::Fmp4>),
+	Hls(Box<import::Hls>),
 }
 
 pub struct Publish {
@@ -38,22 +39,22 @@ impl Publish {
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {
-				let avc3 = moq_mux::Avc3::new(broadcast.clone());
+				let avc3 = import::Avc3::new(broadcast.clone());
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
 			PublishFormat::Fmp4 { passthrough } => {
-				let fmp4 = moq_mux::Fmp4::new(
+				let fmp4 = import::Fmp4::new(
 					broadcast.clone(),
-					moq_mux::Fmp4Config {
+					import::Fmp4Config {
 						passthrough: *passthrough,
 					},
 				);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Hls { playlist, passthrough } => {
-				let hls = moq_mux::Hls::new(
+				let hls = import::Hls::new(
 					broadcast.clone(),
-					moq_mux::HlsConfig {
+					import::HlsConfig {
 						playlist: playlist.clone(),
 						client: None,
 						passthrough: *passthrough,

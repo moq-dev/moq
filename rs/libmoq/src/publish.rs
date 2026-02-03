@@ -1,6 +1,7 @@
 use std::{str::FromStr, sync::Arc};
 
 use moq_lite::coding::Buf;
+use moq_mux::import;
 
 use crate::{Error, Id, NonZeroSlab};
 
@@ -10,7 +11,7 @@ pub struct Publish {
 	broadcasts: NonZeroSlab<hang::BroadcastProducer>,
 
 	/// Active media encoders/decoders for publishing.
-	media: NonZeroSlab<moq_mux::Decoder>,
+	media: NonZeroSlab<import::Decoder>,
 }
 
 impl Publish {
@@ -32,8 +33,8 @@ impl Publish {
 	pub fn media_ordered(&mut self, broadcast: Id, format: &str, mut init: &[u8]) -> Result<Id, Error> {
 		let broadcast = self.broadcasts.get(broadcast).ok_or(Error::NotFound)?;
 
-		let format = moq_mux::DecoderFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
-		let mut decoder = moq_mux::Decoder::new(broadcast.clone(), format);
+		let format = import::DecoderFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
+		let mut decoder = import::Decoder::new(broadcast.clone(), format);
 
 		decoder
 			.initialize(&mut init)
