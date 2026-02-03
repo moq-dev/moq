@@ -20,6 +20,7 @@ crate-type = ["staticlib"]
 anyhow = { version = "1", features = ["backtrace"] }
 hang = { workspace = true }
 moq-lite = { workspace = true, features = ["serde"] }
+moq-mux = { workspace = true }
 moq-native = { workspace = true }
 slab = "0.4"
 thiserror = "2"

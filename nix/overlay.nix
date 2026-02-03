@@ -24,11 +24,11 @@ in
     }
   );
 
-  hang = craneLib.buildPackage (
-    crateInfo ../rs/hang-cli/Cargo.toml
+  moq = craneLib.buildPackage (
+    crateInfo ../rs/moq-cli/Cargo.toml
     // {
       src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p hang-cli";
+      cargoExtraArgs = "-p moq-cli";
     }
   );
 

@@ -2,10 +2,8 @@ use std::{fmt, str::FromStr};
 
 use bytes::Buf;
 
-use crate::{
-	self as hang, Error,
-	import::{self, Aac, Opus},
-};
+use crate::{Aac, Opus};
+use hang::Error;
 
 /// The supported decoder formats.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,13 +66,13 @@ impl fmt::Display for DecoderFormat {
 enum DecoderKind {
 	/// aka H264 with inline SPS/PPS
 	#[cfg(feature = "h264")]
-	Avc3(import::Avc3),
+	Avc3(crate::Avc3),
 	// Boxed because it's a large struct and clippy complains about the size.
 	#[cfg(feature = "mp4")]
-	Fmp4(Box<import::Fmp4>),
+	Fmp4(Box<crate::Fmp4>),
 	/// aka H265 with inline SPS/PPS
 	#[cfg(feature = "h265")]
-	Hev1(import::Hev1),
+	Hev1(crate::Hev1),
 	Aac(Aac),
 	Opus(Opus),
 }
@@ -92,11 +90,11 @@ impl Decoder {
 	pub fn new(broadcast: hang::BroadcastProducer, format: DecoderFormat) -> Self {
 		let decoder = match format {
 			#[cfg(feature = "h264")]
-			DecoderFormat::Avc3 => import::Avc3::new(broadcast).into(),
+			DecoderFormat::Avc3 => crate::Avc3::new(broadcast).into(),
 			#[cfg(feature = "mp4")]
-			DecoderFormat::Fmp4 => Box::new(import::Fmp4::new(broadcast, import::Fmp4Config::default())).into(),
+			DecoderFormat::Fmp4 => Box::new(crate::Fmp4::new(broadcast, crate::Fmp4Config::default())).into(),
 			#[cfg(feature = "h265")]
-			DecoderFormat::Hev1 => import::Hev1::new(broadcast).into(),
+			DecoderFormat::Hev1 => crate::Hev1::new(broadcast).into(),
 			DecoderFormat::Aac => Aac::new(broadcast).into(),
 			DecoderFormat::Opus => Opus::new(broadcast).into(),
 		};

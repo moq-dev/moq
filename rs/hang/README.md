@@ -20,8 +20,7 @@ We most of the implement the [WebCodecs specification](https://www.w3.org/TR/web
 - **Audio:** AAC, Opus
 
 ## CMAF Import
-There's also a `cmaf` module that can import fMP4/CMAF files into a hang broadcast.
-It's crude and doesn't support all features, but it's a good starting point to ingest existing content.
+For importing fMP4/CMAF/HLS files, see the `moq-mux` crate.
 
 ## Examples
 - [Publishing a video track](examples/video.rs)

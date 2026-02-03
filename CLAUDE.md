@@ -41,8 +41,9 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq/            # Core protocol (published as moq-lite)
   moq-relay/      # Clusterable relay server
   moq-token/      # JWT authentication
-  hang/           # Media encoding/streaming
-  hang-cli/       # CLI tool for media operations (binary is named `hang`)
+  hang/           # Media encoding/streaming (catalog/container format)
+  moq-mux/        # Media muxers/demuxers (fMP4, CMAF, HLS)
+  moq-cli/        # CLI tool for media operations (binary is named `moq`)
 
 /js/               # TypeScript/JavaScript packages
   moq/             # Core protocol for browsers (published as @moq/lite)

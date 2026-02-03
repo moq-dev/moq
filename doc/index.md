@@ -89,7 +89,7 @@ If everything works, a browser window will pop up demoing how to both publish an
 There are a bunch of MoQ binaries and plugins. Some highlights:
 
 - [moq-relay](/app/relay/) - A server connecting publishers to subscribers, able to form a [self-hosted CDN cluster](/app/relay/cluster).
-- [hang-cli](/app/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc), including via ffmpeg.
+- [moq-cli](/app/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc), including via ffmpeg.
 - [obs](/app/obs) - An OBS plugin, able to publish a MoQ broadcast and/or use MoQ broadcasts as sources.
 - [gstreamer](/app/gstreamer) - A gstreamer plugin, split into a source and a sink.
 - [web](/app/web) - A web component you can throw on your website, wrapping a `<video>` tag. It can also do publishing!

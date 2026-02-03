@@ -1,10 +1,11 @@
 [workspace]
 members = [
     "rs/hang",
-    "rs/hang-cli",
     "rs/libmoq",
+    "rs/moq-cli",
     "rs/moq-clock",
     "rs/moq-lite",
+    "rs/moq-mux",
     "rs/moq-native",
     "rs/moq-relay",
     "rs/moq-token",
@@ -14,6 +15,7 @@ resolver = "2"
 
 [workspace.dependencies]
 hang = { version = "0.11", path = "rs/hang" }
+moq-mux = { version = "0.1", path = "rs/moq-mux" }
 moq-lite = { version = "0.12", path = "rs/moq-lite" }
 moq-native = { version = "0.12", path = "rs/moq-native" }
 moq-token = { version = "0.5", path = "rs/moq-token" }

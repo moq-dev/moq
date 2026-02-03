@@ -83,9 +83,9 @@ Opinionated helpers to configure a Quinn QUIC endpoint.
 
 ## CLI Tools
 
-### hang-cli
+### moq-cli
 
-Command-line tool for media operations (binary name: `hang`).
+Command-line tool for media operations (binary name: `moq`).
 
 **Features:**
 - Publish video from files or FFmpeg
@@ -94,16 +94,16 @@ Command-line tool for media operations (binary name: `hang`).
 
 **Installation:**
 ```bash
-cargo install hang-cli
+cargo install moq-cli
 ```
 
 **Usage:**
 ```bash
 # Publish a video file
-hang publish video.mp4
+moq publish video.mp4
 
 # Publish from FFmpeg
-ffmpeg -i input.mp4 -f mpegts - | hang publish -
+ffmpeg -i input.mp4 -f mpegts - | moq publish -
 ```
 
 [Learn more](/app/cli)
@@ -174,8 +174,8 @@ cargo build --release
 # Build moq-relay
 nix build github:moq-dev/moq#moq-relay
 
-# Build hang-cli
-nix build github:moq-dev/moq#hang-cli
+# Build moq-cli
+nix build github:moq-dev/moq#moq
 ```
 
 ## Quick Start

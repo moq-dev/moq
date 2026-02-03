@@ -1,24 +1,24 @@
 ---
-title: FFmpeg / hang-cli
+title: FFmpeg / moq-cli
 description: Command-line tools for MoQ media
 ---
 
-# FFmpeg / hang-cli
+# FFmpeg / moq-cli
 
-`hang-cli` is a command-line tool for publishing media to MoQ relays. It works with FFmpeg for encoding.
+`moq-cli` is a command-line tool for publishing media to MoQ relays. It works with FFmpeg for encoding.
 
 ## Installation
 
 ### Using Cargo
 
 ```bash
-cargo install hang-cli
+cargo install moq-cli
 ```
 
 ### Using Nix
 
 ```bash
-nix build github:moq-dev/moq#hang-cli
+nix build github:moq-dev/moq#moq
 ```
 
 ### From Source
@@ -26,45 +26,45 @@ nix build github:moq-dev/moq#hang-cli
 ```bash
 git clone https://github.com/moq-dev/moq
 cd moq
-cargo build --release --bin hang-cli
+cargo build --release --bin moq
 ```
 
-The binary will be in `target/release/hang-cli` (or just `hang` when installed).
+The binary will be in `target/release/moq`.
 
 ## Basic Usage
 
 ### Publish a Video File
 
 ```bash
-hang publish video.mp4 https://relay.example.com/anon/my-stream
+moq publish video.mp4 https://relay.example.com/anon/my-stream
 ```
 
 ### Publish from FFmpeg
 
-Pipe FFmpeg output directly to hang:
+Pipe FFmpeg output directly to moq:
 
 ```bash
-ffmpeg -i input.mp4 -f mpegts - | hang publish - https://relay.example.com/anon/my-stream
+ffmpeg -i input.mp4 -f mpegts - | moq publish - https://relay.example.com/anon/my-stream
 ```
 
 ### Publish a Webcam
 
 ```bash
 # macOS
-ffmpeg -f avfoundation -i "0:0" -f mpegts - | hang publish - https://relay.example.com/anon/webcam
+ffmpeg -f avfoundation -i "0:0" -f mpegts - | moq publish - https://relay.example.com/anon/webcam
 
 # Linux
-ffmpeg -f v4l2 -i /dev/video0 -f mpegts - | hang publish - https://relay.example.com/anon/webcam
+ffmpeg -f v4l2 -i /dev/video0 -f mpegts - | moq publish - https://relay.example.com/anon/webcam
 ```
 
 ### Publish Screen
 
 ```bash
 # macOS
-ffmpeg -f avfoundation -i "1:" -f mpegts - | hang publish - https://relay.example.com/anon/screen
+ffmpeg -f avfoundation -i "1:" -f mpegts - | moq publish - https://relay.example.com/anon/screen
 
 # Linux (X11)
-ffmpeg -f x11grab -i :0.0 -f mpegts - | hang publish - https://relay.example.com/anon/screen
+ffmpeg -f x11grab -i :0.0 -f mpegts - | moq publish - https://relay.example.com/anon/screen
 ```
 
 ## Encoding Options
@@ -76,7 +76,7 @@ ffmpeg -i input.mp4 \
     -c:v libx264 -preset ultrafast -tune zerolatency \
     -b:v 2500k -maxrate 2500k -bufsize 5000k \
     -c:a aac -b:a 128k \
-    -f mpegts - | hang publish - https://relay.example.com/anon/stream
+    -f mpegts - | moq publish - https://relay.example.com/anon/stream
 ```
 
 ### Low Latency Settings
@@ -86,7 +86,7 @@ ffmpeg -i input.mp4 \
     -c:v libx264 -preset ultrafast -tune zerolatency \
     -g 30 -keyint_min 30 \
     -c:a aac \
-    -f mpegts - | hang publish - https://relay.example.com/anon/stream
+    -f mpegts - | moq publish - https://relay.example.com/anon/stream
 ```
 
 ### H.265/HEVC
@@ -95,7 +95,7 @@ ffmpeg -i input.mp4 \
 ffmpeg -i input.mp4 \
     -c:v libx265 -preset ultrafast \
     -c:a aac \
-    -f mpegts - | hang publish - https://relay.example.com/anon/stream
+    -f mpegts - | moq publish - https://relay.example.com/anon/stream
 ```
 
 ## Authentication
@@ -103,7 +103,7 @@ ffmpeg -i input.mp4 \
 Pass a JWT token via the URL:
 
 ```bash
-hang publish video.mp4 "https://relay.example.com/room/123?jwt=<token>"
+moq publish video.mp4 "https://relay.example.com/room/123?jwt=<token>"
 ```
 
 See [Authentication](/app/relay/auth) for token generation.
@@ -137,7 +137,7 @@ just clock subscribe https://relay.example.com/anon
 ### Verbose Output
 
 ```bash
-RUST_LOG=debug hang publish video.mp4 https://relay.example.com/anon/stream
+RUST_LOG=debug moq publish video.mp4 https://relay.example.com/anon/stream
 ```
 
 ### Check Connection

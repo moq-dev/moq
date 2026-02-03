@@ -1,4 +1,3 @@
-use crate as hang;
 use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;

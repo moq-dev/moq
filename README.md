@@ -115,7 +115,9 @@ This repository provides both [Rust](/rs) and [TypeScript](/js) libraries with s
 | [moq-token](rs/moq-token)   | An authentication scheme supported by `moq-relay`. Can be used as a library or as [a CLI](rs/moq-token-cli) to authenticate sessions. |                                                                                |
 | [moq-native](rs/moq-native) | Opinionated helpers to configure a Quinn QUIC endpoint. It's harder than it should be.                                                | [![docs.rs](https://docs.rs/moq-native/badge.svg)](https://docs.rs/moq-native) |
 | [libmoq](rs/libmoq)         | C bindings for `moq-lite`.                                                                                                            | [![docs.rs](https://docs.rs/libmoq/badge.svg)](https://docs.rs/libmoq)         |
-| [hang](rs/hang)             | Media-specific encoding/streaming layered on top of `moq-lite`. Can be used as a library or [a CLI](rs/hang-cli).                     | [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)             |
+| [hang](rs/hang)             | Media-specific encoding/streaming layered on top of `moq-lite`. Can be used as a library.                     | [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)             |
+| [moq-cli](rs/moq-cli)       | A CLI for publishing media to MoQ relays.                                                                                             |                                                                                |
+| [moq-mux](rs/moq-mux)       | Media muxers and demuxers (fMP4/CMAF, HLS) for importing content into MoQ broadcasts.                                                 | [![docs.rs](https://docs.rs/moq-mux/badge.svg)](https://docs.rs/moq-mux)       |
 | [hang-gst](https://github.com/moq-dev/gstreamer) | A GStreamer plugin for publishing or consuming hang broadcasts. A separate repo to avoid requiring gstreamer as a build dependency.            |                                                                                |
 
 
@@ -202,7 +204,7 @@ just web
 
 Then open [localhost:5173](http://localhost:5173) and watch BBB, pushed from terminal 1 via iroh to the relay running in terminal 2, from where the browser fetches it over regular WebTransport.
 
-`just serve` serves a video via iroh alongside regular QUIC (it enables the `iroh` feature). This repo currently does not provide a native viewer, so you can't subscribe to it directly. However, you can use the [watch example from iroh-live](https://github.com/n0-computer/iroh-live/blob/main/iroh-live/examples/watch.rs) to view a video published via `hang-native`.
+`just serve` serves a video via iroh alongside regular QUIC (it enables the `iroh` feature). This repo currently does not provide a native viewer, so you can't subscribe to it directly. However, you can use the [watch example from iroh-live](https://github.com/n0-computer/iroh-live/blob/main/iroh-live/examples/watch.rs) to view a video published via `moq-native`.
 
 ## License
 

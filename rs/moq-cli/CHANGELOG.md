@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: Renamed from `hang-cli` to `moq-cli`. The binary is now named `moq` instead of `hang`.
+- Import module moved to new `moq-mux` crate.
+
 ## [0.7.4](https://github.com/moq-dev/moq/compare/hang-cli-v0.7.3...hang-cli-v0.7.4) - 2026-01-24
 
 ### Other

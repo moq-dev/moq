@@ -20,13 +20,13 @@ Run it yourself, or pay for an external service (ex. Cloudflare).
 - [Clustering](/app/relay/cluster) - Multi-region deployment
 
 
-## [hang-cli](/app/cli)
+## [moq-cli](/app/cli)
 A CLI for publishing to media streams.
 Another tool does the encoding (ex. ffmpeg), making it easy to pipe any media into MoQ.
 
 ```bash
 # Publish your webcam
-ffmpeg -f avfoundation -i "0" -f mp4 - | hang publish https://relay.example.com my-stream
+ffmpeg -f avfoundation -i "0" -f mp4 - | moq publish https://relay.example.com my-stream
 ```
 
 ## [OBS Plugin](/app/obs)

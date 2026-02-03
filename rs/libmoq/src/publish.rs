@@ -10,7 +10,7 @@ pub struct Publish {
 	broadcasts: NonZeroSlab<hang::BroadcastProducer>,
 
 	/// Active media encoders/decoders for publishing.
-	media: NonZeroSlab<hang::import::Decoder>,
+	media: NonZeroSlab<moq_mux::Decoder>,
 }
 
 impl Publish {
@@ -32,9 +32,8 @@ impl Publish {
 	pub fn media_ordered(&mut self, broadcast: Id, format: &str, mut init: &[u8]) -> Result<Id, Error> {
 		let broadcast = self.broadcasts.get(broadcast).ok_or(Error::NotFound)?;
 
-		let format =
-			hang::import::DecoderFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
-		let mut decoder = hang::import::Decoder::new(broadcast.clone(), format);
+		let format = moq_mux::DecoderFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
+		let mut decoder = moq_mux::Decoder::new(broadcast.clone(), format);
 
 		decoder
 			.initialize(&mut init)

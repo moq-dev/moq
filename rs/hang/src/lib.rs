@@ -8,7 +8,8 @@
 //!
 //! - **Catalog**: JSON track containing codec info and track metadata, updated live as tracks change.
 //! - **Container**: Simple frame format consisting of timestamp (microseconds) + codec bitstream payload.
-//! - **Import**: Import fMP4/CMAF files into hang broadcasts via the [`import`] module.
+//!
+//! For importing fMP4/CMAF/HLS streams, see the `moq-mux` crate.
 //!
 //! ## Frame Container
 //!
@@ -21,7 +22,6 @@
 mod error;
 
 pub mod catalog;
-pub mod import;
 pub mod model;
 
 // export the moq-lite version in use

@@ -1,5 +1,4 @@
-use crate as hang;
-use crate::import::annexb::{NalIterator, START_CODE};
+use crate::annexb::{NalIterator, START_CODE};
 
 use anyhow::Context;
 use buf_list::BufList;

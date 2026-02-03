@@ -66,11 +66,6 @@ pub enum Error {
 	#[error("timestamp went backwards")]
 	TimestampBackwards,
 
-	/// An error from the HTTP client.
-	#[cfg(feature = "hls")]
-	#[error("http error: {0}")]
-	Http(Arc<reqwest::Error>),
-
 	/// Failed to parse a URL.
 	#[error("url parse error: {0}")]
 	Url(#[from] url::ParseError),
@@ -89,12 +84,5 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<serde_json::Error> for Error {
 	fn from(err: serde_json::Error) -> Self {
 		Error::Json(Arc::new(err))
-	}
-}
-
-#[cfg(feature = "hls")]
-impl From<reqwest::Error> for Error {
-	fn from(err: reqwest::Error) -> Self {
-		Error::Http(Arc::new(err))
 	}
 }

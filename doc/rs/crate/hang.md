@@ -188,25 +188,24 @@ This simple container:
 
 ## CMAF Import
 
-`hang` includes a `cmaf` module to import fMP4/CMAF files:
+For importing fMP4/CMAF/HLS files, see the `moq-mux` crate:
 
 ```rust
-use hang::cmaf::*;
+use moq_mux::*;
 
-// Import CMAF file
-let cmaf_data = std::fs::read("video.mp4")?;
-let broadcast = Broadcast::from_cmaf(&cmaf_data)?;
+// Import fMP4 file
+let fmp4 = Fmp4::new(broadcast, Fmp4Config::default());
+fmp4.decode_from(&mut reader).await?;
 
-// Publish to relay
-connection.publish_broadcast(broadcast).await?;
+// Import HLS playlist
+let hls = Hls::new(broadcast, HlsConfig::new(playlist_url))?;
+hls.run().await?;
 ```
 
 This is useful for:
 - Ingesting existing content
 - Converting VOD to live
 - Testing with sample files
-
-Note: The CMAF importer is basic and doesn't support all features.
 
 ## Grouping
 
@@ -242,23 +241,23 @@ This is handled automatically based on frame metadata.
 
 ## CLI Tool
 
-The `hang-cli` package provides a command-line tool (binary name: `hang`):
+The `moq-cli` package provides a command-line tool (binary name: `moq`):
 
 ```bash
 # Install
-cargo install hang-cli
+cargo install moq-cli
 
 # Publish a video file
-hang publish video.mp4
+moq publish video.mp4
 
 # Publish from FFmpeg
-ffmpeg -i input.mp4 -f mpegts - | hang publish -
+ffmpeg -i input.mp4 -f mpegts - | moq publish -
 
 # Custom encoding settings
-hang publish --codec h264 --bitrate 2000000 video.mp4
+moq publish --codec h264 --bitrate 2000000 video.mp4
 ```
 
-See `hang --help` for all options, or [FFmpeg documentation](/app/cli).
+See `moq --help` for all options, or [FFmpeg documentation](/app/cli).
 
 ## API Reference
 

@@ -5,7 +5,7 @@ on:
     tags:
       - 'moq-relay-v*'
       - 'moq-token-cli-v*'
-      - 'hang-cli-v*'
+      - 'moq-cli-v*'
 
 jobs:
   cache:

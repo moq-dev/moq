@@ -26,7 +26,7 @@ However, we do use GCP for GeoDNS because most providers don't support it or too
 
 ## Deploy
 
-1. `nix flake update` to update the `moq-relay` and `hang-cli` binaries.
+1. `nix flake update` to update the `moq-relay` and `moq-cli` binaries.
   - **NOTE**: This pulls from `main` on github, not a local path or the latest release.
 2. `just deploy-all` to deploy to all nodes in parallel.
   - This will take a while as the builds *currently* occur on the remote nodes.

@@ -22,9 +22,9 @@ pub enum PublishFormat {
 }
 
 enum PublishDecoder {
-	Avc3(Box<hang::import::Avc3>),
-	Fmp4(Box<hang::import::Fmp4>),
-	Hls(Box<hang::import::Hls>),
+	Avc3(Box<moq_mux::Avc3>),
+	Fmp4(Box<moq_mux::Fmp4>),
+	Hls(Box<moq_mux::Hls>),
 }
 
 pub struct Publish {
@@ -38,22 +38,22 @@ impl Publish {
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {
-				let avc3 = hang::import::Avc3::new(broadcast.clone());
+				let avc3 = moq_mux::Avc3::new(broadcast.clone());
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
 			PublishFormat::Fmp4 { passthrough } => {
-				let fmp4 = hang::import::Fmp4::new(
+				let fmp4 = moq_mux::Fmp4::new(
 					broadcast.clone(),
-					hang::import::Fmp4Config {
+					moq_mux::Fmp4Config {
 						passthrough: *passthrough,
 					},
 				);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Hls { playlist, passthrough } => {
-				let hls = hang::import::Hls::new(
+				let hls = moq_mux::Hls::new(
 					broadcast.clone(),
-					hang::import::HlsConfig {
+					moq_mux::HlsConfig {
 						playlist: playlist.clone(),
 						client: None,
 						passthrough: *passthrough,

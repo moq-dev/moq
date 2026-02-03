@@ -144,10 +144,10 @@ pub name url="http://localhost:4443/anon" prefix="" *args:
 	# Download the sample media.
 	just download "{{name}}"
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin hang
-	# Publish the media with the hang cli.
+	cargo build --bin moq
+	# Publish the media with the moq cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin hang -- \
+	cargo run --bin moq -- \
 		publish --url "{{url}}" --name "{{prefix}}{{name}}" {{args}} fmp4
 
 # Generate and ingest an HLS stream from a video file.
@@ -232,9 +232,9 @@ pub-hls name relay="http://localhost:4443/anon":
 	}
 	trap cleanup SIGINT SIGTERM EXIT
 
-	# Run hang to ingest from local files
+	# Run moq to ingest from local files
 	echo ">>> Running with --passthrough flag"
-	cargo run --bin hang -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
+	cargo run --bin moq -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
 	EXIT_CODE=$?
 
 	# Cleanup after cargo run completes (success or failure)
@@ -249,16 +249,16 @@ pub-h264 name url="http://localhost:4443/anon" *args:
 	just download "{{name}}"
 
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin hang
+	cargo build --bin moq
 
-	# Run ffmpeg and pipe H.264 Annex B output to hang
+	# Run ffmpeg and pipe H.264 Annex B output to moq
 	ffmpeg -hide_banner -v quiet \
 		-stream_loop -1 -re \
 		-i "dev/{{name}}.fmp4" \
 		-c:v copy -an \
 		-bsf:v h264_mp4toannexb \
 		-f h264 \
-		- | cargo run --bin hang -- publish --url "{{url}}" --name "{{name}}" --format annex-b {{args}}
+		- | cargo run --bin moq -- publish --url "{{url}}" --name "{{name}}" --format annex-b {{args}}
 
 # Publish/subscribe using gstreamer - see https://github.com/moq-dev/gstreamer
 pub-gst name url='http://localhost:4443/anon':
@@ -270,18 +270,18 @@ sub name url='http://localhost:4443/anon':
 	@echo "GStreamer plugin has moved to: https://github.com/moq-dev/gstreamer"
 	@echo "Install and use hang-gst directly for GStreamer functionality"
 
-# Publish a video using ffmpeg directly from hang to the localhost
+# Publish a video using ffmpeg directly from moq to the localhost
 # To also serve via iroh, pass --iroh-enabled as last argument.
 serve name *args:
 	# Download the sample media.
 	just download "{{name}}"
 
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin hang
+	cargo build --bin moq
 
-	# Run ffmpeg and pipe the output to hang
+	# Run ffmpeg and pipe the output to moq
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin hang -- \
+	cargo run --bin moq -- \
 		{{args}} serve --listen "[::]:4443" --tls-generate "localhost" \
 		--name "{{name}}" fmp4
 

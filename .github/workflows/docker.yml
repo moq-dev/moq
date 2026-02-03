@@ -6,7 +6,7 @@ on:
       - 'moq-relay-v*'
       - 'moq-clock-v*'
       # NOTE: The -cli is automatically removed
-      - 'hang-cli-v*'
+      - 'moq-cli-v*'
       - 'moq-token-cli-v*'
 
 env:
