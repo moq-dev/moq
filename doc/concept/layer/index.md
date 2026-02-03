@@ -1,6 +1,6 @@
 ---
 title: Layering
-description: It's like a cake but resuable.
+description: It's like a cake but reusable.
 ---
 
 # Layers
@@ -37,7 +37,7 @@ Let's dive in, starting at the bottom of the stack.
 
 ## QUIC
 QUIC is the core protocol that powers HTTP/3, designed to fix head-of-line blocking that plagues TCP and thus HTTP/2.
-It accomplishes via multiple "streams" that can be delivered concurrently, with each HTTP/3 request using a dedicated stream,
+It accomplishes this via multiple "streams" that can be delivered concurrently, with each HTTP/3 request using a dedicated stream.
 
 QUIC uses UDP under the hood but it is fundamentally a connection-oriented protocol with congestion control, flow control, retransmissions, etc.
 You should think of it like TCP 2.0 and not a firehose of UDP packets.
@@ -66,7 +66,7 @@ The big brains at the IETF took a wishlist of everything that *should* be in TCP
 
 ## WebTransport
 WebTransport is a small layer that shares a QUIC connection with HTTP/3.
-It adds some features, mostly in the form of the HTTP handshake, but its primarily provides browser support for the QUIC API.
+It adds some features, mostly in the form of the HTTP handshake, but it primarily provides browser support for the QUIC API.
 Think of it like WebSocket but for QUIC instead of TCP.
 
 In my opinion, it's not particularly well designed but also harmless.
@@ -80,7 +80,7 @@ It's certainly possible but HTTP semantics make it more difficult:
 - **With HTTP/3**: only the client can create a stream (HTTP request), as HTTP push is gone and a mistake anyway. It gets awkward because the client needs to know when the server wants to write a new stream.
 
 [moq-relay](/app/relay/) does provide a HTTP endpoint so a client can still request content on-demand instead of subscribing.
-This is useful for backwards compatibility with HLS, but the long-term goal is to make publishing and subscribing symettrical via WebTransport.
+This is useful for backwards compatibility with HLS, but the long-term goal is to make publishing and subscribing symmetrical via WebTransport.
 
 
 ## MoqTransport
@@ -145,7 +145,7 @@ You can create new tracks for whatever purpose and it doesn't interfere with the
 Go ahead, create a `controller` track to stream button presses and it will be treated like any other opaque sequence of bytes.
 
 Additionally, MoQ is implemented in application space.
-It's not an unchangable side-car like WebRTC, built into the browser directly.
+It's not an unchangeable side-car like WebRTC, built into the browser directly.
 If you don't like some functionality in this library, go ahead and fork it.
 You can ship your own web and native apps.
 

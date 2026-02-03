@@ -21,7 +21,7 @@ See the draft: [draft-lcurley-moq-lite](https://www.ietf.org/archive/id/draft-lc
 
 ## Major Differences
 - **No Request IDs**: A bidirectional stream for each request. (note: draft-17 will copy this feature)
-- **No Push**: A subscriber must explicity request each track.
+- **No Push**: A subscriber must explicitly request each track.
 - **No FETCH**: Use HTTP for VOD.
 - **No Joining Fetch**: Subscriptions start at the latest group (aka I-frame), not the latest object (aka P-frame).
 - **No subgroups**: Make a new track for SVC layers.

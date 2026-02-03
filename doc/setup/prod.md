@@ -69,8 +69,8 @@ TLS is where most people get stuck.
 
 - QUIC uses the same TLS certificate as HTTPS.
 - However, TLS load balancers currently don't support QUIC, so you need to provision your own TLS certificates.
--  You can disable TLS verification if you don't care about MITM attacks, but only for native clients.
--  Web browsers can support self-signed certificates via [fingerprint verification](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport/WebTransport#servercertificatehashes), but it's limited to ephemeral certificates (<2 weeks).
+- You can disable TLS verification if you don't care about MITM attacks, but only for native clients.
+- Web browsers can support self-signed certificates via [fingerprint verification](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport/WebTransport#servercertificatehashes), but it's limited to ephemeral certificates (<2 weeks).
 
 And of course, make sure UDP is allowed on your firewall.
 The default WebTransport port is UDP/443 but anything will work if you put it in the URL.

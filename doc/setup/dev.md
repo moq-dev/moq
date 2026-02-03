@@ -45,7 +45,7 @@ Most of the commands default to `http://localhost:4443/anon`.
 That's pretty lame.
 
 If you want to do a real test of how MoQ works over the internet, you're going to need a remote server.
-Fortunately I'm hosting a small cluster on Linode for just the occassion: `https://cdn.moq.dev`
+Fortunately I'm hosting a small cluster on Linode for just the occasion: `https://cdn.moq.dev`
 
 ::: warning
 All of these commands are unauthenticated, hence the `/anon`.

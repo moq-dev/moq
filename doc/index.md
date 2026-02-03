@@ -37,7 +37,7 @@ features:
 
   - icon: 🌐
     title: Modern Web
-    details: Utilizies WebTransport, WebCodecs, and WebAudio APIs for native browser compatibility without hacks.
+    details: Utilizes WebTransport, WebCodecs, and WebAudio APIs for native browser compatibility without hacks.
 
   - icon: 🎯
     title: Multi-platform
@@ -68,7 +68,7 @@ The protocol is being standardized by the [IETF](https://datatracker.ietf.org/gr
 
 [moq.dev](https://moq.dev) is an open source implementation written in Rust (native) and Typescript (web).
 We support compatibility with the *official* [IETF drafts](https://datatracker.ietf.org/group/moq/documents/), but the main focus is a subset called [moq-lite](/concept/layer/moq-lite) and [hang](/concept/layer/hang).
-The idea to [build first, argue later](/concept/standard/).
+The idea is to [build first, argue later](/concept/standard/).
 
 See the [concepts](/concept/) page for a breakdown of the layering, rationale, and comparison to other protocols.
 
@@ -86,7 +86,7 @@ If everything works, a browser window will pop up demoing how to both publish an
 - Skip ahead to the [production guide](/setup/prod) to see what it takes to run this bad boy.
 
 ## Applications
-There are a bunch of MoQ binaries and plugins Some highlights:
+There are a bunch of MoQ binaries and plugins. Some highlights:
 
 - [moq-relay](/app/relay/) - A server connecting publishers to subscribers, able to form a [self-hosted CDN cluster](/app/relay/cluster).
 - [hang-cli](/app/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc), including via ffmpeg.

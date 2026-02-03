@@ -5,7 +5,7 @@ description: Understanding MoQ's fundamental concepts
 
 # Concepts
 Welcome to my favorite section.
-MoQ has been a multi-year journey to solve some very real problems in the industry and now its time to flex the design.
+MoQ has been a multi-year journey to solve some very real problems in the industry and now it's time to flex the design.
 
 ## Layers
 The over-arching design philosophy of MoQ is to make things simple, composable, and customizable.
