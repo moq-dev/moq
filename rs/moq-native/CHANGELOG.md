@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1](https://github.com/moq-dev/moq/compare/moq-native-v0.12.0...moq-native-v0.12.1) - 2026-02-03
+
+### Other
+
+- Tweak a few small things the AI merge missed. ([#876](https://github.com/moq-dev/moq/pull/876))
+- Remove Produce struct and simplify API ([#875](https://github.com/moq-dev/moq/pull/875))
+
 ## [0.12.0](https://github.com/moq-dev/moq/compare/moq-native-v0.11.0...moq-native-v0.12.0) - 2026-01-24
 
 ### Other

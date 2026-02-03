@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/moq-dev/moq/compare/hang-v0.11.0...hang-v0.12.0) - 2026-02-03
+
+### Other
+
+- Rename minBuffer to jitter ([#894](https://github.com/moq-dev/moq/pull/894))
+- Add support for multiple groups, and fetching them ([#877](https://github.com/moq-dev/moq/pull/877))
+- Tweak a few small things the AI merge missed. ([#876](https://github.com/moq-dev/moq/pull/876))
+- Remove Produce struct and simplify API ([#875](https://github.com/moq-dev/moq/pull/875))
+- Close audio groups immediately. ([#870](https://github.com/moq-dev/moq/pull/870))
+- CMAF passthrough attempt v3 ([#867](https://github.com/moq-dev/moq/pull/867))
+
 ## [0.11.0](https://github.com/moq-dev/moq/compare/hang-v0.10.0...hang-v0.11.0) - 2026-01-24
 
 ### Added

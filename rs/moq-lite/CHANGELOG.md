@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.12.0...moq-lite-v0.13.0) - 2026-02-03
+
+### Other
+
+- Add support for multiple groups, and fetching them ([#877](https://github.com/moq-dev/moq/pull/877))
+- Tweak a few small things the AI merge missed. ([#876](https://github.com/moq-dev/moq/pull/876))
+- Remove Produce struct and simplify API ([#875](https://github.com/moq-dev/moq/pull/875))
+- Close session on drop ([#872](https://github.com/moq-dev/moq/pull/872))
+
 ## [0.12.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.11.0...moq-lite-v0.12.0) - 2026-01-24
 
 ### Other
