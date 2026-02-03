@@ -271,7 +271,7 @@ class DecoderTrack {
 		effect.effect((inner) => {
 			const network = inner.get(consumer.buffered);
 			const decode = inner.get(this.#buffered);
-			this.buffered.set(mergeBufferedRanges(network, decode));
+			this.buffered.update(() => mergeBufferedRanges(network, decode));
 		});
 
 		decoder.configure({
@@ -347,6 +347,12 @@ class DecoderTrack {
 			flip: false,
 		});
 
+		// Use decode buffer directly (no network jitter buffer for CMAF yet)
+		effect.effect((inner) => {
+			const decode = inner.get(this.#buffered);
+			this.buffered.update(() => decode);
+		});
+
 		effect.spawn(async () => {
 			// Process data segments
 			// TODO: Use a consumer wrapper for CMAF to support latency control
@@ -355,6 +361,8 @@ class DecoderTrack {
 				if (!group) break;
 
 				effect.spawn(async () => {
+					let previous: Time.Micro | undefined;
+
 					try {
 						for (;;) {
 							const segment = await Promise.race([group.readFrame(), effect.cancel]);
@@ -377,6 +385,14 @@ class DecoderTrack {
 									frameCount: (current?.frameCount ?? 0) + 1,
 									bytesReceived: (current?.bytesReceived ?? 0) + sample.data.byteLength,
 								}));
+
+								// Track decode buffer
+								if (previous !== undefined) {
+									const start = Time.Milli.fromMicro(previous);
+									const end = Time.Milli.fromMicro(sample.timestamp as Time.Micro);
+									this.#addBuffered(start, end);
+								}
+								previous = sample.timestamp as Time.Micro;
 
 								decoder.decode(chunk);
 							}

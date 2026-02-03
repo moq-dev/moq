@@ -191,7 +191,7 @@ export class Decoder {
 		effect.effect((inner) => {
 			const network = inner.get(consumer.buffered);
 			const decode = inner.get(this.#decodeBuffered);
-			this.#buffered.set(mergeBufferedRanges(network, decode));
+			this.#buffered.update(() => mergeBufferedRanges(network, decode));
 		});
 
 		effect.spawn(async () => {
@@ -242,7 +242,7 @@ export class Decoder {
 		// TODO: Add CMAF consumer wrapper for latency control
 		effect.effect((inner) => {
 			const decode = inner.get(this.#decodeBuffered);
-			this.#buffered.set(decode);
+			this.#buffered.update(() => decode);
 		});
 
 		effect.spawn(async () => {
