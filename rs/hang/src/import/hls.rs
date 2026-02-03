@@ -626,7 +626,7 @@ mod tests {
 
 	#[test]
 	fn hls_ingest_starts_without_importers() {
-		let broadcast = moq_lite::Broadcast::produce().producer.into();
+		let broadcast = moq_lite::Broadcast::produce().into();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);
 		let hls = Hls::new(broadcast, cfg).unwrap();

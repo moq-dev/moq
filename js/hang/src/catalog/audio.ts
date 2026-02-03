@@ -32,10 +32,13 @@ export const AudioConfigSchema = z.object({
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: u53Schema.optional(),
 
-	// Minimum buffer size in milliseconds required for smooth playback.
-	// This represents the minimum time the player should buffer before starting playback.
-	// The player should add additional buffer on top of this value.
-	minBuffer: u53Schema.optional(),
+	// The maximum jitter before the next frame is emitted in milliseconds.
+	// The player's jitter buffer should be larger than this value.
+	// If not provided, the player should assume each frame is flushed immediately.
+	//
+	// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
+	// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 23ms
+	jitter: u53Schema.optional(),
 });
 
 export const AudioSchema = z

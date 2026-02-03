@@ -1,7 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
-import { PRIORITY } from "../priority";
+import * as Catalog from "../../catalog";
 
 export type TypingProps = {
 	enabled?: boolean | Signal<boolean>;
@@ -9,7 +8,7 @@ export type TypingProps = {
 
 export class Typing {
 	static readonly TRACK = "chat/typing.bool";
-	static readonly PRIORITY = PRIORITY.typing;
+	static readonly PRIORITY = Catalog.PRIORITY.typing;
 
 	enabled: Signal<boolean>;
 

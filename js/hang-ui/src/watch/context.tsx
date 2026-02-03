@@ -1,5 +1,5 @@
 import { type Moq, Signals } from "@moq/hang";
-import type * as Catalog from "@moq/hang/catalog";
+import type { BufferedRanges } from "@moq/hang/watch";
 import type HangWatch from "@moq/hang/watch/element";
 import solid from "@moq/signals/solid";
 import type { JSX } from "solid-js";
@@ -28,8 +28,8 @@ type WatchUIContextValues = {
 	togglePlayback: () => void;
 	toggleMuted: () => void;
 	buffering: () => boolean;
-	buffer: () => number;
-	setBuffer: (value: number) => void;
+	jitter: () => number;
+	setJitter: (value: number) => void;
 	availableRenditions: () => Rendition[];
 	activeRendition: () => string | undefined;
 	setActiveRendition: (name: string | undefined) => void;
@@ -37,6 +37,9 @@ type WatchUIContextValues = {
 	setIsStatsPanelVisible: (visible: boolean) => void;
 	isFullscreen: () => boolean;
 	toggleFullscreen: () => void;
+	timestamp: () => number;
+	videoBuffered: () => BufferedRanges;
+	audioBuffered: () => BufferedRanges;
 };
 
 export const WatchUIContext = createContext<WatchUIContextValues>();
@@ -47,7 +50,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const [isMuted, setIsMuted] = createSignal<boolean>(false);
 	const [currentVolume, setCurrentVolume] = createSignal<number>(0);
 	const [buffering, setBuffering] = createSignal<boolean>(false);
-	const buffer = solid(props.hangWatch.buffer);
+	const jitter = solid(props.hangWatch.jitter);
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
 	const [activeRendition, setActiveRendition] = createSignal<string | undefined>(undefined);
 	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
@@ -66,23 +69,28 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	};
 
 	const setVolume = (volume: number) => {
-		props.hangWatch.volume.set(volume / 100);
+		props.hangWatch.audio.volume.set(volume / 100);
 	};
 
 	const toggleMuted = () => {
-		props.hangWatch.muted.update((muted) => !muted);
+		props.hangWatch.audio.muted.update((muted) => !muted);
 	};
 
-	const setBuffer = (latency: number) => {
-		props.hangWatch.buffer.set(latency as Moq.Time.Milli);
+	const setJitter = (latency: number) => {
+		props.hangWatch.jitter.set(latency as Moq.Time.Milli);
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
 		props.hangWatch.video.source.target.update((prev) => ({
 			...prev,
-			rendition: name,
+			name: name,
 		}));
 	};
+
+	// Use solid helper for the new signals
+	const timestamp = solid(props.hangWatch.timestamp);
+	const videoBuffered = solid(props.hangWatch.video.buffered);
+	const audioBuffered = solid(props.hangWatch.audio.buffered);
 
 	const value: WatchUIContextValues = {
 		hangWatch: props.hangWatch,
@@ -94,8 +102,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		currentVolume,
 		toggleMuted,
 		buffering,
-		buffer,
-		setBuffer,
+		jitter,
+		setJitter,
 		availableRenditions,
 		activeRendition,
 		setActiveRendition: setActiveRenditionValue,
@@ -103,6 +111,9 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		setIsStatsPanelVisible,
 		isFullscreen,
 		toggleFullscreen,
+		timestamp,
+		videoBuffered,
+		audioBuffered,
 	};
 
 	const watch = props.hangWatch;
@@ -131,7 +142,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const paused = effect.get(watch.video.paused);
+		const paused = effect.get(watch.paused);
 		setIsPlaying(!paused);
 	});
 
@@ -146,29 +157,30 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.effect((effect) => {
-		const syncStatus = effect.get(watch.video.source.syncStatus);
-		const bufferStatus = effect.get(watch.video.source.bufferStatus);
-		const shouldShow = syncStatus.state === "wait" || bufferStatus.state === "empty";
-
-		setBuffering(shouldShow);
+		const buffering = effect.get(watch.buffering);
+		setBuffering(buffering);
 	});
 
 	signals.effect((effect) => {
-		const rootCatalog = effect.get(watch.broadcast.catalog);
-		const videoCatalog = rootCatalog?.video;
+		const jitter = effect.get(watch.jitter);
+		setJitter(jitter);
+	});
+
+	signals.effect((effect) => {
+		const videoCatalog = effect.get(watch.video.source.catalog);
 		const renditions = videoCatalog?.renditions ?? {};
 
 		const renditionsList: Rendition[] = Object.entries(renditions).map(([name, config]) => ({
 			name,
-			width: (config as Catalog.VideoConfig).codedWidth,
-			height: (config as Catalog.VideoConfig).codedHeight,
+			width: config.codedWidth,
+			height: config.codedHeight,
 		}));
 
 		setAvailableRenditions(renditionsList);
 	});
 
 	signals.effect((effect) => {
-		const selected = effect.get(watch.video.source.active);
+		const selected = effect.get(watch.video.source.track);
 		setActiveRendition(selected);
 	});
 

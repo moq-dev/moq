@@ -43,6 +43,12 @@ impl Session {
 	}
 }
 
+impl Drop for Session {
+	fn drop(&mut self) {
+		self.session.close(Error::Cancel.to_code(), "dropped");
+	}
+}
+
 // We use a wrapper type that is dyn-compatible to remove the generic bounds from Session.
 trait SessionInner: Send + Sync {
 	fn close(&self, code: u32, reason: &str);

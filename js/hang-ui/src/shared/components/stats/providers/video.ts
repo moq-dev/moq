@@ -46,8 +46,8 @@ export class VideoProvider extends BaseProvider {
 			return;
 		}
 
-		const display = this.props.video.source.display.peek();
-		const stats = this.props.video.source.stats.peek();
+		const catalog = this.props.video.source.catalog.peek();
+		const stats = this.props.video.stats.peek();
 		const now = performance.now();
 
 		// Calculate FPS from frame count delta and timestamp delta
@@ -90,7 +90,7 @@ export class VideoProvider extends BaseProvider {
 			this.previousWhen = now;
 		}
 
-		const { width, height } = display ?? {};
+		const { width, height } = catalog?.display ?? {};
 
 		const parts = [
 			width && height ? `${width}x${height}` : "N/A",

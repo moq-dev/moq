@@ -1,7 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
-import type * as Catalog from "../catalog";
-import { PRIORITY } from "./priority";
+import * as Catalog from "../catalog";
 
 export type PreviewProps = {
 	enabled?: boolean | Signal<boolean>;
@@ -10,7 +9,7 @@ export type PreviewProps = {
 
 export class Preview {
 	static readonly TRACK = "preview.json";
-	static readonly PRIORITY = PRIORITY.preview;
+	static readonly PRIORITY = Catalog.PRIORITY.preview;
 
 	enabled: Signal<boolean>;
 	info: Signal<Catalog.Preview | undefined>;
@@ -30,10 +29,9 @@ export class Preview {
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		if (!effect.get(this.enabled)) return;
-
-		const info = effect.get(this.info);
-		if (!info) return;
+		const values = effect.getAll([this.enabled, this.info]);
+		if (!values) return;
+		const [_, info] = values;
 
 		track.writeJson(info);
 	}

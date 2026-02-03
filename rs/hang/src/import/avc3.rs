@@ -64,7 +64,7 @@ impl Avc3 {
 			display_ratio_height: None,
 			optimize_for_latency: None,
 			container: hang::catalog::Container::Legacy,
-			min_buffer: None,
+			jitter: None,
 		};
 
 		if let Some(old) = &self.config
@@ -91,11 +91,10 @@ impl Avc3 {
 			video.priority = 2;
 		}
 
-		let track = track.produce();
-		self.broadcast.insert_track(track.consumer);
+		let track = self.broadcast.create_track(track);
 
 		self.config = Some(config);
-		self.track = Some(track.producer.into());
+		self.track = Some(track.into());
 
 		Ok(())
 	}

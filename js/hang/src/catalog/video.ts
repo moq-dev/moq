@@ -43,10 +43,15 @@ export const VideoConfigSchema = z.object({
 	// Default: true
 	optimizeForLatency: z.boolean().optional(),
 
-	// Minimum buffer size in milliseconds required for smooth playback.
-	// This represents the minimum time the player should buffer before starting playback.
-	// The player should add additional buffer on top of this value.
-	minBuffer: u53Schema.optional(),
+	// The maximum jitter before the next frame is emitted in milliseconds.
+	// The player's jitter buffer should be larger than this value.
+	// If not provided, the player should assume each frame is flushed immediately.
+	//
+	// ex:
+	// - If each frame is flushed immediately, this would be 1000/fps.
+	// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
+	// - If frames are buffered into 2s segments, this would be 2s.
+	jitter: u53Schema.optional(),
 });
 
 // Mirrors VideoDecoderConfig

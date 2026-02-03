@@ -1,6 +1,6 @@
 # moq-token
 
-A Javascript/Typescript library and CLI for implementing authentication with a MoQ relay. For comprehensive documentation including token structure, authorization rules, and examples, see the [Authentication Documentation](../../doc/concepts/authentication.md)
+A Javascript/Typescript library and CLI for implementing authentication with a MoQ relay. For comprehensive documentation including token structure, authorization rules, and examples, see the [Authentication Documentation](../../doc/concept/authentication.md)
 
 ## Installation
 
@@ -23,11 +23,10 @@ And then run
 moq-token generate ...
 ```
 
-You can also just directly use it via deno or bun as:
+You can also just directly use it via bun as:
 
 ```bash
 bunx @moq/token generate ...
-deno run -A npm:@moq/token/cli generate ...
 ```
 
 

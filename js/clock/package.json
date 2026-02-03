@@ -13,13 +13,15 @@
 		"moq-clock": "./src/main.ts"
 	},
 	"scripts": {
-		"check": "deno check"
+		"check": "tsc --noEmit"
 	},
 	"dependencies": {
-		"@moq/lite": "workspace:*"
+		"@moq/lite": "workspace:*",
+		"@fails-components/webtransport": "^1.5.2",
+		"@fails-components/webtransport-transport-http3-quiche": "^1.5.2"
 	},
 	"devDependencies": {
-		"@types/deno": "^2.3.0",
+		"@types/node": "^24.3.1",
 		"typescript": "^5.9.2"
 	}
 }

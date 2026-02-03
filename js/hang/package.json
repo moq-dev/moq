@@ -1,7 +1,7 @@
 {
 	"name": "@moq/hang",
 	"type": "module",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "Media over QUIC library",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
@@ -11,8 +11,6 @@
 		"./publish/element": "./src/publish/element.ts",
 		"./watch": "./src/watch/index.ts",
 		"./watch/element": "./src/watch/element.ts",
-		"./meet": "./src/meet/index.ts",
-		"./meet/element": "./src/meet/element.ts",
 		"./catalog": "./src/catalog/index.ts",
 		"./support": "./src/support/index.ts",
 		"./support/element": "./src/support/element.ts"
@@ -20,8 +18,7 @@
 	"sideEffects": [
 		"./src/publish/element.ts",
 		"./src/watch/element.ts",
-		"./src/support/element.ts",
-		"./src/meet/element.ts"
+		"./src/support/element.ts"
 	],
 	"scripts": {
 		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",

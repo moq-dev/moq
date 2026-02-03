@@ -1,5 +1,5 @@
 import { Effect, Signal } from "@moq/signals";
-import type { Source } from "./source";
+import type { Decoder } from "./decoder";
 
 const MIN_GAIN = 0.001;
 const FADE_TIME = 0.2;
@@ -12,7 +12,7 @@ export type EmitterProps = {
 
 // A helper that emits audio directly to the speakers.
 export class Emitter {
-	source: Source;
+	source: Decoder;
 	volume: Signal<number>;
 	muted: Signal<boolean>;
 
@@ -28,7 +28,7 @@ export class Emitter {
 	// The gain node used to adjust the volume.
 	#gain = new Signal<GainNode | undefined>(undefined);
 
-	constructor(source: Source, props?: EmitterProps) {
+	constructor(source: Decoder, props?: EmitterProps) {
 		this.source = source;
 		this.volume = Signal.from(props?.volume ?? 0.5);
 		this.muted = Signal.from(props?.muted ?? false);

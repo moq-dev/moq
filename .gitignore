@@ -30,7 +30,7 @@ node_modules
 *.m3u8
 *.m4s
 
-# We're using bun (and sometimes deno)
+# We're using bun
 package-lock.json
 yarn.lock
 pnpm-lock.yaml

@@ -53,11 +53,9 @@ export class Broadcast {
 	}
 
 	#run(effect: Effect) {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
-		const connection = effect.get(this.connection);
-		if (!connection) return;
+		const values = effect.getAll([this.enabled, this.connection]);
+		if (!values) return;
+		const [_enabled, connection] = values;
 
 		const path = effect.get(this.path);
 		if (path === undefined) return;

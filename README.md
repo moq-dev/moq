@@ -55,7 +55,6 @@ If you don't like Nix, then you can install dependencies manually:
 - [Rust](https://www.rust-lang.org/tools/install)
 - [Bun](https://bun.sh/)
 - [FFmpeg](https://ffmpeg.org/download.html)
-- [Deno](https://deno.com/runtime) (optional)
 - ...probably some other stuff
 
 **Run it:**
@@ -67,7 +66,7 @@ just install
 just dev
 ```
 
-Then visit [https://localhost:8080](https://localhost:8080) to see the demo.
+Then visit [http://localhost:5173](http://localhost:5173) to see the demo.
 
 
 ## Architecture
@@ -124,8 +123,8 @@ This repository provides both [Rust](/rs) and [TypeScript](/js) libraries with s
 
 | Package                                  | Description                                                                                                        | NPM                                                                                                   |
 |------------------------------------------|--------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
-| **[@moq/lite](js/lite)**             | The core pub/sub transport protocol. Intended for browsers, but can be run server-side using [Deno](https://deno.com/).                                   | [![npm](https://img.shields.io/npm/v/@moq/lite)](https://www.npmjs.com/package/@moq/lite)   |
-| **[@moq/token](js/token)**             |  Authentication library & CLI for JS/TS environments (see [Authentication](doc/concepts/authentication.md))                               | [![npm](https://img.shields.io/npm/v/@moq/token)](https://www.npmjs.com/package/@moq/token)   |
+| **[@moq/lite](js/lite)**             | The core pub/sub transport protocol. Intended for browsers, but can be run server-side with a WebTransport polyfill.                                   | [![npm](https://img.shields.io/npm/v/@moq/lite)](https://www.npmjs.com/package/@moq/lite)   |
+| **[@moq/token](js/token)**             |  Authentication library & CLI for JS/TS environments (see [Authentication](doc/concept/authentication.md))                               | [![npm](https://img.shields.io/npm/v/@moq/token)](https://www.npmjs.com/package/@moq/token)   |
 | **[@moq/hang](js/hang)**           | Media-specific encoding/streaming layered on top of `moq-lite`. Provides both a Javascript API and Web Components. | [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang) |
 | **[@moq/hang-demo](js/hang-demo)** | Examples using `@moq/hang`.                                                                                  |                                                                                                       |
 | **[@moq/hang-ui](js/hang-ui)**.    | UI Components that interact with the Hang Web Components using SolidJS.                                                 | [![npm](https://img.shields.io/npm/v/@moq/hang-ui)](https://www.npmjs.com/package/@moq/hang-ui) |
@@ -134,7 +133,7 @@ This repository provides both [Rust](/rs) and [TypeScript](/js) libraries with s
 ## Documentation
 Additional documentation and implementation details:
 
-- **[Authentication](doc/concepts/authentication.md)** - JWT tokens, authorization, and security
+- **[Authentication](doc/concept/authentication.md)** - JWT tokens, authorization, and security
 
 
 ## Protocol

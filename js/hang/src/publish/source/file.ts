@@ -19,12 +19,9 @@ export class File {
 		this.file = Signal.from(config.file);
 
 		this.signals.effect((effect) => {
-			const file = effect.get(this.file);
-			const enabled = effect.get(this.enabled);
-
-			if (!file || !enabled) {
-				return;
-			}
+			const values = effect.getAll([this.file, this.enabled]);
+			if (!values) return;
+			const [file] = values;
 
 			this.#decode(file, effect).catch((err) => {
 				console.error("Failed to decode file:", err);

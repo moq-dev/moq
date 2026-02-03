@@ -12,7 +12,7 @@ use std::future::Future;
 use bytes::Bytes;
 use tokio::sync::watch;
 
-use crate::{Error, Produce, Result};
+use crate::{Error, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
 
@@ -26,10 +26,8 @@ pub struct Group {
 }
 
 impl Group {
-	pub fn produce(self) -> Produce<GroupProducer, GroupConsumer> {
-		let producer = GroupProducer::new(self);
-		let consumer = producer.consume();
-		Produce { producer, consumer }
+	pub fn produce(self) -> GroupProducer {
+		GroupProducer::new(self)
 	}
 }
 
@@ -83,7 +81,7 @@ pub struct GroupProducer {
 }
 
 impl GroupProducer {
-	fn new(info: Group) -> Self {
+	pub fn new(info: Group) -> Self {
 		Self {
 			info,
 			state: Default::default(),
@@ -106,9 +104,9 @@ impl GroupProducer {
 
 	/// Create a frame with an upfront size
 	pub fn create_frame(&mut self, info: Frame) -> FrameProducer {
-		let frame = Frame::produce(info);
-		self.append_frame(frame.consumer);
-		frame.producer
+		let frame = info.produce();
+		self.append_frame(frame.consume());
+		frame
 	}
 
 	/// Append a frame to the group.
@@ -215,6 +213,26 @@ impl GroupConsumer {
 			if self.state.changed().await.is_err() {
 				return Err(Error::Cancel);
 			}
+		}
+	}
+
+	pub async fn get_frame(&self, index: usize) -> Result<Option<FrameConsumer>> {
+		let mut state = self.state.clone();
+		let Ok(state) = state
+			.wait_for(|state| index < state.frames.len() || state.closed.is_some())
+			.await
+		else {
+			return Err(Error::Cancel);
+		};
+
+		if let Some(frame) = state.frames.get(index).cloned() {
+			return Ok(Some(frame));
+		}
+
+		match &state.closed {
+			Some(Ok(_)) => Ok(None),
+			Some(Err(err)) => Err(err.clone()),
+			_ => unreachable!(),
 		}
 	}
 }

@@ -1,12 +1,6 @@
-const MAX_U6 = 2 ** 6 - 1;
-const MAX_U14 = 2 ** 14 - 1;
-const MAX_U30 = 2 ** 30 - 1;
+import * as Varint from "./varint.ts";
+
 const MAX_U31 = 2 ** 31 - 1;
-const MAX_U53 = Number.MAX_SAFE_INTEGER;
-
-// TODO: Figure out why webpack is converting this to Math.pow
-//const MAX_U62: bigint = 2n ** 62n - 1n;
-
 const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a message
 
 export class Stream {
@@ -161,7 +155,7 @@ export class Reader {
 	// Returns a Number using 53-bits, the max Javascript can use for integer math
 	async u53(): Promise<number> {
 		const v = await this.u62();
-		if (v > MAX_U53) {
+		if (v > Varint.MAX_U53) {
 			throw new Error("value larger than 53-bits; use v62 instead");
 		}
 
@@ -251,27 +245,14 @@ export class Writer {
 	}
 
 	async u53(v: number) {
-		if (v < 0) {
-			throw new Error(`underflow, value is negative: ${v.toString()}`);
-		}
-		if (v > MAX_U53) {
+		if (v > Varint.MAX_U53) {
 			throw new Error(`overflow, value larger than 53-bits: ${v.toString()}`);
 		}
-
-		await this.write(setVint53(this.#scratch, v));
+		await this.write(Varint.encodeTo(this.#scratch, v));
 	}
 
 	async u62(v: bigint) {
-		if (v < 0) {
-			throw new Error(`underflow, value is negative: ${v.toString()}`);
-		}
-		/*
-		if (v >= MAX_U62) {
-			throw new Error(`overflow, value larger than 62-bits: ${v}`);
-		}
-		*/
-
-		await this.write(setVint62(this.#scratch, v));
+		await this.write(Varint.encodeTo(this.#scratch, v));
 	}
 
 	async write(v: Uint8Array) {
@@ -302,65 +283,21 @@ export class Writer {
 	}
 }
 
-export function setUint8(dst: ArrayBuffer, v: number): Uint8Array {
+function setUint8(dst: ArrayBuffer, v: number): Uint8Array {
 	const buffer = new Uint8Array(dst, 0, 1);
 	buffer[0] = v;
 	return buffer;
 }
 
-export function setUint16(dst: ArrayBuffer, v: number): Uint8Array {
+function setUint16(dst: ArrayBuffer, v: number): Uint8Array {
 	const view = new DataView(dst, 0, 2);
 	view.setUint16(0, v);
 	return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
 }
 
-export function setInt32(dst: ArrayBuffer, v: number): Uint8Array {
+function setInt32(dst: ArrayBuffer, v: number): Uint8Array {
 	const view = new DataView(dst, 0, 4);
 	view.setInt32(0, v);
-	return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-}
-
-export function setUint32(dst: ArrayBuffer, v: number): Uint8Array {
-	const view = new DataView(dst, 0, 4);
-	view.setUint32(0, v);
-	return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-}
-
-export function setVint53(dst: ArrayBuffer, v: number): Uint8Array {
-	if (v <= MAX_U6) {
-		return setUint8(dst, v);
-	}
-	if (v <= MAX_U14) {
-		return setUint16(dst, v | 0x4000);
-	}
-	if (v <= MAX_U30) {
-		return setUint32(dst, v | 0x80000000);
-	}
-	if (v <= MAX_U53) {
-		return setUint64(dst, BigInt(v) | 0xc000000000000000n);
-	}
-	throw new Error(`overflow, value larger than 53-bits: ${v.toString()}`);
-}
-
-export function setVint62(dst: ArrayBuffer, v: bigint): Uint8Array {
-	if (v < MAX_U6) {
-		return setUint8(dst, Number(v));
-	}
-	if (v < MAX_U14) {
-		return setUint16(dst, Number(v) | 0x4000);
-	}
-	if (v <= MAX_U30) {
-		return setUint32(dst, Number(v) | 0x80000000);
-	}
-	//if (v <= MAX_U62) {
-	return setUint64(dst, BigInt(v) | 0xc000000000000000n);
-	//}
-	//throw new Error(`overflow, value larger than 62-bits: ${v}`);
-}
-
-export function setUint64(dst: ArrayBuffer, v: bigint): Uint8Array {
-	const view = new DataView(dst, 0, 8);
-	view.setBigUint64(0, v);
 	return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
 }
 

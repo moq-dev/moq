@@ -5,6 +5,7 @@ export * from "./container";
 export * from "./integers";
 export * from "./location";
 export * from "./preview";
+export * from "./priority";
 export * from "./root";
 export * from "./track";
 export * from "./user";

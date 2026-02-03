@@ -13,113 +13,130 @@ export default defineConfig({
 		logo: "/icon.svg",
 
 		nav: [
-			{ text: "Dev", link: "/dev/" },
-			{ text: "Relay", link: "/relay/" },
-			{ text: "Rust", link: "/rust/" },
+			{ text: "Setup", link: "/setup/" },
+			{ text: "Concepts", link: "/concept/" },
+			{ text: "Apps", link: "/app/" },
+			{ text: "Rust", link: "/rs/" },
 			{ text: "TypeScript", link: "/ts/" },
-			{ text: "Concepts", link: "/concepts/" },
 		],
 
 		sidebar: {
-			"/dev/": [
+			"/setup/": [
 				{
-					text: "Getting Started",
-					items: [{ text: "Quick Start", link: "/dev/" }],
+					text: "Setup",
+					link: "/setup/",
+					items: [
+						{ text: "Development", link: "/setup/dev" },
+						{ text: "Production", link: "/setup/prod" },
+					],
 				},
 			],
 
-			"/concepts/": [
+			"/concept/": [
 				{
 					text: "Concepts",
+					link: "/concept/",
 					items: [
-						{ text: "Layers", link: "/concepts/" },
-						{ text: "Protocol", link: "/concepts/protocol" },
-						{ text: "Authentication", link: "/concepts/authentication" },
-						{ text: "Standards", link: "/concepts/standards" },
-					],
-				},
-				{
-					text: "Comparisons",
-					items: [
-						{ text: "vs RTMP/SRT", link: "/concepts/contribution" },
-						{ text: "vs HLS/DASH", link: "/concepts/distribution" },
-						{ text: "vs WebRTC", link: "/concepts/conferencing" },
-					],
-				},
-			],
-
-			"/relay/": [
-				{
-					text: "Relay Server",
-					items: [
-						{ text: "Overview", link: "/relay/" },
-						{ text: "Authentication", link: "/relay/auth" },
-						{ text: "Clustering", link: "/relay/cluster" },
-						{ text: "Production", link: "/relay/production" },
-					],
-				},
-			],
-
-			"/web/": [
-				{
-					text: "Web",
-					items: [{ text: "Overview", link: "/web/" }],
-				},
-			],
-
-			"/obs/": [
-				{
-					text: "OBS",
-					items: [{ text: "Overview", link: "/obs/" }],
-				},
-			],
-
-			"/gstreamer/": [
-				{
-					text: "GStreamer",
-					items: [{ text: "Overview", link: "/gstreamer/" }],
-				},
-			],
-
-			"/ffmpeg/": [
-				{
-					text: "FFmpeg",
-					items: [{ text: "Overview", link: "/ffmpeg/" }],
-				},
-			],
-
-			"/rust/": [
-				{
-					text: "Rust Libraries",
-					items: [
-						{ text: "Overview", link: "/rust/" },
-						{ text: "moq-lite", link: "/rust/lite" },
-						{ text: "hang", link: "/rust/hang" },
-						{ text: "moq-token", link: "/rust/token" },
-						{ text: "web-transport", link: "/rust/web-transport" },
-						{ text: "Examples", link: "/rust/examples" },
-					],
-				},
-			],
-
-			"/ts/": [
-				{
-					text: "TypeScript Libraries",
-					items: [
-						{ text: "Overview", link: "/ts/" },
-						{ text: "@moq/lite", link: "/ts/lite" },
 						{
-							text: "@moq/hang",
-							link: "/ts/hang/",
+							text: "Layers",
 							items: [
-								{ text: "Watch", link: "/ts/hang/watch" },
-								{ text: "Publish", link: "/ts/hang/publish" },
+								{ text: "Overview", link: "/concept/layer/" },
+								{ text: "lite", link: "/concept/layer/moq-lite" },
+								{ text: "hang", link: "/concept/layer/hang" },
 							],
 						},
-						{ text: "@moq/hang-ui", link: "/ts/hang-ui" },
-						{ text: "@moq/token", link: "/ts/token" },
-						{ text: "@moq/signals", link: "/ts/signals" },
-						{ text: "Examples", link: "/ts/examples" },
+
+						{ text: "Terminology", link: "/concept/terminology" },
+						{
+							text: "Standards",
+							items: [
+								{ text: "Overview", link: "/concept/standard/" },
+								{ text: "MoqTransport", link: "/concept/standard/moq-transport" },
+							],
+						},
+						{
+							text: "Use Cases",
+							link: "/concept/use-cases/",
+							items: [
+								{ text: "Contribution", link: "/concept/use-cases/contribution" },
+								{ text: "Distribution", link: "/concept/use-cases/distribution" },
+								{ text: "Conferencing", link: "/concept/use-cases/conferencing" },
+							],
+						},
+					],
+				},
+			],
+
+			"/app/": [
+				{
+					text: "Applications",
+					link: "/app/",
+					items: [
+						{
+							text: "Relay",
+							link: "/app/relay/",
+							items: [
+								{ text: "Configuration", link: "/app/relay/config" },
+								{ text: "Authentication", link: "/app/relay/auth" },
+								{ text: "Clustering", link: "/app/relay/cluster" },
+								{ text: "Production", link: "/app/relay/production" },
+							],
+						},
+						{ text: "CLI", link: "/app/cli" },
+						{ text: "OBS", link: "/app/plugin/obs" },
+						{ text: "Gstreamer", link: "/app/plugin/gstreamer" },
+						{ text: "Web", link: "/app/plugin/web" },
+					],
+				},
+			],
+
+			"/rs/": [
+				{
+					text: "Environments",
+					link: "/rs/env/",
+					items: [
+						{ text: "Native", link: "/rs/env/native" },
+						{ text: "WASM", link: "/rs/env/wasm" },
+					],
+				},
+				{
+					link: "/rs/crate",
+					items: [
+						{ text: "moq-lite", link: "/rs/crate/moq-lite" },
+						{ text: "moq-native", link: "/rs/crate/moq-native" },
+						{ text: "moq-token", link: "/rs/crate/moq-token" },
+						{ text: "hang", link: "/rs/crate/hang" },
+						{ text: "web-transport", link: "/rs/crate/web-transport" },
+					],
+				},
+			],
+
+			"/js/": [
+				{
+					text: "Environments",
+					link: "/js/env/",
+					items: [
+						{ text: "Web", link: "/js/env/web" },
+						{ text: "Native", link: "/js/env/native" },
+					],
+				},
+				{
+					text: "Packages",
+					link: "/js/@moq",
+					items: [
+						{ text: "@moq/lite", link: "/js/@moq/lite" },
+						{
+							text: "@moq/hang",
+							link: "/js/hang/",
+							items: [
+								{ text: "Watch", link: "/js/@moq/hang/watch" },
+								{ text: "Publish", link: "/js/@moq/hang/publish" },
+							],
+						},
+						{ text: "@moq/hang-ui", link: "/js/@moq/hang-ui" },
+						{ text: "@moq/token", link: "/js/@moq/token" },
+						{ text: "@moq/signals", link: "/js/@moq/signals" },
+						{ text: "@moq/web-transport-ws", link: "/js/@moq/web-transport-ws" },
 					],
 				},
 			],
@@ -131,7 +148,7 @@ export default defineConfig({
 		],
 
 		editLink: {
-			pattern: "https://github.com/moq-dev/moq/edit/main/docs/:path",
+			pattern: "https://github.com/moq-dev/moq/edit/main/doc/:path",
 			text: "Edit this page on GitHub",
 		},
 
@@ -145,7 +162,7 @@ export default defineConfig({
 
 		footer: {
 			message: "Licensed under MIT or Apache-2.0",
-			copyright: "Copyright © 2025-present MoQ Contributors",
+			copyright: "Copyright © 2026-present moq.dev",
 		},
 	},
 

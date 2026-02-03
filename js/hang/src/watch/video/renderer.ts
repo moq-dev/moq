@@ -1,5 +1,5 @@
 import { Effect, Signal } from "@moq/signals";
-import type { Source } from "./source";
+import type { Decoder } from "./decoder";
 
 export type RendererProps = {
 	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
@@ -8,7 +8,7 @@ export type RendererProps = {
 
 // An component to render a video to a canvas.
 export class Renderer {
-	source: Source;
+	decoder: Decoder;
 
 	// The canvas to render the video to.
 	canvas: Signal<HTMLCanvasElement | undefined>;
@@ -22,8 +22,8 @@ export class Renderer {
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
 	#signals = new Effect();
 
-	constructor(source: Source, props?: RendererProps) {
-		this.source = source;
+	constructor(decoder: Decoder, props?: RendererProps) {
+		this.decoder = decoder;
 		this.canvas = Signal.from(props?.canvas);
 		this.paused = Signal.from(props?.paused ?? false);
 
@@ -38,11 +38,9 @@ export class Renderer {
 	}
 
 	#runResize(effect: Effect) {
-		const canvas = effect.get(this.canvas);
-		if (!canvas) return;
-
-		const display = effect.get(this.source.display);
-		if (!display) return; // Keep current canvas size until we have new dimensions
+		const values = effect.getAll([this.canvas, this.decoder.display]);
+		if (!values) return; // Keep current canvas size until we have new dimensions
+		const [canvas, display] = values;
 
 		// Only update if dimensions actually changed (setting canvas.width/height clears the canvas)
 		// TODO I thought the signals library would prevent this, but I'm too lazy to investigate.
@@ -64,7 +62,7 @@ export class Renderer {
 		const observer = new IntersectionObserver(
 			(entries) => {
 				for (const entry of entries) {
-					this.source.enabled.set(entry.isIntersecting);
+					this.decoder.enabled.set(entry.isIntersecting);
 				}
 			},
 			{
@@ -73,7 +71,7 @@ export class Renderer {
 			},
 		);
 
-		effect.cleanup(() => this.source.enabled.set(false));
+		effect.cleanup(() => this.decoder.enabled.set(false));
 
 		observer.observe(canvas);
 		effect.cleanup(() => observer.disconnect());
@@ -87,7 +85,7 @@ export class Renderer {
 
 		const paused = effect.get(this.paused);
 		if (!paused) {
-			frame = effect.get(this.source.frame);
+			frame = effect.get(this.decoder.frame);
 			this.#lastFrame?.close();
 			this.#lastFrame = frame?.clone();
 		} else {
@@ -124,7 +122,7 @@ export class Renderer {
 		ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
 		// Apply horizontal flip if specified in the video config
-		const flip = this.source.catalog.peek()?.flip;
+		const flip = this.decoder.source.catalog.peek()?.flip;
 		if (flip) {
 			ctx.scale(-1, 1);
 			ctx.translate(-ctx.canvas.width, 0);

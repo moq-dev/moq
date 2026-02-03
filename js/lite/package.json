@@ -1,7 +1,7 @@
 {
 	"name": "@moq/lite",
 	"type": "module",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "Media over QUIC library",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
@@ -29,7 +29,6 @@
 		"@types/node": "^24.3.1",
 		"vite-plugin-html": "^3.2.2",
 		"rimraf": "^6.0.1",
-		"@types/deno": "^2.3.0",
 		"typescript": "^5.9.2",
 		"madge": "^8.0.0"
 	}
