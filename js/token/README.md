@@ -1,6 +1,6 @@
 # moq-token
 
-A Javascript/Typescript library and CLI for implementing authentication with a MoQ relay. For comprehensive documentation including token structure, authorization rules, and examples, see the [Authentication Documentation](../../doc/concepts/authentication.md)
+A Javascript/Typescript library and CLI for implementing authentication with a MoQ relay. For comprehensive documentation including token structure, authorization rules, and examples, see the [Authentication Documentation](../../doc/concept/authentication.md)
 
 ## Installation
 

@@ -8,72 +8,110 @@ hero:
       link: /setup/
     - theme: alt
       text: Concepts
-      link: /concepts/
+      link: /concept/
     - theme: alt
-      text: API
-      link: /api/
+      text: Apps
+      link: /app/
+    - theme: alt
+      text: Rust
+      link: /rs/
+    - theme: alt
+      text: Typescript
+      link: /js/
     - theme: alt
       text: Demo
       link: https://moq.dev/
 
 features:
   - icon: 🚀
-    title: Real-time Latency
-    details: MoQ supports the entire latency spectrum, down to the tens of milliseconds. All thanks to QUIC.
+    title: Latency
+    details: MoQ supports the entire latency spectrum on a per-viewer basis. Support real-time, interactive, or sit-back user experiences with a unified stack.
 
   - icon: 📈
     title: Massive Scale
-    details: Everything is designed to fan-out across a generic CDN. Able to handle millions of concurrent viewers across the globe.
+    details: All content can be cached and fanned-out via a generic CDN. Serve millions of concurrent viewers across the globe, including via Cloudflare (and more soon).
+
+  - icon: 🔧
+    title: Flexible
+    details: Supports contribution, distribution, and even conferencing. Extend the protocol with custom tracks for any sort of live content.
 
   - icon: 🌐
     title: Modern Web
-    details: Uses WebTransport, WebCodecs, and WebAudio APIs for native browser compatibility without hacks.
+    details: Utilizes WebTransport, WebCodecs, and WebAudio APIs for native browser compatibility without hacks.
 
   - icon: 🎯
     title: Multi-platform
-    details: Implemented in Rust (native) and TypeScript (web). Comes with integrations for ffmpeg, OBS, Gstreamer, and more to come.
-
-  - icon: 🔧
-    title: Generic Protocol
-    details: Not just for media; MoQ is able to deliver any live or custom data. Your application is in control.
+    details: Libraries in Rust (native) and TypeScript (web). Integrations for ffmpeg, OBS, Gstreamer, and more to come.
 
   - icon: 💪
     title: Efficient
-    details: Save resources by only encoding or transmitting data when needed. Built on top of production-grade QUIC libraries.
+    details: Save resources by only encoding or transmitting data when needed. Built on top of production-ready QUIC libraries.
+
+  - icon: 🔒
+    title: Secure
+    details: Encrypted via TLS and authenticated via JWT. You can optionally self-host a private CDN or end-to-end encrypt your content.
+
+  - icon: ⏪
+    title: Backwards Compatible
+    details: Supports CMAF and HLS for legacy device support. Gradually migrate your users without breaking a leg.
+
+  - icon: 👯
+    title: Peer-to-Peer
+    details: Utilize a CDN and/or connect directly to peers via Iroh (native only). Automatically discovers broadcasts available on a connection.
 ---
 
 ## What is MoQ?
 
-[Media over QUIC](https://moq.dev) (MoQ) is a next-generation live media protocol that provides **real-time latency** at **massive scale**. Built using modern web technologies, MoQ delivers WebRTC-like latency without the constraints of WebRTC. The core networking is delegated to a QUIC library but the rest is in application-space, giving you full control over your media pipeline.
+**Media over QUIC** (MoQ) is a next-generation live media protocol.
+As the name implies, it leverages QUIC to transmit media across multiple concurrent streams, potentially out-of-order.
+The protocol is being standardized by the [IETF](https://datatracker.ietf.org/group/moq/), backed by some of the largest tech companies: Google, Cisco, Akamai, Cloudflare, etc.
 
-**NOTE**: This project uses [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) and [hang](https://datatracker.ietf.org/doc/draft-lcurley-moq-hang/) instead of the *official* [IETF drafts](https://datatracker.ietf.org/group/moq/documents/).
-The focus is on simplicity and deployability, avoiding the bloat and politics experimental protocols designed by committee.
-We support compatibility with a subset of the latest IETF drafts, but it's *not recommended* given the ongoing standardization churn.
+[moq.dev](https://moq.dev) is an open source implementation written in Rust (native) and Typescript (web).
+We support compatibility with the *official* [IETF drafts](https://datatracker.ietf.org/group/moq/documents/), but the main focus is a subset called [moq-lite](/concept/layer/moq-lite) and [hang](/concept/layer/hang).
+The idea is to [build first, argue later](/concept/standard/).
 
-## Quick Start
+See the [concepts](/concept/) page for a breakdown of the layering, rationale, and comparison to other protocols.
 
-Get up and running in seconds with [Nix](https://nixos.org/download.html), or use an [alternative method](/setup).
+## Setup
+Get up and running in seconds with [Nix](https://nixos.org/download.html), or be lame and [install stuff manually](/setup/):
 
 ```bash
 # Runs a relay, media publisher, and the web server
 nix develop -c just dev
 ```
 
-## Rust
-The Rust libraries are intended for native platforms, such as desktop applications or servers.
+If everything works, a browser window will pop up demoing how to both publish and watch content via the web.
 
-- **[moq-lite](/rust/moq-lite)** - The core pub/sub transport protocol; media agnostic.
-- **[moq-relay](/rust/moq-relay)** - A clusterable relay server that can form a CDN.
-- **[hang](/rust/hang)** - The media library: provides codecs, containers, etc.
-- **[hang-cli](/rust/hang-cli)** - A CLI tool for publishing media from a variety of sources.
+- Keep reading the [development guide](/setup/dev) to run more advanced demos.
+- Skip ahead to the [production guide](/setup/prod) to see what it takes to run this bad boy.
 
-[Full Rust Documentation →](/rust/)
+## Applications
+There are a bunch of MoQ binaries and plugins. Some highlights:
 
-## TypeScript
-The TypeScript libraries are intended for web browsers, but also work server-side with a [WebTransport polyfill](https://github.com/fails-components/webtransport).
+- [moq-relay](/app/relay/) - A server connecting publishers to subscribers, able to form a [self-hosted CDN cluster](/app/relay/cluster).
+- [hang-cli](/app/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc), including via ffmpeg.
+- [obs](/app/obs) - An OBS plugin, able to publish a MoQ broadcast and/or use MoQ broadcasts as sources.
+- [gstreamer](/app/gstreamer) - A gstreamer plugin, split into a source and a sink.
+- [web](/app/web) - A web component you can throw on your website, wrapping a `<video>` tag. It can also do publishing!
+- [...and more](/app/)
 
-- **[@moq/lite](/typescript/lite)** - The core pub/sub transport protocol; media agnostic.
-- **[@moq/hang](/typescript/hang)** - The media library; provides codecs, containers, etc.
-- **[@moq/hang-ui](https://www.npmjs.com/package/@moq/hang-ui)** - Optional UI controls layered on top of `@moq/hang`.
+## Rust Crates 🦀
+Integrate MoQ into your application without fear.
+The main focus is [native](/rs/env/native), but there's also some [WASM support](/rs/env/wasm).
 
-[Full TypeScript Documentation →](/typescript/)
+Some highlights:
+- [moq-lite](/rs/crate/moq-lite) - Performs the core asynchronous networking, caching, and fanout.
+- [hang](/rs/crate/hang) - Performs any media stuff: currently only transmuxing.
+- [libmoq](/rs/crate/libmoq) - C bindings for the above, no finagling Rust into your build system.
+- [web-transport](/rs/crate/web-transport) - A suite of crates required to get QUIC access in the browser, plus some polyfills.
+- [...and more](/rs/)
+
+## TypeScript Packages
+Run MoQ in a [web browser](/js/env/web) utilizing the latest Web tech.
+Or run a [native app](/js/env/native) (with polyfills) via Node/Bun/Deno.
+
+Some highlights:
+- [@moq/lite](/js/@moq/lite) - Performs the core asynchronous networking.
+- [@moq/hang](/js/@moq/hang/) - Performs any media stuff: capture, encode, transmux, decode, render.
+- [@moq/hang-ui](/js/@moq/hang-ui) - A simple web UI for those too lazy to vibe code one.
+- [...and more](/js/)

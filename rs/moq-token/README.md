@@ -3,7 +3,7 @@
 A simple JWT and JWK based authentication scheme for moq-relay.
 
 For comprehensive documentation including token structure, authorization rules, and examples, see:
-**[Authentication Documentation](../../doc/concepts/authentication.md)**
+**[Authentication Documentation](../../doc/concept/authentication.md)**
 
 ## Quick Usage (symmetric keys)
 ```bash

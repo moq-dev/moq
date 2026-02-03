@@ -14,55 +14,129 @@ export default defineConfig({
 
 		nav: [
 			{ text: "Setup", link: "/setup/" },
-			{ text: "Concepts", link: "/concepts/" },
-			{ text: "API", link: "/api/" },
+			{ text: "Concepts", link: "/concept/" },
+			{ text: "Apps", link: "/app/" },
+			{ text: "Rust", link: "/rs/" },
+			{ text: "TypeScript", link: "/js/" },
 		],
 
 		sidebar: {
 			"/setup/": [
 				{
 					text: "Setup",
+					link: "/setup/",
 					items: [
-						{ text: "Quick Start", link: "/setup/" },
-						{ text: "Development", link: "/setup/development" },
-						{ text: "Production", link: "/setup/production" },
+						{ text: "Development", link: "/setup/dev" },
+						{ text: "Production", link: "/setup/prod" },
 					],
 				},
 			],
 
-			"/concepts/": [
+			"/concept/": [
 				{
 					text: "Concepts",
+					link: "/concept/",
 					items: [
-						{ text: "Layers", link: "/concepts/" },
-						{ text: "Latency", link: "/concepts/latency" },
-						{ text: "Standards", link: "/concepts/standards" },
+						{
+							text: "Layers",
+							items: [
+								{ text: "Overview", link: "/concept/layer/" },
+								{ text: "lite", link: "/concept/layer/moq-lite" },
+								{ text: "hang", link: "/concept/layer/hang" },
+							],
+						},
+
+						{ text: "Terminology", link: "/concept/terminology" },
+						{
+							text: "Standards",
+							items: [
+								{ text: "Overview", link: "/concept/standard/" },
+								{ text: "MoqTransport", link: "/concept/standard/moq-transport" },
+							],
+						},
+						{
+							text: "Use Cases",
+							link: "/concept/use-case/",
+							items: [
+								{ text: "Contribution", link: "/concept/use-case/contribution" },
+								{ text: "Distribution", link: "/concept/use-case/distribution" },
+								{ text: "Conferencing", link: "/concept/use-case/conferencing" },
+							],
+						},
 					],
 				},
 			],
 
-			"/rust/": [
+			"/app/": [
 				{
-					text: "Rust Libraries",
+					text: "Applications",
+					link: "/app/",
 					items: [
-						{ text: "Overview", link: "/rust/" },
-						{ text: "moq-lite", link: "/rust/moq-lite" },
-						{ text: "hang", link: "/rust/hang" },
-						{ text: "moq-relay", link: "/rust/moq-relay" },
-						{ text: "Examples", link: "/rust/examples" },
+						{
+							text: "Relay",
+							link: "/app/relay/",
+							items: [
+								{ text: "Configuration", link: "/app/relay/config" },
+								{ text: "Authentication", link: "/app/relay/auth" },
+								{ text: "Clustering", link: "/app/relay/cluster" },
+								{ text: "Production", link: "/app/relay/production" },
+							],
+						},
+						{ text: "CLI", link: "/app/cli" },
+						{ text: "OBS", link: "/app/plugin/obs" },
+						{ text: "Gstreamer", link: "/app/plugin/gstreamer" },
+						{ text: "Web", link: "/app/plugin/web" },
 					],
 				},
 			],
 
-			"/typescript/": [
+			"/rs/": [
 				{
-					text: "TypeScript Libraries",
+					text: "Environments",
+					link: "/rs/env/",
 					items: [
-						{ text: "Overview", link: "/typescript/" },
-						{ text: "@moq/lite", link: "/typescript/lite" },
-						{ text: "@moq/hang", link: "/typescript/hang" },
-						{ text: "Web Components", link: "/typescript/web-components" },
-						{ text: "Examples", link: "/typescript/examples" },
+						{ text: "Native", link: "/rs/env/native" },
+						{ text: "WASM", link: "/rs/env/wasm" },
+					],
+				},
+				{
+					link: "/rs/crate",
+					items: [
+						{ text: "moq-lite", link: "/rs/crate/moq-lite" },
+						{ text: "moq-native", link: "/rs/crate/moq-native" },
+						{ text: "moq-token", link: "/rs/crate/moq-token" },
+						{ text: "hang", link: "/rs/crate/hang" },
+						{ text: "web-transport", link: "/rs/crate/web-transport" },
+					],
+				},
+			],
+
+			"/js/": [
+				{
+					text: "Environments",
+					link: "/js/env/",
+					items: [
+						{ text: "Web", link: "/js/env/web" },
+						{ text: "Native", link: "/js/env/native" },
+					],
+				},
+				{
+					text: "Packages",
+					link: "/js/@moq",
+					items: [
+						{ text: "@moq/lite", link: "/js/@moq/lite" },
+						{
+							text: "@moq/hang",
+							link: "/js/@moq/hang/",
+							items: [
+								{ text: "Watch", link: "/js/@moq/hang/watch" },
+								{ text: "Publish", link: "/js/@moq/hang/publish" },
+							],
+						},
+						{ text: "@moq/hang-ui", link: "/js/@moq/hang-ui" },
+						{ text: "@moq/token", link: "/js/@moq/token" },
+						{ text: "@moq/signals", link: "/js/@moq/signals" },
+						{ text: "@moq/web-transport-ws", link: "/js/@moq/web-transport-ws" },
 					],
 				},
 			],
@@ -74,7 +148,7 @@ export default defineConfig({
 		],
 
 		editLink: {
-			pattern: "https://github.com/moq-dev/moq/edit/main/docs/:path",
+			pattern: "https://github.com/moq-dev/moq/edit/main/doc/:path",
 			text: "Edit this page on GitHub",
 		},
 
@@ -88,7 +162,7 @@ export default defineConfig({
 
 		footer: {
 			message: "Licensed under MIT or Apache-2.0",
-			copyright: "Copyright © 2025-present MoQ Contributors",
+			copyright: "Copyright © 2026-present moq.dev",
 		},
 	},
 
@@ -97,6 +171,8 @@ export default defineConfig({
 		lineNumbers: true,
 	},
 
-	// TODO: Remove this
-	ignoreDeadLinks: true,
+	ignoreDeadLinks: [
+		// Localhost URLs are intentional for development
+		"http://localhost:5173",
+	],
 });
