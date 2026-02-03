@@ -397,7 +397,7 @@ function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRang
 		const last = result.at(-1);
 		if (last && last.end >= range.start) {
 			// Merge overlapping ranges
-			last.end = Math.max(last.end, range.end) as Time.Milli;
+			last.end = Time.Milli.max(last.end, range.end);
 		} else {
 			result.push({ ...range });
 		}
