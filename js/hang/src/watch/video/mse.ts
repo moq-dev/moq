@@ -218,6 +218,9 @@ export class Mse implements Backend {
 			this.#stalled.set(element.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA);
 		};
 
+		// Set initial state
+		update();
+
 		// TODO Are these the correct events to use?
 		effect.event(element, "waiting", update);
 		effect.event(element, "playing", update);

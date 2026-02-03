@@ -1,6 +1,6 @@
 import { Moq } from "@moq/hang";
 import type { BufferedRange } from "@moq/hang/watch";
-import { createMemo, createSignal, For, Show } from "solid-js";
+import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import useWatchUIContext from "../hooks/use-watch-ui";
 
 const MIN_RANGE = 0 as Moq.Time.Milli;
@@ -79,11 +79,17 @@ export default function BufferControl(props: BufferControlProps) {
 		document.removeEventListener("mouseup", onMouseUp);
 	};
 
+	// Cleanup listeners on unmount
+	onCleanup(() => {
+		document.removeEventListener("mousemove", onMouseMove);
+		document.removeEventListener("mouseup", onMouseUp);
+	});
+
 	return (
-		<div class="bufferControlContainer">
+		<div class="buffer__container">
 			{/* Buffer Visualization - interactive, click/drag to set buffer */}
 			<div
-				class={`bufferVisualization ${isDragging() ? "dragging" : ""}`}
+				class={`buffer__visualization ${isDragging() ? "buffer__visualization--dragging" : ""}`}
 				ref={containerRef}
 				onMouseDown={onMouseDown}
 				role="slider"
@@ -94,11 +100,11 @@ export default function BufferControl(props: BufferControlProps) {
 				aria-label="Buffer jitter"
 			>
 				{/* Playhead (left edge = current time) */}
-				<div class="bufferPlayhead" />
+				<div class="buffer__playhead" />
 
 				{/* Video buffer track */}
-				<div class="bufferTrack bufferTrack--video">
-					<span class="bufferTrackLabel">Video</span>
+				<div class="buffer__track buffer__track--video">
+					<span class="buffer__track-label">Video</span>
 					<For each={context.videoBuffered()}>
 						{(range, i) => {
 							const info = () => {
@@ -109,9 +115,9 @@ export default function BufferControl(props: BufferControlProps) {
 							return (
 								<Show when={info()}>
 									{(rangeInfo) => (
-										<div class="bufferRange" style={rangeInfo().style}>
+										<div class="buffer__range" style={rangeInfo().style}>
 											<Show when={rangeInfo().isOverflow}>
-												<span class="bufferOverflowLabel">{rangeInfo().overflowSec}s</span>
+												<span class="buffer__overflow-label">{rangeInfo().overflowSec}s</span>
 											</Show>
 										</div>
 									)}
@@ -122,8 +128,8 @@ export default function BufferControl(props: BufferControlProps) {
 				</div>
 
 				{/* Audio buffer track */}
-				<div class="bufferTrack bufferTrack--audio">
-					<span class="bufferTrackLabel">Audio</span>
+				<div class="buffer__track buffer__track--audio">
+					<span class="buffer__track-label">Audio</span>
 					<For each={context.audioBuffered()}>
 						{(range, i) => {
 							const info = () => {
@@ -134,9 +140,9 @@ export default function BufferControl(props: BufferControlProps) {
 							return (
 								<Show when={info()}>
 									{(rangeInfo) => (
-										<div class="bufferRange" style={rangeInfo().style}>
+										<div class="buffer__range" style={rangeInfo().style}>
 											<Show when={rangeInfo().isOverflow}>
-												<span class="bufferOverflowLabel">{rangeInfo().overflowSec}s</span>
+												<span class="buffer__overflow-label">{rangeInfo().overflowSec}s</span>
 											</Show>
 										</div>
 									)}
@@ -147,9 +153,9 @@ export default function BufferControl(props: BufferControlProps) {
 				</div>
 
 				{/* Buffer target line (draggable) - wrapped in track-area container */}
-				<div class="bufferTargetArea">
-					<div class="bufferTargetLine" style={{ left: `${bufferTargetPct()}%` }}>
-						<span class="bufferTargetLabel">{`${Math.round(context.jitter())}ms`}</span>
+				<div class="buffer__target-area">
+					<div class="buffer__target-line" style={{ left: `${bufferTargetPct()}%` }}>
+						<span class="buffer__target-label">{`${Math.round(context.jitter())}ms`}</span>
 					</div>
 				</div>
 			</div>

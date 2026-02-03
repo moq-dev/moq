@@ -160,6 +160,10 @@ export class Mse implements Backend {
 				if (!next.frame) continue; // Skip over group done notifications.
 
 				pending = next.frame;
+
+				// Mark that we received this frame for latency calculation.
+				this.source.sync.received(Moq.Time.Milli.fromMicro(pending.timestamp as Moq.Time.Micro));
+
 				break;
 			}
 
@@ -172,6 +176,9 @@ export class Mse implements Backend {
 				// Compute duration from next frame's timestamp, or use last known duration if stream ended
 				if (frame) {
 					duration = (frame.timestamp - pending.timestamp) as Moq.Time.Micro;
+
+					// Mark that we received this frame for latency calculation.
+					this.source.sync.received(Moq.Time.Milli.fromMicro(frame.timestamp as Moq.Time.Micro));
 				}
 
 				// Wrap raw frame in moof+mdat

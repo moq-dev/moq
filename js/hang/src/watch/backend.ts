@@ -179,7 +179,6 @@ export class MultiBackend implements Backend {
 			paused: this.paused,
 			element,
 		});
-		effect.cleanup(() => mse.close());
 
 		const video = new Video.Mse(mse, this.#videoSource);
 		const audio = new Audio.Mse(mse, this.#audioSource, {
