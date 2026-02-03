@@ -67,7 +67,8 @@ export class Muxer {
 		if (paused) return;
 
 		// Use the computed latency (catalog jitter + user jitter)
-		const latency = effect.get(this.#sync.latency);
+		// Convert to seconds since DOM APIs use seconds
+		const latency = Time.Milli.toSecond(effect.get(this.#sync.latency));
 
 		effect.interval(() => {
 			// Skip over gaps based on the effective latency.
@@ -75,12 +76,13 @@ export class Muxer {
 			if (buffered.length === 0) return;
 
 			const last = buffered.end(buffered.length - 1);
-			const diff = last - element.currentTime;
+			const target = last - latency;
+			const seek = target - element.currentTime;
 
-			// Seek to maintain the target latency from the buffer end.
-			if (diff > latency && diff > 0.1) {
-				console.warn("skipping ahead", diff, "seconds");
-				element.currentTime = last - latency;
+			// Seek forward if we're too far behind, or backward if we're too far ahead (>100ms)
+			if (seek > 0.1 || seek < -0.1) {
+				console.warn("seeking", seek > 0 ? "forward" : "backward", Math.abs(seek).toFixed(3), "seconds");
+				element.currentTime = target;
 			}
 		}, 100);
 	}
