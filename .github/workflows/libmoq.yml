@@ -76,6 +76,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: Parse version
         id: parse
         run: |
@@ -87,6 +91,15 @@ jobs:
             exit 1
           fi
 
+      - name: Find previous libmoq tag
+        id: prev_tag
+        run: |
+          # Get all libmoq tags sorted by version, excluding the current tag
+          current_tag="libmoq-v${{ steps.parse.outputs.version }}"
+          prev_tag=$(git tag --list 'libmoq-v*' --sort=-v:refname | grep -v "^${current_tag}$" | head -n1)
+          echo "tag=${prev_tag}" >> $GITHUB_OUTPUT
+          echo "Previous tag: ${prev_tag:-none}"
+
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
@@ -94,8 +107,19 @@ jobs:
           merge-multiple: true
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: libmoq v${{ steps.parse.outputs.version }}
-          generate_release_notes: true
-          files: artifacts/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev_tag="${{ steps.prev_tag.outputs.tag }}"
+          if [ -n "$prev_tag" ]; then
+            gh release create "${{ github.ref_name }}" \
+              --title "libmoq v${{ steps.parse.outputs.version }}" \
+              --generate-notes \
+              --notes-start-tag "$prev_tag" \
+              artifacts/*
+          else
+            gh release create "${{ github.ref_name }}" \
+              --title "libmoq v${{ steps.parse.outputs.version }}" \
+              --generate-notes \
+              artifacts/*
+          fi
