@@ -78,7 +78,6 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 	// Create the video catalog entry with the renditions
 	let video = hang::catalog::Video {
 		renditions,
-		priority: 1,
 		display: None,
 		rotation: None,
 		flip: None,
