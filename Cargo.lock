@@ -1571,7 +1571,7 @@ checksum = "253b313319f7109de64e480ffb606f89475cd758bae82e096e00c5d95341d30e"
 
 [[package]]
 name = "hang"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "buf-list",
