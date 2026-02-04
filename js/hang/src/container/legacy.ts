@@ -296,7 +296,7 @@ export class Consumer {
 			// Try to merge with the last range if contiguous
 			const last = ranges.at(-1);
 			if (last && last.end >= start) {
-				last.end = Math.max(last.end, end) as Time.Milli;
+				last.end = Moq.Time.Milli.max(last.end, end);
 			} else {
 				ranges.push({ start, end });
 			}

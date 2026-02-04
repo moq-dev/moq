@@ -1,4 +1,4 @@
-import type { Time } from "@moq/lite";
+import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 
 export interface SyncProps {
@@ -22,7 +22,7 @@ export class Sync {
 	video: Signal<Time.Milli | undefined>;
 
 	// The buffer required, based on both audio and video.
-	#latency = new Signal<Time.Milli>(0 as Time.Milli);
+	#latency = new Signal<Time.Milli>(Time.Milli.zero);
 	readonly latency: Signal<Time.Milli> = this.#latency;
 
 	// A ghetto way to learn when the reference/latency changes.
@@ -46,10 +46,10 @@ export class Sync {
 
 	#runLatency(effect: Effect): void {
 		const jitter = effect.get(this.jitter);
-		const video = effect.get(this.video) ?? 0;
-		const audio = effect.get(this.audio) ?? 0;
+		const video = effect.get(this.video) ?? Time.Milli.zero;
+		const audio = effect.get(this.audio) ?? Time.Milli.zero;
 
-		const latency = (Math.max(video, audio) + jitter) as Time.Milli;
+		const latency = Time.Milli.add(Time.Milli.max(video, audio), jitter);
 		this.#latency.set(latency);
 
 		this.#resolve();
@@ -61,7 +61,7 @@ export class Sync {
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
 	received(timestamp: Time.Milli): void {
-		const ref = (performance.now() - timestamp) as Time.Milli;
+		const ref = Time.Milli.sub(Time.Milli.now(), timestamp);
 		const current = this.#reference.peek();
 
 		if (current !== undefined && ref >= current) {
@@ -85,13 +85,13 @@ export class Sync {
 		for (;;) {
 			// Sleep until it's time to decode the next frame.
 			// NOTE: This function runs in parallel for each frame.
-			const now = performance.now();
-			const ref = (now - timestamp) as Time.Milli;
+			const now = Time.Milli.now();
+			const ref = Time.Milli.sub(now, timestamp);
 
 			const currentRef = this.#reference.peek();
 			if (currentRef === undefined) return;
 
-			const sleep = currentRef - ref + this.#latency.peek();
+			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#latency.peek());
 			if (sleep <= 0) return;
 			const wait = new Promise((resolve) => setTimeout(resolve, sleep)).then(() => true);
 

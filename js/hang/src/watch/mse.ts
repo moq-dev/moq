@@ -140,7 +140,7 @@ export class Muxer {
 		// Compute the target currentTime based on reference and latency.
 		// reference = performance.now() - frameTimestamp (in ms) when we received the earliest frame
 		// So the target media timestamp (in ms) at time `now` is: now - reference - latency
-		const target = (performance.now() - reference - latency) as Time.Milli;
+		const target = Time.Milli.sub(Time.Milli.sub(Time.Milli.now(), reference), latency);
 
 		// Seek to the target position.
 		element.currentTime = Time.Milli.toSecond(target);

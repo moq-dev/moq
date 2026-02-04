@@ -313,7 +313,7 @@ export class Decoder {
 		// Calculate end time from sample duration
 		const durationMicro = ((sample.numberOfFrames / sample.sampleRate) * 1_000_000) as Time.Micro;
 		const durationMilli = Time.Milli.fromMicro(durationMicro);
-		const end = (timestampMilli + durationMilli) as Time.Milli;
+		const end = Time.Milli.add(timestampMilli, durationMilli);
 
 		// Add to decode buffer
 		this.#addDecodeBuffered(timestampMilli, end);
@@ -348,8 +348,8 @@ export class Decoder {
 			for (const range of current) {
 				// Extend range if new sample overlaps or is adjacent (1ms tolerance for float precision)
 				if (start <= range.end + 1 && end >= range.start) {
-					range.start = Math.min(range.start, start) as Time.Milli;
-					range.end = Math.max(range.end, end) as Time.Milli;
+					range.start = Time.Milli.min(range.start, start);
+					range.end = Time.Milli.max(range.end, end);
 					return;
 				}
 			}
@@ -363,7 +363,7 @@ export class Decoder {
 		this.#decodeBuffered.mutate((current) => {
 			while (current.length > 0) {
 				if (current[0].end >= timestamp) {
-					current[0].start = Math.max(current[0].start, timestamp) as Time.Milli;
+					current[0].start = Time.Milli.max(current[0].start, timestamp);
 					break;
 				}
 				current.shift();
@@ -397,7 +397,7 @@ function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRang
 		const last = result.at(-1);
 		if (last && last.end >= range.start) {
 			// Merge overlapping ranges
-			last.end = Math.max(last.end, range.end) as Time.Milli;
+			last.end = Time.Milli.max(last.end, range.end);
 		} else {
 			result.push({ ...range });
 		}

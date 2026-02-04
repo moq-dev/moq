@@ -182,7 +182,7 @@ export class Mse implements Backend {
 
 				// Compute duration from next frame's timestamp, or use last known duration if stream ended
 				if (frame) {
-					duration = (frame.timestamp - pending.timestamp) as Moq.Time.Micro;
+					duration = Moq.Time.Micro.sub(frame.timestamp, pending.timestamp);
 
 					// Mark that we received this frame right now for latency calculation.
 					this.source.sync.received(Moq.Time.Milli.fromMicro(frame.timestamp as Moq.Time.Micro));
