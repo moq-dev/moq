@@ -5,7 +5,6 @@ import { u53Schema } from "./integers";
 // Backwards compatibility: old track schema
 const TrackSchema = z.object({
 	name: z.string(),
-	priority: z.number().int().min(0).max(255),
 });
 
 // Mirrors AudioDecoderConfig
@@ -46,9 +45,6 @@ export const AudioSchema = z
 		// A map of track name to rendition configuration.
 		// This is not an array so it will work with JSON Merge Patch.
 		renditions: z.record(z.string(), AudioConfigSchema),
-
-		// The priority of the audio track, relative to other tracks in the broadcast.
-		priority: z.number().int().min(0).max(255),
 	})
 	.or(
 		// Backwards compatibility: transform old {track, config} format to new object format
@@ -59,7 +55,6 @@ export const AudioSchema = z
 			})
 			.transform((old) => ({
 				renditions: { [old.track.name]: old.config },
-				priority: old.track.priority,
 			})),
 	);
 

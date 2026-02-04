@@ -50,7 +50,7 @@ export class Window {
 			const updates = effect.get(this.#catalog)?.track;
 			if (!updates) return;
 
-			const track = broadcast.subscribe(updates.name, updates.priority);
+			const track = broadcast.subscribe(updates.name, Catalog.PRIORITY.location);
 			effect.cleanup(() => track.close());
 
 			effect.spawn(this.#runTrack.bind(this, track));

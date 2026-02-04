@@ -26,7 +26,7 @@ export class Peers {
 			const enabled = effect.get(this.enabled);
 			if (!enabled) return;
 
-			effect.set(this.catalog, { name: Peers.TRACK, priority: Peers.PRIORITY });
+			effect.set(this.catalog, { name: Peers.TRACK });
 		});
 	}
 

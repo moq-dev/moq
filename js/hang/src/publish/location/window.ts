@@ -37,7 +37,7 @@ export class Window {
 
 			effect.set(this.catalog, {
 				initial: this.position.peek(),
-				track: { name: Window.TRACK, priority: Window.PRIORITY },
+				track: { name: Window.TRACK },
 				handle: effect.get(this.handle),
 			});
 		});

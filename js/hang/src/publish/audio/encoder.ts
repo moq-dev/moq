@@ -220,7 +220,6 @@ export class Encoder {
 
 		const catalog: Catalog.Audio = {
 			renditions: { [Encoder.TRACK]: config },
-			priority: Encoder.PRIORITY,
 		};
 
 		effect.set(this.#catalog, catalog);

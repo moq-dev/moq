@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
+import * as Catalog from "../../catalog";
 
 export interface MessageProps {
 	// Whether to start downloading the chat.
@@ -43,7 +43,7 @@ export class Message {
 		if (!values) return;
 		const [_, catalog, broadcast] = values;
 
-		const track = broadcast.subscribe(catalog.name, catalog.priority);
+		const track = broadcast.subscribe(catalog.name, Catalog.PRIORITY.chat);
 		effect.cleanup(() => track.close());
 
 		// Undefined is only when we're not subscribed to the track.

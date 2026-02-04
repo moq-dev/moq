@@ -27,7 +27,7 @@ export class Message {
 			const enabled = effect.get(this.enabled);
 			if (!enabled) return;
 
-			effect.set(this.catalog, { name: Message.TRACK, priority: Message.PRIORITY });
+			effect.set(this.catalog, { name: Message.TRACK });
 		});
 	}
 
