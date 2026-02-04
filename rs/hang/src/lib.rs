@@ -14,11 +14,13 @@
 //! See the [moq-mux](https://crates.io/crates/moq-mux) crate for importing existing media formats into hang broadcasts.
 mod error;
 
+/// The catalog is used to describe the available media tracks and codecs.
 pub mod catalog;
-pub mod container;
-//pub mod wrapper;
 
-// export the moq-lite version in use
+/// The container is the contents of each media track.
+pub mod container;
+
+/// Export the moq-lite version we use.
 pub use moq_lite;
 
 pub use catalog::{Catalog, CatalogConsumer, CatalogGuard, CatalogProducer};

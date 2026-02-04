@@ -14,10 +14,7 @@ pub struct Avc3 {
 	catalog: hang::catalog::CatalogProducer,
 
 	// The track being produced.
-	track: Option<moq_lite::TrackProducer>,
-
-	// The current group being written.
-	group: Option<moq_lite::GroupProducer>,
+	track: Option<hang::container::OrderedProducer>,
 
 	// Whether the track has been initialized.
 	// If it changes, then we'll reinitialize with a new track.
@@ -36,7 +33,6 @@ impl Avc3 {
 			broadcast,
 			catalog,
 			track: None,
-			group: None,
 			config: None,
 			current: Default::default(),
 			zero: None,
@@ -91,7 +87,7 @@ impl Avc3 {
 		let track = self.broadcast.create_track(track);
 
 		self.config = Some(config);
-		self.track = Some(track);
+		self.track = Some(track.into());
 
 		Ok(())
 	}
@@ -235,26 +231,17 @@ impl Avc3 {
 		let track = self.track.as_mut().context("expected SPS before any frames")?;
 		let pts = pts.context("missing timestamp")?;
 
-		let mut group = if self.current.contains_idr {
-			if let Some(group) = self.group.take() {
-				group.close();
-			}
-			track.append_group()
-		} else {
-			self.group.take().context("no keyframe at start")?
-		};
-
 		let payload = std::mem::take(&mut self.current.chunks);
 		let frame = hang::container::Frame {
 			timestamp: pts,
+			keyframe: self.current.contains_idr,
 			payload,
 		};
 
-		frame.encode(&mut group);
+		track.write(frame)?;
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
-		self.group = Some(group);
 
 		Ok(())
 	}

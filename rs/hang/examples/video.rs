@@ -92,10 +92,7 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> moq_lite::TrackP
 	broadcast.insert_track(catalog.track.clone());
 
 	// Actually create the media track now.
-	let track = broadcast.create_track(video_track);
-
-	// Wrap the track in a hang:TrackProducer for convenience methods.
-	track.into()
+	broadcast.create_track(video_track)
 }
 
 // Produce a broadcast and publish it to the origin.
@@ -114,6 +111,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Not real frames of course.
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(1).unwrap(),
+		keyframe: true,
 		payload: Bytes::from_static(b"keyframe NAL data").into(),
 	};
 	frame.encode(&mut group)?;
@@ -122,6 +120,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(2).unwrap(),
+		keyframe: false,
 		payload: Bytes::from_static(b"delta NAL data").into(),
 	};
 	frame.encode(&mut group)?;
@@ -133,6 +132,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	let mut group = track.append_group();
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(3).unwrap(),
+		keyframe: true,
 		payload: Bytes::from_static(b"keyframe NAL data").into(),
 	};
 	frame.encode(&mut group)?;

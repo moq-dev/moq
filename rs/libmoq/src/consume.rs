@@ -192,7 +192,7 @@ impl Consume {
 			name: rendition.clone(),
 			priority: 1, // TODO: Remove priority
 		});
-		let track = moq_lite::TrackConsumer::new(track, latency);
+		let track = hang::container::OrderedConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
 		let id = self.video_task.insert(channel.0);
@@ -231,7 +231,7 @@ impl Consume {
 			name: rendition.clone(),
 			priority: 2, // TODO: Remove priority
 		});
-		let track = TrackConsumer::new(track, latency);
+		let track = hang::container::OrderedConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
 		let id = self.audio_task.insert(channel.0);
@@ -250,8 +250,8 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_track(mut track: moq_lite::TrackConsumer, on_frame: &mut OnStatus) -> Result<(), Error> {
-		while let Some(mut frame) = track.read_frame().await? {
+	async fn run_track(mut track: hang::container::OrderedConsumer, on_frame: &mut OnStatus) -> Result<(), Error> {
+		while let Some(mut frame) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::container::BufList::new();
 			new_payload.push_chunk(if frame.payload.num_chunks() == 1 {

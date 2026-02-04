@@ -1,13 +1,12 @@
 use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
-use moq_lite as moq;
 
 /// Opus decoder, initialized via a OpusHead. Does not support Ogg.
 pub struct Opus {
 	broadcast: moq_lite::BroadcastProducer,
 	catalog: hang::CatalogProducer,
-	track: Option<moq_lite::TrackProducer>,
+	track: Option<hang::container::OrderedProducer>,
 	zero: Option<tokio::time::Instant>,
 }
 
@@ -59,7 +58,7 @@ impl Opus {
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
 		let track = self.broadcast.create_track(track);
-		self.track = Some(track);
+		self.track = Some(track.into());
 
 		Ok(())
 	}
@@ -76,12 +75,12 @@ impl Opus {
 
 		let frame = hang::container::Frame {
 			timestamp: pts,
+			keyframe: true, // Audio frames are always keyframes
 			payload,
 		};
 
-		let mut group = track.append_group();
-		frame.encode(&mut group)?;
-		group.close();
+		track.write(frame)?;
+		track.flush()?; // Flush the current group because we know the next frame will be a keyframe.
 
 		Ok(())
 	}

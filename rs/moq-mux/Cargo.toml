@@ -25,7 +25,6 @@ opus = []
 anyhow = "1"
 buf-list = "1"
 bytes = "1"
-futures = "0.3"
 h264-parser = { version = "0.4.0", optional = true }
 hang = { workspace = true }
 m3u8-rs = { version = "5", optional = true }
@@ -41,7 +40,6 @@ reqwest = { version = "0.12", default-features = false, features = [
 	"gzip",
 ], optional = true }
 scuffle-h265 = { version = "0.2.2", optional = true }
-thiserror = "2"
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = "0.1"
 url = "2"

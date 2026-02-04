@@ -13,7 +13,6 @@ categories = ["multimedia", "network-programming", "web-programming"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1"
 buf-list = "1"
 bytes = "1"
 futures = "0.3"

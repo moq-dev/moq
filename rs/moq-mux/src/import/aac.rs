@@ -6,7 +6,7 @@ use bytes::Buf;
 pub struct Aac {
 	broadcast: moq_lite::BroadcastProducer,
 	catalog: hang::catalog::CatalogProducer,
-	track: Option<moq_lite::TrackProducer>,
+	track: Option<hang::container::OrderedProducer>,
 	zero: Option<tokio::time::Instant>,
 }
 
@@ -110,7 +110,7 @@ impl Aac {
 		let track = catalog.audio.create_track("aac", config.clone());
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
-		self.track = Some(self.broadcast.create_track(track));
+		self.track = Some(self.broadcast.create_track(track).into());
 
 		Ok(())
 	}
@@ -127,12 +127,12 @@ impl Aac {
 
 		let frame = hang::container::Frame {
 			timestamp: pts,
+			keyframe: true, // Audio frames are always keyframes
 			payload,
 		};
 
-		let mut group = track.append_group();
-		frame.encode(&mut group)?;
-		group.close();
+		track.write(frame)?;
+		track.flush()?; // We know the next frame will be a keyframe, so flush the current group.
 
 		Ok(())
 	}
