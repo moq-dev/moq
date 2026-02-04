@@ -1,0 +1,36 @@
+name: Release Doc
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'doc/**'
+      - '.github/workflows/release-doc.yml'
+
+concurrency:
+  group: release-doc
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release Documentation
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'moq-dev'
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Install dependencies
+        run: nix develop --command bun install --frozen-lockfile
+        working-directory: doc
+
+      - name: Deploy to Cloudflare
+        run: nix develop --command bun run deploy
+        working-directory: doc
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
