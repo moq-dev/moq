@@ -23,39 +23,48 @@ hero:
       link: https://moq.dev/
 
 features:
-  - icon: 🚀
-    title: Latency
+  - icon:
+      src: /emoji/rocket.svg
+    title: Dynamic
     details: MoQ supports the entire latency spectrum on a per-viewer basis. Support real-time, interactive, or sit-back user experiences with a unified stack.
 
-  - icon: 📈
-    title: Massive Scale
+  - icon:
+      src: /emoji/stonk.svg
+    title: Scalable
     details: All content can be cached and fanned-out via a generic CDN. Serve millions of concurrent viewers across the globe, including via Cloudflare (and more soon).
 
-  - icon: 🔧
-    title: Flexible
+  - icon:
+      src: /emoji/puzzle.svg
+    title: Extensible
     details: Supports contribution, distribution, and even conferencing. Extend the protocol with custom tracks for any sort of live content.
 
-  - icon: 🌐
+  - icon:
+      src: /emoji/globe.svg
     title: Modern Web
     details: Utilizes WebTransport, WebCodecs, and WebAudio APIs for native browser compatibility without hacks.
 
-  - icon: 🎯
-    title: Multi-platform
-    details: Libraries in Rust (native) and TypeScript (web). Integrations for ffmpeg, OBS, Gstreamer, and more to come.
+  - icon:
+      src: /emoji/box.svg
+    title: Universal
+    details: Libraries in Rust (native) and TypeScript (web). Integrations for ffmpeg, OBS, Gstreamer, and more to come. And C bindings!
 
-  - icon: 💪
+  - icon:
+      src: /emoji/battery.svg
     title: Efficient
     details: Save resources by only encoding or transmitting data when needed. Built on top of production-ready QUIC libraries.
 
-  - icon: 🔒
+  - icon:
+      src: /emoji/lock.svg
     title: Secure
     details: Encrypted via TLS and authenticated via JWT. You can optionally self-host a private CDN or end-to-end encrypt your content.
 
-  - icon: ⏪
+  - icon:
+      src: /emoji/back.svg
     title: Backwards Compatible
     details: Supports CMAF and HLS for legacy device support. Gradually migrate your users without breaking a leg.
 
-  - icon: 👯
+  - icon:
+      src: /emoji/link.svg
     title: Peer-to-Peer
     details: Utilize a CDN and/or connect directly to peers via Iroh (native only). Automatically discovers broadcasts available on a connection.
 ---
