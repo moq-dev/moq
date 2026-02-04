@@ -62,8 +62,7 @@ impl Opus {
 		let track = self.broadcast.create_track(track);
 
 		let mut catalog = self.broadcast.catalog.lock();
-		let audio = catalog.insert_audio(track.info.name.clone(), config);
-		audio.priority = 2;
+		catalog.insert_audio(track.info.name.clone(), config);
 
 		self.track = Some(track);
 

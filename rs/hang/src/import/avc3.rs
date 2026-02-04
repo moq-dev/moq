@@ -87,8 +87,7 @@ impl Avc3 {
 
 		{
 			let mut catalog = self.broadcast.catalog.lock();
-			let video = catalog.insert_video(track.name.clone(), config.clone());
-			video.priority = 2;
+			catalog.insert_video(track.name.clone(), config.clone());
 		}
 
 		let track = self.broadcast.create_track(track);

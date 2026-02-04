@@ -32,9 +32,6 @@ pub struct Video {
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	pub renditions: BTreeMap<String, VideoConfig>,
 
-	/// The priority of the video track, relative to other tracks in the broadcast.
-	pub priority: u8,
-
 	/// Render the video at this size in pixels.
 	/// This is separate from the display aspect ratio because it does not require reinitialization.
 	#[serde(default)]

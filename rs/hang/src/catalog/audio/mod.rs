@@ -25,9 +25,6 @@ pub struct Audio {
 	/// This is not an array so it will work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	pub renditions: BTreeMap<String, AudioConfig>,
-
-	/// The priority of the audio track, relative to other tracks in the broadcast.
-	pub priority: u8,
 }
 
 /// Audio decoder configuration based on WebCodecs AudioDecoderConfig.

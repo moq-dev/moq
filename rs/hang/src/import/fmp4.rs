@@ -188,8 +188,7 @@ impl Fmp4 {
 						priority: 1,
 					};
 
-					let video = catalog.insert_video(track.name.clone(), config.clone());
-					video.priority = 1;
+					catalog.insert_video(track.name.clone(), config.clone());
 
 					// Record this track name
 					created_video_tracks.push(track.name.clone());
@@ -204,8 +203,7 @@ impl Fmp4 {
 						priority: 2,
 					};
 
-					let audio = catalog.insert_audio(track.name.clone(), config.clone());
-					audio.priority = 2;
+					catalog.insert_audio(track.name.clone(), config.clone());
 
 					// Record this track name
 					created_audio_tracks.push(track.name.clone());
