@@ -55,7 +55,6 @@ impl Video {
 			let name = format!("video{}{}", i, extension);
 			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
 				entry.insert(config.clone());
-				// TODO: Remove priority
 				return moq_lite::Track { name, priority: 1 };
 			}
 		}

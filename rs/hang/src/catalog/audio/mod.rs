@@ -38,7 +38,6 @@ impl Audio {
 
 			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
 				entry.insert(config.clone());
-				// TODO: Remove priority
 				return moq_lite::Track { name, priority: 2 };
 			}
 		}

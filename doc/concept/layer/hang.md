@@ -32,8 +32,7 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
         "codedHeight": 720,
         "container": "legacy"
       }
-    },
-    "priority": 1
+    }
   },
   "audio": {
     "renditions": {
@@ -44,8 +43,7 @@ Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
         "bitrate": 283637,
         "container": "legacy"
       }
-    },
-    "priority": 2
+    }
   }
 }
 ```
