@@ -5,7 +5,6 @@ import { u53Schema } from "./integers";
 // Backwards compatibility: old track schema
 const TrackSchema = z.object({
 	name: z.string(),
-	priority: z.number().int().min(0).max(255),
 });
 
 // Based on VideoDecoderConfig
@@ -62,9 +61,6 @@ export const VideoSchema = z
 		// This is not an array in order for it to work with JSON Merge Patch.
 		renditions: z.record(z.string(), VideoConfigSchema),
 
-		// The priority of the video track, relative to other tracks in the broadcast.
-		priority: z.number().int().min(0).max(255),
-
 		// Render the video at this size in pixels.
 		// This is separate from the display aspect ratio because it does not require reinitialization.
 		display: z
@@ -95,7 +91,6 @@ export const VideoSchema = z
 				const config = arr[0]?.config;
 				return {
 					renditions: Object.fromEntries(arr.map((item) => [item.track.name, item.config])),
-					priority: arr[0]?.track.priority ?? 128,
 					display:
 						config?.displayAspectWidth && config?.displayAspectHeight
 							? { width: config.displayAspectWidth, height: config.displayAspectHeight }

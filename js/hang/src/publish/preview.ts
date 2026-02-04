@@ -24,7 +24,7 @@ export class Preview {
 
 		this.signals.effect((effect) => {
 			if (!effect.get(this.enabled)) return;
-			effect.set(this.catalog, { name: Preview.TRACK, priority: Preview.PRIORITY });
+			effect.set(this.catalog, { name: Preview.TRACK });
 		});
 	}
 

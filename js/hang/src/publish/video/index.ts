@@ -91,7 +91,6 @@ export class Root {
 
 		const catalog: Catalog.Video = {
 			renditions,
-			priority: Root.PRIORITY,
 			display: {
 				width: Catalog.u53(display.width),
 				height: Catalog.u53(display.height),

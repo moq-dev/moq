@@ -36,7 +36,7 @@ export class Peers {
 		if (!values) return;
 		const [_, catalog, broadcast] = values;
 
-		const track = broadcast.subscribe(catalog.name, catalog.priority);
+		const track = broadcast.subscribe(catalog.name, Catalog.PRIORITY.location);
 		effect.cleanup(() => track.close());
 
 		effect.spawn(this.#runTrack.bind(this, track));

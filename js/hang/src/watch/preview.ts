@@ -33,7 +33,7 @@ export class Preview {
 			const [_, broadcast, catalog] = values;
 
 			// Subscribe to the preview.json track directly
-			const track = broadcast.subscribe(catalog.name, catalog.priority);
+			const track = broadcast.subscribe(catalog.name, Catalog.PRIORITY.preview);
 			effect.cleanup(() => track.close());
 
 			effect.spawn(async () => {
