@@ -1,12 +1,7 @@
 //! This module contains the structs and functions for the MoQ catalog format
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, MutexGuard};
-
-/// The catalog format is a JSON file that describes the tracks available in a broadcast.
+use crate::catalog::{Audio, Chat, User, Video};
+use crate::{CatalogProducer, Result};
 use serde::{Deserialize, Serialize};
-
-use crate::Result;
-use crate::catalog::{Audio, AudioConfig, Chat, User, Video, VideoConfig};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 #[serde_with::serde_as]
@@ -19,14 +14,14 @@ pub struct Catalog {
 	/// Contains a map of video track renditions that the viewer can choose from
 	/// based on their preferences (resolution, bitrate, codec, etc).
 	#[serde(default)]
-	pub video: Option<Video>,
+	pub video: Video,
 
 	/// Audio track information with multiple renditions.
 	///
 	/// Contains a map of audio track renditions that the viewer can choose from
 	/// based on their preferences (codec, bitrate, language, etc).
 	#[serde(default)]
-	pub audio: Option<Audio>,
+	pub audio: Audio,
 
 	/// User metadata for the broadcaster
 	#[serde(default)]
@@ -93,182 +88,6 @@ impl Catalog {
 			priority: 100,
 		}
 	}
-
-	// A silly helpers to change None -> Some or Some -> None based on the number of renditions.
-	pub fn insert_video(&mut self, name: String, config: VideoConfig) -> &mut Video {
-		let mut video = self.video.take().unwrap_or_default();
-		video.renditions.insert(name, config);
-		self.video = Some(video);
-		self.video.as_mut().unwrap()
-	}
-
-	pub fn insert_audio(&mut self, name: String, config: AudioConfig) -> &mut Audio {
-		let mut audio = self.audio.take().unwrap_or_default();
-		audio.renditions.insert(name, config);
-		self.audio = Some(audio);
-		self.audio.as_mut().unwrap()
-	}
-
-	pub fn remove_video(&mut self, name: &str) {
-		let mut video = self.video.take().unwrap_or_default();
-		video.renditions.remove(name);
-
-		match video.renditions.is_empty() {
-			true => self.video = None,
-			false => self.video = Some(video),
-		}
-	}
-
-	pub fn remove_audio(&mut self, name: &str) {
-		let mut audio = self.audio.take().unwrap_or_default();
-		audio.renditions.remove(name);
-
-		match audio.renditions.is_empty() {
-			true => self.audio = None,
-			false => self.audio = Some(audio),
-		}
-	}
-}
-
-/// Produces a catalog track that describes the available media tracks.
-///
-/// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
-/// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
-#[derive(Clone)]
-pub struct CatalogProducer {
-	/// Access to the underlying track producer.
-	pub track: moq_lite::TrackProducer,
-	current: Arc<Mutex<Catalog>>,
-}
-
-impl CatalogProducer {
-	/// Create a new catalog producer with the given track and initial catalog.
-	fn new(track: moq_lite::TrackProducer, init: Catalog) -> Self {
-		Self {
-			current: Arc::new(Mutex::new(init)),
-			track,
-		}
-	}
-
-	/// Get mutable access to the catalog, publishing it after any changes.
-	pub fn lock(&mut self) -> CatalogGuard<'_> {
-		CatalogGuard {
-			catalog: self.current.lock().unwrap(),
-			track: &mut self.track,
-			updated: false,
-		}
-	}
-
-	/// Create a consumer for this catalog, receiving updates as they're published.
-	pub fn consume(&self) -> CatalogConsumer {
-		CatalogConsumer::new(self.track.consume())
-	}
-
-	/// Finish publishing to this catalog and close the track.
-	pub fn close(self) {
-		self.track.close();
-	}
-}
-
-impl From<moq_lite::TrackProducer> for CatalogProducer {
-	fn from(inner: moq_lite::TrackProducer) -> Self {
-		Self::new(inner, Catalog::default())
-	}
-}
-
-/// RAII guard for modifying a catalog with automatic publishing on drop.
-///
-/// Obtained via [`CatalogProducer::lock`].
-pub struct CatalogGuard<'a> {
-	catalog: MutexGuard<'a, Catalog>,
-	track: &'a mut moq_lite::TrackProducer,
-	updated: bool,
-}
-
-impl<'a> Deref for CatalogGuard<'a> {
-	type Target = Catalog;
-
-	fn deref(&self) -> &Self::Target {
-		&self.catalog
-	}
-}
-
-impl<'a> DerefMut for CatalogGuard<'a> {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		self.updated = true;
-		&mut self.catalog
-	}
-}
-
-impl Drop for CatalogGuard<'_> {
-	fn drop(&mut self) {
-		// Avoid publishing if we didn't use `&mut self` at all.
-		if !self.updated {
-			return;
-		}
-
-		let mut group = self.track.append_group();
-
-		// TODO decide if this should return an error, or be impossible to fail
-		let frame = self.catalog.to_string().expect("invalid catalog");
-		group.write_frame(frame);
-		group.close();
-	}
-}
-
-/// A catalog consumer, used to receive catalog updates and discover tracks.
-///
-/// This wraps a `moq_lite::TrackConsumer` and automatically deserializes JSON
-/// catalog data to discover available audio and video tracks in a broadcast.
-#[derive(Clone)]
-pub struct CatalogConsumer {
-	/// Access to the underlying track consumer.
-	pub track: moq_lite::TrackConsumer,
-	group: Option<moq_lite::GroupConsumer>,
-}
-
-impl CatalogConsumer {
-	/// Create a new catalog consumer from a MoQ track consumer.
-	pub fn new(track: moq_lite::TrackConsumer) -> Self {
-		Self { track, group: None }
-	}
-
-	/// Get the next catalog update.
-	///
-	/// This method waits for the next catalog publication and returns the
-	/// catalog data. If there are no more updates, `None` is returned.
-	pub async fn next(&mut self) -> Result<Option<Catalog>> {
-		loop {
-			tokio::select! {
-				res = self.track.next_group() => {
-					match res? {
-						Some(group) => {
-							// Use the new group.
-							self.group = Some(group);
-						}
-						// The track has ended, so we should return None.
-						None => return Ok(None),
-					}
-				},
-				Some(frame) = async { self.group.as_mut()?.read_frame().await.transpose() } => {
-					self.group.take(); // We don't support deltas yet
-					let catalog = Catalog::from_slice(&frame?)?;
-					return Ok(Some(catalog));
-				}
-			}
-		}
-	}
-
-	/// Wait until the catalog track is closed.
-	pub async fn closed(&self) -> Result<()> {
-		Ok(self.track.closed().await?)
-	}
-}
-
-impl From<moq_lite::TrackConsumer> for CatalogConsumer {
-	fn from(inner: moq_lite::TrackConsumer) -> Self {
-		Self::new(inner)
-	}
 }
 
 #[cfg(test)]
@@ -293,7 +112,6 @@ mod test {
 						"container": "legacy"
 					}
 				},
-				"priority": 1
 			},
 			"audio": {
 				"renditions": {
@@ -305,7 +123,6 @@ mod test {
 						"container": "legacy"
 					}
 				},
-				"priority": 2
 			}
 		}"#
 		.to_string();
@@ -351,17 +168,15 @@ mod test {
 		);
 
 		let decoded = Catalog {
-			video: Some(Video {
+			video: Video {
 				renditions: video_renditions,
-				priority: 1,
 				display: None,
 				rotation: None,
 				flip: None,
-			}),
-			audio: Some(Audio {
+			},
+			audio: Audio {
 				renditions: audio_renditions,
-				priority: 2,
-			}),
+			},
 			..Default::default()
 		};
 

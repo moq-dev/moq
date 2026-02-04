@@ -23,12 +23,6 @@ pub struct Frame {
 	/// This is NOT a wall clock time.
 	pub timestamp: Timestamp,
 
-	/// Whether this frame is a keyframe (can be decoded independently).
-	///
-	/// Keyframes are used as group boundaries and entry points for new subscribers.
-	/// It's necessary to periodically encode keyframes to support new subscribers.
-	pub keyframe: bool,
-
 	/// The encoded media data for this frame, split into chunks.
 	///
 	/// The format depends on the codec being used (H.264, AV1, Opus, etc.).

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::ops::Deref;
 
 use crate::Error;
-use crate::model::{Frame, GroupConsumer, Timestamp};
+use crate::wrapper::{Frame, GroupConsumer, Timestamp};
 use futures::{StreamExt, stream::FuturesUnordered};
 
 /// A producer for media tracks.

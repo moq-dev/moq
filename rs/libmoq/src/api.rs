@@ -353,7 +353,7 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 	ffi::enter(move || {
 		let media = ffi::parse_id(media)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
-		let timestamp = hang::Timestamp::from_micros(timestamp_us)?;
+		let timestamp = hang::container::Timestamp::from_micros(timestamp_us)?;
 		State::lock().publish.media_frame(media, payload, timestamp)
 	})
 }

@@ -38,7 +38,7 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 
 // Create a video track with a catalog that describes it.
 // The catalog can contain multiple tracks, used by the viewer to choose the best track.
-fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProducer {
+fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> moq_lite::TrackProducer {
 	// Basic information about the video track.
 	let video_track = moq_lite::Track {
 		name: "video".to_string(),
@@ -75,19 +75,15 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> hang::TrackProdu
 	let mut renditions = std::collections::BTreeMap::new();
 	renditions.insert(video_track.name.clone(), video_config);
 
-	// Create the video catalog entry with the renditions
-	let video = hang::catalog::Video {
-		renditions,
-		priority: 1,
-		display: None,
-		rotation: None,
-		flip: None,
-	};
-
 	// Create a producer/consumer pair for the catalog.
 	// This JSON encodes the catalog as a "catalog.json" track.
 	let catalog = hang::catalog::Catalog {
-		video: Some(video),
+		video: hang::catalog::Video {
+			renditions,
+			display: None,
+			rotation: None,
+			flip: None,
+		},
 		..Default::default()
 	}
 	.produce();
@@ -112,33 +108,39 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
 	origin.publish_broadcast("", broadcast.consume());
 
+	// Create a new group.
+	let mut group = track.append_group();
+
 	// Not real frames of course.
-	track.write(hang::Frame {
-		keyframe: true,
-		timestamp: hang::Timestamp::from_secs(1).unwrap(),
+	let frame = hang::container::Frame {
+		timestamp: hang::container::Timestamp::from_secs(1).unwrap(),
 		payload: Bytes::from_static(b"keyframe NAL data").into(),
-	})?;
+	};
+	frame.encode(&mut group)?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-	track.write(hang::Frame {
-		keyframe: false,
-		timestamp: hang::Timestamp::from_secs(2).unwrap(),
+	let frame = hang::container::Frame {
+		timestamp: hang::container::Timestamp::from_secs(2).unwrap(),
 		payload: Bytes::from_static(b"delta NAL data").into(),
-	})?;
+	};
+	frame.encode(&mut group)?;
+	group.close();
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-	// Automatically creates a new group if you write a new keyframe.
-
-	track.write(hang::Frame {
-		keyframe: true,
-		timestamp: hang::Timestamp::from_secs(3).unwrap(),
+	// Create a new group for each keyframe.
+	let mut group = track.append_group();
+	let frame = hang::container::Frame {
+		timestamp: hang::container::Timestamp::from_secs(3).unwrap(),
 		payload: Bytes::from_static(b"keyframe NAL data").into(),
-	})?;
+	};
+	frame.encode(&mut group)?;
 
 	// Sleep before exiting and closing the broadcast.
 	tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+	group.close();
 
 	Ok(())
 }

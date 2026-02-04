@@ -1,5 +1,5 @@
 use clap::Subcommand;
-use hang::{BroadcastProducer, moq_lite::BroadcastConsumer};
+use hang::moq_lite;
 use moq_mux::import;
 
 #[derive(Subcommand, Clone)]
@@ -30,21 +30,25 @@ enum PublishDecoder {
 
 pub struct Publish {
 	decoder: PublishDecoder,
-	broadcast: BroadcastProducer,
+	broadcast: moq_lite::BroadcastProducer,
 }
 
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
-		let broadcast = BroadcastProducer::default();
+		let mut broadcast = moq_lite::BroadcastProducer::default();
+
+		let catalog = hang::Catalog::default().produce();
+		broadcast.insert_track(catalog.track.clone());
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {
-				let avc3 = import::Avc3::new(broadcast.clone());
+				let avc3 = import::Avc3::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
 			PublishFormat::Fmp4 { passthrough } => {
 				let fmp4 = import::Fmp4::new(
 					broadcast.clone(),
+					catalog.clone(),
 					import::Fmp4Config {
 						passthrough: *passthrough,
 					},
@@ -54,6 +58,7 @@ impl Publish {
 			PublishFormat::Hls { playlist, passthrough } => {
 				let hls = import::Hls::new(
 					broadcast.clone(),
+					catalog.clone(),
 					import::HlsConfig {
 						playlist: playlist.clone(),
 						client: None,
@@ -67,7 +72,7 @@ impl Publish {
 		Ok(Self { decoder, broadcast })
 	}
 
-	pub fn consume(&self) -> BroadcastConsumer {
+	pub fn consume(&self) -> moq_lite::BroadcastConsumer {
 		self.broadcast.consume()
 	}
 }

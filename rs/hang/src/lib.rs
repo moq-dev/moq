@@ -1,31 +1,25 @@
 //! # hang: WebCodecs compatible media encoding for MoQ
 //!
-//! Media-specific library built on [`moq_lite`] for streaming audio and video with WebCodecs.
+//! Media-specific library built on [moq_lite] for streaming audio and video with WebCodecs.
 //!
-//! ## Overview
+//! Each `hang` broadcast consists of:
 //!
-//! `hang` adds media support to the generic [`moq_lite`] transport:
+//! - **Catalog**: A JSON track containing codec info and track metadata, updated live as tracks change.
+//! - **Tracks**: Audio or video, supporting one or more renditions.
 //!
-//! - **Catalog**: JSON track containing codec info and track metadata, updated live as tracks change.
-//! - **Container**: Simple frame format consisting of timestamp (microseconds) + codec bitstream payload.
+//! Each track specifies a container format:
+//! - **Legacy**: A timestamp followed by the codec payload.
+//! - **CMAF**: Fragmented MP4 container (moof+mdat pair)
 //!
-//! For importing fMP4/CMAF/HLS streams, see the `moq-mux` crate.
-//!
-//! ## Frame Container
-//!
-//! Each frame consists of:
-//! - Timestamp (u64): presentation time in microseconds
-//! - Payload: raw encoded codec data (H.264, Opus, etc.)
-//!
-//! This simple format works directly with WebCodecs APIs in browsers.
-//!
+//! See the [moq-mux](https://crates.io/crates/moq-mux) crate for importing existing media formats into hang broadcasts.
 mod error;
 
 pub mod catalog;
-pub mod model;
+pub mod container;
+//pub mod wrapper;
 
 // export the moq-lite version in use
 pub use moq_lite;
 
+pub use catalog::{Catalog, CatalogConsumer, CatalogGuard, CatalogProducer};
 pub use error::*;
-pub use model::*;

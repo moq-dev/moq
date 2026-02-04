@@ -3,18 +3,22 @@ use super::annexb::{NalIterator, START_CODE};
 use anyhow::Context;
 use buf_list::BufList;
 use bytes::{Buf, Bytes};
-use moq_lite as moq;
 use scuffle_h265::{NALUnitType, SpsNALUnit};
 
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams, ignores VPS.
 pub struct Hev1 {
 	// The broadcast being produced.
-	// This `hang` variant includes a catalog.
-	broadcast: hang::BroadcastProducer,
+	broadcast: moq_lite::BroadcastProducer,
+
+	// The catalog being produced.
+	catalog: hang::CatalogProducer,
 
 	// The track being produced.
-	track: Option<hang::TrackProducer>,
+	track: Option<moq_lite::TrackProducer>,
+
+	// The current group being written.
+	group: Option<moq_lite::GroupProducer>,
 
 	// Whether the track has been initialized.
 	// If it changes, then we'll reinitialize with a new track.
@@ -28,10 +32,12 @@ pub struct Hev1 {
 }
 
 impl Hev1 {
-	pub fn new(broadcast: hang::BroadcastProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer) -> Self {
 		Self {
 			broadcast,
+			catalog,
 			track: None,
+			group: None,
 			config: None,
 			current: Default::default(),
 			zero: None,
@@ -71,28 +77,20 @@ impl Hev1 {
 			return Ok(());
 		}
 
+		let mut catalog = self.catalog.lock();
+
 		if let Some(track) = &self.track.take() {
 			tracing::debug!(name = ?track.info.name, "reinitializing track");
-			self.broadcast.catalog.lock().remove_video(&track.info.name);
+			catalog.video.remove_track(&track.info);
 		}
 
-		let track = moq::Track {
-			name: self.broadcast.track_name("video"),
-			priority: 2,
-		};
-
+		let track = catalog.video.create_track("hev1", config.clone());
 		tracing::debug!(name = ?track.name, ?config, "starting track");
-
-		{
-			let mut catalog = self.broadcast.catalog.lock();
-			let video = catalog.insert_video(track.name.clone(), config.clone());
-			video.priority = 2;
-		}
 
 		let track = self.broadcast.create_track(track);
 
 		self.config = Some(config);
-		self.track = Some(track.into());
+		self.track = Some(track);
 
 		Ok(())
 	}
@@ -121,7 +119,7 @@ impl Hev1 {
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::Timestamp>,
+		pts: Option<hang::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 
@@ -145,7 +143,7 @@ impl Hev1 {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::Timestamp>,
+		pts: Option<hang::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 		// Iterate over the NAL units in the buffer based on start codes.
@@ -169,7 +167,7 @@ impl Hev1 {
 
 	/// Decode a single NAL unit. Only reads the first header byte to extract nal_unit_type,
 	/// Ignores nuh_layer_id and nuh_temporal_id_plus1.
-	fn decode_nal(&mut self, nal: Bytes, pts: Option<hang::Timestamp>) -> anyhow::Result<()> {
+	fn decode_nal(&mut self, nal: Bytes, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
 		anyhow::ensure!(nal.len() >= 2, "NAL unit is too short");
 		// u16 header: [forbidden_zero_bit(1) | nal_unit_type(6) | nuh_layer_id(6) | nuh_temporal_id_plus1(3)]
 		let header = nal.first().context("NAL unit is too short")?;
@@ -232,7 +230,7 @@ impl Hev1 {
 		Ok(())
 	}
 
-	fn maybe_start_frame(&mut self, pts: Option<hang::Timestamp>) -> anyhow::Result<()> {
+	fn maybe_start_frame(&mut self, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
 		// If we haven't seen any slices, we shouldn't flush yet.
 		if !self.current.contains_slice {
 			return Ok(());
@@ -241,17 +239,26 @@ impl Hev1 {
 		let track = self.track.as_mut().context("expected SPS before any frames")?;
 		let pts = pts.context("missing timestamp")?;
 
+		let mut group = if self.current.contains_idr {
+			if let Some(group) = self.group.take() {
+				group.close();
+			}
+			track.append_group()
+		} else {
+			self.group.take().context("no keyframe at start")?
+		};
+
 		let payload = std::mem::take(&mut self.current.chunks);
-		let frame = hang::Frame {
+		let frame = hang::container::Frame {
 			timestamp: pts,
-			keyframe: self.current.contains_idr,
 			payload,
 		};
 
-		track.write(frame)?;
+		frame.encode(&mut group)?;
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
+		self.group = Some(group);
 
 		Ok(())
 	}
@@ -260,13 +267,15 @@ impl Hev1 {
 		self.track.is_some()
 	}
 
-	fn pts(&mut self, hint: Option<hang::Timestamp>) -> anyhow::Result<hang::Timestamp> {
+	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(hang::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
+		Ok(hang::container::Timestamp::from_micros(
+			zero.elapsed().as_micros() as u64
+		)?)
 	}
 }
 
@@ -274,7 +283,7 @@ impl Drop for Hev1 {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
 			tracing::debug!(name = ?track.info.name, "ending track");
-			self.broadcast.catalog.lock().remove_video(&track.info.name);
+			self.catalog.lock().video.remove_track(&track.info);
 		}
 	}
 }

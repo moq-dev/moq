@@ -1,8 +1,7 @@
 use anyhow::Context;
 use bytes::{Buf, Bytes, BytesMut};
-use hang::Timestamp;
 use hang::catalog::{AAC, AV1, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
-use moq_lite as moq;
+use hang::container::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -34,8 +33,11 @@ pub struct Fmp4Config {
 /// - AAC (MP4A)
 /// - Opus
 pub struct Fmp4 {
-	// The broadcast being produced
-	broadcast: hang::BroadcastProducer,
+	/// The broadcast being produced
+	broadcast: moq_lite::BroadcastProducer,
+
+	/// The catalog being produced
+	catalog: hang::CatalogProducer,
 
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track>,
@@ -94,10 +96,10 @@ impl Fmp4Track {
 impl Fmp4 {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
-	/// The broadcast will be populated with tracks as they're discovered in the
-	/// fMP4 file. The catalog from the `hang::BroadcastProducer` is used automatically.
-	pub fn new(broadcast: hang::BroadcastProducer, config: Fmp4Config) -> Self {
+	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer, config: Fmp4Config) -> Self {
 		Self {
+			catalog,
 			tracks: HashMap::default(),
 			moov: None,
 			moof: None,
@@ -167,13 +169,9 @@ impl Fmp4 {
 	}
 
 	fn init(&mut self, moov: Moov) -> anyhow::Result<()> {
-		// Make a clone to avoid the borrow checker.
-		let mut catalog = self.broadcast.catalog.clone();
+		// Clone the catalog to avoid the borrow checker.
+		let mut catalog = self.catalog.clone();
 		let mut catalog = catalog.lock();
-
-		// Track which specific tracks were created in this init call
-		let mut created_video_tracks = Vec::new();
-		let mut created_audio_tracks = Vec::new();
 
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
@@ -182,34 +180,12 @@ impl Fmp4 {
 			let (kind, track) = match handler.as_ref() {
 				b"vide" => {
 					let config = self.init_video(trak)?;
-
-					let track = moq::Track {
-						name: self.broadcast.track_name("video"),
-						priority: 1,
-					};
-
-					let video = catalog.insert_video(track.name.clone(), config.clone());
-					video.priority = 1;
-
-					// Record this track name
-					created_video_tracks.push(track.name.clone());
-
+					let track = catalog.video.create_track("m4s", config.clone());
 					(TrackKind::Video, track)
 				}
 				b"soun" => {
 					let config = self.init_audio(trak)?;
-
-					let track = moq::Track {
-						name: self.broadcast.track_name("audio"),
-						priority: 2,
-					};
-
-					let audio = catalog.insert_audio(track.name.clone(), config.clone());
-					audio.priority = 2;
-
-					// Record this track name
-					created_audio_tracks.push(track.name.clone());
-
+					let track = catalog.audio.create_track("m4s", config.clone());
 					(TrackKind::Audio, track)
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
@@ -527,7 +503,7 @@ impl Fmp4 {
 						.unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size)) as usize;
 
 					let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-					let timestamp = hang::Timestamp::from_scale(pts, timescale)?;
+					let timestamp = hang::container::Timestamp::from_scale(pts, timescale)?;
 
 					if offset + size > mdat.data.len() {
 						anyhow::bail!("invalid data offset");
@@ -554,9 +530,8 @@ impl Fmp4 {
 						// TODO Avoid a copy if mp4-atom switches to using Bytes?
 						let payload = Bytes::copy_from_slice(&mdat.data[offset..(offset + size)]);
 
-						let frame = hang::Frame {
+						let frame = hang::container::Frame {
 							timestamp,
-							keyframe,
 							payload: payload.into(),
 						};
 
@@ -649,20 +624,20 @@ impl Fmp4 {
 					track.jitter = Some(jitter);
 
 					// Update the catalog with the new jitter
-					let mut catalog = self.broadcast.catalog.lock();
+					let mut catalog = self.catalog.lock();
 
 					match track.kind {
 						TrackKind::Video => {
-							let video = catalog.video.as_mut().context("missing video")?;
-							let config = video
+							let config = catalog
+								.video
 								.renditions
 								.get_mut(&track.producer.info.name)
 								.context("missing video config")?;
 							config.jitter = Some(jitter.convert()?);
 						}
 						TrackKind::Audio => {
-							let audio = catalog.audio.as_mut().context("missing audio")?;
-							let config = audio
+							let config = catalog
+								.audio
 								.renditions
 								.get_mut(&track.producer.info.name)
 								.context("missing audio config")?;
@@ -679,13 +654,13 @@ impl Fmp4 {
 
 impl Drop for Fmp4 {
 	fn drop(&mut self) {
-		let mut catalog = self.broadcast.catalog.lock();
+		let mut catalog = self.catalog.lock();
 
 		for track in self.tracks.values() {
 			match track.kind {
-				TrackKind::Video => catalog.remove_video(&track.producer.info.name),
-				TrackKind::Audio => catalog.remove_audio(&track.producer.info.name),
-			}
+				TrackKind::Video => catalog.video.remove_track(&track.producer.info).is_some(),
+				TrackKind::Audio => catalog.audio.remove_track(&track.producer.info).is_some(),
+			};
 		}
 	}
 }

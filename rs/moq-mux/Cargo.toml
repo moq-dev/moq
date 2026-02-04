@@ -13,11 +13,13 @@ categories = ["multimedia", "network-programming", "web-programming"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["mp4", "h264", "h265", "hls"]
+default = ["mp4", "h264", "h265", "hls", "aac", "opus"]
 mp4 = ["dep:mp4-atom"]
 h264 = ["dep:h264-parser"]
 h265 = ["dep:scuffle-h265"]
 hls = ["dep:m3u8-rs", "dep:reqwest", "mp4"]
+aac = []
+opus = []
 
 [dependencies]
 anyhow = "1"
@@ -28,7 +30,11 @@ h264-parser = { version = "0.4.0", optional = true }
 hang = { workspace = true }
 m3u8-rs = { version = "5", optional = true }
 moq-lite = { workspace = true, features = ["serde"] }
-mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"], optional = true }
+mp4-atom = { version = "0.10.0", features = [
+	"tokio",
+	"bytes",
+	"serde",
+], optional = true }
 num_enum = "0.7"
 reqwest = { version = "0.12", default-features = false, features = [
 	"rustls-tls",

@@ -10,7 +10,7 @@ pub use h264::*;
 pub use h265::*;
 pub use vp9::*;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -32,9 +32,6 @@ pub struct Video {
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	pub renditions: BTreeMap<String, VideoConfig>,
 
-	/// The priority of the video track, relative to other tracks in the broadcast.
-	pub priority: u8,
-
 	/// Render the video at this size in pixels.
 	/// This is separate from the display aspect ratio because it does not require reinitialization.
 	#[serde(default)]
@@ -49,6 +46,27 @@ pub struct Video {
 	/// Default: false
 	#[serde(default)]
 	pub flip: Option<bool>,
+}
+
+impl Video {
+	/// Create a new video track with the given extension and configuration.
+	pub fn create_track(&mut self, extension: &str, config: VideoConfig) -> moq_lite::Track {
+		for i in 0.. {
+			let name = format!("video{}{}", i, extension);
+			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
+				entry.insert(config.clone());
+				// TODO: Remove priority
+				return moq_lite::Track { name, priority: 1 };
+			}
+		}
+
+		unreachable!("no available video track name");
+	}
+
+	// Remove the track from the catalog and return the configuration if found.
+	pub fn remove_track(&mut self, track: &moq_lite::Track) -> Option<VideoConfig> {
+		self.renditions.remove(track.name.as_str())
+	}
 }
 
 /// Display size for rendering video

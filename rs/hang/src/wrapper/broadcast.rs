@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::{
-	TrackConsumer,
 	catalog::{Catalog, CatalogConsumer, CatalogProducer},
+	wrapper::TrackConsumer,
 };
 
 #[derive(Clone)]

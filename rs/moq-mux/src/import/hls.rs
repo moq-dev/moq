@@ -20,7 +20,6 @@ use tracing::{debug, info, warn};
 use url::Url;
 
 use super::{Fmp4, Fmp4Config};
-use hang::BroadcastProducer;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
@@ -79,7 +78,10 @@ struct StepOutcome {
 /// to run the continuous ingest loop.
 pub struct Hls {
 	/// Broadcast that all CMAF importers write into.
-	broadcast: BroadcastProducer,
+	broadcast: moq_lite::BroadcastProducer,
+
+	/// The catalog being produced.
+	catalog: hang::CatalogProducer,
 
 	/// fMP4 importers for each discovered video rendition.
 	/// Each importer feeds a separate MoQ track but shares the same catalog.
@@ -122,7 +124,11 @@ impl TrackState {
 
 impl Hls {
 	/// Create a new HLS ingest that will write into the given broadcast.
-	pub fn new(broadcast: BroadcastProducer, cfg: HlsConfig) -> anyhow::Result<Self> {
+	pub fn new(
+		broadcast: moq_lite::BroadcastProducer,
+		catalog: hang::CatalogProducer,
+		cfg: HlsConfig,
+	) -> anyhow::Result<Self> {
 		let base_url = cfg.parse_playlist()?;
 		let client = cfg.client.unwrap_or_else(|| {
 			Client::builder()
@@ -133,6 +139,7 @@ impl Hls {
 		let passthrough = cfg.passthrough;
 		Ok(Self {
 			broadcast,
+			catalog,
 			video_importers: Vec::new(),
 			passthrough,
 			audio_importer: None,
@@ -482,6 +489,7 @@ impl Hls {
 		while self.video_importers.len() <= index {
 			let importer = Fmp4::new(
 				self.broadcast.clone(),
+				self.catalog.clone(),
 				Fmp4Config {
 					passthrough: self.passthrough,
 				},
@@ -496,7 +504,7 @@ impl Hls {
 	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
 		let passthrough = self.passthrough;
 		self.audio_importer
-			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), Fmp4Config { passthrough }))
+			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), self.catalog.clone(), Fmp4Config { passthrough }))
 	}
 
 	#[cfg(test)]
@@ -626,10 +634,11 @@ mod tests {
 
 	#[test]
 	fn hls_ingest_starts_without_importers() {
-		let broadcast = moq_lite::Broadcast::produce().into();
+		let broadcast = moq_lite::Broadcast::produce();
+		let catalog = hang::Catalog::default().produce();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);
-		let hls = Hls::new(broadcast, cfg).unwrap();
+		let hls = Hls::new(broadcast, catalog, cfg).unwrap();
 
 		assert!(!hls.has_video_importer());
 		assert!(!hls.has_audio_importer());

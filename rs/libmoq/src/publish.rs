@@ -8,7 +8,7 @@ use crate::{Error, Id, NonZeroSlab};
 #[derive(Default)]
 pub struct Publish {
 	/// Active broadcast producers for publishing.
-	broadcasts: NonZeroSlab<hang::BroadcastProducer>,
+	broadcasts: NonZeroSlab<(moq_lite::BroadcastProducer, hang::CatalogProducer)>,
 
 	/// Active media encoders/decoders for publishing.
 	media: NonZeroSlab<import::Decoder>,
@@ -16,13 +16,15 @@ pub struct Publish {
 
 impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
-		let broadcast = hang::BroadcastProducer::default();
-		let id = self.broadcasts.insert(broadcast);
+		let id = self.broadcasts.insert(Default::default());
 		Ok(id)
 	}
 
-	pub fn get(&self, id: Id) -> Result<&hang::BroadcastProducer, Error> {
-		self.broadcasts.get(id).ok_or(Error::NotFound)
+	pub fn get(&self, id: Id) -> Result<&moq_lite::BroadcastProducer, Error> {
+		self.broadcasts
+			.get(id)
+			.ok_or(Error::NotFound)
+			.map(|(broadcast, _)| broadcast)
 	}
 
 	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
@@ -31,10 +33,10 @@ impl Publish {
 	}
 
 	pub fn media_ordered(&mut self, broadcast: Id, format: &str, mut init: &[u8]) -> Result<Id, Error> {
-		let broadcast = self.broadcasts.get(broadcast).ok_or(Error::NotFound)?;
+		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::NotFound)?;
 
 		let format = import::DecoderFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
-		let mut decoder = import::Decoder::new(broadcast.clone(), format);
+		let mut decoder = import::Decoder::new(broadcast.clone(), catalog.clone(), format);
 
 		decoder
 			.initialize(&mut init)
@@ -49,7 +51,12 @@ impl Publish {
 		Ok(id)
 	}
 
-	pub fn media_frame(&mut self, media: Id, mut data: &[u8], timestamp: hang::Timestamp) -> Result<(), Error> {
+	pub fn media_frame(
+		&mut self,
+		media: Id,
+		mut data: &[u8],
+		timestamp: hang::container::Timestamp,
+	) -> Result<(), Error> {
 		let media = self.media.get_mut(media).ok_or(Error::NotFound)?;
 
 		media

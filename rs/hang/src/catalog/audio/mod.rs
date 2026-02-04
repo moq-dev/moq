@@ -4,7 +4,7 @@ mod codec;
 pub use aac::*;
 pub use codec::*;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 
 use bytes::Bytes;
 
@@ -25,9 +25,31 @@ pub struct Audio {
 	/// This is not an array so it will work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	pub renditions: BTreeMap<String, AudioConfig>,
+}
 
-	/// The priority of the audio track, relative to other tracks in the broadcast.
-	pub priority: u8,
+impl Audio {
+	/// Create a new audio track with the given extension and configuration.
+	pub fn create_track(&mut self, extension: &str, config: AudioConfig) -> moq_lite::Track {
+		for i in 0.. {
+			let name = match extension {
+				"" => format!("audio{}", i),
+				extension => format!("audio{}.{}", i, extension),
+			};
+
+			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
+				entry.insert(config.clone());
+				// TODO: Remove priority
+				return moq_lite::Track { name, priority: 2 };
+			}
+		}
+
+		unreachable!("no available audio track name");
+	}
+
+	// Remove the track from the catalog and return the configuration if found.
+	pub fn remove_track(&mut self, track: &moq_lite::Track) -> Option<AudioConfig> {
+		self.renditions.remove(track.name.as_str())
+	}
 }
 
 /// Audio decoder configuration based on WebCodecs AudioDecoderConfig.

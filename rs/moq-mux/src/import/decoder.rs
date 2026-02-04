@@ -1,8 +1,6 @@
 use std::{fmt, str::FromStr};
 
 use bytes::Buf;
-
-use super::{Aac, Opus};
 use hang::Error;
 
 /// The supported decoder formats.
@@ -19,8 +17,10 @@ pub enum DecoderFormat {
 	#[cfg(feature = "h265")]
 	Hev1,
 	/// Raw AAC frames (not ADTS).
+	#[cfg(feature = "aac")]
 	Aac,
 	/// Raw Opus frames (not Ogg).
+	#[cfg(feature = "opus")]
 	Opus,
 }
 
@@ -40,7 +40,9 @@ impl FromStr for DecoderFormat {
 			"hev1" => Ok(DecoderFormat::Hev1),
 			#[cfg(feature = "mp4")]
 			"fmp4" | "cmaf" => Ok(DecoderFormat::Fmp4),
+			#[cfg(feature = "aac")]
 			"aac" => Ok(DecoderFormat::Aac),
+			#[cfg(feature = "opus")]
 			"opus" => Ok(DecoderFormat::Opus),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
@@ -56,7 +58,9 @@ impl fmt::Display for DecoderFormat {
 			DecoderFormat::Fmp4 => write!(f, "fmp4"),
 			#[cfg(feature = "h265")]
 			DecoderFormat::Hev1 => write!(f, "hev1"),
+			#[cfg(feature = "aac")]
 			DecoderFormat::Aac => write!(f, "aac"),
+			#[cfg(feature = "opus")]
 			DecoderFormat::Opus => write!(f, "opus"),
 		}
 	}
@@ -73,8 +77,10 @@ enum DecoderKind {
 	/// aka H265 with inline SPS/PPS
 	#[cfg(feature = "h265")]
 	Hev1(super::Hev1),
-	Aac(Aac),
-	Opus(Opus),
+	#[cfg(feature = "aac")]
+	Aac(super::Aac),
+	#[cfg(feature = "opus")]
+	Opus(super::Opus),
 }
 
 /// A generic interface for importing a stream of media into a hang broadcast.
@@ -87,16 +93,18 @@ pub struct Decoder {
 
 impl Decoder {
 	/// Create a new decoder with the given format.
-	pub fn new(broadcast: hang::BroadcastProducer, format: DecoderFormat) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer, format: DecoderFormat) -> Self {
 		let decoder = match format {
 			#[cfg(feature = "h264")]
-			DecoderFormat::Avc3 => super::Avc3::new(broadcast).into(),
+			DecoderFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),
 			#[cfg(feature = "mp4")]
-			DecoderFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, super::Fmp4Config::default())).into(),
+			DecoderFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default())).into(),
 			#[cfg(feature = "h265")]
-			DecoderFormat::Hev1 => super::Hev1::new(broadcast).into(),
-			DecoderFormat::Aac => Aac::new(broadcast).into(),
-			DecoderFormat::Opus => Opus::new(broadcast).into(),
+			DecoderFormat::Hev1 => super::Hev1::new(broadcast, catalog).into(),
+			#[cfg(feature = "aac")]
+			DecoderFormat::Aac => super::Aac::new(broadcast, catalog).into(),
+			#[cfg(feature = "opus")]
+			DecoderFormat::Opus => super::Opus::new(broadcast, catalog).into(),
 		};
 
 		Self { decoder }
@@ -116,7 +124,9 @@ impl Decoder {
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
 			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.initialize(buf)?,
+			#[cfg(feature = "aac")]
 			DecoderKind::Aac(decoder) => decoder.initialize(buf)?,
+			#[cfg(feature = "opus")]
 			DecoderKind::Opus(decoder) => decoder.initialize(buf)?,
 		}
 
@@ -147,7 +157,9 @@ impl Decoder {
 			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.decode_stream(buf, None),
 			// TODO Fix or make these more type safe.
+			#[cfg(feature = "aac")]
 			DecoderKind::Aac(_) => anyhow::bail!("AAC does not support stream decoding"),
+			#[cfg(feature = "opus")]
 			DecoderKind::Opus(_) => anyhow::bail!("Opus does not support stream decoding"),
 		}
 	}
@@ -165,7 +177,7 @@ impl Decoder {
 	pub fn decode_frame<T: Buf + AsRef<[u8]>>(
 		&mut self,
 		buf: &mut T,
-		pts: Option<hang::Timestamp>,
+		pts: Option<hang::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		match &mut self.decoder {
 			#[cfg(feature = "h264")]
@@ -174,7 +186,9 @@ impl Decoder {
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf),
 			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.decode_frame(buf, pts),
+			#[cfg(feature = "aac")]
 			DecoderKind::Aac(decoder) => decoder.decode(buf, pts),
+			#[cfg(feature = "opus")]
 			DecoderKind::Opus(decoder) => decoder.decode(buf, pts),
 		}
 	}
@@ -188,7 +202,9 @@ impl Decoder {
 			DecoderKind::Fmp4(decoder) => decoder.is_initialized(),
 			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.is_initialized(),
+			#[cfg(feature = "aac")]
 			DecoderKind::Aac(decoder) => decoder.is_initialized(),
+			#[cfg(feature = "opus")]
 			DecoderKind::Opus(decoder) => decoder.is_initialized(),
 		}
 	}
