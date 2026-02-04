@@ -16,7 +16,11 @@ pub struct Publish {
 
 impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
-		let id = self.broadcasts.insert(Default::default());
+		let mut broadcast = moq_lite::BroadcastProducer::new();
+		let catalog = broadcast.create_track(hang::Catalog::default_track());
+		let catalog = hang::CatalogProducer::new(catalog, hang::Catalog::default());
+
+		let id = self.broadcasts.insert((broadcast, catalog));
 		Ok(id)
 	}
 

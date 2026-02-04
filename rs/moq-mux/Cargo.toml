@@ -18,6 +18,7 @@ mp4 = ["dep:mp4-atom"]
 h264 = ["dep:h264-parser"]
 h265 = ["dep:scuffle-h265"]
 hls = ["dep:m3u8-rs", "dep:reqwest", "mp4"]
+# Feature flags for codec support; no gated dependencies yet
 aac = []
 opus = []
 

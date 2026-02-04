@@ -264,7 +264,7 @@ impl Avc3 {
 
 impl Drop for Avc3 {
 	fn drop(&mut self) {
-		if let Some(track) = &self.track {
+		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.info.name, "ending track");
 			self.catalog.lock().video.remove_track(&track.info);
 		}
