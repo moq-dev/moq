@@ -10,7 +10,7 @@ members = [
     "rs/moq-relay",
     "rs/moq-token",
     "rs/moq-token-cli",
-    "rs/xtask",
+    "rs/x",
 ]
 resolver = "2"
 

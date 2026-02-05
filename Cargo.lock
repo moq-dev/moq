@@ -5973,6 +5973,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "x"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "x509-parser"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6004,13 +6011,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7d8a75eaf6557bb84a65ace8609883db44a29951042ada9b393151532e41fcb"
 dependencies = [
  "xml-rs",
-]
-
-[[package]]
-name = "xtask"
-version = "0.1.0"
-dependencies = [
- "clap",
 ]
 
 [[package]]

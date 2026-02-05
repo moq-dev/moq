@@ -2,4 +2,4 @@
 rustflags = ["--cfg", "tokio_unstable"]
 
 [alias]
-xtask = "run --package xtask --"
+x = "run --package x --"

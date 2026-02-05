@@ -1,6 +1,6 @@
-//! xtask - Development task runner for MoQ
+//! Development task runner for MoQ
 //!
-//! Run with: `cargo xtask <command>`
+//! Run with: `./x <command>` or `cargo x <command>`
 //!
 //! This replaces the justfile with a pure Rust solution.
 
@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 
 /// MoQ development task runner
 #[derive(Parser)]
-#[command(name = "xtask", about = "MoQ development task runner")]
+#[command(name = "x", about = "MoQ development task runner")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
