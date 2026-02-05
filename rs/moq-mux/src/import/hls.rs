@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -76,12 +77,20 @@ struct StepOutcome {
 ///
 /// Provides `init()` to prime the ingest with initial segments, and `service()`
 /// to run the continuous ingest loop.
+///
+/// In addition to importing media, this generates HLS playlists as MoQ tracks:
+/// - `playlist.m3u8`: Main/master playlist referencing all renditions
+/// - `video{n}.m3u8`: Media playlist for each video rendition
+/// - `audio.m3u8`: Media playlist for the audio rendition (if present)
+/// @TODO: multi audio
 pub struct Hls {
 	/// Broadcast that all CMAF importers write into.
 	broadcast: moq_lite::BroadcastProducer,
 
 	/// The catalog being produced.
 	catalog: hang::CatalogProducer,
+
+	master_playlist_track: Option<moq_lite::TrackProducer>,
 
 	/// fMP4 importers for each discovered video rendition.
 	/// Each importer feeds a separate MoQ track but shares the same catalog.
@@ -108,14 +117,19 @@ enum TrackKind {
 
 struct TrackState {
 	playlist: Url,
+	playlist_track: moq_lite::TrackProducer,
+	init_track: moq_lite::TrackProducer,
 	next_sequence: Option<u64>,
 	init_ready: bool,
+	//last_playlist_hash: Option<u64>, // do we need this to detect playlist changes?
 }
 
 impl TrackState {
-	fn new(playlist: Url) -> Self {
+	fn new(playlist: Url, playlist_track: moq_lite::TrackProducer, init_track: moq_lite::TrackProducer) -> Self {
 		Self {
 			playlist,
+			playlist_track,
+			init_track,
 			next_sequence: None,
 			init_ready: false,
 		}
@@ -140,6 +154,7 @@ impl Hls {
 		Ok(Self {
 			broadcast,
 			catalog,
+			master_playlist_track: None,
 			video_importers: Vec::new(),
 			passthrough,
 			audio_importer: None,
@@ -293,9 +308,11 @@ impl Hls {
 			anyhow::ensure!(!variants.is_empty(), "no usable variants found in master playlist");
 
 			// Create a video track state for every usable variant.
-			for variant in &variants {
+			for (index, variant) in variants.iter().enumerate() {
 				let video_url = resolve_uri(&self.base_url, &variant.uri)?;
-				self.video.push(TrackState::new(video_url));
+				let playlist_track = self.broadcast.create_track(moq_lite::Track::new(format!("video{}.m3u8", index)));
+				let init_track = self.broadcast.create_track(moq_lite::Track::new(format!("video{}.init.mp4", index)));
+				self.video.push(TrackState::new(video_url, playlist_track, init_track));
 			}
 
 			// Choose an audio rendition based on the first variant with an audio group.
@@ -303,7 +320,9 @@ impl Hls {
 				if let Some(audio_tag) = select_audio(&master, group_id) {
 					if let Some(uri) = &audio_tag.uri {
 						let audio_url = resolve_uri(&self.base_url, uri)?;
-						self.audio = Some(TrackState::new(audio_url));
+						let playlist_track = self.broadcast.create_track(moq_lite::Track::new("audio.m3u8"));
+						let init_track = self.broadcast.create_track(moq_lite::Track::new("audio.init.mp4"));
+						self.audio = Some(TrackState::new(audio_url, playlist_track, init_track));
 					} else {
 						warn!(%group_id, "audio rendition missing URI");
 					}
@@ -318,12 +337,18 @@ impl Hls {
 				audio = audio_url.as_deref().unwrap_or("none"),
 				"selected master playlist renditions"
 			);
-
+			self.master_playlist_track = Some(self.broadcast.create_track(moq_lite::Track::new("playlist.m3u8")));
+			if let Some(ref mut track) = self.master_playlist_track {
+				publish_master_playlist(track.clone(), master);
+			}
 			return Ok(());
 		}
 
 		// Fallback: treat the provided URL as a single media playlist.
-		self.video.push(TrackState::new(self.base_url.clone()));
+		self.video.push(TrackState::new(self.base_url.clone(),
+			self.broadcast.create_track(moq_lite::Track::new("video0.m3u8")),
+			self.broadcast.create_track(moq_lite::Track::new("video0.init.mp4")),
+		));
 		Ok(())
 	}
 
@@ -619,6 +644,20 @@ fn resolve_uri(base: &Url, value: &str) -> std::result::Result<Url, url::ParseEr
 	}
 
 	base.join(value)
+}
+
+fn publish_master_playlist(mut master_playlist_track: moq_lite::TrackProducer, master: MasterPlaylist) {
+    // Create a new group
+    let mut group = master_playlist_track.append_group();
+
+	// Test string
+	let test_data = b"HENRY WAS HERE\n";
+	
+	// Write the test data as a single frame in the group
+	group.write_frame(test_data as &[u8]);
+
+    // Close the group (important!)
+    group.close();
 }
 
 #[cfg(test)]
