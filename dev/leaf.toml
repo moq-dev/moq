@@ -5,7 +5,8 @@ level = "debug"
 
 [server]
 # Listen for QUIC connections on UDP:4444
-listen = "0.0.0.0:4444"
+# Sometimes IPv6 causes issues; try 127.0.0.1:4444 instead.
+listen = "[::]:4444"
 
 # Generate a self-signed certificate for the server.
 # You should use a real certificate in production.
@@ -13,7 +14,7 @@ tls.generate = ["localhost"]
 
 [web.http]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
-listen = "0.0.0.0:4444"
+listen = "[::]:4444"
 
 # This clustering scheme is very very simple for now.
 #

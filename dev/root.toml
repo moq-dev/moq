@@ -5,7 +5,8 @@ level = "debug"
 
 [server]
 # Listen for QUIC connections on UDP:4443
-listen = "0.0.0.0:4443"
+# Sometimes IPv6 causes issues; try 127.0.0.1:4443 instead.
+listen = "[::]:4443"
 
 # Generate a self-signed certificate for the given hostnames.
 # This is used for local development, in conjunction with a fingerprint, or with TLS verification disabled.
@@ -14,7 +15,7 @@ tls.generate = ["localhost"]
 [web.http]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
 # Defaults to disabled if not provided.
-listen = "0.0.0.0:4443"
+listen = "[::]:4443"
 
 # In production, we would use a real certificate from something like Let's Encrypt.
 # Multiple certificates are supported; the first one that matches the SNI will be used.
