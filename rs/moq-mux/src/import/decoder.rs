@@ -248,9 +248,7 @@ impl Decoder {
 			#[cfg(feature = "h264")]
 			DecoderFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),
 			#[cfg(feature = "mp4")]
-			DecoderFormat::Fmp4 => {
-				Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default())).into()
-			}
+			DecoderFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default())).into(),
 			#[cfg(feature = "h265")]
 			DecoderFormat::Hev1 => super::Hev1::new(broadcast, catalog).into(),
 			#[cfg(feature = "aac")]
@@ -303,16 +301,20 @@ impl Decoder {
 	) -> anyhow::Result<()> {
 		match &mut self.decoder {
 			#[cfg(feature = "h264")]
-			DecoderKind::Avc3(decoder) => decoder.decode_frame(buf, pts),
+			DecoderKind::Avc3(decoder) => decoder.decode_frame(buf, pts)?,
 			#[cfg(feature = "mp4")]
-			DecoderKind::Fmp4(decoder) => decoder.decode(buf),
+			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
 			#[cfg(feature = "h265")]
-			DecoderKind::Hev1(decoder) => decoder.decode_frame(buf, pts),
+			DecoderKind::Hev1(decoder) => decoder.decode_frame(buf, pts)?,
 			#[cfg(feature = "aac")]
-			DecoderKind::Aac(decoder) => decoder.decode(buf, pts),
+			DecoderKind::Aac(decoder) => decoder.decode(buf, pts)?,
 			#[cfg(feature = "opus")]
-			DecoderKind::Opus(decoder) => decoder.decode(buf, pts),
+			DecoderKind::Opus(decoder) => decoder.decode(buf, pts)?,
 		}
+
+		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
+
+		Ok(())
 	}
 
 	/// Check if the decoder has read enough data to be initialized.
