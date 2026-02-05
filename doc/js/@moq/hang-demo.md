@@ -12,7 +12,7 @@ Follow the [Quick Start](/setup/) guide to get started.
 
 You can target a remote relay instead of a local one with the command:
 ```bash
-just web https://cdn.moq.dev/anon
+./x web https://cdn.moq.dev/anon
 ```
 
 ## Watch Demo

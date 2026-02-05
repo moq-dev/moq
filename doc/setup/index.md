@@ -29,13 +29,13 @@ Install the following:
 Then run the demo:
 ```bash
 # Runs the demo using pinned dependencies
-nix develop -c just dev
+nix develop -c ./x dev
 ```
 
 If you install `direnv`, then the Nix shell will be loaded whenever you `cd` into the repo:
 ```bash
-# Run the demo... in 9 keystrokes
-just dev
+# Run the demo... in 7 keystrokes
+./x dev
 ```
 
 
@@ -43,7 +43,6 @@ just dev
 
 If you don't like Nix or enjoy suffering with Windows, then you can manually install the dependencies:
 
-- [Just](https://github.com/casey/just)
 - [Rust](https://www.rust-lang.org/tools/install)
 - [Bun](https://bun.sh/)
 - [FFmpeg](https://ffmpeg.org/download.html)
@@ -52,16 +51,16 @@ If you don't like Nix or enjoy suffering with Windows, then you can manually ins
 Then run:
 ```bash
 # Install additional dependencies, usually linters
-just install
+./x install
 
 # Run the demo
-just dev
+./x dev
 ```
 
 When in doubt, check the [Nix Flake](https://github.com/moq-dev/moq/blob/main/flake.nix) for the full list of dependencies.
 
 ## What's Happening?
-The `just dev` command starts three components:
+The `./x dev` command starts three components:
 
 - [moq-relay](/app/relay/): A server that routes live data between publishers and subscribers.
 - [moq-cli](/app/cli): A CLI that publishes video content piped from `ffmpeg`.

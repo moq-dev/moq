@@ -114,10 +114,10 @@ The repository includes helper commands for test content:
 
 ```bash
 # Publish Big Buck Bunny
-just pub bbb https://relay.example.com/anon
+./x pub fmp4 bbb https://relay.example.com/anon
 
 # Publish Tears of Steel
-just pub tos https://relay.example.com/anon
+./x pub fmp4 tos https://relay.example.com/anon
 ```
 
 ## Clock Synchronization
@@ -126,10 +126,10 @@ Publish and subscribe to clock broadcasts for testing:
 
 ```bash
 # Publish a clock
-just clock publish https://relay.example.com/anon
+./x clock publish https://relay.example.com/anon
 
 # Subscribe to a clock
-just clock subscribe https://relay.example.com/anon
+./x clock subscribe https://relay.example.com/anon
 ```
 
 ## Debugging
