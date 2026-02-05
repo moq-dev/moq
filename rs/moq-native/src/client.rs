@@ -35,7 +35,9 @@ pub struct ClientTls {
 		id = "tls-disable-verify",
 		long = "tls-disable-verify",
 		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
-		action = clap::ArgAction::SetTrue
+		default_missing_value = "true",
+		num_args = 0..=1,
+		value_parser = clap::value_parser!(bool),
 	)]
 	pub disable_verify: Option<bool>,
 }
