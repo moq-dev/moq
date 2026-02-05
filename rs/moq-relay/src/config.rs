@@ -3,11 +3,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AuthConfig, ClusterConfig, WebConfig};
 
-#[derive(Parser, Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields, default)]
 pub struct Config {
 	/// The QUIC/TLS configuration for the server.
 	#[command(flatten)]
+	#[serde(default)]
 	pub server: moq_native::ServerConfig,
 
 	/// The QUIC/TLS configuration for the client. (clustering only)
@@ -41,6 +42,7 @@ pub struct Config {
 
 	/// Iroh specific configuration, used for both a client and server.
 	#[command(flatten)]
+	#[serde(default)]
 	#[cfg(feature = "iroh")]
 	pub iroh: moq_native::IrohEndpointConfig,
 }
