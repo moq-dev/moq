@@ -196,7 +196,7 @@ just relay --iroh-enabled
 just pub-iroh bbb iroh://ENDPOINT_ID  anon/
 # Alternatively you can use WebTransport over HTTP/3 over iroh,
 # which allows to set a path prefix in the URL:
-just pub-iroh bbb h3+iroh://ENDPOINT_ID/anon 
+just pub-iroh bbb h3+iroh://ENDPOINT_ID/anon
 
 # Terminal 3: Start web server
 just web
