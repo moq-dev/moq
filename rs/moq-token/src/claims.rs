@@ -62,7 +62,7 @@ pub struct Claims {
 	pub subscribe: Vec<String>,
 
 	/// The expiration time of the token as a unix timestamp.
-	#[serde(rename = "exp")]
+	#[serde(rename = "exp", skip_serializing_if = "Option::is_none")]
 	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
 	pub expires: Option<std::time::SystemTime>,
 
