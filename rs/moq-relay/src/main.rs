@@ -32,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
 	let server = config.server.init()?;
+	println!("client: {:?}", config.client);
 	let client = config.client.init()?;
 
 	#[cfg(feature = "iroh")]
