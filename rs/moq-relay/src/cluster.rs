@@ -128,7 +128,7 @@ impl Cluster {
 			anyhow::bail!("combined connection closed");
 		};
 
-		// Subscribe to available origins.
+		// Subscribe to available origins from secondary (what we learn from other nodes).
 		// Use with_root to automatically strip the prefix from announced paths.
 		let origins = self
 			.secondary
@@ -136,9 +136,14 @@ impl Cluster {
 			.context("no authorized origins")?;
 
 		// Announce ourselves as an origin to the root node.
+		// This goes into primary so it gets shared with other nodes via run_remote_once.
 		if let Some(myself) = self.config.node.as_ref() {
 			tracing::info!(%myself, "announcing as leaf");
-			origins.publish_broadcast(myself, self.noop.consume());
+			let announce_origin = self
+				.primary
+				.with_root(&self.config.prefix)
+				.context("failed to create announcement origin")?;
+			announce_origin.publish_broadcast(myself, self.noop.consume());
 		}
 
 		// If the token is provided, read it from the disk and use it in the query parameter.
