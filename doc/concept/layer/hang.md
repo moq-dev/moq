@@ -10,13 +10,10 @@ See the draft: [draft-lcurley-moq-hang](https://www.ietf.org/archive/id/draft-lc
 
 ## Catalog
 `catalog.json` is a special track that contains a JSON description of available tracks.
-This track is live updated as tracks are added, removed, or changed.
+This is how the viewer decides what it can decode and wants to receive.
+The catalog track is live updated as media tracks are added, removed, or changed.
 
-MoQ doesn't have a mechanism to discover track names; that's the role of this catalog track.
-A viewer has to know ahead of time that a broadcast contains a `catalog.json` track.
-
-It's possible to have multiple different types/versions of catalog tracks.
-For example, a `playlist.m3u8` track could be used in conjunction with a `catalog.json` track to provide backwards compatibility for HLS.
+Each media track is described using the [WebCodecs specification](https://www.w3.org/TR/webcodecs/) and we plan to support every codec in the [WebCodecs registry](https://w3c.github.io/webcodecs/codec_registry.html).
 
 ### Example
 Here is Big Buck Bunny's `catalog.json` as of 2026-02-02:
@@ -72,7 +69,8 @@ This is the minimum amount of information required to initialize a video decoder
 The catalog also contains a `container` field for each rendition used to denote the encoding of each track.
 Unfortunately, the raw codec bitstream lacks timestamp information so we need some sort of container.
 
-The same container formats are used for both video and audio.
+Containers can support additional features and configuration.
+For example, `CMAF` specifies a timescale instead of hard-coding it to microseconds like `legacy`.
 
 ### Legacy
 This is a lightweight container with no frills attached.
@@ -85,11 +83,11 @@ Each frame consists of:
 ### CMAF
 This is a more robust container used by HLS/DASH.
 
-Unfortunately, it's not quite designed for real-time streaming and incurs either a latency or size overhead:
-- Minimal latency: 1-frame fragments introduce ~100 bytes of overhead per frame.
-- Minimal size (HLS): GoP sized fragments introduce a GoP's worth of latency.
-- Mixed latency/size (LL-HLS): 500ms sized fragments introduce a 500ms latency, with some additional overhead.
-
 Each frame consists of:
 - A `moof` box containing a `tfhd` box and a `tfdt` box.
 - A `mdat` box containing the codec payload.
+
+Unfortunately, fMP4 is not quite designed for real-time streaming and incurs either a latency or size overhead:
+- Minimal latency: 1-frame fragments introduce ~100 bytes of overhead per frame.
+- Minimal size (HLS): GoP sized fragments introduce a GoP's worth of latency.
+- Mixed latency/size (LL-HLS): 500ms sized fragments introduce a 500ms latency, with some additional overhead.

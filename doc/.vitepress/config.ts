@@ -39,18 +39,18 @@ export default defineConfig({
 					items: [
 						{
 							text: "Layers",
+							link: "/concept/layer/",
 							items: [
-								{ text: "Overview", link: "/concept/layer/" },
-								{ text: "lite", link: "/concept/layer/moq-lite" },
+								{ text: "quic", link: "/concept/layer/quic" },
+								{ text: "web-transport", link: "/concept/layer/web-transport" },
+								{ text: "moq-lite", link: "/concept/layer/moq-lite" },
 								{ text: "hang", link: "/concept/layer/hang" },
 							],
 						},
-
-						{ text: "Terminology", link: "/concept/terminology" },
 						{
 							text: "Standards",
+							link: "/concept/standard/",
 							items: [
-								{ text: "Overview", link: "/concept/standard/" },
 								{ text: "MoqTransport", link: "/concept/standard/moq-transport" },
 							],
 						},
@@ -61,6 +61,7 @@ export default defineConfig({
 								{ text: "Contribution", link: "/concept/use-case/contribution" },
 								{ text: "Distribution", link: "/concept/use-case/distribution" },
 								{ text: "Conferencing", link: "/concept/use-case/conferencing" },
+								{ text: "Exotic", link: "/concept/use-case/exotic" },
 							],
 						},
 					],

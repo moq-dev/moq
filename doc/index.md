@@ -72,8 +72,8 @@ features:
 ## What is MoQ?
 
 **Media over QUIC** (MoQ) is a next-generation live media protocol.
-As the name implies, it leverages QUIC to transmit media across multiple concurrent streams, potentially out-of-order.
-The protocol is being standardized by the [IETF](https://datatracker.ietf.org/group/moq/), backed by some of the largest tech companies: Google, Cisco, Akamai, Cloudflare, etc.
+As the name implies, we use QUIC to concurrently transmit media and avoid latency build-up during congestion.
+The protocol is being standardized by the [IETF](https://datatracker.ietf.org/group/moq/about/) and backed by some of the largest tech companies: Google, Cisco, Akamai, Cloudflare, etc.
 
 [moq.dev](https://moq.dev) is an open source implementation written in Rust (native) and Typescript (web).
 We support compatibility with the *official* [IETF drafts](https://datatracker.ietf.org/group/moq/documents/), but the main focus is a subset called [moq-lite](/concept/layer/moq-lite) and [hang](/concept/layer/hang).
@@ -82,7 +82,7 @@ The idea is to [build first, argue later](/concept/standard/).
 See the [concepts](/concept/) page for a breakdown of the layering, rationale, and comparison to other protocols.
 
 ## Setup
-Get up and running in seconds with [Nix](https://nixos.org/download.html), or be lame and [install stuff manually](/setup/):
+Get up and running in seconds with [Nix](https://nixos.org/download.html) ([+Flakes](https://nixos.wiki/wiki/Flakes)), or be lame and [install stuff manually](/setup/):
 
 ```bash
 # Runs a relay, media publisher, and the web server
@@ -92,25 +92,24 @@ nix develop -c just dev
 If everything works, a browser window will pop up demoing how to both publish and watch content via the web.
 
 - Keep reading the [development guide](/setup/dev) to run more advanced demos.
-- Skip ahead to the [production guide](/setup/prod) to see what it takes to run this bad boy.
+- Skip ahead to the [production guide](/setup/prod) to see what it takes to deploy this bad boy.
 
 ## Applications
-There are a bunch of MoQ binaries and plugins. Some highlights:
+There are a bunch of MoQ binaries and plugins.
 
+Some highlights:
 - [moq-relay](/app/relay/) - A server connecting publishers to subscribers, able to form a [self-hosted CDN cluster](/app/relay/cluster).
 - [moq-cli](/app/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc), including via ffmpeg.
 - [obs](/app/obs) - An OBS plugin, able to publish a MoQ broadcast and/or use MoQ broadcasts as sources.
 - [gstreamer](/app/gstreamer) - A gstreamer plugin, split into a source and a sink.
-- [web](/app/web) - A web component you can throw on your website, wrapping a `<video>` tag. It can also do publishing!
+- [web](/app/web) - A web component you can slap on your website to watch and publish MoQ broadcasts.
 - [...and more](/app/)
 
 ## Rust Crates 🦀
-Integrate MoQ into your application without fear.
-The main focus is [native](/rs/env/native), but there's also some [WASM support](/rs/env/wasm).
+Integrate MoQ into your application without fear. Focused on [native](/rs/env/native) but has token [WASM](/rs/env/wasm) support.
 
 Some highlights:
 - [moq-lite](/rs/crate/moq-lite) - Performs the core asynchronous networking, caching, and fanout.
-- [hang](/rs/crate/hang) - Media-specific encoding and streaming (catalog, container format).
 - [moq-mux](/rs/crate/moq-mux) - Media muxers/demuxers for fMP4, CMAF, and HLS import.
 - [libmoq](/rs/crate/libmoq) - C bindings for the above, no finagling Rust into your build system.
 - [web-transport](/rs/crate/web-transport) - A suite of crates required to get QUIC access in the browser, plus some polyfills.
@@ -118,7 +117,7 @@ Some highlights:
 
 ## TypeScript Packages
 Run MoQ in a [web browser](/js/env/web) utilizing the latest Web tech.
-Or run a [native app](/js/env/native) (with polyfills) via Node/Bun/Deno.
+Or run on [native](/js/env/native) with polyfills via Node/Bun/Deno.
 
 Some highlights:
 - [@moq/lite](/js/@moq/lite) - Performs the core asynchronous networking.
