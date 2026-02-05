@@ -99,14 +99,6 @@ QUIC is available in browsers via [WebTransport](https://developer.mozilla.org/e
 The lack of Safari support is a bit of a bummer especially because it's tied to the OS version.
 But we have an (automatic) WebSocket fallback in the meantime.
 
-### Connection Migration
-**Bonus feature**: QUIC connections can survive IP address changes.
-Switch from WiFi to cellular?
-The stream keeps playing.
-
-This is possible because QUIC uses connection IDs rather than the traditional `IP:port` tuple.
-This also allows for some pretty neat [load balancing](https://datatracker.ietf.org/doc/html/draft-ietf-quic-load-balancers) techniques.
-
 ## Security
 TLS 1.3 is required for QUIC.
 

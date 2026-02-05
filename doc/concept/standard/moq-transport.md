@@ -34,7 +34,7 @@ Again, I don't think a CDN will ever implement this due to conflicts/complexity/
 
 ### Group
 A collection of **sub-groups**, potentially served out-of-order.
-Each group is identified by an monotonically increasing group ID, with gaps allowed.
+Each group is identified by a monotonically increasing group ID, with gaps allowed.
 
 ### Sub-Group
 A collection of **frames**, served in order over a single QUIC stream.
@@ -45,21 +45,21 @@ In moq-lite, you would make a separate track for each layer so you can select/pr
 
 ### Object
 The smallest unit in MoQ: a sized chunk of data.
-Each object is identified by an monotonically increasing object ID.
+Each object is identified by a monotonically increasing object ID.
 
 Unlike moq-lite, there may be both explicit and implicit gaps in the object ID.
 There are also "Object Properties" that can be used to store K/V metadata pairs.
 
 ## Request
 MoqTransport has a bunch of different request types, each with a different purpose.
-They are identified by a request ID and have cooresponding _OK and _ERROR responses.
+They are identified by a request ID and have corresponding _OK and _ERROR responses.
 
 Note that `moq-lite` contains the equivalent of: `SUBSCRIBE` and `SUBSCRIBE_NAMESPACE`.
 The other requests are unique to MoqTransport.
 
 ### SUBSCRIBE
 Allows access to future objects.
-When a new object is available, each active subscriber will receive a copy of it over the cooresponding sub-group QUIC stream.
+When a new object is available, each active subscriber will receive a copy of it over the corresponding sub-group QUIC stream.
 
 Unlike moq-lite, a subscription starts at the latest object within a group, not the first object.
 This is quite annoying because you have to issue a `JOINING FETCH` request to get the earlier objects within the group (ex. the I-frame).
@@ -82,7 +82,7 @@ Unlike moq-lite, there is a `forward=1` flag to automatically receive any `PUBLI
 Announces the availability of a namespace.
 There's no information about the tracks within the namespace.
 
-Unlike moq-lite, this can be sent without a cooresponding `SUBSCRIBE_NAMESPACE`.
+Unlike moq-lite, this can be sent without a corresponding `SUBSCRIBE_NAMESPACE`.
 
 ### FETCH
 Allows access to past objects.
