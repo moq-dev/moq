@@ -140,7 +140,7 @@ ffmpeg-cmaf input output='-' *args:
 # Publish a video using ffmpeg to the localhost relay server
 # NOTE: The `http` means that we perform insecure certificate verification.
 # Switch it to `https` when you're ready to use a real certificate.
-pub name url="http://localhost:4443/anon" prefix="" *args:
+pub name url="http://localhost:4443/anon" *args:
 	# Download the sample media.
 	just download "{{name}}"
 	# Pre-build the binary so we don't queue media while compiling.
@@ -148,7 +148,17 @@ pub name url="http://localhost:4443/anon" prefix="" *args:
 	# Publish the media with the moq cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
 	cargo run --bin moq -- \
-		publish --url "{{url}}" --name "{{prefix}}{{name}}" {{args}} fmp4
+		{{args}} publish --url "{{url}}" --name "{{name}}" fmp4
+		
+pub-iroh name url prefix="":
+	# Download the sample media.
+	just download "{{name}}"
+	# Pre-build the binary so we don't queue media while compiling.
+	cargo build --bin moq
+	# Publish the media with the moq cli.
+	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
+	cargo run --bin moq -- \
+		--iroh-enabled publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
