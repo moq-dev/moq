@@ -50,9 +50,7 @@ export default defineConfig({
 						{
 							text: "Standards",
 							link: "/concept/standard/",
-							items: [
-								{ text: "MoqTransport", link: "/concept/standard/moq-transport" },
-							],
+							items: [{ text: "MoqTransport", link: "/concept/standard/moq-transport" }],
 						},
 						{
 							text: "Use Cases",
