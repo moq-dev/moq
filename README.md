@@ -193,10 +193,10 @@ just relay --iroh-enabled
 # We set an `anon/` prefix to match the broadcast name the web ui expects
 # Because moq-lite does not have headers if using raw QUIC, only the hostname
 # in the URL can be used.
-just pub bbb iroh://ENDPOINT_ID/anon --iroh-enabled
+just pub-iroh bbb iroh://ENDPOINT_ID  anon/
 # Alternatively you can use WebTransport over HTTP/3 over iroh,
 # which allows to set a path prefix in the URL:
-just pub bbb h3+iroh://ENDPOINT_ID/anon --iroh-enabled
+just pub-iroh bbb h3+iroh://ENDPOINT_ID/anon 
 
 # Terminal 3: Start web server
 just web
