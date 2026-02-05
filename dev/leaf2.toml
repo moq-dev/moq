@@ -1,0 +1,42 @@
+[log]
+# Enable debug logging for development.
+# The RUST_LOG environment variable will take precedence.
+level = "debug"
+
+[server]
+# Listen for QUIC connections on UDP:4445 (different from leaf1's 4444)
+listen = "[::]:4445"
+
+# Generate a self-signed certificate for the server.
+tls.generate = ["localhost"]
+
+[web.http]
+# Listen for HTTP and WebSocket (TCP) connections on the given address.
+listen = "[::]:4445"
+
+[cluster]
+# Connect to the root node to discover other nodes.
+connect = "localhost:4443"
+
+# Use the token in this file when connecting to other nodes.
+# `just auth-token` will populate this file.
+token = "dev/root.jwt"
+
+# My hostname, which must be accessible from other nodes.
+# This is different from leaf1's localhost:4444
+node = "localhost:4445"
+
+[client]
+# Disable TLS verification for local development.
+tls.disable_verify = true
+
+[auth]
+# `just auth-key` will populate this file.
+key = "dev/root.jwk"
+
+# NOTE: Cannot have both key and public configured together in newer moq-relay
+# public = "anon"
+
+[iroh]
+# Disable iroh for local testing
+enabled = false

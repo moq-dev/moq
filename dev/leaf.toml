@@ -5,7 +5,7 @@ level = "debug"
 
 [server]
 # Listen for QUIC connections on UDP:4444
-listen = "0.0.0.0:4444"
+listen = "[::]:4444"
 
 # Generate a self-signed certificate for the server.
 # You should use a real certificate in production.
@@ -13,7 +13,7 @@ tls.generate = ["localhost"]
 
 [web.http]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
-listen = "0.0.0.0:4444"
+listen = "[::]:4444"
 
 # This clustering scheme is very very simple for now.
 #
@@ -64,5 +64,9 @@ tls.disable_verify = true
 # `just auth-key` will populate this file.
 key = "dev/root.jwk"
 
-# Allow anonymous publishing and subscribing for this prefix.
-public = "anon"
+# NOTE: Cannot have both key and public configured together in newer moq-relay
+# public = "anon"
+
+[iroh]
+# Disable iroh for local testing
+enabled = false

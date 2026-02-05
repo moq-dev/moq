@@ -5,7 +5,7 @@ level = "debug"
 
 [server]
 # Listen for QUIC connections on UDP:4443
-listen = "0.0.0.0:4443"
+listen = "[::]:4443"
 
 # Generate a self-signed certificate for the given hostnames.
 # This is used for local development, in conjunction with a fingerprint, or with TLS verification disabled.
@@ -14,7 +14,7 @@ tls.generate = ["localhost"]
 [web.http]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
 # Defaults to disabled if not provided.
-listen = "0.0.0.0:4443"
+listen = "[::]:4443"
 
 # In production, we would use a real certificate from something like Let's Encrypt.
 # Multiple certificates are supported; the first one that matches the SNI will be used.
@@ -29,5 +29,9 @@ listen = "0.0.0.0:4443"
 # If you want to disable authentication, don't specify a key.
 key = "dev/root.jwk"
 
-# Allow anonymous publishing and subscribing for anon/**
-public = "anon"
+# NOTE: Cannot have both key and public configured together in newer moq-relay
+# public = "anon"
+
+[iroh]
+# Disable iroh for local testing
+enabled = false
