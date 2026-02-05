@@ -34,19 +34,32 @@ struct OriginConsumerNotify {
 
 impl OriginConsumerNotify {
 	fn announce(&self, path: impl AsPath, broadcast: BroadcastConsumer) {
-		let path = path.as_path().strip_prefix(&self.root).unwrap().to_owned();
-		self.tx.send((path, Some(broadcast))).expect("consumer closed");
+		let path = path.as_path();
+		// Filter out announcements that don't match this consumer's root prefix.
+		let Some(path) = path.strip_prefix(&self.root) else {
+			return;
+		};
+		self.tx.send((path.to_owned(), Some(broadcast))).expect("consumer closed");
 	}
 
 	fn reannounce(&self, path: impl AsPath, broadcast: BroadcastConsumer) {
-		let path = path.as_path().strip_prefix(&self.root).unwrap().to_owned();
+		let path = path.as_path();
+		// Filter out announcements that don't match this consumer's root prefix.
+		let Some(path) = path.strip_prefix(&self.root) else {
+			return;
+		};
+		let path = path.to_owned();
 		self.tx.send((path.clone(), None)).expect("consumer closed");
 		self.tx.send((path, Some(broadcast))).expect("consumer closed");
 	}
 
 	fn unannounce(&self, path: impl AsPath) {
-		let path = path.as_path().strip_prefix(&self.root).unwrap().to_owned();
-		self.tx.send((path, None)).expect("consumer closed");
+		let path = path.as_path();
+		// Filter out announcements that don't match this consumer's root prefix.
+		let Some(path) = path.strip_prefix(&self.root) else {
+			return;
+		};
+		self.tx.send((path.to_owned(), None)).expect("consumer closed");
 	}
 }
 
@@ -1310,5 +1323,56 @@ mod tests {
 
 		narrow_consumer.assert_next("worm-node/data", &broadcast1.consume());
 		narrow_consumer.assert_next_wait(); // Should not see foobar
+	}
+
+	// Test for issue #910: with_root() should filter announcements instead of panicking
+	#[tokio::test]
+	async fn test_with_root_filters_non_matching_announcements() {
+		let origin = Origin::produce();
+		let broadcast1 = Broadcast::produce();
+		let broadcast2 = Broadcast::produce();
+
+		// Create a consumer with a specific root prefix
+		let mut consumer = origin.with_root("my-prefix").expect("should create root").consume();
+
+		// Publish a broadcast that DOES match the prefix
+		origin.publish_broadcast("my-prefix/test", broadcast1.consume());
+
+		// Publish a broadcast that does NOT match the prefix
+		origin.publish_broadcast("other-prefix/test", broadcast2.consume());
+
+		// The consumer should only receive the matching broadcast without panicking
+		consumer.assert_next("test", &broadcast1.consume());
+		consumer.assert_next_wait(); // Should NOT receive other-prefix/test, and should NOT panic
+	}
+
+	// Additional test for issue #910: ensure unannounce also filters correctly
+	#[tokio::test]
+	async fn test_with_root_filters_non_matching_unannouncements() {
+		let origin = Origin::produce();
+		let broadcast1 = Broadcast::produce();
+		let broadcast2 = Broadcast::produce();
+
+		// Publish broadcasts before creating the consumer
+		origin.publish_broadcast("my-prefix/test", broadcast1.consume());
+		origin.publish_broadcast("other-prefix/test", broadcast2.consume());
+
+		// Create a consumer with a specific root prefix
+		let mut consumer = origin.with_root("my-prefix").expect("should create root").consume();
+
+		// Consumer should only see the matching broadcast
+		consumer.assert_next("test", &broadcast1.consume());
+		consumer.assert_next_wait();
+
+		// Drop both broadcasts to trigger unannouncements
+		drop(broadcast1);
+		drop(broadcast2);
+
+		// Wait for the async cleanup tasks to run
+		tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+		// Consumer should receive unannouncement for matching path only, without panicking
+		consumer.assert_next_none("test");
+		consumer.assert_next_wait(); // Should NOT panic on the non-matching unannouncement
 	}
 }
