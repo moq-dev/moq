@@ -49,7 +49,6 @@
         # Rust dependencies
         rustDeps = with pkgs; [
           rust-toolchain
-          just
           pkg-config
           glib
           libressl

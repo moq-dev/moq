@@ -10,9 +10,9 @@ MoQ (Media over QUIC) is a next-generation live media delivery protocol providin
 
 ```bash
 # Code quality and testing
-just check        # Run all tests and linting
-just fix          # Auto-fix linting issues
-just build        # Build all packages
+./x check        # Run all tests and linting
+./x fix          # Auto-fix linting issues
+./x build        # Build all packages
 ```
 
 ## Architecture
@@ -53,26 +53,26 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 
 ## Development Tips
 
-1. The project uses `just` as the task runner - check `justfile` for all available commands
+1. The project uses `./x` (or `cargo x`) as the task runner - check `rs/x/src/main.rs` for all available commands
 2. For Rust development, the workspace is configured in the `rs/Cargo.toml`
 3. For JS/TS development, bun workspaces are used with configuration in `js/package.json`
 
 ## Tooling
 
 - **TypeScript**: Always use `bun` for all package management and script execution (not npm, yarn, or pnpm)
-- **Common**: Use `just` for common development tasks
+- **Common**: Use `./x` (or `cargo x`) for common development tasks
 - **Rust**: Use `cargo` for Rust-specific operations
 
 ## Testing Approach
 
-- Run `just check` to execute all tests and linting.
-- Run `just fix` to automatically fix formating and easy things.
+- Run `./x check` to execute all tests and linting.
+- Run `./x fix` to automatically fix formating and easy things.
 - Rust tests are integrated within source files
 
 ## Workflow
 
 When making changes to the codebase:
 1. Make your code changes
-2. Run `just fix` to auto-format and fix linting issues
-3. Run `just check` to verify everything passes
+2. Run `./x fix` to auto-format and fix linting issues
+3. Run `./x check` to verify everything passes
 4. Commit and push changes

@@ -86,7 +86,7 @@ Get up and running in seconds with [Nix](https://nixos.org/download.html), or be
 
 ```bash
 # Runs a relay, media publisher, and the web server
-nix develop -c just dev
+nix develop -c ./x dev
 ```
 
 If everything works, a browser window will pop up demoing how to both publish and watch content via the web.
