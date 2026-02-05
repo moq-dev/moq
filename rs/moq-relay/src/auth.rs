@@ -138,20 +138,18 @@ impl Auth {
 	}
 
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
-		if let Some(key) = config.key {
-			if config.public.is_some() {
-				anyhow::bail!("root key and public path cannot be configured together");
-			}
+		let public = config.public.map(|p| p.as_path().to_owned());
 
+		if let Some(key) = config.key {
 			if key.starts_with("http://") || key.starts_with("https://") {
-				Self::new_remote(key, config.refresh_interval).await
+				Self::new_remote(key, public, config.refresh_interval).await
 			} else {
-				Self::new_local(key)
+				Self::new_local(key, public)
 			}
-		} else if let Some(public) = config.public {
+		} else if public.is_some() {
 			Ok(Self {
 				key: None,
-				public: Some(public.as_path().to_owned()),
+				public,
 				refresh_task: None,
 			})
 		} else {
@@ -159,7 +157,7 @@ impl Auth {
 		}
 	}
 
-	async fn new_remote(uri: String, refresh_interval: Option<u64>) -> anyhow::Result<Self> {
+	async fn new_remote(uri: String, public: Option<PathOwned>, refresh_interval: Option<u64>) -> anyhow::Result<Self> {
 		// Start with an empty KeySet
 		let key_set = Arc::new(Mutex::new(KeySet::default()));
 
@@ -181,12 +179,12 @@ impl Auth {
 
 		Ok(Self {
 			key: Some(key_set),
-			public: None,
+			public,
 			refresh_task,
 		})
 	}
 
-	fn new_local(key: String) -> anyhow::Result<Self> {
+	fn new_local(key: String, public: Option<PathOwned>) -> anyhow::Result<Self> {
 		let key = moq_token::Key::from_file(&key).context("cannot load key")?;
 		let key_set = Arc::new(Mutex::new(KeySet {
 			keys: vec![Arc::new(key)],
@@ -194,7 +192,7 @@ impl Auth {
 
 		Ok(Self {
 			key: Some(key_set),
-			public: None,
+			public,
 			refresh_task: None,
 		})
 	}
