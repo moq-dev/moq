@@ -22,9 +22,9 @@ where
 	}
 }
 
+#[serde_with::skip_serializing_none]
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
-#[serde_with::skip_serializing_none]
 #[serde(default)]
 pub struct Claims {
 	/// The root for the publish/subscribe options below.
