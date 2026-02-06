@@ -418,10 +418,10 @@ impl Key {
 
 				let token = jsonwebtoken::decode::<Claims>(token, decode, &validation)?;
 
-				if let Some(exp) = token.claims.expires {
-					if exp < std::time::SystemTime::now() {
-						anyhow::bail!("token has expired");
-					}
+				if let Some(exp) = token.claims.expires
+					&& exp < std::time::SystemTime::now()
+				{
+					anyhow::bail!("token has expired");
 				}
 
 				token.claims.validate()?;
