@@ -109,8 +109,9 @@ impl Cluster {
 	//
 	// Returns a [ClusterRegistration] that should be kept alive for the duration of the session.
 	pub fn register(&self, token: &AuthToken) -> Option<ClusterRegistration> {
-		if self.config.node.is_some() {
+		if self.config.root.is_some() {
 			// Only the root node can register other nodes.
+			// Otherwise, they will gossip between themselves and over-announce each other.
 			return None;
 		}
 
@@ -248,10 +249,14 @@ impl Cluster {
 		token: String,
 		origin: BroadcastConsumer,
 	) -> anyhow::Result<()> {
-		let url = match token.is_empty() {
-			true => Url::parse(&format!("https://{remote}/?node={local}"))?,
-			false => Url::parse(&format!("https://{remote}/?jwt={token}&node={local}"))?,
-		};
+		let mut url = Url::parse(&format!("https://{remote}/"))?;
+		{
+			let mut q = url.query_pairs_mut();
+			if !token.is_empty() {
+				q.append_pair("jwt", &token);
+			}
+			q.append_pair("node", local);
+		}
 		let mut backoff = 1;
 
 		loop {
