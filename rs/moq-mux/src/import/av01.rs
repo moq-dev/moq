@@ -174,6 +174,16 @@ impl Av01 {
 			jitter: None,
 		};
 
+		if let Some(old) = &self.config
+			&& old == &config
+		{
+			return Ok(());
+		}
+
+		if let Some(track) = &self.track.take() {
+			self.catalog.lock().video.remove_track(&track.info);
+		}
+
 		let mut catalog = self.catalog.lock();
 		let track = catalog.video.create_track("av01", config.clone());
 		drop(catalog);
