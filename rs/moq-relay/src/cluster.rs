@@ -154,7 +154,10 @@ impl Cluster {
 		// If the token is provided, read it from the disk and use it in the query parameter.
 		// TODO put this in an AUTH header once WebTransport supports it.
 		let token = match &self.config.token {
-			Some(path) => std::fs::read_to_string(path).context("failed to read token")?,
+			Some(path) => std::fs::read_to_string(path)
+				.context("failed to read token")?
+				.trim()
+				.to_string(),
 			None => "".to_string(),
 		};
 
