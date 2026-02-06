@@ -106,13 +106,21 @@ impl Cluster {
 	}
 
 	// Register a cluster node's presence.
-	// Returns a BroadcastProducer that should be kept alive for the duration of the session.
-	pub fn register(&self, token: &AuthToken) -> Option<BroadcastProducer> {
-		let node = token.cluster.as_ref()?;
+	//
+	// Returns a [ClusterRegistration] that should be kept alive for the duration of the session.
+	pub fn register(&self, token: &AuthToken) -> Option<ClusterRegistration> {
+		if self.config.node.is_some() {
+			// Only the root node can register other nodes.
+			return None;
+		}
+
+		let node = token.cluster.clone()?;
 		let broadcast = Broadcast::produce();
-		let path = moq_lite::Path::new(&self.config.prefix).join(node);
+
+		let path = moq_lite::Path::new(&self.config.prefix).join(&node);
 		self.primary.publish_broadcast(path, broadcast.consume());
-		Some(broadcast)
+
+		Some(ClusterRegistration::new(node, broadcast))
 	}
 
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
@@ -284,5 +292,26 @@ impl Cluster {
 			.context("failed to connect to remote")?;
 
 		session.closed().await.map_err(Into::into)
+	}
+}
+
+pub struct ClusterRegistration {
+	// The name of the node.
+	node: String,
+
+	// The announcement, send to other nodes.
+	broadcast: BroadcastProducer,
+}
+
+impl ClusterRegistration {
+	pub fn new(node: String, broadcast: BroadcastProducer) -> Self {
+		tracing::info!(%node, "registered cluster client");
+		ClusterRegistration { node, broadcast }
+	}
+}
+impl Drop for ClusterRegistration {
+	fn drop(&mut self) {
+		tracing::info!(%self.node, "unregistered cluster client");
+		self.broadcast.close();
 	}
 }
