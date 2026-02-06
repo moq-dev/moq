@@ -1245,13 +1245,13 @@ mod tests {
 		assert!(limited_producer.publish_broadcast("org/team1/project2", broadcast2.consume()));
 		assert!(limited_producer.publish_broadcast("org/team2/project1", broadcast3.consume()));
 
-		// Narrow down to team1 only
-		let mut team1_consumer = limited_producer
+		// Narrow down to team2 only
+		let mut team2_consumer = limited_producer
 			.consume_only(&["org/team2".into()])
-			.expect("should create team1 consumer");
+			.expect("should create team2 consumer");
 
-		team1_consumer.assert_next("org/team2/project1", &broadcast3.consume());
-		team1_consumer.assert_next_wait(); // Should NOT see team1 content
+		team2_consumer.assert_next("org/team2/project1", &broadcast3.consume());
+		team2_consumer.assert_next_wait(); // Should NOT see team1 content
 
 		// Further narrow down to team1/project1
 		let mut project1_consumer = limited_producer
