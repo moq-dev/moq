@@ -2,6 +2,9 @@
 default:
   just --list
 
+update:
+	nix flake update
+
 # Get the hostname for a node
 host node:
 	#!/usr/bin/env bash
