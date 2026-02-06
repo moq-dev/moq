@@ -93,10 +93,7 @@ impl Cluster {
 	}
 
 	// For a given auth token, return the origin that should be used for the session.
-	//
-	// Returns a BroadcastProducer, crudely used to determine when the session is closed.
-	// This is used to announce the presence of cluster nodes.
-	pub fn publisher(&self, token: &AuthToken) -> Option<(OriginProducer, BroadcastProducer)> {
+	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
 		// If this is a cluster node, then add its broadcasts to the secondary origin.
 		// That way we won't publish them to other cluster nodes.
 		let publish_origin = match token.cluster.is_some() {
@@ -105,16 +102,17 @@ impl Cluster {
 		};
 
 		let publish_origin = publish_origin.with_root(&token.root)?;
-		let publisher = publish_origin.publish_only(&token.publish)?;
+		publish_origin.publish_only(&token.publish)
+	}
 
+	// Register a cluster node's presence.
+	// Returns a BroadcastProducer that should be kept alive for the duration of the session.
+	pub fn register(&self, token: &AuthToken) -> Option<BroadcastProducer> {
+		let node = token.cluster.as_ref()?;
 		let broadcast = Broadcast::produce();
-		if let Some(node) = &token.cluster {
-			// If this
-			let path = moq_lite::Path::new(&self.config.prefix).join(node);
-			self.primary.publish_broadcast(path, broadcast.consume());
-		}
-
-		Some((publisher, broadcast))
+		let path = moq_lite::Path::new(&self.config.prefix).join(node);
+		self.primary.publish_broadcast(path, broadcast.consume());
+		Some(broadcast)
 	}
 
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {

@@ -28,12 +28,13 @@ impl Connection {
 
 		let publish = self.cluster.publisher(&token);
 		let subscribe = self.cluster.subscriber(&token);
+		let registration = self.cluster.register(&token);
 
 		match (&publish, &subscribe) {
-			(Some((publish, _)), Some(subscribe)) => {
+			(Some(publish), Some(subscribe)) => {
 				tracing::info!(root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
 			}
-			(Some((publish, _)), None) => {
+			(Some(publish), None) => {
 				tracing::info!(root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
 			}
 			(None, Some(subscribe)) => {
@@ -49,13 +50,16 @@ impl Connection {
 		let session = self
 			.request
 			.with_publish(subscribe)
-			.with_consume(publish.map(|(p, _)| p))
+			.with_consume(publish)
 			// TODO: Uncomment when observability feature is merged
 			// .with_stats(stats)
 			.accept()
 			.await?;
 
 		// Wait until the session is closed.
-		session.closed().await.map_err(Into::into)
+		// Keep registration alive so the cluster node stays announced.
+		session.closed().await?;
+		drop(registration);
+		Ok(())
 	}
 }

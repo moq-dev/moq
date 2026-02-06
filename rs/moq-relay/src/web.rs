@@ -237,6 +237,7 @@ async fn serve_ws(
 	let token = state.auth.verify(&params)?;
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
+	let registration = state.cluster.register(&token);
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
@@ -256,7 +257,8 @@ async fn serve_ws(
 				tungstenite::Error::ConnectionClosed
 			})
 			.with(tungstenite_to_axum);
-		let _ = handle_socket(id, socket, publish.map(|(p, _)| p), subscribe).await;
+		let _ = handle_socket(id, socket, publish, subscribe).await;
+		drop(registration);
 	}))
 }
 
