@@ -149,7 +149,7 @@ pub name url="http://localhost:4443/anon" *args:
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
 	cargo run --bin moq -- \
 		{{args}} publish --url "{{url}}" --name "{{name}}" fmp4
-		
+
 pub-iroh name url prefix="":
 	# Download the sample media.
 	just download "{{name}}"
@@ -344,12 +344,15 @@ check:
 	if command -v nix &> /dev/null; then nix flake check; fi
 
 # Run comprehensive CI checks including all feature combinations (requires cargo-hack)
-check-all:
+ci:
 	#!/usr/bin/env bash
 	set -euo pipefail
 
 	# Run the standard checks first
 	just check
+
+	# Run the unit tests
+	just test
 
 	# Check all feature combinations for the hang crate
 	# requires: cargo install cargo-hack

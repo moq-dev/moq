@@ -28,4 +28,4 @@ jobs:
           cache-on-failure: true
 
       # Run checks with cached dependencies
-      - run: nix develop --command just check-all
+      - run: nix develop --command just ci

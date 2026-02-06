@@ -414,8 +414,16 @@ impl Key {
 			Ok(decode) => {
 				let mut validation = jsonwebtoken::Validation::new(self.algorithm.into());
 				validation.required_spec_claims = Default::default(); // Don't require exp, but still validate it if present
+				validation.validate_exp = false; // We validate exp ourselves to handle null values
 
 				let token = jsonwebtoken::decode::<Claims>(token, decode, &validation)?;
+
+				if let Some(exp) = token.claims.expires
+					&& exp < std::time::SystemTime::now()
+				{
+					anyhow::bail!("token has expired");
+				}
+
 				token.claims.validate()?;
 
 				Ok(token.claims)

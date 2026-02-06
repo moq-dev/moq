@@ -12,7 +12,7 @@
 	"scripts": {
 		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
 		"check": "tsc --noEmit && madge --circular --extensions ts,tsx src && tsc -b examples/tsconfig.json",
-		"test": "bun test",
+		"test": "bun test --only-failures",
 		"release": "bun ../scripts/release.ts"
 	},
 	"dependencies": {
