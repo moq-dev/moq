@@ -11,6 +11,8 @@
 mod client;
 mod crypto;
 mod log;
+#[cfg(feature = "quinn")]
+mod quinn;
 mod server;
 
 pub use client::*;
@@ -20,9 +22,24 @@ pub use server::*;
 // Re-export these crates.
 pub use moq_lite;
 pub use rustls;
+
+#[cfg(feature = "quinn")]
 pub use web_transport_quinn;
+
+#[cfg(feature = "quiche")]
+mod quiche;
+#[cfg(feature = "quiche")]
+pub use web_transport_quiche;
 
 #[cfg(feature = "iroh")]
 mod iroh;
 #[cfg(feature = "iroh")]
 pub use iroh::*;
+
+/// The QUIC backend to use for connections.
+#[derive(Clone, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuicBackend {
+	Quinn,
+	Quiche,
+}

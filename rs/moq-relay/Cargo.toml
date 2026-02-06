@@ -19,6 +19,8 @@ doc = false
 [features]
 default = ["iroh"]
 iroh = ["moq-native/iroh"]
+quinn = ["moq-native/quinn"]
+quiche = ["moq-native/quiche"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }

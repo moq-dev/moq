@@ -19,7 +19,8 @@ doc = false
 [features]
 default = ["iroh"]
 iroh = ["moq-native/iroh"]
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+quinn = ["moq-native/quinn"]
+quiche = ["moq-native/quiche"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
