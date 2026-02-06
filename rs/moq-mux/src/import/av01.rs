@@ -72,7 +72,7 @@ impl Av01 {
 				color_primaries: seq_header.color_config.color_primaries,
 				transfer_characteristics: seq_header.color_config.transfer_characteristics,
 				matrix_coefficients: seq_header.color_config.matrix_coefficients,
-				full_range: false,
+				full_range: seq_header.color_config.full_color_range,
 			}
 			.into(),
 			description: None,
