@@ -1,4 +1,4 @@
-use crate::{Auth, Cluster};
+use crate::{Auth, AuthParams, Cluster};
 
 use moq_native::Request;
 
@@ -12,20 +12,13 @@ pub struct Connection {
 impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let (path, token) = match self.request.url() {
-			Some(url) => {
-				// Extract the path and token from the URL.
-				let path = url.path();
-				let token = url
-					.query_pairs()
-					.find(|(k, v)| k == "jwt" && !v.is_empty())
-					.map(|(_, v)| v.to_string());
-				(path, token)
-			}
-			None => ("", None),
+		let params = match self.request.url() {
+			Some(url) => AuthParams::from_url(&url),
+			None => AuthParams::default(),
 		};
+
 		// Verify the URL before accepting the connection.
-		let token = match self.auth.verify(path, token.as_deref()) {
+		let token = match self.auth.verify(&params) {
 			Ok(token) => token,
 			Err(err) => {
 				let _ = self.request.reject(err.clone().into()).await;
@@ -37,10 +30,10 @@ impl Connection {
 		let subscribe = self.cluster.subscriber(&token);
 
 		match (&publish, &subscribe) {
-			(Some(publish), Some(subscribe)) => {
+			(Some((publish, _)), Some(subscribe)) => {
 				tracing::info!(root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
 			}
-			(Some(publish), None) => {
+			(Some((publish, _)), None) => {
 				tracing::info!(root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
 			}
 			(None, Some(subscribe)) => {
@@ -56,7 +49,7 @@ impl Connection {
 		let session = self
 			.request
 			.with_publish(subscribe)
-			.with_consume(publish)
+			.with_consume(publish.map(|(p, _)| p))
 			// TODO: Uncomment when observability feature is merged
 			// .with_stats(stats)
 			.accept()

@@ -56,9 +56,6 @@ pub struct Cluster {
 	config: ClusterConfig,
 	client: moq_native::Client,
 
-	// Advertises ourselves as an origin to other nodes.
-	noop: BroadcastProducer,
-
 	// Broadcasts announced by local clients (users).
 	pub primary: OriginProducer,
 
@@ -74,7 +71,6 @@ impl Cluster {
 		Cluster {
 			config,
 			client,
-			noop: Broadcast::produce(),
 			primary: Origin::produce(),
 			secondary: Origin::produce(),
 			combined: Origin::produce(),
@@ -86,7 +82,7 @@ impl Cluster {
 		// These broadcasts will be served to the session (when it subscribes).
 		// If this is a cluster node, then only publish our primary broadcasts.
 		// Otherwise publish everything.
-		let subscribe_origin = match token.cluster {
+		let subscribe_origin = match token.cluster.is_some() {
 			true => &self.primary,
 			false => &self.combined,
 		};
@@ -96,16 +92,29 @@ impl Cluster {
 		subscribe_origin.consume_only(&token.subscribe)
 	}
 
-	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
+	// For a given auth token, return the origin that should be used for the session.
+	//
+	// Returns a BroadcastProducer, crudely used to determine when the session is closed.
+	// This is used to announce the presence of cluster nodes.
+	pub fn publisher(&self, token: &AuthToken) -> Option<(OriginProducer, BroadcastProducer)> {
 		// If this is a cluster node, then add its broadcasts to the secondary origin.
 		// That way we won't publish them to other cluster nodes.
-		let publish_origin = match token.cluster {
+		let publish_origin = match token.cluster.is_some() {
 			true => &self.secondary,
 			false => &self.primary,
 		};
 
 		let publish_origin = publish_origin.with_root(&token.root)?;
-		publish_origin.publish_only(&token.publish)
+		let publisher = publish_origin.publish_only(&token.publish)?;
+
+		let broadcast = Broadcast::produce();
+		if let Some(node) = &token.cluster {
+			// If this
+			let path = moq_lite::Path::new(&self.config.prefix).join(node);
+			self.primary.publish_broadcast(path, broadcast.consume());
+		}
+
+		Some((publisher, broadcast))
 	}
 
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
@@ -135,17 +144,6 @@ impl Cluster {
 			.with_root(&self.config.prefix)
 			.context("no authorized origins")?;
 
-		// Announce ourselves as an origin to the root node.
-		// This goes into primary so it gets shared with other nodes via run_remote_once.
-		if let Some(myself) = self.config.node.as_ref() {
-			tracing::info!(%myself, "announcing as leaf");
-			let announce_origin = self
-				.primary
-				.with_root(&self.config.prefix)
-				.context("failed to create announcement origin")?;
-			announce_origin.publish_broadcast(myself, self.noop.consume());
-		}
-
 		// If the token is provided, read it from the disk and use it in the query parameter.
 		// TODO put this in an AUTH header once WebTransport supports it.
 		let token = match &self.config.token {
@@ -153,15 +151,18 @@ impl Cluster {
 			None => "".to_string(),
 		};
 
-		let noop = self.noop.consume();
+		let local = self.config.node.clone().context("missing node")?;
+
+		// Create a dummy broadcast that we don't close so run_remote doesn't close.
+		let noop = Broadcast::produce();
 
 		// Despite returning a Result, we should NEVER return an Ok
 		tokio::select! {
-			res = self.clone().run_remote(&root, token.clone(), noop) => {
+			res = self.clone().run_remote(&root, &local, token.clone(), noop.consume()) => {
 				res.context("failed to connect to root")?;
 				anyhow::bail!("connection to root closed");
 			}
-			res = self.clone().run_remotes(origins.consume(), token) => {
+			res = self.clone().run_remotes(origins.consume(), &local, token) => {
 				res.context("failed to connect to remotes")?;
 				anyhow::bail!("connection to remotes closed");
 			}
@@ -191,7 +192,7 @@ impl Cluster {
 		}
 	}
 
-	async fn run_remotes(self, mut origins: OriginConsumer, token: String) -> anyhow::Result<()> {
+	async fn run_remotes(self, mut origins: OriginConsumer, local: &str, token: String) -> anyhow::Result<()> {
 		// Cancel tasks when the origin is closed.
 		let mut active: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
 
@@ -199,7 +200,7 @@ impl Cluster {
 		// NOTE: The root node will connect to all other nodes as a client, ignoring the existing (server) connection.
 		// This ensures that nodes are advertising a valid hostname before any tracks get announced.
 		while let Some((node, origin)) = origins.announced().await {
-			if Some(node.as_str()) == self.config.node.as_deref() {
+			if node.as_str() == local {
 				// Skip ourselves.
 				continue;
 			}
@@ -215,10 +216,11 @@ impl Cluster {
 			let this = self.clone();
 			let token = token.clone();
 			let node2 = node.clone();
+			let local = local.to_string();
 
 			let handle = tokio::spawn(
 				async move {
-					match this.run_remote(node2.as_str(), token, origin).await {
+					match this.run_remote(node2.as_str(), &local, token, origin).await {
 						Ok(()) => tracing::info!(%node2, "origin closed"),
 						Err(err) => tracing::warn!(%err, %node2, "origin error"),
 					}
@@ -232,11 +234,17 @@ impl Cluster {
 		Ok(())
 	}
 
-	#[tracing::instrument("remote", skip_all, err, fields(%node))]
-	async fn run_remote(mut self, node: &str, token: String, origin: BroadcastConsumer) -> anyhow::Result<()> {
+	#[tracing::instrument("remote", skip_all, err, fields(%remote))]
+	async fn run_remote(
+		mut self,
+		remote: &str,
+		local: &str,
+		token: String,
+		origin: BroadcastConsumer,
+	) -> anyhow::Result<()> {
 		let url = match token.is_empty() {
-			true => Url::parse(&format!("https://{node}/"))?,
-			false => Url::parse(&format!("https://{node}/?jwt={token}"))?,
+			true => Url::parse(&format!("https://{remote}/?node={local}"))?,
+			false => Url::parse(&format!("https://{remote}/?jwt={token}&node={local}"))?,
 		};
 		let mut backoff = 1;
 
