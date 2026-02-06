@@ -7,13 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 MoQ (Media over QUIC) is a next-generation live media delivery protocol providing real-time latency at massive scale. It's a polyglot monorepo with Rust (server/native) and TypeScript/JavaScript (browser) implementations.
 
 ## Common Development Commands
-
 ```bash
 # Code quality and testing
 just check        # Run all tests and linting
 just fix          # Auto-fix linting issues
 just build        # Build all packages
 ```
+
+Except when being run in the Claude Code on the web: Use cargo/bun directly.
 
 ## Architecture
 
@@ -29,6 +30,7 @@ The project contains multiple layers of protocols:
 4. **hang** - Media-specific encoding/decoding on top of `moq-lite`. Contains:
     - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
     - container: each frame consists of a timestamp and codec bitstream
+    - hang-ui: Solid.js Web Components for media playback/publishing UI
 5. **application** - Users building on top of `moq-lite` or `hang`
 
 Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq` layer should be generic, using rules on the wire on how to deliver content.
@@ -37,31 +39,46 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 ## Project Structure
 
 ```
-/rs/               # Rust crates
-  moq/            # Core protocol (published as moq-lite)
-  moq-relay/      # Clusterable relay server
-  moq-token/      # JWT authentication
-  hang/           # Media encoding/streaming (catalog/container format)
-  moq-mux/        # Media muxers/demuxers (fMP4, CMAF, HLS)
-  moq-cli/        # CLI tool for media operations (binary is named `moq`)
+/rs/                  # Rust crates
+  moq-lite/          # Core pub/sub protocol (published as moq-lite)
+  moq-native/        # QUIC/WebTransport connection helpers for native apps
+  moq-relay/         # Clusterable relay server (binary: moq-relay)
+  moq-token/         # JWT authentication library
+  moq-token-cli/     # JWT token CLI tool (binary: moq-token)
+  moq-cli/           # CLI tool for media operations (binary: moq)
+  moq-clock/         # Clock synchronization example (binary: moq-clock)
+  moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
+  hang/              # Media encoding/streaming (catalog/container format)
+  libmoq/            # C bindings (staticlib)
 
-/js/               # TypeScript/JavaScript packages
-  moq/             # Core protocol for browsers (published as @moq/lite)
-  hang/            # Media layer with Web Components (published as @moq/hang)
-  hang-demo/       # Demo applications
+/js/                  # TypeScript/JavaScript packages
+  lite/              # Core protocol for browsers (published as @moq/lite)
+  signals/           # Reactive signals library (published as @moq/signals)
+  token/             # JWT token generation (published as @moq/token)
+  clock/             # Clock example (published as @moq/clock)
+  hang/              # Media layer (published as @moq/hang)
+  hang-ui/           # Web Components UI (published as @moq/hang-ui)
+  hang-demo/         # Demo applications
+
+/doc/                 # Documentation site (VitePress, deployed via Cloudflare)
+/dev/                 # Development config and test media files
+/cdn/                 # CDN infrastructure (Terraform)
 ```
 
 ## Development Tips
 
 1. The project uses `just` as the task runner - check `justfile` for all available commands
-2. For Rust development, the workspace is configured in the `rs/Cargo.toml`
-3. For JS/TS development, bun workspaces are used with configuration in `js/package.json`
+2. For Rust development, the workspace is configured in the root `Cargo.toml`
+3. For JS/TS development, bun workspaces are used with configuration in the root `package.json`
 
 ## Tooling
 
 - **TypeScript**: Always use `bun` for all package management and script execution (not npm, yarn, or pnpm)
 - **Common**: Use `just` for common development tasks
 - **Rust**: Use `cargo` for Rust-specific operations
+- **Formatting/Linting**: Biome for JS/TS formatting and linting
+- **UI**: Solid.js for Web Components in `hang-ui`
+- **Builds**: Nix flake for reproducible builds (optional)
 
 ## Testing Approach
 
@@ -75,4 +92,6 @@ When making changes to the codebase:
 1. Make your code changes
 2. Run `just fix` to auto-format and fix linting issues
 3. Run `just check` to verify everything passes
-4. Commit and push changes
+4. Update relevant documentation (CLAUDE.md, doc/, README) when making major changes
+5. Add unit tests for any changes that are easy enough to test
+6. Commit and push changes
