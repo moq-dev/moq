@@ -108,6 +108,15 @@ impl Cluster {
 		publish_origin.publish_only(&token.publish)
 	}
 
+	pub fn announce_node(&self, node: &str) -> BroadcastProducer {
+		let broadcast = Broadcast::produce();
+		self.primary
+			.with_root(&self.config.prefix)
+			.expect("should create root")
+			.publish_broadcast(node, broadcast.consume());
+		broadcast
+	}
+
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
 		self.primary
 			.consume_broadcast(broadcast)
@@ -137,7 +146,7 @@ impl Cluster {
 
 		// Announce ourselves as an origin to the root node.
 		// This goes into primary so it gets shared with other nodes via run_remote_once.
-		if let Some(myself) = self.config.node.as_ref() {
+		if false && let Some(myself) = self.config.node.as_ref() {
 			tracing::info!(%myself, "announcing as leaf");
 			let announce_origin = self
 				.primary
@@ -234,9 +243,14 @@ impl Cluster {
 
 	#[tracing::instrument("remote", skip_all, err, fields(%node))]
 	async fn run_remote(mut self, node: &str, token: String, origin: BroadcastConsumer) -> anyhow::Result<()> {
+		let cluster_node = if Some(node) == self.config.root.as_ref().map(|r| r.as_str()) {
+			self.config.node.clone().unwrap_or_default()
+		} else {
+			"".to_string()
+		};
 		let url = match token.is_empty() {
 			true => Url::parse(&format!("https://{node}/"))?,
-			false => Url::parse(&format!("https://{node}/?jwt={token}"))?,
+			false => Url::parse(&format!("https://{node}/?jwt={token}&node={cluster_node}"))?,
 		};
 		let mut backoff = 1;
 

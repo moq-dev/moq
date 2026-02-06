@@ -12,7 +12,7 @@ pub struct Connection {
 impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let (path, token) = match self.request.url() {
+		let (path, token, cluster_node) = match self.request.url() {
 			Some(url) => {
 				// Extract the path and token from the URL.
 				let path = url.path();
@@ -20,9 +20,13 @@ impl Connection {
 					.query_pairs()
 					.find(|(k, v)| k == "jwt" && !v.is_empty())
 					.map(|(_, v)| v.to_string());
-				(path, token)
+				let cluster_node = url
+					.query_pairs()
+					.find(|(k, v)| k == "node" && !v.is_empty())
+					.map(|(_, v)| v.to_string());
+				(path, token, cluster_node)
 			}
-			None => ("", None),
+			None => ("", None, None),
 		};
 		// Verify the URL before accepting the connection.
 		let token = match self.auth.verify(path, token.as_deref()) {
@@ -61,6 +65,15 @@ impl Connection {
 			// .with_stats(stats)
 			.accept()
 			.await?;
+
+		let _node_announce = if let Some(cluster_node) = cluster_node
+			&& token.cluster
+		{
+			tracing::info!("cluster node: {:?}", cluster_node);
+			Some(self.cluster.announce_node(&cluster_node))
+		} else {
+			None
+		};
 
 		// Wait until the session is closed.
 		session.closed().await.map_err(Into::into)
