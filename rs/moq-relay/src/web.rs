@@ -25,7 +25,7 @@ use moq_lite::{OriginConsumer, OriginProducer};
 use std::future::Future;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{Auth, Cluster};
+use crate::{Auth, AuthParams, Cluster};
 
 #[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
@@ -161,14 +161,15 @@ async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct AuthParams {
+struct AuthQuery {
 	jwt: Option<String>,
+	register: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct FetchParams {
 	#[serde(flatten)]
-	auth: AuthParams,
+	auth: AuthQuery,
 
 	#[serde(default)]
 	group: FetchGroup,
@@ -223,14 +224,20 @@ impl<'de> serde::Deserialize<'de> for FetchFrame {
 async fn serve_ws(
 	ws: WebSocketUpgrade,
 	Path(path): Path<String>,
-	Query(params): Query<AuthParams>,
+	Query(query): Query<AuthQuery>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	let ws = ws.protocols(["webtransport"]);
 
-	let token = state.auth.verify(&path, params.jwt.as_deref())?;
+	let params = AuthParams {
+		path,
+		jwt: query.jwt,
+		register: query.register,
+	};
+	let token = state.auth.verify(&params)?;
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
+	let registration = state.cluster.register(&token);
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
@@ -251,6 +258,7 @@ async fn serve_ws(
 			})
 			.with(tungstenite_to_axum);
 		let _ = handle_socket(id, socket, publish, subscribe).await;
+		drop(registration);
 	}))
 }
 
@@ -283,7 +291,7 @@ where
 /// Serve the announced broadcasts for a given prefix.
 async fn serve_announced(
 	path: Option<Path<String>>,
-	Query(params): Query<AuthParams>,
+	Query(query): Query<AuthQuery>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<String> {
 	let prefix = match path {
@@ -291,7 +299,12 @@ async fn serve_announced(
 		None => String::new(),
 	};
 
-	let token = state.auth.verify(&prefix, params.jwt.as_deref())?;
+	let params = AuthParams {
+		path: prefix,
+		jwt: query.jwt,
+		register: query.register,
+	};
+	let token = state.auth.verify(&params)?;
 	let Some(mut origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
@@ -323,7 +336,12 @@ async fn serve_fetch(
 	}
 
 	let broadcast = path.join("/");
-	let token = state.auth.verify(&broadcast, params.auth.jwt.as_deref())?;
+	let auth = AuthParams {
+		path: broadcast.clone(),
+		jwt: params.auth.jwt,
+		register: params.auth.register,
+	};
+	let token = state.auth.verify(&auth)?;
 
 	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());

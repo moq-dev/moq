@@ -51,22 +51,28 @@ cluster:
 	# Then run a BOATLOAD of services to make sure they all work correctly.
 	# Publish the funny bunny to the root node.
 	# Publish the robot fanfic to the leaf node.
-	bun run concurrently --kill-others --names root,leaf,bbb,tos,web --prefix-colors auto \
+	bun run concurrently --kill-others --names root,leaf0,leaf1,bbb,tos,web --prefix-colors auto \
 		"just root" \
-		"sleep 1 && just leaf" \
-		"sleep 2 && just pub bbb http://localhost:4444/demo?jwt=$(cat dev/demo-cli.jwt)" \
-		"sleep 3 && just pub tos http://localhost:4443/demo?jwt=$(cat dev/demo-cli.jwt)" \
-		"sleep 4 && just web http://localhost:4443/demo?jwt=$(cat dev/demo-web.jwt)"
+		"sleep 1 && just leaf0" \
+		"sleep 2 && just leaf1" \
+		"sleep 3 && just pub bbb http://localhost:4444/demo?jwt=$(cat dev/demo-cli.jwt)" \
+		"sleep 4 && just pub tos http://localhost:4443/demo?jwt=$(cat dev/demo-cli.jwt)" \
+		"sleep 5 && just web http://localhost:4445/demo?jwt=$(cat dev/demo-web.jwt)"
 
 # Run a localhost root server, accepting connections from leaf nodes.
 root: auth-key
 	# Run the root server with a special configuration file.
 	cargo run --bin moq-relay -- dev/root.toml
 
-# Run a localhost leaf server, connecting to the root server.
-leaf: auth-token
+# Run a localhost leaf, connecting to the root server.
+leaf0: auth-token
 	# Run the leaf server with a special configuration file.
-	cargo run --bin moq-relay -- dev/leaf.toml
+	cargo run --bin moq-relay -- dev/leaf0.toml
+
+# Run a second localhost leaf, connecting to the root server.
+leaf1: auth-token
+	# Run the leaf server with a special configuration file.
+	cargo run --bin moq-relay -- dev/leaf1.toml
 
 # Generate a random secret key for authentication.
 # By default, this uses HMAC-SHA256, so it's symmetric.
