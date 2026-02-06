@@ -244,7 +244,11 @@ impl Av01 {
 		use scuffle_av1::ObuType;
 		match header.obu_type {
 			ObuType::SequenceHeader => {
-				match SequenceHeaderObu::parse(header, &mut &obu_data[1..]) {
+				// Calculate payload offset accounting for optional extension byte
+				let has_extension = (obu_data[0] >> 2) & 1 == 1;
+				let payload_offset = if has_extension { 2 } else { 1 };
+
+				match SequenceHeaderObu::parse(header, &mut &obu_data[payload_offset..]) {
 					Ok(seq_header) => {
 						self.init(&seq_header)?;
 					}
