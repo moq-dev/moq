@@ -163,7 +163,7 @@ async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
 #[derive(Debug, serde::Deserialize)]
 struct AuthQuery {
 	jwt: Option<String>,
-	node: Option<String>,
+	register: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -232,7 +232,7 @@ async fn serve_ws(
 	let params = AuthParams {
 		path,
 		jwt: query.jwt,
-		node: query.node,
+		register: query.register,
 	};
 	let token = state.auth.verify(&params)?;
 	let publish = state.cluster.publisher(&token);
@@ -302,7 +302,7 @@ async fn serve_announced(
 	let params = AuthParams {
 		path: prefix,
 		jwt: query.jwt,
-		node: query.node,
+		register: query.register,
 	};
 	let token = state.auth.verify(&params)?;
 	let Some(mut origin) = state.cluster.subscriber(&token) else {
@@ -339,7 +339,7 @@ async fn serve_fetch(
 	let auth = AuthParams {
 		path: broadcast.clone(),
 		jwt: params.auth.jwt,
-		node: params.auth.node,
+		register: params.auth.register,
 	};
 	let token = state.auth.verify(&auth)?;
 

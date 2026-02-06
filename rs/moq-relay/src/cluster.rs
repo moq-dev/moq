@@ -82,7 +82,7 @@ impl Cluster {
 		// These broadcasts will be served to the session (when it subscribes).
 		// If this is a cluster node, then only publish our primary broadcasts.
 		// Otherwise publish everything.
-		let subscribe_origin = match token.cluster.is_some() {
+		let subscribe_origin = match token.cluster {
 			true => &self.primary,
 			false => &self.combined,
 		};
@@ -96,7 +96,7 @@ impl Cluster {
 	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
 		// If this is a cluster node, then add its broadcasts to the secondary origin.
 		// That way we won't publish them to other cluster nodes.
-		let publish_origin = match token.cluster.is_some() {
+		let publish_origin = match token.cluster {
 			true => &self.secondary,
 			false => &self.primary,
 		};
@@ -109,13 +109,7 @@ impl Cluster {
 	//
 	// Returns a [ClusterRegistration] that should be kept alive for the duration of the session.
 	pub fn register(&self, token: &AuthToken) -> Option<ClusterRegistration> {
-		if self.config.root.is_some() {
-			// Only the root node can register other nodes.
-			// Otherwise, they will gossip between themselves and over-announce each other.
-			return None;
-		}
-
-		let node = token.cluster.clone()?;
+		let node = token.register.clone()?;
 		let broadcast = Broadcast::produce();
 
 		let path = moq_lite::Path::new(&self.config.prefix).join(&node);
@@ -168,11 +162,11 @@ impl Cluster {
 
 		// Despite returning a Result, we should NEVER return an Ok
 		tokio::select! {
-			res = self.clone().run_remote(&root, &local, token.clone(), noop.consume()) => {
+			res = self.clone().run_remote(&root, Some(local.as_str()), token.clone(), noop.consume()) => {
 				res.context("failed to connect to root")?;
 				anyhow::bail!("connection to root closed");
 			}
-			res = self.clone().run_remotes(origins.consume(), &local, token) => {
+			res = self.clone().run_remotes(origins.consume(), token) => {
 				res.context("failed to connect to remotes")?;
 				anyhow::bail!("connection to remotes closed");
 			}
@@ -202,7 +196,7 @@ impl Cluster {
 		}
 	}
 
-	async fn run_remotes(self, mut origins: OriginConsumer, local: &str, token: String) -> anyhow::Result<()> {
+	async fn run_remotes(self, mut origins: OriginConsumer, token: String) -> anyhow::Result<()> {
 		// Cancel tasks when the origin is closed.
 		let mut active: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
 
@@ -210,7 +204,7 @@ impl Cluster {
 		// NOTE: The root node will connect to all other nodes as a client, ignoring the existing (server) connection.
 		// This ensures that nodes are advertising a valid hostname before any tracks get announced.
 		while let Some((node, origin)) = origins.announced().await {
-			if node.as_str() == local {
+			if self.config.node.as_deref() == Some(node.as_str()) {
 				// Skip ourselves.
 				continue;
 			}
@@ -226,11 +220,10 @@ impl Cluster {
 			let this = self.clone();
 			let token = token.clone();
 			let node2 = node.clone();
-			let local = local.to_string();
 
 			let handle = tokio::spawn(
 				async move {
-					match this.run_remote(node2.as_str(), &local, token, origin).await {
+					match this.run_remote(node2.as_str(), None, token, origin).await {
 						Ok(()) => tracing::info!(%node2, "origin closed"),
 						Err(err) => tracing::warn!(%err, %node2, "origin error"),
 					}
@@ -248,7 +241,7 @@ impl Cluster {
 	async fn run_remote(
 		mut self,
 		remote: &str,
-		local: &str,
+		register: Option<&str>,
 		token: String,
 		origin: BroadcastConsumer,
 	) -> anyhow::Result<()> {
@@ -258,7 +251,9 @@ impl Cluster {
 			if !token.is_empty() {
 				q.append_pair("jwt", &token);
 			}
-			q.append_pair("node", local);
+			if let Some(register) = register {
+				q.append_pair("register", register);
+			}
 		}
 		let mut backoff = 1;
 
@@ -288,7 +283,9 @@ impl Cluster {
 	}
 
 	async fn run_remote_once(&mut self, url: &Url) -> anyhow::Result<()> {
-		tracing::info!(%url, "connecting to remote");
+		let mut log_url = url.clone();
+		log_url.set_query(None);
+		tracing::info!(url = %log_url, "connecting to remote");
 
 		let session = self
 			.client

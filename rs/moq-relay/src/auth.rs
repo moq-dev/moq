@@ -10,7 +10,7 @@ use std::time::Duration;
 pub struct AuthParams {
 	pub path: String,
 	pub jwt: Option<String>,
-	pub node: Option<String>,
+	pub register: Option<String>,
 }
 
 impl AuthParams {
@@ -24,7 +24,7 @@ impl AuthParams {
 	pub fn from_url(url: &url::Url) -> Self {
 		let path = url.path().to_string();
 		let mut jwt = None;
-		let mut node = None;
+		let mut register = None;
 
 		for (k, v) in url.query_pairs() {
 			if v.is_empty() {
@@ -32,12 +32,12 @@ impl AuthParams {
 			}
 			match k.as_ref() {
 				"jwt" => jwt = Some(v.into_owned()),
-				"node" => node = Some(v.into_owned()),
+				"register" => register = Some(v.into_owned()),
 				_ => {}
 			}
 		}
 
-		Self { path, jwt, node }
+		Self { path, jwt, register }
 	}
 }
 
@@ -55,10 +55,7 @@ pub enum AuthError {
 	#[error("the path does not match the root")]
 	IncorrectRoot,
 
-	#[error("a node was expected")]
-	ExpectedNode,
-
-	#[error("a cluster was expected")]
+	#[error("a cluster token was expected")]
 	ExpectedCluster,
 }
 
@@ -106,7 +103,8 @@ pub struct AuthToken {
 	pub root: PathOwned,
 	pub subscribe: Vec<PathOwned>,
 	pub publish: Vec<PathOwned>,
-	pub cluster: Option<String>,
+	pub cluster: bool,
+	pub register: Option<String>,
 }
 
 const REFRESH_ERROR_INTERVAL: Duration = Duration::from_secs(300);
@@ -299,18 +297,18 @@ impl Auth {
 			})
 			.collect();
 
-		let cluster = match (params.node.as_deref(), claims.cluster) {
+		let register = match (params.register.as_deref(), claims.cluster) {
 			(Some(node), true) => Some(node.to_owned()),
-			(None, true) => return Err(AuthError::ExpectedNode),
 			(Some(_), false) => return Err(AuthError::ExpectedCluster),
-			(None, false) => None,
+			_ => None,
 		};
 
 		Ok(AuthToken {
 			root: root.to_owned(),
 			subscribe,
 			publish,
-			cluster,
+			cluster: claims.cluster,
+			register,
 		})
 	}
 }
