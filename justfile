@@ -351,6 +351,9 @@ check-all:
 	# Run the standard checks first
 	just check
 
+	# Run the unit tests
+	just test
+
 	# Check all feature combinations for the hang crate
 	# requires: cargo install cargo-hack
 	echo "Checking all feature combinations for hang..."

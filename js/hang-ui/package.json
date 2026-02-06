@@ -18,7 +18,6 @@
 		"check": "tsc --noEmit",
 		"clean": "rimraf dist",
 		"fix": "biome check src --fix",
-		"test": "vitest",
 		"release": "bun ../scripts/release.ts"
 	},
 	"peerDependencies": {
@@ -37,7 +36,6 @@
 		"typescript": "^5.9.2",
 		"unplugin-solid": "^1.0.0",
 		"vite": "^7.3.1",
-		"vite-plugin-solid": "^2.11.10",
-		"vitest": "^3.2.4"
+		"vite-plugin-solid": "^2.11.10"
 	}
 }
