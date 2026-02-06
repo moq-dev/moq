@@ -13,7 +13,7 @@ impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
 		let params = match self.request.url() {
-			Some(url) => AuthParams::from_url(&url),
+			Some(url) => AuthParams::from_url(url),
 			None => AuthParams::default(),
 		};
 
