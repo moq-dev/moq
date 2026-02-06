@@ -264,15 +264,17 @@ impl Cluster {
 				res = self.run_remote_once(&url) => res,
 			};
 
-			if let Err(err) = res {
-				backoff *= 2;
-				tracing::error!(%err, "remote error");
+			match res {
+				Ok(()) => backoff = 1,
+				Err(err) => {
+					backoff *= 2;
+					tracing::error!(%err, "remote error");
+				}
 			}
 
 			let timeout = tokio::time::Duration::from_secs(backoff);
 			if timeout > tokio::time::Duration::from_secs(300) {
 				// 5 minutes of backoff is enough, just give up.
-				// TODO Reset the backoff if the connect is successful for some period of time.
 				anyhow::bail!("remote connection keep failing, giving up");
 			}
 

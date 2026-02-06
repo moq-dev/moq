@@ -4,8 +4,8 @@
 level = "debug"
 
 [server]
-# Listen for QUIC connections on UDP:4444
-# Sometimes IPv6 causes issues; try 127.0.0.1:4444 instead.
+# Listen for QUIC connections on UDP:4445
+# Sometimes IPv6 causes issues; try 127.0.0.1:4445 instead.
 listen = "[::]:4445"
 
 # Generate a self-signed certificate for the server.
@@ -22,7 +22,7 @@ listen = "[::]:4445"
 # Announcements flow from leaf -> root -> leaf, but any subscriptions are leaf -> leaf.
 # The root node can serve (user) subscriptions too.
 #
-# The root node is either missing the "root" field below or it's identifical to the "node" field.
+# The root node is either missing the "root" field below or it's identical to the "node" field.
 # This node acts a server only, accepting incoming connections from leaf nodes and users alike.
 #
 # There can be any number of leaf nodes.
