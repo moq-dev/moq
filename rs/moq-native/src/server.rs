@@ -1,22 +1,21 @@
 use std::path::PathBuf;
 use std::{net, time::Duration};
 
+use crate::QuicBackend;
 use crate::crypto;
 #[cfg(feature = "iroh")]
 use crate::iroh::IrohQuicRequest;
 use anyhow::Context;
 use moq_lite::Session;
-use rand::Rng;
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
-use rustls::server::{ClientHello, ResolvesServerCert};
-use rustls::sign::CertifiedKey;
+use rustls::pki_types::CertificateDer;
+#[cfg(feature = "quinn")]
+use rustls::pki_types::PrivatePkcs8KeyDer;
 use std::fs;
 use std::io::{self, Cursor, Read};
 use std::sync::{Arc, RwLock};
 use url::Url;
 #[cfg(feature = "iroh")]
 use web_transport_iroh::iroh;
-use web_transport_quinn::http;
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -63,6 +62,10 @@ pub struct ServerConfig {
 	#[arg(id = "server-bind", long = "server-bind", alias = "listen", env = "MOQ_SERVER_BIND")]
 	pub bind: Option<net::SocketAddr>,
 
+	/// The QUIC backend to use.
+	#[arg(long = "quic-backend", default_value = "quinn", env = "MOQ_QUIC_BACKEND")]
+	pub backend: QuicBackend,
+
 	/// Server ID to embed in connection IDs for QUIC-LB compatibility.
 	/// If set, connection IDs will be derived semi-deterministically.
 	#[arg(id = "server-quic-lb-id", long = "server-quic-lb-id", env = "MOQ_SERVER_QUIC_LB_ID")]
@@ -87,7 +90,22 @@ pub struct ServerConfig {
 
 impl ServerConfig {
 	pub fn init(self) -> anyhow::Result<Server> {
-		Server::new(self)
+		match self.backend {
+			QuicBackend::Quinn => {
+				#[cfg(not(feature = "quinn"))]
+				anyhow::bail!("quinn backend not compiled; rebuild with --features quinn");
+
+				#[cfg(feature = "quinn")]
+				Server::new_quinn(self)
+			}
+			QuicBackend::Quiche => {
+				#[cfg(not(feature = "quiche"))]
+				anyhow::bail!("quiche backend not compiled; rebuild with --features quiche");
+
+				#[cfg(feature = "quiche")]
+				Server::new_quiche(self)
+			}
+		}
 	}
 }
 
@@ -96,21 +114,39 @@ impl ServerConfig {
 /// Create via [`ServerConfig::init`] or [`Server::new`].
 pub struct Server {
 	moq: moq_lite::Server,
-	quic: quinn::Endpoint,
+	inner: ServerInner,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
-	certs: Arc<ServeCerts>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
 }
 
+enum ServerInner {
+	#[cfg(feature = "quinn")]
+	Quinn {
+		quic: quinn::Endpoint,
+		certs: Arc<ServeCerts>,
+	},
+	#[cfg(feature = "quiche")]
+	Quiche {
+		server: web_transport_quiche::ez::Server,
+		fingerprints: Arc<RwLock<ServerTlsInfo>>,
+	},
+}
+
 impl Server {
+	/// Create a new server using the default (quinn) backend.
+	#[cfg(feature = "quinn")]
 	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
+		Self::new_quinn(config)
+	}
+
+	#[cfg(feature = "quinn")]
+	fn new_quinn(config: ServerConfig) -> anyhow::Result<Self> {
 		// Enable BBR congestion control
 		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
 		transport.max_idle_timeout(Some(Duration::from_secs(10).try_into().unwrap()));
 		transport.keep_alive_interval(Some(Duration::from_secs(4)));
-		//transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
 		let transport = Arc::new(transport);
 
@@ -123,7 +159,7 @@ impl Server {
 		let certs = Arc::new(certs);
 
 		#[cfg(unix)]
-		tokio::spawn(Self::reload_certs(certs.clone(), config.tls.clone()));
+		tokio::spawn(Self::reload_certs_quinn(certs.clone(), config.tls.clone()));
 
 		let mut tls = rustls::ServerConfig::builder_with_provider(provider)
 			.with_protocol_versions(&[&rustls::version::TLS13])?
@@ -169,13 +205,98 @@ impl Server {
 			.context("failed to create QUIC endpoint")?;
 
 		Ok(Self {
-			quic: quic.clone(),
+			inner: ServerInner::Quinn { quic, certs },
 			accept: Default::default(),
-			certs,
 			moq: moq_lite::Server::new(),
 			#[cfg(feature = "iroh")]
 			iroh: None,
 		})
+	}
+
+	#[cfg(feature = "quiche")]
+	fn new_quiche(config: ServerConfig) -> anyhow::Result<Self> {
+		if config.quic_lb_id.is_some() {
+			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
+		}
+
+		if !config.tls.generate.is_empty() {
+			anyhow::bail!(
+				"--tls-generate is not supported with the quiche backend (requires rcgen which is quinn-gated)"
+			);
+		}
+
+		anyhow::ensure!(
+			!config.tls.cert.is_empty() && !config.tls.key.is_empty(),
+			"--tls-cert and --tls-key are required with the quiche backend"
+		);
+		anyhow::ensure!(
+			config.tls.cert.len() == config.tls.key.len(),
+			"must provide matching --tls-cert and --tls-key pairs"
+		);
+
+		let listen = config.bind.unwrap_or("[::]:443".parse().unwrap());
+
+		// Load certs in PEM format and convert to DER for quiche
+		let (chain, key) = Self::load_quiche_cert(&config.tls.cert[0], &config.tls.key[0])?;
+
+		// Compute fingerprints using rustls crypto (always available)
+		let provider = crypto::provider();
+		let fingerprints: Vec<String> = chain
+			.iter()
+			.map(|cert| hex::encode(crypto::sha256(&provider, cert.as_ref())))
+			.collect();
+
+		let info = Arc::new(RwLock::new(ServerTlsInfo {
+			#[cfg(feature = "quinn")]
+			certs: Vec::new(),
+			fingerprints,
+		}));
+
+		let alpn = vec![
+			b"h3".to_vec(),
+			moq_lite::lite::ALPN.as_bytes().to_vec(),
+			moq_lite::ietf::ALPN.as_bytes().to_vec(),
+		];
+
+		let server = web_transport_quiche::ez::ServerBuilder::default()
+			.with_alpn(alpn)
+			.with_bind(listen)?
+			.with_single_cert(chain, key)
+			.map_err(|e| anyhow::anyhow!("failed to create quiche server: {e}"))?;
+
+		Ok(Self {
+			inner: ServerInner::Quiche {
+				server,
+				fingerprints: info,
+			},
+			accept: Default::default(),
+			moq: moq_lite::Server::new(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		})
+	}
+
+	#[cfg(feature = "quiche")]
+	fn load_quiche_cert(
+		cert_path: &PathBuf,
+		key_path: &PathBuf,
+	) -> anyhow::Result<(Vec<CertificateDer<'static>>, rustls::pki_types::PrivateKeyDer<'static>)> {
+		let chain_file = fs::File::open(cert_path).context("failed to open cert file")?;
+		let mut chain_reader = io::BufReader::new(chain_file);
+
+		let chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut chain_reader)
+			.collect::<Result<_, _>>()
+			.context("failed to read certs")?;
+
+		anyhow::ensure!(!chain.is_empty(), "could not find certificate");
+
+		let mut key_buf = Vec::new();
+		let mut key_file = fs::File::open(key_path).context("failed to open key file")?;
+		key_file.read_to_end(&mut key_buf)?;
+
+		let key = rustls_pemfile::private_key(&mut Cursor::new(&key_buf))?.context("missing private key")?;
+
+		Ok((chain, key))
 	}
 
 	#[cfg(feature = "iroh")]
@@ -194,14 +315,8 @@ impl Server {
 		self
 	}
 
-	// TODO: Uncomment when observability feature is merged
-	// pub fn with_stats(mut self, stats: impl Into<Option<Arc<dyn moq_lite::Stats>>>) -> Self {
-	// 	self.moq = self.moq.with_stats(stats);
-	// 	self
-	// }
-
-	#[cfg(unix)]
-	async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
+	#[cfg(all(unix, feature = "quinn"))]
+	async fn reload_certs_quinn(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
 		use tokio::signal::unix::{SignalKind, signal};
 
 		// Dunno why we wouldn't be allowed to listen for signals, but just in case.
@@ -218,7 +333,12 @@ impl Server {
 
 	// Return the SHA256 fingerprints of all our certificates.
 	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
-		self.certs.info.clone()
+		match &self.inner {
+			#[cfg(feature = "quinn")]
+			ServerInner::Quinn { certs, .. } => certs.info.clone(),
+			#[cfg(feature = "quiche")]
+			ServerInner::Quiche { fingerprints, .. } => fingerprints.clone(),
+		}
 	}
 
 	/// Returns the next partially established QUIC or WebTransport session.
@@ -244,38 +364,71 @@ impl Server {
 				std::future::pending::<()>().await
 			};
 
-			tokio::select! {
-				res = self.quic.accept() => {
-					let conn = res?;
-					self.accept.push(Self::accept_session(self.moq.clone(), conn).boxed());
-				}
-				res = iroh_accept_fut => {
-					#[cfg(feature = "iroh")]
-					{
-						let conn = res?;
-						self.accept.push(Self::accept_iroh_session(self.moq.clone(), conn).boxed());
+			match &mut self.inner {
+				#[cfg(feature = "quinn")]
+				ServerInner::Quinn { quic, .. } => {
+					tokio::select! {
+						res = quic.accept() => {
+							let conn = res?;
+							self.accept.push(Self::accept_quinn_session(self.moq.clone(), conn).boxed());
+						}
+						res = iroh_accept_fut => {
+							#[cfg(feature = "iroh")]
+							{
+								let conn = res?;
+								self.accept.push(Self::accept_iroh_session(self.moq.clone(), conn).boxed());
+							}
+							#[cfg(not(feature = "iroh"))]
+							let _: () = res;
+						}
+						Some(res) = self.accept.next() => {
+							match res {
+								Ok(session) => return Some(session),
+								Err(err) => tracing::debug!(%err, "failed to accept session"),
+							}
+						}
+						_ = tokio::signal::ctrl_c() => {
+							self.close();
+							tokio::time::sleep(Duration::from_millis(100)).await;
+							return None;
+						}
 					}
-					#[cfg(not(feature = "iroh"))]
-					let _: () = res;
 				}
-				Some(res) = self.accept.next() => {
-					match res {
-						Ok(session) => return Some(session),
-						Err(err) => tracing::debug!(%err, "failed to accept session"),
+				#[cfg(feature = "quiche")]
+				ServerInner::Quiche { server, .. } => {
+					tokio::select! {
+						res = server.accept() => {
+							let conn = res?;
+							self.accept.push(Self::accept_quiche_session(self.moq.clone(), conn).boxed());
+						}
+						res = iroh_accept_fut => {
+							#[cfg(feature = "iroh")]
+							{
+								let conn = res?;
+								self.accept.push(Self::accept_iroh_session(self.moq.clone(), conn).boxed());
+							}
+							#[cfg(not(feature = "iroh"))]
+							let _: () = res;
+						}
+						Some(res) = self.accept.next() => {
+							match res {
+								Ok(session) => return Some(session),
+								Err(err) => tracing::debug!(%err, "failed to accept session"),
+							}
+						}
+						_ = tokio::signal::ctrl_c() => {
+							self.close();
+							tokio::time::sleep(Duration::from_millis(100)).await;
+							return None;
+						}
 					}
-				}
-				_ = tokio::signal::ctrl_c() => {
-					self.close();
-					// Give it a chance to close.
-					tokio::time::sleep(Duration::from_millis(100)).await;
-
-					return None;
 				}
 			}
 		}
 	}
 
-	async fn accept_session(server: moq_lite::Server, conn: quinn::Incoming) -> anyhow::Result<Request> {
+	#[cfg(feature = "quinn")]
+	async fn accept_quinn_session(server: moq_lite::Server, conn: quinn::Incoming) -> anyhow::Result<Request> {
 		let mut conn = conn.accept()?;
 
 		let handshake = conn
@@ -305,14 +458,45 @@ impl Server {
 					.context("failed to receive WebTransport request")?;
 				Ok(Request {
 					server: server.clone(),
-					kind: RequestKind::WebTransport(request),
+					kind: RequestKind::QuinnWebTransport(request),
 				})
 			}
 			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => Ok(Request {
 				server: server.clone(),
-				kind: RequestKind::Quic(QuicRequest::accept(conn)),
+				kind: RequestKind::QuinnQuic(QuicRequest::accept(conn)),
 			}),
 			_ => anyhow::bail!("unsupported ALPN: {alpn}"),
+		}
+	}
+
+	#[cfg(feature = "quiche")]
+	async fn accept_quiche_session(
+		server: moq_lite::Server,
+		conn: web_transport_quiche::ez::Connection,
+	) -> anyhow::Result<Request> {
+		let alpn = conn.alpn().unwrap_or_default();
+		let alpn = String::from_utf8(alpn).unwrap_or_default();
+
+		tracing::debug!(ip = %conn.peer_addr(), %alpn, "accepting via quiche");
+
+		match alpn.as_str() {
+			"h3" => {
+				// WebTransport over HTTP/3: perform the H3 handshake
+				let request = web_transport_quiche::h3::Request::accept(conn)
+					.await
+					.map_err(|e| anyhow::anyhow!("failed to accept WebTransport request: {e}"))?;
+				Ok(Request {
+					server: server.clone(),
+					kind: RequestKind::QuicheWebTransport(request),
+				})
+			}
+			_ => {
+				// Raw QUIC mode
+				Ok(Request {
+					server: server.clone(),
+					kind: RequestKind::QuicheQuic(crate::quiche::QuicheQuicRequest::accept(conn)),
+				})
+			}
 		}
 	}
 
@@ -349,18 +533,38 @@ impl Server {
 	}
 
 	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
-		self.quic.local_addr().context("failed to get local address")
+		match &self.inner {
+			#[cfg(feature = "quinn")]
+			ServerInner::Quinn { quic, .. } => quic.local_addr().context("failed to get local address"),
+			#[cfg(feature = "quiche")]
+			ServerInner::Quiche { server, .. } => server.local_addr().context("failed to get local address"),
+		}
 	}
 
 	pub fn close(&mut self) {
-		self.quic.close(quinn::VarInt::from_u32(0), b"server shutdown");
+		match &mut self.inner {
+			#[cfg(feature = "quinn")]
+			ServerInner::Quinn { quic, .. } => {
+				quic.close(quinn::VarInt::from_u32(0), b"server shutdown");
+			}
+			#[cfg(feature = "quiche")]
+			ServerInner::Quiche { .. } => {
+				// quiche server doesn't have a close method; dropping it is sufficient
+			}
+		}
 	}
 }
 
 /// An incoming connection that can be accepted or rejected.
 enum RequestKind {
-	WebTransport(web_transport_quinn::Request),
-	Quic(QuicRequest),
+	#[cfg(feature = "quinn")]
+	QuinnWebTransport(web_transport_quinn::Request),
+	#[cfg(feature = "quinn")]
+	QuinnQuic(QuicRequest),
+	#[cfg(feature = "quiche")]
+	QuicheWebTransport(web_transport_quiche::h3::Request),
+	#[cfg(feature = "quiche")]
+	QuicheQuic(crate::quiche::QuicheQuicRequest),
 	#[cfg(feature = "iroh")]
 	IrohWebTransport(web_transport_iroh::H3Request),
 	#[cfg(feature = "iroh")]
@@ -374,14 +578,41 @@ pub struct Request {
 
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn reject(self, status: http::StatusCode) -> anyhow::Result<()> {
+	pub async fn reject(self, code: u16) -> anyhow::Result<()> {
 		match self.kind {
-			RequestKind::WebTransport(request) => request.close(status).await?,
-			RequestKind::Quic(request) => request.close(status),
+			#[cfg(feature = "quinn")]
+			RequestKind::QuinnWebTransport(request) => {
+				let status = web_transport_quinn::http::StatusCode::from_u16(code).context("invalid status code")?;
+				request.close(status).await?;
+			}
+			#[cfg(feature = "quinn")]
+			RequestKind::QuinnQuic(request) => {
+				let status = web_transport_quinn::http::StatusCode::from_u16(code).context("invalid status code")?;
+				request.close(status);
+			}
+			#[cfg(feature = "quiche")]
+			RequestKind::QuicheWebTransport(request) => {
+				let status = web_transport_quiche::http::StatusCode::from_u16(code).context("invalid status code")?;
+				request
+					.close(status)
+					.await
+					.map_err(|e| anyhow::anyhow!("failed to close quiche WebTransport request: {e}"))?;
+			}
+			#[cfg(feature = "quiche")]
+			RequestKind::QuicheQuic(request) => {
+				let status = web_transport_quiche::http::StatusCode::from_u16(code).context("invalid status code")?;
+				request.close(status);
+			}
 			#[cfg(feature = "iroh")]
-			RequestKind::IrohWebTransport(request) => request.close(status).await?,
+			RequestKind::IrohWebTransport(request) => {
+				let status = web_transport_iroh::http::StatusCode::from_u16(code).context("invalid status code")?;
+				request.close(status).await?;
+			}
 			#[cfg(feature = "iroh")]
-			RequestKind::IrohQuic(request) => request.close(status),
+			RequestKind::IrohQuic(request) => {
+				let status = web_transport_iroh::http::StatusCode::from_u16(code).context("invalid status code")?;
+				request.close(status);
+			}
 		}
 		Ok(())
 	}
@@ -396,17 +627,23 @@ impl Request {
 		self
 	}
 
-	// TODO: Uncomment when observability feature is merged
-	// pub fn with_stats(mut self, stats: impl Into<Option<Arc<dyn moq_lite::Stats>>>) -> Self {
-	// 	self.server = self.server.with_stats(stats);
-	// 	self
-	// }
-
 	/// Accept the session, performing rest of the MoQ handshake.
 	pub async fn accept(self) -> anyhow::Result<Session> {
 		let session = match self.kind {
-			RequestKind::WebTransport(request) => self.server.accept(request.ok().await?).await?,
-			RequestKind::Quic(request) => self.server.accept(request.ok()).await?,
+			#[cfg(feature = "quinn")]
+			RequestKind::QuinnWebTransport(request) => self.server.accept(request.ok().await?).await?,
+			#[cfg(feature = "quinn")]
+			RequestKind::QuinnQuic(request) => self.server.accept(request.ok()).await?,
+			#[cfg(feature = "quiche")]
+			RequestKind::QuicheWebTransport(request) => {
+				let conn = request
+					.respond(web_transport_quiche::http::StatusCode::OK)
+					.await
+					.map_err(|e| anyhow::anyhow!("failed to accept quiche WebTransport: {e}"))?;
+				self.server.accept(conn).await?
+			}
+			#[cfg(feature = "quiche")]
+			RequestKind::QuicheQuic(request) => self.server.accept(request.ok()).await?,
 			#[cfg(feature = "iroh")]
 			RequestKind::IrohWebTransport(request) => self.server.accept(request.ok().await?).await?,
 			#[cfg(feature = "iroh")]
@@ -418,7 +655,10 @@ impl Request {
 	/// Returns the URL provided by the client.
 	pub fn url(&self) -> Option<&Url> {
 		match &self.kind {
-			RequestKind::WebTransport(request) => Some(request.url()),
+			#[cfg(feature = "quinn")]
+			RequestKind::QuinnWebTransport(request) => Some(request.url()),
+			#[cfg(feature = "quiche")]
+			RequestKind::QuicheWebTransport(request) => Some(request.url()),
 			#[cfg(feature = "iroh")]
 			RequestKind::IrohWebTransport(request) => Some(request.url()),
 			_ => None,
@@ -426,14 +666,14 @@ impl Request {
 	}
 }
 
-/// A raw QUIC connection request without WebTransport framing.
-///
-/// Used to accept/reject QUIC connections.
+/// A raw QUIC connection request without WebTransport framing (quinn backend).
+#[cfg(feature = "quinn")]
 pub struct QuicRequest {
 	connection: quinn::Connection,
 	url: Url,
 }
 
+#[cfg(feature = "quinn")]
 impl QuicRequest {
 	/// Accept a new QUIC session from a client.
 	pub fn accept(connection: quinn::Connection) -> Self {
@@ -454,9 +694,7 @@ impl QuicRequest {
 	}
 
 	/// Reject the session with a status code.
-	///
-	/// The status code number will be used as the error code.
-	pub fn close(self, status: http::StatusCode) {
+	pub fn close(self, status: web_transport_quinn::http::StatusCode) {
 		self.connection
 			.close(status.as_u16().into(), status.as_str().as_bytes());
 	}
@@ -465,16 +703,19 @@ impl QuicRequest {
 /// TLS certificate information including fingerprints.
 #[derive(Debug)]
 pub struct ServerTlsInfo {
-	pub(crate) certs: Vec<Arc<CertifiedKey>>,
+	#[cfg(feature = "quinn")]
+	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
 	pub fingerprints: Vec<String>,
 }
 
+#[cfg(feature = "quinn")]
 #[derive(Debug)]
 struct ServeCerts {
 	info: Arc<RwLock<ServerTlsInfo>>,
 	provider: crypto::Provider,
 }
 
+#[cfg(feature = "quinn")]
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
@@ -506,7 +747,7 @@ impl ServeCerts {
 	}
 
 	// Load a certificate and corresponding key from a file, but don't add it to the certs
-	fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<CertifiedKey> {
+	fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<rustls::sign::CertifiedKey> {
 		let chain = fs::File::open(chain_path).context("failed to open cert file")?;
 		let mut chain = io::BufReader::new(chain);
 
@@ -526,7 +767,7 @@ impl ServeCerts {
 		let key = rustls_pemfile::private_key(&mut Cursor::new(&buf))?.context("missing private key")?;
 		let key = self.provider.key_provider.load_private_key(key)?;
 
-		let certified_key = CertifiedKey::new(chain, key);
+		let certified_key = rustls::sign::CertifiedKey::new(chain, key);
 
 		certified_key.keys_match().context(format!(
 			"private key {} doesn't match certificate {}",
@@ -537,7 +778,7 @@ impl ServeCerts {
 		Ok(certified_key)
 	}
 
-	fn generate(&self, hostnames: &[String]) -> anyhow::Result<CertifiedKey> {
+	fn generate(&self, hostnames: &[String]) -> anyhow::Result<rustls::sign::CertifiedKey> {
 		let key_pair = rcgen::KeyPair::generate()?;
 
 		let mut params = rcgen::CertificateParams::new(hostnames)?;
@@ -556,11 +797,11 @@ impl ServeCerts {
 		let key = self.provider.key_provider.load_private_key(key_der.into())?;
 
 		// Create a rustls::sign::CertifiedKey
-		Ok(CertifiedKey::new(vec![cert.into()], key))
+		Ok(rustls::sign::CertifiedKey::new(vec![cert.into()], key))
 	}
 
 	// Replace the certificates
-	pub fn set_certs(&self, certs: Vec<Arc<CertifiedKey>>) {
+	pub fn set_certs(&self, certs: Vec<Arc<rustls::sign::CertifiedKey>>) {
 		let fingerprints = certs
 			.iter()
 			.map(|ck| {
@@ -575,7 +816,10 @@ impl ServeCerts {
 	}
 
 	// Return the best certificate for the given ClientHello.
-	fn best_certificate(&self, client_hello: &ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+	fn best_certificate(
+		&self,
+		client_hello: &rustls::server::ClientHello<'_>,
+	) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		let server_name = client_hello.server_name()?;
 		let dns_name = rustls::pki_types::ServerName::try_from(server_name).ok()?;
 
@@ -595,8 +839,9 @@ impl ServeCerts {
 	}
 }
 
-impl ResolvesServerCert for ServeCerts {
-	fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+#[cfg(feature = "quinn")]
+impl rustls::server::ResolvesServerCert for ServeCerts {
+	fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
 		if let Some(cert) = self.best_certificate(&client_hello) {
 			return Some(cert);
 		}
@@ -620,6 +865,7 @@ impl ResolvesServerCert for ServeCerts {
 pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] Vec<u8>);
 
 impl ServerId {
+	#[cfg(feature = "quinn")]
 	fn len(&self) -> usize {
 		self.0.len()
 	}
@@ -640,29 +886,23 @@ impl std::str::FromStr for ServerId {
 }
 
 /// Connection ID generator that embeds a fixed server ID for QUIC-LB support.
-///
-/// This enables stateless load balancing where the load balancer can route
-/// packets to the correct server by parsing the connection ID. As of Jan 2026,
-/// AWS NLB imposes some specific requirements which have been determined
-/// empirically to be the following:
-/// - The server ID must be exactly 8 bytes long.
-/// - The connection ID must be exactly 16 bytes in total.
-/// - Only the "plaintext" mode is supported.
-///
-/// See: https://datatracker.ietf.org/doc/draft-ietf-quic-load-balancers/
+#[cfg(feature = "quinn")]
 struct ServerIdGenerator {
 	server_id: ServerId,
 	nonce_len: usize,
 }
 
+#[cfg(feature = "quinn")]
 impl ServerIdGenerator {
 	fn new(server_id: ServerId, nonce_len: usize) -> Self {
 		Self { server_id, nonce_len }
 	}
 }
 
+#[cfg(feature = "quinn")]
 impl quinn::ConnectionIdGenerator for ServerIdGenerator {
 	fn generate_cid(&mut self) -> quinn::ConnectionId {
+		use rand::Rng;
 		let cid_len = self.cid_len();
 		let mut cid = Vec::with_capacity(cid_len);
 		// First byte has "self-encoded length" of server ID + nonce

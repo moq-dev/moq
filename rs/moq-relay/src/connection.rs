@@ -1,5 +1,6 @@
 use crate::{Auth, Cluster};
 
+use axum::http;
 use moq_native::Request;
 
 pub struct Connection {
@@ -28,7 +29,8 @@ impl Connection {
 		let token = match self.auth.verify(path, token.as_deref()) {
 			Ok(token) => token,
 			Err(err) => {
-				let _ = self.request.reject(err.clone().into()).await;
+				let status: http::StatusCode = err.clone().into();
+				let _ = self.request.reject(status.as_u16()).await;
 				return Err(err.into());
 			}
 		};
