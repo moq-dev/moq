@@ -244,7 +244,6 @@ impl Av01 {
 		use scuffle_av1::ObuType;
 		match header.obu_type {
 			ObuType::SequenceHeader => {
-				// Calculate payload offset accounting for optional extension byte
 				let has_extension = (obu_data[0] >> 2) & 1 == 1;
 				let payload_offset = if has_extension { 2 } else { 1 };
 
@@ -412,6 +411,7 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
 		// - obu_reserved_1bit (1)
 
 		let header = data[0];
+		let has_extension = (header >> 2) & 1 == 1;
 		let has_size = (header >> 1) & 1 == 1;
 
 		if !has_size {
@@ -420,9 +420,9 @@ impl<'a, T: Buf + AsRef<[u8]> + 'a> Iterator for ObuIterator<'a, T> {
 			return Some(Ok(obu));
 		}
 
-		// Parse LEB128 size
+		// LEB128 size field starts after header byte and optional extension byte
 		let mut size: usize = 0;
-		let mut offset = 1;
+		let mut offset = if has_extension { 2 } else { 1 };
 		let mut shift = 0;
 
 		loop {
