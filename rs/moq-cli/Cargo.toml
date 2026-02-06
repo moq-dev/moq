@@ -19,6 +19,7 @@ doc = false
 [features]
 default = ["iroh"]
 iroh = ["moq-native/iroh"]
+quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
 
 [dependencies]

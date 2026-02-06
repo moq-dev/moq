@@ -91,8 +91,9 @@ pub struct ClientConfig {
 	pub bind: net::SocketAddr,
 
 	/// The QUIC backend to use.
-	#[arg(long = "quic-backend", default_value = "quinn", env = "MOQ_QUIC_BACKEND")]
-	pub backend: QuicBackend,
+	/// Auto-detected from compiled features if not specified.
+	#[arg(long = "quic-backend", env = "MOQ_QUIC_BACKEND")]
+	pub backend: Option<QuicBackend>,
 
 	#[command(flatten)]
 	#[serde(default)]
@@ -105,120 +106,40 @@ pub struct ClientConfig {
 
 impl ClientConfig {
 	pub fn init(self) -> anyhow::Result<Client> {
-		match self.backend {
+		let backend = self.backend.clone().unwrap_or_else(|| {
+			if cfg!(feature = "quinn") {
+				QuicBackend::Quinn
+			} else if cfg!(feature = "quiche") {
+				QuicBackend::Quiche
+			} else {
+				panic!("no QUIC backend compiled; enable quinn or quiche feature")
+			}
+		});
+
+		let tls = Self::build_tls_config(&self)?;
+
+		let inner = match backend {
 			QuicBackend::Quinn => {
 				#[cfg(not(feature = "quinn"))]
 				anyhow::bail!("quinn backend not compiled; rebuild with --features quinn");
 
 				#[cfg(feature = "quinn")]
-				Client::new_quinn(self)
+				ClientInner::Quinn(crate::quinn::QuinnClient::new(&self)?)
 			}
 			QuicBackend::Quiche => {
 				#[cfg(not(feature = "quiche"))]
 				anyhow::bail!("quiche backend not compiled; rebuild with --features quiche");
 
 				#[cfg(feature = "quiche")]
-				Client::new_quiche(self)
+				ClientInner::Quiche(crate::quiche::QuicheClient::new(&self)?)
 			}
-		}
-	}
-}
+		};
 
-impl Default for ClientConfig {
-	fn default() -> Self {
-		Self {
-			bind: "[::]:0".parse().unwrap(),
-			backend: QuicBackend::default(),
-			tls: ClientTls::default(),
-			websocket: ClientWebSocket::default(),
-		}
-	}
-}
-
-/// Client for establishing MoQ connections over QUIC, WebTransport, or WebSocket.
-///
-/// Create via [`ClientConfig::init`] or [`Client::new`].
-#[derive(Clone)]
-#[non_exhaustive]
-pub struct Client {
-	pub moq: moq_lite::Client,
-	pub websocket: ClientWebSocket,
-	inner: ClientInner,
-	tls: rustls::ClientConfig,
-	#[cfg(feature = "iroh")]
-	pub iroh: Option<iroh::Endpoint>,
-}
-
-#[derive(Clone)]
-enum ClientInner {
-	#[cfg(feature = "quinn")]
-	Quinn {
-		quic: quinn::Endpoint,
-		transport: Arc<quinn::TransportConfig>,
-	},
-	#[cfg(feature = "quiche")]
-	Quiche {
-		bind: net::SocketAddr,
-		disable_verify: bool,
-	},
-}
-
-impl Client {
-	/// Create a new client using the default (quinn) backend.
-	///
-	/// This is equivalent to calling `ClientConfig::default().init()`.
-	#[cfg(feature = "quinn")]
-	pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
-		Self::new_quinn(config)
-	}
-
-	#[cfg(feature = "quinn")]
-	fn new_quinn(config: ClientConfig) -> anyhow::Result<Self> {
-		let tls = Self::build_tls_config(&config)?;
-
-		let socket = std::net::UdpSocket::bind(config.bind).context("failed to bind UDP socket")?;
-
-		// TODO Validate the BBR implementation before enabling it
-		let mut transport = quinn::TransportConfig::default();
-		transport.max_idle_timeout(Some(time::Duration::from_secs(10).try_into().unwrap()));
-		transport.keep_alive_interval(Some(time::Duration::from_secs(4)));
-		transport.mtu_discovery_config(None); // Disable MTU discovery
-		let transport = Arc::new(transport);
-
-		// There's a bit more boilerplate to make a generic endpoint.
-		let runtime = quinn::default_runtime().context("no async runtime")?;
-		let endpoint_config = quinn::EndpointConfig::default();
-
-		// Create the generic QUIC endpoint.
-		let quic =
-			quinn::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
-
-		Ok(Self {
+		Ok(Client {
 			moq: moq_lite::Client::new(),
-			websocket: config.websocket,
+			websocket: self.websocket,
 			tls,
-			inner: ClientInner::Quinn { quic, transport },
-			#[cfg(feature = "iroh")]
-			iroh: None,
-		})
-	}
-
-	#[cfg(feature = "quiche")]
-	fn new_quiche(config: ClientConfig) -> anyhow::Result<Self> {
-		let tls = Self::build_tls_config(&config)?;
-
-		if !config.tls.root.is_empty() {
-			tracing::warn!("--tls-root is not supported with the quiche backend; system roots will be used");
-		}
-
-		Ok(Self {
-			moq: moq_lite::Client::new(),
-			websocket: config.websocket,
-			tls,
-			inner: ClientInner::Quiche {
-				bind: config.bind,
-				disable_verify: config.tls.disable_verify.unwrap_or_default(),
-			},
+			inner,
 			#[cfg(feature = "iroh")]
 			iroh: None,
 		})
@@ -274,6 +195,48 @@ impl Client {
 
 		Ok(tls)
 	}
+}
+
+impl Default for ClientConfig {
+	fn default() -> Self {
+		Self {
+			bind: "[::]:0".parse().unwrap(),
+			backend: None,
+			tls: ClientTls::default(),
+			websocket: ClientWebSocket::default(),
+		}
+	}
+}
+
+/// Client for establishing MoQ connections over QUIC, WebTransport, or WebSocket.
+///
+/// Create via [`ClientConfig::init`] or [`Client::new`].
+#[derive(Clone)]
+pub struct Client {
+	moq: moq_lite::Client,
+	websocket: ClientWebSocket,
+	inner: ClientInner,
+	tls: rustls::ClientConfig,
+	#[cfg(feature = "iroh")]
+	iroh: Option<iroh::Endpoint>,
+}
+
+#[derive(Clone)]
+enum ClientInner {
+	#[cfg(feature = "quinn")]
+	Quinn(crate::quinn::QuinnClient),
+	#[cfg(feature = "quiche")]
+	Quiche(crate::quiche::QuicheClient),
+}
+
+impl Client {
+	/// Create a new client using the default (quinn) backend.
+	///
+	/// This is equivalent to calling `ClientConfig::default().init()`.
+	#[cfg(feature = "quinn")]
+	pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
+		config.init()
+	}
 
 	#[cfg(feature = "iroh")]
 	pub fn with_iroh(mut self, iroh: Option<iroh::Endpoint>) -> Self {
@@ -302,195 +265,56 @@ impl Client {
 
 		match &self.inner {
 			#[cfg(feature = "quinn")]
-			ClientInner::Quinn { .. } => self.connect_race_quinn(url).await,
+			ClientInner::Quinn(quinn) => {
+				let tls = self.tls.clone();
+				let quic_url = url.clone();
+				let quic_handle = async {
+					let res = quinn.connect(&tls, quic_url).await;
+					if let Err(err) = &res {
+						tracing::warn!(%err, "QUIC connection failed");
+					}
+					res
+				};
+
+				let ws_handle = self.ws_race_handle(url);
+
+				Ok(tokio::select! {
+					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
+					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
+					else => anyhow::bail!("failed to connect to server"),
+				})
+			}
 			#[cfg(feature = "quiche")]
-			ClientInner::Quiche { .. } => self.connect_race_quiche(url).await,
+			ClientInner::Quiche(quiche) => {
+				let quic_url = url.clone();
+				let quic_handle = async {
+					let res = quiche.connect(quic_url).await;
+					if let Err(err) = &res {
+						tracing::warn!(%err, "QUIC connection failed");
+					}
+					res
+				};
+
+				let ws_handle = self.ws_race_handle(url);
+
+				Ok(tokio::select! {
+					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
+					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
+					else => anyhow::bail!("failed to connect to server"),
+				})
+			}
 		}
 	}
 
-	#[cfg(feature = "quinn")]
-	async fn connect_race_quinn(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
-		let quic_url = url.clone();
-		let quic_handle = async {
-			let res = self.connect_quinn(quic_url).await;
-			if let Err(err) = &res {
-				tracing::warn!(%err, "QUIC connection failed");
-			}
-			res
-		};
-
-		let ws_handle = async {
-			if !self.websocket.enabled {
-				return None;
-			}
-			let res = self.connect_websocket(url).await;
-			if let Err(err) = &res {
-				tracing::warn!(%err, "WebSocket connection failed");
-			}
-			Some(res)
-		};
-
-		Ok(tokio::select! {
-			Ok(quic) = quic_handle => self.moq.connect(quic).await?,
-			Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-			else => anyhow::bail!("failed to connect to server"),
-		})
-	}
-
-	#[cfg(feature = "quiche")]
-	async fn connect_race_quiche(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
-		let quic_url = url.clone();
-		let quic_handle = async {
-			let res = self.connect_quiche(quic_url).await;
-			if let Err(err) = &res {
-				tracing::warn!(%err, "QUIC connection failed");
-			}
-			res
-		};
-
-		let ws_handle = async {
-			if !self.websocket.enabled {
-				return None;
-			}
-			let res = self.connect_websocket(url).await;
-			if let Err(err) = &res {
-				tracing::warn!(%err, "WebSocket connection failed");
-			}
-			Some(res)
-		};
-
-		Ok(tokio::select! {
-			Ok(quic) = quic_handle => self.moq.connect(quic).await?,
-			Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-			else => anyhow::bail!("failed to connect to server"),
-		})
-	}
-
-	#[cfg(feature = "quinn")]
-	async fn connect_quinn(&self, mut url: Url) -> anyhow::Result<web_transport_quinn::Session> {
-		let (quic, transport) = match &self.inner {
-			ClientInner::Quinn { quic, transport } => (quic, transport),
-			#[allow(unreachable_patterns)]
-			_ => unreachable!(),
-		};
-
-		let mut config = self.tls.clone();
-
-		let host = url.host().context("invalid DNS name")?.to_string();
-		let port = url.port().unwrap_or(443);
-
-		// Look up the DNS entry.
-		let ip = tokio::net::lookup_host((host.clone(), port))
-			.await
-			.context("failed DNS lookup")?
-			.next()
-			.context("no DNS entries")?;
-
-		if url.scheme() == "http" {
-			// Perform a HTTP request to fetch the certificate fingerprint.
-			let mut fingerprint = url.clone();
-			fingerprint.set_path("/certificate.sha256");
-			fingerprint.set_query(None);
-			fingerprint.set_fragment(None);
-
-			tracing::warn!(url = %fingerprint, "performing insecure HTTP request for certificate");
-
-			let resp = reqwest::get(fingerprint.as_str())
-				.await
-				.context("failed to fetch fingerprint")?
-				.error_for_status()
-				.context("fingerprint request failed")?;
-
-			let fingerprint = resp.text().await.context("failed to read fingerprint")?;
-			let fingerprint = hex::decode(fingerprint.trim()).context("invalid fingerprint")?;
-
-			let verifier = FingerprintVerifier::new(config.crypto_provider().clone(), fingerprint);
-			config.dangerous().set_certificate_verifier(Arc::new(verifier));
-
-			url.set_scheme("https").expect("failed to set scheme");
+	async fn ws_race_handle(&self, url: Url) -> Option<anyhow::Result<web_transport_ws::Session>> {
+		if !self.websocket.enabled {
+			return None;
 		}
-
-		let alpn = match url.scheme() {
-			"https" => web_transport_quinn::ALPN,
-			"moql" => moq_lite::lite::ALPN,
-			"moqt" => moq_lite::ietf::ALPN,
-			_ => anyhow::bail!("url scheme must be 'http', 'https', or 'moql'"),
-		};
-
-		// TODO support connecting to both ALPNs at the same time
-		config.alpn_protocols = vec![alpn.as_bytes().to_vec()];
-		config.key_log = Arc::new(rustls::KeyLogFile::new());
-
-		let config: quinn::crypto::rustls::QuicClientConfig = config.try_into()?;
-		let mut config = quinn::ClientConfig::new(Arc::new(config));
-		config.transport_config(transport.clone());
-
-		tracing::debug!(%url, %ip, %alpn, "connecting");
-
-		let connection = quic.connect_with(config, ip, &host)?.await?;
-		tracing::Span::current().record("id", connection.stable_id());
-
-		let session = match alpn {
-			web_transport_quinn::ALPN => web_transport_quinn::Session::connect(connection, url).await?,
-			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => web_transport_quinn::Session::raw(connection, url),
-			_ => unreachable!("ALPN was checked above"),
-		};
-
-		Ok(session)
-	}
-
-	#[cfg(feature = "quiche")]
-	async fn connect_quiche(&self, url: Url) -> anyhow::Result<web_transport_quiche::Connection> {
-		let (bind, disable_verify) = match &self.inner {
-			ClientInner::Quiche { bind, disable_verify } => (bind, disable_verify),
-			#[allow(unreachable_patterns)]
-			_ => unreachable!(),
-		};
-
-		let host = url.host().context("invalid DNS name")?.to_string();
-		let port = url.port().unwrap_or(443);
-
-		if url.scheme() == "http" {
-			anyhow::bail!("fingerprint verification (http:// scheme) is not supported with the quiche backend");
+		let res = self.connect_websocket(url).await;
+		if let Err(err) = &res {
+			tracing::warn!(%err, "WebSocket connection failed");
 		}
-
-		let alpn = match url.scheme() {
-			"https" => web_transport_quiche::ALPN,
-			"moql" => moq_lite::lite::ALPN,
-			"moqt" => moq_lite::ietf::ALPN,
-			_ => anyhow::bail!("url scheme must be 'https' or 'moql'"),
-		};
-
-		let mut settings = web_transport_quiche::Settings::default();
-		settings.verify_peer = !disable_verify;
-
-		let builder = web_transport_quiche::ez::ClientBuilder::default()
-			.with_settings(settings)
-			.with_bind(*bind)?;
-
-		tracing::debug!(%url, %alpn, "connecting via quiche");
-
-		match alpn {
-			web_transport_quiche::ALPN => {
-				// WebTransport over HTTP/3
-				let conn = builder
-					.connect(&host, port)
-					.await
-					.map_err(|e| anyhow::anyhow!("quiche connect failed: {e}"))?;
-				let session = web_transport_quiche::Connection::connect(conn, url)
-					.await
-					.map_err(|e| anyhow::anyhow!("WebTransport handshake failed: {e}"))?;
-				Ok(session)
-			}
-			_ => {
-				// Raw QUIC mode
-				let conn = builder
-					.connect(&host, port)
-					.await
-					.map_err(|e| anyhow::anyhow!("quiche connect failed: {e}"))?;
-				Ok(web_transport_quiche::Connection::raw(conn, url))
-			}
-		}
+		Some(res)
 	}
 
 	async fn connect_websocket(&self, mut url: Url) -> anyhow::Result<web_transport_ws::Session> {
@@ -578,8 +402,6 @@ impl Client {
 		let conn = endpoint.connect(endpoint_id, alpn.as_bytes()).await?;
 		let session = match alpn {
 			web_transport_iroh::ALPN_H3 => {
-				// We need to change the scheme to `https` because currently web_transport_iroh only
-				// accepts that scheme.
 				let url = url_set_scheme(url, "https")?;
 				web_transport_iroh::Session::connect_h3(conn, url).await?
 			}
@@ -626,62 +448,6 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 
 	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
 		self.0.signature_verification_algorithms.supported_schemes()
-	}
-}
-
-// Verify the certificate matches a provided fingerprint.
-#[cfg(feature = "quinn")]
-#[derive(Debug)]
-struct FingerprintVerifier {
-	provider: crypto::Provider,
-	fingerprint: Vec<u8>,
-}
-
-#[cfg(feature = "quinn")]
-impl FingerprintVerifier {
-	pub fn new(provider: crypto::Provider, fingerprint: Vec<u8>) -> Self {
-		Self { provider, fingerprint }
-	}
-}
-
-#[cfg(feature = "quinn")]
-impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
-	fn verify_server_cert(
-		&self,
-		end_entity: &CertificateDer<'_>,
-		_intermediates: &[CertificateDer<'_>],
-		_server_name: &ServerName<'_>,
-		_ocsp: &[u8],
-		_now: UnixTime,
-	) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-		let fingerprint = crypto::sha256(&self.provider, end_entity);
-		if fingerprint.as_ref() == self.fingerprint.as_slice() {
-			Ok(rustls::client::danger::ServerCertVerified::assertion())
-		} else {
-			Err(rustls::Error::General("fingerprint mismatch".into()))
-		}
-	}
-
-	fn verify_tls12_signature(
-		&self,
-		message: &[u8],
-		cert: &CertificateDer<'_>,
-		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
-	}
-
-	fn verify_tls13_signature(
-		&self,
-		message: &[u8],
-		cert: &CertificateDer<'_>,
-		dss: &rustls::DigitallySignedStruct,
-	) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-		rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
-	}
-
-	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-		self.provider.signature_verification_algorithms.supported_schemes()
 	}
 }
 

@@ -11,6 +11,8 @@
 mod client;
 mod crypto;
 mod log;
+#[cfg(feature = "quinn")]
+mod quinn;
 mod server;
 
 pub use client::*;
@@ -35,10 +37,9 @@ mod iroh;
 pub use iroh::*;
 
 /// The QUIC backend to use for connections.
-#[derive(Clone, Debug, Default, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QuicBackend {
-	#[default]
 	Quinn,
 	Quiche,
 }
