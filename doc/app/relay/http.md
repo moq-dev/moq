@@ -107,7 +107,36 @@ The HTTP endpoints can serve as basic health checks:
 curl -f http://localhost:4443/announced/ || echo "Relay down"
 ```
 
+### Late Join
+
+When a viewer joins a live broadcast mid-stream, they often start receiving delta frames before a keyframe.
+The `/fetch` endpoint can solve this by requesting a previous group that contains the keyframe:
+
+```bash
+# Fetch a specific group by sequence number
+curl "http://localhost:4443/fetch/demo/stream/video?group=42"
+
+# Fetch the catalog to discover available tracks
+curl "http://localhost:4443/fetch/demo/stream/catalog.json"
+```
+
+The `?group=N` parameter requests a specific group by its sequence number.
+Without it, you get the most recent group (the live edge).
+
+**Typical late-join flow:**
+
+1. Subscribe to the video track via MoQ to start receiving live groups.
+2. Note the first group sequence number you receive (e.g. `N`).
+3. Fetch group `N-1` via HTTP to get the keyframe for the previous GoP.
+4. Decode the HTTP-fetched keyframe first, then switch to the live MoQ stream.
+
+::: tip
+Use HTTP fetch for catch-up and historical data. Use MoQ subscriptions for the live edge.
+The two complement each other — HTTP is request/response, MoQ is push-based.
+:::
+
 ## See Also
 
 - [Relay Configuration](/app/relay/config) - Full config reference
 - [Clustering](/app/relay/cluster) - Multi-relay deployments
+- [hang format](/concept/layer/hang) - Groups, keyframes, and container details
