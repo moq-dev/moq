@@ -16,6 +16,9 @@ pub enum DecoderFormat {
 	/// aka H265 with inline SPS/PPS
 	#[cfg(feature = "h265")]
 	Hev1,
+	/// AV1 with inline sequence headers
+	#[cfg(feature = "av1")]
+	Av01,
 	/// Raw AAC frames (not ADTS).
 	#[cfg(feature = "aac")]
 	Aac,
@@ -40,6 +43,8 @@ impl FromStr for DecoderFormat {
 			"hev1" => Ok(DecoderFormat::Hev1),
 			#[cfg(feature = "mp4")]
 			"fmp4" | "cmaf" => Ok(DecoderFormat::Fmp4),
+			#[cfg(feature = "av1")]
+			"av01" | "av1" | "av1C" => Ok(DecoderFormat::Av01),
 			#[cfg(feature = "aac")]
 			"aac" => Ok(DecoderFormat::Aac),
 			#[cfg(feature = "opus")]
@@ -58,6 +63,8 @@ impl fmt::Display for DecoderFormat {
 			DecoderFormat::Fmp4 => write!(f, "fmp4"),
 			#[cfg(feature = "h265")]
 			DecoderFormat::Hev1 => write!(f, "hev1"),
+			#[cfg(feature = "av1")]
+			DecoderFormat::Av01 => write!(f, "av01"),
 			#[cfg(feature = "aac")]
 			DecoderFormat::Aac => write!(f, "aac"),
 			#[cfg(feature = "opus")]
@@ -79,6 +86,9 @@ pub enum StreamFormat {
 	/// aka H265 with inline SPS/PPS
 	#[cfg(feature = "h265")]
 	Hev1,
+	/// AV1 with inline sequence headers
+	#[cfg(feature = "av1")]
+	Av01,
 }
 
 impl FromStr for StreamFormat {
@@ -97,6 +107,8 @@ impl FromStr for StreamFormat {
 			"hev1" => Ok(StreamFormat::Hev1),
 			#[cfg(feature = "mp4")]
 			"fmp4" | "cmaf" => Ok(StreamFormat::Fmp4),
+			#[cfg(feature = "av1")]
+			"av01" | "av1" | "av1C" => Ok(StreamFormat::Av01),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
 	}
@@ -111,6 +123,8 @@ impl fmt::Display for StreamFormat {
 			StreamFormat::Fmp4 => write!(f, "fmp4"),
 			#[cfg(feature = "h265")]
 			StreamFormat::Hev1 => write!(f, "hev1"),
+			#[cfg(feature = "av1")]
+			StreamFormat::Av01 => write!(f, "av01"),
 		}
 	}
 }
@@ -124,6 +138,8 @@ impl From<StreamFormat> for DecoderFormat {
 			StreamFormat::Fmp4 => DecoderFormat::Fmp4,
 			#[cfg(feature = "h265")]
 			StreamFormat::Hev1 => DecoderFormat::Hev1,
+			#[cfg(feature = "av1")]
+			StreamFormat::Av01 => DecoderFormat::Av01,
 		}
 	}
 }
@@ -139,6 +155,8 @@ enum StreamKind {
 	/// aka H265 with inline SPS/PPS
 	#[cfg(feature = "h265")]
 	Hev1(super::Hev1),
+	#[cfg(feature = "av1")]
+	Av01(super::Av01),
 }
 
 #[derive(derive_more::From)]
@@ -152,6 +170,8 @@ enum DecoderKind {
 	/// aka H265 with inline SPS/PPS
 	#[cfg(feature = "h265")]
 	Hev1(super::Hev1),
+	#[cfg(feature = "av1")]
+	Av01(super::Av01),
 	#[cfg(feature = "aac")]
 	Aac(super::Aac),
 	#[cfg(feature = "opus")]
@@ -168,7 +188,11 @@ pub struct StreamDecoder {
 
 impl StreamDecoder {
 	/// Create a new stream decoder with the given format.
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer, format: StreamFormat) -> Self {
+	pub fn new(
+		broadcast: moq_lite::BroadcastProducer,
+		catalog: hang::catalog::CatalogProducer,
+		format: StreamFormat,
+	) -> Self {
 		let decoder = match format {
 			#[cfg(feature = "h264")]
 			StreamFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),
@@ -176,6 +200,8 @@ impl StreamDecoder {
 			StreamFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default())).into(),
 			#[cfg(feature = "h265")]
 			StreamFormat::Hev1 => super::Hev1::new(broadcast, catalog).into(),
+			#[cfg(feature = "av1")]
+			StreamFormat::Av01 => super::Av01::new(broadcast, catalog).into(),
 		};
 
 		Self { decoder }
@@ -194,6 +220,8 @@ impl StreamDecoder {
 			StreamKind::Fmp4(decoder) => decoder.decode(buf)?,
 			#[cfg(feature = "h265")]
 			StreamKind::Hev1(decoder) => decoder.initialize(buf)?,
+			#[cfg(feature = "av1")]
+			StreamKind::Av01(decoder) => decoder.initialize(buf)?,
 		}
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -218,6 +246,8 @@ impl StreamDecoder {
 			StreamKind::Fmp4(decoder) => decoder.decode(buf),
 			#[cfg(feature = "h265")]
 			StreamKind::Hev1(decoder) => decoder.decode_stream(buf, None),
+			#[cfg(feature = "av1")]
+			StreamKind::Av01(decoder) => decoder.decode_stream(buf, None),
 		}
 	}
 
@@ -230,6 +260,8 @@ impl StreamDecoder {
 			StreamKind::Fmp4(decoder) => decoder.is_initialized(),
 			#[cfg(feature = "h265")]
 			StreamKind::Hev1(decoder) => decoder.is_initialized(),
+			#[cfg(feature = "av1")]
+			StreamKind::Av01(decoder) => decoder.is_initialized(),
 		}
 	}
 }
@@ -243,7 +275,11 @@ pub struct Decoder {
 
 impl Decoder {
 	/// Create a new decoder with the given format.
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer, format: DecoderFormat) -> Self {
+	pub fn new(
+		broadcast: moq_lite::BroadcastProducer,
+		catalog: hang::catalog::CatalogProducer,
+		format: DecoderFormat,
+	) -> Self {
 		let decoder = match format {
 			#[cfg(feature = "h264")]
 			DecoderFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),
@@ -251,6 +287,8 @@ impl Decoder {
 			DecoderFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default())).into(),
 			#[cfg(feature = "h265")]
 			DecoderFormat::Hev1 => super::Hev1::new(broadcast, catalog).into(),
+			#[cfg(feature = "av1")]
+			DecoderFormat::Av01 => super::Av01::new(broadcast, catalog).into(),
 			#[cfg(feature = "aac")]
 			DecoderFormat::Aac => super::Aac::new(broadcast, catalog).into(),
 			#[cfg(feature = "opus")]
@@ -274,6 +312,8 @@ impl Decoder {
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
 			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.initialize(buf)?,
+			#[cfg(feature = "av1")]
+			DecoderKind::Av01(decoder) => decoder.initialize(buf)?,
 			#[cfg(feature = "aac")]
 			DecoderKind::Aac(decoder) => decoder.initialize(buf)?,
 			#[cfg(feature = "opus")]
@@ -306,6 +346,8 @@ impl Decoder {
 			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
 			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.decode_frame(buf, pts)?,
+			#[cfg(feature = "av1")]
+			DecoderKind::Av01(decoder) => decoder.decode_frame(buf, pts)?,
 			#[cfg(feature = "aac")]
 			DecoderKind::Aac(decoder) => decoder.decode(buf, pts)?,
 			#[cfg(feature = "opus")]
@@ -326,6 +368,8 @@ impl Decoder {
 			DecoderKind::Fmp4(decoder) => decoder.is_initialized(),
 			#[cfg(feature = "h265")]
 			DecoderKind::Hev1(decoder) => decoder.is_initialized(),
+			#[cfg(feature = "av1")]
+			DecoderKind::Av01(decoder) => decoder.is_initialized(),
 			#[cfg(feature = "aac")]
 			DecoderKind::Aac(decoder) => decoder.is_initialized(),
 			#[cfg(feature = "opus")]

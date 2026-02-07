@@ -2646,6 +2646,7 @@ dependencies = [
  "mp4-atom",
  "num_enum",
  "reqwest 0.12.28",
+ "scuffle-av1",
  "scuffle-h265",
  "tokio",
  "tracing",
@@ -4032,6 +4033,18 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "scuffle-av1"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "028eddc8b17fe9dba817b238c56d3acf03748bdbed4c35783cfb93857ef15955"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "scuffle-bytes-util",
+ "scuffle-workspace-hack",
+]
 
 [[package]]
 name = "scuffle-bytes-util"

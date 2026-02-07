@@ -14,10 +14,11 @@
 //! The [Decoder] module provides a generic interface for importing a stream of media.
 //! If you know the format in advance, use the specific decoder instead.
 
-#[cfg(feature = "aac")]
 mod aac;
 #[cfg(any(feature = "h264", feature = "h265"))]
 mod annexb;
+#[cfg(feature = "av1")]
+mod av01;
 #[cfg(feature = "h264")]
 mod avc3;
 mod decoder;
@@ -27,11 +28,11 @@ mod fmp4;
 mod hev1;
 #[cfg(feature = "hls")]
 mod hls;
-#[cfg(feature = "opus")]
 mod opus;
 
-#[cfg(feature = "aac")]
 pub use aac::*;
+#[cfg(feature = "av1")]
+pub use av01::*;
 #[cfg(feature = "h264")]
 pub use avc3::*;
 pub use decoder::*;
@@ -41,5 +42,4 @@ pub use fmp4::*;
 pub use hev1::*;
 #[cfg(feature = "hls")]
 pub use hls::*;
-#[cfg(feature = "opus")]
 pub use opus::*;
