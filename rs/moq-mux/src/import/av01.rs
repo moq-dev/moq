@@ -245,11 +245,11 @@ impl Av01 {
 		buf: &mut T,
 		pts: Option<hang::container::Timestamp>,
 	) -> anyhow::Result<()> {
-		let pts = self.pts(pts)?;
-
 		let obus = ObuIterator::new(buf);
 
 		for obu in obus {
+			// Generate PTS for each OBU to avoid reusing same timestamp
+			let pts = self.pts(pts)?;
 			self.decode_obu(obu?, Some(pts))?;
 		}
 
@@ -281,16 +281,17 @@ impl Av01 {
 	fn decode_obu(&mut self, obu_data: Bytes, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
 		anyhow::ensure!(!obu_data.is_empty(), "OBU is too short");
 
-		// Parse OBU header
-		let header = scuffle_av1::ObuHeader::parse(&mut &obu_data[..])?;
+		// Parse OBU header - this consumes header + extension + LEB128 size
+		let mut reader = &obu_data[..];
+		let header = scuffle_av1::ObuHeader::parse(&mut reader)?;
+
+		// Calculate payload offset by seeing how much the parser consumed
+		let payload_offset = obu_data.len() - reader.len();
 
 		// Match on the ObuType enum directly
 		use scuffle_av1::ObuType;
 		match header.obu_type {
 			ObuType::SequenceHeader => {
-				let has_extension = (obu_data[0] >> 2) & 1 == 1;
-				let payload_offset = if has_extension { 2 } else { 1 };
-
 				match SequenceHeaderObu::parse(header, &mut &obu_data[payload_offset..]) {
 					Ok(seq_header) => {
 						self.init(&seq_header)?;
@@ -310,11 +311,8 @@ impl Av01 {
 				self.maybe_start_frame(pts)?;
 			}
 			ObuType::FrameHeader | ObuType::Frame => {
-				let has_extension = (obu_data[0] >> 2) & 1 == 1;
-				let obu_header_size = if has_extension { 2 } else { 1 };
-
-				let is_keyframe = if obu_data.len() > obu_header_size {
-					let data = &obu_data[obu_header_size..];
+				let is_keyframe = if obu_data.len() > payload_offset {
+					let data = &obu_data[payload_offset..];
 					if data.is_empty() {
 						false
 					} else {
@@ -332,9 +330,9 @@ impl Av01 {
 					}
 				} else {
 					tracing::warn!(
-						"Frame OBU too short: {} bytes (header_size={})",
+						"Frame OBU too short: {} bytes (payload_offset={})",
 						obu_data.len(),
-						obu_header_size
+						payload_offset
 					);
 					false
 				};
