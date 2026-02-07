@@ -55,7 +55,7 @@ const MessagesV14 = {
 } as const;
 
 // v15 message map — 0x05 → RequestError, 0x07 → RequestOk (different wire format)
-// Messages removed in v15 (0x08, 0x0E, 0x12, 0x13, 0x19, 0x1F) are still kept for decoding compatibility
+// Messages removed in v15 (0x08, 0x0E, 0x12, 0x13, 0x19, 0x1E, 0x1F) are excluded and will be rejected
 const MessagesV15 = {
 	[Setup.ClientSetup.id]: Setup.ClientSetup,
 	[Setup.ServerSetup.id]: Setup.ServerSetup,

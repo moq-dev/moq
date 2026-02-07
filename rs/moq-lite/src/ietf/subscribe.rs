@@ -476,6 +476,48 @@ mod tests {
 	}
 
 	#[test]
+	fn test_subscribe_update_v15_round_trip() {
+		let msg = SubscribeUpdate {
+			request_id: RequestId(10),
+			subscription_request_id: RequestId(5),
+			start_location: Location { group: 0, object: 0 },
+			end_group: 0,
+			subscriber_priority: 200,
+			forward: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: SubscribeUpdate = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(10));
+		assert_eq!(decoded.subscription_request_id, RequestId(5));
+		assert_eq!(decoded.subscriber_priority, 200);
+		assert!(decoded.forward);
+	}
+
+	#[test]
+	fn test_subscribe_update_v14_round_trip() {
+		let msg = SubscribeUpdate {
+			request_id: RequestId(10),
+			subscription_request_id: RequestId(5),
+			start_location: Location { group: 1, object: 2 },
+			end_group: 100,
+			subscriber_priority: 200,
+			forward: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: SubscribeUpdate = decode_message(&encoded, Version::Draft14).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(10));
+		assert_eq!(decoded.subscription_request_id, RequestId(5));
+		assert_eq!(decoded.start_location, Location { group: 1, object: 2 });
+		assert_eq!(decoded.end_group, 100);
+		assert_eq!(decoded.subscriber_priority, 200);
+		assert!(decoded.forward);
+	}
+
+	#[test]
 	fn test_subscribe_ok_rejects_non_zero_expires() {
 		#[rustfmt::skip]
 		let invalid_bytes = vec![

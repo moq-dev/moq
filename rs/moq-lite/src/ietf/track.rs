@@ -92,3 +92,52 @@ impl<V> Decode<V> for TrackStatusCode {
 		Self::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::BytesMut;
+
+	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+		let mut buf = BytesMut::new();
+		msg.encode_msg(&mut buf, version);
+		buf.to_vec()
+	}
+
+	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes::Bytes::from(bytes.to_vec());
+		M::decode_msg(&mut buf, version)
+	}
+
+	#[test]
+	fn test_track_status_v14_round_trip() {
+		let msg = TrackStatus {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: TrackStatus = decode_message(&encoded, Version::Draft14).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+	}
+
+	#[test]
+	fn test_track_status_v15_round_trip() {
+		let msg = TrackStatus {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: TrackStatus = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+	}
+}

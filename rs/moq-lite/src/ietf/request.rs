@@ -125,3 +125,49 @@ impl Message for RequestError<'_> {
 		})
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::BytesMut;
+
+	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+		let mut buf = BytesMut::new();
+		msg.encode_msg(&mut buf, version);
+		buf.to_vec()
+	}
+
+	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes::Bytes::from(bytes.to_vec());
+		M::decode_msg(&mut buf, version)
+	}
+
+	#[test]
+	fn test_request_ok_round_trip() {
+		let msg = RequestOk {
+			request_id: RequestId(42),
+			parameters: MessageParameters::default(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: RequestOk = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(42));
+	}
+
+	#[test]
+	fn test_request_error_round_trip() {
+		let msg = RequestError {
+			request_id: RequestId(99),
+			error_code: 500,
+			reason_phrase: "Internal error".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: RequestError = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(99));
+		assert_eq!(decoded.error_code, 500);
+		assert_eq!(decoded.reason_phrase, "Internal error");
+	}
+}

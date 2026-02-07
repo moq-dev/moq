@@ -135,11 +135,15 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					publisher.recv_request_ok(&msg)?;
 				}
 			},
-			ietf::PublishNamespaceError::ID => {
-				let msg = ietf::PublishNamespaceError::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				publisher.recv_publish_namespace_error(msg)?;
-			}
+			// 0x08: PublishNamespaceError in v14, removed in v15 (replaced by RequestError 0x05)
+			ietf::PublishNamespaceError::ID => match version {
+				Version::Draft14 => {
+					let msg = ietf::PublishNamespaceError::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					publisher.recv_publish_namespace_error(msg)?;
+				}
+				Version::Draft15 => return Err(Error::UnexpectedMessage),
+			},
 			ietf::PublishNamespaceDone::ID => {
 				let msg = ietf::PublishNamespaceDone::decode_msg(&mut data, version)?;
 				tracing::debug!(message = ?msg, "received control message");
@@ -175,16 +179,24 @@ async fn run_control_read<S: web_transport_trait::Session>(
 				tracing::debug!(message = ?msg, "received control message");
 				publisher.recv_subscribe_namespace(msg)?;
 			}
-			ietf::SubscribeNamespaceOk::ID => {
-				let msg = ietf::SubscribeNamespaceOk::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				subscriber.recv_subscribe_namespace_ok(msg)?;
-			}
-			ietf::SubscribeNamespaceError::ID => {
-				let msg = ietf::SubscribeNamespaceError::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				subscriber.recv_subscribe_namespace_error(msg)?;
-			}
+			// 0x12: SubscribeNamespaceOk in v14, removed in v15 (replaced by RequestOk 0x07)
+			ietf::SubscribeNamespaceOk::ID => match version {
+				Version::Draft14 => {
+					let msg = ietf::SubscribeNamespaceOk::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					subscriber.recv_subscribe_namespace_ok(msg)?;
+				}
+				Version::Draft15 => return Err(Error::UnexpectedMessage),
+			},
+			// 0x13: SubscribeNamespaceError in v14, removed in v15 (replaced by RequestError 0x05)
+			ietf::SubscribeNamespaceError::ID => match version {
+				Version::Draft14 => {
+					let msg = ietf::SubscribeNamespaceError::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					subscriber.recv_subscribe_namespace_error(msg)?;
+				}
+				Version::Draft15 => return Err(Error::UnexpectedMessage),
+			},
 			ietf::UnsubscribeNamespace::ID => {
 				let msg = ietf::UnsubscribeNamespace::decode_msg(&mut data, version)?;
 				tracing::debug!(message = ?msg, "received control message");
@@ -215,30 +227,28 @@ async fn run_control_read<S: web_transport_trait::Session>(
 				tracing::debug!(message = ?msg, "received control message");
 				subscriber.recv_fetch_ok(msg)?;
 			}
-			ietf::FetchError::ID => {
-				let msg = ietf::FetchError::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				subscriber.recv_fetch_error(msg)?;
-			}
+			// 0x19: FetchError in v14, removed in v15 (replaced by RequestError 0x05)
+			ietf::FetchError::ID => match version {
+				Version::Draft14 => {
+					let msg = ietf::FetchError::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					subscriber.recv_fetch_error(msg)?;
+				}
+				Version::Draft15 => return Err(Error::UnexpectedMessage),
+			},
 			ietf::Publish::ID => {
 				let msg = ietf::Publish::decode_msg(&mut data, version)?;
 				tracing::debug!(message = ?msg, "received control message");
 				subscriber.recv_publish(msg)?;
 			}
-			ietf::PublishOk::ID => {
-				tracing::debug!(
-					message_id = ietf::PublishOk::ID,
-					"received control message (unsupported)"
-				);
-				return Err(Error::Unsupported);
-			}
-			ietf::PublishError::ID => {
-				tracing::debug!(
-					message_id = ietf::PublishError::ID,
-					"received control message (unsupported)"
-				);
-				return Err(Error::Unsupported);
-			}
+			// 0x1E: PublishOk — v14: unsupported, v15: removed (replaced by RequestOk 0x07)
+			ietf::PublishOk::ID => match version {
+				Version::Draft14 | Version::Draft15 => return Err(Error::UnexpectedMessage),
+			},
+			// 0x1F: PublishError — v14: unsupported, v15: removed (replaced by RequestError 0x05)
+			ietf::PublishError::ID => match version {
+				Version::Draft14 | Version::Draft15 => return Err(Error::UnexpectedMessage),
+			},
 			_ => return Err(Error::UnexpectedMessage),
 		}
 

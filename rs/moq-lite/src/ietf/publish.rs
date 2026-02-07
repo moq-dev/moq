@@ -368,3 +368,102 @@ impl Message for PublishError<'_> {
 		})
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::BytesMut;
+
+	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+		let mut buf = BytesMut::new();
+		msg.encode_msg(&mut buf, version);
+		buf.to_vec()
+	}
+
+	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes::Bytes::from(bytes.to_vec());
+		M::decode_msg(&mut buf, version)
+	}
+
+	#[test]
+	fn test_publish_v14_round_trip() {
+		let msg = Publish {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+			track_alias: 42,
+			group_order: GroupOrder::Descending,
+			largest_location: Some(Location { group: 10, object: 5 }),
+			forward: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: Publish = decode_message(&encoded, Version::Draft14).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+		assert_eq!(decoded.track_alias, 42);
+		assert_eq!(decoded.largest_location, Some(Location { group: 10, object: 5 }));
+		assert!(decoded.forward);
+	}
+
+	#[test]
+	fn test_publish_v15_round_trip() {
+		let msg = Publish {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+			track_alias: 42,
+			group_order: GroupOrder::Descending,
+			largest_location: Some(Location { group: 10, object: 5 }),
+			forward: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: Publish = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+		assert_eq!(decoded.track_alias, 42);
+		assert_eq!(decoded.largest_location, Some(Location { group: 10, object: 5 }));
+		assert!(decoded.forward);
+	}
+
+	#[test]
+	fn test_publish_ok_v14_round_trip() {
+		let msg = PublishOk {
+			request_id: RequestId(7),
+			forward: true,
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: FilterType::LargestObject,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: PublishOk = decode_message(&encoded, Version::Draft14).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(7));
+		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	#[test]
+	fn test_publish_ok_v15_round_trip() {
+		let msg = PublishOk {
+			request_id: RequestId(7),
+			forward: true,
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: FilterType::LargestObject,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: PublishOk = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(7));
+		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, 128);
+	}
+}

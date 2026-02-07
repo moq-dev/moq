@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map};
+use std::collections::{BTreeMap, HashMap, btree_map, hash_map};
 
 use num_enum::{FromPrimitive, IntoPrimitive};
 
@@ -104,17 +104,18 @@ impl Parameters {
 
 // ---- Message Parameters (used in Subscribe, Publish, Fetch, etc.) ----
 // Uses raw u64 keys since parameter IDs have different meanings from setup parameters.
+// BTreeMap ensures deterministic wire encoding order.
 
 #[derive(Default, Debug, Clone)]
 pub struct MessageParameters {
-	vars: HashMap<u64, u64>,
-	bytes: HashMap<u64, Vec<u8>>,
+	vars: BTreeMap<u64, u64>,
+	bytes: BTreeMap<u64, Vec<u8>>,
 }
 
 impl<V: Clone> Decode<V> for MessageParameters {
 	fn decode<R: bytes::Buf>(mut r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let mut vars = HashMap::new();
-		let mut bytes = HashMap::new();
+		let mut vars = BTreeMap::new();
+		let mut bytes = BTreeMap::new();
 
 		let count = u64::decode(r, version.clone())?;
 
@@ -127,13 +128,13 @@ impl<V: Clone> Decode<V> for MessageParameters {
 
 			if kind % 2 == 0 {
 				match vars.entry(kind) {
-					hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-					hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version.clone())?),
+					btree_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
+					btree_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version.clone())?),
 				};
 			} else {
 				match bytes.entry(kind) {
-					hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-					hash_map::Entry::Vacant(entry) => entry.insert(Vec::<u8>::decode(&mut r, version.clone())?),
+					btree_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
+					btree_map::Entry::Vacant(entry) => entry.insert(Vec::<u8>::decode(&mut r, version.clone())?),
 				};
 			}
 		}
