@@ -109,12 +109,56 @@ impl Av01 {
 		Ok(())
 	}
 
+	/// Initialize with minimal config if sequence header parsing fails
+	fn init_minimal(&mut self) -> anyhow::Result<()> {
+		let config = hang::catalog::VideoConfig {
+			coded_width: None,
+			coded_height: None,
+			codec: hang::catalog::AV1 {
+				profile: 0,  // Main profile
+				level: 0,    // Unknown
+				tier: 'M',   // Main tier
+				bitdepth: 8, // Assume 8-bit
+				mono_chrome: false,
+				chroma_subsampling_x: true, // 4:2:0
+				chroma_subsampling_y: true,
+				chroma_sample_position: 0,
+				color_primaries: 2,          // Unspecified
+				transfer_characteristics: 2, // Unspecified
+				matrix_coefficients: 2,      // Unspecified
+				full_range: false,
+			}
+			.into(),
+			description: None,
+			framerate: None,
+			bitrate: None,
+			display_ratio_width: None,
+			display_ratio_height: None,
+			optimize_for_latency: None,
+			container: hang::catalog::Container::Legacy,
+			jitter: None,
+		};
+
+		let mut catalog = self.catalog.lock();
+		let track = catalog.video.create_track("av01", config.clone());
+		tracing::debug!(name = ?track.name, "starting track with minimal config");
+		drop(catalog);
+
+		let track = self.broadcast.create_track(track);
+
+		self.config = Some(config);
+		self.track = Some(track.into());
+
+		Ok(())
+	}
+
 	/// Initialize the decoder with sequence header and other metadata OBUs.
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
 		let data = buf.as_ref();
 
 		// Handle av1C format (MP4/container initialization)
-		if data.len() >= 4 && data[0] == 0x0a && data.len() == 16 {
+		// av1C box starts with 0x81 (marker=1, version=1) per ISO/IEC 14496-15
+		if data.len() >= 4 && data[0] == 0x81 && data.len() >= 16 {
 			self.init_from_av1c(data)?;
 			buf.advance(data.len());
 			return Ok(());
@@ -251,8 +295,12 @@ impl Av01 {
 					Ok(seq_header) => {
 						self.init(&seq_header)?;
 					}
-					Err(e) => {
-						tracing::warn!("Failed to parse sequence header OBU, skipping: {}", e);
+					Err(_) => {
+						// Use minimal config so stream can work (catalog won't have full info)
+						if self.track.is_none() {
+							tracing::debug!("Sequence header parsing failed, initializing with minimal config");
+							self.init_minimal()?;
+						}
 					}
 				}
 
