@@ -111,7 +111,7 @@ The main reason why we use WebTransport is just to avoid HTTP semantics.
 Only the HTTP client can issue a HTTP request and there's no way (any longer) for the server to push content to the client.
 
 We could totally have the client increment a sequence number (like HLS/DASH) and constantly request the next segment.
-But then when doing [contribution](/concept/use-case/contribution/), the client/server dynamic is inverted.
+But then when doing [contribution](/concept/use-case/contribution), the client/server dynamic is inverted.
 Rather than fight HTTP semantics, we're using a proper bidirectional protocol like QUIC/WebTransport instead.
 
 ### Why it doesn't Matter
