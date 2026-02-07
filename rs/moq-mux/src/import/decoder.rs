@@ -44,7 +44,7 @@ impl FromStr for DecoderFormat {
 			#[cfg(feature = "mp4")]
 			"fmp4" | "cmaf" => Ok(DecoderFormat::Fmp4),
 			#[cfg(feature = "av1")]
-			"av01" | "av1" => Ok(DecoderFormat::Av01),
+			"av01" | "av1" | "av1C" => Ok(DecoderFormat::Av01),
 			#[cfg(feature = "aac")]
 			"aac" => Ok(DecoderFormat::Aac),
 			#[cfg(feature = "opus")]
@@ -108,7 +108,7 @@ impl FromStr for StreamFormat {
 			#[cfg(feature = "mp4")]
 			"fmp4" | "cmaf" => Ok(StreamFormat::Fmp4),
 			#[cfg(feature = "av1")]
-			"av01" | "av1" => Ok(StreamFormat::Av01),
+			"av01" | "av1" | "av1C" => Ok(StreamFormat::Av01),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
 	}
