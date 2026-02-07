@@ -19,6 +19,11 @@ export class ClientSetup {
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		if (version === Version.DRAFT_15) {
 			// Draft15: no versions list, just parameters
+			// Make sure versions is draft 15 only.
+			if (this.versions.length !== 1 || this.versions[0] !== Version.DRAFT_15) {
+				throw new Error("versions must be draft 15 only");
+			}
+
 			await this.parameters.encode(w);
 		} else if (version === Version.DRAFT_14) {
 			await w.u53(this.versions.length);
@@ -80,15 +85,15 @@ export class ServerSetup {
 		this.parameters = parameters;
 	}
 
-	async #encode(w: Writer, encodeVersion: IetfVersion): Promise<void> {
-		if (encodeVersion === Version.DRAFT_15) {
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (version === Version.DRAFT_15) {
 			// Draft15: no version field, just parameters
 			await this.parameters.encode(w);
-		} else if (encodeVersion === Version.DRAFT_14) {
+		} else if (version === Version.DRAFT_14) {
 			await w.u53(this.version);
 			await this.parameters.encode(w);
 		} else {
-			const _: never = encodeVersion;
+			const _: never = version;
 			throw new Error(`unsupported version: ${_}`);
 		}
 	}

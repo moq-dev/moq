@@ -9,7 +9,7 @@ import type * as Control from "./control.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { type Publish, type PublishDone, PublishError } from "./publish.ts";
 import type { PublishNamespace, PublishNamespaceDone } from "./publish_namespace.ts";
-import type { RequestError, RequestOk } from "./request.ts";
+import { RequestError, type RequestOk } from "./request.ts";
 import { Subscribe, type SubscribeError, type SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	SubscribeNamespace,
@@ -18,6 +18,7 @@ import {
 	UnsubscribeNamespace,
 } from "./subscribe_namespace.ts";
 import type { TrackStatus } from "./track.ts";
+import { Version } from "./version.ts";
 
 /**
  * Handles subscribing to broadcasts using moq-transport protocol with lite-compatibility restrictions.
@@ -245,8 +246,16 @@ export class Subscriber {
 	async handlePublish(msg: Publish) {
 		// TODO technically, we should send PUBLISH_OK if we had a SUBSCRIBE in flight for the same track.
 		// Otherwise, the peer will SUBSCRIBE_ERROR because duplicate subscriptions are not allowed :(
-		const err = new PublishError(msg.requestId, 500, "publish not supported");
-		await this.#control.write(err);
+		if (this.#control.version === Version.DRAFT_15) {
+			const err = new RequestError(msg.requestId, 500, "publish not supported");
+			await this.#control.write(err);
+		} else if (this.#control.version === Version.DRAFT_14) {
+			const err = new PublishError(msg.requestId, 500, "publish not supported");
+			await this.#control.write(err);
+		} else {
+			const version: never = this.#control.version;
+			throw new Error(`unsupported version: ${version}`);
+		}
 	}
 
 	/**

@@ -5375,9 +5375,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-quinn"
-version = "0.10.2"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f44b4e68a3e7adb790793e24ec8b5923a610a8c2df1d6cd58849f9e4759d04"
+checksum = "a98cafbfe6a6222996a07243a673bc3ea3e664fb5ea5217738900218ae62c28b"
 dependencies = [
  "bytes",
  "futures",
@@ -5389,15 +5389,15 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "web-transport-proto 0.3.1",
+ "web-transport-proto 0.4.0",
  "web-transport-trait",
 ]
 
 [[package]]
 name = "web-transport-trait"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ae5c857e6b426610648b39c6b48f9e66ae97b27b166d7c2f1ec369596548271"
+checksum = "2615c30ed29953bb3727391850279a25c948c0b7a4ed2343d3a78e1d3cce2f7c"
 dependencies = [
  "bytes",
 ]

@@ -133,7 +133,8 @@ impl Server {
 		tls.alpn_protocols = vec![
 			web_transport_quinn::ALPN.as_bytes().to_vec(),
 			moq_lite::lite::ALPN.as_bytes().to_vec(),
-			moq_lite::ietf::ALPN.as_bytes().to_vec(),
+			moq_lite::ietf::ALPN_14.as_bytes().to_vec(),
+			moq_lite::ietf::ALPN_15.as_bytes().to_vec(),
 		];
 		tls.key_log = Arc::new(rustls::KeyLogFile::new());
 
@@ -308,7 +309,7 @@ impl Server {
 					kind: RequestKind::WebTransport(request),
 				})
 			}
-			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => Ok(Request {
+			moq_lite::lite::ALPN | moq_lite::ietf::ALPN_14 | moq_lite::ietf::ALPN_15 => Ok(Request {
 				server: server.clone(),
 				kind: RequestKind::Quic(QuicRequest::accept(conn)),
 			}),
@@ -332,7 +333,7 @@ impl Server {
 					kind: RequestKind::IrohWebTransport(request),
 				})
 			}
-			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => {
+			moq_lite::lite::ALPN | moq_lite::ietf::ALPN_14 | moq_lite::ietf::ALPN_15 => {
 				let request = IrohQuicRequest::accept(conn);
 				Ok(Request {
 					server: server.clone(),
@@ -376,7 +377,7 @@ impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
 	pub async fn reject(self, status: http::StatusCode) -> anyhow::Result<()> {
 		match self.kind {
-			RequestKind::WebTransport(request) => request.close(status).await?,
+			RequestKind::WebTransport(request) => request.reject(status).await?,
 			RequestKind::Quic(request) => request.close(status),
 			#[cfg(feature = "iroh")]
 			RequestKind::IrohWebTransport(request) => request.close(status).await?,
@@ -405,7 +406,21 @@ impl Request {
 	/// Accept the session, performing rest of the MoQ handshake.
 	pub async fn accept(self) -> anyhow::Result<Session> {
 		let session = match self.kind {
-			RequestKind::WebTransport(request) => self.server.accept(request.ok().await?).await?,
+			RequestKind::WebTransport(request) => {
+				let mut response = web_transport_quinn::proto::ConnectResponse::new(http::StatusCode::OK);
+
+				// Choose the ALPN based on our supported versions.
+				if let Some(alpn) = request
+					.protocols
+					.iter()
+					.find(|alpn| moq_lite::alpns().contains(&alpn.as_str()))
+				{
+					response = response.with_protocol(alpn.as_str());
+				}
+
+				let session = request.respond(response).await?;
+				self.server.accept(session).await?
+			}
 			RequestKind::Quic(request) => self.server.accept(request.ok()).await?,
 			#[cfg(feature = "iroh")]
 			RequestKind::IrohWebTransport(request) => self.server.accept(request.ok().await?).await?,
@@ -418,7 +433,7 @@ impl Request {
 	/// Returns the URL provided by the client.
 	pub fn url(&self) -> Option<&Url> {
 		match &self.kind {
-			RequestKind::WebTransport(request) => Some(request.url()),
+			RequestKind::WebTransport(request) => Some(&request.url),
 			#[cfg(feature = "iroh")]
 			RequestKind::IrohWebTransport(request) => Some(request.url()),
 			_ => None,
@@ -445,7 +460,11 @@ impl QuicRequest {
 
 	/// Accept the session, returning a 200 OK if using WebTransport.
 	pub fn ok(self) -> web_transport_quinn::Session {
-		web_transport_quinn::Session::raw(self.connection, self.url)
+		// TODO add support for ALPN negotiation
+		let request = web_transport_quinn::proto::ConnectRequest::new(self.url);
+		let response = web_transport_quinn::proto::ConnectResponse::new(http::StatusCode::OK);
+
+		web_transport_quinn::Session::raw(self.connection, request, response)
 	}
 
 	/// Returns the URL provided by the client.

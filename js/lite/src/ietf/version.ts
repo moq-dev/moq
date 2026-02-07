@@ -23,6 +23,12 @@ export const Version = {
 
 export type Version = (typeof Version)[keyof typeof Version];
 
+// ALPN / WebTransport subprotocol identifiers for draft versions.
+export const ALPN = {
+	DRAFT_14: "moq-00",
+	DRAFT_15: "moqt-15",
+} as const;
+
 /**
  * IETF protocol versions used by the ietf/ module.
  * Use this narrower type for version-branched encode/decode to get exhaustive matching.

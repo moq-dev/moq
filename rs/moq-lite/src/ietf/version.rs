@@ -1,6 +1,6 @@
 use crate::coding;
 
-pub const ALPN: &str = "moq-00";
+pub const ALPN_14: &str = "moq-00";
 pub const ALPN_15: &str = "moqt-15";
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -27,11 +27,5 @@ impl TryFrom<coding::Version> for Version {
 impl From<Version> for coding::Version {
 	fn from(value: Version) -> Self {
 		Self(value as u64)
-	}
-}
-
-impl Version {
-	pub const fn coding(self) -> coding::Version {
-		coding::Version(self as u64)
 	}
 }

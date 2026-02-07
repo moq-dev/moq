@@ -65,6 +65,21 @@ export class Subscribe {
 			// v15: fields are in parameters
 			const params = await MessageParameters.decode(r);
 			const subscriberPriority = params.subscriberPriority ?? 128;
+			const groupOrder = params.groupOrder ?? GROUP_ORDER;
+			if (groupOrder > 2 || groupOrder === 0) {
+				throw new Error(`unknown group order: ${groupOrder}`);
+			}
+
+			const forward = params.forward ?? true;
+			if (!forward) {
+				throw new Error(`unsupported forward value: ${forward}`);
+			}
+
+			const filterType = params.subscriptionFilter ?? 0x2;
+			if (filterType !== 0x1 && filterType !== 0x2) {
+				throw new Error(`unsupported filter type: ${filterType}`);
+			}
+
 			return new Subscribe(requestId, trackNamespace, trackName, subscriberPriority);
 		} else if (version === Version.DRAFT_14) {
 			const subscriberPriority = await r.u8();
