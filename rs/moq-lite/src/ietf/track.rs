@@ -1,4 +1,4 @@
-//! IETF moq-transport-14 track status messages
+//! IETF moq-transport track status messages (v14 + v15)
 
 use std::borrow::Cow;
 
@@ -7,12 +7,14 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{FilterType, GroupOrder, Message, Parameters, RequestId, Version},
+	ietf::{FilterType, GroupOrder, Message, MessageParameters, Parameters, RequestId, Version},
 };
 
 use super::namespace::{decode_namespace, encode_namespace};
 
 /// TrackStatus message (0x0d)
+/// v14: own format (TrackStatusRequest-like with subscribe fields)
+/// v15: same wire format as SUBSCRIBE. Response is REQUEST_OK.
 #[derive(Clone, Debug)]
 pub struct TrackStatus<'a> {
 	pub request_id: RequestId,
@@ -27,11 +29,21 @@ impl Message for TrackStatus<'_> {
 		self.request_id.encode(w, version);
 		encode_namespace(w, &self.track_namespace, version);
 		self.track_name.encode(w, version);
-		0u8.encode(w, version); // subscriber priority
-		GroupOrder::Descending.encode(w, version);
-		false.encode(w, version); // forward
-		FilterType::LargestObject.encode(w, version); // filter type
-		0u8.encode(w, version); // no parameters
+
+		match version {
+			Version::Draft14 => {
+				0u8.encode(w, version); // subscriber priority
+				GroupOrder::Descending.encode(w, version);
+				false.encode(w, version); // forward
+				FilterType::LargestObject.encode(w, version); // filter type
+				0u8.encode(w, version); // no parameters
+			}
+			Version::Draft15 => {
+				// v15: same format as Subscribe - fields in parameters
+				let params = MessageParameters::default();
+				params.encode(w, version);
+			}
+		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -39,13 +51,18 @@ impl Message for TrackStatus<'_> {
 		let track_namespace = decode_namespace(r, version)?;
 		let track_name = Cow::<str>::decode(r, version)?;
 
-		let _subscriber_priority = u8::decode(r, version)?;
-		let _group_order = GroupOrder::decode(r, version)?;
-		let _forward = bool::decode(r, version)?;
-		let _filter_type = u64::decode(r, version)?;
-
-		// Ignore parameters, who cares.
-		let _params = Parameters::decode(r, version)?;
+		match version {
+			Version::Draft14 => {
+				let _subscriber_priority = u8::decode(r, version)?;
+				let _group_order = GroupOrder::decode(r, version)?;
+				let _forward = bool::decode(r, version)?;
+				let _filter_type = u64::decode(r, version)?;
+				let _params = Parameters::decode(r, version)?;
+			}
+			Version::Draft15 => {
+				let _params = MessageParameters::decode(r, version)?;
+			}
+		}
 
 		Ok(Self {
 			request_id,

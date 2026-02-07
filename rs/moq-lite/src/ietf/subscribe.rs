@@ -1,4 +1,4 @@
-//! IETF moq-transport-14 subscribe messages
+//! IETF moq-transport subscribe messages (v14 + v15)
 
 use std::borrow::Cow;
 
@@ -7,7 +7,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{GroupOrder, Location, Message, Parameters, RequestId, Version},
+	ietf::{GroupOrder, Location, Message, MessageParameters, Parameters, RequestId, Version},
 };
 
 use super::namespace::{decode_namespace, encode_namespace};
@@ -50,60 +50,93 @@ impl Message for Subscribe<'_> {
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
-
-		// Decode namespace (tuple of strings)
 		let track_namespace = decode_namespace(r, version)?;
-
 		let track_name = Cow::<str>::decode(r, version)?;
-		let subscriber_priority = u8::decode(r, version)?;
 
-		let group_order = GroupOrder::decode(r, version)?;
+		match version {
+			Version::Draft14 => {
+				let subscriber_priority = u8::decode(r, version)?;
+				let group_order = GroupOrder::decode(r, version)?;
 
-		let forward = bool::decode(r, version)?;
-		if !forward {
-			return Err(DecodeError::Unsupported);
+				let forward = bool::decode(r, version)?;
+				if !forward {
+					return Err(DecodeError::Unsupported);
+				}
+
+				let filter_type = FilterType::decode(r, version)?;
+				match filter_type {
+					FilterType::AbsoluteStart => {
+						let _start = Location::decode(r, version)?;
+					}
+					FilterType::AbsoluteRange => {
+						let _start = Location::decode(r, version)?;
+						let _end_group = u64::decode(r, version)?;
+					}
+					FilterType::NextGroup | FilterType::LargestObject => {}
+				};
+
+				let _params = Parameters::decode(r, version)?;
+
+				Ok(Self {
+					request_id,
+					track_namespace,
+					track_name,
+					subscriber_priority,
+					group_order,
+					filter_type,
+				})
+			}
+			Version::Draft15 => {
+				// v15: fields moved into parameters
+				let params = MessageParameters::decode(r, version)?;
+
+				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
+				let group_order = match params.group_order() {
+					Some(v) => GroupOrder::try_from(v as u8).unwrap_or(GroupOrder::Descending),
+					None => GroupOrder::Descending,
+				};
+				let filter_type = params.subscription_filter().unwrap_or(FilterType::LargestObject);
+
+				Ok(Self {
+					request_id,
+					track_namespace,
+					track_name,
+					subscriber_priority,
+					group_order,
+					filter_type,
+				})
+			}
 		}
-
-		let filter_type = FilterType::decode(r, version)?;
-		match filter_type {
-			FilterType::AbsoluteStart => {
-				let _start = Location::decode(r, version)?;
-			}
-			FilterType::AbsoluteRange => {
-				let _start = Location::decode(r, version)?;
-				let _end_group = u64::decode(r, version)?;
-			}
-			FilterType::NextGroup | FilterType::LargestObject => {}
-		};
-
-		// Ignore parameters, who cares.
-		let _params = Parameters::decode(r, version)?;
-
-		Ok(Self {
-			request_id,
-			track_namespace,
-			track_name,
-			subscriber_priority,
-			group_order,
-			filter_type,
-		})
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
 		self.request_id.encode(w, version);
 		encode_namespace(w, &self.track_namespace, version);
 		self.track_name.encode(w, version);
-		self.subscriber_priority.encode(w, version);
-		GroupOrder::Descending.encode(w, version);
-		true.encode(w, version); // forward
 
-		assert!(
-			!matches!(self.filter_type, FilterType::AbsoluteStart | FilterType::AbsoluteRange),
-			"Absolute subscribe not supported"
-		);
+		match version {
+			Version::Draft14 => {
+				self.subscriber_priority.encode(w, version);
+				GroupOrder::Descending.encode(w, version);
+				true.encode(w, version); // forward
 
-		self.filter_type.encode(w, version);
-		0u8.encode(w, version); // no parameters
+				assert!(
+					!matches!(self.filter_type, FilterType::AbsoluteStart | FilterType::AbsoluteRange),
+					"Absolute subscribe not supported"
+				);
+
+				self.filter_type.encode(w, version);
+				0u8.encode(w, version); // no parameters
+			}
+			Version::Draft15 => {
+				let mut params = MessageParameters::default();
+				params.set_subscriber_priority(self.subscriber_priority);
+				params.set_group_order(u8::from(GroupOrder::Descending) as u64);
+				params.set_forward(true);
+				params.set_subscription_filter(self.filter_type);
+				params.encode(w, version);
+			}
+		}
 	}
 }
 
@@ -120,32 +153,47 @@ impl Message for SubscribeOk {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
 		self.request_id.encode(w, version);
 		self.track_alias.encode(w, version);
-		0u64.encode(w, version); // expires = 0
-		GroupOrder::Descending.encode(w, version);
-		false.encode(w, version); // no content
-		0u8.encode(w, version); // no parameters
+
+		match version {
+			Version::Draft14 => {
+				0u64.encode(w, version); // expires = 0
+				GroupOrder::Descending.encode(w, version);
+				false.encode(w, version); // no content
+				0u8.encode(w, version); // no parameters
+			}
+			Version::Draft15 => {
+				// v15: just parameters after track_alias
+				let mut params = MessageParameters::default();
+				params.set_group_order(u8::from(GroupOrder::Descending) as u64);
+				params.encode(w, version);
+			}
+		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let track_alias = u64::decode(r, version)?;
 
-		let expires = u64::decode(r, version)?;
-		if expires != 0 {
-			return Err(DecodeError::Unsupported);
+		match version {
+			Version::Draft14 => {
+				let expires = u64::decode(r, version)?;
+				if expires != 0 {
+					return Err(DecodeError::Unsupported);
+				}
+
+				let _group_order = u8::decode(r, version)?;
+
+				if bool::decode(r, version)? {
+					let _group = u64::decode(r, version)?;
+					let _object = u64::decode(r, version)?;
+				}
+
+				let _params = Parameters::decode(r, version)?;
+			}
+			Version::Draft15 => {
+				let _params = MessageParameters::decode(r, version)?;
+			}
 		}
-
-		// Ignore group order, who cares.
-		let _group_order = u8::decode(r, version)?;
-
-		// TODO: We don't support largest group/object yet
-		if bool::decode(r, version)? {
-			let _group = u64::decode(r, version)?;
-			let _object = u64::decode(r, version)?;
-		}
-
-		// Ignore parameters, who cares.
-		let _params = Parameters::decode(r, version)?;
 
 		Ok(Self {
 			request_id,
@@ -202,18 +250,7 @@ impl Message for Unsubscribe {
 	}
 }
 
-/*
-  Type (i) = 0x2,
-  Length (16),
-  Request ID (i),
-  Subscription Request ID (i),
-  Start Location (Location),
-  End Group (i),
-  Subscriber Priority (8),
-  Forward (8),
-  Number of Parameters (i),
-  Parameters (..) ...
-*/
+/// SubscribeUpdate message (0x02)
 #[derive(Debug)]
 pub struct SubscribeUpdate {
 	pub request_id: RequestId,
@@ -222,39 +259,72 @@ pub struct SubscribeUpdate {
 	pub end_group: u64,
 	pub subscriber_priority: u8,
 	pub forward: bool,
-	// pub parameters: Parameters,
 }
 
 impl Message for SubscribeUpdate {
 	const ID: u64 = 0x02;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		self.subscription_request_id.encode(w, version);
-		self.start_location.encode(w, version);
-		self.end_group.encode(w, version);
-		self.subscriber_priority.encode(w, version);
-		self.forward.encode(w, version);
-		0u8.encode(w, version); // no parameters
+		match version {
+			Version::Draft14 => {
+				self.request_id.encode(w, version);
+				self.subscription_request_id.encode(w, version);
+				self.start_location.encode(w, version);
+				self.end_group.encode(w, version);
+				self.subscriber_priority.encode(w, version);
+				self.forward.encode(w, version);
+				0u8.encode(w, version); // no parameters
+			}
+			Version::Draft15 => {
+				self.request_id.encode(w, version);
+				self.subscription_request_id.encode(w, version);
+				let mut params = MessageParameters::default();
+				params.set_subscriber_priority(self.subscriber_priority);
+				params.set_forward(self.forward);
+				params.set_subscription_filter(FilterType::LargestObject);
+				params.encode(w, version);
+			}
+		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		let subscription_request_id = RequestId::decode(r, version)?;
-		let start_location = Location::decode(r, version)?;
-		let end_group = u64::decode(r, version)?;
-		let subscriber_priority = u8::decode(r, version)?;
-		let forward = bool::decode(r, version)?;
-		let _parameters = Parameters::decode(r, version)?;
+		match version {
+			Version::Draft14 => {
+				let request_id = RequestId::decode(r, version)?;
+				let subscription_request_id = RequestId::decode(r, version)?;
+				let start_location = Location::decode(r, version)?;
+				let end_group = u64::decode(r, version)?;
+				let subscriber_priority = u8::decode(r, version)?;
+				let forward = bool::decode(r, version)?;
+				let _parameters = Parameters::decode(r, version)?;
 
-		Ok(Self {
-			request_id,
-			subscription_request_id,
-			start_location,
-			end_group,
-			subscriber_priority,
-			forward,
-		})
+				Ok(Self {
+					request_id,
+					subscription_request_id,
+					start_location,
+					end_group,
+					subscriber_priority,
+					forward,
+				})
+			}
+			Version::Draft15 => {
+				let request_id = RequestId::decode(r, version)?;
+				let subscription_request_id = RequestId::decode(r, version)?;
+				let params = MessageParameters::decode(r, version)?;
+
+				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
+				let forward = params.forward().unwrap_or(true);
+
+				Ok(Self {
+					request_id,
+					subscription_request_id,
+					start_location: Location { group: 0, object: 0 },
+					end_group: 0,
+					subscriber_priority,
+					forward,
+				})
+			}
+		}
 	}
 }
 
@@ -263,15 +333,15 @@ mod tests {
 	use super::*;
 	use bytes::BytesMut;
 
-	fn encode_message<M: Message>(msg: &M) -> Vec<u8> {
+	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, Version::Draft14);
+		msg.encode_msg(&mut buf, version);
 		buf.to_vec()
 	}
 
-	fn decode_message<M: Message>(bytes: &[u8]) -> Result<M, DecodeError> {
+	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
 		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		M::decode_msg(&mut buf, Version::Draft14)
+		M::decode_msg(&mut buf, version)
 	}
 
 	#[test]
@@ -285,8 +355,28 @@ mod tests {
 			filter_type: FilterType::LargestObject,
 		};
 
-		let encoded = encode_message(&msg);
-		let decoded: Subscribe = decode_message(&encoded).unwrap();
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: Subscribe = decode_message(&encoded, Version::Draft14).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test");
+		assert_eq!(decoded.track_name, "video");
+		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	#[test]
+	fn test_subscribe_round_trip_v15() {
+		let msg = Subscribe {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: FilterType::LargestObject,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: Subscribe = decode_message(&encoded, Version::Draft15).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(1));
 		assert_eq!(decoded.track_namespace.as_str(), "test");
@@ -305,8 +395,8 @@ mod tests {
 			filter_type: FilterType::LargestObject,
 		};
 
-		let encoded = encode_message(&msg);
-		let decoded: Subscribe = decode_message(&encoded).unwrap();
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: Subscribe = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.track_namespace.as_str(), "conference/room123");
 	}
@@ -318,10 +408,24 @@ mod tests {
 			track_alias: 42,
 		};
 
-		let encoded = encode_message(&msg);
-		let decoded: SubscribeOk = decode_message(&encoded).unwrap();
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(42));
+	}
+
+	#[test]
+	fn test_subscribe_ok_v15() {
+		let msg = SubscribeOk {
+			request_id: RequestId(42),
+			track_alias: 42,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(42));
+		assert_eq!(decoded.track_alias, 42);
 	}
 
 	#[test]
@@ -332,8 +436,8 @@ mod tests {
 			reason_phrase: "Not found".into(),
 		};
 
-		let encoded = encode_message(&msg);
-		let decoded: SubscribeError = decode_message(&encoded).unwrap();
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: SubscribeError = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(123));
 		assert_eq!(decoded.error_code, 500);
@@ -346,8 +450,8 @@ mod tests {
 			request_id: RequestId(999),
 		};
 
-		let encoded = encode_message(&msg);
-		let decoded: Unsubscribe = decode_message(&encoded).unwrap();
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: Unsubscribe = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(999));
 	}
@@ -367,7 +471,7 @@ mod tests {
 			0x00, // num_params
 		];
 
-		let result: Result<Subscribe, _> = decode_message(&invalid_bytes);
+		let result: Result<Subscribe, _> = decode_message(&invalid_bytes, Version::Draft14);
 		assert!(result.is_err());
 	}
 
@@ -382,7 +486,7 @@ mod tests {
 			0x00, // num_params
 		];
 
-		let result: Result<SubscribeOk, _> = decode_message(&invalid_bytes);
+		let result: Result<SubscribeOk, _> = decode_message(&invalid_bytes, Version::Draft14);
 		assert!(result.is_err());
 	}
 }
