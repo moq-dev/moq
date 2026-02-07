@@ -107,3 +107,144 @@ export class Parameters {
 		return params;
 	}
 }
+
+// ---- Message Parameters (used in Subscribe, Publish, Fetch, etc.) ----
+// Uses raw bigint keys since parameter IDs have different meanings from setup parameters.
+
+// Varint parameter IDs (even)
+const MSG_PARAM_DELIVERY_TIMEOUT = 0x02n;
+const MSG_PARAM_MAX_CACHE_DURATION = 0x04n;
+const MSG_PARAM_EXPIRES = 0x08n;
+const MSG_PARAM_PUBLISHER_PRIORITY = 0x0en;
+const MSG_PARAM_FORWARD = 0x10n;
+const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
+const MSG_PARAM_GROUP_ORDER = 0x22n;
+
+// Bytes parameter IDs (odd)
+const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
+
+export class MessageParameters {
+	vars: Map<bigint, bigint>;
+	bytes: Map<bigint, Uint8Array>;
+
+	constructor() {
+		this.vars = new Map();
+		this.bytes = new Map();
+	}
+
+	// --- Varint accessors ---
+
+	get subscriberPriority(): number | undefined {
+		const v = this.vars.get(MSG_PARAM_SUBSCRIBER_PRIORITY);
+		return v !== undefined ? Number(v) : undefined;
+	}
+
+	set subscriberPriority(v: number) {
+		this.vars.set(MSG_PARAM_SUBSCRIBER_PRIORITY, BigInt(v));
+	}
+
+	get groupOrder(): number | undefined {
+		const v = this.vars.get(MSG_PARAM_GROUP_ORDER);
+		return v !== undefined ? Number(v) : undefined;
+	}
+
+	set groupOrder(v: number) {
+		this.vars.set(MSG_PARAM_GROUP_ORDER, BigInt(v));
+	}
+
+	get forward(): boolean | undefined {
+		const v = this.vars.get(MSG_PARAM_FORWARD);
+		return v !== undefined ? v !== 0n : undefined;
+	}
+
+	set forward(v: boolean) {
+		this.vars.set(MSG_PARAM_FORWARD, v ? 1n : 0n);
+	}
+
+	get publisherPriority(): number | undefined {
+		const v = this.vars.get(MSG_PARAM_PUBLISHER_PRIORITY);
+		return v !== undefined ? Number(v) : undefined;
+	}
+
+	set publisherPriority(v: number) {
+		this.vars.set(MSG_PARAM_PUBLISHER_PRIORITY, BigInt(v));
+	}
+
+	get expires(): bigint | undefined {
+		return this.vars.get(MSG_PARAM_EXPIRES);
+	}
+
+	set expires(v: bigint) {
+		this.vars.set(MSG_PARAM_EXPIRES, v);
+	}
+
+	get deliveryTimeout(): bigint | undefined {
+		return this.vars.get(MSG_PARAM_DELIVERY_TIMEOUT);
+	}
+
+	set deliveryTimeout(v: bigint) {
+		this.vars.set(MSG_PARAM_DELIVERY_TIMEOUT, v);
+	}
+
+	get maxCacheDuration(): bigint | undefined {
+		return this.vars.get(MSG_PARAM_MAX_CACHE_DURATION);
+	}
+
+	set maxCacheDuration(v: bigint) {
+		this.vars.set(MSG_PARAM_MAX_CACHE_DURATION, v);
+	}
+
+	// --- Bytes accessors ---
+
+	get subscriptionFilter(): number | undefined {
+		const data = this.bytes.get(MSG_PARAM_SUBSCRIPTION_FILTER);
+		if (!data || data.length === 0) return undefined;
+		// Filter type is a varint — for our purposes, the first byte suffices
+		return data[0];
+	}
+
+	set subscriptionFilter(v: number) {
+		this.bytes.set(MSG_PARAM_SUBSCRIPTION_FILTER, new Uint8Array([v]));
+	}
+
+	async encode(w: Writer) {
+		await w.u53(this.vars.size + this.bytes.size);
+
+		for (const [id, value] of this.vars) {
+			await w.u62(id);
+			await w.u62(value);
+		}
+
+		for (const [id, value] of this.bytes) {
+			await w.u62(id);
+			await w.u53(value.length);
+			await w.write(value);
+		}
+	}
+
+	static async decode(r: Reader): Promise<MessageParameters> {
+		const count = await r.u53();
+		const params = new MessageParameters();
+
+		for (let i = 0; i < count; i++) {
+			const id = await r.u62();
+
+			if (id % 2n === 0n) {
+				if (params.vars.has(id)) {
+					throw new Error(`duplicate message parameter id: ${id.toString()}`);
+				}
+				const varint = await r.u62();
+				params.vars.set(id, varint);
+			} else {
+				if (params.bytes.has(id)) {
+					throw new Error(`duplicate message parameter id: ${id.toString()}`);
+				}
+				const size = await r.u53();
+				const bytes = await r.read(size);
+				params.bytes.set(id, bytes);
+			}
+		}
+
+		return params;
+	}
+}

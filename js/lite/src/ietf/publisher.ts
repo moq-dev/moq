@@ -14,6 +14,7 @@ import {
 	type PublishNamespaceError,
 	type PublishNamespaceOk,
 } from "./publish_namespace.ts";
+import type { RequestError, RequestOk } from "./request.ts";
 import { type Subscribe, SubscribeError, SubscribeOk, type Unsubscribe } from "./subscribe.ts";
 import type { SubscribeNamespace, UnsubscribeNamespace } from "./subscribe_namespace.ts";
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
@@ -153,6 +154,7 @@ export class Publisher {
 				hasSubgroupObject: false,
 				// Automatically end the group on stream FIN
 				hasEnd: true,
+				hasPriority: true,
 			});
 
 			console.debug("sending group header", header);
@@ -222,4 +224,14 @@ export class Publisher {
 	async handleSubscribeNamespace(_msg: SubscribeNamespace) {}
 
 	async handleUnsubscribeNamespace(_msg: UnsubscribeNamespace) {}
+
+	// v15: REQUEST_OK replaces PublishNamespaceOk, SubscribeNamespaceOk
+	async handleRequestOk(_msg: RequestOk) {
+		// TODO: route by request_id to determine what kind of request it belongs to
+	}
+
+	// v15: REQUEST_ERROR replaces SubscribeError, PublishError, etc.
+	async handleRequestError(_msg: RequestError) {
+		// TODO: route by request_id to determine what kind of request it belongs to
+	}
 }

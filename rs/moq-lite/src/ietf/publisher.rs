@@ -7,7 +7,9 @@ use web_transport_trait::SendStream;
 use crate::{
 	Error, Origin, OriginConsumer, Track, TrackConsumer,
 	coding::Writer,
-	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, MessageParameters, RequestId, Version},
+	ietf::{
+		self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, MessageParameters, RequestId, Version,
+	},
 	model::GroupConsumer,
 };
 

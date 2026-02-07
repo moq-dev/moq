@@ -103,42 +103,38 @@ async fn run_control_read<S: web_transport_trait::Session>(
 				subscriber.recv_subscribe_ok(msg)?;
 			}
 			// 0x05: SubscribeError in v14, REQUEST_ERROR in v15
-			ietf::SubscribeError::ID => {
-				match version {
-					Version::Draft14 => {
-						let msg = ietf::SubscribeError::decode_msg(&mut data, version)?;
-						tracing::debug!(message = ?msg, "received control message");
-						subscriber.recv_subscribe_error(msg)?;
-					}
-					Version::Draft15 => {
-						let msg = ietf::RequestError::decode_msg(&mut data, version)?;
-						tracing::debug!(message = ?msg, "received control message");
-						subscriber.recv_request_error(&msg)?;
-						publisher.recv_request_error(&msg)?;
-					}
+			ietf::SubscribeError::ID => match version {
+				Version::Draft14 => {
+					let msg = ietf::SubscribeError::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					subscriber.recv_subscribe_error(msg)?;
 				}
-			}
+				Version::Draft15 => {
+					let msg = ietf::RequestError::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					subscriber.recv_request_error(&msg)?;
+					publisher.recv_request_error(&msg)?;
+				}
+			},
 			ietf::PublishNamespace::ID => {
 				let msg = ietf::PublishNamespace::decode_msg(&mut data, version)?;
 				tracing::debug!(message = ?msg, "received control message");
 				subscriber.recv_publish_namespace(msg)?;
 			}
 			// 0x07: PublishNamespaceOk in v14, REQUEST_OK in v15
-			ietf::PublishNamespaceOk::ID => {
-				match version {
-					Version::Draft14 => {
-						let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, version)?;
-						tracing::debug!(message = ?msg, "received control message");
-						publisher.recv_publish_namespace_ok(msg)?;
-					}
-					Version::Draft15 => {
-						let msg = ietf::RequestOk::decode_msg(&mut data, version)?;
-						tracing::debug!(message = ?msg, "received control message");
-						subscriber.recv_request_ok(&msg)?;
-						publisher.recv_request_ok(&msg)?;
-					}
+			ietf::PublishNamespaceOk::ID => match version {
+				Version::Draft14 => {
+					let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					publisher.recv_publish_namespace_ok(msg)?;
 				}
-			}
+				Version::Draft15 => {
+					let msg = ietf::RequestOk::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					subscriber.recv_request_ok(&msg)?;
+					publisher.recv_request_ok(&msg)?;
+				}
+			},
 			ietf::PublishNamespaceError::ID => {
 				let msg = ietf::PublishNamespaceError::decode_msg(&mut data, version)?;
 				tracing::debug!(message = ?msg, "received control message");

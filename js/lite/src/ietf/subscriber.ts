@@ -9,6 +9,7 @@ import type * as Control from "./control.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { type Publish, type PublishDone, PublishError } from "./publish.ts";
 import type { PublishNamespace, PublishNamespaceDone } from "./publish_namespace.ts";
+import type { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, type SubscribeError, type SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	SubscribeNamespace,
@@ -316,5 +317,23 @@ export class Subscriber {
 	 */
 	async handleTrackStatus(_msg: TrackStatus) {
 		throw new Error("TRACK_STATUS messages are not supported");
+	}
+
+	// v15: REQUEST_OK replaces SubscribeNamespaceOk, PublishNamespaceOk
+	async handleRequestOk(msg: RequestOk) {
+		// In v15, RequestOk is used for subscribe namespace acknowledgements
+		// Route by request_id — treat similarly to SubscribeNamespaceOk for now
+		console.debug("received REQUEST_OK", msg.requestId);
+	}
+
+	// v15: REQUEST_ERROR replaces SubscribeNamespaceError, etc.
+	async handleRequestError(msg: RequestError) {
+		// In v15, RequestError replaces SubscribeError for subscribe requests
+		const callback = this.#subscribeCallbacks.get(msg.requestId);
+		if (callback) {
+			callback.reject(new Error(`REQUEST_ERROR: code=${msg.errorCode} reason=${msg.reasonPhrase}`));
+		} else {
+			console.warn("handleRequestError unknown requestId", msg.requestId);
+		}
 	}
 }

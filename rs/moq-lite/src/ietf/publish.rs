@@ -110,8 +110,7 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode},
 	ietf::{
-		FilterType, GroupOrder, Location, Message, MessageParameters, Parameters, RequestId,
-		Version,
+		FilterType, GroupOrder, Location, Message, MessageParameters, Parameters, RequestId, Version,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };

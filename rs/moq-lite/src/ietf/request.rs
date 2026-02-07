@@ -91,10 +91,7 @@ impl Message for RequestOk {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let parameters = MessageParameters::decode(r, version)?;
-		Ok(Self {
-			request_id,
-			parameters,
-		})
+		Ok(Self { request_id, parameters })
 	}
 }
 

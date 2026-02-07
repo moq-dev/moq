@@ -82,9 +82,13 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n); // Allow a ton of request IDs.
 	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js")); // Put the implementation name in the parameters.
 
-	const client = new Ietf.ClientSetup([Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14], params);
+	const client = new Ietf.ClientSetup(
+		[Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_15, Ietf.Version.DRAFT_14],
+		params,
+	);
 	console.debug(url.toString(), "sending client setup", client);
-	await client.encode(stream.writer);
+	// Always encode in Draft14 format for initial handshake (version list + params)
+	await client.encode(stream.writer, Ietf.Version.DRAFT_14);
 
 	// And we expect 0x21 as the response.
 	const serverCompat = await stream.reader.u53();
@@ -92,7 +96,8 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		throw new Error(`unsupported server message type: ${serverCompat.toString()}`);
 	}
 
-	const server = await Ietf.ServerSetup.decode(stream.reader);
+	// Decode ServerSetup in Draft14 format (version + params)
+	const server = await Ietf.ServerSetup.decode(stream.reader, Ietf.Version.DRAFT_14);
 	console.debug(url.toString(), "received server setup", server);
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
@@ -100,8 +105,8 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		return new Lite.Connection(url, quic, stream, server.version as Lite.Version);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
-		console.debug(url.toString(), "moq-ietf session established");
-		return new Ietf.Connection(url, quic, stream, maxRequestId);
+		console.debug(url.toString(), "moq-ietf session established, version:", server.version.toString(16));
+		return new Ietf.Connection(url, quic, stream, maxRequestId, server.version as Ietf.IetfVersion);
 	} else {
 		throw new Error(`unsupported server version: ${server.version.toString()}`);
 	}

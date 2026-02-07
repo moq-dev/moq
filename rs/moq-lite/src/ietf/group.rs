@@ -58,7 +58,11 @@ impl GroupFlags {
 			"has_subgroup and has_subgroup_object cannot be true at the same time"
 		);
 
-		let base = if self.has_priority { Self::START } else { Self::START_NO_PRIORITY };
+		let base = if self.has_priority {
+			Self::START
+		} else {
+			Self::START_NO_PRIORITY
+		};
 		let mut id: u64 = base;
 		if self.has_extensions {
 			id |= 0x01;

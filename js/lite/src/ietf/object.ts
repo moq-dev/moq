@@ -7,6 +7,9 @@ export interface GroupFlags {
 	hasSubgroup: boolean;
 	hasSubgroupObject: boolean;
 	hasEnd: boolean;
+	// v15: whether priority is present in the header.
+	// When false (0x30 base), priority inherits from the control message.
+	hasPriority: boolean;
 }
 
 /**
@@ -33,7 +36,8 @@ export class Group {
 			throw new Error(`Subgroup ID must be 0 if hasSubgroup is false: ${this.subGroupId}`);
 		}
 
-		let id = 0x10;
+		const base = this.flags.hasPriority ? 0x10 : 0x30;
+		let id = base;
 		if (this.flags.hasExtensions) {
 			id |= 0x01;
 		}
@@ -52,26 +56,38 @@ export class Group {
 		if (this.flags.hasSubgroup) {
 			await w.u53(this.subGroupId);
 		}
-		await w.u8(0); // publisher priority
+		if (this.flags.hasPriority) {
+			await w.u8(this.publisherPriority);
+		}
 	}
 
 	static async decode(r: Reader): Promise<Group> {
 		const id = await r.u53();
-		if (id < 0x10 || id > 0x1f) {
+
+		let hasPriority: boolean;
+		let baseId: number;
+		if (id >= 0x10 && id <= 0x1f) {
+			hasPriority = true;
+			baseId = id;
+		} else if (id >= 0x30 && id <= 0x3f) {
+			hasPriority = false;
+			baseId = id - (0x30 - 0x10);
+		} else {
 			throw new Error(`Unsupported group type: ${id}`);
 		}
 
-		const flags = {
-			hasExtensions: (id & 0x01) !== 0,
-			hasSubgroupObject: (id & 0x02) !== 0,
-			hasSubgroup: (id & 0x04) !== 0,
-			hasEnd: (id & 0x08) !== 0,
+		const flags: GroupFlags = {
+			hasExtensions: (baseId & 0x01) !== 0,
+			hasSubgroupObject: (baseId & 0x02) !== 0,
+			hasSubgroup: (baseId & 0x04) !== 0,
+			hasEnd: (baseId & 0x08) !== 0,
+			hasPriority,
 		};
 
 		const trackAlias = await r.u62();
 		const groupId = await r.u53();
 		const subGroupId = flags.hasSubgroup ? await r.u53() : 0;
-		const publisherPriority = await r.u8(); // Don't care about publisher priority
+		const publisherPriority = hasPriority ? await r.u8() : 128; // Default priority when absent
 
 		return new Group(trackAlias, groupId, subGroupId, publisherPriority, flags);
 	}
