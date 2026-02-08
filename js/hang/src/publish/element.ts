@@ -9,6 +9,12 @@ type Observed = (typeof OBSERVED)[number];
 
 type SourceType = "camera" | "screen" | "file";
 
+type HangPublishProps<TChildren = unknown> = {
+	[K in Observed]?: string | number | boolean;
+} & {
+	children?: TChildren;
+};
+
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
 // There's no destructor for web components so this is the best we can do.
@@ -17,8 +23,8 @@ const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 export default class HangPublish extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
-	url = new Signal<URL | undefined>(undefined);
-	path = new Signal<Moq.Path.Valid | undefined>(undefined);
+	#url = new Signal<URL | undefined>(undefined);
+	#path = new Signal<Moq.Path.Valid | undefined>(undefined);
 	source = new Signal<SourceType | File | undefined>(undefined);
 
 	// Controls whether audio/video is enabled.
@@ -50,7 +56,7 @@ export default class HangPublish extends HTMLElement {
 		cleanup.register(this, this.signals);
 
 		this.connection = new Moq.Connection.Reload({
-			url: this.url,
+			url: this.#url,
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.connection.close());
@@ -72,7 +78,7 @@ export default class HangPublish extends HTMLElement {
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
 			enabled: this.#enabled,
-			path: this.path,
+			path: this.#path,
 
 			audio: {
 				enabled: this.#audioEnabled,
@@ -144,6 +150,22 @@ export default class HangPublish extends HTMLElement {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
 		}
+	}
+
+	get url(): Signal<URL | undefined> {
+		return this.#url;
+	}
+
+	set url(value: string | URL | undefined) {
+		value ? this.setAttribute("url", String(value)) : this.removeAttribute("url");
+	}
+
+	get path(): Signal<Moq.Path.Valid | undefined> {
+		return this.#path;
+	}
+
+	set path(value: string | Moq.Path.Valid | undefined) {
+		value ? this.setAttribute("path", String(value)) : this.removeAttribute("path");
 	}
 
 	#runSource(effect: Effect) {
@@ -229,4 +251,19 @@ declare global {
 	interface HTMLElementTagNameMap {
 		"hang-publish": HangPublish;
 	}
+	namespace JSX {
+		interface IntrinsicElements {
+			"hang-publish": HangPublishProps;
+		}
+	}
 }
+
+declare module "react" {
+	namespace JSX {
+		interface IntrinsicElements {
+			"hang-publish": HangPublishProps;
+		}
+	}
+}
+
+export { HangPublish };

@@ -12,6 +12,12 @@ import type * as Video from "./video";
 const OBSERVED = ["url", "name", "path", "paused", "volume", "muted", "reload", "jitter", "latency"] as const;
 type Observed = (typeof OBSERVED)[number];
 
+type HangWatchProps<TChildren = unknown> = {
+	[K in Observed]?: string | number | boolean;
+} & {
+	children?: TChildren;
+};
+
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
 // There's no destructor for web components so this is the best we can do.
@@ -170,12 +176,24 @@ export default class HangWatch extends HTMLElement implements Backend {
 		return this.connection.url;
 	}
 
+	set url(value: string | URL | undefined) {
+		value ? this.setAttribute("url", String(value)) : this.removeAttribute("url");
+	}
+
 	get path(): Signal<Moq.Path.Valid | undefined> {
 		return this.broadcast.path;
 	}
 
+	set path(value: string | Moq.Path.Valid | undefined) {
+		value ? this.setAttribute("path", String(value)) : this.removeAttribute("path");
+	}
+
 	get jitter(): Signal<Time.Milli> {
 		return this.#backend.jitter;
+	}
+
+	set jitter(value: string | Time.Milli | undefined) {
+		value != null ? this.setAttribute("jitter", String(value)) : this.removeAttribute("jitter");
 	}
 
 	get paused(): Signal<boolean> {
@@ -197,4 +215,19 @@ declare global {
 	interface HTMLElementTagNameMap {
 		"hang-watch": HangWatch;
 	}
+	namespace JSX {
+		interface IntrinsicElements {
+			"hang-watch": HangWatchProps;
+		}
+	}
 }
+
+declare module "react" {
+	namespace JSX {
+		interface IntrinsicElements {
+			"hang-watch": HangWatchProps;
+		}
+	}
+}
+
+export { HangWatch };

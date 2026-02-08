@@ -19,9 +19,3 @@ customElement("hang-publish-ui", (_, { element }) => {
 		</Show>
 	);
 });
-
-declare global {
-	interface HTMLElementTagNameMap {
-		"hang-publish-ui": HTMLElement;
-	}
-}

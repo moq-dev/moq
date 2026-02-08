@@ -37,15 +37,11 @@ Here's how you can use them (see also @moq/hang-demo for a complete example):
 ```
 
 ```html
-	<hang-publish-ui>
-		<hang-publish url="<MOQ relay URL>" path="<relay path>">
-			<video
-				style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;"
-				muted
-				autoplay
-			></video>
-		</hang-publish>
-	</hang-publish-ui>
+<hang-publish-ui>
+	<hang-publish url="<MOQ relay URL>" path="<relay path>">
+		<video style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;" muted autoplay></video>
+	</hang-publish>
+</hang-publish-ui>
 ```
 
 ## Project Structure

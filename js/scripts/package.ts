@@ -9,6 +9,9 @@ console.log("✍️  Rewriting package.json...");
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 
 function rewritePath(p: string): string {
+	if (p.endsWith(".d.ts")) {
+		return p.replace(/^\.\/src/, ".");
+	}
 	return p.replace(/^\.\/src/, ".").replace(/\.ts(x)?$/, ".js");
 }
 

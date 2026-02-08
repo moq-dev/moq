@@ -6,8 +6,14 @@
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
 	"exports": {
-		"./publish": "./src/publish/index.tsx",
-		"./watch": "./src/watch/index.tsx"
+		"./publish": {
+			"types": "./src/publish/publish.d.ts",
+			"import": "./src/publish/index.tsx"
+		},
+		"./watch": {
+			"types": "./src/watch/watch.d.ts",
+			"import": "./src/watch/index.tsx"
+		}
 	},
 	"sideEffects": [
 		"./src/publish/index.tsx",

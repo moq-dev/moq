@@ -18,9 +18,3 @@ customElement("hang-watch-ui", (_, { element }) => {
 		</Show>
 	);
 });
-
-declare global {
-	interface HTMLElementTagNameMap {
-		"hang-watch-ui": HTMLElement;
-	}
-}
