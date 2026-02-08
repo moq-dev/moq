@@ -74,39 +74,7 @@ moq-relay relay.toml
 
 ## HTTP Endpoints
 
-For debugging, the relay exposes HTTP endpoints on the same bind address (TCP instead of UDP):
-
-### GET /certificate.sha256
-
-Returns the fingerprint of the TLS certificate:
-
-```bash
-curl http://localhost:4443/certificate.sha256
-```
-
-### GET /announced/*prefix
-
-Returns all announced tracks with the given prefix:
-
-```bash
-# All announced broadcasts
-curl http://localhost:4443/announced/
-
-# Broadcasts under "demo/"
-curl http://localhost:4443/announced/demo
-```
-
-### GET /fetch/*path
-
-Returns the latest group of the given track:
-
-```bash
-curl http://localhost:4443/fetch/demo/video
-```
-
-::: warning
-The HTTP server listens on TCP, not HTTPS. It's intended for local debugging only.
-:::
+The relay exposes HTTP/HTTPS endpoints for debugging, health checks, and late-join. See [HTTP](/app/relay/http) for details.
 
 ## TLS Setup
 
@@ -147,7 +115,7 @@ Metrics (Prometheus format) are planned but not yet implemented.
 
 Current visibility:
 - Check logs for connection count
-- Use HTTP endpoints for track inspection
+- Use [HTTP endpoints](/app/relay/http) for track inspection
 - Monitor system resources (CPU, memory, bandwidth)
 
 ## Performance

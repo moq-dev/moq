@@ -10,69 +10,39 @@ This guide covers connecting to a relay, discovering broadcasts, subscribing to 
 
 ## Dependencies
 
-Add these to your `Cargo.toml`:
+The key crates:
 
-```toml
-[dependencies]
-moq-lite = "0.2"
-moq-native = "0.2"
-hang = "0.2"
-tokio = { version = "1", features = ["full"] }
-url = "2"
-anyhow = "1"
-tracing = "0.1"
-```
-
-[moq-native](/rs/crate/moq-native) configures QUIC (via [quinn](https://crates.io/crates/quinn)) and TLS (via [rustls](https://crates.io/crates/rustls)) for you.
-If you need full control over the QUIC endpoint, you can use `moq-lite` directly with any `web_transport_trait::Session` implementation.
+- [moq-native](https://crates.io/crates/moq-native) — Configures QUIC (via [quinn](https://crates.io/crates/quinn)) and TLS (via [rustls](https://crates.io/crates/rustls)) for you.
+- [moq-lite](https://crates.io/crates/moq-lite) — The core pub/sub protocol. Can be used directly with any `web_transport_trait::Session` implementation if you need full control over the QUIC endpoint.
+- [hang](https://crates.io/crates/hang) — Media-specific catalog and container format on top of `moq-lite`.
 
 ## Connecting
 
-Create a client and connect to a relay:
+Create a [`ClientConfig`](https://docs.rs/moq-native/latest/moq_native/struct.ClientConfig.html) and connect to a relay:
 
 ```rust
-use moq_native::ClientConfig;
-use url::Url;
-
-let client = ClientConfig::default().init()?;
-let url = Url::parse("https://cdn.moq.dev/anon/my-broadcast")?;
+let client = moq_native::ClientConfig::default().init()?;
+let url = url::Url::parse("https://cdn.moq.dev/anon/my-broadcast")?;
 let session = client.connect(url).await?;
 ```
 
-`ClientConfig` provides sensible defaults: system TLS roots, WebSocket fallback enabled, and a 200ms head-start for QUIC.
+The default configuration uses system TLS roots, enables WebSocket fallback, and gives QUIC a 200ms head-start.
 
 ### URL Schemes
 
 The client supports several URL schemes:
 
 - `https://` — WebTransport over HTTP/3 (recommended for browsers and native)
-- `http://` — Local development with self-signed certs (fetches fingerprint automatically)
-- `moql://` — Raw QUIC with the moq-lite ALPN (no WebTransport overhead)
+- `http://` — Local development with self-signed certs (fetches the certificate fingerprint automatically)
+- `moqt://` — Raw QUIC with the MoQ IETF ALPN (no WebTransport overhead)
+- `moql://` — Raw QUIC with the moq-lite ALPN
 
 ### Transport Racing
 
 `client.connect()` automatically races QUIC and WebSocket connections.
-QUIC gets a 200ms head-start; if it fails, WebSocket takes over.
+QUIC gets a configurable head-start (default 200ms); if it fails, WebSocket takes over.
 Once WebSocket wins for a given server, future connections skip the delay.
 This is transparent to your application.
-
-### TLS
-
-For local development with self-signed certificates:
-
-```rust
-let mut config = ClientConfig::default();
-config.tls.disable_verify = Some(true); // Don't do this in production
-let client = config.init()?;
-```
-
-For custom root certificates:
-
-```rust
-let mut config = ClientConfig::default();
-config.tls.root = vec!["/path/to/root.pem".into()];
-let client = config.init()?;
-```
 
 ### Authentication
 
@@ -90,40 +60,33 @@ See the [Authentication guide](/app/relay/auth) for how to generate tokens.
 ## Publishing
 
 The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) demonstrates publishing end-to-end.
-The key pattern is: create an `Origin`, connect a session to it, then publish broadcasts:
+
+The key pattern is: create an [`Origin`](https://docs.rs/moq-lite/latest/moq_lite/struct.Origin.html), connect a session to it, then publish broadcasts:
 
 ```rust
-// Create a local origin for published broadcasts.
 let origin = moq_lite::Origin::produce();
-
-// Connect with publishing enabled.
 let session = client
     .with_publish(origin.consume())
     .connect(url).await?;
 
-// Create a broadcast and publish it.
 let mut broadcast = moq_lite::Broadcast::produce();
-
 // ... add catalog and tracks to the broadcast ...
-
 origin.publish_broadcast("", broadcast.consume());
-
-// Wait until the session closes.
-session.closed().await?;
 ```
 
+See the full [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) example for catalog setup, track creation, and frame encoding.
+
 ## Subscribing
+
+The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs) demonstrates subscribing end-to-end.
 
 To consume a broadcast, use `with_consume()` and listen for announcements:
 
 ```rust
-// Create a local origin for incoming broadcasts.
 let origin = moq_lite::Origin::produce();
 let mut consumer = origin.consume();
-
-// Connect with consuming enabled.
 let session = client
-    .with_consume(origin.clone())
+    .with_consume(origin)
     .connect(url).await?;
 
 // Wait for broadcasts to be announced.
@@ -132,8 +95,6 @@ while let Some((path, broadcast)) = consumer.announced().await {
         tracing::info!(%path, "broadcast ended");
         continue;
     };
-
-    tracing::info!(%path, "new broadcast");
     // Subscribe to tracks on this broadcast...
 }
 ```
@@ -148,78 +109,31 @@ let broadcast = consumer.consume_broadcast("my-stream")
 ## Reading the Catalog
 
 The [hang](/concept/layer/hang) catalog describes available media tracks.
-Subscribe to it using `CatalogConsumer`:
+Subscribe to it using [`CatalogConsumer`](https://docs.rs/hang/latest/hang/struct.CatalogConsumer.html):
 
 ```rust
-use hang::{Catalog, CatalogConsumer};
-
-// Subscribe to the special "catalog.json" track.
-let catalog_track = broadcast.subscribe_track(
-    &Catalog::default_track()
-);
-let mut catalog = CatalogConsumer::new(catalog_track);
-
-// Wait for the first catalog update.
-let info = catalog.next().await?
-    .expect("no catalog received");
-
-// Iterate video renditions.
-for (name, config) in &info.video.renditions {
-    tracing::info!(
-        %name,
-        codec = %config.codec,
-        width = ?config.coded_width,
-        height = ?config.coded_height,
-        "video track"
-    );
-}
-
-// Iterate audio renditions.
-for (name, config) in &info.audio.renditions {
-    tracing::info!(
-        %name,
-        codec = %config.codec,
-        sample_rate = config.sample_rate,
-        channels = config.channel_count,
-        "audio track"
-    );
-}
+let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track());
+let mut catalog = hang::CatalogConsumer::new(catalog_track);
+let info = catalog.next().await?.expect("no catalog");
 ```
 
-The catalog is live-updated.
-Call `catalog.next().await` again to receive updates when tracks change.
+The catalog is live-updated — call `catalog.next().await` again to receive updates when tracks change.
+
+See the full [subscribe.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs) example for iterating renditions and selecting a track.
 
 ## Reading Frames
 
-Subscribe to a media track and read frames using `OrderedConsumer`:
+Subscribe to a media track and read frames using [`OrderedConsumer`](https://docs.rs/hang/latest/hang/container/struct.OrderedConsumer.html):
 
 ```rust
-use hang::container::{OrderedConsumer, Frame};
-use std::time::Duration;
-
-// Pick a video track from the catalog.
-let track = moq_lite::Track {
-    name: "video0".to_string(),
-    priority: 1,
-};
-
-// Subscribe with a max latency of 500ms.
 let track_consumer = broadcast.subscribe_track(&track);
-let mut ordered = OrderedConsumer::new(
+let mut ordered = hang::container::OrderedConsumer::new(
     track_consumer,
-    Duration::from_millis(500),
+    Duration::from_millis(500), // max latency before skipping groups
 );
 
-// Read frames in presentation order.
 while let Some(frame) = ordered.read().await? {
-    let Frame { timestamp, keyframe, payload } = frame;
-    let bytes = payload.num_bytes();
-
-    if keyframe {
-        tracing::debug!(%timestamp, %bytes, "keyframe");
-    }
-
-    // Feed `payload` to your decoder...
+    // frame.timestamp, frame.keyframe, frame.payload
 }
 ```
 
@@ -247,21 +161,19 @@ Use a ring buffer between the decoder and audio output to absorb network jitter.
 
 ## Common Pitfalls
 
-### Missing Keyframe on Late Join
-
-When joining a live stream mid-broadcast, you may receive delta frames before a keyframe arrives.
-Your decoder will produce corrupted output until the next keyframe.
-
-**Workaround**: Use the relay's [HTTP fetch endpoint](/app/relay/http) to request a previous group containing the keyframe, then switch to the live MoQ subscription.
-
 ### `description` Field in the Catalog
 
-The `description` field in `VideoConfig` determines how codec parameters are delivered:
+Both `VideoConfig` and `AudioConfig` have a `description` field that provides out-of-band codec initialization data. If present, it contains codec-specific configuration as a hex-encoded byte string.
 
-- **`description: Some(hex)`** — AVCC format. The hex value contains SPS/PPS (H.264) or VPS/SPS/PPS (H.265). NAL units in the payload are length-prefixed.
-- **`description: None`** — Annex B format. SPS/PPS are inline in the bitstream before each keyframe. NAL units use start codes (`00 00 00 01`).
+**Video examples:**
+- **H.264** — SPS/PPS in AVCC format. NAL units in the payload are length-prefixed.
+- **H.265** — VPS/SPS/PPS in HVCC format.
 
-Both formats are valid.
+**Audio examples:**
+- **AAC** — `AudioSpecificConfig` bytes.
+- **Opus** — Typically `None`; configuration is in-band.
+
+When `description` is `None`, codec parameters are delivered in-band (e.g. Annex B start codes `00 00 00 01` or `00 00 01` for H.264/H.265).
 Your decoder must handle whichever format the publisher uses.
 See the [hang format docs](/concept/layer/hang) for details.
 
@@ -277,7 +189,8 @@ Check the `container` field for each rendition:
 ## Next Steps
 
 - [hang format](/concept/layer/hang) — Catalog schema and container details
-- [moq-lite](/rs/crate/moq-lite) — Core protocol API reference
-- [moq-native](/rs/crate/moq-native) — Client configuration options
+- [moq-lite docs](https://docs.rs/moq-lite) — Core protocol API reference
+- [moq-native docs](https://docs.rs/moq-native) — Client configuration options
 - [Relay HTTP endpoints](/app/relay/http) — HTTP fetch for debugging and late-join
-- [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) — Complete publishing example
+- [video.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) — Complete publishing example
+- [subscribe.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs) — Complete subscribing example
