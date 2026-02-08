@@ -309,30 +309,46 @@ impl Client {
 			url.set_scheme("https").expect("failed to set scheme");
 		}
 
-		let alpn = match url.scheme() {
-			"https" => web_transport_quinn::ALPN,
-			"moql" => moq_lite::lite::ALPN,
-			"moqt" => moq_lite::ietf::ALPN,
-			_ => anyhow::bail!("url scheme must be 'http', 'https', or 'moql'"),
+		let alpns: Vec<String> = match url.scheme() {
+			"https" => vec![web_transport_quinn::ALPN.to_string()],
+			"moqt" => moq_lite::alpns().into_iter().map(|alpn| alpn.to_string()).collect(),
+			alpn if moq_lite::alpns().contains(&alpn) => vec![alpn.to_string()],
+			_ => anyhow::bail!("url scheme must be 'http', 'https', or 'moqt'"),
 		};
 
-		// TODO support connecting to both ALPNs at the same time
-		config.alpn_protocols = vec![alpn.as_bytes().to_vec()];
+		config.alpn_protocols = alpns.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 		config.key_log = Arc::new(rustls::KeyLogFile::new());
 
 		let config: quinn::crypto::rustls::QuicClientConfig = config.try_into()?;
 		let mut config = quinn::ClientConfig::new(Arc::new(config));
 		config.transport_config(self.transport.clone());
 
-		tracing::debug!(%url, %ip, %alpn, "connecting");
+		tracing::debug!(%url, %ip, alpns = ?alpns, "connecting");
 
 		let connection = self.quic.connect_with(config, ip, &host)?.await?;
 		tracing::Span::current().record("id", connection.stable_id());
 
-		let session = match alpn {
-			web_transport_quinn::ALPN => web_transport_quinn::Session::connect(connection, url).await?,
-			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => web_transport_quinn::Session::raw(connection, url),
-			_ => unreachable!("ALPN was checked above"),
+		let mut request = web_transport_quinn::proto::ConnectRequest::new(url);
+
+		let session = if request.url.scheme() == "https" {
+			let alpns: Vec<String> = moq_lite::alpns().iter().map(|alpn| alpn.to_string()).collect();
+			let request = request.with_protocols(alpns);
+			web_transport_quinn::Session::connect(connection, request).await?
+		} else {
+			request = request.with_protocols(alpns);
+
+			let mut response =
+				web_transport_quinn::proto::ConnectResponse::new(web_transport_quinn::http::StatusCode::OK);
+			if let Some(negotiated_alpn) = connection
+				.handshake_data()
+				.and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+				.and_then(|data| data.protocol)
+				.and_then(|proto| String::from_utf8(proto).ok())
+			{
+				response = response.with_protocol(negotiated_alpn);
+			}
+
+			web_transport_quinn::Session::raw(connection, request, response)
 		};
 
 		Ok(session)
@@ -343,7 +359,6 @@ impl Client {
 
 		let host = url.host_str().context("missing hostname")?.to_string();
 		let port = url.port().unwrap_or_else(|| match url.scheme() {
-			"https" | "wss" | "moql" | "moqt" => 443,
 			"http" | "ws" => 80,
 			_ => 443,
 		});
@@ -366,7 +381,7 @@ impl Client {
 				url.set_scheme("ws").expect("failed to set scheme");
 				false
 			}
-			"https" | "moql" | "moqt" => {
+			"https" | "moqt" => {
 				url.set_scheme("wss").expect("failed to set scheme");
 				true
 			}
@@ -412,9 +427,11 @@ impl Client {
 	#[cfg(feature = "iroh")]
 	async fn connect_iroh(&self, url: Url) -> anyhow::Result<web_transport_iroh::Session> {
 		let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
+		// TODO Suupport multiple ALPNs
 		let alpn = match url.scheme() {
 			"moql+iroh" | "iroh" => moq_lite::lite::ALPN,
-			"moqt+iroh" => moq_lite::ietf::ALPN,
+			"moqt+iroh" => moq_lite::ietf::ALPN_14,
+			"moqt-15+iroh" => moq_lite::ietf::ALPN_15,
 			"h3+iroh" => web_transport_iroh::ALPN_H3,
 			_ => anyhow::bail!("Invalid URL: unknown scheme"),
 		};

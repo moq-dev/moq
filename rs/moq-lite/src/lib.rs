@@ -41,6 +41,7 @@ mod path;
 mod server;
 mod session;
 mod setup;
+mod version;
 
 pub mod coding;
 pub mod ietf;
@@ -52,3 +53,4 @@ pub use model::*;
 pub use path::*;
 pub use server::*;
 pub use session::*;
+pub use version::*;

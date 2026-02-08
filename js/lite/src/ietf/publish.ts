@@ -2,10 +2,10 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { Parameters } from "./parameters.ts";
+import { MessageParameters, Parameters } from "./parameters.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
-// PUBLISH messages are new in draft-14 but not yet fully supported
-// These are stubs matching the Rust implementation
+// PUBLISH messages are new in draft-14
 
 export class Publish {
 	static id = 0x1d;
@@ -39,52 +39,75 @@ export class Publish {
 		this.forward = forward;
 	}
 
-	async #encode(w: Writer): Promise<void> {
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
 		await Namespace.encode(w, this.trackNamespace);
 		await w.string(this.trackName);
 		await w.u62(this.trackAlias);
-		await w.u8(this.groupOrder);
-		await w.bool(this.contentExists);
-		if (this.contentExists !== !!this.largest) {
-			throw new Error("contentExists and largest must both be true or false");
+
+		if (version === Version.DRAFT_15) {
+			// v15: fields in parameters
+			const params = new MessageParameters();
+			params.groupOrder = this.groupOrder;
+			params.forward = this.forward;
+			await params.encode(w);
+		} else if (version === Version.DRAFT_14) {
+			await w.u8(this.groupOrder);
+			await w.bool(this.contentExists);
+			if (this.contentExists !== !!this.largest) {
+				throw new Error("contentExists and largest must both be true or false");
+			}
+			if (this.largest) {
+				await w.u62(this.largest.groupId);
+				await w.u62(this.largest.objectId);
+			}
+			await w.bool(this.forward);
+			await w.u53(0); // size of parameters
+		} else {
+			const _: never = version;
+			throw new Error(`unsupported version: ${_}`);
 		}
-		if (this.largest) {
-			await w.u62(this.largest.groupId);
-			await w.u62(this.largest.objectId);
-		}
-		await w.bool(this.forward);
-		await w.u53(0); // size of parameters
 	}
 
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (mw) => this.#encode(mw, version));
 	}
 
-	static async decode(r: Reader): Promise<Publish> {
-		return Message.decode(r, Publish.#decode);
+	static async decode(r: Reader, version: IetfVersion): Promise<Publish> {
+		return Message.decode(r, (mr) => Publish.#decode(mr, version));
 	}
 
-	static async #decode(r: Reader): Promise<Publish> {
+	static async #decode(r: Reader, version: IetfVersion): Promise<Publish> {
 		const requestId = await r.u62();
 		const trackNamespace = await Namespace.decode(r);
 		const trackName = await r.string();
 		const trackAlias = await r.u62();
-		const groupOrder = await r.u8();
-		const contentExists = await r.bool();
-		const largest = contentExists ? { groupId: await r.u62(), objectId: await r.u62() } : undefined;
-		const forward = await r.bool();
-		await Parameters.decode(r); // ignore parameters
-		return new Publish(
-			requestId,
-			trackNamespace,
-			trackName,
-			trackAlias,
-			groupOrder,
-			contentExists,
-			largest,
-			forward,
-		);
+
+		if (version === Version.DRAFT_15) {
+			const params = await MessageParameters.decode(r);
+			const groupOrder = params.groupOrder ?? 0x02;
+			const forward = params.forward ?? true;
+			return new Publish(requestId, trackNamespace, trackName, trackAlias, groupOrder, false, undefined, forward);
+		} else if (version === Version.DRAFT_14) {
+			const groupOrder = await r.u8();
+			const contentExists = await r.bool();
+			const largest = contentExists ? { groupId: await r.u62(), objectId: await r.u62() } : undefined;
+			const forward = await r.bool();
+			await Parameters.decode(r); // ignore parameters
+			return new Publish(
+				requestId,
+				trackNamespace,
+				trackName,
+				trackAlias,
+				groupOrder,
+				contentExists,
+				largest,
+				forward,
+			);
+		} else {
+			const _: never = version;
+			throw new Error(`unsupported version: ${_}`);
+		}
 	}
 }
 

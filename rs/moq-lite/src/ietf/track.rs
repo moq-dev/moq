@@ -1,4 +1,4 @@
-//! IETF moq-transport-14 track status messages
+//! IETF moq-transport track status messages (v14 + v15)
 
 use std::borrow::Cow;
 
@@ -7,12 +7,14 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{FilterType, GroupOrder, Message, Parameters, RequestId, Version},
+	ietf::{FilterType, GroupOrder, Message, MessageParameters, Parameters, RequestId, Version},
 };
 
 use super::namespace::{decode_namespace, encode_namespace};
 
 /// TrackStatus message (0x0d)
+/// v14: own format (TrackStatusRequest-like with subscribe fields)
+/// v15: same wire format as SUBSCRIBE. Response is REQUEST_OK.
 #[derive(Clone, Debug)]
 pub struct TrackStatus<'a> {
 	pub request_id: RequestId,
@@ -27,11 +29,21 @@ impl Message for TrackStatus<'_> {
 		self.request_id.encode(w, version);
 		encode_namespace(w, &self.track_namespace, version);
 		self.track_name.encode(w, version);
-		0u8.encode(w, version); // subscriber priority
-		GroupOrder::Descending.encode(w, version);
-		false.encode(w, version); // forward
-		FilterType::LargestObject.encode(w, version); // filter type
-		0u8.encode(w, version); // no parameters
+
+		match version {
+			Version::Draft14 => {
+				0u8.encode(w, version); // subscriber priority
+				GroupOrder::Descending.encode(w, version);
+				false.encode(w, version); // forward
+				FilterType::LargestObject.encode(w, version); // filter type
+				0u8.encode(w, version); // no parameters
+			}
+			Version::Draft15 => {
+				// v15: same format as Subscribe - fields in parameters
+				let params = MessageParameters::default();
+				params.encode(w, version);
+			}
+		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -39,13 +51,18 @@ impl Message for TrackStatus<'_> {
 		let track_namespace = decode_namespace(r, version)?;
 		let track_name = Cow::<str>::decode(r, version)?;
 
-		let _subscriber_priority = u8::decode(r, version)?;
-		let _group_order = GroupOrder::decode(r, version)?;
-		let _forward = bool::decode(r, version)?;
-		let _filter_type = u64::decode(r, version)?;
-
-		// Ignore parameters, who cares.
-		let _params = Parameters::decode(r, version)?;
+		match version {
+			Version::Draft14 => {
+				let _subscriber_priority = u8::decode(r, version)?;
+				let _group_order = GroupOrder::decode(r, version)?;
+				let _forward = bool::decode(r, version)?;
+				let _filter_type = u64::decode(r, version)?;
+				let _params = Parameters::decode(r, version)?;
+			}
+			Version::Draft15 => {
+				let _params = MessageParameters::decode(r, version)?;
+			}
+		}
 
 		Ok(Self {
 			request_id,
@@ -73,5 +90,54 @@ impl<V> Encode<V> for TrackStatusCode {
 impl<V> Decode<V> for TrackStatusCode {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		Self::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::BytesMut;
+
+	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+		let mut buf = BytesMut::new();
+		msg.encode_msg(&mut buf, version);
+		buf.to_vec()
+	}
+
+	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes::Bytes::from(bytes.to_vec());
+		M::decode_msg(&mut buf, version)
+	}
+
+	#[test]
+	fn test_track_status_v14_round_trip() {
+		let msg = TrackStatus {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: TrackStatus = decode_message(&encoded, Version::Draft14).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+	}
+
+	#[test]
+	fn test_track_status_v15_round_trip() {
+		let msg = TrackStatus {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: TrackStatus = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
 	}
 }

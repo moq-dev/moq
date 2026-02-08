@@ -14,9 +14,11 @@ import {
 	type PublishNamespaceError,
 	type PublishNamespaceOk,
 } from "./publish_namespace.ts";
+import { RequestError, type RequestOk } from "./request.ts";
 import { type Subscribe, SubscribeError, SubscribeOk, type Unsubscribe } from "./subscribe.ts";
 import type { SubscribeNamespace, UnsubscribeNamespace } from "./subscribe_namespace.ts";
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
+import { Version } from "./version.ts";
 
 /**
  * Handles publishing broadcasts using moq-transport protocol with lite-compatibility restrictions.
@@ -85,12 +87,17 @@ export class Publisher {
 		const broadcast = this.#broadcasts.get(name);
 
 		if (!broadcast) {
-			const errorMsg = new SubscribeError(
-				msg.requestId,
-				404, // Not found
-				"Broadcast not found",
-			);
-			await this.#control.write(errorMsg);
+			if (this.#control.version === Version.DRAFT_15) {
+				const errorMsg = new RequestError(msg.requestId, 404, "Broadcast not found");
+				await this.#control.write(errorMsg);
+			} else if (this.#control.version === Version.DRAFT_14) {
+				const errorMsg = new SubscribeError(msg.requestId, 404, "Broadcast not found");
+				await this.#control.write(errorMsg);
+			} else {
+				const version: never = this.#control.version;
+				throw new Error(`unsupported version: ${version}`);
+			}
+
 			return;
 		}
 
@@ -153,6 +160,7 @@ export class Publisher {
 				hasSubgroupObject: false,
 				// Automatically end the group on stream FIN
 				hasEnd: true,
+				hasPriority: true,
 			});
 
 			console.debug("sending group header", header);
@@ -222,4 +230,14 @@ export class Publisher {
 	async handleSubscribeNamespace(_msg: SubscribeNamespace) {}
 
 	async handleUnsubscribeNamespace(_msg: UnsubscribeNamespace) {}
+
+	// v15: REQUEST_OK replaces PublishNamespaceOk, SubscribeNamespaceOk
+	async handleRequestOk(_msg: RequestOk) {
+		// TODO: route by request_id to determine what kind of request it belongs to
+	}
+
+	// v15: REQUEST_ERROR replaces SubscribeError, PublishError, etc.
+	async handleRequestError(_msg: RequestError) {
+		// TODO: route by request_id to determine what kind of request it belongs to
+	}
 }

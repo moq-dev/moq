@@ -1,18 +1,6 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::{Error, coding, ietf, lite};
-
-/// The versions of MoQ that are supported by this implementation.
-///
-/// Ordered by preference, with the client's preference taking priority.
-pub const VERSIONS: [coding::Version; 3] = [
-	lite::Version::Draft02.coding(),
-	lite::Version::Draft01.coding(),
-	ietf::Version::Draft14.coding(),
-];
-
-/// The ALPN strings for supported versions.
-pub const ALPNS: [&str; 2] = [lite::ALPN, ietf::ALPN];
+use crate::Error;
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///

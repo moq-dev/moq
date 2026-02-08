@@ -3,10 +3,13 @@ import test from "node:test";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as GoAway from "./goaway.ts";
-import { PublishDone } from "./publish.ts";
+import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
+import { RequestError, RequestOk } from "./request.ts";
+import * as Setup from "./setup.ts";
 import * as Subscribe from "./subscribe.ts";
 import * as Track from "./track.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 // Helper to create a writable stream that captures written data
 function createTestWritableStream(): { stream: WritableStream<Uint8Array>; written: Uint8Array[] } {
@@ -31,11 +34,24 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
 	return result;
 }
 
-// Helper to encode a message
+// Helper to encode a message (no version)
 async function encodeMessage<T extends { encode(w: Writer): Promise<void> }>(message: T): Promise<Uint8Array> {
 	const { stream, written } = createTestWritableStream();
 	const writer = new Writer(stream);
 	await message.encode(writer);
+	writer.close();
+	await writer.closed;
+	return concatChunks(written);
+}
+
+// Helper to encode a versioned message
+async function encodeVersioned<T extends { encode(w: Writer, v: IetfVersion): Promise<void> }>(
+	message: T,
+	version: IetfVersion,
+): Promise<Uint8Array> {
+	const { stream, written } = createTestWritableStream();
+	const writer = new Writer(stream);
+	await message.encode(writer, version);
 	writer.close();
 	await writer.closed;
 	return concatChunks(written);
@@ -47,12 +63,22 @@ async function decodeMessage<T>(bytes: Uint8Array, decoder: (r: Reader) => Promi
 	return await decoder(reader);
 }
 
-// Subscribe tests
-test("Subscribe: round trip", async () => {
+// Helper to decode a versioned message
+async function decodeVersioned<T>(
+	bytes: Uint8Array,
+	decoder: (r: Reader, v: IetfVersion) => Promise<T>,
+	version: IetfVersion,
+): Promise<T> {
+	const reader = new Reader(undefined, bytes);
+	return await decoder(reader, version);
+}
+
+// Subscribe tests (v14)
+test("Subscribe v14: round trip", async () => {
 	const msg = new Subscribe.Subscribe(1n, Path.from("test"), "video", 128);
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Subscribe.Subscribe.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.requestId, 1n);
 	assert.strictEqual(decoded.trackNamespace, "test");
@@ -60,20 +86,43 @@ test("Subscribe: round trip", async () => {
 	assert.strictEqual(decoded.subscriberPriority, 128);
 });
 
-test("Subscribe: nested namespace", async () => {
+test("Subscribe v14: nested namespace", async () => {
 	const msg = new Subscribe.Subscribe(100n, Path.from("conference/room123"), "audio", 255);
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Subscribe.Subscribe.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.trackNamespace, "conference/room123");
 });
 
-test("SubscribeOk: without largest", async () => {
+test("SubscribeOk v14: without largest", async () => {
 	const msg = new Subscribe.SubscribeOk(42n, 43n);
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Subscribe.SubscribeOk.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
+
+	assert.strictEqual(decoded.requestId, 42n);
+	assert.strictEqual(decoded.trackAlias, 43n);
+});
+
+// Subscribe tests (v15)
+test("Subscribe v15: round trip", async () => {
+	const msg = new Subscribe.Subscribe(1n, Path.from("test"), "video", 128);
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, Version.DRAFT_15);
+
+	assert.strictEqual(decoded.requestId, 1n);
+	assert.strictEqual(decoded.trackNamespace, "test");
+	assert.strictEqual(decoded.trackName, "video");
+	assert.strictEqual(decoded.subscriberPriority, 128);
+});
+
+test("SubscribeOk v15: round trip", async () => {
+	const msg = new Subscribe.SubscribeOk(42n, 43n);
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, Version.DRAFT_15);
 
 	assert.strictEqual(decoded.requestId, 42n);
 	assert.strictEqual(decoded.trackAlias, 43n);
@@ -216,7 +265,7 @@ test("TrackStatus: round trip", async () => {
 });
 
 // Validation tests
-test("Subscribe: rejects invalid filter type", async () => {
+test("Subscribe v14: rejects invalid filter type", async () => {
 	const invalidBytes = new Uint8Array([
 		0x01, // subscribe_id
 		0x02, // track_alias
@@ -239,11 +288,11 @@ test("Subscribe: rejects invalid filter type", async () => {
 	]);
 
 	await assert.rejects(async () => {
-		await decodeMessage(invalidBytes, Subscribe.Subscribe.decode);
+		await decodeVersioned(invalidBytes, Subscribe.Subscribe.decode, Version.DRAFT_14);
 	});
 });
 
-test("SubscribeOk: rejects non-zero expires", async () => {
+test("SubscribeOk v14: rejects non-zero expires", async () => {
 	const invalidBytes = new Uint8Array([
 		0x01, // subscribe_id
 		0x05, // INVALID: expires = 5
@@ -253,7 +302,7 @@ test("SubscribeOk: rejects non-zero expires", async () => {
 	]);
 
 	await assert.rejects(async () => {
-		await decodeMessage(invalidBytes, Subscribe.SubscribeOk.decode);
+		await decodeVersioned(invalidBytes, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
 	});
 });
 
@@ -277,4 +326,95 @@ test("PublishNamespace: unicode namespace", async () => {
 
 	assert.strictEqual(decoded.requestId, 1n);
 	assert.strictEqual(decoded.trackNamespace, "会议/房间");
+});
+
+// Publish v15 tests
+test("Publish v15: round trip", async () => {
+	const msg = new Publish(1n, Path.from("test/ns"), "video", 42n, 0x02, false, undefined, true);
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+	const decoded = await decodeVersioned(encoded, Publish.decode, Version.DRAFT_15);
+
+	assert.strictEqual(decoded.requestId, 1n);
+	assert.strictEqual(decoded.trackNamespace, "test/ns");
+	assert.strictEqual(decoded.trackName, "video");
+	assert.strictEqual(decoded.trackAlias, 42n);
+	assert.strictEqual(decoded.forward, true);
+});
+
+test("Publish v14: round trip", async () => {
+	const msg = new Publish(1n, Path.from("test/ns"), "video", 42n, 0x02, true, { groupId: 10n, objectId: 5n }, true);
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Publish.decode, Version.DRAFT_14);
+
+	assert.strictEqual(decoded.requestId, 1n);
+	assert.strictEqual(decoded.trackNamespace, "test/ns");
+	assert.strictEqual(decoded.trackName, "video");
+	assert.strictEqual(decoded.trackAlias, 42n);
+	assert.strictEqual(decoded.forward, true);
+	assert.strictEqual(decoded.contentExists, true);
+	assert.strictEqual(decoded.largest?.groupId, 10n);
+	assert.strictEqual(decoded.largest?.objectId, 5n);
+});
+
+// ClientSetup v15 tests
+test("ClientSetup v15: round trip", async () => {
+	const msg = new Setup.ClientSetup([Version.DRAFT_15]);
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+	const decoded = await decodeVersioned(encoded, Setup.ClientSetup.decode, Version.DRAFT_15);
+
+	assert.strictEqual(decoded.versions.length, 1);
+	assert.strictEqual(decoded.versions[0], Version.DRAFT_15);
+});
+
+test("ClientSetup v14: round trip", async () => {
+	const msg = new Setup.ClientSetup([Version.DRAFT_14]);
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Setup.ClientSetup.decode, Version.DRAFT_14);
+
+	assert.strictEqual(decoded.versions.length, 1);
+	assert.strictEqual(decoded.versions[0], Version.DRAFT_14);
+});
+
+// ServerSetup v15 tests
+test("ServerSetup v15: round trip", async () => {
+	const msg = new Setup.ServerSetup(Version.DRAFT_15);
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+	const decoded = await decodeVersioned(encoded, Setup.ServerSetup.decode, Version.DRAFT_15);
+
+	assert.strictEqual(decoded.version, Version.DRAFT_15);
+});
+
+test("ServerSetup v14: round trip", async () => {
+	const msg = new Setup.ServerSetup(Version.DRAFT_14);
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Setup.ServerSetup.decode, Version.DRAFT_14);
+
+	assert.strictEqual(decoded.version, Version.DRAFT_14);
+});
+
+// RequestOk / RequestError v15 tests
+test("RequestOk: round trip", async () => {
+	const msg = new RequestOk(42n);
+
+	const encoded = await encodeMessage(msg);
+	const decoded = await decodeMessage(encoded, RequestOk.decode);
+
+	assert.strictEqual(decoded.requestId, 42n);
+});
+
+test("RequestError: round trip", async () => {
+	const msg = new RequestError(99n, 500, "Internal error");
+
+	const encoded = await encodeMessage(msg);
+	const decoded = await decodeMessage(encoded, RequestError.decode);
+
+	assert.strictEqual(decoded.requestId, 99n);
+	assert.strictEqual(decoded.errorCode, 500);
+	assert.strictEqual(decoded.reasonPhrase, "Internal error");
 });

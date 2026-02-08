@@ -17,7 +17,7 @@ import {
 	PublishNamespaceOk,
 } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
-import { MaxRequestId, RequestsBlocked } from "./request.ts";
+import { MaxRequestId, RequestError, RequestOk, RequestsBlocked } from "./request.ts";
 import * as Setup from "./setup.ts";
 import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
@@ -28,6 +28,7 @@ import {
 } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatus, TrackStatusRequest } from "./track.ts";
+import type { IetfVersion } from "./version.ts";
 
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
@@ -58,13 +59,15 @@ export class Connection implements Established {
 	 * @param url - The URL of the connection
 	 * @param quic - The WebTransport session
 	 * @param controlStream - The control stream
+	 * @param maxRequestId - The initial max request ID
+	 * @param version - The negotiated protocol version
 	 *
 	 * @internal
 	 */
-	constructor(url: URL, quic: WebTransport, control: Stream, maxRequestId: bigint) {
+	constructor(url: URL, quic: WebTransport, control: Stream, maxRequestId: bigint, version?: IetfVersion) {
 		this.url = url;
 		this.#quic = quic;
-		this.#control = new Control.Stream(control, maxRequestId);
+		this.#control = new Control.Stream(control, maxRequestId, version);
 
 		this.#quic.closed.finally(() => {
 			this.#control.close();
@@ -203,6 +206,14 @@ export class Connection implements Established {
 					this.#control.maxRequestId(msg.requestId);
 				} else if (msg instanceof RequestsBlocked) {
 					console.warn("ignoring REQUESTS_BLOCKED message");
+				} else if (msg instanceof RequestOk) {
+					// v15: Route RequestOk to both publisher and subscriber
+					await this.#publisher.handleRequestOk(msg);
+					await this.#subscriber.handleRequestOk(msg);
+				} else if (msg instanceof RequestError) {
+					// v15: Route RequestError to both publisher and subscriber
+					await this.#publisher.handleRequestError(msg);
+					await this.#subscriber.handleRequestError(msg);
 				} else {
 					unreachable(msg);
 				}

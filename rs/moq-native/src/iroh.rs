@@ -70,7 +70,8 @@ impl IrohEndpointConfig {
 		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(vec![
 			web_transport_iroh::ALPN_H3.as_bytes().to_vec(),
 			moq_lite::lite::ALPN.as_bytes().to_vec(),
-			moq_lite::ietf::ALPN.as_bytes().to_vec(),
+			moq_lite::ietf::ALPN_14.as_bytes().to_vec(),
+			moq_lite::ietf::ALPN_15.as_bytes().to_vec(),
 		]);
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr_v4(addr);
@@ -87,7 +88,7 @@ impl IrohEndpointConfig {
 }
 
 /// URL schemes supported for connecting to iroh endpoints.
-pub const IROH_SCHEMES: [&str; 4] = ["iroh", "moql+iroh", "moqt+iroh", "h3+iroh"];
+pub const IROH_SCHEMES: [&str; 5] = ["iroh", "moql+iroh", "moqt+iroh", "moqt-15+iroh", "h3+iroh"];
 
 /// Returns `true` if `url` has a scheme included in [`IROH_SCHEMES`].
 pub fn is_iroh_url(url: &Url) -> bool {
