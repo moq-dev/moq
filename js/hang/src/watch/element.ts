@@ -186,8 +186,8 @@ export default class HangWatch extends HTMLElement implements Backend {
 		return this.#backend.jitter;
 	}
 
-	set jitter(value: string | Time.Milli) {
-		value ? this.setAttribute("jitter", String(value)) : this.removeAttribute("jitter");
+	set jitter(value: string | Time.Milli | undefined) {
+		value != null ? this.setAttribute("jitter", String(value)) : this.removeAttribute("jitter");
 	}
 
 	get paused(): Signal<boolean> {
@@ -211,7 +211,7 @@ declare global {
 	}
 	namespace JSX {
 		interface IntrinsicElements {
-			"hang-watch": React.HTMLAttributes<HangWatch> & {
+			"hang-watch": {
 				[K in Observed]?: string | number | boolean;
 			};
 		}
@@ -221,7 +221,7 @@ declare global {
 declare module "react" {
 	namespace JSX {
 		interface IntrinsicElements {
-			"hang-watch": React.HTMLAttributes<HangWatch> & {
+			"hang-watch": import("react").HTMLAttributes<HangWatch> & {
 				[K in Observed]?: string | number | boolean;
 			};
 		}

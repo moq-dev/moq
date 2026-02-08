@@ -12,7 +12,10 @@ declare global {
 declare module "react" {
 	namespace JSX {
 		interface IntrinsicElements {
-			"hang-watch-ui": React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;
+			"hang-watch-ui": import("react").DetailedHTMLProps<
+				import("react").HTMLAttributes<HTMLElement>,
+				HTMLElement
+			>;
 		}
 	}
 }

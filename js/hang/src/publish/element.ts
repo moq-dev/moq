@@ -247,7 +247,7 @@ declare global {
 	}
 	namespace JSX {
 		interface IntrinsicElements {
-			"hang-publish": React.HTMLAttributes<HangPublish> & {
+			"hang-publish": {
 				[K in Observed]?: string | number | boolean;
 			};
 		}
@@ -257,7 +257,7 @@ declare global {
 declare module "react" {
 	namespace JSX {
 		interface IntrinsicElements {
-			"hang-publish": React.HTMLAttributes<HangPublish> & {
+			"hang-publish": import("react").HTMLAttributes<HangPublish> & {
 				[K in Observed]?: string | number | boolean;
 			};
 		}
