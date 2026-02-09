@@ -6,6 +6,41 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[derive(Default, Debug)]
+pub struct AuthParams {
+	pub path: String,
+	pub jwt: Option<String>,
+	pub register: Option<String>,
+}
+
+impl AuthParams {
+	pub fn new(path: impl Into<String>) -> Self {
+		Self {
+			path: path.into(),
+			..Default::default()
+		}
+	}
+
+	pub fn from_url(url: &url::Url) -> Self {
+		let path = url.path().to_string();
+		let mut jwt = None;
+		let mut register = None;
+
+		for (k, v) in url.query_pairs() {
+			if v.is_empty() {
+				continue;
+			}
+			match k.as_ref() {
+				"jwt" => jwt = Some(v.into_owned()),
+				"register" => register = Some(v.into_owned()),
+				_ => {}
+			}
+		}
+
+		Self { path, jwt, register }
+	}
+}
+
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum AuthError {
 	#[error("authentication is disabled")]
@@ -19,6 +54,9 @@ pub enum AuthError {
 
 	#[error("the path does not match the root")]
 	IncorrectRoot,
+
+	#[error("a cluster token was expected")]
+	ExpectedCluster,
 }
 
 impl From<AuthError> for http::StatusCode {
@@ -66,6 +104,7 @@ pub struct AuthToken {
 	pub subscribe: Vec<PathOwned>,
 	pub publish: Vec<PathOwned>,
 	pub cluster: bool,
+	pub register: Option<String>,
 }
 
 const REFRESH_ERROR_INTERVAL: Duration = Duration::from_secs(300);
@@ -138,20 +177,18 @@ impl Auth {
 	}
 
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
-		if let Some(key) = config.key {
-			if config.public.is_some() {
-				anyhow::bail!("root key and public path cannot be configured together");
-			}
+		let public = config.public.map(|p| p.as_path().to_owned());
 
+		if let Some(key) = config.key {
 			if key.starts_with("http://") || key.starts_with("https://") {
-				Self::new_remote(key, config.refresh_interval).await
+				Self::new_remote(key, public, config.refresh_interval).await
 			} else {
-				Self::new_local(key)
+				Self::new_local(key, public)
 			}
-		} else if let Some(public) = config.public {
+		} else if public.is_some() {
 			Ok(Self {
 				key: None,
-				public: Some(public.as_path().to_owned()),
+				public,
 				refresh_task: None,
 			})
 		} else {
@@ -159,7 +196,7 @@ impl Auth {
 		}
 	}
 
-	async fn new_remote(uri: String, refresh_interval: Option<u64>) -> anyhow::Result<Self> {
+	async fn new_remote(uri: String, public: Option<PathOwned>, refresh_interval: Option<u64>) -> anyhow::Result<Self> {
 		// Start with an empty KeySet
 		let key_set = Arc::new(Mutex::new(KeySet::default()));
 
@@ -181,12 +218,12 @@ impl Auth {
 
 		Ok(Self {
 			key: Some(key_set),
-			public: None,
+			public,
 			refresh_task,
 		})
 	}
 
-	fn new_local(key: String) -> anyhow::Result<Self> {
+	fn new_local(key: String, public: Option<PathOwned>) -> anyhow::Result<Self> {
 		let key = moq_token::Key::from_file(&key).context("cannot load key")?;
 		let key_set = Arc::new(Mutex::new(KeySet {
 			keys: vec![Arc::new(key)],
@@ -194,24 +231,24 @@ impl Auth {
 
 		Ok(Self {
 			key: Some(key_set),
-			public: None,
+			public,
 			refresh_task: None,
 		})
 	}
 
 	// Parse the token from the user provided URL, returning the claims if successful.
 	// If no token is provided, then the claims will use the public path if it is set.
-	pub fn verify(&self, path: &str, token: Option<&str>) -> Result<AuthToken, AuthError> {
+	pub fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
 		// Find the token in the query parameters.
 		// ?jwt=...
-		let claims = if let Some(token) = token
+		let claims = if let Some(token) = params.jwt.as_deref()
 			&& let Some(key) = self.key.as_deref()
 		{
 			key.lock()
 				.expect("key mutex poisoned")
 				.decode(token)
 				.map_err(|_| AuthError::DecodeFailed)?
-		} else if let Some(_token) = token {
+		} else if params.jwt.is_some() {
 			return Err(AuthError::UnexpectedToken);
 		} else if let Some(public) = &self.public {
 			moq_token::Claims {
@@ -226,7 +263,7 @@ impl Auth {
 
 		// Get the path from the URL, removing any leading or trailing slashes.
 		// We will automatically add a trailing slash when joining the path with the subscribe/publish roots.
-		let root = Path::new(path);
+		let root = Path::new(&params.path);
 
 		// Make sure the URL path matches the root path.
 		let Some(suffix) = root.strip_prefix(&claims.root) else {
@@ -260,11 +297,18 @@ impl Auth {
 			})
 			.collect();
 
+		let register = match (params.register.as_deref(), claims.cluster) {
+			(Some(node), true) => Some(node.to_owned()),
+			(Some(_), false) => return Err(AuthError::ExpectedCluster),
+			_ => None,
+		};
+
 		Ok(AuthToken {
 			root: root.to_owned(),
 			subscribe,
 			publish,
 			cluster: claims.cluster,
+			register,
 		})
 	}
 }
@@ -292,13 +336,13 @@ mod tests {
 		.await?;
 
 		// Should succeed for anonymous path
-		let token = auth.verify("/anon", None)?;
+		let token = auth.verify(&AuthParams::new("/anon"))?;
 		assert_eq!(token.root, "anon".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
 
 		// Should succeed for sub-paths under anonymous
-		let token = auth.verify("/anon/room/123", None)?;
+		let token = auth.verify(&AuthParams::new("/anon/room/123"))?;
 		assert_eq!(token.root, Path::new("anon/room/123").to_owned());
 		assert_eq!(token.subscribe, vec![Path::new("").to_owned()]);
 		assert_eq!(token.publish, vec![Path::new("").to_owned()]);
@@ -316,7 +360,7 @@ mod tests {
 		.await?;
 
 		// Should succeed for any path
-		let token = auth.verify("/any/path", None)?;
+		let token = auth.verify(&AuthParams::new("/any/path"))?;
 		assert_eq!(token.root, Path::new("any/path").to_owned());
 		assert_eq!(token.subscribe, vec![Path::new("").to_owned()]);
 		assert_eq!(token.publish, vec![Path::new("").to_owned()]);
@@ -334,7 +378,7 @@ mod tests {
 		.await?;
 
 		// Should fail for non-anonymous path
-		let result = auth.verify("/secret", None);
+		let result = auth.verify(&AuthParams::new("/secret"));
 		assert!(result.is_err());
 
 		Ok(())
@@ -350,7 +394,7 @@ mod tests {
 		.await?;
 
 		// Should fail when no token and no public path
-		let result = auth.verify("/any/path", None);
+		let result = auth.verify(&AuthParams::new("/any/path"));
 		assert!(result.is_err());
 
 		Ok(())
@@ -365,7 +409,11 @@ mod tests {
 		.await?;
 
 		// Should fail when token provided but no key configured
-		let result = auth.verify("/any/path", Some("fake-token"));
+		let result = auth.verify(&AuthParams {
+			path: "/any/path".into(),
+			jwt: Some("fake-token".into()),
+			..Default::default()
+		});
 		assert!(result.is_err());
 
 		Ok(())
@@ -390,7 +438,11 @@ mod tests {
 		let token = key.encode(&claims)?;
 
 		// Should succeed with valid token and matching path
-		let token = auth.verify("/room/123", Some(&token))?;
+		let token = auth.verify(&AuthParams {
+			path: "/room/123".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 		assert_eq!(token.root, "room/123".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["alice".as_path()]);
@@ -417,7 +469,11 @@ mod tests {
 		let token = key.encode(&claims)?;
 
 		// Should fail when trying to access wrong path
-		let result = auth.verify("/secret", Some(&token));
+		let result = auth.verify(&AuthParams {
+			path: "/secret".into(),
+			jwt: Some(token),
+			..Default::default()
+		});
 		assert!(result.is_err());
 
 		Ok(())
@@ -442,7 +498,11 @@ mod tests {
 		let token = key.encode(&claims)?;
 
 		// Verify the restrictions are preserved
-		let token = auth.verify("/room/123", Some(&token))?;
+		let token = auth.verify(&AuthParams {
+			path: "/room/123".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 		assert_eq!(token.root, "room/123".as_path());
 		assert_eq!(token.subscribe, vec!["bob".as_path()]);
 		assert_eq!(token.publish, vec!["alice".as_path()]);
@@ -468,7 +528,11 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		let token = auth.verify("/room/123", Some(&token))?;
+		let token = auth.verify(&AuthParams {
+			path: "/room/123".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec![]);
 
@@ -493,7 +557,11 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		let token = auth.verify("/room/123", Some(&token))?;
+		let token = auth.verify(&AuthParams {
+			path: "/room/123".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 		assert_eq!(token.subscribe, vec![]);
 		assert_eq!(token.publish, vec!["bob".as_path()]);
 
@@ -519,7 +587,11 @@ mod tests {
 		let token = key.encode(&claims)?;
 
 		// Connect to more specific path room/123/alice
-		let token = auth.verify("/room/123/alice", Some(&token))?;
+		let token = auth.verify(&AuthParams {
+			path: "/room/123/alice".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 
 		// Root should be updated to the more specific path
 		assert_eq!(token.root, Path::new("room/123/alice"));
@@ -549,7 +621,11 @@ mod tests {
 		let token = key.encode(&claims)?;
 
 		// Connect to room/123/alice - should remove alice prefix from publish
-		let token = auth.verify("/room/123/alice", Some(&token))?;
+		let token = auth.verify(&AuthParams {
+			path: "/room/123/alice".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 
 		assert_eq!(token.root, "room/123/alice".as_path());
 		// Alice still can't subscribe to anything.
@@ -579,7 +655,11 @@ mod tests {
 		let token = key.encode(&claims)?;
 
 		// Connect to room/123/bob - should remove bob prefix from subscribe
-		let token = auth.verify("/room/123/bob", Some(&token))?;
+		let token = auth.verify(&AuthParams {
+			path: "/room/123/bob".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 
 		assert_eq!(token.root, "room/123/bob".as_path());
 		// bob prefix stripped, now can subscribe to everything under room/123/bob
@@ -608,7 +688,11 @@ mod tests {
 		let token = key.encode(&claims)?;
 
 		// Connect to room/123/alice - loses ability to subscribe to bob
-		let verified = auth.verify("/room/123/alice", Some(&token))?;
+		let verified = auth.verify(&AuthParams {
+			path: "/room/123/alice".into(),
+			jwt: Some(token.clone()),
+			..Default::default()
+		})?;
 
 		assert_eq!(verified.root, "room/123/alice".as_path());
 		// Can't subscribe to bob anymore (alice doesn't have bob prefix)
@@ -617,13 +701,17 @@ mod tests {
 		assert_eq!(verified.publish, vec!["".as_path()]);
 
 		// Connect to room/123/bob - loses ability to publish to alice
-		let token = auth.verify("/room/123/bob", Some(&token))?;
+		let verified = auth.verify(&AuthParams {
+			path: "/room/123/bob".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 
-		assert_eq!(token.root, "room/123/bob".as_path());
+		assert_eq!(verified.root, "room/123/bob".as_path());
 		// Can subscribe to everything under bob
-		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(verified.subscribe, vec!["".as_path()]);
 		// Can't publish to alice anymore (bob doesn't have alice prefix)
-		assert_eq!(token.publish, vec![]);
+		assert_eq!(verified.publish, vec![]);
 
 		Ok(())
 	}
@@ -647,7 +735,11 @@ mod tests {
 		let token = key.encode(&claims)?;
 
 		// Connect to room/123/users - permissions should be reduced
-		let verified = auth.verify("/room/123/users", Some(&token))?;
+		let verified = auth.verify(&AuthParams {
+			path: "/room/123/users".into(),
+			jwt: Some(token.clone()),
+			..Default::default()
+		})?;
 
 		assert_eq!(verified.root, "room/123/users".as_path());
 		// users prefix removed from paths
@@ -655,13 +747,17 @@ mod tests {
 		assert_eq!(verified.publish, vec!["alice/camera".as_path()]);
 
 		// Connect to room/123/users/alice - further reduction
-		let token = auth.verify("/room/123/users/alice", Some(&token))?;
+		let verified = auth.verify(&AuthParams {
+			path: "/room/123/users/alice".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 
-		assert_eq!(token.root, "room/123/users/alice".as_path());
+		assert_eq!(verified.root, "room/123/users/alice".as_path());
 		// Can't subscribe (alice doesn't have bob prefix)
-		assert_eq!(token.subscribe, vec![]);
+		assert_eq!(verified.subscribe, vec![]);
 		// users/alice prefix removed, left with camera
-		assert_eq!(token.publish, vec!["camera".as_path()]);
+		assert_eq!(verified.publish, vec!["camera".as_path()]);
 
 		Ok(())
 	}
@@ -685,11 +781,15 @@ mod tests {
 		let token = key.encode(&claims)?;
 
 		// Connect to more specific path
-		let token = auth.verify("/room/123/alice", Some(&token))?;
+		let verified = auth.verify(&AuthParams {
+			path: "/room/123/alice".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 
 		// Should remain read-only
-		assert_eq!(token.subscribe, vec!["".as_path()]);
-		assert_eq!(token.publish, vec![]);
+		assert_eq!(verified.subscribe, vec!["".as_path()]);
+		assert_eq!(verified.publish, vec![]);
 
 		// Write-only token
 		let claims = moq_token::Claims {
@@ -700,7 +800,11 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		let verified = auth.verify("/room/123/alice", Some(&token))?;
+		let verified = auth.verify(&AuthParams {
+			path: "/room/123/alice".into(),
+			jwt: Some(token),
+			..Default::default()
+		})?;
 
 		// Should remain write-only
 		assert_eq!(verified.subscribe, vec![]);

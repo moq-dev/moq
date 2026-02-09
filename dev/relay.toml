@@ -8,7 +8,8 @@ level = "debug"
 
 [server]
 # Listen for QUIC connections on UDP:4443
-listen = "0.0.0.0:4443"
+# Sometimes IPv6 causes issues; try 127.0.0.1:4443 instead.
+listen = "[::]:4443"
 
 # Generate a self-signed certificate for the given hostnames.
 # This is used for local development, in conjunction with a fingerprint, or with TLS verification disabled.
@@ -18,7 +19,7 @@ tls.generate = ["localhost"]
 # Listen for HTTP and WebSocket connections on the given TCP address.
 # This is unfortunately required to serve certificate.sha256 for local development.
 # However, as a bonus, we can serve tracks via both HTTP and WebSocket fallbacks.
-listen = "0.0.0.0:4443"
+listen = "[::]:4443"
 
 # See root.toml and leaf.toml for auth and clustering examples.
 [auth]

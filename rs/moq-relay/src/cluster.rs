@@ -56,9 +56,6 @@ pub struct Cluster {
 	config: ClusterConfig,
 	client: moq_native::Client,
 
-	// Advertises ourselves as an origin to other nodes.
-	noop: BroadcastProducer,
-
 	// Broadcasts announced by local clients (users).
 	pub primary: OriginProducer,
 
@@ -74,7 +71,6 @@ impl Cluster {
 		Cluster {
 			config,
 			client,
-			noop: Broadcast::produce(),
 			primary: Origin::produce(),
 			secondary: Origin::produce(),
 			combined: Origin::produce(),
@@ -96,6 +92,7 @@ impl Cluster {
 		subscribe_origin.consume_only(&token.subscribe)
 	}
 
+	// For a given auth token, return the origin that should be used for the session.
 	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
 		// If this is a cluster node, then add its broadcasts to the secondary origin.
 		// That way we won't publish them to other cluster nodes.
@@ -106,6 +103,19 @@ impl Cluster {
 
 		let publish_origin = publish_origin.with_root(&token.root)?;
 		publish_origin.publish_only(&token.publish)
+	}
+
+	// Register a cluster node's presence.
+	//
+	// Returns a [ClusterRegistration] that should be kept alive for the duration of the session.
+	pub fn register(&self, token: &AuthToken) -> Option<ClusterRegistration> {
+		let node = token.register.clone()?;
+		let broadcast = Broadcast::produce();
+
+		let path = moq_lite::Path::new(&self.config.prefix).join(&node);
+		self.primary.publish_broadcast(path, broadcast.consume());
+
+		Some(ClusterRegistration::new(node, broadcast))
 	}
 
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
@@ -135,29 +145,24 @@ impl Cluster {
 			.with_root(&self.config.prefix)
 			.context("no authorized origins")?;
 
-		// Announce ourselves as an origin to the root node.
-		// This goes into primary so it gets shared with other nodes via run_remote_once.
-		if let Some(myself) = self.config.node.as_ref() {
-			tracing::info!(%myself, "announcing as leaf");
-			let announce_origin = self
-				.primary
-				.with_root(&self.config.prefix)
-				.context("failed to create announcement origin")?;
-			announce_origin.publish_broadcast(myself, self.noop.consume());
-		}
-
 		// If the token is provided, read it from the disk and use it in the query parameter.
 		// TODO put this in an AUTH header once WebTransport supports it.
 		let token = match &self.config.token {
-			Some(path) => std::fs::read_to_string(path).context("failed to read token")?,
+			Some(path) => std::fs::read_to_string(path)
+				.context("failed to read token")?
+				.trim()
+				.to_string(),
 			None => "".to_string(),
 		};
 
-		let noop = self.noop.consume();
+		let local = self.config.node.clone().context("missing node")?;
+
+		// Create a dummy broadcast that we don't close so run_remote doesn't close.
+		let noop = Broadcast::produce();
 
 		// Despite returning a Result, we should NEVER return an Ok
 		tokio::select! {
-			res = self.clone().run_remote(&root, token.clone(), noop) => {
+			res = self.clone().run_remote(&root, Some(local.as_str()), token.clone(), noop.consume()) => {
 				res.context("failed to connect to root")?;
 				anyhow::bail!("connection to root closed");
 			}
@@ -199,7 +204,7 @@ impl Cluster {
 		// NOTE: The root node will connect to all other nodes as a client, ignoring the existing (server) connection.
 		// This ensures that nodes are advertising a valid hostname before any tracks get announced.
 		while let Some((node, origin)) = origins.announced().await {
-			if Some(node.as_str()) == self.config.node.as_deref() {
+			if self.config.node.as_deref() == Some(node.as_str()) {
 				// Skip ourselves.
 				continue;
 			}
@@ -218,7 +223,7 @@ impl Cluster {
 
 			let handle = tokio::spawn(
 				async move {
-					match this.run_remote(node2.as_str(), token, origin).await {
+					match this.run_remote(node2.as_str(), None, token, origin).await {
 						Ok(()) => tracing::info!(%node2, "origin closed"),
 						Err(err) => tracing::warn!(%err, %node2, "origin error"),
 					}
@@ -232,12 +237,24 @@ impl Cluster {
 		Ok(())
 	}
 
-	#[tracing::instrument("remote", skip_all, err, fields(%node))]
-	async fn run_remote(mut self, node: &str, token: String, origin: BroadcastConsumer) -> anyhow::Result<()> {
-		let url = match token.is_empty() {
-			true => Url::parse(&format!("https://{node}/"))?,
-			false => Url::parse(&format!("https://{node}/?jwt={token}"))?,
-		};
+	#[tracing::instrument("remote", skip_all, err, fields(%remote))]
+	async fn run_remote(
+		mut self,
+		remote: &str,
+		register: Option<&str>,
+		token: String,
+		origin: BroadcastConsumer,
+	) -> anyhow::Result<()> {
+		let mut url = Url::parse(&format!("https://{remote}/"))?;
+		{
+			let mut q = url.query_pairs_mut();
+			if !token.is_empty() {
+				q.append_pair("jwt", &token);
+			}
+			if let Some(register) = register {
+				q.append_pair("register", register);
+			}
+		}
 		let mut backoff = 1;
 
 		loop {
@@ -247,15 +264,17 @@ impl Cluster {
 				res = self.run_remote_once(&url) => res,
 			};
 
-			if let Err(err) = res {
-				backoff *= 2;
-				tracing::error!(%err, "remote error");
+			match res {
+				Ok(()) => backoff = 1,
+				Err(err) => {
+					backoff *= 2;
+					tracing::error!(%err, "remote error");
+				}
 			}
 
 			let timeout = tokio::time::Duration::from_secs(backoff);
 			if timeout > tokio::time::Duration::from_secs(300) {
 				// 5 minutes of backoff is enough, just give up.
-				// TODO Reset the backoff if the connect is successful for some period of time.
 				anyhow::bail!("remote connection keep failing, giving up");
 			}
 
@@ -266,7 +285,9 @@ impl Cluster {
 	}
 
 	async fn run_remote_once(&mut self, url: &Url) -> anyhow::Result<()> {
-		tracing::info!(%url, "connecting to remote");
+		let mut log_url = url.clone();
+		log_url.set_query(None);
+		tracing::info!(url = %log_url, "connecting to remote");
 
 		let session = self
 			.client
@@ -278,5 +299,26 @@ impl Cluster {
 			.context("failed to connect to remote")?;
 
 		session.closed().await.map_err(Into::into)
+	}
+}
+
+pub struct ClusterRegistration {
+	// The name of the node.
+	node: String,
+
+	// The announcement, send to other nodes.
+	broadcast: BroadcastProducer,
+}
+
+impl ClusterRegistration {
+	pub fn new(node: String, broadcast: BroadcastProducer) -> Self {
+		tracing::info!(%node, "registered cluster client");
+		ClusterRegistration { node, broadcast }
+	}
+}
+impl Drop for ClusterRegistration {
+	fn drop(&mut self) {
+		tracing::info!(%self.node, "unregistered cluster client");
+		self.broadcast.close();
 	}
 }

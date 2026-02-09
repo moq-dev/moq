@@ -1,0 +1,10 @@
+---
+title: Use Cases
+description: How MoQ should be used in the wild
+---
+
+# Use Cases
+- [Contribution](/concept/use-case/contribution): A publisher (ex. OBS) sends data to a service (ex. Twitch).
+- [Distribution](/concept/use-case/distribution): A service (ex. Twitch) distributes data to viewers.
+- [Conferencing](/concept/use-case/conferencing): A service (ex. Zoom) facilitates a conference between multiple participants.
+- [Exotic](/concept/use-case/exotic): Some ideas for other use cases that might be viable.

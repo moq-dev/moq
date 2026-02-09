@@ -23,7 +23,7 @@
 	"scripts": {
 		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
-		"test": "vitest",
+		"test": "bun test --only-failures",
 		"release": "bun ../scripts/release.ts"
 	},
 	"dependencies": {
@@ -41,7 +41,6 @@
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
 		"fast-glob": "^3.3.3",
 		"rimraf": "^6.0.1",
-		"typescript": "^5.9.2",
-		"vitest": "^3.2.4"
+		"typescript": "^5.9.2"
 	}
 }

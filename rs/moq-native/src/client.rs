@@ -34,7 +34,9 @@ pub struct ClientTls {
 		id = "tls-disable-verify",
 		long = "tls-disable-verify",
 		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
-		action = clap::ArgAction::SetTrue
+		default_missing_value = "true",
+		num_args = 0..=1,
+		value_parser = clap::value_parser!(bool),
 	)]
 	pub disable_verify: Option<bool>,
 }
@@ -466,4 +468,42 @@ fn url_set_scheme(url: Url, scheme: &str) -> anyhow::Result<Url> {
 	)
 	.parse()?;
 	Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use clap::Parser;
+
+	#[test]
+	fn test_toml_disable_verify_survives_update_from() {
+		let toml = r#"
+			tls.disable_verify = true
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(config.tls.disable_verify, Some(true));
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --tls-disable-verify flag).
+		config.update_from(["test"]);
+		assert_eq!(config.tls.disable_verify, Some(true));
+	}
+
+	#[test]
+	fn test_cli_disable_verify_flag() {
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify"]);
+		assert_eq!(config.tls.disable_verify, Some(true));
+	}
+
+	#[test]
+	fn test_cli_disable_verify_explicit_false() {
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify", "false"]);
+		assert_eq!(config.tls.disable_verify, Some(false));
+	}
+
+	#[test]
+	fn test_cli_no_disable_verify() {
+		let config = ClientConfig::parse_from(["test"]);
+		assert_eq!(config.tls.disable_verify, None);
+	}
 }

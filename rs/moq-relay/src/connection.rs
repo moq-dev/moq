@@ -1,4 +1,4 @@
-use crate::{Auth, Cluster};
+use crate::{Auth, AuthParams, Cluster};
 
 use axum::http;
 use moq_native::Request;
@@ -13,20 +13,13 @@ pub struct Connection {
 impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let (path, token) = match self.request.url() {
-			Some(url) => {
-				// Extract the path and token from the URL.
-				let path = url.path();
-				let token = url
-					.query_pairs()
-					.find(|(k, v)| k == "jwt" && !v.is_empty())
-					.map(|(_, v)| v.to_string());
-				(path, token)
-			}
-			None => ("", None),
+		let params = match self.request.url() {
+			Some(url) => AuthParams::from_url(url),
+			None => AuthParams::default(),
 		};
+
 		// Verify the URL before accepting the connection.
-		let token = match self.auth.verify(path, token.as_deref()) {
+		let token = match self.auth.verify(&params) {
 			Ok(token) => token,
 			Err(err) => {
 				let status: http::StatusCode = err.clone().into();
@@ -37,6 +30,7 @@ impl Connection {
 
 		let publish = self.cluster.publisher(&token);
 		let subscribe = self.cluster.subscriber(&token);
+		let registration = self.cluster.register(&token);
 
 		match (&publish, &subscribe) {
 			(Some(publish), Some(subscribe)) => {
@@ -65,6 +59,9 @@ impl Connection {
 			.await?;
 
 		// Wait until the session is closed.
-		session.closed().await.map_err(Into::into)
+		// Keep registration alive so the cluster node stays announced.
+		session.closed().await?;
+		drop(registration);
+		Ok(())
 	}
 }

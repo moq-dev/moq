@@ -4,8 +4,9 @@
 level = "debug"
 
 [server]
-# Listen for QUIC connections on UDP:4444
-listen = "0.0.0.0:4444"
+# Listen for QUIC connections on UDP:4445
+# Sometimes IPv6 causes issues; try 127.0.0.1:4445 instead.
+listen = "[::]:4445"
 
 # Generate a self-signed certificate for the server.
 # You should use a real certificate in production.
@@ -13,7 +14,7 @@ tls.generate = ["localhost"]
 
 [web.http]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
-listen = "0.0.0.0:4444"
+listen = "[::]:4445"
 
 # This clustering scheme is very very simple for now.
 #
@@ -21,7 +22,7 @@ listen = "0.0.0.0:4444"
 # Announcements flow from leaf -> root -> leaf, but any subscriptions are leaf -> leaf.
 # The root node can serve (user) subscriptions too.
 #
-# The root node is either missing the "root" field below or it's identifical to the "node" field.
+# The root node is either missing the "root" field below or it's identical to the "node" field.
 # This node acts a server only, accepting incoming connections from leaf nodes and users alike.
 #
 # There can be any number of leaf nodes.
@@ -41,7 +42,7 @@ connect = "localhost:4443"
 token = "dev/root.jwt"
 
 # My hostname, which must be accessible from other nodes.
-node = "localhost:4444"
+node = "localhost:4445"
 
 # Each leaf node will connect to the root node and other nodes, using this configuration.
 [client]

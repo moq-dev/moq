@@ -19,6 +19,17 @@
 			"Bash(bun run *)",
 			"Bash(ffprobe:*)",
 			"Bash(rs/libmoq/build.sh:*)",
+			"Bash(xargs dirname:*)",
+			"Bash(git fetch:*)",
+			"Bash(lsof:*)",
+			"Bash(kill:*)",
+			"Bash(bun install:*)",
+			"Bash(gh pr view:*)",
+			"Bash(git fetch:*)",
+			"Bash(gh pr list:*)",
+			"Bash(gh issue view:*)",
+			"Bash(gh pr diff:*)",
+
 			"WebSearch"
 		]
 	}

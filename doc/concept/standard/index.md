@@ -4,122 +4,38 @@ description: IETF drafts and protocol specifications
 ---
 
 # Standards
+MoQ is a big tent, full of many different opinions and ideas.
+I consider any media protocol that uses QUIC to be part of MoQ, even if it's part of a standards body or organization.
 
-MoQ is built on open standards and protocol specifications.
+Additionally, MoQ is experimental and not yet battle-tested, so expect all of these standards to change.
+If you're interested in participating, join any of these communities and get involved.
 
-## Protocol Specifications
+## IETF MoQ Working Group
+The IETF MoQ Working Group is the official standardization body for MoQ.
+The group is primarily focusing on the [MoqTransport](/concept/standard/moq-transport) specification, but there's a number of other drafts too.
 
-### moq-lite
+There's no membership fee or criteria to join.
+If you want to participate, you should show up to the regular online (and in-person) meetings.
+Once you get more involved, jump into the excessive number of [GitHub issues](https://github.com/moq-wg/moq-transport/issues) and join the [mailing list](https://mailarchive.ietf.org/arch/browse/moq/).
 
-The core pub/sub transport protocol.
+- [Working Group](https://datatracker.ietf.org/group/moq/about/)
+- [Documents](https://datatracker.ietf.org/group/moq/documents/)
+- [GitHub](https://github.com/moq-wg/moq-transport)
 
-**Specification:** [draft-lcurley-moq-lite](https://moq-dev.github.io/drafts/draft-lcurley-moq-lite.html)
+## moq.dev
+[moq.dev](https://moq.dev) is an open-source implementation of MoQ primarily focused on production usage.
 
-This defines:
-- Broadcasts, tracks, groups, frames
-- Message types and encoding
-- Subscription and announcement flows
-- Prioritization and reliability
+The goal is to support compatibility with the IETF drafts, but not a full implementation.
+The IETF process is slow and involves a lot of debate, discussion, and negotiation.
+All of this is *on purpose* and produces a better standard in the end.
 
-### hang
+But the standard is too immature, full of bloat, and there's too much churn.
+If we had to gate every change behind IETF approval, it would take months to make even the smallest change.
 
-Media-specific encoding/streaming protocol.
+To that end we've created a subset of the standard called [moq-lite](/concept/layer/moq-lite) and [hang](/concept/layer/hang).
+The concepts are very similar to [MoqTransport](/concept/standard/moq-transport) and [MSF](/concept/standard/msf) respectively, with the intent to converge some day.
 
-**Specification:** [draft-lcurley-moq-hang](https://moq-dev.github.io/drafts/draft-lcurley-moq-hang.html)
-
-This defines:
-- Catalog format for track discovery
-- Frame container format
-- Codec requirements
-- Media-specific grouping
-
-### Use Cases
-
-Document describing various MoQ use cases.
-
-**Specification:** [draft-lcurley-moq-use-cases](https://moq-dev.github.io/drafts/draft-lcurley-moq-use-cases.html)
-
-Covers:
-- Live video streaming
-- Audio conferencing
-- Text chat and data streams
-- Gaming and IoT
-
-## Relationship to IETF MoQ
-
-This project is a [fork](https://moq.dev/blog/transfork) of the [IETF MoQ Working Group](https://datatracker.ietf.org/group/moq/documents/) specification.
-
-### Key Differences
-
-| Aspect | IETF MoQ | This Project |
-|--------|----------|--------------|
-| Scope | Broad, general-purpose | Focused on deployability |
-| Design | Feature-rich, many extensions | Minimal, opinionated |
-| Status | Ongoing standardization | Production-ready |
-
-### Why Fork?
-
-The fork prioritizes:
-
-1. **Simplicity** - Fewer concepts, easier to implement
-2. **Deployability** - Works today with existing infrastructure
-3. **Focus** - Optimized for live streaming use cases
-
-Both efforts share knowledge and collaborate where beneficial.
-
-## Underlying Standards
-
-### QUIC
-
-[RFC 9000](https://datatracker.ietf.org/doc/html/rfc9000) - QUIC: A UDP-Based Multiplexed and Secure Transport
-
-MoQ uses QUIC for:
-- Stream multiplexing
-- Built-in TLS 1.3
-- Prioritization
-- Congestion control
-
-### WebTransport
-
-[WebTransport over HTTP/3](https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/)
-
-Provides browser access to QUIC features:
-- Bidirectional streams
-- Unidirectional streams
-- Datagrams
-- HTTP/3 handshake for firewall traversal
-
-### WebCodecs
-
-[W3C WebCodecs API](https://www.w3.org/TR/webcodecs/)
-
-Browser API for media encoding/decoding:
-- Hardware-accelerated codecs
-- Low-level frame access
-- Used by `@moq/hang`
-
-### JWT
-
-[RFC 7519](https://datatracker.ietf.org/doc/html/rfc7519) - JSON Web Token
-
-Used for authentication:
-- Path-based authorization
-- Signed claims
-- Expiration handling
-
-## Contributing
-
-Specifications are maintained in the [moq-dev/drafts](https://github.com/moq-dev/drafts) repository.
-
-Contributions welcome:
-- Issue feedback
-- Propose clarifications
-- Submit use cases
-- Report implementation issues
-
-## Next Steps
-
-- Read the [Protocol details](/concept/layer/)
-- Understand [Authentication](/app/relay/auth)
-- Try the [Rust libraries](/rs/)
-- Try the [TypeScript libraries](/js/)
+- [Website](https://moq.dev)
+- [GitHub](https://github.com/moq-dev/moq)
+- [Documentation](https://doc.moq.dev)
+- [Discord](https://discord.gg/FCYF3p99mr)

@@ -4,7 +4,7 @@
 [server]
 # Listen for QUIC connections on UDP:443
 # This is the default port for WebTransport
-listen = "0.0.0.0:443"
+listen = "[::]:443"
 
 [server.tls]
 # You'll need to provide a real certificate and key in production.
@@ -14,11 +14,11 @@ key = "key.pem"
 
 #[web.http]
 # Optionally listen for HTTP and WebSocket connections on port 80.
-# listen = "0.0.0.0:80"
+# listen = "[::]:80"
 
 [web.https]
 # Optionally listen for TCP/HTTPS/WSS connections on port 443.
-listen = "0.0.0.0:443"
+listen = "[::]:443"
 
 # You'll need to provide a real certificate and key in production.
 # This can be the exact same certificate and key as the QUIC endpoint.

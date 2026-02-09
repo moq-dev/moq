@@ -109,9 +109,9 @@ mod test {
 						"codedHeight": 720,
 						"bitrate": 6000000,
 						"framerate": 30.0,
-						"container": "legacy"
+						"container": {"kind": "legacy"}
 					}
-				},
+				}
 			},
 			"audio": {
 				"renditions": {
@@ -120,9 +120,9 @@ mod test {
 						"sampleRate": 48000,
 						"numberOfChannels": 2,
 						"bitrate": 128000,
-						"container": "legacy"
+						"container": {"kind": "legacy"}
 					}
-				},
+				}
 			}
 		}"#
 		.to_string();

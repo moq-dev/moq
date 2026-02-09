@@ -692,11 +692,11 @@ mod tests {
 		let consumer2 = broadcast2.consume();
 		let consumer3 = broadcast3.consume();
 
+		let mut consumer = origin.consume();
+
 		origin.publish_broadcast("test", consumer1.clone());
 		origin.publish_broadcast("test", consumer2.clone());
 		origin.publish_broadcast("test", consumer3.clone());
-
-		let mut consumer = origin.consume();
 		assert!(consumer.consume_broadcast("test").is_some());
 
 		consumer.assert_next("test", &consumer1);
@@ -783,11 +783,11 @@ mod tests {
 		let origin = Origin::produce();
 		let broadcast = Broadcast::produce();
 
+		let mut consumer = origin.consume();
 		for i in 0..256 {
 			origin.publish_broadcast(format!("test{i}"), broadcast.consume());
 		}
 
-		let mut consumer = origin.consume();
 		for i in 0..256 {
 			consumer.assert_next(format!("test{i}"), &broadcast.consume());
 		}
@@ -798,11 +798,11 @@ mod tests {
 		let origin = Origin::produce();
 		let broadcast = Broadcast::produce();
 
+		let mut consumer = origin.consume();
 		for i in 0..256 {
 			origin.publish_broadcast(format!("test{i}"), broadcast.consume());
 		}
 
-		let mut consumer = origin.consume();
 		for i in 0..256 {
 			// try_next does not have the same issue because it's synchronous.
 			consumer.assert_try_next(format!("test{i}"), &broadcast.consume());
@@ -818,10 +818,10 @@ mod tests {
 		let foo_producer = origin.with_root("foo").expect("should create root");
 		assert_eq!(foo_producer.root().as_str(), "foo");
 
+		let mut consumer = origin.consume();
+
 		// When publishing to "bar/baz", it should actually publish to "foo/bar/baz"
 		assert!(foo_producer.publish_broadcast("bar/baz", broadcast.consume()));
-
-		let mut consumer = origin.consume();
 		// The original consumer should see the full path
 		consumer.assert_next("foo/bar/baz", &broadcast.consume());
 
@@ -840,10 +840,10 @@ mod tests {
 		let foo_bar_producer = foo_producer.with_root("bar").expect("should create bar root");
 		assert_eq!(foo_bar_producer.root().as_str(), "foo/bar");
 
+		let mut consumer = origin.consume();
+
 		// Publishing to "baz" should actually publish to "foo/bar/baz"
 		assert!(foo_bar_producer.publish_broadcast("baz", broadcast.consume()));
-
-		let mut consumer = origin.consume();
 		// The original consumer sees the full path
 		consumer.assert_next("foo/bar/baz", &broadcast.consume());
 
@@ -888,6 +888,8 @@ mod tests {
 		let broadcast2 = Broadcast::produce();
 		let broadcast3 = Broadcast::produce();
 
+		let mut consumer = origin.consume();
+
 		// Publish to different paths
 		origin.publish_broadcast("allowed", broadcast1.consume());
 		origin.publish_broadcast("allowed/nested", broadcast2.consume());
@@ -904,7 +906,6 @@ mod tests {
 		limited_consumer.assert_next_wait(); // Should not see "notallowed"
 
 		// Unscoped consumer should see all
-		let mut consumer = origin.consume();
 		consumer.assert_next("allowed", &broadcast1.consume());
 		consumer.assert_next("allowed/nested", &broadcast2.consume());
 		consumer.assert_next("notallowed", &broadcast3.consume());
@@ -944,6 +945,8 @@ mod tests {
 			.publish_only(&["bar".into(), "goop/pee".into()])
 			.expect("should create limited producer");
 
+		let mut consumer = origin.consume();
+
 		// Should be able to publish to foo/bar and foo/goop/pee (but user sees as bar and goop/pee)
 		assert!(limited_producer.publish_broadcast("bar", broadcast.consume()));
 		assert!(limited_producer.publish_broadcast("bar/nested", broadcast.consume()));
@@ -956,7 +959,6 @@ mod tests {
 		assert!(!limited_producer.publish_broadcast("goop/other", broadcast.consume()));
 
 		// Original consumer sees full paths
-		let mut consumer = origin.consume();
 		consumer.assert_next("foo/bar", &broadcast.consume());
 		consumer.assert_next("foo/bar/nested", &broadcast.consume());
 		consumer.assert_next("foo/goop/pee", &broadcast.consume());
@@ -1243,13 +1245,13 @@ mod tests {
 		assert!(limited_producer.publish_broadcast("org/team1/project2", broadcast2.consume()));
 		assert!(limited_producer.publish_broadcast("org/team2/project1", broadcast3.consume()));
 
-		// Narrow down to team1 only
-		let mut team1_consumer = limited_producer
+		// Narrow down to team2 only
+		let mut team2_consumer = limited_producer
 			.consume_only(&["org/team2".into()])
-			.expect("should create team1 consumer");
+			.expect("should create team2 consumer");
 
-		team1_consumer.assert_next("org/team2/project1", &broadcast3.consume());
-		team1_consumer.assert_next_wait(); // Should NOT see team1 content
+		team2_consumer.assert_next("org/team2/project1", &broadcast3.consume());
+		team2_consumer.assert_next_wait(); // Should NOT see team1 content
 
 		// Further narrow down to team1/project1
 		let mut project1_consumer = limited_producer
