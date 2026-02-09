@@ -6424,18 +6424,6 @@ dependencies = [
 [[package]]
 name = "web-transport-proto"
 version = "0.4.0"
-dependencies = [
- "bytes",
- "http",
- "sfv",
- "thiserror 2.0.18",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "web-transport-proto"
-version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee133824c73a492e5739a449fb088571d8a418c2de29520035639107d6a7d6bc"
 dependencies = [
@@ -6449,7 +6437,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-quiche"
-version = "0.0.3"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1c2cb7364d4f01c4e8be96bb47af0a6a079365990724e92fd98a1960b6d3b20"
 dependencies = [
  "boring",
  "bytes",
@@ -6488,7 +6478,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-trait"
-version = "0.3.1"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2615c30ed29953bb3727391850279a25c948c0b7a4ed2343d3a78e1d3cce2f7c"
 dependencies = [
  "bytes",
 ]
@@ -6504,7 +6496,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.24.0",
- "web-transport-proto 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "web-transport-proto 0.4.0",
  "web-transport-trait",
 ]
 

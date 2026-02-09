@@ -94,7 +94,7 @@ pub struct ClientConfig {
 
 	/// The QUIC backend to use.
 	/// Auto-detected from compiled features if not specified.
-	#[arg(long = "quic-backend", env = "MOQ_QUIC_BACKEND")]
+	#[arg(id = "client-backend", long = "client-backend", env = "MOQ_CLIENT_BACKEND")]
 	pub backend: Option<QuicBackend>,
 
 	#[command(flatten)]

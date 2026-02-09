@@ -17,7 +17,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh"]
+default = ["iroh", "quinn", "quiche"]
 iroh = ["moq-native/iroh"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
@@ -31,7 +31,9 @@ clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 http-body = "1"
 moq-lite = { workspace = true, features = ["serde"] }
-moq-native = { workspace = true, features = ["aws-lc-rs"] }
+moq-native = { workspace = true, default-features = false, features = [
+	"aws-lc-rs",
+] }
 moq-token = { workspace = true, features = ["jwks-loader"] }
 rustls = { version = "0.23", features = [
 	"aws-lc-rs",

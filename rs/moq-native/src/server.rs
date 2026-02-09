@@ -58,7 +58,7 @@ pub struct ServerConfig {
 
 	/// The QUIC backend to use.
 	/// Auto-detected from compiled features if not specified.
-	#[arg(long = "quic-backend", env = "MOQ_QUIC_BACKEND")]
+	#[arg(id = "server-backend", long = "server-backend", env = "MOQ_SERVER_BACKEND")]
 	pub backend: Option<QuicBackend>,
 
 	/// Server ID to embed in connection IDs for QUIC-LB compatibility.

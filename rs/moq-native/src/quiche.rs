@@ -2,7 +2,7 @@ use crate::client::ClientConfig;
 use crate::crypto;
 use crate::server::{ServerConfig, ServerTlsInfo};
 use anyhow::Context;
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::fs;
 use std::io::{self, Cursor, Read};
 use std::net;
@@ -91,25 +91,23 @@ impl QuicheServer {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
 		}
 
-		if !config.tls.generate.is_empty() {
-			anyhow::bail!(
-				"--tls-generate is not supported with the quiche backend (requires rcgen which is quinn-gated)"
-			);
-		}
-
-		anyhow::ensure!(
-			!config.tls.cert.is_empty() && !config.tls.key.is_empty(),
-			"--tls-cert and --tls-key are required with the quiche backend"
-		);
-		anyhow::ensure!(
-			config.tls.cert.len() == config.tls.key.len(),
-			"must provide matching --tls-cert and --tls-key pairs"
-		);
-
 		let listen = config.bind.unwrap_or("[::]:443".parse().unwrap());
 
-		// Load certs in PEM format and convert to DER for quiche
-		let (chain, key) = load_quiche_cert(&config.tls.cert[0], &config.tls.key[0])?;
+		let (chain, key) = if !config.tls.generate.is_empty() {
+			generate_quiche_cert(&config.tls.generate)?
+		} else {
+			anyhow::ensure!(
+				!config.tls.cert.is_empty() && !config.tls.key.is_empty(),
+				"--tls-cert and --tls-key are required with the quiche backend"
+			);
+			anyhow::ensure!(
+				config.tls.cert.len() == config.tls.key.len(),
+				"must provide matching --tls-cert and --tls-key pairs"
+			);
+
+			// Load certs in PEM format and convert to DER for quiche
+			load_quiche_cert(&config.tls.cert[0], &config.tls.key[0])?
+		};
 
 		// Compute fingerprints using rustls crypto (always available)
 		let provider = crypto::provider();
@@ -213,6 +211,26 @@ fn load_quiche_cert(
 	let key = rustls_pemfile::private_key(&mut Cursor::new(&key_buf))?.context("missing private key")?;
 
 	Ok((chain, key))
+}
+
+fn generate_quiche_cert(
+	hostnames: &[String],
+) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+	let key_pair = rcgen::KeyPair::generate()?;
+
+	let mut params = rcgen::CertificateParams::new(hostnames)?;
+
+	// Make the certificate valid for two weeks, starting yesterday (in case of clock drift).
+	// WebTransport certificates MUST be valid for two weeks at most.
+	params.not_before = ::time::OffsetDateTime::now_utc() - ::time::Duration::days(1);
+	params.not_after = params.not_before + ::time::Duration::days(14);
+
+	let cert = params.self_signed(&key_pair)?;
+
+	let key_der = key_pair.serialized_der().to_vec();
+	let key = PrivateKeyDer::Pkcs8(key_der.into());
+
+	Ok((vec![cert.into()], key))
 }
 
 // ── QuicheQuicRequest ───────────────────────────────────────────────

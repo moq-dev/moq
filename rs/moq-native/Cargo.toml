@@ -20,7 +20,7 @@ quinn = [
     "dep:reqwest",
     "dep:rustls-webpki",
 ]
-quiche = ["dep:web-transport-quiche"]
+quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh"]
 ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring"]
