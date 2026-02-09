@@ -64,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.5](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.4...moq-relay-v0.10.5) - 2026-02-09
+
+### Other
+
+- Announce cluster nodes via query param instead ([#923](https://github.com/moq-dev/moq/pull/923))
+- Revert ipv4 and fix tls.disable-verify in TOML ([#918](https://github.com/moq-dev/moq/pull/918))
+- Allow a public path in addition to a key. ([#917](https://github.com/moq-dev/moq/pull/917))
+- Make iroh config optional. ([#916](https://github.com/moq-dev/moq/pull/916))
+- Fix origin announcement to use primary connection in cluster ([#911](https://github.com/moq-dev/moq/pull/911))
+
 ## [0.10.4](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.3...moq-relay-v0.10.4) - 2026-02-03
 
 ### Other

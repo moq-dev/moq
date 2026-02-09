@@ -16,7 +16,7 @@ resolver = "2"
 [workspace.dependencies]
 hang = { version = "0.13", path = "rs/hang" }
 moq-lite = { version = "0.13", path = "rs/moq-lite" }
-moq-mux = { version = "0.1", path = "rs/moq-mux" }
+moq-mux = { version = "0.2", path = "rs/moq-mux" }
 moq-native = { version = "0.12", path = "rs/moq-native" }
 moq-token = { version = "0.5", path = "rs/moq-token" }
 
