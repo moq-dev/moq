@@ -14,10 +14,14 @@ mod log;
 #[cfg(feature = "quinn")]
 mod quinn;
 mod server;
+#[cfg(feature = "websocket")]
+mod websocket;
 
 pub use client::*;
 pub use log::*;
 pub use server::*;
+#[cfg(feature = "websocket")]
+pub use websocket::*;
 
 // Re-export these crates.
 pub use moq_lite;

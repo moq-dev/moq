@@ -13,6 +13,8 @@ mod cluster;
 mod config;
 mod connection;
 mod web;
+#[cfg(feature = "websocket")]
+mod websocket;
 
 pub use auth::*;
 pub use cluster::*;

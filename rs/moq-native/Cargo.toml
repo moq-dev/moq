@@ -12,7 +12,7 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["quinn", "aws-lc-rs"]
+default = ["quinn", "aws-lc-rs", "websocket"]
 quinn = [
     "dep:quinn",
     "dep:web-transport-quinn",
@@ -23,6 +23,7 @@ quinn = [
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh"]
+websocket = ["dep:web-transport-ws"]
 ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring"]
 tokio-console = ["dep:console-subscriber"]
 
@@ -59,7 +60,7 @@ url = "2"
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
-web-transport-ws = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+web-transport-ws = { workspace = true, features = ["rustls-tls-webpki-roots"], optional = true }
 
 [dev-dependencies]
 anyhow = "1"
