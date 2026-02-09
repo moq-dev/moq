@@ -30,7 +30,7 @@
 
 	<h3>Other demos:</h3>
 	<ul>
-		<li><a href="index.html?path=me" target="_blank" rel="noreferrer" id="watch">Watch your broadcast: <span
+		<li><a href="index.html?broadcast=me" target="_blank" rel="noreferrer" id="watch">Watch your broadcast: <span
 					id="watch-name"></span></a></li>
 		<li><a href="mse.html">Watch a broadcast (MSE).</a></li>
 		<li><a href="support.html">Check browser support.</a></li>
@@ -39,7 +39,7 @@
 	<h3>Tips:</h3>
 	<p>
 		This page creates a broadcast called `me` by default.
-		You can use <a href="index.html?&path=notme">query parameters</a> to use a different path and create
+		You can use <a href="index.html?broadcast=notme">query parameters</a> to use a different broadcast name and create
 		multiple broadcasts.
 	</p>
 	<p>
@@ -69,7 +69,7 @@ publish.broadcast.audio.enabled.set(true);</code></pre>
 	<p>
 		You're not limited to web publishing either.
 		Try running <code class="language-bash">just pub tos</code> in a new terminal and then <a
-			href="index.html?path=tos" target="_blank">watch robots bang</a>.
+			href="index.html?broadcast=tos" target="_blank">watch robots bang</a>.
 		This uses ffmpeg to produce a fragmented MP4 file piped over stdout then sent over the network.
 		Yeah it's pretty gross.
 	</p>
