@@ -1,38 +1,35 @@
 ---
-title: HTTP Endpoints
-description: Debug endpoints exposed by moq-relay
+title: HTTP
+description: HTTP endpoints exposed by moq-relay
 ---
 
 # HTTP Endpoints
 
-moq-relay exposes HTTP endpoints for debugging and diagnostics. These run on TCP alongside the QUIC/UDP server.
-
-::: warning
-The HTTP server is unencrypted and intended for local debugging only. Don't expose it to the public internet.
-:::
+moq-relay exposes HTTP/HTTPS endpoints via TCP too.
+These were initially added for debugging but are useful for many things, such as fetching old content.
 
 ## Configuration
 
+The relay supports both HTTP and HTTPS, configured independently:
+
 ```toml
 [web.http]
-# Listen for HTTP connections on TCP
-listen = "0.0.0.0:4443"
+# Listen for unencrypted HTTP connections on TCP
+listen = "0.0.0.0:80"
+
+[web.https]
+# Listen for encrypted HTTPS connections on TCP
+listen = "0.0.0.0:443"
+cert = "cert.pem"
+key = "key.pem"
 ```
 
-The default is the same port as the QUIC server, just on TCP instead of UDP.
+::: warning
+HTTP is unencrypted, which means any [authentication tokens](/app/relay/auth) will be sent in plaintext.
+It's recommended to only use HTTPS in production.
+:::
 
-## Endpoints
-
-### GET /certificate.sha256
-
-Returns the SHA-256 fingerprint of the TLS certificate. Useful for local development with self-signed certificates.
-
-```bash
-curl http://localhost:4443/certificate.sha256
-# f4:a3:b2:... (hex-encoded fingerprint)
-```
-
-Browsers can use this fingerprint to trust the self-signed certificate for WebTransport connections.
+## Notable Endpoints
 
 ### GET /announced/*prefix
 
@@ -49,65 +46,40 @@ curl http://localhost:4443/announced/demo
 curl http://localhost:4443/announced/demo/my-stream
 ```
 
-Returns a list of broadcast paths currently available on the relay.
-
 ### GET /fetch/*path
 
-Fetches the latest group from a track. Useful for quick debugging without setting up a full subscriber.
+Fetches a specific group from a track, by default the latest group.
+Useful for quick debugging without setting up a full subscriber, or for fetching old content.
+
+The path is `/<broadcast>/<track>`, where the last segment is the track name and everything before it is the broadcast path.
 
 ```bash
-# Get latest video group
-curl http://localhost:4443/fetch/demo/my-stream/video
+# Get latest catalog from broadcast "demo/my-stream"
+curl http://localhost:4443/fetch/demo/my-stream/catalog.json
 
-# Get latest audio group
-curl http://localhost:4443/fetch/demo/my-stream/audio
+# Get a specific video group from broadcast "demo/my-stream"
+curl http://localhost:4443/fetch/demo/my-stream/video?group=42
 ```
 
-Returns the raw bytes of the most recent group on that track.
+::: tip
+Use HTTP fetch for catch-up and historical data.
+Use MoQ subscriptions for the live edge.
+The two complement each other — HTTP is request/response, MoQ is pub/sub.
+:::
 
-## Use Cases
+### GET /certificate.sha256
 
-### Local Development
-
-During development, use `/certificate.sha256` to get the fingerprint of auto-generated certificates:
+Returns the SHA-256 fingerprint of the TLS certificate.
+This is only useful for local development with self-signed certificates.
 
 ```bash
-# Start the relay
-moq-relay dev/relay.toml
-
-# Get the fingerprint for WebTransport
-FINGERPRINT=$(curl -s http://localhost:4443/certificate.sha256)
+curl http://localhost:4443/certificate.sha256
+# f4:a3:b2:... (hex-encoded fingerprint)
 ```
 
-### Debugging
-
-Check what's being announced:
-
-```bash
-# Is my publisher connected?
-curl http://localhost:4443/announced/my-stream
-
-# What's available under this prefix?
-curl http://localhost:4443/announced/demo
-```
-
-Peek at actual data:
-
-```bash
-# Is the video track producing data?
-curl http://localhost:4443/fetch/demo/stream/video | hexdump -C | head
-```
-
-### Health Checks
-
-The HTTP endpoints can serve as basic health checks:
-
-```bash
-# Is the relay responding?
-curl -f http://localhost:4443/announced/ || echo "Relay down"
-```
 
 ## See Also
 
 - [Relay Configuration](/app/relay/config) - Full config reference
 - [Clustering](/app/relay/cluster) - Multi-relay deployments
+- [hang format](/concept/layer/hang) - Groups, keyframes, and container details

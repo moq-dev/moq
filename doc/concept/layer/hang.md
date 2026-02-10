@@ -91,3 +91,27 @@ Unfortunately, fMP4 is not quite designed for real-time streaming and incurs eit
 - Minimal latency: 1-frame fragments introduce ~100 bytes of overhead per frame.
 - Minimal size (HLS): GoP sized fragments introduce a GoP's worth of latency.
 - Mixed latency/size (LL-HLS): 500ms sized fragments introduce a 500ms latency, with some additional overhead.
+
+## `description`
+The `description` field in audio/video renditions contains codec-specific initialization data based on the [WebCodecs codec registration](https://www.w3.org/TR/webcodecs-codec-registry/).
+
+For example, the `description` field for [H.264](https://www.w3.org/TR/webcodecs-avc-codec-registration/) can be:
+- **present**: the `description` is an `avcC` box, containing the SPS/PPS and other information.
+- **absent**: the SPS/PPS NALUs are delivered **inline** before each keyframe.
+
+There's no "right format" and both exist in the wild.
+Inlining the SPS/PPS marginally increases the overhead of each frame, but it means the decoder can be reinitialized (ex. resolution change).
+
+Unfortunately, your decoder should handle both.
+
+## Groups and Keyframes
+
+Each MoQ group aligns with a video Group of Pictures (GoP).
+A new group starts with a keyframe (IDR frame) that can be decoded independently.
+
+This has important implications:
+- **Skipping a group means skipping an entire GoP.** The relay can drop old groups without corrupting the decoder state.
+- **Late-join viewers** start at the beginning of a group (the keyframe), since it's not possible to join mid-group.
+- **Audio groups** don't need to align with video groups and can contain any number of frames.
+
+The relay uses group boundaries for partial reliability: if congestion occurs, entire groups are dropped rather than individual frames, keeping the decoder in a consistent state.
