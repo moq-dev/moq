@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2](https://github.com/moq-dev/moq/compare/moq-native-v0.12.1...moq-native-v0.12.2) - 2026-02-09
+
+### Other
+
+- Revert ipv4 and fix tls.disable-verify in TOML ([#918](https://github.com/moq-dev/moq/pull/918))
+
 ## [0.12.1](https://github.com/moq-dev/moq/compare/moq-native-v0.12.0...moq-native-v0.12.1) - 2026-02-03
 
 ### Other
