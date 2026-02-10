@@ -12,13 +12,13 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["quinn", "aws-lc-rs", "websocket", "quiche"]
+default = ["quinn", "aws-lc-rs", "websocket"]
 quinn = [
-    "dep:quinn",
-    "dep:web-transport-quinn",
-    "dep:rcgen",
-    "dep:reqwest",
-    "dep:rustls-webpki",
+	"dep:quinn",
+	"dep:web-transport-quinn",
+	"dep:rcgen",
+	"dep:reqwest",
+	"dep:rustls-webpki",
 ]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
