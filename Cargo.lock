@@ -6436,10 +6436,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "web-transport-quiche"
-version = "0.0.5"
+name = "web-transport-proto"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1c2cb7364d4f01c4e8be96bb47af0a6a079365990724e92fd98a1960b6d3b20"
+checksum = "1178b54e051ff748f2be77d5f462453c459f921f84cda01ff7f5f3340db60d87"
+dependencies = [
+ "bytes",
+ "http",
+ "sfv",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "web-transport-quiche"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc0e6e50aed45cb2a880939836fc5f077ab4c2fbdef9aa516569c31a426ee0df"
 dependencies = [
  "boring",
  "bytes",
@@ -6452,7 +6466,7 @@ dependencies = [
  "tokio-quiche",
  "tracing",
  "url",
- "web-transport-proto 0.4.0",
+ "web-transport-proto 0.5.0",
  "web-transport-trait",
 ]
 

@@ -12,7 +12,7 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["quinn", "aws-lc-rs", "websocket"]
+default = ["quinn", "aws-lc-rs", "websocket", "quiche"]
 quinn = [
     "dep:quinn",
     "dep:web-transport-quinn",
@@ -60,7 +60,9 @@ url = "2"
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
-web-transport-ws = { workspace = true, features = ["rustls-tls-webpki-roots"], optional = true }
+web-transport-ws = { workspace = true, features = [
+	"rustls-tls-webpki-roots",
+], optional = true }
 
 [dev-dependencies]
 anyhow = "1"

@@ -140,7 +140,7 @@ impl QuicheServer {
 		})
 	}
 
-	pub fn accept(&mut self) -> impl std::future::Future<Output = Option<web_transport_quiche::ez::Connection>> + '_ {
+	pub fn accept(&mut self) -> impl std::future::Future<Output = Option<web_transport_quiche::ez::Incoming>> + '_ {
 		self.server.accept()
 	}
 
@@ -163,16 +163,21 @@ impl QuicheServer {
 
 pub(crate) async fn accept_quiche_session(
 	server: moq_lite::Server,
-	conn: web_transport_quiche::ez::Connection,
+	incoming: web_transport_quiche::ez::Incoming,
 ) -> anyhow::Result<crate::server::Request> {
-	let alpn = conn.alpn().unwrap_or_default();
-	let alpn = String::from_utf8(alpn).unwrap_or_default();
+	tracing::debug!(ip = %incoming.peer_addr(), "accepting via quiche");
 
-	tracing::debug!(ip = %conn.peer_addr(), %alpn, "accepting via quiche");
+	// Accept the connection and wait for it to be established
+	let conn = incoming.accept().await?;
 
-	match alpn.as_str() {
-		"h3" => {
-			// WebTransport over HTTP/3: perform the H3 handshake
+	// Get the negotiated ALPN from the established connection
+	let alpn = conn.alpn().context("missing ALPN")?;
+	let alpn = std::str::from_utf8(&alpn).context("failed to decode ALPN")?;
+	tracing::debug!(ip = %conn.peer_addr(), ?alpn, "accepted via quiche");
+
+	match alpn {
+		web_transport_quiche::ALPN => {
+			// WebTransport over HTTP/3
 			let request = web_transport_quiche::h3::Request::accept(conn)
 				.await
 				.map_err(|e| anyhow::anyhow!("failed to accept WebTransport request: {e}"))?;
@@ -182,7 +187,7 @@ pub(crate) async fn accept_quiche_session(
 			})
 		}
 		_ => {
-			// Raw QUIC mode
+			// Raw QUIC mode (moql or moqt)
 			Ok(crate::server::Request {
 				server: server.clone(),
 				kind: crate::server::RequestKind::QuicheQuic(QuicheQuicRequest::accept(conn)),

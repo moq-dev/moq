@@ -230,8 +230,8 @@ impl Server {
 				ServerInner::Quiche(quiche) => {
 					tokio::select! {
 						res = quiche.accept() => {
-							let conn = res?;
-							self.accept.push(crate::quiche::accept_quiche_session(self.moq.clone(), conn).boxed());
+							let incoming = res?;
+							self.accept.push(crate::quiche::accept_quiche_session(self.moq.clone(), incoming).boxed());
 						}
 						res = iroh_accept_fut => {
 							#[cfg(feature = "iroh")]
