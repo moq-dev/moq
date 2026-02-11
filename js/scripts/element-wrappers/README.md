@@ -6,7 +6,7 @@ Generates typed framework wrappers from [Custom Elements Manifest](https://custo
 
 ## Architecture
 
-```
+```text
 element-wrappers/
 ├── index.ts              # Orchestrator — runs all enabled generators
 ├── generators/
