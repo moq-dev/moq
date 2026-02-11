@@ -31,3 +31,7 @@ url = "2"
 [dependencies.derive_more]
 version = "2"
 features = ["from", "display", "debug"]
+
+[dev-dependencies]
+anyhow = "1"
+moq-native = { workspace = true }

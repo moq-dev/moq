@@ -63,3 +63,10 @@ web-transport-quinn = { workspace = true, optional = true }
 web-transport-ws = { workspace = true, features = [
 	"rustls-tls-webpki-roots",
 ], optional = true }
+
+[dev-dependencies]
+anyhow = "1"
+bytes = "1"
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+toml = "0.9"
+url = "2"

@@ -1992,6 +1992,7 @@ checksum = "253b313319f7109de64e480ffb606f89475cd758bae82e096e00c5d95341d30e"
 name = "hang"
 version = "0.13.1"
 dependencies = [
+ "anyhow",
  "buf-list",
  "bytes",
  "derive_more",
@@ -1999,6 +2000,7 @@ dependencies = [
  "hex",
  "lazy_static",
  "moq-lite",
+ "moq-native",
  "regex",
  "serde",
  "serde_json",
@@ -3178,6 +3180,7 @@ name = "moq-native"
 version = "0.12.2"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "console-subscriber",
  "futures",
@@ -3198,6 +3201,7 @@ dependencies = [
  "serde_with",
  "time",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -3225,6 +3229,7 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_with",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",
