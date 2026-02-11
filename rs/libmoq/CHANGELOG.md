@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/moq-dev/moq/compare/libmoq-v0.2.6...libmoq-v0.2.7) - 2026-02-09
+
+### Other
+
+- Use `moq` instead of `hang` for some crates ([#906](https://github.com/moq-dev/moq/pull/906))
+- Remove priority from the catalog ([#905](https://github.com/moq-dev/moq/pull/905))
+
 ## [0.2.6](https://github.com/moq-dev/moq/compare/libmoq-v0.2.5...libmoq-v0.2.6) - 2026-02-03
 
 ### Other

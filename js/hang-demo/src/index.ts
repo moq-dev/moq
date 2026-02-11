@@ -13,7 +13,7 @@ if (!watch) throw new Error("unable to find <hang-watch> element");
 
 // If query params are provided, use them.
 const urlParams = new URLSearchParams(window.location.search);
-const path = urlParams.get("path");
+const path = urlParams.get("broadcast") ?? urlParams.get("path");
 const url = urlParams.get("url");
 
 if (path) {

@@ -52,7 +52,10 @@ impl Video {
 	/// Create a new video track with the given extension and configuration.
 	pub fn create_track(&mut self, extension: &str, config: VideoConfig) -> moq_lite::Track {
 		for i in 0.. {
-			let name = format!("video{}{}", i, extension);
+			let name = match extension {
+				"" => format!("video{}", i),
+				extension => format!("video{}.{}", i, extension),
+			};
 			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
 				entry.insert(config.clone());
 				// TODO: Remove priority

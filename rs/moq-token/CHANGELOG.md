@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.9](https://github.com/moq-dev/moq/compare/moq-token-v0.5.8...moq-token-v0.5.9) - 2026-02-09
+
+### Other
+
+- Fix tokens with a null expiration. ([#922](https://github.com/moq-dev/moq/pull/922))
+
 ## [0.5.8](https://github.com/moq-dev/moq/compare/moq-token-v0.5.7...moq-token-v0.5.8) - 2026-02-03
 
 ### Other
