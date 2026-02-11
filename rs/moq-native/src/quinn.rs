@@ -99,9 +99,14 @@ impl QuinnClient {
 		let connection = self.quic.connect_with(config, ip, &host)?.await?;
 		tracing::Span::current().record("id", connection.stable_id());
 
+		let request = web_transport_quinn::proto::ConnectRequest::new(url).with_protocol(alpn);
+
 		let session = match alpn {
-			web_transport_quinn::ALPN => web_transport_quinn::Session::connect(connection, url).await?,
-			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => web_transport_quinn::Session::raw(connection, url),
+			web_transport_quinn::ALPN => web_transport_quinn::Session::connect(connection, request).await?,
+			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => {
+				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
+				web_transport_quinn::Session::raw(connection, request, response)
+			}
 			_ => unreachable!("ALPN was checked above"),
 		};
 
@@ -252,82 +257,104 @@ impl QuinnServer {
 	}
 }
 
-pub(crate) async fn accept_quinn_session(
-	server: moq_lite::Server,
-	conn: quinn::Incoming,
-) -> anyhow::Result<crate::server::Request> {
-	let mut conn = conn.accept()?;
-
-	let handshake = conn
-		.handshake_data()
-		.await?
-		.downcast::<quinn::crypto::rustls::HandshakeData>()
-		.unwrap();
-
-	let alpn = handshake.protocol.context("missing ALPN")?;
-	let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
-	let host = handshake.server_name.unwrap_or_default();
-
-	tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepting");
-
-	// Wait for the QUIC connection to be established.
-	let conn = conn.await.context("failed to establish QUIC connection")?;
-
-	let span = tracing::Span::current();
-	span.record("id", conn.stable_id()); // TODO can we get this earlier?
-	tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepted");
-
-	match alpn.as_str() {
-		web_transport_quinn::ALPN => {
-			// Wait for the CONNECT request.
-			let request = web_transport_quinn::Request::accept(conn)
-				.await
-				.context("failed to receive WebTransport request")?;
-			Ok(crate::server::Request {
-				server: server.clone(),
-				kind: crate::server::RequestKind::QuinnWebTransport(request),
-			})
-		}
-		moq_lite::lite::ALPN | moq_lite::ietf::ALPN => Ok(crate::server::Request {
-			server: server.clone(),
-			kind: crate::server::RequestKind::QuinnQuic(QuinnRequest::accept(conn)),
-		}),
-		_ => anyhow::bail!("unsupported ALPN: {alpn}"),
-	}
-}
-
 // ── QuinnRequest ────────────────────────────────────────────────────
 
 /// A raw QUIC connection request without WebTransport framing (quinn backend).
-pub struct QuinnRequest {
-	connection: quinn::Connection,
-	url: Url,
+pub(crate) enum QuinnRequest {
+	Raw {
+		request: web_transport_quinn::proto::ConnectRequest,
+		response: web_transport_quinn::proto::ConnectResponse,
+		connection: quinn::Connection,
+	},
+	WebTransport {
+		request: web_transport_quinn::Request,
+	},
 }
 
 impl QuinnRequest {
-	/// Accept a new QUIC session from a client.
-	pub fn accept(connection: quinn::Connection) -> Self {
-		let url: Url = format!("moql://{}", connection.remote_address())
-			.parse()
-			.expect("URL is valid");
-		Self { connection, url }
+	pub async fn accept(conn: quinn::Incoming) -> anyhow::Result<Self> {
+		let mut conn = conn.accept()?;
+
+		let handshake = conn
+			.handshake_data()
+			.await?
+			.downcast::<quinn::crypto::rustls::HandshakeData>()
+			.unwrap();
+
+		let alpn = handshake.protocol.context("missing ALPN")?;
+		let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
+		let host = handshake.server_name.unwrap_or_default();
+
+		tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepting");
+
+		// Wait for the QUIC connection to be established.
+		let conn = conn.await.context("failed to establish QUIC connection")?;
+
+		let span = tracing::Span::current();
+		span.record("id", conn.stable_id()); // TODO can we get this earlier?
+		tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepted");
+
+		match alpn.as_str() {
+			web_transport_quinn::ALPN => {
+				// Wait for the CONNECT request.
+				let request = web_transport_quinn::Request::accept(conn)
+					.await
+					.context("failed to receive WebTransport request")?;
+				Ok(Self::WebTransport { request })
+			}
+			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => {
+				let url = format!("moqt://{}", host).parse::<Url>().unwrap();
+				let request = web_transport_quinn::proto::ConnectRequest::new(url);
+				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
+				Ok(Self::Raw {
+					connection: conn,
+					request,
+					response,
+				})
+			}
+			_ => anyhow::bail!("unsupported ALPN: {alpn}"),
+		}
 	}
 
 	/// Accept the session, returning a 200 OK if using WebTransport.
-	pub fn ok(self) -> web_transport_quinn::Session {
-		web_transport_quinn::Session::raw(self.connection, self.url)
+	pub async fn ok(self) -> Result<web_transport_quinn::Session, web_transport_quinn::ServerError> {
+		match self {
+			QuinnRequest::Raw {
+				connection,
+				request,
+				response,
+			} => Ok(web_transport_quinn::Session::raw(connection, request, response)),
+			QuinnRequest::WebTransport { request } => {
+				let mut response = web_transport_quinn::proto::ConnectResponse::OK;
+				// TODO actually pick a valid moq protocol
+				if let Some(alpn) = request.protocols.first() {
+					response = response.with_protocol(alpn);
+				}
+				request.respond(response).await
+			}
+		}
 	}
 
 	/// Returns the URL provided by the client.
-	#[allow(dead_code)]
 	pub fn url(&self) -> &Url {
-		&self.url
+		match self {
+			QuinnRequest::Raw { request, .. } => &request.url,
+			QuinnRequest::WebTransport { request, .. } => &request.url,
+		}
 	}
 
 	/// Reject the session with a status code.
-	pub fn close(self, status: web_transport_quinn::http::StatusCode) {
-		self.connection
-			.close(status.as_u16().into(), status.as_str().as_bytes());
+	pub async fn close(
+		self,
+		status: web_transport_quinn::http::StatusCode,
+	) -> Result<(), web_transport_quinn::ServerError> {
+		match self {
+			QuinnRequest::Raw { connection, .. } => {
+				connection.close(status.as_u16().into(), status.as_str().as_bytes());
+				Ok(())
+			}
+			QuinnRequest::WebTransport { request, .. } => request.reject(status).await,
+		}
 	}
 }
 

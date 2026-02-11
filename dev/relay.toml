@@ -15,7 +15,6 @@ listen = "[::]:4443"
 # This is used for local development, in conjunction with a fingerprint, or with TLS verification disabled.
 tls.generate = ["localhost"]
 
-# Requires --features quiche
 backend = "quiche"
 
 [web.http]

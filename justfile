@@ -11,7 +11,7 @@ default:
 # Install any dependencies.
 install:
 	bun install
-	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-hack
+	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-hack cargo-sweep
 
 # Alias for dev.
 all: dev
@@ -398,6 +398,9 @@ fix:
 
 	if command -v tofu &> /dev/null; then (cd cdn && just fix); fi
 
+	# Remove old build artifacts to save disk space.
+	if command -v cargo-sweep &> /dev/null; then cargo sweep --time 7; fi
+
 # Upgrade any tooling
 update:
 	bun update
@@ -411,6 +414,7 @@ update:
 
 	# Update the Nix flake.
 	nix flake update
+
 
 # Build the packages
 build:

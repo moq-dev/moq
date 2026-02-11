@@ -1,19 +1,19 @@
+use std::net;
 use std::path::PathBuf;
-use std::{net, time::Duration};
 
 use crate::QuicBackend;
-#[cfg(feature = "iroh")]
-use crate::iroh::IrohQuicRequest;
-use anyhow::Context;
 use moq_lite::Session;
 use std::sync::{Arc, RwLock};
 use url::Url;
 #[cfg(feature = "iroh")]
 use web_transport_iroh::iroh;
 
+use anyhow::Context;
+
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
 
 /// TLS configuration for the server.
 ///
@@ -85,40 +85,7 @@ pub struct ServerConfig {
 
 impl ServerConfig {
 	pub fn init(self) -> anyhow::Result<Server> {
-		let backend = self.backend.clone().unwrap_or_else(|| {
-			if cfg!(feature = "quinn") {
-				QuicBackend::Quinn
-			} else if cfg!(feature = "quiche") {
-				QuicBackend::Quiche
-			} else {
-				panic!("no QUIC backend compiled; enable quinn or quiche feature")
-			}
-		});
-
-		let inner = match backend {
-			QuicBackend::Quinn => {
-				#[cfg(not(feature = "quinn"))]
-				anyhow::bail!("quinn backend not compiled; rebuild with --features quinn");
-
-				#[cfg(feature = "quinn")]
-				ServerInner::Quinn(crate::quinn::QuinnServer::new(self)?)
-			}
-			QuicBackend::Quiche => {
-				#[cfg(not(feature = "quiche"))]
-				anyhow::bail!("quiche backend not compiled; rebuild with --features quiche");
-
-				#[cfg(feature = "quiche")]
-				ServerInner::Quiche(crate::quiche::QuicheServer::new(self)?)
-			}
-		};
-
-		Ok(Server {
-			inner,
-			accept: Default::default(),
-			moq: moq_lite::Server::new(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
-		})
+		Server::new(self)
 	}
 }
 
@@ -127,24 +94,53 @@ impl ServerConfig {
 /// Create via [`ServerConfig::init`] or [`Server::new`].
 pub struct Server {
 	moq: moq_lite::Server,
-	inner: ServerInner,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
-}
-
-enum ServerInner {
 	#[cfg(feature = "quinn")]
-	Quinn(crate::quinn::QuinnServer),
+	quinn: Option<crate::quinn::QuinnServer>,
 	#[cfg(feature = "quiche")]
-	Quiche(crate::quiche::QuicheServer),
+	quiche: Option<crate::quiche::QuicheServer>,
 }
 
 impl Server {
-	/// Create a new server using the default (quinn) backend.
-	#[cfg(feature = "quinn")]
+	#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
 	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
-		config.init()
+		anyhow::bail!("no QUIC backend compiled; enable quinn, quiche, or iroh feature");
+	}
+
+	#[cfg(any(feature = "quinn", feature = "quiche", feature = "iroh"))]
+	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
+		let backend = config.backend.clone().unwrap_or({
+			if cfg!(feature = "quinn") {
+				QuicBackend::Quinn
+			} else {
+				QuicBackend::Quiche
+			}
+		});
+
+		#[cfg(feature = "quinn")]
+		let quinn = match backend {
+			QuicBackend::Quinn => Some(crate::quinn::QuinnServer::new(config.clone())?),
+			QuicBackend::Quiche => None,
+		};
+
+		#[cfg(feature = "quiche")]
+		let quiche = match backend {
+			QuicBackend::Quiche => Some(crate::quiche::QuicheServer::new(config)?),
+			QuicBackend::Quinn => None,
+		};
+
+		Ok(Server {
+			accept: Default::default(),
+			moq: moq_lite::Server::new(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+			#[cfg(feature = "quinn")]
+			quinn,
+			#[cfg(feature = "quiche")]
+			quiche,
+		})
 	}
 
 	#[cfg(feature = "iroh")]
@@ -165,12 +161,15 @@ impl Server {
 
 	// Return the SHA256 fingerprints of all our certificates.
 	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
-		match &self.inner {
-			#[cfg(feature = "quinn")]
-			ServerInner::Quinn(quinn) => quinn.tls_info(),
-			#[cfg(feature = "quiche")]
-			ServerInner::Quiche(quiche) => quiche.tls_info(),
+		#[cfg(feature = "quinn")]
+		if let Some(quinn) = self.quinn.as_ref() {
+			return quinn.tls_info();
 		}
+		#[cfg(feature = "quiche")]
+		if let Some(quiche) = self.quiche.as_ref() {
+			return quiche.tls_info();
+		}
+		unreachable!("no QUIC backend compiled");
 	}
 
 	/// Returns the next partially established QUIC or WebTransport session.
@@ -179,110 +178,79 @@ impl Server {
 	/// so the connection can be rejected early on an invalid path or missing auth.
 	///
 	/// The [Request] is either a WebTransport or a raw QUIC request.
-	/// Call [Request::accept] or [Request::reject] to complete the handshake.
+	/// Call [Request::ok] or [Request::close] to complete the handshake.
 	pub async fn accept(&mut self) -> Option<Request> {
 		loop {
-			// tokio::select! does not support cfg directives on arms, so we need to put the
-			// iroh cfg into a block, and default to a pending future if iroh is disabled.
-			let iroh_accept_fut = async {
+			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
+			let iroh_accept = async {
 				#[cfg(feature = "iroh")]
-				if let Some(endpoint) = self.iroh.as_ref() {
-					endpoint.accept().await
-				} else {
-					std::future::pending::<_>().await
+				if let Some(endpoint) = self.iroh.as_mut() {
+					return endpoint.accept().await;
 				}
-
-				#[cfg(not(feature = "iroh"))]
-				std::future::pending::<()>().await
+				std::future::pending::<_>().await
 			};
 
-			match &mut self.inner {
+			let quinn_accept = async {
 				#[cfg(feature = "quinn")]
-				ServerInner::Quinn(quinn) => {
-					tokio::select! {
-						res = quinn.accept() => {
-							let conn = res?;
-							self.accept.push(crate::quinn::accept_quinn_session(self.moq.clone(), conn).boxed());
-						}
-						res = iroh_accept_fut => {
-							#[cfg(feature = "iroh")]
-							{
-								let conn = res?;
-								self.accept.push(Self::accept_iroh_session(self.moq.clone(), conn).boxed());
-							}
-							#[cfg(not(feature = "iroh"))]
-							let _: () = res;
-						}
-						Some(res) = self.accept.next() => {
-							match res {
-								Ok(session) => return Some(session),
-								Err(err) => tracing::debug!(%err, "failed to accept session"),
-							}
-						}
-						_ = tokio::signal::ctrl_c() => {
-							self.close();
-							tokio::time::sleep(Duration::from_millis(100)).await;
-							return None;
-						}
-					}
+				if let Some(quinn) = self.quinn.as_mut() {
+					return quinn.accept().await;
 				}
-				#[cfg(feature = "quiche")]
-				ServerInner::Quiche(quiche) => {
-					tokio::select! {
-						res = quiche.accept() => {
-							let incoming = res?;
-							self.accept.push(crate::quiche::accept_quiche_session(self.moq.clone(), incoming).boxed());
-						}
-						res = iroh_accept_fut => {
-							#[cfg(feature = "iroh")]
-							{
-								let conn = res?;
-								self.accept.push(Self::accept_iroh_session(self.moq.clone(), conn).boxed());
-							}
-							#[cfg(not(feature = "iroh"))]
-							let _: () = res;
-						}
-						Some(res) = self.accept.next() => {
-							match res {
-								Ok(session) => return Some(session),
-								Err(err) => tracing::debug!(%err, "failed to accept session"),
-							}
-						}
-						_ = tokio::signal::ctrl_c() => {
-							self.close();
-							tokio::time::sleep(Duration::from_millis(100)).await;
-							return None;
-						}
-					}
-				}
-			}
-		}
-	}
+				std::future::pending::<_>().await
+			};
 
-	#[cfg(feature = "iroh")]
-	async fn accept_iroh_session(server: moq_lite::Server, conn: iroh::endpoint::Incoming) -> anyhow::Result<Request> {
-		let conn = conn.accept()?.await?;
-		let alpn = String::from_utf8(conn.alpn().to_vec()).context("failed to decode ALPN")?;
-		tracing::Span::current().record("id", conn.stable_id());
-		tracing::debug!(remote = %conn.remote_id().fmt_short(), %alpn, "accepted");
-		match alpn.as_str() {
-			web_transport_iroh::ALPN_H3 => {
-				let request = web_transport_iroh::H3Request::accept(conn)
-					.await
-					.context("failed to receive WebTransport request")?;
-				Ok(Request {
-					server: server.clone(),
-					kind: RequestKind::IrohWebTransport(request),
-				})
+			let quiche_accept = async {
+				#[cfg(feature = "quiche")]
+				if let Some(quiche) = self.quiche.as_mut() {
+					return quiche.accept().await;
+				}
+				std::future::pending::<_>().await
+			};
+
+			let server = self.moq.clone();
+
+			tokio::select! {
+				Some(conn) = quinn_accept => {
+					#[cfg(feature = "quinn")]
+					self.accept.push(async move {
+						let quinn = super::quinn::QuinnRequest::accept(conn).await?;
+						Ok(Request {
+							server,
+							kind: RequestKind::Quinn(quinn),
+						})
+					}.boxed());
+				}
+				Some(conn) = quiche_accept => {
+					#[cfg(feature = "quiche")]
+					self.accept.push(async move {
+						let quiche = super::quiche::QuicheRequest::accept(conn).await?;
+						Ok(Request {
+							server,
+							kind: RequestKind::Quiche(quiche),
+						})
+					}.boxed());
+				}
+				Some(conn) = iroh_accept => {
+					#[cfg(feature = "iroh")]
+					self.accept.push(async move {
+						let iroh = super::iroh::IrohRequest::accept(conn).await?;
+						Ok(Request {
+							server,
+							kind: RequestKind::Iroh(iroh),
+						})
+					}.boxed());
+				}
+				Some(res) = self.accept.next() => {
+					match res {
+						Ok(session) => return Some(session),
+						Err(err) => tracing::debug!(%err, "failed to accept session"),
+					}
+				}
+				_ = tokio::signal::ctrl_c() => {
+					self.close();
+					tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+					return None;
+				}
 			}
-			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => {
-				let request = IrohQuicRequest::accept(conn);
-				Ok(Request {
-					server: server.clone(),
-					kind: RequestKind::IrohQuic(request),
-				})
-			}
-			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
 		}
 	}
 
@@ -292,84 +260,71 @@ impl Server {
 	}
 
 	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
-		match &self.inner {
-			#[cfg(feature = "quinn")]
-			ServerInner::Quinn(quinn) => quinn.local_addr(),
-			#[cfg(feature = "quiche")]
-			ServerInner::Quiche(quiche) => quiche.local_addr(),
+		#[cfg(feature = "quinn")]
+		if let Some(quinn) = self.quinn.as_ref() {
+			return quinn.local_addr();
 		}
+		#[cfg(feature = "quiche")]
+		if let Some(quiche) = self.quiche.as_ref() {
+			return quiche.local_addr();
+		}
+		unreachable!("no QUIC backend compiled");
 	}
 
 	pub fn close(&mut self) {
-		match &mut self.inner {
-			#[cfg(feature = "quinn")]
-			ServerInner::Quinn(quinn) => quinn.close(),
-			#[cfg(feature = "quiche")]
-			ServerInner::Quiche(quiche) => quiche.close(),
+		#[cfg(feature = "quinn")]
+		if let Some(quinn) = self.quinn.as_mut() {
+			quinn.close();
 		}
+		#[cfg(feature = "quiche")]
+		if let Some(quiche) = self.quiche.as_mut() {
+			quiche.close();
+		}
+		unreachable!("no QUIC backend compiled");
 	}
 }
 
 /// An incoming connection that can be accepted or rejected.
 pub(crate) enum RequestKind {
 	#[cfg(feature = "quinn")]
-	QuinnWebTransport(web_transport_quinn::Request),
-	#[cfg(feature = "quinn")]
-	QuinnQuic(crate::quinn::QuinnRequest),
+	Quinn(crate::quinn::QuinnRequest),
 	#[cfg(feature = "quiche")]
-	QuicheWebTransport(web_transport_quiche::h3::Request),
-	#[cfg(feature = "quiche")]
-	QuicheQuic(crate::quiche::QuicheQuicRequest),
+	Quiche(crate::quiche::QuicheRequest),
 	#[cfg(feature = "iroh")]
-	IrohWebTransport(web_transport_iroh::H3Request),
-	#[cfg(feature = "iroh")]
-	IrohQuic(IrohQuicRequest),
+	Iroh(crate::iroh::IrohRequest),
 }
 
 pub struct Request {
-	pub(crate) server: moq_lite::Server,
-	pub(crate) kind: RequestKind,
+	server: moq_lite::Server,
+	kind: RequestKind,
 }
 
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn reject(self, code: u16) -> anyhow::Result<()> {
+	pub async fn close(self, code: u16) -> anyhow::Result<()> {
 		match self.kind {
 			#[cfg(feature = "quinn")]
-			RequestKind::QuinnWebTransport(request) => {
+			RequestKind::Quinn(request) => {
 				let status = web_transport_quinn::http::StatusCode::from_u16(code).context("invalid status code")?;
 				request.close(status).await?;
-			}
-			#[cfg(feature = "quinn")]
-			RequestKind::QuinnQuic(request) => {
-				let status = web_transport_quinn::http::StatusCode::from_u16(code).context("invalid status code")?;
-				request.close(status);
+				Ok(())
 			}
 			#[cfg(feature = "quiche")]
-			RequestKind::QuicheWebTransport(request) => {
+			RequestKind::Quiche(request) => {
 				let status = web_transport_quiche::http::StatusCode::from_u16(code).context("invalid status code")?;
 				request
-					.close(status)
+					.reject(status)
 					.await
 					.map_err(|e| anyhow::anyhow!("failed to close quiche WebTransport request: {e}"))?;
-			}
-			#[cfg(feature = "quiche")]
-			RequestKind::QuicheQuic(request) => {
-				let status = web_transport_quiche::http::StatusCode::from_u16(code).context("invalid status code")?;
-				request.close(status);
+				Ok(())
 			}
 			#[cfg(feature = "iroh")]
-			RequestKind::IrohWebTransport(request) => {
+			RequestKind::Iroh(request) => {
 				let status = web_transport_iroh::http::StatusCode::from_u16(code).context("invalid status code")?;
 				request.close(status).await?;
-			}
-			#[cfg(feature = "iroh")]
-			RequestKind::IrohQuic(request) => {
-				let status = web_transport_iroh::http::StatusCode::from_u16(code).context("invalid status code")?;
-				request.close(status);
+				Ok(())
 			}
 		}
-		Ok(())
 	}
 
 	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {
@@ -383,40 +338,38 @@ impl Request {
 	}
 
 	/// Accept the session, performing rest of the MoQ handshake.
-	pub async fn accept(self) -> anyhow::Result<Session> {
-		let session = match self.kind {
+	pub async fn ok(self) -> anyhow::Result<Session> {
+		match self.kind {
 			#[cfg(feature = "quinn")]
-			RequestKind::QuinnWebTransport(request) => self.server.accept(request.ok().await?).await?,
-			#[cfg(feature = "quinn")]
-			RequestKind::QuinnQuic(request) => self.server.accept(request.ok()).await?,
+			RequestKind::Quinn(request) => Ok(self.server.accept(request.ok().await?).await?),
 			#[cfg(feature = "quiche")]
-			RequestKind::QuicheWebTransport(request) => {
+			RequestKind::Quiche(request) => {
 				let conn = request
-					.respond(web_transport_quiche::http::StatusCode::OK)
+					.ok()
 					.await
 					.map_err(|e| anyhow::anyhow!("failed to accept quiche WebTransport: {e}"))?;
-				self.server.accept(conn).await?
+				Ok(self.server.accept(conn).await?)
 			}
-			#[cfg(feature = "quiche")]
-			RequestKind::QuicheQuic(request) => self.server.accept(request.ok()).await?,
 			#[cfg(feature = "iroh")]
-			RequestKind::IrohWebTransport(request) => self.server.accept(request.ok().await?).await?,
-			#[cfg(feature = "iroh")]
-			RequestKind::IrohQuic(request) => self.server.accept(request.ok()).await?,
-		};
-		Ok(session)
+			RequestKind::Iroh(request) => Ok(self.server.accept(request.ok().await?).await?),
+		}
+	}
+
+	#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
+	pub fn url(&self) -> Option<&Url> {
+		None
 	}
 
 	/// Returns the URL provided by the client.
+	#[cfg(any(feature = "quinn", feature = "quiche", feature = "iroh"))]
 	pub fn url(&self) -> Option<&Url> {
 		match &self.kind {
 			#[cfg(feature = "quinn")]
-			RequestKind::QuinnWebTransport(request) => Some(request.url()),
+			RequestKind::Quinn(request) => Some(request.url()),
 			#[cfg(feature = "quiche")]
-			RequestKind::QuicheWebTransport(request) => Some(request.url()),
+			RequestKind::Quiche(request) => Some(request.url()),
 			#[cfg(feature = "iroh")]
-			RequestKind::IrohWebTransport(request) => Some(request.url()),
-			_ => None,
+			RequestKind::Iroh(request) => Some(request.url()),
 		}
 	}
 }

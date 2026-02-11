@@ -1,7 +1,5 @@
 use crate::QuicBackend;
 use crate::crypto;
-#[cfg(feature = "websocket")]
-use crate::websocket::ClientWebSocket;
 use anyhow::Context;
 use std::path::PathBuf;
 use std::{net, sync::Arc};
@@ -63,18 +61,22 @@ pub struct ClientConfig {
 	#[cfg(feature = "websocket")]
 	#[command(flatten)]
 	#[serde(default)]
-	pub websocket: ClientWebSocket,
+	pub websocket: super::ClientWebSocket,
 }
 
 impl ClientConfig {
+	#[cfg(not(any(feature = "quinn", feature = "quiche")))]
 	pub fn init(self) -> anyhow::Result<Client> {
-		let backend = self.backend.clone().unwrap_or_else(|| {
+		anyhow::bail!("no QUIC backend compiled; enable quinn or quiche feature");
+	}
+
+	#[cfg(any(feature = "quinn", feature = "quiche"))]
+	pub fn init(self) -> anyhow::Result<Client> {
+		let backend = self.backend.clone().unwrap_or({
 			if cfg!(feature = "quinn") {
 				QuicBackend::Quinn
-			} else if cfg!(feature = "quiche") {
-				QuicBackend::Quiche
 			} else {
-				panic!("no QUIC backend compiled; enable quinn or quiche feature")
+				QuicBackend::Quiche
 			}
 		});
 
@@ -167,7 +169,7 @@ impl Default for ClientConfig {
 			backend: None,
 			tls: ClientTls::default(),
 			#[cfg(feature = "websocket")]
-			websocket: ClientWebSocket::default(),
+			websocket: super::ClientWebSocket::default(),
 		}
 	}
 }
@@ -179,7 +181,7 @@ impl Default for ClientConfig {
 pub struct Client {
 	moq: moq_lite::Client,
 	#[cfg(feature = "websocket")]
-	websocket: ClientWebSocket,
+	websocket: super::ClientWebSocket,
 	inner: ClientInner,
 	tls: rustls::ClientConfig,
 	#[cfg(feature = "iroh")]
@@ -229,6 +231,8 @@ impl Client {
 		}
 
 		match &self.inner {
+			#[cfg(not(any(feature = "quinn", feature = "quiche")))]
+			_ => unreachable!("no QUIC backend compiled"),
 			#[cfg(feature = "quinn")]
 			ClientInner::Quinn(quinn) => {
 				let tls = self.tls.clone();

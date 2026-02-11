@@ -59,6 +59,7 @@
           cargo-shear
           cargo-edit
           cargo-hack
+          cargo-sweep
         ];
 
         # JavaScript dependencies

@@ -23,7 +23,7 @@ impl Connection {
 			Ok(token) => token,
 			Err(err) => {
 				let status: http::StatusCode = err.clone().into();
-				let _ = self.request.reject(status.as_u16()).await;
+				let _ = self.request.close(status.as_u16()).await;
 				return Err(err.into());
 			}
 		};
@@ -55,7 +55,7 @@ impl Connection {
 			.with_consume(publish)
 			// TODO: Uncomment when observability feature is merged
 			// .with_stats(stats)
-			.accept()
+			.ok()
 			.await?;
 
 		// Wait until the session is closed.
