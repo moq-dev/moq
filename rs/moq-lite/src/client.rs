@@ -102,7 +102,7 @@ impl Client {
 				let request_id_max = ietf::RequestId(
 					parameters
 						.get_varint(ietf::ParameterVarInt::MaxRequestId)
-						.unwrap_or(u32::MAX as u64),
+						.unwrap_or_default(),
 				);
 
 				let stream = stream.with_version(version);

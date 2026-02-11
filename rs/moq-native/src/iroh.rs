@@ -66,12 +66,12 @@ impl IrohEndpointConfig {
 			SecretKey::generate(&mut rand::rng())
 		};
 
-		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(vec![
-			web_transport_iroh::ALPN_H3.as_bytes().to_vec(),
-			moq_lite::lite::ALPN.as_bytes().to_vec(),
-			moq_lite::ietf::ALPN_14.as_bytes().to_vec(),
-			moq_lite::ietf::ALPN_15.as_bytes().to_vec(),
-		]);
+		let mut alpns = vec![web_transport_iroh::ALPN_H3.as_bytes().to_vec()];
+		for alpn in moq_lite::alpns() {
+			alpns.push(alpn.as_bytes().to_vec());
+		}
+
+		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(alpns);
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr_v4(addr);
 		}

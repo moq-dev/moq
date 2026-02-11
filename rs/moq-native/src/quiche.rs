@@ -78,11 +78,12 @@ impl QuicheClient {
 					.connect(&host, port)
 					.await
 					.context("failed to connect to quiche server")?;
-				Ok(web_transport_quiche::Connection::raw(
-					conn,
-					request,
-					web_transport_quiche::proto::ConnectResponse::OK,
-				))
+
+				let alpn = conn.alpn().context("missing ALPN")?;
+				let alpn = std::str::from_utf8(&alpn).context("failed to decode ALPN")?;
+
+				let response = web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn);
+				Ok(web_transport_quiche::Connection::raw(conn, request, response))
 			}
 			_ => unreachable!("unsupported URL scheme: {}", url.scheme()),
 		}
@@ -133,7 +134,7 @@ impl QuicheServer {
 			fingerprints,
 		}));
 
-		let mut alpns = vec![b"h3".to_vec(), moq_lite::lite::ALPN.as_bytes().to_vec()];
+		let mut alpns = vec![b"h3".to_vec()];
 		for alpn in moq_lite::alpns() {
 			alpns.push(alpn.as_bytes().to_vec());
 		}
