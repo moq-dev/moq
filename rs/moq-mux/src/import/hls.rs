@@ -647,16 +647,14 @@ fn resolve_uri(base: &Url, value: &str) -> std::result::Result<Url, url::ParseEr
 }
 
 fn publish_master_playlist(mut master_playlist_track: moq_lite::TrackProducer, master: MasterPlaylist) {
-    // Create a new group
+	// The Multi-Variant Playlist never changes so we can just serialize it, publish a single group and move on.
+	// No need to rewrite pathing as variant playlists are all relative to base url.
     let mut group = master_playlist_track.append_group();
 
-	// Test string
-	let test_data = b"HENRY WAS HERE\n";
-	
-	// Write the test data as a single frame in the group
-	group.write_frame(test_data as &[u8]);
+	let mut v: Vec<u8> = Vec::new();
+	master.write_to(&mut v).unwrap();
 
-    // Close the group (important!)
+	group.write_frame(v);
     group.close();
 }
 
