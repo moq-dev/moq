@@ -24,7 +24,7 @@
 		"./src/watch/index.tsx"
 	],
 	"scripts": {
-		"prebuild": "npx cem analyze --config cem.config.js && bun ../scripts/element-wrappers/index.ts",
+		"prebuild": "bunx cem analyze --config cem.config.js && bun ../scripts/element-wrappers/index.ts",
 		"build": "bun run clean && vite build && cp custom-elements.json dist/ && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
 		"clean": "rimraf dist",

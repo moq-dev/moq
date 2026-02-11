@@ -25,7 +25,7 @@
 		"./src/support/element.ts"
 	],
 	"scripts": {
-		"prebuild": "npx cem analyze --config cem.config.js && bun ../scripts/element-wrappers/index.ts",
+		"prebuild": "bunx cem analyze --config cem.config.js && bun ../scripts/element-wrappers/index.ts",
 		"build": "rimraf dist && tsc -b && cp custom-elements.json dist/ && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
 		"test": "bun test --only-failures",

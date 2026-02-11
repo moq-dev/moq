@@ -126,17 +126,6 @@ bun run build      # Build package with Vite + TypeScript declarations
 
 The code generator lives in `../scripts/element-wrappers/`:
 
-```
-element-wrappers/
-├── index.ts              # Orchestrator - runs all enabled generators
-├── generators/
-│   └── react.ts          # React wrapper generator
-└── utils/
-    ├── manifest.ts       # CEM loader + JSDoc extraction
-    ├── codegen.ts        # JSDoc + code formatting
-    └── types.ts          # TypeScript interfaces
-```
-
 ### React Wrappers
 
 Auto-generated from CEM, exported from `@moq/hang-ui/react`:

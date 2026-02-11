@@ -22,7 +22,7 @@ element-wrappers/
 ### 1. CEM Analysis
 
 ```bash
-npx cem analyze --config cem.config.js
+bunx cem analyze --config cem.config.js
 ```
 
 Generates `custom-elements.json` from your Web Component source files.
@@ -77,7 +77,7 @@ Add to your package's `package.json`:
 ```json
 {
   "scripts": {
-    "prebuild": "npx cem analyze && bun ../scripts/element-wrappers/index.ts"
+    "prebuild": "bunx cem analyze && bun ../scripts/element-wrappers/index.ts"
   }
 }
 ```

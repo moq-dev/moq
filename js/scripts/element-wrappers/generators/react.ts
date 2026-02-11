@@ -38,7 +38,7 @@ function generateAttributesInterface(element: CustomElement): string {
 				}
 			}
 			// Attributes are optional in JSX
-			return `    ${attr.name}?: ${type};`;
+			return `    "${attr.name}"?: ${type};`;
 		})
 		.join("\n");
 
