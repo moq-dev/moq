@@ -460,9 +460,19 @@ impl QuicRequest {
 
 	/// Accept the session, returning a 200 OK if using WebTransport.
 	pub fn ok(self) -> web_transport_quinn::Session {
-		// TODO add support for ALPN negotiation
 		let request = web_transport_quinn::proto::ConnectRequest::new(self.url);
-		let response = web_transport_quinn::proto::ConnectResponse::new(http::StatusCode::OK);
+		let mut response = web_transport_quinn::proto::ConnectResponse::new(http::StatusCode::OK);
+
+		// Propagate the negotiated ALPN so session.protocol() works for version negotiation.
+		if let Some(alpn) = self
+			.connection
+			.handshake_data()
+			.and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+			.and_then(|data| data.protocol)
+			.and_then(|proto| String::from_utf8(proto).ok())
+		{
+			response = response.with_protocol(alpn);
+		}
 
 		web_transport_quinn::Session::raw(self.connection, request, response)
 	}

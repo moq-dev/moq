@@ -228,7 +228,11 @@ impl Message for Publish<'_> {
 				let params = MessageParameters::decode(r, version)?;
 
 				let group_order = match params.group_order() {
-					Some(v) => GroupOrder::try_from(v as u8).unwrap_or(GroupOrder::Descending),
+					Some(v) => u8::try_from(v)
+						.ok()
+						.and_then(|v| GroupOrder::try_from(v).ok())
+						.map(GroupOrder::any_to_descending)
+						.unwrap_or(GroupOrder::Descending),
 					None => GroupOrder::Descending,
 				};
 				let largest_location = params.largest_object();
@@ -270,7 +274,7 @@ impl Message for PublishOk {
 				self.subscriber_priority.encode(w, version);
 				self.group_order.encode(w, version);
 				self.filter_type.encode(w, version);
-				assert!(
+				debug_assert!(
 					matches!(self.filter_type, FilterType::LargestObject | FilterType::NextGroup),
 					"absolute subscribe not supported"
 				);
@@ -325,7 +329,11 @@ impl Message for PublishOk {
 				let forward = params.forward().unwrap_or(true);
 				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
 				let group_order = match params.group_order() {
-					Some(v) => GroupOrder::try_from(v as u8).unwrap_or(GroupOrder::Descending),
+					Some(v) => u8::try_from(v)
+						.ok()
+						.and_then(|v| GroupOrder::try_from(v).ok())
+						.map(GroupOrder::any_to_descending)
+						.unwrap_or(GroupOrder::Descending),
 					None => GroupOrder::Descending,
 				};
 				let filter_type = params.subscription_filter().unwrap_or(FilterType::LargestObject);

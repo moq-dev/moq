@@ -1,4 +1,5 @@
 import type { Reader, Writer } from "../stream.ts";
+import * as Varint from "../varint.ts";
 
 export const Parameter = {
 	MaxRequestId: 2n,
@@ -121,6 +122,7 @@ const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
 const MSG_PARAM_GROUP_ORDER = 0x22n;
 
 // Bytes parameter IDs (odd)
+const MSG_PARAM_LARGEST_OBJECT = 0x09n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
 
 export class MessageParameters {
@@ -195,6 +197,23 @@ export class MessageParameters {
 	}
 
 	// --- Bytes accessors ---
+
+	get largest(): { groupId: bigint; objectId: bigint } | undefined {
+		const data = this.bytes.get(MSG_PARAM_LARGEST_OBJECT);
+		if (!data || data.length === 0) return undefined;
+		const [groupId, rest] = Varint.decode(data);
+		const [objectId] = Varint.decode(rest);
+		return { groupId: BigInt(groupId), objectId: BigInt(objectId) };
+	}
+
+	set largest(v: { groupId: bigint; objectId: bigint }) {
+		const buf1 = Varint.encode(Number(v.groupId));
+		const buf2 = Varint.encode(Number(v.objectId));
+		const combined = new Uint8Array(buf1.length + buf2.length);
+		combined.set(buf1, 0);
+		combined.set(buf2, buf1.length);
+		this.bytes.set(MSG_PARAM_LARGEST_OBJECT, combined);
+	}
 
 	get subscriptionFilter(): number | undefined {
 		const data = this.bytes.get(MSG_PARAM_SUBSCRIPTION_FILTER);

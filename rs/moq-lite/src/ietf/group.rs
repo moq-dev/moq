@@ -10,6 +10,16 @@ pub enum GroupOrder {
 	Descending = 0x2,
 }
 
+impl GroupOrder {
+	/// Map `Any` (0x0) to `Descending`, leaving other values unchanged.
+	pub fn any_to_descending(self) -> Self {
+		match self {
+			Self::Any => Self::Descending,
+			other => other,
+		}
+	}
+}
+
 impl<V> Encode<V> for GroupOrder {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
 		u8::from(*self).encode(w, version);

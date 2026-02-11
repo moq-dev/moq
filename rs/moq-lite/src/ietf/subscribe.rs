@@ -92,7 +92,11 @@ impl Message for Subscribe<'_> {
 
 				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
 				let group_order = match params.group_order() {
-					Some(v) => GroupOrder::try_from(v as u8).unwrap_or(GroupOrder::Descending),
+					Some(v) => u8::try_from(v)
+						.ok()
+						.and_then(|v| GroupOrder::try_from(v).ok())
+						.map(GroupOrder::any_to_descending)
+						.unwrap_or(GroupOrder::Descending),
 					None => GroupOrder::Descending,
 				};
 				let filter_type = params.subscription_filter().unwrap_or(FilterType::LargestObject);
@@ -117,10 +121,10 @@ impl Message for Subscribe<'_> {
 		match version {
 			Version::Draft14 => {
 				self.subscriber_priority.encode(w, version);
-				GroupOrder::Descending.encode(w, version);
+				self.group_order.encode(w, version);
 				true.encode(w, version); // forward
 
-				assert!(
+				debug_assert!(
 					!matches!(self.filter_type, FilterType::AbsoluteStart | FilterType::AbsoluteRange),
 					"Absolute subscribe not supported"
 				);
@@ -131,7 +135,7 @@ impl Message for Subscribe<'_> {
 			Version::Draft15 => {
 				let mut params = MessageParameters::default();
 				params.set_subscriber_priority(self.subscriber_priority);
-				params.set_group_order(u8::from(GroupOrder::Descending) as u64);
+				params.set_group_order(u8::from(self.group_order) as u64);
 				params.set_forward(true);
 				params.set_subscription_filter(self.filter_type);
 				params.encode(w, version);

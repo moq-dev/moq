@@ -311,9 +311,9 @@ impl Client {
 
 		let alpns: Vec<String> = match url.scheme() {
 			"https" => vec![web_transport_quinn::ALPN.to_string()],
-			"moqt" => moq_lite::alpns().into_iter().map(|alpn| alpn.to_string()).collect(),
+			"moqt" => moq_lite::alpns().iter().map(|alpn| alpn.to_string()).collect(),
 			alpn if moq_lite::alpns().contains(&alpn) => vec![alpn.to_string()],
-			_ => anyhow::bail!("url scheme must be 'http', 'https', or 'moqt'"),
+			_ => anyhow::bail!("url scheme must be 'http', 'https', 'moqt', or a recognized MoQ ALPN"),
 		};
 
 		config.alpn_protocols = alpns.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
@@ -427,7 +427,7 @@ impl Client {
 	#[cfg(feature = "iroh")]
 	async fn connect_iroh(&self, url: Url) -> anyhow::Result<web_transport_iroh::Session> {
 		let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
-		// TODO Suupport multiple ALPNs
+		// TODO Support multiple ALPNs
 		let alpn = match url.scheme() {
 			"moql+iroh" | "iroh" => moq_lite::lite::ALPN,
 			"moqt+iroh" => moq_lite::ietf::ALPN_14,

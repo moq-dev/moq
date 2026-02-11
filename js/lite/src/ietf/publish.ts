@@ -50,6 +50,9 @@ export class Publish {
 			const params = new MessageParameters();
 			params.groupOrder = this.groupOrder;
 			params.forward = this.forward;
+			if (this.largest) {
+				params.largest = this.largest;
+			}
 			await params.encode(w);
 		} else if (version === Version.DRAFT_14) {
 			await w.u8(this.groupOrder);
@@ -87,7 +90,17 @@ export class Publish {
 			const params = await MessageParameters.decode(r);
 			const groupOrder = params.groupOrder ?? 0x02;
 			const forward = params.forward ?? true;
-			return new Publish(requestId, trackNamespace, trackName, trackAlias, groupOrder, false, undefined, forward);
+			const largest = params.largest;
+			return new Publish(
+				requestId,
+				trackNamespace,
+				trackName,
+				trackAlias,
+				groupOrder,
+				!!largest,
+				largest,
+				forward,
+			);
 		} else if (version === Version.DRAFT_14) {
 			const groupOrder = await r.u8();
 			const contentExists = await r.bool();

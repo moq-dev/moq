@@ -98,8 +98,11 @@ impl Client {
 			Version::Ietf(version) => {
 				// Decode the parameters to get the initial request ID.
 				let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
-				let request_id_max =
-					ietf::RequestId(parameters.get_varint(ietf::ParameterVarInt::MaxRequestId).unwrap_or(0));
+				let request_id_max = ietf::RequestId(
+					parameters
+						.get_varint(ietf::ParameterVarInt::MaxRequestId)
+						.unwrap_or(u32::MAX as u64),
+				);
 
 				let stream = stream.with_version(version);
 				ietf::start(

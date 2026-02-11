@@ -65,9 +65,12 @@ export class Subscribe {
 			// v15: fields are in parameters
 			const params = await MessageParameters.decode(r);
 			const subscriberPriority = params.subscriberPriority ?? 128;
-			const groupOrder = params.groupOrder ?? GROUP_ORDER;
-			if (groupOrder > 2 || groupOrder === 0) {
+			let groupOrder = params.groupOrder ?? GROUP_ORDER;
+			if (groupOrder > 2) {
 				throw new Error(`unknown group order: ${groupOrder}`);
+			}
+			if (groupOrder === 0) {
+				groupOrder = GROUP_ORDER; // default to descending
 			}
 
 			const forward = params.forward ?? true;
@@ -84,9 +87,12 @@ export class Subscribe {
 		} else if (version === Version.DRAFT_14) {
 			const subscriberPriority = await r.u8();
 
-			const groupOrder = await r.u8();
+			let groupOrder = await r.u8();
 			if (groupOrder > 2) {
 				throw new Error(`unknown group order: ${groupOrder}`);
+			}
+			if (groupOrder === 0) {
+				groupOrder = GROUP_ORDER; // default to descending
 			}
 
 			const forward = await r.bool();
