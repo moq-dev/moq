@@ -80,8 +80,10 @@ export class Parameters {
 				await w.u62(delta);
 
 				if (isVar) {
+					// biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in vars map
 					await w.u62(this.vars.get(key)!);
 				} else {
+					// biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in bytes map
 					const value = this.bytes.get(key)!;
 					await w.u53(value.length);
 					await w.write(value);
@@ -272,8 +274,10 @@ export class MessageParameters {
 				await w.u62(delta);
 
 				if (isVar) {
+					// biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in vars map
 					await w.u62(this.vars.get(key)!);
 				} else {
+					// biome-ignore lint/style/noNonNullAssertion: key is guaranteed to exist in bytes map
 					const value = this.bytes.get(key)!;
 					await w.u53(value.length);
 					await w.write(value);

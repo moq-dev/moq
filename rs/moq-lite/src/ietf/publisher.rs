@@ -304,7 +304,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					match chunk? {
 						Some(mut chunk) => {
-							tracing::trace!(id = stream.debug, size = chunk.len(), "writing chunk");
 							stream.write_all(&mut chunk).await?;
 						}
 						None => break,
