@@ -81,10 +81,7 @@ impl QuinnClient {
 
 		let alpns = match url.scheme() {
 			"https" => vec![web_transport_quinn::ALPN.as_bytes().to_vec()],
-			"moqt" | "moql" => moq_lite::alpns()
-				.into_iter()
-				.map(|alpn| alpn.as_bytes().to_vec())
-				.collect(),
+			"moqt" | "moql" => moq_lite::alpns().iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
 			_ => anyhow::bail!("url scheme must be 'http', 'https', or 'moql'"),
 		};
 

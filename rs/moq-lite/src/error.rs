@@ -81,8 +81,8 @@ pub enum Error {
 	#[error("invalid role")]
 	InvalidRole,
 
-	#[error("unknown ALPN")]
-	UnknownAlpn,
+	#[error("unknown ALPN: {0}")]
+	UnknownAlpn(String),
 }
 
 impl Error {
@@ -108,7 +108,7 @@ impl Error {
 			Self::TooLarge => 18,
 			Self::TooManyParameters => 19,
 			Self::InvalidRole => 20,
-			Self::UnknownAlpn => 21,
+			Self::UnknownAlpn(_) => 21,
 			Self::App(app) => *app + 64,
 		}
 	}

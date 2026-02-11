@@ -52,8 +52,9 @@ impl Server {
 				Version::Ietf(ietf::Version::Draft14),
 				vec![ietf::Version::Draft14.into()],
 			),
+			Some(p) if p == lite::ALPN => (Version::Ietf(ietf::Version::Draft14), NEGOTIATED.to_vec()),
 			None => (Version::Ietf(ietf::Version::Draft14), NEGOTIATED.to_vec()),
-			Some(_) => return Err(Error::UnknownAlpn),
+			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
 		let mut stream = Stream::accept(&session, encoding).await?;
