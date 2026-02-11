@@ -81,7 +81,7 @@ impl Encode<Version> for Client {
 
 		match v {
 			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft14) => {
-				u16::try_from(size).expect("message be huge").encode(w, v)
+				u16::try_from(size).expect("message too large for u16").encode(w, v)
 			}
 			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => (size as u64).encode(w, v),
 		}
@@ -124,7 +124,7 @@ impl Encode<Version> for Server {
 
 		match v {
 			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft14) => {
-				u16::try_from(size).expect("message be huge").encode(w, v)
+				u16::try_from(size).expect("message too large for u16").encode(w, v)
 			}
 			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => (size as u64).encode(w, v),
 		}

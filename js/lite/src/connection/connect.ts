@@ -97,7 +97,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	const client = new Ietf.ClientSetup(
 		// NOTE: draft 15 onwards does not use CLIENT_SETUP to negotiate the version.
-		// We still echo is just to make sure we're not accidentally trying to negotiate the version.
+		// We still echo it just to make sure we're not accidentally trying to negotiate the version.
 		setupVersion === Ietf.Version.DRAFT_15
 			? [Ietf.Version.DRAFT_15]
 			: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
@@ -138,7 +138,7 @@ async function connectWebTransport(
 	const finalOptions: WebTransportOptions = {
 		allowPooling: false,
 		congestionControl: "low-latency",
-		// @ts-expect-error - TODO: add protocols to WebTransportOptionsb
+		// @ts-expect-error - TODO: add protocols to WebTransportOptions
 		protocols: [Ietf.ALPN.DRAFT_15],
 		...options,
 	};
