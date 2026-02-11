@@ -336,10 +336,10 @@ impl QuinnRequest {
 	}
 
 	/// Returns the URL provided by the client.
-	pub fn url(&self) -> &Url {
+	pub fn url(&self) -> Option<&Url> {
 		match self {
-			QuinnRequest::Raw { request, .. } => &request.url,
-			QuinnRequest::WebTransport { request, .. } => &request.url,
+			QuinnRequest::Raw { .. } => None,
+			QuinnRequest::WebTransport { request } => Some(&request.url),
 		}
 	}
 
@@ -428,6 +428,7 @@ impl ServeCerts {
 		Ok(certified_key)
 	}
 
+	#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 	fn generate(&self, hostnames: &[String]) -> anyhow::Result<rustls::sign::CertifiedKey> {
 		let key_pair = rcgen::KeyPair::generate()?;
 
@@ -448,6 +449,11 @@ impl ServeCerts {
 
 		// Create a rustls::sign::CertifiedKey
 		Ok(rustls::sign::CertifiedKey::new(vec![cert.into()], key))
+	}
+
+	#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+	fn generate(&self, hostnames: &[String]) -> anyhow::Result<rustls::sign::CertifiedKey> {
+		anyhow::bail!("no crypto provider available; enable aws-lc-rs or ring feature");
 	}
 
 	// Replace the certificates

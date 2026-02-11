@@ -104,18 +104,14 @@ pub struct Server {
 }
 
 impl Server {
-	#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
-	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
-		anyhow::bail!("no QUIC backend compiled; enable quinn, quiche, or iroh feature");
-	}
-
-	#[cfg(any(feature = "quinn", feature = "quiche", feature = "iroh"))]
 	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
 		let backend = config.backend.clone().unwrap_or({
 			if cfg!(feature = "quinn") {
 				QuicBackend::Quinn
-			} else {
+			} else if cfg!(feature = "quiche") {
 				QuicBackend::Quiche
+			} else {
+				anyhow::bail!("no QUIC backend compiled; enable quinn or quiche feature");
 			}
 		});
 
@@ -172,6 +168,11 @@ impl Server {
 		unreachable!("no QUIC backend compiled");
 	}
 
+	#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
+	pub async fn accept(&mut self) -> Option<Request> {
+		unreachable!("no QUIC backend compiled; enable quinn, quiche, or iroh feature");
+	}
+
 	/// Returns the next partially established QUIC or WebTransport session.
 	///
 	/// This returns a [Request] instead of a [web_transport_quinn::Session]
@@ -179,32 +180,42 @@ impl Server {
 	///
 	/// The [Request] is either a WebTransport or a raw QUIC request.
 	/// Call [Request::ok] or [Request::close] to complete the handshake.
+	#[cfg(any(feature = "quinn", feature = "quiche", feature = "iroh"))]
 	pub async fn accept(&mut self) -> Option<Request> {
 		loop {
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
+			#[cfg(feature = "iroh")]
 			let iroh_accept = async {
 				#[cfg(feature = "iroh")]
 				if let Some(endpoint) = self.iroh.as_mut() {
 					return endpoint.accept().await;
 				}
-				std::future::pending::<_>().await
+				None
 			};
+			#[cfg(not(feature = "iroh"))]
+			let iroh_accept = async { None::<()> };
 
+			#[cfg(feature = "quinn")]
 			let quinn_accept = async {
 				#[cfg(feature = "quinn")]
 				if let Some(quinn) = self.quinn.as_mut() {
 					return quinn.accept().await;
 				}
-				std::future::pending::<_>().await
+				None
 			};
+			#[cfg(not(feature = "quinn"))]
+			let quinn_accept = async { None::<()> };
 
+			#[cfg(feature = "quiche")]
 			let quiche_accept = async {
 				#[cfg(feature = "quiche")]
 				if let Some(quiche) = self.quiche.as_mut() {
 					return quiche.accept().await;
 				}
-				std::future::pending::<_>().await
+				None
 			};
+			#[cfg(not(feature = "quiche"))]
+			let quiche_accept = async { None::<()> };
 
 			let server = self.moq.clone();
 
@@ -301,17 +312,17 @@ pub struct Request {
 
 impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
-	pub async fn close(self, code: u16) -> anyhow::Result<()> {
+	pub async fn close(self, _code: u16) -> anyhow::Result<()> {
 		match self.kind {
 			#[cfg(feature = "quinn")]
 			RequestKind::Quinn(request) => {
-				let status = web_transport_quinn::http::StatusCode::from_u16(code).context("invalid status code")?;
+				let status = web_transport_quinn::http::StatusCode::from_u16(_code).context("invalid status code")?;
 				request.close(status).await?;
 				Ok(())
 			}
 			#[cfg(feature = "quiche")]
 			RequestKind::Quiche(request) => {
-				let status = web_transport_quiche::http::StatusCode::from_u16(code).context("invalid status code")?;
+				let status = web_transport_quiche::http::StatusCode::from_u16(_code).context("invalid status code")?;
 				request
 					.reject(status)
 					.await
@@ -320,7 +331,7 @@ impl Request {
 			}
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh(request) => {
-				let status = web_transport_iroh::http::StatusCode::from_u16(code).context("invalid status code")?;
+				let status = web_transport_iroh::http::StatusCode::from_u16(_code).context("invalid status code")?;
 				request.close(status).await?;
 				Ok(())
 			}
@@ -355,21 +366,18 @@ impl Request {
 		}
 	}
 
-	#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
-	pub fn url(&self) -> Option<&Url> {
-		None
-	}
-
 	/// Returns the URL provided by the client.
-	#[cfg(any(feature = "quinn", feature = "quiche", feature = "iroh"))]
 	pub fn url(&self) -> Option<&Url> {
-		match &self.kind {
+		#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
+		unreachable!("no QUIC backend compiled; enable quinn, quiche, or iroh feature");
+
+		match self.kind {
 			#[cfg(feature = "quinn")]
-			RequestKind::Quinn(request) => Some(request.url()),
+			RequestKind::Quinn(ref request) => request.url(),
 			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(request) => Some(request.url()),
+			RequestKind::Quiche(ref request) => request.url(),
 			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(request) => Some(request.url()),
+			RequestKind::Iroh(ref request) => request.url(),
 		}
 	}
 }

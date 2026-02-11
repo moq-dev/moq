@@ -24,13 +24,10 @@ serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
 web-async = { version = "0.1.1", features = ["tracing"] }
 web-transport-iroh = "0.1.1"
-web-transport-quiche = { path = "../web-transport/web-transport-quiche" }
-web-transport-quinn = { path = "../web-transport/web-transport-quinn" }
-web-transport-trait = { path = "../web-transport/web-transport-trait" }
-web-transport-ws = { path = "../web-transport/web-transport-ws" }
-
-[patch.crates-io]
-web-transport-trait = { path = "../web-transport/web-transport-trait" }
+web-transport-quiche = "0.2"
+web-transport-quinn = "0.11"
+web-transport-trait = "0.3"
+web-transport-ws = "0.2"
 
 [profile.dev]
 panic = "abort"

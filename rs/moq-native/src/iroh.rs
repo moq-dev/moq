@@ -96,10 +96,9 @@ pub fn is_iroh_url(url: &Url) -> bool {
 pub enum IrohRequest {
 	Quic {
 		connection: iroh::endpoint::Connection,
-		url: Url,
 	},
 	WebTransport {
-		request: web_transport_iroh::H3Request,
+		request: Box<web_transport_iroh::H3Request>,
 	},
 }
 
@@ -114,14 +113,11 @@ impl IrohRequest {
 				let request = web_transport_iroh::H3Request::accept(conn)
 					.await
 					.context("failed to receive WebTransport request")?;
-				Ok(Self::WebTransport { request })
+				Ok(Self::WebTransport {
+					request: Box::new(request),
+				})
 			}
-			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => Ok(Self::Quic {
-				url: format!("moql+iroh://{}", conn.remote_id().fmt_short())
-					.parse::<Url>()
-					.context("failed to parse URL")?,
-				connection: conn,
-			}),
+			moq_lite::lite::ALPN | moq_lite::ietf::ALPN => Ok(Self::Quic { connection: conn }),
 			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
 		}
 	}
@@ -145,10 +141,10 @@ impl IrohRequest {
 		}
 	}
 
-	pub fn url(&self) -> &Url {
+	pub fn url(&self) -> Option<&Url> {
 		match self {
-			IrohRequest::Quic { url, .. } => url,
-			IrohRequest::WebTransport { request } => request.url(),
+			IrohRequest::Quic { .. } => None,
+			IrohRequest::WebTransport { request } => Some(request.url()),
 		}
 	}
 }

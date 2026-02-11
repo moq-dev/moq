@@ -65,14 +65,55 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
-	#[cfg(not(any(feature = "quinn", feature = "quiche")))]
 	pub fn init(self) -> anyhow::Result<Client> {
+		Client::new(self)
+	}
+}
+
+impl Default for ClientConfig {
+	fn default() -> Self {
+		Self {
+			bind: "[::]:0".parse().unwrap(),
+			backend: None,
+			tls: ClientTls::default(),
+			#[cfg(feature = "websocket")]
+			websocket: super::ClientWebSocket::default(),
+		}
+	}
+}
+
+/// Client for establishing MoQ connections over QUIC, WebTransport, or WebSocket.
+///
+/// Create via [`ClientConfig::init`] or [`Client::new`].
+#[derive(Clone)]
+pub struct Client {
+	moq: moq_lite::Client,
+	#[cfg(feature = "websocket")]
+	websocket: super::ClientWebSocket,
+	inner: ClientInner,
+	tls: rustls::ClientConfig,
+	#[cfg(feature = "iroh")]
+	iroh: Option<iroh::Endpoint>,
+}
+
+#[derive(Clone)]
+enum ClientInner {
+	#[cfg(feature = "quinn")]
+	Quinn(crate::quinn::QuinnClient),
+	#[cfg(feature = "quiche")]
+	Quiche(crate::quiche::QuicheClient),
+}
+
+impl Client {
+	#[cfg(not(any(feature = "quinn", feature = "quiche")))]
+	pub fn new(_config: ClientConfig) -> anyhow::Result<Self> {
 		anyhow::bail!("no QUIC backend compiled; enable quinn or quiche feature");
 	}
 
+	/// Create a new client
 	#[cfg(any(feature = "quinn", feature = "quiche"))]
-	pub fn init(self) -> anyhow::Result<Client> {
-		let backend = self.backend.clone().unwrap_or({
+	pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
+		let backend = config.backend.clone().unwrap_or({
 			if cfg!(feature = "quinn") {
 				QuicBackend::Quinn
 			} else {
@@ -80,38 +121,6 @@ impl ClientConfig {
 			}
 		});
 
-		let tls = Self::build_tls_config(&self)?;
-
-		let inner = match backend {
-			QuicBackend::Quinn => {
-				#[cfg(not(feature = "quinn"))]
-				anyhow::bail!("quinn backend not compiled; rebuild with --features quinn");
-
-				#[cfg(feature = "quinn")]
-				ClientInner::Quinn(crate::quinn::QuinnClient::new(&self)?)
-			}
-			QuicBackend::Quiche => {
-				#[cfg(not(feature = "quiche"))]
-				anyhow::bail!("quiche backend not compiled; rebuild with --features quiche");
-
-				#[cfg(feature = "quiche")]
-				ClientInner::Quiche(crate::quiche::QuicheClient::new(&self)?)
-			}
-		};
-
-		Ok(Client {
-			moq: moq_lite::Client::new(),
-			#[cfg(feature = "websocket")]
-			websocket: self.websocket,
-			tls,
-			inner,
-			#[cfg(feature = "iroh")]
-			iroh: None,
-		})
-	}
-
-	/// Build the rustls ClientConfig used for WebSocket TLS and (with quinn) QUIC TLS.
-	fn build_tls_config(config: &ClientConfig) -> anyhow::Result<rustls::ClientConfig> {
 		let provider = crypto::provider();
 
 		// Create a list of acceptable root certificates.
@@ -158,51 +167,32 @@ impl ClientConfig {
 			tls.dangerous().set_certificate_verifier(Arc::new(noop));
 		}
 
-		Ok(tls)
-	}
-}
+		let inner = match backend {
+			QuicBackend::Quinn => {
+				#[cfg(not(feature = "quinn"))]
+				anyhow::bail!("quinn backend not compiled; rebuild with --features quinn");
 
-impl Default for ClientConfig {
-	fn default() -> Self {
-		Self {
-			bind: "[::]:0".parse().unwrap(),
-			backend: None,
-			tls: ClientTls::default(),
+				#[cfg(feature = "quinn")]
+				ClientInner::Quinn(crate::quinn::QuinnClient::new(&config)?)
+			}
+			QuicBackend::Quiche => {
+				#[cfg(not(feature = "quiche"))]
+				anyhow::bail!("quiche backend not compiled; rebuild with --features quiche");
+
+				#[cfg(feature = "quiche")]
+				ClientInner::Quiche(crate::quiche::QuicheClient::new(&config)?)
+			}
+		};
+
+		Ok(Self {
+			moq: moq_lite::Client::new(),
 			#[cfg(feature = "websocket")]
-			websocket: super::ClientWebSocket::default(),
-		}
-	}
-}
-
-/// Client for establishing MoQ connections over QUIC, WebTransport, or WebSocket.
-///
-/// Create via [`ClientConfig::init`] or [`Client::new`].
-#[derive(Clone)]
-pub struct Client {
-	moq: moq_lite::Client,
-	#[cfg(feature = "websocket")]
-	websocket: super::ClientWebSocket,
-	inner: ClientInner,
-	tls: rustls::ClientConfig,
-	#[cfg(feature = "iroh")]
-	iroh: Option<iroh::Endpoint>,
-}
-
-#[derive(Clone)]
-enum ClientInner {
-	#[cfg(feature = "quinn")]
-	Quinn(crate::quinn::QuinnClient),
-	#[cfg(feature = "quiche")]
-	Quiche(crate::quiche::QuicheClient),
-}
-
-impl Client {
-	/// Create a new client using the default (quinn) backend.
-	///
-	/// This is equivalent to calling `ClientConfig::default().init()`.
-	#[cfg(feature = "quinn")]
-	pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
-		config.init()
+			websocket: config.websocket,
+			tls,
+			inner,
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		})
 	}
 
 	#[cfg(feature = "iroh")]
@@ -221,7 +211,12 @@ impl Client {
 		self
 	}
 
-	/// Establish a WebTransport/QUIC connection followed by a MoQ handshake.
+	#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
+	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_lite::Session> {
+		anyhow::bail!("no QUIC backend compiled; enable quinn, quiche, or iroh feature");
+	}
+
+	#[cfg(any(feature = "quinn", feature = "quiche", feature = "iroh"))]
 	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
 		#[cfg(feature = "iroh")]
 		if crate::iroh::is_iroh_url(&url) {
@@ -230,11 +225,9 @@ impl Client {
 			return Ok(session);
 		}
 
-		match &self.inner {
-			#[cfg(not(any(feature = "quinn", feature = "quiche")))]
-			_ => unreachable!("no QUIC backend compiled"),
+		match self.inner {
 			#[cfg(feature = "quinn")]
-			ClientInner::Quinn(quinn) => {
+			ClientInner::Quinn(ref quinn) => {
 				let tls = self.tls.clone();
 				let quic_url = url.clone();
 				let quic_handle = async {
@@ -263,7 +256,7 @@ impl Client {
 				}
 			}
 			#[cfg(feature = "quiche")]
-			ClientInner::Quiche(quiche) => {
+			ClientInner::Quiche(ref quiche) => {
 				let quic_url = url.clone();
 				let quic_handle = async {
 					let res = quiche.connect(quic_url).await;

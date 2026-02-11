@@ -9,7 +9,7 @@ use std::net;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use url::Url;
-use web_transport_quinn::proto::ConnectRequest;
+use web_transport_quiche::proto::ConnectRequest;
 
 // ── Client ──────────────────────────────────────────────────────────
 
@@ -188,6 +188,7 @@ fn load_quiche_cert(
 	Ok((chain, key))
 }
 
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 fn generate_quiche_cert(
 	hostnames: &[String],
 ) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
@@ -206,6 +207,13 @@ fn generate_quiche_cert(
 	let key = PrivateKeyDer::Pkcs8(key_der.into());
 
 	Ok((vec![cert.into()], key))
+}
+
+#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+fn generate_quiche_cert(
+	hostnames: &[String],
+) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+	anyhow::bail!("no crypto provider available; enable aws-lc-rs or ring feature");
 }
 
 // ── QuicheQuicRequest ───────────────────────────────────────────────
@@ -274,10 +282,10 @@ impl QuicheRequest {
 	}
 
 	/// Returns the URL for this connection.
-	pub fn url(&self) -> &Url {
+	pub fn url(&self) -> Option<&Url> {
 		match self {
-			QuicheRequest::Raw { request, .. } => &request.url,
-			QuicheRequest::WebTransport { request } => &request.url,
+			QuicheRequest::Raw { .. } => None,
+			QuicheRequest::WebTransport { request } => Some(&request.url),
 		}
 	}
 

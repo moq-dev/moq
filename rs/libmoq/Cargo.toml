@@ -30,8 +30,3 @@ url = "2"
 
 [build-dependencies]
 cbindgen = "0.29"
-
-[dev-dependencies]
-anyhow = "1"
-moq-native = { workspace = true }
-url = "2"
