@@ -1,5 +1,6 @@
 use std::{net, path::PathBuf, str::FromStr};
 
+use anyhow::Context;
 use url::Url;
 use web_transport_iroh::{
 	http,
@@ -13,8 +14,6 @@ pub use iroh::Endpoint as IrohEndpoint;
 #[non_exhaustive]
 pub struct IrohEndpointConfig {
 	/// Whether to enable iroh support.
-	///
-	/// NOTE: The feature flag `iroh` must also be enabled.
 	#[arg(
 		id = "iroh-enabled",
 		long = "iroh-enabled",
@@ -95,22 +94,58 @@ pub fn is_iroh_url(url: &Url) -> bool {
 	IROH_SCHEMES.contains(&url.scheme())
 }
 
-/// Raw QUIC-only iroh request (not using HTTP/3).
-pub struct IrohQuicRequest(iroh::endpoint::Connection);
+pub enum IrohRequest {
+	Quic {
+		connection: iroh::endpoint::Connection,
+	},
+	WebTransport {
+		request: Box<web_transport_iroh::H3Request>,
+	},
+}
 
-impl IrohQuicRequest {
-	/// Accept a new QUIC-only WebTransport session from a client.
-	pub fn accept(conn: iroh::endpoint::Connection) -> Self {
-		Self(conn)
+impl IrohRequest {
+	pub async fn accept(conn: iroh::endpoint::Incoming) -> anyhow::Result<Self> {
+		let conn = conn.accept()?.await?;
+		let alpn = String::from_utf8(conn.alpn().to_vec()).context("failed to decode ALPN")?;
+		tracing::Span::current().record("id", conn.stable_id());
+		tracing::debug!(remote = %conn.remote_id().fmt_short(), %alpn, "accepted");
+		match alpn.as_str() {
+			web_transport_iroh::ALPN_H3 => {
+				let request = web_transport_iroh::H3Request::accept(conn)
+					.await
+					.context("failed to receive WebTransport request")?;
+				Ok(Self::WebTransport {
+					request: Box::new(request),
+				})
+			}
+			alpn if moq_lite::alpns().contains(&alpn) => Ok(Self::Quic { connection: conn }),
+			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
+		}
 	}
 
 	/// Accept the session.
-	pub fn ok(self) -> web_transport_iroh::Session {
-		web_transport_iroh::Session::raw(self.0)
+	pub async fn ok(self) -> Result<web_transport_iroh::Session, web_transport_iroh::ServerError> {
+		match self {
+			IrohRequest::Quic { connection, .. } => Ok(web_transport_iroh::Session::raw(connection)),
+			IrohRequest::WebTransport { request } => request.ok().await,
+		}
 	}
 
 	/// Reject the session.
-	pub fn close(self, status: http::StatusCode) {
-		self.0.close(status.as_u16().into(), status.as_str().as_bytes());
+	pub async fn close(self, status: http::StatusCode) -> Result<(), web_transport_iroh::ServerError> {
+		match self {
+			IrohRequest::Quic { connection, .. } => {
+				let _: () = connection.close(status.as_u16().into(), status.as_str().as_bytes());
+				Ok(())
+			}
+			IrohRequest::WebTransport { request, .. } => request.close(status).await,
+		}
+	}
+
+	pub fn url(&self) -> Option<&Url> {
+		match self {
+			IrohRequest::Quic { .. } => None,
+			IrohRequest::WebTransport { request } => Some(request.url()),
+		}
 	}
 }

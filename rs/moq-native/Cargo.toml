@@ -12,10 +12,19 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["aws-lc-rs"]
-aws-lc-rs = ["rustls/aws-lc-rs", "rcgen/aws_lc_rs", "quinn/rustls-aws-lc-rs"]
+default = ["quinn", "aws-lc-rs", "websocket"]
+quinn = [
+    "dep:quinn",
+    "dep:web-transport-quinn",
+    "dep:rcgen",
+    "dep:reqwest",
+    "dep:rustls-webpki",
+]
+quiche = ["dep:web-transport-quiche", "dep:rcgen"]
+aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh"]
-ring = ["rustls/ring", "rcgen/ring", "quinn/rustls-ring"]
+websocket = ["dep:web-transport-ws"]
+ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring"]
 tokio-console = ["dep:console-subscriber"]
 
 [dependencies]
@@ -33,14 +42,14 @@ quinn = { version = "0.11", default-features = false, features = [
 	"platform-verifier",
 	"runtime-tokio",
 	"bloom",
-] }
+], optional = true }
 rand = "0.9.2"
-rcgen = { version = "0.14", default-features = false }
-reqwest = { version = "0.12", default-features = false }
+rcgen = { version = "0.14", default-features = false, optional = true }
+reqwest = { version = "0.12", default-features = false, optional = true }
 rustls = "0.23"
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
-rustls-webpki = { version = "0.103", features = ["aws-lc-rs"] }
+rustls-webpki = { version = "0.103", features = ["aws-lc-rs"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
 time = "0.3"
@@ -49,8 +58,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 web-transport-iroh = { workspace = true, optional = true }
-web-transport-quinn = { workspace = true }
-web-transport-ws = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+web-transport-quiche = { workspace = true, optional = true }
+web-transport-quinn = { workspace = true, optional = true }
+web-transport-ws = { workspace = true, features = [
+	"rustls-tls-webpki-roots",
+], optional = true }
 
 [dev-dependencies]
 anyhow = "1"
