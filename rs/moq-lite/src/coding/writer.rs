@@ -1,4 +1,10 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{
+	fmt::Debug,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
+};
 
 use crate::{Error, coding::*};
 

@@ -3,6 +3,7 @@ import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
+import type { IetfVersion } from "./version.ts";
 
 // In draft-14, ANNOUNCE is renamed to PUBLISH_NAMESPACE
 export class PublishNamespace {
@@ -16,24 +17,24 @@ export class PublishNamespace {
 		this.trackNamespace = trackNamespace;
 	}
 
-	async #encode(w: Writer): Promise<void> {
+	async #encode(w: Writer, _version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
 		await Namespace.encode(w, this.trackNamespace);
 		await w.u53(0); // size of parameters
 	}
 
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (wr) => this.#encode(wr, version));
 	}
 
-	static async decode(r: Reader): Promise<PublishNamespace> {
-		return Message.decode(r, PublishNamespace.#decode);
+	static async decode(r: Reader, version: IetfVersion): Promise<PublishNamespace> {
+		return Message.decode(r, (rd) => PublishNamespace.#decode(rd, version));
 	}
 
-	static async #decode(r: Reader): Promise<PublishNamespace> {
+	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespace> {
 		const requestId = await r.u62();
 		const trackNamespace = await Namespace.decode(r);
-		await Parameters.decode(r); // ignore parameters
+		await Parameters.decode(r, version); // ignore parameters
 		return new PublishNamespace(requestId, trackNamespace);
 	}
 }
@@ -51,11 +52,11 @@ export class PublishNamespaceOk {
 		await w.u62(this.requestId);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<PublishNamespaceOk> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishNamespaceOk> {
 		return Message.decode(r, PublishNamespaceOk.#decode);
 	}
 
@@ -84,11 +85,11 @@ export class PublishNamespaceError {
 		await w.string(this.reasonPhrase);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<PublishNamespaceError> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishNamespaceError> {
 		return Message.decode(r, PublishNamespaceError.#decode);
 	}
 
@@ -119,11 +120,11 @@ export class PublishNamespaceCancel {
 		await w.string(this.reasonPhrase);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<PublishNamespaceCancel> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishNamespaceCancel> {
 		return Message.decode(r, PublishNamespaceCancel.#decode);
 	}
 
@@ -149,11 +150,11 @@ export class PublishNamespaceDone {
 		await Namespace.encode(w, this.trackNamespace);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<PublishNamespaceDone> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishNamespaceDone> {
 		return Message.decode(r, PublishNamespaceDone.#decode);
 	}
 

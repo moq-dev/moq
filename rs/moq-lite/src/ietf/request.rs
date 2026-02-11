@@ -103,6 +103,8 @@ pub struct RequestError<'a> {
 	pub request_id: RequestId,
 	pub error_code: u64,
 	pub reason_phrase: Cow<'a, str>,
+	/// v16+: retry interval in milliseconds
+	pub retry_interval: u64,
 }
 
 impl Message for RequestError<'_> {
@@ -112,16 +114,24 @@ impl Message for RequestError<'_> {
 		self.request_id.encode(w, version);
 		self.error_code.encode(w, version);
 		self.reason_phrase.encode(w, version);
+		if version == Version::Draft16 {
+			self.retry_interval.encode(w, version);
+		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let error_code = u64::decode(r, version)?;
 		let reason_phrase = Cow::<str>::decode(r, version)?;
+		let retry_interval = match version {
+			Version::Draft16 => u64::decode(r, version)?,
+			_ => 0,
+		};
 		Ok(Self {
 			request_id,
 			error_code,
 			reason_phrase,
+			retry_interval,
 		})
 	}
 }
@@ -161,6 +171,7 @@ mod tests {
 			request_id: RequestId(99),
 			error_code: 500,
 			reason_phrase: "Internal error".into(),
+			retry_interval: 0,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -169,5 +180,24 @@ mod tests {
 		assert_eq!(decoded.request_id, RequestId(99));
 		assert_eq!(decoded.error_code, 500);
 		assert_eq!(decoded.reason_phrase, "Internal error");
+		assert_eq!(decoded.retry_interval, 0);
+	}
+
+	#[test]
+	fn test_request_error_v16_retry_interval() {
+		let msg = RequestError {
+			request_id: RequestId(99),
+			error_code: 500,
+			reason_phrase: "Internal error".into(),
+			retry_interval: 5000,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft16);
+		let decoded: RequestError = decode_message(&encoded, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(99));
+		assert_eq!(decoded.error_code, 500);
+		assert_eq!(decoded.reason_phrase, "Internal error");
+		assert_eq!(decoded.retry_interval, 5000);
 	}
 }

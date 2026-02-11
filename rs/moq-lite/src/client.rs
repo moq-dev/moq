@@ -46,6 +46,10 @@ impl Client {
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
+			Some(p) if p == ietf::ALPN_16 => (
+				Version::Ietf(ietf::Version::Draft16),
+				vec![ietf::Version::Draft16.into()],
+			),
 			Some(p) if p == ietf::ALPN_15 => (
 				Version::Ietf(ietf::Version::Draft15),
 				vec![ietf::Version::Draft15.into()],
@@ -61,10 +65,14 @@ impl Client {
 
 		let mut stream = Stream::open(&session, encoding).await?;
 
+		let ietf_version = match encoding {
+			Version::Ietf(v) => v,
+			_ => ietf::Version::Draft14,
+		};
 		let mut parameters = ietf::Parameters::default();
 		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-		let parameters = parameters.encode_bytes(());
+		let parameters = parameters.encode_bytes(ietf_version);
 
 		let client = setup::Client {
 			versions: supported.clone().into(),

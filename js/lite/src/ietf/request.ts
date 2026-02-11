@@ -1,6 +1,7 @@
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { MessageParameters } from "./parameters.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 export class MaxRequestId {
 	static id = 0x15;
@@ -15,7 +16,7 @@ export class MaxRequestId {
 		await w.u62(this.requestId);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
@@ -23,7 +24,7 @@ export class MaxRequestId {
 		return new MaxRequestId(await r.u62());
 	}
 
-	static async decode(r: Reader): Promise<MaxRequestId> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<MaxRequestId> {
 		return Message.decode(r, MaxRequestId.#decode);
 	}
 }
@@ -41,7 +42,7 @@ export class RequestsBlocked {
 		await w.u62(this.requestId);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
@@ -49,7 +50,7 @@ export class RequestsBlocked {
 		return new RequestsBlocked(await r.u62());
 	}
 
-	static async decode(r: Reader): Promise<RequestsBlocked> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<RequestsBlocked> {
 		return Message.decode(r, RequestsBlocked.#decode);
 	}
 }
@@ -67,23 +68,23 @@ export class RequestOk {
 		this.parameters = parameters;
 	}
 
-	async #encode(w: Writer): Promise<void> {
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
-		await this.parameters.encode(w);
+		await this.parameters.encode(w, version);
 	}
 
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (wr) => this.#encode(wr, version));
 	}
 
-	static async #decode(r: Reader): Promise<RequestOk> {
+	static async #decode(r: Reader, version: IetfVersion): Promise<RequestOk> {
 		const requestId = await r.u62();
-		const parameters = await MessageParameters.decode(r);
+		const parameters = await MessageParameters.decode(r, version);
 		return new RequestOk(requestId, parameters);
 	}
 
-	static async decode(r: Reader): Promise<RequestOk> {
-		return Message.decode(r, RequestOk.#decode);
+	static async decode(r: Reader, version: IetfVersion): Promise<RequestOk> {
+		return Message.decode(r, (rd) => RequestOk.#decode(rd, version));
 	}
 }
 
@@ -95,31 +96,37 @@ export class RequestError {
 	requestId: bigint;
 	errorCode: number;
 	reasonPhrase: string;
+	retryInterval: bigint;
 
-	constructor(requestId: bigint, errorCode: number, reasonPhrase: string) {
+	constructor(requestId: bigint, errorCode: number, reasonPhrase: string, retryInterval = 0n) {
 		this.requestId = requestId;
 		this.errorCode = errorCode;
 		this.reasonPhrase = reasonPhrase;
+		this.retryInterval = retryInterval;
 	}
 
-	async #encode(w: Writer): Promise<void> {
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
 		await w.u62(BigInt(this.errorCode));
 		await w.string(this.reasonPhrase);
+		if (version === Version.DRAFT_16) {
+			await w.u62(this.retryInterval);
+		}
 	}
 
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (wr) => this.#encode(wr, version));
 	}
 
-	static async #decode(r: Reader): Promise<RequestError> {
+	static async #decode(r: Reader, version: IetfVersion): Promise<RequestError> {
 		const requestId = await r.u62();
 		const errorCode = Number(await r.u62());
 		const reasonPhrase = await r.string();
-		return new RequestError(requestId, errorCode, reasonPhrase);
+		const retryInterval = version === Version.DRAFT_16 ? await r.u62() : 0n;
+		return new RequestError(requestId, errorCode, reasonPhrase, retryInterval);
 	}
 
-	static async decode(r: Reader): Promise<RequestError> {
-		return Message.decode(r, RequestError.#decode);
+	static async decode(r: Reader, version: IetfVersion): Promise<RequestError> {
+		return Message.decode(r, (rd) => RequestError.#decode(rd, version));
 	}
 }

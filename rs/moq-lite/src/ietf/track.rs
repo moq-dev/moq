@@ -38,7 +38,7 @@ impl Message for TrackStatus<'_> {
 				FilterType::LargestObject.encode(w, version); // filter type
 				0u8.encode(w, version); // no parameters
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				// v15: same format as Subscribe - fields in parameters
 				let params = MessageParameters::default();
 				params.encode(w, version);
@@ -59,7 +59,7 @@ impl Message for TrackStatus<'_> {
 				let _filter_type = u64::decode(r, version)?;
 				let _params = Parameters::decode(r, version)?;
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				let _params = MessageParameters::decode(r, version)?;
 			}
 		}

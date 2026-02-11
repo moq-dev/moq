@@ -75,7 +75,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn send_ok(&self, request_id: RequestId) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => self.control.send(ietf::PublishNamespaceOk { request_id }),
-			Version::Draft15 => self.control.send(ietf::RequestOk {
+			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestOk {
 				request_id,
 				parameters: MessageParameters::default(),
 			}),
@@ -90,10 +90,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				error_code,
 				reason_phrase: reason.into(),
 			}),
-			Version::Draft15 => self.control.send(ietf::RequestError {
+			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestError {
 				request_id,
 				error_code,
 				reason_phrase: reason.into(),
+				retry_interval: 0,
 			}),
 		}
 	}
@@ -471,11 +472,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						reason_phrase: err.to_string().into(),
 					})?;
 				}
-				Version::Draft15 => {
+				Version::Draft15 | Version::Draft16 => {
 					self.control.send(ietf::RequestError {
 						request_id: msg.request_id,
 						error_code: 400,
 						reason_phrase: err.to_string().into(),
+						retry_interval: 0,
 					})?;
 				}
 			}
@@ -490,7 +492,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						filter_type: FilterType::LargestObject,
 					})?;
 				}
-				Version::Draft15 => {
+				Version::Draft15 | Version::Draft16 => {
 					self.control.send(ietf::RequestOk {
 						request_id: msg.request_id,
 						parameters: MessageParameters::default(),

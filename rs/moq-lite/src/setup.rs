@@ -22,9 +22,8 @@ pub struct Client {
 impl Client {
 	fn encode_inner<W: bytes::BufMut>(&self, w: &mut W, v: Version) {
 		match v {
-			Version::Ietf(ietf::Version::Draft15) => {
-				// Draft15: no versions list, parameters only.
-				assert_eq!(self.versions, coding::Versions::from([ietf::Version::Draft15.into()]));
+			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft16) => {
+				// Draft15+: no versions list, parameters only.
 			}
 			Version::Ietf(ietf::Version::Draft14)
 			| Version::Lite(lite::Version::Draft02)
@@ -43,7 +42,9 @@ impl Decode<Version> for Client {
 		}
 
 		let size = match v {
-			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft14) => u16::decode(r, v)? as usize,
+			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
+				u16::decode(r, v)? as usize
+			}
 			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => u64::decode(r, v)? as usize,
 		};
 
@@ -54,9 +55,9 @@ impl Decode<Version> for Client {
 		let mut msg = r.copy_to_bytes(size);
 
 		let versions = match v {
-			Version::Ietf(ietf::Version::Draft15) => {
-				// Draft15: no versions list, parameters only.
-				coding::Versions::from([ietf::Version::Draft15.into()])
+			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft16) => {
+				// Draft15+: no versions list, parameters only.
+				coding::Versions::from([v.into()])
 			}
 			Version::Ietf(ietf::Version::Draft14)
 			| Version::Lite(lite::Version::Draft02)
@@ -80,7 +81,7 @@ impl Encode<Version> for Client {
 		let size = sizer.size;
 
 		match v {
-			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft14) => {
+			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
 				u16::try_from(size).expect("message too large for u16").encode(w, v)
 			}
 			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => (size as u64).encode(w, v),
@@ -102,9 +103,8 @@ pub struct Server {
 impl Server {
 	fn encode_inner<W: bytes::BufMut>(&self, w: &mut W, v: Version) {
 		match v {
-			Version::Ietf(ietf::Version::Draft15) => {
-				// Draft15: No version field, parameters only.
-				assert_eq!(self.version, ietf::Version::Draft15.into());
+			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft16) => {
+				// Draft15+: No version field, parameters only.
 			}
 			Version::Ietf(ietf::Version::Draft14)
 			| Version::Lite(lite::Version::Draft02)
@@ -123,7 +123,7 @@ impl Encode<Version> for Server {
 		let size = sizer.size;
 
 		match v {
-			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft14) => {
+			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
 				u16::try_from(size).expect("message too large for u16").encode(w, v)
 			}
 			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => (size as u64).encode(w, v),
@@ -141,7 +141,9 @@ impl Decode<Version> for Server {
 		}
 
 		let size = match v {
-			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft14) => u16::decode(r, v)? as usize,
+			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
+				u16::decode(r, v)? as usize
+			}
 			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => u64::decode(r, v)? as usize,
 		};
 
@@ -151,7 +153,7 @@ impl Decode<Version> for Server {
 
 		let mut msg = r.copy_to_bytes(size);
 		let version = match v {
-			Version::Ietf(ietf::Version::Draft15) => v.into(),
+			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft16) => v.into(),
 			Version::Ietf(ietf::Version::Draft14)
 			| Version::Lite(lite::Version::Draft02)
 			| Version::Lite(lite::Version::Draft01) => coding::Version::decode(&mut msg, v)?,

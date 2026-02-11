@@ -1,6 +1,7 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
+import type { IetfVersion } from "./version.ts";
 
 export class Fetch {
 	static id = 0x16;
@@ -41,11 +42,11 @@ export class Fetch {
 		throw new Error("FETCH messages are not supported");
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<Fetch> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<Fetch> {
 		return Message.decode(r, Fetch.#decode);
 	}
 
@@ -67,11 +68,11 @@ export class FetchOk {
 		throw new Error("FETCH_OK messages are not supported");
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<FetchOk> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<FetchOk> {
 		return Message.decode(r, FetchOk.#decode);
 	}
 
@@ -97,11 +98,11 @@ export class FetchError {
 		throw new Error("FETCH_ERROR messages are not supported");
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<FetchError> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<FetchError> {
 		return Message.decode(r, FetchError.#decode);
 	}
 
@@ -123,11 +124,11 @@ export class FetchCancel {
 		throw new Error("FETCH_CANCEL messages are not supported");
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<FetchCancel> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<FetchCancel> {
 		return Message.decode(r, FetchCancel.#decode);
 	}
 

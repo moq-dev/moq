@@ -2,6 +2,7 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
+import type { IetfVersion } from "./version.ts";
 
 export class TrackStatusRequest {
 	static id = 0x0d;
@@ -19,11 +20,11 @@ export class TrackStatusRequest {
 		await w.string(this.trackName);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<TrackStatusRequest> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<TrackStatusRequest> {
 		return Message.decode(r, TrackStatusRequest.#decode);
 	}
 
@@ -66,11 +67,11 @@ export class TrackStatus {
 		await w.u62(this.lastObjectId);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<TrackStatus> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<TrackStatus> {
 		return Message.decode(r, TrackStatus.#decode);
 	}
 

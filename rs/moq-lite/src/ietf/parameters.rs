@@ -4,6 +4,8 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::coding::*;
 
+use super::Version;
+
 const MAX_PARAMS: u64 = 64;
 
 // ---- Setup Parameters (used in CLIENT_SETUP/SERVER_SETUP) ----
@@ -34,32 +36,41 @@ pub struct Parameters {
 	bytes: HashMap<ParameterBytes, Vec<u8>>,
 }
 
-impl<V: Clone> Decode<V> for Parameters {
-	fn decode<R: bytes::Buf>(mut r: &mut R, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for Parameters {
+	fn decode<R: bytes::Buf>(mut r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let mut vars = HashMap::new();
 		let mut bytes = HashMap::new();
 
-		// I hate this encoding so much; let me encode my role and get on with my life.
-		let count = u64::decode(r, version.clone())?;
+		let count = u64::decode(r, version)?;
 
 		if count > MAX_PARAMS {
 			return Err(DecodeError::TooMany);
 		}
 
-		for _ in 0..count {
-			let kind = u64::decode(r, version.clone())?;
+		let mut prev_type: u64 = 0;
+
+		for i in 0..count {
+			let kind = match version {
+				Version::Draft16 => {
+					let delta = u64::decode(r, version)?;
+					let abs = if i == 0 { delta } else { prev_type + delta };
+					prev_type = abs;
+					abs
+				}
+				_ => u64::decode(r, version)?,
+			};
 
 			if kind % 2 == 0 {
 				let kind = ParameterVarInt::from(kind);
 				match vars.entry(kind) {
 					hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-					hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version.clone())?),
+					hash_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version)?),
 				};
 			} else {
 				let kind = ParameterBytes::from(kind);
 				match bytes.entry(kind) {
 					hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-					hash_map::Entry::Vacant(entry) => entry.insert(Vec::<u8>::decode(&mut r, version.clone())?),
+					hash_map::Entry::Vacant(entry) => entry.insert(Vec::<u8>::decode(&mut r, version)?),
 				};
 			}
 		}
@@ -68,18 +79,51 @@ impl<V: Clone> Decode<V> for Parameters {
 	}
 }
 
-impl<V: Clone> Encode<V> for Parameters {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		(self.vars.len() + self.bytes.len()).encode(w, version.clone());
+impl Encode<Version> for Parameters {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+		(self.vars.len() + self.bytes.len()).encode(w, version);
 
-		for (kind, value) in self.vars.iter() {
-			u64::from(*kind).encode(w, version.clone());
-			value.encode(w, version.clone());
-		}
+		match version {
+			Version::Draft16 => {
+				// Delta encoding: collect all keys, sort, encode deltas
+				let mut all: Vec<(u64, bool, usize)> = Vec::new(); // (key, is_var, index)
+				let var_keys: Vec<_> = self.vars.keys().collect();
+				let byte_keys: Vec<_> = self.bytes.keys().collect();
+				for (i, k) in var_keys.iter().enumerate() {
+					all.push((u64::from(**k), true, i));
+				}
+				for (i, k) in byte_keys.iter().enumerate() {
+					all.push((u64::from(**k), false, i));
+				}
+				all.sort_by_key(|(k, _, _)| *k);
 
-		for (kind, value) in self.bytes.iter() {
-			u64::from(*kind).encode(w, version.clone());
-			value.encode(w, version.clone());
+				let var_vals: Vec<_> = self.vars.values().collect();
+				let byte_vals: Vec<_> = self.bytes.values().collect();
+
+				let mut prev_type: u64 = 0;
+				for (idx, (kind, is_var, orig_idx)) in all.iter().enumerate() {
+					let delta = if idx == 0 { *kind } else { kind - prev_type };
+					prev_type = *kind;
+					delta.encode(w, version);
+
+					if *is_var {
+						var_vals[*orig_idx].encode(w, version);
+					} else {
+						byte_vals[*orig_idx].encode(w, version);
+					}
+				}
+			}
+			_ => {
+				for (kind, value) in self.vars.iter() {
+					u64::from(*kind).encode(w, version);
+					value.encode(w, version);
+				}
+
+				for (kind, value) in self.bytes.iter() {
+					u64::from(*kind).encode(w, version);
+					value.encode(w, version);
+				}
+			}
 		}
 	}
 }
@@ -112,29 +156,39 @@ pub struct MessageParameters {
 	bytes: BTreeMap<u64, Vec<u8>>,
 }
 
-impl<V: Clone> Decode<V> for MessageParameters {
-	fn decode<R: bytes::Buf>(mut r: &mut R, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for MessageParameters {
+	fn decode<R: bytes::Buf>(mut r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let mut vars = BTreeMap::new();
 		let mut bytes = BTreeMap::new();
 
-		let count = u64::decode(r, version.clone())?;
+		let count = u64::decode(r, version)?;
 
 		if count > MAX_PARAMS {
 			return Err(DecodeError::TooMany);
 		}
 
-		for _ in 0..count {
-			let kind = u64::decode(r, version.clone())?;
+		let mut prev_type: u64 = 0;
+
+		for i in 0..count {
+			let kind = match version {
+				Version::Draft16 => {
+					let delta = u64::decode(r, version)?;
+					let abs = if i == 0 { delta } else { prev_type + delta };
+					prev_type = abs;
+					abs
+				}
+				_ => u64::decode(r, version)?,
+			};
 
 			if kind % 2 == 0 {
 				match vars.entry(kind) {
 					btree_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-					btree_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version.clone())?),
+					btree_map::Entry::Vacant(entry) => entry.insert(u64::decode(&mut r, version)?),
 				};
 			} else {
 				match bytes.entry(kind) {
 					btree_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-					btree_map::Entry::Vacant(entry) => entry.insert(Vec::<u8>::decode(&mut r, version.clone())?),
+					btree_map::Entry::Vacant(entry) => entry.insert(Vec::<u8>::decode(&mut r, version)?),
 				};
 			}
 		}
@@ -143,18 +197,49 @@ impl<V: Clone> Decode<V> for MessageParameters {
 	}
 }
 
-impl<V: Clone> Encode<V> for MessageParameters {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		(self.vars.len() + self.bytes.len()).encode(w, version.clone());
+impl Encode<Version> for MessageParameters {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+		(self.vars.len() + self.bytes.len()).encode(w, version);
 
-		for (kind, value) in self.vars.iter() {
-			kind.encode(w, version.clone());
-			value.encode(w, version.clone());
-		}
+		match version {
+			Version::Draft16 => {
+				// Delta encoding: BTreeMap is already sorted, merge and sort by key
+				enum ParamValue<'a> {
+					Var(&'a u64),
+					Bytes(&'a Vec<u8>),
+				}
+				let mut all: Vec<(u64, ParamValue)> = Vec::new();
+				for (k, v) in self.vars.iter() {
+					all.push((*k, ParamValue::Var(v)));
+				}
+				for (k, v) in self.bytes.iter() {
+					all.push((*k, ParamValue::Bytes(v)));
+				}
+				all.sort_by_key(|(k, _)| *k);
 
-		for (kind, value) in self.bytes.iter() {
-			kind.encode(w, version.clone());
-			value.encode(w, version.clone());
+				let mut prev_type: u64 = 0;
+				for (idx, (kind, val)) in all.iter().enumerate() {
+					let delta = if idx == 0 { *kind } else { kind - prev_type };
+					prev_type = *kind;
+					delta.encode(w, version);
+
+					match val {
+						ParamValue::Var(v) => v.encode(w, version),
+						ParamValue::Bytes(v) => v.encode(w, version),
+					}
+				}
+			}
+			_ => {
+				for (kind, value) in self.vars.iter() {
+					kind.encode(w, version);
+					value.encode(w, version);
+				}
+
+				for (kind, value) in self.bytes.iter() {
+					kind.encode(w, version);
+					value.encode(w, version);
+				}
+			}
 		}
 	}
 }
@@ -262,5 +347,95 @@ impl MessageParameters {
 		let mut buf = Vec::new();
 		ft.encode(&mut buf, ());
 		self.bytes.insert(Self::SUBSCRIPTION_FILTER, buf);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::BytesMut;
+
+	#[test]
+	fn test_parameters_v16_delta_round_trip() {
+		let mut params = Parameters::default();
+		params.set_bytes(ParameterBytes::Path, b"/test".to_vec());
+		params.set_varint(ParameterVarInt::MaxRequestId, 100);
+		params.set_bytes(ParameterBytes::Implementation, b"test-impl".to_vec());
+
+		let mut buf = BytesMut::new();
+		params.encode(&mut buf, Version::Draft16);
+
+		let mut bytes = buf.freeze();
+		let decoded = Parameters::decode(&mut bytes, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.get_bytes(ParameterBytes::Path), Some(b"/test".as_ref()));
+		assert_eq!(decoded.get_varint(ParameterVarInt::MaxRequestId), Some(100));
+		assert_eq!(
+			decoded.get_bytes(ParameterBytes::Implementation),
+			Some(b"test-impl".as_ref())
+		);
+	}
+
+	#[test]
+	fn test_parameters_v15_round_trip() {
+		let mut params = Parameters::default();
+		params.set_bytes(ParameterBytes::Path, b"/test".to_vec());
+		params.set_varint(ParameterVarInt::MaxRequestId, 100);
+
+		let mut buf = BytesMut::new();
+		params.encode(&mut buf, Version::Draft15);
+
+		let mut bytes = buf.freeze();
+		let decoded = Parameters::decode(&mut bytes, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.get_bytes(ParameterBytes::Path), Some(b"/test".as_ref()));
+		assert_eq!(decoded.get_varint(ParameterVarInt::MaxRequestId), Some(100));
+	}
+
+	#[test]
+	fn test_message_parameters_v16_delta_round_trip() {
+		let mut params = MessageParameters::default();
+		params.set_subscriber_priority(200);
+		params.set_group_order(2);
+		params.set_forward(true);
+
+		let mut buf = BytesMut::new();
+		params.encode(&mut buf, Version::Draft16);
+
+		let mut bytes = buf.freeze();
+		let decoded = MessageParameters::decode(&mut bytes, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.subscriber_priority(), Some(200));
+		assert_eq!(decoded.group_order(), Some(2));
+		assert_eq!(decoded.forward(), Some(true));
+	}
+
+	#[test]
+	fn test_message_parameters_v15_round_trip() {
+		let mut params = MessageParameters::default();
+		params.set_subscriber_priority(128);
+		params.set_group_order(2);
+
+		let mut buf = BytesMut::new();
+		params.encode(&mut buf, Version::Draft15);
+
+		let mut bytes = buf.freeze();
+		let decoded = MessageParameters::decode(&mut bytes, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.subscriber_priority(), Some(128));
+		assert_eq!(decoded.group_order(), Some(2));
+	}
+
+	#[test]
+	fn test_message_parameters_empty_v16() {
+		let params = MessageParameters::default();
+
+		let mut buf = BytesMut::new();
+		params.encode(&mut buf, Version::Draft16);
+
+		let mut bytes = buf.freeze();
+		let decoded = MessageParameters::decode(&mut bytes, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.subscriber_priority(), None);
 	}
 }

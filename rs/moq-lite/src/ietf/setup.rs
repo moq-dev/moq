@@ -24,11 +24,11 @@ impl Message for ClientSetup {
 				let parameters = Parameters::decode(r, version)?;
 				Ok(Self { versions, parameters })
 			}
-			IetfVersion::Draft15 => {
-				// Draft15: no versions list, just parameters
+			IetfVersion::Draft15 | IetfVersion::Draft16 => {
+				// Draft15+: no versions list, just parameters
 				let parameters = Parameters::decode(r, version)?;
 				Ok(Self {
-					versions: vec![Version(IetfVersion::Draft15 as u64)].into(),
+					versions: vec![Version(version as u64)].into(),
 					parameters,
 				})
 			}
@@ -42,8 +42,8 @@ impl Message for ClientSetup {
 				self.versions.encode(w, version);
 				self.parameters.encode(w, version);
 			}
-			IetfVersion::Draft15 => {
-				// Draft15: no versions list, just parameters
+			IetfVersion::Draft15 | IetfVersion::Draft16 => {
+				// Draft15+: no versions list, just parameters
 				self.parameters.encode(w, version);
 			}
 		}
@@ -69,8 +69,8 @@ impl Message for ServerSetup {
 				self.version.encode(w, version);
 				self.parameters.encode(w, version);
 			}
-			IetfVersion::Draft15 => {
-				// Draft15: no version field, just parameters
+			IetfVersion::Draft15 | IetfVersion::Draft16 => {
+				// Draft15+: no version field, just parameters
 				self.parameters.encode(w, version);
 			}
 		}
@@ -79,15 +79,18 @@ impl Message for ServerSetup {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: IetfVersion) -> Result<Self, DecodeError> {
 		match version {
 			IetfVersion::Draft14 => {
-				let version = Version::decode(r, version)?;
-				let parameters = Parameters::decode(r, version)?;
-				Ok(Self { version, parameters })
-			}
-			IetfVersion::Draft15 => {
-				// Draft15: no version field, just parameters
+				let selected = Version::decode(r, version)?;
 				let parameters = Parameters::decode(r, version)?;
 				Ok(Self {
-					version: Version(IetfVersion::Draft15 as u64),
+					version: selected,
+					parameters,
+				})
+			}
+			IetfVersion::Draft15 | IetfVersion::Draft16 => {
+				// Draft15+: no version field, just parameters
+				let parameters = Parameters::decode(r, version)?;
+				Ok(Self {
+					version: Version(version as u64),
 					parameters,
 				})
 			}

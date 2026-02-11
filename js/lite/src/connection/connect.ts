@@ -78,7 +78,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
-	if (protocol === Ietf.ALPN.DRAFT_15) {
+	if (protocol === Ietf.ALPN.DRAFT_16) {
+		setupVersion = Ietf.Version.DRAFT_16;
+	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
 	} else if (protocol === undefined) {
 		setupVersion = Ietf.Version.DRAFT_14;
@@ -98,9 +100,11 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	const client = new Ietf.ClientSetup(
 		// NOTE: draft 15 onwards does not use CLIENT_SETUP to negotiate the version.
 		// We still echo it just to make sure we're not accidentally trying to negotiate the version.
-		setupVersion === Ietf.Version.DRAFT_15
-			? [Ietf.Version.DRAFT_15]
-			: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
+		setupVersion === Ietf.Version.DRAFT_16
+			? [Ietf.Version.DRAFT_16]
+			: setupVersion === Ietf.Version.DRAFT_15
+				? [Ietf.Version.DRAFT_15]
+				: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
 		params,
 	);
 	console.debug(url.toString(), "sending client setup", client);
@@ -139,7 +143,7 @@ async function connectWebTransport(
 		allowPooling: false,
 		congestionControl: "low-latency",
 		// @ts-expect-error - TODO: add protocols to WebTransportOptions
-		protocols: [Ietf.ALPN.DRAFT_15],
+		protocols: [Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
 		...options,
 	};
 

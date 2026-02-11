@@ -1,5 +1,6 @@
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 export const Parameter = {
 	MaxRequestId: 2n,
@@ -61,44 +62,71 @@ export class Parameters {
 		return this.vars.delete(id);
 	}
 
-	async encode(w: Writer) {
+	async encode(w: Writer, version: IetfVersion) {
 		await w.u53(this.vars.size + this.bytes.size);
-		for (const [id, value] of this.vars) {
-			await w.u62(id);
-			await w.u62(value);
-		}
 
-		for (const [id, value] of this.bytes) {
-			await w.u62(id);
-			await w.u53(value.length);
-			await w.write(value);
+		if (version === Version.DRAFT_16) {
+			// Delta encoding: collect all keys, sort, encode deltas
+			const all: { key: bigint; isVar: boolean }[] = [];
+			for (const id of this.vars.keys()) all.push({ key: id, isVar: true });
+			for (const id of this.bytes.keys()) all.push({ key: id, isVar: false });
+			all.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+
+			let prevType = 0n;
+			for (let i = 0; i < all.length; i++) {
+				const { key, isVar } = all[i];
+				const delta = i === 0 ? key : key - prevType;
+				prevType = key;
+				await w.u62(delta);
+
+				if (isVar) {
+					await w.u62(this.vars.get(key)!);
+				} else {
+					const value = this.bytes.get(key)!;
+					await w.u53(value.length);
+					await w.write(value);
+				}
+			}
+		} else {
+			for (const [id, value] of this.vars) {
+				await w.u62(id);
+				await w.u62(value);
+			}
+
+			for (const [id, value] of this.bytes) {
+				await w.u62(id);
+				await w.u53(value.length);
+				await w.write(value);
+			}
 		}
 	}
 
-	static async decode(r: Reader): Promise<Parameters> {
+	static async decode(r: Reader, version: IetfVersion): Promise<Parameters> {
 		const count = await r.u53();
 		const params = new Parameters();
 
-		for (let i = 0; i < count; i++) {
-			const id = await r.u62();
+		let prevType = 0n;
 
-			// Per draft-ietf-moq-transport-14 Section 1.4.2:
-			// - If Type is even, Value is a single varint (no length prefix)
-			// - If Type is odd, Value has a length prefix followed by bytes
+		for (let i = 0; i < count; i++) {
+			let id: bigint;
+			if (version === Version.DRAFT_16) {
+				const delta = await r.u62();
+				id = i === 0 ? delta : prevType + delta;
+				prevType = id;
+			} else {
+				id = await r.u62();
+			}
+
 			if (id % 2n === 0n) {
 				if (params.vars.has(id)) {
 					throw new Error(`duplicate parameter id: ${id.toString()}`);
 				}
-
-				// Even: read varint and store as encoded bytes
 				const varint = await r.u62();
 				params.setVarint(id, varint);
 			} else {
 				if (params.bytes.has(id)) {
 					throw new Error(`duplicate parameter id: ${id.toString()}`);
 				}
-
-				// Odd: read length-prefixed bytes
 				const size = await r.u53();
 				const bytes = await r.read(size);
 				params.setBytes(id, bytes);
@@ -226,27 +254,60 @@ export class MessageParameters {
 		this.bytes.set(MSG_PARAM_SUBSCRIPTION_FILTER, new Uint8Array([v]));
 	}
 
-	async encode(w: Writer) {
+	async encode(w: Writer, version: IetfVersion) {
 		await w.u53(this.vars.size + this.bytes.size);
 
-		for (const [id, value] of this.vars) {
-			await w.u62(id);
-			await w.u62(value);
-		}
+		if (version === Version.DRAFT_16) {
+			// Delta encoding: merge vars and bytes, sort by key
+			const all: { key: bigint; isVar: boolean }[] = [];
+			for (const id of this.vars.keys()) all.push({ key: id, isVar: true });
+			for (const id of this.bytes.keys()) all.push({ key: id, isVar: false });
+			all.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
-		for (const [id, value] of this.bytes) {
-			await w.u62(id);
-			await w.u53(value.length);
-			await w.write(value);
+			let prevType = 0n;
+			for (let i = 0; i < all.length; i++) {
+				const { key, isVar } = all[i];
+				const delta = i === 0 ? key : key - prevType;
+				prevType = key;
+				await w.u62(delta);
+
+				if (isVar) {
+					await w.u62(this.vars.get(key)!);
+				} else {
+					const value = this.bytes.get(key)!;
+					await w.u53(value.length);
+					await w.write(value);
+				}
+			}
+		} else {
+			for (const [id, value] of this.vars) {
+				await w.u62(id);
+				await w.u62(value);
+			}
+
+			for (const [id, value] of this.bytes) {
+				await w.u62(id);
+				await w.u53(value.length);
+				await w.write(value);
+			}
 		}
 	}
 
-	static async decode(r: Reader): Promise<MessageParameters> {
+	static async decode(r: Reader, version: IetfVersion): Promise<MessageParameters> {
 		const count = await r.u53();
 		const params = new MessageParameters();
 
+		let prevType = 0n;
+
 		for (let i = 0; i < count; i++) {
-			const id = await r.u62();
+			let id: bigint;
+			if (version === Version.DRAFT_16) {
+				const delta = await r.u62();
+				id = i === 0 ? delta : prevType + delta;
+				prevType = id;
+			} else {
+				id = await r.u62();
+			}
 
 			if (id % 2n === 0n) {
 				if (params.vars.has(id)) {

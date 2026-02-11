@@ -184,7 +184,7 @@ impl Message for Publish<'_> {
 				// parameters
 				0u8.encode(w, version);
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				let mut params = MessageParameters::default();
 				params.set_group_order(u8::from(self.group_order) as u64);
 				if let Some(location) = &self.largest_location {
@@ -224,7 +224,7 @@ impl Message for Publish<'_> {
 					forward,
 				})
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				let params = MessageParameters::decode(r, version)?;
 
 				let group_order = match params.group_order() {
@@ -281,7 +281,7 @@ impl Message for PublishOk {
 				// no parameters
 				0u8.encode(w, version);
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				let mut params = MessageParameters::default();
 				params.set_forward(self.forward);
 				params.set_subscriber_priority(self.subscriber_priority);
@@ -323,7 +323,7 @@ impl Message for PublishOk {
 					filter_type,
 				})
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				let params = MessageParameters::decode(r, version)?;
 
 				let forward = params.forward().unwrap_or(true);

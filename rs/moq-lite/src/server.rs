@@ -44,6 +44,10 @@ impl Server {
 		}
 
 		let (encoding, supported) = match session.protocol() {
+			Some(p) if p == ietf::ALPN_16 => (
+				Version::Ietf(ietf::Version::Draft16),
+				vec![ietf::Version::Draft16.into()],
+			),
 			Some(p) if p == ietf::ALPN_15 => (
 				Version::Ietf(ietf::Version::Draft15),
 				vec![ietf::Version::Draft15.into()],
@@ -71,13 +75,14 @@ impl Server {
 			.ok_or_else(|| Error::Version(client.versions.clone(), supported.into()))?;
 
 		// Only encode parameters if we're using the IETF draft because it has max_request_id
-		let parameters = if version.is_ietf() {
-			let mut parameters = ietf::Parameters::default();
-			parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
-			parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-			parameters.encode_bytes(())
-		} else {
-			lite::Parameters::default().encode_bytes(())
+		let parameters = match version {
+			Version::Ietf(ietf_version) => {
+				let mut parameters = ietf::Parameters::default();
+				parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
+				parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+				parameters.encode_bytes(ietf_version)
+			}
+			Version::Lite(_) => lite::Parameters::default().encode_bytes(()),
 		};
 
 		let server = setup::Server {

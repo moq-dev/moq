@@ -17,20 +17,15 @@ export class ClientSetup {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version === Version.DRAFT_15) {
-			// Draft15: no versions list, just parameters
-			// Make sure versions is draft 15 only.
-			if (this.versions.length !== 1 || this.versions[0] !== Version.DRAFT_15) {
-				throw new Error("versions must be draft 15 only");
-			}
-
-			await this.parameters.encode(w);
+		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			// Draft15+: no versions list, just parameters
+			await this.parameters.encode(w, version);
 		} else if (version === Version.DRAFT_14) {
 			await w.u53(this.versions.length);
 			for (const v of this.versions) {
 				await w.u53(v);
 			}
-			await this.parameters.encode(w);
+			await this.parameters.encode(w, version);
 		} else {
 			const _: never = version;
 			throw new Error(`unsupported version: ${_}`);
@@ -42,10 +37,10 @@ export class ClientSetup {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<ClientSetup> {
-		if (version === Version.DRAFT_15) {
-			// Draft15: no versions list, just parameters
-			const parameters = await Parameters.decode(r);
-			return new ClientSetup([Version.DRAFT_15], parameters);
+		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			// Draft15+: no versions list, just parameters
+			const parameters = await Parameters.decode(r, version);
+			return new ClientSetup([version], parameters);
 		} else if (version === Version.DRAFT_14) {
 			// Number of supported versions
 			const numVersions = await r.u53();
@@ -60,7 +55,7 @@ export class ClientSetup {
 				supportedVersions.push(v);
 			}
 
-			const parameters = await Parameters.decode(r);
+			const parameters = await Parameters.decode(r, version);
 
 			return new ClientSetup(supportedVersions, parameters);
 		} else {
@@ -86,12 +81,12 @@ export class ServerSetup {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		if (version === Version.DRAFT_15) {
-			// Draft15: no version field, just parameters
-			await this.parameters.encode(w);
+		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			// Draft15+: no version field, just parameters
+			await this.parameters.encode(w, version);
 		} else if (version === Version.DRAFT_14) {
 			await w.u53(this.version);
-			await this.parameters.encode(w);
+			await this.parameters.encode(w, version);
 		} else {
 			const _: never = version;
 			throw new Error(`unsupported version: ${_}`);
@@ -103,13 +98,13 @@ export class ServerSetup {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<ServerSetup> {
-		if (version === Version.DRAFT_15) {
-			// Draft15: no version field, just parameters
-			const parameters = await Parameters.decode(r);
-			return new ServerSetup(Version.DRAFT_15, parameters);
+		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			// Draft15+: no version field, just parameters
+			const parameters = await Parameters.decode(r, version);
+			return new ServerSetup(version, parameters);
 		} else if (version === Version.DRAFT_14) {
 			const selectedVersion = await r.u53();
-			const parameters = await Parameters.decode(r);
+			const parameters = await Parameters.decode(r, version);
 			return new ServerSetup(selectedVersion, parameters);
 		} else {
 			const _: never = version;

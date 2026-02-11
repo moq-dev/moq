@@ -34,16 +34,6 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
 	return result;
 }
 
-// Helper to encode a message (no version)
-async function encodeMessage<T extends { encode(w: Writer): Promise<void> }>(message: T): Promise<Uint8Array> {
-	const { stream, written } = createTestWritableStream();
-	const writer = new Writer(stream);
-	await message.encode(writer);
-	writer.close();
-	await writer.closed;
-	return concatChunks(written);
-}
-
 // Helper to encode a versioned message
 async function encodeVersioned<T extends { encode(w: Writer, v: IetfVersion): Promise<void> }>(
 	message: T,
@@ -55,12 +45,6 @@ async function encodeVersioned<T extends { encode(w: Writer, v: IetfVersion): Pr
 	writer.close();
 	await writer.closed;
 	return concatChunks(written);
-}
-
-// Helper to decode a message
-async function decodeMessage<T>(bytes: Uint8Array, decoder: (r: Reader) => Promise<T>): Promise<T> {
-	const reader = new Reader(undefined, bytes);
-	return await decoder(reader);
 }
 
 // Helper to decode a versioned message
@@ -131,8 +115,8 @@ test("SubscribeOk v15: round trip", async () => {
 test("SubscribeError: round trip", async () => {
 	const msg = new Subscribe.SubscribeError(123n, 500, "Not found");
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Subscribe.SubscribeError.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeError.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.requestId, 123n);
 	assert.strictEqual(decoded.errorCode, 500);
@@ -142,8 +126,8 @@ test("SubscribeError: round trip", async () => {
 test("Unsubscribe: round trip", async () => {
 	const msg = new Subscribe.Unsubscribe(999n);
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Subscribe.Unsubscribe.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Subscribe.Unsubscribe.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.requestId, 999n);
 });
@@ -151,8 +135,8 @@ test("Unsubscribe: round trip", async () => {
 test("PublishDone: basic test", async () => {
 	const msg = new PublishDone(10n, 0, "complete");
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, PublishDone.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, PublishDone.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.requestId, 10n);
 	assert.strictEqual(decoded.statusCode, 0);
@@ -162,8 +146,8 @@ test("PublishDone: basic test", async () => {
 test("PublishDone: with error", async () => {
 	const msg = new PublishDone(10n, 1, "error");
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, PublishDone.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, PublishDone.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.requestId, 10n);
 	assert.strictEqual(decoded.statusCode, 1);
@@ -174,8 +158,8 @@ test("PublishDone: with error", async () => {
 test("PublishNamespace: round trip", async () => {
 	const msg = new Announce.PublishNamespace(1n, Path.from("test/broadcast"));
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Announce.PublishNamespace.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.requestId, 1n);
 	assert.strictEqual(decoded.trackNamespace, "test/broadcast");
@@ -184,8 +168,8 @@ test("PublishNamespace: round trip", async () => {
 test("PublishNamespaceOk: round trip", async () => {
 	const msg = new Announce.PublishNamespaceOk(2n);
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Announce.PublishNamespaceOk.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Announce.PublishNamespaceOk.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.requestId, 2n);
 });
@@ -193,8 +177,8 @@ test("PublishNamespaceOk: round trip", async () => {
 test("PublishNamespaceError: round trip", async () => {
 	const msg = new Announce.PublishNamespaceError(3n, 404, "Unauthorized");
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Announce.PublishNamespaceError.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Announce.PublishNamespaceError.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.requestId, 3n);
 	assert.strictEqual(decoded.errorCode, 404);
@@ -204,8 +188,8 @@ test("PublishNamespaceError: round trip", async () => {
 test("PublishNamespaceDone: round trip", async () => {
 	const msg = new Announce.PublishNamespaceDone(Path.from("old/stream"));
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Announce.PublishNamespaceDone.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Announce.PublishNamespaceDone.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.trackNamespace, "old/stream");
 });
@@ -213,8 +197,8 @@ test("PublishNamespaceDone: round trip", async () => {
 test("PublishNamespaceCancel: round trip", async () => {
 	const msg = new Announce.PublishNamespaceCancel(Path.from("canceled"), 1, "Shutdown");
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Announce.PublishNamespaceCancel.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Announce.PublishNamespaceCancel.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.trackNamespace, "canceled");
 	assert.strictEqual(decoded.errorCode, 1);
@@ -225,8 +209,8 @@ test("PublishNamespaceCancel: round trip", async () => {
 test("GoAway: with URL", async () => {
 	const msg = new GoAway.GoAway("https://example.com/new");
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, GoAway.GoAway.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, GoAway.GoAway.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.newSessionUri, "https://example.com/new");
 });
@@ -234,8 +218,8 @@ test("GoAway: with URL", async () => {
 test("GoAway: empty", async () => {
 	const msg = new GoAway.GoAway("");
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, GoAway.GoAway.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, GoAway.GoAway.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.newSessionUri, "");
 });
@@ -244,8 +228,8 @@ test("GoAway: empty", async () => {
 test("TrackStatusRequest: round trip", async () => {
 	const msg = new Track.TrackStatusRequest(Path.from("video/stream"), "main");
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Track.TrackStatusRequest.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Track.TrackStatusRequest.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.trackNamespace, "video/stream");
 	assert.strictEqual(decoded.trackName, "main");
@@ -254,8 +238,8 @@ test("TrackStatusRequest: round trip", async () => {
 test("TrackStatus: round trip", async () => {
 	const msg = new Track.TrackStatus(Path.from("test"), "status", 200, 42n, 100n);
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Track.TrackStatus.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Track.TrackStatus.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.trackNamespace, "test");
 	assert.strictEqual(decoded.trackName, "status");
@@ -310,8 +294,8 @@ test("SubscribeOk v14: rejects non-zero expires", async () => {
 test("SubscribeError: unicode strings", async () => {
 	const msg = new Subscribe.SubscribeError(1n, 400, "Error: 错误 🚫");
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Subscribe.SubscribeError.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeError.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.requestId, 1n);
 	assert.strictEqual(decoded.errorCode, 400);
@@ -321,8 +305,8 @@ test("SubscribeError: unicode strings", async () => {
 test("PublishNamespace: unicode namespace", async () => {
 	const msg = new Announce.PublishNamespace(1n, Path.from("会议/房间"));
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, Announce.PublishNamespace.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_14);
 
 	assert.strictEqual(decoded.requestId, 1n);
 	assert.strictEqual(decoded.trackNamespace, "会议/房间");
@@ -402,19 +386,32 @@ test("ServerSetup v14: round trip", async () => {
 test("RequestOk: round trip", async () => {
 	const msg = new RequestOk(42n);
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, RequestOk.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+	const decoded = await decodeVersioned(encoded, RequestOk.decode, Version.DRAFT_15);
 
 	assert.strictEqual(decoded.requestId, 42n);
 });
 
-test("RequestError: round trip", async () => {
+test("RequestError v15: round trip", async () => {
 	const msg = new RequestError(99n, 500, "Internal error");
 
-	const encoded = await encodeMessage(msg);
-	const decoded = await decodeMessage(encoded, RequestError.decode);
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+	const decoded = await decodeVersioned(encoded, RequestError.decode, Version.DRAFT_15);
 
 	assert.strictEqual(decoded.requestId, 99n);
 	assert.strictEqual(decoded.errorCode, 500);
 	assert.strictEqual(decoded.reasonPhrase, "Internal error");
+	assert.strictEqual(decoded.retryInterval, 0n);
+});
+
+test("RequestError v16: round trip with retryInterval", async () => {
+	const msg = new RequestError(99n, 500, "Internal error", 5000n);
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_16);
+	const decoded = await decodeVersioned(encoded, RequestError.decode, Version.DRAFT_16);
+
+	assert.strictEqual(decoded.requestId, 99n);
+	assert.strictEqual(decoded.errorCode, 500);
+	assert.strictEqual(decoded.reasonPhrase, "Internal error");
+	assert.strictEqual(decoded.retryInterval, 5000n);
 });

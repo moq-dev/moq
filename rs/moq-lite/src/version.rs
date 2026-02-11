@@ -10,7 +10,7 @@ pub(crate) const NEGOTIATED: [Version; 3] = [
 ];
 
 /// The ALPN strings for supported versions.
-const ALPNS: [&str; 3] = [lite::ALPN, ietf::ALPN_14, ietf::ALPN_15];
+const ALPNS: [&str; 4] = [lite::ALPN, ietf::ALPN_14, ietf::ALPN_15, ietf::ALPN_16];
 
 // Return the ALPN strings for supported versions.
 // This is a function so we can avoid semver bumps.

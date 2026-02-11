@@ -45,7 +45,7 @@ export class Publish {
 		await w.string(this.trackName);
 		await w.u62(this.trackAlias);
 
-		if (version === Version.DRAFT_15) {
+		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			// v15: fields in parameters
 			const params = new MessageParameters();
 			params.groupOrder = this.groupOrder;
@@ -53,7 +53,7 @@ export class Publish {
 			if (this.largest) {
 				params.largest = this.largest;
 			}
-			await params.encode(w);
+			await params.encode(w, version);
 		} else if (version === Version.DRAFT_14) {
 			await w.u8(this.groupOrder);
 			await w.bool(this.contentExists);
@@ -86,8 +86,8 @@ export class Publish {
 		const trackName = await r.string();
 		const trackAlias = await r.u62();
 
-		if (version === Version.DRAFT_15) {
-			const params = await MessageParameters.decode(r);
+		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			const params = await MessageParameters.decode(r, version);
 			const groupOrder = params.groupOrder ?? 0x02;
 			const forward = params.forward ?? true;
 			const largest = params.largest;
@@ -106,7 +106,7 @@ export class Publish {
 			const contentExists = await r.bool();
 			const largest = contentExists ? { groupId: await r.u62(), objectId: await r.u62() } : undefined;
 			const forward = await r.bool();
-			await Parameters.decode(r); // ignore parameters
+			await Parameters.decode(r, version); // ignore parameters
 			return new Publish(
 				requestId,
 				trackNamespace,
@@ -131,11 +131,11 @@ export class PublishOk {
 		throw new Error("PUBLISH_OK messages are not supported");
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<PublishOk> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishOk> {
 		return Message.decode(r, PublishOk.#decode);
 	}
 
@@ -163,11 +163,11 @@ export class PublishError {
 		await w.string(this.reasonPhrase);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<PublishError> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishError> {
 		return Message.decode(r, PublishError.#decode);
 	}
 
@@ -200,11 +200,11 @@ export class PublishDone {
 		await w.string(this.reasonPhrase);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<PublishDone> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishDone> {
 		return Message.decode(r, PublishDone.#decode);
 	}
 

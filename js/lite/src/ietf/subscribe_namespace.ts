@@ -3,6 +3,7 @@ import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
+import type { IetfVersion } from "./version.ts";
 
 // In draft-14, SUBSCRIBE_ANNOUNCES is renamed to SUBSCRIBE_NAMESPACE
 export class SubscribeNamespace {
@@ -16,24 +17,24 @@ export class SubscribeNamespace {
 		this.requestId = requestId;
 	}
 
-	async #encode(w: Writer): Promise<void> {
+	async #encode(w: Writer, _version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
 		await Namespace.encode(w, this.namespace);
 		await w.u53(0); // no parameters
 	}
 
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (wr) => this.#encode(wr, version));
 	}
 
-	static async decode(r: Reader): Promise<SubscribeNamespace> {
-		return Message.decode(r, SubscribeNamespace.#decode);
+	static async decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespace> {
+		return Message.decode(r, (rd) => SubscribeNamespace.#decode(rd, version));
 	}
 
-	static async #decode(r: Reader): Promise<SubscribeNamespace> {
+	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespace> {
 		const requestId = await r.u62();
 		const namespace = await Namespace.decode(r);
-		await Parameters.decode(r);
+		await Parameters.decode(r, version);
 
 		return new SubscribeNamespace(namespace, requestId);
 	}
@@ -52,11 +53,11 @@ export class SubscribeNamespaceOk {
 		await w.u62(this.requestId);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<SubscribeNamespaceOk> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<SubscribeNamespaceOk> {
 		return Message.decode(r, SubscribeNamespaceOk.#decode);
 	}
 
@@ -85,11 +86,11 @@ export class SubscribeNamespaceError {
 		await w.string(this.reasonPhrase);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<SubscribeNamespaceError> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<SubscribeNamespaceError> {
 		return Message.decode(r, SubscribeNamespaceError.#decode);
 	}
 
@@ -115,11 +116,11 @@ export class UnsubscribeNamespace {
 		await w.u62(this.requestId);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<UnsubscribeNamespace> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<UnsubscribeNamespace> {
 		return Message.decode(r, UnsubscribeNamespace.#decode);
 	}
 

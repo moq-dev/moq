@@ -87,7 +87,7 @@ export class Publisher {
 		const broadcast = this.#broadcasts.get(name);
 
 		if (!broadcast) {
-			if (this.#control.version === Version.DRAFT_15) {
+			if (this.#control.version === Version.DRAFT_15 || this.#control.version === Version.DRAFT_16) {
 				const errorMsg = new RequestError(msg.requestId, 404, "Broadcast not found");
 				await this.#control.write(errorMsg);
 			} else if (this.#control.version === Version.DRAFT_14) {

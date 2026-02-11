@@ -246,7 +246,7 @@ export class Subscriber {
 	async handlePublish(msg: Publish) {
 		// TODO technically, we should send PUBLISH_OK if we had a SUBSCRIBE in flight for the same track.
 		// Otherwise, the peer will SUBSCRIBE_ERROR because duplicate subscriptions are not allowed :(
-		if (this.#control.version === Version.DRAFT_15) {
+		if (this.#control.version === Version.DRAFT_15 || this.#control.version === Version.DRAFT_16) {
 			const err = new RequestError(msg.requestId, 500, "publish not supported");
 			await this.#control.write(err);
 		} else if (this.#control.version === Version.DRAFT_14) {

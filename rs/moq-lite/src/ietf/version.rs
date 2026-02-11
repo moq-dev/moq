@@ -2,12 +2,14 @@ use crate::coding;
 
 pub const ALPN_14: &str = "moq-00";
 pub const ALPN_15: &str = "moqt-15";
+pub const ALPN_16: &str = "moqt-16";
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(u64)]
 pub enum Version {
 	Draft14 = 0xff00000e,
 	Draft15 = 0xff00000f,
+	Draft16 = 0xff000010,
 }
 
 impl TryFrom<coding::Version> for Version {
@@ -18,6 +20,8 @@ impl TryFrom<coding::Version> for Version {
 			Ok(Self::Draft14)
 		} else if value == Self::Draft15.into() {
 			Ok(Self::Draft15)
+		} else if value == Self::Draft16.into() {
+			Ok(Self::Draft16)
 		} else {
 			Err(())
 		}

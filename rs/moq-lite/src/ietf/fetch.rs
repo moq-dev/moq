@@ -121,7 +121,7 @@ impl Message for Fetch<'_> {
 				self.fetch_type.encode(w, version);
 				0u8.encode(w, version); // no parameters
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				// v15: request_id, fetch_type, parameters (with subscriber_priority, group_order)
 				self.fetch_type.encode(w, version);
 				let mut params = MessageParameters::default();
@@ -148,7 +148,7 @@ impl Message for Fetch<'_> {
 					fetch_type,
 				})
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				let fetch_type = FetchType::decode(buf, version)?;
 				let params = MessageParameters::decode(buf, version)?;
 
@@ -193,7 +193,7 @@ impl Message for FetchOk {
 				self.end_location.encode(w, version);
 				0u8.encode(w, version); // no parameters
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				// v15: request_id, end_of_track(8), end_location, parameters
 				self.end_of_track.encode(w, version);
 				self.end_location.encode(w, version);
@@ -220,7 +220,7 @@ impl Message for FetchOk {
 					end_location,
 				})
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				let end_of_track = bool::decode(buf, version)?;
 				let end_location = Location::decode(buf, version)?;
 				let params = MessageParameters::decode(buf, version)?;

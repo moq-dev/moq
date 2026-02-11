@@ -64,7 +64,7 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor(url: URL, quic: WebTransport, control: Stream, maxRequestId: bigint, version?: IetfVersion) {
+	constructor(url: URL, quic: WebTransport, control: Stream, maxRequestId: bigint, version: IetfVersion) {
 		this.url = url;
 		this.#quic = quic;
 		this.#control = new Control.Stream(control, maxRequestId, version);

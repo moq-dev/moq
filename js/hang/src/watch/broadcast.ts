@@ -40,7 +40,7 @@ export class Broadcast {
 		this.connection = Signal.from(props?.connection);
 		this.path = Signal.from(props?.path);
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.reload = Signal.from(props?.reload ?? true);
+		this.reload = Signal.from(props?.reload ?? false);
 
 		this.signals.effect(this.#runReload.bind(this));
 		this.signals.effect(this.#runBroadcast.bind(this));

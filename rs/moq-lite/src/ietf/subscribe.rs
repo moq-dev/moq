@@ -86,7 +86,7 @@ impl Message for Subscribe<'_> {
 					filter_type,
 				})
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				// v15: fields moved into parameters
 				let params = MessageParameters::decode(r, version)?;
 
@@ -132,7 +132,7 @@ impl Message for Subscribe<'_> {
 				self.filter_type.encode(w, version);
 				0u8.encode(w, version); // no parameters
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				let mut params = MessageParameters::default();
 				params.set_subscriber_priority(self.subscriber_priority);
 				params.set_group_order(u8::from(self.group_order) as u64);
@@ -165,7 +165,7 @@ impl Message for SubscribeOk {
 				false.encode(w, version); // no content
 				0u8.encode(w, version); // no parameters
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				// v15: just parameters after track_alias
 				let mut params = MessageParameters::default();
 				params.set_group_order(u8::from(GroupOrder::Descending) as u64);
@@ -194,7 +194,7 @@ impl Message for SubscribeOk {
 
 				let _params = Parameters::decode(r, version)?;
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				let _params = MessageParameters::decode(r, version)?;
 			}
 		}
@@ -279,7 +279,7 @@ impl Message for SubscribeUpdate {
 				self.forward.encode(w, version);
 				0u8.encode(w, version); // no parameters
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				self.request_id.encode(w, version);
 				self.subscription_request_id.encode(w, version);
 				let mut params = MessageParameters::default();
@@ -311,7 +311,7 @@ impl Message for SubscribeUpdate {
 					forward,
 				})
 			}
-			Version::Draft15 => {
+			Version::Draft15 | Version::Draft16 => {
 				let request_id = RequestId::decode(r, version)?;
 				let subscription_request_id = RequestId::decode(r, version)?;
 				let params = MessageParameters::decode(r, version)?;
