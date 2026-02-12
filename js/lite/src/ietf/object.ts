@@ -137,7 +137,7 @@ export class Frame {
 	static async decode(r: Reader, flags: GroupFlags): Promise<Frame> {
 		const delta = await r.u53();
 		if (delta !== 0) {
-			console.warn(`object ID delta is not supported, ignoring: ${delta}`);
+			throw new Error(`object ID delta is not supported: ${delta}`);
 		}
 
 		if (flags.hasExtensions) {

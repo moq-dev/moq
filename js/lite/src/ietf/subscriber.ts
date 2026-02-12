@@ -287,7 +287,7 @@ export class Subscriber {
 		const producer = new Group(group.groupId);
 
 		if (group.subGroupId !== 0) {
-			console.warn("subgroup ID is not supported, ignoring");
+			throw new Error("subgroups are not supported");
 		}
 
 		try {

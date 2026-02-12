@@ -288,6 +288,7 @@ export class Connection implements Established {
 					stream.stop(new Error("cancel"));
 				})
 				.catch((err: unknown) => {
+					console.error("error processing object stream", err);
 					stream.stop(err);
 				});
 		}
@@ -297,13 +298,9 @@ export class Connection implements Established {
 	 * Handles a single object stream.
 	 */
 	async #runObjectStream(stream: Reader) {
-		try {
-			// we don't support other stream types yet
-			const header = await Group.decode(stream);
-			await this.#subscriber.handleGroup(header, stream);
-		} catch (err) {
-			console.error("error processing object stream", err);
-		}
+		// we don't support other stream types yet
+		const header = await Group.decode(stream);
+		await this.#subscriber.handleGroup(header, stream);
 	}
 
 	/**
