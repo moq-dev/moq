@@ -108,10 +108,10 @@ export class RequestError {
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
 		await w.u62(BigInt(this.errorCode));
-		await w.string(this.reasonPhrase);
 		if (version === Version.DRAFT_16) {
 			await w.u62(this.retryInterval);
 		}
+		await w.string(this.reasonPhrase);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {

@@ -72,11 +72,11 @@ export class Parameters {
 			for (const id of this.bytes.keys()) all.push({ key: id, isVar: false });
 			all.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
-			let prevType = 0n;
+			let prevId = 0n;
 			for (let i = 0; i < all.length; i++) {
 				const { key, isVar } = all[i];
-				const delta = i === 0 ? key : key - prevType;
-				prevType = key;
+				const delta = i === 0 ? key : key - prevId;
+				prevId = key;
 				await w.u62(delta);
 
 				if (isVar) {
@@ -266,11 +266,11 @@ export class MessageParameters {
 			for (const id of this.bytes.keys()) all.push({ key: id, isVar: false });
 			all.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 
-			let prevType = 0n;
+			let prevId = 0n;
 			for (let i = 0; i < all.length; i++) {
 				const { key, isVar } = all[i];
-				const delta = i === 0 ? key : key - prevType;
-				prevType = key;
+				const delta = i === 0 ? key : key - prevId;
+				prevId = key;
 				await w.u62(delta);
 
 				if (isVar) {

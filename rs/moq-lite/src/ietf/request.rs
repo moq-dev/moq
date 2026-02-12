@@ -113,20 +113,20 @@ impl Message for RequestError<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
 		self.request_id.encode(w, version);
 		self.error_code.encode(w, version);
-		self.reason_phrase.encode(w, version);
 		if version == Version::Draft16 {
 			self.retry_interval.encode(w, version);
 		}
+		self.reason_phrase.encode(w, version);
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let error_code = u64::decode(r, version)?;
-		let reason_phrase = Cow::<str>::decode(r, version)?;
 		let retry_interval = match version {
 			Version::Draft16 => u64::decode(r, version)?,
 			_ => 0,
 		};
+		let reason_phrase = Cow::<str>::decode(r, version)?;
 		Ok(Self {
 			request_id,
 			error_code,

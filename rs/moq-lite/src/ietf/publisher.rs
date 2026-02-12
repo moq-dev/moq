@@ -134,7 +134,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
-	/// Send a subscribe error, using RequestError for v15.
+	/// Send a subscribe error, using RequestError for v15+.
 	fn send_subscribe_error(&self, request_id: RequestId, error_code: u64, reason: &str) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => self.control.send(ietf::SubscribeError {
@@ -426,7 +426,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
-	/// Send a fetch error, using RequestError for v15.
+	/// Send a fetch error, using RequestError for v15+.
 	fn send_fetch_error(&self, request_id: RequestId, error_code: u64, reason: &str) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => self.control.send(ietf::FetchError {
