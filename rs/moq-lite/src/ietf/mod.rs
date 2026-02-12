@@ -17,7 +17,6 @@ mod publish_namespace;
 mod publisher;
 mod request;
 mod session;
-mod setup;
 mod subscribe;
 mod subscribe_namespace;
 mod subscriber;

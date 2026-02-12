@@ -12,7 +12,6 @@ mod parameters;
 mod priority;
 mod publisher;
 mod session;
-mod setup;
 mod stream;
 mod subscribe;
 mod subscriber;
