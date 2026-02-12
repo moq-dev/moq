@@ -2,7 +2,7 @@ import type { Announced } from "../announced.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
-import { type Reader, Readers, type Stream } from "../stream.ts";
+import { type Reader, Readers, Stream } from "../stream.ts";
 import { unreachable } from "../util/index.ts";
 import * as Control from "./control.ts";
 import { Fetch, FetchCancel, FetchError, FetchOk } from "./fetch.ts";
@@ -17,7 +17,7 @@ import {
 	PublishNamespaceOk,
 } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
-import { MaxRequestId, RequestsBlocked } from "./request.ts";
+import { MaxRequestId, RequestError, RequestOk, RequestsBlocked } from "./request.ts";
 import * as Setup from "./setup.ts";
 import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
@@ -28,6 +28,7 @@ import {
 } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatus, TrackStatusRequest } from "./track.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
@@ -58,20 +59,34 @@ export class Connection implements Established {
 	 * @param url - The URL of the connection
 	 * @param quic - The WebTransport session
 	 * @param controlStream - The control stream
+	 * @param maxRequestId - The initial max request ID
+	 * @param version - The negotiated protocol version
 	 *
 	 * @internal
 	 */
-	constructor(url: URL, quic: WebTransport, control: Stream, maxRequestId: bigint) {
+	constructor({
+		url,
+		quic,
+		control,
+		maxRequestId,
+		version,
+	}: {
+		url: URL;
+		quic: WebTransport;
+		control: Stream;
+		maxRequestId: bigint;
+		version: IetfVersion;
+	}) {
 		this.url = url;
 		this.#quic = quic;
-		this.#control = new Control.Stream(control, maxRequestId);
+		this.#control = new Control.Stream({ stream: control, maxRequestId, version });
 
 		this.#quic.closed.finally(() => {
 			this.#control.close();
 		});
 
-		this.#publisher = new Publisher(this.#quic, this.#control);
-		this.#subscriber = new Subscriber(this.#control);
+		this.#publisher = new Publisher({ quic: this.#quic, control: this.#control });
+		this.#subscriber = new Subscriber({ control: this.#control, quic: this.#quic });
 
 		void this.#run();
 	}
@@ -92,11 +107,15 @@ export class Connection implements Established {
 	}
 
 	async #run(): Promise<void> {
-		const controlMessages = this.#runControlStream();
-		const objectStreams = this.#runObjectStreams();
+		const tasks: Promise<void>[] = [this.#runControlStream(), this.#runObjectStreams()];
+
+		// v16: accept bidi streams for SUBSCRIBE_NAMESPACE
+		if (this.#control.version === Version.DRAFT_16) {
+			tasks.push(this.#runBidiStreams());
+		}
 
 		try {
-			await Promise.all([controlMessages, objectStreams]);
+			await Promise.all(tasks);
 		} catch (err) {
 			if (!this.#closed) {
 				console.error("fatal error running connection", err);
@@ -203,6 +222,14 @@ export class Connection implements Established {
 					this.#control.maxRequestId(msg.requestId);
 				} else if (msg instanceof RequestsBlocked) {
 					console.warn("ignoring REQUESTS_BLOCKED message");
+				} else if (msg instanceof RequestOk) {
+					// v15: Route RequestOk to both publisher and subscriber
+					await this.#publisher.handleRequestOk(msg);
+					await this.#subscriber.handleRequestOk(msg);
+				} else if (msg instanceof RequestError) {
+					// v15: Route RequestError to both publisher and subscriber
+					await this.#publisher.handleRequestError(msg);
+					await this.#subscriber.handleRequestError(msg);
 				} else {
 					unreachable(msg);
 				}
@@ -261,6 +288,7 @@ export class Connection implements Established {
 					stream.stop(new Error("cancel"));
 				})
 				.catch((err: unknown) => {
+					console.error("error processing object stream", err);
 					stream.stop(err);
 				});
 		}
@@ -270,13 +298,37 @@ export class Connection implements Established {
 	 * Handles a single object stream.
 	 */
 	async #runObjectStream(stream: Reader) {
-		try {
-			// we don't support other stream types yet
-			const header = await Group.decode(stream);
-			console.debug("received group header", header);
-			await this.#subscriber.handleGroup(header, stream);
-		} catch (err) {
-			console.error("error processing object stream", err);
+		// we don't support other stream types yet
+		const header = await Group.decode(stream);
+		await this.#subscriber.handleGroup(header, stream);
+	}
+
+	/**
+	 * Accepts bidirectional streams for v16 SUBSCRIBE_NAMESPACE.
+	 */
+	async #runBidiStreams() {
+		for (;;) {
+			const stream = await Stream.accept(this.#quic);
+			if (!stream) break;
+
+			void this.#runBidiStream(stream).catch((err: unknown) => {
+				console.error("error processing bidi stream", err);
+				stream.abort(new Error("bidi stream error"));
+			});
+		}
+	}
+
+	/**
+	 * Handles a single incoming bidi stream.
+	 */
+	async #runBidiStream(stream: Stream) {
+		const messageType = await stream.reader.u53();
+
+		if (messageType === SubscribeNamespace.id) {
+			await this.#publisher.handleSubscribeNamespaceStream(stream);
+		} else {
+			console.warn(`unexpected bidi stream type: ${messageType}`);
+			stream.abort(new Error("unexpected stream type"));
 		}
 	}
 

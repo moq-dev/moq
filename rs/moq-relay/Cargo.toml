@@ -17,19 +17,24 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh"]
+default = ["iroh", "quinn", "websocket", "quiche"]
 iroh = ["moq-native/iroh"]
+quinn = ["moq-native/quinn"]
+quiche = ["moq-native/quiche"]
+websocket = ["moq-native/websocket", "dep:web-transport-ws", "axum/ws"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-axum = { version = "0.8", features = ["tokio", "ws"] }
+axum = { version = "0.8", features = ["tokio"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 http-body = "1"
 moq-lite = { workspace = true, features = ["serde"] }
-moq-native = { workspace = true, features = ["aws-lc-rs"] }
+moq-native = { workspace = true, default-features = false, features = [
+	"aws-lc-rs",
+] }
 moq-token = { workspace = true, features = ["jwks-loader"] }
 rustls = { version = "0.23", features = [
 	"aws-lc-rs",
@@ -42,7 +47,7 @@ toml = "0.9"
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 url = { version = "2", features = ["serde"] }
-web-transport-ws = { workspace = true }
+web-transport-ws = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 sd-notify = "0.4"

@@ -16,4 +16,4 @@ doc = false
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-moq-token = { version = "0.5", path = "../moq-token" }
+moq-token = { workspace = true }

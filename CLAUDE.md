@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance for AI coding agents when working with code in this repository.
 
 ## Project Overview
 
@@ -14,7 +14,7 @@ just fix          # Auto-fix linting issues
 just build        # Build all packages
 ```
 
-Except when being run in the Claude Code on the web: Use cargo/bun directly.
+If `just` is unavailable, use `cargo` or `bun` directly.
 
 ## Architecture
 

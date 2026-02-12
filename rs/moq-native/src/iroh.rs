@@ -1,5 +1,6 @@
 use std::{net, path::PathBuf, str::FromStr};
 
+use anyhow::Context;
 use url::Url;
 use web_transport_iroh::{
 	http,
@@ -13,8 +14,6 @@ pub use iroh::Endpoint as IrohEndpoint;
 #[non_exhaustive]
 pub struct IrohEndpointConfig {
 	/// Whether to enable iroh support.
-	///
-	/// NOTE: The feature flag `iroh` must also be enabled.
 	#[arg(
 		id = "iroh-enabled",
 		long = "iroh-enabled",
@@ -67,11 +66,12 @@ impl IrohEndpointConfig {
 			SecretKey::generate(&mut rand::rng())
 		};
 
-		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(vec![
-			web_transport_iroh::ALPN_H3.as_bytes().to_vec(),
-			moq_lite::lite::ALPN.as_bytes().to_vec(),
-			moq_lite::ietf::ALPN.as_bytes().to_vec(),
-		]);
+		let mut alpns = vec![web_transport_iroh::ALPN_H3.as_bytes().to_vec()];
+		for alpn in moq_lite::ALPNS {
+			alpns.push(alpn.as_bytes().to_vec());
+		}
+
+		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(alpns);
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr_v4(addr);
 		}
@@ -87,29 +87,111 @@ impl IrohEndpointConfig {
 }
 
 /// URL schemes supported for connecting to iroh endpoints.
-pub const IROH_SCHEMES: [&str; 4] = ["iroh", "moql+iroh", "moqt+iroh", "h3+iroh"];
+pub const IROH_SCHEMES: [&str; 5] = ["iroh", "moql+iroh", "moqt+iroh", "moqt-15+iroh", "h3+iroh"];
 
 /// Returns `true` if `url` has a scheme included in [`IROH_SCHEMES`].
 pub fn is_iroh_url(url: &Url) -> bool {
 	IROH_SCHEMES.contains(&url.scheme())
 }
 
-/// Raw QUIC-only iroh request (not using HTTP/3).
-pub struct IrohQuicRequest(iroh::endpoint::Connection);
+pub enum IrohRequest {
+	Quic {
+		connection: iroh::endpoint::Connection,
+	},
+	WebTransport {
+		request: Box<web_transport_iroh::H3Request>,
+	},
+}
 
-impl IrohQuicRequest {
-	/// Accept a new QUIC-only WebTransport session from a client.
-	pub fn accept(conn: iroh::endpoint::Connection) -> Self {
-		Self(conn)
+impl IrohRequest {
+	pub async fn accept(conn: iroh::endpoint::Incoming) -> anyhow::Result<Self> {
+		let conn = conn.accept()?.await?;
+		let alpn = String::from_utf8(conn.alpn().to_vec()).context("failed to decode ALPN")?;
+		tracing::Span::current().record("id", conn.stable_id());
+		tracing::debug!(remote = %conn.remote_id().fmt_short(), %alpn, "accepted");
+		match alpn.as_str() {
+			web_transport_iroh::ALPN_H3 => {
+				let request = web_transport_iroh::H3Request::accept(conn)
+					.await
+					.context("failed to receive WebTransport request")?;
+				Ok(Self::WebTransport {
+					request: Box::new(request),
+				})
+			}
+			alpn if moq_lite::ALPNS.contains(&alpn) => Ok(Self::Quic { connection: conn }),
+			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
+		}
 	}
 
 	/// Accept the session.
-	pub fn ok(self) -> web_transport_iroh::Session {
-		web_transport_iroh::Session::raw(self.0)
+	pub async fn ok(self) -> Result<web_transport_iroh::Session, web_transport_iroh::ServerError> {
+		match self {
+			IrohRequest::Quic { connection, .. } => Ok(web_transport_iroh::Session::raw(connection)),
+			IrohRequest::WebTransport { request } => request.ok().await,
+		}
 	}
 
 	/// Reject the session.
-	pub fn close(self, status: http::StatusCode) {
-		self.0.close(status.as_u16().into(), status.as_str().as_bytes());
+	pub async fn close(self, status: http::StatusCode) -> Result<(), web_transport_iroh::ServerError> {
+		match self {
+			IrohRequest::Quic { connection, .. } => {
+				let _: () = connection.close(status.as_u16().into(), status.as_str().as_bytes());
+				Ok(())
+			}
+			IrohRequest::WebTransport { request, .. } => request.close(status).await,
+		}
 	}
+
+	pub fn url(&self) -> Option<&Url> {
+		match self {
+			IrohRequest::Quic { .. } => None,
+			IrohRequest::WebTransport { request } => Some(request.url()),
+		}
+	}
+}
+
+pub(crate) async fn connect(endpoint: &IrohEndpoint, url: Url) -> anyhow::Result<web_transport_iroh::Session> {
+	let host = url.host().context("Invalid URL: missing host")?.to_string();
+	let endpoint_id: iroh::EndpointId = host.parse().context("Invalid URL: host is not an iroh endpoint id")?;
+
+	// We need to use this API to provide multiple ALPNs
+	let alpn = b"h3";
+	let opts = iroh::endpoint::ConnectOptions::new()
+		.with_additional_alpns(moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect());
+
+	let mut connecting = endpoint.connect_with_opts(endpoint_id, alpn, opts).await?;
+	let alpn = connecting.alpn().await?;
+	let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
+
+	let session = match alpn.as_str() {
+		web_transport_iroh::ALPN_H3 => {
+			let conn = connecting.await?;
+			let url = url_set_scheme(url, "https")?;
+			web_transport_iroh::Session::connect_h3(conn, url).await?
+		}
+		alpn if moq_lite::ALPNS.contains(&alpn) => {
+			let conn = connecting.await?;
+			// TODO: Add support for ALPNs.
+			web_transport_iroh::Session::raw(conn)
+		}
+		_ => anyhow::bail!("unsupported ALPN: {alpn}"),
+	};
+
+	Ok(session)
+}
+
+/// Returns a new URL with a changed scheme.
+///
+/// [`Url::set_scheme`] returns an error if the scheme change is not valid according to
+/// [the URL specification's section on legal scheme state overrides](https://url.spec.whatwg.org/#scheme-state).
+///
+/// This function allows all scheme changes, as long as the resulting URL is valid.
+fn url_set_scheme(url: Url, scheme: &str) -> anyhow::Result<Url> {
+	let url = format!(
+		"{}:{}",
+		scheme,
+		url.to_string().split_once(":").context("invalid URL")?.1
+	)
+	.parse()?;
+	Ok(url)
 }

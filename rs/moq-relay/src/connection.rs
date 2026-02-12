@@ -1,5 +1,6 @@
 use crate::{Auth, AuthParams, Cluster};
 
+use axum::http;
 use moq_native::Request;
 
 pub struct Connection {
@@ -21,7 +22,8 @@ impl Connection {
 		let token = match self.auth.verify(&params) {
 			Ok(token) => token,
 			Err(err) => {
-				let _ = self.request.reject(err.clone().into()).await;
+				let status: http::StatusCode = err.clone().into();
+				let _ = self.request.close(status.as_u16()).await;
 				return Err(err.into());
 			}
 		};
@@ -53,7 +55,7 @@ impl Connection {
 			.with_consume(publish)
 			// TODO: Uncomment when observability feature is merged
 			// .with_stats(stats)
-			.accept()
+			.ok()
 			.await?;
 
 		// Wait until the session is closed.

@@ -1,13 +1,10 @@
-use std::{
-	collections::{HashMap, hash_map::Entry},
-	sync::Arc,
-};
+use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
 	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
 	TrackProducer,
 	coding::Reader,
-	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId, Version},
+	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, MessageParameters, RequestId, Version},
 	model::BroadcastProducer,
 };
 
@@ -26,6 +23,9 @@ struct State {
 
 	// Each PUBLISH message that is implicitly causing a PUBLISH_NAMESPACE message.
 	publishes: HashMap<RequestId, PathOwned>,
+
+	// Maps PublishNamespace request_id → track_namespace (for v16 PublishNamespaceDone)
+	publish_namespace_ids: HashMap<RequestId, PathOwned>,
 }
 
 struct TrackState {
@@ -65,12 +65,44 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_publish_namespace(&mut self, msg: ietf::PublishNamespace) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
+		// Track the request_id → namespace mapping for v16 PublishNamespaceDone
+		{
+			let mut state = self.state.lock();
+			state
+				.publish_namespace_ids
+				.insert(request_id, msg.track_namespace.to_owned());
+		}
+
 		match self.start_announce(msg.track_namespace.to_owned()) {
-			Ok(_) => self.control.send(ietf::PublishNamespaceOk { request_id }),
-			Err(err) => self.control.send(ietf::PublishNamespaceError {
+			Ok(_) => self.send_ok(request_id),
+			Err(err) => self.send_error(request_id, 400, &err.to_string()),
+		}
+	}
+
+	/// Send a generic OK response, using the version-appropriate message.
+	fn send_ok(&self, request_id: RequestId) -> Result<(), Error> {
+		match self.version {
+			Version::Draft14 => self.control.send(ietf::PublishNamespaceOk { request_id }),
+			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestOk {
 				request_id,
-				error_code: 400,
-				reason_phrase: err.to_string().into(),
+				parameters: MessageParameters::default(),
+			}),
+		}
+	}
+
+	/// Send a generic error response, using the version-appropriate message.
+	fn send_error(&self, request_id: RequestId, error_code: u64, reason: &str) -> Result<(), Error> {
+		match self.version {
+			Version::Draft14 => self.control.send(ietf::PublishNamespaceError {
+				request_id,
+				error_code,
+				reason_phrase: reason.into(),
+			}),
+			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestError {
+				request_id,
+				error_code,
+				reason_phrase: reason.into(),
+				retry_interval: 0,
 			}),
 		}
 	}
@@ -135,7 +167,23 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub fn recv_publish_namespace_done(&mut self, msg: ietf::PublishNamespaceDone) -> Result<(), Error> {
-		self.stop_announce(msg.track_namespace.to_owned())
+		match self.version {
+			Version::Draft14 | Version::Draft15 => self.stop_announce(msg.track_namespace.to_owned()),
+			Version::Draft16 => {
+				// In v16, PublishNamespaceDone uses request_id instead of track_namespace
+				let state = self.state.lock();
+				let path = state.publish_namespace_ids.get(&msg.request_id).cloned();
+				drop(state);
+
+				if let Some(path) = path {
+					self.state.lock().publish_namespace_ids.remove(&msg.request_id);
+					self.stop_announce(path)
+				} else {
+					tracing::warn!(request_id = %msg.request_id, "unknown publish_namespace request_id in done");
+					Ok(())
+				}
+			}
+		}
 	}
 
 	pub fn recv_subscribe_ok(&mut self, msg: ietf::SubscribeOk) -> Result<(), Error> {
@@ -150,6 +198,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub fn recv_subscribe_error(&mut self, msg: ietf::SubscribeError) -> Result<(), Error> {
+		let mut state = self.state.lock();
+
+		if let Some(track) = state.subscribes.remove(&msg.request_id) {
+			track.producer.abort(Error::Cancel);
+			if let Some(alias) = track.alias {
+				state.aliases.remove(&alias);
+			}
+		}
+
+		Ok(())
+	}
+
+	pub fn recv_request_ok(&mut self, _msg: &ietf::RequestOk) -> Result<(), Error> {
+		// v15: generic OK response. SubscribeOk is still separate (0x04).
+		// Other request types (publish_namespace, fetch) are no-ops for us.
+		Ok(())
+	}
+
+	pub fn recv_request_error(&mut self, msg: &ietf::RequestError<'_>) -> Result<(), Error> {
+		// v15: generic error response. Check if it's a subscribe error.
 		let mut state = self.state.lock();
 
 		if let Some(track) = state.subscribes.remove(&msg.request_id) {
@@ -182,11 +250,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	pub async fn run(self) -> Result<(), Error> {
 		loop {
-			let stream = self
-				.session
-				.accept_uni()
-				.await
-				.map_err(|err| Error::Transport(Arc::new(err)))?;
+			let stream = self.session.accept_uni().await.map_err(Error::from_transport)?;
 
 			let stream = Reader::new(stream, self.version);
 			let this = self.clone();
@@ -204,7 +268,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match kind {
 			FetchHeader::TYPE => return Err(Error::Unsupported),
-			GroupFlags::START..=GroupFlags::END => {}
+			GroupFlags::START..=GroupFlags::END | GroupFlags::START_NO_PRIORITY..=GroupFlags::END_NO_PRIORITY => {}
 			_ => return Err(Error::UnexpectedStream),
 		}
 
@@ -287,7 +351,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		tracing::trace!(?group, "received group header");
 
 		if group.sub_group_id != 0 {
-			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, stripping");
+			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");
+			return Err(Error::Unsupported);
 		}
 
 		let producer = {
@@ -313,7 +378,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 
 		match res {
-			Err(Error::Cancel) | Err(Error::Transport(_)) => {
+			Err(Error::Cancel) => {
 				tracing::trace!(group = %producer.info.sequence, "group cancelled");
 				producer.abort(Error::Cancel);
 			}
@@ -338,7 +403,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
 			if id_delta != 0 {
-				tracing::warn!(id_delta = %id_delta, "object ID gaps not supported, ignoring");
+				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
+				return Err(Error::Unsupported);
 			}
 
 			if group.flags.has_extensions {
@@ -420,19 +486,41 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	pub fn recv_publish(&mut self, msg: ietf::Publish<'_>) -> Result<(), Error> {
 		if let Err(err) = self.start_publish(&msg) {
-			self.control.send(ietf::PublishError {
-				request_id: msg.request_id,
-				error_code: 400,
-				reason_phrase: err.to_string().into(),
-			})?;
+			match self.version {
+				Version::Draft14 => {
+					self.control.send(ietf::PublishError {
+						request_id: msg.request_id,
+						error_code: 400,
+						reason_phrase: err.to_string().into(),
+					})?;
+				}
+				Version::Draft15 | Version::Draft16 => {
+					self.control.send(ietf::RequestError {
+						request_id: msg.request_id,
+						error_code: 400,
+						reason_phrase: err.to_string().into(),
+						retry_interval: 0,
+					})?;
+				}
+			}
 		} else {
-			self.control.send(ietf::PublishOk {
-				request_id: msg.request_id,
-				forward: true,
-				subscriber_priority: 0,
-				group_order: GroupOrder::Descending,
-				filter_type: FilterType::LargestObject,
-			})?;
+			match self.version {
+				Version::Draft14 => {
+					self.control.send(ietf::PublishOk {
+						request_id: msg.request_id,
+						forward: true,
+						subscriber_priority: 0,
+						group_order: GroupOrder::Descending,
+						filter_type: FilterType::LargestObject,
+					})?;
+				}
+				Version::Draft15 | Version::Draft16 => {
+					self.control.send(ietf::RequestOk {
+						request_id: msg.request_id,
+						parameters: MessageParameters::default(),
+					})?;
+				}
+			}
 		}
 
 		Ok(())

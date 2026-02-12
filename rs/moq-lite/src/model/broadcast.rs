@@ -193,7 +193,11 @@ impl BroadcastConsumer {
 		let mut state = self.state.lock();
 
 		if let Some(producer) = state.producers.get(&track.name) {
-			return producer.consume();
+			if !producer.is_closed() {
+				return producer.consume();
+			}
+			// Remove the stale entry
+			state.producers.remove(&track.name);
 		}
 
 		// Otherwise we have never seen this track before and need to create a new producer.
@@ -219,7 +223,12 @@ impl BroadcastConsumer {
 		let state = self.state.clone();
 		web_async::spawn(async move {
 			producer.unused().await;
-			state.lock().producers.remove(&producer.info.name);
+			let mut state = state.lock();
+			if let Some(current) = state.producers.remove(&producer.info.name)
+				&& !current.is_clone(&producer)
+			{
+				state.producers.insert(current.info.name.clone(), current);
+			}
 		});
 
 		consumer
@@ -393,6 +402,35 @@ mod test {
 
 		let track5 = consumer2.subscribe_track(&Track::new("track3"));
 		track5.assert_error();
+	}
+
+	#[tokio::test]
+	async fn stale_producer() {
+		let mut broadcast = Broadcast::produce();
+		let consumer = broadcast.consume();
+
+		// Subscribe to a track, creating a request
+		let track1 = consumer.subscribe_track(&Track::new("track1"));
+
+		// Get the requested producer and close it (simulating publisher disconnect)
+		let mut producer1 = broadcast.assert_request();
+		producer1.append_group();
+		producer1.close();
+
+		// The consumer should see the track as closed
+		track1.assert_closed();
+
+		// Subscribe again to the same track - should get a NEW producer, not the stale one
+		let mut track2 = consumer.subscribe_track(&Track::new("track1"));
+		track2.assert_not_closed();
+		track2.assert_not_clone(&track1);
+
+		// There should be a new request for the track
+		let mut producer2 = broadcast.assert_request();
+		producer2.append_group();
+
+		// The new consumer should receive the new group
+		track2.assert_group();
 	}
 
 	#[tokio::test]

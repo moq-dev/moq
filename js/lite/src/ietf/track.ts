@@ -2,6 +2,7 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
+import type { IetfVersion } from "./version.ts";
 
 export class TrackStatusRequest {
 	static id = 0x0d;
@@ -9,7 +10,7 @@ export class TrackStatusRequest {
 	trackNamespace: Path.Valid;
 	trackName: string;
 
-	constructor(trackNamespace: Path.Valid, trackName: string) {
+	constructor({ trackNamespace, trackName }: { trackNamespace: Path.Valid; trackName: string }) {
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 	}
@@ -19,18 +20,18 @@ export class TrackStatusRequest {
 		await w.string(this.trackName);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<TrackStatusRequest> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<TrackStatusRequest> {
 		return Message.decode(r, TrackStatusRequest.#decode);
 	}
 
 	static async #decode(r: Reader): Promise<TrackStatusRequest> {
 		const trackNamespace = await Namespace.decode(r);
 		const trackName = await r.string();
-		return new TrackStatusRequest(trackNamespace, trackName);
+		return new TrackStatusRequest({ trackNamespace, trackName });
 	}
 }
 
@@ -44,13 +45,19 @@ export class TrackStatus {
 	lastGroupId: bigint;
 	lastObjectId: bigint;
 
-	constructor(
-		trackNamespace: Path.Valid,
-		trackName: string,
-		statusCode: number,
-		lastGroupId: bigint,
-		lastObjectId: bigint,
-	) {
+	constructor({
+		trackNamespace,
+		trackName,
+		statusCode,
+		lastGroupId,
+		lastObjectId,
+	}: {
+		trackNamespace: Path.Valid;
+		trackName: string;
+		statusCode: number;
+		lastGroupId: bigint;
+		lastObjectId: bigint;
+	}) {
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 		this.statusCode = statusCode;
@@ -66,11 +73,11 @@ export class TrackStatus {
 		await w.u62(this.lastObjectId);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<TrackStatus> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<TrackStatus> {
 		return Message.decode(r, TrackStatus.#decode);
 	}
 
@@ -81,7 +88,7 @@ export class TrackStatus {
 		const lastGroupId = await r.u62();
 		const lastObjectId = await r.u62();
 
-		return new TrackStatus(trackNamespace, trackName, statusCode, lastGroupId, lastObjectId);
+		return new TrackStatus({ trackNamespace, trackName, statusCode, lastGroupId, lastObjectId });
 	}
 
 	// Track status codes

@@ -1,6 +1,6 @@
-use std::{cmp, fmt::Debug, io, sync::Arc};
+use std::{cmp, fmt::Debug, io};
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{Error, coding::*};
 
@@ -34,18 +34,12 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 				}
 				Err(DecodeError::Short) => {
 					// Try to read more data
-					if self
-						.stream
-						.read_buf(&mut self.buffer)
-						.await
-						.map_err(|e| Error::Transport(Arc::new(e)))?
-						.is_none()
-					{
+					if !self.read_more().await? {
 						// Stream closed while we still need more data
-						return Err(Error::Decode(DecodeError::Short));
+						return Err(Error::Decode);
 					}
 				}
-				Err(e) => return Err(Error::Decode(e)),
+				Err(e) => return Err(e.into()),
 			}
 		}
 	}
@@ -55,11 +49,11 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	where
 		V: Clone,
 	{
-		match self.closed().await {
-			Ok(()) => Ok(None),
-			Err(Error::Decode(DecodeError::ExpectedEnd)) => Ok(Some(self.decode().await?)),
-			Err(e) => Err(e),
+		if !self.has_more().await? {
+			return Ok(None);
 		}
+
+		Ok(Some(self.decode().await?))
 	}
 
 	/// Decode the next message from the stream without consuming it.
@@ -73,18 +67,12 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 				Ok(msg) => return Ok(msg),
 				Err(DecodeError::Short) => {
 					// Try to read more data
-					if self
-						.stream
-						.read_buf(&mut self.buffer)
-						.await
-						.map_err(|e| Error::Transport(Arc::new(e)))?
-						.is_none()
-					{
+					if !self.read_more().await? {
 						// Stream closed while we still need more data
-						return Err(Error::Decode(DecodeError::Short));
+						return Err(Error::Decode);
 					}
 				}
-				Err(e) => return Err(Error::Decode(e)),
+				Err(e) => return Err(e.into()),
 			}
 		}
 	}
@@ -97,10 +85,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 			return Ok(Some(data));
 		}
 
-		self.stream
-			.read_chunk(max)
-			.await
-			.map_err(|e| Error::Transport(Arc::new(e)))
+		self.stream.read_chunk(max).await.map_err(Error::from_transport)
 	}
 
 	/// Read exactly the given number of bytes from the stream.
@@ -118,10 +103,11 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		buf.put(data);
 
 		while buf.has_remaining_mut() {
-			self.stream
-				.read_buf(&mut buf)
-				.await
-				.map_err(|e| Error::Transport(Arc::new(e)))?;
+			match self.stream.read_buf(&mut buf).await {
+				Ok(Some(_)) => {}
+				Ok(None) => return Err(Error::Decode),
+				Err(e) => return Err(Error::from_transport(e)),
+			}
 		}
 
 		Ok(buf.into_inner().freeze())
@@ -138,8 +124,8 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 				.stream
 				.read_chunk(size)
 				.await
-				.map_err(|e| Error::Transport(Arc::new(e)))?
-				.ok_or(Error::Decode(DecodeError::Short))?;
+				.map_err(Error::from_transport)?
+				.ok_or(Error::Decode)?;
 			size -= chunk.len();
 		}
 
@@ -148,18 +134,29 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 
 	/// Wait until the stream is closed, erroring if there are any additional bytes.
 	pub async fn closed(&mut self) -> Result<(), Error> {
-		if self.buffer.is_empty()
-			&& self
-				.stream
-				.read_buf(&mut self.buffer)
-				.await
-				.map_err(|e| Error::Transport(Arc::new(e)))?
-				.is_none()
-		{
-			return Ok(());
+		if self.has_more().await? {
+			return Err(Error::Decode);
 		}
 
-		Err(DecodeError::ExpectedEnd.into())
+		Ok(())
+	}
+
+	/// Returns true if there is more data available in the buffer or stream.
+	async fn has_more(&mut self) -> Result<bool, Error> {
+		if !self.buffer.is_empty() {
+			return Ok(true);
+		}
+
+		self.read_more().await
+	}
+
+	/// Try to read more data from the stream. Returns true if data was read, false if stream closed.
+	async fn read_more(&mut self) -> Result<bool, Error> {
+		match self.stream.read_buf(&mut self.buffer).await {
+			Ok(Some(_)) => Ok(true),
+			Ok(None) => Ok(false),
+			Err(e) => Err(Error::from_transport(e)),
+		}
 	}
 
 	/// Abort the stream with the given error.

@@ -56,7 +56,7 @@ impl FromStr for DecoderFormat {
 
 impl fmt::Display for DecoderFormat {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
+		match *self {
 			#[cfg(feature = "h264")]
 			DecoderFormat::Avc3 => write!(f, "avc3"),
 			#[cfg(feature = "mp4")]
@@ -116,7 +116,7 @@ impl FromStr for StreamFormat {
 
 impl fmt::Display for StreamFormat {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
+		match *self {
 			#[cfg(feature = "h264")]
 			StreamFormat::Avc3 => write!(f, "avc3"),
 			#[cfg(feature = "mp4")]
@@ -213,15 +213,15 @@ impl StreamDecoder {
 	///
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		match &mut self.decoder {
+		match self.decoder {
 			#[cfg(feature = "h264")]
-			StreamKind::Avc3(decoder) => decoder.initialize(buf)?,
+			StreamKind::Avc3(ref mut decoder) => decoder.initialize(buf)?,
 			#[cfg(feature = "mp4")]
-			StreamKind::Fmp4(decoder) => decoder.decode(buf)?,
+			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
 			#[cfg(feature = "h265")]
-			StreamKind::Hev1(decoder) => decoder.initialize(buf)?,
+			StreamKind::Hev1(ref mut decoder) => decoder.initialize(buf)?,
 			#[cfg(feature = "av1")]
-			StreamKind::Av01(decoder) => decoder.initialize(buf)?,
+			StreamKind::Av01(ref mut decoder) => decoder.initialize(buf)?,
 		}
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -239,29 +239,29 @@ impl StreamDecoder {
 	///
 	/// If the buffer is not fully consumed, more data is needed.
 	pub fn decode_stream<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		match &mut self.decoder {
+		match self.decoder {
 			#[cfg(feature = "h264")]
-			StreamKind::Avc3(decoder) => decoder.decode_stream(buf, None),
+			StreamKind::Avc3(ref mut decoder) => decoder.decode_stream(buf, None),
 			#[cfg(feature = "mp4")]
-			StreamKind::Fmp4(decoder) => decoder.decode(buf),
+			StreamKind::Fmp4(ref mut decoder) => decoder.decode(buf),
 			#[cfg(feature = "h265")]
-			StreamKind::Hev1(decoder) => decoder.decode_stream(buf, None),
+			StreamKind::Hev1(ref mut decoder) => decoder.decode_stream(buf, None),
 			#[cfg(feature = "av1")]
-			StreamKind::Av01(decoder) => decoder.decode_stream(buf, None),
+			StreamKind::Av01(ref mut decoder) => decoder.decode_stream(buf, None),
 		}
 	}
 
 	/// Check if the decoder has read enough data to be initialized.
 	pub fn is_initialized(&self) -> bool {
-		match &self.decoder {
+		match self.decoder {
 			#[cfg(feature = "h264")]
-			StreamKind::Avc3(decoder) => decoder.is_initialized(),
+			StreamKind::Avc3(ref decoder) => decoder.is_initialized(),
 			#[cfg(feature = "mp4")]
-			StreamKind::Fmp4(decoder) => decoder.is_initialized(),
+			StreamKind::Fmp4(ref decoder) => decoder.is_initialized(),
 			#[cfg(feature = "h265")]
-			StreamKind::Hev1(decoder) => decoder.is_initialized(),
+			StreamKind::Hev1(ref decoder) => decoder.is_initialized(),
 			#[cfg(feature = "av1")]
-			StreamKind::Av01(decoder) => decoder.is_initialized(),
+			StreamKind::Av01(ref decoder) => decoder.is_initialized(),
 		}
 	}
 }
@@ -305,19 +305,19 @@ impl Decoder {
 	///
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		match &mut self.decoder {
+		match self.decoder {
 			#[cfg(feature = "h264")]
-			DecoderKind::Avc3(decoder) => decoder.initialize(buf)?,
+			DecoderKind::Avc3(ref mut decoder) => decoder.initialize(buf)?,
 			#[cfg(feature = "mp4")]
-			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
+			DecoderKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
 			#[cfg(feature = "h265")]
-			DecoderKind::Hev1(decoder) => decoder.initialize(buf)?,
+			DecoderKind::Hev1(ref mut decoder) => decoder.initialize(buf)?,
 			#[cfg(feature = "av1")]
-			DecoderKind::Av01(decoder) => decoder.initialize(buf)?,
+			DecoderKind::Av01(ref mut decoder) => decoder.initialize(buf)?,
 			#[cfg(feature = "aac")]
-			DecoderKind::Aac(decoder) => decoder.initialize(buf)?,
+			DecoderKind::Aac(ref mut decoder) => decoder.initialize(buf)?,
 			#[cfg(feature = "opus")]
-			DecoderKind::Opus(decoder) => decoder.initialize(buf)?,
+			DecoderKind::Opus(ref mut decoder) => decoder.initialize(buf)?,
 		}
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -339,19 +339,19 @@ impl Decoder {
 		buf: &mut T,
 		pts: Option<hang::container::Timestamp>,
 	) -> anyhow::Result<()> {
-		match &mut self.decoder {
+		match self.decoder {
 			#[cfg(feature = "h264")]
-			DecoderKind::Avc3(decoder) => decoder.decode_frame(buf, pts)?,
+			DecoderKind::Avc3(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			#[cfg(feature = "mp4")]
-			DecoderKind::Fmp4(decoder) => decoder.decode(buf)?,
+			DecoderKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
 			#[cfg(feature = "h265")]
-			DecoderKind::Hev1(decoder) => decoder.decode_frame(buf, pts)?,
+			DecoderKind::Hev1(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			#[cfg(feature = "av1")]
-			DecoderKind::Av01(decoder) => decoder.decode_frame(buf, pts)?,
+			DecoderKind::Av01(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			#[cfg(feature = "aac")]
-			DecoderKind::Aac(decoder) => decoder.decode(buf, pts)?,
+			DecoderKind::Aac(ref mut decoder) => decoder.decode(buf, pts)?,
 			#[cfg(feature = "opus")]
-			DecoderKind::Opus(decoder) => decoder.decode(buf, pts)?,
+			DecoderKind::Opus(ref mut decoder) => decoder.decode(buf, pts)?,
 		}
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -361,19 +361,19 @@ impl Decoder {
 
 	/// Check if the decoder has read enough data to be initialized.
 	pub fn is_initialized(&self) -> bool {
-		match &self.decoder {
+		match self.decoder {
 			#[cfg(feature = "h264")]
-			DecoderKind::Avc3(decoder) => decoder.is_initialized(),
+			DecoderKind::Avc3(ref decoder) => decoder.is_initialized(),
 			#[cfg(feature = "mp4")]
-			DecoderKind::Fmp4(decoder) => decoder.is_initialized(),
+			DecoderKind::Fmp4(ref decoder) => decoder.is_initialized(),
 			#[cfg(feature = "h265")]
-			DecoderKind::Hev1(decoder) => decoder.is_initialized(),
+			DecoderKind::Hev1(ref decoder) => decoder.is_initialized(),
 			#[cfg(feature = "av1")]
-			DecoderKind::Av01(decoder) => decoder.is_initialized(),
+			DecoderKind::Av01(ref decoder) => decoder.is_initialized(),
 			#[cfg(feature = "aac")]
-			DecoderKind::Aac(decoder) => decoder.is_initialized(),
+			DecoderKind::Aac(ref decoder) => decoder.is_initialized(),
 			#[cfg(feature = "opus")]
-			DecoderKind::Opus(decoder) => decoder.is_initialized(),
+			DecoderKind::Opus(ref decoder) => decoder.is_initialized(),
 		}
 	}
 }

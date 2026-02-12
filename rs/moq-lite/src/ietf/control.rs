@@ -48,7 +48,7 @@ impl Control {
 
 		tracing::trace!(id = T::ID, size = buf.len(), hex = %hex::encode(&buf), "encoded control message");
 
-		self.tx.send(buf).map_err(|e| Error::Transport(Arc::new(e)))?;
+		self.tx.send(buf).map_err(|_| Error::Transport)?;
 		Ok(())
 	}
 
@@ -71,6 +71,9 @@ impl Control {
 	}
 
 	pub async fn next_request_id(&self) -> Result<RequestId, Error> {
+		let timeout = tokio::time::sleep(std::time::Duration::from_secs(10));
+		tokio::pin!(timeout);
+
 		loop {
 			let notify = {
 				let mut state = self.state.lock().unwrap();
@@ -85,6 +88,10 @@ impl Control {
 			tokio::select! {
 				_ = notify => continue,
 				_ = self.tx.closed() => return Err(Error::Cancel),
+				_ = &mut timeout => {
+					tracing::warn!("timed out waiting for MAX_REQUEST_ID");
+					return Err(Error::Cancel);
+				}
 			}
 		}
 	}

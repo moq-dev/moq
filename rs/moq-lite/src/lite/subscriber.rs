@@ -45,11 +45,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_uni(self) -> Result<(), Error> {
 		loop {
-			let stream = self
-				.session
-				.accept_uni()
-				.await
-				.map_err(|err| Error::Transport(Arc::new(err)))?;
+			let stream = self.session.accept_uni().await.map_err(Error::from_transport)?;
 
 			let stream = Reader::new(stream, self.version);
 			let this = self.clone();
@@ -191,7 +187,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 
 		match res {
-			Err(Error::Cancel) | Err(Error::Transport(_)) => {
+			Err(Error::Cancel) => {
 				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe cancelled");
 				track.abort(Error::Cancel);
 			}
@@ -252,7 +248,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 
 		match res {
-			Err(Error::Cancel) | Err(Error::Transport(_)) => {
+			Err(Error::Cancel) => {
 				tracing::trace!(group = %group.info.sequence, "group cancelled");
 				group.abort(Error::Cancel);
 			}

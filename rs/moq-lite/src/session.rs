@@ -1,18 +1,6 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin};
 
-use crate::{Error, coding, ietf, lite};
-
-/// The versions of MoQ that are supported by this implementation.
-///
-/// Ordered by preference, with the client's preference taking priority.
-pub const VERSIONS: [coding::Version; 3] = [
-	lite::Version::Draft02.coding(),
-	lite::Version::Draft01.coding(),
-	ietf::Version::Draft14.coding(),
-];
-
-/// The ALPN strings for supported versions.
-pub const ALPNS: [&str; 2] = [lite::ALPN, ietf::ALPN];
+use crate::Error;
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
@@ -20,13 +8,13 @@ pub const ALPNS: [&str; 2] = [lite::ALPN, ietf::ALPN];
 /// - [`crate::Client::connect`] for clients.
 /// - [`crate::Server::accept`] for servers.
 pub struct Session {
-	session: Arc<dyn SessionInner>,
+	session: Box<dyn SessionInner>,
 }
 
 impl Session {
 	pub(super) fn new<S: web_transport_trait::Session>(session: S) -> Self {
 		Self {
-			session: Arc::new(session),
+			session: Box::new(session),
 		}
 	}
 
@@ -38,8 +26,8 @@ impl Session {
 	/// Block until the transport session is closed.
 	// TODO Remove the Result the next time we make a breaking change.
 	pub async fn closed(&self) -> Result<(), Error> {
-		let err = self.session.closed().await;
-		Err(Error::Transport(err))
+		self.session.closed().await;
+		Err(Error::Transport)
 	}
 }
 
@@ -52,7 +40,7 @@ impl Drop for Session {
 // We use a wrapper type that is dyn-compatible to remove the generic bounds from Session.
 trait SessionInner: Send + Sync {
 	fn close(&self, code: u32, reason: &str);
-	fn closed(&self) -> Pin<Box<dyn Future<Output = Arc<dyn crate::error::SendSyncError>> + Send + '_>>;
+	fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
 impl<S: web_transport_trait::Session> SessionInner for S {
@@ -60,7 +48,9 @@ impl<S: web_transport_trait::Session> SessionInner for S {
 		S::close(self, code, reason);
 	}
 
-	fn closed(&self) -> Pin<Box<dyn Future<Output = Arc<dyn crate::error::SendSyncError>> + Send + '_>> {
-		Box::pin(async move { Arc::new(S::closed(self).await) as Arc<dyn crate::error::SendSyncError> })
+	fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+		Box::pin(async move {
+			let _ = S::closed(self).await;
+		})
 	}
 }

@@ -13,6 +13,8 @@ mod cluster;
 mod config;
 mod connection;
 mod web;
+#[cfg(feature = "websocket")]
+mod websocket;
 
 pub use auth::*;
 pub use cluster::*;
@@ -31,8 +33,9 @@ async fn main() -> anyhow::Result<()> {
 	let config = Config::load()?;
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
-	let server = config.server.init()?;
-	println!("client: {:?}", config.client);
+
+	#[allow(unused_mut)]
+	let mut server = config.server.init()?;
 	let client = config.client.init()?;
 
 	#[cfg(feature = "iroh")]

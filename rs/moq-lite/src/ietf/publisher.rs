@@ -1,13 +1,16 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use tokio::sync::oneshot;
 use web_async::{FuturesExt, Lock};
 use web_transport_trait::SendStream;
 
 use crate::{
-	Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
 	coding::Writer,
-	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId, Version},
+	ietf::{
+		self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, Message, MessageParameters, RequestId,
+		Version,
+	},
 	model::GroupConsumer,
 };
 
@@ -37,6 +40,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub async fn run(mut self) -> Result<(), Error> {
+		// Track request_id → namespace mapping for v16 PublishNamespaceDone
+		let mut namespace_requests: HashMap<crate::PathOwned, RequestId> = HashMap::new();
+
 		while let Some((path, active)) = self.origin.announced().await {
 			let suffix = path.to_owned();
 
@@ -44,6 +50,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
 
 				let request_id = self.control.next_request_id().await?;
+				namespace_requests.insert(suffix.clone(), request_id);
 
 				self.control.send(ietf::PublishNamespace {
 					request_id,
@@ -51,9 +58,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				})?;
 			} else {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
-				self.control.send(ietf::PublishNamespaceDone {
-					track_namespace: suffix,
-				})?;
+				if let Some(request_id) = namespace_requests.remove(&suffix) {
+					self.control.send(ietf::PublishNamespaceDone {
+						track_namespace: suffix,
+						request_id,
+					})?;
+				} else {
+					tracing::warn!(broadcast = %self.origin.absolute(&path), "unannounce for unknown namespace");
+				}
 			}
 		}
 
@@ -80,12 +92,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		tracing::info!(id = %request_id, broadcast = %absolute, %track, "subscribed started");
 
 		let Some(broadcast) = self.origin.consume_broadcast(&msg.track_namespace) else {
-			self.control.send(ietf::SubscribeError {
-				request_id,
-				error_code: 404,
-				reason_phrase: "Broadcast not found".into(),
-			})?;
-			return Ok(());
+			return self.send_subscribe_error(request_id, 404, "Broadcast not found");
 		};
 
 		let track = Track {
@@ -137,12 +144,25 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
+	/// Send a subscribe error, using RequestError for v15+.
+	fn send_subscribe_error(&self, request_id: RequestId, error_code: u64, reason: &str) -> Result<(), Error> {
+		match self.version {
+			Version::Draft14 => self.control.send(ietf::SubscribeError {
+				request_id,
+				error_code,
+				reason_phrase: reason.into(),
+			}),
+			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestError {
+				request_id,
+				error_code,
+				reason_phrase: reason.into(),
+				retry_interval: 0,
+			}),
+		}
+	}
+
 	pub fn recv_subscribe_update(&mut self, msg: ietf::SubscribeUpdate) -> Result<(), Error> {
-		self.control.send(ietf::SubscribeError {
-			request_id: msg.request_id,
-			error_code: 500,
-			reason_phrase: "subscribe update not supported".into(),
-		})
+		self.send_subscribe_error(msg.request_id, 500, "subscribe update not supported")
 	}
 
 	async fn run_track(
@@ -244,10 +264,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		version: Version,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
-		let mut stream = session
-			.open_uni()
-			.await
-			.map_err(|err| Error::Transport(Arc::new(err)))?;
+		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
 		stream.set_priority(priority);
 
 		let mut stream = Writer::new(stream, version);
@@ -293,7 +310,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					};
 
 					match chunk? {
-						Some(mut chunk) => stream.write_all(&mut chunk).await?,
+						Some(mut chunk) => {
+							stream.write_all(&mut chunk).await?;
+						}
 						None => break,
 					}
 				}
@@ -320,6 +339,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	pub fn recv_publish_namespace_ok(&mut self, _msg: ietf::PublishNamespaceOk) -> Result<(), Error> {
 		// We don't care.
+		Ok(())
+	}
+
+	pub fn recv_request_ok(&mut self, _msg: &ietf::RequestOk) -> Result<(), Error> {
+		// v15: generic OK response. For publish_namespace, we don't care.
+		Ok(())
+	}
+
+	pub fn recv_request_error(&mut self, msg: &ietf::RequestError<'_>) -> Result<(), Error> {
+		// v15: generic error response. Log it like publish_namespace_error.
+		tracing::warn!(?msg, "request error");
 		Ok(())
 	}
 
@@ -350,51 +380,29 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn recv_fetch(&mut self, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let subscribe_id = match msg.fetch_type {
 			FetchType::Standalone { .. } => {
-				return self.control.send(ietf::FetchError {
-					request_id: msg.request_id,
-					error_code: 500,
-					reason_phrase: "not supported".into(),
-				});
+				return self.send_fetch_error(msg.request_id, 500, "not supported");
 			}
 			FetchType::RelativeJoining {
 				subscriber_request_id,
 				group_offset,
 			} => {
 				if group_offset != 0 {
-					return self.control.send(ietf::FetchError {
-						request_id: msg.request_id,
-						error_code: 500,
-						reason_phrase: "not supported".into(),
-					});
+					return self.send_fetch_error(msg.request_id, 500, "not supported");
 				}
 
 				subscriber_request_id
 			}
 			FetchType::AbsoluteJoining { .. } => {
-				return self.control.send(ietf::FetchError {
-					request_id: msg.request_id,
-					error_code: 500,
-					reason_phrase: "not supported".into(),
-				});
+				return self.send_fetch_error(msg.request_id, 500, "not supported");
 			}
 		};
 
 		let subscribes = self.subscribes.lock();
 		if !subscribes.contains_key(&subscribe_id) {
-			return self.control.send(ietf::FetchError {
-				request_id: msg.request_id,
-				error_code: 404,
-				reason_phrase: "Subscribe not found".into(),
-			});
+			return self.send_fetch_error(msg.request_id, 404, "Subscribe not found");
 		}
 
-		self.control.send(ietf::FetchOk {
-			request_id: msg.request_id,
-			group_order: GroupOrder::Descending,
-			end_of_track: false,
-			// TODO get the proper group_id
-			end_location: Location { group: 0, object: 0 },
-		})?;
+		self.send_fetch_ok(msg.request_id)?;
 
 		let session = self.session.clone();
 		let request_id = msg.request_id;
@@ -409,12 +417,42 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		Ok(())
 	}
 
+	/// Send a fetch OK, using RequestOk for v15+.
+	fn send_fetch_ok(&self, request_id: RequestId) -> Result<(), Error> {
+		match self.version {
+			Version::Draft14 => self.control.send(ietf::FetchOk {
+				request_id,
+				group_order: GroupOrder::Descending,
+				end_of_track: false,
+				end_location: Location { group: 0, object: 0 },
+			}),
+			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestOk {
+				request_id,
+				parameters: MessageParameters::default(),
+			}),
+		}
+	}
+
+	/// Send a fetch error, using RequestError for v15+.
+	fn send_fetch_error(&self, request_id: RequestId, error_code: u64, reason: &str) -> Result<(), Error> {
+		match self.version {
+			Version::Draft14 => self.control.send(ietf::FetchError {
+				request_id,
+				error_code,
+				reason_phrase: reason.into(),
+			}),
+			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestError {
+				request_id,
+				error_code,
+				reason_phrase: reason.into(),
+				retry_interval: 0,
+			}),
+		}
+	}
+
 	// We literally just create a stream and FIN it.
 	async fn run_fetch(session: S, request_id: RequestId, version: Version) -> Result<(), Error> {
-		let stream = session
-			.open_uni()
-			.await
-			.map_err(|err| Error::Transport(Arc::new(err)))?;
+		let stream = session.open_uni().await.map_err(Error::from_transport)?;
 
 		let mut writer = Writer::new(stream, version);
 
@@ -431,5 +469,76 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn recv_fetch_cancel(&mut self, msg: ietf::FetchCancel) -> Result<(), Error> {
 		tracing::warn!(?msg, "fetch cancel");
 		Ok(())
+	}
+
+	/// Handle a SUBSCRIBE_NAMESPACE message received on a v16 bidirectional stream.
+	/// Reads the request, sends REQUEST_OK, then streams NAMESPACE/NAMESPACE_DONE messages.
+	pub async fn recv_subscribe_namespace_stream(
+		&mut self,
+		mut stream: crate::coding::Stream<S, Version>,
+	) -> Result<(), Error> {
+		let msg: ietf::SubscribeNamespace = stream.reader.decode().await?;
+		let prefix = msg.namespace.to_owned();
+
+		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
+
+		// Create a filtered consumer for this prefix
+		let mut origin = self
+			.origin
+			.consume_only(&[prefix.as_path()])
+			.ok_or(Error::Unauthorized)?;
+
+		// Send REQUEST_OK
+		stream.writer.encode(&ietf::RequestOk::ID).await?;
+		stream
+			.writer
+			.encode(&ietf::RequestOk {
+				request_id: msg.request_id,
+				parameters: ietf::MessageParameters::default(),
+			})
+			.await?;
+
+		// Send initial NAMESPACE messages for currently active namespaces
+		while let Some((path, active)) = origin.try_announced() {
+			let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
+			if active.is_some() {
+				tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
+				stream.writer.encode(&ietf::Namespace::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::Namespace {
+						suffix: suffix.to_owned(),
+					})
+					.await?;
+			}
+		}
+
+		// Stream updates
+		loop {
+			tokio::select! {
+				biased;
+				res = stream.reader.closed() => return res,
+				announced = origin.announced() => {
+					match announced {
+						Some((path, active)) => {
+							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
+							if active.is_some() {
+								tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
+								stream.writer.encode(&ietf::Namespace::ID).await?;
+								stream.writer.encode(&ietf::Namespace { suffix }).await?;
+							} else {
+								tracing::debug!(broadcast = %origin.absolute(&path), "namespace_done");
+								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+								stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
+							}
+						}
+						None => {
+							stream.writer.finish()?;
+							return stream.writer.closed().await;
+						}
+					}
+				}
+			}
+		}
 	}
 }

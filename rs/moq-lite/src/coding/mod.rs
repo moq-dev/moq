@@ -17,6 +17,3 @@ pub use stream::*;
 pub use varint::*;
 pub use version::*;
 pub use writer::*;
-
-// Re-export the bytes crate
-pub use bytes::*;

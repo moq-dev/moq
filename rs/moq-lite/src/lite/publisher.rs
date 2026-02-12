@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_async::FuturesExt;
 
@@ -68,7 +66,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					Error::Cancel => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
 					}
-					Error::Transport(_) => {
+					Error::Transport => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
 					}
 					err => {
@@ -160,7 +158,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			{
 				match &err {
 					// TODO better classify WebTransport errors.
-					Error::Cancel | Error::Transport(_) => {
+					Error::Cancel | Error::Transport => {
 						tracing::info!(%id, broadcast = %absolute, %track, "subscribed cancelled")
 					}
 					err => {
@@ -250,10 +248,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		version: Version,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
-		let stream = session
-			.open_uni()
-			.await
-			.map_err(|err| Error::Transport(Arc::new(err)))?;
+		let stream = session.open_uni().await.map_err(Error::from_transport)?;
 
 		let mut stream = Writer::new(stream, version);
 		stream.set_priority(priority.current());

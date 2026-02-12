@@ -12,7 +12,8 @@ export interface BroadcastProps {
 	// The broadcast name.
 	path?: Moq.Path.Valid | Signal<Moq.Path.Valid | undefined>;
 
-	// You can disable reloading if you don't want to wait for an announcement.
+	// Whether to reload the broadcast when it goes offline.
+	// Defaults to false; pass true to wait for an announcement before subscribing.
 	reload?: boolean | Signal<boolean>;
 }
 
@@ -40,7 +41,7 @@ export class Broadcast {
 		this.connection = Signal.from(props?.connection);
 		this.path = Signal.from(props?.path);
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.reload = Signal.from(props?.reload ?? true);
+		this.reload = Signal.from(props?.reload ?? false);
 
 		this.signals.effect(this.#runReload.bind(this));
 		this.signals.effect(this.#runBroadcast.bind(this));

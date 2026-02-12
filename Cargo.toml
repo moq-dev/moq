@@ -17,15 +17,16 @@ resolver = "2"
 hang = { version = "0.13", path = "rs/hang" }
 moq-lite = { version = "0.13", path = "rs/moq-lite" }
 moq-mux = { version = "0.2", path = "rs/moq-mux" }
-moq-native = { version = "0.12", path = "rs/moq-native" }
+moq-native = { version = "0.12", path = "rs/moq-native", default-features = false }
 moq-token = { version = "0.5", path = "rs/moq-token" }
 
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
 web-async = { version = "0.1.1", features = ["tracing"] }
 web-transport-iroh = "0.1.1"
-web-transport-quinn = "0.10"
-web-transport-trait = "0.3"
+web-transport-quiche = "0.2"
+web-transport-quinn = "0.11"
+web-transport-trait = "0.3.2"
 web-transport-ws = "0.2.2"
 
 [profile.dev]

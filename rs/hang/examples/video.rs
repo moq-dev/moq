@@ -1,5 +1,5 @@
 // cargo run --example video
-use moq_lite::coding::Bytes;
+use bytes::Bytes;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

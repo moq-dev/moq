@@ -2,8 +2,8 @@
 // use std::sync::Arc;
 
 use crate::{
-	Error, OriginConsumer, OriginProducer, Session, VERSIONS,
-	coding::{Decode, Encode, Stream},
+	Error, NEGOTIATED, OriginConsumer, OriginProducer, Session, Version,
+	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
 
@@ -43,18 +43,39 @@ impl Client {
 			tracing::warn!("not publishing or consuming anything");
 		}
 
-		let mut stream = Stream::open(&session, setup::ServerKind::Ietf14).await?;
+		// If ALPN was used to negotiate the version, use the appropriate encoding.
+		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
+		let (encoding, supported) = match session.protocol() {
+			Some(p) if p == ietf::ALPN_16 => (
+				Version::Ietf(ietf::Version::Draft16),
+				vec![ietf::Version::Draft16.into()],
+			),
+			Some(p) if p == ietf::ALPN_15 => (
+				Version::Ietf(ietf::Version::Draft15),
+				vec![ietf::Version::Draft15.into()],
+			),
+			Some(p) if p == ietf::ALPN_14 => (
+				Version::Ietf(ietf::Version::Draft14),
+				vec![ietf::Version::Draft14.into()],
+			),
+			Some(p) if p == lite::ALPN => (Version::Ietf(ietf::Version::Draft14), NEGOTIATED.to_vec()),
+			None => (Version::Ietf(ietf::Version::Draft14), NEGOTIATED.to_vec()),
+			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
+		};
 
+		let mut stream = Stream::open(&session, encoding).await?;
+
+		let ietf_version = match encoding {
+			Version::Ietf(v) => v,
+			_ => ietf::Version::Draft14,
+		};
 		let mut parameters = ietf::Parameters::default();
 		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-		let parameters = parameters.encode_bytes(());
+		let parameters = parameters.encode_bytes(ietf_version);
 
 		let client = setup::Client {
-			// Unfortunately, we have to pick a single draft range to support.
-			// moq-lite can support this handshake.
-			kind: setup::ClientKind::Ietf14,
-			versions: VERSIONS.into(),
+			versions: supported.clone().into(),
 			parameters,
 		};
 
@@ -65,36 +86,45 @@ impl Client {
 		let mut server: setup::Server = stream.reader.decode().await?;
 		tracing::trace!(?server, "received server setup");
 
-		if let Ok(version) = lite::Version::try_from(server.version) {
-			let stream = stream.with_version(version);
-			lite::start(
-				session.clone(),
-				stream,
-				self.publish.clone(),
-				self.consume.clone(),
-				version,
-			)
-			.await?;
-		} else if let Ok(version) = ietf::Version::try_from(server.version) {
-			// Decode the parameters to get the initial request ID.
-			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
-			let request_id_max =
-				ietf::RequestId(parameters.get_varint(ietf::ParameterVarInt::MaxRequestId).unwrap_or(0));
+		let version = supported
+			.iter()
+			.find(|v| coding::Version::from(**v) == server.version)
+			.copied()
+			.ok_or(Error::Version)?;
 
-			let stream = stream.with_version(version);
-			ietf::start(
-				session.clone(),
-				stream,
-				request_id_max,
-				true,
-				self.publish.clone(),
-				self.consume.clone(),
-				version,
-			)
-			.await?;
-		} else {
-			// unreachable, but just in case
-			return Err(Error::Version(client.versions, [server.version].into()));
+		match version {
+			Version::Lite(version) => {
+				let stream = stream.with_version(version);
+				lite::start(
+					session.clone(),
+					stream,
+					self.publish.clone(),
+					self.consume.clone(),
+					version,
+				)
+				.await?;
+			}
+			Version::Ietf(version) => {
+				// Decode the parameters to get the initial request ID.
+				let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
+				let request_id_max = ietf::RequestId(
+					parameters
+						.get_varint(ietf::ParameterVarInt::MaxRequestId)
+						.unwrap_or_default(),
+				);
+
+				let stream = stream.with_version(version);
+				ietf::start(
+					session.clone(),
+					stream,
+					request_id_max,
+					true,
+					self.publish.clone(),
+					self.consume.clone(),
+					version,
+				)
+				.await?;
+			}
 		}
 
 		tracing::debug!(version = ?server.version, "connected");

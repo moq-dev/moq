@@ -6,6 +6,9 @@ use tokio::sync::watch;
 use crate::{Error, Result};
 
 /// A chunk of data with an upfront size.
+///
+/// Note that this is just the header.
+/// You use [FrameProducer] and [FrameConsumer] to deal with the frame payload, potentially chunked.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {

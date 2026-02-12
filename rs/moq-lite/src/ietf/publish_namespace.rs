@@ -90,28 +90,57 @@ impl Message for PublishNamespaceError<'_> {
 	}
 }
 /// PublishNamespaceDone message (0x09)
+/// v14/v15: uses track_namespace. v16: uses request_id.
 #[derive(Clone, Debug)]
 pub struct PublishNamespaceDone<'a> {
+	/// v14/v15: the namespace being unannounced
 	pub track_namespace: Path<'a>,
+	/// v16: the request ID of the original PublishNamespace
+	pub request_id: RequestId,
 }
 
 impl Message for PublishNamespaceDone<'_> {
 	const ID: u64 = 0x09;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		encode_namespace(w, &self.track_namespace, version);
+		match version {
+			Version::Draft14 | Version::Draft15 => {
+				encode_namespace(w, &self.track_namespace, version);
+			}
+			Version::Draft16 => {
+				self.request_id.encode(w, version);
+			}
+		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let track_namespace = decode_namespace(r, version)?;
-		Ok(Self { track_namespace })
+		match version {
+			Version::Draft14 | Version::Draft15 => {
+				let track_namespace = decode_namespace(r, version)?;
+				Ok(Self {
+					track_namespace,
+					request_id: RequestId(0),
+				})
+			}
+			Version::Draft16 => {
+				let request_id = RequestId::decode(r, version)?;
+				Ok(Self {
+					track_namespace: Path::default(),
+					request_id,
+				})
+			}
+		}
 	}
 }
 
 /// PublishNamespaceCancel message (0x0c)
+/// v14/v15: uses track_namespace. v16: uses request_id.
 #[derive(Clone, Debug)]
 pub struct PublishNamespaceCancel<'a> {
+	/// v14/v15: the namespace being cancelled
 	pub track_namespace: Path<'a>,
+	/// v16: the request ID of the original PublishNamespace
+	pub request_id: RequestId,
 	pub error_code: u64,
 	pub reason_phrase: Cow<'a, str>,
 }
@@ -120,17 +149,34 @@ impl Message for PublishNamespaceCancel<'_> {
 	const ID: u64 = 0x0c;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		encode_namespace(w, &self.track_namespace, version);
+		match version {
+			Version::Draft14 | Version::Draft15 => {
+				encode_namespace(w, &self.track_namespace, version);
+			}
+			Version::Draft16 => {
+				self.request_id.encode(w, version);
+			}
+		}
 		self.error_code.encode(w, version);
 		self.reason_phrase.encode(w, version);
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let track_namespace = decode_namespace(r, version)?;
+		let (track_namespace, request_id) = match version {
+			Version::Draft14 | Version::Draft15 => {
+				let track_namespace = decode_namespace(r, version)?;
+				(track_namespace, RequestId(0))
+			}
+			Version::Draft16 => {
+				let request_id = RequestId::decode(r, version)?;
+				(Path::default(), request_id)
+			}
+		};
 		let error_code = u64::decode(r, version)?;
 		let reason_phrase = Cow::<str>::decode(r, version)?;
 		Ok(Self {
 			track_namespace,
+			request_id,
 			error_code,
 			reason_phrase,
 		})
@@ -142,15 +188,15 @@ mod tests {
 	use super::*;
 	use bytes::BytesMut;
 
-	fn encode_message<M: Message>(msg: &M) -> Vec<u8> {
+	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, Version::Draft14);
+		msg.encode_msg(&mut buf, version);
 		buf.to_vec()
 	}
 
-	fn decode_message<M: Message>(bytes: &[u8]) -> Result<M, DecodeError> {
+	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
 		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		M::decode_msg(&mut buf, Version::Draft14)
+		M::decode_msg(&mut buf, version)
 	}
 
 	#[test]
@@ -160,8 +206,8 @@ mod tests {
 			track_namespace: Path::new("test/broadcast"),
 		};
 
-		let encoded = encode_message(&msg);
-		let decoded: PublishNamespace = decode_message(&encoded).unwrap();
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: PublishNamespace = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.track_namespace.as_str(), "test/broadcast");
 	}
@@ -174,37 +220,69 @@ mod tests {
 			reason_phrase: "Unauthorized".into(),
 		};
 
-		let encoded = encode_message(&msg);
-		let decoded: PublishNamespaceError = decode_message(&encoded).unwrap();
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: PublishNamespaceError = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.error_code, 404);
 		assert_eq!(decoded.reason_phrase, "Unauthorized");
 	}
 
 	#[test]
-	fn test_unannounce() {
+	fn test_unannounce_v14() {
 		let msg = PublishNamespaceDone {
 			track_namespace: Path::new("old/stream"),
+			request_id: RequestId(0),
 		};
 
-		let encoded = encode_message(&msg);
-		let decoded: PublishNamespaceDone = decode_message(&encoded).unwrap();
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: PublishNamespaceDone = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.track_namespace.as_str(), "old/stream");
 	}
 
 	#[test]
-	fn test_announce_cancel() {
+	fn test_unannounce_v16() {
+		let msg = PublishNamespaceDone {
+			track_namespace: Path::default(),
+			request_id: RequestId(42),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft16);
+		let decoded: PublishNamespaceDone = decode_message(&encoded, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(42));
+	}
+
+	#[test]
+	fn test_announce_cancel_v14() {
 		let msg = PublishNamespaceCancel {
 			track_namespace: Path::new("canceled"),
+			request_id: RequestId(0),
 			error_code: 1,
 			reason_phrase: "Shutdown".into(),
 		};
 
-		let encoded = encode_message(&msg);
-		let decoded: PublishNamespaceCancel = decode_message(&encoded).unwrap();
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: PublishNamespaceCancel = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.track_namespace.as_str(), "canceled");
+		assert_eq!(decoded.error_code, 1);
+		assert_eq!(decoded.reason_phrase, "Shutdown");
+	}
+
+	#[test]
+	fn test_announce_cancel_v16() {
+		let msg = PublishNamespaceCancel {
+			track_namespace: Path::default(),
+			request_id: RequestId(7),
+			error_code: 1,
+			reason_phrase: "Shutdown".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft16);
+		let decoded: PublishNamespaceCancel = decode_message(&encoded, Version::Draft16).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(7));
 		assert_eq!(decoded.error_code, 1);
 		assert_eq!(decoded.reason_phrase, "Shutdown");
 	}
@@ -218,7 +296,7 @@ mod tests {
 			0x01, // INVALID: num_params = 1
 		];
 
-		let result: Result<PublishNamespace, _> = decode_message(&invalid_bytes);
+		let result: Result<PublishNamespace, _> = decode_message(&invalid_bytes, Version::Draft14);
 		assert!(result.is_err());
 	}
 }

@@ -1,5 +1,6 @@
 use rand::Rng;
 
+use crate::Error;
 use crate::coding::{Decode, DecodeError, Encode, VarInt};
 
 use std::sync::LazyLock;
@@ -186,6 +187,15 @@ impl<const SCALE: u64> Timescale<SCALE> {
 			},
 			None => Err(TimeOverflow),
 		}
+	}
+
+	pub fn encode<W: bytes::BufMut>(&self, w: &mut W) {
+		self.0.encode(w, ());
+	}
+
+	pub fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, Error> {
+		let v = VarInt::decode(r, ())?;
+		Ok(Self(v))
 	}
 }
 

@@ -7,6 +7,9 @@ export interface GroupFlags {
 	hasSubgroup: boolean;
 	hasSubgroupObject: boolean;
 	hasEnd: boolean;
+	// v15: whether priority is present in the header.
+	// When false (0x30 base), priority inherits from the control message.
+	hasPriority: boolean;
 }
 
 /**
@@ -20,7 +23,19 @@ export class Group {
 	subGroupId: number;
 	publisherPriority: number;
 
-	constructor(trackAlias: bigint, groupId: number, subGroupId: number, publisherPriority: number, flags: GroupFlags) {
+	constructor({
+		trackAlias,
+		groupId,
+		subGroupId,
+		publisherPriority,
+		flags,
+	}: {
+		trackAlias: bigint;
+		groupId: number;
+		subGroupId: number;
+		publisherPriority: number;
+		flags: GroupFlags;
+	}) {
 		this.flags = flags;
 		this.trackAlias = trackAlias;
 		this.groupId = groupId;
@@ -33,7 +48,8 @@ export class Group {
 			throw new Error(`Subgroup ID must be 0 if hasSubgroup is false: ${this.subGroupId}`);
 		}
 
-		let id = 0x10;
+		const base = this.flags.hasPriority ? 0x10 : 0x30;
+		let id = base;
 		if (this.flags.hasExtensions) {
 			id |= 0x01;
 		}
@@ -52,28 +68,40 @@ export class Group {
 		if (this.flags.hasSubgroup) {
 			await w.u53(this.subGroupId);
 		}
-		await w.u8(0); // publisher priority
+		if (this.flags.hasPriority) {
+			await w.u8(this.publisherPriority);
+		}
 	}
 
 	static async decode(r: Reader): Promise<Group> {
 		const id = await r.u53();
-		if (id < 0x10 || id > 0x1f) {
+
+		let hasPriority: boolean;
+		let baseId: number;
+		if (id >= 0x10 && id <= 0x1f) {
+			hasPriority = true;
+			baseId = id;
+		} else if (id >= 0x30 && id <= 0x3f) {
+			hasPriority = false;
+			baseId = id - (0x30 - 0x10);
+		} else {
 			throw new Error(`Unsupported group type: ${id}`);
 		}
 
-		const flags = {
-			hasExtensions: (id & 0x01) !== 0,
-			hasSubgroupObject: (id & 0x02) !== 0,
-			hasSubgroup: (id & 0x04) !== 0,
-			hasEnd: (id & 0x08) !== 0,
+		const flags: GroupFlags = {
+			hasExtensions: (baseId & 0x01) !== 0,
+			hasSubgroupObject: (baseId & 0x02) !== 0,
+			hasSubgroup: (baseId & 0x04) !== 0,
+			hasEnd: (baseId & 0x08) !== 0,
+			hasPriority,
 		};
 
 		const trackAlias = await r.u62();
 		const groupId = await r.u53();
 		const subGroupId = flags.hasSubgroup ? await r.u53() : 0;
-		const publisherPriority = await r.u8(); // Don't care about publisher priority
+		const publisherPriority = hasPriority ? await r.u8() : 128; // Default priority when absent
 
-		return new Group(trackAlias, groupId, subGroupId, publisherPriority, flags);
+		return new Group({ trackAlias, groupId, subGroupId, publisherPriority, flags });
 	}
 }
 
@@ -81,7 +109,7 @@ export class Frame {
 	// undefined means end of group
 	payload?: Uint8Array;
 
-	constructor(payload?: Uint8Array) {
+	constructor({ payload }: { payload?: Uint8Array } = {}) {
 		this.payload = payload;
 	}
 
@@ -109,7 +137,7 @@ export class Frame {
 	static async decode(r: Reader, flags: GroupFlags): Promise<Frame> {
 		const delta = await r.u53();
 		if (delta !== 0) {
-			console.warn(`object ID delta is not supported, ignoring: ${delta}`);
+			throw new Error(`object ID delta is not supported: ${delta}`);
 		}
 
 		if (flags.hasExtensions) {
@@ -122,14 +150,14 @@ export class Frame {
 
 		if (payloadLength > 0) {
 			const payload = await r.read(payloadLength);
-			return new Frame(payload);
+			return new Frame({ payload });
 		}
 
 		const status = await r.u53();
 
 		if (flags.hasEnd) {
 			// Empty frame
-			if (status === 0) return new Frame(new Uint8Array(0));
+			if (status === 0) return new Frame({ payload: new Uint8Array(0) });
 		} else if (status === 0 || status === GROUP_END) {
 			// TODO status === 0 should be an empty frame, but moq-rs seems to be sending it incorrectly on group end.
 			return new Frame();

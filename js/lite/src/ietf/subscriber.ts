@@ -2,21 +2,25 @@ import { Announced } from "../announced.ts";
 import { Broadcast, type TrackRequest } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
-import type { Reader } from "../stream.ts";
+import { type Reader, Stream } from "../stream.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import type * as Control from "./control.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { type Publish, type PublishDone, PublishError } from "./publish.ts";
 import type { PublishNamespace, PublishNamespaceDone } from "./publish_namespace.ts";
+import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, type SubscribeError, type SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	SubscribeNamespace,
+	SubscribeNamespaceEntry,
+	SubscribeNamespaceEntryDone,
 	type SubscribeNamespaceError,
 	type SubscribeNamespaceOk,
 	UnsubscribeNamespace,
 } from "./subscribe_namespace.ts";
 import type { TrackStatus } from "./track.ts";
+import { Version } from "./version.ts";
 
 /**
  * Handles subscribing to broadcasts using moq-transport protocol with lite-compatibility restrictions.
@@ -47,15 +51,18 @@ export class Subscriber {
 		}
 	>();
 
+	#quic: WebTransport;
+
 	/**
 	 * Creates a new Subscriber instance.
-	 * @param quic - The WebTransport session to use
 	 * @param control - The control stream writer for sending control messages
+	 * @param quic - The WebTransport session (needed for v16 bidi streams)
 	 *
 	 * @internal
 	 */
-	constructor(control: Control.Stream) {
+	constructor({ control, quic }: { control: Control.Stream; quic: WebTransport }) {
 		this.#control = control;
+		this.#quic = quic;
 	}
 
 	/**
@@ -83,14 +90,90 @@ export class Subscriber {
 	}
 
 	async #runAnnounced(announced: Announced, prefix: Path.Valid) {
+		if (this.#control.version === Version.DRAFT_16) {
+			await this.#runAnnouncedV16(announced, prefix);
+		} else {
+			await this.#runAnnouncedLegacy(announced, prefix);
+		}
+	}
+
+	async #runAnnouncedLegacy(announced: Announced, prefix: Path.Valid) {
 		const requestId = await this.#control.nextRequestId();
 		if (requestId === undefined) return;
 
 		try {
-			this.#control.write(new SubscribeNamespace(prefix, requestId));
+			this.#control.write(new SubscribeNamespace({ namespace: prefix, requestId }));
 			await announced.closed;
 		} finally {
-			this.#control.write(new UnsubscribeNamespace(requestId));
+			this.#control.write(new UnsubscribeNamespace({ requestId }));
+		}
+	}
+
+	async #runAnnouncedV16(announced: Announced, prefix: Path.Valid) {
+		const requestId = await this.#control.nextRequestId();
+		if (requestId === undefined) return;
+
+		const version = this.#control.version;
+
+		try {
+			// Open a bidi stream for SUBSCRIBE_NAMESPACE
+			const stream = await Stream.open(this.#quic);
+
+			// Write message type + SUBSCRIBE_NAMESPACE
+			await stream.writer.u53(SubscribeNamespace.id);
+			const msg = new SubscribeNamespace({ namespace: prefix, requestId });
+			await msg.encode(stream.writer, version);
+
+			// Read REQUEST_OK or REQUEST_ERROR
+			const responseType = await stream.reader.u53();
+			if (responseType === RequestOk.id) {
+				await RequestOk.decode(stream.reader, version);
+			} else if (responseType === RequestError.id) {
+				const err = await RequestError.decode(stream.reader, version);
+				throw new Error(`SUBSCRIBE_NAMESPACE error: code=${err.errorCode} reason=${err.reasonPhrase}`);
+			} else {
+				throw new Error(`unexpected response type: ${responseType}`);
+			}
+
+			// Loop reading NAMESPACE / NAMESPACE_DONE messages
+			const readLoop = (async () => {
+				for (;;) {
+					const done = await stream.reader.done();
+					if (done) break;
+
+					const msgType = await stream.reader.u53();
+					if (msgType === SubscribeNamespaceEntry.id) {
+						const entry = await SubscribeNamespaceEntry.decode(stream.reader, version);
+						const path = Path.join(prefix, entry.suffix);
+						console.debug(`announced: broadcast=${path} active=true`);
+
+						this.#announced.add(path);
+						for (const consumer of this.#announcedConsumers) {
+							consumer.append({ path, active: true });
+						}
+					} else if (msgType === SubscribeNamespaceEntryDone.id) {
+						const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
+						const path = Path.join(prefix, entry.suffix);
+						console.debug(`announced: broadcast=${path} active=false`);
+
+						this.#announced.delete(path);
+						for (const consumer of this.#announcedConsumers) {
+							consumer.append({ path, active: false });
+						}
+					} else {
+						throw new Error(`unexpected message type on subscribe_namespace stream: ${msgType}`);
+					}
+				}
+			})();
+
+			// Wait for either the read loop to finish or the announced to close
+			await Promise.race([readLoop, announced.closed]);
+
+			// Close the bidi stream (replaces UnsubscribeNamespace)
+			stream.close();
+		} catch (err: unknown) {
+			const e = error(err);
+			console.warn(`subscribe_namespace error: ${e.message}`);
 		}
 	}
 
@@ -122,7 +205,12 @@ export class Subscriber {
 
 		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
 
-		const msg = new Subscribe(requestId, broadcast, request.track.name, request.priority);
+		const msg = new Subscribe({
+			requestId,
+			trackNamespace: broadcast,
+			trackName: request.track.name,
+			subscriberPriority: request.priority,
+		});
 
 		// Send SUBSCRIBE message on control stream and wait for response
 		const responsePromise = new Promise<SubscribeOk>((resolve, reject) => {
@@ -139,7 +227,7 @@ export class Subscriber {
 			try {
 				await request.track.closed;
 
-				const msg = new Unsubscribe(requestId);
+				const msg = new Unsubscribe({ requestId });
 				await this.#control.write(msg);
 				console.debug(`unsubscribe: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
 			} finally {
@@ -199,7 +287,7 @@ export class Subscriber {
 		const producer = new Group(group.groupId);
 
 		if (group.subGroupId !== 0) {
-			console.warn("subgroup ID is not supported, ignoring");
+			throw new Error("subgroups are not supported");
 		}
 
 		try {
@@ -244,8 +332,24 @@ export class Subscriber {
 	async handlePublish(msg: Publish) {
 		// TODO technically, we should send PUBLISH_OK if we had a SUBSCRIBE in flight for the same track.
 		// Otherwise, the peer will SUBSCRIBE_ERROR because duplicate subscriptions are not allowed :(
-		const err = new PublishError(msg.requestId, 500, "publish not supported");
-		await this.#control.write(err);
+		if (this.#control.version === Version.DRAFT_15 || this.#control.version === Version.DRAFT_16) {
+			const err = new RequestError({
+				requestId: msg.requestId,
+				errorCode: 500,
+				reasonPhrase: "publish not supported",
+			});
+			await this.#control.write(err);
+		} else if (this.#control.version === Version.DRAFT_14) {
+			const err = new PublishError({
+				requestId: msg.requestId,
+				errorCode: 500,
+				reasonPhrase: "publish not supported",
+			});
+			await this.#control.write(err);
+		} else {
+			const version: never = this.#control.version;
+			throw new Error(`unsupported version: ${version}`);
+		}
 	}
 
 	/**
@@ -316,5 +420,23 @@ export class Subscriber {
 	 */
 	async handleTrackStatus(_msg: TrackStatus) {
 		throw new Error("TRACK_STATUS messages are not supported");
+	}
+
+	// v15: REQUEST_OK replaces SubscribeNamespaceOk, PublishNamespaceOk
+	async handleRequestOk(msg: RequestOk) {
+		// In v15, RequestOk is used for subscribe namespace acknowledgements
+		// Route by request_id — treat similarly to SubscribeNamespaceOk for now
+		console.debug("received REQUEST_OK", msg.requestId);
+	}
+
+	// v15: REQUEST_ERROR replaces SubscribeNamespaceError, etc.
+	async handleRequestError(msg: RequestError) {
+		// In v15, RequestError replaces SubscribeError for subscribe requests
+		const callback = this.#subscribeCallbacks.get(msg.requestId);
+		if (callback) {
+			callback.reject(new Error(`REQUEST_ERROR: code=${msg.errorCode} reason=${msg.reasonPhrase}`));
+		} else {
+			console.warn("handleRequestError unknown requestId", msg.requestId);
+		}
 	}
 }
