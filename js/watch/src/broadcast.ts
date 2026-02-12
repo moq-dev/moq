@@ -1,6 +1,6 @@
+import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import * as Catalog from "@moq/hang/catalog";
 
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;

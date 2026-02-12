@@ -1,9 +1,9 @@
-import type * as Moq from "@moq/lite";
-import { Time } from "@moq/lite";
-import { Effect, type Getter, Signal } from "@moq/signals";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { isFirefox } from "@moq/hang/util/hacks";
+import type * as Moq from "@moq/lite";
+import { Time } from "@moq/lite";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Source } from "./types";
 
 export interface EncoderProps {

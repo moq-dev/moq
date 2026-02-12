@@ -1,6 +1,6 @@
+import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type * as Catalog from "@moq/hang/catalog";
 import type { Broadcast } from "../broadcast";
 import type { Sync } from "../sync";
 

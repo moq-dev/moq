@@ -1,5 +1,5 @@
-import { Effect, Signal } from "@moq/signals";
 import type * as Catalog from "@moq/hang/catalog";
+import { Effect, Signal } from "@moq/signals";
 import { Peers, type PeersProps } from "./peers";
 import { Window, type WindowProps } from "./window";
 

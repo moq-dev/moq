@@ -1,5 +1,5 @@
-import { createEffect, createSignal } from "solid-js";
 import { Button, Icon } from "@moq/ui-core";
+import { createEffect, createSignal } from "solid-js";
 import useWatchUIContext from "../hooks/use-watch-ui";
 
 const getVolumeIcon = (volume: number, isMuted: boolean) => {

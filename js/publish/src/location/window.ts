@@ -1,7 +1,7 @@
+import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
 import { Effect, Signal } from "@moq/signals";
-import * as Catalog from "@moq/hang/catalog";
 
 export type WindowProps = {
 	// If true, then we'll publish our position to the broadcast.

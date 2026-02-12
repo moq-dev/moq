@@ -1,9 +1,9 @@
 import { type Moq, Signals } from "@moq/hang";
-import type { BufferedRanges } from "..";
-import type HangWatch from "../element";
 import solid from "@moq/signals/solid";
 import type { JSX } from "solid-js";
 import { createContext, createSignal, onCleanup } from "solid-js";
+import type { BufferedRanges } from "..";
+import type HangWatch from "../element";
 
 type WatchUIContextProviderProps = {
 	hangWatch: HangWatch;

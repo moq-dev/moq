@@ -1,6 +1,6 @@
 import { Moq } from "@moq/hang";
-import type { BufferedRange } from "../..";
 import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import type { BufferedRange } from "../..";
 import useWatchUIContext from "../hooks/use-watch-ui";
 
 const MIN_RANGE = 0 as Moq.Time.Milli;

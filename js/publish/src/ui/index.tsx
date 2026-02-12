@@ -1,7 +1,7 @@
-import type HangPublish from "../element";
 import { customElement } from "solid-element";
 import { createSignal, onMount } from "solid-js";
 import { Show } from "solid-js/web";
+import type HangPublish from "../element";
 import { PublishUI } from "./element.tsx";
 
 customElement("hang-publish-ui", (_, { element }) => {

@@ -1,6 +1,6 @@
-import type HangWatch from "../element";
 import { customElement } from "solid-element";
 import { createSignal, onMount, Show } from "solid-js";
+import type HangWatch from "../element";
 import { WatchUI } from "./element.tsx";
 
 customElement("hang-watch-ui", (_, { element }) => {

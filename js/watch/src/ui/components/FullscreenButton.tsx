@@ -1,5 +1,5 @@
-import { Show } from "solid-js";
 import { Button, Icon } from "@moq/ui-core";
+import { Show } from "solid-js";
 import useWatchUIContext from "../hooks/use-watch-ui";
 
 export default function FullscreenButton() {

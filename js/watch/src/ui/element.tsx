@@ -1,7 +1,7 @@
-import type HangWatch from "../element";
+import { Stats } from "@moq/ui-core";
 import { useContext } from "solid-js";
 import { Show } from "solid-js/web";
-import { Stats } from "@moq/ui-core";
+import type HangWatch from "../element";
 
 import BufferingIndicator from "./components/BufferingIndicator";
 import WatchControls from "./components/WatchControls";
