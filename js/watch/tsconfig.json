@@ -3,8 +3,8 @@
 	"compilerOptions": {
 		"rootDir": ".",
 		"outDir": "dist",
-		"composite": true
+		"jsx": "preserve",
+		"jsxImportSource": "solid-js"
 	},
-	"include": ["src"],
-	"exclude": ["src/ui"]
+	"include": ["src"]
 }
