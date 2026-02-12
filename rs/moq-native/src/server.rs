@@ -106,25 +106,28 @@ pub struct Server {
 impl Server {
 	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
 		let backend = config.backend.clone().unwrap_or({
-			if cfg!(feature = "quinn") {
+			#[cfg(feature = "quinn")]
+			{
 				QuicBackend::Quinn
-			} else if cfg!(feature = "quiche") {
-				QuicBackend::Quiche
-			} else {
-				anyhow::bail!("no QUIC backend compiled; enable quinn or quiche feature");
 			}
+			#[cfg(all(feature = "quiche", not(feature = "quinn")))]
+			{
+				QuicBackend::Quiche
+			}
+			#[cfg(all(not(feature = "quiche"), not(feature = "quinn")))]
+			panic!("no QUIC backend compiled; enable quinn or quiche feature");
 		});
 
 		#[cfg(feature = "quinn")]
 		let quinn = match backend {
 			QuicBackend::Quinn => Some(crate::quinn::QuinnServer::new(config.clone())?),
-			QuicBackend::Quiche => None,
+			_ => None,
 		};
 
 		#[cfg(feature = "quiche")]
 		let quiche = match backend {
 			QuicBackend::Quiche => Some(crate::quiche::QuicheServer::new(config)?),
-			QuicBackend::Quinn => None,
+			_ => None,
 		};
 
 		Ok(Server {
@@ -305,6 +308,10 @@ pub(crate) enum RequestKind {
 	Iroh(crate::iroh::IrohRequest),
 }
 
+/// An incoming MoQ session that can be accepted or rejected.
+///
+/// [Self::with_publish] and [Self::with_consume] will configure what will be published and consumed from the session respectively.
+/// Otherwise, the Server's configuration is used by default.
 pub struct Request {
 	server: moq_lite::Server,
 	kind: RequestKind,
@@ -338,11 +345,13 @@ impl Request {
 		}
 	}
 
+	/// Publish the given origin to the session.
 	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {
 		self.server = self.server.with_publish(publish);
 		self
 	}
 
+	/// Consume the given origin from the session.
 	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
 		self.server = self.server.with_consume(consume);
 		self

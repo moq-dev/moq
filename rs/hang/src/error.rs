@@ -10,10 +10,6 @@ pub enum Error {
 	#[error("moq lite error: {0}")]
 	Moq(#[from] moq_lite::Error),
 
-	/// Failed to decode a message at the MoQ transport layer.
-	#[error("decode error: {0}")]
-	Decode(#[from] moq_lite::coding::DecodeError),
-
 	/// JSON serialization/deserialization error.
 	#[error("json error: {0}")]
 	Json(Arc<serde_json::Error>),

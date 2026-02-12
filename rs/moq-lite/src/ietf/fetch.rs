@@ -312,23 +312,6 @@ impl<V> Decode<V> for FetchHeader {
 	}
 }
 
-/// Fetch object serialization (v14 format).
-/// v15 adds SerializationFlags for delta encoding but we skip that for now.
-pub struct FetchObject {
-	/*
-	v14:
-	Group ID (i),
-	Subgroup ID (i),
-	Object ID (i),
-	Publisher Priority (8),
-	Extension Headers Length (i),
-	[Extension headers (...)],
-	Object Payload Length (i),
-	[Object Status (i)],
-	Object Payload (..),
-	*/
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;

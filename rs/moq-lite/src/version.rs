@@ -9,30 +9,14 @@ pub(crate) const NEGOTIATED: [Version; 3] = [
 	Version::Ietf(ietf::Version::Draft14),
 ];
 
-/// The ALPN strings for supported versions.
-const ALPNS: [&str; 4] = [lite::ALPN, ietf::ALPN_14, ietf::ALPN_15, ietf::ALPN_16];
-
-// Return the ALPN strings for supported versions.
-// This is a function so we can avoid semver bumps.
-pub fn alpns() -> &'static [&'static str] {
-	&ALPNS
-}
+/// ALPN strings for supported versions.
+pub const ALPNS: &[&str] = &[lite::ALPN, ietf::ALPN_14, ietf::ALPN_15, ietf::ALPN_16];
 
 // A combination of ietf::Version and lite::Version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Version {
+pub(crate) enum Version {
 	Ietf(ietf::Version),
 	Lite(lite::Version),
-}
-
-impl Version {
-	pub fn is_ietf(self) -> bool {
-		matches!(self, Self::Ietf(_))
-	}
-
-	pub fn is_lite(self) -> bool {
-		matches!(self, Self::Lite(_))
-	}
 }
 
 impl From<ietf::Version> for Version {

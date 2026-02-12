@@ -41,7 +41,7 @@ impl QuicheClient {
 
 		let alpns = match url.scheme() {
 			"https" => vec![web_transport_quiche::ALPN.as_bytes().to_vec()],
-			"moqt" | "moql" => moq_lite::alpns().iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
+			"moqt" | "moql" => moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
 			_ => anyhow::bail!("url scheme must be 'https', 'moqt', or 'moql'"),
 		};
 
@@ -56,7 +56,7 @@ impl QuicheClient {
 		tracing::debug!(%url, "connecting via quiche");
 
 		let mut request = web_transport_quiche::proto::ConnectRequest::new(url.clone());
-		for alpn in moq_lite::alpns() {
+		for alpn in moq_lite::ALPNS {
 			request = request.with_protocol(alpn.to_string());
 		}
 
@@ -135,7 +135,7 @@ impl QuicheServer {
 		}));
 
 		let mut alpns = vec![b"h3".to_vec()];
-		for alpn in moq_lite::alpns() {
+		for alpn in moq_lite::ALPNS {
 			alpns.push(alpn.as_bytes().to_vec());
 		}
 
@@ -259,7 +259,7 @@ impl QuicheRequest {
 					.context("failed to accept WebTransport request")?;
 				Ok(Self::WebTransport { request })
 			}
-			alpn if moq_lite::alpns().contains(&alpn) => Ok(Self::Raw {
+			alpn if moq_lite::ALPNS.contains(&alpn) => Ok(Self::Raw {
 				connection: conn,
 				request: ConnectRequest::new("moqt://".to_string().parse::<Url>().unwrap()),
 				response: web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn),

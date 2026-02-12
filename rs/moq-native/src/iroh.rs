@@ -67,7 +67,7 @@ impl IrohEndpointConfig {
 		};
 
 		let mut alpns = vec![web_transport_iroh::ALPN_H3.as_bytes().to_vec()];
-		for alpn in moq_lite::alpns() {
+		for alpn in moq_lite::ALPNS {
 			alpns.push(alpn.as_bytes().to_vec());
 		}
 
@@ -118,7 +118,7 @@ impl IrohRequest {
 					request: Box::new(request),
 				})
 			}
-			alpn if moq_lite::alpns().contains(&alpn) => Ok(Self::Quic { connection: conn }),
+			alpn if moq_lite::ALPNS.contains(&alpn) => Ok(Self::Quic { connection: conn }),
 			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
 		}
 	}
@@ -148,4 +148,50 @@ impl IrohRequest {
 			IrohRequest::WebTransport { request } => Some(request.url()),
 		}
 	}
+}
+
+pub(crate) async fn connect(endpoint: &IrohEndpoint, url: Url) -> anyhow::Result<web_transport_iroh::Session> {
+	let host = url.host().context("Invalid URL: missing host")?.to_string();
+	let endpoint_id: iroh::EndpointId = host.parse().context("Invalid URL: host is not an iroh endpoint id")?;
+
+	// We need to use this API to provide multiple ALPNs
+	let alpn = b"h3";
+	let opts = iroh::endpoint::ConnectOptions::new()
+		.with_additional_alpns(moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect());
+
+	let mut connecting = endpoint.connect_with_opts(endpoint_id, alpn, opts).await?;
+	let alpn = connecting.alpn().await?;
+	let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
+
+	let session = match alpn.as_str() {
+		web_transport_iroh::ALPN_H3 => {
+			let conn = connecting.await?;
+			let url = url_set_scheme(url, "https")?;
+			web_transport_iroh::Session::connect_h3(conn, url).await?
+		}
+		alpn if moq_lite::ALPNS.contains(&alpn) => {
+			let conn = connecting.await?;
+			// TODO: Add support for ALPNs.
+			web_transport_iroh::Session::raw(conn)
+		}
+		_ => anyhow::bail!("unsupported ALPN: {alpn}"),
+	};
+
+	Ok(session)
+}
+
+/// Returns a new URL with a changed scheme.
+///
+/// [`Url::set_scheme`] returns an error if the scheme change is not valid according to
+/// [the URL specification's section on legal scheme state overrides](https://url.spec.whatwg.org/#scheme-state).
+///
+/// This function allows all scheme changes, as long as the resulting URL is valid.
+fn url_set_scheme(url: Url, scheme: &str) -> anyhow::Result<Url> {
+	let url = format!(
+		"{}:{}",
+		scheme,
+		url.to_string().split_once(":").context("invalid URL")?.1
+	)
+	.parse()?;
+	Ok(url)
 }

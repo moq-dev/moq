@@ -137,6 +137,7 @@ impl Parameters {
 		self.vars.insert(kind, value);
 	}
 
+	#[cfg(test)]
 	pub fn get_bytes(&self, kind: ParameterBytes) -> Option<&[u8]> {
 		self.bytes.get(&kind).map(|v| v.as_slice())
 	}
@@ -246,10 +247,10 @@ impl Encode<Version> for MessageParameters {
 
 impl MessageParameters {
 	// Varint parameter IDs (even)
-	const DELIVERY_TIMEOUT: u64 = 0x02;
-	const MAX_CACHE_DURATION: u64 = 0x04;
-	const EXPIRES: u64 = 0x08;
-	const PUBLISHER_PRIORITY: u64 = 0x0E;
+	//const DELIVERY_TIMEOUT: u64 = 0x02;
+	//const MAX_CACHE_DURATION: u64 = 0x04;
+	//const EXPIRES: u64 = 0x08;
+	//const PUBLISHER_PRIORITY: u64 = 0x0E;
 	const FORWARD: u64 = 0x10;
 	const SUBSCRIBER_PRIORITY: u64 = 0x20;
 	const GROUP_ORDER: u64 = 0x22;
@@ -262,6 +263,7 @@ impl MessageParameters {
 
 	// --- Varint accessors ---
 
+	/*
 	pub fn delivery_timeout(&self) -> Option<u64> {
 		self.vars.get(&Self::DELIVERY_TIMEOUT).copied()
 	}
@@ -293,6 +295,7 @@ impl MessageParameters {
 	pub fn set_publisher_priority(&mut self, v: u8) {
 		self.vars.insert(Self::PUBLISHER_PRIORITY, v as u64);
 	}
+	*/
 
 	pub fn forward(&self) -> Option<bool> {
 		self.vars.get(&Self::FORWARD).map(|v| *v != 0)
