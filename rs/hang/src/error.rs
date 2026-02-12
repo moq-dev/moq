@@ -5,6 +5,7 @@ use std::sync::Arc;
 /// This enum represents all possible errors that can occur when working with
 /// hang media streams, codecs, and containers.
 #[derive(Debug, thiserror::Error, Clone)]
+#[non_exhaustive]
 pub enum Error {
 	/// An error from the underlying MoQ transport layer.
 	#[error("moq lite error: {0}")]

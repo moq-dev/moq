@@ -11,6 +11,7 @@ pub trait Decode<V>: Sized {
 
 /// A decode error.
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum DecodeError {
 	#[error("short buffer")]
 	Short,
