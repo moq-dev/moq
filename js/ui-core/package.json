@@ -20,9 +20,7 @@
 		"release": "bun ../scripts/release.ts"
 	},
 	"peerDependencies": {
-		"@moq/hang": "workspace:^0.1.0",
-		"@moq/signals": "workspace:^0.1.0",
-		"@moq/watch": "workspace:^0.1.0"
+		"@moq/signals": "workspace:^0.1.0"
 	},
 	"devDependencies": {
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
