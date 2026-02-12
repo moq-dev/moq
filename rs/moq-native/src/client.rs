@@ -353,8 +353,14 @@ mod tests {
 
 	#[test]
 	fn test_cli_disable_verify_explicit_false() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify", "false"]);
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=false"]);
 		assert_eq!(config.tls.disable_verify, Some(false));
+	}
+
+	#[test]
+	fn test_cli_disable_verify_explicit_true() {
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=true"]);
+		assert_eq!(config.tls.disable_verify, Some(true));
 	}
 
 	#[test]
