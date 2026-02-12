@@ -1,3 +1,4 @@
+import { Announced } from "../announced.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
@@ -23,7 +24,7 @@ import {
 	type UnsubscribeNamespace,
 } from "./subscribe_namespace.ts";
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import { Version } from "./version.ts";
 
 /**
  * Handles publishing broadcasts using moq-transport protocol with lite-compatibility restrictions.
@@ -36,6 +37,9 @@ export class Publisher {
 
 	// Our published broadcasts.
 	#broadcasts: Map<Path.Valid, Broadcast> = new Map();
+
+	// Any consumers that want each new announcement.
+	#announcedConsumers = new Set<Announced>();
 
 	/**
 	 * Creates a new Publisher instance.
@@ -55,6 +59,7 @@ export class Publisher {
 	 */
 	publish(path: Path.Valid, broadcast: Broadcast) {
 		this.#broadcasts.set(path, broadcast);
+		this.#notifyConsumers(path, true);
 		void this.#runPublish(path, broadcast);
 	}
 
@@ -77,6 +82,7 @@ export class Publisher {
 		} finally {
 			broadcast.close();
 			this.#broadcasts.delete(path);
+			this.#notifyConsumers(path, false);
 		}
 	}
 
@@ -285,23 +291,42 @@ export class Publisher {
 			const ok = new RequestOk({ requestId: msg.requestId });
 			await ok.encode(stream.writer, version);
 
-			// Send NAMESPACE for each currently published broadcast matching prefix
-			const active = new Set<Path.Valid>();
+			// Create an Announced consumer and seed it with current broadcasts
+			const announced = new Announced(prefix);
 			for (const name of this.#broadcasts.keys()) {
 				const suffix = Path.stripPrefix(prefix, name);
 				if (suffix === null) continue;
-				console.debug(`namespace: broadcast=${name} suffix=${suffix}`);
-				active.add(suffix);
-
-				await stream.writer.u53(SubscribeNamespaceEntry.id);
-				const entry = new SubscribeNamespaceEntry({ suffix });
-				await entry.encode(stream.writer, version);
+				announced.append({ path: suffix, active: true });
 			}
+			this.#announcedConsumers.add(announced);
 
-			// Wait for broadcast changes and stream updates
-			// We poll by watching for stream close or broadcasts changing.
-			// This is a simplified version — we check periodically rather than using signals.
-			await Promise.race([stream.reader.closed, this.#watchBroadcasts(stream, prefix, active, version)]);
+			// Close the consumer when the stream closes
+			stream.reader.closed.then(
+				() => announced.close(),
+				() => announced.close(),
+			);
+
+			try {
+				for (;;) {
+					const entry = await announced.next();
+					if (!entry) break;
+
+					if (entry.active) {
+						console.debug(`namespace: suffix=${entry.path} active=true`);
+						await stream.writer.u53(SubscribeNamespaceEntry.id);
+						const msg = new SubscribeNamespaceEntry({ suffix: entry.path });
+						await msg.encode(stream.writer, version);
+					} else {
+						console.debug(`namespace: suffix=${entry.path} active=false`);
+						await stream.writer.u53(SubscribeNamespaceEntryDone.id);
+						const msg = new SubscribeNamespaceEntryDone({ suffix: entry.path });
+						await msg.encode(stream.writer, version);
+					}
+				}
+			} finally {
+				announced.close();
+				this.#announcedConsumers.delete(announced);
+			}
 
 			stream.close();
 		} catch (err: unknown) {
@@ -311,39 +336,15 @@ export class Publisher {
 		}
 	}
 
-	async #watchBroadcasts(stream: Stream, prefix: Path.Valid, active: Set<Path.Valid>, version: IetfVersion) {
-		// Simple polling approach - check for changes every 100ms
-		// A proper implementation would use signals/events
-		for (;;) {
-			await new Promise((resolve) => setTimeout(resolve, 100));
-
-			const newActive = new Set<Path.Valid>();
-			for (const name of this.#broadcasts.keys()) {
-				const suffix = Path.stripPrefix(prefix, name);
-				if (suffix === null) continue;
-				newActive.add(suffix);
+	#notifyConsumers(path: Path.Valid, active: boolean) {
+		for (const consumer of this.#announcedConsumers) {
+			const suffix = Path.stripPrefix(consumer.prefix, path);
+			if (suffix === null) continue;
+			try {
+				consumer.append({ path: suffix, active });
+			} catch {
+				// Consumer already closed, will be cleaned up
 			}
-
-			// Send NAMESPACE for new broadcasts
-			for (const added of newActive) {
-				if (active.has(added)) continue;
-				console.debug(`namespace: suffix=${added} active=true`);
-				await stream.writer.u53(SubscribeNamespaceEntry.id);
-				const entry = new SubscribeNamespaceEntry({ suffix: added });
-				await entry.encode(stream.writer, version);
-			}
-
-			// Send NAMESPACE_DONE for removed broadcasts
-			for (const removed of active) {
-				if (newActive.has(removed)) continue;
-				console.debug(`namespace: suffix=${removed} active=false`);
-				await stream.writer.u53(SubscribeNamespaceEntryDone.id);
-				const entry = new SubscribeNamespaceEntryDone({ suffix: removed });
-				await entry.encode(stream.writer, version);
-			}
-
-			active.clear();
-			for (const s of newActive) active.add(s);
 		}
 	}
 }

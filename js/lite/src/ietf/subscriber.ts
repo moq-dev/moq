@@ -161,7 +161,7 @@ export class Subscriber {
 							consumer.append({ path, active: false });
 						}
 					} else {
-						console.warn(`unexpected message type on subscribe_namespace stream: ${msgType}`);
+						throw new Error(`unexpected message type on subscribe_namespace stream: ${msgType}`);
 					}
 				}
 			})();

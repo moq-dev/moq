@@ -58,11 +58,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				})?;
 			} else {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
-				let request_id = namespace_requests.remove(&suffix).unwrap_or(RequestId(0));
-				self.control.send(ietf::PublishNamespaceDone {
-					track_namespace: suffix,
-					request_id,
-				})?;
+				if let Some(request_id) = namespace_requests.remove(&suffix) {
+					self.control.send(ietf::PublishNamespaceDone {
+						track_namespace: suffix,
+						request_id,
+					})?;
+				} else {
+					tracing::warn!(broadcast = %self.origin.absolute(&path), "unannounce for unknown namespace");
+				}
 			}
 		}
 
