@@ -22,7 +22,7 @@ bytes = "1"
 hang = { workspace = true }
 moq-lite = { workspace = true, features = ["serde"] }
 moq-mux = { workspace = true }
-moq-native = { workspace = true }
+moq-native = { workspace = true, default-features = true }
 slab = "0.4"
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }
@@ -34,5 +34,5 @@ cbindgen = "0.29"
 
 [dev-dependencies]
 anyhow = "1"
-moq-native = { workspace = true }
+moq-native = { workspace = true, default-features = true }
 url = "2"

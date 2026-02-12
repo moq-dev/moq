@@ -17,7 +17,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["iroh", "quinn", "websocket", "quiche"]
+default = ["iroh", "quinn", "websocket"]
 iroh = ["moq-native/iroh"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]

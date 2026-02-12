@@ -34,4 +34,4 @@ features = ["from", "display", "debug"]
 
 [dev-dependencies]
 anyhow = "1"
-moq-native = { workspace = true }
+moq-native = { workspace = true, default-features = true }
