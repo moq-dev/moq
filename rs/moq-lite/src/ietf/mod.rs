@@ -36,7 +36,6 @@ pub use publish_namespace::*;
 use publisher::*;
 pub use request::*;
 pub(crate) use session::*;
-pub use setup::*;
 pub use subscribe::*;
 pub use subscribe_namespace::*;
 use subscriber::*;

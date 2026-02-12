@@ -2906,6 +2906,7 @@ name = "libmoq"
 version = "0.2.7"
 dependencies = [
  "anyhow",
+ "bytes",
  "cbindgen",
  "hang",
  "moq-lite",

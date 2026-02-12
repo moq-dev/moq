@@ -4,8 +4,6 @@ use anyhow::Context;
 use std::path::PathBuf;
 use std::{net, sync::Arc};
 use url::Url;
-#[cfg(feature = "iroh")]
-use web_transport_iroh::iroh;
 
 /// TLS configuration for the client.
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
@@ -90,18 +88,13 @@ pub struct Client {
 	moq: moq_lite::Client,
 	#[cfg(feature = "websocket")]
 	websocket: super::ClientWebSocket,
-	inner: ClientInner,
 	tls: rustls::ClientConfig,
-	#[cfg(feature = "iroh")]
-	iroh: Option<iroh::Endpoint>,
-}
-
-#[derive(Clone)]
-enum ClientInner {
 	#[cfg(feature = "quinn")]
-	Quinn(crate::quinn::QuinnClient),
+	quinn: Option<crate::quinn::QuinnClient>,
 	#[cfg(feature = "quiche")]
-	Quiche(crate::quiche::QuicheClient),
+	quiche: Option<crate::quiche::QuicheClient>,
+	#[cfg(feature = "iroh")]
+	iroh: Option<web_transport_iroh::iroh::Endpoint>,
 }
 
 impl Client {
@@ -114,11 +107,16 @@ impl Client {
 	#[cfg(any(feature = "quinn", feature = "quiche"))]
 	pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
 		let backend = config.backend.clone().unwrap_or({
-			if cfg!(feature = "quinn") {
+			#[cfg(feature = "quinn")]
+			{
 				QuicBackend::Quinn
-			} else {
+			}
+			#[cfg(all(feature = "quiche", not(feature = "quinn")))]
+			{
 				QuicBackend::Quiche
 			}
+			#[cfg(all(not(feature = "quiche"), not(feature = "quinn")))]
+			panic!("no QUIC backend compiled; enable quinn or quiche feature");
 		});
 
 		let provider = crypto::provider();
@@ -167,21 +165,16 @@ impl Client {
 			tls.dangerous().set_certificate_verifier(Arc::new(noop));
 		}
 
-		let inner = match backend {
-			QuicBackend::Quinn => {
-				#[cfg(not(feature = "quinn"))]
-				anyhow::bail!("quinn backend not compiled; rebuild with --features quinn");
+		#[cfg(feature = "quinn")]
+		let quinn = match backend {
+			QuicBackend::Quinn => Some(crate::quinn::QuinnClient::new(&config)?),
+			_ => None,
+		};
 
-				#[cfg(feature = "quinn")]
-				ClientInner::Quinn(crate::quinn::QuinnClient::new(&config)?)
-			}
-			QuicBackend::Quiche => {
-				#[cfg(not(feature = "quiche"))]
-				anyhow::bail!("quiche backend not compiled; rebuild with --features quiche");
-
-				#[cfg(feature = "quiche")]
-				ClientInner::Quiche(crate::quiche::QuicheClient::new(&config)?)
-			}
+		#[cfg(feature = "quiche")]
+		let quiche = match backend {
+			QuicBackend::Quiche => Some(crate::quiche::QuicheClient::new(&config)?),
+			_ => None,
 		};
 
 		Ok(Self {
@@ -189,14 +182,17 @@ impl Client {
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
-			inner,
+			#[cfg(feature = "quinn")]
+			quinn,
+			#[cfg(feature = "quiche")]
+			quiche,
 			#[cfg(feature = "iroh")]
 			iroh: None,
 		})
 	}
 
 	#[cfg(feature = "iroh")]
-	pub fn with_iroh(mut self, iroh: Option<iroh::Endpoint>) -> Self {
+	pub fn with_iroh(mut self, iroh: Option<web_transport_iroh::iroh::Endpoint>) -> Self {
 		self.iroh = iroh;
 		self
 	}
@@ -220,94 +216,72 @@ impl Client {
 	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
 		#[cfg(feature = "iroh")]
 		if crate::iroh::is_iroh_url(&url) {
-			let session = self.connect_iroh(url).await?;
+			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
+			let session = crate::iroh::connect(endpoint, url).await?;
 			let session = self.moq.connect(session).await?;
 			return Ok(session);
 		}
 
-		match self.inner {
-			#[cfg(feature = "quinn")]
-			ClientInner::Quinn(ref quinn) => {
-				let tls = self.tls.clone();
-				let quic_url = url.clone();
-				let quic_handle = async {
-					let res = quinn.connect(&tls, quic_url).await;
-					if let Err(err) = &res {
-						tracing::warn!(%err, "QUIC connection failed");
-					}
-					res
-				};
-
-				#[cfg(feature = "websocket")]
-				{
-					let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url);
-
-					Ok(tokio::select! {
-						Ok(quic) = quic_handle => self.moq.connect(quic).await?,
-						Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-						else => anyhow::bail!("failed to connect to server"),
-					})
+		#[cfg(feature = "quinn")]
+		if let Some(quinn) = self.quinn.as_ref() {
+			let tls = self.tls.clone();
+			let quic_url = url.clone();
+			let quic_handle = async {
+				let res = quinn.connect(&tls, quic_url).await;
+				if let Err(err) = &res {
+					tracing::warn!(%err, "QUIC connection failed");
 				}
+				res
+			};
 
-				#[cfg(not(feature = "websocket"))]
-				{
-					let session = quic_handle.await?;
-					Ok(self.moq.connect(session).await?)
-				}
+			#[cfg(feature = "websocket")]
+			{
+				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url);
+
+				return Ok(tokio::select! {
+					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
+					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
+					else => anyhow::bail!("failed to connect to server"),
+				});
 			}
-			#[cfg(feature = "quiche")]
-			ClientInner::Quiche(ref quiche) => {
-				let quic_url = url.clone();
-				let quic_handle = async {
-					let res = quiche.connect(quic_url).await;
-					if let Err(err) = &res {
-						tracing::warn!(%err, "QUIC connection failed");
-					}
-					res
-				};
 
-				#[cfg(feature = "websocket")]
-				{
-					let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url);
-
-					Ok(tokio::select! {
-						Ok(quic) = quic_handle => self.moq.connect(quic).await?,
-						Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
-						else => anyhow::bail!("failed to connect to server"),
-					})
-				}
-
-				#[cfg(not(feature = "websocket"))]
-				{
-					let session = quic_handle.await?;
-					Ok(self.moq.connect(session).await?)
-				}
+			#[cfg(not(feature = "websocket"))]
+			{
+				let session = quic_handle.await?;
+				return Ok(self.moq.connect(session).await?);
 			}
 		}
-	}
 
-	#[cfg(feature = "iroh")]
-	async fn connect_iroh(&self, url: Url) -> anyhow::Result<web_transport_iroh::Session> {
-		let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
-		// TODO Support multiple ALPNs
-		let alpn = match url.scheme() {
-			"moql+iroh" | "iroh" => moq_lite::lite::ALPN,
-			"moqt+iroh" => moq_lite::ietf::ALPN_14,
-			"moqt-15+iroh" => moq_lite::ietf::ALPN_15,
-			"h3+iroh" => web_transport_iroh::ALPN_H3,
-			_ => anyhow::bail!("Invalid URL: unknown scheme"),
-		};
-		let host = url.host().context("Invalid URL: missing host")?.to_string();
-		let endpoint_id: iroh::EndpointId = host.parse().context("Invalid URL: host is not an iroh endpoint id")?;
-		let conn = endpoint.connect(endpoint_id, alpn.as_bytes()).await?;
-		let session = match alpn {
-			web_transport_iroh::ALPN_H3 => {
-				let url = url_set_scheme(url, "https")?;
-				web_transport_iroh::Session::connect_h3(conn, url).await?
+		#[cfg(feature = "quiche")]
+		if let Some(quiche) = self.quiche.as_ref() {
+			let quic_url = url.clone();
+			let quic_handle = async {
+				let res = quiche.connect(quic_url).await;
+				if let Err(err) = &res {
+					tracing::warn!(%err, "QUIC connection failed");
+				}
+				res
+			};
+
+			#[cfg(feature = "websocket")]
+			{
+				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url);
+
+				return Ok(tokio::select! {
+					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
+					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
+					else => anyhow::bail!("failed to connect to server"),
+				});
 			}
-			_ => web_transport_iroh::Session::raw(conn),
-		};
-		Ok(session)
+
+			#[cfg(not(feature = "websocket"))]
+			{
+				let session = quic_handle.await?;
+				return Ok(self.moq.connect(session).await?);
+			}
+		}
+
+		anyhow::bail!("no QUIC backend compiled; enable quinn or quiche feature");
 	}
 }
 
@@ -349,23 +323,6 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 	fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
 		self.0.signature_verification_algorithms.supported_schemes()
 	}
-}
-
-/// Returns a new URL with a changed scheme.
-///
-/// [`Url::set_scheme`] returns an error if the scheme change is not valid according to
-/// [the URL specification's section on legal scheme state overrides](https://url.spec.whatwg.org/#scheme-state).
-///
-/// This function allows all scheme changes, as long as the resulting URL is valid.
-#[cfg(feature = "iroh")]
-fn url_set_scheme(url: Url, scheme: &str) -> anyhow::Result<Url> {
-	let url = format!(
-		"{}:{}",
-		scheme,
-		url.to_string().split_once(":").context("invalid URL")?.1
-	)
-	.parse()?;
-	Ok(url)
 }
 
 #[cfg(test)]

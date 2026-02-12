@@ -10,6 +10,7 @@ impl<T> SendSyncError for T where T: std::error::Error + MaybeSend + MaybeSync {
 
 /// A list of possible errors that can occur during the session.
 #[derive(thiserror::Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum Error {
 	#[error("transport error: {0}")]
 	Transport(Arc<dyn SendSyncError>),

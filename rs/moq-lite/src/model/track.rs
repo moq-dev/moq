@@ -22,6 +22,7 @@ use std::{collections::VecDeque, future::Future};
 
 const MAX_CACHE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// A track is a collection of groups, delivered out-of-order until expired.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {

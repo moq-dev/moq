@@ -81,7 +81,7 @@ impl QuinnClient {
 
 		let alpns = match url.scheme() {
 			"https" => vec![web_transport_quinn::ALPN.as_bytes().to_vec()],
-			"moqt" | "moql" => moq_lite::alpns().iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
+			"moqt" | "moql" => moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
 			_ => anyhow::bail!("url scheme must be 'https', 'moqt', or 'moql'"),
 		};
 
@@ -98,7 +98,7 @@ impl QuinnClient {
 		tracing::Span::current().record("id", connection.stable_id());
 
 		let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
-		for alpn in moq_lite::alpns() {
+		for alpn in moq_lite::ALPNS {
 			request = request.with_protocol(alpn.to_string());
 		}
 
@@ -210,7 +210,7 @@ impl QuinnServer {
 			.with_cert_resolver(certs.clone());
 
 		let mut alpns = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
-		for alpn in moq_lite::alpns() {
+		for alpn in moq_lite::ALPNS {
 			alpns.push(alpn.as_bytes().to_vec());
 		}
 
@@ -313,7 +313,7 @@ impl QuinnRequest {
 					.context("failed to receive WebTransport request")?;
 				Ok(Self::WebTransport { request })
 			}
-			alpn if moq_lite::alpns().contains(&alpn) => {
+			alpn if moq_lite::ALPNS.contains(&alpn) => {
 				let url = format!("moqt://{}", host).parse::<Url>().unwrap();
 				let request = web_transport_quinn::proto::ConnectRequest::new(url);
 				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);

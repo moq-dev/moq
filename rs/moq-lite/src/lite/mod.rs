@@ -25,7 +25,6 @@ pub use message::*;
 pub use parameters::*;
 use publisher::*;
 pub(super) use session::*;
-pub use setup::*;
 pub use stream::*;
 pub use subscribe::*;
 use subscriber::*;

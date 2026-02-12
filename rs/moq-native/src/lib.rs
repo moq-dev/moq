@@ -44,6 +44,11 @@ pub use iroh::*;
 #[derive(Clone, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QuicBackend {
+	/// [web-transport-quinn](https://crates.io/crates/web-transport-quinn)
+	#[cfg(feature = "quinn")]
 	Quinn,
+
+	/// [web-transport-quiche](https://crates.io/crates/web-transport-quiche)
+	#[cfg(feature = "quiche")]
 	Quiche,
 }

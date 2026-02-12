@@ -6,10 +6,6 @@ use std::{fmt, ops::Deref};
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Version(pub u64);
 
-/// A version number negotiated during the setup.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Alpn(pub &'static str);
-
 impl From<u64> for Version {
 	fn from(v: u64) -> Self {
 		Self(v)
