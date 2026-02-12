@@ -1,5 +1,5 @@
 import { Mutex } from "async-mutex";
-import type { Reader, Stream as StreamInner, Writer } from "../stream.ts";
+import type { Stream as StreamInner, Writer } from "../stream.ts";
 import { Fetch, FetchCancel, FetchError, FetchOk } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import { Publish, PublishDone, PublishError, PublishOk } from "./publish.ts";
@@ -152,10 +152,8 @@ export class Stream {
 			try {
 				const msgClass = messages[messageType as keyof typeof messages];
 
-				const msg = await (msgClass as { decode: (r: Reader, v: IetfVersion) => Promise<Message> }).decode(
-					this.stream.reader,
-					this.version,
-				);
+				console.debug("reading message", msgClass);
+				const msg = await msgClass.decode(this.stream.reader, this.version);
 
 				console.debug("message read", msg);
 				return msg;

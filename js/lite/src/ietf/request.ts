@@ -121,8 +121,8 @@ export class RequestError {
 	static async #decode(r: Reader, version: IetfVersion): Promise<RequestError> {
 		const requestId = await r.u62();
 		const errorCode = Number(await r.u62());
-		const reasonPhrase = await r.string();
 		const retryInterval = version === Version.DRAFT_16 ? await r.u62() : 0n;
+		const reasonPhrase = await r.string();
 		return new RequestError(requestId, errorCode, reasonPhrase, retryInterval);
 	}
 
