@@ -62,8 +62,9 @@ async fn run<S: web_transport_trait::Session>(
 	tokio::select! {
 		res = subscriber.clone().run() => res,
 		res = publisher.clone().run() => res,
-		res = run_control_read(setup.reader, control, publisher, subscriber, version) => res,
+		res = run_control_read(setup.reader, control, publisher.clone(), subscriber, version) => res,
 		res = Control::run::<S>(setup.writer, rx) => res,
+		res = run_bidi_streams(session, publisher, version) => res,
 	}
 }
 
@@ -174,11 +175,15 @@ async fn run_control_read<S: web_transport_trait::Session>(
 				tracing::debug!(message = ?msg, "received control message");
 				return Err(Error::Unsupported);
 			}
-			ietf::SubscribeNamespace::ID => {
-				let msg = ietf::SubscribeNamespace::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				publisher.recv_subscribe_namespace(msg)?;
-			}
+			// 0x11: SubscribeNamespace — v14/v15: control stream, v16: bidi stream only
+			ietf::SubscribeNamespace::ID => match version {
+				Version::Draft14 | Version::Draft15 => {
+					let msg = ietf::SubscribeNamespace::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					publisher.recv_subscribe_namespace(msg)?;
+				}
+				Version::Draft16 => return Err(Error::UnexpectedMessage),
+			},
 			// 0x12: SubscribeNamespaceOk in v14, removed in v15+
 			ietf::SubscribeNamespaceOk::ID => match version {
 				Version::Draft14 => {
@@ -197,11 +202,15 @@ async fn run_control_read<S: web_transport_trait::Session>(
 				}
 				Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
 			},
-			ietf::UnsubscribeNamespace::ID => {
-				let msg = ietf::UnsubscribeNamespace::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				publisher.recv_unsubscribe_namespace(msg)?;
-			}
+			// 0x14: UnsubscribeNamespace — v14/v15: control stream, v16: removed (use stream close)
+			ietf::UnsubscribeNamespace::ID => match version {
+				Version::Draft14 | Version::Draft15 => {
+					let msg = ietf::UnsubscribeNamespace::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					publisher.recv_unsubscribe_namespace(msg)?;
+				}
+				Version::Draft16 => return Err(Error::UnexpectedMessage),
+			},
 			ietf::MaxRequestId::ID => {
 				let msg = ietf::MaxRequestId::decode_msg(&mut data, version)?;
 				tracing::debug!(message = ?msg, "received control message");
@@ -254,6 +263,43 @@ async fn run_control_read<S: web_transport_trait::Session>(
 
 		if !data.is_empty() {
 			return Err(Error::WrongSize);
+		}
+	}
+}
+
+/// Accept bidirectional streams for v16 SUBSCRIBE_NAMESPACE.
+/// For v14/v15, no bidi streams are expected (other than the control stream).
+async fn run_bidi_streams<S: web_transport_trait::Session>(
+	session: S,
+	publisher: Publisher<S>,
+	version: Version,
+) -> Result<(), Error> {
+	// Only v16 uses bidi streams for SUBSCRIBE_NAMESPACE
+	if version != Version::Draft16 {
+		// Park forever — we don't accept bidi streams for v14/v15.
+		std::future::pending::<()>().await;
+		return Ok(());
+	}
+
+	loop {
+		let mut stream = Stream::accept(&session, version).await?;
+
+		// Read the first message type ID to determine the stream type
+		let id: u64 = stream.reader.decode().await?;
+
+		match id {
+			ietf::SubscribeNamespace::ID => {
+				let mut pub_clone = publisher.clone();
+				web_async::spawn(async move {
+					if let Err(err) = pub_clone.recv_subscribe_namespace_stream(stream).await {
+						tracing::debug!(%err, "subscribe_namespace stream error");
+					}
+				});
+			}
+			_ => {
+				tracing::warn!(id, "unexpected bidi stream type");
+				return Err(Error::UnexpectedStream);
+			}
 		}
 	}
 }

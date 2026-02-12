@@ -26,6 +26,9 @@ struct State {
 
 	// Each PUBLISH message that is implicitly causing a PUBLISH_NAMESPACE message.
 	publishes: HashMap<RequestId, PathOwned>,
+
+	// Maps PublishNamespace request_id → track_namespace (for v16 PublishNamespaceDone)
+	publish_namespace_ids: HashMap<RequestId, PathOwned>,
 }
 
 struct TrackState {
@@ -64,6 +67,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	pub fn recv_publish_namespace(&mut self, msg: ietf::PublishNamespace) -> Result<(), Error> {
 		let request_id = msg.request_id;
+
+		// Track the request_id → namespace mapping for v16 PublishNamespaceDone
+		{
+			let mut state = self.state.lock();
+			state
+				.publish_namespace_ids
+				.insert(request_id, msg.track_namespace.to_owned());
+		}
 
 		match self.start_announce(msg.track_namespace.to_owned()) {
 			Ok(_) => self.send_ok(request_id),
@@ -159,7 +170,23 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub fn recv_publish_namespace_done(&mut self, msg: ietf::PublishNamespaceDone) -> Result<(), Error> {
-		self.stop_announce(msg.track_namespace.to_owned())
+		match self.version {
+			Version::Draft14 | Version::Draft15 => self.stop_announce(msg.track_namespace.to_owned()),
+			Version::Draft16 => {
+				// In v16, PublishNamespaceDone uses request_id instead of track_namespace
+				let state = self.state.lock();
+				let path = state.publish_namespace_ids.get(&msg.request_id).cloned();
+				drop(state);
+
+				if let Some(path) = path {
+					self.state.lock().publish_namespace_ids.remove(&msg.request_id);
+					self.stop_announce(path)
+				} else {
+					tracing::warn!(request_id = %msg.request_id, "unknown publish_namespace request_id in done");
+					Ok(())
+				}
+			}
+		}
 	}
 
 	pub fn recv_subscribe_ok(&mut self, msg: ietf::SubscribeOk) -> Result<(), Error> {

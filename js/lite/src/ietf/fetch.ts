@@ -16,17 +16,27 @@ export class Fetch {
 	endGroup: bigint;
 	endObject: bigint;
 
-	constructor(
-		requestId: bigint,
-		trackNamespace: Path.Valid,
-		trackName: string,
-		subscriberPriority: number,
-		groupOrder: number,
-		startGroup: bigint,
-		startObject: bigint,
-		endGroup: bigint,
-		endObject: bigint,
-	) {
+	constructor({
+		requestId,
+		trackNamespace,
+		trackName,
+		subscriberPriority,
+		groupOrder,
+		startGroup,
+		startObject,
+		endGroup,
+		endObject,
+	}: {
+		requestId: bigint;
+		trackNamespace: Path.Valid;
+		trackName: string;
+		subscriberPriority: number;
+		groupOrder: number;
+		startGroup: bigint;
+		startObject: bigint;
+		endGroup: bigint;
+		endObject: bigint;
+	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
@@ -60,7 +70,7 @@ export class FetchOk {
 
 	requestId: bigint;
 
-	constructor(requestId: bigint) {
+	constructor({ requestId }: { requestId: bigint }) {
 		this.requestId = requestId;
 	}
 
@@ -88,7 +98,11 @@ export class FetchError {
 	errorCode: number;
 	reasonPhrase: string;
 
-	constructor(requestId: bigint, errorCode: number, reasonPhrase: string) {
+	constructor({
+		requestId,
+		errorCode,
+		reasonPhrase,
+	}: { requestId: bigint; errorCode: number; reasonPhrase: string }) {
 		this.requestId = requestId;
 		this.errorCode = errorCode;
 		this.reasonPhrase = reasonPhrase;
@@ -116,7 +130,7 @@ export class FetchCancel {
 
 	requestId: bigint;
 
-	constructor(requestId: bigint) {
+	constructor({ requestId }: { requestId: bigint }) {
 		this.requestId = requestId;
 	}
 

@@ -1,7 +1,7 @@
 import type { Broadcast } from "../broadcast.ts";
 import type { Group } from "../group.ts";
-import type * as Path from "../path.ts";
-import { Writer } from "../stream.ts";
+import * as Path from "../path.ts";
+import { type Stream, Writer } from "../stream.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import type * as Control from "./control.ts";
@@ -14,11 +14,16 @@ import {
 	type PublishNamespaceError,
 	type PublishNamespaceOk,
 } from "./publish_namespace.ts";
-import { RequestError, type RequestOk } from "./request.ts";
+import { RequestError, RequestOk } from "./request.ts";
 import { type Subscribe, SubscribeError, SubscribeOk, type Unsubscribe } from "./subscribe.ts";
-import type { SubscribeNamespace, UnsubscribeNamespace } from "./subscribe_namespace.ts";
+import {
+	SubscribeNamespace,
+	SubscribeNamespaceEntry,
+	SubscribeNamespaceEntryDone,
+	type UnsubscribeNamespace,
+} from "./subscribe_namespace.ts";
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
-import { Version } from "./version.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 /**
  * Handles publishing broadcasts using moq-transport protocol with lite-compatibility restrictions.
@@ -39,7 +44,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, control: Control.Stream) {
+	constructor({ quic, control }: { quic: WebTransport; control: Control.Stream }) {
 		this.#quic = quic;
 		this.#control = control;
 	}
@@ -58,13 +63,13 @@ export class Publisher {
 			const requestId = await this.#control.nextRequestId();
 			if (requestId === undefined) return;
 
-			const announce = new PublishNamespace(requestId, path);
+			const announce = new PublishNamespace({ requestId, trackNamespace: path });
 			await this.#control.write(announce);
 
 			// Wait until the broadcast is closed, then remove it from the lookup.
 			await broadcast.closed;
 
-			const unannounce = new PublishNamespaceDone(path);
+			const unannounce = new PublishNamespaceDone({ trackNamespace: path });
 			await this.#control.write(unannounce);
 		} catch (err: unknown) {
 			const e = error(err);
@@ -88,10 +93,18 @@ export class Publisher {
 
 		if (!broadcast) {
 			if (this.#control.version === Version.DRAFT_15 || this.#control.version === Version.DRAFT_16) {
-				const errorMsg = new RequestError(msg.requestId, 404, "Broadcast not found");
+				const errorMsg = new RequestError({
+					requestId: msg.requestId,
+					errorCode: 404,
+					reasonPhrase: "Broadcast not found",
+				});
 				await this.#control.write(errorMsg);
 			} else if (this.#control.version === Version.DRAFT_14) {
-				const errorMsg = new SubscribeError(msg.requestId, 404, "Broadcast not found");
+				const errorMsg = new SubscribeError({
+					requestId: msg.requestId,
+					errorCode: 404,
+					reasonPhrase: "Broadcast not found",
+				});
 				await this.#control.write(errorMsg);
 			} else {
 				const version: never = this.#control.version;
@@ -104,7 +117,7 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.trackName, msg.subscriberPriority);
 
 		// Send SUBSCRIBE_OK response on control stream
-		const okMsg = new SubscribeOk(msg.requestId, msg.requestId);
+		const okMsg = new SubscribeOk({ requestId: msg.requestId, trackAlias: msg.requestId });
 		await this.#control.write(okMsg);
 		console.debug(`publish ok: broadcast=${name} track=${track.name}`);
 
@@ -129,12 +142,12 @@ export class Publisher {
 			}
 
 			console.debug(`publish done: broadcast=${broadcast} track=${track.name}`);
-			const msg = new PublishDone(requestId, 200, "OK");
+			const msg = new PublishDone({ requestId, statusCode: 200, reasonPhrase: "OK" });
 			await this.#control.write(msg);
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`publish error: broadcast=${broadcast} track=${track.name} error=${e.message}`);
-			const msg = new PublishDone(requestId, 500, e.message);
+			const msg = new PublishDone({ requestId, statusCode: 500, reasonPhrase: e.message });
 			await this.#control.write(msg);
 		} finally {
 			track.close();
@@ -154,13 +167,19 @@ export class Publisher {
 			const stream = await Writer.open(this.#quic);
 
 			// Write STREAM_HEADER_SUBGROUP
-			const header = new GroupMessage(requestId, group.sequence, 0, 0, {
-				hasExtensions: false,
-				hasSubgroup: false,
-				hasSubgroupObject: false,
-				// Automatically end the group on stream FIN
-				hasEnd: true,
-				hasPriority: true,
+			const header = new GroupMessage({
+				trackAlias: requestId,
+				groupId: group.sequence,
+				subGroupId: 0,
+				publisherPriority: 0,
+				flags: {
+					hasExtensions: false,
+					hasSubgroup: false,
+					hasSubgroupObject: false,
+					// Automatically end the group on stream FIN
+					hasEnd: true,
+					hasPriority: true,
+				},
 			});
 
 			console.debug("sending group header", header);
@@ -172,7 +191,7 @@ export class Publisher {
 					if (!frame) break;
 
 					// Write each frame as an object
-					const obj = new Frame(frame);
+					const obj = new Frame({ payload: frame });
 					await obj.encode(stream, header.flags);
 				}
 
@@ -191,7 +210,13 @@ export class Publisher {
 	 */
 	async handleTrackStatusRequest(msg: TrackStatusRequest) {
 		// moq-lite doesn't support track status requests
-		const statusMsg = new TrackStatus(msg.trackNamespace, msg.trackName, TrackStatus.STATUS_NOT_FOUND, 0n, 0n);
+		const statusMsg = new TrackStatus({
+			trackNamespace: msg.trackNamespace,
+			trackName: msg.trackName,
+			statusCode: TrackStatus.STATUS_NOT_FOUND,
+			lastGroupId: 0n,
+			lastObjectId: 0n,
+		});
 		await this.#control.write(statusMsg);
 	}
 
@@ -239,5 +264,86 @@ export class Publisher {
 	// v15: REQUEST_ERROR replaces SubscribeError, PublishError, etc.
 	async handleRequestError(_msg: RequestError) {
 		// TODO: route by request_id to determine what kind of request it belongs to
+	}
+
+	/**
+	 * Handle a v16 SUBSCRIBE_NAMESPACE on a bidirectional stream.
+	 * Reads the request, sends REQUEST_OK, then streams NAMESPACE/NAMESPACE_DONE.
+	 */
+	async handleSubscribeNamespaceStream(stream: Stream) {
+		const version = this.#control.version;
+
+		try {
+			// Read the SubscribeNamespace message (type ID already consumed by connection)
+			const msg = await SubscribeNamespace.decode(stream.reader, version);
+			const prefix = msg.namespace;
+
+			console.debug(`subscribe_namespace stream: prefix=${prefix}`);
+
+			// Send REQUEST_OK
+			await stream.writer.u53(RequestOk.id);
+			const ok = new RequestOk({ requestId: msg.requestId });
+			await ok.encode(stream.writer, version);
+
+			// Send NAMESPACE for each currently published broadcast matching prefix
+			const active = new Set<Path.Valid>();
+			for (const name of this.#broadcasts.keys()) {
+				const suffix = Path.stripPrefix(prefix, name);
+				if (suffix === null) continue;
+				console.debug(`namespace: broadcast=${name} suffix=${suffix}`);
+				active.add(suffix);
+
+				await stream.writer.u53(SubscribeNamespaceEntry.id);
+				const entry = new SubscribeNamespaceEntry({ suffix });
+				await entry.encode(stream.writer, version);
+			}
+
+			// Wait for broadcast changes and stream updates
+			// We poll by watching for stream close or broadcasts changing.
+			// This is a simplified version — we check periodically rather than using signals.
+			await Promise.race([stream.reader.closed, this.#watchBroadcasts(stream, prefix, active, version)]);
+
+			stream.close();
+		} catch (err: unknown) {
+			const e = error(err);
+			console.debug(`subscribe_namespace stream error: ${e.message}`);
+			stream.abort(e);
+		}
+	}
+
+	async #watchBroadcasts(stream: Stream, prefix: Path.Valid, active: Set<Path.Valid>, version: IetfVersion) {
+		// Simple polling approach - check for changes every 100ms
+		// A proper implementation would use signals/events
+		for (;;) {
+			await new Promise((resolve) => setTimeout(resolve, 100));
+
+			const newActive = new Set<Path.Valid>();
+			for (const name of this.#broadcasts.keys()) {
+				const suffix = Path.stripPrefix(prefix, name);
+				if (suffix === null) continue;
+				newActive.add(suffix);
+			}
+
+			// Send NAMESPACE for new broadcasts
+			for (const added of newActive) {
+				if (active.has(added)) continue;
+				console.debug(`namespace: suffix=${added} active=true`);
+				await stream.writer.u53(SubscribeNamespaceEntry.id);
+				const entry = new SubscribeNamespaceEntry({ suffix: added });
+				await entry.encode(stream.writer, version);
+			}
+
+			// Send NAMESPACE_DONE for removed broadcasts
+			for (const removed of active) {
+				if (newActive.has(removed)) continue;
+				console.debug(`namespace: suffix=${removed} active=false`);
+				await stream.writer.u53(SubscribeNamespaceEntryDone.id);
+				const entry = new SubscribeNamespaceEntryDone({ suffix: removed });
+				await entry.encode(stream.writer, version);
+			}
+
+			active.clear();
+			for (const s of newActive) active.add(s);
+		}
 	}
 }

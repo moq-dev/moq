@@ -19,16 +19,25 @@ export class Publish {
 	largest: { groupId: bigint; objectId: bigint } | undefined;
 	forward: boolean;
 
-	constructor(
-		requestId: bigint,
-		trackNamespace: Path.Valid,
-		trackName: string,
-		trackAlias: bigint,
-		groupOrder: number,
-		contentExists: boolean,
-		largest: { groupId: bigint; objectId: bigint } | undefined,
-		forward: boolean,
-	) {
+	constructor({
+		requestId,
+		trackNamespace,
+		trackName,
+		trackAlias,
+		groupOrder,
+		contentExists,
+		largest,
+		forward,
+	}: {
+		requestId: bigint;
+		trackNamespace: Path.Valid;
+		trackName: string;
+		trackAlias: bigint;
+		groupOrder: number;
+		contentExists: boolean;
+		largest: { groupId: bigint; objectId: bigint } | undefined;
+		forward: boolean;
+	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
@@ -91,23 +100,23 @@ export class Publish {
 			const groupOrder = params.groupOrder ?? 0x02;
 			const forward = params.forward ?? true;
 			const largest = params.largest;
-			return new Publish(
+			return new Publish({
 				requestId,
 				trackNamespace,
 				trackName,
 				trackAlias,
 				groupOrder,
-				!!largest,
+				contentExists: !!largest,
 				largest,
 				forward,
-			);
+			});
 		} else if (version === Version.DRAFT_14) {
 			const groupOrder = await r.u8();
 			const contentExists = await r.bool();
 			const largest = contentExists ? { groupId: await r.u62(), objectId: await r.u62() } : undefined;
 			const forward = await r.bool();
 			await Parameters.decode(r, version); // ignore parameters
-			return new Publish(
+			return new Publish({
 				requestId,
 				trackNamespace,
 				trackName,
@@ -116,7 +125,7 @@ export class Publish {
 				contentExists,
 				largest,
 				forward,
-			);
+			});
 		} else {
 			const _: never = version;
 			throw new Error(`unsupported version: ${_}`);
@@ -151,7 +160,11 @@ export class PublishError {
 	errorCode: number;
 	reasonPhrase: string;
 
-	constructor(requestId: bigint, errorCode: number, reasonPhrase: string) {
+	constructor({
+		requestId,
+		errorCode,
+		reasonPhrase,
+	}: { requestId: bigint; errorCode: number; reasonPhrase: string }) {
 		this.requestId = requestId;
 		this.errorCode = errorCode;
 		this.reasonPhrase = reasonPhrase;
@@ -175,7 +188,7 @@ export class PublishError {
 		const requestId = await r.u62();
 		const errorCode = Number(await r.u62());
 		const reasonPhrase = await r.string();
-		return new PublishError(requestId, errorCode, reasonPhrase);
+		return new PublishError({ requestId, errorCode, reasonPhrase });
 	}
 }
 
@@ -187,7 +200,11 @@ export class PublishDone {
 	statusCode: number;
 	reasonPhrase: string;
 
-	constructor(requestId: bigint, statusCode: number, reasonPhrase: string) {
+	constructor({
+		requestId,
+		statusCode,
+		reasonPhrase,
+	}: { requestId: bigint; statusCode: number; reasonPhrase: string }) {
 		this.requestId = requestId;
 		this.statusCode = statusCode;
 		this.reasonPhrase = reasonPhrase;
@@ -214,6 +231,6 @@ export class PublishDone {
 		await r.u62(); // ignore stream_count
 		const reasonPhrase = await r.string();
 
-		return new PublishDone(requestId, statusCode, reasonPhrase);
+		return new PublishDone({ requestId, statusCode, reasonPhrase });
 	}
 }

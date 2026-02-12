@@ -5,10 +5,11 @@ use web_async::{FuturesExt, Lock};
 use web_transport_trait::SendStream;
 
 use crate::{
-	Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
 	coding::Writer,
 	ietf::{
-		self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, MessageParameters, RequestId, Version,
+		self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, Message, MessageParameters, RequestId,
+		Version,
 	},
 	model::GroupConsumer,
 };
@@ -39,6 +40,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub async fn run(mut self) -> Result<(), Error> {
+		// Track request_id → namespace mapping for v16 PublishNamespaceDone
+		let mut namespace_requests: HashMap<crate::PathOwned, RequestId> = HashMap::new();
+
 		while let Some((path, active)) = self.origin.announced().await {
 			let suffix = path.to_owned();
 
@@ -46,6 +50,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
 
 				let request_id = self.control.next_request_id().await?;
+				namespace_requests.insert(suffix.clone(), request_id);
 
 				self.control.send(ietf::PublishNamespace {
 					request_id,
@@ -53,8 +58,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				})?;
 			} else {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
+				let request_id = namespace_requests.remove(&suffix).unwrap_or(RequestId(0));
 				self.control.send(ietf::PublishNamespaceDone {
 					track_namespace: suffix,
+					request_id,
 				})?;
 			}
 		}
@@ -465,5 +472,76 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn recv_fetch_cancel(&mut self, msg: ietf::FetchCancel) -> Result<(), Error> {
 		tracing::warn!(?msg, "fetch cancel");
 		Ok(())
+	}
+
+	/// Handle a SUBSCRIBE_NAMESPACE message received on a v16 bidirectional stream.
+	/// Reads the request, sends REQUEST_OK, then streams NAMESPACE/NAMESPACE_DONE messages.
+	pub async fn recv_subscribe_namespace_stream(
+		&mut self,
+		mut stream: crate::coding::Stream<S, Version>,
+	) -> Result<(), Error> {
+		let msg: ietf::SubscribeNamespace = stream.reader.decode().await?;
+		let prefix = msg.namespace.to_owned();
+
+		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
+
+		// Create a filtered consumer for this prefix
+		let mut origin = self
+			.origin
+			.consume_only(&[prefix.as_path()])
+			.ok_or(Error::Unauthorized)?;
+
+		// Send REQUEST_OK
+		stream.writer.encode(&ietf::RequestOk::ID).await?;
+		stream
+			.writer
+			.encode(&ietf::RequestOk {
+				request_id: msg.request_id,
+				parameters: ietf::MessageParameters::default(),
+			})
+			.await?;
+
+		// Send initial NAMESPACE messages for currently active namespaces
+		while let Some((path, active)) = origin.try_announced() {
+			let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
+			if active.is_some() {
+				tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
+				stream.writer.encode(&ietf::Namespace::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::Namespace {
+						suffix: suffix.to_owned(),
+					})
+					.await?;
+			}
+		}
+
+		// Stream updates
+		loop {
+			tokio::select! {
+				biased;
+				res = stream.reader.closed() => return res,
+				announced = origin.announced() => {
+					match announced {
+						Some((path, active)) => {
+							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
+							if active.is_some() {
+								tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
+								stream.writer.encode(&ietf::Namespace::ID).await?;
+								stream.writer.encode(&ietf::Namespace { suffix }).await?;
+							} else {
+								tracing::debug!(broadcast = %origin.absolute(&path), "namespace_done");
+								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+								stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
+							}
+						}
+						None => {
+							stream.writer.finish()?;
+							return stream.writer.closed().await;
+						}
+					}
+				}
+			}
+		}
 	}
 }

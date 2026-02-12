@@ -23,7 +23,19 @@ export class Group {
 	subGroupId: number;
 	publisherPriority: number;
 
-	constructor(trackAlias: bigint, groupId: number, subGroupId: number, publisherPriority: number, flags: GroupFlags) {
+	constructor({
+		trackAlias,
+		groupId,
+		subGroupId,
+		publisherPriority,
+		flags,
+	}: {
+		trackAlias: bigint;
+		groupId: number;
+		subGroupId: number;
+		publisherPriority: number;
+		flags: GroupFlags;
+	}) {
 		this.flags = flags;
 		this.trackAlias = trackAlias;
 		this.groupId = groupId;
@@ -89,7 +101,7 @@ export class Group {
 		const subGroupId = flags.hasSubgroup ? await r.u53() : 0;
 		const publisherPriority = hasPriority ? await r.u8() : 128; // Default priority when absent
 
-		return new Group(trackAlias, groupId, subGroupId, publisherPriority, flags);
+		return new Group({ trackAlias, groupId, subGroupId, publisherPriority, flags });
 	}
 }
 
@@ -97,7 +109,7 @@ export class Frame {
 	// undefined means end of group
 	payload?: Uint8Array;
 
-	constructor(payload?: Uint8Array) {
+	constructor({ payload }: { payload?: Uint8Array } = {}) {
 		this.payload = payload;
 	}
 
@@ -138,14 +150,14 @@ export class Frame {
 
 		if (payloadLength > 0) {
 			const payload = await r.read(payloadLength);
-			return new Frame(payload);
+			return new Frame({ payload });
 		}
 
 		const status = await r.u53();
 
 		if (flags.hasEnd) {
 			// Empty frame
-			if (status === 0) return new Frame(new Uint8Array(0));
+			if (status === 0) return new Frame({ payload: new Uint8Array(0) });
 		} else if (status === 0 || status === GROUP_END) {
 			// TODO status === 0 should be an empty frame, but moq-rs seems to be sending it incorrectly on group end.
 			return new Frame();

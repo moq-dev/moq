@@ -8,7 +8,7 @@ export class MaxRequestId {
 
 	requestId: bigint;
 
-	constructor(requestId: bigint) {
+	constructor({ requestId }: { requestId: bigint }) {
 		this.requestId = requestId;
 	}
 
@@ -21,7 +21,7 @@ export class MaxRequestId {
 	}
 
 	static async #decode(r: Reader): Promise<MaxRequestId> {
-		return new MaxRequestId(await r.u62());
+		return new MaxRequestId({ requestId: await r.u62() });
 	}
 
 	static async decode(r: Reader, _version: IetfVersion): Promise<MaxRequestId> {
@@ -34,7 +34,7 @@ export class RequestsBlocked {
 
 	requestId: bigint;
 
-	constructor(requestId: bigint) {
+	constructor({ requestId }: { requestId: bigint }) {
 		this.requestId = requestId;
 	}
 
@@ -47,7 +47,7 @@ export class RequestsBlocked {
 	}
 
 	static async #decode(r: Reader): Promise<RequestsBlocked> {
-		return new RequestsBlocked(await r.u62());
+		return new RequestsBlocked({ requestId: await r.u62() });
 	}
 
 	static async decode(r: Reader, _version: IetfVersion): Promise<RequestsBlocked> {
@@ -63,7 +63,10 @@ export class RequestOk {
 	requestId: bigint;
 	parameters: MessageParameters;
 
-	constructor(requestId: bigint, parameters = new MessageParameters()) {
+	constructor({
+		requestId,
+		parameters = new MessageParameters(),
+	}: { requestId: bigint; parameters?: MessageParameters }) {
 		this.requestId = requestId;
 		this.parameters = parameters;
 	}
@@ -80,7 +83,7 @@ export class RequestOk {
 	static async #decode(r: Reader, version: IetfVersion): Promise<RequestOk> {
 		const requestId = await r.u62();
 		const parameters = await MessageParameters.decode(r, version);
-		return new RequestOk(requestId, parameters);
+		return new RequestOk({ requestId, parameters });
 	}
 
 	static async decode(r: Reader, version: IetfVersion): Promise<RequestOk> {
@@ -98,7 +101,17 @@ export class RequestError {
 	reasonPhrase: string;
 	retryInterval: bigint;
 
-	constructor(requestId: bigint, errorCode: number, reasonPhrase: string, retryInterval = 0n) {
+	constructor({
+		requestId,
+		errorCode,
+		reasonPhrase,
+		retryInterval = 0n,
+	}: {
+		requestId: bigint;
+		errorCode: number;
+		reasonPhrase: string;
+		retryInterval?: bigint;
+	}) {
 		this.requestId = requestId;
 		this.errorCode = errorCode;
 		this.reasonPhrase = reasonPhrase;
@@ -123,7 +136,7 @@ export class RequestError {
 		const errorCode = Number(await r.u62());
 		const retryInterval = version === Version.DRAFT_16 ? await r.u62() : 0n;
 		const reasonPhrase = await r.string();
-		return new RequestError(requestId, errorCode, reasonPhrase, retryInterval);
+		return new RequestError({ requestId, errorCode, reasonPhrase, retryInterval });
 	}
 
 	static async decode(r: Reader, version: IetfVersion): Promise<RequestError> {

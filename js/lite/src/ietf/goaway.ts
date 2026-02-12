@@ -7,7 +7,7 @@ export class GoAway {
 
 	newSessionUri: string;
 
-	constructor(newSessionUri: string) {
+	constructor({ newSessionUri }: { newSessionUri: string }) {
 		this.newSessionUri = newSessionUri;
 	}
 
@@ -25,6 +25,6 @@ export class GoAway {
 
 	static async #decode(r: Reader): Promise<GoAway> {
 		const newSessionUri = await r.string();
-		return new GoAway(newSessionUri);
+		return new GoAway({ newSessionUri });
 	}
 }

@@ -16,7 +16,17 @@ export class Subscribe {
 	trackName: string;
 	subscriberPriority: number;
 
-	constructor(requestId: bigint, trackNamespace: Path.Valid, trackName: string, subscriberPriority: number) {
+	constructor({
+		requestId,
+		trackNamespace,
+		trackName,
+		subscriberPriority,
+	}: {
+		requestId: bigint;
+		trackNamespace: Path.Valid;
+		trackName: string;
+		subscriberPriority: number;
+	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
@@ -83,7 +93,7 @@ export class Subscribe {
 				throw new Error(`unsupported filter type: ${filterType}`);
 			}
 
-			return new Subscribe(requestId, trackNamespace, trackName, subscriberPriority);
+			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority });
 		} else if (version === Version.DRAFT_14) {
 			const subscriberPriority = await r.u8();
 
@@ -107,7 +117,7 @@ export class Subscribe {
 
 			await Parameters.decode(r, version); // ignore parameters
 
-			return new Subscribe(requestId, trackNamespace, trackName, subscriberPriority);
+			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority });
 		} else {
 			const _: never = version;
 			throw new Error(`unsupported version: ${_}`);
@@ -121,7 +131,7 @@ export class SubscribeOk {
 	requestId: bigint;
 	trackAlias: bigint;
 
-	constructor(requestId: bigint, trackAlias: bigint) {
+	constructor({ requestId, trackAlias }: { requestId: bigint; trackAlias: bigint }) {
 		this.requestId = requestId;
 		this.trackAlias = trackAlias;
 	}
@@ -182,7 +192,7 @@ export class SubscribeOk {
 			throw new Error(`unsupported version: ${_}`);
 		}
 
-		return new SubscribeOk(requestId, trackAlias);
+		return new SubscribeOk({ requestId, trackAlias });
 	}
 }
 
@@ -193,7 +203,11 @@ export class SubscribeError {
 	errorCode: number;
 	reasonPhrase: string;
 
-	constructor(requestId: bigint, errorCode: number, reasonPhrase: string) {
+	constructor({
+		requestId,
+		errorCode,
+		reasonPhrase,
+	}: { requestId: bigint; errorCode: number; reasonPhrase: string }) {
 		this.requestId = requestId;
 		this.errorCode = errorCode;
 		this.reasonPhrase = reasonPhrase;
@@ -218,7 +232,7 @@ export class SubscribeError {
 		const errorCode = Number(await r.u62());
 		const reasonPhrase = await r.string();
 
-		return new SubscribeError(requestId, errorCode, reasonPhrase);
+		return new SubscribeError({ requestId, errorCode, reasonPhrase });
 	}
 }
 
@@ -227,7 +241,7 @@ export class Unsubscribe {
 
 	requestId: bigint;
 
-	constructor(requestId: bigint) {
+	constructor({ requestId }: { requestId: bigint }) {
 		this.requestId = requestId;
 	}
 
@@ -245,6 +259,6 @@ export class Unsubscribe {
 
 	static async #decode(r: Reader): Promise<Unsubscribe> {
 		const requestId = await r.u62();
-		return new Unsubscribe(requestId);
+		return new Unsubscribe({ requestId });
 	}
 }

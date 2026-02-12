@@ -11,7 +11,7 @@ export class ClientSetup {
 	versions: number[];
 	parameters: Parameters;
 
-	constructor(versions: number[], parameters = new Parameters()) {
+	constructor({ versions, parameters = new Parameters() }: { versions: number[]; parameters?: Parameters }) {
 		this.versions = versions;
 		this.parameters = parameters;
 	}
@@ -40,7 +40,7 @@ export class ClientSetup {
 		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			// Draft15+: no versions list, just parameters
 			const parameters = await Parameters.decode(r, version);
-			return new ClientSetup([version], parameters);
+			return new ClientSetup({ versions: [version], parameters });
 		} else if (version === Version.DRAFT_14) {
 			// Number of supported versions
 			const numVersions = await r.u53();
@@ -57,7 +57,7 @@ export class ClientSetup {
 
 			const parameters = await Parameters.decode(r, version);
 
-			return new ClientSetup(supportedVersions, parameters);
+			return new ClientSetup({ versions: supportedVersions, parameters });
 		} else {
 			const _: never = version;
 			throw new Error(`unsupported version: ${_}`);
@@ -75,7 +75,7 @@ export class ServerSetup {
 	version: number;
 	parameters: Parameters;
 
-	constructor(version: number, parameters = new Parameters()) {
+	constructor({ version, parameters = new Parameters() }: { version: number; parameters?: Parameters }) {
 		this.version = version;
 		this.parameters = parameters;
 	}
@@ -101,11 +101,11 @@ export class ServerSetup {
 		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			// Draft15+: no version field, just parameters
 			const parameters = await Parameters.decode(r, version);
-			return new ServerSetup(version, parameters);
+			return new ServerSetup({ version, parameters });
 		} else if (version === Version.DRAFT_14) {
 			const selectedVersion = await r.u53();
 			const parameters = await Parameters.decode(r, version);
-			return new ServerSetup(selectedVersion, parameters);
+			return new ServerSetup({ version: selectedVersion, parameters });
 		} else {
 			const _: never = version;
 			throw new Error(`unsupported version: ${_}`);

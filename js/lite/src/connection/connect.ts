@@ -97,16 +97,17 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n); // Allow a ton of request IDs.
 	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js")); // Put the implementation name in the parameters.
 
-	const client = new Ietf.ClientSetup(
+	const client = new Ietf.ClientSetup({
 		// NOTE: draft 15 onwards does not use CLIENT_SETUP to negotiate the version.
 		// We still echo it just to make sure we're not accidentally trying to negotiate the version.
-		setupVersion === Ietf.Version.DRAFT_16
-			? [Ietf.Version.DRAFT_16]
-			: setupVersion === Ietf.Version.DRAFT_15
-				? [Ietf.Version.DRAFT_15]
-				: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
-		params,
-	);
+		versions:
+			setupVersion === Ietf.Version.DRAFT_16
+				? [Ietf.Version.DRAFT_16]
+				: setupVersion === Ietf.Version.DRAFT_15
+					? [Ietf.Version.DRAFT_15]
+					: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
+		parameters: params,
+	});
 	console.debug(url.toString(), "sending client setup", client);
 	await client.encode(stream.writer, setupVersion);
 
@@ -126,7 +127,13 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
 		console.debug(url.toString(), "moq-ietf session established, version:", server.version.toString(16));
-		return new Ietf.Connection(url, session, stream, maxRequestId, server.version as Ietf.IetfVersion);
+		return new Ietf.Connection({
+			url,
+			quic: session,
+			control: stream,
+			maxRequestId,
+			version: server.version as Ietf.IetfVersion,
+		});
 	} else {
 		throw new Error(`unsupported server version: ${server.version.toString()}`);
 	}

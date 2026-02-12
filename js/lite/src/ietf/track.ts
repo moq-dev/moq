@@ -10,7 +10,7 @@ export class TrackStatusRequest {
 	trackNamespace: Path.Valid;
 	trackName: string;
 
-	constructor(trackNamespace: Path.Valid, trackName: string) {
+	constructor({ trackNamespace, trackName }: { trackNamespace: Path.Valid; trackName: string }) {
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 	}
@@ -31,7 +31,7 @@ export class TrackStatusRequest {
 	static async #decode(r: Reader): Promise<TrackStatusRequest> {
 		const trackNamespace = await Namespace.decode(r);
 		const trackName = await r.string();
-		return new TrackStatusRequest(trackNamespace, trackName);
+		return new TrackStatusRequest({ trackNamespace, trackName });
 	}
 }
 
@@ -45,13 +45,19 @@ export class TrackStatus {
 	lastGroupId: bigint;
 	lastObjectId: bigint;
 
-	constructor(
-		trackNamespace: Path.Valid,
-		trackName: string,
-		statusCode: number,
-		lastGroupId: bigint,
-		lastObjectId: bigint,
-	) {
+	constructor({
+		trackNamespace,
+		trackName,
+		statusCode,
+		lastGroupId,
+		lastObjectId,
+	}: {
+		trackNamespace: Path.Valid;
+		trackName: string;
+		statusCode: number;
+		lastGroupId: bigint;
+		lastObjectId: bigint;
+	}) {
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 		this.statusCode = statusCode;
@@ -82,7 +88,7 @@ export class TrackStatus {
 		const lastGroupId = await r.u62();
 		const lastObjectId = await r.u62();
 
-		return new TrackStatus(trackNamespace, trackName, statusCode, lastGroupId, lastObjectId);
+		return new TrackStatus({ trackNamespace, trackName, statusCode, lastGroupId, lastObjectId });
 	}
 
 	// Track status codes

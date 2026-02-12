@@ -80,8 +80,30 @@ const MessagesV15 = {
 	[RequestsBlocked.id]: RequestsBlocked,
 } as const;
 
-// v16 uses the same message map as v15
-const MessagesV16 = MessagesV15;
+// v16 message map — SubscribeNamespace (0x11) and UnsubscribeNamespace (0x14) move to bidi streams
+const MessagesV16 = {
+	[Setup.ClientSetup.id]: Setup.ClientSetup,
+	[Setup.ServerSetup.id]: Setup.ServerSetup,
+	[Subscribe.id]: Subscribe,
+	[SubscribeOk.id]: SubscribeOk,
+	[RequestError.id]: RequestError, // 0x05 → RequestError
+	[PublishNamespace.id]: PublishNamespace,
+	[RequestOk.id]: RequestOk, // 0x07 → RequestOk
+	[PublishNamespaceDone.id]: PublishNamespaceDone,
+	[Unsubscribe.id]: Unsubscribe,
+	[PublishDone.id]: PublishDone,
+	[PublishNamespaceCancel.id]: PublishNamespaceCancel,
+	[TrackStatusRequest.id]: TrackStatusRequest,
+	[GoAway.id]: GoAway,
+	[Fetch.id]: Fetch,
+	[FetchCancel.id]: FetchCancel,
+	[FetchOk.id]: FetchOk,
+	// SubscribeNamespace (0x11) removed — now on bidi stream
+	// UnsubscribeNamespace (0x14) removed — now use stream close
+	[Publish.id]: Publish,
+	[MaxRequestId.id]: MaxRequestId,
+	[RequestsBlocked.id]: RequestsBlocked,
+} as const;
 
 type V14MessageType = (typeof MessagesV14)[keyof typeof MessagesV14];
 type V15MessageType = (typeof MessagesV15)[keyof typeof MessagesV15];
@@ -106,7 +128,15 @@ export class Stream {
 	#writeLock = new Mutex();
 	#readLock = new Mutex();
 
-	constructor(stream: StreamInner, maxRequestId: bigint, version: IetfVersion = Version.DRAFT_14) {
+	constructor({
+		stream,
+		maxRequestId,
+		version = Version.DRAFT_14,
+	}: {
+		stream: StreamInner;
+		maxRequestId: bigint;
+		version?: IetfVersion;
+	}) {
 		this.stream = stream;
 		this.version = version;
 		this.#maxRequestId = maxRequestId;
