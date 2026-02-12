@@ -28,6 +28,7 @@ pub struct ClientTls {
 		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
 		default_missing_value = "true",
 		num_args = 0..=1,
+		require_equals = true,
 		value_parser = clap::value_parser!(bool),
 	)]
 	pub disable_verify: Option<bool>,
@@ -352,8 +353,14 @@ mod tests {
 
 	#[test]
 	fn test_cli_disable_verify_explicit_false() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify", "false"]);
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=false"]);
 		assert_eq!(config.tls.disable_verify, Some(false));
+	}
+
+	#[test]
+	fn test_cli_disable_verify_explicit_true() {
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=true"]);
+		assert_eq!(config.tls.disable_verify, Some(true));
 	}
 
 	#[test]
