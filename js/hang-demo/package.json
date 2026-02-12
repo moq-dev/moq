@@ -13,7 +13,6 @@
 	},
 	"dependencies": {
 		"@moq/hang": "workspace:^",
-		"@moq/hang-ui": "workspace:^",
 		"@moq/watch": "workspace:^",
 		"@moq/publish": "workspace:^"
 	},

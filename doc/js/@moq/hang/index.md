@@ -1,6 +1,6 @@
 ---
 title: "@moq/hang"
-description: Media library with Web Components
+description: Core media library (catalog, container, support)
 ---
 
 # @moq/hang
@@ -8,16 +8,16 @@ description: Media library with Web Components
 [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-High-level media library for real-time streaming using [Media over QUIC](https://moq.dev), built on top of [@moq/lite](/js/@moq/lite).
+Core media library for [Media over QUIC](https://moq.dev), built on top of [@moq/lite](/js/@moq/lite). Provides shared primitives used by [`@moq/watch`](/js/@moq/watch) and [`@moq/publish`](/js/@moq/publish).
 
 ## Overview
 
 `@moq/hang` provides:
 
-- **Web Components** - Easiest way to add MoQ to your page
-- **JavaScript API** - Advanced control for custom applications
-- **WebCodecs integration** - Hardware-accelerated encoding/decoding
-- **Reactive state** - Built on `@moq/signals`
+- **Catalog** - JSON track describing other tracks and their codec properties
+- **Container** - CMAF-based framing (timestamp + codec bitstream)
+- **Support** - `<hang-support>` Web Component for browser capability detection
+- **Utilities** - Hex encoding, libav polyfill, WebCodecs hacks
 
 ## Installation
 
@@ -28,194 +28,46 @@ npm add @moq/hang
 pnpm add @moq/hang
 ```
 
-## Web Components
+## Web Component
 
-The fastest way to add MoQ to your web page. See [Web Components](/js/env/web) for full details.
+### `<hang-support>`
 
-### Publishing
-
-```html
-<script type="module">
-    import "@moq/hang/publish/element";
-</script>
-
-<hang-publish
-    url="https://relay.example.com/anon"
-    path="room/alice"
-    audio video controls>
-    <!-- Optional: preview -->
-    <video muted autoplay></video>
-</hang-publish>
-```
-
-[Learn more about publishing](/js/@moq/hang/publish)
-
-### Watching
+Display browser support information:
 
 ```html
 <script type="module">
-    import "@moq/hang/watch/element";
+    import "@moq/hang/support/element";
 </script>
 
-<hang-watch
-    url="https://relay.example.com/anon"
-    path="room/alice"
-    controls>
-    <!-- Optional: canvas for video -->
-    <canvas></canvas>
-</hang-watch>
+<hang-support mode="publish" show="partial"></hang-support>
 ```
 
 ## JavaScript API
 
-For advanced use cases:
-
 ```typescript
 import * as Hang from "@moq/hang";
 
-// Create connection
-const connection = new Hang.Connection("https://relay.example.com/anon");
+// Catalog — describes tracks and their codec properties
+import * as Catalog from "@moq/hang/catalog";
 
-// Publishing media
-const publish = new Hang.Publish.Broadcast(connection, {
-    enabled: true,
-    name: "alice",
-    video: { enabled: true, device: "camera" },
-    audio: { enabled: true },
-});
-
-// Subscribing to media
-const watch = new Hang.Watch.Broadcast(connection, {
-    enabled: true,
-    name: "alice",
-    video: { enabled: true },
-    audio: { enabled: true },
-});
-
-// Everything is reactive
-publish.name.set("bob");
-watch.volume.set(0.8);
+// Container — CMAF framing (timestamp + codec bitstream)
+import * as Container from "@moq/hang/container";
 ```
 
-## Features
-
-### Real-time Latency
-
-Uses WebTransport and WebCodecs for sub-second latency:
+For watching and publishing, use the dedicated packages:
 
 ```typescript
-const watch = new Hang.Watch.Broadcast(connection, {
-    name: "live-stream",
-    // Latency optimizations
-    video: { enabled: true },
-});
+import * as Watch from "@moq/watch";
+import * as Publish from "@moq/publish";
 ```
 
-### Device Selection
+## Related Packages
 
-Choose camera or screen:
-
-```typescript
-const publish = new Hang.Publish.Broadcast(connection, {
-    name: "my-stream",
-    video: {
-        enabled: true,
-        device: "camera", // or "screen"
-    },
-});
-
-// Switch devices
-publish.video.device.set("screen");
-```
-
-### Quality Control
-
-Control encoding quality:
-
-```typescript
-const publish = new Hang.Publish.Broadcast(connection, {
-    name: "my-stream",
-    video: {
-        enabled: true,
-        bitrate: 2_500_000, // 2.5 Mbps
-        framerate: 30,
-    },
-});
-```
-
-### Playback Controls
-
-```typescript
-const watch = new Hang.Watch.Broadcast(connection, {
-    name: "stream",
-});
-
-// Pause/resume
-watch.paused.set(true);
-watch.paused.set(false);
-
-// Volume
-watch.muted.set(false);
-watch.volume.set(0.8);
-```
-
-## Reactive State
-
-Everything uses signals from `@moq/signals`:
-
-```typescript
-import { react } from "@moq/signals/react";
-
-const publish = document.querySelector("hang-publish") as HangPublish;
-
-// Convert to React signal
-const videoSource = react(publish.video.media);
-
-useEffect(() => {
-    previewVideo.srcObject = videoSource();
-}, [videoSource]);
-```
-
-## Supported Codecs
-
-**Video:**
-- H.264 (AVC) - Best compatibility
-- H.265 (HEVC) - Better compression
-- VP8 / VP9 - Open codec
-- AV1 - Latest, best compression
-
-**Audio:**
-- Opus - Best for voice/music
-- AAC - Good compatibility
-
-Codec selection is automatic based on browser support.
-
-## Browser Support
-
-Requires:
-- **WebTransport** - Chrome 97+, Edge 97+
-- **WebCodecs** - Same browsers
-- **WebAudio** - All modern browsers
-
-## Examples
-
-Check out [hang-demo](https://github.com/moq-dev/moq/tree/main/js/hang-demo) for:
-
-- Video conferencing
-- Screen sharing
-- Chat integration
-- Quality selection UI
-
-[View more examples](https://github.com/moq-dev/moq/tree/main/js)
-
-## Framework Integration
-
-Works with any framework:
-
-- **React** - Via `@moq/signals/react`
-- **SolidJS** - Via `@moq/signals/solid` or `@moq/hang-ui`
-- **Vue** - Via `@moq/signals/vue`
-- **Vanilla JS** - Direct Web Components
+- **[@moq/watch](/js/@moq/watch)** — Subscribe to and render MoQ broadcasts
+- **[@moq/publish](/js/@moq/publish)** — Publish media to MoQ broadcasts
+- **[@moq/ui-core](/js/@moq/ui-core)** — Shared UI components
+- **[@moq/lite](/js/@moq/lite)** — Core pub/sub transport protocol
+- **[@moq/signals](/js/@moq/signals)** — Reactive signals library
 
 ## Protocol Specification
 

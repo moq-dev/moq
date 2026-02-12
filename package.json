@@ -15,7 +15,6 @@
 		"js/ui-core",
 		"js/watch",
 		"js/publish",
-		"js/hang-ui",
 		"js/hang-demo",
 		"js/signals"
 	],

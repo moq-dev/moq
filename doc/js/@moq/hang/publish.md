@@ -5,7 +5,7 @@ description: Publish camera, microphone, or screen to MoQ
 
 # Publishing Streams
 
-This guide covers how to publish media to MoQ relays using `@moq/hang`.
+This guide covers how to publish media to MoQ relays using `@moq/publish`.
 
 ## Web Component
 
@@ -13,7 +13,7 @@ The simplest way to publish:
 
 ```html
 <script type="module">
-    import "@moq/hang/publish/element";
+    import "@moq/publish/element";
 </script>
 
 <hang-publish
@@ -252,8 +252,8 @@ try {
 
 ```tsx
 import { useEffect, useRef, useState } from "react";
-import "@moq/hang/publish/element";
-import type { HangPublish } from "@moq/hang";
+import "@moq/publish/element";
+import type HangPublish from "@moq/publish/element";
 
 function Publisher({ url, path }) {
     const publishRef = useRef<HangPublish>(null);
@@ -287,20 +287,13 @@ function Publisher({ url, path }) {
 
 ## SolidJS Integration
 
-Use `@moq/hang-ui`:
+Use `@moq/publish/ui` for the SolidJS UI overlay:
 
 ```tsx
-import { HangPublish } from "@moq/hang-ui/publish";
+import "@moq/publish/element";
+import "@moq/publish/ui";
 
-function Publisher(props) {
-    return (
-        <HangPublish
-            url={props.url}
-            path={props.path}
-            audio video controls
-        />
-    );
-}
+// The <hang-publish-ui> element wraps <hang-publish> with controls
 ```
 
 ## Authentication

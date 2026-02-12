@@ -5,7 +5,7 @@ description: Subscribe to and render MoQ broadcasts
 
 # Watching Streams
 
-This guide covers how to subscribe to and render MoQ broadcasts using `@moq/hang`.
+This guide covers how to subscribe to and render MoQ broadcasts using `@moq/watch`.
 
 ## Web Component
 
@@ -13,7 +13,7 @@ The simplest way to watch a stream:
 
 ```html
 <script type="module">
-    import "@moq/hang/watch/element";
+    import "@moq/watch/element";
 </script>
 
 <hang-watch
@@ -203,8 +203,8 @@ watch.error.subscribe((error) => {
 
 ```tsx
 import { useEffect, useRef } from "react";
-import "@moq/hang/watch/element";
-import type { HangWatch } from "@moq/hang";
+import "@moq/watch/element";
+import type HangWatch from "@moq/watch/element";
 
 function VideoPlayer({ url, path }) {
     const watchRef = useRef<HangWatch>(null);
@@ -236,26 +236,19 @@ function VideoPlayer({ url, path }) {
 
 ## SolidJS Integration
 
-Use `@moq/hang-ui` for native components:
+Use `@moq/watch/ui` for the SolidJS UI overlay:
 
 ```tsx
-import { HangWatch } from "@moq/hang-ui/watch";
+import "@moq/watch/element";
+import "@moq/watch/ui";
 
-function VideoPlayer(props) {
-    return (
-        <HangWatch
-            url={props.url}
-            path={props.path}
-            controls
-        />
-    );
-}
+// The <hang-watch-ui> element wraps <hang-watch> with controls
 ```
 
 Or use Web Components directly:
 
 ```tsx
-import "@moq/hang/watch/element";
+import "@moq/watch/element";
 
 function VideoPlayer(props) {
     return (
