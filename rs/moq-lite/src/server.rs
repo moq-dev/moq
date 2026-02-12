@@ -72,7 +72,7 @@ impl Server {
 			.iter()
 			.flat_map(|v| Version::try_from(*v).ok())
 			.find(|v| supported.contains(v))
-			.ok_or_else(|| Error::Version(client.versions.clone(), supported.into()))?;
+			.ok_or(Error::Version)?;
 
 		// Only encode parameters if we're using the IETF draft because it has max_request_id
 		let parameters = match version {

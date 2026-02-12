@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::Error;
 use crate::coding::{Reader, Writer};
 
@@ -15,7 +13,7 @@ impl<S: web_transport_trait::Session, V> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		let (send, recv) = session.open_bi().await.map_err(|err| Error::Transport(Arc::new(err)))?;
+		let (send, recv) = session.open_bi().await.map_err(Error::from_transport)?;
 
 		let writer = Writer::new(send, version.clone());
 		let reader = Reader::new(recv, version);
@@ -28,10 +26,7 @@ impl<S: web_transport_trait::Session, V> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		let (send, recv) = session
-			.accept_bi()
-			.await
-			.map_err(|err| Error::Transport(Arc::new(err)))?;
+		let (send, recv) = session.accept_bi().await.map_err(Error::from_transport)?;
 
 		let writer = Writer::new(send, version.clone());
 		let reader = Reader::new(recv, version);

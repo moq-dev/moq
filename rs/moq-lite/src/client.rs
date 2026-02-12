@@ -90,7 +90,7 @@ impl Client {
 			.iter()
 			.find(|v| coding::Version::from(**v) == server.version)
 			.copied()
-			.ok_or_else(|| Error::Version(client.versions.clone(), supported.clone().into()))?;
+			.ok_or(Error::Version)?;
 
 		match version {
 			Version::Lite(version) => {

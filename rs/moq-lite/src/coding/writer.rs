@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::fmt::Debug;
 
 use crate::{Error, coding::*};
 
@@ -33,7 +33,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 				.unwrap()
 				.write_buf(&mut self.buffer)
 				.await
-				.map_err(|e| Error::Transport(Arc::new(e)))?;
+				.map_err(Error::from_transport)?;
 		}
 
 		Ok(())
@@ -46,7 +46,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 			.unwrap()
 			.write_buf(buf)
 			.await
-			.map_err(|e| Error::Transport(Arc::new(e)))
+			.map_err(Error::from_transport)
 	}
 
 	/// Write the entire [Buf] to the stream.
@@ -61,11 +61,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 
 	/// Mark the stream as finished.
 	pub fn finish(&mut self) -> Result<(), Error> {
-		self.stream
-			.as_mut()
-			.unwrap()
-			.finish()
-			.map_err(|e| Error::Transport(Arc::new(e)))
+		self.stream.as_mut().unwrap().finish().map_err(Error::from_transport)
 	}
 
 	/// Abort the stream with the given error.
@@ -80,7 +76,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 			.unwrap()
 			.closed()
 			.await
-			.map_err(|e| Error::Transport(Arc::new(e)))?;
+			.map_err(Error::from_transport)?;
 		Ok(())
 	}
 

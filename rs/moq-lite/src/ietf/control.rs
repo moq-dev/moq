@@ -48,7 +48,7 @@ impl Control {
 
 		tracing::trace!(id = T::ID, size = buf.len(), hex = %hex::encode(&buf), "encoded control message");
 
-		self.tx.send(buf).map_err(|e| Error::Transport(Arc::new(e)))?;
+		self.tx.send(buf).map_err(|_| Error::Transport)?;
 		Ok(())
 	}
 

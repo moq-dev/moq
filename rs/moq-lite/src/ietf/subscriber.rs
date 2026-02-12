@@ -1,7 +1,4 @@
-use std::{
-	collections::{HashMap, hash_map::Entry},
-	sync::Arc,
-};
+use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
 	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
@@ -253,11 +250,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	pub async fn run(self) -> Result<(), Error> {
 		loop {
-			let stream = self
-				.session
-				.accept_uni()
-				.await
-				.map_err(|err| Error::Transport(Arc::new(err)))?;
+			let stream = self.session.accept_uni().await.map_err(Error::from_transport)?;
 
 			let stream = Reader::new(stream, self.version);
 			let this = self.clone();
@@ -385,7 +378,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 
 		match res {
-			Err(Error::Cancel) | Err(Error::Transport(_)) => {
+			Err(Error::Cancel) => {
 				tracing::trace!(group = %producer.info.sequence, "group cancelled");
 				producer.abort(Error::Cancel);
 			}

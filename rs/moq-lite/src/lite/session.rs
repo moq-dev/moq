@@ -32,7 +32,7 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 		};
 
 		match res {
-			Err(Error::Transport(_)) => {
+			Err(Error::Transport) => {
 				tracing::info!("session terminated");
 				session.close(1, "");
 			}
