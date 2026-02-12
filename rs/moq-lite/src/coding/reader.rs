@@ -103,7 +103,11 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		buf.put(data);
 
 		while buf.has_remaining_mut() {
-			self.stream.read_buf(&mut buf).await.map_err(Error::from_transport)?;
+			match self.stream.read_buf(&mut buf).await {
+				Ok(Some(_)) => {}
+				Ok(None) => return Err(Error::Decode),
+				Err(e) => return Err(Error::from_transport(e)),
+			}
 		}
 
 		Ok(buf.into_inner().freeze())

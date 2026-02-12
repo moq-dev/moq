@@ -44,7 +44,7 @@ pub enum Error {
 
 	// The application closes the stream with a code.
 	#[error("app code={0}")]
-	App(u32),
+	App(u16),
 
 	#[error("not found")]
 	NotFound,
@@ -97,7 +97,7 @@ impl Error {
 			Self::TooLarge => 18,
 			Self::TooManyParameters => 19,
 			Self::InvalidRole => 20,
-			Self::App(app) => *app + 64,
+			Self::App(app) => *app as u32 + 64,
 		}
 	}
 
@@ -123,7 +123,10 @@ impl Error {
 			18 => Self::TooLarge,
 			19 => Self::TooManyParameters,
 			20 => Self::InvalidRole,
-			code if code >= 64 => Self::App(code - 64),
+			code if code >= 64 => match u16::try_from(code - 64) {
+				Ok(app) => Self::App(app),
+				Err(_) => Self::ProtocolViolation,
+			},
 			_ => Self::ProtocolViolation,
 		}
 	}
