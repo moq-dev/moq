@@ -151,11 +151,7 @@ export class Stream {
 
 			try {
 				const msgClass = messages[messageType as keyof typeof messages];
-
-				console.debug("reading message", msgClass);
 				const msg = await msgClass.decode(this.stream.reader, this.version);
-
-				console.debug("message read", msg);
 				return msg;
 			} catch (err) {
 				console.error("failed to decode message", messageType, err);
