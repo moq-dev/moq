@@ -224,10 +224,10 @@ impl BroadcastConsumer {
 		web_async::spawn(async move {
 			producer.unused().await;
 			let mut state = state.lock();
-			if let Some(current) = state.producers.remove(&producer.info.name) {
-				if !current.is_clone(&producer) {
-					state.producers.insert(current.info.name.clone(), current);
-				}
+			if let Some(current) = state.producers.remove(&producer.info.name)
+				&& !current.is_clone(&producer)
+			{
+				state.producers.insert(current.info.name.clone(), current);
 			}
 		});
 
