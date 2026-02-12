@@ -129,6 +129,7 @@ This repository provides both [Rust](/rs) and [TypeScript](/js) libraries with s
 | **[@moq/token](js/token)**             |  Authentication library & CLI for JS/TS environments (see [Authentication](doc/concept/authentication.md))                               | [![npm](https://img.shields.io/npm/v/@moq/token)](https://www.npmjs.com/package/@moq/token)   |
 | **[@moq/hang](js/hang)**           | Media-specific encoding/streaming layered on top of `moq-lite`. Provides both a Javascript API and Web Components. | [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang) |
 | **[@moq/hang-demo](js/hang-demo)** | Examples using `@moq/hang`.                                                                                  |                                                                                                       |
+| **[@moq/ui-core](js/ui-core)**     | Shared UI components (Button, Icon, Stats, CSS theme) used by hang-ui.                                                  | [![npm](https://img.shields.io/npm/v/@moq/ui-core)](https://www.npmjs.com/package/@moq/ui-core) |
 | **[@moq/hang-ui](js/hang-ui)**.    | UI Components that interact with the Hang Web Components using SolidJS.                                                 | [![npm](https://img.shields.io/npm/v/@moq/hang-ui)](https://www.npmjs.com/package/@moq/hang-ui) |
 
 

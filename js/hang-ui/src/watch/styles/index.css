@@ -1,7 +1,7 @@
-@import "../../shared/variables.css";
-@import "../../shared/flex.css";
-@import "../../shared/components/button/button.css";
-@import "../../shared/components/stats/styles/index.css";
+@import "@moq/ui-core/variables.css";
+@import "@moq/ui-core/flex.css";
+@import "@moq/ui-core/button/button.css";
+@import "@moq/ui-core/stats/styles/index.css";
 
 /* Color variables for buffer states */
 :root {

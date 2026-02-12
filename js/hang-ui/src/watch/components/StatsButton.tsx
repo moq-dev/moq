@@ -1,5 +1,4 @@
-import Button from "../../shared/components/button/button";
-import * as Icon from "../../shared/components/icon/icon";
+import { Button, Icon } from "@moq/ui-core";
 import useWatchUIContext from "../hooks/use-watch-ui";
 
 /**

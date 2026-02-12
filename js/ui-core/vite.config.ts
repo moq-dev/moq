@@ -7,13 +7,12 @@ export default defineConfig({
 	build: {
 		lib: {
 			entry: {
-				"publish/index": resolve(__dirname, "src/publish/index.tsx"),
-				"watch/index": resolve(__dirname, "src/watch/index.tsx"),
+				index: resolve(__dirname, "src/index.ts"),
 			},
 			formats: ["es"],
 		},
 		rollupOptions: {
-			external: ["@moq/hang", "@moq/lite", "@moq/signals", "@moq/ui-core"],
+			external: ["@moq/hang", "@moq/lite", "@moq/signals"],
 		},
 		sourcemap: true,
 		target: "esnext",

@@ -61,23 +61,16 @@ src/
 │   ├── element.tsx      # Main publish UI component
 │   └── index.tsx        # Entry point for publish UI
 │
-├── watch/               # Watching/playback UI components
-│   ├── components/      # UI controls for watching
-│   ├── hooks/           # Custom Solid hooks for watch UI
-│   ├── styles/          # CSS styles for watch UI
-│   ├── context.tsx      # Context provider for watch state
-│   ├── element.tsx      # Main watch UI component
-│   └── index.tsx        # Entry point for watch UI
-│
-└── shared/              # Shared components and utilities
-    ├── components/      # Reusable UI components
-	│   ├── button/      # Button component
-	│   ├── icon/        # Icon component
-	│   └── stats/       # Statistics and monitoring components
-    ├── flex.css         # Flexbox utilities
-    └── variables.css    # CSS variables and theme
-
+└── watch/               # Watching/playback UI components
+    ├── components/      # UI controls for watching
+    ├── hooks/           # Custom Solid hooks for watch UI
+    ├── styles/          # CSS styles for watch UI
+    ├── context.tsx      # Context provider for watch state
+    ├── element.tsx      # Main watch UI component
+    └── index.tsx        # Entry point for watch UI
 ```
+
+> **Note:** Shared UI components (Button, Icon, Stats, CSS variables) have been extracted into the [`@moq/ui-core`](../ui-core) package.
 
 ### Module Overview
 
@@ -101,10 +94,10 @@ Implements the video player UI with controls for watching live streams. Includes
 - **BufferingIndicator**: Visual feedback during buffering
 - **StatsButton**: Toggle statistics panel
 
-#### **shared/**
-Common components and utilities used across the package.
+#### **@moq/ui-core** (external dependency)
+Shared UI components consumed by this package. See [`@moq/ui-core`](../ui-core) for details.
 
 - **Button**: Reusable button component with consistent styling
 - **Icon**: Icon wrapper component
-- **Stats**: Provides real-time statistics monitoring for both audio and video streams. Uses a provider pattern to collect and display metrics.
-- **CSS utilities**: Shared styles, variables, and flexbox utilities
+- **Stats**: Real-time statistics monitoring for media streams
+- **CSS utilities**: Theme variables, flexbox utilities, and component styles

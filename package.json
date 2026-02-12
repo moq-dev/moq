@@ -12,6 +12,7 @@
 		"js/clock",
 		"js/token",
 		"js/hang",
+		"js/ui-core",
 		"js/hang-ui",
 		"js/hang-demo",
 		"js/signals"

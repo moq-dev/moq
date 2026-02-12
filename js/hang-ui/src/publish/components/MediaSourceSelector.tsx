@@ -1,6 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
-import Button from "../../shared/components/button/button";
-import * as Icon from "../../shared/components/icon/icon";
+import { Button, Icon } from "@moq/ui-core";
 
 type MediaSourceSelectorProps = {
 	sources?: MediaDeviceInfo[];

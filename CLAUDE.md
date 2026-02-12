@@ -57,6 +57,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   token/             # JWT token generation (published as @moq/token)
   clock/             # Clock example (published as @moq/clock)
   hang/              # Media layer (published as @moq/hang)
+  ui-core/           # Shared UI components (published as @moq/ui-core)
   hang-ui/           # Web Components UI (published as @moq/hang-ui)
   hang-demo/         # Demo applications
 
