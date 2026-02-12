@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.13.1...moq-lite-v0.14.0) - 2026-02-12
+
+### Other
+
+- Fix subscriber losing App reset codes ([#946](https://github.com/moq-dev/moq/pull/946))
+- Fix cleanup task race in subscribe_track ([#947](https://github.com/moq-dev/moq/pull/947))
+- Fix stale TrackProducer returned from cache ([#945](https://github.com/moq-dev/moq/pull/945))
+- Error cleanup ([#944](https://github.com/moq-dev/moq/pull/944))
+- Reduce the moq-lite API size ([#943](https://github.com/moq-dev/moq/pull/943))
+- Drop non-zero sub-group streams, instead of warning. ([#942](https://github.com/moq-dev/moq/pull/942))
+- Properly implement the draft-16 SUBSCRIBE_NAMESPACE stream. ([#940](https://github.com/moq-dev/moq/pull/940))
+- (AI) Initial draft 16 support ([#938](https://github.com/moq-dev/moq/pull/938))
+- (AI) Initial moq-transport-15 support ([#930](https://github.com/moq-dev/moq/pull/930))
+
 ## [0.13.1](https://github.com/moq-dev/moq/compare/moq-lite-v0.13.0...moq-lite-v0.13.1) - 2026-02-09
 
 ### Other

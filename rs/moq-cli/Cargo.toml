@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.7.6"
+version = "0.7.7"
 edition = "2024"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]

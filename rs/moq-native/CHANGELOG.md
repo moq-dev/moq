@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/moq-dev/moq/compare/moq-native-v0.12.2...moq-native-v0.13.0) - 2026-02-12
+
+### Other
+
+- Reduce the moq-lite API size ([#943](https://github.com/moq-dev/moq/pull/943))
+- (AI) Initial moq-transport-15 support ([#930](https://github.com/moq-dev/moq/pull/930))
+- (AI) Add support for quiche to moq-native ([#928](https://github.com/moq-dev/moq/pull/928))
+
 ## [0.12.2](https://github.com/moq-dev/moq/compare/moq-native-v0.12.1...moq-native-v0.12.2) - 2026-02-09
 
 ### Other
