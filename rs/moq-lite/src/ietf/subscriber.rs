@@ -358,7 +358,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		tracing::trace!(?group, "received group header");
 
 		if group.sub_group_id != 0 {
-			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, stripping");
+			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");
+			return Err(Error::Unsupported);
 		}
 
 		let producer = {
@@ -409,7 +410,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
 			if id_delta != 0 {
-				tracing::warn!(id_delta = %id_delta, "object ID gaps not supported, ignoring");
+				tracing::warn!(id_delta = %id_delta, "object ID delta is not supported, dropping stream");
+				return Err(Error::Unsupported);
 			}
 
 			if group.flags.has_extensions {

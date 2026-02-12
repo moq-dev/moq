@@ -74,7 +74,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	const stream = await Stream.open(session);
 
 	// @ts-expect-error - TODO: add protocol to WebTransport
-	const protocol = session instanceof WebTransport ? session.protocol : undefined;
+	const protocol: string | undefined = session instanceof WebTransport ? session.protocol : undefined;
 
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
@@ -82,7 +82,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
-	} else if (protocol === undefined) {
+	} else if (protocol === "" || protocol === undefined) {
 		setupVersion = Ietf.Version.DRAFT_14;
 	} else {
 		throw new Error(`unsupported WebTransport protocol: ${protocol}`);
