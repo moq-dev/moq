@@ -160,6 +160,11 @@ impl TrackProducer {
 		}
 	}
 
+	/// Return true if the track has been closed or aborted.
+	pub fn is_closed(&self) -> bool {
+		self.state.borrow().closed.is_some()
+	}
+
 	/// Return true if this is the same track.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
