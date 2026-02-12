@@ -14,10 +14,10 @@ Core media library for [Media over QUIC](https://moq.dev), built on top of [@moq
 
 `@moq/hang` provides:
 
-- **Catalog** - JSON track describing other tracks and their codec properties
-- **Container** - CMAF-based framing (timestamp + codec bitstream)
-- **Support** - `<hang-support>` Web Component for browser capability detection
-- **Utilities** - Hex encoding, libav polyfill, WebCodecs hacks
+- **Catalog** - JSON track describing other tracks and their codec properties (audio, video, chat, location, etc.)
+- **Container** - Media framing in two formats: CMAF (fMP4) and Legacy (varint-timestamp + raw codec bitstream)
+- **Support** - Browser capability detection and `<hang-support>` Web Component
+- **Utilities** - Hex encoding, Opus audio polyfill (libav), latency computation, browser detection workarounds
 
 ## Installation
 
@@ -50,8 +50,12 @@ import * as Hang from "@moq/hang";
 // Catalog — describes tracks and their codec properties
 import * as Catalog from "@moq/hang/catalog";
 
-// Container — CMAF framing (timestamp + codec bitstream)
+// Container — media framing (CMAF and Legacy formats)
 import * as Container from "@moq/hang/container";
+
+// CMAF (fMP4) and Legacy (varint-timestamp + raw bitstream) are both available:
+// Container.Cmaf — createVideoInitSegment, createAudioInitSegment, encodeDataSegment, decodeDataSegment, etc.
+// Container.Legacy — Producer / Consumer classes
 ```
 
 For watching and publishing, use the dedicated packages:
