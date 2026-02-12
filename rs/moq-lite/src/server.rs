@@ -54,7 +54,7 @@ impl Server {
 			.iter()
 			.find(|v| VERSIONS.contains(v))
 			.copied()
-			.ok_or_else(|| Error::Version(client.versions.clone(), VERSIONS.into()))?;
+			.ok_or(Error::Version)?;
 
 		// Only encode parameters if we're using the IETF draft because it has max_request_id
 		let parameters = if ietf::Version::try_from(version).is_ok() && client.kind == setup::ClientKind::Ietf14 {
@@ -101,7 +101,7 @@ impl Server {
 			.await?;
 		} else {
 			// unreachable, but just in case
-			return Err(Error::Version(client.versions, VERSIONS.into()));
+			return Err(Error::Version);
 		}
 
 		tracing::debug!(?version, "connected");

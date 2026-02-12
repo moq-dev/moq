@@ -94,7 +94,7 @@ impl Client {
 			.await?;
 		} else {
 			// unreachable, but just in case
-			return Err(Error::Version(client.versions, [server.version].into()));
+			return Err(Error::Version);
 		}
 
 		tracing::debug!(version = ?server.version, "connected");

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use tokio::sync::oneshot;
 use web_async::{FuturesExt, Lock};
@@ -244,10 +244,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		version: Version,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
-		let mut stream = session
-			.open_uni()
-			.await
-			.map_err(|err| Error::Transport(Arc::new(err)))?;
+		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
 		stream.set_priority(priority);
 
 		let mut stream = Writer::new(stream, version);
@@ -411,10 +408,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	// We literally just create a stream and FIN it.
 	async fn run_fetch(session: S, request_id: RequestId, version: Version) -> Result<(), Error> {
-		let stream = session
-			.open_uni()
-			.await
-			.map_err(|err| Error::Transport(Arc::new(err)))?;
+		let stream = session.open_uni().await.map_err(Error::from_transport)?;
 
 		let mut writer = Writer::new(stream, version);
 
