@@ -47,14 +47,20 @@ Import `@moq/watch/ui` for a SolidJS-powered overlay with buffering indicator, s
 
 ```html
 <script type="module">
+    import "@moq/watch/element";
     import "@moq/watch/ui";
 </script>
 
-<hang-watch-ui
-    url="https://relay.example.com/anon"
-    path="room/alice">
+<hang-watch-ui>
+    <hang-watch
+        url="https://relay.example.com/anon"
+        path="room/alice">
+        <canvas></canvas>
+    </hang-watch>
 </hang-watch-ui>
 ```
+
+The `<hang-watch-ui>` element automatically discovers the nested `<hang-watch>` and wires up reactive controls.
 
 ## JavaScript API
 

@@ -287,13 +287,19 @@ function Publisher({ url, path }) {
 
 ## SolidJS Integration
 
-Use `@moq/publish/ui` for the SolidJS UI overlay:
+Use `@moq/publish/ui` for the SolidJS UI overlay. The `<hang-publish-ui>` element wraps a nested `<hang-publish>`:
 
-```tsx
-import "@moq/publish/element";
-import "@moq/publish/ui";
+```html
+<script type="module">
+    import "@moq/publish/element";
+    import "@moq/publish/ui";
+</script>
 
-// The <hang-publish-ui> element wraps <hang-publish> with controls
+<hang-publish-ui>
+    <hang-publish url="https://relay.example.com/anon" path="room/alice" audio video>
+        <video muted autoplay></video>
+    </hang-publish>
+</hang-publish-ui>
 ```
 
 ## Authentication

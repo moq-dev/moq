@@ -47,14 +47,21 @@ Import `@moq/publish/ui` for a SolidJS-powered overlay with device selection and
 
 ```html
 <script type="module">
+    import "@moq/publish/element";
     import "@moq/publish/ui";
 </script>
 
-<hang-publish-ui
-    url="https://relay.example.com/anon"
-    path="room/alice">
+<hang-publish-ui>
+    <hang-publish
+        url="https://relay.example.com/anon"
+        path="room/alice"
+        audio video>
+        <video muted autoplay></video>
+    </hang-publish>
 </hang-publish-ui>
 ```
+
+The `<hang-publish-ui>` element automatically discovers the nested `<hang-publish>` and wires up reactive controls.
 
 ## JavaScript API
 

@@ -236,13 +236,19 @@ function VideoPlayer({ url, path }) {
 
 ## SolidJS Integration
 
-Use `@moq/watch/ui` for the SolidJS UI overlay:
+Use `@moq/watch/ui` for the SolidJS UI overlay. The `<hang-watch-ui>` element wraps a nested `<hang-watch>`:
 
-```tsx
-import "@moq/watch/element";
-import "@moq/watch/ui";
+```html
+<script type="module">
+    import "@moq/watch/element";
+    import "@moq/watch/ui";
+</script>
 
-// The <hang-watch-ui> element wraps <hang-watch> with controls
+<hang-watch-ui>
+    <hang-watch url="https://relay.example.com/anon" path="room/alice">
+        <canvas></canvas>
+    </hang-watch>
+</hang-watch-ui>
 ```
 
 Or use Web Components directly:
