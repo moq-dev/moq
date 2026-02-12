@@ -1,4 +1,4 @@
-import type HangWatch from "@moq/watch/element";
+import type HangWatch from "../element";
 import { useContext } from "solid-js";
 import { Show } from "solid-js/web";
 import { Stats } from "@moq/ui-core";

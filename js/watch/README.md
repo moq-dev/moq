@@ -66,6 +66,25 @@ watch.video.media.subscribe((stream) => {
 });
 ```
 
+## UI Web Component
+
+`@moq/watch` includes a SolidJS-powered UI overlay (`<hang-watch-ui>`) with playback controls, volume, buffering indicator, quality selector, and stats panel. It depends on [`@moq/ui-core`](../ui-core) for shared UI primitives.
+
+```html
+<script type="module">
+    import "@moq/watch/element";
+    import "@moq/watch/ui";
+</script>
+
+<hang-watch-ui>
+    <hang-watch url="https://relay.example.com/anon" path="room/alice">
+        <canvas></canvas>
+    </hang-watch>
+</hang-watch-ui>
+```
+
+The `<hang-watch-ui>` element automatically discovers the nested `<hang-watch>` element and wires up reactive controls.
+
 ## Features
 
 - **WebCodecs decoding** — Hardware-accelerated video and audio decoding

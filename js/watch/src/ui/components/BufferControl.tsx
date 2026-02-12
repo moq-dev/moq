@@ -1,5 +1,5 @@
 import { Moq } from "@moq/hang";
-import type { BufferedRange } from "@moq/watch";
+import type { BufferedRange } from "../..";
 import { createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import useWatchUIContext from "../hooks/use-watch-ui";
 

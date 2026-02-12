@@ -1,4 +1,4 @@
-import type HangWatch from "@moq/watch/element";
+import type HangWatch from "../element";
 import { customElement } from "solid-element";
 import { createSignal, onMount, Show } from "solid-js";
 import { WatchUI } from "./element.tsx";

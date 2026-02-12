@@ -1,5 +1,5 @@
 import "./highlight";
-import "@moq/hang-ui/watch";
+import "@moq/watch/ui";
 import HangSupport from "@moq/hang/support/element";
 import HangWatch from "@moq/watch/element";
 import HangConfig from "./config";
