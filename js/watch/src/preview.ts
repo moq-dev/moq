@@ -1,7 +1,7 @@
 import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
 import { Effect, Signal } from "@moq/signals";
-import * as Catalog from "../catalog";
+import * as Catalog from "@moq/hang/catalog";
 
 export interface PreviewProps {
 	enabled?: boolean | Signal<boolean>;

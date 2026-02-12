@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
-import type * as Catalog from "../../catalog";
+import type * as Catalog from "@moq/hang/catalog";
 import { Message, type MessageProps } from "./message";
 import { Typing, type TypingProps } from "./typing";
 

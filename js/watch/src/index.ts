@@ -8,4 +8,4 @@ export * from "./preview";
 export * as Video from "./video";
 
 // NOTE: element is not exported from this module
-// You have to import it from @moq/hang/watch/element instead.
+// You have to import it from @moq/watch/element instead.

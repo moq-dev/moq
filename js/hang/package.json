@@ -9,15 +9,15 @@
 		".": "./src/index.ts",
 		"./publish": "./src/publish/index.ts",
 		"./publish/element": "./src/publish/element.ts",
-		"./watch": "./src/watch/index.ts",
-		"./watch/element": "./src/watch/element.ts",
 		"./catalog": "./src/catalog/index.ts",
+		"./container": "./src/container/index.ts",
+		"./util/hex": "./src/util/hex.ts",
+		"./util/libav": "./src/util/libav.ts",
 		"./support": "./src/support/index.ts",
 		"./support/element": "./src/support/element.ts"
 	},
 	"sideEffects": [
 		"./src/publish/element.ts",
-		"./src/watch/element.ts",
 		"./src/support/element.ts"
 	],
 	"scripts": {

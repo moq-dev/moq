@@ -23,7 +23,8 @@
 	"peerDependencies": {
 		"@moq/hang": "workspace:^0.1.0",
 		"@moq/signals": "workspace:^0.1.0",
-		"@moq/ui-core": "workspace:^0.1.0"
+		"@moq/ui-core": "workspace:^0.1.0",
+		"@moq/watch": "workspace:^0.1.0"
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.77",

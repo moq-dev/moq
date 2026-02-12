@@ -45,7 +45,7 @@ There's also a Javascript API for more advanced use cases; see below.
     <script type="module">
         // Import the web components
         import "@moq/hang/publish/element";
-        import "@moq/hang/watch/element";
+        import "@moq/watch/element";
     </script>
 </head>
 <body>
@@ -114,7 +114,7 @@ Subscribes to a hang broadcast and renders it.
 
 ```html
 <script type="module">
-    import "@moq/hang/watch/element";
+    import "@moq/watch/element";
 </script>
 
 <!-- NOTE: You'll also need to publish a broadcast with the same name. See below. -->
@@ -126,6 +126,8 @@ Subscribes to a hang broadcast and renders it.
     <canvas></canvas>
 </hang-watch>
 ```
+
+> **Note:** The `<hang-watch>` element is now provided by [`@moq/watch`](../watch). See its [README](../watch/README.md) for full details.
 
 
 ### `<hang-publish>`
@@ -184,8 +186,9 @@ const publish = new Hang.Publish.Broadcast(connection, {
     video: { enabled: true, device: "camera" },
 });
 
-// Subscribing to media, with (optional) initial settings
-const watch = new Hang.Watch.Broadcast(connection, {
+// Subscribing to media — now in @moq/watch
+import * as Watch from "@moq/watch";
+const watch = new Watch.Broadcast(connection, {
 	enabled: true,
 	name: "bob",
 	video: { enabled: true },

@@ -1,7 +1,7 @@
 import * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import * as Catalog from "../../catalog";
-import * as Container from "../../container";
+import * as Catalog from "@moq/hang/catalog";
+import * as Container from "@moq/hang/container";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
 import type { Muxer } from "../mse";
 import type { Backend, Stats } from "./backend";

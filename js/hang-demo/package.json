@@ -13,7 +13,8 @@
 	},
 	"dependencies": {
 		"@moq/hang": "workspace:^",
-		"@moq/hang-ui": "workspace:^"
+		"@moq/hang-ui": "workspace:^",
+		"@moq/watch": "workspace:^"
 	},
 	"devDependencies": {
 		"@tailwindcss/typography": "^0.5.16",

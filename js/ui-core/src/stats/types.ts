@@ -1,6 +1,7 @@
 export type KnownStatsProviders = "network" | "video" | "audio" | "buffer";
 
 import type * as Hang from "@moq/hang";
+import type * as Watch from "@moq/watch";
 
 /**
  * Context passed to providers for updating display data
@@ -19,13 +20,13 @@ export interface VideoResolution {
 
 // TODO Don't re-export these types?
 export type Signal<T> = Hang.Moq.Signals.Getter<T>;
-export type AudioStats = Hang.Watch.Audio.Stats;
-export type AudioSource = Hang.Watch.Audio.Backend;
+export type AudioStats = Watch.Audio.Stats;
+export type AudioSource = Watch.Audio.Backend;
 export type AudioConfig = Hang.Catalog.AudioConfig;
-export type VideoStats = Hang.Watch.Video.Stats;
+export type VideoStats = Watch.Video.Stats;
 
-// TODO use Hang.Watch.Backend instead?
+// TODO use Watch.Backend instead?
 export type ProviderProps = {
-	audio: Hang.Watch.Audio.Backend;
-	video: Hang.Watch.Video.Backend;
+	audio: Watch.Audio.Backend;
+	video: Watch.Video.Backend;
 };
