@@ -13,7 +13,7 @@ export default defineConfig({
 			formats: ["es"],
 		},
 		rollupOptions: {
-			external: ["@moq/hang", "@moq/lite", "@moq/signals", "@moq/ui-core", "@moq/watch"],
+			external: ["@moq/hang", "@moq/lite", "@moq/signals", "@moq/ui-core", "@moq/watch", "@moq/publish"],
 		},
 		sourcemap: true,
 		target: "esnext",

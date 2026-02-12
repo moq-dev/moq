@@ -1,0 +1,31 @@
+{
+	"name": "@moq/publish",
+	"type": "module",
+	"version": "0.1.0",
+	"description": "Publish media to Media over QUIC streams",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": "github:moq-dev/moq",
+	"exports": {
+		".": "./src/index.ts",
+		"./element": "./src/element.ts"
+	},
+	"sideEffects": [
+		"./src/element.ts"
+	],
+	"scripts": {
+		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
+		"check": "tsc --noEmit",
+		"release": "bun ../scripts/release.ts"
+	},
+	"dependencies": {
+		"@moq/hang": "workspace:^",
+		"@moq/lite": "workspace:^",
+		"@moq/signals": "workspace:^"
+	},
+	"devDependencies": {
+		"@types/audioworklet": "^0.0.77",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
+		"rimraf": "^6.0.1",
+		"typescript": "^5.9.2"
+	}
+}

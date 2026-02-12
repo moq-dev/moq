@@ -61,6 +61,7 @@
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/hang-ui": "workspace:^",
+        "@moq/publish": "workspace:^",
         "@moq/watch": "workspace:^",
       },
       "devDependencies": {
@@ -89,6 +90,7 @@
       },
       "peerDependencies": {
         "@moq/hang": "workspace:^0.1.0",
+        "@moq/publish": "workspace:^0.1.0",
         "@moq/signals": "workspace:^0.1.0",
         "@moq/ui-core": "workspace:^0.1.0",
         "@moq/watch": "workspace:^0.1.0",
@@ -113,6 +115,21 @@
       },
       "peerDependencies": {
         "zod": "^4.1.0",
+      },
+    },
+    "js/publish": {
+      "name": "@moq/publish",
+      "version": "0.1.0",
+      "dependencies": {
+        "@moq/hang": "workspace:^",
+        "@moq/lite": "workspace:^",
+        "@moq/signals": "workspace:^",
+      },
+      "devDependencies": {
+        "@types/audioworklet": "^0.0.77",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.241",
+        "rimraf": "^6.0.1",
+        "typescript": "^5.9.2",
       },
     },
     "js/signals": {
@@ -441,6 +458,8 @@
     "@moq/hang-ui": ["@moq/hang-ui@workspace:js/hang-ui"],
 
     "@moq/lite": ["@moq/lite@workspace:js/lite"],
+
+    "@moq/publish": ["@moq/publish@workspace:js/publish"],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 

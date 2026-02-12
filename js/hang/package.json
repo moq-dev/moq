@@ -7,17 +7,15 @@
 	"repository": "github:moq-dev/moq",
 	"exports": {
 		".": "./src/index.ts",
-		"./publish": "./src/publish/index.ts",
-		"./publish/element": "./src/publish/element.ts",
 		"./catalog": "./src/catalog/index.ts",
 		"./container": "./src/container/index.ts",
 		"./util/hex": "./src/util/hex.ts",
 		"./util/libav": "./src/util/libav.ts",
+		"./util/hacks": "./src/util/hacks.ts",
 		"./support": "./src/support/index.ts",
 		"./support/element": "./src/support/element.ts"
 	},
 	"sideEffects": [
-		"./src/publish/element.ts",
 		"./src/support/element.ts"
 	],
 	"scripts": {

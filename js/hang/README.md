@@ -44,7 +44,7 @@ There's also a Javascript API for more advanced use cases; see below.
 <head>
     <script type="module">
         // Import the web components
-        import "@moq/hang/publish/element";
+        import "@moq/publish/element";
         import "@moq/watch/element";
     </script>
 </head>
@@ -144,7 +144,7 @@ Publishes a microphone/camera or screen as a hang broadcast.
 
 ```html
 <script type="module">
-    import "@moq/hang/publish/element";
+    import "@moq/publish/element";
 </script>
 
 <hang-publish
@@ -153,6 +153,8 @@ Publishes a microphone/camera or screen as a hang broadcast.
     <video autoplay muted></video>
 </hang-publish>
 ```
+
+> **Note:** The `<hang-publish>` element is now provided by [`@moq/publish`](../publish). See its [README](../publish/README.md) for full details.
 
 ### `<hang-support>`
 
@@ -179,8 +181,9 @@ import * as Hang from "@moq/hang";
 // Create a new connection, available via `.established`
 const connection = new Hang.Connection("https://cdn.moq.dev/anon");
 
-// Publishing media, with (optional) initial settings
-const publish = new Hang.Publish.Broadcast(connection, {
+// Publishing media — now in @moq/publish
+import * as Publish from "@moq/publish";
+const publish = new Publish.Broadcast(connection, {
 	enabled: true,
 	name: "bob",
     video: { enabled: true, device: "camera" },

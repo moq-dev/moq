@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
-import * as Catalog from "../../catalog";
+import * as Catalog from "@moq/hang/catalog";
 
 export type TypingProps = {
 	enabled?: boolean | Signal<boolean>;

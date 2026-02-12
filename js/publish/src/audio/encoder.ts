@@ -1,9 +1,9 @@
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import * as Catalog from "../../catalog";
-import * as Container from "../../container";
-import * as libav from "../../util/libav";
+import * as Catalog from "@moq/hang/catalog";
+import * as Container from "@moq/hang/container";
+import * as libav from "@moq/hang/util/libav";
 import type * as Capture from "./capture";
 import type { Source } from "./types";
 

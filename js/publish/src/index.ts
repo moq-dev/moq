@@ -8,4 +8,4 @@ export * as User from "./user";
 export * as Video from "./video";
 
 // NOTE: element is not exported from this module
-// You have to import it from @moq/hang/publish/element instead.
+// You have to import it from @moq/publish/element instead.
