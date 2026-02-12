@@ -1,4 +1,4 @@
-import type HangPublish from "@moq/publish/element";
+import type HangPublish from "../element";
 import { customElement } from "solid-element";
 import { createSignal, onMount } from "solid-js";
 import { Show } from "solid-js/web";

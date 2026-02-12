@@ -6,12 +6,16 @@ export default defineConfig({
 	plugins: [solidPlugin()],
 	build: {
 		lib: {
-			entry: {},
+			entry: {
+				"ui/index": resolve(__dirname, "src/ui/index.tsx"),
+			},
 			formats: ["es"],
 		},
 		rollupOptions: {
-			external: ["@moq/hang", "@moq/lite", "@moq/signals", "@moq/ui-core", "@moq/publish"],
+			external: ["@moq/hang", "@moq/lite", "@moq/signals", "@moq/ui-core"],
 		},
+		outDir: "dist",
+		emptyOutDir: false,
 		sourcemap: true,
 		target: "esnext",
 	},

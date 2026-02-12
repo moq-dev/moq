@@ -1,4 +1,4 @@
-import type HangPublish from "@moq/publish/element";
+import type HangPublish from "../element";
 import type { JSX } from "solid-js";
 import { createContext, createEffect, createSignal } from "solid-js";
 

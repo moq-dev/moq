@@ -63,6 +63,25 @@ const publish = new Publish.Broadcast(connection, {
 publish.source.camera.enabled.set(true);
 ```
 
+## UI Web Component
+
+`@moq/publish` includes a SolidJS-powered UI overlay (`<hang-publish-ui>`) with source selection (camera, screen, file, microphone) and status indicator. It depends on [`@moq/ui-core`](../ui-core) for shared UI primitives.
+
+```html
+<script type="module">
+    import "@moq/publish/element";
+    import "@moq/publish/ui";
+</script>
+
+<hang-publish-ui>
+    <hang-publish url="https://relay.example.com/anon" path="room/alice" audio video>
+        <video muted autoplay></video>
+    </hang-publish>
+</hang-publish-ui>
+```
+
+The `<hang-publish-ui>` element automatically discovers the nested `<hang-publish>` element and wires up reactive controls.
+
 ## Features
 
 - **Camera & microphone** — Capture from user devices

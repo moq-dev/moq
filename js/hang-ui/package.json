@@ -5,12 +5,8 @@
 	"description": "Media over QUIC library UI components",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
-	"exports": {
-		"./publish": "./src/publish/index.tsx"
-	},
-	"sideEffects": [
-		"./src/publish/index.tsx"
-	],
+	"exports": {},
+	"sideEffects": [],
 	"scripts": {
 		"build": "bun run clean && vite build && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
@@ -18,12 +14,7 @@
 		"fix": "biome check src --fix",
 		"release": "bun ../scripts/release.ts"
 	},
-	"peerDependencies": {
-		"@moq/hang": "workspace:^0.1.0",
-		"@moq/signals": "workspace:^0.1.0",
-		"@moq/ui-core": "workspace:^0.1.0",
-		"@moq/publish": "workspace:^0.1.0"
-	},
+	"peerDependencies": {},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.77",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
