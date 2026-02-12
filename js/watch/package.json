@@ -17,6 +17,7 @@
 	"scripts": {
 		"build": "rimraf dist && tsc -b tsconfig.build.json && vite build && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
+		"test": "bun test --only-failures",
 		"release": "bun ../scripts/release.ts"
 	},
 	"dependencies": {
