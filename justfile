@@ -11,7 +11,7 @@ default:
 # Install any dependencies.
 install:
 	bun install
-	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-hack
+	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-hack cargo-sweep
 
 # Alias for dev.
 all: dev
@@ -360,10 +360,10 @@ ci:
 	# Run the unit tests
 	just test
 
-	# Check all feature combinations for the hang crate
+	# Check all feature combinations for all crates
 	# requires: cargo install cargo-hack
-	echo "Checking all feature combinations for hang..."
-	cargo hack check --package hang --each-feature --no-dev-deps
+	echo "Checking all feature combinations..."
+	cargo hack check --workspace --each-feature --no-dev-deps
 
 # Run the unit tests
 test:
@@ -379,19 +379,6 @@ test:
 	fi
 
 	cargo test --all-targets --all-features
-
-# Run comprehensive tests including all feature combinations (requires cargo-hack)
-test-all:
-	#!/usr/bin/env bash
-	set -euo pipefail
-
-	# Run the standard tests first
-	just test
-
-	# Test all feature combinations for the hang crate
-	# requires: cargo install cargo-hack
-	echo "Testing all feature combinations for hang..."
-	cargo hack test --package hang --each-feature
 
 # Automatically fix some issues.
 fix:
@@ -411,6 +398,9 @@ fix:
 
 	if command -v tofu &> /dev/null; then (cd cdn && just fix); fi
 
+	# Remove old build artifacts to save disk space.
+	if command -v cargo-sweep &> /dev/null; then cargo sweep --time 7; fi
+
 # Upgrade any tooling
 update:
 	bun update
@@ -424,6 +414,7 @@ update:
 
 	# Update the Nix flake.
 	nix flake update
+
 
 # Build the packages
 build:

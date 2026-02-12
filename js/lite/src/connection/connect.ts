@@ -57,21 +57,36 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	}
 
 	// Race them, using `.any` to ignore if one participant has a error.
-	const quic = await Promise.any(
+	const session = await Promise.any(
 		webtransport ? (websocket ? [websocket, webtransport] : [webtransport]) : [websocket],
 	);
 	if (done) done();
 
-	if (!quic) throw new Error("no transport available");
+	if (!session) throw new Error("no transport available");
 
 	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
-	if (quic instanceof WebTransportWs) {
+	if (session instanceof WebTransportWs) {
 		console.warn(url.toString(), "using WebSocket fallback; the user experience may be degraded");
 		websocketWon.add(url.toString());
 	}
 
 	// moq-rs currently requires the ROLE extension to be set.
-	const stream = await Stream.open(quic);
+	const stream = await Stream.open(session);
+
+	// @ts-expect-error - TODO: add protocol to WebTransport
+	const protocol: string | undefined = session instanceof WebTransport ? session.protocol : undefined;
+
+	// Choose setup encoding based on negotiated WebTransport protocol (if any).
+	let setupVersion: Ietf.Version;
+	if (protocol === Ietf.ALPN.DRAFT_16) {
+		setupVersion = Ietf.Version.DRAFT_16;
+	} else if (protocol === Ietf.ALPN.DRAFT_15) {
+		setupVersion = Ietf.Version.DRAFT_15;
+	} else if (protocol === "" || protocol === undefined) {
+		setupVersion = Ietf.Version.DRAFT_14;
+	} else {
+		throw new Error(`unsupported WebTransport protocol: ${protocol}`);
+	}
 
 	// We're encoding 0x20 so it's backwards compatible with moq-transport-10+
 	await stream.writer.u53(Lite.StreamId.ClientCompat);
@@ -82,9 +97,19 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n); // Allow a ton of request IDs.
 	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js")); // Put the implementation name in the parameters.
 
-	const client = new Ietf.ClientSetup([Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14], params);
+	const client = new Ietf.ClientSetup({
+		// NOTE: draft 15 onwards does not use CLIENT_SETUP to negotiate the version.
+		// We still echo it just to make sure we're not accidentally trying to negotiate the version.
+		versions:
+			setupVersion === Ietf.Version.DRAFT_16
+				? [Ietf.Version.DRAFT_16]
+				: setupVersion === Ietf.Version.DRAFT_15
+					? [Ietf.Version.DRAFT_15]
+					: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
+		parameters: params,
+	});
 	console.debug(url.toString(), "sending client setup", client);
-	await client.encode(stream.writer);
+	await client.encode(stream.writer, setupVersion);
 
 	// And we expect 0x21 as the response.
 	const serverCompat = await stream.reader.u53();
@@ -92,16 +117,23 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		throw new Error(`unsupported server message type: ${serverCompat.toString()}`);
 	}
 
-	const server = await Ietf.ServerSetup.decode(stream.reader);
+	// Decode ServerSetup in Draft14 format (version + params)
+	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
 	console.debug(url.toString(), "received server setup", server);
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
 		console.debug(url.toString(), "moq-lite session established");
-		return new Lite.Connection(url, quic, stream, server.version as Lite.Version);
+		return new Lite.Connection(url, session, stream, server.version as Lite.Version);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
-		console.debug(url.toString(), "moq-ietf session established");
-		return new Ietf.Connection(url, quic, stream, maxRequestId);
+		console.debug(url.toString(), "moq-ietf session established, version:", server.version.toString(16));
+		return new Ietf.Connection({
+			url,
+			quic: session,
+			control: stream,
+			maxRequestId,
+			version: server.version as Ietf.IetfVersion,
+		});
 	} else {
 		throw new Error(`unsupported server version: ${server.version.toString()}`);
 	}
@@ -117,6 +149,8 @@ async function connectWebTransport(
 	const finalOptions: WebTransportOptions = {
 		allowPooling: false,
 		congestionControl: "low-latency",
+		// @ts-expect-error - TODO: add protocols to WebTransportOptions
+		protocols: [Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
 		...options,
 	};
 
@@ -161,7 +195,7 @@ async function connectWebTransport(
 }
 
 // TODO accept arguments to control the port/path used.
-async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>): Promise<WebTransport | undefined> {
+async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>): Promise<WebTransportWs | undefined> {
 	const timer = new Promise<void>((resolve) => setTimeout(resolve, delay));
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);

@@ -1,6 +1,6 @@
 use std::{cmp, fmt::Debug, io};
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::{Error, coding::*};
 

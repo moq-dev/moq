@@ -15,6 +15,8 @@ listen = "[::]:4443"
 # This is used for local development, in conjunction with a fingerprint, or with TLS verification disabled.
 tls.generate = ["localhost"]
 
+backend = "quiche"
+
 [web.http]
 # Listen for HTTP and WebSocket connections on the given TCP address.
 # This is unfortunately required to serve certificate.sha256 for local development.

@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 
 use buf_list::BufList;
 use futures::{StreamExt, stream::FuturesUnordered};
-use moq_lite::coding::Decode;
 
 use super::{Frame, Timestamp};
 use crate::Error;
@@ -188,7 +187,7 @@ impl GroupReader {
 
 		let mut payload = BufList::from_iter(payload);
 
-		let timestamp = Timestamp::decode(&mut payload, ())?;
+		let timestamp = Timestamp::decode(&mut payload)?;
 
 		let frame = Frame {
 			keyframe: (self.index == 0),

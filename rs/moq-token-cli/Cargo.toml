@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.5.9"
+version = "0.5.10"
 edition = "2024"
 
 [[bin]]
@@ -16,4 +16,4 @@ doc = false
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-moq-token = { version = "0.5", path = "../moq-token" }
+moq-token = { workspace = true }

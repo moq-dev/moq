@@ -13,6 +13,7 @@ pub type Status = i32;
 /// Each error variant maps to a specific negative error code
 /// returned to C callers.
 #[derive(Debug, thiserror::Error, Clone)]
+#[non_exhaustive]
 pub enum Error {
 	/// Resource was closed.
 	#[error("closed")]

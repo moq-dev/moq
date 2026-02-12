@@ -110,7 +110,7 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode},
 	ietf::{
-		FilterType, GroupOrder, Location, Message, Parameters, RequestId, Version,
+		FilterType, GroupOrder, Location, Message, MessageParameters, Parameters, RequestId, Version,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
@@ -169,17 +169,31 @@ impl Message for Publish<'_> {
 		encode_namespace(w, &self.track_namespace, version);
 		self.track_name.encode(w, version);
 		self.track_alias.encode(w, version);
-		self.group_order.encode(w, version);
-		if let Some(location) = &self.largest_location {
-			true.encode(w, version);
-			location.encode(w, version);
-		} else {
-			false.encode(w, version);
-		}
 
-		self.forward.encode(w, version);
-		// parameters
-		0u8.encode(w, version);
+		match version {
+			Version::Draft14 => {
+				self.group_order.encode(w, version);
+				if let Some(location) = &self.largest_location {
+					true.encode(w, version);
+					location.encode(w, version);
+				} else {
+					false.encode(w, version);
+				}
+
+				self.forward.encode(w, version);
+				// parameters
+				0u8.encode(w, version);
+			}
+			Version::Draft15 | Version::Draft16 => {
+				let mut params = MessageParameters::default();
+				params.set_group_order(u8::from(self.group_order) as u64);
+				if let Some(location) = &self.largest_location {
+					params.set_largest_object(location);
+				}
+				params.set_forward(self.forward);
+				params.encode(w, version);
+			}
+		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -187,24 +201,54 @@ impl Message for Publish<'_> {
 		let track_namespace = decode_namespace(r, version)?;
 		let track_name = Cow::<str>::decode(r, version)?;
 		let track_alias = u64::decode(r, version)?;
-		let group_order = GroupOrder::decode(r, version)?;
-		let content_exists = bool::decode(r, version)?;
-		let largest_location = match content_exists {
-			true => Some(Location::decode(r, version)?),
-			false => None,
-		};
-		let forward = bool::decode(r, version)?;
-		// parameters
-		let _params = Parameters::decode(r, version)?;
-		Ok(Self {
-			request_id,
-			track_namespace,
-			track_name,
-			track_alias,
-			group_order,
-			largest_location,
-			forward,
-		})
+
+		match version {
+			Version::Draft14 => {
+				let group_order = GroupOrder::decode(r, version)?;
+				let content_exists = bool::decode(r, version)?;
+				let largest_location = match content_exists {
+					true => Some(Location::decode(r, version)?),
+					false => None,
+				};
+				let forward = bool::decode(r, version)?;
+				// parameters
+				let _params = Parameters::decode(r, version)?;
+
+				Ok(Self {
+					request_id,
+					track_namespace,
+					track_name,
+					track_alias,
+					group_order,
+					largest_location,
+					forward,
+				})
+			}
+			Version::Draft15 | Version::Draft16 => {
+				let params = MessageParameters::decode(r, version)?;
+
+				let group_order = match params.group_order() {
+					Some(v) => u8::try_from(v)
+						.ok()
+						.and_then(|v| GroupOrder::try_from(v).ok())
+						.map(GroupOrder::any_to_descending)
+						.unwrap_or(GroupOrder::Descending),
+					None => GroupOrder::Descending,
+				};
+				let largest_location = params.largest_object();
+				let forward = params.forward().unwrap_or(true);
+
+				Ok(Self {
+					request_id,
+					track_namespace,
+					track_name,
+					track_alias,
+					group_order,
+					largest_location,
+					forward,
+				})
+			}
+		}
 	}
 }
 
@@ -223,45 +267,86 @@ impl Message for PublishOk {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
 		self.request_id.encode(w, version);
-		self.forward.encode(w, version);
-		self.subscriber_priority.encode(w, version);
-		self.group_order.encode(w, version);
-		self.filter_type.encode(w, version);
-		assert!(
-			matches!(self.filter_type, FilterType::LargestObject | FilterType::NextGroup),
-			"absolute subscribe not supported"
-		);
-		// no parameters
-		0u8.encode(w, version);
+
+		match version {
+			Version::Draft14 => {
+				self.forward.encode(w, version);
+				self.subscriber_priority.encode(w, version);
+				self.group_order.encode(w, version);
+				self.filter_type.encode(w, version);
+				debug_assert!(
+					matches!(self.filter_type, FilterType::LargestObject | FilterType::NextGroup),
+					"absolute subscribe not supported"
+				);
+				// no parameters
+				0u8.encode(w, version);
+			}
+			Version::Draft15 | Version::Draft16 => {
+				let mut params = MessageParameters::default();
+				params.set_forward(self.forward);
+				params.set_subscriber_priority(self.subscriber_priority);
+				params.set_group_order(u8::from(self.group_order) as u64);
+				params.set_subscription_filter(self.filter_type);
+				params.encode(w, version);
+			}
+		}
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
-		let forward = bool::decode(r, version)?;
-		let subscriber_priority = u8::decode(r, version)?;
-		let group_order = GroupOrder::decode(r, version)?;
-		let filter_type = FilterType::decode(r, version)?;
-		match filter_type {
-			FilterType::AbsoluteStart => {
-				let _start = Location::decode(r, version)?;
-			}
-			FilterType::AbsoluteRange => {
-				let _start = Location::decode(r, version)?;
-				let _end_group = u64::decode(r, version)?;
-			}
-			FilterType::NextGroup | FilterType::LargestObject => {}
-		};
 
-		// no parameters
-		let _params = Parameters::decode(r, version)?;
+		match version {
+			Version::Draft14 => {
+				let forward = bool::decode(r, version)?;
+				let subscriber_priority = u8::decode(r, version)?;
+				let group_order = GroupOrder::decode(r, version)?;
+				let filter_type = FilterType::decode(r, version)?;
+				match filter_type {
+					FilterType::AbsoluteStart => {
+						let _start = Location::decode(r, version)?;
+					}
+					FilterType::AbsoluteRange => {
+						let _start = Location::decode(r, version)?;
+						let _end_group = u64::decode(r, version)?;
+					}
+					FilterType::NextGroup | FilterType::LargestObject => {}
+				};
 
-		Ok(Self {
-			request_id,
-			forward,
-			subscriber_priority,
-			group_order,
-			filter_type,
-		})
+				// no parameters
+				let _params = Parameters::decode(r, version)?;
+
+				Ok(Self {
+					request_id,
+					forward,
+					subscriber_priority,
+					group_order,
+					filter_type,
+				})
+			}
+			Version::Draft15 | Version::Draft16 => {
+				let params = MessageParameters::decode(r, version)?;
+
+				let forward = params.forward().unwrap_or(true);
+				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
+				let group_order = match params.group_order() {
+					Some(v) => u8::try_from(v)
+						.ok()
+						.and_then(|v| GroupOrder::try_from(v).ok())
+						.map(GroupOrder::any_to_descending)
+						.unwrap_or(GroupOrder::Descending),
+					None => GroupOrder::Descending,
+				};
+				let filter_type = params.subscription_filter().unwrap_or(FilterType::LargestObject);
+
+				Ok(Self {
+					request_id,
+					forward,
+					subscriber_priority,
+					group_order,
+					filter_type,
+				})
+			}
+		}
 	}
 }
 
@@ -289,5 +374,104 @@ impl Message for PublishError<'_> {
 			error_code,
 			reason_phrase,
 		})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use bytes::BytesMut;
+
+	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+		let mut buf = BytesMut::new();
+		msg.encode_msg(&mut buf, version);
+		buf.to_vec()
+	}
+
+	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes::Bytes::from(bytes.to_vec());
+		M::decode_msg(&mut buf, version)
+	}
+
+	#[test]
+	fn test_publish_v14_round_trip() {
+		let msg = Publish {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+			track_alias: 42,
+			group_order: GroupOrder::Descending,
+			largest_location: Some(Location { group: 10, object: 5 }),
+			forward: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: Publish = decode_message(&encoded, Version::Draft14).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+		assert_eq!(decoded.track_alias, 42);
+		assert_eq!(decoded.largest_location, Some(Location { group: 10, object: 5 }));
+		assert!(decoded.forward);
+	}
+
+	#[test]
+	fn test_publish_v15_round_trip() {
+		let msg = Publish {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+			track_alias: 42,
+			group_order: GroupOrder::Descending,
+			largest_location: Some(Location { group: 10, object: 5 }),
+			forward: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: Publish = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+		assert_eq!(decoded.track_alias, 42);
+		assert_eq!(decoded.largest_location, Some(Location { group: 10, object: 5 }));
+		assert!(decoded.forward);
+	}
+
+	#[test]
+	fn test_publish_ok_v14_round_trip() {
+		let msg = PublishOk {
+			request_id: RequestId(7),
+			forward: true,
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: FilterType::LargestObject,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft14);
+		let decoded: PublishOk = decode_message(&encoded, Version::Draft14).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(7));
+		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	#[test]
+	fn test_publish_ok_v15_round_trip() {
+		let msg = PublishOk {
+			request_id: RequestId(7),
+			forward: true,
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: FilterType::LargestObject,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft15);
+		let decoded: PublishOk = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(7));
+		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, 128);
 	}
 }

@@ -12,9 +12,9 @@ const watch = document.getElementById("watch") as HTMLAnchorElement;
 const watchName = document.getElementById("watch-name") as HTMLSpanElement;
 
 const urlParams = new URLSearchParams(window.location.search);
-const path = urlParams.get("path");
+const path = urlParams.get("broadcast") ?? urlParams.get("path");
 if (path) {
 	publish.setAttribute("path", path);
-	watch.href = `index.html?path=${path}`;
+	watch.href = `index.html?broadcast=${path}`;
 	watchName.textContent = path;
 }

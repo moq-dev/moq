@@ -78,6 +78,7 @@ export default defineConfig({
 								{ text: "Configuration", link: "/app/relay/config" },
 								{ text: "Authentication", link: "/app/relay/auth" },
 								{ text: "Clustering", link: "/app/relay/cluster" },
+								{ text: "HTTP", link: "/app/relay/http" },
 								{ text: "Production", link: "/app/relay/production" },
 							],
 						},

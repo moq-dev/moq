@@ -2,6 +2,7 @@ use crate::coding;
 
 /// A list of possible errors that can occur during the session.
 #[derive(thiserror::Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum Error {
 	#[error("transport error")]
 	Transport,
@@ -72,6 +73,9 @@ pub enum Error {
 
 	#[error("invalid role")]
 	InvalidRole,
+
+	#[error("unknown ALPN: {0}")]
+	UnknownAlpn(String),
 }
 
 impl Error {
@@ -97,6 +101,7 @@ impl Error {
 			Self::TooLarge => 18,
 			Self::TooManyParameters => 19,
 			Self::InvalidRole => 20,
+			Self::UnknownAlpn(_) => 21,
 			Self::App(app) => *app as u32 + 64,
 		}
 	}

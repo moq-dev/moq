@@ -1,6 +1,6 @@
 use std::{str::FromStr, sync::Arc};
 
-use moq_lite::coding::Buf;
+use bytes::Buf;
 use moq_mux::import;
 
 use crate::{Error, Id, NonZeroSlab};

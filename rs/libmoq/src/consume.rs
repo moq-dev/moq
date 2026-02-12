@@ -1,6 +1,6 @@
 use std::ffi::c_char;
 
-use moq_lite::coding::Buf;
+use bytes::Buf;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;

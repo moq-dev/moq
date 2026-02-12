@@ -1,6 +1,7 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
+import type { IetfVersion } from "./version.ts";
 
 export class Fetch {
 	static id = 0x16;
@@ -15,17 +16,27 @@ export class Fetch {
 	endGroup: bigint;
 	endObject: bigint;
 
-	constructor(
-		requestId: bigint,
-		trackNamespace: Path.Valid,
-		trackName: string,
-		subscriberPriority: number,
-		groupOrder: number,
-		startGroup: bigint,
-		startObject: bigint,
-		endGroup: bigint,
-		endObject: bigint,
-	) {
+	constructor({
+		requestId,
+		trackNamespace,
+		trackName,
+		subscriberPriority,
+		groupOrder,
+		startGroup,
+		startObject,
+		endGroup,
+		endObject,
+	}: {
+		requestId: bigint;
+		trackNamespace: Path.Valid;
+		trackName: string;
+		subscriberPriority: number;
+		groupOrder: number;
+		startGroup: bigint;
+		startObject: bigint;
+		endGroup: bigint;
+		endObject: bigint;
+	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
@@ -41,11 +52,11 @@ export class Fetch {
 		throw new Error("FETCH messages are not supported");
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<Fetch> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<Fetch> {
 		return Message.decode(r, Fetch.#decode);
 	}
 
@@ -59,7 +70,7 @@ export class FetchOk {
 
 	requestId: bigint;
 
-	constructor(requestId: bigint) {
+	constructor({ requestId }: { requestId: bigint }) {
 		this.requestId = requestId;
 	}
 
@@ -67,11 +78,11 @@ export class FetchOk {
 		throw new Error("FETCH_OK messages are not supported");
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<FetchOk> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<FetchOk> {
 		return Message.decode(r, FetchOk.#decode);
 	}
 
@@ -87,7 +98,11 @@ export class FetchError {
 	errorCode: number;
 	reasonPhrase: string;
 
-	constructor(requestId: bigint, errorCode: number, reasonPhrase: string) {
+	constructor({
+		requestId,
+		errorCode,
+		reasonPhrase,
+	}: { requestId: bigint; errorCode: number; reasonPhrase: string }) {
 		this.requestId = requestId;
 		this.errorCode = errorCode;
 		this.reasonPhrase = reasonPhrase;
@@ -97,11 +112,11 @@ export class FetchError {
 		throw new Error("FETCH_ERROR messages are not supported");
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<FetchError> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<FetchError> {
 		return Message.decode(r, FetchError.#decode);
 	}
 
@@ -115,7 +130,7 @@ export class FetchCancel {
 
 	requestId: bigint;
 
-	constructor(requestId: bigint) {
+	constructor({ requestId }: { requestId: bigint }) {
 		this.requestId = requestId;
 	}
 
@@ -123,11 +138,11 @@ export class FetchCancel {
 		throw new Error("FETCH_CANCEL messages are not supported");
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<FetchCancel> {
+	static async decode(r: Reader, _version: IetfVersion): Promise<FetchCancel> {
 		return Message.decode(r, FetchCancel.#decode);
 	}
 
