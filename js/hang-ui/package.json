@@ -1,7 +1,7 @@
 {
 	"name": "@moq/hang-ui",
 	"type": "module",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"description": "Media over QUIC library UI components",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
@@ -14,7 +14,7 @@
 		"./src/watch/index.tsx"
 	],
 	"scripts": {
-		"build": "bun run clean && vite build && bun ../scripts/package.ts",
+		"build": "bun run clean && vite build && tsc && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
 		"clean": "rimraf dist",
 		"fix": "biome check src --fix",
