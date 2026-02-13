@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import * as libav from "@moq/hang/util/libav";
+import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
@@ -158,7 +158,7 @@ export class Encoder {
 
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
-			await libav.polyfill();
+			await Util.Libav.polyfill();
 
 			const encoder = new AudioEncoder({
 				output: (frame) => {

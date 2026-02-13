@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import { isFirefox } from "@moq/hang/util/hacks";
+import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
@@ -302,7 +302,7 @@ export class Encoder {
 
 		// Try hardware encoding first.
 		// We can't reliably detect hardware encoding on Firefox: https://github.com/w3c/webcodecs/issues/896
-		if (!isFirefox) {
+		if (!Util.Hacks.isFirefox) {
 			for (const codec of HARDWARE_CODECS) {
 				if (!codec.startsWith(required)) continue;
 

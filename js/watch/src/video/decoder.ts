@@ -1,6 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import * as Hex from "@moq/hang/util/hex";
+import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
@@ -276,7 +276,7 @@ class DecoderTrack {
 
 		decoder.configure({
 			...this.config,
-			description: this.config.description ? Hex.toBytes(this.config.description) : undefined,
+			description: this.config.description ? Util.Hex.toBytes(this.config.description) : undefined,
 			optimizeForLatency: this.config.optimizeForLatency ?? true,
 			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
 			flip: false,
@@ -336,7 +336,7 @@ class DecoderTrack {
 		if (this.config.container.kind !== "cmaf") return;
 
 		const { timescale } = this.config.container;
-		const description = this.config.description ? Hex.toBytes(this.config.description) : undefined;
+		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
 
 		// Configure decoder with description from catalog
 		decoder.configure({
@@ -469,7 +469,7 @@ function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRang
 }
 
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
-	const description = config.description ? Hex.toBytes(config.description) : undefined;
+	const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 	const { supported } = await VideoDecoder.isConfigSupported({
 		codec: config.codec,
 		description,

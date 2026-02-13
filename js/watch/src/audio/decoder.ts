@@ -1,7 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import * as Hex from "@moq/hang/util/hex";
-import * as libav from "@moq/hang/util/libav";
+import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
@@ -195,7 +194,7 @@ export class Decoder {
 		});
 
 		effect.spawn(async () => {
-			const loaded = await libav.polyfill();
+			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
 			const decoder = new AudioDecoder({
@@ -204,7 +203,7 @@ export class Decoder {
 			});
 			effect.cleanup(() => decoder.close());
 
-			const description = config.description ? Hex.toBytes(config.description) : undefined;
+			const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 			decoder.configure({
 				...config,
 				description,
@@ -236,7 +235,7 @@ export class Decoder {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
 		const { timescale } = config.container;
-		const description = config.description ? Hex.toBytes(config.description) : undefined;
+		const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 
 		// For CMAF, just use decode buffer (no network jitter buffer yet)
 		// TODO: Add CMAF consumer wrapper for latency control
@@ -246,7 +245,7 @@ export class Decoder {
 		});
 
 		effect.spawn(async () => {
-			const loaded = await libav.polyfill();
+			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
 			const decoder = new AudioDecoder({
@@ -377,7 +376,7 @@ export class Decoder {
 }
 
 async function supported(config: Catalog.AudioConfig): Promise<boolean> {
-	const description = config.description ? Hex.toBytes(config.description) : undefined;
+	const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 	const res = await AudioDecoder.isConfigSupported({
 		...config,
 		description,
