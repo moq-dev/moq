@@ -8,22 +8,25 @@ import { join } from "node:path";
 console.log("✍️  Rewriting package.json...");
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 
-function rewritePath(p: string): string {
-	return p.replace(/^\.\/src/, ".").replace(/\.ts(x)?$/, ".js");
+function rewritePath(p: string, ext: string): string {
+	return p.replace(/^\.\/src/, ".").replace(/\.ts(x)?$/, `.${ext}`);
 }
 
-pkg.main &&= rewritePath(pkg.main);
-pkg.types &&= rewritePath(pkg.types);
+pkg.main &&= rewritePath(pkg.main, "js");
+pkg.types &&= rewritePath(pkg.types, "d.ts");
 
 if (pkg.exports) {
 	for (const key in pkg.exports) {
 		const val = pkg.exports[key];
 		if (typeof val === "string") {
-			pkg.exports[key] = rewritePath(val);
+			pkg.exports[key] = {
+				types: rewritePath(val, "d.ts"),
+				default: rewritePath(val, "js"),
+			};
 		} else if (typeof val === "object") {
 			for (const sub in val) {
 				if (typeof val[sub] === "string") {
-					val[sub] = rewritePath(val[sub]);
+					val[sub] = rewritePath(val[sub], "js");
 				}
 			}
 		}
@@ -31,19 +34,19 @@ if (pkg.exports) {
 }
 
 if (pkg.sideEffects) {
-	pkg.sideEffects = pkg.sideEffects.map(rewritePath);
+	pkg.sideEffects = pkg.sideEffects.map((p: string) => rewritePath(p, "js"));
 }
 
 if (pkg.files) {
-	pkg.files = pkg.files.map(rewritePath);
+	pkg.files = pkg.files.map((p: string) => rewritePath(p, "js"));
 }
 
 if (pkg.bin) {
 	if (typeof pkg.bin === "string") {
-		pkg.bin = rewritePath(pkg.bin);
+		pkg.bin = rewritePath(pkg.bin, "js");
 	} else if (typeof pkg.bin === "object") {
 		for (const key in pkg.bin) {
-			pkg.bin[key] = rewritePath(pkg.bin[key]);
+			pkg.bin[key] = rewritePath(pkg.bin[key], "js");
 		}
 	}
 }
