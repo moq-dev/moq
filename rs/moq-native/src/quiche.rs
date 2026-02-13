@@ -29,7 +29,7 @@ impl QuicheClient {
 		Ok(Self {
 			bind: config.bind,
 			disable_verify: config.tls.disable_verify.unwrap_or_default(),
-			max_streams: config.max_streams.unwrap_or(1024),
+			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
 		})
 	}
 
@@ -143,7 +143,7 @@ impl QuicheServer {
 			alpns.push(alpn.as_bytes().to_vec());
 		}
 
-		let max_streams = config.max_streams.unwrap_or(1024);
+		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
 
 		let mut settings = web_transport_quiche::Settings::default();
 		settings.alpn = alpns;

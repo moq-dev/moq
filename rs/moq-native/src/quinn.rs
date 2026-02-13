@@ -29,7 +29,7 @@ impl QuinnClient {
 		transport.keep_alive_interval(Some(time::Duration::from_secs(4)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
 
-		let max_streams = config.max_streams.unwrap_or(1024);
+		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
 		let max_streams = quinn::VarInt::from_u64(max_streams).unwrap_or(quinn::VarInt::MAX);
 		transport.max_concurrent_bidi_streams(max_streams);
 		transport.max_concurrent_uni_streams(max_streams);
@@ -200,7 +200,7 @@ impl QuinnServer {
 		transport.keep_alive_interval(Some(Duration::from_secs(4)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
 
-		let max_streams = config.max_streams.unwrap_or(1024);
+		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
 		let max_streams = quinn::VarInt::from_u64(max_streams).unwrap_or(quinn::VarInt::MAX);
 		transport.max_concurrent_bidi_streams(max_streams);
 		transport.max_concurrent_uni_streams(max_streams);

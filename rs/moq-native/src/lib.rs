@@ -8,6 +8,9 @@
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting connections.
 
+/// Default maximum number of concurrent QUIC streams (both bidi and uni) per connection.
+pub const DEFAULT_MAX_STREAMS: u64 = 1024;
+
 mod client;
 mod crypto;
 mod log;

@@ -79,7 +79,7 @@ pub struct ServerConfig {
 	pub quic_lb_nonce: Option<usize>,
 
 	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
-	/// Defaults to 1024 if not set.
+	/// Defaults to [`DEFAULT_MAX_STREAMS`] if not set.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[arg(
 		id = "server-max-streams",

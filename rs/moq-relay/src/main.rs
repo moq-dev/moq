@@ -22,6 +22,10 @@ pub use config::*;
 pub use connection::*;
 pub use web::*;
 
+/// Default maximum concurrent QUIC streams for the relay, higher than
+/// [`moq_native::DEFAULT_MAX_STREAMS`] to handle many concurrent subscriptions.
+const DEFAULT_RELAY_MAX_STREAMS: u64 = 10_000;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// TODO: It would be nice to remove this and rely on feature flags only.
@@ -34,10 +38,10 @@ async fn main() -> anyhow::Result<()> {
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
 
-	// The relay needs higher stream limits than the default (1024)
+	// The relay needs higher stream limits than the default
 	// to handle many concurrent subscriptions across connections.
-	config.client.max_streams.get_or_insert(10_000);
-	config.server.max_streams.get_or_insert(10_000);
+	config.client.max_streams.get_or_insert(DEFAULT_RELAY_MAX_STREAMS);
+	config.server.max_streams.get_or_insert(DEFAULT_RELAY_MAX_STREAMS);
 
 	#[allow(unused_mut)]
 	let mut server = config.server.init()?;
