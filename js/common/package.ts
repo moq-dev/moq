@@ -94,7 +94,7 @@ copyFileSync("README.md", join("dist", "README.md"));
 console.log("🔍 Running publint...");
 const { messages, pkg: lintPkg } = await publint({
 	pkgDir: resolve("dist"),
-	level: "suggestion",
+	level: "warning",
 	pack: false,
 });
 

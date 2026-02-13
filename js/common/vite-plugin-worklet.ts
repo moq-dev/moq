@@ -32,6 +32,10 @@ export function workletInline(): Plugin {
 
 			const filePath = id.slice(0, -SUFFIX.length);
 
+			if (this.addWatchFile) {
+				this.addWatchFile(filePath);
+			}
+
 			const result = await build({
 				entryPoints: [filePath],
 				bundle: true,
