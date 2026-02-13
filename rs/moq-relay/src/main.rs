@@ -30,9 +30,14 @@ async fn main() -> anyhow::Result<()> {
 		.install_default()
 		.expect("failed to install default crypto provider");
 
-	let config = Config::load()?;
+	let mut config = Config::load()?;
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
+
+	// The relay needs higher stream limits than the default (1024)
+	// to handle many concurrent subscriptions across connections.
+	config.client.max_streams.get_or_insert(10_000);
+	config.server.max_streams.get_or_insert(10_000);
 
 	#[allow(unused_mut)]
 	let mut server = config.server.init()?;

@@ -78,6 +78,16 @@ pub struct ServerConfig {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic_lb_nonce: Option<usize>,
 
+	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
+	/// Defaults to 1024 if not set.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "server-max-streams",
+		long = "server-max-streams",
+		env = "MOQ_SERVER_MAX_STREAMS"
+	)]
+	pub max_streams: Option<u64>,
+
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ServerTlsConfig,
