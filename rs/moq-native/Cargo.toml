@@ -22,7 +22,7 @@ quinn = [
 ]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
-iroh = ["dep:web-transport-iroh"]
+iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
 websocket = ["dep:web-transport-ws"]
 ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring"]
 tokio-console = ["dep:console-subscriber"]
@@ -58,6 +58,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 web-transport-iroh = { workspace = true, optional = true }
+web-transport-proto = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
 web-transport-ws = { workspace = true, features = [
