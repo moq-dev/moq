@@ -25,8 +25,8 @@ tokio = "1.48"
 web-async = { version = "0.1.1", features = ["tracing"] }
 web-transport-iroh = "0.1.1"
 web-transport-quiche = "0.2"
-web-transport-quinn = "0.11"
-web-transport-trait = "0.3.2"
+web-transport-quinn = "0.11.4"
+web-transport-trait = "0.3.3"
 web-transport-ws = "0.2.2"
 
 [profile.dev]
