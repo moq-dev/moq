@@ -14,11 +14,54 @@ type SourceType = "camera" | "screen" | "file";
 // There's no destructor for web components so this is the best we can do.
 const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 
+/**
+ * @tag hang-publish
+ * @summary Publish live video streams over Media over QUIC (MOQ)
+ * @description A custom element that captures and publishes video/audio streams over the Media over QUIC protocol.
+ * Supports multiple input sources including camera, screen sharing, and file playback. Handles encoding,
+ * transmission, and connection management to MOQ relay servers. Includes optional preview via video element.
+ *
+ * @attr {string} url - The WebTransport URL of the MOQ relay server (e.g., "https://relay.example.com")
+ * @attr {string} path - The broadcast path to publish to (e.g., "/live/mystream")
+ * @attr {string} source - Input source type: "camera", "screen", or "file"
+ * @attr {boolean} muted - Whether audio is muted (disables audio track)
+ * @attr {boolean} invisible - Whether video is disabled (disables video track)
+ *
+ * @slot default - Optional video element for local preview of the published stream
+ *
+ * @example HTML with camera
+ * ```html
+ * <hang-publish url="https://relay.example.com" path="/live/mystream" source="camera">
+ *   <video autoplay muted style="width: 320px; height: 240px;"></video>
+ * </hang-publish>
+ * ```
+ *
+ * @example HTML with screen sharing
+ * ```html
+ * <hang-publish url="https://relay.example.com" path="/presentation" source="screen">
+ *   <video autoplay muted style="width: 640px; height: 360px;"></video>
+ * </hang-publish>
+ * ```
+ *
+ * @example React
+ * ```tsx
+ * import '@moq/hang/publish/element';
+ * import { HangPublish } from '@moq/hang/react';
+ *
+ * export function HangPublishComponent({ url, path }) {
+ *   return (
+ *     <HangPublish url={url} path={path}>
+ *       <video autoplay muted style={{ width: '320px', height: '240px' }} />
+ *     </HangPublish>
+ *   );
+ * }
+ * ```
+ */
 export default class HangPublish extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
-	url = new Signal<URL | undefined>(undefined);
-	path = new Signal<Moq.Path.Valid | undefined>(undefined);
+	#url = new Signal<URL | undefined>(undefined);
+	#path = new Signal<Moq.Path.Valid | undefined>(undefined);
 	source = new Signal<SourceType | File | undefined>(undefined);
 
 	// Controls whether audio/video is enabled.
@@ -50,7 +93,7 @@ export default class HangPublish extends HTMLElement {
 		cleanup.register(this, this.signals);
 
 		this.connection = new Moq.Connection.Reload({
-			url: this.url,
+			url: this.#url,
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.connection.close());
@@ -72,7 +115,7 @@ export default class HangPublish extends HTMLElement {
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
 			enabled: this.#enabled,
-			path: this.path,
+			path: this.#path,
 
 			audio: {
 				enabled: this.#audioEnabled,
@@ -144,6 +187,22 @@ export default class HangPublish extends HTMLElement {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
 		}
+	}
+
+	get url(): Signal<URL | undefined> {
+		return this.#url;
+	}
+
+	set url(value: string | URL | undefined) {
+		value ? this.setAttribute("url", String(value)) : this.removeAttribute("url");
+	}
+
+	get path(): Signal<Moq.Path.Valid | undefined> {
+		return this.#path;
+	}
+
+	set path(value: string | Moq.Path.Valid | undefined) {
+		value ? this.setAttribute("path", String(value)) : this.removeAttribute("path");
 	}
 
 	#runSource(effect: Effect) {
@@ -225,8 +284,4 @@ export default class HangPublish extends HTMLElement {
 
 customElements.define("hang-publish", HangPublish);
 
-declare global {
-	interface HTMLElementTagNameMap {
-		"hang-publish": HangPublish;
-	}
-}
+export { HangPublish };

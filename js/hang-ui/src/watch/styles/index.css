@@ -3,6 +3,12 @@
 @import "../../shared/components/button/button.css";
 @import "../../shared/components/stats/styles/index.css";
 
+/* Host element default styles */
+:host {
+	position: relative;
+	display: block;
+}
+
 /* Color variables for buffer states */
 :root {
 	--buffer-green: #4ade80;
@@ -12,9 +18,11 @@
 
 .watchVideoContainer {
 	display: block;
-	position: relative;
+	position: absolute;
+	top: 0;
+	left: 0;
 	width: 100%;
-	height: auto;
+	height: 100%;
 	border-radius: 4px;
 	margin: 0 auto;
 	pointer-events: none;
@@ -89,6 +97,7 @@
 	0% {
 		transform: rotate(0deg);
 	}
+
 	100% {
 		transform: rotate(360deg);
 	}

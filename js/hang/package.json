@@ -13,7 +13,11 @@
 		"./watch/element": "./src/watch/element.ts",
 		"./catalog": "./src/catalog/index.ts",
 		"./support": "./src/support/index.ts",
-		"./support/element": "./src/support/element.ts"
+		"./support/element": "./src/support/element.ts",
+		"./react": {
+			"types": "./wrappers/react/index.d.ts",
+			"default": "./src/wrappers/react/index.ts"
+		}
 	},
 	"sideEffects": [
 		"./src/publish/element.ts",
@@ -21,7 +25,8 @@
 		"./src/support/element.ts"
 	],
 	"scripts": {
-		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
+		"prebuild": "bunx cem analyze --config cem.config.js && bun ../scripts/element-wrappers/index.ts",
+		"build": "rimraf dist && tsc -b && cp custom-elements.json dist/ && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
 		"test": "bun test --only-failures",
 		"release": "bun ../scripts/release.ts"
@@ -37,10 +42,12 @@
 		"zod": "^4.1.5"
 	},
 	"devDependencies": {
+		"@custom-elements-manifest/analyzer": "^0.11.0",
 		"@types/audioworklet": "^0.0.77",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
 		"fast-glob": "^3.3.3",
 		"rimraf": "^6.0.1",
 		"typescript": "^5.9.2"
-	}
+	},
+	"customElements": "custom-elements.json"
 }

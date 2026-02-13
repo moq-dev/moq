@@ -17,7 +17,52 @@ type Observed = (typeof OBSERVED)[number];
 // There's no destructor for web components so this is the best we can do.
 const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 
-// An optional web component that wraps a <canvas>
+/**
+ * @tag hang-watch
+ * @summary Watch live or on-demand video streams over Media over QUIC (MOQ)
+ * @description A custom element that provides core playback functionality for watching video streams
+ * transmitted over Media over QUIC protocol. Wraps a canvas or video element and handles connection,
+ * decoding, synchronization, and rendering. Supports configurable jitter buffer, volume control,
+ * pause/resume, and automatic reconnection.
+ *
+ * @attr {string} url - The WebTransport URL of the MOQ relay server (e.g., "https://relay.example.com")
+ * @attr {string} path - The broadcast path to subscribe to (e.g., "/live/stream")
+ * @attr {boolean} paused - Whether playback is paused
+ * @attr {number} volume - Audio volume level (0.0 to 1.0, default: 0.5)
+ * @attr {boolean} muted - Whether audio is muted
+ * @attr {boolean} reload - Whether to automatically reconnect on connection loss
+ * @attr {number} jitter - Target jitter buffer in milliseconds (default: 100)
+ *
+ * @slot default - Container for the canvas or video element
+ *
+ * @example HTML with canvas
+ * ```html
+ * <hang-watch url="https://relay.example.com" path="/live/stream" jitter="100" muted reload volume="0.5">
+ *   <canvas style="width: 100%; height: auto;" width="1280" height="720"></canvas>
+ * </hang-watch>
+ * ```
+ *
+ * @example HTML with video element
+ * ```html
+ * <hang-watch url="https://relay.example.com" path="/broadcast" reload>
+ *   <video style="width: 100%; height: auto;" controls></video>
+ * </hang-watch>
+ * ```
+ *
+ * @example React
+ * ```tsx
+ * import '@moq/hang/watch/element';
+ * import { HangWatch } from '@moq/hang/react';
+ *
+ * export function HangWatchComponent({ url, path }) {
+ *   return (
+ *     <HangWatch url={url} path={path} jitter={100} muted reload volume={0}>
+ *       <canvas style={{ width: '100%', height: 'auto' }} width="1280" height="720" />
+ *     </HangWatch>
+ *   );
+ * }
+ * ```
+ */
 export default class HangWatch extends HTMLElement implements Backend {
 	static observedAttributes = OBSERVED;
 
@@ -170,12 +215,24 @@ export default class HangWatch extends HTMLElement implements Backend {
 		return this.connection.url;
 	}
 
+	set url(value: string | URL | undefined) {
+		value ? this.setAttribute("url", String(value)) : this.removeAttribute("url");
+	}
+
 	get path(): Signal<Moq.Path.Valid | undefined> {
 		return this.broadcast.path;
 	}
 
+	set path(value: string | Moq.Path.Valid | undefined) {
+		value ? this.setAttribute("path", String(value)) : this.removeAttribute("path");
+	}
+
 	get jitter(): Signal<Time.Milli> {
 		return this.#backend.jitter;
+	}
+
+	set jitter(value: string | Time.Milli | undefined) {
+		value != null ? this.setAttribute("jitter", String(value)) : this.removeAttribute("jitter");
 	}
 
 	get paused(): Signal<boolean> {
@@ -193,8 +250,4 @@ export default class HangWatch extends HTMLElement implements Backend {
 
 customElements.define("hang-watch", HangWatch);
 
-declare global {
-	interface HTMLElementTagNameMap {
-		"hang-watch": HangWatch;
-	}
-}
+export { HangWatch };

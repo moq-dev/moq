@@ -218,6 +218,38 @@ useEffect(() => {
 }, [media]);
 ```
 
+## Build System & Code Generation
+
+This package uses Custom Elements Manifest (CEM) to automatically generate framework-specific wrappers.
+
+### React Wrappers
+
+Auto-generated from CEM, exported from `@moq/hang/react`:
+
+```tsx
+import { HangWatch, HangPublish } from '@moq/hang/react';
+
+<HangWatch url="https://relay.example.com" path="/stream" jitter={100} muted reload>
+  <canvas width={1280} height={720} />
+</HangWatch>
+
+<HangPublish url="https://relay.example.com" path="/stream" source="camera">
+  <video autoPlay muted />
+</HangPublish>
+```
+
+### Generating Wrappers for Other Frameworks
+
+To add Vue, Angular, or other frameworks, see the [element-wrappers guide](../scripts/element-wrappers/README.md) for step-by-step instructions.
+
+The process:
+1. Create a generator in `../scripts/element-wrappers/generators/<framework>.ts`
+2. Register it in `../scripts/element-wrappers/index.ts`
+3. Add package export in `package.json`
+4. Run `bun run prebuild` to generate wrappers
+
+Full details: [`../scripts/element-wrappers/README.md`](../scripts/element-wrappers/README.md)
+
 ## License
 
 Licensed under either:

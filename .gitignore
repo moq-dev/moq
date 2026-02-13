@@ -34,3 +34,10 @@ node_modules
 package-lock.json
 yarn.lock
 pnpm-lock.yaml
+
+# Generated framework wrappers
+js/hang-ui/src/wrappers/
+js/hang/src/wrappers/
+
+# Generated manifest (created during build)
+custom-elements.json

@@ -8,3 +8,9 @@
 @import "./source-button.css";
 @import "./media-selector.css";
 @import "./status-indicator.css";
+
+/* Host element default styles */
+:host {
+	position: relative;
+	display: block;
+}
