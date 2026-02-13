@@ -35,13 +35,13 @@ impl AsPath for Path<'_> {
 
 impl AsPath for String {
 	fn as_path(&self) -> Path<'_> {
-		Path(Cow::Borrowed(self))
+		Path::new(self)
 	}
 }
 
 impl<'a> AsPath for &'a String {
 	fn as_path(&self) -> Path<'a> {
-		Path(Cow::Borrowed(self))
+		Path::new(self)
 	}
 }
 

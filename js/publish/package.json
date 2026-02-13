@@ -1,0 +1,38 @@
+{
+	"name": "@moq/publish",
+	"type": "module",
+	"version": "0.1.0",
+	"description": "Publish media to Media over QUIC streams",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": "github:moq-dev/moq",
+	"exports": {
+		".": "./src/index.ts",
+		"./element": "./src/element.ts",
+		"./ui": "./src/ui/index.tsx"
+	},
+	"sideEffects": [
+		"./src/element.ts",
+		"./src/ui/index.tsx"
+	],
+	"scripts": {
+		"build": "rimraf dist && tsc -b tsconfig.build.json && vite build && bun ../scripts/package.ts",
+		"check": "tsc --noEmit",
+		"release": "bun ../scripts/release.ts"
+	},
+	"dependencies": {
+		"@moq/hang": "workspace:^",
+		"@moq/lite": "workspace:^",
+		"@moq/signals": "workspace:^",
+		"@moq/ui-core": "workspace:^"
+	},
+	"devDependencies": {
+		"@types/audioworklet": "^0.0.77",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
+		"rimraf": "^6.0.1",
+		"solid-element": "^1.9.1",
+		"solid-js": "^1.9.10",
+		"typescript": "^5.9.2",
+		"vite": "^7.3.1",
+		"vite-plugin-solid": "^2.11.10"
+	}
+}

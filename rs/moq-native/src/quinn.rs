@@ -28,6 +28,12 @@ impl QuinnClient {
 		transport.max_idle_timeout(Some(time::Duration::from_secs(10).try_into().unwrap()));
 		transport.keep_alive_interval(Some(time::Duration::from_secs(4)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
+
+		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
+		let max_streams = quinn::VarInt::from_u64(max_streams).unwrap_or(quinn::VarInt::MAX);
+		transport.max_concurrent_bidi_streams(max_streams);
+		transport.max_concurrent_uni_streams(max_streams);
+
 		let transport = Arc::new(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
@@ -193,6 +199,12 @@ impl QuinnServer {
 		transport.max_idle_timeout(Some(Duration::from_secs(10).try_into().unwrap()));
 		transport.keep_alive_interval(Some(Duration::from_secs(4)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
+
+		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
+		let max_streams = quinn::VarInt::from_u64(max_streams).unwrap_or(quinn::VarInt::MAX);
+		transport.max_concurrent_bidi_streams(max_streams);
+		transport.max_concurrent_uni_streams(max_streams);
+
 		let transport = Arc::new(transport);
 
 		let provider = crypto::provider();

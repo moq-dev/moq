@@ -78,6 +78,15 @@ pub struct ServerConfig {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub quic_lb_nonce: Option<usize>,
 
+	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "server-max-streams",
+		long = "server-max-streams",
+		env = "MOQ_SERVER_MAX_STREAMS"
+	)]
+	pub max_streams: Option<u64>,
+
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ServerTlsConfig,
@@ -119,6 +128,7 @@ impl Server {
 		});
 
 		#[cfg(feature = "quinn")]
+		#[allow(unreachable_patterns)]
 		let quinn = match backend {
 			QuicBackend::Quinn => Some(crate::quinn::QuinnServer::new(config.clone())?),
 			_ => None,
@@ -233,10 +243,10 @@ impl Server {
 						})
 					}.boxed());
 				}
-				Some(conn) = quiche_accept => {
+				Some(_conn) = quiche_accept => {
 					#[cfg(feature = "quiche")]
 					self.accept.push(async move {
-						let quiche = super::quiche::QuicheRequest::accept(conn).await?;
+						let quiche = super::quiche::QuicheRequest::accept(_conn).await?;
 						Ok(Request {
 							server,
 							kind: RequestKind::Quiche(quiche),

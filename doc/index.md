@@ -122,5 +122,6 @@ Or run on [native](/js/env/native) with polyfills via Node/Bun/Deno.
 Some highlights:
 - [@moq/lite](/js/@moq/lite) - Performs the core asynchronous networking.
 - [@moq/hang](/js/@moq/hang/) - Performs any media stuff: capture, encode, transmux, decode, render.
-- [@moq/hang-ui](/js/@moq/hang-ui) - A simple web UI for those too lazy to vibe code one.
+- [@moq/watch](/js/@moq/watch) - Subscribe to and render MoQ broadcasts.
+- [@moq/publish](/js/@moq/publish) - Publish media to MoQ broadcasts.
 - [...and more](/js/)

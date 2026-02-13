@@ -28,6 +28,7 @@ pub struct ClientTls {
 		env = "MOQ_CLIENT_TLS_DISABLE_VERIFY",
 		default_missing_value = "true",
 		num_args = 0..=1,
+		require_equals = true,
 		value_parser = clap::value_parser!(bool),
 	)]
 	pub disable_verify: Option<bool>,
@@ -52,6 +53,15 @@ pub struct ClientConfig {
 	#[arg(id = "client-backend", long = "client-backend", env = "MOQ_CLIENT_BACKEND")]
 	pub backend: Option<QuicBackend>,
 
+	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "client-max-streams",
+		long = "client-max-streams",
+		env = "MOQ_CLIENT_MAX_STREAMS"
+	)]
+	pub max_streams: Option<u64>,
+
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ClientTls,
@@ -73,6 +83,7 @@ impl Default for ClientConfig {
 		Self {
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
+			max_streams: None,
 			tls: ClientTls::default(),
 			#[cfg(feature = "websocket")]
 			websocket: super::ClientWebSocket::default(),
@@ -166,6 +177,7 @@ impl Client {
 		}
 
 		#[cfg(feature = "quinn")]
+		#[allow(unreachable_patterns)]
 		let quinn = match backend {
 			QuicBackend::Quinn => Some(crate::quinn::QuinnClient::new(&config)?),
 			_ => None,
@@ -352,8 +364,14 @@ mod tests {
 
 	#[test]
 	fn test_cli_disable_verify_explicit_false() {
-		let config = ClientConfig::parse_from(["test", "--tls-disable-verify", "false"]);
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=false"]);
 		assert_eq!(config.tls.disable_verify, Some(false));
+	}
+
+	#[test]
+	fn test_cli_disable_verify_explicit_true() {
+		let config = ClientConfig::parse_from(["test", "--tls-disable-verify=true"]);
+		assert_eq!(config.tls.disable_verify, Some(true));
 	}
 
 	#[test]

@@ -50,6 +50,8 @@
         rustDeps = with pkgs; [
           rust-toolchain
           just
+          git
+          cmake
           pkg-config
           glib
           libressl
