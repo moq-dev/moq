@@ -21,10 +21,17 @@ if (pkg.exports) {
 	for (const key in pkg.exports) {
 		const val = pkg.exports[key];
 		if (typeof val === "string") {
-			pkg.exports[key] = {
-				types: rewritePath(val, "d.ts"),
-				default: rewritePath(val, "js"),
-			};
+			if (val.endsWith(".css")) {
+				// CSS exports are only needed for dev-time resolution;
+				// consumers inline them at build time via @import.
+				// We purposely do not copy them to the dist to help catch bugs.
+				delete pkg.exports[key];
+			} else {
+				pkg.exports[key] = {
+					types: rewritePath(val, "d.ts"),
+					default: rewritePath(val, "js"),
+				};
+			}
 		} else if (typeof val === "object") {
 			for (const sub in val) {
 				if (typeof val[sub] === "string") {
