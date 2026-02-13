@@ -7,5 +7,5 @@
 		"outDir": "dist",
 		"emitDeclarationOnly": true
 	},
-	"include": ["src"]
+	"include": ["src", "../common/worklet.d.ts"]
 }

@@ -7,8 +7,8 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
 import type * as Render from "./render";
 import type { ToMain } from "./render";
-// Unfortunately, we need to use a Vite-exclusive import for now.
-import RenderWorklet from "./render-worklet.ts?worker&url";
+// Compiled and inlined as a blob URL via vite-plugin-worklet.
+import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 
 export type DecoderProps = {

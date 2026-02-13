@@ -15,9 +15,9 @@
 		"./src/ui/index.tsx"
 	],
 	"scripts": {
-		"build": "rimraf dist && vite build && tsc && bun ../scripts/package.ts",
+		"build": "rimraf dist && vite build && tsc && bun ../common/package.ts",
 		"check": "tsc --noEmit",
-		"release": "bun ../scripts/release.ts"
+		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
 		"@moq/hang": "workspace:^",
