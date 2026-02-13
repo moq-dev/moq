@@ -9,9 +9,7 @@
 		".": "./src/index.ts",
 		"./catalog": "./src/catalog/index.ts",
 		"./container": "./src/container/index.ts",
-		"./util/hex": "./src/util/hex.ts",
-		"./util/libav": "./src/util/libav.ts",
-		"./util/hacks": "./src/util/hacks.ts",
+		"./util": "./src/util/index.ts",
 		"./support": "./src/support/index.ts",
 		"./support/element": "./src/support/element.ts"
 	},
