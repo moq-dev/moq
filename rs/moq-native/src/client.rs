@@ -177,6 +177,7 @@ impl Client {
 		}
 
 		#[cfg(feature = "quinn")]
+		#[allow(unreachable_patterns)]
 		let quinn = match backend {
 			QuicBackend::Quinn => Some(crate::quinn::QuinnClient::new(&config)?),
 			_ => None,

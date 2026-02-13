@@ -128,6 +128,7 @@ impl Server {
 		});
 
 		#[cfg(feature = "quinn")]
+		#[allow(unreachable_patterns)]
 		let quinn = match backend {
 			QuicBackend::Quinn => Some(crate::quinn::QuinnServer::new(config.clone())?),
 			_ => None,
@@ -242,10 +243,10 @@ impl Server {
 						})
 					}.boxed());
 				}
-				Some(conn) = quiche_accept => {
+				Some(_conn) = quiche_accept => {
 					#[cfg(feature = "quiche")]
 					self.accept.push(async move {
-						let quiche = super::quiche::QuicheRequest::accept(conn).await?;
+						let quiche = super::quiche::QuicheRequest::accept(_conn).await?;
 						Ok(Request {
 							server,
 							kind: RequestKind::Quiche(quiche),
