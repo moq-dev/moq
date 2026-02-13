@@ -28,7 +28,7 @@ if (pkg.exports) {
 		} else if (typeof val === "object") {
 			for (const sub in val) {
 				if (typeof val[sub] === "string") {
-					val[sub] = rewritePath(val[sub], "js");
+					val[sub] = rewritePath(val[sub], sub === "types" ? "d.ts" : "js");
 				}
 			}
 		}
