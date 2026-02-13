@@ -3,7 +3,9 @@
 // Split from release.ts to allow building packages without publishing
 
 import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { publint } from "publint";
+import { formatMessage } from "publint/utils";
 
 console.log("✍️  Rewriting package.json...");
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
@@ -80,5 +82,20 @@ writeFileSync("dist/package.json", JSON.stringify(pkg, null, 2));
 // Copy static files
 console.log("📄 Copying README.md...");
 copyFileSync("README.md", join("dist", "README.md"));
+
+// Lint the package to catch publishing issues
+console.log("🔍 Running publint...");
+const { messages, pkg: lintPkg } = await publint({
+	pkgDir: resolve("dist"),
+	level: "suggestion",
+	pack: false,
+});
+
+if (messages.length > 0) {
+	for (const message of messages) {
+		console.error(formatMessage(message, lintPkg));
+	}
+	process.exit(1);
+}
 
 console.log("📦 Package built successfully in dist/");
