@@ -36,21 +36,31 @@ High-level media library with Web Components for streaming audio and video.
 
 [Learn more](/js/@moq/hang/)
 
-## UI Components
+## Media Packages
 
-### @moq/hang-ui
+### @moq/watch
 
-[![npm](https://img.shields.io/npm/v/@moq/hang-ui)](https://www.npmjs.com/package/@moq/hang-ui)
+[![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)
 
-SolidJS UI components that interact with hang Web Components.
+Subscribe to and render MoQ broadcasts. Includes both a JavaScript API and a `<hang-watch>` Web Component, plus an optional `<hang-watch-ui>` SolidJS overlay.
 
-**Features:**
-- Quality selector
-- Playback controls
-- Chat interface
-- Network statistics
+[Learn more](/js/@moq/watch)
 
-[Learn more](/js/@moq/hang-ui)
+### @moq/publish
+
+[![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish)
+
+Publish media to MoQ broadcasts. Includes both a JavaScript API and a `<hang-publish>` Web Component, plus an optional `<hang-publish-ui>` SolidJS overlay.
+
+[Learn more](/js/@moq/publish)
+
+### @moq/ui-core
+
+[![npm](https://img.shields.io/npm/v/@moq/ui-core)](https://www.npmjs.com/package/@moq/ui-core)
+
+Shared UI primitives (Button, Icon, Stats, CSS theme) used by `@moq/watch/ui` and `@moq/publish/ui`.
+
+[Learn more](/js/@moq/ui-core)
 
 ## Utilities
 
@@ -74,13 +84,13 @@ JWT token generation and verification for browsers.
 
 ```bash
 bun add @moq/lite
-bun add @moq/hang
-bun add @moq/hang-ui
+bun add @moq/watch
+bun add @moq/publish
 
 # or with other package managers
 npm add @moq/lite
-pnpm add @moq/hang
-yarn add @moq/hang
+npm add @moq/watch
+npm add @moq/publish
 ```
 
 ## Quick Start
@@ -94,8 +104,8 @@ The easiest way to add MoQ to your web page:
 <html>
 <head>
     <script type="module">
-        import "@moq/hang/publish/element";
-        import "@moq/hang/watch/element";
+        import "@moq/publish/element";
+        import "@moq/watch/element";
     </script>
 </head>
 <body>
@@ -190,7 +200,7 @@ createEffect(() => {
 });
 ```
 
-Use `@moq/hang-ui` for ready-made SolidJS components.
+Use `@moq/watch/ui` and `@moq/publish/ui` for ready-made SolidJS UI overlays.
 
 ## Demo Application
 

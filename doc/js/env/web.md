@@ -32,7 +32,7 @@ Publish camera/microphone or screen as a MoQ broadcast.
 
 ```html
 <script type="module">
-    import "@moq/hang/publish/element";
+    import "@moq/publish/element";
 </script>
 
 <hang-publish
@@ -61,7 +61,7 @@ Subscribe to and render a MoQ broadcast.
 
 ```html
 <script type="module">
-    import "@moq/hang/watch/element";
+    import "@moq/watch/element";
 </script>
 
 <hang-watch
@@ -120,7 +120,7 @@ const currentVolume = watch.volume.get();
 All properties are signals from `@moq/signals`:
 
 ```typescript
-import { HangWatch } from "@moq/hang/watch/element";
+import { HangWatch } from "@moq/watch/element";
 
 const watch = document.querySelector("hang-watch") as HangWatch;
 
@@ -138,7 +138,7 @@ watch.path      // Signal<string>
 
 ```tsx
 import { useEffect, useRef } from "react";
-import "@moq/hang/watch/element";
+import "@moq/watch/element";
 
 function VideoPlayer({ url, path }) {
     const ref = useRef<HangWatch>(null);
@@ -163,10 +163,10 @@ function VideoPlayer({ url, path }) {
 
 ### SolidJS
 
-Use `@moq/hang-ui` for native SolidJS components, or use Web Components directly:
+Use `@moq/watch/ui` and `@moq/publish/ui` for SolidJS UI overlays, or use Web Components directly:
 
 ```tsx
-import "@moq/hang/watch/element";
+import "@moq/watch/element";
 
 function VideoPlayer(props) {
     return (
@@ -193,7 +193,7 @@ function VideoPlayer(props) {
 </template>
 
 <script>
-import "@moq/hang/watch/element";
+import "@moq/watch/element";
 
 export default {
     props: ["url", "path"],
@@ -228,10 +228,10 @@ To prevent tree-shaking from removing component registrations, explicitly import
 
 ```typescript
 // Correct
-import "@moq/hang/watch/element";
+import "@moq/watch/element";
 
 // May be tree-shaken (don't use)
-import "@moq/hang";
+import "@moq/watch";
 ```
 
 ## TypeScript Support
@@ -239,7 +239,8 @@ import "@moq/hang";
 Full TypeScript support with type definitions:
 
 ```typescript
-import type { HangWatch, HangPublish } from "@moq/hang";
+import type HangWatch from "@moq/watch/element";
+import type HangPublish from "@moq/publish/element";
 
 const watch: HangWatch = document.querySelector("hang-watch")!;
 const publish: HangPublish = document.querySelector("hang-publish")!;
@@ -290,7 +291,7 @@ For production, you'll want to:
 2. Set up proper [authentication](/app/relay/auth)
 3. Use a bundler like [Vite](https://vite.dev/)
 
-Currently, you need to use a bundler and [Vite](https://vite.dev/) is the only supported option for `@moq/hang`.
+Currently, you need to use a bundler and [Vite](https://vite.dev/) is the only supported option for `@moq/watch` and `@moq/publish`.
 It makes me very sad and we're working on a more universal solution, contributions welcome!
 
 **NOTE** both of these libraries are intended for client-side.

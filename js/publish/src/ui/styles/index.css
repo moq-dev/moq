@@ -1,0 +1,10 @@
+/* Shared dependencies */
+@import "@moq/ui-core/variables.css";
+@import "@moq/ui-core/flex.css";
+@import "@moq/ui-core/button/button.css";
+
+/* Component styles */
+@import "./controls.css";
+@import "./source-button.css";
+@import "./media-selector.css";
+@import "./status-indicator.css";

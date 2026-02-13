@@ -146,7 +146,7 @@ const vueCount = vue(count);
 All `@moq/hang` properties are signals:
 
 ```typescript
-import "@moq/hang/watch/element";
+import "@moq/watch/element";
 import { react } from "@moq/signals/react";
 
 const watch = document.querySelector("hang-watch") as HangWatch;

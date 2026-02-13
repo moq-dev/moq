@@ -1,0 +1,33 @@
+{
+	"name": "@moq/ui-core",
+	"type": "module",
+	"version": "0.1.0",
+	"description": "Shared UI components for Media over QUIC",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": "github:moq-dev/moq",
+	"exports": {
+		".": "./src/index.ts",
+		"./variables.css": "./src/variables.css",
+		"./flex.css": "./src/flex.css",
+		"./button/button.css": "./src/button/button.css",
+		"./stats/styles/index.css": "./src/stats/styles/index.css"
+	},
+	"scripts": {
+		"build": "bun run clean && vite build && tsc && bun ../scripts/package.ts",
+		"check": "tsc --noEmit",
+		"clean": "rimraf dist",
+		"fix": "biome check src --fix",
+		"release": "bun ../scripts/release.ts"
+	},
+	"peerDependencies": {
+		"@moq/signals": "workspace:^0.1.0"
+	},
+	"devDependencies": {
+		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
+		"rimraf": "^6.0.1",
+		"solid-js": "^1.9.10",
+		"typescript": "^5.9.2",
+		"vite": "^7.3.1",
+		"vite-plugin-solid": "^2.11.10"
+	}
+}
