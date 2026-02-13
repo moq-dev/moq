@@ -2,9 +2,9 @@
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
 		"rootDir": ".",
-		"outDir": "dist",
-		"jsx": "preserve",
-		"jsxImportSource": "solid-js"
+		"outDir": "dist"
 	},
-	"include": ["src"]
+	"include": ["src"],
+	"exclude": ["src/ui"],
+	"references": [{ "path": "src/ui" }]
 }
