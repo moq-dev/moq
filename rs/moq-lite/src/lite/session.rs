@@ -70,7 +70,7 @@ async fn recv_session_info<S: web_transport_trait::Session>(
 //   0% change  → wait MAX_SEND_INTERVAL
 //   ≥SEND_CHANGE_THRESHOLD change → wait MIN_SEND_INTERVAL
 const MIN_SEND_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-const MAX_SEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const MAX_SEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const SEND_CHANGE_THRESHOLD: f64 = 0.25;
 const SEND_CHECK_INTERVAL: std::time::Duration = MIN_SEND_INTERVAL;
 
