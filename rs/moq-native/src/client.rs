@@ -53,6 +53,15 @@ pub struct ClientConfig {
 	#[arg(id = "client-backend", long = "client-backend", env = "MOQ_CLIENT_BACKEND")]
 	pub backend: Option<QuicBackend>,
 
+	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "client-max-streams",
+		long = "client-max-streams",
+		env = "MOQ_CLIENT_MAX_STREAMS"
+	)]
+	pub max_streams: Option<u64>,
+
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ClientTls,
@@ -74,6 +83,7 @@ impl Default for ClientConfig {
 		Self {
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
+			max_streams: None,
 			tls: ClientTls::default(),
 			#[cfg(feature = "websocket")]
 			websocket: super::ClientWebSocket::default(),
