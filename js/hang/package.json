@@ -7,23 +7,18 @@
 	"repository": "github:moq-dev/moq",
 	"exports": {
 		".": "./src/index.ts",
-		"./publish": "./src/publish/index.ts",
-		"./publish/element": "./src/publish/element.ts",
-		"./watch": "./src/watch/index.ts",
-		"./watch/element": "./src/watch/element.ts",
 		"./catalog": "./src/catalog/index.ts",
+		"./container": "./src/container/index.ts",
+		"./util": "./src/util/index.ts",
 		"./support": "./src/support/index.ts",
 		"./support/element": "./src/support/element.ts"
 	},
 	"sideEffects": [
-		"./src/publish/element.ts",
-		"./src/watch/element.ts",
 		"./src/support/element.ts"
 	],
 	"scripts": {
 		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
 		"check": "tsc --noEmit",
-		"test": "bun test --only-failures",
 		"release": "bun ../scripts/release.ts"
 	},
 	"dependencies": {
@@ -32,8 +27,6 @@
 		"@moq/lite": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"@svta/cml-iso-bmff": "^1.0.0-alpha.9",
-		"async-mutex": "^0.5.0",
-		"comlink": "^4.4.2",
 		"zod": "^4.1.5"
 	},
 	"devDependencies": {
