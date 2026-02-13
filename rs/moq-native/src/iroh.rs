@@ -68,10 +68,9 @@ impl IrohEndpointConfig {
 			SecretKey::generate(&mut rand::rng())
 		};
 
-		let mut alpns = vec![web_transport_iroh::ALPN_H3.as_bytes().to_vec()];
-		for alpn in moq_lite::ALPNS {
-			alpns.push(alpn.as_bytes().to_vec());
-		}
+		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
+		let mut alpns: Vec<Vec<u8>> = moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
+		alpns.push(web_transport_iroh::ALPN_H3.as_bytes().to_vec());
 
 		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(alpns);
 		if let Some(addr) = self.bind_v4 {
@@ -164,10 +163,12 @@ pub(crate) async fn connect(endpoint: &IrohEndpoint, url: Url) -> anyhow::Result
 	let host = url.host().context("Invalid URL: missing host")?.to_string();
 	let endpoint_id: iroh::EndpointId = host.parse().context("Invalid URL: host is not an iroh endpoint id")?;
 
-	// We need to use this API to provide multiple ALPNs
-	let alpn = b"h3";
-	let opts = iroh::endpoint::ConnectOptions::new()
-		.with_additional_alpns(moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect());
+	// We need to use this API to provide multiple ALPNs.
+	// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
+	let alpn = moq_lite::ALPNS[0].as_bytes();
+	let mut additional: Vec<Vec<u8>> = moq_lite::ALPNS[1..].iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
+	additional.push(b"h3".to_vec());
+	let opts = iroh::endpoint::ConnectOptions::new().with_additional_alpns(additional);
 
 	let mut connecting = endpoint.connect_with_opts(endpoint_id, alpn, opts).await?;
 	let alpn = connecting.alpn().await?;

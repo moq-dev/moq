@@ -209,10 +209,9 @@ impl QuinnServer {
 			.with_no_client_auth()
 			.with_cert_resolver(certs.clone());
 
-		let mut alpns = vec![web_transport_quinn::ALPN.as_bytes().to_vec()];
-		for alpn in moq_lite::ALPNS {
-			alpns.push(alpn.as_bytes().to_vec());
-		}
+		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
+		let mut alpns: Vec<Vec<u8>> = moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
+		alpns.push(web_transport_quinn::ALPN.as_bytes().to_vec());
 
 		tls.alpn_protocols = alpns;
 		tls.key_log = Arc::new(rustls::KeyLogFile::new());
