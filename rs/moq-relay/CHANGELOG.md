@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.5...moq-relay-v0.10.6) - 2026-02-12
+
+### Other
+
+- (AI) Add support for quiche to moq-native ([#928](https://github.com/moq-dev/moq/pull/928))
+
 ## [0.10.5](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.4...moq-relay-v0.10.5) - 2026-02-09
 
 ### Other

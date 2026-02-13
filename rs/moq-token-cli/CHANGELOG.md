@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.11](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.10...moq-token-cli-v0.5.11) - 2026-02-12
+
+### Other
+
+- (AI) Add support for quiche to moq-native ([#928](https://github.com/moq-dev/moq/pull/928))
+
 ## [0.5.10](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.9...moq-token-cli-v0.5.10) - 2026-02-09
 
 ### Other

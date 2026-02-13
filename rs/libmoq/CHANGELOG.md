@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8](https://github.com/moq-dev/moq/compare/libmoq-v0.2.7...libmoq-v0.2.8) - 2026-02-12
+
+### Other
+
+- Error cleanup ([#944](https://github.com/moq-dev/moq/pull/944))
+- Reduce the moq-lite API size ([#943](https://github.com/moq-dev/moq/pull/943))
+
 ## [0.2.7](https://github.com/moq-dev/moq/compare/libmoq-v0.2.6...libmoq-v0.2.7) - 2026-02-09
 
 ### Other

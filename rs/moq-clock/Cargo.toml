@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.10.5"
+version = "0.10.6"
 edition = "2024"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
@@ -17,7 +17,7 @@ anyhow = { version = "1", features = ["backtrace"] }
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 moq-lite = { workspace = true }
-moq-native = { workspace = true }
+moq-native = { workspace = true, default-features = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
 url = "2"

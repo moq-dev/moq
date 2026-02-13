@@ -1279,6 +1279,54 @@ mod tests {
 		assert!(limited_producer.publish_only(&["other/path".into()]).is_none());
 	}
 
+	// Regression test for https://github.com/moq-dev/moq/issues/910
+	// with_root panics when String has trailing slash (AsPath for String skips normalization)
+	#[tokio::test]
+	async fn test_with_root_trailing_slash_consumer() {
+		let origin = Origin::produce();
+
+		// Use an owned String so the trailing slash is NOT normalized away.
+		let prefix = "some_prefix/".to_string();
+		let mut consumer = origin.consume().with_root(prefix).unwrap();
+
+		let b = origin.create_broadcast("some_prefix/test").unwrap();
+		consumer.assert_next("test", &b.consume());
+	}
+
+	// Same issue but for the producer side of with_root
+	#[tokio::test]
+	async fn test_with_root_trailing_slash_producer() {
+		let origin = Origin::produce();
+
+		// Use an owned String so the trailing slash is NOT normalized away.
+		let prefix = "some_prefix/".to_string();
+		let rooted = origin.with_root(prefix).unwrap();
+
+		let b = rooted.create_broadcast("test").unwrap();
+
+		let mut consumer = rooted.consume();
+		consumer.assert_next("test", &b.consume());
+	}
+
+	// Verify unannounce also doesn't panic with trailing slash
+	#[tokio::test]
+	async fn test_with_root_trailing_slash_unannounce() {
+		let origin = Origin::produce();
+
+		let prefix = "some_prefix/".to_string();
+		let mut consumer = origin.consume().with_root(prefix).unwrap();
+
+		let b = origin.create_broadcast("some_prefix/test").unwrap();
+		consumer.assert_next("test", &b.consume());
+
+		// Drop the broadcast producer to trigger unannounce
+		drop(b);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+		// unannounce also calls strip_prefix(&self.root).unwrap()
+		consumer.assert_next_none("test");
+	}
+
 	#[tokio::test]
 	async fn test_select_maintains_access_with_wider_prefix() {
 		let origin = Origin::produce();

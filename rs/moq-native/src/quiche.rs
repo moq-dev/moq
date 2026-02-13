@@ -17,6 +17,7 @@ use web_transport_quiche::proto::ConnectRequest;
 pub(crate) struct QuicheClient {
 	pub bind: net::SocketAddr,
 	pub disable_verify: bool,
+	pub max_streams: u64,
 }
 
 impl QuicheClient {
@@ -28,6 +29,7 @@ impl QuicheClient {
 		Ok(Self {
 			bind: config.bind,
 			disable_verify: config.tls.disable_verify.unwrap_or_default(),
+			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
 		})
 	}
 
@@ -48,6 +50,8 @@ impl QuicheClient {
 		let mut settings = web_transport_quiche::Settings::default();
 		settings.verify_peer = !self.disable_verify;
 		settings.alpn = alpns;
+		settings.initial_max_streams_bidi = self.max_streams;
+		settings.initial_max_streams_uni = self.max_streams;
 
 		let builder = web_transport_quiche::ez::ClientBuilder::default()
 			.with_settings(settings)
@@ -139,8 +143,12 @@ impl QuicheServer {
 			alpns.push(alpn.as_bytes().to_vec());
 		}
 
+		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
+
 		let mut settings = web_transport_quiche::Settings::default();
 		settings.alpn = alpns;
+		settings.initial_max_streams_bidi = max_streams;
+		settings.initial_max_streams_uni = max_streams;
 
 		let server = web_transport_quiche::ez::ServerBuilder::default()
 			.with_settings(settings)

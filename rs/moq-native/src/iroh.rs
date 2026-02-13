@@ -20,6 +20,7 @@ pub struct IrohEndpointConfig {
 		env = "MOQ_IROH_ENABLED",
 		default_missing_value = "true",
 		num_args = 0..=1,
+		require_equals = true,
 		value_parser = clap::value_parser!(bool),
 	)]
 	pub enabled: Option<bool>,
