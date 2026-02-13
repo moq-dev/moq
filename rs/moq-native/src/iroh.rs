@@ -87,14 +87,6 @@ impl IrohEndpointConfig {
 	}
 }
 
-/// URL schemes supported for connecting to iroh endpoints.
-pub const IROH_SCHEMES: [&str; 5] = ["iroh", "moql+iroh", "moqt+iroh", "moqt-15+iroh", "h3+iroh"];
-
-/// Returns `true` if `url` has a scheme included in [`IROH_SCHEMES`].
-pub fn is_iroh_url(url: &Url) -> bool {
-	IROH_SCHEMES.contains(&url.scheme())
-}
-
 pub enum IrohRequest {
 	Quic {
 		request: web_transport_iroh::QuicRequest,

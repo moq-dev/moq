@@ -215,7 +215,7 @@ impl Client {
 	#[cfg(any(feature = "quinn", feature = "quiche", feature = "iroh"))]
 	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
 		#[cfg(feature = "iroh")]
-		if crate::iroh::is_iroh_url(&url) {
+		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
 			let session = crate::iroh::connect(endpoint, url).await?;
 			let session = self.moq.connect(session).await?;
