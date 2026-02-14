@@ -60,7 +60,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   ui-core/           # Shared UI components (published as @moq/ui-core)
   watch/             # Watch/subscribe to streams + UI (published as @moq/watch)
   publish/           # Publish media to streams + UI (published as @moq/publish)
-  hang-demo/         # Demo applications
+  demo/              # Demo applications
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
 /dev/                 # Development config and test media files

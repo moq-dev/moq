@@ -8,7 +8,7 @@ description: Publish media to MoQ broadcasts
 [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Publish media to MoQ broadcasts. Provides both a JavaScript API and a `<hang-publish>` Web Component, plus an optional `<hang-publish-ui>` SolidJS overlay.
+Publish media to MoQ broadcasts. Provides both a JavaScript API and a `<moq-publish>` Web Component, plus an optional `<moq-publish-ui>` SolidJS overlay.
 
 ## Installation
 
@@ -25,12 +25,12 @@ npm add @moq/publish
     import "@moq/publish/element";
 </script>
 
-<hang-publish
+<moq-publish
     url="https://relay.example.com/anon"
     path="room/alice"
     audio video controls>
     <video muted autoplay></video>
-</hang-publish>
+</moq-publish>
 ```
 
 **Attributes:**
@@ -51,17 +51,17 @@ Import `@moq/publish/ui` for a SolidJS-powered overlay with device selection and
     import "@moq/publish/ui";
 </script>
 
-<hang-publish-ui>
-    <hang-publish
+<moq-publish-ui>
+    <moq-publish
         url="https://relay.example.com/anon"
         path="room/alice"
         audio video>
         <video muted autoplay></video>
-    </hang-publish>
-</hang-publish-ui>
+    </moq-publish>
+</moq-publish-ui>
 ```
 
-The `<hang-publish-ui>` element automatically discovers the nested `<hang-publish>` and wires up reactive controls.
+The `<moq-publish-ui>` element automatically discovers the nested `<moq-publish>` and wires up reactive controls.
 
 ## JavaScript API
 

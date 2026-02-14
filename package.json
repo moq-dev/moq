@@ -15,7 +15,7 @@
 		"js/ui-core",
 		"js/watch",
 		"js/publish",
-		"js/hang-demo",
+		"js/demo",
 		"js/signals"
 	],
 	"scripts": {

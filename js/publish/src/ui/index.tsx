@@ -1,27 +1,27 @@
 import { customElement } from "solid-element";
 import { createSignal, onMount } from "solid-js";
 import { Show } from "solid-js/web";
-import type HangPublish from "../element";
+import type MoqPublish from "../element";
 import { PublishUI } from "./element.tsx";
 
-customElement("hang-publish-ui", (_, { element }) => {
-	const [nested, setNested] = createSignal<HangPublish | undefined>();
+customElement("moq-publish-ui", (_, { element }) => {
+	const [nested, setNested] = createSignal<MoqPublish | undefined>();
 
 	onMount(async () => {
-		await customElements.whenDefined("hang-publish");
-		const publishEl = element.querySelector("hang-publish");
-		setNested(publishEl ? (publishEl as HangPublish) : undefined);
+		await customElements.whenDefined("moq-publish");
+		const publishEl = element.querySelector("moq-publish");
+		setNested(publishEl ? (publishEl as MoqPublish) : undefined);
 	});
 
 	return (
 		<Show when={nested()} keyed>
-			{(publish: HangPublish) => <PublishUI publish={publish} />}
+			{(publish: MoqPublish) => <PublishUI publish={publish} />}
 		</Show>
 	);
 });
 
 declare global {
 	interface HTMLElementTagNameMap {
-		"hang-publish-ui": HTMLElement;
+		"moq-publish-ui": HTMLElement;
 	}
 }

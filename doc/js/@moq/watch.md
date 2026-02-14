@@ -8,7 +8,7 @@ description: Subscribe to and render MoQ broadcasts
 [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Subscribe to and render MoQ broadcasts. Provides both a JavaScript API and a `<hang-watch>` Web Component, plus an optional `<hang-watch-ui>` SolidJS overlay.
+Subscribe to and render MoQ broadcasts. Provides both a JavaScript API and a `<moq-watch>` Web Component, plus an optional `<moq-watch-ui>` SolidJS overlay.
 
 ## Installation
 
@@ -25,12 +25,12 @@ npm add @moq/watch
     import "@moq/watch/element";
 </script>
 
-<hang-watch
+<moq-watch
     url="https://relay.example.com/anon"
     path="room/alice"
     controls>
     <canvas></canvas>
-</hang-watch>
+</moq-watch>
 ```
 
 **Attributes:**
@@ -51,16 +51,16 @@ Import `@moq/watch/ui` for a SolidJS-powered overlay with buffering indicator, s
     import "@moq/watch/ui";
 </script>
 
-<hang-watch-ui>
-    <hang-watch
+<moq-watch-ui>
+    <moq-watch
         url="https://relay.example.com/anon"
         path="room/alice">
         <canvas></canvas>
-    </hang-watch>
-</hang-watch-ui>
+    </moq-watch>
+</moq-watch-ui>
 ```
 
-The `<hang-watch-ui>` element automatically discovers the nested `<hang-watch>` and wires up reactive controls.
+The `<moq-watch-ui>` element automatically discovers the nested `<moq-watch>` and wires up reactive controls.
 
 ## JavaScript API
 

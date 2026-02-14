@@ -18,7 +18,7 @@ type Observed = (typeof OBSERVED)[number];
 const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 
 // An optional web component that wraps a <canvas>
-export default class HangWatch extends HTMLElement implements Backend {
+export default class MoqWatch extends HTMLElement implements Backend {
 	static observedAttributes = OBSERVED;
 
 	// The connection to the moq-relay server.
@@ -191,10 +191,10 @@ export default class HangWatch extends HTMLElement implements Backend {
 	}
 }
 
-customElements.define("hang-watch", HangWatch);
+customElements.define("moq-watch", MoqWatch);
 
 declare global {
 	interface HTMLElementTagNameMap {
-		"hang-watch": HangWatch;
+		"moq-watch": MoqWatch;
 	}
 }

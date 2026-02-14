@@ -1,9 +1,9 @@
 ---
-title: "@moq/hang-demo"
+title: "@moq/demo"
 description: Demo application showcasing MoQ in the browser
 ---
 
-# @moq/hang-demo
+# @moq/demo
 A demo web application that showcases MoQ capabilities.
 Watch live streams, publish from your camera or screen, and explore the technology.
 

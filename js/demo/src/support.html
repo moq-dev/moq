@@ -12,7 +12,11 @@
 
 <body>
 	<!-- Show if this browser supports everything we need. -->
-	<hang-support details></hang-support>
+	<h3>Watch Support</h3>
+	<moq-watch-support details></moq-watch-support>
+
+	<h3>Publish Support</h3>
+	<moq-publish-support details></moq-publish-support>
 
 	<h3>Other demos:</h3>
 	<ul>
@@ -23,13 +27,7 @@
 
 	<h3>Tips:</h3>
 	<p>
-		The <code>hang-support</code> element is used to check if the browser supports all of the web APIs we need.
-	</p>
-	<p>
-		Control which features are tested via the <code>mode</code> attribute.
-		By default, all features are tested.
-		<br/>
-		<code class="language-typescript">const mode: "core" | "watch" | "publish" | "all" = "all";</code>
+		The <code>moq-watch-support</code> and <code>moq-publish-support</code> elements check if the browser supports all of the web APIs needed for watching and publishing respectively.
 	</p>
 	<p>
 		Only show the element if some features are unsupported.

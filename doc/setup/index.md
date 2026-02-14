@@ -65,7 +65,7 @@ The `just dev` command starts three components:
 
 - [moq-relay](/app/relay/): A server that routes live data between publishers and subscribers.
 - [moq-cli](/app/cli): A CLI that publishes video content piped from `ffmpeg`.
-- [hang-demo](/js/@moq/hang-demo): A web page with various demos.
+- [demo](/js/@moq/demo): A web page with various demos.
 
 Once everything compiles, it should open [localhost:5173](http://localhost:5173) in your browser.
 

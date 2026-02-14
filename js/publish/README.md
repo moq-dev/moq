@@ -26,12 +26,12 @@ The simplest way to publish a stream:
     import "@moq/publish/element";
 </script>
 
-<hang-publish
+<moq-publish
     url="https://relay.example.com/anon"
     path="room/alice"
     audio video controls>
     <video muted autoplay></video>
-</hang-publish>
+</moq-publish>
 ```
 
 ### Attributes
@@ -65,7 +65,7 @@ publish.source.camera.enabled.set(true);
 
 ## UI Web Component
 
-`@moq/publish` includes a SolidJS-powered UI overlay (`<hang-publish-ui>`) with source selection (camera, screen, file, microphone) and status indicator. It depends on [`@moq/ui-core`](../ui-core) for shared UI primitives.
+`@moq/publish` includes a SolidJS-powered UI overlay (`<moq-publish-ui>`) with source selection (camera, screen, file, microphone) and status indicator. It depends on [`@moq/ui-core`](../ui-core) for shared UI primitives.
 
 ```html
 <script type="module">
@@ -73,14 +73,14 @@ publish.source.camera.enabled.set(true);
     import "@moq/publish/ui";
 </script>
 
-<hang-publish-ui>
-    <hang-publish url="https://relay.example.com/anon" path="room/alice" audio video>
+<moq-publish-ui>
+    <moq-publish url="https://relay.example.com/anon" path="room/alice" audio video>
         <video muted autoplay></video>
-    </hang-publish>
-</hang-publish-ui>
+    </moq-publish>
+</moq-publish-ui>
 ```
 
-The `<hang-publish-ui>` element automatically discovers the nested `<hang-publish>` element and wires up reactive controls.
+The `<moq-publish-ui>` element automatically discovers the nested `<moq-publish>` element and wires up reactive controls.
 
 ## Features
 

@@ -16,13 +16,13 @@ The simplest way to publish:
     import "@moq/publish/element";
 </script>
 
-<hang-publish
+<moq-publish
     url="https://relay.example.com/anon"
     path="room/alice"
     device="camera"
     audio video controls>
     <video muted autoplay></video>
-</hang-publish>
+</moq-publish>
 ```
 
 ### Attributes
@@ -39,7 +39,7 @@ The simplest way to publish:
 ### Events
 
 ```typescript
-const publish = document.querySelector("hang-publish") as HangPublish;
+const publish = document.querySelector("moq-publish") as MoqPublish;
 
 publish.addEventListener("start", () => {
     console.log("Publishing started");
@@ -253,10 +253,10 @@ try {
 ```tsx
 import { useEffect, useRef, useState } from "react";
 import "@moq/publish/element";
-import type HangPublish from "@moq/publish/element";
+import type MoqPublish from "@moq/publish/element";
 
 function Publisher({ url, path }) {
-    const publishRef = useRef<HangPublish>(null);
+    const publishRef = useRef<MoqPublish>(null);
     const [isPublishing, setIsPublishing] = useState(false);
 
     const togglePublish = () => {
@@ -269,13 +269,13 @@ function Publisher({ url, path }) {
 
     return (
         <div>
-            <hang-publish
+            <moq-publish
                 ref={publishRef}
                 url={url}
                 path={path}
                 audio video>
                 <video muted autoplay style={{ width: "100%" }} />
-            </hang-publish>
+            </moq-publish>
 
             <button onClick={togglePublish}>
                 {isPublishing ? "Stop" : "Start"} Publishing
@@ -287,7 +287,7 @@ function Publisher({ url, path }) {
 
 ## SolidJS Integration
 
-Use `@moq/publish/ui` for the SolidJS UI overlay. The `<hang-publish-ui>` element wraps a nested `<hang-publish>`:
+Use `@moq/publish/ui` for the SolidJS UI overlay. The `<moq-publish-ui>` element wraps a nested `<moq-publish>`:
 
 ```html
 <script type="module">
@@ -295,11 +295,11 @@ Use `@moq/publish/ui` for the SolidJS UI overlay. The `<hang-publish-ui>` elemen
     import "@moq/publish/ui";
 </script>
 
-<hang-publish-ui>
-    <hang-publish url="https://relay.example.com/anon" path="room/alice" audio video>
+<moq-publish-ui>
+    <moq-publish url="https://relay.example.com/anon" path="room/alice" audio video>
         <video muted autoplay></video>
-    </hang-publish>
-</hang-publish-ui>
+    </moq-publish>
+</moq-publish-ui>
 ```
 
 ## Authentication
@@ -307,11 +307,11 @@ Use `@moq/publish/ui` for the SolidJS UI overlay. The `<hang-publish-ui>` elemen
 Include JWT token in the URL:
 
 ```html
-<hang-publish
+<moq-publish
     url="https://relay.example.com/room/123?jwt=eyJhbGciOiJIUzI1NiIs..."
     path="alice"
     audio video>
-</hang-publish>
+</moq-publish>
 ```
 
 See [Authentication](/app/relay/auth) for token generation.

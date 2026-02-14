@@ -14,7 +14,7 @@ type SourceType = "camera" | "screen" | "file";
 // There's no destructor for web components so this is the best we can do.
 const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 
-export default class HangPublish extends HTMLElement {
+export default class MoqPublish extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
 	url = new Signal<URL | undefined>(undefined);
@@ -223,10 +223,10 @@ export default class HangPublish extends HTMLElement {
 	}
 }
 
-customElements.define("hang-publish", HangPublish);
+customElements.define("moq-publish", MoqPublish);
 
 declare global {
 	interface HTMLElementTagNameMap {
-		"hang-publish": HangPublish;
+		"moq-publish": MoqPublish;
 	}
 }

@@ -4,7 +4,7 @@ import { Moq } from "@moq/hang";
  * A simple web component for configuring the relay URL and broadcast name.
  * Auto-discovers available broadcasts and shows them as clickable suggestions.
  */
-export default class HangConfig extends HTMLElement {
+export default class MoqWatchConfig extends HTMLElement {
 	#urlInput: HTMLInputElement;
 	#pathInput: HTMLInputElement;
 	#suggestions: HTMLDivElement;
@@ -228,4 +228,4 @@ export default class HangConfig extends HTMLElement {
 	}
 }
 
-customElements.define("hang-config", HangConfig);
+customElements.define("moq-watch-config", MoqWatchConfig);

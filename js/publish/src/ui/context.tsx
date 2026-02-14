@@ -1,6 +1,6 @@
 import type { JSX } from "solid-js";
 import { createContext, createEffect, createSignal } from "solid-js";
-import type HangPublish from "../element";
+import type MoqPublish from "../element";
 
 export type PublishStatus =
 	| "no-url"
@@ -12,7 +12,7 @@ export type PublishStatus =
 	| "select-source";
 
 type PublishUIContextValue = {
-	hangPublish: HangPublish;
+	moqPublish: MoqPublish;
 	cameraDevices: () => MediaDeviceInfo[];
 	microphoneDevices: () => MediaDeviceInfo[];
 	publishStatus: () => PublishStatus;
@@ -27,7 +27,7 @@ type PublishUIContextValue = {
 };
 
 type PublishUIContextProviderProps = {
-	hangPublish: HangPublish;
+	moqPublish: MoqPublish;
 	children: JSX.Element;
 };
 
@@ -48,13 +48,13 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 	const [publishStatus, setPublishStatus] = createSignal<PublishStatus>("no-url");
 
 	const setFile = (file: File) => {
-		props.hangPublish.source.set(file);
-		props.hangPublish.invisible.set(false);
-		props.hangPublish.muted.set(true);
+		props.moqPublish.source.set(file);
+		props.moqPublish.invisible.set(false);
+		props.moqPublish.muted.set(true);
 	};
 
 	const value: PublishUIContextValue = {
-		hangPublish: props.hangPublish,
+		moqPublish: props.moqPublish,
 		cameraDevices,
 		microphoneDevices,
 		publishStatus,
@@ -69,7 +69,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 	};
 
 	createEffect(() => {
-		const publish = props.hangPublish;
+		const publish = props.moqPublish;
 
 		// Initialize with "nothing" active on page load
 		publish.muted.set(true);
