@@ -13,11 +13,11 @@
 		"./stats/styles/index.css": "./src/stats/styles/index.css"
 	},
 	"scripts": {
-		"build": "bun run clean && vite build && bun ../scripts/package.ts",
+		"build": "bun run clean && vite build && tsc && bun ../common/package.ts",
 		"check": "tsc --noEmit",
 		"clean": "rimraf dist",
 		"fix": "biome check src --fix",
-		"release": "bun ../scripts/release.ts"
+		"release": "bun ../common/release.ts"
 	},
 	"peerDependencies": {
 		"@moq/signals": "workspace:^0.1.0"

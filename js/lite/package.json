@@ -10,10 +10,10 @@
 		"./zod": "./src/zod.ts"
 	},
 	"scripts": {
-		"build": "rimraf dist && tsc -b && bun ../scripts/package.ts",
+		"build": "rimraf dist && tsc -b && bun ../common/package.ts",
 		"check": "tsc --noEmit && madge --circular --extensions ts,tsx src && tsc -b examples/tsconfig.json",
 		"test": "bun test --only-failures",
-		"release": "bun ../scripts/release.ts"
+		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
 		"async-mutex": "^0.5.0",
@@ -25,7 +25,6 @@
 	},
 	"devDependencies": {
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
-		"vite": "^6.3.6",
 		"@types/node": "^24.3.1",
 		"vite-plugin-html": "^3.2.2",
 		"rimraf": "^6.0.1",

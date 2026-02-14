@@ -19,10 +19,11 @@
 	"devDependencies": {
 		"@tailwindcss/typography": "^0.5.16",
 		"@tailwindcss/vite": "^4.1.13",
+		"esbuild": "^0.27.0",
 		"highlight.js": "^11.11.1",
 		"tailwindcss": "^4.1.13",
 		"typescript": "^5.9.2",
-		"vite": "^6.3.6",
+		"vite": "^7.3.1",
 		"vite-plugin-solid": "^2.11.10"
 	}
 }

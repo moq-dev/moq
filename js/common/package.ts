@@ -3,27 +3,39 @@
 // Split from release.ts to allow building packages without publishing
 
 import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { publint } from "publint";
+import { formatMessage } from "publint/utils";
 
 console.log("✍️  Rewriting package.json...");
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 
-function rewritePath(p: string): string {
-	return p.replace(/^\.\/src/, ".").replace(/\.ts(x)?$/, ".js");
+function rewritePath(p: string, ext: string): string {
+	return p.replace(/^\.\/src/, ".").replace(/\.ts(x)?$/, `.${ext}`);
 }
 
-pkg.main &&= rewritePath(pkg.main);
-pkg.types &&= rewritePath(pkg.types);
+pkg.main &&= rewritePath(pkg.main, "js");
+pkg.types &&= rewritePath(pkg.types, "d.ts");
 
 if (pkg.exports) {
 	for (const key in pkg.exports) {
 		const val = pkg.exports[key];
 		if (typeof val === "string") {
-			pkg.exports[key] = rewritePath(val);
+			if (val.endsWith(".css")) {
+				// CSS exports are only needed for dev-time resolution;
+				// consumers inline them at build time via @import.
+				// We purposely do not copy them to the dist to help catch bugs.
+				delete pkg.exports[key];
+			} else {
+				pkg.exports[key] = {
+					types: rewritePath(val, "d.ts"),
+					default: rewritePath(val, "js"),
+				};
+			}
 		} else if (typeof val === "object") {
 			for (const sub in val) {
 				if (typeof val[sub] === "string") {
-					val[sub] = rewritePath(val[sub]);
+					val[sub] = rewritePath(val[sub], sub === "types" ? "d.ts" : "js");
 				}
 			}
 		}
@@ -31,19 +43,19 @@ if (pkg.exports) {
 }
 
 if (pkg.sideEffects) {
-	pkg.sideEffects = pkg.sideEffects.map(rewritePath);
+	pkg.sideEffects = pkg.sideEffects.map((p: string) => rewritePath(p, "js"));
 }
 
 if (pkg.files) {
-	pkg.files = pkg.files.map(rewritePath);
+	pkg.files = pkg.files.map((p: string) => rewritePath(p, "js"));
 }
 
 if (pkg.bin) {
 	if (typeof pkg.bin === "string") {
-		pkg.bin = rewritePath(pkg.bin);
+		pkg.bin = rewritePath(pkg.bin, "js");
 	} else if (typeof pkg.bin === "object") {
 		for (const key in pkg.bin) {
-			pkg.bin[key] = rewritePath(pkg.bin[key]);
+			pkg.bin[key] = rewritePath(pkg.bin[key], "js");
 		}
 	}
 }
@@ -77,5 +89,20 @@ writeFileSync("dist/package.json", JSON.stringify(pkg, null, 2));
 // Copy static files
 console.log("📄 Copying README.md...");
 copyFileSync("README.md", join("dist", "README.md"));
+
+// Lint the package to catch publishing issues
+console.log("🔍 Running publint...");
+const { messages, pkg: lintPkg } = await publint({
+	pkgDir: resolve("dist"),
+	level: "warning",
+	pack: false,
+});
+
+if (messages.length > 0) {
+	for (const message of messages) {
+		console.error(formatMessage(message, lintPkg));
+	}
+	process.exit(1);
+}
 
 console.log("📦 Package built successfully in dist/");

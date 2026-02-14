@@ -1,19 +1,21 @@
 import tailwindcss from "@tailwindcss/vite";
+import { resolve } from "path";
 import { defineConfig } from "vite";
 import solidPlugin from "vite-plugin-solid";
+import { workletInline } from "../common/vite-plugin-worklet";
 
 export default defineConfig({
 	root: "src",
-	plugins: [tailwindcss(), solidPlugin()],
+	plugins: [tailwindcss(), solidPlugin(), workletInline()],
 	build: {
 		target: "esnext",
 		sourcemap: process.env.NODE_ENV === "production" ? false : "inline",
 		rollupOptions: {
 			input: {
-				watch: "index.html",
-				publish: "publish.html",
-				support: "support.html",
-				mse: "mse.html",
+				watch: resolve(__dirname, "src/index.html"),
+				publish: resolve(__dirname, "src/publish.html"),
+				support: resolve(__dirname, "src/support.html"),
+				mse: resolve(__dirname, "src/mse.html"),
 			},
 		},
 	},

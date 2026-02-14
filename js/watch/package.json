@@ -18,10 +18,10 @@
 		"./src/support/element.ts"
 	],
 	"scripts": {
-		"build": "rimraf dist && tsc -b tsconfig.build.json && vite build && bun ../scripts/package.ts",
+		"build": "rimraf dist && vite build && tsc && bun ../common/package.ts",
 		"check": "tsc --noEmit",
 		"test": "bun test --only-failures",
-		"release": "bun ../scripts/release.ts"
+		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
 		"@moq/hang": "workspace:^",
@@ -32,6 +32,7 @@
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.77",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
+		"esbuild": "^0.27.0",
 		"rimraf": "^6.0.1",
 		"solid-element": "^1.9.1",
 		"solid-js": "^1.9.10",

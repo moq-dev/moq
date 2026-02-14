@@ -360,6 +360,9 @@ ci:
 	# Run the unit tests
 	just test
 
+	# Make sure everything builds
+	just build
+
 	# Check all feature combinations for all crates
 	# requires: cargo install cargo-hack
 	echo "Checking all feature combinations..."

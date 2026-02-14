@@ -1,10 +1,11 @@
 {
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
-		"rootDir": ".",
-		"outDir": "dist"
+		"rootDir": "./src",
+		"jsx": "preserve",
+		"jsxImportSource": "solid-js",
+		"outDir": "dist",
+		"emitDeclarationOnly": true
 	},
-	"include": ["src"],
-	"exclude": ["src/ui"],
-	"references": [{ "path": "src/ui" }]
+	"include": ["src", "../common/worklet.d.ts"]
 }
