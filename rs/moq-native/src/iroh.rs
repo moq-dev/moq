@@ -159,7 +159,10 @@ pub(crate) async fn connect(endpoint: &IrohEndpoint, url: Url) -> anyhow::Result
 	// We need to use this API to provide multiple ALPNs.
 	// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
 	let alpn = moq_lite::ALPNS[0].as_bytes();
-	let mut additional: Vec<Vec<u8>> = moq_lite::ALPNS[1..].iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
+	let mut additional: Vec<Vec<u8>> = moq_lite::ALPNS[1..]
+		.iter()
+		.map(|alpn| alpn.as_bytes().to_vec())
+		.collect();
 	additional.push(b"h3".to_vec());
 	let opts = iroh::endpoint::ConnectOptions::new().with_additional_alpns(additional);
 
