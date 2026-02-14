@@ -1,14 +1,13 @@
 # Health check configuration
-variable "health_jwt" {
-  description = "JWT token for health check endpoint (must have GET access to demo/)"
-  type        = string
-  sensitive   = true
-}
-
 variable "health_email" {
   description = "Email address for health check failure notifications"
   type        = string
   default     = ""
+}
+
+# Read the JWT from the secrets directory, same as other tokens
+locals {
+  health_jwt = trimspace(file("${path.module}/secrets/demo-get.jwt"))
 }
 
 # HTTPS uptime check for each relay node
@@ -20,7 +19,7 @@ resource "google_monitoring_uptime_check_config" "relay" {
   period       = "300s" # every 5 minutes
 
   http_check {
-    path         = "/fetch/demo/bbb/catalog.json?jwt=${var.health_jwt}"
+    path         = "/fetch/demo/bbb/catalog.json?jwt=${local.health_jwt}"
     port         = 443
     use_ssl      = true
     validate_ssl = true

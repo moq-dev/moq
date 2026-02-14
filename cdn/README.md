@@ -22,6 +22,9 @@ However, we do use GCP for GeoDNS because most providers don't support it or too
 
     # to allow publishing to `demo/`
     cargo run --bin moq-token -- --key secrets/root.jwk sign --root "demo" --publish "" > secrets/demo-pub.jwt
+
+    # to allow fetching from `demo/` (used by health checks and the website)
+    cargo run --bin moq-token -- --key secrets/root.jwk sign --root "demo" --get "" > secrets/demo-get.jwt
     ```
 
 ## Deploy

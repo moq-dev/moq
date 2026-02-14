@@ -121,12 +121,12 @@ logs-pub:
 	ssh root@$HOST "journalctl -u hang-bbb -f"
 
 # Run health checks against all relay nodes
-health jwt:
-	./health.sh {{jwt}}
+health:
+	./health.sh
 
 # Run health checks with webhook notification on failure
-health-notify jwt webhook:
-	./health.sh {{jwt}} {{webhook}}
+health-notify webhook:
+	./health.sh {{webhook}}
 
 # Check tofu formatting
 check:
