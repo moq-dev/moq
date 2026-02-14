@@ -31,6 +31,7 @@ variable "gcp_service_list" {
   type        = list(string)
   default = [
     "dns.googleapis.com",
+    "monitoring.googleapis.com",
   ]
 }
 
