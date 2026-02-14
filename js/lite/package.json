@@ -25,7 +25,6 @@
 	},
 	"devDependencies": {
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
-		"vite": "^6.3.6",
 		"@types/node": "^24.3.1",
 		"vite-plugin-html": "^3.2.2",
 		"rimraf": "^6.0.1",
