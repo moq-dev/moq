@@ -67,6 +67,8 @@
         "@tailwindcss/vite": "^4.1.13",
         "esbuild": "^0.27.0",
         "highlight.js": "^11.11.1",
+        "solid-element": "^1.9.1",
+        "solid-js": "^1.9.10",
         "tailwindcss": "^4.1.13",
         "typescript": "^5.9.2",
         "vite": "^7.3.1",
