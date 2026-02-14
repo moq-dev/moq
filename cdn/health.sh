@@ -11,11 +11,11 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-JWT_FILE="${SCRIPT_DIR}/secrets/demo-get.jwt"
+JWT_FILE="${SCRIPT_DIR}/secrets/demo-sub.jwt"
 
 if [ ! -f "$JWT_FILE" ]; then
 	echo "Error: $JWT_FILE not found."
-	echo "Generate it with: cargo run --bin moq-token -- --key secrets/root.jwk sign --root \"demo\" --get \"\" > secrets/demo-get.jwt"
+	echo "Generate it with: cargo run --bin moq-token -- --key secrets/root.jwk sign --root \"demo\" --get \"\" > secrets/demo-sub.jwt"
 	exit 1
 fi
 

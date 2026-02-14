@@ -7,7 +7,7 @@ variable "health_email" {
 
 # Read the JWT from the secrets directory, same as other tokens
 locals {
-  health_jwt = trimspace(file("${path.module}/secrets/demo-get.jwt"))
+  health_jwt = trimspace(file("${path.module}/secrets/demo-sub.jwt"))
 }
 
 # HTTPS uptime check for each relay node
