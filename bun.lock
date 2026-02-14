@@ -9,7 +9,6 @@
         "@types/bun": "^1.3.8",
         "concurrently": "^9.2.1",
         "publint": "^0.3.0",
-        "vite": "^7.3.1",
       },
     },
     "doc": {
@@ -66,9 +65,11 @@
       "devDependencies": {
         "@tailwindcss/typography": "^0.5.16",
         "@tailwindcss/vite": "^4.1.13",
+        "esbuild": "^0.27.0",
         "highlight.js": "^11.11.1",
         "tailwindcss": "^4.1.13",
         "typescript": "^5.9.2",
+        "vite": "^7.3.1",
         "vite-plugin-solid": "^2.11.10",
       },
     },
@@ -104,10 +105,12 @@
       "devDependencies": {
         "@types/audioworklet": "^0.0.77",
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
+        "esbuild": "^0.27.0",
         "rimraf": "^6.0.1",
         "solid-element": "^1.9.1",
         "solid-js": "^1.9.10",
         "typescript": "^5.9.2",
+        "vite": "^7.3.1",
         "vite-plugin-solid": "^2.11.10",
       },
     },
@@ -159,6 +162,7 @@
         "rimraf": "^6.0.1",
         "solid-js": "^1.9.10",
         "typescript": "^5.9.2",
+        "vite": "^7.3.1",
         "vite-plugin-solid": "^2.11.10",
       },
       "peerDependencies": {
@@ -177,10 +181,12 @@
       "devDependencies": {
         "@types/audioworklet": "^0.0.77",
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
+        "esbuild": "^0.27.0",
         "rimraf": "^6.0.1",
         "solid-element": "^1.9.1",
         "solid-js": "^1.9.10",
         "typescript": "^5.9.2",
+        "vite": "^7.3.1",
         "vite-plugin-solid": "^2.11.10",
       },
     },

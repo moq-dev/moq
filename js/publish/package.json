@@ -28,10 +28,12 @@
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.77",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
+		"esbuild": "^0.27.0",
 		"rimraf": "^6.0.1",
 		"solid-element": "^1.9.1",
 		"solid-js": "^1.9.10",
 		"typescript": "^5.9.2",
+		"vite": "^7.3.1",
 		"vite-plugin-solid": "^2.11.10"
 	}
 }
