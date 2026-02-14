@@ -72,21 +72,17 @@ async fn recv_session_info<S: web_transport_trait::Session>(
 const MIN_SEND_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_SEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const SEND_CHANGE_THRESHOLD: f64 = 0.25;
-const SEND_CHECK_INTERVAL: std::time::Duration = MIN_SEND_INTERVAL;
-
 async fn send_session_info<S: web_transport_trait::Session>(
 	session: &S,
 	mut writer: Writer<S::SendStream, Version>,
 ) -> Result<(), Error> {
 	use web_transport_trait::Stats;
 
-	let mut interval = tokio::time::interval(SEND_CHECK_INTERVAL);
 	let mut last_sent: Option<u64> = None;
 	let mut last_sent_at = tokio::time::Instant::now();
 
 	loop {
-		// Poll frequently so we detect sudden bitrate changes quickly.
-		interval.tick().await;
+		tokio::time::sleep(MIN_SEND_INTERVAL).await;
 
 		let bitrate = session.stats().estimated_send_rate();
 

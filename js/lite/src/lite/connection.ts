@@ -132,7 +132,7 @@ export class Connection implements Established {
 			for (;;) {
 				const msg = await SessionInfo.decodeMaybe(this.#session.reader);
 				if (!msg) break;
-				this.bitrate.set(msg.bitrate || undefined);
+				this.bitrate.set(msg.bitrate ?? undefined);
 			}
 		} finally {
 			console.debug("session stream closed");
