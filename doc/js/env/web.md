@@ -79,7 +79,7 @@ Subscribe to and render a MoQ broadcast.
 Display browser support information for watching streams.
 
 **Attributes:**
-- `show` - "full", "partial", or "none" (default: "full")
+- `show` - "always", "warning", "error", or "never" (default: "warning")
 - `details` - show detailed codec information
 
 **Example:**
@@ -98,7 +98,7 @@ Display browser support information for watching streams.
 Display browser support information for publishing streams.
 
 **Attributes:**
-- `show` - "full", "partial", or "none" (default: "full")
+- `show` - "always", "warning", "error", or "never" (default: "warning")
 - `details` - show detailed codec information
 
 **Example:**
@@ -139,7 +139,7 @@ const currentVolume = watch.volume.get();
 All properties are signals from `@moq/signals`:
 
 ```typescript
-import { MoqWatch } from "@moq/watch/element";
+import type MoqWatch from "@moq/watch/element";
 
 const watch = document.querySelector("moq-watch") as MoqWatch;
 

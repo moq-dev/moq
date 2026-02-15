@@ -28,7 +28,9 @@ export default class MoqWatchSupport extends HTMLElement {
 	constructor() {
 		super();
 
-		isSupported().then((s) => this.#support.set(s));
+		isSupported()
+			.then((s) => this.#support.set(s))
+			.catch((err) => console.error("Failed to detect watch support:", err));
 	}
 
 	connectedCallback() {
@@ -79,10 +81,11 @@ export default class MoqWatchSupport extends HTMLElement {
 		if (!support.audio.decoding || !support.video.decoding) return "none";
 		if (!support.audio.render || !support.video.render) return "none";
 
-		if (!Object.values(support.audio.decoding).some((v) => v)) return "none";
+		if (!Object.values(support.audio.decoding).some((v) => v === true || v === "full" || v === "partial"))
+			return "none";
 		if (!Object.values(support.video.decoding).some((v) => v.software || v.hardware)) return "none";
 
-		if (!Object.values(support.audio.decoding).every((v) => v)) return "partial";
+		if (!Object.values(support.audio.decoding).every((v) => v === true || v === "full")) return "partial";
 		if (!Object.values(support.video.decoding).every((v) => v.software || v.hardware)) return "partial";
 
 		return "full";
