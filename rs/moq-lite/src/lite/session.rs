@@ -2,7 +2,7 @@ use tokio::sync::oneshot;
 
 use crate::{
 	Error, OriginConsumer, OriginProducer,
-	coding::Stream,
+	coding::{Stream, Writer},
 	lite::{SessionInfo, Version},
 };
 
@@ -24,9 +24,12 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 
 	let init = oneshot::channel();
 
+	let session2 = session.clone();
+
 	web_async::spawn(async move {
 		let res = tokio::select! {
-			res = run_session(setup) => res,
+			res = recv_session_info::<S>(setup.reader) => res,
+			res = send_session_info::<S>(&session2, setup.writer) => res,
 			res = publisher.run() => res,
 			res = subscriber.run(init.0) => res,
 		};
@@ -56,8 +59,54 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 	Ok(())
 }
 
-// TODO do something useful with this
-async fn run_session<S: web_transport_trait::Session>(mut stream: Stream<S, Version>) -> Result<(), Error> {
-	while let Some(_info) = stream.reader.decode_maybe::<SessionInfo>().await? {}
+async fn recv_session_info<S: web_transport_trait::Session>(
+	mut reader: crate::coding::Reader<S::RecvStream, Version>,
+) -> Result<(), Error> {
+	while let Some(_info) = reader.decode_maybe::<SessionInfo>().await? {}
 	Err(Error::Cancel)
+}
+
+// Send interval scales linearly with the relative change in bitrate:
+//   0% change  → wait MAX_SEND_INTERVAL
+//   ≥SEND_CHANGE_THRESHOLD change → wait MIN_SEND_INTERVAL
+const MIN_SEND_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const MAX_SEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const SEND_CHANGE_THRESHOLD: f64 = 0.25;
+async fn send_session_info<S: web_transport_trait::Session>(
+	session: &S,
+	mut writer: Writer<S::SendStream, Version>,
+) -> Result<(), Error> {
+	use web_transport_trait::Stats;
+
+	let mut last_sent: Option<u64> = None;
+	let mut last_sent_at = tokio::time::Instant::now();
+
+	loop {
+		tokio::time::sleep(MIN_SEND_INTERVAL).await;
+
+		let bitrate = session.stats().estimated_send_rate();
+
+		let Some(bitrate) = bitrate else {
+			continue;
+		};
+
+		// Only send updates when the bitrate has changed significantly.
+		// Small changes wait longer (up to MAX), large changes send sooner (down to MIN).
+		let should_send = match last_sent {
+			None => true,
+			Some(prev) => {
+				let change = (bitrate as f64 - prev as f64).abs() / prev.max(1) as f64;
+				let t = (change / SEND_CHANGE_THRESHOLD).min(1.0);
+				let required = MAX_SEND_INTERVAL.mul_f64(1.0 - t) + MIN_SEND_INTERVAL.mul_f64(t);
+				last_sent_at.elapsed() >= required
+			}
+		};
+
+		if should_send {
+			let info = SessionInfo { bitrate: Some(bitrate) };
+			writer.encode(&info).await?;
+			last_sent = Some(bitrate);
+			last_sent_at = tokio::time::Instant::now();
+		}
+	}
 }
