@@ -95,7 +95,7 @@ class AudioBackend implements Audio.Backend {
 
 /// A generic backend that supports either MSE or WebCodecs based on the provided element.
 ///
-/// This is primarily what backs the <hang-watch> web component, but it's useful as a standalone for other use cases.
+/// This is primarily what backs the <moq-watch> web component, but it's useful as a standalone for other use cases.
 export class MultiBackend implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;

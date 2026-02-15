@@ -11,11 +11,11 @@
 </head>
 
 <body class="dark:bg-black p-4">
-	<!-- Show if this browser supports everything we need. -->
-	<hang-support mode="watch" show="partial"></hang-support>
+	<!-- Always show this banner to flex browser support. -->
+	<moq-watch-support show="always"></moq-watch-support>
 
-	<!-- This optional component shows some simple controls for the inner <hang-watch> component. -->
-	<hang-watch-ui>
+	<!-- This optional component shows some simple controls for the inner <moq-watch> component. -->
+	<moq-watch-ui>
 		<!--
 			Some supported attributes are:
 			- `url`: The URL of the (relay) server; feel free to use `https://cdn.moq.dev/anon` for public access.
@@ -28,27 +28,26 @@
 
 			NOTE: Cloudflare doesn't support reload yet.
 		-->
-		<hang-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted jitter="100" reload>
+		<moq-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted jitter="100" reload>
 			<!-- Provide a canvas element to render the video via WebCodecs. -->
 			<canvas style="width: 100%; height: auto;"></canvas>
 			<!-- Or provide a video element to use the (higher latency) MSE backend. -->
 			<!-- <video style="width: 100%; height: auto;" autoplay muted></video> -->
-		</hang-watch>
-	</hang-watch-ui>
+		</moq-watch>
+	</moq-watch-ui>
 
 	<!-- (optional) Configure the relay URL and broadcast name. Auto-discovers available broadcasts. -->
-	<hang-config id="config" url="%VITE_RELAY_URL%" path="bbb"></hang-config>
+	<moq-watch-config id="config" url="%VITE_RELAY_URL%" path="bbb"></moq-watch-config>
 
 	<h3>Other demos:</h3>
 	<ul>
 		<li><a href="mse.html">Watch a broadcast (MSE).</a></li>
 		<li><a href="publish.html">Publish a broadcast.</a></li>
-		<li><a href="support.html">Check browser support.</a></li>
 	</ul>
 
 	<h3>Tips:</h3>
 	<p>
-		You can find the source code for this demo in <code>js/hang-demo/src/index.html</code>.
+		You can find the source code for this demo in <code>js/demo/src/index.html</code>.
 		Yes I know it's confusing when a command automatically opens a browser window.
 	</p>
 	<p>
@@ -60,9 +59,9 @@
 	</p>
 	<hr />
 	<p>
-		You can instanciate the player via the provided <code class="language-html">&lt;hang-watch&gt;</code> <a
+		You can instanciate the player via the provided <code class="language-html">&lt;moq-watch&gt;</code> <a
 			href="https://developer.mozilla.org/en-US/docs/Web/API/Web_components">Web Component</a>.
-		Either modify HTML attributes like <code class="language-html">&lt;hang-watch paused&gt;</code> or use the
+		Either modify HTML attributes like <code class="language-html">&lt;moq-watch paused&gt;</code> or use the
 		Javascript API.
 		The Javascript API is still evolving, so I recommend the Web Component for now.
 	</p>
@@ -72,10 +71,10 @@
 			href="https://developer.mozilla.org/en-US/docs/Web/API/OffscreenCanvas">OffscreenCanvas</a>
 		works.
 		For example:
-	<pre><code class="language-html">&lt;hang-watch url=&quot;http://localhost:4443/&quot; room=&quot;demo&quot; path=&quot;bbb&quot;&gt;
+	<pre><code class="language-html">&lt;moq-watch url=&quot;http://localhost:4443/&quot; room=&quot;demo&quot; path=&quot;bbb&quot;&gt;
 	&lt;!-- Optionally provide a custom canvas element that we can style as needed --&gt;
 	&lt;canvas style=&quot;max-width: 100%; height: auto; border-radius: 4px;&quot;&gt;&lt;/canvas&gt;
-&lt;/hang-watch&gt;</code></pre>
+&lt;/moq-watch&gt;</code></pre>
 	</p>
 	<p>
 		Don't want video? Don't provide a canvas!

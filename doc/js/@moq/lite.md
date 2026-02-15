@@ -238,7 +238,7 @@ Firefox and Safari support is experimental or planned.
 
 For more examples, see:
 - [TypeScript examples](https://github.com/moq-dev/moq/tree/main/js)
-- [hang-demo](https://github.com/moq-dev/moq/tree/main/js/hang-demo)
+- [demo](https://github.com/moq-dev/moq/tree/main/js/demo)
 
 ## Protocol Specification
 

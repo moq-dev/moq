@@ -42,7 +42,7 @@ High-level media library with Web Components for streaming audio and video.
 
 [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)
 
-Subscribe to and render MoQ broadcasts. Includes both a JavaScript API and a `<hang-watch>` Web Component, plus an optional `<hang-watch-ui>` SolidJS overlay.
+Subscribe to and render MoQ broadcasts. Includes both a JavaScript API and a `<moq-watch>` Web Component, plus an optional `<moq-watch-ui>` SolidJS overlay.
 
 [Learn more](/js/@moq/watch)
 
@@ -50,7 +50,7 @@ Subscribe to and render MoQ broadcasts. Includes both a JavaScript API and a `<h
 
 [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish)
 
-Publish media to MoQ broadcasts. Includes both a JavaScript API and a `<hang-publish>` Web Component, plus an optional `<hang-publish-ui>` SolidJS overlay.
+Publish media to MoQ broadcasts. Includes both a JavaScript API and a `<moq-publish>` Web Component, plus an optional `<moq-publish-ui>` SolidJS overlay.
 
 [Learn more](/js/@moq/publish)
 
@@ -110,20 +110,20 @@ The easiest way to add MoQ to your web page:
 </head>
 <body>
     <!-- Publish camera/microphone -->
-    <hang-publish
+    <moq-publish
         url="https://relay.example.com/anon"
         path="room/alice"
         audio video controls>
         <video muted autoplay></video>
-    </hang-publish>
+    </moq-publish>
 
     <!-- Watch the stream -->
-    <hang-watch
+    <moq-watch
         url="https://relay.example.com/anon"
         path="room/alice"
         controls>
         <canvas></canvas>
-    </hang-watch>
+    </moq-watch>
 </body>
 </html>
 ```
@@ -179,7 +179,7 @@ The reactive API works with popular frameworks:
 ```typescript
 import react from "@moq/signals/react";
 
-const publish = document.querySelector("hang-publish") as HangPublish;
+const publish = document.querySelector("moq-publish") as MoqPublish;
 const media = react(publish.video.media);
 
 useEffect(() => {
@@ -192,7 +192,7 @@ useEffect(() => {
 ```typescript
 import solid from "@moq/signals/solid";
 
-const publish = document.querySelector("hang-publish") as HangPublish;
+const publish = document.querySelector("moq-publish") as MoqPublish;
 const media = solid(publish.video.media);
 
 createEffect(() => {
@@ -204,7 +204,7 @@ Use `@moq/watch/ui` and `@moq/publish/ui` for ready-made SolidJS UI overlays.
 
 ## Demo Application
 
-Check out the [hang-demo](https://github.com/moq-dev/moq/tree/main/js/hang-demo) for complete examples:
+Check out the [demo](https://github.com/moq-dev/moq/tree/main/js/demo) for complete examples:
 
 - Video conferencing
 - Screen sharing

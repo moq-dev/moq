@@ -9,13 +9,8 @@
 		".": "./src/index.ts",
 		"./catalog": "./src/catalog/index.ts",
 		"./container": "./src/container/index.ts",
-		"./util": "./src/util/index.ts",
-		"./support": "./src/support/index.ts",
-		"./support/element": "./src/support/element.ts"
+		"./util": "./src/util/index.ts"
 	},
-	"sideEffects": [
-		"./src/support/element.ts"
-	],
 	"scripts": {
 		"build": "rimraf dist && tsc -b && bun ../common/package.ts",
 		"check": "tsc --noEmit",

@@ -1,15 +1,15 @@
 import "./highlight";
 import "@moq/watch/ui";
-import HangSupport from "@moq/hang/support/element";
-import HangWatch from "@moq/watch/element";
-import HangConfig from "./config";
+import MoqWatch from "@moq/watch/element";
+import MoqWatchSupport from "@moq/watch/support/element";
+import MoqWatchConfig from "./config";
 
-export { HangSupport, HangWatch, HangConfig };
+export { MoqWatchSupport, MoqWatch, MoqWatchConfig };
 
-const watch = document.querySelector("hang-watch") as HangWatch | undefined;
-const config = document.querySelector("hang-config") as HangConfig | undefined;
+const watch = document.querySelector("moq-watch") as MoqWatch | undefined;
+const config = document.querySelector("moq-watch-config") as MoqWatchConfig | undefined;
 
-if (!watch) throw new Error("unable to find <hang-watch> element");
+if (!watch) throw new Error("unable to find <moq-watch> element");
 
 // If query params are provided, use them.
 const urlParams = new URLSearchParams(window.location.search);

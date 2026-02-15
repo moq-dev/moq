@@ -17,22 +17,21 @@
 
 		See index.html for more details on these components.
 	-->
-	<hang-support mode="watch" show="partial"></hang-support>
+	<moq-watch-support show="warning"></moq-watch-support>
 
-	<hang-watch-ui>
-		<hang-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted jitter="200" reload>
+	<moq-watch-ui>
+		<moq-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted jitter="200" reload>
 			<video style="width: 100%; height: auto;" autoplay muted></video>
-		</hang-watch>
-	</hang-watch-ui>
+		</moq-watch>
+	</moq-watch-ui>
 
-	<hang-config id="config" url="%VITE_RELAY_URL%" path="bbb"></hang-config>
+	<moq-watch-config id="config" url="%VITE_RELAY_URL%" path="bbb"></moq-watch-config>
 
 	<h3>Other demos:</h3>
 	<ul>
 		<li><a href="index.html">Watch a broadcast (WebCodecs).</a></li>
 		<li><a href="publish.html">Publish a broadcast.</a></li>
 		<li><a href="meet.html">Watch a room of broadcasts.</a></li>
-		<li><a href="support.html">Check browser support.</a></li>
 	</ul>
 
 	<h3>Tips:</h3>
@@ -44,9 +43,9 @@
 	</p>
 	<p>
 		To use MSE, provide a <code>&lt;video&gt;</code> element instead of a <code>&lt;canvas&gt;</code> element:
-	<pre><code class="language-html">&lt;hang-watch url="https://cdn.moq.dev/anon" path="bbb"&gt;
+	<pre><code class="language-html">&lt;moq-watch url="https://cdn.moq.dev/anon" path="bbb"&gt;
 	&lt;video style="max-width: 100%; height: auto;" autoplay muted&gt;&lt;/video&gt;
-&lt;/hang-watch&gt;</code></pre>
+&lt;/moq-watch&gt;</code></pre>
 	</p>
 </body>
 

@@ -7,7 +7,7 @@ Real-time statistics display for monitoring media streaming performance (network
 ```tsx
 <Stats 
   context={WatchUIContext}
-  getElement={(ctx) => ctx?.hangWatch()}
+  getElement={(ctx) => ctx?.moqWatch()}
 />
 ```
 

@@ -8,11 +8,14 @@
 	"exports": {
 		".": "./src/index.ts",
 		"./element": "./src/element.ts",
-		"./ui": "./src/ui/index.tsx"
+		"./ui": "./src/ui/index.tsx",
+		"./support": "./src/support/index.ts",
+		"./support/element": "./src/support/element.ts"
 	},
 	"sideEffects": [
 		"./src/element.ts",
-		"./src/ui/index.tsx"
+		"./src/ui/index.tsx",
+		"./src/support/element.ts"
 	],
 	"scripts": {
 		"build": "rimraf dist && vite build && tsc && bun ../common/package.ts",

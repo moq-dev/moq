@@ -303,7 +303,7 @@ serve name *args:
 
 # Run the web server
 web url='http://localhost:4443/anon':
-	cd js/hang-demo && VITE_RELAY_URL="{{url}}" bun run dev
+	cd js/demo && VITE_RELAY_URL="{{url}}" bun run dev
 
 # Publish the clock broadcast
 # `action` is either `publish` or `subscribe`

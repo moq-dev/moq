@@ -16,12 +16,12 @@ The simplest way to watch a stream:
     import "@moq/watch/element";
 </script>
 
-<hang-watch
+<moq-watch
     url="https://relay.example.com/anon"
     path="room/alice"
     controls>
     <canvas></canvas>
-</hang-watch>
+</moq-watch>
 ```
 
 ### Attributes
@@ -38,7 +38,7 @@ The simplest way to watch a stream:
 ### Events
 
 ```typescript
-const watch = document.querySelector("hang-watch") as HangWatch;
+const watch = document.querySelector("moq-watch") as MoqWatch;
 
 watch.addEventListener("play", () => {
     console.log("Playback started");
@@ -204,10 +204,10 @@ watch.error.subscribe((error) => {
 ```tsx
 import { useEffect, useRef } from "react";
 import "@moq/watch/element";
-import type HangWatch from "@moq/watch/element";
+import type MoqWatch from "@moq/watch/element";
 
 function VideoPlayer({ url, path }) {
-    const watchRef = useRef<HangWatch>(null);
+    const watchRef = useRef<MoqWatch>(null);
 
     useEffect(() => {
         const watch = watchRef.current;
@@ -223,20 +223,20 @@ function VideoPlayer({ url, path }) {
     }, []);
 
     return (
-        <hang-watch
+        <moq-watch
             ref={watchRef}
             url={url}
             path={path}
             controls>
             <canvas style={{ width: "100%" }} />
-        </hang-watch>
+        </moq-watch>
     );
 }
 ```
 
 ## SolidJS Integration
 
-Use `@moq/watch/ui` for the SolidJS UI overlay. The `<hang-watch-ui>` element wraps a nested `<hang-watch>`:
+Use `@moq/watch/ui` for the SolidJS UI overlay. The `<moq-watch-ui>` element wraps a nested `<moq-watch>`:
 
 ```html
 <script type="module">
@@ -244,11 +244,11 @@ Use `@moq/watch/ui` for the SolidJS UI overlay. The `<hang-watch-ui>` element wr
     import "@moq/watch/ui";
 </script>
 
-<hang-watch-ui>
-    <hang-watch url="https://relay.example.com/anon" path="room/alice">
+<moq-watch-ui>
+    <moq-watch url="https://relay.example.com/anon" path="room/alice">
         <canvas></canvas>
-    </hang-watch>
-</hang-watch-ui>
+    </moq-watch>
+</moq-watch-ui>
 ```
 
 Or use Web Components directly:
@@ -258,12 +258,12 @@ import "@moq/watch/element";
 
 function VideoPlayer(props) {
     return (
-        <hang-watch
+        <moq-watch
             url={props.url}
             path={props.path}
             controls>
             <canvas />
-        </hang-watch>
+        </moq-watch>
     );
 }
 ```

@@ -11,8 +11,8 @@
 </head>
 
 <body>
-	<!-- Show if this browser supports everything we need. -->
-	<hang-support mode="publish" show="partial"></hang-support>
+	<!-- Always show this banner to flex browser support. -->
+	<moq-publish-support show="always"></moq-publish-support>
 
 	<!--
 		Use the included Web Component to render a preview and simple controls.
@@ -22,18 +22,17 @@
 		Feel free to hard-code it if you have public access configured, like `url="https://cdn.moq.dev/anon"`
 		NOTE: `http` performs an insecure certificate check. You must use `https` in production.
 	-->
-	<hang-publish-ui>
-		<hang-publish url="%VITE_RELAY_URL%" path="me">
+	<moq-publish-ui>
+		<moq-publish url="%VITE_RELAY_URL%" path="me">
 			<video style="width: 100%; height: auto; border-radius: 4px; margin: 0 auto;" muted autoplay></video>
-		</hang-publish>
-	</hang-publish-ui>
+		</moq-publish>
+	</moq-publish-ui>
 
 	<h3>Other demos:</h3>
 	<ul>
 		<li><a href="index.html?broadcast=me" target="_blank" rel="noreferrer" id="watch">Watch your broadcast: <span
 					id="watch-name"></span></a></li>
 		<li><a href="mse.html">Watch a broadcast (MSE).</a></li>
-		<li><a href="support.html">Check browser support.</a></li>
 	</ul>
 
 	<h3>Tips:</h3>
@@ -54,10 +53,10 @@
 		If there's multiple viewers, the relay will fan out the media to all of them.
 	</p>
 	<p>
-		You can create a broadcaster via the provided <code class="language-html">&lt;hang-publish&gt;</code> <a
+		You can create a broadcaster via the provided <code class="language-html">&lt;moq-publish&gt;</code> <a
 			href="https://developer.mozilla.org/en-US/docs/Web/API/Web_components">Web Component</a>.
 		Either modify HTML attributes like <code
-			class="language-html">&lt;hang-publish source="camera" audio /&gt;</code>
+			class="language-html">&lt;moq-publish source="camera" audio /&gt;</code>
 		or access the element's Javascript API:
 	<pre><code class="language-typescript">const publish = document.getElementById("publish");
 publish.broadcast.audio.enabled.set(true);</code></pre>

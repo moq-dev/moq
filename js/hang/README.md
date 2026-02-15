@@ -13,8 +13,9 @@ Core media library for [Media over QUIC](https://moq.dev/) (MoQ). Provides share
 
 - **Catalog** — JSON track describing other tracks and their codec properties (audio, video, chat, location, etc.)
 - **Container** — Media framing in two formats: CMAF (fMP4) and Legacy (varint-timestamp + raw codec bitstream)
-- **Support** — Browser capability detection and `<hang-support>` Web Component
 - **Utilities** — Hex encoding, Opus audio polyfill (libav), latency computation, browser detection workarounds
+
+Browser support detection is provided by [`<moq-watch-support>`](../watch) and [`<moq-publish-support>`](../publish).
 
 ## Installation
 
@@ -24,20 +25,6 @@ npm add @moq/hang
 pnpm add @moq/hang
 yarn add @moq/hang
 bun add @moq/hang
-```
-
-## Web Component
-
-### `<hang-support>`
-
-Display browser support information:
-
-```html
-<script type="module">
-    import "@moq/hang/support/element";
-</script>
-
-<hang-support mode="publish" show="partial"></hang-support>
 ```
 
 ## JavaScript API

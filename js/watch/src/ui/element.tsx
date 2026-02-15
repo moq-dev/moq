@@ -1,16 +1,16 @@
 import { Stats } from "@moq/ui-core";
 import { useContext } from "solid-js";
 import { Show } from "solid-js/web";
-import type HangWatch from "../element";
+import type MoqWatch from "../element";
 
 import BufferingIndicator from "./components/BufferingIndicator";
 import WatchControls from "./components/WatchControls";
 import WatchUIContextProvider, { WatchUIContext } from "./context";
 import styles from "./styles/index.css?inline";
 
-export function WatchUI(props: { watch: HangWatch }) {
+export function WatchUI(props: { watch: MoqWatch }) {
 	return (
-		<WatchUIContextProvider hangWatch={props.watch}>
+		<WatchUIContextProvider moqWatch={props.watch}>
 			<style>{styles}</style>
 			<div class="watchVideoContainer">
 				<slot />
@@ -21,8 +21,8 @@ export function WatchUI(props: { watch: HangWatch }) {
 						<Show when={context.isStatsPanelVisible()}>
 							<Stats
 								context={WatchUIContext}
-								getElement={(ctx): HangWatch | undefined => {
-									return ctx?.hangWatch;
+								getElement={(ctx): MoqWatch | undefined => {
+									return ctx?.moqWatch;
 								}}
 							/>
 						</Show>
