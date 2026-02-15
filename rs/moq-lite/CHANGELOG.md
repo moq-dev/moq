@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1](https://github.com/moq-dev/moq/compare/moq-lite-v0.14.0...moq-lite-v0.14.1) - 2026-02-15
+
+### Other
+
+- Fix AsPath for String not normalizing paths ([#954](https://github.com/moq-dev/moq/pull/954))
+
 ## [0.14.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.13.1...moq-lite-v0.14.0) - 2026-02-12
 
 ### Other

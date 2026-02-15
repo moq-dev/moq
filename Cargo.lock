@@ -102,9 +102,9 @@ dependencies = [
 
 [[package]]
 name = "arc-swap"
-version = "1.8.1"
+version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ded5f9a03ac8f24d1b8a25101ee812cd32cdc8c50a4c50237de2c4915850e73"
+checksum = "f9f3647c145568cec02c42054e07bdf9a5a698e15b466fb2341bfc393cd24aa5"
 dependencies = [
  "rustversion",
 ]
@@ -428,9 +428,9 @@ dependencies = [
 
 [[package]]
 name = "bitflags"
-version = "2.10.0"
+version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
+checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
 name = "blake3"
@@ -475,9 +475,9 @@ dependencies = [
 
 [[package]]
 name = "boring"
-version = "4.21.1"
+version = "4.21.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9078ed42084a408d2a1c33bb9dde775721227f1673e4daa81e7f74017b412ce3"
+checksum = "a732fa30cc654efcca7d4b39cc0e0b0a22df43a188fa8221ea9a24ddca718caf"
 dependencies = [
  "bitflags",
  "boring-sys",
@@ -488,9 +488,9 @@ dependencies = [
 
 [[package]]
 name = "boring-sys"
-version = "4.21.1"
+version = "4.21.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4f033d6ba6dee8b5322f5504acf758c29317790883bac078e7949dd3d670269"
+checksum = "f922afb52d05239f8d4042ca1df15da9d340c2b58bfb5b8daf15acbf8d6e195e"
 dependencies = [
  "bindgen",
  "cmake",
@@ -567,9 +567,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.55"
+version = "1.2.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47b26a0954ae34af09b50f0de26458fa95369a0d478d8236d3f93082b219bd29"
+checksum = "aebf35691d1bfb0ac386a69bac2fde4dd276fb618cf8bf4f5318fe285e821bb2"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1129,9 +1129,9 @@ dependencies = [
 
 [[package]]
 name = "der"
-version = "0.8.0-rc.12"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c0182be35043efdd2df327a443bb600606e350cfb090cccb233e9451e76f5a3"
+checksum = "71fd89660b2dc699704064e59e9dba0147b903e85319429e131620d022be411b"
 dependencies = [
  "const-oid 0.10.2",
  "pem-rfc7468 1.0.0",
@@ -2867,9 +2867,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.181"
+version = "0.2.182"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "459427e2af2b9c839b132acb702a1c654d95e10f8c326bfc2ad11310e458b1c5"
+checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 
 [[package]]
 name = "libloading"
@@ -3097,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -3116,7 +3116,7 @@ dependencies = [
 
 [[package]]
 name = "moq-clock"
-version = "0.10.6"
+version = "0.10.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3130,7 +3130,7 @@ dependencies = [
 
 [[package]]
 name = "moq-lite"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "async-channel",
  "bytes",
@@ -3207,7 +3207,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.10.6"
+version = "0.10.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -4051,7 +4051,7 @@ version = "0.11.0-rc.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12922b6296c06eb741b02d7b5161e3aaa22864af38dfa025a1a3ba3f68c84577"
 dependencies = [
- "der 0.8.0-rc.12",
+ "der 0.8.0",
  "spki 0.8.0-rc.4",
 ]
 
@@ -5030,9 +5030,9 @@ dependencies = [
 
 [[package]]
 name = "security-framework"
-version = "3.5.1"
+version = "3.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3297343eaf830f66ede390ea39da1d462b6b0c1b000f420d0a83f898bbbe6ef"
+checksum = "d17b898a6d6948c3a8ee4372c17cb384f90d2e6e912ef00895b14fd7ab54ec38"
 dependencies = [
  "bitflags",
  "core-foundation 0.10.1",
@@ -5043,9 +5043,9 @@ dependencies = [
 
 [[package]]
 name = "security-framework-sys"
-version = "2.15.0"
+version = "2.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc1f0cbffaac4852523ce30d8bd3c5cdc873501d96ff467ca09b6767bb8cd5c0"
+checksum = "321c8673b092a9a42605034a9879d73cb79101ed5fd117bc9a597b89b4e9e61a"
 dependencies = [
  "core-foundation-sys",
  "libc",
@@ -5322,9 +5322,9 @@ dependencies = [
 
 [[package]]
 name = "simple_asn1"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "297f631f50729c8c99b84667867963997ec0b50f32b2a7dbcab828ef0541e8bb"
+checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
  "num-bigint",
  "num-traits",
@@ -5503,7 +5503,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8baeff88f34ed0691978ec34440140e1572b68c7dd4a495fd14a3dc1944daa80"
 dependencies = [
  "base64ct",
- "der 0.8.0-rc.12",
+ "der 0.8.0",
 ]
 
 [[package]]
@@ -5622,9 +5622,9 @@ checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
 
 [[package]]
 name = "task-killswitch"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73dc630154f65447b1ee9d2d097522ac1eff991a84e18256417f33eaf3225014"
+checksum = "4b2ba744ef0fcfe2d3fa7475ec61af0a9c76c1b0a75d58f0d20a9e10745ae44f"
 dependencies = [
  "dashmap 6.1.0",
  "parking_lot",
@@ -5976,9 +5976,9 @@ checksum = "ab16f14aed21ee8bfd8ec22513f7287cd4a91aa92e44edfe2c17ddd004e92607"
 
 [[package]]
 name = "tonic"
-version = "0.14.3"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a286e33f82f8a1ee2df63f4fa35c0becf4a85a0cb03091a15fd7bf0b402dc94a"
+checksum = "7f32a6f80051a4111560201420c7885d0082ba9efe2ab61875c587bb6b18b9a0"
 dependencies = [
  "async-trait",
  "axum",
@@ -6005,9 +6005,9 @@ dependencies = [
 
 [[package]]
 name = "tonic-prost"
-version = "0.14.3"
+version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6c55a2d6a14174563de34409c9f92ff981d006f56da9c6ecd40d9d4a31500b0"
+checksum = "9f86539c0089bfd09b1f8c0ab0239d80392af74c21bc9e0f15e1b4aca4c1647f"
 dependencies = [
  "bytes",
  "prost",
@@ -6295,11 +6295,11 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.20.0"
+version = "1.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee48d38b119b0cd71fe4141b30f5ba9c7c5d9f4e7a3a8b4a674e4b6ef789976f"
+checksum = "b672338555252d43fd2240c714dc444b8c6fb0a5c5335e65a07bba7742735ddb"
 dependencies = [
- "getrandom 0.3.4",
+ "getrandom 0.4.1",
  "js-sys",
  "wasm-bindgen",
 ]
@@ -6564,9 +6564,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-proto"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08f2dccff2e778302b6f9289cc6644e37b37629d6020a4608d4a4c2f99bd448b"
+checksum = "17633ea7058419f87cbb7f341ab75ac5c1d6d187c154b0bd4c87539e66f4c4e4"
 dependencies = [
  "bytes",
  "http",
@@ -6578,9 +6578,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-quiche"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11874cd8e11edbd9d815e63dedb23be27ec256e8d735b1651f99a23ccd0648d8"
+checksum = "d4ca5eff9a10c611565ca0cff61c17d6d5a54c174130959496dcc55572f639da"
 dependencies = [
  "boring",
  "bytes",
@@ -6599,9 +6599,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-quinn"
-version = "0.11.3"
+version = "0.11.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c43f91486ee9d3065c017f13f4ff901928e78b2d3a124268dff821bd1caed6ca"
+checksum = "96b195557749e84091d7b912a25e190e9606283b5121d041faf538b0b55f40d7"
 dependencies = [
  "bytes",
  "futures",
@@ -6619,9 +6619,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-trait"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2615c30ed29953bb3727391850279a25c948c0b7a4ed2343d3a78e1d3cce2f7c"
+checksum = "802d6aa508f2c63c9050ceabc17265bbf90ed4d6f4e4357e987583883628e79c"
 dependencies = [
  "bytes",
 ]
