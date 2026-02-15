@@ -204,7 +204,7 @@ watch.error.subscribe((error) => {
 ```tsx
 import { useEffect, useRef } from "react";
 import "@moq/watch/element";
-import type MoqWatch from "@moq/watch/element";
+import MoqWatch from "@moq/watch/element";
 
 function VideoPlayer({ url, path }) {
     const watchRef = useRef<MoqWatch>(null);

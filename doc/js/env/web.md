@@ -139,7 +139,7 @@ const currentVolume = watch.volume.get();
 All properties are signals from `@moq/signals`:
 
 ```typescript
-import type MoqWatch from "@moq/watch/element";
+import MoqWatch from "@moq/watch/element";
 
 const watch = document.querySelector("moq-watch") as MoqWatch;
 
@@ -258,8 +258,8 @@ import "@moq/watch";
 Full TypeScript support with type definitions:
 
 ```typescript
-import type MoqWatch from "@moq/watch/element";
-import type MoqPublish from "@moq/publish/element";
+import MoqWatch from "@moq/watch/element";
+import MoqPublish from "@moq/publish/element";
 
 const watch: MoqWatch = document.querySelector("moq-watch")!;
 const publish: MoqPublish = document.querySelector("moq-publish")!;
