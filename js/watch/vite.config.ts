@@ -11,6 +11,8 @@ export default defineConfig({
 				index: resolve(__dirname, "src/index.ts"),
 				element: resolve(__dirname, "src/element.ts"),
 				"ui/index": resolve(__dirname, "src/ui/index.tsx"),
+				"support/index": resolve(__dirname, "src/support/index.ts"),
+				"support/element": resolve(__dirname, "src/support/element.ts"),
 			},
 			formats: ["es"],
 		},

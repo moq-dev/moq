@@ -6,6 +6,7 @@ import { workletInline } from "../common/vite-plugin-worklet";
 
 export default defineConfig({
 	root: "src",
+	envDir: resolve(__dirname),
 	plugins: [tailwindcss(), solidPlugin(), workletInline()],
 	build: {
 		target: "esnext",
