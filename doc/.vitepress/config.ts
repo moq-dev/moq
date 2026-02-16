@@ -50,7 +50,11 @@ export default defineConfig({
 						{
 							text: "Standards",
 							link: "/concept/standard/",
-							items: [{ text: "MoqTransport", link: "/concept/standard/moq-transport" }],
+							items: [
+								{ text: "MoqTransport", link: "/concept/standard/moq-transport" },
+								{ text: "MSF", link: "/concept/standard/msf" },
+								{ text: "LOC", link: "/concept/standard/loc" },
+							],
 						},
 						{
 							text: "Use Cases",
@@ -59,7 +63,8 @@ export default defineConfig({
 								{ text: "Contribution", link: "/concept/use-case/contribution" },
 								{ text: "Distribution", link: "/concept/use-case/distribution" },
 								{ text: "Conferencing", link: "/concept/use-case/conferencing" },
-								{ text: "Exotic", link: "/concept/use-case/exotic" },
+								{ text: "AI", link: "/concept/use-case/ai" },
+								{ text: "Other", link: "/concept/use-case/other" },
 							],
 						},
 					],
