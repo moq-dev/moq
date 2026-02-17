@@ -97,7 +97,7 @@ If two connections can serve the same content, the subscription goes to the "bes
 ## Economies of Scale
 A subtle problem with contribution protocols is that they're not used for distribution.
 
-This might silly: "of course distribution and contribution are different!"
+This might be silly: "of course distribution and contribution are different!"
 But when you really sit down and break down the requirements, they're not that different.
 One is client-server while the other is server-client, one is 1:1 while the other is 1:N.
 

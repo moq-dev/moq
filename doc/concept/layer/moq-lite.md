@@ -8,25 +8,34 @@ description: A fraction of the calories with none of the fat.
 The goal is to keep the core transport layer simple and focused on practical use-cases.
 
 There's too much fringe functionality in the MoqTransport draft that's not practical to implement.
-Most of it is specific to Cisco's implementation and bizarre requirements anyway.
+Most of it is specific to Cisco's implementation and bizarre requirements, so it probably won't impact you.
 
 ## Compatibility
-Keep in mind that moq-lite is forward compatible with the IETF draft.
-For every moq-lite API, there's a corresponding moq-transport API.
-So fortunately, it doesn't matter if I get hit by a bus and moq-lite ceases to exist.
+`moq-lite` is forward compatible with `moq-transport`.
+That means for every moq-lite API, there's a corresponding moq-transport API.
 
-The moq.dev libraries negotiate the `moq-lite` or `moq-transport` version as part of the QUIC/WebTransport handshake (via ALPN).
-When `moq-transport` wire format is negotiated, we implement a compatibility layer that enforces the moq-lite API.
+That's good!
+You're not locked into moq-lite and can use moq-transport in the future.
+I can get hit by a bus and you wouldn't shed a tear.
+
+Both [moq-lite](/rs/crate/moq-lite) and [@moq/lite](/js/@moq/lite) negotiate the `moq-lite` or `moq-transport` version as part of the QUIC/WebTransport handshake (via ALPN).
+When `moq-transport` wire format is negotiated, we still enforce the moq-lite API.
 For example, if there's a gap in a group (valid in moq-transport), we drop the tail of the group instead of erroring.
 
-|---------------|---------------|-----------|----------------------------------------------------------------------|
-| client        | relay         | supported |                                                                      |
+The following table shows the simplified compatibility matrix.
+Note that there are typically 2 clients, a publisher and a subscriber.
+But if a publisher needs a feature, then the subscriber needs it too, so you can lump them together.
+
+| client        | relay         | supported | notes                                                                |
 |---------------|---------------|:---------:|----------------------------------------------------------------------|
 | moq-lite      | moq-lite      | ✅        |                                                                      |
 | moq-lite      | moq-transport | ✅        |                                                                      |
-| moq-transport | moq-lite      | ⚠️        | Can't use moq-transport specific features.                           |
-| moq-transport | moq-transport | ⚠️        | Depends on the implementation; nobody has implemented every feature. |
-|---------------|---------------|-----------|----------------------------------------------------------------------|
+| moq-transport | moq-lite      | ⚠️        | No moq-transport-only features.                                      |
+| moq-transport | moq-transport | ⚠️        | Depends on the implementation.                                       |
+
+Obviously I'm biased, but I wouldn't recommend using moq-transport yet.
+Each new draft version (every 2 months) introduces a lot of churn and changes.
+We have regular interoperability tests and it's never flawless.
 
 ## Definitions
 - **Broadcast** - A named and discoverable collection of **tracks** from a single publisher.
@@ -52,3 +61,6 @@ The main goal is to reduce complexity and make the protocol easier to implement.
 - **No pausing**: Unsubscribe if you don't want a track.
 - **No binary names**: Uses UTF-8 strings instead of arrays of byte arrays.
 - **No datagrams**: Maybe one day.
+
+This may seem like a lot of missing features, but in practice you don't need them.
+For example, [MSF](/concept/standard/msf) doesn't use any of these features so it's fully compatible with moq-lite.
