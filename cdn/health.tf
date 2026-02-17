@@ -12,7 +12,7 @@ locals {
 
 # HTTPS uptime check for each relay node
 resource "google_monitoring_uptime_check_config" "relay" {
-  for_each = local.relays
+  for_each   = local.relays
 
   display_name = "relay-${each.key}"
   timeout      = "10s"
@@ -29,7 +29,8 @@ resource "google_monitoring_uptime_check_config" "relay" {
     type = "uptime_url"
 
     labels = {
-      project_id = var.gcp_project
+      # Must use the project name string, not the numeric project number
+      project_id = data.google_project.current.project_id
       host       = "${each.key}.${var.domain}"
     }
   }
@@ -37,7 +38,7 @@ resource "google_monitoring_uptime_check_config" "relay" {
 
 # Email notification channel (created only if email is provided)
 resource "google_monitoring_notification_channel" "email" {
-  count = var.health_email != "" ? 1 : 0
+  count      = var.health_email != "" ? 1 : 0
 
   display_name = "MoQ CDN Health Alerts"
   type         = "email"
