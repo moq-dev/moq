@@ -109,6 +109,10 @@
 }
 
 /* Tables */
+.vp-doc table {
+	margin: 2.5rem 0;
+}
+
 .vp-doc th {
 	font-weight: 700;
 	color: #ffffff;
