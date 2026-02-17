@@ -19,14 +19,12 @@ The moq.dev libraries negotiate the `moq-lite` or `moq-transport` version as par
 When `moq-transport` wire format is negotiated, we implement a compatibility layer that enforces the moq-lite API.
 For example, if there's a gap in a group (valid in moq-transport), we drop the tail of the group instead of erroring.
 
-|---------------|---------------|-----------|----------------------------------------------------------------------|
-| client        | relay         | supported |                                                                      |
+| client        | relay         | supported | notes                                                                |
 |---------------|---------------|:---------:|----------------------------------------------------------------------|
 | moq-lite      | moq-lite      | ✅        |                                                                      |
 | moq-lite      | moq-transport | ✅        |                                                                      |
-| moq-transport | moq-lite      | ⚠️        | Can't use moq-transport specific features.                           |
-| moq-transport | moq-transport | ⚠️        | Depends on the implementation; nobody has implemented every feature. |
-|---------------|---------------|-----------|----------------------------------------------------------------------|
+| moq-transport | moq-lite      | ⚠️        | No moq-transport-only features.                                      |
+| moq-transport | moq-transport | ⚠️        | Depends on the implementation.                                       |
 
 ## Definitions
 - **Broadcast** - A named and discoverable collection of **tracks** from a single publisher.

@@ -108,6 +108,18 @@
 	margin: 0 auto;
 }
 
+/* Tables */
+.vp-doc th {
+	font-weight: 700;
+	color: #ffffff;
+	background-color: #1e293b;
+	border-bottom: 2px solid #22c55e;
+}
+
+.vp-doc tr:nth-child(even) {
+	background-color: rgba(30, 41, 59, 0.5);
+}
+
 /* Navbar background */
 .VPNav {
 	background-color: #0f172a;

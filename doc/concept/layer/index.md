@@ -24,12 +24,12 @@ To accomplish this, MoQ is broken into layers:
 │  WebTransport   │  🌐 Browser-compatible QUIC
 │                 │     - HTTP/3 handshake
 ├─────────────────┤
-|      QUIC       |  🌐 Underlying transport protocol
+│      QUIC       │  🌐 Underlying transport protocol
 │                 │     - streams, datagrams, prioritization, etc.
 └─────────────────┘
 ```
 
-You get to choose which layers you want to use and which layers you want to replace.
+You can choose which layers to use and which to replace.
 It's like a cake; you choose if you want frosting.
 
 ## QUIC
