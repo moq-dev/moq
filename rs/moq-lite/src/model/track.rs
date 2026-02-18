@@ -217,7 +217,7 @@ impl TrackConsumer {
 
 	/// Block until the group is available.
 	///
-	/// NOTE: This can block indefinitely if the requested group is dropped.
+	/// Returns None if the group is not in the cache and a newer group exists.
 	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
 		let mut state = self.state.clone();
 
@@ -227,13 +227,20 @@ impl TrackConsumer {
 					return true;
 				}
 
-				if let Some(drop_sequence) = state.drop_sequence
-					&& drop_sequence >= sequence
+				// Check if the group exists in the cache.
+				if state.groups.iter().any(|(_, group)| group.info.sequence == sequence) {
+					return true;
+				}
+
+				// The group is not in the cache.
+				// If we've already seen this or a newer sequence, it's gone.
+				if let Some(max_sequence) = state.max_sequence
+					&& max_sequence >= sequence
 				{
 					return true;
 				}
 
-				state.groups.iter().any(|(_, group)| group.info.sequence == sequence)
+				false
 			})
 			.await
 		else {
@@ -245,9 +252,9 @@ impl TrackConsumer {
 		}
 
 		match &state.closed {
-			Some(Ok(_)) => Ok(None), // end of stream
+			Some(Ok(_)) => Ok(None),
 			Some(Err(err)) => Err(err.clone()),
-			None => Ok(None), // Dropped
+			None => Ok(None), // Not in cache
 		}
 	}
 
