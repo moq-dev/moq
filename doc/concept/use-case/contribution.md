@@ -6,17 +6,42 @@ description: How MoQ compares to contribution protocols like RTMP and SRT
 # MoQ vs RTMP/SRT
 This page compares MoQ with traditional **contribution protocols** like RTMP and SRT.
 
+**WARNING**: I have the least experience with contribution protocols.
+I did read the SRT specification once and it made me very sad.
+Take everything with a grain of salt.
+
 ## Requirements
 Okay the boring stuff first.
 Contribution protocols need to:
-
 - Publish from a client to a server
-- Interface with encoders and other media sources (like OBS)
-- Support a wide range of devices (browsers optional)
-- Support a wide range of networks (especially mobile)
-- Support the latest and greatest codecs
-- Support live streaming (duh)
-- (optional) support ad signaling 🤮
+- Integrate with encoders and other media sources (ex. OBS)
+- Support a wide range of devices
+
+Some optional features:
+- Support browsers
+- Support modern codecs (looking at you, RTMP)
+- Support ad signaling 🤮
+- Support DRM 🤮
+- Support a wide range of networks
+- Support adaptive bitrate
+- Support simulcast (multiple renditions)
+
+## Use-Cases
+There's a lot of optional features for contribution protocols.
+I would generalize this into two camps:
+1. User generated content (ex. YouTube/Twitch/Facebook)
+2. Studio generated content (ex. SportsBall)
+
+If you focus on large audiences, then you can over-provision bandwidth and compute resources.
+The network protocol doesn't really matter that much; device support and integrations are more important.
+You also need a way to monetize your users via ads and (indirectly) via DRM.
+
+If you focus on small audiences, then the economics start to matter.
+The contribution protocol needs to work on commodity low-end devices and spotty networks.
+It might even be too expensive to transcode content for every broadcaster.
+
+This is an over-generalization of course.
+HUMOR ME.
 
 ## Existing Protocols
 - **RTMP** ([Real-Time Messaging Protocol](https://en.wikipedia.org/wiki/Real-Time_Messaging_Protocol)) - The classic Flash-era protocol
@@ -25,14 +50,8 @@ Contribution protocols need to:
 - **WebRTC** ([Web Real-Time Communication](https://en.wikipedia.org/wiki/WebRTC)) - Can be used for contribution via [WHIP](https://www.rfc-editor.org/rfc/rfc9725.html)
 - **RTSP** ([Real-Time Streaming Protocol](https://en.wikipedia.org/wiki/Real-Time_Streaming_Protocol)) - Used in IP cameras
 
-The contribution landscape is quite fragmented, mostly split into two camps:
-1. User generated content (YouTube/Twitch/Facebook) primarily uses RTMP.
-2. Studio generated content primarily uses SRT.
-
-That's an over-generalization of course, but it's very interesting to see the divide.
-SRT is built into modern production equipment (hardware) while RTMP is used in consumer software.
-
-Why? IDK.
+User-generated content (YouTube/Twitch/Facebook) primarily uses RTMP.
+Studio-generated content primarily uses SRT.
 
 ## Pull vs Push
 Existing contribution protocols are push-based.
@@ -42,7 +61,7 @@ However, MoQ is fundamentally a pull-based protocol.
 Technically, MoqTransport supports push too (via PUBLISH), but hear me out for a second.
 
 ### The Push Problem
-I would say there is one major problem with push: **There's no "optional" content.**
+I would say there is one major problem with push: **Nothing is optional.**
 
 When a publisher creates multiple tracks, like 360p and 1080p, it needs to simultaneously encode and transmit both tracks.
 There's no way of knowing if anything downstream *actually* wants the 1080p track; it might go straight to `/dev/null` on the media server.
@@ -91,7 +110,7 @@ Again there's no business logic for this built into MoQ: it's automatic.
 
 But what about clients that don't support P2P?
 Each client can also establish a connection to a MoQ CDN as a fallback.
-This works because the client discovers all available broadcasts available on a connection via the built-in [announce mechanism](/feature/announce).
+This works because the client discovers all available broadcasts available on a connection via the built-in [announce mechanism](/concept/layer/moq-lite).
 If two connections can serve the same content, the subscription goes to the "best" connection (ie. P2P > CDN).
 
 ## Economies of Scale

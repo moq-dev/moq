@@ -115,3 +115,8 @@ This has important implications:
 - **Audio groups** don't need to align with video groups and can contain any number of frames.
 
 The relay uses group boundaries for partial reliability: if congestion occurs, entire groups are dropped rather than individual frames, keeping the decoder in a consistent state.
+
+## Custom Media Formats
+You can make your own media format if you have full control over the publisher and all viewers.
+You would be missing out on existing tools and libraries but it's really not that complicated;
+QUIC and moq-lite do the heavy lifting.

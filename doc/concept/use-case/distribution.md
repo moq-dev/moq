@@ -10,13 +10,15 @@ This page compares MoQ with traditional **distribution protocols** like HLS and 
 Okay the boring stuff first.
 Distribution protocols need to:
 
-- Publish from a server to clients
-- Scale to any number of clients
-- Support a wide range of devices (especially web)
-- Support a wide range of networks (especially mobile)
-- Support live streaming (duh)
-- (optional) support VOD and DVR
-- (optional) support DRM 🤮
+- Support any number of viewers
+- Support a wide range of devices
+- Support a wide range of networks
+- Support web browsers
+- Support multiple renditions (ABR)
+
+Some optional features:
+- Support VOD and DVR
+- Support DRM 🤮
 
 ## Existing Protocols
 - **HLS** ([HTTP Live Streaming](https://en.wikipedia.org/wiki/HTTP_Live_Streaming)) - Apple's protocol. Used to be required for iOS, now mainly for Airplay.
@@ -29,6 +31,7 @@ A "state-less" protocol like HTTP is perfect for distribution because it can be 
 We're mostly going to be discussing HLS/DASH in the rest of this document.
 
 Notable mentions:
+- **Sye** ([Sye](https://www.aboutamazon.eu/news/job-creation-and-investment/how-homegrown-swedish-streaming-technology-went-worldwide-with-amazon-and-prime-video)) - Prime Video's protocol they force (with money) every CDN to support.
 - **RTMP** ([Real-Time Messaging Protocol](https://en.wikipedia.org/wiki/Real-Time_Messaging_Protocol)) - The classic Flash-era protocol before we switching to HTTP.
 - **WebRTC** ([Web Real-Time Communication](https://en.wikipedia.org/wiki/WebRTC)) - Can be used for distribution, but it's not designed for it.
 
