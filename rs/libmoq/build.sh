@@ -168,8 +168,8 @@ else
     tar -czvf "$ARCHIVE" "$NAME"
 fi
 
-# Clean up directory, keep archive
-rm -rf "$PACKAGE_DIR"
+# Clean up directory, keep archive (use $NAME since we cd'd into $OUTPUT_DIR)
+rm -rf "$NAME"
 
 echo ""
 echo "Created: $OUTPUT_DIR/$ARCHIVE"
