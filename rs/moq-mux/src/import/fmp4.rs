@@ -180,12 +180,12 @@ impl Fmp4 {
 			let (kind, track) = match handler.as_ref() {
 				b"vide" => {
 					let config = self.init_video(trak)?;
-					let track = catalog.video.create_track("m4s", config.clone());
+					let track = catalog.video.create_track(".m4s", config.clone());
 					(TrackKind::Video, track)
 				}
 				b"soun" => {
 					let config = self.init_audio(trak)?;
-					let track = catalog.audio.create_track("m4s", config.clone());
+					let track = catalog.audio.create_track(".m4s", config.clone());
 					(TrackKind::Audio, track)
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
