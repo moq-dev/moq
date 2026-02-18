@@ -61,7 +61,7 @@ However, MoQ is fundamentally a pull-based protocol.
 Technically, MoqTransport supports push too (via PUBLISH), but hear me out for a second.
 
 ### The Push Problem
-I would say there is one major problem with push: **There's no "optional" content.**
+I would say there is one major problem with push: **Nothing is optional.**
 
 When a publisher creates multiple tracks, like 360p and 1080p, it needs to simultaneously encode and transmit both tracks.
 There's no way of knowing if anything downstream *actually* wants the 1080p track; it might go straight to `/dev/null` on the media server.
@@ -110,7 +110,7 @@ Again there's no business logic for this built into MoQ: it's automatic.
 
 But what about clients that don't support P2P?
 Each client can also establish a connection to a MoQ CDN as a fallback.
-This works because the client discovers all available broadcasts available on a connection via the built-in [announce mechanism](/feature/announce).
+This works because the client discovers all available broadcasts available on a connection via the built-in [announce mechanism](/concept/layer/moq-lite).
 If two connections can serve the same content, the subscription goes to the "best" connection (ie. P2P > CDN).
 
 ## Economies of Scale
