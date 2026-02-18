@@ -29,7 +29,8 @@ resource "google_monitoring_uptime_check_config" "relay" {
     type = "uptime_url"
 
     labels = {
-      project_id = var.gcp_project
+      # Must use the project name string, not the numeric project number
+      project_id = data.google_project.current.project_id
       host       = "${each.key}.${var.domain}"
     }
   }

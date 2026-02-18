@@ -26,6 +26,9 @@ provider "google" {
   project = var.gcp_project
 }
 
+# Look up the project to get the string project ID (vs numeric project number)
+data "google_project" "current" {}
+
 variable "gcp_service_list" {
   description = "The list of apis necessary for the project"
   type        = list(string)
