@@ -75,33 +75,6 @@ TLS is where most people get stuck.
 And of course, make sure UDP is allowed on your firewall.
 The default WebTransport port is UDP/443 but anything will work if you put it in the URL.
 
-## systemd Service
-
-Create a systemd service file:
-
-```ini
-# /etc/systemd/system/moq-relay.service
-[Unit]
-Description=MoQ Relay Server
-After=network.target
-
-[Service]
-Type=simple
-User=moq
-ExecStart=/usr/local/bin/moq-relay /etc/moq-relay/relay.toml
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-
-```bash
-sudo systemctl enable moq-relay
-sudo systemctl start moq-relay
-```
 
 ## Next Steps
 

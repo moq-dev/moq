@@ -89,15 +89,15 @@ This is because QUIC uses connection IDs rather than the traditional `IP:port` t
 It's also the basis for some pretty neat [load balancing](https://datatracker.ietf.org/doc/html/draft-ietf-quic-load-balancers) techniques.
 
 ## Browser Support
-
 QUIC is available in browsers via [WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API):
 
-- **Chrome/Edge** - Supported since 2021
-- **Firefox** - Supported since 2023
-- **Safari** - [Intent to support](https://github.com/WebKit/standards-positions/issues/18#issuecomment-1495890122), behind a flag since 2025
+- **Chrome/Edge** - Supported since 2021 (97)
+- **Firefox** - Supported since 2023 (114)
+- **Safari** - Supported since 2026 (26.4)
 
-The lack of Safari support is a bit of a bummer especially because it's tied to the OS version.
-But we have an (automatic) WebSocket fallback in the meantime.
+The late arrival of Safari support is a bit of a bummer, because the Safari version is tied to the OS version.
+That means MacOS 26.4 and iOS 26.4 is the minimum version for Safari support.
+We have an (automatic) WebSocket fallback in the meantime.
 
 ## Security
 TLS 1.3 is required for QUIC.
