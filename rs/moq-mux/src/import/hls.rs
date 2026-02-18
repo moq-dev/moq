@@ -453,7 +453,6 @@ impl Hls {
 		// Publish init segment to its track
 		let init_track = track.init_track.as_mut().expect("init_track was just created");
 		let mut group = init_track.append_group();
-		dbg!("group sequence:", group.info.sequence);
 		group.write_frame(bytes.clone());
 		group.close();
 
@@ -520,7 +519,6 @@ impl Hls {
 	}
 
 	async fn fetch_bytes(&self, url: Url) -> anyhow::Result<Bytes> {
-		dbg!(&url);
 		if url.scheme() == "file" {
 			let path = url.to_file_path().ok().context("invalid file URL")?;
 			let bytes = tokio::fs::read(&path).await.context("failed to read file")?;
@@ -597,11 +595,7 @@ enum Playlist {
 }
 
 fn publish_playlist(mut playlist_track: moq_lite::TrackProducer, playlist: Playlist) {
-	// The Multi-Variant Playlist never changes so we can just serialize it, publish a single group and move on.
-	// No need to rewrite pathing as variant playlists are all relative to base url.
     let mut group = playlist_track.append_group();
-
-	dbg!(&playlist); // Debug print to see the playlist structure
 
 	let mut v: Vec<u8> = Vec::new();
 
