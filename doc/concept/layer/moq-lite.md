@@ -58,14 +58,14 @@ It's also useful for individual broadcasts as you can get notifications it comes
 The [moq-relay clustering](/app/relay/cluster) feature actually uses this to discover other nodes in the cluster AND what broadcasts are available on each node.
 
 ### Subscriptions
-All data transfer are initiated by a subscription.
+All data transfers are initiated by subscriptions.
 
 The subscriber needs to send a `SUBSCRIBE` message indicating the **broadcast** and **track** they want (both strings).
 There are additional options, such as `priority`, that primarily impact the behavior during congestion.
 See the congestion section below for more details.
 
 If the peer doesn't have the broadcast/track, they will get an error.
-Otherwise, the subscription is active and will stay open until closed be the publisher (possibly with an error).
+Otherwise, the subscription is active and will stay open until closed by the publisher (possibly with an error).
 
 A track is broken into **groups**, each with an increasing ID.
 Conceptually, these are join points, and new subscriptions will always start at the latest group.

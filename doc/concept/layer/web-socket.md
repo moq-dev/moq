@@ -45,7 +45,7 @@ The frame type is identified by the first byte, borrowing values from the QUIC s
 #### `STREAM` (0x08) / `STREAM_FIN` (0x09)
 Carries data for a stream. `STREAM_FIN` indicates the final data on the stream.
 
-```
+```text
 +--------+-----------+---------+
 | Type   | Stream ID | Payload |
 | 1 byte | VarInt    | ...     |
@@ -57,7 +57,7 @@ No length field is needed since WebSocket already provides message boundaries.
 #### `RESET_STREAM` (0x04)
 Abruptly terminates the sending side of a stream with an error code.
 
-```
+```text
 +--------+-----------+------------+
 | Type   | Stream ID | Error Code |
 | 1 byte | VarInt    | VarInt     |
@@ -67,7 +67,7 @@ Abruptly terminates the sending side of a stream with an error code.
 #### `STOP_SENDING` (0x05)
 Requests the peer stop sending on a stream. The peer should respond with a `RESET_STREAM`.
 
-```
+```text
 +--------+-----------+------------+
 | Type   | Stream ID | Error Code |
 | 1 byte | VarInt    | VarInt     |
@@ -77,7 +77,7 @@ Requests the peer stop sending on a stream. The peer should respond with a `RESE
 #### `APPLICATION_CLOSE` (0x1d)
 Gracefully closes the connection with an error code and reason.
 
-```
+```text
 +--------+------------+--------+
 | Type   | Error Code | Reason |
 | 1 byte | VarInt     | UTF-8  |

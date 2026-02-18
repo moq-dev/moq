@@ -34,7 +34,7 @@ I would generalize this into two camps:
 
 If you focus on large audiences, then you can over-provision bandwidth and compute resources.
 The network protocol doesn't really matter that much; device support and integrations are more important.
-You also need a way to monitize your users via ads and (indirectly) via DRM.
+You also need a way to monetize your users via ads and (indirectly) via DRM.
 
 If you focus on small audiences, then the economics start to matter.
 The contribution protocol needs to work on commodity low-end devices and spotty networks.
@@ -50,8 +50,8 @@ HUMOR ME.
 - **WebRTC** ([Web Real-Time Communication](https://en.wikipedia.org/wiki/WebRTC)) - Can be used for contribution via [WHIP](https://www.rfc-editor.org/rfc/rfc9725.html)
 - **RTSP** ([Real-Time Streaming Protocol](https://en.wikipedia.org/wiki/Real-Time_Streaming_Protocol)) - Used in IP cameras
 
-User generated content (YouTube/Twitch/Facebook) primarily uses RTMP.
-Studio generated content primarily uses SRT.
+User-generated content (YouTube/Twitch/Facebook) primarily uses RTMP.
+Studio-generated content primarily uses SRT.
 
 ## Pull vs Push
 Existing contribution protocols are push-based.

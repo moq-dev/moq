@@ -9,7 +9,7 @@ We don't want you to hit a brick wall if you deviate from the standard path (*ah
 We also want to benefit from economies of scale (like HTTP), utilizing generic libraries and tools whenever possible.
 
 To accomplish this, MoQ is broken into layers stacked on top of each other.
-It's like a cake; you choose if you want frosting or not.
+It's like a cake; you choose whether you want frosting or not.
 
 
 ## QUIC
