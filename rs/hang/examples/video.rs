@@ -106,7 +106,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	origin.publish_broadcast("", broadcast.consume());
 
 	// Create a new group.
-	let mut group = track.append_group();
+	let mut group = track.append_group()?;
 
 	// Not real frames of course.
 	let frame = hang::container::Frame {
@@ -124,12 +124,12 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 		payload: Bytes::from_static(b"delta NAL data").into(),
 	};
 	frame.encode(&mut group)?;
-	group.close();
+	group.close()?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
 	// Create a new group for each keyframe.
-	let mut group = track.append_group();
+	let mut group = track.append_group()?;
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(3).unwrap(),
 		keyframe: true,
@@ -140,7 +140,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Sleep before exiting and closing the broadcast.
 	tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-	group.close();
+	group.close()?;
 
 	Ok(())
 }

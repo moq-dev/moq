@@ -39,7 +39,7 @@ impl CatalogProducer {
 
 	/// Finish publishing to this catalog and close the track.
 	pub fn close(self) {
-		self.track.close();
+		let _ = self.track.close();
 	}
 }
 
@@ -86,11 +86,13 @@ impl Drop for CatalogGuard<'_> {
 			return;
 		}
 
-		let mut group = self.track.append_group();
+		let Ok(mut group) = self.track.append_group() else {
+			return;
+		};
 
 		// TODO decide if this should return an error, or be impossible to fail
 		let frame = self.catalog.to_string().expect("invalid catalog");
-		group.write_frame(frame);
-		group.close();
+		let _ = group.write_frame(frame);
+		let _ = group.close();
 	}
 }

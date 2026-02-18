@@ -144,7 +144,7 @@ impl Drop for BroadcastProducer {
 
 		// Drain any remaining requests.
 		while let Ok(producer) = self.requested.1.try_recv() {
-			producer.abort(Error::Cancel);
+			let _ = producer.abort(Error::Cancel);
 		}
 
 		let mut state = self.state.lock();
@@ -211,7 +211,7 @@ impl BroadcastConsumer {
 			Err(_) => {
 				// If the BroadcastProducer is closed, immediately close the track.
 				// This is a bit more ergonomic than returning None.
-				producer.abort(Error::Cancel);
+				let _ = producer.abort(Error::Cancel);
 				return consumer;
 			}
 		}
@@ -222,7 +222,7 @@ impl BroadcastConsumer {
 		// Remove the track from the lookup when it's unused.
 		let state = self.state.clone();
 		web_async::spawn(async move {
-			producer.unused().await;
+			let _ = producer.unused().await;
 			let mut state = state.lock();
 			if let Some(current) = state.producers.remove(&producer.info.name)
 				&& !current.is_clone(&producer)
@@ -272,7 +272,7 @@ mod test {
 
 		// Make sure we can insert before a consumer is created.
 		producer.insert_track(track1.clone());
-		track1.append_group();
+		track1.append_group().unwrap();
 
 		let consumer = producer.consume();
 
@@ -286,7 +286,7 @@ mod test {
 		let mut track2_consumer = consumer2.subscribe_track(&Track::new("track2"));
 		track2_consumer.assert_no_group();
 
-		track2.append_group();
+		track2.append_group().unwrap();
 
 		track2_consumer.assert_group();
 	}
@@ -334,7 +334,7 @@ mod test {
 
 		// Create a new track and insert it into the broadcast.
 		let mut track1 = producer.create_track(Track::new("track1"));
-		track1.append_group();
+		track1.append_group().unwrap();
 
 		let mut track1c = consumer.subscribe_track(&track1.info);
 		let track2 = consumer.subscribe_track(&Track::new("track2"));
@@ -389,7 +389,7 @@ mod test {
 		track3.consume().assert_is_clone(&track1);
 
 		// Append a group and make sure they all get it.
-		track3.append_group();
+		track3.append_group().unwrap();
 		track1.assert_group();
 		track2.assert_group();
 
@@ -414,8 +414,8 @@ mod test {
 
 		// Get the requested producer and close it (simulating publisher disconnect)
 		let mut producer1 = broadcast.assert_request();
-		producer1.append_group();
-		producer1.close();
+		producer1.append_group().unwrap();
+		producer1.close().unwrap();
 
 		// The consumer should see the track as closed
 		track1.assert_closed();
@@ -427,7 +427,7 @@ mod test {
 
 		// There should be a new request for the track
 		let mut producer2 = broadcast.assert_request();
-		producer2.append_group();
+		producer2.append_group().unwrap();
 
 		// The new consumer should receive the new group
 		track2.assert_group();

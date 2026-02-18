@@ -6515,10 +6515,11 @@ dependencies = [
 
 [[package]]
 name = "web-async"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6b2260b739b0e95cf9b78f22a64704af7ed9760ea12baa3745b4b97899dc89a"
+checksum = "d62fa8bcb7b58ba32c300bbe5e2a57cc1b7ed2cf4baf62e1b0b7223670e210fc"
 dependencies = [
+ "parking_lot",
  "tokio",
  "tracing",
  "wasm-bindgen-futures",

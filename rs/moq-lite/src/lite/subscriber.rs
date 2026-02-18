@@ -189,15 +189,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match res {
 			Err(Error::Cancel) => {
 				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe cancelled");
-				track.abort(Error::Cancel);
+				let _ = track.abort(Error::Cancel);
 			}
 			Err(err) => {
 				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, %err, "subscribe error");
-				track.abort(err);
+				let _ = track.abort(err);
 			}
 			_ => {
 				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe complete");
-				track.close();
+				let _ = track.close();
 			}
 		}
 	}
@@ -239,7 +239,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let track = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
 			let group = Group { sequence: hdr.sequence };
-			track.create_group(group).ok_or(Error::Old)?
+			track.create_group(group)?
 		};
 
 		let res = tokio::select! {
@@ -250,15 +250,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match res {
 			Err(Error::Cancel) => {
 				tracing::trace!(group = %group.info.sequence, "group cancelled");
-				group.abort(Error::Cancel);
+				let _ = group.abort(Error::Cancel);
 			}
 			Err(err) => {
 				tracing::debug!(%err, group = %group.info.sequence, "group error");
-				group.abort(err);
+				let _ = group.abort(err);
 			}
 			_ => {
 				tracing::trace!(group = %group.info.sequence, "group complete");
-				group.close();
+				let _ = group.close();
 			}
 		}
 
@@ -271,7 +271,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		mut group: GroupProducer,
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
-			let frame = group.create_frame(Frame { size });
+			let frame = group.create_frame(Frame { size })?;
 
 			let res = tokio::select! {
 				_ = frame.unused() => Err(Error::Cancel),
@@ -279,12 +279,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 
 			if let Err(err) = res {
-				frame.abort(err.clone());
+				let _ = frame.abort(err.clone());
 				return Err(err);
 			}
 		}
 
-		group.close();
+		group.close()?;
 
 		Ok(())
 	}
@@ -305,12 +305,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				.await?
 				.ok_or(Error::WrongSize)?;
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
-			frame.write_chunk(chunk);
+			frame.write_chunk(chunk)?;
 		}
 
 		tracing::trace!(size = %frame.info.size, "read frame");
 
-		frame.close();
+		frame.close()?;
 
 		Ok(())
 	}

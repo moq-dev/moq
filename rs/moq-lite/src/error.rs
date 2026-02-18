@@ -76,6 +76,12 @@ pub enum Error {
 
 	#[error("unknown ALPN: {0}")]
 	UnknownAlpn(String),
+
+	#[error("dropped")]
+	Dropped,
+
+	#[error("closed")]
+	Closed,
 }
 
 impl Error {
@@ -102,6 +108,8 @@ impl Error {
 			Self::TooManyParameters => 19,
 			Self::InvalidRole => 20,
 			Self::UnknownAlpn(_) => 21,
+			Self::Dropped => 24,
+			Self::Closed => 25,
 			Self::App(app) => *app as u32 + 64,
 		}
 	}
@@ -128,6 +136,8 @@ impl Error {
 			18 => Self::TooLarge,
 			19 => Self::TooManyParameters,
 			20 => Self::InvalidRole,
+			24 => Self::Dropped,
+			25 => Self::Closed,
 			code if code >= 64 => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::ProtocolViolation,

@@ -201,7 +201,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut state = self.state.lock();
 
 		if let Some(track) = state.subscribes.remove(&msg.request_id) {
-			track.producer.abort(Error::Cancel);
+			let _ = track.producer.abort(Error::Cancel);
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -221,7 +221,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut state = self.state.lock();
 
 		if let Some(track) = state.subscribes.remove(&msg.request_id) {
-			track.producer.abort(Error::Cancel);
+			let _ = track.producer.abort(Error::Cancel);
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -234,7 +234,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut state = self.state.lock();
 
 		if let Some(track) = state.subscribes.remove(&msg.request_id) {
-			track.producer.close();
+			let _ = track.producer.close();
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -338,10 +338,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe started");
 
-		track.unused().await;
+		let _ = track.unused().await;
 		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
 
-		track.abort(Error::Cancel);
+		let _ = track.abort(Error::Cancel);
 
 		Ok(())
 	}
@@ -369,7 +369,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let group = Group {
 				sequence: group.group_id,
 			};
-			track.producer.create_group(group).ok_or(Error::Old)?
+			track.producer.create_group(group)?
 		};
 
 		let res = tokio::select! {
@@ -380,15 +380,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match res {
 			Err(Error::Cancel) => {
 				tracing::trace!(group = %producer.info.sequence, "group cancelled");
-				producer.abort(Error::Cancel);
+				let _ = producer.abort(Error::Cancel);
 			}
 			Err(err) => {
 				tracing::debug!(%err, group = %producer.info.sequence, "group error");
-				producer.abort(err);
+				let _ = producer.abort(err);
 			}
 			_ => {
 				tracing::trace!(group = %producer.info.sequence, "group complete");
-				producer.close();
+				let _ = producer.close();
 			}
 		}
 
@@ -418,8 +418,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
 					// Empty frame
-					let frame = producer.create_frame(Frame { size: 0 });
-					frame.close();
+					let frame = producer.create_frame(Frame { size: 0 })?;
+					frame.close()?;
 				} else if status == 3 && !group.flags.has_end {
 					// End of group
 					break;
@@ -427,7 +427,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				let frame = producer.create_frame(Frame { size });
+				let frame = producer.create_frame(Frame { size })?;
 
 				let res = tokio::select! {
 					_ = frame.unused() => Err(Error::Cancel),
@@ -435,13 +435,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				};
 
 				if let Err(err) = res {
-					frame.abort(err.clone());
+					let _ = frame.abort(err.clone());
 					return Err(err);
 				}
 			}
 		}
 
-		producer.close();
+		producer.close()?;
 
 		Ok(())
 	}
@@ -458,12 +458,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		while remain > 0 {
 			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
-			frame.write_chunk(chunk);
+			frame.write_chunk(chunk)?;
 		}
 
 		tracing::trace!(size = %frame.info.size, "read frame");
 
-		frame.close();
+		frame.close()?;
 
 		Ok(())
 	}
