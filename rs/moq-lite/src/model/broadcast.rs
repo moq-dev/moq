@@ -13,16 +13,6 @@ use web_async::Lock;
 
 use super::Track;
 
-struct State {
-	// When explicitly publishing, we hold a reference to the consumer.
-	// This prevents the track from being marked as "unused".
-	consumers: HashMap<String, TrackConsumer>,
-
-	// When requesting, we hold a reference to the producer for dynamic tracks.
-	// The track will be marked as "unused" when the last consumer is dropped.
-	producers: HashMap<String, TrackProducer>,
-}
-
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`Broadcast::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
@@ -35,6 +25,17 @@ impl Broadcast {
 	pub fn produce() -> BroadcastProducer {
 		BroadcastProducer::new()
 	}
+}
+
+#[derive(Default)]
+struct State {
+	// When requesting, we hold a reference to the producer for dynamic tracks.
+	// The track will be marked as "unused" when the last consumer is dropped.
+	producers: HashMap<String, TrackProducer>,
+
+	// When explicitly publishing, we hold a reference to the consumer.
+	// This prevents the track from being marked as "unused".
+	consumers: HashMap<String, TrackConsumer>,
 }
 
 /// Receive broadcast/track requests and return if we can fulfill them.
@@ -57,31 +58,16 @@ impl Default for BroadcastProducer {
 impl BroadcastProducer {
 	pub fn new() -> Self {
 		Self {
-			state: Lock::new(State {
-				consumers: HashMap::new(),
-				producers: HashMap::new(),
-			}),
+			state: Default::default(),
 			closed: Default::default(),
 			requested: async_channel::unbounded(),
 			cloned: Default::default(),
 		}
 	}
 
-	/// Return the next requested track.
-	pub async fn requested_track(&mut self) -> Option<TrackProducer> {
-		self.requested.1.recv().await.ok()
-	}
-
-	/// Produce a new track and insert it into the broadcast.
-	pub fn create_track(&mut self, track: Track) -> TrackProducer {
-		let track = TrackProducer::new(track);
-		self.insert_track(track.clone());
-		track
-	}
-
 	/// Insert a track into the lookup, returning true if it was unique.
 	///
-	/// NOTE: You probably want to [TrackProducer::clone] to keep publishing to the track.
+	/// NOTE: You probably want to [TrackProducer::clone] first to keep publishing to the track.
 	pub fn insert_track(&mut self, track: TrackProducer) -> bool {
 		let mut state = self.state.lock();
 		state.consumers.insert(track.info.name.clone(), track.consume());
@@ -92,6 +78,19 @@ impl BroadcastProducer {
 	pub fn remove_track(&mut self, name: &str) -> bool {
 		let mut state = self.state.lock();
 		state.consumers.remove(name).is_some() || state.producers.remove(name).is_some()
+	}
+
+	/// Produce a new track and insert it into the broadcast.
+	pub fn create_track(&mut self, track: Track) -> TrackProducer {
+		let track = TrackProducer::new(track);
+		self.insert_track(track.clone());
+		track
+	}
+
+	pub fn dynamic(&self) -> BroadcastDynamic {
+		BroadcastDynamic {
+			state: self.state.clone(),
+		}
 	}
 
 	pub fn consume(&self) -> BroadcastConsumer {
@@ -178,6 +177,26 @@ impl BroadcastProducer {
 	pub fn assert_no_request(&mut self) {
 		assert!(self.requested_track().now_or_never().is_none(), "should have blocked");
 	}
+}
+
+#[derive(Clone)]
+pub struct BroadcastDynamic {
+	state: Lock<State>,
+}
+
+impl BroadcastLookup {
+	pub fn new(producer: BroadcastProducer) -> Self {
+		web_async::spawn(Self::run(producer.clone(), state.clone()));
+
+		Self { producer, state }
+	}
+
+	/// Return the next requested track.
+	pub async fn requested_track(&mut self) -> Option<TrackProducer> {
+		self.requested.1.recv().await.ok()
+	}
+
+	async fn run(producer: BroadcastProducer, state: Lock<LookupState>) {}
 }
 
 /// Subscribe to abitrary broadcast/tracks.
