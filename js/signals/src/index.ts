@@ -421,7 +421,7 @@ export class Effect {
 	run(fn: (effect: Effect) => void) {
 		if (this.#dispose === undefined) {
 			if (DEV) {
-				console.warn("Effect.nested called when closed, ignoring");
+				console.warn("Effect.run called when closed, ignoring");
 			}
 			return;
 		}
