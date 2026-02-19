@@ -1,3 +1,4 @@
+import { Signal } from "@moq/signals";
 import type { Announced } from "../announced.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
@@ -35,6 +36,9 @@ export class Connection implements Established {
 
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
+
+	// Estimated send bitrate reported by the server, in bits per second.
+	bitrate = new Signal<number | undefined>(undefined);
 
 	// Just to avoid logging when `close()` is called.
 	#closed = false;
@@ -128,7 +132,7 @@ export class Connection implements Established {
 			for (;;) {
 				const msg = await SessionInfo.decodeMaybe(this.#session.reader);
 				if (!msg) break;
-				// TODO use the session info
+				this.bitrate.set(msg.bitrate ?? undefined);
 			}
 		} finally {
 			console.debug("session stream closed");

@@ -28,6 +28,7 @@ tokio = { workspace = true, features = [
 	"io-util",
 	"sync",
 	"test-util",
+	"time",
 ] }
 tracing = "0.1"
 web-async = { workspace = true }
