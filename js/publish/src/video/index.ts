@@ -39,8 +39,8 @@ export class Root {
 
 		this.flip = Signal.from(props?.flip ?? false);
 
-		this.signals.effect(this.#runCatalog.bind(this));
-		this.signals.effect(this.#runFrame.bind(this));
+		this.signals.run(this.#runCatalog.bind(this));
+		this.signals.run(this.#runFrame.bind(this));
 	}
 
 	#runFrame(effect: Effect) {

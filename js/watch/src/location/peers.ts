@@ -24,11 +24,11 @@ export class Peers {
 		this.broadcast = broadcast;
 		this.enabled = Signal.from(props?.enabled ?? false);
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			this.#catalog.set(effect.get(catalog)?.location?.peers);
 		});
 
-		this.signals.effect(this.#run.bind(this));
+		this.signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect) {

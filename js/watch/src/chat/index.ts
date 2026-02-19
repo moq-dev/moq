@@ -25,7 +25,7 @@ export class Chat {
 		this.typing = new Typing(broadcast, catalog, props?.typing);
 
 		// Grab the chat section from the catalog (if it's changed).
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			const message = effect.get(this.message.catalog);
 			const typing = effect.get(this.typing.catalog);
 			if (!message && !typing) return;

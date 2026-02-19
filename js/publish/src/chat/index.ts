@@ -24,7 +24,7 @@ export class Root {
 		this.message = new Message(props?.message);
 		this.typing = new Typing(props?.typing);
 
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			this.#catalog.set({
 				message: effect.get(this.message.catalog),
 				typing: effect.get(this.typing.catalog),

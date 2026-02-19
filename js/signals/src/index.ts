@@ -458,7 +458,7 @@ export class Effect {
 			return;
 		}
 
-		this.effect((effect) => {
+		this.run((effect) => {
 			const value = effect.get(signal);
 			fn(value);
 		});

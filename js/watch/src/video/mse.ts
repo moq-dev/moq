@@ -35,9 +35,9 @@ export class Mse implements Backend {
 		this.source = source;
 		this.source.supported.set(supported); // super hacky
 
-		this.signals.effect(this.#runMedia.bind(this));
-		this.signals.effect(this.#runStalled.bind(this));
-		this.signals.effect(this.#runTimestamp.bind(this));
+		this.signals.run(this.#runMedia.bind(this));
+		this.signals.run(this.#runStalled.bind(this));
+		this.signals.run(this.#runTimestamp.bind(this));
 	}
 
 	#runMedia(effect: Effect): void {

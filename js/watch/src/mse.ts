@@ -28,11 +28,11 @@ export class Muxer {
 		this.paused = Signal.from(props?.paused ?? false);
 		this.#sync = sync;
 
-		this.#signals.effect(this.#runMediaSource.bind(this));
-		this.#signals.effect(this.#runSkip.bind(this));
-		this.#signals.effect(this.#runTrim.bind(this));
-		this.#signals.effect(this.#runPaused.bind(this));
-		this.#signals.effect(this.#runSync.bind(this));
+		this.#signals.run(this.#runMediaSource.bind(this));
+		this.#signals.run(this.#runSkip.bind(this));
+		this.#signals.run(this.#runTrim.bind(this));
+		this.#signals.run(this.#runPaused.bind(this));
+		this.#signals.run(this.#runSync.bind(this));
 	}
 
 	#runMediaSource(effect: Effect): void {

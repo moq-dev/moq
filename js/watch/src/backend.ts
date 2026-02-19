@@ -131,7 +131,7 @@ export class MultiBackend implements Backend {
 
 		this.paused = Signal.from(props?.paused ?? false);
 
-		this.signals.effect(this.#runElement.bind(this));
+		this.signals.run(this.#runElement.bind(this));
 	}
 
 	#runElement(effect: Effect): void {

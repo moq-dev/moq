@@ -30,12 +30,12 @@ export class Message {
 		this.enabled = Signal.from(props?.enabled ?? false);
 
 		// Grab the chat section from the catalog (if it's changed).
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
 			this.#catalog.set(effect.get(catalog)?.chat?.message);
 		});
 
-		this.#signals.effect(this.#run.bind(this));
+		this.#signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect) {

@@ -31,7 +31,7 @@ export class Window {
 		this.position = Signal.from(props?.position ?? undefined);
 		this.handle = Signal.from(props?.handle ?? undefined);
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const enabled = effect.get(this.enabled);
 			if (!enabled) return;
 

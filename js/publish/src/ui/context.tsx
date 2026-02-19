@@ -76,7 +76,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 		publish.invisible.set(true);
 		publish.source.set(undefined);
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const clearCameraDevices = () => setCameraMediaDevices([]);
 			const video = effect.get(publish.video);
 
@@ -94,7 +94,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			setCameraMediaDevices(devices);
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const clearMicrophoneDevices = () => setMicrophoneMediaDevices([]);
 			const audio = effect.get(publish.audio);
 
@@ -118,7 +118,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			setMicrophoneMediaDevices(devices);
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const source = effect.get(publish.source);
 			const muted = effect.get(publish.muted);
 			const invisible = effect.get(publish.invisible);
@@ -126,12 +126,12 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			setNothingActive(source === undefined && muted && invisible);
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const audioActive = !effect.get(publish.muted);
 			setMicrophoneActive(audioActive);
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const videoSource = effect.get(publish.source);
 			const videoActive = effect.get(publish.video);
 
@@ -147,7 +147,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			}
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const video = effect.get(publish.video);
 
 			if (!video || !("device" in video)) return;
@@ -156,7 +156,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			setSelectedCameraSource(requested);
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const audio = effect.get(publish.audio);
 
 			if (!audio || !("device" in audio)) return;
@@ -165,7 +165,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			setSelectedMicrophoneSource(requested);
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const url = effect.get(publish.connection.url);
 			const status = effect.get(publish.connection.status);
 			const audioSource = effect.get(publish.broadcast.audio.source);
@@ -193,7 +193,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			}
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const selectedSource = effect.get(publish.source);
 			setFileActive(selectedSource instanceof File);
 		});

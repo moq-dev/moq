@@ -41,7 +41,7 @@ export class Sync {
 			this.#resolve = resolve;
 		});
 
-		this.signals.effect(this.#runLatency.bind(this));
+		this.signals.run(this.#runLatency.bind(this));
 	}
 
 	#runLatency(effect: Effect): void {

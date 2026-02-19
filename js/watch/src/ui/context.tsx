@@ -119,7 +119,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const watch = props.moqWatch;
 	const signals = new Signals.Effect();
 
-	signals.effect((effect) => {
+	signals.run((effect) => {
 		const url = effect.get(watch.connection.url);
 		const connection = effect.get(watch.connection.status);
 		const broadcast = effect.get(watch.broadcast.status);
@@ -141,32 +141,32 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		}
 	});
 
-	signals.effect((effect) => {
+	signals.run((effect) => {
 		const paused = effect.get(watch.paused);
 		setIsPlaying(!paused);
 	});
 
-	signals.effect((effect) => {
+	signals.run((effect) => {
 		const volume = effect.get(watch.audio.volume);
 		setCurrentVolume(volume * 100);
 	});
 
-	signals.effect((effect) => {
+	signals.run((effect) => {
 		const muted = effect.get(watch.audio.muted);
 		setIsMuted(muted);
 	});
 
-	signals.effect((effect) => {
+	signals.run((effect) => {
 		const stalled = effect.get(watch.video.stalled);
 		setBuffering(stalled);
 	});
 
-	signals.effect((effect) => {
+	signals.run((effect) => {
 		const jitter = effect.get(watch.jitter);
 		setJitter(jitter);
 	});
 
-	signals.effect((effect) => {
+	signals.run((effect) => {
 		const videoCatalog = effect.get(watch.video.source.catalog);
 		const renditions = videoCatalog?.renditions ?? {};
 
@@ -179,7 +179,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		setAvailableRenditions(renditionsList);
 	});
 
-	signals.effect((effect) => {
+	signals.run((effect) => {
 		const selected = effect.get(watch.video.source.track);
 		setActiveRendition(selected);
 	});

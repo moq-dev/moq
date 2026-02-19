@@ -18,7 +18,7 @@ export class File {
 		this.enabled = Signal.from(config.enabled ?? false);
 		this.file = Signal.from(config.file);
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const values = effect.getAll([this.file, this.enabled]);
 			if (!values) return;
 			const [file] = values;

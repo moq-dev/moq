@@ -30,20 +30,20 @@ export class Window {
 		this.broadcast = broadcast;
 		this.enabled = Signal.from(props?.enabled ?? false);
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			this.#catalog.set(effect.get(catalog)?.location);
 		});
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
 			this.#position.set(effect.get(this.#catalog)?.initial);
 		});
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			this.#handle.set(effect.get(this.#catalog)?.handle);
 		});
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const broadcast = effect.get(this.broadcast);
 			if (!broadcast) return;
 

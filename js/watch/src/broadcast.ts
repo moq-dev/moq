@@ -43,9 +43,9 @@ export class Broadcast {
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? false);
 
-		this.signals.effect(this.#runReload.bind(this));
-		this.signals.effect(this.#runBroadcast.bind(this));
-		this.signals.effect(this.#runCatalog.bind(this));
+		this.signals.run(this.#runReload.bind(this));
+		this.signals.run(this.#runBroadcast.bind(this));
+		this.signals.run(this.#runCatalog.bind(this));
 	}
 
 	#runReload(effect: Effect): void {

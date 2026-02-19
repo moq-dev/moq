@@ -79,7 +79,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 		// This is kind of dangerous because it can create loops.
 		// NOTE: This only runs when the element is connected to the DOM, which is not obvious.
 		// This is because there's no destructor for web components to clean up our effects.
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const url = effect.get(this.url);
 			if (url) {
 				this.setAttribute("url", url.toString());
@@ -88,7 +88,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 			}
 		});
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const broadcast = effect.get(this.path);
 			if (broadcast) {
 				this.setAttribute("path", broadcast.toString());
@@ -97,7 +97,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 			}
 		});
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const muted = effect.get(this.audio.muted);
 			if (muted) {
 				this.setAttribute("muted", "");
@@ -106,7 +106,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 			}
 		});
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const paused = effect.get(this.paused);
 			if (paused) {
 				this.setAttribute("paused", "true");
@@ -115,12 +115,12 @@ export default class MoqWatch extends HTMLElement implements Backend {
 			}
 		});
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const volume = effect.get(this.audio.volume);
 			this.setAttribute("volume", volume.toString());
 		});
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const jitter = Math.floor(effect.get(this.jitter));
 			this.setAttribute("jitter", jitter.toString());
 		});

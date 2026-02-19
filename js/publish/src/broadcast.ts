@@ -49,7 +49,7 @@ export class Broadcast {
 		this.preview = new Preview(props?.preview);
 		this.user = new User.Info(props?.user);
 
-		this.signals.effect(this.#run.bind(this));
+		this.signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect) {
@@ -75,7 +75,7 @@ export class Broadcast {
 
 			effect.cleanup(() => request.track.close());
 
-			effect.effect((effect) => {
+			effect.run((effect) => {
 				if (effect.get(request.track.state.closed)) return;
 
 				switch (request.track.name) {

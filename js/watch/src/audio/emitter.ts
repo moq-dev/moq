@@ -35,7 +35,7 @@ export class Emitter {
 		this.paused = Signal.from(props?.paused ?? props?.muted ?? false);
 
 		// Set the volume to 0 when muted.
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			const muted = effect.get(this.muted);
 			if (muted) {
 				this.#unmuteVolume = this.volume.peek() || 0.5;
@@ -45,18 +45,18 @@ export class Emitter {
 			}
 		});
 
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			const enabled = !effect.get(this.paused) && !effect.get(this.muted);
 			this.source.enabled.set(enabled);
 		});
 
 		// Set unmute when the volume is non-zero.
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			const volume = effect.get(this.volume);
 			this.muted.set(volume === 0);
 		});
 
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			const root = effect.get(this.source.root);
 			if (!root) return;
 
@@ -65,7 +65,7 @@ export class Emitter {
 
 			effect.set(this.#gain, gain);
 
-			effect.effect(() => {
+			effect.run(() => {
 				// We only connect/disconnect when enabled to save power.
 				// Otherwise the worklet keeps running in the background returning 0s.
 				const enabled = effect.get(this.source.enabled);
@@ -76,7 +76,7 @@ export class Emitter {
 			});
 		});
 
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			const gain = effect.get(this.#gain);
 			if (!gain) return;
 

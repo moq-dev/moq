@@ -61,7 +61,7 @@ export default class MoqPublish extends HTMLElement {
 		this.#audioEnabled = new Signal(false);
 		this.#eitherEnabled = new Signal(false);
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const muted = effect.get(this.muted);
 			const invisible = effect.get(this.invisible);
 			this.#videoEnabled.set(!invisible);
@@ -94,7 +94,7 @@ export default class MoqPublish extends HTMLElement {
 		this.signals.cleanup(() => observer.disconnect());
 		setPreview();
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const preview = effect.get(this.#preview);
 			if (!preview) return;
 
@@ -112,7 +112,7 @@ export default class MoqPublish extends HTMLElement {
 			});
 		});
 
-		this.signals.effect(this.#runSource.bind(this));
+		this.signals.run(this.#runSource.bind(this));
 	}
 
 	connectedCallback() {
@@ -152,13 +152,13 @@ export default class MoqPublish extends HTMLElement {
 
 		if (source === "camera") {
 			const video = new Source.Camera({ enabled: this.#videoEnabled });
-			this.signals.effect((effect) => {
+			this.signals.run((effect) => {
 				const source = effect.get(video.source);
 				this.broadcast.video.source.set(source);
 			});
 
 			const audio = new Source.Microphone({ enabled: this.#audioEnabled });
-			this.signals.effect((effect) => {
+			this.signals.run((effect) => {
 				const source = effect.get(audio.source);
 				this.broadcast.audio.source.set(source);
 			});
@@ -179,7 +179,7 @@ export default class MoqPublish extends HTMLElement {
 				enabled: this.#eitherEnabled,
 			});
 
-			this.signals.effect((effect) => {
+			this.signals.run((effect) => {
 				const source = effect.get(screen.source);
 				if (!source) return;
 
@@ -205,7 +205,7 @@ export default class MoqPublish extends HTMLElement {
 				enabled: this.#eitherEnabled,
 			});
 
-			this.signals.effect((effect) => {
+			this.signals.run((effect) => {
 				const source = effect.get(fileSource.source);
 				this.broadcast.video.source.set(source.video);
 				this.broadcast.audio.source.set(source.audio);

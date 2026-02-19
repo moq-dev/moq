@@ -63,7 +63,7 @@ export class Reload {
 		this.#delay = this.delay.initial;
 
 		// Create a reactive root so cleanup is easier.
-		this.signals.effect(this.#connect.bind(this));
+		this.signals.run(this.#connect.bind(this));
 	}
 
 	#connect(effect: Effect): void {

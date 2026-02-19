@@ -63,9 +63,9 @@ export class Encoder {
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.config = Signal.from(props?.config);
 
-		this.#signals.effect(this.#runCatalog.bind(this));
-		this.#signals.effect(this.#runConfig.bind(this));
-		this.#signals.effect(this.#runDimensions.bind(this));
+		this.#signals.run(this.#runCatalog.bind(this));
+		this.#signals.run(this.#runConfig.bind(this));
+		this.#signals.run(this.#runDimensions.bind(this));
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
@@ -94,14 +94,14 @@ export class Encoder {
 
 			effect.cleanup(() => encoder.close());
 
-			effect.effect(() => {
+			effect.run(() => {
 				const config = effect.get(this.#config);
 				if (!config) return;
 
 				encoder.configure(config);
 			});
 
-			effect.effect((effect) => {
+			effect.run((effect) => {
 				const frame = effect.get(this.frame);
 				if (!frame) return;
 

@@ -34,12 +34,12 @@ export class Device<Kind extends "audio" | "video"> {
 		this.kind = kind;
 		this.preferred = Signal.from(props?.preferred);
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			effect.spawn(this.#run.bind(this, effect));
 			effect.event(navigator.mediaDevices, "devicechange", () => effect.reload());
 		});
 
-		this.signals.effect(this.#runRequested.bind(this));
+		this.signals.run(this.#runRequested.bind(this));
 	}
 
 	async #run(effect: Effect) {
