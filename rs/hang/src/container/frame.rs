@@ -50,7 +50,7 @@ impl Frame {
 		for chunk in &self.payload {
 			chunked.write_chunk(chunk.clone())?;
 		}
-		chunked.close()?;
+		chunked.finish()?;
 
 		Ok(())
 	}

@@ -65,7 +65,7 @@ impl Publisher {
 			now = next;
 		}
 
-		let _ = segment.close();
+		segment.finish()?;
 
 		Ok(())
 	}

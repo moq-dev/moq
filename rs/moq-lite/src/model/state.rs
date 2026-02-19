@@ -1,8 +1,8 @@
 use std::{
 	ops::{Deref, DerefMut},
 	sync::{
-		atomic::{AtomicUsize, Ordering},
 		Arc,
+		atomic::{AtomicUsize, Ordering},
 	},
 	task::Poll,
 };
@@ -10,8 +10,8 @@ use std::{
 use web_async::{Lock, LockGuard};
 
 use crate::{
-	model::waiter::{waiter_fn, Waiter, WaiterList},
 	Error,
+	model::waiter::{Waiter, WaiterList, waiter_fn},
 };
 
 #[derive(Debug)]
@@ -99,13 +99,8 @@ impl<T> Producer<T> {
 		}
 	}
 
-	pub fn close(self, err: Error) -> Result<(), Error> {
-		let mut state = self.state.lock();
-		state.closed.clone()?;
-		state.closed = Err(err);
-		let waiters = state.waiters.take();
-		drop(state); // Release lock BEFORE waking
-		waiters.wake();
+	pub fn close(&mut self, err: Error) -> Result<(), Error> {
+		self.modify()?.close(err);
 		Ok(())
 	}
 
@@ -290,6 +285,14 @@ impl<'a, T> ProducerMut<'a, T> {
 			state: Some(state),
 			modified: false,
 		}
+	}
+
+	/// NOTE: This takes self so it's impossible to be in a closed state.
+	pub fn close(mut self, err: Error) {
+		let state = self.state.as_mut().unwrap();
+		// We don't need to check for state.closed because we checked when making ProducerMut
+		state.closed = Err(err);
+		self.modified = true;
 	}
 }
 

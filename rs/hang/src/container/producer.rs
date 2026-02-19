@@ -42,8 +42,8 @@ impl OrderedProducer {
 		tracing::trace!(?frame, "write frame");
 
 		if frame.keyframe {
-			if let Some(group) = self.group.take() {
-				group.close()?;
+			if let Some(mut group) = self.group.take() {
+				group.finish()?;
 			}
 
 			// Make sure this frame's timestamp doesn't go backwards relative to the last keyframe.
@@ -75,7 +75,7 @@ impl OrderedProducer {
 	///
 	/// This is useful to flush when you know the next frame will be a keyframe.
 	pub fn flush(&mut self) -> Result<(), Error> {
-		self.group.take().ok_or(Error::MissingKeyframe)?.close()?;
+		self.group.take().ok_or(Error::MissingKeyframe)?.finish()?;
 		Ok(())
 	}
 

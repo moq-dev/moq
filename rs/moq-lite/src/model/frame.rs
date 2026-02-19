@@ -127,28 +127,16 @@ impl FrameProducer {
 		state.write_chunk(chunk)
 	}
 
-	pub fn final_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
-		let chunk = chunk.into();
-		let mut state = self.state.modify()?;
-		state.write_chunk(chunk)?;
+	/// Optional: mark the frame as finished when all bytes have been written.
+	pub fn finish(&mut self) -> Result<()> {
+		let state = self.state.modify()?;
 		if state.remaining != 0 {
 			return Err(Error::WrongSize);
 		}
 		Ok(())
 	}
 
-	pub fn close(self) -> Result<()> {
-		{
-			let state = self.state.modify()?;
-			if state.remaining != 0 {
-				return Err(Error::WrongSize);
-			}
-		}
-		let _ = self.state.close(Error::Closed);
-		Ok(())
-	}
-
-	pub fn abort(self, err: Error) -> Result<()> {
+	pub fn abort(&mut self, err: Error) -> Result<()> {
 		self.state.close(err)
 	}
 

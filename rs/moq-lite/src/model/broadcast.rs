@@ -143,7 +143,7 @@ impl Drop for BroadcastProducer {
 		self.requested.0.close();
 
 		// Drain any remaining requests.
-		while let Ok(producer) = self.requested.1.try_recv() {
+		while let Ok(mut producer) = self.requested.1.try_recv() {
 			let _ = producer.abort(Error::Cancel);
 		}
 
@@ -201,7 +201,7 @@ impl BroadcastConsumer {
 		}
 
 		// Otherwise we have never seen this track before and need to create a new producer.
-		let producer = track.clone().produce();
+		let mut producer = track.clone().produce();
 		let consumer = producer.consume();
 
 		// Insert the producer into the lookup so we will deduplicate requests.
@@ -415,7 +415,7 @@ mod test {
 		// Get the requested producer and close it (simulating publisher disconnect)
 		let mut producer1 = broadcast.assert_request();
 		producer1.append_group().unwrap();
-		producer1.close().unwrap();
+		producer1.finish().unwrap();
 
 		// The consumer should see the track as closed
 		track1.assert_closed();

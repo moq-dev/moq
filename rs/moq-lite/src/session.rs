@@ -19,7 +19,7 @@ impl Session {
 	}
 
 	/// Close the underlying transport session.
-	pub fn close(self, err: Error) {
+	pub fn close(&mut self, err: Error) {
 		self.session.close(err.to_code(), err.to_string().as_ref());
 	}
 

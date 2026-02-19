@@ -1,7 +1,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::{Catalog, CatalogConsumer};
+use crate::{Catalog, CatalogConsumer, Error};
 
 /// Produces a catalog track that describes the available media tracks.
 ///
@@ -37,9 +37,10 @@ impl CatalogProducer {
 		CatalogConsumer::new(self.track.consume())
 	}
 
-	/// Finish publishing to this catalog and close the track.
-	pub fn close(self) {
-		let _ = self.track.close();
+	/// Finish publishing to this catalog
+	pub fn finish(&mut self) -> Result<(), Error> {
+		self.track.finish()?;
+		Ok(())
 	}
 }
 
@@ -93,6 +94,6 @@ impl Drop for CatalogGuard<'_> {
 		// TODO decide if this should return an error, or be impossible to fail
 		let frame = self.catalog.to_string().expect("invalid catalog");
 		let _ = group.write_frame(frame);
-		let _ = group.close();
+		let _ = group.finish();
 	}
 }

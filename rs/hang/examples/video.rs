@@ -124,7 +124,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 		payload: Bytes::from_static(b"delta NAL data").into(),
 	};
 	frame.encode(&mut group)?;
-	group.close()?;
+	group.finish()?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
@@ -140,7 +140,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Sleep before exiting and closing the broadcast.
 	tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-	group.close()?;
+	group.finish()?;
 
 	Ok(())
 }

@@ -112,7 +112,7 @@ impl GroupProducer {
 		};
 		let mut frame = self.create_frame(frame)?;
 		frame.write_chunk(data)?;
-		frame.close()
+		Ok(())
 	}
 
 	/// Create a frame with an upfront size
@@ -133,17 +133,23 @@ impl GroupProducer {
 	}
 
 	/// Clean termination of the group.
-	pub fn close(self) -> Result<()> {
-		{
-			let mut state = self.state.modify()?;
-			state.fin = true;
-		}
-		let _ = self.state.close(Error::Closed);
+	pub fn finish(&mut self) -> Result<()> {
+		let mut state = self.state.modify()?;
+		state.fin = true;
 		Ok(())
 	}
 
-	pub fn abort(self, err: Error) -> Result<()> {
-		self.state.close(err)
+	pub fn abort(&mut self, err: Error) -> Result<()> {
+		let mut state = self.state.modify()?;
+
+		// Abort all frames still in progress.
+		for frame in state.frames.iter_mut() {
+			// Ignore errors, we don't care if the frame was already closed.
+			frame.abort(err.clone()).ok();
+		}
+
+		state.close(err);
+		Ok(())
 	}
 
 	/// Create a new consumer for the group.
@@ -216,8 +222,7 @@ impl GroupConsumer {
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub async fn get_frame(&self, index: usize) -> Result<Option<FrameConsumer>> {
-		let res =
-			waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
+		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
 		Ok(res.map(|producer| producer.consume()))
 	}
 

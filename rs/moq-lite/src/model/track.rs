@@ -72,10 +72,10 @@ impl State {
 		}
 
 		// If we've already seen a newer sequence, the group is gone.
-		if let Some(max) = self.max_sequence {
-			if max >= sequence {
-				return Poll::Ready(None);
-			}
+		if let Some(max) = self.max_sequence
+			&& max >= sequence
+		{
+			return Poll::Ready(None);
 		}
 
 		if self.fin {
@@ -140,21 +140,29 @@ impl TrackProducer {
 	pub fn write_frame<B: Into<bytes::Bytes>>(&mut self, frame: B) -> Result<()> {
 		let mut group = self.append_group()?;
 		group.write_frame(frame.into())?;
-		group.close()
-	}
-
-	pub fn close(self) -> Result<()> {
-		{
-			let mut state = self.state.modify()?;
-			state.fin = true;
-		}
-		// Explicitly close so consumers see Error::Closed even if other Producer clones exist.
-		let _ = self.state.close(Error::Closed);
+		group.finish()?;
 		Ok(())
 	}
 
-	pub fn abort(self, err: Error) -> Result<()> {
-		self.state.close(err)
+	/// Mark the end of the track.
+	pub fn finish(&mut self) -> Result<()> {
+		let mut state = self.state.modify()?;
+		state.fin = true;
+		Ok(())
+	}
+
+	/// Abort the track with the given error.
+	pub fn abort(&mut self, err: Error) -> Result<()> {
+		let mut state = self.state.modify()?;
+
+		// Abort all groups still in progress.
+		for group in state.groups.iter_mut() {
+			// Ignore errors, we don't care if the group was already closed.
+			group.abort(err.clone()).ok();
+		}
+
+		state.close(err);
+		Ok(())
 	}
 
 	/// Create a new consumer for the track, starting at the latest group.
@@ -226,8 +234,7 @@ impl TrackConsumer {
 	///
 	/// Returns None if the group is not in the cache and a newer group exists.
 	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
-		let res =
-			waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_get_group(sequence))).await?;
+		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_get_group(sequence))).await?;
 		Ok(res.map(|producer| producer.consume()))
 	}
 

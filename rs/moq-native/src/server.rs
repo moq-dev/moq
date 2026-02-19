@@ -299,10 +299,12 @@ impl Server {
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_mut() {
 			quinn.close();
+			return;
 		}
 		#[cfg(feature = "quiche")]
 		if let Some(quiche) = self.quiche.as_mut() {
 			quiche.close();
+			return;
 		}
 		unreachable!("no QUIC backend compiled");
 	}

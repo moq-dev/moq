@@ -541,9 +541,9 @@ impl Fmp4 {
 						let mut group = match track.kind {
 							// If this is a video keyframe, we create a new group.
 							TrackKind::Video if keyframe => {
-								if let Some(group) = track.group.take() {
+								if let Some(mut group) = track.group.take() {
 									// Close the previous group if it exists.
-									let _ = group.close();
+									group.finish()?;
 								}
 								track.producer.append_group()?
 							}
@@ -590,8 +590,8 @@ impl Fmp4 {
 			// If we're doing passthrough mode, then we write one giant fragment instead of individual frames.
 			if self.config.passthrough {
 				let mut group = if contains_keyframe {
-					if let Some(group) = track.group.take() {
-						let _ = group.close();
+					if let Some(mut group) = track.group.take() {
+						group.finish()?;
 					}
 
 					track.producer.append_group()?
@@ -608,13 +608,13 @@ impl Fmp4 {
 
 				frame.write_chunk(moof_raw.clone())?;
 				frame.write_chunk(Bytes::copy_from_slice(mdat_raw))?;
-				frame.close()?;
+				frame.finish()?;
 
 				track.group = Some(group);
 			} else if track.kind == TrackKind::Audio {
 				// Close the audio group if it exists.
-				if let Some(group) = track.group.take() {
-					let _ = group.close();
+				if let Some(mut group) = track.group.take() {
+					group.finish()?;
 				}
 			}
 

@@ -200,7 +200,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_subscribe_error(&mut self, msg: ietf::SubscribeError) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
-		if let Some(track) = state.subscribes.remove(&msg.request_id) {
+		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
 			let _ = track.producer.abort(Error::Cancel);
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
@@ -220,7 +220,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// v15: generic error response. Check if it's a subscribe error.
 		let mut state = self.state.lock();
 
-		if let Some(track) = state.subscribes.remove(&msg.request_id) {
+		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
 			let _ = track.producer.abort(Error::Cancel);
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
@@ -233,8 +233,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_publish_done(&mut self, msg: ietf::PublishDone<'_>) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
-		if let Some(track) = state.subscribes.remove(&msg.request_id) {
-			let _ = track.producer.close();
+		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
+			let _ = track.producer.finish();
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -321,7 +321,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		request_id: RequestId,
 		broadcast: Path<'_>,
-		track: TrackProducer,
+		mut track: TrackProducer,
 	) -> Result<(), Error> {
 		self.control.send(ietf::Subscribe {
 			request_id,
@@ -355,7 +355,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::Unsupported);
 		}
 
-		let producer = {
+		let mut producer = {
 			let mut state = self.state.lock();
 			let request_id = match state.aliases.get(&group.track_alias) {
 				Some(request_id) => *request_id,
@@ -388,7 +388,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			_ => {
 				tracing::trace!(group = %producer.info.sequence, "group complete");
-				let _ = producer.close();
+				let _ = producer.finish();
 			}
 		}
 
@@ -418,8 +418,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
 					// Empty frame
-					let frame = producer.create_frame(Frame { size: 0 })?;
-					frame.close()?;
+					let mut frame = producer.create_frame(Frame { size: 0 })?;
+					frame.finish()?;
 				} else if status == 3 && !group.flags.has_end {
 					// End of group
 					break;
@@ -427,7 +427,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				let frame = producer.create_frame(Frame { size })?;
+				let mut frame = producer.create_frame(Frame { size })?;
 
 				let res = tokio::select! {
 					_ = frame.unused() => Err(Error::Cancel),
@@ -438,10 +438,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					let _ = frame.abort(err.clone());
 					return Err(err);
 				}
+
+				frame.finish()?;
 			}
 		}
-
-		producer.close()?;
 
 		Ok(())
 	}
@@ -462,8 +462,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		tracing::trace!(size = %frame.info.size, "read frame");
-
-		frame.close()?;
 
 		Ok(())
 	}
