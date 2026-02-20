@@ -309,6 +309,7 @@ async fn serve_fetch(
 					group: None,
 					frame: Some(frame),
 					deadline,
+					content_type: None,
 				}),
 				Ok(None) => Err(StatusCode::NOT_FOUND),
 				Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -317,6 +318,7 @@ async fn serve_fetch(
 				group: Some(group),
 				frame: None,
 				deadline,
+				content_type: content_type_for_track(&track.info.name),
 			}),
 		}
 	})
@@ -329,10 +331,21 @@ async fn serve_fetch(
 	}
 }
 
+fn content_type_for_track(track_name: &str) -> Option<&'static str> {
+	if track_name.ends_with(".m3u8") {
+		Some("application/vnd.apple.mpegurl")
+	} else if track_name.ends_with(".init") || track_name.ends_with(".m4s") || track_name.ends_with(".mp4") {
+		Some("video/mp4")
+	} else {
+		None
+	}
+}
+
 struct ServeGroup {
 	group: Option<moq_lite::GroupConsumer>,
 	frame: Option<moq_lite::FrameConsumer>,
 	deadline: tokio::time::Instant,
+	content_type: Option<&'static str>,
 }
 
 impl ServeGroup {
@@ -362,7 +375,15 @@ impl ServeGroup {
 
 impl IntoResponse for ServeGroup {
 	fn into_response(self) -> Response {
-		Response::new(Body::new(self))
+		let content_type = self.content_type;
+		let mut response = Response::new(Body::new(self));
+		if let Some(ct) = content_type {
+			response.headers_mut().insert(
+				axum::http::header::CONTENT_TYPE,
+				axum::http::HeaderValue::from_static(ct),
+			);
+		}
+		response
 	}
 }
 
