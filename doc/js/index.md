@@ -177,23 +177,23 @@ The reactive API works with popular frameworks:
 ### React
 
 ```typescript
-import react from "@moq/signals/react";
+import { useValue } from "@moq/signals/react";
 
 const publish = document.querySelector("moq-publish") as MoqPublish;
-const media = react(publish.video.media);
+const media = useValue(publish.video.media);
 
 useEffect(() => {
-    video.srcObject = media();
+    video.srcObject = media;
 }, [media]);
 ```
 
 ### SolidJS
 
 ```typescript
-import solid from "@moq/signals/solid";
+import { createAccessor } from "@moq/signals/solid";
 
 const publish = document.querySelector("moq-publish") as MoqPublish;
-const media = solid(publish.video.media);
+const media = createAccessor(publish.video.media);
 
 createEffect(() => {
     video.srcObject = media();

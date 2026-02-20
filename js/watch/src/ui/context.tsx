@@ -1,5 +1,5 @@
 import { type Moq, Signals } from "@moq/hang";
-import solid from "@moq/signals/solid";
+import { createAccessor } from "@moq/signals/solid";
 import type { JSX } from "solid-js";
 import { createContext, createSignal, onCleanup } from "solid-js";
 import type { BufferedRanges } from "..";
@@ -47,12 +47,12 @@ export const WatchUIContext = createContext<WatchUIContextValues>();
 export default function WatchUIContextProvider(props: WatchUIContextProviderProps) {
 	const [watchStatus, setWatchStatus] = createSignal<WatchStatus>("no-url");
 	const [isPlaying, setIsPlaying] = createSignal<boolean>(false);
-	const [isMuted, setIsMuted] = createSignal<boolean>(false);
+	const isMuted = createAccessor(props.moqWatch.audio.muted);
 	const [currentVolume, setCurrentVolume] = createSignal<number>(0);
-	const [buffering, setBuffering] = createSignal<boolean>(false);
-	const jitter = solid(props.moqWatch.jitter);
+	const buffering = createAccessor(props.moqWatch.video.stalled);
+	const jitter = createAccessor(props.moqWatch.jitter);
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
-	const [activeRendition, setActiveRendition] = createSignal<string | undefined>(undefined);
+	const activeRendition = createAccessor(props.moqWatch.video.source.track);
 	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
 	const [isFullscreen, setIsFullscreen] = createSignal<boolean>(!!document.fullscreenElement);
 
@@ -87,10 +87,9 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		}));
 	};
 
-	// Use solid helper for the new signals
-	const timestamp = solid(props.moqWatch.video.timestamp);
-	const videoBuffered = solid(props.moqWatch.video.buffered);
-	const audioBuffered = solid(props.moqWatch.audio.buffered);
+	const timestamp = createAccessor(props.moqWatch.video.timestamp);
+	const videoBuffered = createAccessor(props.moqWatch.video.buffered);
+	const audioBuffered = createAccessor(props.moqWatch.audio.buffered);
 
 	const value: WatchUIContextValues = {
 		moqWatch: props.moqWatch,
@@ -152,21 +151,6 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.run((effect) => {
-		const muted = effect.get(watch.audio.muted);
-		setIsMuted(muted);
-	});
-
-	signals.run((effect) => {
-		const stalled = effect.get(watch.video.stalled);
-		setBuffering(stalled);
-	});
-
-	signals.run((effect) => {
-		const jitter = effect.get(watch.jitter);
-		setJitter(jitter);
-	});
-
-	signals.run((effect) => {
 		const videoCatalog = effect.get(watch.video.source.catalog);
 		const renditions = videoCatalog?.renditions ?? {};
 
@@ -177,11 +161,6 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		}));
 
 		setAvailableRenditions(renditionsList);
-	});
-
-	signals.run((effect) => {
-		const selected = effect.get(watch.video.source.track);
-		setActiveRendition(selected);
 	});
 
 	const handleFullscreenChange = () => {
