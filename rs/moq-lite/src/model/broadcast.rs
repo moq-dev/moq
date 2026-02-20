@@ -36,17 +36,18 @@ struct State {
 	// When explicitly publishing, we hold a reference to the consumer.
 	// This prevents the track from being marked as "unused".
 	consumers: HashMap<String, TrackConsumer>,
+
+	// Tracks requested by consumers.
+	requested: Vec<TrackProducer>,
+
+	// Increased by 1 for each dynamic producer.
+	// requested is cleared when this hits 0.
+	dynamic: usize,
 }
 
 /// Receive broadcast/track requests and return if we can fulfill them.
 pub struct BroadcastProducer {
 	state: Lock<State>,
-	closed: watch::Sender<bool>,
-	requested: (
-		async_channel::Sender<TrackProducer>,
-		async_channel::Receiver<TrackProducer>,
-	),
-	cloned: Arc<AtomicUsize>,
 }
 
 impl Default for BroadcastProducer {
