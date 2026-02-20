@@ -190,7 +190,7 @@ useEffect(() => {
 ### SolidJS
 
 ```typescript
-import createAccessor from "@moq/signals/solid";
+import { createAccessor } from "@moq/signals/solid";
 
 const publish = document.querySelector("moq-publish") as MoqPublish;
 const media = createAccessor(publish.video.media);

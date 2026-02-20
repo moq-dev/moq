@@ -122,7 +122,7 @@ Effects also provide lifecycle helpers that auto-cleanup:
 ### Solid.js
 
 ```ts
-import createAccessor from "@moq/signals/solid";
+import { createAccessor } from "@moq/signals/solid";
 
 const count = new Signal(0);
 const value = createAccessor(count); // returns a Solid Accessor
