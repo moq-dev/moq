@@ -1,0 +1,102 @@
+.watch-ui__status-indicator {
+	gap: var(--spacing-12);
+	backdrop-filter: blur(var(--spacing-16));
+}
+
+.watch-ui__status-indicator-dot {
+	position: relative;
+	width: 0.75rem;
+	height: 0.75rem;
+	border-radius: 50%;
+	flex-shrink: 0;
+	z-index: 1;
+}
+
+.watch-ui__status-indicator-dot::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	border-radius: 50%;
+	background: currentcolor;
+	transform: scale(1);
+	opacity: 0.5;
+	animation: status-pulse 1.5s ease-out infinite;
+	z-index: -1;
+}
+
+.watch-ui__status-indicator-dot::after {
+	display: none;
+}
+
+.watch-ui__status-indicator-dot--live::after,
+.watch-ui__status-indicator-dot--connected::after,
+.watch-ui__status-indicator-dot--loading::after,
+.watch-ui__status-indicator-dot--connecting::after {
+	display: block;
+}
+
+.watch-ui__status-indicator-dot--error {
+	background: var(--color-gray-100);
+	color: var(--color-gray-100);
+}
+
+.watch-ui__status-indicator-text--error {
+	color: var(--color-gray-100);
+}
+
+.watch-ui__status-indicator-dot--connecting {
+	background: var(--color-yellow-400);
+	color: var(--color-yellow-400);
+}
+
+.watch-ui__status-indicator-text--connecting {
+	color: var(--color-yellow-400);
+}
+
+.watch-ui__status-indicator-dot--loading {
+	background: var(--color-yellow-400);
+	color: var(--color-yellow-400);
+}
+
+.watch-ui__status-indicator-text--loading {
+	color: var(--color-yellow-400);
+}
+
+.watch-ui__status-indicator-dot--live {
+	background: var(--color-green-400);
+	color: var(--color-green-400);
+}
+
+.watch-ui__status-indicator-text--live {
+	color: var(--color-green-400);
+}
+
+.watch-ui__status-indicator-dot--connected {
+	background: var(--color-blue-500);
+	color: var(--color-blue-500);
+}
+
+.watch-ui__status-indicator-text--connected {
+	color: var(--color-blue-500);
+}
+
+.watch-ui__status-indicator-text {
+	font-size: 1rem;
+	letter-spacing: 0.1rem;
+}
+
+@keyframes status-pulse {
+	0% {
+		transform: scale(1);
+		opacity: 0.5;
+	}
+
+	70% {
+		opacity: 0.25;
+	}
+
+	100% {
+		transform: scale(2.5);
+		opacity: 0;
+	}
+}

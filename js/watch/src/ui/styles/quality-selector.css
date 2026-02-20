@@ -1,0 +1,40 @@
+.watch-ui__quality-selector {
+	display: flex;
+	align-items: center;
+	gap: var(--spacing-8);
+	background: transparent;
+	border-radius: var(--spacing-8);
+}
+
+.watch-ui__quality-label {
+	font-size: 1.25rem;
+	font-weight: 500;
+	color: var(--color-white);
+	white-space: nowrap;
+}
+
+.watch-ui__quality-select {
+	flex: 0 1 auto;
+	font-size: 1rem;
+	padding: var(--spacing-8);
+	border-radius: var(--spacing-4);
+	background: var(--color-white-alpha-10);
+	color: var(--color-white);
+	border: var(--spacing-1) solid var(--color-white-alpha-20);
+	cursor: pointer;
+	transition: background 0.2s ease;
+}
+
+.watch-ui__quality-select:hover {
+	background: var(--color-white-alpha-15);
+}
+
+.watch-ui__quality-select:focus {
+	outline: var(--spacing-2) solid var(--color-white-alpha-30);
+	outline-offset: var(--spacing-2);
+}
+
+.watch-ui__quality-select option {
+	background: var(--color-gray-950);
+	color: var(--color-white);
+}

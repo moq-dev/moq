@@ -6,8 +6,8 @@ export default function BufferingIndicator() {
 
 	return (
 		<Show when={context.buffering()}>
-			<div class="bufferingContainer">
-				<div class="bufferingSpinner" />
+			<div class="watch-ui__buffering flex--center">
+				<div class="watch-ui__buffering-spinner" />
 			</div>
 		</Show>
 	);

@@ -10,7 +10,7 @@ type WatchUIContextProviderProps = {
 	children: JSX.Element;
 };
 
-type WatchStatus = "no-url" | "disconnected" | "connecting" | "offline" | "loading" | "live" | "connected";
+export type WatchStatus = "no-url" | "disconnected" | "connecting" | "offline" | "loading" | "live" | "connected";
 
 export type Rendition = {
 	name: string;

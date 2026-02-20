@@ -30,12 +30,12 @@ export default function VolumeSlider() {
 	});
 
 	return (
-		<div class="volumeSliderContainer">
+		<div class="watch-ui__volume-slider flex--center">
 			<Button title={context.isMuted() ? "Unmute" : "Mute"} onClick={() => context.toggleMuted()}>
 				{getVolumeIcon(context.currentVolume(), context.isMuted())}
 			</Button>
 			<input type="range" onChange={onInputChange} min="0" max="100" value={context.currentVolume()} />
-			<span class="volumeLabel">{volumeLabel()}</span>
+			<span class="watch-ui__volume-label">{volumeLabel()}</span>
 		</div>
 	);
 }

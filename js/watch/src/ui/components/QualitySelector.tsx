@@ -10,14 +10,14 @@ export default function QualitySelector() {
 	};
 
 	return (
-		<div class="qualitySelectorContainer">
-			<label for="quality-select" class="qualityLabel">
+		<div class="watch-ui__quality-selector">
+			<label for="quality-select" class="watch-ui__quality-label">
 				Quality:{" "}
 			</label>
 			<select
 				id="quality-select"
 				onChange={handleQualityChange}
-				class="qualitySelect"
+				class="watch-ui__quality-select"
 				value={context.activeRendition() ?? ""}
 			>
 				<option value="">Auto</option>

@@ -12,7 +12,7 @@ export function WatchUI(props: { watch: MoqWatch }) {
 	return (
 		<WatchUIContextProvider moqWatch={props.watch}>
 			<style>{styles}</style>
-			<div class="watchVideoContainer">
+			<div class="watch-ui__video-container">
 				<slot />
 				{(() => {
 					const context = useContext(WatchUIContext);

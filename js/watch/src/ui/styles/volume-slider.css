@@ -1,0 +1,8 @@
+.watch-ui__volume-slider {
+	gap: var(--spacing-4);
+}
+
+.watch-ui__volume-label {
+	width: var(--spacing-16);
+	text-align: right;
+}
