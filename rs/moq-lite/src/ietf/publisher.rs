@@ -46,7 +46,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		loop {
 			let announced = tokio::select! {
 				biased;
-				_ = self.session.closed() => break,
+				_ = self.session.closed() => return Ok(()),
 				announced = self.origin.announced() => announced,
 			};
 
