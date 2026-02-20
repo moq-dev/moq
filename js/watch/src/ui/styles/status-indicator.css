@@ -17,7 +17,7 @@
 	position: absolute;
 	inset: 0;
 	border-radius: 50%;
-	background: currentColor;
+	background: currentcolor;
 	transform: scale(1);
 	opacity: 0.5;
 	animation: status-pulse 1.5s ease-out infinite;
