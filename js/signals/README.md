@@ -122,18 +122,19 @@ Effects also provide lifecycle helpers that auto-cleanup:
 ### Solid.js
 
 ```ts
-import solid from "@moq/signals/solid";
+import createAccessor from "@moq/signals/solid";
 
 const count = new Signal(0);
-const value = solid(count); // returns a Solid Accessor
+const value = createAccessor(count); // returns a Solid Accessor
 ```
 
 ### React
 
 ```ts
-import react from "@moq/signals/react";
+import { useValue, useSignal } from "@moq/signals/react";
 
 function Component() {
-  const value = react(count); // uses useSyncExternalStore under the hood
+  const value = useValue(count); // read-only
+  const [value2, setValue2] = useSignal(count); // read-write, like useState
 }
 ```
