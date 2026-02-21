@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.6...moq-relay-v0.10.7) - 2026-02-21
+
+### Other
+
+- Increase MAX_STREAMS default and make it configurable ([#955](https://github.com/moq-dev/moq/pull/955))
+
 ## [0.10.6](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.5...moq-relay-v0.10.6) - 2026-02-12
 
 ### Other

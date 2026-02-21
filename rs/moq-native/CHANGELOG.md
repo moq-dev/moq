@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2](https://github.com/moq-dev/moq/compare/moq-native-v0.13.1...moq-native-v0.13.2) - 2026-02-21
+
+### Fixed
+
+- prevent panic in Server::close() on ctrl+c ([#982](https://github.com/moq-dev/moq/pull/982))
+
 ## [0.13.0](https://github.com/moq-dev/moq/compare/moq-native-v0.12.2...moq-native-v0.13.0) - 2026-02-12
 
 ### Other
