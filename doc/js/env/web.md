@@ -308,7 +308,7 @@ For production, you'll want to:
 
 1. Use a production relay ([moq-relay](/app/relay/))
 2. Set up proper [authentication](/app/relay/auth)
-3. Use a bundler (e.g. [Vite](https://vite.dev/), [Webpack](https://webpack.js.org/), [esbuild](https://esbuild.github.io/), etc.)
+3. Use a bundler, see [examples](https://github.com/moq-dev/web) for Vite, Webpack, esbuild, and more.
 
 **NOTE** both of these libraries are intended for client-side.
 However, `@moq/lite` can run on the server side using [Deno](https://deno.com/) or a [WebTransport polyfill](https://github.com/moq-dev/web-transport/tree/main/web-transport-ws).
