@@ -18,7 +18,7 @@ The simplest way to watch a stream:
 
 <moq-watch
     url="https://relay.example.com/anon"
-    path="room/alice"
+    name="room/alice"
     controls>
     <canvas></canvas>
 </moq-watch>
@@ -29,7 +29,7 @@ The simplest way to watch a stream:
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `url` | string | required | Relay server URL |
-| `path` | string | required | Broadcast path |
+| `name` | string | required | Broadcast name |
 | `controls` | boolean | false | Show playback controls |
 | `paused` | boolean | false | Pause playback |
 | `muted` | boolean | false | Mute audio |
@@ -206,7 +206,7 @@ import { useEffect, useRef } from "react";
 import "@moq/watch/element";
 import MoqWatch from "@moq/watch/element";
 
-function VideoPlayer({ url, path }) {
+function VideoPlayer({ url, name }) {
     const watchRef = useRef<MoqWatch>(null);
 
     useEffect(() => {
@@ -226,7 +226,7 @@ function VideoPlayer({ url, path }) {
         <moq-watch
             ref={watchRef}
             url={url}
-            path={path}
+            name={name}
             controls>
             <canvas style={{ width: "100%" }} />
         </moq-watch>
@@ -245,7 +245,7 @@ Use `@moq/watch/ui` for the SolidJS UI overlay. The `<moq-watch-ui>` element wra
 </script>
 
 <moq-watch-ui>
-    <moq-watch url="https://relay.example.com/anon" path="room/alice">
+    <moq-watch url="https://relay.example.com/anon" name="room/alice">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>
@@ -260,7 +260,7 @@ function VideoPlayer(props) {
     return (
         <moq-watch
             url={props.url}
-            path={props.path}
+            name={props.name}
             controls>
             <canvas />
         </moq-watch>

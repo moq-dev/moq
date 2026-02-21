@@ -20,18 +20,17 @@
 	<moq-watch-support show="warning"></moq-watch-support>
 
 	<moq-watch-ui>
-		<moq-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted jitter="200" reload>
+		<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" muted jitter="200" reload>
 			<video style="width: 100%; height: auto;" autoplay muted></video>
 		</moq-watch>
 	</moq-watch-ui>
 
-	<moq-watch-config id="config" url="%VITE_RELAY_URL%" path="bbb"></moq-watch-config>
+	<moq-watch-config id="config" url="%VITE_RELAY_URL%" name="bbb"></moq-watch-config>
 
 	<h3>Other demos:</h3>
 	<ul>
 		<li><a href="index.html">Watch a broadcast (WebCodecs).</a></li>
 		<li><a href="publish.html">Publish a broadcast.</a></li>
-		<li><a href="meet.html">Watch a room of broadcasts.</a></li>
 	</ul>
 
 	<h3>Tips:</h3>
@@ -43,7 +42,7 @@
 	</p>
 	<p>
 		To use MSE, provide a <code>&lt;video&gt;</code> element instead of a <code>&lt;canvas&gt;</code> element:
-	<pre><code class="language-html">&lt;moq-watch url="https://cdn.moq.dev/anon" path="bbb"&gt;
+	<pre><code class="language-html">&lt;moq-watch url="https://cdn.moq.dev/anon" name="bbb"&gt;
 	&lt;video style="max-width: 100%; height: auto;" autoplay muted&gt;&lt;/video&gt;
 &lt;/moq-watch&gt;</code></pre>
 	</p>

@@ -7,9 +7,7 @@ import { Broadcast } from "./broadcast";
 import { Sync } from "./sync";
 import type * as Video from "./video";
 
-// TODO remove name; replaced with path
-// TODO remove latency; replaced with buffer
-const OBSERVED = ["url", "name", "path", "paused", "volume", "muted", "reload", "jitter", "latency"] as const;
+const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "jitter"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -89,11 +87,11 @@ export default class MoqWatch extends HTMLElement implements Backend {
 		});
 
 		this.signals.run((effect) => {
-			const broadcast = effect.get(this.path);
-			if (broadcast) {
-				this.setAttribute("path", broadcast.toString());
+			const name = effect.get(this.name);
+			if (name) {
+				this.setAttribute("name", name.toString());
 			} else {
-				this.removeAttribute("path");
+				this.removeAttribute("name");
 			}
 		});
 
@@ -146,8 +144,8 @@ export default class MoqWatch extends HTMLElement implements Backend {
 
 		if (name === "url") {
 			this.url.set(newValue ? new URL(newValue) : undefined);
-		} else if (name === "name" || name === "path") {
-			this.path.set(newValue ? Moq.Path.from(newValue) : undefined);
+		} else if (name === "name") {
+			this.name.set(newValue ? Moq.Path.from(newValue) : undefined);
 		} else if (name === "paused") {
 			this.paused.set(newValue !== null);
 		} else if (name === "volume") {
@@ -157,8 +155,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 			this.audio.muted.set(newValue !== null);
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
-		} else if (name === "jitter" || name === "latency") {
-			// "latency" is a legacy alias for "jitter"
+		} else if (name === "jitter") {
 			this.jitter.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
 		} else {
 			const exhaustive: never = name;
@@ -170,8 +167,8 @@ export default class MoqWatch extends HTMLElement implements Backend {
 		return this.connection.url;
 	}
 
-	get path(): Signal<Moq.Path.Valid | undefined> {
-		return this.broadcast.path;
+	get name(): Signal<Moq.Path.Valid | undefined> {
+		return this.broadcast.name;
 	}
 
 	get jitter(): Signal<Time.Milli> {

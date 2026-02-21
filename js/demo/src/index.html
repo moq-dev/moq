@@ -19,7 +19,7 @@
 		<!--
 			Some supported attributes are:
 			- `url`: The URL of the (relay) server; feel free to use `https://cdn.moq.dev/anon` for public access.
-			- `path`: The broadcast name, otherwise we use the last part of the URL.
+			- `name`: The broadcast name, otherwise we use the last part of the URL.
 			- `paused`: Video and audio are paused.
 			- `muted`: Audio is muted.
 			- `volume`: The audio volume (0-1).
@@ -28,7 +28,7 @@
 
 			NOTE: Cloudflare doesn't support reload yet.
 		-->
-		<moq-watch id="watch" url="%VITE_RELAY_URL%" path="bbb" muted jitter="100" reload>
+		<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" muted jitter="100" reload>
 			<!-- Provide a canvas element to render the video via WebCodecs. -->
 			<canvas style="width: 100%; height: auto;"></canvas>
 			<!-- Or provide a video element to use the (higher latency) MSE backend. -->
@@ -37,7 +37,7 @@
 	</moq-watch-ui>
 
 	<!-- (optional) Configure the relay URL and broadcast name. Auto-discovers available broadcasts. -->
-	<moq-watch-config id="config" url="%VITE_RELAY_URL%" path="bbb"></moq-watch-config>
+	<moq-watch-config id="config" url="%VITE_RELAY_URL%" name="bbb"></moq-watch-config>
 
 	<h3>Other demos:</h3>
 	<ul>
@@ -71,7 +71,7 @@
 			href="https://developer.mozilla.org/en-US/docs/Web/API/OffscreenCanvas">OffscreenCanvas</a>
 		works.
 		For example:
-	<pre><code class="language-html">&lt;moq-watch url=&quot;http://localhost:4443/&quot; room=&quot;demo&quot; path=&quot;bbb&quot;&gt;
+	<pre><code class="language-html">&lt;moq-watch url=&quot;http://localhost:4443/&quot; name=&quot;bbb&quot;&gt;
 	&lt;!-- Optionally provide a custom canvas element that we can style as needed --&gt;
 	&lt;canvas style=&quot;max-width: 100%; height: auto; border-radius: 4px;&quot;&gt;&lt;/canvas&gt;
 &lt;/moq-watch&gt;</code></pre>

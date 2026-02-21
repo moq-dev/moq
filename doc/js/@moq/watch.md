@@ -27,7 +27,7 @@ npm add @moq/watch
 
 <moq-watch
     url="https://relay.example.com/anon"
-    path="room/alice"
+    name="room/alice"
     controls>
     <canvas></canvas>
 </moq-watch>
@@ -35,7 +35,7 @@ npm add @moq/watch
 
 **Attributes:**
 - `url` (required) — Relay server URL
-- `path` (required) — Broadcast path/name
+- `name` (required) — Broadcast name
 - `controls` — Show playback controls (boolean)
 - `paused` — Pause playback (boolean)
 - `muted` — Mute audio (boolean)
@@ -54,7 +54,7 @@ Import `@moq/watch/ui` for a SolidJS-powered overlay with buffering indicator, s
 <moq-watch-ui>
     <moq-watch
         url="https://relay.example.com/anon"
-        path="room/alice">
+        name="room/alice">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>
