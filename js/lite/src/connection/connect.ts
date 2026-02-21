@@ -75,6 +75,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	// @ts-expect-error - TODO: add protocol to WebTransport
 	const protocol: string | undefined = session instanceof WebTransport ? session.protocol : undefined;
+	console.debug(url.toString(), "negotiated ALPN:", protocol ?? "(none)");
 
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
@@ -82,7 +83,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
-	} else if (protocol === "" || protocol === undefined) {
+	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
+		// moq-lite ALPN (or no protocol) uses Draft14 encoding for SETUP,
+		// then negotiates the actual version via the SETUP message.
 		setupVersion = Ietf.Version.DRAFT_14;
 	} else {
 		throw new Error(`unsupported WebTransport protocol: ${protocol}`);
@@ -150,7 +153,7 @@ async function connectWebTransport(
 		allowPooling: false,
 		congestionControl: "low-latency",
 		// @ts-expect-error - TODO: add protocols to WebTransportOptions
-		protocols: [Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
+		protocols: [Lite.ALPN, Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
 		...options,
 	};
 

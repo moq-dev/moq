@@ -4,3 +4,7 @@ export const Version = {
 } as const;
 
 export type Version = (typeof Version)[keyof typeof Version];
+
+/// The WebTransport subprotocol identifier for moq-lite.
+/// Version negotiation still happens via SETUP when this is used.
+export const ALPN = "moql";
