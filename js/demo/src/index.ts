@@ -13,12 +13,12 @@ if (!watch) throw new Error("unable to find <moq-watch> element");
 
 // If query params are provided, use them.
 const urlParams = new URLSearchParams(window.location.search);
-const path = urlParams.get("broadcast") ?? urlParams.get("path");
+const name = urlParams.get("broadcast") ?? urlParams.get("name");
 const url = urlParams.get("url");
 
-if (path) {
-	watch.setAttribute("path", path);
-	config?.setAttribute("path", path);
+if (name) {
+	watch.setAttribute("name", name);
+	config?.setAttribute("name", name);
 }
 if (url) {
 	watch.setAttribute("url", url);
@@ -27,7 +27,7 @@ if (url) {
 
 // Sync config changes to the watch element.
 config?.addEventListener("change", (e) => {
-	const { url, path } = (e as CustomEvent).detail;
+	const { url, name } = (e as CustomEvent).detail;
 	if (url) watch.setAttribute("url", url);
-	if (path) watch.setAttribute("path", path);
+	if (name) watch.setAttribute("name", name);
 });

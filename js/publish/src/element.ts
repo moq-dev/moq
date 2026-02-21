@@ -3,8 +3,7 @@ import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
 import * as Source from "./source";
 
-// TODO remove name; replaced with path
-const OBSERVED = ["url", "name", "path", "muted", "invisible", "source"] as const;
+const OBSERVED = ["url", "name", "muted", "invisible", "source"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 type SourceType = "camera" | "screen" | "file";
@@ -18,7 +17,7 @@ export default class MoqPublish extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
 	url = new Signal<URL | undefined>(undefined);
-	path = new Signal<Moq.Path.Valid | undefined>(undefined);
+	name = new Signal<Moq.Path.Valid | undefined>(undefined);
 	source = new Signal<SourceType | File | undefined>(undefined);
 
 	// Controls whether audio/video is enabled.
@@ -72,7 +71,7 @@ export default class MoqPublish extends HTMLElement {
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
 			enabled: this.#enabled,
-			path: this.path,
+			name: this.name,
 
 			audio: {
 				enabled: this.#audioEnabled,
@@ -128,8 +127,8 @@ export default class MoqPublish extends HTMLElement {
 
 		if (name === "url") {
 			this.url.set(newValue ? new URL(newValue) : undefined);
-		} else if (name === "name" || name === "path") {
-			this.path.set(newValue ? Moq.Path.from(newValue) : undefined);
+		} else if (name === "name") {
+			this.name.set(newValue ? Moq.Path.from(newValue) : undefined);
 		} else if (name === "source") {
 			if (newValue === "camera" || newValue === "screen" || newValue === "file" || newValue === null) {
 				this.source.set(newValue as SourceType | undefined);

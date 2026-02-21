@@ -11,7 +11,7 @@ import * as Video from "./video";
 export type BroadcastProps = {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
 	enabled?: boolean | Signal<boolean>;
-	path?: Moq.Path.Valid | Signal<Moq.Path.Valid | undefined>;
+	name?: Moq.Path.Valid | Signal<Moq.Path.Valid | undefined>;
 	audio?: Audio.EncoderProps;
 	video?: Video.Props;
 	location?: Location.Props;
@@ -25,7 +25,7 @@ export class Broadcast {
 
 	connection: Signal<Moq.Connection.Established | undefined>;
 	enabled: Signal<boolean>;
-	path: Signal<Moq.Path.Valid | undefined>;
+	name: Signal<Moq.Path.Valid | undefined>;
 
 	audio: Audio.Encoder;
 	video: Video.Root;
@@ -40,7 +40,7 @@ export class Broadcast {
 	constructor(props?: BroadcastProps) {
 		this.connection = Signal.from(props?.connection);
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.path = Signal.from(props?.path);
+		this.name = Signal.from(props?.name);
 
 		this.audio = new Audio.Encoder(props?.audio);
 		this.video = new Video.Root(props?.video);
@@ -57,13 +57,13 @@ export class Broadcast {
 		if (!values) return;
 		const [_enabled, connection] = values;
 
-		const path = effect.get(this.path);
-		if (path === undefined) return;
+		const name = effect.get(this.name);
+		if (name === undefined) return;
 
 		const broadcast = new Moq.Broadcast();
 		effect.cleanup(() => broadcast.close());
 
-		connection.publish(path, broadcast);
+		connection.publish(name, broadcast);
 
 		effect.spawn(this.#runBroadcast.bind(this, broadcast, effect));
 	}

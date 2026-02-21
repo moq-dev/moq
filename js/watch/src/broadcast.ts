@@ -10,7 +10,7 @@ export interface BroadcastProps {
 	enabled?: boolean | Signal<boolean>;
 
 	// The broadcast name.
-	path?: Moq.Path.Valid | Signal<Moq.Path.Valid | undefined>;
+	name?: Moq.Path.Valid | Signal<Moq.Path.Valid | undefined>;
 
 	// Whether to reload the broadcast when it goes offline.
 	// Defaults to false; pass true to wait for an announcement before subscribing.
@@ -22,7 +22,7 @@ export class Broadcast {
 	connection: Signal<Moq.Connection.Established | undefined>;
 
 	enabled: Signal<boolean>;
-	path: Signal<Moq.Path.Valid | undefined>;
+	name: Signal<Moq.Path.Valid | undefined>;
 	status = new Signal<"offline" | "loading" | "live">("offline");
 	reload: Signal<boolean>;
 
@@ -39,7 +39,7 @@ export class Broadcast {
 
 	constructor(props?: BroadcastProps) {
 		this.connection = Signal.from(props?.connection);
-		this.path = Signal.from(props?.path);
+		this.name = Signal.from(props?.name);
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? false);
 
@@ -62,10 +62,10 @@ export class Broadcast {
 		const conn = effect.get(this.connection);
 		if (!conn) return;
 
-		const path = effect.get(this.path);
-		if (path === undefined) return;
+		const name = effect.get(this.name);
+		if (name === undefined) return;
 
-		const announced = conn.announced(path);
+		const announced = conn.announced(name);
 		effect.cleanup(() => announced.close());
 
 		effect.spawn(async () => {
@@ -74,7 +74,7 @@ export class Broadcast {
 				if (!update) break;
 
 				// Require full equality
-				if (update.path !== path) {
+				if (update.path !== name) {
 					console.warn("ignoring announce", update.path);
 					continue;
 				}
@@ -89,10 +89,10 @@ export class Broadcast {
 		if (!values) return;
 		const [_enabled, _announced, conn] = values;
 
-		const path = effect.get(this.path);
-		if (path === undefined) return;
+		const name = effect.get(this.name);
+		if (name === undefined) return;
 
-		const broadcast = conn.consume(path);
+		const broadcast = conn.consume(name);
 		effect.cleanup(() => broadcast.close());
 
 		effect.set(this.#active, broadcast);
@@ -117,13 +117,13 @@ export class Broadcast {
 				const update = await Catalog.fetch(catalog);
 				if (!update) break;
 
-				console.debug("received catalog", this.path.peek(), update);
+				console.debug("received catalog", this.name.peek(), update);
 
 				this.#catalog.set(update);
 				this.status.set("live");
 			}
 		} catch (err) {
-			console.warn("error fetching catalog", this.path.peek(), err);
+			console.warn("error fetching catalog", this.name.peek(), err);
 		} finally {
 			this.#catalog.set(undefined);
 			this.status.set("offline");

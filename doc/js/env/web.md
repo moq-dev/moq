@@ -22,7 +22,7 @@ Publish camera/microphone or screen as a MoQ broadcast.
 
 **Attributes:**
 - `url` (required) - Relay server URL
-- `path` (required) - Broadcast path/name
+- `name` (required) - Broadcast name
 - `device` - "camera" or "screen" (default: "camera")
 - `audio` - Enable audio capture (boolean)
 - `video` - Enable video capture (boolean)
@@ -37,7 +37,7 @@ Publish camera/microphone or screen as a MoQ broadcast.
 
 <moq-publish
     url="https://relay.example.com/anon"
-    path="room/alice"
+    name="room/alice"
     device="camera"
     audio video controls>
     <!-- Optional preview element -->
@@ -51,7 +51,7 @@ Subscribe to and render a MoQ broadcast.
 
 **Attributes:**
 - `url` (required) - Relay server URL
-- `path` (required) - Broadcast path/name
+- `name` (required) - Broadcast name
 - `controls` - Show playback controls (boolean)
 - `paused` - Pause playback (boolean)
 - `muted` - Mute audio (boolean)
@@ -66,7 +66,7 @@ Subscribe to and render a MoQ broadcast.
 
 <moq-watch
     url="https://relay.example.com/anon"
-    path="room/alice"
+    name="room/alice"
     volume="0.8"
     controls>
     <!-- Optional canvas for video rendering -->
@@ -148,7 +148,7 @@ watch.volume    // Signal<number>
 watch.muted     // Signal<boolean>
 watch.paused    // Signal<boolean>
 watch.url       // Signal<string>
-watch.path      // Signal<string>
+watch.name      // Signal<string>
 ```
 
 ## Framework Integration
@@ -159,7 +159,7 @@ watch.path      // Signal<string>
 import { useEffect, useRef } from "react";
 import "@moq/watch/element";
 
-function VideoPlayer({ url, path }) {
+function VideoPlayer({ url, name }) {
     const ref = useRef<MoqWatch>(null);
 
     useEffect(() => {
@@ -172,7 +172,7 @@ function VideoPlayer({ url, path }) {
         <moq-watch
             ref={ref}
             url={url}
-            path={path}
+            name={name}
             controls>
             <canvas />
         </moq-watch>
@@ -191,7 +191,7 @@ function VideoPlayer(props) {
     return (
         <moq-watch
             url={props.url}
-            path={props.path}
+            name={props.name}
             controls>
             <canvas />
         </moq-watch>
@@ -205,7 +205,7 @@ function VideoPlayer(props) {
 <template>
     <moq-watch
         :url="url"
-        :path="path"
+        :name="name"
         controls>
         <canvas />
     </moq-watch>
@@ -215,7 +215,7 @@ function VideoPlayer(props) {
 import "@moq/watch/element";
 
 export default {
-    props: ["url", "path"],
+    props: ["url", "name"],
 };
 </script>
 ```
@@ -236,7 +236,7 @@ moq-watch canvas {
 }
 </style>
 
-<moq-watch url="..." path="..." controls>
+<moq-watch url="..." name="..." controls>
     <canvas style="width: 100%; border-radius: 8px;"></canvas>
 </moq-watch>
 ```

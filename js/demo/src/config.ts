@@ -64,10 +64,10 @@ export default class MoqWatchConfig extends HTMLElement {
 
 		// Initialize from attributes
 		const url = this.getAttribute("url");
-		const path = this.getAttribute("path");
+		const name = this.getAttribute("name");
 
 		if (url) this.#urlInput.value = url;
-		if (path) this.#pathInput.value = path;
+		if (name) this.#pathInput.value = name;
 
 		// Start discovery if URL is set
 		if (url) this.#scheduleDiscovery();
@@ -78,14 +78,14 @@ export default class MoqWatchConfig extends HTMLElement {
 	}
 
 	static get observedAttributes() {
-		return ["url", "path"];
+		return ["url", "name"];
 	}
 
 	attributeChangedCallback(name: string, _oldValue: string | null, newValue: string | null) {
 		if (name === "url" && newValue !== this.#urlInput.value) {
 			this.#urlInput.value = newValue || "";
 			this.#scheduleDiscovery();
-		} else if (name === "path" && newValue !== this.#pathInput.value) {
+		} else if (name === "name" && newValue !== this.#pathInput.value) {
 			this.#pathInput.value = newValue || "";
 		}
 	}
@@ -94,7 +94,7 @@ export default class MoqWatchConfig extends HTMLElement {
 		return this.#urlInput.value;
 	}
 
-	get path(): string {
+	get name(): string {
 		return this.#pathInput.value;
 	}
 
@@ -105,14 +105,14 @@ export default class MoqWatchConfig extends HTMLElement {
 	}
 
 	#onPathChange() {
-		this.setAttribute("path", this.#pathInput.value);
+		this.setAttribute("name", this.#pathInput.value);
 		this.#dispatchChange();
 	}
 
 	#dispatchChange() {
 		this.dispatchEvent(
 			new CustomEvent("change", {
-				detail: { url: this.url, path: this.path },
+				detail: { url: this.url, name: this.name },
 				bubbles: true,
 			}),
 		);
