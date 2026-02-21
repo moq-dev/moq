@@ -12,7 +12,7 @@ The principles are the same but the implementation is exponentially simpler give
 
 # Usage
 These are demos, duh.
-We're using Vite but other bundlers should just work™.
+We're using Vite but other bundlers should work too.
 
 # License
 
