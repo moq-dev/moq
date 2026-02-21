@@ -1,7 +1,7 @@
 {
 	"name": "@moq/watch",
 	"type": "module",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Watch/subscribe to Media over QUIC streams",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
