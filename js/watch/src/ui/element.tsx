@@ -21,8 +21,8 @@ export function WatchUI(props: { watch: MoqWatch }) {
 						<Show when={context.isStatsPanelVisible()}>
 							<Stats
 								context={WatchUIContext}
-								getElement={(ctx): MoqWatch | undefined => {
-									return ctx?.moqWatch;
+								getElement={(ctx) => {
+									return ctx?.moqWatch.backend;
 								}}
 							/>
 						</Show>
