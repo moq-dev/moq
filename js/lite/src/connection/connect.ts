@@ -75,6 +75,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	// @ts-expect-error - TODO: add protocol to WebTransport
 	const protocol: string | undefined = session instanceof WebTransport ? session.protocol : undefined;
+	console.debug(url.toString(), "negotiated ALPN:", protocol ?? "(none)");
 
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
