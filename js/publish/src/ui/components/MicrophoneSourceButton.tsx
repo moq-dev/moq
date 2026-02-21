@@ -6,12 +6,12 @@ import MediaSourceSourceSelector from "./MediaSourceSelector";
 export default function MicrophoneSourceButton() {
 	const context = usePublishUIContext();
 	const onClick = () => {
-		if (context.moqPublish.source.peek() === "camera") {
+		if (context.moqPublish.source === "camera") {
 			// Camera already selected, toggle audio.
-			context.moqPublish.muted.update((muted) => !muted);
+			context.moqPublish.muted = !context.moqPublish.muted;
 		} else {
-			context.moqPublish.source.set("camera");
-			context.moqPublish.muted.set(false);
+			context.moqPublish.source = "camera";
+			context.moqPublish.muted = false;
 		}
 	};
 
