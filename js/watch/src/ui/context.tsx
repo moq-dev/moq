@@ -47,17 +47,17 @@ export const WatchUIContext = createContext<WatchUIContextValues>();
 export default function WatchUIContextProvider(props: WatchUIContextProviderProps) {
 	const [watchStatus, setWatchStatus] = createSignal<WatchStatus>("no-url");
 	const [isPlaying, setIsPlaying] = createSignal<boolean>(false);
-	const isMuted = createAccessor(props.moqWatch.audio.muted);
+	const isMuted = createAccessor(props.moqWatch.backend.audio.muted);
 	const [currentVolume, setCurrentVolume] = createSignal<number>(0);
-	const buffering = createAccessor(props.moqWatch.video.stalled);
-	const jitter = createAccessor(props.moqWatch.jitter);
+	const buffering = createAccessor(props.moqWatch.backend.video.stalled);
+	const jitter = createAccessor(props.moqWatch.backend.jitter);
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
-	const activeRendition = createAccessor(props.moqWatch.video.source.track);
+	const activeRendition = createAccessor(props.moqWatch.backend.video.source.track);
 	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
 	const [isFullscreen, setIsFullscreen] = createSignal<boolean>(!!document.fullscreenElement);
 
 	const togglePlayback = () => {
-		props.moqWatch.paused.set(!props.moqWatch.paused.get());
+		props.moqWatch.paused = !props.moqWatch.paused;
 	};
 
 	const toggleFullscreen = () => {
@@ -69,27 +69,27 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	};
 
 	const setVolume = (volume: number) => {
-		props.moqWatch.audio.volume.set(volume / 100);
+		props.moqWatch.backend.audio.volume.set(volume / 100);
 	};
 
 	const toggleMuted = () => {
-		props.moqWatch.audio.muted.update((muted) => !muted);
+		props.moqWatch.backend.audio.muted.update((muted) => !muted);
 	};
 
 	const setJitter = (latency: Moq.Time.Milli) => {
-		props.moqWatch.jitter.set(latency);
+		props.moqWatch.jitter = latency;
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
-		props.moqWatch.video.source.target.update((prev) => ({
+		props.moqWatch.backend.video.source.target.update((prev) => ({
 			...prev,
 			name: name,
 		}));
 	};
 
-	const timestamp = createAccessor(props.moqWatch.video.timestamp);
-	const videoBuffered = createAccessor(props.moqWatch.video.buffered);
-	const audioBuffered = createAccessor(props.moqWatch.audio.buffered);
+	const timestamp = createAccessor(props.moqWatch.backend.video.timestamp);
+	const videoBuffered = createAccessor(props.moqWatch.backend.video.buffered);
+	const audioBuffered = createAccessor(props.moqWatch.backend.audio.buffered);
 
 	const value: WatchUIContextValues = {
 		moqWatch: props.moqWatch,
@@ -141,17 +141,17 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	});
 
 	signals.run((effect) => {
-		const paused = effect.get(watch.paused);
+		const paused = effect.get(watch.backend.paused);
 		setIsPlaying(!paused);
 	});
 
 	signals.run((effect) => {
-		const volume = effect.get(watch.audio.volume);
+		const volume = effect.get(watch.backend.audio.volume);
 		setCurrentVolume(volume * 100);
 	});
 
 	signals.run((effect) => {
-		const videoCatalog = effect.get(watch.video.source.catalog);
+		const videoCatalog = effect.get(watch.backend.video.source.catalog);
 		const renditions = videoCatalog?.renditions ?? {};
 
 		const renditionsList: Rendition[] = Object.entries(renditions).map(([name, config]) => ({

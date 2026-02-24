@@ -1,11 +1,9 @@
 import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
-import type * as Audio from "./audio";
-import { type Backend, MultiBackend } from "./backend";
+import { MultiBackend } from "./backend";
 import { Broadcast } from "./broadcast";
 import { Sync } from "./sync";
-import type * as Video from "./video";
 
 const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "jitter"] as const;
 type Observed = (typeof OBSERVED)[number];
@@ -16,7 +14,7 @@ type Observed = (typeof OBSERVED)[number];
 const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 
 // An optional web component that wraps a <canvas>
-export default class MoqWatch extends HTMLElement implements Backend {
+export default class MoqWatch extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
 	// The connection to the moq-relay server.
@@ -29,7 +27,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 	sync = new Sync();
 
 	// The backend that powers this element.
-	#backend: MultiBackend;
+	backend: MultiBackend;
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
@@ -53,10 +51,10 @@ export default class MoqWatch extends HTMLElement implements Backend {
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
-		this.#backend = new MultiBackend({
+		this.backend = new MultiBackend({
 			broadcast: this.broadcast,
 		});
-		this.signals.cleanup(() => this.#backend.close());
+		this.signals.cleanup(() => this.backend.close());
 
 		// Watch to see if the canvas element is added or removed.
 		const setElement = () => {
@@ -65,7 +63,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 			if (canvas && video) {
 				throw new Error("Cannot have both canvas and video elements");
 			}
-			this.#backend.element.set(canvas ?? video);
+			this.backend.element.set(canvas ?? video);
 		};
 
 		const observer = new MutationObserver(setElement);
@@ -78,7 +76,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 		// NOTE: This only runs when the element is connected to the DOM, which is not obvious.
 		// This is because there's no destructor for web components to clean up our effects.
 		this.signals.run((effect) => {
-			const url = effect.get(this.url);
+			const url = effect.get(this.connection.url);
 			if (url) {
 				this.setAttribute("url", url.toString());
 			} else {
@@ -87,7 +85,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 		});
 
 		this.signals.run((effect) => {
-			const name = effect.get(this.name);
+			const name = effect.get(this.broadcast.name);
 			if (name) {
 				this.setAttribute("name", name.toString());
 			} else {
@@ -96,7 +94,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 		});
 
 		this.signals.run((effect) => {
-			const muted = effect.get(this.audio.muted);
+			const muted = effect.get(this.backend.audio.muted);
 			if (muted) {
 				this.setAttribute("muted", "");
 			} else {
@@ -105,7 +103,7 @@ export default class MoqWatch extends HTMLElement implements Backend {
 		});
 
 		this.signals.run((effect) => {
-			const paused = effect.get(this.paused);
+			const paused = effect.get(this.backend.paused);
 			if (paused) {
 				this.setAttribute("paused", "true");
 			} else {
@@ -114,12 +112,12 @@ export default class MoqWatch extends HTMLElement implements Backend {
 		});
 
 		this.signals.run((effect) => {
-			const volume = effect.get(this.audio.volume);
+			const volume = effect.get(this.backend.audio.volume);
 			this.setAttribute("volume", volume.toString());
 		});
 
 		this.signals.run((effect) => {
-			const jitter = Math.floor(effect.get(this.jitter));
+			const jitter = Math.floor(effect.get(this.backend.jitter));
 			this.setAttribute("jitter", jitter.toString());
 		});
 	}
@@ -143,48 +141,56 @@ export default class MoqWatch extends HTMLElement implements Backend {
 		}
 
 		if (name === "url") {
-			this.url.set(newValue ? new URL(newValue) : undefined);
+			this.connection.url.set(newValue ? new URL(newValue) : undefined);
 		} else if (name === "name") {
-			this.name.set(newValue ? Moq.Path.from(newValue) : undefined);
+			this.broadcast.name.set(newValue ? Moq.Path.from(newValue) : undefined);
 		} else if (name === "paused") {
-			this.paused.set(newValue !== null);
+			this.backend.paused.set(newValue !== null);
 		} else if (name === "volume") {
 			const volume = newValue ? Number.parseFloat(newValue) : 0.5;
-			this.audio.volume.set(volume);
+			this.backend.audio.volume.set(volume);
 		} else if (name === "muted") {
-			this.audio.muted.set(newValue !== null);
+			this.backend.audio.muted.set(newValue !== null);
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "jitter") {
-			this.jitter.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
+			this.backend.jitter.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
 		}
 	}
 
-	get url(): Signal<URL | undefined> {
-		return this.connection.url;
+	get url(): URL | undefined {
+		return this.connection.url.peek();
 	}
 
-	get name(): Signal<Moq.Path.Valid | undefined> {
-		return this.broadcast.name;
+	set url(value: string | URL | undefined) {
+		this.connection.url.set(value ? new URL(value) : undefined);
 	}
 
-	get jitter(): Signal<Time.Milli> {
-		return this.#backend.jitter;
+	get name(): Moq.Path.Valid | undefined {
+		return this.broadcast.name.peek();
 	}
 
-	get paused(): Signal<boolean> {
-		return this.#backend.paused;
+	set name(value: string | Moq.Path.Valid | undefined) {
+		this.broadcast.name.set(value ? Moq.Path.from(value) : undefined);
 	}
 
-	get audio(): Audio.Backend {
-		return this.#backend.audio;
+	get paused(): boolean {
+		return this.backend.paused.peek();
 	}
 
-	get video(): Video.Backend {
-		return this.#backend.video;
+	set paused(value: boolean) {
+		this.backend.paused.set(value);
+	}
+
+	get jitter(): Time.Milli {
+		return this.backend.jitter.peek();
+	}
+
+	set jitter(value: number) {
+		this.backend.jitter.set(value as Time.Milli);
 	}
 }
 

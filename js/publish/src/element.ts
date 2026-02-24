@@ -16,13 +16,13 @@ const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 export default class MoqPublish extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
-	url = new Signal<URL | undefined>(undefined);
-	name = new Signal<Moq.Path.Valid | undefined>(undefined);
-	source = new Signal<SourceType | File | undefined>(undefined);
-
-	// Controls whether audio/video is enabled.
-	muted = new Signal(false);
-	invisible = new Signal(false);
+	// Reactive state for element properties that are also HTML attributes.
+	// Access these Signals directly for reactive subscriptions (e.g. effect.get(el.state.source)).
+	state = {
+		source: new Signal<SourceType | File | undefined>(undefined),
+		muted: new Signal(false),
+		invisible: new Signal(false),
+	};
 
 	connection: Moq.Connection.Reload;
 	broadcast: Broadcast;
@@ -49,7 +49,6 @@ export default class MoqPublish extends HTMLElement {
 		cleanup.register(this, this.signals);
 
 		this.connection = new Moq.Connection.Reload({
-			url: this.url,
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.connection.close());
@@ -61,8 +60,8 @@ export default class MoqPublish extends HTMLElement {
 		this.#eitherEnabled = new Signal(false);
 
 		this.signals.run((effect) => {
-			const muted = effect.get(this.muted);
-			const invisible = effect.get(this.invisible);
+			const muted = effect.get(this.state.muted);
+			const invisible = effect.get(this.state.invisible);
 			this.#videoEnabled.set(!invisible);
 			this.#audioEnabled.set(!muted);
 			this.#eitherEnabled.set(!muted || !invisible);
@@ -71,7 +70,6 @@ export default class MoqPublish extends HTMLElement {
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
 			enabled: this.#enabled,
-			name: this.name,
 
 			audio: {
 				enabled: this.#audioEnabled,
@@ -126,19 +124,19 @@ export default class MoqPublish extends HTMLElement {
 		if (oldValue === newValue) return;
 
 		if (name === "url") {
-			this.url.set(newValue ? new URL(newValue) : undefined);
+			this.connection.url.set(newValue ? new URL(newValue) : undefined);
 		} else if (name === "name") {
-			this.name.set(newValue ? Moq.Path.from(newValue) : undefined);
+			this.broadcast.name.set(newValue ? Moq.Path.from(newValue) : undefined);
 		} else if (name === "source") {
 			if (newValue === "camera" || newValue === "screen" || newValue === "file" || newValue === null) {
-				this.source.set(newValue as SourceType | undefined);
+				this.state.source.set(newValue as SourceType | undefined);
 			} else {
 				throw new Error(`Invalid source: ${newValue}`);
 			}
 		} else if (name === "muted") {
-			this.muted.set(newValue !== null);
+			this.state.muted.set(newValue !== null);
 		} else if (name === "invisible") {
-			this.invisible.set(newValue !== null);
+			this.state.invisible.set(newValue !== null);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -146,7 +144,7 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	#runSource(effect: Effect) {
-		const source = effect.get(this.source);
+		const source = effect.get(this.state.source);
 		if (!source) return;
 
 		if (source === "camera") {
@@ -219,6 +217,46 @@ export default class MoqPublish extends HTMLElement {
 
 		const exhaustive: never = source;
 		throw new Error(`Invalid source: ${exhaustive}`);
+	}
+
+	get url(): URL | undefined {
+		return this.connection.url.peek();
+	}
+
+	set url(value: string | URL | undefined) {
+		this.connection.url.set(value ? new URL(value) : undefined);
+	}
+
+	get name(): Moq.Path.Valid | undefined {
+		return this.broadcast.name.peek();
+	}
+
+	set name(value: string | Moq.Path.Valid | undefined) {
+		this.broadcast.name.set(value ? Moq.Path.from(value) : undefined);
+	}
+
+	get source(): SourceType | File | undefined {
+		return this.state.source.peek();
+	}
+
+	set source(value: SourceType | File | undefined) {
+		this.state.source.set(value);
+	}
+
+	get muted(): boolean {
+		return this.state.muted.peek();
+	}
+
+	set muted(value: boolean) {
+		this.state.muted.set(value);
+	}
+
+	get invisible(): boolean {
+		return this.state.invisible.peek();
+	}
+
+	set invisible(value: boolean) {
+		this.state.invisible.set(value);
 	}
 }
 

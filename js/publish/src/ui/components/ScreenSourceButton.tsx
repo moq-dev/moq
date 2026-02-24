@@ -4,9 +4,9 @@ import usePublishUIContext from "../hooks/use-publish-ui";
 export default function ScreenSourceButton() {
 	const context = usePublishUIContext();
 	const onClick = () => {
-		context.moqPublish.source.set("screen");
-		context.moqPublish.invisible.set(false);
-		context.moqPublish.muted.set(true);
+		context.moqPublish.source = "screen";
+		context.moqPublish.invisible = false;
+		context.moqPublish.muted = true;
 	};
 
 	return (
