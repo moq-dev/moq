@@ -11,7 +11,6 @@ use crate::{
 	model::BroadcastProducer,
 };
 
-use tokio::sync::oneshot;
 use web_async::Lock;
 
 #[derive(Clone)]
@@ -35,10 +34,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	/// Send a signal when the subscriber is initialized.
-	pub async fn run(self, init: oneshot::Sender<()>) -> Result<(), Error> {
+	pub async fn run(self) -> Result<(), Error> {
 		tokio::select! {
-			Err(err) = self.clone().run_announce(init) => Err(err),
+			Err(err) = self.clone().run_announce() => Err(err),
 			res = self.run_uni() => res,
 		}
 	}
@@ -72,10 +70,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_announce(mut self, init: oneshot::Sender<()>) -> Result<(), Error> {
+	async fn run_announce(mut self) -> Result<(), Error> {
 		if self.origin.is_none() {
 			// Don't do anything if there's no origin configured.
-			let _ = init.send(());
 			return Ok(());
 		}
 
@@ -102,8 +99,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				// Draft03: no AnnounceInit, initial state comes via Announce messages.
 			}
 		}
-
-		let _ = init.send(());
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {

@@ -101,8 +101,7 @@ impl Server {
 					self.publish.clone(),
 					self.consume.clone(),
 					version,
-				)
-				.await?;
+				)?;
 			}
 			Version::Ietf(version) => {
 				// Decode the client's parameters to get their max request ID.
@@ -119,8 +118,7 @@ impl Server {
 					self.publish.clone(),
 					self.consume.clone(),
 					version,
-				)
-				.await?;
+				)?;
 			}
 		};
 

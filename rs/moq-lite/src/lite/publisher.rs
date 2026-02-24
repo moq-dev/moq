@@ -115,23 +115,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				stream.writer.encode(&announce_init).await?;
 			}
 			Version::Draft03 => {
-				// Draft03: send individual Announce messages for initial state.
-				while let Some((path, active)) = origin.try_announced() {
-					let suffix = path
-						.strip_prefix(&prefix)
-						.expect("origin returned invalid path")
-						.to_owned();
-
-					if active.is_some() {
-						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-						let msg = lite::Announce::Active { suffix, hops: 0 };
-						stream.writer.encode(&msg).await?;
-					} else {
-						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-						let msg = lite::Announce::Ended { suffix, hops: 0 };
-						stream.writer.encode(&msg).await?;
-					}
-				}
+				// No more announce init in Draft03.
 			}
 		}
 

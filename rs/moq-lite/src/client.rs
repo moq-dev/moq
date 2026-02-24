@@ -101,8 +101,7 @@ impl Client {
 					self.publish.clone(),
 					self.consume.clone(),
 					version,
-				)
-				.await?;
+				)?;
 			}
 			Version::Ietf(version) => {
 				// Decode the parameters to get the initial request ID.
@@ -122,8 +121,7 @@ impl Client {
 					self.publish.clone(),
 					self.consume.clone(),
 					version,
-				)
-				.await?;
+				)?;
 			}
 		}
 
