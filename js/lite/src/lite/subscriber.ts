@@ -8,7 +8,7 @@ import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import { StreamId } from "./stream.ts";
-import { Subscribe, SubscribeOk } from "./subscribe.ts";
+import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
 /**
@@ -130,7 +130,11 @@ export class Subscriber {
 		await msg.encode(stream.writer, this.version);
 
 		try {
-			await SubscribeOk.decode(stream.reader, this.version);
+			// The first response MUST be a SUBSCRIBE_OK.
+			const resp = await decodeSubscribeResponse(stream.reader, this.version);
+			if (!("ok" in resp)) {
+				throw new Error("first subscribe response must be SUBSCRIBE_OK");
+			}
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 
 			await Promise.race([stream.reader.closed, request.track.closed]);

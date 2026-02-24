@@ -228,10 +228,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		stream.writer.encode(&msg).await?;
 
-		// TODO use the response correctly populate the track info
-		let _info: lite::SubscribeOk = stream.reader.decode().await?;
+		// The first response MUST be a SUBSCRIBE_OK.
+		let resp: lite::SubscribeResponse = stream.reader.decode().await?;
+		let lite::SubscribeResponse::Ok(_info) = resp else {
+			return Err(Error::ProtocolViolation);
+		};
 
-		// Wait until the stream is closed
+		// TODO handle additional SUBSCRIBE_OK and SUBSCRIBE_DROP messages.
 		stream.reader.closed().await?;
 
 		Ok(())

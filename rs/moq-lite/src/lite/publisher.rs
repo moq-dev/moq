@@ -210,7 +210,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			end_group: None,
 		};
 
-		stream.writer.encode(&info).await?;
+		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
 		tokio::select! {
 			res = Self::run_track(session, track, subscribe, priority, version) => res?,

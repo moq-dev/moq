@@ -7,7 +7,7 @@ import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
-import { type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
+import { encodeSubscribeResponse, type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
 /**
@@ -155,7 +155,7 @@ export class Publisher {
 
 		try {
 			const info = new SubscribeOk({ priority: msg.priority });
-			await info.encode(stream.writer, this.version);
+			await encodeSubscribeResponse(stream.writer, { ok: info }, this.version);
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 

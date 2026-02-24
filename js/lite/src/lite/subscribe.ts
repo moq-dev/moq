@@ -255,3 +255,92 @@ export class SubscribeOk {
 		return Message.decode(r, SubscribeOk.#decode.bind(SubscribeOk, version));
 	}
 }
+
+/// Indicates that one or more groups have been dropped.
+///
+/// Draft03 only.
+export class SubscribeDrop {
+	sequence: number;
+	count: number;
+	error: number;
+
+	constructor(sequence: number, count: number, error: number) {
+		this.sequence = sequence;
+		this.count = count;
+		this.error = error;
+	}
+
+	async #encode(w: Writer) {
+		await w.u53(this.sequence);
+		await w.u53(this.count);
+		await w.u53(this.error);
+	}
+
+	static async #decode(r: Reader): Promise<SubscribeDrop> {
+		return new SubscribeDrop(await r.u53(), await r.u53(), await r.u53());
+	}
+
+	async encode(w: Writer): Promise<void> {
+		return Message.encode(w, this.#encode.bind(this));
+	}
+
+	static async decode(r: Reader): Promise<SubscribeDrop> {
+		return Message.decode(r, SubscribeDrop.#decode);
+	}
+}
+
+/**
+ * A response message on the subscribe stream.
+ *
+ * In Draft03, each response is prefixed with a type discriminator:
+ * - 0x0 for SUBSCRIBE_OK
+ * - 0x1 for SUBSCRIBE_DROP
+ *
+ * SUBSCRIBE_OK must be the first message on the response stream.
+ */
+export type SubscribeResponse = { ok: SubscribeOk } | { drop: SubscribeDrop };
+
+export async function encodeSubscribeResponse(w: Writer, resp: SubscribeResponse, version: Version): Promise<void> {
+	switch (version) {
+		case Version.DRAFT_03:
+			if ("ok" in resp) {
+				await w.u53(0x0);
+				await resp.ok.encode(w, version);
+			} else {
+				await w.u53(0x1);
+				await resp.drop.encode(w);
+			}
+			break;
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+			if ("ok" in resp) {
+				await resp.ok.encode(w, version);
+			} else {
+				throw new Error("subscribe drop not supported for this version");
+			}
+			break;
+		default:
+			unreachable(version);
+	}
+}
+
+export async function decodeSubscribeResponse(r: Reader, version: Version): Promise<SubscribeResponse> {
+	switch (version) {
+		case Version.DRAFT_03: {
+			const typ = await r.u53();
+			switch (typ) {
+				case 0x0:
+					return { ok: await SubscribeOk.decode(r, version) };
+				case 0x1:
+					return { drop: await SubscribeDrop.decode(r) };
+				default:
+					throw new Error(`unknown subscribe response type: ${typ}`);
+			}
+		}
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+			return { ok: await SubscribeOk.decode(r, version) };
+		default:
+			unreachable(version);
+	}
+}
