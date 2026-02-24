@@ -60,8 +60,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.consume_only(&[prefix.as_path()])
 			.ok_or(Error::Unauthorized)?;
 
+		let version = self.version;
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix).await {
+			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version).await {
 				match &err {
 					Error::Cancel => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
@@ -87,29 +88,54 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
+		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
-		let mut init = Vec::new();
 
-		// Send ANNOUNCE_INIT as the first message with all currently active paths
-		// We use `try_next()` to synchronously get the initial updates.
-		while let Some((path, active)) = origin.try_announced() {
-			let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
+		match version {
+			Version::Draft01 | Version::Draft02 => {
+				let mut init = Vec::new();
 
-			if active.is_some() {
-				tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-				init.push(suffix.to_owned());
-			} else {
-				// A potential race.
-				tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-				init.retain(|path| path != &suffix);
+				// Send ANNOUNCE_INIT as the first message with all currently active paths
+				// We use `try_next()` to synchronously get the initial updates.
+				while let Some((path, active)) = origin.try_announced() {
+					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
+
+					if active.is_some() {
+						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+						init.push(suffix.to_owned());
+					} else {
+						// A potential race.
+						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+						init.retain(|path| path != &suffix);
+					}
+				}
+
+				let announce_init = lite::AnnounceInit { suffixes: init };
+				stream.writer.encode(&announce_init).await?;
+			}
+			Version::Draft03 => {
+				// Draft03: send individual Announce messages for initial state.
+				while let Some((path, active)) = origin.try_announced() {
+					let suffix = path
+						.strip_prefix(&prefix)
+						.expect("origin returned invalid path")
+						.to_owned();
+
+					if active.is_some() {
+						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+						let msg = lite::Announce::Active { suffix, hops: 0 };
+						stream.writer.encode(&msg).await?;
+					} else {
+						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+						let msg = lite::Announce::Ended { suffix, hops: 0 };
+						stream.writer.encode(&msg).await?;
+					}
+				}
 			}
 		}
 
-		let announce_init = lite::AnnounceInit { suffixes: init };
-		stream.writer.encode(&announce_init).await?;
-
-		// Flush any synchronously announced paths
+		// Send updates as they arrive.
 		loop {
 			tokio::select! {
 				biased;
@@ -121,11 +147,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 							if active.is_some() {
 								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-								let msg = lite::Announce::Active { suffix };
+								let msg = lite::Announce::Active { suffix, hops: 0 };
 								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-								let msg = lite::Announce::Ended { suffix };
+								let msg = lite::Announce::Ended { suffix, hops: 0 };
 								stream.writer.encode(&msg).await?;
 							}
 						},

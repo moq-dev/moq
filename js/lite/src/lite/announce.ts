@@ -1,37 +1,69 @@
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
+import { Version } from "./version.ts";
+
+function unreachable(v: never): never {
+	throw new Error(`unsupported version: ${v}`);
+}
 
 export class Announce {
 	suffix: Path.Valid;
 	active: boolean;
+	hops: number;
 
-	constructor(suffix: Path.Valid, active: boolean) {
+	constructor(suffix: Path.Valid, active: boolean, hops: number = 0) {
 		this.suffix = suffix;
 		this.active = active;
+		this.hops = hops;
 	}
 
-	async #encode(w: Writer) {
+	async #encode(w: Writer, version: Version) {
 		await w.bool(this.active);
 		await w.string(this.suffix);
+
+		switch (version) {
+			case Version.DRAFT_03:
+				await w.u53(this.hops);
+				break;
+			case Version.DRAFT_01:
+			case Version.DRAFT_02:
+				break;
+			default:
+				unreachable(version);
+		}
 	}
 
-	static async #decode(r: Reader): Promise<Announce> {
+	static async #decode(r: Reader, version: Version): Promise<Announce> {
 		const active = await r.bool();
 		const suffix = Path.from(await r.string());
-		return new Announce(suffix, active);
+
+		let hops: number;
+		switch (version) {
+			case Version.DRAFT_03:
+				hops = await r.u53();
+				break;
+			case Version.DRAFT_01:
+			case Version.DRAFT_02:
+				hops = 0;
+				break;
+			default:
+				unreachable(version);
+		}
+
+		return new Announce(suffix, active, hops);
 	}
 
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: Version): Promise<void> {
+		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
-	static async decode(r: Reader): Promise<Announce> {
-		return Message.decode(r, Announce.#decode);
+	static async decode(r: Reader, version: Version): Promise<Announce> {
+		return Message.decode(r, (r) => Announce.#decode(r, version));
 	}
 
-	static async decodeMaybe(r: Reader): Promise<Announce | undefined> {
-		return Message.decodeMaybe(r, Announce.#decode);
+	static async decodeMaybe(r: Reader, version: Version): Promise<Announce | undefined> {
+		return Message.decodeMaybe(r, (r) => Announce.#decode(r, version));
 	}
 }
 
@@ -60,6 +92,9 @@ export class AnnounceInterest {
 	}
 }
 
+/// Sent after setup to communicate the initially announced paths.
+///
+/// Used by Draft01/Draft02 only. Draft03 uses individual Announce messages instead.
 export class AnnounceInit {
 	suffixes: Path.Valid[];
 

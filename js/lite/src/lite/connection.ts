@@ -162,7 +162,7 @@ export class Connection implements Established {
 			await this.#publisher.runAnnounce(msg, stream);
 			return;
 		} else if (typ === StreamId.Subscribe) {
-			const msg = await Subscribe.decode(stream.reader);
+			const msg = await Subscribe.decode(stream.reader, this.version);
 			await this.#publisher.runSubscribe(msg, stream);
 			return;
 		} else {

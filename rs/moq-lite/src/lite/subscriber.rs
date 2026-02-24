@@ -91,19 +91,26 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let mut producers = HashMap::new();
 
-		let msg: lite::AnnounceInit = stream.reader.decode().await?;
-		for path in msg.suffixes {
-			self.start_announce(path, &mut producers)?;
+		match self.version {
+			Version::Draft01 | Version::Draft02 => {
+				let msg: lite::AnnounceInit = stream.reader.decode().await?;
+				for path in msg.suffixes {
+					self.start_announce(path, &mut producers)?;
+				}
+			}
+			Version::Draft03 => {
+				// Draft03: no AnnounceInit, initial state comes via Announce messages.
+			}
 		}
 
 		let _ = init.send(());
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {
-				lite::Announce::Active { suffix: path } => {
+				lite::Announce::Active { suffix: path, .. } => {
 					self.start_announce(path, &mut producers)?;
 				}
-				lite::Announce::Ended { suffix: path } => {
+				lite::Announce::Ended { suffix: path, .. } => {
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 
 					// Close the producer.
