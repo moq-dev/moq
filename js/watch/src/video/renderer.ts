@@ -87,12 +87,13 @@ export class Renderer {
 		if (!paused) {
 			frame = effect.get(this.decoder.frame);
 			this.#lastFrame?.close();
+			this.#lastFrame = undefined;
+
 			try {
 				this.#lastFrame = frame?.clone();
 			} catch {
 				// The frame may have been closed by the decoder before we could clone it.
 				// This is a race condition during startup; a new frame will arrive shortly.
-				this.#lastFrame = undefined;
 				frame = undefined;
 			}
 		} else {
