@@ -81,7 +81,7 @@ export class Publisher {
 			case Version.DRAFT_03:
 				// Draft03: send individual Announce messages for initial state.
 				for (const suffix of active) {
-					const wire = new Announce(suffix, true);
+					const wire = new Announce({ suffix, active: true });
 					await wire.encode(stream.writer, this.version);
 				}
 				break;
@@ -118,14 +118,14 @@ export class Publisher {
 			// Announce any new broadcasts.
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
-				const wire = new Announce(added, true);
+				const wire = new Announce({ suffix: added, active: true });
 				await wire.encode(stream.writer, this.version);
 			}
 
 			// Announce any removed broadcasts.
 			for (const removed of active.difference(newActive)) {
 				console.debug(`announce: broadcast=${removed} active=false`);
-				const wire = new Announce(removed, false);
+				const wire = new Announce({ suffix: removed, active: false });
 				await wire.encode(stream.writer, this.version);
 			}
 
@@ -154,8 +154,8 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.track, msg.priority);
 
 		try {
-			const info = new SubscribeOk({ version: this.version, priority: msg.priority });
-			await info.encode(stream.writer);
+			const info = new SubscribeOk({ priority: msg.priority });
+			await info.encode(stream.writer, this.version);
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 

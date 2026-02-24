@@ -123,7 +123,7 @@ export class Subscriber {
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 
-		const msg = new Subscribe(id, broadcast, request.track.name, request.priority);
+		const msg = new Subscribe({ id, broadcast, track: request.track.name, priority: request.priority });
 
 		const stream = await Stream.open(this.#quic);
 		await stream.writer.u53(StreamId.Subscribe);

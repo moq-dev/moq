@@ -180,9 +180,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track: (&track.info.name).into(),
 			priority: track.info.priority,
 			ordered: true,
-			max_latency: 0,
-			start_group: 0,
-			end_group: 0,
+			max_latency: std::time::Duration::ZERO,
+			start_group: None,
+			end_group: None,
 		};
 
 		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe started");

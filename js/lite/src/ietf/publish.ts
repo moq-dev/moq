@@ -1,5 +1,6 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { MessageParameters, Parameters } from "./parameters.ts";
@@ -76,8 +77,7 @@ export class Publish {
 			await w.bool(this.forward);
 			await w.u53(0); // size of parameters
 		} else {
-			const _: never = version;
-			throw new Error(`unsupported version: ${_}`);
+			unreachable(version);
 		}
 	}
 
@@ -127,8 +127,7 @@ export class Publish {
 				forward,
 			});
 		} else {
-			const _: never = version;
-			throw new Error(`unsupported version: ${_}`);
+			unreachable(version);
 		}
 	}
 }

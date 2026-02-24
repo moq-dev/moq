@@ -39,6 +39,13 @@ pub struct GroupDrop {
 
 impl Message for GroupDrop {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		match version {
+			Version::Draft01 | Version::Draft02 => {
+				unreachable!("group drop not supported for version: {:?}", version);
+			}
+			Version::Draft03 => {}
+		}
+
 		Ok(Self {
 			sequence: u64::decode(r, version)?,
 			count: u64::decode(r, version)?,
@@ -47,6 +54,13 @@ impl Message for GroupDrop {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+		match version {
+			Version::Draft01 | Version::Draft02 => {
+				unreachable!("group drop not supported for version: {:?}", version);
+			}
+			Version::Draft03 => {}
+		}
+
 		self.sequence.encode(w, version);
 		self.count.encode(w, version);
 		self.error.encode(w, version);

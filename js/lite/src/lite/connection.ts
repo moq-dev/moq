@@ -28,7 +28,7 @@ export class Connection implements Established {
 	#quic: WebTransport;
 
 	// Use to receive/send session messages.
-	#session: Stream;
+	#session?: Stream;
 
 	// Module for contributing tracks.
 	#publisher: Publisher;
@@ -47,7 +47,7 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor(url: URL, quic: WebTransport, session: Stream, version: Version) {
+	constructor(url: URL, quic: WebTransport, version: Version, session?: Stream) {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
@@ -123,6 +123,11 @@ export class Connection implements Established {
 	}
 
 	async #runSession() {
+		if (!this.#session) {
+			// moq-lite draft-03 doesn't use a session stream.
+			return;
+		}
+
 		try {
 			// Receive messages until the connection is closed.
 			for (;;) {

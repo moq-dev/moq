@@ -9,7 +9,8 @@ use super::{Publisher, Subscriber};
 pub(crate) fn start<S: web_transport_trait::Session>(
 	session: S,
 	// The stream used to setup the session, after exchanging setup messages.
-	setup: Stream<S, Version>,
+	// NOTE: No longer used in draft-03.
+	setup: Option<Stream<S, Version>>,
 	// We will publish any local broadcasts from this origin.
 	publish: Option<OriginConsumer>,
 	// We will consume any remote broadcasts, inserting them into this origin.
@@ -22,7 +23,7 @@ pub(crate) fn start<S: web_transport_trait::Session>(
 
 	web_async::spawn(async move {
 		let res = tokio::select! {
-			res = run_session(setup) => res,
+			Err(res) = run_session(setup) => Err(res),
 			res = publisher.run() => res,
 			res = subscriber.run() => res,
 		};
@@ -47,7 +48,11 @@ pub(crate) fn start<S: web_transport_trait::Session>(
 }
 
 // TODO do something useful with this
-async fn run_session<S: web_transport_trait::Session>(mut stream: Stream<S, Version>) -> Result<(), Error> {
-	while let Some(_info) = stream.reader.decode_maybe::<SessionInfo>().await? {}
-	Err(Error::Cancel)
+async fn run_session<S: web_transport_trait::Session>(stream: Option<Stream<S, Version>>) -> Result<(), Error> {
+	if let Some(mut stream) = stream {
+		while let Some(_info) = stream.reader.decode_maybe::<SessionInfo>().await? {}
+		return Err(Error::Cancel);
+	}
+
+	Ok(())
 }

@@ -204,10 +204,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let info = lite::SubscribeOk {
 			priority: track.info.priority,
-			ordered: true,
-			max_latency: 0,
-			start_group: 0,
-			end_group: 0,
+			ordered: false,
+			max_latency: std::time::Duration::ZERO,
+			start_group: None,
+			end_group: None,
 		};
 
 		stream.writer.encode(&info).await?;

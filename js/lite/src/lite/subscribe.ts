@@ -1,11 +1,8 @@
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
-
-function unreachable(v: never): never {
-	throw new Error(`unsupported version: ${v}`);
-}
 
 export class SubscribeUpdate {
 	priority: number;
@@ -84,27 +81,28 @@ export class Subscribe {
 	priority: number;
 	ordered: boolean;
 	maxLatency: number;
-	startGroup: number;
-	endGroup: number;
 
-	constructor(
-		id: bigint,
-		broadcast: Path.Valid,
-		track: string,
-		priority: number,
-		ordered: boolean = true,
-		maxLatency: number = 0,
-		startGroup: number = 0,
-		endGroup: number = 0,
-	) {
-		this.id = id;
-		this.broadcast = broadcast;
-		this.track = track;
-		this.priority = priority;
-		this.ordered = ordered;
-		this.maxLatency = maxLatency;
-		this.startGroup = startGroup;
-		this.endGroup = endGroup;
+	startGroup?: number;
+	endGroup?: number;
+
+	constructor(props: {
+		id: bigint;
+		broadcast: Path.Valid;
+		track: string;
+		priority: number;
+		ordered?: boolean;
+		maxLatency?: number;
+		startGroup?: number;
+		endGroup?: number;
+	}) {
+		this.id = props.id;
+		this.broadcast = props.broadcast;
+		this.track = props.track;
+		this.priority = props.priority;
+		this.ordered = props.ordered ?? false;
+		this.maxLatency = props.maxLatency ?? 0;
+		this.startGroup = props.startGroup;
+		this.endGroup = props.endGroup;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -117,8 +115,8 @@ export class Subscribe {
 			case Version.DRAFT_03:
 				await w.bool(this.ordered);
 				await w.u53(this.maxLatency);
-				await w.u53(this.startGroup);
-				await w.u53(this.endGroup);
+				await w.u53(this.startGroup ? this.startGroup + 1 : 0);
+				await w.u53(this.endGroup ? this.endGroup + 1 : 0);
 				break;
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
@@ -140,11 +138,20 @@ export class Subscribe {
 				const maxLatency = await r.u53();
 				const startGroup = await r.u53();
 				const endGroup = await r.u53();
-				return new Subscribe(id, broadcast, track, priority, ordered, maxLatency, startGroup, endGroup);
+				return new Subscribe({
+					id,
+					broadcast,
+					track,
+					priority,
+					ordered,
+					maxLatency,
+					startGroup: startGroup > 0 ? startGroup - 1 : undefined,
+					endGroup: endGroup > 0 ? endGroup - 1 : undefined,
+				});
 			}
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
-				return new Subscribe(id, broadcast, track, priority);
+				return new Subscribe({ id, broadcast, track, priority });
 			default:
 				unreachable(version);
 		}
@@ -160,30 +167,25 @@ export class Subscribe {
 }
 
 export class SubscribeOk {
-	// The version
-	readonly version: Version;
-	priority?: number;
-	ordered?: boolean;
-	maxLatency?: number;
+	priority: number;
+	ordered: boolean;
+	maxLatency: number;
 	startGroup?: number;
 	endGroup?: number;
 
 	constructor({
-		version,
-		priority = undefined,
-		ordered = undefined,
-		maxLatency = undefined,
+		priority = 0,
+		ordered = true,
+		maxLatency = 0,
 		startGroup = undefined,
 		endGroup = undefined,
 	}: {
-		version: Version;
 		priority?: number;
 		ordered?: boolean;
 		maxLatency?: number;
 		startGroup?: number;
 		endGroup?: number;
 	}) {
-		this.version = version;
 		this.priority = priority;
 		this.ordered = ordered;
 		this.maxLatency = maxLatency;
@@ -191,14 +193,14 @@ export class SubscribeOk {
 		this.endGroup = endGroup;
 	}
 
-	async #encode(w: Writer) {
-		switch (this.version) {
+	async #encode(w: Writer, version: Version) {
+		switch (version) {
 			case Version.DRAFT_03:
-				await w.u8(this.priority ?? 0);
-				await w.bool(this.ordered ?? true);
-				await w.u53(this.maxLatency ?? 0);
-				await w.u53(this.startGroup ?? 0);
-				await w.u53(this.endGroup ?? 0);
+				await w.u8(this.priority);
+				await w.bool(this.ordered);
+				await w.u53(this.maxLatency);
+				await w.u53(this.startGroup ? this.startGroup + 1 : 0);
+				await w.u53(this.endGroup ? this.endGroup + 1 : 0);
 				break;
 			case Version.DRAFT_02:
 				// noop
@@ -207,7 +209,7 @@ export class SubscribeOk {
 				await w.u8(this.priority ?? 0);
 				break;
 			default:
-				unreachable(this.version);
+				unreachable(version);
 		}
 	}
 
@@ -236,11 +238,11 @@ export class SubscribeOk {
 				unreachable(version);
 		}
 
-		return new SubscribeOk({ version, priority, ordered, maxLatency, startGroup, endGroup });
+		return new SubscribeOk({ priority, ordered, maxLatency, startGroup, endGroup });
 	}
 
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: Version): Promise<void> {
+		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
 	static async decode(r: Reader, version: Version): Promise<SubscribeOk> {

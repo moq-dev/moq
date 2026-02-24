@@ -16,9 +16,9 @@ pub struct Subscribe<'a> {
 	pub track: Cow<'a, str>,
 	pub priority: u8,
 	pub ordered: bool,
-	pub max_latency: u64,
-	pub start_group: u64,
-	pub end_group: u64,
+	pub max_latency: std::time::Duration,
+	pub start_group: Option<u64>,
+	pub end_group: Option<u64>,
 }
 
 impl Message for Subscribe<'_> {
@@ -31,12 +31,12 @@ impl Message for Subscribe<'_> {
 		let (ordered, max_latency, start_group, end_group) = match version {
 			Version::Draft03 => {
 				let ordered = u8::decode(r, version)? != 0;
-				let max_latency = u64::decode(r, version)?;
-				let start_group = u64::decode(r, version)?;
-				let end_group = u64::decode(r, version)?;
+				let max_latency = std::time::Duration::decode(r, version)?;
+				let start_group = Option::<u64>::decode(r, version)?;
+				let end_group = Option::<u64>::decode(r, version)?;
 				(ordered, max_latency, start_group, end_group)
 			}
-			Version::Draft01 | Version::Draft02 => (true, 0, 0, 0),
+			Version::Draft01 | Version::Draft02 => (false, std::time::Duration::ZERO, None, None),
 		};
 
 		Ok(Self {
@@ -73,9 +73,9 @@ impl Message for Subscribe<'_> {
 pub struct SubscribeOk {
 	pub priority: u8,
 	pub ordered: bool,
-	pub max_latency: u64,
-	pub start_group: u64,
-	pub end_group: u64,
+	pub max_latency: std::time::Duration,
+	pub start_group: Option<u64>,
+	pub end_group: Option<u64>,
 }
 
 impl Message for SubscribeOk {
@@ -100,9 +100,9 @@ impl Message for SubscribeOk {
 			Version::Draft03 => {
 				let priority = u8::decode(r, version)?;
 				let ordered = u8::decode(r, version)? != 0;
-				let max_latency = u64::decode(r, version)?;
-				let start_group = u64::decode(r, version)?;
-				let end_group = u64::decode(r, version)?;
+				let max_latency = std::time::Duration::decode(r, version)?;
+				let start_group = Option::<u64>::decode(r, version)?;
+				let end_group = Option::<u64>::decode(r, version)?;
 
 				Ok(Self {
 					priority,
@@ -114,17 +114,17 @@ impl Message for SubscribeOk {
 			}
 			Version::Draft01 => Ok(Self {
 				priority: u8::decode(r, version)?,
-				ordered: true,
-				max_latency: 0,
-				start_group: 0,
-				end_group: 0,
+				ordered: false,
+				max_latency: std::time::Duration::ZERO,
+				start_group: None,
+				end_group: None,
 			}),
 			Version::Draft02 => Ok(Self {
 				priority: 0,
-				ordered: true,
-				max_latency: 0,
-				start_group: 0,
-				end_group: 0,
+				ordered: false,
+				max_latency: std::time::Duration::ZERO,
+				start_group: None,
+				end_group: None,
 			}),
 		}
 	}
@@ -139,17 +139,30 @@ pub struct SubscribeUpdate {
 	pub priority: u8,
 	pub ordered: bool,
 	pub max_latency: u64,
-	pub start_group: u64,
-	pub end_group: u64,
+	pub start_group: Option<u64>,
+	pub end_group: Option<u64>,
 }
 
 impl Message for SubscribeUpdate {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		match version {
+			Version::Draft01 | Version::Draft02 => {
+				unreachable!("subscribe update not supported for version: {:?}", version);
+			}
+			Version::Draft03 => {}
+		}
+
 		let priority = u8::decode(r, version)?;
 		let ordered = u8::decode(r, version)? != 0;
 		let max_latency = u64::decode(r, version)?;
-		let start_group = u64::decode(r, version)?;
-		let end_group = u64::decode(r, version)?;
+		let start_group = match u64::decode(r, version)? {
+			0 => None,
+			group => Some(group - 1),
+		};
+		let end_group = match u64::decode(r, version)? {
+			0 => None,
+			group => Some(group - 1),
+		};
 
 		Ok(Self {
 			priority,
@@ -161,10 +174,25 @@ impl Message for SubscribeUpdate {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+		match version {
+			Version::Draft01 | Version::Draft02 => {
+				unreachable!("subscribe update not supported for version: {:?}", version);
+			}
+			Version::Draft03 => {}
+		}
+
 		self.priority.encode(w, version);
 		(self.ordered as u8).encode(w, version);
 		self.max_latency.encode(w, version);
-		self.start_group.encode(w, version);
-		self.end_group.encode(w, version);
+
+		match self.start_group {
+			Some(start_group) => (start_group + 1).encode(w, version),
+			None => 0u64.encode(w, version),
+		}
+
+		match self.end_group {
+			Some(end_group) => (end_group + 1).encode(w, version),
+			None => 0u64.encode(w, version),
+		}
 	}
 }

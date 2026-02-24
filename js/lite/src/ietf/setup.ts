@@ -1,4 +1,5 @@
 import type { Reader, Writer } from "../stream.ts";
+import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import { Parameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -27,8 +28,7 @@ export class ClientSetup {
 			}
 			await this.parameters.encode(w, version);
 		} else {
-			const _: never = version;
-			throw new Error(`unsupported version: ${_}`);
+			unreachable(version);
 		}
 	}
 
@@ -59,8 +59,7 @@ export class ClientSetup {
 
 			return new ClientSetup({ versions: supportedVersions, parameters });
 		} else {
-			const _: never = version;
-			throw new Error(`unsupported version: ${_}`);
+			unreachable(version);
 		}
 	}
 
@@ -88,8 +87,7 @@ export class ServerSetup {
 			await w.u53(this.version);
 			await this.parameters.encode(w, version);
 		} else {
-			const _: never = version;
-			throw new Error(`unsupported version: ${_}`);
+			unreachable(version);
 		}
 	}
 
@@ -107,8 +105,7 @@ export class ServerSetup {
 			const parameters = await Parameters.decode(r, version);
 			return new ServerSetup({ version: selectedVersion, parameters });
 		} else {
-			const _: never = version;
-			throw new Error(`unsupported version: ${_}`);
+			unreachable(version);
 		}
 	}
 

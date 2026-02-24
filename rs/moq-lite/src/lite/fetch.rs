@@ -20,6 +20,13 @@ pub struct Fetch<'a> {
 
 impl Message for Fetch<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		match version {
+			Version::Draft01 | Version::Draft02 => {
+				unreachable!("fetch not supported for version: {:?}", version);
+			}
+			Version::Draft03 => {}
+		}
+
 		let broadcast = Path::decode(r, version)?;
 		let track = Cow::<str>::decode(r, version)?;
 		let priority = u8::decode(r, version)?;
@@ -34,6 +41,13 @@ impl Message for Fetch<'_> {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+		match version {
+			Version::Draft01 | Version::Draft02 => {
+				unreachable!("fetch not supported for version: {:?}", version);
+			}
+			Version::Draft03 => {}
+		}
+
 		self.broadcast.encode(w, version);
 		self.track.encode(w, version);
 		self.priority.encode(w, version);

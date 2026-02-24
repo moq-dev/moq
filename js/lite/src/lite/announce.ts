@@ -1,21 +1,18 @@
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
-
-function unreachable(v: never): never {
-	throw new Error(`unsupported version: ${v}`);
-}
 
 export class Announce {
 	suffix: Path.Valid;
 	active: boolean;
 	hops: number;
 
-	constructor(suffix: Path.Valid, active: boolean, hops: number = 0) {
-		this.suffix = suffix;
-		this.active = active;
-		this.hops = hops;
+	constructor(props: { suffix: Path.Valid; active: boolean; hops?: number }) {
+		this.suffix = props.suffix;
+		this.active = props.active;
+		this.hops = props.hops ?? 0;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -38,20 +35,19 @@ export class Announce {
 		const active = await r.bool();
 		const suffix = Path.from(await r.string());
 
-		let hops: number;
+		let hops = 0;
 		switch (version) {
 			case Version.DRAFT_03:
 				hops = await r.u53();
 				break;
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
-				hops = 0;
 				break;
 			default:
 				unreachable(version);
 		}
 
-		return new Announce(suffix, active, hops);
+		return new Announce({ suffix, active, hops });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

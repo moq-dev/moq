@@ -94,3 +94,19 @@ impl<V> Encode<V> for Cow<'_, str> {
 		w.put(self.as_bytes());
 	}
 }
+
+impl<V> Encode<V> for Option<u64> {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
+		match self {
+			Some(value) => (value + 1).encode(w, version),
+			None => 0u64.encode(w, version),
+		}
+	}
+}
+
+impl<V> Encode<V> for std::time::Duration {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
+		// TODO Make encoding fallable.
+		(self.as_millis() as u64).encode(w, version)
+	}
+}
