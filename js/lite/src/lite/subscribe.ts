@@ -115,8 +115,8 @@ export class Subscribe {
 			case Version.DRAFT_03:
 				await w.bool(this.ordered);
 				await w.u53(this.maxLatency);
-				await w.u53(this.startGroup ? this.startGroup + 1 : 0);
-				await w.u53(this.endGroup ? this.endGroup + 1 : 0);
+				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
+				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				break;
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
@@ -199,8 +199,8 @@ export class SubscribeOk {
 				await w.u8(this.priority);
 				await w.bool(this.ordered);
 				await w.u53(this.maxLatency);
-				await w.u53(this.startGroup ? this.startGroup + 1 : 0);
-				await w.u53(this.endGroup ? this.endGroup + 1 : 0);
+				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
+				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				break;
 			case Version.DRAFT_02:
 				// noop
@@ -238,7 +238,13 @@ export class SubscribeOk {
 				unreachable(version);
 		}
 
-		return new SubscribeOk({ priority, ordered, maxLatency, startGroup, endGroup });
+		return new SubscribeOk({
+			priority,
+			ordered,
+			maxLatency,
+			startGroup: startGroup !== undefined && startGroup > 0 ? startGroup - 1 : undefined,
+			endGroup: endGroup !== undefined && endGroup > 0 ? endGroup - 1 : undefined,
+		});
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

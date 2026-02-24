@@ -1,6 +1,20 @@
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
+import { Version } from "./version.ts";
+
+function guardDraft03(version: Version) {
+	switch (version) {
+		case Version.DRAFT_03:
+			break;
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+			throw new Error("fetch not supported for this version");
+		default:
+			unreachable(version);
+	}
+}
 
 export class Fetch {
 	broadcast: Path.Valid;
@@ -30,11 +44,13 @@ export class Fetch {
 		return new Fetch(broadcast, track, priority, group);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, version: Version): Promise<void> {
+		guardDraft03(version);
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<Fetch> {
+	static async decode(r: Reader, version: Version): Promise<Fetch> {
+		guardDraft03(version);
 		return Message.decode(r, Fetch.#decode);
 	}
 }

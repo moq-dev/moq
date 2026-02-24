@@ -112,6 +112,11 @@ pub struct AnnounceInit<'a> {
 
 impl Message for AnnounceInit<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		match version {
+			Version::Draft01 | Version::Draft02 => {}
+			Version::Draft03 => unreachable!("announce init not supported for version: {:?}", version),
+		}
+
 		let count = u64::decode(r, version)?;
 
 		// Don't allocate more than 1024 elements upfront
@@ -125,6 +130,11 @@ impl Message for AnnounceInit<'_> {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+		match version {
+			Version::Draft01 | Version::Draft02 => {}
+			Version::Draft03 => unreachable!("announce init not supported for version: {:?}", version),
+		}
+
 		(self.suffixes.len() as u64).encode(w, version);
 		for path in &self.suffixes {
 			path.encode(w, version);

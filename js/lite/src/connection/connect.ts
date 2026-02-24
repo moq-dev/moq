@@ -155,7 +155,7 @@ async function connectWebTransport(
 		allowPooling: false,
 		congestionControl: "low-latency",
 		// @ts-expect-error - TODO: add protocols to WebTransportOptions
-		protocols: [Lite.ALPN, Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
+		protocols: [Lite.ALPN_03, Lite.ALPN, Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
 		...options,
 	};
 

@@ -98,6 +98,18 @@ export class AnnounceInit {
 		this.suffixes = paths;
 	}
 
+	static #guard(version: Version) {
+		switch (version) {
+			case Version.DRAFT_01:
+			case Version.DRAFT_02:
+				break;
+			case Version.DRAFT_03:
+				throw new Error("announce init not supported for Draft03");
+			default:
+				unreachable(version);
+		}
+	}
+
 	async #encode(w: Writer) {
 		await w.u53(this.suffixes.length);
 		for (const path of this.suffixes) {
@@ -114,11 +126,13 @@ export class AnnounceInit {
 		return new AnnounceInit(suffixes);
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, version: Version): Promise<void> {
+		AnnounceInit.#guard(version);
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<AnnounceInit> {
+	static async decode(r: Reader, version: Version): Promise<AnnounceInit> {
+		AnnounceInit.#guard(version);
 		return Message.decode(r, AnnounceInit.#decode);
 	}
 }

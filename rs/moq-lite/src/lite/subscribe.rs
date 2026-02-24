@@ -138,7 +138,7 @@ impl Message for SubscribeOk {
 pub struct SubscribeUpdate {
 	pub priority: u8,
 	pub ordered: bool,
-	pub max_latency: u64,
+	pub max_latency: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
 }
@@ -154,7 +154,7 @@ impl Message for SubscribeUpdate {
 
 		let priority = u8::decode(r, version)?;
 		let ordered = u8::decode(r, version)? != 0;
-		let max_latency = u64::decode(r, version)?;
+		let max_latency = std::time::Duration::decode(r, version)?;
 		let start_group = match u64::decode(r, version)? {
 			0 => None,
 			group => Some(group - 1),

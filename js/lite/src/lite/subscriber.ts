@@ -59,7 +59,7 @@ export class Subscriber {
 				case Version.DRAFT_01:
 				case Version.DRAFT_02: {
 					// Receive ANNOUNCE_INIT first
-					const init = await AnnounceInit.decode(stream.reader);
+					const init = await AnnounceInit.decode(stream.reader, this.version);
 
 					// Process initial announcements
 					for (const suffix of init.suffixes) {

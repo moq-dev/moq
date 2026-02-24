@@ -131,7 +131,7 @@ export class Connection implements Established {
 		try {
 			// Receive messages until the connection is closed.
 			for (;;) {
-				const msg = await SessionInfo.decodeMaybe(this.#session.reader);
+				const msg = await SessionInfo.decodeMaybe(this.#session.reader, this.version);
 				if (!msg) break;
 				// TODO use the session info
 			}

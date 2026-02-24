@@ -88,7 +88,7 @@ export class Publisher {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02: {
 				const init = new AnnounceInit([...active]);
-				await init.encode(stream.writer);
+				await init.encode(stream.writer, this.version);
 				break;
 			}
 		}

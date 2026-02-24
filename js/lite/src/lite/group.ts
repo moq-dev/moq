@@ -1,5 +1,7 @@
 import type { Reader, Writer } from "../stream.ts";
+import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
+import { Version } from "./version.ts";
 
 export class Group {
 	subscribe: bigint;
@@ -43,6 +45,18 @@ export class GroupDrop {
 		this.error = error;
 	}
 
+	static #guard(version: Version) {
+		switch (version) {
+			case Version.DRAFT_03:
+				break;
+			case Version.DRAFT_01:
+			case Version.DRAFT_02:
+				throw new Error("group drop not supported for this version");
+			default:
+				unreachable(version);
+		}
+	}
+
 	async #encode(w: Writer) {
 		await w.u53(this.sequence);
 		await w.u53(this.count);
@@ -53,15 +67,18 @@ export class GroupDrop {
 		return new GroupDrop(await r.u53(), await r.u53(), await r.u53());
 	}
 
-	async encode(w: Writer): Promise<void> {
+	async encode(w: Writer, version: Version): Promise<void> {
+		GroupDrop.#guard(version);
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
-	static async decode(r: Reader): Promise<GroupDrop> {
+	static async decode(r: Reader, version: Version): Promise<GroupDrop> {
+		GroupDrop.#guard(version);
 		return Message.decode(r, GroupDrop.#decode);
 	}
 
-	static async decodeMaybe(r: Reader): Promise<GroupDrop | undefined> {
+	static async decodeMaybe(r: Reader, version: Version): Promise<GroupDrop | undefined> {
+		GroupDrop.#guard(version);
 		return Message.decodeMaybe(r, GroupDrop.#decode);
 	}
 }
