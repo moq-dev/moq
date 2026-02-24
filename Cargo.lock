@@ -1967,6 +1967,7 @@ name = "hang"
 version = "0.14.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "buf-list",
  "bytes",
  "derive_more",

@@ -19,6 +19,7 @@ impl Publish {
 		let mut broadcast = moq_lite::BroadcastProducer::new();
 		let catalog = broadcast.create_track(hang::Catalog::default_track());
 		let catalog = hang::CatalogProducer::new(catalog, hang::Catalog::default());
+		broadcast.insert_track(catalog.msf_track.clone());
 
 		let id = self.broadcasts.insert((broadcast, catalog));
 		Ok(id)
