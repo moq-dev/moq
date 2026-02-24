@@ -2,7 +2,7 @@
 	"name": "@moq/hang",
 	"type": "module",
 	"version": "0.2.0",
-	"description": "Media over QUIC library",
+	"description": "WebCodecs-based media format for MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
 	"exports": {
