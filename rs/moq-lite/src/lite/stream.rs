@@ -8,6 +8,8 @@ pub enum ControlType {
 	Session = 0,
 	Announce = 1,
 	Subscribe = 2,
+	Fetch = 3,
+	Probe = 4,
 }
 
 impl<V> Decode<V> for ControlType {

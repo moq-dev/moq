@@ -26,6 +26,7 @@ impl Client {
 				// Draft15+: no versions list, parameters only.
 			}
 			Version::Ietf(ietf::Version::Draft14)
+			| Version::Lite(lite::Version::Draft03)
 			| Version::Lite(lite::Version::Draft02)
 			| Version::Lite(lite::Version::Draft01) => self.versions.encode(w, v),
 		};
@@ -45,7 +46,9 @@ impl Decode<Version> for Client {
 			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
 				u16::decode(r, v)? as usize
 			}
-			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => u64::decode(r, v)? as usize,
+			Version::Lite(lite::Version::Draft03 | lite::Version::Draft02 | lite::Version::Draft01) => {
+				u64::decode(r, v)? as usize
+			}
 		};
 
 		if r.remaining() < size {
@@ -60,6 +63,7 @@ impl Decode<Version> for Client {
 				coding::Versions::from([v.into()])
 			}
 			Version::Ietf(ietf::Version::Draft14)
+			| Version::Lite(lite::Version::Draft03)
 			| Version::Lite(lite::Version::Draft02)
 			| Version::Lite(lite::Version::Draft01) => coding::Versions::decode(&mut msg, v)?,
 		};
@@ -84,7 +88,9 @@ impl Encode<Version> for Client {
 			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
 				u16::try_from(size).expect("message too large for u16").encode(w, v)
 			}
-			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => (size as u64).encode(w, v),
+			Version::Lite(lite::Version::Draft03 | lite::Version::Draft02 | lite::Version::Draft01) => {
+				(size as u64).encode(w, v)
+			}
 		}
 		self.encode_inner(w, v);
 	}
@@ -107,6 +113,7 @@ impl Server {
 				// Draft15+: No version field, parameters only.
 			}
 			Version::Ietf(ietf::Version::Draft14)
+			| Version::Lite(lite::Version::Draft03)
 			| Version::Lite(lite::Version::Draft02)
 			| Version::Lite(lite::Version::Draft01) => self.version.encode(w, v),
 		};
@@ -126,7 +133,9 @@ impl Encode<Version> for Server {
 			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
 				u16::try_from(size).expect("message too large for u16").encode(w, v)
 			}
-			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => (size as u64).encode(w, v),
+			Version::Lite(lite::Version::Draft03 | lite::Version::Draft02 | lite::Version::Draft01) => {
+				(size as u64).encode(w, v)
+			}
 		}
 
 		self.encode_inner(w, v);
@@ -144,7 +153,9 @@ impl Decode<Version> for Server {
 			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16) => {
 				u16::decode(r, v)? as usize
 			}
-			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => u64::decode(r, v)? as usize,
+			Version::Lite(lite::Version::Draft03 | lite::Version::Draft02 | lite::Version::Draft01) => {
+				u64::decode(r, v)? as usize
+			}
 		};
 
 		if r.remaining() < size {
@@ -155,6 +166,7 @@ impl Decode<Version> for Server {
 		let version = match v {
 			Version::Ietf(ietf::Version::Draft15 | ietf::Version::Draft16) => v.into(),
 			Version::Ietf(ietf::Version::Draft14)
+			| Version::Lite(lite::Version::Draft03)
 			| Version::Lite(lite::Version::Draft02)
 			| Version::Lite(lite::Version::Draft01) => coding::Version::decode(&mut msg, v)?,
 		};
