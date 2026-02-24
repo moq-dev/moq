@@ -36,7 +36,7 @@ export class Device<Kind extends "audio" | "video"> {
 
 		this.signals.run((effect) => {
 			effect.spawn(this.#run.bind(this, effect));
-			effect.event(navigator.mediaDevices, "devicechange", () => effect.reload());
+			effect.event(navigator.mediaDevices, "devicechange", () => this.permission.mutate(() => {}));
 		});
 
 		this.signals.run(this.#runRequested.bind(this));

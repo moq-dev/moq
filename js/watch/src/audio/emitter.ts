@@ -65,14 +65,14 @@ export class Emitter {
 
 			effect.set(this.#gain, gain);
 
-			effect.run(() => {
+			effect.run((inner) => {
 				// We only connect/disconnect when enabled to save power.
 				// Otherwise the worklet keeps running in the background returning 0s.
-				const enabled = effect.get(this.source.enabled);
+				const enabled = inner.get(this.source.enabled);
 				if (!enabled) return;
 
 				gain.connect(root.context.destination); // speakers
-				effect.cleanup(() => gain.disconnect());
+				inner.cleanup(() => gain.disconnect());
 			});
 		});
 

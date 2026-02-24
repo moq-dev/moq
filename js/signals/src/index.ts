@@ -279,7 +279,13 @@ export class Effect {
 		if (this.#fn) {
 			this.#fn(this);
 
-			if (DEV && this.#unwatch.length === 0) {
+			if (
+				DEV &&
+				this.#dispose !== undefined &&
+				this.#unwatch.length === 0 &&
+				this.#dispose.length === 0 &&
+				this.#async.length === 0
+			) {
 				console.warn("Effect did not subscribe to any signals; it will never rerun.", this.#stack);
 			}
 		}
@@ -540,11 +546,6 @@ export class Effect {
 
 		target.addEventListener(type, listener, options);
 		this.cleanup(() => target.removeEventListener(type, listener, options));
-	}
-
-	// Reschedule the effect to run again.
-	reload() {
-		this.#schedule();
 	}
 
 	// Register a cleanup function.
