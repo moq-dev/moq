@@ -8,21 +8,21 @@ export class SubscribeUpdate {
 	priority: number;
 	ordered: boolean;
 	maxLatency: number;
-	startGroup: number;
-	endGroup: number;
+	startGroup?: number;
+	endGroup?: number;
 
-	constructor(
-		priority: number,
-		ordered: boolean = true,
-		maxLatency: number = 0,
-		startGroup: number = 0,
-		endGroup: number = 0,
-	) {
-		this.priority = priority;
-		this.ordered = ordered;
-		this.maxLatency = maxLatency;
-		this.startGroup = startGroup;
-		this.endGroup = endGroup;
+	constructor(props: {
+		priority: number;
+		ordered?: boolean;
+		maxLatency?: number;
+		startGroup?: number;
+		endGroup?: number;
+	}) {
+		this.priority = props.priority;
+		this.ordered = props.ordered ?? true;
+		this.maxLatency = props.maxLatency ?? 0;
+		this.startGroup = props.startGroup;
+		this.endGroup = props.endGroup;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -31,8 +31,8 @@ export class SubscribeUpdate {
 				await w.u8(this.priority);
 				await w.bool(this.ordered);
 				await w.u53(this.maxLatency);
-				await w.u53(this.startGroup);
-				await w.u53(this.endGroup);
+				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
+				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
 				break;
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
@@ -51,11 +51,17 @@ export class SubscribeUpdate {
 				const maxLatency = await r.u53();
 				const startGroup = await r.u53();
 				const endGroup = await r.u53();
-				return new SubscribeUpdate(priority, ordered, maxLatency, startGroup, endGroup);
+				return new SubscribeUpdate({
+					priority,
+					ordered,
+					maxLatency,
+					startGroup: startGroup > 0 ? startGroup - 1 : undefined,
+					endGroup: endGroup > 0 ? endGroup - 1 : undefined,
+				});
 			}
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
-				return new SubscribeUpdate(await r.u8());
+				return new SubscribeUpdate({ priority: await r.u8() });
 			default:
 				unreachable(version);
 		}
