@@ -30,6 +30,9 @@ impl Client {
 			| Version::Lite(lite::Version::Draft01) => self.versions.encode(w, v)?,
 			Version::Lite(lite::Version::Draft03) => unreachable!("draft-03 uses no setup message"),
 		};
+		if w.remaining_mut() < self.parameters.len() {
+			return Err(EncodeError::Short);
+		}
 		w.put_slice(&self.parameters);
 		Ok(())
 	}
@@ -116,6 +119,9 @@ impl Server {
 			| Version::Lite(lite::Version::Draft01) => self.version.encode(w, v)?,
 			Version::Lite(lite::Version::Draft03) => unreachable!("draft-03 uses no setup message"),
 		};
+		if w.remaining_mut() < self.parameters.len() {
+			return Err(EncodeError::Short);
+		}
 		w.put_slice(&self.parameters);
 		Ok(())
 	}

@@ -213,13 +213,26 @@ impl<V> Decode<V> for VarInt {
 impl<V> Encode<V> for VarInt {
 	/// Encode a varint to the given writer.
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, _: V) -> Result<(), EncodeError> {
+		let remaining = w.remaining_mut();
 		if self.0 < (1u64 << 6) {
+			if remaining < 1 {
+				return Err(EncodeError::Short);
+			}
 			w.put_u8(self.0 as u8);
 		} else if self.0 < (1u64 << 14) {
+			if remaining < 2 {
+				return Err(EncodeError::Short);
+			}
 			w.put_u16((0b01 << 14) | self.0 as u16);
 		} else if self.0 < (1u64 << 30) {
+			if remaining < 4 {
+				return Err(EncodeError::Short);
+			}
 			w.put_u32((0b10 << 30) | self.0 as u32);
 		} else {
+			if remaining < 8 {
+				return Err(EncodeError::Short);
+			}
 			w.put_u64((0b11 << 62) | self.0);
 		}
 		Ok(())

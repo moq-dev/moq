@@ -167,6 +167,7 @@ impl From<coding::EncodeError> for Error {
 		match err {
 			coding::EncodeError::BoundsExceeded(_) => Error::BoundsExceeded,
 			coding::EncodeError::TooLarge => Error::TooLarge,
+			coding::EncodeError::Short => Error::TooLarge,
 		}
 	}
 }
