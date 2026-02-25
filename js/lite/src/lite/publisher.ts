@@ -270,7 +270,7 @@ export class Publisher {
 			getStats?: () => Promise<{ estimatedSendRate: number | null }>;
 		};
 		if (!quic.getStats) {
-			stream.writer.reset(new Error("stats not supported"));
+			stream.abort(new Error("stats not supported"));
 			return;
 		}
 
