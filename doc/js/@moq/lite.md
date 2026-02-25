@@ -8,7 +8,7 @@ description: Core pub/sub protocol for browsers
 [![npm](https://img.shields.io/npm/v/@moq/lite)](https://www.npmjs.com/package/@moq/lite)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-A TypeScript implementation of [Media over QUIC](https://moq.dev/) providing real-time data delivery in web browsers. Implements the [moq-lite specification](https://moq-dev.github.io/drafts/draft-lcurley-moq-lite.html).
+A TypeScript implementation of [Media over QUIC](https://moq.dev/) providing real-time data delivery in web browsers. Implements the [moq-lite specification](/spec/draft-lcurley-moq-lite).
 
 ## Overview
 
@@ -242,7 +242,7 @@ For more examples, see:
 
 ## Protocol Specification
 
-See the [moq-lite specification](https://moq-dev.github.io/drafts/draft-lcurley-moq-lite.html) for protocol details.
+See the [moq-lite specification](/spec/draft-lcurley-moq-lite) for protocol details.
 
 ## Next Steps
 

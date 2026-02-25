@@ -6,7 +6,6 @@ use crate::{
 /// Sent to probe the available bitrate.
 ///
 /// Draft03 only.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Probe {
 	pub bitrate: u64,

@@ -39,4 +39,9 @@ export class Probe {
 		guardDraft03(version);
 		return Message.decode(r, Probe.#decode);
 	}
+
+	static async decodeMaybe(r: Reader, version: Version): Promise<Probe | undefined> {
+		guardDraft03(version);
+		return Message.decodeMaybe(r, Probe.#decode);
+	}
 }

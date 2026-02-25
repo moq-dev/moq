@@ -273,7 +273,7 @@ Key types:
 
 ## Protocol Specification
 
-See the [hang specification](https://moq-dev.github.io/drafts/draft-lcurley-moq-hang.html) for protocol details.
+See the [hang specification](/spec/draft-lcurley-moq-hang) for protocol details.
 
 ## Next Steps
 

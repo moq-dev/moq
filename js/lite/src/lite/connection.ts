@@ -170,6 +170,9 @@ export class Connection implements Established {
 			const msg = await Subscribe.decode(stream.reader, this.version);
 			await this.#publisher.runSubscribe(msg, stream);
 			return;
+		} else if (typ === StreamId.Probe) {
+			await this.#publisher.runProbe(stream);
+			return;
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}

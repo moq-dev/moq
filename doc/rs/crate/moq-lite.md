@@ -9,7 +9,7 @@ description: Core pub/sub transport protocol in Rust
 [![docs.rs](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
 
-The core pub/sub transport protocol implementing the [moq-lite specification](https://moq-dev.github.io/drafts/draft-lcurley-moq-lite.html).
+The core pub/sub transport protocol implementing the [moq-lite specification](/spec/draft-lcurley-moq-lite).
 
 ## Overview
 
@@ -227,7 +227,7 @@ Key types:
 
 ## Protocol Specification
 
-See the [moq-lite specification](https://moq-dev.github.io/drafts/draft-lcurley-moq-lite.html) for protocol details.
+See the [moq-lite specification](/spec/draft-lcurley-moq-lite) for protocol details.
 
 ## Next Steps
 

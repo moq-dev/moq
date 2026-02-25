@@ -266,24 +266,24 @@ export class SubscribeOk {
 ///
 /// Draft03 only.
 export class SubscribeDrop {
-	sequence: number;
-	count: number;
+	start: number;
+	end: number;
 	error: number;
 
-	constructor(sequence: number, count: number, error: number) {
-		this.sequence = sequence;
-		this.count = count;
-		this.error = error;
+	constructor(props: { start: number; end: number; error: number }) {
+		this.start = props.start;
+		this.end = props.end;
+		this.error = props.error;
 	}
 
 	async #encode(w: Writer) {
-		await w.u53(this.sequence);
-		await w.u53(this.count);
+		await w.u53(this.start);
+		await w.u53(this.end);
 		await w.u53(this.error);
 	}
 
 	static async #decode(r: Reader): Promise<SubscribeDrop> {
-		return new SubscribeDrop(await r.u53(), await r.u53(), await r.u53());
+		return new SubscribeDrop({ start: await r.u53(), end: await r.u53(), error: await r.u53() });
 	}
 
 	async encode(w: Writer): Promise<void> {

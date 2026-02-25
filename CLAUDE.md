@@ -63,6 +63,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   demo/              # Demo applications
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
+  spec/              # moq-lite and hang protocol specifications
 /dev/                 # Development config and test media files
 /cdn/                 # CDN infrastructure (Terraform)
 ```

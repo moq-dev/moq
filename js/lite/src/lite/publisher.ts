@@ -7,8 +7,13 @@ import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
+import { Probe } from "./probe.ts";
 import { encodeSubscribeResponse, type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { Version } from "./version.ts";
+
+const PROBE_INTERVAL = 100; // ms
+const PROBE_MAX_AGE = 10_000; // ms
+const PROBE_MAX_DELTA = 0.25;
 
 /**
  * Handles publishing broadcasts and managing their lifecycle.
@@ -250,6 +255,64 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			group.close(e);
+		}
+	}
+
+	/**
+	 * Handles a probe stream by periodically reporting estimated bitrate.
+	 * @param stream - The probe bidi stream
+	 *
+	 * @internal
+	 */
+	async runProbe(stream: Stream) {
+		// getStats is not yet in the TypeScript WebTransport type definitions.
+		const quic = this.#quic as unknown as {
+			getStats?: () => Promise<{ estimatedSendRate: number | null }>;
+		};
+		if (!quic.getStats) {
+			stream.abort(new Error("stats not supported"));
+			return;
+		}
+
+		let lastSentBitrate: number | undefined;
+		let lastSentTime: number | undefined;
+
+		try {
+			for (;;) {
+				const timeout = new Promise<"timeout">((resolve) =>
+					setTimeout(() => resolve("timeout"), PROBE_INTERVAL),
+				);
+				const result = await Promise.race([timeout, stream.reader.closed]);
+				if (result !== "timeout") break;
+
+				const stats = await quic.getStats();
+				const bitrate = stats.estimatedSendRate;
+				if (bitrate == null) continue;
+
+				let shouldSend: boolean;
+				if (lastSentBitrate === undefined || lastSentTime === undefined) {
+					shouldSend = true;
+				} else if (lastSentBitrate === 0) {
+					shouldSend = bitrate > 0;
+				} else {
+					const elapsed = performance.now() - lastSentTime;
+					const t = Math.max(PROBE_INTERVAL, Math.min(PROBE_MAX_AGE, elapsed));
+					const range = PROBE_MAX_AGE - PROBE_INTERVAL;
+					const threshold = (PROBE_MAX_DELTA * (PROBE_MAX_AGE - t)) / range;
+					const change = Math.abs(bitrate - lastSentBitrate) / lastSentBitrate;
+					shouldSend = change >= threshold;
+				}
+
+				if (shouldSend) {
+					await new Probe(bitrate).encode(stream.writer, this.version);
+					lastSentBitrate = bitrate;
+					lastSentTime = performance.now();
+				}
+			}
+		} catch (err: unknown) {
+			const e = error(err);
+			console.warn(`probe error: ${e.message}`);
+			stream.abort(e);
 		}
 	}
 
