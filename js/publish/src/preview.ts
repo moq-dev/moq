@@ -22,7 +22,7 @@ export class Preview {
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.info = Signal.from(props?.info);
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
 			effect.set(this.catalog, { name: Preview.TRACK });
 		});

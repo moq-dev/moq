@@ -233,10 +233,10 @@ impl Server {
 			let server = self.moq.clone();
 
 			tokio::select! {
-				Some(conn) = quinn_accept => {
+				Some(_conn) = quinn_accept => {
 					#[cfg(feature = "quinn")]
 					self.accept.push(async move {
-						let quinn = super::quinn::QuinnRequest::accept(conn).await?;
+						let quinn = super::quinn::QuinnRequest::accept(_conn).await?;
 						Ok(Request {
 							server,
 							kind: RequestKind::Quinn(quinn),
@@ -253,10 +253,10 @@ impl Server {
 						})
 					}.boxed());
 				}
-				Some(conn) = iroh_accept => {
+				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
 					self.accept.push(async move {
-						let iroh = super::iroh::IrohRequest::accept(conn).await?;
+						let iroh = super::iroh::IrohRequest::accept(_conn).await?;
 						Ok(Request {
 							server,
 							kind: RequestKind::Iroh(iroh),
@@ -270,8 +270,7 @@ impl Server {
 					}
 				}
 				_ = tokio::signal::ctrl_c() => {
-					self.close();
-					tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+					self.close().await;
 					return None;
 				}
 			}
@@ -295,17 +294,22 @@ impl Server {
 		unreachable!("no QUIC backend compiled");
 	}
 
-	pub fn close(&mut self) {
+	pub async fn close(&mut self) {
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_mut() {
 			quinn.close();
-			return;
+			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 		}
 		#[cfg(feature = "quiche")]
 		if let Some(quiche) = self.quiche.as_mut() {
 			quiche.close();
-			return;
+			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 		}
+		#[cfg(feature = "iroh")]
+		if let Some(iroh) = self.iroh.take() {
+			iroh.close().await;
+		}
+		#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
 		unreachable!("no QUIC backend compiled");
 	}
 }

@@ -63,10 +63,10 @@ export class Decoder {
 
 		this.enabled = Signal.from(props?.enabled ?? false);
 
-		this.#signals.effect(this.#runWorklet.bind(this));
-		this.#signals.effect(this.#runEnabled.bind(this));
-		this.#signals.effect(this.#runLatency.bind(this));
-		this.#signals.effect(this.#runDecoder.bind(this));
+		this.#signals.run(this.#runWorklet.bind(this));
+		this.#signals.run(this.#runEnabled.bind(this));
+		this.#signals.run(this.#runLatency.bind(this));
+		this.#signals.run(this.#runDecoder.bind(this));
 	}
 
 	#runWorklet(effect: Effect): void {
@@ -187,7 +187,7 @@ export class Decoder {
 		effect.cleanup(() => consumer.close());
 
 		// Combine network jitter buffer with decode buffer
-		effect.effect((inner) => {
+		effect.run((inner) => {
 			const network = inner.get(consumer.buffered);
 			const decode = inner.get(this.#decodeBuffered);
 			this.#buffered.update(() => mergeBufferedRanges(network, decode));
@@ -239,7 +239,7 @@ export class Decoder {
 
 		// For CMAF, just use decode buffer (no network jitter buffer yet)
 		// TODO: Add CMAF consumer wrapper for latency control
-		effect.effect((inner) => {
+		effect.run((inner) => {
 			const decode = inner.get(this.#decodeBuffered);
 			this.#buffered.update(() => decode);
 		});

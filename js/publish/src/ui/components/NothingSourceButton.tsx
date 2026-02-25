@@ -4,9 +4,9 @@ import usePublishUIContext from "../hooks/use-publish-ui";
 export default function NothingSourceButton() {
 	const context = usePublishUIContext();
 	const onClick = () => {
-		context.moqPublish.source.set(undefined);
-		context.moqPublish.muted.set(true);
-		context.moqPublish.invisible.set(true);
+		context.moqPublish.source = undefined;
+		context.moqPublish.muted = true;
+		context.moqPublish.invisible = true;
 	};
 
 	return (

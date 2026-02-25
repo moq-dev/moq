@@ -23,11 +23,11 @@ export class Preview {
 		this.broadcast = broadcast;
 		this.enabled = Signal.from(props?.enabled ?? false);
 
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			this.#catalog.set(effect.get(catalog)?.preview);
 		});
 
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			const values = effect.getAll([this.enabled, this.broadcast, this.#catalog]);
 			if (!values) return;
 			const [_, broadcast, catalog] = values;

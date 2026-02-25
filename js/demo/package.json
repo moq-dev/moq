@@ -2,7 +2,7 @@
 	"name": "@moq/demo",
 	"private": true,
 	"type": "module",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Media over QUIC - Demo",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",

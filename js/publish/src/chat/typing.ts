@@ -23,7 +23,7 @@ export class Typing {
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.active = new Signal<boolean>(false);
 
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			const enabled = effect.get(this.enabled);
 			if (!enabled) return;
 

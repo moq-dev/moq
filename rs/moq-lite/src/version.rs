@@ -10,7 +10,7 @@ pub(crate) const NEGOTIATED: [Version; 3] = [
 ];
 
 /// ALPN strings for supported versions.
-pub const ALPNS: &[&str] = &[lite::ALPN, ietf::ALPN_14, ietf::ALPN_15, ietf::ALPN_16];
+pub const ALPNS: &[&str] = &[lite::ALPN_03, lite::ALPN, ietf::ALPN_16, ietf::ALPN_15, ietf::ALPN_14];
 
 // A combination of ietf::Version and lite::Version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

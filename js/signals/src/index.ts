@@ -278,6 +278,16 @@ export class Effect {
 
 		if (this.#fn) {
 			this.#fn(this);
+
+			if (
+				DEV &&
+				this.#dispose !== undefined &&
+				this.#unwatch.length === 0 &&
+				this.#dispose.length === 0 &&
+				this.#async.length === 0
+			) {
+				console.warn("Effect did not subscribe to any signals; it will never rerun.", this.#stack);
+			}
 		}
 	}
 
@@ -414,7 +424,7 @@ export class Effect {
 	}
 
 	// Create a nested effect that can be rerun independently.
-	effect(fn: (effect: Effect) => void) {
+	run(fn: (effect: Effect) => void) {
 		if (this.#dispose === undefined) {
 			if (DEV) {
 				console.warn("Effect.nested called when closed, ignoring");
@@ -424,6 +434,11 @@ export class Effect {
 
 		const effect = new Effect(fn);
 		this.#dispose.push(() => effect.close());
+	}
+
+	// Backwards compatibility with the old name.
+	effect(fn: (effect: Effect) => void) {
+		return this.run(fn);
 	}
 
 	// Get the values of multiple signals, returning undefined if any are falsy.
@@ -449,7 +464,7 @@ export class Effect {
 			return;
 		}
 
-		this.effect((effect) => {
+		this.run((effect) => {
 			const value = effect.get(signal);
 			fn(value);
 		});
@@ -531,11 +546,6 @@ export class Effect {
 
 		target.addEventListener(type, listener, options);
 		this.cleanup(() => target.removeEventListener(type, listener, options));
-	}
-
-	// Reschedule the effect to run again.
-	reload() {
-		this.#schedule();
 	}
 
 	// Register a cleanup function.

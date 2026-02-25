@@ -28,7 +28,7 @@ export class Info {
 		this.avatar = Signal.from(props?.avatar);
 		this.color = Signal.from(props?.color);
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
 
 			effect.set(this.catalog, {

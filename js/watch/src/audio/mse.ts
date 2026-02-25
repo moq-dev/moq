@@ -35,8 +35,8 @@ export class Mse implements Backend {
 		this.volume = Signal.from(props?.volume ?? 0.5);
 		this.muted = Signal.from(props?.muted ?? false);
 
-		this.#signals.effect(this.#runMedia.bind(this));
-		this.#signals.effect(this.#runVolume.bind(this));
+		this.#signals.run(this.#runMedia.bind(this));
+		this.#signals.run(this.#runVolume.bind(this));
 	}
 
 	#runMedia(effect: Effect): void {

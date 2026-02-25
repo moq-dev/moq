@@ -58,10 +58,10 @@ export class Decoder implements Backend {
 		this.source = source;
 		this.source.supported.set(supported); // super hacky
 
-		this.#signals.effect(this.#runPending.bind(this));
-		this.#signals.effect(this.#runActive.bind(this));
-		this.#signals.effect(this.#runDisplay.bind(this));
-		this.#signals.effect(this.#runBuffering.bind(this));
+		this.#signals.run(this.#runPending.bind(this));
+		this.#signals.run(this.#runActive.bind(this));
+		this.#signals.run(this.#runDisplay.bind(this));
+		this.#signals.run(this.#runBuffering.bind(this));
 	}
 
 	#runPending(effect: Effect): void {
@@ -83,7 +83,7 @@ export class Decoder implements Backend {
 
 		effect.cleanup(() => pending?.close());
 
-		effect.effect((effect) => {
+		effect.run((effect) => {
 			if (!pending) return;
 
 			const active = effect.get(this.#active);
@@ -200,7 +200,7 @@ class DecoderTrack {
 		this.config = requiredConfig;
 		this.stats = props.stats;
 
-		this.signals.effect(this.#run.bind(this));
+		this.signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect): void {
@@ -268,7 +268,7 @@ class DecoderTrack {
 		effect.cleanup(() => consumer.close());
 
 		// Combine network jitter buffer with decode buffer
-		effect.effect((inner) => {
+		effect.run((inner) => {
 			const network = inner.get(consumer.buffered);
 			const decode = inner.get(this.#buffered);
 			this.buffered.update(() => mergeBufferedRanges(network, decode));
@@ -348,7 +348,7 @@ class DecoderTrack {
 		});
 
 		// Use decode buffer directly (no network jitter buffer for CMAF yet)
-		effect.effect((inner) => {
+		effect.run((inner) => {
 			const decode = inner.get(this.#buffered);
 			this.buffered.update(() => decode);
 		});

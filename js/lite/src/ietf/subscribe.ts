@@ -1,5 +1,6 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { MessageParameters, Parameters } from "./parameters.ts";
@@ -53,8 +54,7 @@ export class Subscribe {
 			await w.u53(0x2); // filter type = LargestObject
 			await w.u53(0); // no parameters
 		} else {
-			const _: never = version;
-			throw new Error(`unsupported version: ${_}`);
+			unreachable(version);
 		}
 	}
 
@@ -119,8 +119,7 @@ export class Subscribe {
 
 			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority });
 		} else {
-			const _: never = version;
-			throw new Error(`unsupported version: ${_}`);
+			unreachable(version);
 		}
 	}
 }
@@ -151,8 +150,7 @@ export class SubscribeOk {
 			await w.bool(false); // content exists = false
 			await w.u53(0); // no parameters
 		} else {
-			const _: never = version;
-			throw new Error(`unsupported version: ${_}`);
+			unreachable(version);
 		}
 	}
 
@@ -188,8 +186,7 @@ export class SubscribeOk {
 
 			await Parameters.decode(r, version); // ignore parameters
 		} else {
-			const _: never = version;
-			throw new Error(`unsupported version: ${_}`);
+			unreachable(version);
 		}
 
 		return new SubscribeOk({ requestId, trackAlias });

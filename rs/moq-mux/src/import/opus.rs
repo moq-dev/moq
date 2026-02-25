@@ -57,7 +57,7 @@ impl Opus {
 		let track = catalog.audio.create_track("opus", config.clone());
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
-		let track = self.broadcast.create_track(track);
+		let track = self.broadcast.create_track(track)?;
 		self.track = Some(track.into());
 
 		Ok(())

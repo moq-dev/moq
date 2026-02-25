@@ -110,7 +110,7 @@ impl Aac {
 		let track = catalog.audio.create_track("aac", config.clone());
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
-		self.track = Some(self.broadcast.create_track(track).into());
+		self.track = Some(self.broadcast.create_track(track)?.into());
 
 		Ok(())
 	}

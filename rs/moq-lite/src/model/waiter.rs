@@ -22,12 +22,14 @@ impl Waiter {
 		list.register(self);
 	}
 
+	/*
 	/// Create a no-op waiter for synchronous polling (won't register)
 	pub fn noop() -> Self {
 		Self {
 			waker: Arc::new(Waker::noop().clone()),
 		}
 	}
+	*/
 }
 
 /// A list of weak wakers waiting for notification

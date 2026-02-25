@@ -2,12 +2,14 @@
 	--color-white: #ffffff;
 	--color-white-alpha-05: rgba(255, 255, 255, 0.05);
 	--color-white-alpha-10: rgba(255, 255, 255, 0.1);
+	--color-white-alpha-15: rgba(255, 255, 255, 0.15);
 	--color-white-alpha-20: rgba(255, 255, 255, 0.2);
 	--color-white-alpha-25: rgba(255, 255, 255, 0.25);
 	--color-white-alpha-30: rgba(255, 255, 255, 0.3);
 	--color-white-alpha-70: rgba(255, 255, 255, 0.7);
 	--color-white-alpha-90: rgba(255, 255, 255, 0.9);
 	--color-gray-100: #9ca3af;
+	--color-gray-950: #1a1a1a;
 	--color-blue-400: #00dfff;
 	--color-blue-500: #52a1ff;
 	--color-blue-900: #1b3243;
@@ -19,6 +21,7 @@
 	--color-yellow-400: #facc15;
 	--color-orange-300: rgb(253, 186, 116);
 	--color-orange-400: #ff9900;
+	--color-orange-450: #fb923c;
 	--color-orange-500: #f97316;
 	--color-orange-900: #4d301b;
 	--color-amber-600: #d97706;
@@ -41,6 +44,7 @@
 	--color-black-alpha-8: rgba(0, 0, 0, 0.08);
 	--color-black-alpha-10: rgba(0, 0, 0, 0.1);
 	--color-black-alpha-60: rgba(0, 0, 0, 0.6);
+	--color-black-alpha-70: rgba(0, 0, 0, 0.7);
 	--color-black-alpha-85: rgba(0, 0, 0, 0.85);
 	--color-black: #000000;
 	--spacing-1: 0.0625rem; /* 1px */
@@ -50,6 +54,7 @@
 	--spacing-12: 0.75rem; /* 12px */
 	--spacing-16: 1rem; /* 16px */
 	--spacing-24: 1.5rem; /* 24px */
+	--spacing-32: 2rem; /* 32px */
 	--spacing-48: 3rem; /* 48px */
 	--border-radius-sm: 0.5rem;
 	--border-radius-md: 0.75rem;

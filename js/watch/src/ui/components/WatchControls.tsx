@@ -8,15 +8,15 @@ import WatchStatusIndicator from "./WatchStatusIndicator";
 
 export default function WatchControls() {
 	return (
-		<div class="watchControlsContainer">
-			<div class="playbackControlsRow flex--align-center">
+		<div class="watch-ui__controls">
+			<div class="watch-ui__playback-controls flex--align-center">
 				<PlayPauseButton />
 				<VolumeSlider />
 				<WatchStatusIndicator />
 				<StatsButton />
 				<FullscreenButton />
 			</div>
-			<div class="latencyControlsRow">
+			<div class="watch-ui__latency-controls">
 				<BufferControl />
 				<QualitySelector />
 			</div>

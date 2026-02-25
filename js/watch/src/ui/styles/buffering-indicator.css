@@ -1,0 +1,30 @@
+.watch-ui__buffering {
+	position: absolute;
+	width: 100%;
+	height: 100%;
+	top: 0;
+	left: 0;
+	z-index: 1;
+	background-color: var(--color-black-alpha-40);
+	backdrop-filter: blur(var(--spacing-2));
+	pointer-events: auto;
+}
+
+.watch-ui__buffering-spinner {
+	width: 2.5rem;
+	height: 2.5rem;
+	border: var(--spacing-4) solid var(--color-white-alpha-20);
+	border-top: var(--spacing-4) solid var(--color-white);
+	border-radius: 50%;
+	animation: buffer-spin 1s linear infinite;
+}
+
+@keyframes buffer-spin {
+	0% {
+		transform: rotate(0deg);
+	}
+
+	100% {
+		transform: rotate(360deg);
+	}
+}

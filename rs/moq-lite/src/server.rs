@@ -44,20 +44,33 @@ impl Server {
 		}
 
 		let (encoding, supported) = match session.protocol() {
-			Some(p) if p == ietf::ALPN_16 => (
+			Some(ietf::ALPN_16) => (
 				Version::Ietf(ietf::Version::Draft16),
 				vec![ietf::Version::Draft16.into()],
 			),
-			Some(p) if p == ietf::ALPN_15 => (
+			Some(ietf::ALPN_15) => (
 				Version::Ietf(ietf::Version::Draft15),
 				vec![ietf::Version::Draft15.into()],
 			),
-			Some(p) if p == ietf::ALPN_14 => (
+			Some(ietf::ALPN_14) => (
 				Version::Ietf(ietf::Version::Draft14),
 				vec![ietf::Version::Draft14.into()],
 			),
-			Some(p) if p == lite::ALPN => (Version::Ietf(ietf::Version::Draft14), NEGOTIATED.to_vec()),
-			None => (Version::Ietf(ietf::Version::Draft14), NEGOTIATED.to_vec()),
+			Some(lite::ALPN_03) => {
+				// Starting with draft-03, there's no more SETUP control stream.
+				lite::start(
+					session.clone(),
+					None,
+					self.publish.clone(),
+					self.consume.clone(),
+					lite::Version::Draft03,
+				)?;
+
+				tracing::debug!(version = ?lite::Version::Draft03, "connected");
+
+				return Ok(Session::new(session));
+			}
+			Some(lite::ALPN) | None => (Version::Ietf(ietf::Version::Draft14), NEGOTIATED.to_vec()),
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
@@ -97,12 +110,11 @@ impl Server {
 				let stream = stream.with_version(version);
 				lite::start(
 					session.clone(),
-					stream,
+					Some(stream),
 					self.publish.clone(),
 					self.consume.clone(),
 					version,
-				)
-				.await?;
+				)?;
 			}
 			Version::Ietf(version) => {
 				// Decode the client's parameters to get their max request ID.
@@ -119,8 +131,7 @@ impl Server {
 					self.publish.clone(),
 					self.consume.clone(),
 					version,
-				)
-				.await?;
+				)?;
 			}
 		};
 

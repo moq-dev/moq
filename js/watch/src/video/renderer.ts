@@ -27,14 +27,14 @@ export class Renderer {
 		this.canvas = Signal.from(props?.canvas);
 		this.paused = Signal.from(props?.paused ?? false);
 
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			const canvas = effect.get(this.canvas);
 			this.#ctx.set(canvas?.getContext("2d") ?? undefined);
 		});
 
-		this.#signals.effect(this.#runEnabled.bind(this));
-		this.#signals.effect(this.#runRender.bind(this));
-		this.#signals.effect(this.#runResize.bind(this));
+		this.#signals.run(this.#runEnabled.bind(this));
+		this.#signals.run(this.#runRender.bind(this));
+		this.#signals.run(this.#runResize.bind(this));
 	}
 
 	#runResize(effect: Effect) {

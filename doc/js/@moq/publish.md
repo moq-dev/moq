@@ -27,7 +27,7 @@ npm add @moq/publish
 
 <moq-publish
     url="https://relay.example.com/anon"
-    path="room/alice"
+    name="room/alice"
     audio video controls>
     <video muted autoplay></video>
 </moq-publish>
@@ -35,7 +35,7 @@ npm add @moq/publish
 
 **Attributes:**
 - `url` (required) — Relay server URL
-- `path` (required) — Broadcast path/name
+- `name` (required) — Broadcast name
 - `device` — "camera" or "screen" (default: "camera")
 - `audio` — Enable audio capture (boolean)
 - `video` — Enable video capture (boolean)
@@ -54,7 +54,7 @@ Import `@moq/publish/ui` for a SolidJS-powered overlay with device selection and
 <moq-publish-ui>
     <moq-publish
         url="https://relay.example.com/anon"
-        path="room/alice"
+        name="room/alice"
         audio video>
         <video muted autoplay></video>
     </moq-publish>

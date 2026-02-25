@@ -23,7 +23,7 @@ export class Message {
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.latest = new Signal<string>("");
 
-		this.#signals.effect((effect) => {
+		this.#signals.run((effect) => {
 			const enabled = effect.get(this.enabled);
 			if (!enabled) return;
 

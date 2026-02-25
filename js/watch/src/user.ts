@@ -18,7 +18,7 @@ export class Info {
 	constructor(catalog: Signal<Catalog.Root | undefined>, props?: Props) {
 		this.enabled = Signal.from(props?.enabled ?? false);
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
 
 			this.#id.set(effect.get(catalog)?.user?.id);

@@ -110,25 +110,18 @@ impl<T> Producer<T> {
 		Ok(ProducerMut::new(state))
 	}
 
-	pub async fn modify_when<F>(&self, mut f: F) -> Result<ProducerMut<'_, T>, Error>
+	pub fn poll_modify<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Error>>
 	where
-		F: Unpin + FnMut(&T) -> bool,
+		F: FnMut(&mut ProducerMut<'_, T>) -> Poll<R>,
 	{
-		waiter_fn(|waiter| self.poll_modify_when(waiter, &mut f)).await
-	}
+		let mut state = self.modify()?;
 
-	pub fn poll_modify_when<F>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<ProducerMut<'_, T>, Error>>
-	where
-		F: FnMut(&T) -> bool,
-	{
-		let mut state = self.state.lock();
-		state.closed.clone()?;
-
-		if f(&state.value) {
-			let state = ProducerMut::new(state);
-			return Poll::Ready(Ok(state));
+		if let Poll::Ready(res) = f(&mut state) {
+			return Poll::Ready(Ok(res));
 		}
 
+		// Re-extract state from producer_state to register
+		let state = state.state.as_mut().unwrap();
 		waiter.register(&mut state.waiters);
 		Poll::Pending
 	}
@@ -197,12 +190,14 @@ impl<T> Producer<T> {
 		self.state.is_clone(&other.state)
 	}
 
+	/*
 	pub(crate) fn weak(&self) -> ProducerWeak<T> {
 		ProducerWeak {
 			state: self.state.clone(),
 			counts: self.counts.clone(),
 		}
 	}
+	*/
 }
 
 impl<T> Clone for Producer<T> {
@@ -239,6 +234,7 @@ impl<T> Drop for Producer<T> {
 	}
 }
 
+/*
 #[derive(Debug)]
 pub(crate) struct ProducerWeak<T> {
 	state: Lock<State<T>>,
@@ -271,6 +267,7 @@ impl<T> Clone for ProducerWeak<T> {
 		}
 	}
 }
+*/
 
 #[derive(Debug)]
 pub struct ProducerMut<'a, T> {
@@ -359,11 +356,13 @@ pub struct Consumer<T> {
 }
 
 impl<T> Consumer<T> {
+	/*
 	pub fn borrow(&self) -> ConsumerRef<'_, T> {
 		ConsumerRef {
 			state: self.state.lock(),
 		}
 	}
+	*/
 
 	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Error>>
 	where
@@ -404,6 +403,24 @@ impl<T> Consumer<T> {
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.is_clone(&other.state)
 	}
+
+	/*
+	pub fn produce(self) -> Result<Producer<T>, Error> {
+		// First check if closed without holding the lock
+		{
+			let state = self.state.lock();
+			state.closed.clone()?;
+
+			// Atomically increment producer count
+			self.counts.producers.fetch_add(1, Ordering::Relaxed);
+		}
+
+		Ok(Producer {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		})
+	}
+	*/
 }
 
 impl<T> Drop for Consumer<T> {

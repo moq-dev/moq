@@ -28,7 +28,7 @@ export class Latency {
 		this.buffer = props.buffer;
 		this.config = props.config;
 
-		this.signals.effect(this.#run.bind(this));
+		this.signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect): void {

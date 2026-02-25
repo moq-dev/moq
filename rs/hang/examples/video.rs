@@ -38,7 +38,7 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 
 // Create a video track with a catalog that describes it.
 // The catalog can contain multiple tracks, used by the viewer to choose the best track.
-fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> moq_lite::TrackProducer {
+fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<moq_lite::TrackProducer> {
 	// Basic information about the video track.
 	let video_track = moq_lite::Track {
 		name: "video".to_string(),
@@ -89,17 +89,19 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> moq_lite::TrackP
 	.produce();
 
 	// Publish the catalog track to the broadcast.
-	broadcast.insert_track(catalog.track.clone());
+	broadcast.insert_track(catalog.track.clone())?;
 
 	// Actually create the media track now.
-	broadcast.create_track(video_track)
+	let track = broadcast.create_track(video_track)?;
+
+	Ok(track)
 }
 
 // Produce a broadcast and publish it to the origin.
 async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin.
 	let mut broadcast = moq_lite::Broadcast::produce();
-	let mut track = create_track(&mut broadcast);
+	let mut track = create_track(&mut broadcast)?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.

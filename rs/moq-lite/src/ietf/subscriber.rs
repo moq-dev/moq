@@ -1,8 +1,8 @@
 use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
-	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
-	TrackProducer,
+	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
+	Track, TrackProducer,
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, MessageParameters, RequestId, Version},
 	model::BroadcastProducer,
@@ -135,7 +135,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let producer = broadcast.clone();
 
 		web_async::spawn(async move {
-			if let Err(err) = this.run_broadcast(path.clone(), producer).await {
+			if let Err(err) = this.run_broadcast(path.clone(), producer.dynamic()).await {
 				tracing::debug!(%err, "error running broadcast");
 			}
 			this.state.lock().broadcasts.remove(&path);
@@ -279,16 +279,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_broadcast(&mut self, path: Path<'_>, mut broadcast: BroadcastProducer) -> Result<(), Error> {
+	async fn run_broadcast(&mut self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
 		// Actually start serving subscriptions.
 		loop {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
 			let track = tokio::select! {
-				_ = broadcast.unused() => break,
 				producer = broadcast.requested_track() => match producer {
-					Some(producer) => producer,
-					None => break,
+					Ok(Some(producer)) => producer,
+					_ => break,
 				},
 				_ = self.session.closed() => break,
 			};
@@ -551,11 +550,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Announce our namespace if we haven't already.
 		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-
-		let exists = broadcast.insert_track(track);
-		if exists {
-			tracing::warn!(track = %msg.track_name, "track already exists, replacing it");
-		}
+		broadcast.insert_track(track)?;
 
 		Ok(())
 	}

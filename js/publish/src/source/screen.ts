@@ -23,7 +23,7 @@ export class Screen {
 		this.video = Signal.from(props?.video);
 		this.audio = Signal.from(props?.audio);
 
-		this.signals.effect(this.#run.bind(this));
+		this.signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect): void {

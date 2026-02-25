@@ -18,7 +18,7 @@ The simplest way to publish:
 
 <moq-publish
     url="https://relay.example.com/anon"
-    path="room/alice"
+    name="room/alice"
     device="camera"
     audio video controls>
     <video muted autoplay></video>
@@ -30,7 +30,7 @@ The simplest way to publish:
 | Attribute | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `url` | string | required | Relay server URL |
-| `path` | string | required | Broadcast path |
+| `name` | string | required | Broadcast name |
 | `device` | string | "camera" | "camera" or "screen" |
 | `audio` | boolean | false | Enable audio |
 | `video` | boolean | false | Enable video |
@@ -255,7 +255,7 @@ import { useEffect, useRef, useState } from "react";
 import "@moq/publish/element";
 import type MoqPublish from "@moq/publish/element";
 
-function Publisher({ url, path }) {
+function Publisher({ url, name }) {
     const publishRef = useRef<MoqPublish>(null);
     const [isPublishing, setIsPublishing] = useState(false);
 
@@ -272,7 +272,7 @@ function Publisher({ url, path }) {
             <moq-publish
                 ref={publishRef}
                 url={url}
-                path={path}
+                name={name}
                 audio video>
                 <video muted autoplay style={{ width: "100%" }} />
             </moq-publish>
@@ -296,7 +296,7 @@ Use `@moq/publish/ui` for the SolidJS UI overlay. The `<moq-publish-ui>` element
 </script>
 
 <moq-publish-ui>
-    <moq-publish url="https://relay.example.com/anon" path="room/alice" audio video>
+    <moq-publish url="https://relay.example.com/anon" name="room/alice" audio video>
         <video muted autoplay></video>
     </moq-publish>
 </moq-publish-ui>
@@ -309,7 +309,7 @@ Include JWT token in the URL:
 ```html
 <moq-publish
     url="https://relay.example.com/room/123?jwt=eyJhbGciOiJIUzI1NiIs..."
-    path="alice"
+    name="alice"
     audio video>
 </moq-publish>
 ```

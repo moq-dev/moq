@@ -35,7 +35,7 @@ export default class MoqWatchSupport extends HTMLElement {
 
 	connectedCallback() {
 		this.#signals = new Effect();
-		this.#signals.effect(this.#render.bind(this));
+		this.#signals.run(this.#render.bind(this));
 	}
 
 	disconnectedCallback() {
@@ -160,7 +160,7 @@ export default class MoqWatchSupport extends HTMLElement {
 			this.#details.update((prev) => !prev);
 		});
 
-		effect.effect((effect) => {
+		effect.run((effect) => {
 			detailsButton.textContent = effect.get(this.#details) ? "Details ➖" : "Details ➕";
 		});
 

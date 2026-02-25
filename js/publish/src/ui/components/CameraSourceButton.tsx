@@ -6,12 +6,12 @@ import MediaSourceSourceSelector from "./MediaSourceSelector";
 export default function CameraSourceButton() {
 	const context = usePublishUIContext();
 	const onClick = () => {
-		if (context.moqPublish.source.peek() === "camera") {
+		if (context.moqPublish.source === "camera") {
 			// Camera already selected, toggle video.
-			context.moqPublish.invisible.update((invisible) => !invisible);
+			context.moqPublish.invisible = !context.moqPublish.invisible;
 		} else {
-			context.moqPublish.source.set("camera");
-			context.moqPublish.invisible.set(false);
+			context.moqPublish.source = "camera";
+			context.moqPublish.invisible = false;
 		}
 	};
 

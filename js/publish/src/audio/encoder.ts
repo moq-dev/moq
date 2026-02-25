@@ -62,10 +62,10 @@ export class Encoder {
 		this.volume = Signal.from(props?.volume ?? 1);
 		this.maxLatency = props?.maxLatency ?? (100 as Time.Milli); // Default is a group every 100ms
 
-		this.#signals.effect(this.#runSource.bind(this));
-		this.#signals.effect(this.#runConfig.bind(this));
-		this.#signals.effect(this.#runGain.bind(this));
-		this.#signals.effect(this.#runCatalog.bind(this));
+		this.#signals.run(this.#runSource.bind(this));
+		this.#signals.run(this.#runConfig.bind(this));
+		this.#signals.run(this.#runGain.bind(this));
+		this.#signals.run(this.#runCatalog.bind(this));
 	}
 
 	#runSource(effect: Effect): void {

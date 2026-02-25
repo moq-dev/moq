@@ -192,7 +192,7 @@ impl Fmp4 {
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
 
-			let track = self.broadcast.create_track(track);
+			let track = self.broadcast.create_track(track)?;
 
 			self.tracks.insert(track_id, Fmp4Track::new(kind, track));
 		}

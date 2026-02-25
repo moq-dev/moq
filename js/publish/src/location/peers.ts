@@ -22,7 +22,7 @@ export class Peers {
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.positions = Signal.from(props?.positions ?? {});
 
-		this.signals.effect((effect) => {
+		this.signals.run((effect) => {
 			const enabled = effect.get(this.enabled);
 			if (!enabled) return;
 

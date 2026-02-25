@@ -22,7 +22,7 @@ export class Root {
 		this.window = new Window(props?.window);
 		this.peers = new Peers(props?.peers);
 
-		this.signals.effect(this.#run.bind(this));
+		this.signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect): void {

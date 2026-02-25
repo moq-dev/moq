@@ -4,7 +4,7 @@ import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { Track } from "../track.ts";
-import { error } from "../util/error.ts";
+import { error, unreachable } from "../util/error.ts";
 import type * as Control from "./control.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
@@ -113,8 +113,7 @@ export class Publisher {
 				});
 				await this.#control.write(errorMsg);
 			} else {
-				const version: never = this.#control.version;
-				throw new Error(`unsupported version: ${version}`);
+				unreachable(this.#control.version);
 			}
 
 			return;

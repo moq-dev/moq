@@ -7,8 +7,8 @@ import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
-import { type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
-import type { Version } from "./version.ts";
+import { encodeSubscribeResponse, type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
+import { Version } from "./version.ts";
 
 /**
  * Handles publishing broadcasts and managing their lifecycle.
@@ -64,7 +64,7 @@ export class Publisher {
 	async runAnnounce(msg: AnnounceInterest, stream: Stream) {
 		console.debug(`announce: prefix=${msg.prefix}`);
 
-		// Send ANNOUNCE_INIT as the first message with all currently active paths
+		// Send initial announcements
 		let active = new Set<Path.Valid>();
 
 		const broadcasts = this.#broadcasts.peek();
@@ -77,8 +77,21 @@ export class Publisher {
 			active.add(suffix);
 		}
 
-		const init = new AnnounceInit([...active]);
-		await init.encode(stream.writer);
+		switch (this.version) {
+			case Version.DRAFT_03:
+				// Draft03: send individual Announce messages for initial state.
+				for (const suffix of active) {
+					const wire = new Announce({ suffix, active: true });
+					await wire.encode(stream.writer, this.version);
+				}
+				break;
+			case Version.DRAFT_01:
+			case Version.DRAFT_02: {
+				const init = new AnnounceInit([...active]);
+				await init.encode(stream.writer, this.version);
+				break;
+			}
+		}
 
 		// Wait for updates to the broadcasts.
 		for (;;) {
@@ -105,15 +118,15 @@ export class Publisher {
 			// Announce any new broadcasts.
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
-				const wire = new Announce(added, true);
-				await wire.encode(stream.writer);
+				const wire = new Announce({ suffix: added, active: true });
+				await wire.encode(stream.writer, this.version);
 			}
 
 			// Announce any removed broadcasts.
 			for (const removed of active.difference(newActive)) {
 				console.debug(`announce: broadcast=${removed} active=false`);
-				const wire = new Announce(removed, false);
-				await wire.encode(stream.writer);
+				const wire = new Announce({ suffix: removed, active: false });
+				await wire.encode(stream.writer, this.version);
 			}
 
 			// NOTE: This is kind of a hack that won't work with a rapid UNANNOUNCE/ANNOUNCE cycle.
@@ -141,15 +154,15 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.track, msg.priority);
 
 		try {
-			const info = new SubscribeOk({ version: this.version, priority: msg.priority });
-			await info.encode(stream.writer);
+			const info = new SubscribeOk({ priority: msg.priority });
+			await encodeSubscribeResponse(stream.writer, { ok: info }, this.version);
 
 			console.debug(`publish ok: broadcast=${msg.broadcast} track=${track.name}`);
 
 			const serving = this.#runTrack(msg.id, msg.broadcast, track, stream.writer);
 
 			for (;;) {
-				const decode = SubscribeUpdate.decodeMaybe(stream.reader);
+				const decode = SubscribeUpdate.decodeMaybe(stream.reader, this.version);
 
 				const result = await Promise.any([serving, decode]);
 				if (!result) break;

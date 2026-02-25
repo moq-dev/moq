@@ -48,9 +48,9 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 	const [publishStatus, setPublishStatus] = createSignal<PublishStatus>("no-url");
 
 	const setFile = (file: File) => {
-		props.moqPublish.source.set(file);
-		props.moqPublish.invisible.set(false);
-		props.moqPublish.muted.set(true);
+		props.moqPublish.source = file;
+		props.moqPublish.invisible = false;
+		props.moqPublish.muted = true;
 	};
 
 	const value: PublishUIContextValue = {
@@ -72,11 +72,11 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 		const publish = props.moqPublish;
 
 		// Initialize with "nothing" active on page load
-		publish.muted.set(true);
-		publish.invisible.set(true);
-		publish.source.set(undefined);
+		publish.muted = true;
+		publish.invisible = true;
+		publish.source = undefined;
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const clearCameraDevices = () => setCameraMediaDevices([]);
 			const video = effect.get(publish.video);
 
@@ -94,7 +94,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			setCameraMediaDevices(devices);
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const clearMicrophoneDevices = () => setMicrophoneMediaDevices([]);
 			const audio = effect.get(publish.audio);
 
@@ -118,21 +118,21 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			setMicrophoneMediaDevices(devices);
 		});
 
-		publish.signals.effect((effect) => {
-			const source = effect.get(publish.source);
-			const muted = effect.get(publish.muted);
-			const invisible = effect.get(publish.invisible);
+		publish.signals.run((effect) => {
+			const source = effect.get(publish.state.source);
+			const muted = effect.get(publish.state.muted);
+			const invisible = effect.get(publish.state.invisible);
 
 			setNothingActive(source === undefined && muted && invisible);
 		});
 
-		publish.signals.effect((effect) => {
-			const audioActive = !effect.get(publish.muted);
+		publish.signals.run((effect) => {
+			const audioActive = !effect.get(publish.state.muted);
 			setMicrophoneActive(audioActive);
 		});
 
-		publish.signals.effect((effect) => {
-			const videoSource = effect.get(publish.source);
+		publish.signals.run((effect) => {
+			const videoSource = effect.get(publish.state.source);
 			const videoActive = effect.get(publish.video);
 
 			if (videoActive && videoSource === "camera") {
@@ -147,7 +147,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			}
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const video = effect.get(publish.video);
 
 			if (!video || !("device" in video)) return;
@@ -156,7 +156,7 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			setSelectedCameraSource(requested);
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const audio = effect.get(publish.audio);
 
 			if (!audio || !("device" in audio)) return;
@@ -165,13 +165,13 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			setSelectedMicrophoneSource(requested);
 		});
 
-		publish.signals.effect((effect) => {
+		publish.signals.run((effect) => {
 			const url = effect.get(publish.connection.url);
 			const status = effect.get(publish.connection.status);
 			const audioSource = effect.get(publish.broadcast.audio.source);
 			const videoSource = effect.get(publish.broadcast.video.source);
-			const muted = effect.get(publish.muted);
-			const invisible = effect.get(publish.invisible);
+			const muted = effect.get(publish.state.muted);
+			const invisible = effect.get(publish.state.invisible);
 
 			const audio = audioSource && !muted;
 			const video = videoSource && !invisible;
@@ -193,8 +193,8 @@ export default function PublishUIContextProvider(props: PublishUIContextProvider
 			}
 		});
 
-		publish.signals.effect((effect) => {
-			const selectedSource = effect.get(publish.source);
+		publish.signals.run((effect) => {
+			const selectedSource = effect.get(publish.state.source);
 			setFileActive(selectedSource instanceof File);
 		});
 	});

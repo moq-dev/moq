@@ -58,9 +58,9 @@ export class Source {
 		this.target = Signal.from(props?.target);
 		this.supported = Signal.from(props?.supported);
 
-		this.#signals.effect(this.#runCatalog.bind(this));
-		this.#signals.effect(this.#runSupported.bind(this));
-		this.#signals.effect(this.#runSelected.bind(this));
+		this.#signals.run(this.#runCatalog.bind(this));
+		this.#signals.run(this.#runSupported.bind(this));
+		this.#signals.run(this.#runSelected.bind(this));
 	}
 
 	#runCatalog(effect: Effect): void {
