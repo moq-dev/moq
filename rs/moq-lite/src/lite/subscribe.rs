@@ -190,12 +190,18 @@ impl Message for SubscribeUpdate {
 		self.max_latency.encode(w, version)?;
 
 		match self.start_group {
-			Some(start_group) => start_group.checked_add(1).ok_or(EncodeError::TooLarge)?.encode(w, version)?,
+			Some(start_group) => start_group
+				.checked_add(1)
+				.ok_or(EncodeError::TooLarge)?
+				.encode(w, version)?,
 			None => 0u64.encode(w, version)?,
 		}
 
 		match self.end_group {
-			Some(end_group) => end_group.checked_add(1).ok_or(EncodeError::TooLarge)?.encode(w, version)?,
+			Some(end_group) => end_group
+				.checked_add(1)
+				.ok_or(EncodeError::TooLarge)?
+				.encode(w, version)?,
 			None => 0u64.encode(w, version)?,
 		}
 
@@ -205,11 +211,20 @@ impl Message for SubscribeUpdate {
 
 /// Indicates that one or more groups have been dropped.
 ///
+/// The range `[start, end]` is inclusive on both ends. For example,
+/// `start = 5, end = 7` means groups 5, 6, and 7 were dropped.
+///
 /// Draft03 only.
 #[derive(Clone, Debug)]
 pub struct SubscribeDrop {
-	pub sequence: u64,
-	pub count: u64,
+	/// The first absolute group sequence in the dropped range.
+	pub start: u64,
+
+	/// The last absolute group sequence in the dropped range (inclusive).
+	pub end: u64,
+
+	/// An application-specific error code. A value of 0 indicates no error;
+	/// the groups are simply unavailable.
 	pub error: u64,
 }
 
@@ -223,8 +238,8 @@ impl Message for SubscribeDrop {
 		}
 
 		Ok(Self {
-			sequence: u64::decode(r, version)?,
-			count: u64::decode(r, version)?,
+			start: u64::decode(r, version)?,
+			end: u64::decode(r, version)?,
 			error: u64::decode(r, version)?,
 		})
 	}
@@ -237,8 +252,8 @@ impl Message for SubscribeDrop {
 			Version::Draft03 => {}
 		}
 
-		self.sequence.encode(w, version)?;
-		self.count.encode(w, version)?;
+		self.start.encode(w, version)?;
+		self.end.encode(w, version)?;
 		self.error.encode(w, version)?;
 
 		Ok(())

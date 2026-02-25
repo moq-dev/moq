@@ -44,7 +44,7 @@ impl Consume {
 
 	pub fn catalog(&mut self, broadcast: Id, mut on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::NotFound)?.clone();
-		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track());
+		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
 		let id = self.catalog_task.insert(channel.0);
@@ -191,7 +191,7 @@ impl Consume {
 		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: 1, // TODO: Remove priority
-		});
+		})?;
 		let track = hang::container::OrderedConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
@@ -230,7 +230,7 @@ impl Consume {
 		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
 			priority: 2, // TODO: Remove priority
-		});
+		})?;
 		let track = hang::container::OrderedConsumer::new(track, latency);
 
 		let channel = oneshot::channel();

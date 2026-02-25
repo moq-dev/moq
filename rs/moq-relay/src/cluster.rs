@@ -319,6 +319,6 @@ impl ClusterRegistration {
 impl Drop for ClusterRegistration {
 	fn drop(&mut self) {
 		tracing::info!(%self.node, "unregistered cluster client");
-		self.broadcast.close();
+		self.broadcast.close(moq_lite::Error::Cancel).ok();
 	}
 }

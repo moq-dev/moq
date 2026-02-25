@@ -38,7 +38,7 @@ impl Publish {
 		let mut broadcast = moq_lite::BroadcastProducer::default();
 
 		let catalog = hang::Catalog::default().produce();
-		broadcast.insert_track(catalog.track.clone());
+		broadcast.insert_track(&catalog.track)?;
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {

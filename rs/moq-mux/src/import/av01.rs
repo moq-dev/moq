@@ -101,7 +101,7 @@ impl Av01 {
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 		drop(catalog);
 
-		let track = self.broadcast.create_track(track);
+		let track = self.broadcast.create_track(track)?;
 
 		self.config = Some(config);
 		self.track = Some(track.into());
@@ -144,7 +144,7 @@ impl Av01 {
 		tracing::debug!(name = ?track.name, "starting track with minimal config");
 		drop(catalog);
 
-		let track = self.broadcast.create_track(track);
+		let track = self.broadcast.create_track(track)?;
 
 		self.config = Some(config);
 		self.track = Some(track.into());
@@ -232,7 +232,7 @@ impl Av01 {
 		let track = catalog.video.create_track("av01", config.clone());
 		drop(catalog);
 
-		let track = self.broadcast.create_track(track);
+		let track = self.broadcast.create_track(track)?;
 		self.config = Some(config);
 		self.track = Some(track.into());
 

@@ -233,10 +233,10 @@ impl Server {
 			let server = self.moq.clone();
 
 			tokio::select! {
-				Some(conn) = quinn_accept => {
+				Some(_conn) = quinn_accept => {
 					#[cfg(feature = "quinn")]
 					self.accept.push(async move {
-						let quinn = super::quinn::QuinnRequest::accept(conn).await?;
+						let quinn = super::quinn::QuinnRequest::accept(_conn).await?;
 						Ok(Request {
 							server,
 							kind: RequestKind::Quinn(quinn),
@@ -253,10 +253,10 @@ impl Server {
 						})
 					}.boxed());
 				}
-				Some(conn) = iroh_accept => {
+				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
 					self.accept.push(async move {
-						let iroh = super::iroh::IrohRequest::accept(conn).await?;
+						let iroh = super::iroh::IrohRequest::accept(_conn).await?;
 						Ok(Request {
 							server,
 							kind: RequestKind::Iroh(iroh),

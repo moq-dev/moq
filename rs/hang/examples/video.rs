@@ -38,7 +38,7 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 
 // Create a video track with a catalog that describes it.
 // The catalog can contain multiple tracks, used by the viewer to choose the best track.
-fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> moq_lite::TrackProducer {
+fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<moq_lite::TrackProducer> {
 	// Basic information about the video track.
 	let video_track = moq_lite::Track {
 		name: "video".to_string(),
@@ -89,24 +89,26 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> moq_lite::TrackP
 	.produce();
 
 	// Publish the catalog track to the broadcast.
-	broadcast.insert_track(catalog.track.clone());
+	broadcast.insert_track(&catalog.track)?;
 
 	// Actually create the media track now.
-	broadcast.create_track(video_track)
+	let track = broadcast.create_track(video_track)?;
+
+	Ok(track)
 }
 
 // Produce a broadcast and publish it to the origin.
 async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin.
 	let mut broadcast = moq_lite::Broadcast::produce();
-	let mut track = create_track(&mut broadcast);
+	let mut track = create_track(&mut broadcast)?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
 	origin.publish_broadcast("", broadcast.consume());
 
 	// Create a new group.
-	let mut group = track.append_group();
+	let mut group = track.append_group()?;
 
 	// Not real frames of course.
 	let frame = hang::container::Frame {
@@ -124,12 +126,12 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 		payload: Bytes::from_static(b"delta NAL data").into(),
 	};
 	frame.encode(&mut group)?;
-	group.close();
+	group.finish()?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
 	// Create a new group for each keyframe.
-	let mut group = track.append_group();
+	let mut group = track.append_group()?;
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(3).unwrap(),
 		keyframe: true,
@@ -140,7 +142,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Sleep before exiting and closing the broadcast.
 	tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-	group.close();
+	group.finish()?;
 
 	Ok(())
 }

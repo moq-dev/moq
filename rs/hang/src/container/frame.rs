@@ -45,12 +45,12 @@ impl Frame {
 
 		let size = header.len() + self.payload.remaining();
 
-		let mut chunked = group.create_frame(size.into());
-		chunked.write_chunk(header.freeze());
+		let mut chunked = group.create_frame(size.into())?;
+		chunked.write_chunk(header.freeze())?;
 		for chunk in &self.payload {
-			chunked.write_chunk(chunk.clone());
+			chunked.write_chunk(chunk.clone())?;
 		}
-		chunked.close();
+		chunked.finish()?;
 
 		Ok(())
 	}
