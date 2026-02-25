@@ -7,8 +7,13 @@ import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
+import { Probe } from "./probe.ts";
 import { encodeSubscribeResponse, type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { Version } from "./version.ts";
+
+const PROBE_MIN_INTERVAL = 100; // ms
+const PROBE_MAX_INTERVAL = 10_000; // ms
+const PROBE_CHANGE_THRESHOLD = 0.25;
 
 /**
  * Handles publishing broadcasts and managing their lifecycle.
@@ -250,6 +255,69 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			group.close(e);
+		}
+	}
+
+	/**
+	 * Handles a probe stream by periodically reporting estimated bitrate.
+	 * @param stream - The probe bidi stream
+	 *
+	 * @internal
+	 */
+	async runProbe(stream: Stream) {
+		// getStats is not yet in the TypeScript WebTransport type definitions.
+		const quic = this.#quic as unknown as { getStats?: () => Promise<{ bytesSent: number }> };
+		if (!quic.getStats) {
+			stream.writer.reset(new Error("stats not supported"));
+			return;
+		}
+
+		let interval = PROBE_MIN_INTERVAL;
+		let lastBitrate: number | undefined;
+		let lastBytesSent: number | undefined;
+		let lastTimestamp: number | undefined;
+
+		try {
+			for (;;) {
+				const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), interval));
+				const result = await Promise.race([timeout, stream.reader.closed]);
+				if (result !== "timeout") break;
+
+				const stats = await quic.getStats();
+				const now = performance.now();
+				const bytesSent = stats.bytesSent;
+
+				if (lastBytesSent !== undefined && lastTimestamp !== undefined) {
+					const elapsed = (now - lastTimestamp) / 1000; // seconds
+					if (elapsed > 0) {
+						const bitrate = Math.round(((bytesSent - lastBytesSent) * 8) / elapsed);
+
+						let changed: boolean;
+						if (lastBitrate !== undefined && lastBitrate > 0) {
+							const change = Math.abs(bitrate - lastBitrate) / lastBitrate;
+							changed = change >= PROBE_CHANGE_THRESHOLD;
+						} else {
+							changed = bitrate > 0 || lastBitrate === undefined;
+						}
+
+						if (changed) {
+							const probe = new Probe(bitrate);
+							await probe.encode(stream.writer, this.version);
+							lastBitrate = bitrate;
+							interval = PROBE_MIN_INTERVAL;
+						} else {
+							interval = Math.min(interval * 2, PROBE_MAX_INTERVAL);
+						}
+					}
+				}
+
+				lastBytesSent = bytesSent;
+				lastTimestamp = now;
+			}
+		} catch (err: unknown) {
+			const e = error(err);
+			console.warn(`probe error: ${e.message}`);
+			stream.abort(e);
 		}
 	}
 

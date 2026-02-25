@@ -26,7 +26,6 @@ pub use group::*;
 pub use info::*;
 pub use message::*;
 pub use parameters::*;
-#[allow(unused_imports)]
 pub use probe::*;
 use publisher::*;
 pub(super) use session::*;
