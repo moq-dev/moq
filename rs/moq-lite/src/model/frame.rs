@@ -54,15 +54,12 @@ struct FrameState {
 	chunks: Vec<Bytes>,
 
 	// The number of bytes remaining to be written.
-	remaining: usize,
+	remaining: u64,
 }
 
 impl FrameState {
 	fn write_chunk(&mut self, chunk: Bytes) -> Result<()> {
-		if chunk.len() > self.remaining {
-			return Err(Error::WrongSize);
-		}
-		self.remaining -= chunk.len();
+		self.remaining = self.remaining.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
 		self.chunks.push(chunk);
 		Ok(())
 	}
@@ -78,6 +75,9 @@ impl FrameState {
 	}
 
 	fn poll_read_chunks(&self, index: usize) -> Poll<Vec<Bytes>> {
+		if index >= self.chunks.len() && self.remaining == 0 {
+			return Poll::Ready(Vec::new());
+		}
 		if self.remaining == 0 {
 			Poll::Ready(self.chunks[index..].to_vec())
 		} else {
@@ -88,6 +88,10 @@ impl FrameState {
 	fn poll_read_all(&self, index: usize) -> Poll<Bytes> {
 		if self.remaining > 0 {
 			return Poll::Pending;
+		}
+
+		if index >= self.chunks.len() {
+			return Poll::Ready(Bytes::new());
 		}
 
 		let chunks = &self.chunks[index..];
@@ -113,7 +117,7 @@ impl FrameProducer {
 	pub fn new(info: Frame) -> Self {
 		let state = FrameState {
 			chunks: Vec::new(),
-			remaining: info.size as usize,
+			remaining: info.size,
 		};
 		Self {
 			info,

@@ -154,7 +154,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let track = tokio::select! {
 				producer = broadcast.requested_track() => match producer {
 					Ok(Some(producer)) => producer,
-					_ => break,
+					Ok(None) => break,
+					Err(err) => {
+						tracing::debug!(%err, "broadcast request error");
+						break;
+					}
 				},
 				_ = self.session.closed() => break,
 			};
@@ -278,7 +282,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut frame = group.create_frame(Frame { size })?;
 
 			if let Err(err) = self.run_frame(stream, &mut frame).await {
-				frame.abort(err.clone())?;
+				let _ = frame.abort(err.clone());
 				return Err(err);
 			}
 

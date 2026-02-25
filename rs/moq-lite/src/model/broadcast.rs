@@ -102,7 +102,7 @@ impl BroadcastProducer {
 	}
 
 	pub fn close(&mut self, err: Error) -> Result<(), Error> {
-		self.state.close(err.clone())?;
+		self.state.close(err)?;
 		Ok(())
 	}
 
@@ -139,7 +139,6 @@ impl BroadcastDynamic {
 
 	fn poll_requested_track(&self, waiter: &Waiter) -> Poll<Result<Option<TrackProducer>, Error>> {
 		self.state.poll_modify(waiter, |state| {
-			// NOTE: This will infinite loop if we access `&mut` without changing the state.
 			if state.requests.is_empty() {
 				return Poll::Pending;
 			}
@@ -197,9 +196,11 @@ impl BroadcastDynamic {
 	}
 }
 
-/// Subscribe to abitrary broadcast/tracks.
+/// Subscribe to arbitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
+	// Uses Producer<State> (not Consumer) because subscribe_track needs to push
+	// requests and update state.producers for dynamic track resolution.
 	state: Producer<State>,
 }
 

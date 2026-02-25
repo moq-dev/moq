@@ -184,7 +184,8 @@ impl TrackProducer {
 
 	/// Return true if the track has been closed or aborted.
 	pub fn is_closed(&self) -> bool {
-		self.state.borrow().fin
+		let state = self.state.borrow();
+		state.is_closed() || state.fin
 	}
 
 	/// Return true if this is the same track.
