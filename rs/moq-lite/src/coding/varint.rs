@@ -7,7 +7,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use super::{Decode, DecodeError, Encode};
+use super::{Decode, DecodeError, Encode, EncodeError};
 
 /// The number is too large to fit in a VarInt (62 bits).
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
@@ -212,7 +212,7 @@ impl<V> Decode<V> for VarInt {
 
 impl<V> Encode<V> for VarInt {
 	/// Encode a varint to the given writer.
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, _: V) {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, _: V) -> Result<(), EncodeError> {
 		if self.0 < (1u64 << 6) {
 			w.put_u8(self.0 as u8);
 		} else if self.0 < (1u64 << 14) {
@@ -222,14 +222,14 @@ impl<V> Encode<V> for VarInt {
 		} else {
 			w.put_u64((0b11 << 62) | self.0);
 		}
+		Ok(())
 	}
 }
 
 impl<V> Encode<V> for u64 {
 	/// Encode a varint to the given writer.
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		// TODO use VarInt everywhere instead of u64
-		let v = VarInt::try_from(*self).expect("u64 too large");
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		let v = VarInt::try_from(*self)?;
 		v.encode(w, version)
 	}
 }
@@ -242,9 +242,8 @@ impl<V> Decode<V> for u64 {
 
 impl<V> Encode<V> for usize {
 	/// Encode a varint to the given writer.
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		// TODO use VarInt everywhere instead of usize
-		let v = VarInt::try_from(*self).expect("usize too large");
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		let v = VarInt::try_from(*self)?;
 		v.encode(w, version)
 	}
 }
@@ -256,7 +255,7 @@ impl<V> Decode<V> for usize {
 }
 
 impl<V> Encode<V> for u32 {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		VarInt::from(*self).encode(w, version)
 	}
 }

@@ -25,7 +25,7 @@ impl Message for Probe {
 		Ok(Self { bitrate })
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {
 				unreachable!("probe not supported for version: {:?}", version);
@@ -33,6 +33,7 @@ impl Message for Probe {
 			Version::Draft03 => {}
 		}
 
-		self.bitrate.encode(w, version);
+		self.bitrate.encode(w, version)?;
+		Ok(())
 	}
 }

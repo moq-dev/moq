@@ -93,9 +93,9 @@ impl Server {
 				let mut parameters = ietf::Parameters::default();
 				parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 				parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-				parameters.encode_bytes(ietf_version)
+				parameters.encode_bytes(ietf_version)?
 			}
-			Version::Lite(_) => lite::Parameters::default().encode_bytes(()),
+			Version::Lite(_) => lite::Parameters::default().encode_bytes(())?,
 		};
 
 		let server = setup::Server {

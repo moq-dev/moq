@@ -32,12 +32,14 @@ impl<V: Clone> Decode<V> for Parameters {
 }
 
 impl<V: Clone> Encode<V> for Parameters {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.0.len().encode(w, version.clone());
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		self.0.len().encode(w, version.clone())?;
 
 		for (kind, value) in self.0.iter() {
-			kind.encode(w, version.clone());
-			value.encode(w, version.clone());
+			kind.encode(w, version.clone())?;
+			value.encode(w, version.clone())?;
 		}
+
+		Ok(())
 	}
 }

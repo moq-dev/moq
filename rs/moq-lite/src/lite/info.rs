@@ -23,12 +23,13 @@ impl Message for SessionInfo {
 		Ok(Self { bitrate })
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {}
 			Version::Draft03 => unreachable!("session info not supported for version: {:?}", version),
 		}
 
-		self.bitrate.unwrap_or(0).encode(w, version);
+		self.bitrate.unwrap_or(0).encode(w, version)?;
+		Ok(())
 	}
 }

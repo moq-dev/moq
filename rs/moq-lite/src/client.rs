@@ -85,7 +85,7 @@ impl Client {
 		let mut parameters = ietf::Parameters::default();
 		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-		let parameters = parameters.encode_bytes(ietf_version);
+		let parameters = parameters.encode_bytes(ietf_version)?;
 
 		let client = setup::Client {
 			versions: supported.clone().into(),

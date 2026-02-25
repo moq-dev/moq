@@ -1,18 +1,23 @@
 use crate::{Path, coding::*};
 
 /// Helper function to encode namespace as tuple of strings
-pub fn encode_namespace<W: bytes::BufMut, V: Clone>(w: &mut W, namespace: &Path, version: V) {
+pub fn encode_namespace<W: bytes::BufMut, V: Clone>(
+	w: &mut W,
+	namespace: &Path,
+	version: V,
+) -> Result<(), EncodeError> {
 	// Split the path by '/' to get individual parts
 	let path_str = namespace.as_str();
 	if path_str.is_empty() {
-		0u64.encode(w, version);
+		0u64.encode(w, version)?;
 	} else {
 		let parts: Vec<&str> = path_str.split('/').collect();
-		(parts.len() as u64).encode(w, version.clone());
+		(parts.len() as u64).encode(w, version.clone())?;
 		for part in parts {
-			part.encode(w, version.clone());
+			part.encode(w, version.clone())?;
 		}
 	}
+	Ok(())
 }
 
 /// Helper function to decode namespace from tuple of strings

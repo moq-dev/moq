@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use crate::{
 	Path,
-	coding::{Decode, DecodeError, Encode},
+	coding::{Decode, DecodeError, Encode, EncodeError},
 	lite::{Message, Version},
 };
 
@@ -40,7 +40,7 @@ impl Message for Fetch<'_> {
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {
 				unreachable!("fetch not supported for version: {:?}", version);
@@ -48,9 +48,10 @@ impl Message for Fetch<'_> {
 			Version::Draft03 => {}
 		}
 
-		self.broadcast.encode(w, version);
-		self.track.encode(w, version);
-		self.priority.encode(w, version);
-		self.group.encode(w, version);
+		self.broadcast.encode(w, version)?;
+		self.track.encode(w, version)?;
+		self.priority.encode(w, version)?;
+		self.group.encode(w, version)?;
+		Ok(())
 	}
 }

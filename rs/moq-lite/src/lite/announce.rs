@@ -38,25 +38,27 @@ impl Message for Announce<'_> {
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match self {
 			Self::Active { suffix, hops } => {
-				AnnounceStatus::Active.encode(w, version);
-				suffix.encode(w, version);
+				AnnounceStatus::Active.encode(w, version)?;
+				suffix.encode(w, version)?;
 				match version {
-					Version::Draft03 => hops.encode(w, version),
+					Version::Draft03 => hops.encode(w, version)?,
 					Version::Draft01 | Version::Draft02 => {}
 				}
 			}
 			Self::Ended { suffix, hops } => {
-				AnnounceStatus::Ended.encode(w, version);
-				suffix.encode(w, version);
+				AnnounceStatus::Ended.encode(w, version)?;
+				suffix.encode(w, version)?;
 				match version {
-					Version::Draft03 => hops.encode(w, version),
+					Version::Draft03 => hops.encode(w, version)?,
 					Version::Draft01 | Version::Draft02 => {}
 				}
 			}
 		}
+
+		Ok(())
 	}
 }
 
@@ -73,8 +75,10 @@ impl Message for AnnouncePlease<'_> {
 		Ok(Self { prefix })
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.prefix.encode(w, version)
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.prefix.encode(w, version)?;
+
+		Ok(())
 	}
 }
 
@@ -94,7 +98,7 @@ impl<V> Decode<V> for AnnounceStatus {
 }
 
 impl<V> Encode<V> for AnnounceStatus {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		(*self as u8).encode(w, version)
 	}
 }
@@ -129,15 +133,17 @@ impl Message for AnnounceInit<'_> {
 		Ok(Self { suffixes: paths })
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {}
 			Version::Draft03 => unreachable!("announce init not supported for version: {:?}", version),
 		}
 
-		(self.suffixes.len() as u64).encode(w, version);
+		(self.suffixes.len() as u64).encode(w, version)?;
 		for path in &self.suffixes {
-			path.encode(w, version);
+			path.encode(w, version)?;
 		}
+
+		Ok(())
 	}
 }

@@ -48,11 +48,12 @@ impl<V> coding::Decode<V> for Version {
 }
 
 impl<V> coding::Encode<V> for Version {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, v: V) {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, v: V) -> Result<(), coding::EncodeError> {
 		match self {
-			Self::Ietf(version) => coding::Version::from(*version).encode(w, v),
-			Self::Lite(version) => coding::Version::from(*version).encode(w, v),
+			Self::Ietf(version) => coding::Version::from(*version).encode(w, v)?,
+			Self::Lite(version) => coding::Version::from(*version).encode(w, v)?,
 		}
+		Ok(())
 	}
 }
 

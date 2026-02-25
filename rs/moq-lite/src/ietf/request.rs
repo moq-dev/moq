@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-	coding::{Decode, DecodeError, Encode},
+	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{Message, MessageParameters, Version},
 };
 
@@ -23,8 +23,9 @@ impl std::fmt::Display for RequestId {
 }
 
 impl<V> Encode<V> for RequestId {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.0.encode(w, version);
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		self.0.encode(w, version)?;
+		Ok(())
 	}
 }
 
@@ -43,8 +44,9 @@ pub struct MaxRequestId {
 impl Message for MaxRequestId {
 	const ID: u64 = 0x15;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -61,8 +63,9 @@ pub struct RequestsBlocked {
 impl Message for RequestsBlocked {
 	const ID: u64 = 0x1a;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -83,9 +86,10 @@ pub struct RequestOk {
 impl Message for RequestOk {
 	const ID: u64 = 0x07;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		self.parameters.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		self.parameters.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -110,13 +114,14 @@ pub struct RequestError<'a> {
 impl Message for RequestError<'_> {
 	const ID: u64 = 0x05;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		self.error_code.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		self.error_code.encode(w, version)?;
 		if version == Version::Draft16 {
-			self.retry_interval.encode(w, version);
+			self.retry_interval.encode(w, version)?;
 		}
-		self.reason_phrase.encode(w, version);
+		self.reason_phrase.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -143,7 +148,7 @@ mod tests {
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version);
+		msg.encode_msg(&mut buf, version).unwrap();
 		buf.to_vec()
 	}
 

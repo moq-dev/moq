@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::fmt::{self, Display};
 
-use crate::coding::{Decode, DecodeError, Encode};
+use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 /// An owned version of [`Path`] with a `'static` lifetime.
 pub type PathOwned = Path<'static>;
@@ -296,8 +296,9 @@ impl<V> Decode<V> for Path<'_> {
 }
 
 impl<V> Encode<V> for Path<'_> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.as_str().encode(w, version)
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		self.as_str().encode(w, version)?;
+		Ok(())
 	}
 }
 

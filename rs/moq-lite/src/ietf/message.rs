@@ -1,4 +1,4 @@
-use crate::coding::{self, DecodeError, Sizer};
+use crate::coding::{self, DecodeError, EncodeError, Sizer};
 use crate::ietf::Version;
 use std::fmt::Debug;
 
@@ -14,21 +14,21 @@ pub trait Message: Sized + Debug {
 	const ID: u64;
 
 	/// Encode this message with a size prefix.
-	fn encode_msg<W: BufMut>(&self, w: &mut W, version: Version);
+	fn encode_msg<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError>;
 
 	/// Decode a size-prefixed message, ensuring exact size consumption.
 	fn decode_msg<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError>;
 }
 
 impl<T: Message> coding::Encode<Version> for T {
-	fn encode<W: BufMut>(&self, w: &mut W, version: Version) {
+	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		// TODO Always encode 2 bytes for the size, then go back and populate it later.
 		// That way we can avoid calculating the size upfront.
 		let mut sizer = Sizer::default();
-		self.encode_msg(&mut sizer, version);
-		let size: u16 = sizer.size.try_into().expect("message too large");
-		size.encode(w, version);
-		self.encode_msg(w, version);
+		self.encode_msg(&mut sizer, version)?;
+		let size: u16 = sizer.size.try_into().map_err(|_| EncodeError::TooLarge)?;
+		size.encode(w, version)?;
+		self.encode_msg(w, version)
 	}
 }
 

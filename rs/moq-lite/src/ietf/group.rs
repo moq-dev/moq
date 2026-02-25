@@ -1,4 +1,4 @@
-use crate::coding::{Decode, DecodeError, Encode};
+use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
@@ -21,8 +21,9 @@ impl GroupOrder {
 }
 
 impl<V> Encode<V> for GroupOrder {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		u8::from(*self).encode(w, version);
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		u8::from(*self).encode(w, version)?;
+		Ok(())
 	}
 }
 
@@ -139,23 +140,24 @@ pub struct GroupHeader {
 }
 
 impl<V: Clone> Encode<V> for GroupHeader {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.flags.encode().encode(w, version.clone());
-		self.track_alias.encode(w, version.clone());
-		self.group_id.encode(w, version.clone());
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		self.flags.encode().encode(w, version.clone())?;
+		self.track_alias.encode(w, version.clone())?;
+		self.group_id.encode(w, version.clone())?;
 
 		if !self.flags.has_subgroup && self.sub_group_id != 0 {
 			panic!("sub_group_id must be 0 if has_subgroup is false");
 		}
 
 		if self.flags.has_subgroup {
-			self.sub_group_id.encode(w, version.clone());
+			self.sub_group_id.encode(w, version.clone())?;
 		}
 
 		// Publisher priority (only if has_priority flag is set)
 		if self.flags.has_priority {
-			self.publisher_priority.encode(w, version);
+			self.publisher_priority.encode(w, version)?;
 		}
+		Ok(())
 	}
 }
 

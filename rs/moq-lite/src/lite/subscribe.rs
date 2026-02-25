@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use crate::{
 	Path,
-	coding::{Decode, DecodeError, Encode, Sizer},
+	coding::{Decode, DecodeError, Encode, EncodeError, Sizer},
 	lite::{Message, Version},
 };
 
@@ -51,21 +51,23 @@ impl Message for Subscribe<'_> {
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.id.encode(w, version);
-		self.broadcast.encode(w, version);
-		self.track.encode(w, version);
-		self.priority.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.id.encode(w, version)?;
+		self.broadcast.encode(w, version)?;
+		self.track.encode(w, version)?;
+		self.priority.encode(w, version)?;
 
 		match version {
 			Version::Draft03 => {
-				(self.ordered as u8).encode(w, version);
-				self.max_latency.encode(w, version);
-				self.start_group.encode(w, version);
-				self.end_group.encode(w, version);
+				(self.ordered as u8).encode(w, version)?;
+				self.max_latency.encode(w, version)?;
+				self.start_group.encode(w, version)?;
+				self.end_group.encode(w, version)?;
 			}
 			Version::Draft01 | Version::Draft02 => {}
 		}
+
+		Ok(())
 	}
 }
 
@@ -79,20 +81,22 @@ pub struct SubscribeOk {
 }
 
 impl Message for SubscribeOk {
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft03 => {
-				self.priority.encode(w, version);
-				(self.ordered as u8).encode(w, version);
-				self.max_latency.encode(w, version);
-				self.start_group.encode(w, version);
-				self.end_group.encode(w, version);
+				self.priority.encode(w, version)?;
+				(self.ordered as u8).encode(w, version)?;
+				self.max_latency.encode(w, version)?;
+				self.start_group.encode(w, version)?;
+				self.end_group.encode(w, version)?;
 			}
 			Version::Draft01 => {
-				self.priority.encode(w, version);
+				self.priority.encode(w, version)?;
 			}
 			Version::Draft02 => {}
 		}
+
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -173,7 +177,7 @@ impl Message for SubscribeUpdate {
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {
 				unreachable!("subscribe update not supported for version: {:?}", version);
@@ -181,19 +185,21 @@ impl Message for SubscribeUpdate {
 			Version::Draft03 => {}
 		}
 
-		self.priority.encode(w, version);
-		(self.ordered as u8).encode(w, version);
-		self.max_latency.encode(w, version);
+		self.priority.encode(w, version)?;
+		(self.ordered as u8).encode(w, version)?;
+		self.max_latency.encode(w, version)?;
 
 		match self.start_group {
-			Some(start_group) => (start_group + 1).encode(w, version),
-			None => 0u64.encode(w, version),
+			Some(start_group) => (start_group + 1).encode(w, version)?,
+			None => 0u64.encode(w, version)?,
 		}
 
 		match self.end_group {
-			Some(end_group) => (end_group + 1).encode(w, version),
-			None => 0u64.encode(w, version),
+			Some(end_group) => (end_group + 1).encode(w, version)?,
+			None => 0u64.encode(w, version)?,
 		}
+
+		Ok(())
 	}
 }
 
@@ -223,7 +229,7 @@ impl Message for SubscribeDrop {
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {
 				unreachable!("subscribe drop not supported for version: {:?}", version);
@@ -231,9 +237,11 @@ impl Message for SubscribeDrop {
 			Version::Draft03 => {}
 		}
 
-		self.sequence.encode(w, version);
-		self.count.encode(w, version);
-		self.error.encode(w, version);
+		self.sequence.encode(w, version)?;
+		self.count.encode(w, version)?;
+		self.error.encode(w, version)?;
+
+		Ok(())
 	}
 }
 
@@ -251,37 +259,39 @@ pub enum SubscribeResponse {
 }
 
 impl Encode<Version> for SubscribeResponse {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft03 => match self {
 				Self::Ok(ok) => {
-					0u64.encode(w, version);
+					0u64.encode(w, version)?;
 					// Write size-prefixed body using Message trait
 					let mut sizer = Sizer::default();
-					Message::encode_msg(ok, &mut sizer, version);
-					sizer.size.encode(w, version);
-					Message::encode_msg(ok, w, version);
+					Message::encode_msg(ok, &mut sizer, version)?;
+					sizer.size.encode(w, version)?;
+					Message::encode_msg(ok, w, version)?;
 				}
 				Self::Drop(drop) => {
-					1u64.encode(w, version);
+					1u64.encode(w, version)?;
 					let mut sizer = Sizer::default();
-					Message::encode_msg(drop, &mut sizer, version);
-					sizer.size.encode(w, version);
-					Message::encode_msg(drop, w, version);
+					Message::encode_msg(drop, &mut sizer, version)?;
+					sizer.size.encode(w, version)?;
+					Message::encode_msg(drop, w, version)?;
 				}
 			},
 			Version::Draft01 | Version::Draft02 => match self {
 				Self::Ok(ok) => {
 					let mut sizer = Sizer::default();
-					Message::encode_msg(ok, &mut sizer, version);
-					sizer.size.encode(w, version);
-					Message::encode_msg(ok, w, version);
+					Message::encode_msg(ok, &mut sizer, version)?;
+					sizer.size.encode(w, version)?;
+					Message::encode_msg(ok, w, version)?;
 				}
 				Self::Drop(_) => {
 					unreachable!("subscribe drop not supported for version: {:?}", version);
 				}
 			},
 		}
+
+		Ok(())
 	}
 }
 

@@ -1,4 +1,4 @@
-use crate::coding::{Decode, DecodeError, Encode};
+use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
@@ -7,9 +7,10 @@ pub struct Location {
 }
 
 impl<V: Clone> Encode<V> for Location {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.group.encode(w, version.clone());
-		self.object.encode(w, version);
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		self.group.encode(w, version.clone())?;
+		self.object.encode(w, version)?;
+		Ok(())
 	}
 }
 

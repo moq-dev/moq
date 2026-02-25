@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use crate::{
 	Path,
-	coding::{Decode, DecodeError, Encode},
+	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
 		GroupOrder, Location, Message, MessageParameters, Parameters, RequestId, Version,
 		namespace::{decode_namespace, encode_namespace},
@@ -29,7 +29,7 @@ pub enum FetchType<'a> {
 }
 
 impl<V: Copy> Encode<V> for FetchType<'_> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		match self {
 			FetchType::Standalone {
 				namespace,
@@ -37,29 +37,30 @@ impl<V: Copy> Encode<V> for FetchType<'_> {
 				start,
 				end,
 			} => {
-				1u8.encode(w, version);
-				encode_namespace(w, namespace, version);
-				track.encode(w, version);
-				start.encode(w, version);
-				end.encode(w, version);
+				1u8.encode(w, version)?;
+				encode_namespace(w, namespace, version)?;
+				track.encode(w, version)?;
+				start.encode(w, version)?;
+				end.encode(w, version)?;
 			}
 			FetchType::RelativeJoining {
 				subscriber_request_id,
 				group_offset,
 			} => {
-				2u8.encode(w, version);
-				subscriber_request_id.encode(w, version);
-				group_offset.encode(w, version);
+				2u8.encode(w, version)?;
+				subscriber_request_id.encode(w, version)?;
+				group_offset.encode(w, version)?;
 			}
 			FetchType::AbsoluteJoining {
 				subscriber_request_id,
 				group_id,
 			} => {
-				3u8.encode(w, version);
-				subscriber_request_id.encode(w, version);
-				group_id.encode(w, version);
+				3u8.encode(w, version)?;
+				subscriber_request_id.encode(w, version)?;
+				group_id.encode(w, version)?;
 			}
 		}
+		Ok(())
 	}
 }
 
@@ -111,25 +112,26 @@ pub struct Fetch<'a> {
 impl Message for Fetch<'_> {
 	const ID: u64 = 0x16;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
 
 		match version {
 			Version::Draft14 => {
-				self.subscriber_priority.encode(w, version);
-				self.group_order.encode(w, version);
-				self.fetch_type.encode(w, version);
-				0u8.encode(w, version); // no parameters
+				self.subscriber_priority.encode(w, version)?;
+				self.group_order.encode(w, version)?;
+				self.fetch_type.encode(w, version)?;
+				0u8.encode(w, version)?; // no parameters
 			}
 			Version::Draft15 | Version::Draft16 => {
 				// v15: request_id, fetch_type, parameters (with subscriber_priority, group_order)
-				self.fetch_type.encode(w, version);
+				self.fetch_type.encode(w, version)?;
 				let mut params = MessageParameters::default();
 				params.set_subscriber_priority(self.subscriber_priority);
 				params.set_group_order(u8::from(self.group_order) as u64);
-				params.encode(w, version);
+				params.encode(w, version)?;
 			}
 		}
+		Ok(())
 	}
 
 	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
@@ -183,25 +185,26 @@ pub struct FetchOk {
 impl Message for FetchOk {
 	const ID: u64 = 0x18;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
 
 		match version {
 			Version::Draft14 => {
-				self.group_order.encode(w, version);
-				self.end_of_track.encode(w, version);
-				self.end_location.encode(w, version);
-				0u8.encode(w, version); // no parameters
+				self.group_order.encode(w, version)?;
+				self.end_of_track.encode(w, version)?;
+				self.end_location.encode(w, version)?;
+				0u8.encode(w, version)?; // no parameters
 			}
 			Version::Draft15 | Version::Draft16 => {
 				// v15: request_id, end_of_track(8), end_location, parameters
-				self.end_of_track.encode(w, version);
-				self.end_location.encode(w, version);
+				self.end_of_track.encode(w, version)?;
+				self.end_location.encode(w, version)?;
 				let mut params = MessageParameters::default();
 				params.set_group_order(u8::from(self.group_order) as u64);
-				params.encode(w, version);
+				params.encode(w, version)?;
 			}
 		}
+		Ok(())
 	}
 
 	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
@@ -255,10 +258,11 @@ pub struct FetchError<'a> {
 impl Message for FetchError<'_> {
 	const ID: u64 = 0x19;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		self.error_code.encode(w, version);
-		self.reason_phrase.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		self.error_code.encode(w, version)?;
+		self.reason_phrase.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
@@ -280,8 +284,9 @@ pub struct FetchCancel {
 impl Message for FetchCancel {
 	const ID: u64 = 0x17;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
@@ -300,8 +305,9 @@ impl FetchHeader {
 }
 
 impl<V> Encode<V> for FetchHeader {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.request_id.encode(w, version);
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		Ok(())
 	}
 }
 
@@ -319,7 +325,7 @@ mod tests {
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version);
+		msg.encode_msg(&mut buf, version).unwrap();
 		buf.to_vec()
 	}
 

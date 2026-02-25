@@ -161,4 +161,14 @@ impl From<coding::BoundsExceeded> for Error {
 	}
 }
 
+impl From<coding::EncodeError> for Error {
+	fn from(err: coding::EncodeError) -> Self {
+		tracing::warn!(%err, "encode error");
+		match err {
+			coding::EncodeError::BoundsExceeded => Error::BoundsExceeded,
+			coding::EncodeError::TooLarge => Error::TooLarge,
+		}
+	}
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

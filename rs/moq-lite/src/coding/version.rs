@@ -27,8 +27,8 @@ impl<V> Decode<V> for Version {
 }
 
 impl<V> Encode<V> for Version {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.0.encode(w, version);
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		self.0.encode(w, version)
 	}
 }
 
@@ -59,12 +59,13 @@ impl<V: Clone> Decode<V> for Versions {
 
 impl<V: Clone> Encode<V> for Versions {
 	/// Encode the version list.
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.0.len().encode(w, version.clone());
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		self.0.len().encode(w, version.clone())?;
 
 		for v in &self.0 {
-			v.encode(w, version.clone());
+			v.encode(w, version.clone())?;
 		}
+		Ok(())
 	}
 }
 
