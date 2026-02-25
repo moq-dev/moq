@@ -40,8 +40,8 @@ moq-lite consists of:
 
 - **Session**: An established QUIC connection between a client and server.
 - **Broadcast**: A collection of Tracks from a single publisher.
-- **Track**: An series of Groups, each of which can be delivered and decoded *out-of-order*.
-- **Group**: An series of Frames, each of which must be delivered and decoded *in-order*.
+- **Track**: A series of Groups, each of which can be delivered and decoded *out-of-order*.
+- **Group**: A series of Frames, each of which must be delivered and decoded *in-order*.
 - **Frame**: A sized payload of bytes within a Group.
 
 The application determines how to split data into broadcast, tracks, groups, and frames.
@@ -108,7 +108,7 @@ The contents are opaque to the moq-lite layer.
 
 # Flow
 This section outlines the flow of messages within a moq-lite session.
-See the section for Messages section for the specific encoding.
+See the Messages section for the specific encoding.
 
 ## Connection
 moq-lite runs on top of WebTransport.
@@ -312,11 +312,11 @@ The version and extensions should be used to support new fields, not the message
 ## STREAM_TYPE
 All streams start with a short header indicating the stream type.
 
-~~~
+```text
 STREAM_TYPE {
   Stream Type (i)
 }
-~~~
+```
 
 The stream ID depends on if it's a bidirectional or unidirectional stream, as indicated in the Streams section.
 A receiver MUST reset the stream if it receives an unknown stream type.
@@ -326,12 +326,12 @@ Unknown stream types MUST NOT be treated as fatal; this enables extension negoti
 ## ANNOUNCE_PLEASE
 A subscriber sends an ANNOUNCE_PLEASE message to indicate it wants to receive an ANNOUNCE message for any broadcasts with a path that starts with the requested prefix.
 
-~~~
+```text
 ANNOUNCE_PLEASE Message {
   Message Length (i)
   Broadcast Path Prefix (s),
 }
-~~~
+```
 
 **Broadcast Path Prefix**:
 Indicate interest for any broadcasts with a path that starts with this prefix.
@@ -348,14 +348,14 @@ Only the suffix is encoded on the wire, as the full path can be constructed by p
 The status is relative to all prior ANNOUNCE messages on the same stream.
 A publisher MUST ONLY alternate between status values (from active to ended or vice versa).
 
-~~~
+```text
 ANNOUNCE Message {
   Message Length (i)
   Announce Status (i),
   Broadcast Path Suffix (s),
   Hops (i),
 }
-~~~
+```
 
 **Announce Status**:
 A flag indicating the announce status.
@@ -375,7 +375,7 @@ A relay SHOULD increment this value when forwarding an announcement.
 ## SUBSCRIBE
 SUBSCRIBE is sent by a subscriber to start a subscription.
 
-~~~
+```text
 SUBSCRIBE Message {
   Message Length (i)
   Subscribe ID (i)
@@ -387,7 +387,7 @@ SUBSCRIBE Message {
   Start Group (i)
   End Group (i)
 }
-~~~
+```
 
 **Subscribe ID**:
 A unique identifier chosen by the subscriber.
@@ -424,7 +424,7 @@ A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
 A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscription.
 The start and end group can be changed in either direction (growing or shrinking).
 
-~~~
+```text
 SUBSCRIBE_UPDATE Message {
   Message Length (i)
   Subscriber Priority (8)
@@ -433,7 +433,7 @@ SUBSCRIBE_UPDATE Message {
   Start Group (i)
   End Group (i)
 }
-~~~
+```
 
 See [SUBSCRIBE](#subscribe) for information about each field.
 
@@ -443,7 +443,7 @@ A SUBSCRIBE_OK message is sent in response to a SUBSCRIBE.
 The publisher MAY send multiple SUBSCRIBE_OK messages to update the subscription.
 The first message on the response stream MUST be a SUBSCRIBE_OK; a SUBSCRIBE_DROP MUST NOT precede it.
 
-~~~
+```text
 SUBSCRIBE_OK Message {
   Type (i) = 0x0
   Message Length (i)
@@ -453,7 +453,7 @@ SUBSCRIBE_OK Message {
   Start Group (i)
   End Group (i)
 }
-~~~
+```
 
 **Type**:
 Set to 0x0 to indicate a SUBSCRIBE_OK message.
@@ -473,7 +473,7 @@ See [SUBSCRIBE](#subscribe) for information about the other fields.
 ## SUBSCRIBE_DROP
 A SUBSCRIBE_DROP message is sent by the publisher on the Subscribe Stream when groups cannot be served.
 
-~~~
+```text
 SUBSCRIBE_DROP Message {
   Type (i) = 0x1
   Message Length (i)
@@ -481,7 +481,7 @@ SUBSCRIBE_DROP Message {
   End Group (i)
   Error Code (i)
 }
-~~~
+```
 
 **Type**:
 Set to 0x1 to indicate a SUBSCRIBE_DROP message.
@@ -499,7 +499,7 @@ A value of 0 indicates no error; the groups are simply unavailable.
 ## FETCH
 FETCH is sent by a subscriber to request a single group from a track.
 
-~~~
+```text
 FETCH Message {
   Message Length (i)
   Broadcast Path (s)
@@ -507,7 +507,7 @@ FETCH Message {
   Subscriber Priority (8)
   Group Sequence (i)
 }
-~~~
+```
 
 **Broadcast Path**:
 The broadcast path of the track to fetch from.
@@ -528,12 +528,12 @@ The publisher FINs the stream after the last frame, or resets on error.
 ## PROBE
 PROBE is used to measure the available bitrate of the connection.
 
-~~~
+```text
 PROBE Message {
   Message Length (i)
   Bitrate (i)
 }
-~~~
+```
 
 **Bitrate**:
 When sent by the subscriber (stream opener): the target bitrate in bits per second that the publisher should pad up to.
@@ -542,13 +542,13 @@ When sent by the publisher (responder): the current measured bitrate in bits per
 ## GROUP
 The GROUP message contains information about a Group, as well as a reference to the subscription being served.
 
-~~~
+```text
 GROUP Message {
   Message Length (i)
   Subscribe ID (i)
   Group Sequence (i)
 }
-~~~
+```
 
 **Subscribe ID**:
 The corresponding Subscribe ID.
@@ -563,12 +563,12 @@ A subscriber MUST handle gaps, potentially caused by congestion.
 ## FRAME
 The FRAME message is a payload within a group.
 
-~~~
+```text
 FRAME Message {
   Message Length (i)
   Payload (b)
 }
-~~~
+```
 
 **Payload**:
 An application specific payload.
@@ -672,5 +672,4 @@ TODO Security
 # IANA Considerations
 
 This document has no IANA actions.
-
 

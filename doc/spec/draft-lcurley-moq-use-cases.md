@@ -9,7 +9,7 @@ However, it's difficult to understand how to use the transport given the layerin
 This document outlines how an application could use MoQ to deliver video, audio, and metadata in a variety of scenarios.
 
 
-# Introduction
+## Introduction
 Media over QUIC is still in the concept phase; a loose collection of ideas and drafts on how to utilize QUIC for live media delivery.
 It's difficult to grasp how to utilize the various layers:
 
@@ -20,7 +20,7 @@ It's difficult to grasp how to utilize the various layers:
 
 This document briefly overviews how live media works and how you could use MoQ to deliver it.
 
-# Video
+## Video
 Video encoding involves complex dependencies between frames/slices.
 The terminology in this section stems from H.264 but is applicable to most modern codecs.
 
@@ -31,7 +31,7 @@ There are three types of frames:
 - **P-Frame**: A frame that depends on previous frames.
 - **B-Frame**: A frame that depends on previous or future frames.
 
-## Group of Pictures
+### Group of Pictures
 A simple application can ignore the complexity of P/B frames and focus on I-Frames.
 This is the optimal approach for many encoding configurations.
 
@@ -53,7 +53,7 @@ A subscriber can choose the Group Order based on the desired user experience:
 A publisher or subscriber can skip the remainder of a Group by resetting a Group Stream or by issuing a SUBSCRIBE_UPDATE.
 A FETCH can be used to recover any partial groups.
 
-## Layers
+### Layers
 An advanced application can subdivide a GoP into layers.
 
 The most comprehensive way to do this is with Scalable Video Coding (SVC).
@@ -78,7 +78,7 @@ It also enables layers to be prioritized within the layer application, for examp
 The application is responsible for determining the relationship between layers, since they're unrelated tracks as MoqTransport is concerned.
 The application could use a catalog to advertise the layers and how to synchronize them, for example based on the Group Sequence.
 
-## Non-Reference Frames
+### Non-Reference Frames
 While not explicitly stated, I believe the complexity in MoqTransport stems almost entirely from a single use-case: the ability to drop individual non-reference frames in the middle of a group.
 
 In theory, transmitting enhancement layers as tracks like mentioned above could introduce head-of-line blocking depending on the encoding.
@@ -88,29 +88,29 @@ And in practice, there's no discernible user impact given the disproportionate s
 The ability to drop individual non-reference frames in the middle of a group is an explicit non-goal for moq-lite.
 
 
-# Audio
+## Audio
 Unlike video, audio is simple and yet has perhaps more potential for optimization.
 
-## Frames
+### Frames
 Audio samples are very small and for the sake of compression, are grouped into a frame.
 This depends on the codec and the sample rate but each frame is typically 10-50ms of audio.
 
 Audio frames are independent, which means they map nicely to moq-lite Groups.
 Each audio frame can be transmitted as a GROUP with a single FRAME.
 
-## Groups
+### Groups
 Audio FRAMEs can also be combined into periodic GROUPs to reduce overhead at the cost of some introducing head-of-line blocking.
 This won't increase latency except under significant congestion as each FRAME is still streamed.
 
 For example, an application could then subscribe to video and audio starting at group X for both tracks, instead of trying to maintain a mapping between the two based on timestamp.
 This is quite common in HLS/DASH as there's no reason to subdivide audio segments at frame boundaries.
 
-## FEC
+### FEC
 Real-time audio applications often use Forward Error Correction (FEC) to conceal packet loss.
 Audio frames are a good candidate for FEC given that they are small and independent.
 
 In an ideal world, FEC would be performed by QUIC based on the properties of the hop.
-However this is not currently not supported and FEC is left to the application.
+However this is not currently supported and FEC is left to the application.
 
 In moq-lite, each FEC packet is transmitted as a separate GROUP with a single FRAME.
 This means using QUIC streams instead of QUIC datagrams to automatically adjust to the viewer's RTT, automatically retransmitting in scenarios where RTT is small.
@@ -118,13 +118,13 @@ Lost packets will be retransmitted unless a real-time subscriber updates the sub
 For example, if group 3 and group 5 are used to reconstruct group 4, then the subscriber can update the subscription to start at group 5, causing group 4 to be skipped.
 
 This round trip of feedback to avoid retransmissions is not ideal but keep in mind that Group Order = DESC will be respected, meaning group 4 won't be (re)transmitted if there's more important data to send.
-This can result in wasted bandwidth versus something like a timeout on the sender, but it does not impact the user experience nor are these unnecessarily retransmittted audio FEC packets large enough to matter.
+This can result in wasted bandwidth versus something like a timeout on the sender, but it does not impact the user experience nor are these unnecessarily retransmitted audio FEC packets large enough to matter.
 
 
-# Metadata
+## Metadata
 There's a number of non-media use cases that can be served by moq-lite.
 
-## Catalog
+### Catalog
 Originally part of the transport itself, the catalog is a list of all tracks within a broadcast.
 It's since been delegated to the application and is now just another track with a well-known name.
 
@@ -136,7 +136,7 @@ In moq-lite, the base and all deltas are a single GROUP.
 The base is the first FRAME and all deltas are subsequent FRAMEs.
 The producer can create a new GROUP to start over, repeating the process.
 
-## Timeline
+### Timeline
 Another track that is commonly pitched is a timeline track.
 This records the presentation timestamp of each Group, giving a VOD viewer to seek to a specific time.
 
@@ -144,7 +144,7 @@ The `timeline` track is a single Group containing a Frame for each timestamp.
 The live nature of the timeline track is great for DVR applications while being concise enough for VOD.
 Timed metadata would use a similar approach or perhaps leverage this track.
 
-## Interaction
+### Interaction
 Another common use-case is to transmit user interactions, such as controller inputs or chat messages.
 It's up to the application to determine the format and encoding of these messages.
 
@@ -153,12 +153,12 @@ The application needs to determine its loss vs latency tolerance, as reordering 
 
 - If you don't want loss, then use a single GROUP with a FRAME per input.
 - If you don't want latency, then use a GROUP per input with a single FRAME.
-- If you want a hybrid, then use form of clustering inputs into GROUPs and FRAMEs based on time.
+- If you want a hybrid, then use a form of clustering inputs into GROUPs and FRAMEs based on time.
 
 A publisher could monitor the session RTT or stream acknowledgements to get a sense of the latency and create Groups accordingly.
 However, this only applies to the first hop and won't be applicable when relays are involved.
 
-# Latency
+## Latency
 One explicit goal of moq-lite is to support multiple latency targets.
 
 This is accomplished by using the same Tracks and Group for all viewers, but slightly changing the behavior based on the subscription.
@@ -168,7 +168,7 @@ This may be done on the fly via SUBSCRIBE_UPDATE, for example if a high-latency 
 The below examples assume one audio and one video track.
 See the next section for more complicated broadcasts.
 
-## Real-Time
+### Real-Time
 Real-time latency is accomplished by prioritizing the most important media during congestion and skipping the rest.
 
 This is slightly different from other media protocols which instead opt to drop packets.
@@ -177,22 +177,22 @@ A subscriber or publisher can reset groups to avoid wasting bandwidth on old dat
 
 A real-time viewer could issue:
 
-~~~
+```text
 SUBSCRIBE track=audio priority=1 order=DESC
 SUBSCRIBE track=video priority=0 order=DESC
-~~~
+```
 
 In this example, audio is higher priority than video, and newer groups are higher priority than older groups.
 Suppose a viewer fell behind after a burst of congestion and has to decide which groups to deliver next.
 This configuration would result in the transmission order:
 
-~~~
+```text
 GROUP track=audio sequence=102
 GROUP track=audio sequence=101
 GROUP track=audio sequence=100
 GROUP track=video sequence=5
 GROUP track=video sequence=4
-~~~
+```
 
 The user experience depends on the amount of congestion:
 
@@ -200,17 +200,17 @@ The user experience depends on the amount of congestion:
 - If there's moderate congestion, the tail of the old video group is dropped.
 - If there's severe congestion, all video will be late/dropped and some audio groups/frames will be dropped.
 
-## Unreliable Live
+### Unreliable Live
 Unreliable live is a term I made up.
 Basically we want low latency, but we don't need it at all costs and we're willing to skip some video to achieve it.
 This is useful for broadcasts where latency is important but so is picture quality.
 
 An unreliable live viewer could issue:
 
-~~~
+```text
 SUBSCRIBE track=audio priority=1 order=ASC
 SUBSCRIBE track=video priority=0 order=DESC
-~~~
+```
 
 This example is different from the real-time one in that audio is reliable and delivered in order.
 Of course this is optional and up to the application, as it will result in buffering during significant congestion.
@@ -220,32 +220,32 @@ Video will be delivered out of order but the player can maintain a jitter buffer
 For example, it could hold onto up to 3s of video frames in memory so it can tolerate an equal amount of congestion.
 If the buffer fills up, the player can STOP_SENDING any old groups and/or update the subscription to skip them.
 
-## Reliable Live
+### Reliable Live
 Reliable live is another term I made up.
 This is when we have a live stream but primarily care about picture quality.
 A good example is a sports game where you want to see every frame.
 
 A reliable live viewer could issue:
 
-~~~
+```text
 SUBSCRIBE track=audio priority=0 order=ASC
 SUBSCRIBE track=video priority=0 order=ASC
-~~~
+```
 
 This will deliver both audio and video in order, and with the same priority.
 The viewer won't miss any content unless the publisher resets a group.
 However, this can result in buffering during congestion and provides a similar user experience to HLS/DASH.
 
-## VOD / DVR
+### VOD / DVR
 Video on Demand (VOD) and Digital Video Recorder (DVR) both involve seeking backwards in a live stream.
 moq-lite can serve this use-case too, don't worry.
 
 A VOD viewer could issue:
 
-~~~
+```text
 SUBSCRIBE track=audio priority=0 order=ASC start=345 end=396
 SUBSCRIBE track=video priority=0 order=ASC start=123 end=134
-~~~
+```
 
 The application is responsible for determining the group sequence numbers based on the desired timestamp.
 This could be done via a `timeline` track or out-of-band.
@@ -260,12 +260,12 @@ It's perfectly valid to specify a `end` in the future and it will behave like re
 Alternatively, a DVR player could prefetch the live playhead by issuing a parallel SUBSCRIBE at a lower priority.
 This would allow playback to immediately continue after clicking the "Go Live" button, canceling or deprioritizing the VOD subscription.
 
-~~~
+```text
 SUBSCRIBE track=video priority=1 order=ASC start=123 end=134
 SUBSCRIBE track=video priority=0 order=DESC
-~~~
+```
 
-## Upstream
+### Upstream
 All of these separate viewers could be watching the same broadcast.
 How is a relay supposed to fetch the content from upstream?
 
@@ -274,24 +274,24 @@ This is the intended behavior for the first hop and dictates which viewers are p
 
 For example, suppose the producer chooses:
 
-~~~
+```text
 INFO track=audio priority=1 order=DESC
 INFO track=video priority=0 order=DESC
-~~~
+```
 
 If Alice is watching a VOD and issues:
 
-~~~
+```text
 SUBSCRIBE track=audio priority=0 order=ASC
 SUBSCRIBE track=video priority=0 order=ASC
-~~~
+```
 
 If Bob is watching real-time and issues:
 
-~~~
+```text
 SUBSCRIBE track=audio priority=1 order=DESC
 SUBSCRIBE track=video priority=0 order=DESC
-~~~
+```
 
 For any congestion on the first mile, then the relay will improve Bob's experience by following the producer's preference.
 However any congestion on the last mile will always use the viewer's preference.
@@ -300,12 +300,12 @@ A relay should use the publisher's priority/order only when there's a conflict.
 If viewers have the same priority/order, then the relay should use the viewer's preference and it can always issue a SUBSCRIBE_UPDATE when this changes.
 
 
-# Broadcast
+## Broadcast
 A broadcast is a collection of tracks from a single producer.
 This usually includes an audio track and/or a video track, but there are reasons to have more than that.
-This is transparent to moq-lite, as the a higher level application is responsible for any grouping between tracks.
+This is transparent to moq-lite, as the higher level application is responsible for any grouping between tracks.
 
-## ABR
+### ABR
 Virtually all mass fan-out use-cases rely on Adaptive Bitrate (ABR) streaming.
 The idea is to encode the same content at multiple bitrates and resolutions, allowing the viewer to choose based on their unique situation.
 
@@ -326,85 +326,84 @@ For example, suppose a viewer is watching the 360p track and wants to switch to 
 
 A real-time or unreliable live viewer could issue:
 
-~~~
+```text
 SUBSCRIBE_UPDATE track=360p  priority=0 order=DESC end=69
 SUBSCRIBE        track=1080p priority=1 order=DESC start=69
-~~~
+```
 
 A reliable live or VOD viewer could issue:
 
-~~~
+```text
 SUBSCRIBE_UPDATE track=360p  priority=1 order=ASC end=69
 SUBSCRIBE        track=1080p priority=0 order=ASC start=69
-~~~
+```
 
 The difference between them is whether to prioritize the old track or the new track.
 In both scenarios, the subscription will seamlessly switch at group 69 even if it's seconds in the future.
 The same behavior can be used to switch down.
 
-## SVC
+### SVC
 We touched on SVC before, but it's worth mentioning as an alternative to ABR.
 I want to see it used more often but I doubt it will be.
 
 Instead of choosing the track based on the bitrate, the viewer subscribes to them all:
 
-~~~
+```text
 SUBSCRIBE track=360p  priority=2 order=DESC
 SUBSCRIBE track=1080p priority=1 order=DESC
 SUBSCRIBE track=4k    priority=0 order=DESC
-~~~
+```
 
 During congestion, the 4k enhancement layer will be deprioritized followed by the 1080p enhancement layer.
 This is a more efficient use of bandwidth than ABR, but it requires more complex encoding.
 
 
-# Conferences
+## Conferences
 Some applications involve multiple producers, such as a conference calls or a live events.
 Even though these are separate broadcasts from potentially separate origins, moq-lite can still serve them over the same session.
 
-## Discovery
+### Discovery
 The first step to joining a conference is to discover the available tracks.
 
 That's where `ANNOUNCE` comes in.
 The subscriber indicates interest in any tracks that start with a prefix, such as `["meeting", "1234"]`.
 As new participants join, new tracks are announced, and the subscriber can choose to subscribe to them.
 
-## Participants
+### Participants
 Extending the idea that audio is more important than video, we can prioritize tracks regardless of the source.
 This works because `SUBSCRIBE priority` is scoped to the session and not the broadcast.
 
-~~~
+```text
 SUBSCRIBE track=[alice, audio] priority=3
 SUBSCRIBE track=[frank, audio] priority=3
 SUBSCRIBE track=[alice, video] priority=1
 SUBSCRIBE track=[frank, video] priority=1
-~~~
+```
 
 When Alice starts talking or is focused, we can actually issue a SUBSCRIBE_UPDATE to increase her priority:
 
-~~~
+```text
 SUBSCRIBE_UPDATE track=[alice, audio] priority=2
 SUBSCRIBE_UPDATE track=[frank, video] priority=0
-~~~
+```
 
 Note that audio is still more important than video, but Alice is now more important than Frank. (poor Frank)
 
 This concept can further be extended to work with SVC or ABR:
 
-~~~
+```text
 SUBSCRIBE track=[alice, 360p] priority=4
 SUBSCRIBE track=[frank, 360p] priority=3
 SUBSCRIBE track=[alice, 720p] priority=2
 SUBSCRIBE track=[frank, 720p] priority=1
-~~~
+```
 
 
-# Security Considerations
+## Security Considerations
 TODO Security
 
 
-# IANA Considerations
+## IANA Considerations
 
 This document has no IANA actions.
-
 
