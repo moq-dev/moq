@@ -202,8 +202,8 @@ impl Message for SubscribeUpdate {
 /// Draft03 only.
 #[derive(Clone, Debug)]
 pub struct SubscribeDrop {
-	pub sequence: u64,
-	pub count: u64,
+	pub start: u64,
+	pub end: u64,
 	pub error: u64,
 }
 
@@ -217,8 +217,8 @@ impl Message for SubscribeDrop {
 		}
 
 		Ok(Self {
-			sequence: u64::decode(r, version)?,
-			count: u64::decode(r, version)?,
+			start: u64::decode(r, version)?,
+			end: u64::decode(r, version)?,
 			error: u64::decode(r, version)?,
 		})
 	}
@@ -231,8 +231,8 @@ impl Message for SubscribeDrop {
 			Version::Draft03 => {}
 		}
 
-		self.sequence.encode(w, version);
-		self.count.encode(w, version);
+		self.start.encode(w, version);
+		self.end.encode(w, version);
 		self.error.encode(w, version);
 	}
 }
