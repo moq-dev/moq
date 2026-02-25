@@ -201,7 +201,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut state = self.state.lock();
 
 		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
-			let _ = track.producer.abort(Error::Cancel);
+			let _ = track.producer.close(Error::Cancel);
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -221,7 +221,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut state = self.state.lock();
 
 		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
-			let _ = track.producer.abort(Error::Cancel);
+			let _ = track.producer.close(Error::Cancel);
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -340,7 +340,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let _ = track.unused().await;
 		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
 
-		let _ = track.abort(Error::Cancel);
+		let _ = track.close(Error::Cancel);
 
 		Ok(())
 	}
@@ -379,11 +379,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match res {
 			Err(Error::Cancel) => {
 				tracing::trace!(group = %producer.info.sequence, "group cancelled");
-				let _ = producer.abort(Error::Cancel);
+				let _ = producer.close(Error::Cancel);
 			}
 			Err(err) => {
 				tracing::debug!(%err, group = %producer.info.sequence, "group error");
-				let _ = producer.abort(err);
+				let _ = producer.close(err);
 			}
 			_ => {
 				tracing::trace!(group = %producer.info.sequence, "group complete");
@@ -434,7 +434,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				};
 
 				if let Err(err) = res {
-					let _ = frame.abort(err.clone());
+					let _ = frame.close(err.clone());
 					return Err(err);
 				}
 
@@ -550,7 +550,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Announce our namespace if we haven't already.
 		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-		broadcast.insert_track(track)?;
+		broadcast.insert_track(&track)?;
 
 		Ok(())
 	}

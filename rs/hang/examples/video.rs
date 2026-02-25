@@ -89,7 +89,7 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<m
 	.produce();
 
 	// Publish the catalog track to the broadcast.
-	broadcast.insert_track(catalog.track.clone())?;
+	broadcast.insert_track(&catalog.track)?;
 
 	// Actually create the media track now.
 	let track = broadcast.create_track(video_track)?;

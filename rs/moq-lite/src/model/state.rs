@@ -194,6 +194,13 @@ impl<T> Producer<T> {
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.is_clone(&other.state)
 	}
+
+	pub fn weak(&self) -> Weak<T> {
+		Weak {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		}
+	}
 }
 
 impl<T> Clone for Producer<T> {
@@ -227,6 +234,76 @@ impl<T> Drop for Producer<T> {
 		};
 
 		waiters.wake();
+	}
+}
+
+/// A weak reference to a Producer/Consumer state.
+///
+/// Does not affect ref counts, so it won't prevent auto-close when all Producers are dropped.
+/// Can be upgraded to a full Producer or Consumer.
+#[derive(Debug)]
+pub struct Weak<T> {
+	state: Lock<State<T>>,
+	counts: Arc<Counts>,
+}
+
+impl<T> Weak<T> {
+	pub fn produce(&self) -> Result<Producer<T>, Error> {
+		{
+			let state = self.state.lock();
+			state.closed.clone()?;
+		}
+
+		self.counts.producers.fetch_add(1, Ordering::Relaxed);
+
+		Ok(Producer {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		})
+	}
+
+	pub fn consume(&self) -> Consumer<T> {
+		self.counts.consumers.fetch_add(1, Ordering::Relaxed);
+
+		Consumer {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		}
+	}
+
+	pub fn is_closed(&self) -> bool {
+		self.state.lock().closed.is_err()
+	}
+
+	pub async fn unused(&self) -> Result<(), Error> {
+		waiter_fn(move |waiter| self.poll_unused(waiter)).await
+	}
+
+	fn poll_unused(&self, waiter: &Waiter) -> Poll<Result<(), Error>> {
+		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
+			return Poll::Ready(Ok(()));
+		}
+
+		let mut state = self.state.lock();
+		if let Err(err) = state.closed.clone() {
+			return Poll::Ready(Err(err));
+		}
+
+		waiter.register(&mut state.waiters);
+		Poll::Pending
+	}
+
+	pub fn is_clone(&self, other: &Self) -> bool {
+		self.state.is_clone(&other.state)
+	}
+}
+
+impl<T> Clone for Weak<T> {
+	fn clone(&self) -> Self {
+		Self {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		}
 	}
 }
 
@@ -355,6 +432,21 @@ impl<T> Consumer<T> {
 
 	pub async fn closed(&self) -> Error {
 		waiter_fn(move |waiter| self.poll_closed(waiter)).await
+	}
+
+	/// Upgrade to a Producer, failing if the state is already closed.
+	pub fn produce(&self) -> Result<Producer<T>, Error> {
+		{
+			let state = self.state.lock();
+			state.closed.clone()?;
+		}
+
+		self.counts.producers.fetch_add(1, Ordering::Relaxed);
+
+		Ok(Producer {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		})
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {

@@ -14,7 +14,7 @@
 
 use crate::{Error, Result};
 
-use super::state::{Consumer, Producer};
+use super::state::{Consumer, Producer, Weak};
 use super::waiter::waiter_fn;
 use super::{Group, GroupConsumer, GroupProducer};
 
@@ -105,7 +105,7 @@ impl TrackProducer {
 		let group = info.produce();
 
 		let mut state = self.state.modify()?;
-		if state.fin {
+		if state.fin && state.max_sequence.unwrap_or(0) >= group.info.sequence {
 			return Err(Error::Closed);
 		}
 
@@ -144,7 +144,9 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Mark the end of the track.
+	/// Mark the last group of the track.
+	///
+	/// NOTE: The track is not closed yet; old groups can still arrive.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = self.state.modify()?;
 		state.fin = true;
@@ -152,13 +154,13 @@ impl TrackProducer {
 	}
 
 	/// Abort the track with the given error.
-	pub fn abort(&mut self, err: Error) -> Result<()> {
+	pub fn close(&mut self, err: Error) -> Result<()> {
 		let mut state = self.state.modify()?;
 
 		// Abort all groups still in progress.
 		for group in state.groups.iter_mut() {
 			// Ignore errors, we don't care if the group was already closed.
-			group.abort(err.clone()).ok();
+			group.close(err.clone()).ok();
 		}
 
 		state.close(err);
@@ -182,15 +184,22 @@ impl TrackProducer {
 		self.state.unused().await
 	}
 
-	/// Return true if the track has been closed or aborted.
+	/// Return true if the track has been closed.
 	pub fn is_closed(&self) -> bool {
-		let state = self.state.borrow();
-		state.is_closed() || state.fin
+		self.state.borrow().is_closed()
 	}
 
 	/// Return true if this is the same track.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.is_clone(&other.state)
+	}
+
+	/// Create a weak reference that doesn't prevent auto-close.
+	pub(crate) fn weak(&self) -> TrackWeak {
+		TrackWeak {
+			info: self.info.clone(),
+			state: self.state.weak(),
+		}
 	}
 }
 
@@ -206,6 +215,36 @@ impl Clone for TrackProducer {
 impl From<Track> for TrackProducer {
 	fn from(info: Track) -> Self {
 		TrackProducer::new(info)
+	}
+}
+
+/// A weak reference to a track that doesn't prevent auto-close.
+#[derive(Clone)]
+pub(crate) struct TrackWeak {
+	pub info: Track,
+	state: Weak<State>,
+}
+
+impl TrackWeak {
+	pub fn is_closed(&self) -> bool {
+		self.state.is_closed()
+	}
+
+	pub fn consume(&self) -> TrackConsumer {
+		let consumer = self.state.consume();
+		TrackConsumer {
+			info: self.info.clone(),
+			state: consumer,
+			index: 0,
+		}
+	}
+
+	pub async fn unused(&self) -> crate::Result<()> {
+		self.state.unused().await
+	}
+
+	pub fn is_clone(&self, other: &Self) -> bool {
+		self.state.is_clone(&other.state)
 	}
 }
 

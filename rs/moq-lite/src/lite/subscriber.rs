@@ -198,11 +198,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match res {
 			Err(Error::Cancel) => {
 				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe cancelled");
-				let _ = track.abort(Error::Cancel);
+				let _ = track.close(Error::Cancel);
 			}
 			Err(err) => {
 				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, %err, "subscribe error");
-				let _ = track.abort(err);
+				let _ = track.close(err);
 			}
 			_ => {
 				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe complete");
@@ -258,11 +258,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match self.run_group(stream, &mut group).await {
 			Err(Error::Cancel) => {
 				tracing::trace!(group = %group.info.sequence, "group cancelled");
-				let _ = group.abort(Error::Cancel);
+				let _ = group.close(Error::Cancel);
 			}
 			Err(err) => {
 				tracing::debug!(%err, group = %group.info.sequence, "group error");
-				let _ = group.abort(err);
+				let _ = group.close(err);
 			}
 			_ => {
 				tracing::trace!(group = %group.info.sequence, "group complete");
@@ -282,7 +282,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut frame = group.create_frame(Frame { size })?;
 
 			if let Err(err) = self.run_frame(stream, &mut frame).await {
-				let _ = frame.abort(err.clone());
+				let _ = frame.close(err.clone());
 				return Err(err);
 			}
 

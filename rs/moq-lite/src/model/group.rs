@@ -139,13 +139,16 @@ impl GroupProducer {
 		Ok(())
 	}
 
-	pub fn abort(&mut self, err: Error) -> Result<()> {
+	/// Close the group with the given error.
+	///
+	/// No updates can be made after this point.
+	pub fn close(&mut self, err: Error) -> Result<()> {
 		let mut state = self.state.modify()?;
 
 		// Abort all frames still in progress.
 		for frame in state.frames.iter_mut() {
 			// Ignore errors, we don't care if the frame was already closed.
-			frame.abort(err.clone()).ok();
+			frame.close(err.clone()).ok();
 		}
 
 		state.close(err);

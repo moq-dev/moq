@@ -140,7 +140,7 @@ impl FrameProducer {
 		Ok(())
 	}
 
-	pub fn abort(&mut self, err: Error) -> Result<()> {
+	pub fn close(&mut self, err: Error) -> Result<()> {
 		self.state.close(err)
 	}
 
