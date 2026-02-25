@@ -9,15 +9,9 @@ use super::BoundsExceeded;
 #[non_exhaustive]
 pub enum EncodeError {
 	#[error("bounds exceeded")]
-	BoundsExceeded,
+	BoundsExceeded(#[from] BoundsExceeded),
 	#[error("too large")]
 	TooLarge,
-}
-
-impl From<BoundsExceeded> for EncodeError {
-	fn from(_: BoundsExceeded) -> Self {
-		Self::BoundsExceeded
-	}
 }
 
 /// Write the value to the buffer using the given version.
@@ -133,7 +127,7 @@ impl<V> Encode<V> for Option<u64> {
 
 impl<V> Encode<V> for std::time::Duration {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		let ms = u64::try_from(self.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?;
+		let ms = u64::try_from(self.as_millis()).map_err(|_| BoundsExceeded)?;
 		ms.encode(w, version)
 	}
 }

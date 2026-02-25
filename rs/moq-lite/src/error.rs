@@ -165,7 +165,7 @@ impl From<coding::EncodeError> for Error {
 	fn from(err: coding::EncodeError) -> Self {
 		tracing::warn!(%err, "encode error");
 		match err {
-			coding::EncodeError::BoundsExceeded => Error::BoundsExceeded,
+			coding::EncodeError::BoundsExceeded(_) => Error::BoundsExceeded,
 			coding::EncodeError::TooLarge => Error::TooLarge,
 		}
 	}
