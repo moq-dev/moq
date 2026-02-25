@@ -4,9 +4,7 @@ description: A simple, WebCodecs-based media format utilizing MoQ.
 ---
 
 # hang
-A simple, WebCodecs-based media format utilizing MoQ.
-
-See the draft: [draft-lcurley-moq-hang](https://www.ietf.org/archive/id/draft-lcurley-moq-hang-01.html).
+A simple, WebCodecs-based media format utilizing MoQ. See the [specification](/spec/draft-lcurley-moq-hang) for wire-level details.
 
 ## Catalog
 `catalog.json` is a special track that contains a JSON description of available tracks.

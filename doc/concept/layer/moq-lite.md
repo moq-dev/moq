@@ -4,7 +4,7 @@ description: A fraction of the calories with none of the fat.
 ---
 
 # moq-lite
-[moq-lite](https://www.ietf.org/archive/id/draft-lcurley-moq-lite-02.html) is a subset of the [MoqTransport](/concept/standard/moq-transport) specification.
+[moq-lite](/spec/draft-lcurley-moq-lite) is a subset of the [MoqTransport](/concept/standard/moq-transport) specification. See the [specification](/spec/draft-lcurley-moq-lite) for wire-level details.
 The goal is to keep the core transport layer simple and focused on practical use-cases.
 
 There's too much fringe functionality in the MoqTransport draft that's not practical to implement.
