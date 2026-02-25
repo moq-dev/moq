@@ -199,11 +199,20 @@ impl Message for SubscribeUpdate {
 
 /// Indicates that one or more groups have been dropped.
 ///
+/// The range `[start, end]` is inclusive on both ends. For example,
+/// `start = 5, end = 7` means groups 5, 6, and 7 were dropped.
+///
 /// Draft03 only.
 #[derive(Clone, Debug)]
 pub struct SubscribeDrop {
+	/// The first absolute group sequence in the dropped range.
 	pub start: u64,
+
+	/// The last absolute group sequence in the dropped range (inclusive).
 	pub end: u64,
+
+	/// An application-specific error code. A value of 0 indicates no error;
+	/// the groups are simply unavailable.
 	pub error: u64,
 }
 
