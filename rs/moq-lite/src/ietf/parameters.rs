@@ -336,11 +336,12 @@ impl MessageParameters {
 		Some(super::Location { group, object })
 	}
 
-	pub fn set_largest_object(&mut self, loc: &super::Location) {
+	pub fn set_largest_object(&mut self, loc: &super::Location) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
-		loc.group.encode(&mut buf, ()).unwrap();
-		loc.object.encode(&mut buf, ()).unwrap();
+		loc.group.encode(&mut buf, ())?;
+		loc.object.encode(&mut buf, ())?;
 		self.bytes.insert(Self::LARGEST_OBJECT, buf);
+		Ok(())
 	}
 
 	/// Get subscription filter (encoded as filter_type varint [+ filter data])

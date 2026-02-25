@@ -146,7 +146,7 @@ impl<V: Clone> Encode<V> for GroupHeader {
 		self.group_id.encode(w, version.clone())?;
 
 		if !self.flags.has_subgroup && self.sub_group_id != 0 {
-			panic!("sub_group_id must be 0 if has_subgroup is false");
+			return Err(EncodeError::InvalidState);
 		}
 
 		if self.flags.has_subgroup {

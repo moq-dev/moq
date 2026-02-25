@@ -190,12 +190,12 @@ impl Message for SubscribeUpdate {
 		self.max_latency.encode(w, version)?;
 
 		match self.start_group {
-			Some(start_group) => (start_group + 1).encode(w, version)?,
+			Some(start_group) => start_group.checked_add(1).ok_or(EncodeError::TooLarge)?.encode(w, version)?,
 			None => 0u64.encode(w, version)?,
 		}
 
 		match self.end_group {
-			Some(end_group) => (end_group + 1).encode(w, version)?,
+			Some(end_group) => end_group.checked_add(1).ok_or(EncodeError::TooLarge)?.encode(w, version)?,
 			None => 0u64.encode(w, version)?,
 		}
 

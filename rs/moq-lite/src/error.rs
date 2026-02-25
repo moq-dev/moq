@@ -65,8 +65,8 @@ pub enum Error {
 	#[error("unsupported")]
 	Unsupported,
 
-	#[error("too large")]
-	TooLarge,
+	#[error("encode error")]
+	Encode,
 
 	#[error("too many parameters")]
 	TooManyParameters,
@@ -98,7 +98,7 @@ impl Error {
 			Self::ProtocolViolation => 15,
 			Self::UnexpectedMessage => 16,
 			Self::Unsupported => 17,
-			Self::TooLarge => 18,
+			Self::Encode => 18,
 			Self::TooManyParameters => 19,
 			Self::InvalidRole => 20,
 			Self::UnknownAlpn(_) => 21,
@@ -125,7 +125,7 @@ impl Error {
 			15 => Self::ProtocolViolation,
 			16 => Self::UnexpectedMessage,
 			17 => Self::Unsupported,
-			18 => Self::TooLarge,
+			18 => Self::Encode,
 			19 => Self::TooManyParameters,
 			20 => Self::InvalidRole,
 			code if code >= 64 => match u16::try_from(code - 64) {
@@ -164,11 +164,7 @@ impl From<coding::BoundsExceeded> for Error {
 impl From<coding::EncodeError> for Error {
 	fn from(err: coding::EncodeError) -> Self {
 		tracing::warn!(%err, "encode error");
-		match err {
-			coding::EncodeError::BoundsExceeded(_) => Error::BoundsExceeded,
-			coding::EncodeError::TooLarge => Error::TooLarge,
-			coding::EncodeError::Short => Error::TooLarge,
-		}
+		Error::Encode
 	}
 }
 

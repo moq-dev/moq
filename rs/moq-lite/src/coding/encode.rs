@@ -14,6 +14,8 @@ pub enum EncodeError {
 	TooLarge,
 	#[error("short buffer")]
 	Short,
+	#[error("invalid state")]
+	InvalidState,
 }
 
 /// Check that the writer has enough remaining capacity.
@@ -135,7 +137,7 @@ impl<V> Encode<V> for Cow<'_, str> {
 impl<V> Encode<V> for Option<u64> {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		match self {
-			Some(value) => (value + 1).encode(w, version),
+			Some(value) => value.checked_add(1).ok_or(EncodeError::TooLarge)?.encode(w, version),
 			None => 0u64.encode(w, version),
 		}
 	}

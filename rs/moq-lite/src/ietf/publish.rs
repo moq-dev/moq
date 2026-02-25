@@ -189,7 +189,7 @@ impl Message for Publish<'_> {
 				let mut params = MessageParameters::default();
 				params.set_group_order(u8::from(self.group_order) as u64);
 				if let Some(location) = &self.largest_location {
-					params.set_largest_object(location);
+					params.set_largest_object(location)?;
 				}
 				params.set_forward(self.forward);
 				params.encode(w, version)?;
