@@ -127,7 +127,7 @@ impl<V> Encode<V> for Option<u64> {
 
 impl<V> Encode<V> for std::time::Duration {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		let ms = u64::try_from(self.as_millis()).map_err(|_| BoundsExceeded)?;
+		let ms = super::VarInt::try_from(self.as_millis())?;
 		ms.encode(w, version)
 	}
 }
