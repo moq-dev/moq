@@ -77,8 +77,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	async fn run_probe(session: &S, stream: &mut Stream<S, Version>, _version: Version) -> Result<(), Error> {
-		let mut last_bitrate: Option<u64> = None;
-		let mut interval = tokio::time::interval(Duration::from_millis(100));
+		const PROBE_INTERVAL: Duration = Duration::from_millis(100);
+		const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
+		const PROBE_MAX_DELTA: f64 = 0.25;
+
+		let mut last_sent: Option<(u64, tokio::time::Instant)> = None;
+		let mut interval = tokio::time::interval(PROBE_INTERVAL);
 
 		loop {
 			tokio::select! {
@@ -90,20 +94,22 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				continue;
 			};
 
-			let changed = match last_bitrate {
-				Some(prev) if prev > 0 => {
-					let change = (bitrate as f64 - prev as f64).abs() / prev as f64;
-					change >= 0.25
-				}
-				Some(_) => bitrate > 0,
+			let should_send = match last_sent {
 				None => true,
+				Some((0, _)) => bitrate > 0,
+				Some((prev, at)) => {
+					let elapsed = at.elapsed().as_secs_f64();
+					let t = elapsed.clamp(PROBE_INTERVAL.as_secs_f64(), PROBE_MAX_AGE.as_secs_f64());
+					let range = PROBE_MAX_AGE.as_secs_f64() - PROBE_INTERVAL.as_secs_f64();
+					let threshold = PROBE_MAX_DELTA * (PROBE_MAX_AGE.as_secs_f64() - t) / range;
+					let change = (bitrate as f64 - prev as f64).abs() / prev as f64;
+					change >= threshold
+				}
 			};
 
-			if changed {
-				let probe = lite::Probe { bitrate };
-				stream.writer.encode(&probe).await?;
-
-				last_bitrate = Some(bitrate);
+			if should_send {
+				stream.writer.encode(&lite::Probe { bitrate }).await?;
+				last_sent = Some((bitrate, tokio::time::Instant::now()));
 			}
 		}
 	}

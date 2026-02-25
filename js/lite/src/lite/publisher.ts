@@ -11,9 +11,9 @@ import { Probe } from "./probe.ts";
 import { encodeSubscribeResponse, type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
-const PROBE_MIN_INTERVAL = 100; // ms
-const PROBE_MAX_INTERVAL = 10_000; // ms
-const PROBE_CHANGE_THRESHOLD = 0.25;
+const PROBE_INTERVAL = 100; // ms
+const PROBE_MAX_AGE = 10_000; // ms
+const PROBE_MAX_DELTA = 0.25;
 
 /**
  * Handles publishing broadcasts and managing their lifecycle.
@@ -266,53 +266,48 @@ export class Publisher {
 	 */
 	async runProbe(stream: Stream) {
 		// getStats is not yet in the TypeScript WebTransport type definitions.
-		const quic = this.#quic as unknown as { getStats?: () => Promise<{ bytesSent: number }> };
+		const quic = this.#quic as unknown as {
+			getStats?: () => Promise<{ estimatedSendRate: number | null }>;
+		};
 		if (!quic.getStats) {
 			stream.writer.reset(new Error("stats not supported"));
 			return;
 		}
 
-		let interval = PROBE_MIN_INTERVAL;
-		let lastBitrate: number | undefined;
-		let lastBytesSent: number | undefined;
-		let lastTimestamp: number | undefined;
+		let lastSentBitrate: number | undefined;
+		let lastSentTime: number | undefined;
 
 		try {
 			for (;;) {
-				const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), interval));
+				const timeout = new Promise<"timeout">((resolve) =>
+					setTimeout(() => resolve("timeout"), PROBE_INTERVAL),
+				);
 				const result = await Promise.race([timeout, stream.reader.closed]);
 				if (result !== "timeout") break;
 
 				const stats = await quic.getStats();
-				const now = performance.now();
-				const bytesSent = stats.bytesSent;
+				const bitrate = stats.estimatedSendRate;
+				if (bitrate == null) continue;
 
-				if (lastBytesSent !== undefined && lastTimestamp !== undefined) {
-					const elapsed = (now - lastTimestamp) / 1000; // seconds
-					if (elapsed > 0) {
-						const bitrate = Math.round(((bytesSent - lastBytesSent) * 8) / elapsed);
-
-						let changed: boolean;
-						if (lastBitrate !== undefined && lastBitrate > 0) {
-							const change = Math.abs(bitrate - lastBitrate) / lastBitrate;
-							changed = change >= PROBE_CHANGE_THRESHOLD;
-						} else {
-							changed = bitrate > 0 || lastBitrate === undefined;
-						}
-
-						if (changed) {
-							const probe = new Probe(bitrate);
-							await probe.encode(stream.writer, this.version);
-							lastBitrate = bitrate;
-							interval = PROBE_MIN_INTERVAL;
-						} else {
-							interval = Math.min(interval * 2, PROBE_MAX_INTERVAL);
-						}
-					}
+				let shouldSend: boolean;
+				if (lastSentBitrate === undefined || lastSentTime === undefined) {
+					shouldSend = true;
+				} else if (lastSentBitrate === 0) {
+					shouldSend = bitrate > 0;
+				} else {
+					const elapsed = performance.now() - lastSentTime;
+					const t = Math.max(PROBE_INTERVAL, Math.min(PROBE_MAX_AGE, elapsed));
+					const range = PROBE_MAX_AGE - PROBE_INTERVAL;
+					const threshold = (PROBE_MAX_DELTA * (PROBE_MAX_AGE - t)) / range;
+					const change = Math.abs(bitrate - lastSentBitrate) / lastSentBitrate;
+					shouldSend = change >= threshold;
 				}
 
-				lastBytesSent = bytesSent;
-				lastTimestamp = now;
+				if (shouldSend) {
+					await new Probe(bitrate).encode(stream.writer, this.version);
+					lastSentBitrate = bitrate;
+					lastSentTime = performance.now();
+				}
 			}
 		} catch (err: unknown) {
 			const e = error(err);
