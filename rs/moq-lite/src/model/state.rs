@@ -81,7 +81,6 @@ impl<T: Default> Default for Producer<T> {
 	}
 }
 
-#[allow(dead_code)]
 impl<T> Producer<T> {
 	pub fn new(value: T) -> Self {
 		Self {
@@ -144,6 +143,13 @@ impl<T> Producer<T> {
 		}
 
 		waiter.register(&mut state.waiters);
+
+		// Re-check after registration to avoid TOCTOU race where the last
+		// consumer drops between the initial check and waiter registration.
+		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
+			return Poll::Ready(Ok(()));
+		}
+
 		Poll::Pending
 	}
 
@@ -151,44 +157,6 @@ impl<T> Producer<T> {
 		ProducerRef {
 			state: self.state.lock(),
 		}
-	}
-
-	// NOTE: Unlike poll_modify, this calls f before checking the closed flag.
-	// This is intentional so callers can still observe final data when the state transitions to closed.
-	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Error>>
-	where
-		F: FnMut(&ProducerRef<'_, T>) -> Poll<R>,
-	{
-		let state = self.state.lock();
-		let producer_state = ProducerRef::new(state);
-
-		if let Poll::Ready(res) = f(&producer_state) {
-			return Poll::Ready(Ok(res));
-		}
-
-		if let Err(err) = producer_state.state.closed.clone() {
-			return Poll::Ready(Err(err));
-		}
-
-		// Re-extract state from consumer_state to register
-		let mut state = producer_state.state;
-		waiter.register(&mut state.waiters);
-
-		Poll::Pending
-	}
-
-	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<Error> {
-		let mut state = self.state.lock();
-		if let Err(err) = state.closed.clone() {
-			return Poll::Ready(err);
-		}
-
-		waiter.register(&mut state.waiters);
-		Poll::Pending
-	}
-
-	pub async fn closed(&self) -> Error {
-		waiter_fn(move |waiter| self.poll_closed(waiter)).await
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {
@@ -248,13 +216,19 @@ pub struct Weak<T> {
 }
 
 impl<T> Weak<T> {
+	#[allow(dead_code)]
 	pub fn produce(&self) -> Result<Producer<T>, Error> {
+		// Increment first to prevent the last Producer::drop from
+		// closing the state between our check and the return.
+		self.counts.producers.fetch_add(1, Ordering::Relaxed);
+
 		{
 			let state = self.state.lock();
-			state.closed.clone()?;
+			if let Err(err) = state.closed.clone() {
+				self.counts.producers.fetch_sub(1, Ordering::Relaxed);
+				return Err(err);
+			}
 		}
-
-		self.counts.producers.fetch_add(1, Ordering::Relaxed);
 
 		Ok(Producer {
 			state: self.state.clone(),
@@ -268,6 +242,12 @@ impl<T> Weak<T> {
 		Consumer {
 			state: self.state.clone(),
 			counts: self.counts.clone(),
+		}
+	}
+
+	pub fn borrow(&self) -> ProducerRef<'_, T> {
+		ProducerRef {
+			state: self.state.lock(),
 		}
 	}
 
@@ -290,6 +270,13 @@ impl<T> Weak<T> {
 		}
 
 		waiter.register(&mut state.waiters);
+
+		// Re-check after registration to avoid TOCTOU race where the last
+		// consumer drops between the initial check and waiter registration.
+		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
+			return Poll::Ready(Ok(()));
+		}
+
 		Poll::Pending
 	}
 
@@ -367,19 +354,9 @@ pub struct ProducerRef<'a, T> {
 	state: LockGuard<'a, State<T>>,
 }
 
-#[allow(dead_code)]
 impl<'a, T> ProducerRef<'a, T> {
-	fn new(state: LockGuard<'a, State<T>>) -> Self {
-		Self { state }
-	}
-
 	pub fn is_closed(&self) -> bool {
 		self.state.closed.is_err()
-	}
-
-	pub fn modify(self) -> Result<ProducerMut<'a, T>, Error> {
-		self.state.closed.clone()?;
-		Ok(ProducerMut::new(self.state))
 	}
 }
 
@@ -436,12 +413,17 @@ impl<T> Consumer<T> {
 
 	/// Upgrade to a Producer, failing if the state is already closed.
 	pub fn produce(&self) -> Result<Producer<T>, Error> {
+		// Increment first to prevent the last Producer::drop from
+		// closing the state between our check and the return.
+		self.counts.producers.fetch_add(1, Ordering::Relaxed);
+
 		{
 			let state = self.state.lock();
-			state.closed.clone()?;
+			if let Err(err) = state.closed.clone() {
+				self.counts.producers.fetch_sub(1, Ordering::Relaxed);
+				return Err(err);
+			}
 		}
-
-		self.counts.producers.fetch_add(1, Ordering::Relaxed);
 
 		Ok(Producer {
 			state: self.state.clone(),
@@ -493,35 +475,5 @@ impl<'a, T> Deref for ConsumerRef<'a, T> {
 
 	fn deref(&self) -> &Self::Target {
 		&self.state.value
-	}
-}
-
-#[allow(dead_code)]
-pub struct ProducerConsumer<T> {
-	pub producer: Producer<T>,
-	pub consumer: Consumer<T>,
-}
-
-impl<T> ProducerConsumer<T> {
-	#[allow(dead_code)]
-	pub fn new(value: T) -> Self {
-		let producer = Producer::new(value);
-		let consumer = producer.consume();
-		Self { producer, consumer }
-	}
-}
-
-impl<T: Default> Default for ProducerConsumer<T> {
-	fn default() -> Self {
-		Self::new(Default::default())
-	}
-}
-
-impl<T> Clone for ProducerConsumer<T> {
-	fn clone(&self) -> Self {
-		Self {
-			producer: self.producer.clone(),
-			consumer: self.consumer.clone(),
-		}
 	}
 }

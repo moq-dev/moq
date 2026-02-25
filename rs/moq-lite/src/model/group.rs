@@ -112,6 +112,7 @@ impl GroupProducer {
 		};
 		let mut frame = self.create_frame(frame)?;
 		frame.write_chunk(data)?;
+		frame.finish()?;
 		Ok(())
 	}
 

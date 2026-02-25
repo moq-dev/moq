@@ -287,7 +287,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let track = tokio::select! {
 				producer = broadcast.requested_track() => match producer {
 					Ok(Some(producer)) => producer,
-					_ => break,
+					Ok(None) => break,
+					Err(err) => {
+						tracing::debug!(%err, "broadcast request error");
+						break;
+					}
 				},
 				_ = self.session.closed() => break,
 			};

@@ -105,7 +105,7 @@ impl TrackProducer {
 		let group = info.produce();
 
 		let mut state = self.state.modify()?;
-		if state.fin && state.max_sequence.unwrap_or(0) >= group.info.sequence {
+		if state.fin && group.info.sequence >= state.max_sequence.unwrap_or(0) {
 			return Err(Error::Closed);
 		}
 
@@ -231,11 +231,13 @@ impl TrackWeak {
 	}
 
 	pub fn consume(&self) -> TrackConsumer {
-		let consumer = self.state.consume();
+		let state = self.state.borrow();
+		let index = state.offset + state.groups.len().saturating_sub(1);
+
 		TrackConsumer {
 			info: self.info.clone(),
-			state: consumer,
-			index: 0,
+			state: self.state.consume(),
+			index,
 		}
 	}
 
