@@ -44,3 +44,7 @@ panic = "abort"
 inherits = "release"
 debug = "line-tables-only"
 # frame pointers: pass RUSTFLAGS="-C force-frame-pointers=yes" when building
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
