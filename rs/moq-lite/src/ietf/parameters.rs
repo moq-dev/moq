@@ -81,7 +81,11 @@ impl Decode<Version> for Parameters {
 
 impl Encode<Version> for Parameters {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		(self.vars.len() + self.bytes.len()).encode(w, version)?;
+		let count = self.vars.len() + self.bytes.len();
+		if count as u64 > MAX_PARAMS {
+			return Err(EncodeError::TooMany);
+		}
+		count.encode(w, version)?;
 
 		match version {
 			Version::Draft16 => {
@@ -202,7 +206,11 @@ impl Decode<Version> for MessageParameters {
 
 impl Encode<Version> for MessageParameters {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		(self.vars.len() + self.bytes.len()).encode(w, version)?;
+		let count = self.vars.len() + self.bytes.len();
+		if count as u64 > MAX_PARAMS {
+			return Err(EncodeError::TooMany);
+		}
+		count.encode(w, version)?;
 
 		match version {
 			Version::Draft16 => {
@@ -351,10 +359,11 @@ impl MessageParameters {
 		super::FilterType::decode(&mut buf, ()).ok()
 	}
 
-	pub fn set_subscription_filter(&mut self, ft: super::FilterType) {
+	pub fn set_subscription_filter(&mut self, ft: super::FilterType) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
-		ft.encode(&mut buf, ()).unwrap();
+		ft.encode(&mut buf, ())?;
 		self.bytes.insert(Self::SUBSCRIPTION_FILTER, buf);
+		Ok(())
 	}
 }
 

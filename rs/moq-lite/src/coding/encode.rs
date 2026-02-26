@@ -16,6 +16,8 @@ pub enum EncodeError {
 	Short,
 	#[error("invalid state")]
 	InvalidState,
+	#[error("too many")]
+	TooMany,
 }
 
 /// Check that the writer has enough remaining capacity.

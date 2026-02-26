@@ -138,7 +138,7 @@ impl Message for Subscribe<'_> {
 				params.set_subscriber_priority(self.subscriber_priority);
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.set_forward(true);
-				params.set_subscription_filter(self.filter_type);
+				params.set_subscription_filter(self.filter_type)?;
 				params.encode(w, version)?;
 			}
 		}
@@ -292,7 +292,7 @@ impl Message for SubscribeUpdate {
 				let mut params = MessageParameters::default();
 				params.set_subscriber_priority(self.subscriber_priority);
 				params.set_forward(self.forward);
-				params.set_subscription_filter(FilterType::LargestObject);
+				params.set_subscription_filter(FilterType::LargestObject)?;
 				params.encode(w, version)?;
 			}
 		}
