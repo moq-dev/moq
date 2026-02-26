@@ -47,6 +47,38 @@ pub enum Error {
 	#[error("not found")]
 	NotFound,
 
+	/// Session task not found.
+	#[error("session not found")]
+	SessionNotFound,
+
+	/// Origin producer not found.
+	#[error("origin not found")]
+	OriginNotFound,
+
+	/// Announcement not found.
+	#[error("announcement not found")]
+	AnnouncementNotFound,
+
+	/// Broadcast not found.
+	#[error("broadcast not found")]
+	BroadcastNotFound,
+
+	/// Catalog not found.
+	#[error("catalog not found")]
+	CatalogNotFound,
+
+	/// Media decoder not found.
+	#[error("media not found")]
+	MediaNotFound,
+
+	/// Track task not found.
+	#[error("track not found")]
+	TrackNotFound,
+
+	/// Frame not found.
+	#[error("frame not found")]
+	FrameNotFound,
+
 	/// Unknown media format specified.
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
@@ -121,6 +153,14 @@ impl ffi::ReturnCode for Error {
 			Error::Hang(_) => -18,
 			Error::NoIndex => -19,
 			Error::NulError(_) => -20,
+			Error::SessionNotFound => -21,
+			Error::OriginNotFound => -22,
+			Error::AnnouncementNotFound => -23,
+			Error::BroadcastNotFound => -24,
+			Error::CatalogNotFound => -25,
+			Error::MediaNotFound => -26,
+			Error::TrackNotFound => -27,
+			Error::FrameNotFound => -28,
 		}
 	}
 }

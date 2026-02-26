@@ -63,7 +63,7 @@ impl Session {
 	}
 
 	pub fn close(&mut self, id: Id) -> Result<(), Error> {
-		self.task.remove(id).ok_or(Error::NotFound)?;
+		self.task.remove(id).ok_or(Error::SessionNotFound)?;
 		Ok(())
 	}
 }
