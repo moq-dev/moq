@@ -15,7 +15,7 @@ impl Message for Probe {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {
-				unreachable!("probe not supported for version: {:?}", version);
+				return Err(DecodeError::Version);
 			}
 			Version::Draft03 => {}
 		}
@@ -28,7 +28,7 @@ impl Message for Probe {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {
-				unreachable!("probe not supported for version: {:?}", version);
+				return Err(EncodeError::Version);
 			}
 			Version::Draft03 => {}
 		}

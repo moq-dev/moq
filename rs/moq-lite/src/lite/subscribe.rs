@@ -151,7 +151,7 @@ impl Message for SubscribeUpdate {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {
-				unreachable!("subscribe update not supported for version: {:?}", version);
+				return Err(DecodeError::Version);
 			}
 			Version::Draft03 => {}
 		}
@@ -180,7 +180,7 @@ impl Message for SubscribeUpdate {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {
-				unreachable!("subscribe update not supported for version: {:?}", version);
+				return Err(EncodeError::Version);
 			}
 			Version::Draft03 => {}
 		}
@@ -232,7 +232,7 @@ impl Message for SubscribeDrop {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {
-				unreachable!("subscribe drop not supported for version: {:?}", version);
+				return Err(DecodeError::Version);
 			}
 			Version::Draft03 => {}
 		}
@@ -247,7 +247,7 @@ impl Message for SubscribeDrop {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {
-				unreachable!("subscribe drop not supported for version: {:?}", version);
+				return Err(EncodeError::Version);
 			}
 			Version::Draft03 => {}
 		}
@@ -301,7 +301,7 @@ impl Encode<Version> for SubscribeResponse {
 					Message::encode_msg(ok, w, version)?;
 				}
 				Self::Drop(_) => {
-					unreachable!("subscribe drop not supported for version: {:?}", version);
+					return Err(EncodeError::Version);
 				}
 			},
 		}

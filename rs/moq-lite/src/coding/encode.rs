@@ -18,6 +18,8 @@ pub enum EncodeError {
 	InvalidState,
 	#[error("too many")]
 	TooMany,
+	#[error("unsupported version")]
+	Version,
 }
 
 /// Check that the writer has enough remaining capacity.

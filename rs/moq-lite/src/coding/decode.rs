@@ -51,6 +51,9 @@ pub enum DecodeError {
 
 	#[error("unsupported")]
 	Unsupported,
+
+	#[error("unsupported version")]
+	Version,
 }
 
 impl<V> Decode<V> for bool {

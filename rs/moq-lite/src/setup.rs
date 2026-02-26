@@ -28,7 +28,7 @@ impl Client {
 			Version::Ietf(ietf::Version::Draft14)
 			| Version::Lite(lite::Version::Draft02)
 			| Version::Lite(lite::Version::Draft01) => self.versions.encode(w, v)?,
-			Version::Lite(lite::Version::Draft03) => unreachable!("draft-03 uses no setup message"),
+			Version::Lite(lite::Version::Draft03) => return Err(EncodeError::Version),
 		};
 		if w.remaining_mut() < self.parameters.len() {
 			return Err(EncodeError::Short);
@@ -51,7 +51,7 @@ impl Decode<Version> for Client {
 				u16::decode(r, v)? as usize
 			}
 			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => u64::decode(r, v)? as usize,
-			Version::Lite(lite::Version::Draft03) => unreachable!("draft-03 uses no setup message"),
+			Version::Lite(lite::Version::Draft03) => return Err(DecodeError::Version),
 		};
 
 		if r.remaining() < size {
@@ -68,7 +68,7 @@ impl Decode<Version> for Client {
 			Version::Ietf(ietf::Version::Draft14)
 			| Version::Lite(lite::Version::Draft02)
 			| Version::Lite(lite::Version::Draft01) => coding::Versions::decode(&mut msg, v)?,
-			Version::Lite(lite::Version::Draft03) => unreachable!("draft-03 uses no setup message"),
+			Version::Lite(lite::Version::Draft03) => return Err(DecodeError::Version),
 		};
 
 		Ok(Self {
@@ -92,7 +92,7 @@ impl Encode<Version> for Client {
 				u16::try_from(size).map_err(|_| EncodeError::TooLarge)?.encode(w, v)?;
 			}
 			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => (size as u64).encode(w, v)?,
-			Version::Lite(lite::Version::Draft03) => unreachable!("draft-03 uses no setup message"),
+			Version::Lite(lite::Version::Draft03) => return Err(EncodeError::Version),
 		}
 		self.encode_inner(w, v)
 	}
@@ -117,7 +117,7 @@ impl Server {
 			Version::Ietf(ietf::Version::Draft14)
 			| Version::Lite(lite::Version::Draft02)
 			| Version::Lite(lite::Version::Draft01) => self.version.encode(w, v)?,
-			Version::Lite(lite::Version::Draft03) => unreachable!("draft-03 uses no setup message"),
+			Version::Lite(lite::Version::Draft03) => return Err(EncodeError::Version),
 		};
 		if w.remaining_mut() < self.parameters.len() {
 			return Err(EncodeError::Short);
@@ -140,7 +140,7 @@ impl Encode<Version> for Server {
 				u16::try_from(size).map_err(|_| EncodeError::TooLarge)?.encode(w, v)?;
 			}
 			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => (size as u64).encode(w, v)?,
-			Version::Lite(lite::Version::Draft03) => unreachable!("draft-03 uses no setup message"),
+			Version::Lite(lite::Version::Draft03) => return Err(EncodeError::Version),
 		}
 
 		self.encode_inner(w, v)
@@ -159,7 +159,7 @@ impl Decode<Version> for Server {
 				u16::decode(r, v)? as usize
 			}
 			Version::Lite(lite::Version::Draft02 | lite::Version::Draft01) => u64::decode(r, v)? as usize,
-			Version::Lite(lite::Version::Draft03) => unreachable!("draft-03 uses no setup message"),
+			Version::Lite(lite::Version::Draft03) => return Err(DecodeError::Version),
 		};
 
 		if r.remaining() < size {
@@ -172,7 +172,7 @@ impl Decode<Version> for Server {
 			Version::Ietf(ietf::Version::Draft14)
 			| Version::Lite(lite::Version::Draft02)
 			| Version::Lite(lite::Version::Draft01) => coding::Version::decode(&mut msg, v)?,
-			Version::Lite(lite::Version::Draft03) => unreachable!("draft-03 uses no setup message"),
+			Version::Lite(lite::Version::Draft03) => return Err(DecodeError::Version),
 		};
 
 		Ok(Self {

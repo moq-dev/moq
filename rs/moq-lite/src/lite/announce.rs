@@ -118,7 +118,7 @@ impl Message for AnnounceInit<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {}
-			Version::Draft03 => unreachable!("announce init not supported for version: {:?}", version),
+			Version::Draft03 => return Err(DecodeError::Version),
 		}
 
 		let count = u64::decode(r, version)?;
@@ -136,7 +136,7 @@ impl Message for AnnounceInit<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft01 | Version::Draft02 => {}
-			Version::Draft03 => unreachable!("announce init not supported for version: {:?}", version),
+			Version::Draft03 => return Err(EncodeError::Version),
 		}
 
 		(self.suffixes.len() as u64).encode(w, version)?;
