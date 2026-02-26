@@ -1,10 +1,13 @@
-use std::ffi::c_char;
-
 use bytes::Buf;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_video_config};
+use crate::{Error, Id, NonZeroSlab, State};
+
+#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+use crate::{moq_audio_config, moq_frame, moq_video_config};
+#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+use std::ffi::c_char;
 
 struct ConsumeCatalog {
 	broadcast: moq_lite::BroadcastConsumer,
@@ -44,7 +47,7 @@ impl Consume {
 
 	pub fn catalog(&mut self, broadcast: Id, mut on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
-		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track());
+		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
 		let id = self.catalog_task.insert(channel.0);
@@ -99,6 +102,7 @@ impl Consume {
 		Ok(())
 	}
 
+	#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
 	pub fn video_config(&mut self, catalog: Id, index: usize, dst: &mut moq_video_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 
@@ -137,6 +141,32 @@ impl Consume {
 		Ok(())
 	}
 
+	/// Returns video config fields as owned Rust values (no C struct needed).
+	#[cfg(feature = "uniffi-api")]
+	pub fn video_config_data(
+		&self,
+		catalog: Id,
+		index: usize,
+	) -> Result<(String, String, Option<Vec<u8>>, Option<u32>, Option<u32>), Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		let (rendition, config) = consume
+			.catalog
+			.video
+			.renditions
+			.iter()
+			.nth(index)
+			.ok_or(Error::NoIndex)?;
+		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
+		Ok((
+			rendition.clone(),
+			codec.clone(),
+			config.description.as_ref().map(|d| d.to_vec()),
+			config.coded_width,
+			config.coded_height,
+		))
+	}
+
+	#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
 	pub fn audio_config(&mut self, catalog: Id, index: usize, dst: &mut moq_audio_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 
@@ -165,6 +195,31 @@ impl Consume {
 		};
 
 		Ok(())
+	}
+
+	/// Returns audio config fields as owned Rust values (no C struct needed).
+	#[cfg(feature = "uniffi-api")]
+	pub fn audio_config_data(
+		&self,
+		catalog: Id,
+		index: usize,
+	) -> Result<(String, String, Option<Vec<u8>>, u32, u32), Error> {
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
+		let (rendition, config) = consume
+			.catalog
+			.audio
+			.renditions
+			.iter()
+			.nth(index)
+			.ok_or(Error::NoIndex)?;
+		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
+		Ok((
+			rendition.clone(),
+			codec.clone(),
+			config.description.as_ref().map(|d| d.to_vec()),
+			config.sample_rate,
+			config.channel_count,
+		))
 	}
 
 	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {
@@ -288,6 +343,7 @@ impl Consume {
 	}
 
 	// NOTE: You're supposed to call this multiple times to get all of the chunks.
+	#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
 	pub fn frame_chunk(&self, frame: Id, index: usize, dst: &mut moq_frame) -> Result<(), Error> {
 		let ordered = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
 		let chunk = ordered.payload.get_chunk(index).ok_or(Error::NoIndex)?;
@@ -306,6 +362,25 @@ impl Consume {
 		};
 
 		Ok(())
+	}
+
+	/// Returns frame data as owned Rust values (no C struct needed).
+	#[cfg(feature = "uniffi-api")]
+	pub fn frame_data(&self, frame: Id) -> Result<(Vec<u8>, u64, bool), Error> {
+		let frame = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
+
+		let payload: Vec<u8> = (0..frame.payload.num_chunks())
+			.filter_map(|i| frame.payload.get_chunk(i))
+			.flat_map(|chunk| chunk.iter().copied())
+			.collect();
+
+		let timestamp_us = frame
+			.timestamp
+			.as_micros()
+			.try_into()
+			.map_err(|_| moq_lite::TimeOverflow)?;
+
+		Ok((payload, timestamp_us, frame.keyframe))
 	}
 
 	pub fn frame_close(&mut self, frame: Id) -> Result<(), Error> {

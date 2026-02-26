@@ -1,6 +1,8 @@
-//! C FFI bindings for [`moq_lite`].
+//! FFI bindings for [`moq_lite`].
 //!
-//! Provides a C-compatible API for real-time pub/sub over QUIC.
+//! Provides a C-compatible API (via the `c-api` feature, default) or a UniFFI-based API
+//! (via the `uniffi-api` feature) for real-time pub/sub over QUIC. If both features are
+//! enabled, the UniFFI API takes precedence.
 //!
 //! ## Concepts
 //!
@@ -16,6 +18,7 @@
 //! All functions return negative error codes on failure or non-negative values on success.
 //! Resources are managed through opaque integer handles that must be explicitly closed.
 
+#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
 mod api;
 mod consume;
 mod error;
@@ -25,10 +28,16 @@ mod origin;
 mod publish;
 mod session;
 mod state;
+#[cfg(feature = "uniffi-api")]
+mod uniffi_api;
 
+#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
 pub use api::*;
 pub use error::*;
 pub use id::*;
+
+#[cfg(feature = "uniffi-api")]
+uniffi::setup_scaffolding!("moq");
 
 pub(crate) use consume::*;
 pub(crate) use origin::*;

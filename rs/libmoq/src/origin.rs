@@ -1,9 +1,12 @@
-use std::ffi::c_char;
-
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_announced};
+use crate::{Error, Id, NonZeroSlab, State};
+
+#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+use std::ffi::c_char;
+#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+use crate::moq_announced;
 
 /// Global state managing all active resources.
 ///
@@ -60,6 +63,7 @@ impl Origin {
 		Ok(())
 	}
 
+	#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
 	pub fn announced_info(&self, announced: Id, dst: &mut moq_announced) -> Result<(), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
 		*dst = moq_announced {
@@ -68,6 +72,13 @@ impl Origin {
 			active: announced.1,
 		};
 		Ok(())
+	}
+
+	/// Returns announcement info as owned Rust values (no C struct needed).
+	#[cfg(feature = "uniffi-api")]
+	pub fn announced_info_owned(&self, announced: Id) -> Result<(String, bool), Error> {
+		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
+		Ok((announced.0.clone(), announced.1))
 	}
 
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {

@@ -13,8 +13,12 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [lib]
 name = "moq"
-crate-type = ["staticlib"]
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+crate-type = ["staticlib", "cdylib"]
+
+[features]
+default = ["c-api"]
+c-api = []
+uniffi-api = []
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -27,12 +31,18 @@ slab = "0.4"
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }
 tracing = "0.1"
+uniffi = { version = "0.31", features = [ "cli" ] }
 url = "2"
 
 [build-dependencies]
 cbindgen = "0.29"
+uniffi = { version = "0.31", features = [ "build" ] }
 
 [dev-dependencies]
 anyhow = "1"
 moq-native = { workspace = true, default-features = true }
 url = "2"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "./uniffi-bindgen.rs"
