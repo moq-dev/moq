@@ -75,6 +75,7 @@ interface Group {
 	consumer: Moq.Group;
 	frames: Frame[]; // decode order
 	latest?: Time.Micro; // The timestamp of the latest known frame
+	done?: boolean; // Set when #runGroup finishes reading all frames
 }
 
 export class Consumer {
@@ -175,13 +176,17 @@ export class Consumer {
 		} catch (_err) {
 			// Ignore errors, we close groups on purpose to skip them.
 		} finally {
+			group.done = true;
+
 			if (group.consumer.sequence === this.#active) {
 				// Advance to the next group.
 				this.#active += 1;
-
-				this.#notify?.();
-				this.#notify = undefined;
 			}
+
+			// Always notify - the consumer may need to advance past this group
+			// even if it wasn't active when this task finished.
+			this.#notify?.();
+			this.#notify = undefined;
 
 			group.consumer.close();
 		}
@@ -249,11 +254,18 @@ export class Consumer {
 				}
 
 				// Check if the group is done and then remove it.
-				if (this.#active > this.#groups[0].consumer.sequence) {
+				// A group is removable when #active has advanced past it, OR when
+				// its #runGroup task has finished (done) and all frames are consumed.
+				// The latter handles the case where #runGroup finished before
+				// #active reached this group (e.g. after a latency skip).
+				if (this.#active > this.#groups[0].consumer.sequence || this.#groups[0].done) {
+					if (this.#groups[0].consumer.sequence === this.#active) {
+						this.#active += 1;
+					}
+
 					const group = this.#groups.shift();
 					if (group) {
 						this.#updateBuffered();
-						// Always true
 						return { frame: undefined, group: group.consumer.sequence };
 					}
 				}
