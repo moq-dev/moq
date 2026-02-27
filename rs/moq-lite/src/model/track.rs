@@ -71,11 +71,7 @@ impl State {
 			}
 		}
 
-		if self.fin {
-			Poll::Ready(None)
-		} else {
-			Poll::Pending
-		}
+		if self.fin { Poll::Ready(None) } else { Poll::Pending }
 	}
 
 	fn poll_get_group(&self, sequence: u64) -> Poll<Option<GroupProducer>> {
