@@ -50,8 +50,8 @@ impl Track {
 
 #[derive(Default)]
 struct State {
-	groups: VecDeque<GroupProducer>,
-	created_at: VecDeque<tokio::time::Instant>,
+	/// Groups in arrival order. `None` entries are tombstones for evicted groups.
+	groups: VecDeque<Option<(GroupProducer, tokio::time::Instant)>>,
 	duplicates: HashSet<u64>,
 	offset: usize,
 	max_sequence: Option<u64>,
@@ -59,11 +59,18 @@ struct State {
 }
 
 impl State {
-	fn poll_next_group(&self, index: usize) -> Poll<Option<GroupProducer>> {
-		let relative = index.saturating_sub(self.offset);
-		if let Some(group) = self.groups.get(relative) {
-			Poll::Ready(Some(group.clone()))
-		} else if self.fin {
+	/// Find the next non-tombstoned group at or after `index`.
+	///
+	/// Returns the group and its absolute index so the consumer can advance past it.
+	fn poll_next_group(&self, index: usize) -> Poll<Option<(GroupProducer, usize)>> {
+		let start = index.saturating_sub(self.offset);
+		for (i, slot) in self.groups.iter().enumerate().skip(start) {
+			if let Some((group, _)) = slot {
+				return Poll::Ready(Some((group.clone(), self.offset + i)));
+			}
+		}
+
+		if self.fin {
 			Poll::Ready(None)
 		} else {
 			Poll::Pending
@@ -71,9 +78,11 @@ impl State {
 	}
 
 	fn poll_get_group(&self, sequence: u64) -> Poll<Option<GroupProducer>> {
-		// Search for the group with the matching sequence.
-		if let Some(group) = self.groups.iter().find(|g| g.info.sequence == sequence) {
-			return Poll::Ready(Some(group.clone()));
+		// Search for the group with the matching sequence, skipping tombstones.
+		for (group, _) in self.groups.iter().flatten() {
+			if group.info.sequence == sequence {
+				return Poll::Ready(Some(group.clone()));
+			}
 		}
 
 		// If we've already seen a newer sequence, the group is gone.
@@ -90,19 +99,33 @@ impl State {
 		Poll::Pending
 	}
 
-	/// Evict groups older than MAX_GROUP_AGE, always keeping at least the most recent group.
+	/// Evict groups older than MAX_GROUP_AGE, never evicting the max_sequence group.
+	///
+	/// Groups are in arrival order, so we can stop early when we hit a non-expired,
+	/// non-max_sequence group (everything after it arrived even later).
+	/// When max_sequence is at the front, we skip past it and tombstone expired groups
+	/// behind it.
 	fn evict_expired(&mut self) {
 		let now = tokio::time::Instant::now();
 
-		while self.groups.len() > 1 {
-			let age = now.duration_since(*self.created_at.front().unwrap());
-			if age <= MAX_GROUP_AGE {
+		for slot in self.groups.iter_mut() {
+			let Some((group, created_at)) = slot else { continue };
+
+			if Some(group.info.sequence) == self.max_sequence {
+				continue;
+			}
+
+			if now.duration_since(*created_at) <= MAX_GROUP_AGE {
 				break;
 			}
 
-			let group = self.groups.pop_front().unwrap();
-			self.created_at.pop_front();
 			self.duplicates.remove(&group.info.sequence);
+			*slot = None;
+		}
+
+		// Trim leading tombstones to advance the offset.
+		while let Some(None) = self.groups.front() {
+			self.groups.pop_front();
 			self.offset += 1;
 		}
 	}
@@ -136,8 +159,7 @@ impl TrackProducer {
 		}
 
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.info.sequence));
-		state.groups.push_back(group.clone());
-		state.created_at.push_back(tokio::time::Instant::now());
+		state.groups.push_back(Some((group.clone(), tokio::time::Instant::now())));
 		state.evict_expired();
 
 		Ok(group)
@@ -155,8 +177,7 @@ impl TrackProducer {
 
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
-		state.groups.push_back(group.clone());
-		state.created_at.push_back(tokio::time::Instant::now());
+		state.groups.push_back(Some((group.clone(), tokio::time::Instant::now())));
 		state.evict_expired();
 
 		Ok(group)
@@ -184,7 +205,7 @@ impl TrackProducer {
 		let mut state = self.state.modify()?;
 
 		// Abort all groups still in progress.
-		for group in state.groups.iter_mut() {
+		for (group, _) in state.groups.iter_mut().flatten() {
 			// Ignore errors, we don't care if the group was already closed.
 			group.close(err.clone()).ok();
 		}
@@ -291,8 +312,8 @@ impl TrackConsumer {
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
 		let index = self.index;
 		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_next_group(index))).await?;
-		let consumer = res.map(|producer| {
-			self.index += 1;
+		let consumer = res.map(|(producer, found_index)| {
+			self.index = found_index + 1;
 			producer.consume()
 		});
 		Ok(consumer)
@@ -369,6 +390,16 @@ impl TrackConsumer {
 mod test {
 	use super::*;
 
+	/// Helper: count non-tombstoned groups in state.
+	fn live_groups(state: &State) -> usize {
+		state.groups.iter().flatten().count()
+	}
+
+	/// Helper: get the sequence number of the first live group.
+	fn first_live_sequence(state: &State) -> u64 {
+		state.groups.iter().flatten().next().unwrap().0.info.sequence
+	}
+
 	#[tokio::test]
 	async fn evict_expired_groups() {
 		tokio::time::pause();
@@ -380,10 +411,9 @@ mod test {
 		producer.append_group().unwrap(); // seq 1
 		producer.append_group().unwrap(); // seq 2
 
-		// All 3 should be present.
 		{
 			let state = producer.state.borrow();
-			assert_eq!(state.groups.len(), 3);
+			assert_eq!(live_groups(&state), 3);
 			assert_eq!(state.offset, 0);
 		}
 
@@ -393,15 +423,13 @@ mod test {
 		// Append a new group to trigger eviction.
 		producer.append_group().unwrap(); // seq 3
 
-		// After push: [0(old), 1(old), 2(old), 3(new)].
-		// Eviction removes 0, 1, 2 (all expired), stops at len=1.
-		// Only group 3 remains.
+		// Groups 0, 1, 2 are expired but seq 3 (max_sequence) is kept.
+		// Leading tombstones are trimmed, so only seq 3 remains.
 		{
 			let state = producer.state.borrow();
-			assert_eq!(state.groups.len(), 1);
-			assert_eq!(state.groups[0].info.sequence, 3);
+			assert_eq!(live_groups(&state), 1);
+			assert_eq!(first_live_sequence(&state), 3);
 			assert_eq!(state.offset, 3);
-			// Evicted sequences should be removed from duplicates.
 			assert!(!state.duplicates.contains(&0));
 			assert!(!state.duplicates.contains(&1));
 			assert!(!state.duplicates.contains(&2));
@@ -410,7 +438,7 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn evict_keeps_latest() {
+	async fn evict_keeps_max_sequence() {
 		tokio::time::pause();
 
 		let mut producer = Track::new("test").produce();
@@ -419,13 +447,13 @@ mod test {
 		// Advance time past threshold.
 		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
 
-		// Append another group. The old group should be evicted.
+		// Append another group; seq 0 is expired and evicted.
 		producer.append_group().unwrap(); // seq 1
 
 		{
 			let state = producer.state.borrow();
-			assert_eq!(state.groups.len(), 1);
-			assert_eq!(state.groups[0].info.sequence, 1);
+			assert_eq!(live_groups(&state), 1);
+			assert_eq!(first_live_sequence(&state), 1);
 			assert_eq!(state.offset, 1);
 		}
 	}
@@ -439,10 +467,9 @@ mod test {
 		producer.append_group().unwrap(); // seq 1
 		producer.append_group().unwrap(); // seq 2
 
-		// No time has passed, so nothing should be evicted.
 		{
 			let state = producer.state.borrow();
-			assert_eq!(state.groups.len(), 3);
+			assert_eq!(live_groups(&state), 3);
 			assert_eq!(state.offset, 0);
 		}
 	}
@@ -454,15 +481,97 @@ mod test {
 		let mut producer = Track::new("test").produce();
 		producer.append_group().unwrap(); // seq 0
 
-		// Consumer starts at group 0.
 		let mut consumer = producer.consume();
 
-		// Advance time and add new groups to trigger eviction.
 		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
 
-		// Group 0 was evicted. Consumer should get group 1 (the only one left).
+		// Group 0 was evicted. Consumer should get group 1.
 		let group = consumer.assert_group();
 		assert_eq!(group.info.sequence, 1);
+	}
+
+	#[tokio::test]
+	async fn out_of_order_max_sequence_at_front() {
+		tokio::time::pause();
+
+		let mut producer = Track::new("test").produce();
+
+		// Arrive out of order: seq 5 first, then 3, then 4.
+		producer.create_group(Group { sequence: 5 }).unwrap();
+		producer.create_group(Group { sequence: 3 }).unwrap();
+		producer.create_group(Group { sequence: 4 }).unwrap();
+
+		// max_sequence = 5, which is at the front of the VecDeque.
+		{
+			let state = producer.state.borrow();
+			assert_eq!(state.max_sequence, Some(5));
+		}
+
+		// Expire all three groups.
+		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+
+		// Append seq 6 (becomes new max_sequence).
+		producer.append_group().unwrap(); // seq 6
+
+		// Seq 3, 4, 5 are all expired. Seq 5 was the old max_sequence but now 6 is.
+		// All old groups are evicted.
+		{
+			let state = producer.state.borrow();
+			assert_eq!(live_groups(&state), 1);
+			assert_eq!(first_live_sequence(&state), 6);
+			assert!(!state.duplicates.contains(&3));
+			assert!(!state.duplicates.contains(&4));
+			assert!(!state.duplicates.contains(&5));
+			assert!(state.duplicates.contains(&6));
+		}
+	}
+
+	#[tokio::test]
+	async fn max_sequence_at_front_blocks_trim() {
+		tokio::time::pause();
+
+		let mut producer = Track::new("test").produce();
+
+		// Arrive: seq 5, then seq 3.
+		producer.create_group(Group { sequence: 5 }).unwrap();
+
+		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+
+		// Seq 3 arrives late; max_sequence is still 5 (at front).
+		producer.create_group(Group { sequence: 3 }).unwrap();
+
+		// Seq 5 is max_sequence (protected). Seq 3 is not expired (just created).
+		// Nothing should be evicted.
+		{
+			let state = producer.state.borrow();
+			assert_eq!(live_groups(&state), 2);
+			assert_eq!(state.offset, 0);
+		}
+
+		// Expire seq 3 as well.
+		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+
+		// Seq 2 arrives late, triggering eviction.
+		producer.create_group(Group { sequence: 2 }).unwrap();
+
+		// Seq 5 is still max_sequence (protected, at front, blocks trim).
+		// Seq 3 is expired → tombstoned.
+		// Seq 2 is fresh → kept.
+		// VecDeque: [Some(5), None, Some(2)]. Leading entry is Some, so offset stays.
+		{
+			let state = producer.state.borrow();
+			assert_eq!(live_groups(&state), 2);
+			assert_eq!(state.offset, 0);
+			assert!(state.duplicates.contains(&5));
+			assert!(!state.duplicates.contains(&3));
+			assert!(state.duplicates.contains(&2));
+		}
+
+		// Consumer should still be able to read through the hole.
+		let mut consumer = producer.consume();
+		let group = consumer.assert_group();
+		// consume() starts at the last slot (seq 2).
+		assert_eq!(group.info.sequence, 2);
 	}
 }
