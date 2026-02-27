@@ -1,0 +1,11 @@
+[Unit]
+Description=Check RAM usage and alert if low or swap is used
+
+[Service]
+Type=oneshot
+ExecStart=/etc/systemd/system/ram-alert.sh
+Environment="RAM_ALERT_WEBHOOK=https://discord.com/api/webhooks/1477023151421395128/3odQzDvXAaeQEwWt1DNv3S_bS4N0oA-LnvQ-VInj0h_I4c4gc5Y31J_O2PK7WAJGRFAS"
+Environment="RAM_ALERT_THRESHOLD=20"
+
+StandardOutput=journal
+StandardError=journal

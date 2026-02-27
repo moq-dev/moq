@@ -5,8 +5,9 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     moq = {
       # Unfortunately, we can't use a relative path here because it executes on the remote.
+      # We have to instead use main.
       # TODO cross-compile locally and upload the binary to the remote.
-      url = "github:moq-dev/moq/moq-relay-v0.10.5";
+      url = "github:moq-dev/moq";
     };
   };
 
