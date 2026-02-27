@@ -24,6 +24,12 @@ variable "ssh_keys" {
   type        = list(string)
 }
 
+variable "ram_alert_webhook" {
+  description = "Webhook URL for RAM usage alerts (Slack, Discord, etc.)"
+  type        = string
+  default     = ""
+}
+
 # Relay node definitions
 # regions: https://api.linode.com/v4/regions
 # instance types: https://api.linode.com/v4/linode/types

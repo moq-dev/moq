@@ -1,0 +1,9 @@
+[Unit]
+Description=Check RAM usage every 5 minutes
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=300
+
+[Install]
+WantedBy=timers.target

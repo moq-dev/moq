@@ -6,6 +6,13 @@ resource "local_file" "moq_relay_service" {
   filename = "${path.module}/relay/moq-relay.service"
 }
 
+resource "local_file" "ram_alert_service" {
+  content = templatefile("${path.module}/relay/ram-alert.service.tftpl", {
+    ram_alert_webhook = var.ram_alert_webhook
+  })
+  filename = "${path.module}/relay/ram-alert.service"
+}
+
 resource "local_file" "moq_cert_service" {
   content = templatefile("${path.module}/relay/moq-cert.service.tftpl", {
     domain = var.domain

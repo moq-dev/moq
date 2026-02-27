@@ -47,9 +47,11 @@ deploy node:
 		systemctl enable moq-cert.service && \
 		systemctl enable certbot-renew.timer && \
 		systemctl enable vacuum.timer && \
+		systemctl enable ram-alert.timer && \
 		systemctl enable moq-relay.service && \
 		systemctl start certbot-renew.timer && \
 		systemctl start vacuum.timer && \
+		systemctl start ram-alert.timer && \
 		systemctl start moq-cert.service && \
 		systemctl restart moq-relay.service"
 
