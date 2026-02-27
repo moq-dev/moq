@@ -7,12 +7,14 @@
 #
 # Environment variables:
 #   RAM_ALERT_WEBHOOK   - webhook URL (overridden by argument)
-#   RAM_ALERT_THRESHOLD - alert when available memory drops below this % (default: 20)
+#   RAM_ALERT_THRESHOLD      - alert when available memory drops below this % (default: 20)
+#   RAM_ALERT_SWAP_THRESHOLD - alert when swap usage exceeds this many MB (default: 100)
 
 set -euo pipefail
 
 WEBHOOK_URL="${1:-${RAM_ALERT_WEBHOOK:-}}"
 THRESHOLD="${RAM_ALERT_THRESHOLD:-20}"
+SWAP_THRESHOLD_MB="${RAM_ALERT_SWAP_THRESHOLD:-100}"
 HOSTNAME=$(hostname)
 
 # Parse /proc/meminfo (values in kB)
@@ -38,9 +40,9 @@ if [ "$mem_pct" -lt "$THRESHOLD" ]; then
 	reasons="${reasons}- Available memory: ${mem_available_mb}MB / ${mem_total_mb}MB (${mem_pct}%)\n"
 fi
 
-if [ "$swap_used" -gt 0 ]; then
+if [ "$swap_used_mb" -gt "$SWAP_THRESHOLD_MB" ]; then
 	alert=true
-	reasons="${reasons}- Swap in use: ${swap_used_mb}MB\n"
+	reasons="${reasons}- Swap in use: ${swap_used_mb}MB (threshold: ${SWAP_THRESHOLD_MB}MB)\n"
 fi
 
 if [ "$alert" = "false" ]; then

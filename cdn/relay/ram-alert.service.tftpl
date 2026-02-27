@@ -6,6 +6,7 @@ Type=oneshot
 ExecStart=/etc/systemd/system/ram-alert.sh
 Environment="RAM_ALERT_WEBHOOK=${webhook}"
 Environment="RAM_ALERT_THRESHOLD=20"
+Environment="RAM_ALERT_SWAP_THRESHOLD=100"
 
 StandardOutput=journal
 StandardError=journal
