@@ -197,8 +197,17 @@ export class Decoder {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
+			let warmGroup: number | undefined;
+
 			const decoder = new AudioDecoder({
-				output: (data) => this.#emit(data),
+				output: (data) => {
+					if (warmGroup !== undefined) {
+						// First group: prime the decoder but don't emit audio.
+						data.close();
+						return;
+					}
+					this.#emit(data);
+				},
 				error: (error) => console.error(error),
 			});
 			effect.cleanup(() => decoder.close());
@@ -213,8 +222,19 @@ export class Decoder {
 				const next = await consumer.next();
 				if (!next) break;
 
-				const { frame } = next;
-				if (!frame) continue; // Skip over group done notifications.
+				const { frame, group } = next;
+				if (!frame) {
+					// Group done notification — if this was the warm-up group, we're done warming.
+					if (warmGroup !== undefined && group === warmGroup) {
+						warmGroup = undefined;
+					}
+					continue;
+				}
+
+				// Track the first group for warm-up.
+				if (warmGroup === undefined && this.#stats.peek() === undefined) {
+					warmGroup = group;
+				}
 
 				this.#stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,

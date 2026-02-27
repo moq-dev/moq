@@ -110,7 +110,11 @@ impl Aac {
 		let track = catalog.audio.create_track("aac", config.clone());
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
-		self.track = Some(self.broadcast.create_track(track)?.into());
+		const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestamp::from_millis_unchecked(100);
+		self.track = Some(hang::container::OrderedProducer::with_max_group_duration(
+			self.broadcast.create_track(track)?,
+			MAX_GROUP_DURATION,
+		));
 
 		Ok(())
 	}
@@ -127,12 +131,10 @@ impl Aac {
 
 		let frame = hang::container::Frame {
 			timestamp: pts,
-			keyframe: true, // Audio frames are always keyframes
 			payload,
 		};
 
 		track.write(frame)?;
-		track.flush()?; // We know the next frame will be a keyframe, so flush the current group.
 
 		Ok(())
 	}

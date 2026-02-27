@@ -236,9 +236,13 @@ impl Hev1 {
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
+
+		if self.current.contains_idr {
+			track.keyframe()?;
+		}
+
 		let frame = hang::container::Frame {
 			timestamp: pts,
-			keyframe: self.current.contains_idr,
 			payload,
 		};
 

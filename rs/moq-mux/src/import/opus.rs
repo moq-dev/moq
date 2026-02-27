@@ -58,7 +58,11 @@ impl Opus {
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
 		let track = self.broadcast.create_track(track)?;
-		self.track = Some(track.into());
+		const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestamp::from_millis_unchecked(100);
+		self.track = Some(hang::container::OrderedProducer::with_max_group_duration(
+			track,
+			MAX_GROUP_DURATION,
+		));
 
 		Ok(())
 	}
@@ -75,12 +79,10 @@ impl Opus {
 
 		let frame = hang::container::Frame {
 			timestamp: pts,
-			keyframe: true, // Audio frames are always keyframes
 			payload,
 		};
 
 		track.write(frame)?;
-		track.flush()?; // Flush the current group because we know the next frame will be a keyframe.
 
 		Ok(())
 	}

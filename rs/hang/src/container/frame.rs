@@ -11,7 +11,6 @@ pub type Timestamp = moq_lite::Timescale<1_000_000>;
 ///
 /// Frames are the fundamental unit of media data in hang. Each frame contains:
 /// - A timestamp when they should be rendered.
-/// - A keyframe flag indicating whether this frame can be decoded independently
 /// - A codec-specific payload.
 #[derive(Clone, Debug)]
 pub struct Frame {
@@ -21,11 +20,6 @@ pub struct Frame {
 	/// start of the stream or some other reference point.
 	/// This is NOT a wall clock time.
 	pub timestamp: Timestamp,
-
-	/// Whether this frame is a keyframe (can be decoded independently).
-	///
-	/// Keyframes are used to start new groups for efficient seeking and caching.
-	pub keyframe: bool,
 
 	/// The encoded media data for this frame, split into chunks.
 	///
@@ -37,8 +31,6 @@ pub struct Frame {
 
 impl Frame {
 	/// Encode the frame to the given group.
-	///
-	/// NOTE: The [Self::keyframe] flag is ignored for this method; you need to create a new group manually.
 	pub fn encode(&self, group: &mut moq_lite::GroupProducer) -> Result<(), Error> {
 		let mut header = BytesMut::new();
 		self.timestamp.encode(&mut header).map_err(moq_lite::Error::from)?;

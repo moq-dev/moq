@@ -373,11 +373,13 @@ impl Av01 {
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
-		let is_keyframe = self.current.contains_keyframe;
+
+		if self.current.contains_keyframe {
+			track.keyframe()?;
+		}
 
 		let frame = hang::container::Frame {
 			timestamp: pts,
-			keyframe: is_keyframe,
 			payload,
 		};
 

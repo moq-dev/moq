@@ -34,7 +34,7 @@ pub struct Consume {
 	video_task: NonZeroSlab<oneshot::Sender<()>>,
 
 	/// Buffered frames ready for consumption.
-	frame: NonZeroSlab<hang::container::Frame>,
+	frame: NonZeroSlab<hang::container::OrderedFrame>,
 }
 
 impl Consume {
@@ -251,21 +251,22 @@ impl Consume {
 	}
 
 	async fn run_track(mut track: hang::container::OrderedConsumer, on_frame: &mut OnStatus) -> Result<(), Error> {
-		while let Some(mut frame) = track.read().await? {
+		while let Some(mut ordered) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::container::BufList::new();
-			new_payload.push_chunk(if frame.payload.num_chunks() == 1 {
+			new_payload.push_chunk(if ordered.payload.num_chunks() == 1 {
 				// We can avoid allocating
-				frame.payload.get_chunk(0).expect("frame has zero chunks").clone()
+				ordered.payload.get_chunk(0).expect("frame has zero chunks").clone()
 			} else {
 				// We need to allocate
-				frame.payload.copy_to_bytes(frame.payload.num_bytes())
+				ordered.payload.copy_to_bytes(ordered.payload.num_bytes())
 			});
 
-			let new_frame = hang::container::Frame {
+			let new_frame = hang::container::OrderedFrame {
+				timestamp: ordered.timestamp,
 				payload: new_payload,
-				timestamp: frame.timestamp,
-				keyframe: frame.keyframe,
+				group: ordered.group,
+				frame: ordered.frame,
 			};
 
 			// Important: Don't hold the mutex during this callback.
@@ -288,10 +289,10 @@ impl Consume {
 
 	// NOTE: You're supposed to call this multiple times to get all of the chunks.
 	pub fn frame_chunk(&self, frame: Id, index: usize, dst: &mut moq_frame) -> Result<(), Error> {
-		let frame = self.frame.get(frame).ok_or(Error::NotFound)?;
-		let chunk = frame.payload.get_chunk(index).ok_or(Error::NoIndex)?;
+		let ordered = self.frame.get(frame).ok_or(Error::NotFound)?;
+		let chunk = ordered.payload.get_chunk(index).ok_or(Error::NoIndex)?;
 
-		let timestamp_us = frame
+		let timestamp_us = ordered
 			.timestamp
 			.as_micros()
 			.try_into()
@@ -301,7 +302,7 @@ impl Consume {
 			payload: chunk.as_ptr(),
 			payload_size: chunk.len(),
 			timestamp_us,
-			keyframe: frame.keyframe,
+			keyframe: ordered.frame == 0,
 		};
 
 		Ok(())

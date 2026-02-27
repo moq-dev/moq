@@ -532,7 +532,6 @@ impl Fmp4 {
 
 						let frame = hang::container::Frame {
 							timestamp,
-							keyframe,
 							payload: payload.into(),
 						};
 
