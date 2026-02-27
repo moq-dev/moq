@@ -24,7 +24,8 @@ use std::{
 	time::Duration,
 };
 
-/// Groups older than this are evicted from the track cache (unless they are the most recent group).
+/// Groups older than this are evicted from the track cache (unless they are the max_sequence group).
+// TODO: Replace with a configurable cache size.
 const MAX_GROUP_AGE: Duration = Duration::from_secs(30);
 
 /// A track is a collection of groups, delivered out-of-order until expired.
@@ -79,13 +80,15 @@ impl State {
 
 	fn poll_get_group(&self, sequence: u64) -> Poll<Option<GroupProducer>> {
 		// Search for the group with the matching sequence, skipping tombstones.
+		// NOTE: Returns Ready(None) if the group was evicted (tombstoned) since
+		// it won't be found and max_sequence >= sequence.
 		for (group, _) in self.groups.iter().flatten() {
 			if group.info.sequence == sequence {
 				return Poll::Ready(Some(group.clone()));
 			}
 		}
 
-		// If we've already seen a newer sequence, the group is gone.
+		// If we've already seen a newer sequence, the group is gone (or was evicted).
 		if let Some(max) = self.max_sequence
 			&& max >= sequence
 		{
@@ -105,9 +108,7 @@ impl State {
 	/// non-max_sequence group (everything after it arrived even later).
 	/// When max_sequence is at the front, we skip past it and tombstone expired groups
 	/// behind it.
-	fn evict_expired(&mut self) {
-		let now = tokio::time::Instant::now();
-
+	fn evict_expired(&mut self, now: tokio::time::Instant) {
 		for slot in self.groups.iter_mut() {
 			let Some((group, created_at)) = slot else { continue };
 
@@ -158,9 +159,10 @@ impl TrackProducer {
 			return Err(Error::Duplicate);
 		}
 
+		let now = tokio::time::Instant::now();
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.info.sequence));
-		state.groups.push_back(Some((group.clone(), tokio::time::Instant::now())));
-		state.evict_expired();
+		state.groups.push_back(Some((group.clone(), now)));
+		state.evict_expired(now);
 
 		Ok(group)
 	}
@@ -172,13 +174,14 @@ impl TrackProducer {
 			return Err(Error::Closed);
 		}
 
+		let now = tokio::time::Instant::now();
 		let sequence = state.max_sequence.map_or(0, |s| s + 1);
 		let group = Group { sequence }.produce();
 
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
-		state.groups.push_back(Some((group.clone(), tokio::time::Instant::now())));
-		state.evict_expired();
+		state.groups.push_back(Some((group.clone(), now)));
+		state.evict_expired(now);
 
 		Ok(group)
 	}
