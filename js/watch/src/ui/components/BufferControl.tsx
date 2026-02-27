@@ -58,19 +58,23 @@ function drawRanges(
 		ctx.globalAlpha = 0.85;
 		ctx.fillStyle = isBuffering ? "#f87171" : i > 0 ? "#facc15" : "#4ade80";
 
-		ctx.beginPath();
-		ctx.roundRect(x, padding, w, rangeHeight, radius);
-		ctx.fill();
+		if (typeof ctx.roundRect === "function") {
+			ctx.beginPath();
+			ctx.roundRect(x, padding, w, rangeHeight, radius);
+			ctx.fill();
+		} else {
+			ctx.fillRect(x, padding, w, rangeHeight);
+		}
 
 		// Draw overflow label if the range extends past the visible max
 		if (endMs > max) {
-			const overflowSec = ((endMs - visibleStart) / 1000).toFixed(1);
+			const overflowSec = ((endMs - max) / 1000).toFixed(1);
 			ctx.globalAlpha = 0.7;
 			ctx.fillStyle = "black";
 			ctx.font = "500 9px system-ui, sans-serif";
 			ctx.textAlign = "right";
 			ctx.textBaseline = "middle";
-			ctx.fillText(`${overflowSec}s`, x + w - 4, height / 2);
+			ctx.fillText(`+${overflowSec}s`, x + w - 4, height / 2);
 		}
 	}
 }
@@ -119,6 +123,20 @@ export default function BufferControl(props: BufferControlProps) {
 		document.removeEventListener("mouseup", onMouseUp);
 	};
 
+	const onKeyDown = (e: KeyboardEvent) => {
+		let delta = 0 as Moq.Time.Milli;
+		if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+			delta = RANGE_STEP;
+		} else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+			delta = -RANGE_STEP as Moq.Time.Milli;
+		} else {
+			return;
+		}
+		e.preventDefault();
+		const value = Math.max(MIN_RANGE, Math.min(maxRange(), context.jitter() + delta)) as Moq.Time.Milli;
+		context.setJitter(value);
+	};
+
 	// Paint buffer ranges to canvas on each animation frame.
 	// Reading signals outside a SolidJS tracking scope avoids reactive subscriptions entirely.
 	let rafId: number | undefined;
@@ -155,6 +173,7 @@ export default function BufferControl(props: BufferControlProps) {
 				class={`watch-ui__buffer-visualization ${isDragging() ? "watch-ui__buffer-visualization--dragging" : ""}`}
 				ref={containerRef}
 				onMouseDown={onMouseDown}
+				onKeyDown={onKeyDown}
 				role="slider"
 				tabIndex={0}
 				aria-valuenow={context.jitter()}
