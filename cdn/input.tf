@@ -24,8 +24,8 @@ variable "ssh_keys" {
   type        = list(string)
 }
 
-variable "ram_alert_webhook" {
-  description = "Webhook URL for RAM usage alerts (Slack, Discord, etc.)"
+variable "webhook" {
+  description = "Webhook URL for all alerts (Slack, Discord, etc.)"
   type        = string
   default     = ""
 }

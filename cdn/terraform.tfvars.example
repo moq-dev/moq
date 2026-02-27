@@ -19,8 +19,5 @@ ssh_keys = [
   "ssh-ed25519 AAAA... your-key-comment",
 ]
 
-# Optional: Webhook URL for RAM usage alerts (Slack, Discord, etc.)
-# ram_alert_webhook = "https://hooks.slack.com/services/..."
-
-# Optional: Email for health check failure alerts
-# health_email = "admin@moq.dev"
+# Optional: Webhook URL for all alerts (Slack, Discord, etc.)
+# webhook = "https://discord.com/api/webhooks/..."

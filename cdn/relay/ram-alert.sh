@@ -61,7 +61,7 @@ if [ -n "$WEBHOOK_URL" ]; then
 	# Escape message for JSON: replace newlines, backslashes, and quotes
 	json_msg=$(echo -e "$msg" | sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g')
 	curl -sf -X POST -H "Content-Type: application/json" \
-		-d "{\"text\": \"${json_msg}\"}" \
+		-d "{\"content\": \"${json_msg}\"}" \
 		"$WEBHOOK_URL" >/dev/null 2>&1 || echo "Warning: webhook post failed"
 fi
 

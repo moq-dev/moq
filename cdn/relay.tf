@@ -8,7 +8,7 @@ resource "local_file" "moq_relay_service" {
 
 resource "local_file" "ram_alert_service" {
   content = templatefile("${path.module}/relay/ram-alert.service.tftpl", {
-    ram_alert_webhook = var.ram_alert_webhook
+    webhook = var.webhook
   })
   filename = "${path.module}/relay/ram-alert.service"
 }

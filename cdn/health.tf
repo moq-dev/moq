@@ -1,10 +1,3 @@
-# Health check configuration
-variable "health_email" {
-  description = "Email address for health check failure notifications"
-  type        = string
-  default     = ""
-}
-
 # Read the JWT from the secrets directory, same as other tokens
 locals {
   health_jwt = trimspace(file("${path.module}/secrets/demo-sub.jwt"))
@@ -36,21 +29,21 @@ resource "google_monitoring_uptime_check_config" "relay" {
   }
 }
 
-# Email notification channel (created only if email is provided)
-resource "google_monitoring_notification_channel" "email" {
-  count = var.health_email != "" ? 1 : 0
+# Webhook notification channel for health alerts (created only if webhook is provided)
+resource "google_monitoring_notification_channel" "webhook" {
+  count = var.webhook != "" ? 1 : 0
 
-  display_name = "MoQ CDN Health Alerts"
-  type         = "email"
+  display_name = "MoQ CDN Alerts"
+  type         = "webhook_tokenauth"
 
   labels = {
-    email_address = var.health_email
+    url = var.webhook
   }
 }
 
 # Alert policy that fires when any node health check fails
 resource "google_monitoring_alert_policy" "relay_down" {
-  count = var.health_email != "" ? 1 : 0
+  count = var.webhook != "" ? 1 : 0
 
   display_name = "MoQ Relay Node Down"
   combiner     = "OR"
@@ -77,7 +70,7 @@ resource "google_monitoring_alert_policy" "relay_down" {
     }
   }
 
-  notification_channels = [google_monitoring_notification_channel.email[0].name]
+  notification_channels = [google_monitoring_notification_channel.webhook[0].name]
 
   alert_strategy {
     auto_close = "1800s" # auto-resolve after 30 minutes of recovery
