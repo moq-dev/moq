@@ -11,7 +11,7 @@ pub struct Avc3 {
 	broadcast: moq_lite::BroadcastProducer,
 
 	// The catalog being produced.
-	catalog: hang::catalog::CatalogProducer,
+	catalog: crate::CatalogProducer,
 
 	// The track being produced.
 	track: Option<hang::container::OrderedProducer>,
@@ -28,7 +28,7 @@ pub struct Avc3 {
 }
 
 impl Avc3 {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::catalog::CatalogProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
 		Self {
 			broadcast,
 			catalog,

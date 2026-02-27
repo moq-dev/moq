@@ -75,8 +75,7 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<m
 	let mut renditions = std::collections::BTreeMap::new();
 	renditions.insert(video_track.name.clone(), video_config);
 
-	// Create a producer/consumer pair for the catalog.
-	// This JSON encodes the catalog as a "catalog.json" track.
+	// Create the catalog describing our video track.
 	let catalog = hang::catalog::Catalog {
 		video: hang::catalog::Video {
 			renditions,
@@ -85,11 +84,13 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<m
 			flip: None,
 		},
 		..Default::default()
-	}
-	.produce();
+	};
 
-	// Publish the catalog track to the broadcast.
-	broadcast.insert_track(&catalog.track)?;
+	// Publish the catalog as a "catalog.json" track in the broadcast.
+	let mut catalog_track = broadcast.create_track(hang::Catalog::default_track())?;
+	let mut group = catalog_track.append_group()?;
+	group.write_frame(catalog.to_string()?)?;
+	group.finish()?;
 
 	// Actually create the media track now.
 	let track = broadcast.create_track(video_track)?;

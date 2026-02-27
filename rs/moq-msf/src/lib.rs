@@ -96,8 +96,8 @@ pub enum Packaging {
 	Loc,
 	/// CMAF fragmented MP4 (CMSF).
 	Cmaf,
-	/// Hang container format.
-	Hang,
+	/// Legacy container format (timestamp + raw codec payload).
+	Legacy,
 	/// Media timeline.
 	MediaTimeline,
 	/// Event timeline.
@@ -111,7 +111,7 @@ impl fmt::Display for Packaging {
 		match self {
 			Packaging::Loc => write!(f, "loc"),
 			Packaging::Cmaf => write!(f, "cmaf"),
-			Packaging::Hang => write!(f, "hang"),
+			Packaging::Legacy => write!(f, "legacy"),
 			Packaging::MediaTimeline => write!(f, "mediatimeline"),
 			Packaging::EventTimeline => write!(f, "eventtimeline"),
 			Packaging::Unknown(s) => write!(f, "{s}"),
@@ -126,7 +126,7 @@ impl FromStr for Packaging {
 		Ok(match s {
 			"loc" => Packaging::Loc,
 			"cmaf" => Packaging::Cmaf,
-			"hang" => Packaging::Hang,
+			"legacy" => Packaging::Legacy,
 			"mediatimeline" => Packaging::MediaTimeline,
 			"eventtimeline" => Packaging::EventTimeline,
 			other => Packaging::Unknown(other.to_string()),
@@ -221,7 +221,7 @@ mod test {
 			version: 1,
 			tracks: vec![Track {
 				name: "video0".to_string(),
-				packaging: Packaging::Hang,
+				packaging: Packaging::Legacy,
 				is_live: true,
 				role: Some(Role::Video),
 				codec: Some("avc3.64001f".to_string()),
@@ -254,7 +254,7 @@ mod test {
 			version: 1,
 			tracks: vec![Track {
 				name: "audio0".to_string(),
-				packaging: Packaging::Hang,
+				packaging: Packaging::Legacy,
 				is_live: true,
 				role: Some(Role::Audio),
 				codec: Some("opus".to_string()),
@@ -287,7 +287,7 @@ mod test {
 		for (s, expected) in [
 			("loc", Packaging::Loc),
 			("cmaf", Packaging::Cmaf),
-			("hang", Packaging::Hang),
+			("legacy", Packaging::Legacy),
 			("mediatimeline", Packaging::MediaTimeline),
 			("eventtimeline", Packaging::EventTimeline),
 			("custom", Packaging::Unknown("custom".to_string())),

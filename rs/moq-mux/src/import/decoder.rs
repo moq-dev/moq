@@ -188,11 +188,7 @@ pub struct StreamDecoder {
 
 impl StreamDecoder {
 	/// Create a new stream decoder with the given format.
-	pub fn new(
-		broadcast: moq_lite::BroadcastProducer,
-		catalog: hang::catalog::CatalogProducer,
-		format: StreamFormat,
-	) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer, format: StreamFormat) -> Self {
 		let decoder = match format {
 			#[cfg(feature = "h264")]
 			StreamFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),
@@ -275,11 +271,7 @@ pub struct Decoder {
 
 impl Decoder {
 	/// Create a new decoder with the given format.
-	pub fn new(
-		broadcast: moq_lite::BroadcastProducer,
-		catalog: hang::catalog::CatalogProducer,
-		format: DecoderFormat,
-	) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer, format: DecoderFormat) -> Self {
 		let decoder = match format {
 			#[cfg(feature = "h264")]
 			DecoderFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),

@@ -1,7 +1,6 @@
 //! MSF catalog conversion and helpers.
 //!
-//! Converts a [`hang::Catalog`] to an MSF [`moq_msf::Catalog`] and provides
-//! a helper to register an MSF mirror track on a [`hang::CatalogProducer`].
+//! Converts a [`hang::Catalog`] to an MSF [`moq_msf::Catalog`].
 
 use base64::Engine;
 
@@ -15,7 +14,7 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 			hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
 			// TODO: For CMAF packaging, build proper CMAF init segments (ftyp+moov).
 			// See draft-ietf-moq-cmsf-00 for the required structure.
-			_ => moq_msf::Packaging::Hang,
+			_ => moq_msf::Packaging::Legacy,
 		};
 
 		let init_data = config
@@ -45,7 +44,7 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 	for (name, config) in &catalog.audio.renditions {
 		let packaging = match &config.container {
 			hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
-			_ => moq_msf::Packaging::Hang,
+			_ => moq_msf::Packaging::Legacy,
 		};
 
 		let init_data = config
@@ -74,26 +73,14 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 	moq_msf::Catalog { version: 1, tracks }
 }
 
-/// Register an MSF mirror track on a catalog producer and insert it into the broadcast.
-///
-/// This creates the MSF catalog track, adds it to the broadcast, and registers
-/// a mirror on the catalog producer so the MSF catalog is automatically updated
-/// whenever the hang catalog changes.
-pub fn register(
-	broadcast: &mut moq_lite::BroadcastProducer,
-	catalog: &hang::CatalogProducer,
-) -> Result<(), moq_lite::Error> {
-	let msf_track = moq_lite::Track {
-		name: moq_msf::DEFAULT_NAME.to_string(),
-		priority: 100,
-	}
-	.produce();
-
-	broadcast.insert_track(&msf_track)?;
-
-	catalog.add_mirror(msf_track, |c| to_msf(c).to_string().expect("invalid MSF catalog"));
-
-	Ok(())
+/// Publish the MSF catalog derived from a hang catalog to the given track.
+pub fn publish(catalog: &hang::Catalog, track: &mut moq_lite::TrackProducer) {
+	let msf = to_msf(catalog);
+	let Ok(mut group) = track.append_group() else {
+		return;
+	};
+	let _ = group.write_frame(msf.to_string().expect("invalid MSF catalog"));
+	let _ = group.finish();
 }
 
 #[cfg(test)]
@@ -166,7 +153,7 @@ mod test {
 		let video = &msf.tracks[0];
 		assert_eq!(video.name, "video0.avc3");
 		assert_eq!(video.role, Some(moq_msf::Role::Video));
-		assert_eq!(video.packaging, moq_msf::Packaging::Hang);
+		assert_eq!(video.packaging, moq_msf::Packaging::Legacy);
 		assert_eq!(video.codec, Some("avc3.64001f".to_string()));
 		assert_eq!(video.width, Some(1280));
 		assert_eq!(video.height, Some(720));
@@ -177,7 +164,7 @@ mod test {
 		let audio = &msf.tracks[1];
 		assert_eq!(audio.name, "audio0");
 		assert_eq!(audio.role, Some(moq_msf::Role::Audio));
-		assert_eq!(audio.packaging, moq_msf::Packaging::Hang);
+		assert_eq!(audio.packaging, moq_msf::Packaging::Legacy);
 		assert_eq!(audio.codec, Some("opus".to_string()));
 		assert_eq!(audio.samplerate, Some(48_000));
 		assert_eq!(audio.channel_config, Some("2".to_string()));

@@ -1,6 +1,6 @@
 //! This module contains the structs and functions for the MoQ catalog format
+use crate::Result;
 use crate::catalog::{Audio, Chat, User, Video};
-use crate::{CatalogProducer, Result};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -74,12 +74,6 @@ impl Catalog {
 	/// Serialize the catalog to a writer.
 	pub fn to_writer(&self, writer: impl std::io::Write) -> Result<()> {
 		Ok(serde_json::to_writer(writer, self)?)
-	}
-
-	/// Produce a catalog track that describes the available media tracks.
-	pub fn produce(self) -> CatalogProducer {
-		let track = Catalog::default_track().produce();
-		CatalogProducer::new(track, self)
 	}
 
 	pub fn default_track() -> moq_lite::Track {
