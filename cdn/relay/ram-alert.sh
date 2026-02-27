@@ -28,7 +28,6 @@ mem_pct=$((mem_available * 100 / mem_total))
 # Convert to human-readable MB
 mem_total_mb=$((mem_total / 1024))
 mem_available_mb=$((mem_available / 1024))
-mem_used_mb=$(( (mem_total - mem_available) / 1024 ))
 swap_used_mb=$((swap_used / 1024))
 
 alert=false
@@ -58,10 +57,9 @@ echo -e "$msg"
 
 # Send webhook if configured
 if [ -n "$WEBHOOK_URL" ]; then
-	# Escape message for JSON: replace newlines, backslashes, and quotes
-	json_msg=$(echo -e "$msg" | sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\n/\\n/g')
+	json_payload=$(echo -e "$msg" | python3 -c 'import json,sys; print(json.dumps({"content": sys.stdin.read()}))')
 	curl -sf -X POST -H "Content-Type: application/json" \
-		-d "{\"content\": \"${json_msg}\"}" \
+		-d "$json_payload" \
 		"$WEBHOOK_URL" >/dev/null 2>&1 || echo "Warning: webhook post failed"
 fi
 

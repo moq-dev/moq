@@ -27,6 +27,7 @@ variable "ssh_keys" {
 variable "webhook" {
   description = "Webhook URL for all alerts (Slack, Discord, etc.)"
   type        = string
+  sensitive   = true
   default     = ""
 }
 
