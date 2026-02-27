@@ -30,11 +30,7 @@ resource "google_monitoring_uptime_check_config" "relay" {
 }
 
 # Webhook notification channel for health alerts (created only if webhook is provided).
-#
-# Uses webhook_tokenauth which sends GCP incident v1.2 JSON payloads.
-# The endpoint must accept this format directly. Discord webhooks require a
-# proxy (e.g. Cloud Function) to translate the payload to {"content": "..."}.
-# For Slack, prefer the native "slack" channel type with OAuth instead.
+# Sends GCP incident v1.2 JSON payloads, which show as raw JSON in Discord.
 resource "google_monitoring_notification_channel" "webhook" {
   count = var.webhook != "" ? 1 : 0
 
