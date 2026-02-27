@@ -21,7 +21,11 @@ use super::{Group, GroupConsumer, GroupProducer};
 use std::{
 	collections::{HashSet, VecDeque},
 	task::Poll,
+	time::Duration,
 };
+
+/// Groups older than this are evicted from the track cache (unless they are the most recent group).
+const MAX_GROUP_AGE: Duration = Duration::from_secs(30);
 
 /// A track is a collection of groups, delivered out-of-order until expired.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +51,7 @@ impl Track {
 #[derive(Default)]
 struct State {
 	groups: VecDeque<GroupProducer>,
+	created_at: VecDeque<tokio::time::Instant>,
 	duplicates: HashSet<u64>,
 	offset: usize,
 	max_sequence: Option<u64>,
@@ -84,6 +89,23 @@ impl State {
 
 		Poll::Pending
 	}
+
+	/// Evict groups older than MAX_GROUP_AGE, always keeping at least the most recent group.
+	fn evict_expired(&mut self) {
+		let now = tokio::time::Instant::now();
+
+		while self.groups.len() > 1 {
+			let age = now.duration_since(*self.created_at.front().unwrap());
+			if age <= MAX_GROUP_AGE {
+				break;
+			}
+
+			let group = self.groups.pop_front().unwrap();
+			self.created_at.pop_front();
+			self.duplicates.remove(&group.info.sequence);
+			self.offset += 1;
+		}
+	}
 }
 
 /// A producer for a track, used to create new groups.
@@ -115,6 +137,8 @@ impl TrackProducer {
 
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.info.sequence));
 		state.groups.push_back(group.clone());
+		state.created_at.push_back(tokio::time::Instant::now());
+		state.evict_expired();
 
 		Ok(group)
 	}
@@ -132,6 +156,8 @@ impl TrackProducer {
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
 		state.groups.push_back(group.clone());
+		state.created_at.push_back(tokio::time::Instant::now());
+		state.evict_expired();
 
 		Ok(group)
 	}
@@ -336,5 +362,107 @@ impl TrackConsumer {
 
 	pub fn assert_not_clone(&self, other: &Self) {
 		assert!(!self.is_clone(other), "should not be clone");
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	#[tokio::test]
+	async fn evict_expired_groups() {
+		tokio::time::pause();
+
+		let mut producer = Track::new("test").produce();
+
+		// Create 3 groups at time 0.
+		producer.append_group().unwrap(); // seq 0
+		producer.append_group().unwrap(); // seq 1
+		producer.append_group().unwrap(); // seq 2
+
+		// All 3 should be present.
+		{
+			let state = producer.state.borrow();
+			assert_eq!(state.groups.len(), 3);
+			assert_eq!(state.offset, 0);
+		}
+
+		// Advance time past the eviction threshold.
+		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+
+		// Append a new group to trigger eviction.
+		producer.append_group().unwrap(); // seq 3
+
+		// After push: [0(old), 1(old), 2(old), 3(new)].
+		// Eviction removes 0, 1, 2 (all expired), stops at len=1.
+		// Only group 3 remains.
+		{
+			let state = producer.state.borrow();
+			assert_eq!(state.groups.len(), 1);
+			assert_eq!(state.groups[0].info.sequence, 3);
+			assert_eq!(state.offset, 3);
+			// Evicted sequences should be removed from duplicates.
+			assert!(!state.duplicates.contains(&0));
+			assert!(!state.duplicates.contains(&1));
+			assert!(!state.duplicates.contains(&2));
+			assert!(state.duplicates.contains(&3));
+		}
+	}
+
+	#[tokio::test]
+	async fn evict_keeps_latest() {
+		tokio::time::pause();
+
+		let mut producer = Track::new("test").produce();
+		producer.append_group().unwrap(); // seq 0
+
+		// Advance time past threshold.
+		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+
+		// Append another group. The old group should be evicted.
+		producer.append_group().unwrap(); // seq 1
+
+		{
+			let state = producer.state.borrow();
+			assert_eq!(state.groups.len(), 1);
+			assert_eq!(state.groups[0].info.sequence, 1);
+			assert_eq!(state.offset, 1);
+		}
+	}
+
+	#[tokio::test]
+	async fn no_eviction_when_fresh() {
+		tokio::time::pause();
+
+		let mut producer = Track::new("test").produce();
+		producer.append_group().unwrap(); // seq 0
+		producer.append_group().unwrap(); // seq 1
+		producer.append_group().unwrap(); // seq 2
+
+		// No time has passed, so nothing should be evicted.
+		{
+			let state = producer.state.borrow();
+			assert_eq!(state.groups.len(), 3);
+			assert_eq!(state.offset, 0);
+		}
+	}
+
+	#[tokio::test]
+	async fn consumer_skips_evicted_groups() {
+		tokio::time::pause();
+
+		let mut producer = Track::new("test").produce();
+		producer.append_group().unwrap(); // seq 0
+
+		// Consumer starts at group 0.
+		let mut consumer = producer.consume();
+
+		// Advance time and add new groups to trigger eviction.
+		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
+		producer.append_group().unwrap(); // seq 1
+
+		// Group 0 was evicted. Consumer should get group 1 (the only one left).
+		let group = consumer.assert_group();
+		assert_eq!(group.info.sequence, 1);
 	}
 }
