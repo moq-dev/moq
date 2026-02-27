@@ -13,7 +13,7 @@ The TypeScript implementation brings MoQ to web browsers using modern APIs like 
 
 [![npm](https://img.shields.io/npm/v/@moq/lite)](https://www.npmjs.com/package/@moq/lite)
 
-Core pub/sub transport protocol for browsers. Implements the [moq-lite specification](https://moq-dev.github.io/drafts/draft-lcurley-moq-lite.html).
+Core pub/sub transport protocol for browsers. Implements the [moq-lite specification](/spec/draft-lcurley-moq-lite).
 
 **Features:**
 - WebTransport-based QUIC

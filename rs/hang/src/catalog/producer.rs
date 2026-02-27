@@ -1,44 +1,66 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::catalog::msf::MsfCatalog;
-use crate::{Catalog, CatalogConsumer};
+use crate::{Catalog, CatalogConsumer, Error};
+
+/// A mirror track that receives content derived from the catalog.
+struct Mirror {
+	track: moq_lite::TrackProducer,
+	convert: Box<dyn Fn(&Catalog) -> String + Send + Sync>,
+}
+
+struct CatalogInner {
+	catalog: Catalog,
+	mirrors: Vec<Mirror>,
+}
 
 /// Produces a catalog track that describes the available media tracks.
 ///
 /// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
 /// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
 ///
-/// An MSF catalog track (`msf.json`) is also published alongside the native
-/// hang catalog (`catalog.json`) whenever the catalog changes.
+/// Additional mirror tracks can be registered via [`add_mirror`](Self::add_mirror) to
+/// automatically publish derived catalog formats (e.g. MSF) whenever the catalog changes.
 #[derive(Clone)]
 pub struct CatalogProducer {
-	/// Access to the underlying hang catalog track producer.
+	/// Access to the underlying catalog track producer.
 	pub track: moq_lite::TrackProducer,
 
-	/// Access to the underlying MSF catalog track producer.
-	pub msf_track: moq_lite::TrackProducer,
-
-	current: Arc<Mutex<Catalog>>,
+	inner: Arc<Mutex<CatalogInner>>,
 }
 
 impl CatalogProducer {
 	/// Create a new catalog producer with the given track and initial catalog.
 	pub fn new(track: moq_lite::TrackProducer, init: Catalog) -> Self {
-		let msf_track = Catalog::default_msf_track().produce();
 		Self {
-			current: Arc::new(Mutex::new(init)),
 			track,
-			msf_track,
+			inner: Arc::new(Mutex::new(CatalogInner {
+				catalog: init,
+				mirrors: Vec::new(),
+			})),
 		}
+	}
+
+	/// Register a mirror track that receives content derived from the catalog.
+	///
+	/// Whenever the catalog changes, the conversion function is called and the
+	/// result is published to the mirror track.
+	pub fn add_mirror(
+		&self,
+		track: moq_lite::TrackProducer,
+		convert: impl Fn(&Catalog) -> String + Send + Sync + 'static,
+	) {
+		self.inner.lock().unwrap().mirrors.push(Mirror {
+			track,
+			convert: Box::new(convert),
+		});
 	}
 
 	/// Get mutable access to the catalog, publishing it after any changes.
 	pub fn lock(&mut self) -> CatalogGuard<'_> {
 		CatalogGuard {
-			catalog: self.current.lock().unwrap(),
+			inner: self.inner.lock().unwrap(),
 			track: &mut self.track,
-			msf_track: &mut self.msf_track,
 			updated: false,
 		}
 	}
@@ -48,10 +70,14 @@ impl CatalogProducer {
 		CatalogConsumer::new(self.track.consume())
 	}
 
-	/// Finish publishing to this catalog and close the track.
-	pub fn close(self) {
-		self.track.close();
-		self.msf_track.close();
+	/// Finish publishing to this catalog and all mirror tracks.
+	pub fn finish(&mut self) -> Result<(), Error> {
+		self.track.finish()?;
+		let mut inner = self.inner.lock().unwrap();
+		for mirror in &mut inner.mirrors {
+			mirror.track.finish()?;
+		}
+		Ok(())
 	}
 }
 
@@ -71,12 +97,11 @@ impl Default for CatalogProducer {
 ///
 /// Obtained via [`CatalogProducer::lock`].
 ///
-/// On drop, both the hang `catalog.json` and MSF `msf.json` tracks are
-/// updated if the catalog was mutated.
+/// On drop, the catalog track and all registered mirror tracks are updated
+/// if the catalog was mutated.
 pub struct CatalogGuard<'a> {
-	catalog: MutexGuard<'a, Catalog>,
+	inner: MutexGuard<'a, CatalogInner>,
 	track: &'a mut moq_lite::TrackProducer,
-	msf_track: &'a mut moq_lite::TrackProducer,
 	updated: bool,
 }
 
@@ -84,14 +109,14 @@ impl<'a> Deref for CatalogGuard<'a> {
 	type Target = Catalog;
 
 	fn deref(&self) -> &Self::Target {
-		&self.catalog
+		&self.inner.catalog
 	}
 }
 
 impl<'a> DerefMut for CatalogGuard<'a> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		self.updated = true;
-		&mut self.catalog
+		&mut self.inner.catalog
 	}
 }
 
@@ -102,18 +127,26 @@ impl Drop for CatalogGuard<'_> {
 			return;
 		}
 
-		// Publish the hang catalog.
-		let mut group = self.track.append_group();
-		// TODO decide if this should return an error, or be impossible to fail
-		let frame = self.catalog.to_string().expect("invalid catalog");
-		group.write_frame(frame);
-		group.close();
+		let CatalogInner { catalog, mirrors } = &mut *self.inner;
 
-		// Publish the MSF catalog derived from the same data.
-		let msf = MsfCatalog::from(&*self.catalog);
-		let mut msf_group = self.msf_track.append_group();
-		let msf_frame = msf.to_string().expect("invalid MSF catalog");
-		msf_group.write_frame(msf_frame);
-		msf_group.close();
+		// Publish the catalog.
+		let Ok(mut group) = self.track.append_group() else {
+			return;
+		};
+
+		// TODO decide if this should return an error, or be impossible to fail
+		let frame = catalog.to_string().expect("invalid catalog");
+		let _ = group.write_frame(frame);
+		let _ = group.finish();
+
+		// Publish to all mirror tracks.
+		for mirror in mirrors {
+			let Ok(mut group) = mirror.track.append_group() else {
+				continue;
+			};
+			let frame = (mirror.convert)(catalog);
+			let _ = group.write_frame(frame);
+			let _ = group.finish();
+		}
 	}
 }

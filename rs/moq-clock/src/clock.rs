@@ -44,11 +44,11 @@ impl Publisher {
 		// Everything but the second.
 		let base = now.format("%Y-%m-%d %H:%M:").to_string();
 
-		segment.write_frame(base.clone());
+		segment.write_frame(base.clone())?;
 
 		loop {
 			let delta = now.format("%S").to_string();
-			segment.write_frame(delta.clone());
+			segment.write_frame(delta.clone())?;
 
 			let next = now + chrono::Duration::try_seconds(1).unwrap();
 			let next = next.with_nanosecond(0).unwrap();
@@ -57,15 +57,15 @@ impl Publisher {
 			tokio::time::sleep(delay).await;
 
 			// Get the current time again to check if we overslept
-			let next = Utc::now();
-			if next.minute() != now.minute() {
+			let actual = Utc::now();
+			if actual.minute() != now.minute() {
 				break;
 			}
 
-			now = next;
+			now = actual;
 		}
 
-		segment.close();
+		segment.finish()?;
 
 		Ok(())
 	}

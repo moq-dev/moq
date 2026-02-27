@@ -88,17 +88,6 @@ impl Catalog {
 			priority: 100,
 		}
 	}
-
-	/// The default name for the MSF catalog track.
-	pub const DEFAULT_MSF_NAME: &str = "msf.json";
-
-	/// Return the default MSF track definition.
-	pub fn default_msf_track() -> moq_lite::Track {
-		moq_lite::Track {
-			name: Catalog::DEFAULT_MSF_NAME.to_string(),
-			priority: 100,
-		}
-	}
 }
 
 #[cfg(test)]

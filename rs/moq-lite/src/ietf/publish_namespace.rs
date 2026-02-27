@@ -21,10 +21,11 @@ pub struct PublishNamespace<'a> {
 impl Message for PublishNamespace<'_> {
 	const ID: u64 = 0x06;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		encode_namespace(w, &self.track_namespace, version);
-		0u8.encode(w, version); // number of parameters
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		encode_namespace(w, &self.track_namespace, version)?;
+		0u8.encode(w, version)?; // number of parameters
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -50,8 +51,9 @@ pub struct PublishNamespaceOk {
 impl Message for PublishNamespaceOk {
 	const ID: u64 = 0x07;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -71,10 +73,11 @@ pub struct PublishNamespaceError<'a> {
 impl Message for PublishNamespaceError<'_> {
 	const ID: u64 = 0x08;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		self.error_code.encode(w, version);
-		self.reason_phrase.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		self.error_code.encode(w, version)?;
+		self.reason_phrase.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -102,15 +105,16 @@ pub struct PublishNamespaceDone<'a> {
 impl Message for PublishNamespaceDone<'_> {
 	const ID: u64 = 0x09;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft14 | Version::Draft15 => {
-				encode_namespace(w, &self.track_namespace, version);
+				encode_namespace(w, &self.track_namespace, version)?;
 			}
 			Version::Draft16 => {
-				self.request_id.encode(w, version);
+				self.request_id.encode(w, version)?;
 			}
 		}
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -148,17 +152,18 @@ pub struct PublishNamespaceCancel<'a> {
 impl Message for PublishNamespaceCancel<'_> {
 	const ID: u64 = 0x0c;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft14 | Version::Draft15 => {
-				encode_namespace(w, &self.track_namespace, version);
+				encode_namespace(w, &self.track_namespace, version)?;
 			}
 			Version::Draft16 => {
-				self.request_id.encode(w, version);
+				self.request_id.encode(w, version)?;
 			}
 		}
-		self.error_code.encode(w, version);
-		self.reason_phrase.encode(w, version);
+		self.error_code.encode(w, version)?;
+		self.reason_phrase.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -190,7 +195,7 @@ mod tests {
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version);
+		msg.encode_msg(&mut buf, version).unwrap();
 		buf.to_vec()
 	}
 

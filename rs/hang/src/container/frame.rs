@@ -41,16 +41,16 @@ impl Frame {
 	/// NOTE: The [Self::keyframe] flag is ignored for this method; you need to create a new group manually.
 	pub fn encode(&self, group: &mut moq_lite::GroupProducer) -> Result<(), Error> {
 		let mut header = BytesMut::new();
-		self.timestamp.encode(&mut header);
+		self.timestamp.encode(&mut header).map_err(moq_lite::Error::from)?;
 
 		let size = header.len() + self.payload.remaining();
 
-		let mut chunked = group.create_frame(size.into());
-		chunked.write_chunk(header.freeze());
+		let mut chunked = group.create_frame(size.into())?;
+		chunked.write_chunk(header.freeze())?;
 		for chunk in &self.payload {
-			chunked.write_chunk(chunk.clone());
+			chunked.write_chunk(chunk.clone())?;
 		}
-		chunked.close();
+		chunked.finish()?;
 
 		Ok(())
 	}

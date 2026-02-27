@@ -1,4 +1,4 @@
-use crate::coding::{Decode, DecodeError, Encode};
+use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
@@ -21,8 +21,9 @@ impl GroupOrder {
 }
 
 impl<V> Encode<V> for GroupOrder {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		u8::from(*self).encode(w, version);
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		u8::from(*self).encode(w, version)?;
+		Ok(())
 	}
 }
 
@@ -62,11 +63,10 @@ impl GroupFlags {
 	pub const START_NO_PRIORITY: u64 = 0x30;
 	pub const END_NO_PRIORITY: u64 = 0x3d;
 
-	pub fn encode(&self) -> u64 {
-		assert!(
-			!self.has_subgroup || !self.has_subgroup_object,
-			"has_subgroup and has_subgroup_object cannot be true at the same time"
-		);
+	pub fn encode(&self) -> Result<u64, EncodeError> {
+		if self.has_subgroup && self.has_subgroup_object {
+			return Err(EncodeError::InvalidState);
+		}
 
 		let base = if self.has_priority {
 			Self::START
@@ -86,7 +86,7 @@ impl GroupFlags {
 		if self.has_end {
 			id |= 0x08;
 		}
-		id
+		Ok(id)
 	}
 
 	pub fn decode(id: u64) -> Result<Self, DecodeError> {
@@ -139,23 +139,24 @@ pub struct GroupHeader {
 }
 
 impl<V: Clone> Encode<V> for GroupHeader {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.flags.encode().encode(w, version.clone());
-		self.track_alias.encode(w, version.clone());
-		self.group_id.encode(w, version.clone());
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		self.flags.encode()?.encode(w, version.clone())?;
+		self.track_alias.encode(w, version.clone())?;
+		self.group_id.encode(w, version.clone())?;
 
 		if !self.flags.has_subgroup && self.sub_group_id != 0 {
-			panic!("sub_group_id must be 0 if has_subgroup is false");
+			return Err(EncodeError::InvalidState);
 		}
 
 		if self.flags.has_subgroup {
-			self.sub_group_id.encode(w, version.clone());
+			self.sub_group_id.encode(w, version.clone())?;
 		}
 
 		// Publisher priority (only if has_priority flag is set)
 		if self.flags.has_priority {
-			self.publisher_priority.encode(w, version);
+			self.publisher_priority.encode(w, version)?;
 		}
+		Ok(())
 	}
 }
 
@@ -201,7 +202,7 @@ mod tests {
 		assert!(!flags.has_extensions);
 		assert!(!flags.has_end);
 		assert!(flags.has_priority);
-		assert_eq!(flags.encode(), 0x10);
+		assert_eq!(flags.encode().unwrap(), 0x10);
 
 		// Type 0x11: No subgroup field, Subgroup ID = 0, Extensions, No end
 		let flags = GroupFlags::decode(0x11).unwrap();
@@ -209,7 +210,7 @@ mod tests {
 		assert!(!flags.has_subgroup_object);
 		assert!(flags.has_extensions);
 		assert!(!flags.has_end);
-		assert_eq!(flags.encode(), 0x11);
+		assert_eq!(flags.encode().unwrap(), 0x11);
 
 		// Type 0x12: No subgroup field, Subgroup ID = First Object ID, No extensions, No end
 		let flags = GroupFlags::decode(0x12).unwrap();
@@ -217,7 +218,7 @@ mod tests {
 		assert!(flags.has_subgroup_object);
 		assert!(!flags.has_extensions);
 		assert!(!flags.has_end);
-		assert_eq!(flags.encode(), 0x12);
+		assert_eq!(flags.encode().unwrap(), 0x12);
 
 		// Type 0x13: No subgroup field, Subgroup ID = First Object ID, Extensions, No end
 		let flags = GroupFlags::decode(0x13).unwrap();
@@ -225,7 +226,7 @@ mod tests {
 		assert!(flags.has_subgroup_object);
 		assert!(flags.has_extensions);
 		assert!(!flags.has_end);
-		assert_eq!(flags.encode(), 0x13);
+		assert_eq!(flags.encode().unwrap(), 0x13);
 
 		// Type 0x14: Subgroup field present, No extensions, No end
 		let flags = GroupFlags::decode(0x14).unwrap();
@@ -233,7 +234,7 @@ mod tests {
 		assert!(!flags.has_subgroup_object);
 		assert!(!flags.has_extensions);
 		assert!(!flags.has_end);
-		assert_eq!(flags.encode(), 0x14);
+		assert_eq!(flags.encode().unwrap(), 0x14);
 
 		// Type 0x15: Subgroup field present, Extensions, No end
 		let flags = GroupFlags::decode(0x15).unwrap();
@@ -241,7 +242,7 @@ mod tests {
 		assert!(!flags.has_subgroup_object);
 		assert!(flags.has_extensions);
 		assert!(!flags.has_end);
-		assert_eq!(flags.encode(), 0x15);
+		assert_eq!(flags.encode().unwrap(), 0x15);
 
 		// Type 0x18: No subgroup field, Subgroup ID = 0, No extensions, End of group
 		let flags = GroupFlags::decode(0x18).unwrap();
@@ -249,7 +250,7 @@ mod tests {
 		assert!(!flags.has_subgroup_object);
 		assert!(!flags.has_extensions);
 		assert!(flags.has_end);
-		assert_eq!(flags.encode(), 0x18);
+		assert_eq!(flags.encode().unwrap(), 0x18);
 
 		// Type 0x19: No subgroup field, Subgroup ID = 0, Extensions, End of group
 		let flags = GroupFlags::decode(0x19).unwrap();
@@ -257,7 +258,7 @@ mod tests {
 		assert!(!flags.has_subgroup_object);
 		assert!(flags.has_extensions);
 		assert!(flags.has_end);
-		assert_eq!(flags.encode(), 0x19);
+		assert_eq!(flags.encode().unwrap(), 0x19);
 
 		// Type 0x1A: No subgroup field, Subgroup ID = First Object ID, No extensions, End of group
 		let flags = GroupFlags::decode(0x1A).unwrap();
@@ -265,7 +266,7 @@ mod tests {
 		assert!(flags.has_subgroup_object);
 		assert!(!flags.has_extensions);
 		assert!(flags.has_end);
-		assert_eq!(flags.encode(), 0x1A);
+		assert_eq!(flags.encode().unwrap(), 0x1A);
 
 		// Type 0x1B: No subgroup field, Subgroup ID = First Object ID, Extensions, End of group
 		let flags = GroupFlags::decode(0x1B).unwrap();
@@ -273,7 +274,7 @@ mod tests {
 		assert!(flags.has_subgroup_object);
 		assert!(flags.has_extensions);
 		assert!(flags.has_end);
-		assert_eq!(flags.encode(), 0x1B);
+		assert_eq!(flags.encode().unwrap(), 0x1B);
 
 		// Type 0x1C: Subgroup field present, No extensions, End of group
 		let flags = GroupFlags::decode(0x1C).unwrap();
@@ -281,7 +282,7 @@ mod tests {
 		assert!(!flags.has_subgroup_object);
 		assert!(!flags.has_extensions);
 		assert!(flags.has_end);
-		assert_eq!(flags.encode(), 0x1C);
+		assert_eq!(flags.encode().unwrap(), 0x1C);
 
 		// Type 0x1D: Subgroup field present, Extensions, End of group
 		let flags = GroupFlags::decode(0x1D).unwrap();
@@ -289,7 +290,7 @@ mod tests {
 		assert!(!flags.has_subgroup_object);
 		assert!(flags.has_extensions);
 		assert!(flags.has_end);
-		assert_eq!(flags.encode(), 0x1D);
+		assert_eq!(flags.encode().unwrap(), 0x1D);
 
 		// Invalid: Both has_subgroup and has_subgroup_object (would be 0x16)
 		assert!(GroupFlags::decode(0x16).is_err());
@@ -303,19 +304,19 @@ mod tests {
 		assert!(!flags.has_subgroup);
 		assert!(!flags.has_extensions);
 		assert!(!flags.has_end);
-		assert_eq!(flags.encode(), 0x30);
+		assert_eq!(flags.encode().unwrap(), 0x30);
 
 		let flags = GroupFlags::decode(0x38).unwrap();
 		assert!(!flags.has_priority);
 		assert!(flags.has_end);
-		assert_eq!(flags.encode(), 0x38);
+		assert_eq!(flags.encode().unwrap(), 0x38);
 
 		let flags = GroupFlags::decode(0x3D).unwrap();
 		assert!(!flags.has_priority);
 		assert!(flags.has_subgroup);
 		assert!(flags.has_extensions);
 		assert!(flags.has_end);
-		assert_eq!(flags.encode(), 0x3D);
+		assert_eq!(flags.encode().unwrap(), 0x3D);
 
 		// Invalid: Both has_subgroup and has_subgroup_object in no-priority range
 		assert!(GroupFlags::decode(0x36).is_err());

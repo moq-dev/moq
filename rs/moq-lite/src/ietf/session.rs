@@ -6,7 +6,7 @@ use crate::{
 
 use super::{Publisher, Subscriber};
 
-pub(crate) async fn start<S: web_transport_trait::Session>(
+pub(crate) fn start<S: web_transport_trait::Session>(
 	session: S,
 	setup: Stream<S, Version>,
 	request_id_max: RequestId,

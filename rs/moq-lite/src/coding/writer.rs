@@ -25,7 +25,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		V: Clone,
 	{
 		self.buffer.clear();
-		msg.encode(&mut self.buffer, self.version.clone());
+		msg.encode(&mut self.buffer, self.version.clone())?;
 
 		while !self.buffer.is_empty() {
 			self.stream

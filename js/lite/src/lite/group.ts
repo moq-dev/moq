@@ -32,40 +32,6 @@ export class Group {
 	}
 }
 
-export class GroupDrop {
-	sequence: number;
-	count: number;
-	error: number;
-
-	constructor(sequence: number, count: number, error: number) {
-		this.sequence = sequence;
-		this.count = count;
-		this.error = error;
-	}
-
-	async #encode(w: Writer) {
-		await w.u53(this.sequence);
-		await w.u53(this.count);
-		await w.u53(this.error);
-	}
-
-	static async #decode(r: Reader): Promise<GroupDrop> {
-		return new GroupDrop(await r.u53(), await r.u53(), await r.u53());
-	}
-
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader): Promise<GroupDrop> {
-		return Message.decode(r, GroupDrop.#decode);
-	}
-
-	static async decodeMaybe(r: Reader): Promise<GroupDrop | undefined> {
-		return Message.decodeMaybe(r, GroupDrop.#decode);
-	}
-}
-
 export class Frame {
 	payload: Uint8Array;
 

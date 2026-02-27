@@ -70,9 +70,6 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		websocketWon.add(url.toString());
 	}
 
-	// moq-rs currently requires the ROLE extension to be set.
-	const stream = await Stream.open(session);
-
 	// @ts-expect-error - TODO: add protocol to WebTransport
 	const protocol: string | undefined = session instanceof WebTransport ? session.protocol : undefined;
 	console.debug(url.toString(), "negotiated ALPN:", protocol ?? "(none)");
@@ -83,6 +80,10 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
+	} else if (protocol === Lite.ALPN_03) {
+		// moq-lite draft-03 doesn't use a session stream, so we return immediately.
+		console.debug(url.toString(), "moq-lite draft-03 session established");
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_03, undefined);
 	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
 		// moq-lite ALPN (or no protocol) uses Draft14 encoding for SETUP,
 		// then negotiates the actual version via the SETUP message.
@@ -92,6 +93,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	}
 
 	// We're encoding 0x20 so it's backwards compatible with moq-transport-10+
+	const stream = await Stream.open(session);
 	await stream.writer.u53(Lite.StreamId.ClientCompat);
 
 	const encoder = new TextEncoder();
@@ -126,7 +128,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
 		console.debug(url.toString(), "moq-lite session established");
-		return new Lite.Connection(url, session, stream, server.version as Lite.Version);
+		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
 		console.debug(url.toString(), "moq-ietf session established, version:", server.version.toString(16));
@@ -153,7 +155,7 @@ async function connectWebTransport(
 		allowPooling: false,
 		congestionControl: "low-latency",
 		// @ts-expect-error - TODO: add protocols to WebTransportOptions
-		protocols: [Lite.ALPN, Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
+		protocols: [Lite.ALPN_03, Lite.ALPN, Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
 		...options,
 	};
 

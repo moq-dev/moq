@@ -1,5 +1,3 @@
-use tokio::sync::oneshot;
-
 use crate::{
 	Error, OriginConsumer, OriginProducer,
 	coding::Stream,
@@ -8,10 +6,11 @@ use crate::{
 
 use super::{Publisher, Subscriber};
 
-pub(crate) async fn start<S: web_transport_trait::Session>(
+pub(crate) fn start<S: web_transport_trait::Session>(
 	session: S,
 	// The stream used to setup the session, after exchanging setup messages.
-	setup: Stream<S, Version>,
+	// NOTE: No longer used in draft-03.
+	setup: Option<Stream<S, Version>>,
 	// We will publish any local broadcasts from this origin.
 	publish: Option<OriginConsumer>,
 	// We will consume any remote broadcasts, inserting them into this origin.
@@ -22,13 +21,11 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 	let publisher = Publisher::new(session.clone(), publish, version);
 	let subscriber = Subscriber::new(session.clone(), subscribe, version);
 
-	let init = oneshot::channel();
-
 	web_async::spawn(async move {
 		let res = tokio::select! {
-			res = run_session(setup) => res,
+			Err(res) = run_session(setup) => Err(res),
 			res = publisher.run() => res,
-			res = subscriber.run(init.0) => res,
+			res = subscriber.run() => res,
 		};
 
 		match res {
@@ -47,17 +44,15 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 		}
 	});
 
-	// Wait until receiving the initial announcements to prevent some race conditions.
-	// Otherwise, `consume()` might return not found if we don't wait long enough, so just wait.
-	// If the announce stream fails or is closed, this will return an error instead of hanging.
-	// TODO return a better error
-	init.1.await.map_err(|_| Error::Cancel)?;
-
 	Ok(())
 }
 
 // TODO do something useful with this
-async fn run_session<S: web_transport_trait::Session>(mut stream: Stream<S, Version>) -> Result<(), Error> {
-	while let Some(_info) = stream.reader.decode_maybe::<SessionInfo>().await? {}
-	Err(Error::Cancel)
+async fn run_session<S: web_transport_trait::Session>(stream: Option<Stream<S, Version>>) -> Result<(), Error> {
+	if let Some(mut stream) = stream {
+		while let Some(_info) = stream.reader.decode_maybe::<SessionInfo>().await? {}
+		return Err(Error::Cancel);
+	}
+
+	Ok(())
 }

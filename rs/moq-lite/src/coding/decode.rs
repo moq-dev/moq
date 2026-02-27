@@ -51,6 +51,9 @@ pub enum DecodeError {
 
 	#[error("unsupported")]
 	Unsupported,
+
+	#[error("unsupported version")]
+	Version,
 }
 
 impl<V> Decode<V> for bool {
@@ -133,5 +136,21 @@ impl<V> Decode<V> for Cow<'_, str> {
 	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let s = String::decode(r, version)?;
 		Ok(Cow::Owned(s))
+	}
+}
+
+impl<V> Decode<V> for Option<u64> {
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
+		match u64::decode(r, version)? {
+			0 => Ok(None),
+			value => Ok(Some(value - 1)),
+		}
+	}
+}
+
+impl<V> Decode<V> for std::time::Duration {
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
+		let value = u64::decode(r, version)?;
+		Ok(Self::from_millis(value))
 	}
 }

@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut};
 
 use crate::{
-	coding::{Decode, DecodeError, Encode, Sizer},
+	coding::{Decode, DecodeError, Encode, EncodeError, Sizer},
 	lite::Version,
 };
 
@@ -13,7 +13,7 @@ use crate::{
 /// - Ensuring no bytes are left over or missing after decoding
 pub trait Message: Sized {
 	/// Encode this message with a size prefix.
-	fn encode_msg<W: BufMut>(&self, w: &mut W, version: Version);
+	fn encode_msg<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError>;
 
 	/// Decode a size-prefixed message, ensuring exact size consumption.
 	fn decode_msg<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError>;
@@ -21,11 +21,11 @@ pub trait Message: Sized {
 
 // Blanket implementation for all types that implement Encode + Decode
 impl<T: Message> Encode<Version> for T {
-	fn encode<W: BufMut>(&self, w: &mut W, version: Version) {
+	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		let mut sizer = Sizer::default();
-		Message::encode_msg(self, &mut sizer, version);
-		sizer.size.encode(w, version);
-		Message::encode_msg(self, w, version);
+		Message::encode_msg(self, &mut sizer, version)?;
+		sizer.size.encode(w, version)?;
+		Message::encode_msg(self, w, version)
 	}
 }
 

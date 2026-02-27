@@ -41,15 +41,16 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1770419143,
-        "narHash": "sha256-K8sTp/uNGbYnuCNFGyUJX5u9sL/BLEEapbAvy8ZcmNc=",
+        "lastModified": 1770688412,
+        "narHash": "sha256-SVhZjqJx+80WfC1KUIgNFRxaRApZN8rAKF2d8m022s8=",
         "owner": "moq-dev",
         "repo": "moq",
-        "rev": "d76ca42e756c63b60cc8d95d6ad2d581c2a04b9d",
+        "rev": "28f3d0c94e968a0d2631eeef197367beac380277",
         "type": "github"
       },
       "original": {
         "owner": "moq-dev",
+        "ref": "moq-relay-v0.10.5",
         "repo": "moq",
         "type": "github"
       }
@@ -72,11 +73,11 @@
     },
     "nixpkgs_2": {
       "locked": {
-        "lastModified": 1770197578,
-        "narHash": "sha256-AYqlWrX09+HvGs8zM6ebZ1pwUqjkfpnv8mewYwAo+iM=",
+        "lastModified": 1771848320,
+        "narHash": "sha256-0MAd+0mun3K/Ns8JATeHT1sX28faLII5hVLq0L3BdZU=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "00c21e4c93d963c50d4c0c89bfa84ed6e0694df2",
+        "rev": "2fc6539b481e1d2569f25f8799236694180c0993",
         "type": "github"
       },
       "original": {

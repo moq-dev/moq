@@ -8,6 +8,8 @@ pub enum ControlType {
 	Session = 0,
 	Announce = 1,
 	Subscribe = 2,
+	Fetch = 3,
+	Probe = 4,
 }
 
 impl<V> Decode<V> for ControlType {
@@ -18,9 +20,10 @@ impl<V> Decode<V> for ControlType {
 }
 
 impl<V> Encode<V> for ControlType {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		let v: u64 = (*self).into();
-		v.encode(w, version)
+		v.encode(w, version)?;
+		Ok(())
 	}
 }
 
@@ -38,8 +41,9 @@ impl<V> Decode<V> for DataType {
 }
 
 impl<V> Encode<V> for DataType {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		let v: u64 = (*self).into();
-		v.encode(w, version)
+		v.encode(w, version)?;
+		Ok(())
 	}
 }

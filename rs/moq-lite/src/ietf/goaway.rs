@@ -16,8 +16,9 @@ pub struct GoAway<'a> {
 impl Message for GoAway<'_> {
 	const ID: u64 = 0x10;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.new_session_uri.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.new_session_uri.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -33,7 +34,7 @@ mod tests {
 
 	fn encode_message<M: Message>(msg: &M) -> Vec<u8> {
 		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, Version::Draft14);
+		msg.encode_msg(&mut buf, Version::Draft14).unwrap();
 		buf.to_vec()
 	}
 

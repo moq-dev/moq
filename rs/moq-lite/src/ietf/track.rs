@@ -25,25 +25,26 @@ pub struct TrackStatus<'a> {
 impl Message for TrackStatus<'_> {
 	const ID: u64 = 0x0d;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		encode_namespace(w, &self.track_namespace, version);
-		self.track_name.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		encode_namespace(w, &self.track_namespace, version)?;
+		self.track_name.encode(w, version)?;
 
 		match version {
 			Version::Draft14 => {
-				0u8.encode(w, version); // subscriber priority
-				GroupOrder::Descending.encode(w, version);
-				false.encode(w, version); // forward
-				FilterType::LargestObject.encode(w, version); // filter type
-				0u8.encode(w, version); // no parameters
+				0u8.encode(w, version)?; // subscriber priority
+				GroupOrder::Descending.encode(w, version)?;
+				false.encode(w, version)?; // forward
+				FilterType::LargestObject.encode(w, version)?; // filter type
+				0u8.encode(w, version)?; // no parameters
 			}
 			Version::Draft15 | Version::Draft16 => {
 				// v15: same format as Subscribe - fields in parameters
 				let params = MessageParameters::default();
-				params.encode(w, version);
+				params.encode(w, version)?;
 			}
 		}
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -82,8 +83,9 @@ pub enum TrackStatusCode {
 }
 
 impl<V> Encode<V> for TrackStatusCode {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		u64::from(*self).encode(w, version);
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		u64::from(*self).encode(w, version)?;
+		Ok(())
 	}
 }
 
@@ -100,7 +102,7 @@ mod tests {
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version);
+		msg.encode_msg(&mut buf, version).unwrap();
 		buf.to_vec()
 	}
 

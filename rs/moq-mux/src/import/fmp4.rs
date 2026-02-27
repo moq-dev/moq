@@ -192,7 +192,7 @@ impl Fmp4 {
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
 
-			let track = self.broadcast.create_track(track);
+			let track = self.broadcast.create_track(track)?;
 
 			self.tracks.insert(track_id, Fmp4Track::new(kind, track));
 		}
@@ -541,11 +541,11 @@ impl Fmp4 {
 						let mut group = match track.kind {
 							// If this is a video keyframe, we create a new group.
 							TrackKind::Video if keyframe => {
-								if let Some(group) = track.group.take() {
+								if let Some(mut group) = track.group.take() {
 									// Close the previous group if it exists.
-									group.close();
+									group.finish()?;
 								}
-								track.producer.append_group()
+								track.producer.append_group()?
 							}
 							// If this is a video non-keyframe, we use the previous group.
 							TrackKind::Video => track.group.take().context("no keyframe at start")?,
@@ -554,7 +554,10 @@ impl Fmp4 {
 								// This is an optimization to avoid a burst of tiny groups, possibly hitting MAX_STREAMS, when it doesn't really matter.
 								// ex. 2s of audio: 1 group instead of 90 groups.
 								// Technically, individual groups are better for skipping, but it's a moot point if fMP4 is introducing so much latency.
-								track.group.take().unwrap_or_else(|| track.producer.append_group())
+								match track.group.take() {
+									Some(group) => group,
+									None => track.producer.append_group()?,
+								}
 							}
 						};
 
@@ -587,11 +590,11 @@ impl Fmp4 {
 			// If we're doing passthrough mode, then we write one giant fragment instead of individual frames.
 			if self.config.passthrough {
 				let mut group = if contains_keyframe {
-					if let Some(group) = track.group.take() {
-						group.close();
+					if let Some(mut group) = track.group.take() {
+						group.finish()?;
 					}
 
-					track.producer.append_group()
+					track.producer.append_group()?
 				} else {
 					track.group.take().context("no keyframe at start")?
 				};
@@ -601,17 +604,17 @@ impl Fmp4 {
 				// To avoid an extra allocation, we use the chunked API to write the moof and mdat atoms separately.
 				let mut frame = group.create_frame(moq_lite::Frame {
 					size: moof_raw.len() as u64 + mdat_raw.len() as u64,
-				});
+				})?;
 
-				frame.write_chunk(moof_raw.clone());
-				frame.write_chunk(Bytes::copy_from_slice(mdat_raw));
-				frame.close();
+				frame.write_chunk(moof_raw.clone())?;
+				frame.write_chunk(Bytes::copy_from_slice(mdat_raw))?;
+				frame.finish()?;
 
 				track.group = Some(group);
 			} else if track.kind == TrackKind::Audio {
 				// Close the audio group if it exists.
-				if let Some(group) = track.group.take() {
-					group.close();
+				if let Some(mut group) = track.group.take() {
+					group.finish()?;
 				}
 			}
 

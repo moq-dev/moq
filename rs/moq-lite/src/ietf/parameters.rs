@@ -80,8 +80,12 @@ impl Decode<Version> for Parameters {
 }
 
 impl Encode<Version> for Parameters {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		(self.vars.len() + self.bytes.len()).encode(w, version);
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		let count = self.vars.len() + self.bytes.len();
+		if count as u64 > MAX_PARAMS {
+			return Err(EncodeError::TooMany);
+		}
+		count.encode(w, version)?;
 
 		match version {
 			Version::Draft16 => {
@@ -104,27 +108,29 @@ impl Encode<Version> for Parameters {
 				for (idx, (kind, is_var, orig_idx)) in all.iter().enumerate() {
 					let delta = if idx == 0 { *kind } else { kind - prev_type };
 					prev_type = *kind;
-					delta.encode(w, version);
+					delta.encode(w, version)?;
 
 					if *is_var {
-						var_vals[*orig_idx].encode(w, version);
+						var_vals[*orig_idx].encode(w, version)?;
 					} else {
-						byte_vals[*orig_idx].encode(w, version);
+						byte_vals[*orig_idx].encode(w, version)?;
 					}
 				}
 			}
 			_ => {
 				for (kind, value) in self.vars.iter() {
-					u64::from(*kind).encode(w, version);
-					value.encode(w, version);
+					u64::from(*kind).encode(w, version)?;
+					value.encode(w, version)?;
 				}
 
 				for (kind, value) in self.bytes.iter() {
-					u64::from(*kind).encode(w, version);
-					value.encode(w, version);
+					u64::from(*kind).encode(w, version)?;
+					value.encode(w, version)?;
 				}
 			}
 		}
+
+		Ok(())
 	}
 }
 
@@ -199,8 +205,12 @@ impl Decode<Version> for MessageParameters {
 }
 
 impl Encode<Version> for MessageParameters {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		(self.vars.len() + self.bytes.len()).encode(w, version);
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		let count = self.vars.len() + self.bytes.len();
+		if count as u64 > MAX_PARAMS {
+			return Err(EncodeError::TooMany);
+		}
+		count.encode(w, version)?;
 
 		match version {
 			Version::Draft16 => {
@@ -222,26 +232,28 @@ impl Encode<Version> for MessageParameters {
 				for (idx, (kind, val)) in all.iter().enumerate() {
 					let delta = if idx == 0 { *kind } else { kind - prev_type };
 					prev_type = *kind;
-					delta.encode(w, version);
+					delta.encode(w, version)?;
 
 					match val {
-						ParamValue::Var(v) => v.encode(w, version),
-						ParamValue::Bytes(v) => v.encode(w, version),
+						ParamValue::Var(v) => v.encode(w, version)?,
+						ParamValue::Bytes(v) => v.encode(w, version)?,
 					}
 				}
 			}
 			_ => {
 				for (kind, value) in self.vars.iter() {
-					kind.encode(w, version);
-					value.encode(w, version);
+					kind.encode(w, version)?;
+					value.encode(w, version)?;
 				}
 
 				for (kind, value) in self.bytes.iter() {
-					kind.encode(w, version);
-					value.encode(w, version);
+					kind.encode(w, version)?;
+					value.encode(w, version)?;
 				}
 			}
 		}
+
+		Ok(())
 	}
 }
 
@@ -332,11 +344,12 @@ impl MessageParameters {
 		Some(super::Location { group, object })
 	}
 
-	pub fn set_largest_object(&mut self, loc: &super::Location) {
+	pub fn set_largest_object(&mut self, loc: &super::Location) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
-		loc.group.encode(&mut buf, ());
-		loc.object.encode(&mut buf, ());
+		loc.group.encode(&mut buf, ())?;
+		loc.object.encode(&mut buf, ())?;
 		self.bytes.insert(Self::LARGEST_OBJECT, buf);
+		Ok(())
 	}
 
 	/// Get subscription filter (encoded as filter_type varint [+ filter data])
@@ -346,10 +359,11 @@ impl MessageParameters {
 		super::FilterType::decode(&mut buf, ()).ok()
 	}
 
-	pub fn set_subscription_filter(&mut self, ft: super::FilterType) {
+	pub fn set_subscription_filter(&mut self, ft: super::FilterType) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
-		ft.encode(&mut buf, ());
+		ft.encode(&mut buf, ())?;
 		self.bytes.insert(Self::SUBSCRIPTION_FILTER, buf);
+		Ok(())
 	}
 }
 
@@ -366,7 +380,7 @@ mod tests {
 		params.set_bytes(ParameterBytes::Implementation, b"test-impl".to_vec());
 
 		let mut buf = BytesMut::new();
-		params.encode(&mut buf, Version::Draft16);
+		params.encode(&mut buf, Version::Draft16).unwrap();
 
 		let mut bytes = buf.freeze();
 		let decoded = Parameters::decode(&mut bytes, Version::Draft16).unwrap();
@@ -386,7 +400,7 @@ mod tests {
 		params.set_varint(ParameterVarInt::MaxRequestId, 100);
 
 		let mut buf = BytesMut::new();
-		params.encode(&mut buf, Version::Draft15);
+		params.encode(&mut buf, Version::Draft15).unwrap();
 
 		let mut bytes = buf.freeze();
 		let decoded = Parameters::decode(&mut bytes, Version::Draft15).unwrap();
@@ -403,7 +417,7 @@ mod tests {
 		params.set_forward(true);
 
 		let mut buf = BytesMut::new();
-		params.encode(&mut buf, Version::Draft16);
+		params.encode(&mut buf, Version::Draft16).unwrap();
 
 		let mut bytes = buf.freeze();
 		let decoded = MessageParameters::decode(&mut bytes, Version::Draft16).unwrap();
@@ -420,7 +434,7 @@ mod tests {
 		params.set_group_order(2);
 
 		let mut buf = BytesMut::new();
-		params.encode(&mut buf, Version::Draft15);
+		params.encode(&mut buf, Version::Draft15).unwrap();
 
 		let mut bytes = buf.freeze();
 		let decoded = MessageParameters::decode(&mut bytes, Version::Draft15).unwrap();
@@ -434,7 +448,7 @@ mod tests {
 		let params = MessageParameters::default();
 
 		let mut buf = BytesMut::new();
-		params.encode(&mut buf, Version::Draft16);
+		params.encode(&mut buf, Version::Draft16).unwrap();
 
 		let mut bytes = buf.freeze();
 		let decoded = MessageParameters::decode(&mut bytes, Version::Draft16).unwrap();

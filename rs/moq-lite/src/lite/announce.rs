@@ -14,36 +14,51 @@ pub enum Announce<'a> {
 	Active {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
+		hops: u64,
 	},
 	Ended {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
+		hops: u64,
 	},
 }
 
 impl Message for Announce<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		Ok(match AnnounceStatus::decode(r, version)? {
-			AnnounceStatus::Active => Self::Active {
-				suffix: Path::decode(r, version)?,
-			},
-			AnnounceStatus::Ended => Self::Ended {
-				suffix: Path::decode(r, version)?,
-			},
+		let status = AnnounceStatus::decode(r, version)?;
+		let suffix = Path::decode(r, version)?;
+		let hops = match version {
+			Version::Draft03 => u64::decode(r, version)?,
+			Version::Draft01 | Version::Draft02 => 0,
+		};
+
+		Ok(match status {
+			AnnounceStatus::Active => Self::Active { suffix, hops },
+			AnnounceStatus::Ended => Self::Ended { suffix, hops },
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match self {
-			Self::Active { suffix } => {
-				AnnounceStatus::Active.encode(w, version);
-				suffix.encode(w, version);
+			Self::Active { suffix, hops } => {
+				AnnounceStatus::Active.encode(w, version)?;
+				suffix.encode(w, version)?;
+				match version {
+					Version::Draft03 => hops.encode(w, version)?,
+					Version::Draft01 | Version::Draft02 => {}
+				}
 			}
-			Self::Ended { suffix } => {
-				AnnounceStatus::Ended.encode(w, version);
-				suffix.encode(w, version);
+			Self::Ended { suffix, hops } => {
+				AnnounceStatus::Ended.encode(w, version)?;
+				suffix.encode(w, version)?;
+				match version {
+					Version::Draft03 => hops.encode(w, version)?,
+					Version::Draft01 | Version::Draft02 => {}
+				}
 			}
 		}
+
+		Ok(())
 	}
 }
 
@@ -60,8 +75,10 @@ impl Message for AnnouncePlease<'_> {
 		Ok(Self { prefix })
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.prefix.encode(w, version)
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.prefix.encode(w, version)?;
+
+		Ok(())
 	}
 }
 
@@ -81,12 +98,14 @@ impl<V> Decode<V> for AnnounceStatus {
 }
 
 impl<V> Encode<V> for AnnounceStatus {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		(*self as u8).encode(w, version)
 	}
 }
 
 /// Sent after setup to communicate the initially announced paths.
+///
+/// Used by Draft01/Draft02 only. Draft03 uses individual Announce messages instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnnounceInit<'a> {
@@ -97,6 +116,11 @@ pub struct AnnounceInit<'a> {
 
 impl Message for AnnounceInit<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		match version {
+			Version::Draft01 | Version::Draft02 => {}
+			Version::Draft03 => return Err(DecodeError::Version),
+		}
+
 		let count = u64::decode(r, version)?;
 
 		// Don't allocate more than 1024 elements upfront
@@ -109,10 +133,17 @@ impl Message for AnnounceInit<'_> {
 		Ok(Self { suffixes: paths })
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		(self.suffixes.len() as u64).encode(w, version);
-		for path in &self.suffixes {
-			path.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		match version {
+			Version::Draft01 | Version::Draft02 => {}
+			Version::Draft03 => return Err(EncodeError::Version),
 		}
+
+		(self.suffixes.len() as u64).encode(w, version)?;
+		for path in &self.suffixes {
+			path.encode(w, version)?;
+		}
+
+		Ok(())
 	}
 }

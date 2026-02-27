@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_async::FuturesExt;
+use web_transport_trait::Stats;
 
 use crate::{
 	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
@@ -41,9 +44,72 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if let Err(err) = match kind {
 				lite::ControlType::Announce => self.recv_announce(stream).await,
 				lite::ControlType::Subscribe => self.recv_subscribe(stream).await,
-				_ => Err(Error::UnexpectedStream),
+				lite::ControlType::Probe => {
+					self.recv_probe(stream);
+					Ok(())
+				}
+				lite::ControlType::Session | lite::ControlType::Fetch => Err(Error::UnexpectedStream),
 			} {
 				tracing::warn!(%err, "control stream error");
+			}
+		}
+	}
+
+	fn recv_probe(&self, mut stream: Stream<S, Version>) {
+		let session = self.session.clone();
+		let version = self.version;
+
+		web_async::spawn(async move {
+			if let Err(err) = Self::run_probe(&session, &mut stream, version).await {
+				match &err {
+					Error::Cancel | Error::Transport => {
+						tracing::debug!("probe stream closed");
+					}
+					err => {
+						tracing::warn!(%err, "probe stream error");
+					}
+				}
+				stream.writer.abort(&err);
+			} else {
+				tracing::debug!("probe stream complete");
+			}
+		});
+	}
+
+	async fn run_probe(session: &S, stream: &mut Stream<S, Version>, _version: Version) -> Result<(), Error> {
+		const PROBE_INTERVAL: Duration = Duration::from_millis(100);
+		const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
+		const PROBE_MAX_DELTA: f64 = 0.25;
+
+		let mut last_sent: Option<(u64, tokio::time::Instant)> = None;
+		let mut interval = tokio::time::interval(PROBE_INTERVAL);
+
+		loop {
+			tokio::select! {
+				res = stream.reader.closed() => return res,
+				_ = interval.tick() => {}
+			}
+
+			let Some(bitrate) = session.stats().estimated_send_rate() else {
+				continue;
+			};
+
+			let should_send = match last_sent {
+				None => true,
+				Some((0, _)) => bitrate > 0,
+				Some((prev, at)) => {
+					let elapsed = at.elapsed().as_secs_f64();
+					let t = elapsed.clamp(PROBE_INTERVAL.as_secs_f64(), PROBE_MAX_AGE.as_secs_f64());
+					let range = PROBE_MAX_AGE.as_secs_f64() - PROBE_INTERVAL.as_secs_f64();
+					let threshold = PROBE_MAX_DELTA * (PROBE_MAX_AGE.as_secs_f64() - t) / range;
+					let change = (bitrate as f64 - prev as f64).abs() / prev as f64;
+					change >= threshold
+				}
+			};
+
+			if should_send {
+				stream.writer.encode(&lite::Probe { bitrate }).await?;
+				last_sent = Some((bitrate, tokio::time::Instant::now()));
 			}
 		}
 	}
@@ -60,8 +126,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.consume_only(&[prefix.as_path()])
 			.ok_or(Error::Unauthorized)?;
 
+		let version = self.version;
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix).await {
+			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version).await {
 				match &err {
 					Error::Cancel => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
@@ -87,29 +154,38 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
+		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
-		let mut init = Vec::new();
 
-		// Send ANNOUNCE_INIT as the first message with all currently active paths
-		// We use `try_next()` to synchronously get the initial updates.
-		while let Some((path, active)) = origin.try_announced() {
-			let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
+		match version {
+			Version::Draft01 | Version::Draft02 => {
+				let mut init = Vec::new();
 
-			if active.is_some() {
-				tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-				init.push(suffix.to_owned());
-			} else {
-				// A potential race.
-				tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-				init.retain(|path| path != &suffix);
+				// Send ANNOUNCE_INIT as the first message with all currently active paths
+				// We use `try_next()` to synchronously get the initial updates.
+				while let Some((path, active)) = origin.try_announced() {
+					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
+
+					if active.is_some() {
+						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+						init.push(suffix.to_owned());
+					} else {
+						// A potential race.
+						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+						init.retain(|path| path != &suffix);
+					}
+				}
+
+				let announce_init = lite::AnnounceInit { suffixes: init };
+				stream.writer.encode(&announce_init).await?;
+			}
+			Version::Draft03 => {
+				// No more announce init in Draft03.
 			}
 		}
 
-		let announce_init = lite::AnnounceInit { suffixes: init };
-		stream.writer.encode(&announce_init).await?;
-
-		// Flush any synchronously announced paths
+		// Send updates as they arrive.
 		loop {
 			tokio::select! {
 				biased;
@@ -121,11 +197,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 							if active.is_some() {
 								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-								let msg = lite::Announce::Active { suffix };
+								let msg = lite::Announce::Active { suffix, hops: 0 };
 								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-								let msg = lite::Announce::Ended { suffix };
+								let msg = lite::Announce::Ended { suffix, hops: 0 };
 								stream.writer.encode(&msg).await?;
 							}
 						},
@@ -188,15 +264,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track);
+		let track = broadcast.subscribe_track(&track)?;
 
 		// TODO wait until track.info() to get the *real* priority
 
 		let info = lite::SubscribeOk {
 			priority: track.info.priority,
+			ordered: false,
+			max_latency: std::time::Duration::ZERO,
+			start_group: None,
+			end_group: None,
 		};
 
-		stream.writer.encode(&info).await?;
+		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
 		tokio::select! {
 			res = Self::run_track(session, track, subscribe, priority, version) => res?,

@@ -120,7 +120,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			priority: msg.subscriber_priority,
 		};
 
-		let track = broadcast.subscribe_track(&track);
+		let track = match broadcast.subscribe_track(&track) {
+			Ok(track) => track,
+			Err(err) => return self.send_subscribe_error(request_id, 404, &err.to_string()),
+		};
 
 		let (tx, rx) = oneshot::channel();
 		let mut subscribes = self.subscribes.lock();

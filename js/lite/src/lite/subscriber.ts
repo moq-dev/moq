@@ -8,8 +8,8 @@ import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import { StreamId } from "./stream.ts";
-import { Subscribe, SubscribeOk } from "./subscribe.ts";
-import type { Version } from "./version.ts";
+import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
+import { Version } from "./version.ts";
 
 /**
  * Handles subscribing to broadcasts and managing their lifecycle.
@@ -55,19 +55,31 @@ export class Subscriber {
 			await stream.writer.u53(StreamId.Announce);
 			await msg.encode(stream.writer);
 
-			// First, receive ANNOUNCE_INIT
-			const init = await AnnounceInit.decode(stream.reader);
+			switch (this.version) {
+				case Version.DRAFT_01:
+				case Version.DRAFT_02: {
+					// Receive ANNOUNCE_INIT first
+					const init = await AnnounceInit.decode(stream.reader, this.version);
 
-			// Process initial announcements
-			for (const suffix of init.suffixes) {
-				const path = Path.join(prefix, suffix);
-				console.debug(`announced: broadcast=${path} active=true`);
-				announced.append({ path, active: true });
+					// Process initial announcements
+					for (const suffix of init.suffixes) {
+						const path = Path.join(prefix, suffix);
+						console.debug(`announced: broadcast=${path} active=true`);
+						announced.append({ path, active: true });
+					}
+					break;
+				}
+				case Version.DRAFT_03:
+					// Draft03: no AnnounceInit, initial state comes via Announce messages.
+					break;
 			}
 
-			// Then receive updates
+			// Receive announce updates (for Draft03, this includes initial state)
 			for (;;) {
-				const announce = await Promise.race([Announce.decodeMaybe(stream.reader), announced.closed]);
+				const announce = await Promise.race([
+					Announce.decodeMaybe(stream.reader, this.version),
+					announced.closed,
+				]);
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
 
@@ -111,14 +123,18 @@ export class Subscriber {
 
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 
-		const msg = new Subscribe(id, broadcast, request.track.name, request.priority);
+		const msg = new Subscribe({ id, broadcast, track: request.track.name, priority: request.priority });
 
 		const stream = await Stream.open(this.#quic);
 		await stream.writer.u53(StreamId.Subscribe);
-		await msg.encode(stream.writer);
+		await msg.encode(stream.writer, this.version);
 
 		try {
-			await SubscribeOk.decode(stream.reader, this.version);
+			// The first response MUST be a SUBSCRIBE_OK.
+			const resp = await decodeSubscribeResponse(stream.reader, this.version);
+			if (!("ok" in resp)) {
+				throw new Error("first subscribe response must be SUBSCRIBE_OK");
+			}
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 
 			await Promise.race([stream.reader.closed, request.track.closed]);

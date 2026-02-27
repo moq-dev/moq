@@ -83,7 +83,7 @@ impl Hev1 {
 		let track = catalog.video.create_track("hev1", config.clone());
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
-		let track = self.broadcast.create_track(track);
+		let track = self.broadcast.create_track(track)?;
 
 		self.config = Some(config);
 		self.track = Some(track.into());

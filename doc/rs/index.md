@@ -14,7 +14,7 @@ The Rust implementation provides the reference implementation of the MoQ protoco
 [![crates.io](https://img.shields.io/crates/v/moq-lite)](https://crates.io/crates/moq-lite)
 [![docs.rs](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite)
 
-The core pub/sub transport protocol implementing the [moq-lite specification](https://moq-dev.github.io/drafts/draft-lcurley-moq-lite.html).
+The core pub/sub transport protocol implementing the [moq-lite specification](/spec/draft-lcurley-moq-lite).
 
 **Features:**
 - Broadcasts, tracks, groups, and frames

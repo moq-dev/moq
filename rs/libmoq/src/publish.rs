@@ -17,9 +17,9 @@ pub struct Publish {
 impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
 		let mut broadcast = moq_lite::BroadcastProducer::new();
-		let catalog = broadcast.create_track(hang::Catalog::default_track());
+		let catalog = broadcast.create_track(hang::Catalog::default_track())?;
 		let catalog = hang::CatalogProducer::new(catalog, hang::Catalog::default());
-		broadcast.insert_track(catalog.msf_track.clone());
+		moq_mux::msf::register(&mut broadcast, &catalog)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog));
 		Ok(id)

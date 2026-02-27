@@ -22,8 +22,9 @@ pub enum FilterType {
 }
 
 impl<V> Encode<V> for FilterType {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		u64::from(*self).encode(w, version);
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		u64::from(*self).encode(w, version)?;
+		Ok(())
 	}
 }
 
@@ -113,34 +114,36 @@ impl Message for Subscribe<'_> {
 		}
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		encode_namespace(w, &self.track_namespace, version);
-		self.track_name.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		encode_namespace(w, &self.track_namespace, version)?;
+		self.track_name.encode(w, version)?;
 
 		match version {
 			Version::Draft14 => {
-				self.subscriber_priority.encode(w, version);
-				self.group_order.encode(w, version);
-				true.encode(w, version); // forward
+				self.subscriber_priority.encode(w, version)?;
+				self.group_order.encode(w, version)?;
+				true.encode(w, version)?; // forward
 
 				debug_assert!(
 					!matches!(self.filter_type, FilterType::AbsoluteStart | FilterType::AbsoluteRange),
 					"Absolute subscribe not supported"
 				);
 
-				self.filter_type.encode(w, version);
-				0u8.encode(w, version); // no parameters
+				self.filter_type.encode(w, version)?;
+				0u8.encode(w, version)?; // no parameters
 			}
 			Version::Draft15 | Version::Draft16 => {
 				let mut params = MessageParameters::default();
 				params.set_subscriber_priority(self.subscriber_priority);
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.set_forward(true);
-				params.set_subscription_filter(self.filter_type);
-				params.encode(w, version);
+				params.set_subscription_filter(self.filter_type)?;
+				params.encode(w, version)?;
 			}
 		}
+
+		Ok(())
 	}
 }
 
@@ -154,24 +157,26 @@ pub struct SubscribeOk {
 impl Message for SubscribeOk {
 	const ID: u64 = 0x04;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		self.track_alias.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		self.track_alias.encode(w, version)?;
 
 		match version {
 			Version::Draft14 => {
-				0u64.encode(w, version); // expires = 0
-				GroupOrder::Descending.encode(w, version);
-				false.encode(w, version); // no content
-				0u8.encode(w, version); // no parameters
+				0u64.encode(w, version)?; // expires = 0
+				GroupOrder::Descending.encode(w, version)?;
+				false.encode(w, version)?; // no content
+				0u8.encode(w, version)?; // no parameters
 			}
 			Version::Draft15 | Version::Draft16 => {
 				// v15: just parameters after track_alias
 				let mut params = MessageParameters::default();
 				params.set_group_order(u8::from(GroupOrder::Descending) as u64);
-				params.encode(w, version);
+				params.encode(w, version)?;
 			}
 		}
+
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -217,10 +222,11 @@ pub struct SubscribeError<'a> {
 impl Message for SubscribeError<'_> {
 	const ID: u64 = 0x05;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		self.error_code.encode(w, version);
-		self.reason_phrase.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		self.error_code.encode(w, version)?;
+		self.reason_phrase.encode(w, version)?;
+		Ok(())
 	}
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
@@ -244,8 +250,9 @@ pub struct Unsubscribe {
 impl Message for Unsubscribe {
 	const ID: u64 = 0x0a;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -268,27 +275,29 @@ pub struct SubscribeUpdate {
 impl Message for SubscribeUpdate {
 	const ID: u64 = 0x02;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft14 => {
-				self.request_id.encode(w, version);
-				self.subscription_request_id.encode(w, version);
-				self.start_location.encode(w, version);
-				self.end_group.encode(w, version);
-				self.subscriber_priority.encode(w, version);
-				self.forward.encode(w, version);
-				0u8.encode(w, version); // no parameters
+				self.request_id.encode(w, version)?;
+				self.subscription_request_id.encode(w, version)?;
+				self.start_location.encode(w, version)?;
+				self.end_group.encode(w, version)?;
+				self.subscriber_priority.encode(w, version)?;
+				self.forward.encode(w, version)?;
+				0u8.encode(w, version)?; // no parameters
 			}
 			Version::Draft15 | Version::Draft16 => {
-				self.request_id.encode(w, version);
-				self.subscription_request_id.encode(w, version);
+				self.request_id.encode(w, version)?;
+				self.subscription_request_id.encode(w, version)?;
 				let mut params = MessageParameters::default();
 				params.set_subscriber_priority(self.subscriber_priority);
 				params.set_forward(self.forward);
-				params.set_subscription_filter(FilterType::LargestObject);
-				params.encode(w, version);
+				params.set_subscription_filter(FilterType::LargestObject)?;
+				params.encode(w, version)?;
 			}
 		}
+
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -339,7 +348,7 @@ mod tests {
 
 	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = BytesMut::new();
-		msg.encode_msg(&mut buf, version);
+		msg.encode_msg(&mut buf, version).unwrap();
 		buf.to_vec()
 	}
 

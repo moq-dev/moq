@@ -89,7 +89,7 @@ deploy-pub:
 	rsync -az pub/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
-	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o result && nix build .#hang-cli -o result-hang"
+	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o result && nix build .#moq-cli -o result-moq-cli"
 
 	echo "  Enabling and starting services..."
 	ssh root@$HOST "\

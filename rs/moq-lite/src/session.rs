@@ -9,17 +9,23 @@ use crate::Error;
 /// - [`crate::Server::accept`] for servers.
 pub struct Session {
 	session: Box<dyn SessionInner>,
+	closed: bool,
 }
 
 impl Session {
 	pub(super) fn new<S: web_transport_trait::Session>(session: S) -> Self {
 		Self {
 			session: Box::new(session),
+			closed: false,
 		}
 	}
 
 	/// Close the underlying transport session.
-	pub fn close(self, err: Error) {
+	pub fn close(&mut self, err: Error) {
+		if self.closed {
+			return;
+		}
+		self.closed = true;
 		self.session.close(err.to_code(), err.to_string().as_ref());
 	}
 
@@ -33,7 +39,9 @@ impl Session {
 
 impl Drop for Session {
 	fn drop(&mut self) {
-		self.session.close(Error::Cancel.to_code(), "dropped");
+		if !self.closed {
+			self.session.close(Error::Cancel.to_code(), "dropped");
+		}
 	}
 }
 

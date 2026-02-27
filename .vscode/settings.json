@@ -1,4 +1,5 @@
 {
 	"css.lint.unknownAtRules": "ignore",
-	"biome.lsp.bin": "./node_modules/.bin/biome"
+	"biome.lsp.bin": "./node_modules/.bin/biome",
+	"cmake.sourceDirectory": "./rs/libmoq"
 }

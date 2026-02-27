@@ -43,8 +43,8 @@ impl Control {
 		tracing::debug!(message = ?msg, "sending control message");
 
 		let mut buf = Vec::new();
-		T::ID.encode(&mut buf, self.version);
-		msg.encode(&mut buf, self.version);
+		T::ID.encode(&mut buf, self.version)?;
+		msg.encode(&mut buf, self.version)?;
 
 		tracing::trace!(id = T::ID, size = buf.len(), hex = %hex::encode(&buf), "encoded control message");
 

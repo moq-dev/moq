@@ -1,8 +1,8 @@
 use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
-	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
-	TrackProducer,
+	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
+	Track, TrackProducer,
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, MessageParameters, RequestId, Version},
 	model::BroadcastProducer,
@@ -135,7 +135,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let producer = broadcast.clone();
 
 		web_async::spawn(async move {
-			if let Err(err) = this.run_broadcast(path.clone(), producer).await {
+			if let Err(err) = this.run_broadcast(path.clone(), producer.dynamic()).await {
 				tracing::debug!(%err, "error running broadcast");
 			}
 			this.state.lock().broadcasts.remove(&path);
@@ -200,8 +200,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_subscribe_error(&mut self, msg: ietf::SubscribeError) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
-		if let Some(track) = state.subscribes.remove(&msg.request_id) {
-			track.producer.abort(Error::Cancel);
+		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
+			let _ = track.producer.close(Error::Cancel);
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -220,8 +220,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// v15: generic error response. Check if it's a subscribe error.
 		let mut state = self.state.lock();
 
-		if let Some(track) = state.subscribes.remove(&msg.request_id) {
-			track.producer.abort(Error::Cancel);
+		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
+			let _ = track.producer.close(Error::Cancel);
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -233,8 +233,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn recv_publish_done(&mut self, msg: ietf::PublishDone<'_>) -> Result<(), Error> {
 		let mut state = self.state.lock();
 
-		if let Some(track) = state.subscribes.remove(&msg.request_id) {
-			track.producer.close();
+		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
+			let _ = track.producer.finish();
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
@@ -279,16 +279,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_broadcast(&mut self, path: Path<'_>, mut broadcast: BroadcastProducer) -> Result<(), Error> {
+	async fn run_broadcast(&mut self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
 		// Actually start serving subscriptions.
 		loop {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
 			let track = tokio::select! {
-				_ = broadcast.unused() => break,
 				producer = broadcast.requested_track() => match producer {
-					Some(producer) => producer,
-					None => break,
+					Ok(Some(producer)) => producer,
+					Ok(None) => break,
+					Err(err) => {
+						tracing::debug!(%err, "broadcast request error");
+						break;
+					}
 				},
 				_ = self.session.closed() => break,
 			};
@@ -321,7 +324,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		request_id: RequestId,
 		broadcast: Path<'_>,
-		track: TrackProducer,
+		mut track: TrackProducer,
 	) -> Result<(), Error> {
 		self.control.send(ietf::Subscribe {
 			request_id,
@@ -338,10 +341,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe started");
 
-		track.unused().await;
+		let _ = track.unused().await;
 		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
 
-		track.abort(Error::Cancel);
+		let _ = track.close(Error::Cancel);
 
 		Ok(())
 	}
@@ -355,7 +358,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::Unsupported);
 		}
 
-		let producer = {
+		let mut producer = {
 			let mut state = self.state.lock();
 			let request_id = match state.aliases.get(&group.track_alias) {
 				Some(request_id) => *request_id,
@@ -369,7 +372,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let group = Group {
 				sequence: group.group_id,
 			};
-			track.producer.create_group(group).ok_or(Error::Old)?
+			track.producer.create_group(group)?
 		};
 
 		let res = tokio::select! {
@@ -380,15 +383,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match res {
 			Err(Error::Cancel) => {
 				tracing::trace!(group = %producer.info.sequence, "group cancelled");
-				producer.abort(Error::Cancel);
+				let _ = producer.close(Error::Cancel);
 			}
 			Err(err) => {
 				tracing::debug!(%err, group = %producer.info.sequence, "group error");
-				producer.abort(err);
+				let _ = producer.close(err);
 			}
 			_ => {
 				tracing::trace!(group = %producer.info.sequence, "group complete");
-				producer.close();
+				let _ = producer.finish();
 			}
 		}
 
@@ -418,8 +421,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
 					// Empty frame
-					let frame = producer.create_frame(Frame { size: 0 });
-					frame.close();
+					let mut frame = producer.create_frame(Frame { size: 0 })?;
+					frame.finish()?;
 				} else if status == 3 && !group.flags.has_end {
 					// End of group
 					break;
@@ -427,7 +430,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
-				let frame = producer.create_frame(Frame { size });
+				let mut frame = producer.create_frame(Frame { size })?;
 
 				let res = tokio::select! {
 					_ = frame.unused() => Err(Error::Cancel),
@@ -435,13 +438,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				};
 
 				if let Err(err) = res {
-					frame.abort(err.clone());
+					let _ = frame.close(err.clone());
 					return Err(err);
 				}
+
+				frame.finish()?;
 			}
 		}
-
-		producer.close();
 
 		Ok(())
 	}
@@ -458,12 +461,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		while remain > 0 {
 			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
-			frame.write_chunk(chunk);
+			frame.write_chunk(chunk)?;
 		}
 
 		tracing::trace!(size = %frame.info.size, "read frame");
-
-		frame.close();
 
 		Ok(())
 	}
@@ -553,11 +554,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Announce our namespace if we haven't already.
 		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-
-		let exists = broadcast.insert_track(track);
-		if exists {
-			tracing::warn!(track = %msg.track_name, "track already exists, replacing it");
-		}
+		broadcast.insert_track(&track)?;
 
 		Ok(())
 	}

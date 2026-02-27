@@ -1,7 +1,7 @@
 use rand::Rng;
 
 use crate::Error;
-use crate::coding::{Decode, DecodeError, Encode, VarInt};
+use crate::coding::{Decode, DecodeError, Encode, EncodeError, VarInt};
 
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -189,8 +189,9 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		}
 	}
 
-	pub fn encode<W: bytes::BufMut>(&self, w: &mut W) {
-		self.0.encode(w, ());
+	pub fn encode<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
+		self.0.encode(w, ())?;
+		Ok(())
 	}
 
 	pub fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, Error> {
@@ -304,8 +305,9 @@ impl<const SCALE: u64, V> Decode<V> for Timescale<SCALE> {
 }
 
 impl<const SCALE: u64, V> Encode<V> for Timescale<SCALE> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) {
-		self.0.encode(w, version)
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		self.0.encode(w, version)?;
+		Ok(())
 	}
 }
 

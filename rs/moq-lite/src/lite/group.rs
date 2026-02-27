@@ -20,8 +20,10 @@ impl Message for Group {
 		})
 	}
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.subscribe.encode(w, version);
-		self.sequence.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.subscribe.encode(w, version)?;
+		self.sequence.encode(w, version)?;
+
+		Ok(())
 	}
 }

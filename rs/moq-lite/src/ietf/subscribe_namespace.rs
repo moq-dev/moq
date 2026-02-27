@@ -23,13 +23,14 @@ pub struct SubscribeNamespace<'a> {
 impl Message for SubscribeNamespace<'_> {
 	const ID: u64 = 0x11;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		encode_namespace(w, &self.namespace, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		encode_namespace(w, &self.namespace, version)?;
 		if version == Version::Draft16 {
-			self.subscribe_options.encode(w, version);
+			self.subscribe_options.encode(w, version)?;
 		}
-		0u8.encode(w, version); // no parameters
+		0u8.encode(w, version)?; // no parameters
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -60,8 +61,9 @@ pub struct SubscribeNamespaceOk {
 impl Message for SubscribeNamespaceOk {
 	const ID: u64 = 0x12;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -81,10 +83,11 @@ pub struct SubscribeNamespaceError<'a> {
 impl Message for SubscribeNamespaceError<'_> {
 	const ID: u64 = 0x13;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
-		self.error_code.encode(w, version);
-		self.reason_phrase.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		self.error_code.encode(w, version)?;
+		self.reason_phrase.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -109,8 +112,9 @@ pub struct UnsubscribeNamespace {
 impl Message for UnsubscribeNamespace {
 	const ID: u64 = 0x14;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		self.request_id.encode(w, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.request_id.encode(w, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -129,8 +133,9 @@ pub struct Namespace<'a> {
 impl Message for Namespace<'_> {
 	const ID: u64 = 0x08;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		encode_namespace(w, &self.suffix, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		encode_namespace(w, &self.suffix, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -149,8 +154,9 @@ pub struct NamespaceDone<'a> {
 impl Message for NamespaceDone<'_> {
 	const ID: u64 = 0x0E;
 
-	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) {
-		encode_namespace(w, &self.suffix, version);
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		encode_namespace(w, &self.suffix, version)?;
+		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
