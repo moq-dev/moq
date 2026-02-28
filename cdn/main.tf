@@ -44,3 +44,11 @@ resource "google_project_service" "all" {
   disable_dependent_services = false
   disable_on_destroy         = false
 }
+
+# Shared memory alert service (used by both relay and publisher)
+resource "local_file" "memory_alert_service" {
+  content = templatefile("${path.module}/common/memory-alert.service.tftpl", {
+    webhook = var.webhook
+  })
+  filename = "${path.module}/common/memory-alert.service"
+}

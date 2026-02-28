@@ -1,0 +1,14 @@
+[Unit]
+Description=Watch systemd services for memory limit breaches
+
+[Service]
+Type=simple
+ExecStart=/etc/systemd/system/memory-alert.py --webhook ${webhook}
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -36,7 +36,8 @@ deploy node:
 	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwk /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
-	rsync -az relay/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='*.tftpl' relay/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='*.tftpl' common/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
 	ssh root@$HOST "cd /var/lib/moq && nix build .#moq-relay -o relay && nix build .#certbot -o cert"
@@ -47,12 +48,12 @@ deploy node:
 		systemctl enable moq-cert.service && \
 		systemctl enable certbot-renew.timer && \
 		systemctl enable vacuum.timer && \
-		systemctl enable ram-alert.timer && \
+		systemctl enable memory-alert.service && \
 		systemctl enable moq-relay.service && \
 		systemctl start certbot-renew.timer && \
 		systemctl start vacuum.timer && \
-		systemctl start ram-alert.timer && \
 		systemctl start moq-cert.service && \
+		systemctl restart memory-alert.service && \
 		systemctl restart moq-relay.service"
 
 # Check status of a node
@@ -88,7 +89,8 @@ deploy-pub:
 	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
-	rsync -az pub/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='*.tftpl' pub/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='*.tftpl' common/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
 	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o result && nix build .#moq-cli -o result-moq-cli"
@@ -99,8 +101,10 @@ deploy-pub:
 		systemctl enable hang-bbb-prepare.service && \
 		systemctl enable hang-bbb.service && \
 		systemctl enable vacuum.timer && \
+		systemctl enable memory-alert.service && \
 		systemctl start hang-bbb-prepare.service && \
 		systemctl start vacuum.timer && \
+		systemctl restart memory-alert.service && \
 		systemctl restart hang-bbb.service"
 
 # Check status of publisher

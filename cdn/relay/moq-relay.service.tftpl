@@ -29,9 +29,9 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
-# Prevent swap usage: soft throttle at 3G, hard kill at 3.5G (node has 4GB)
-MemoryHigh=3G
-MemoryMax=3584M
+# Throttle at 80%, hard kill at 90% of total memory
+MemoryHigh=80%
+MemoryMax=90%
 
 # Security hardening - relaxed to allow Nix to work
 NoNewPrivileges=true
