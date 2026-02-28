@@ -564,25 +564,22 @@ test("buffered shows gap when group sequence numbers are missing", async () => {
 	track.close();
 });
 
-test("buffered merges multi-frame groups with overlapping timestamps", async () => {
+test("consumer errors when group timestamps go backwards", async () => {
 	const track = new Track("test");
 	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
 
-	// Write 2 groups with multiple frames each, where the timestamp ranges overlap.
-	writeGroupWithSequence(track, 0, [0 as Time.Micro, 20_000 as Time.Micro, 40_000 as Time.Micro]);
-	writeGroupWithSequence(track, 1, [30_000 as Time.Micro, 50_000 as Time.Micro, 70_000 as Time.Micro]);
+	// Group 0 at 100ms, group 1 at 50ms — timestamps disagree with sequence order.
+	// Group sequence numbers say 0 < 1, but timestamps say 100ms > 50ms.
+	writeGroupWithSequence(track, 0, [100_000 as Time.Micro]);
+	writeGroupWithSequence(track, 1, [50_000 as Time.Micro]);
+	track.close();
 
-	await new Promise((resolve) => setTimeout(resolve, 100));
+	await new Promise((resolve) => setTimeout(resolve, 50));
 
-	// Group 0 range: [0, 40]. Group 1 range: [30, 70].
-	// They overlap (40 >= 30), so they merge even without the sequential-done check.
-	const ranges = consumer.buffered.peek();
-	assert.strictEqual(ranges.length, 1, `Expected 1 merged range, got ${ranges.length}`);
-	assert.strictEqual(ranges[0].start, 0);
-	assert.strictEqual(ranges[0].end, 70);
+	// Consumer should detect the timestamp ordering violation and throw.
+	await assert.rejects(() => consumeFrames(consumer, 500));
 
 	consumer.close();
-	track.close();
 });
 
 test("buffered does not merge non-consecutive groups across a gap", async () => {
@@ -598,6 +595,175 @@ test("buffered does not merge non-consecutive groups across a gap", async () => 
 	const ranges = consumer.buffered.peek();
 	assert.strictEqual(ranges.length, 2, `Expected 2 ranges (gap at group 1), got ${ranges.length}`);
 
+	// Group 0 range: [0, 0]. No extension because group 1 (N+1) is missing.
+	// N+2 (group 2) exists but is not enough — extension requires exactly N+1.
+	assert.strictEqual(ranges[0].start, 0);
+	assert.strictEqual(ranges[0].end, 0);
+	assert.strictEqual(ranges[1].start, 46);
+	assert.strictEqual(ranges[1].end, 46);
+
 	consumer.close();
 	track.close();
+});
+
+// --- Buffered ranges: in-progress groups ---
+
+test("buffered range for in-progress group uses last frame as end", async () => {
+	const track = new Track("test");
+	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
+
+	// Write a group with 2 frames but don't close it.
+	const group = new Group(0);
+	group.writeFrame(encodeLegacyFrame(0 as Time.Micro));
+	group.writeFrame(encodeLegacyFrame(33_000 as Time.Micro));
+	track.writeGroup(group);
+	// group is NOT closed — still in progress
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	// Group is in-progress, so the last frame has duration 0.
+	// Range should be [0ms, 33ms].
+	const ranges = consumer.buffered.peek();
+	assert.strictEqual(ranges.length, 1, `Expected 1 range, got ${ranges.length}`);
+	assert.strictEqual(ranges[0].start, 0);
+	assert.strictEqual(ranges[0].end, 33);
+
+	group.close();
+	consumer.close();
+	track.close();
+});
+
+test("buffered extension applies when N is done and N+1 has first frame but is not done", async () => {
+	const track = new Track("test");
+	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
+
+	// Group 0: done (closed), single frame at 0ms.
+	writeGroupWithSequence(track, 0, [0 as Time.Micro]);
+
+	// Group 1: in progress (not closed), first frame at 50ms.
+	const group1 = new Group(1);
+	group1.writeFrame(encodeLegacyFrame(50_000 as Time.Micro));
+	track.writeGroup(group1);
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	// Group 0 is done (FIN received) and consecutive group 1 has its first frame.
+	// Extension applies: group 0's last frame duration extends to group 1's first
+	// frame timestamp (50ms). Group 0 range: [0, 50]. Group 1 range: [50, 50].
+	// Merged: [0, 50].
+	const ranges = consumer.buffered.peek();
+	assert.strictEqual(ranges.length, 1, `Expected 1 range, got ${ranges.length}`);
+	assert.strictEqual(ranges[0].start, 0);
+	assert.strictEqual(ranges[0].end, 50);
+
+	group1.close();
+	consumer.close();
+	track.close();
+});
+
+test("no buffered extension when N+1 exists but has no frames", async () => {
+	const track = new Track("test");
+	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
+
+	// Group 0: done, frame at 0ms.
+	writeGroupWithSequence(track, 0, [0 as Time.Micro]);
+
+	// Group 1: exists on the track but has no frames yet.
+	const group1 = new Group(1);
+	track.writeGroup(group1);
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	// Group 0 is done and group 1 exists, but group 1 has no frames.
+	// Without a first frame timestamp, we can't compute the extension.
+	// Group 0 range: [0, 0] (no extension).
+	const ranges = consumer.buffered.peek();
+	assert.strictEqual(ranges.length, 1, `Expected 1 range, got ${ranges.length}`);
+	assert.strictEqual(ranges[0].start, 0);
+	assert.strictEqual(ranges[0].end, 0);
+
+	group1.close();
+	consumer.close();
+	track.close();
+});
+
+// --- Buffered ranges: dynamic updates ---
+
+test("late group arrival fills gap in buffered ranges", async () => {
+	const track = new Track("test");
+	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
+
+	// Write groups 0 and 2 (gap at 1).
+	writeGroupWithSequence(track, 0, [0 as Time.Micro]);
+	writeGroupWithSequence(track, 2, [46_000 as Time.Micro]);
+
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	// Should have 2 ranges (gap at group 1).
+	const rangesBefore = consumer.buffered.peek();
+	assert.strictEqual(rangesBefore.length, 2, `Expected 2 ranges before gap fill, got ${rangesBefore.length}`);
+
+	// Now fill the gap with group 1.
+	writeGroupWithSequence(track, 1, [23_000 as Time.Micro]);
+
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	// Gap is filled: all 3 groups consecutive and done.
+	// Group 0 extends to group 1 start (23ms), group 1 extends to group 2 start (46ms).
+	// Merged: [0, 46].
+	const rangesAfter = consumer.buffered.peek();
+	assert.strictEqual(rangesAfter.length, 1, `Expected 1 range after gap fill, got ${rangesAfter.length}`);
+	assert.strictEqual(rangesAfter[0].start, 0);
+	assert.strictEqual(rangesAfter[0].end, 46);
+
+	consumer.close();
+	track.close();
+});
+
+// --- Buffered ranges: B-frames ---
+
+test("buffered range handles B-frames (out-of-order timestamps within group)", async () => {
+	const track = new Track("test");
+	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
+
+	// B-frame decode order: I-frame at 0, P-frame at 33ms, B-frame at 16ms.
+	// Timestamps within the group are out of order, but that's valid for B-frames.
+	// The group's buffered range should be [min, max] = [0, 33].
+	writeGroupWithSequence(track, 0, [0 as Time.Micro, 33_000 as Time.Micro, 16_000 as Time.Micro]);
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	const ranges = consumer.buffered.peek();
+	assert.strictEqual(ranges.length, 1);
+	assert.strictEqual(ranges[0].start, 0);
+	assert.strictEqual(ranges[0].end, 33);
+
+	consumer.close();
+	track.close();
+});
+
+// --- Group ordering ---
+
+test("consumer delivers groups in sequence order regardless of write order", async () => {
+	const track = new Track("test");
+	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
+
+	// Write groups out of sequence order.
+	writeGroupWithSequence(track, 2, [60_000 as Time.Micro]);
+	writeGroupWithSequence(track, 0, [0 as Time.Micro]);
+	writeGroupWithSequence(track, 1, [30_000 as Time.Micro]);
+
+	track.close();
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	const frames = await consumeFrames(consumer, 500);
+	assert.strictEqual(frames.length, 3, `Expected 3 frames, got ${frames.length}`);
+
+	// Should be delivered in group sequence order, not write order.
+	assert.strictEqual(frames[0].group, 0);
+	assert.strictEqual(frames[1].group, 1);
+	assert.strictEqual(frames[2].group, 2);
+
+	consumer.close();
 });
