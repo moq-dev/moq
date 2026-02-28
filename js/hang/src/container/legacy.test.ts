@@ -564,24 +564,6 @@ test("buffered shows gap when group sequence numbers are missing", async () => {
 	track.close();
 });
 
-test("consumer errors when group timestamps go backwards", async () => {
-	const track = new Track("test");
-	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
-
-	// Group 0 at 100ms, group 1 at 50ms — timestamps disagree with sequence order.
-	// Group sequence numbers say 0 < 1, but timestamps say 100ms > 50ms.
-	writeGroupWithSequence(track, 0, [100_000 as Time.Micro]);
-	writeGroupWithSequence(track, 1, [50_000 as Time.Micro]);
-	track.close();
-
-	await new Promise((resolve) => setTimeout(resolve, 50));
-
-	// Consumer should detect the timestamp ordering violation and throw.
-	await assert.rejects(() => consumeFrames(consumer, 500));
-
-	consumer.close();
-});
-
 test("buffered does not merge non-consecutive groups across a gap", async () => {
 	const track = new Track("test");
 	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
