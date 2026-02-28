@@ -1,11 +1,31 @@
 import assert from "node:assert";
 import test from "node:test";
-import { Time, Track } from "@moq/lite";
+import { Group, Time, Track, Varint } from "@moq/lite";
 import { Consumer, Producer } from "./legacy.ts";
 
 // Helper: encode a frame using the legacy container format (varint timestamp + payload).
 function encodeFrame(producer: Producer, timestamp: Time.Micro, keyframe: boolean) {
 	producer.encode(new Uint8Array([0xde, 0xad]), timestamp, keyframe);
+}
+
+// Helper: encode a raw frame in legacy container format (varint timestamp + payload).
+function encodeLegacyFrame(timestamp: Time.Micro): Uint8Array {
+	const tsBytes = Varint.encode(timestamp);
+	const payload = new Uint8Array([0xde, 0xad]);
+	const data = new Uint8Array(tsBytes.byteLength + payload.byteLength);
+	data.set(tsBytes, 0);
+	data.set(payload, tsBytes.byteLength);
+	return data;
+}
+
+// Helper: write a group with a specific sequence number directly to a track.
+function writeGroupWithSequence(track: Track, sequence: number, timestamps: Time.Micro[]) {
+	const group = new Group(sequence);
+	for (const ts of timestamps) {
+		group.writeFrame(encodeLegacyFrame(ts));
+	}
+	group.close();
+	track.writeGroup(group);
 }
 
 // Helper: write a group with multiple frames to a track.
@@ -390,6 +410,65 @@ test("track closed with error propagates gracefully", async () => {
 	consumer.close();
 });
 
+test("consumer recovers from gap in group sequence numbers", async () => {
+	const track = new Track("test");
+	// Latency target of 100ms. Groups after the gap span >100ms so #checkLatency fires.
+	const consumer = new Consumer(track, { latency: 100 as Time.Milli });
+
+	// Write groups 0 and 1 normally.
+	writeGroupWithSequence(track, 0, [0 as Time.Micro, 20_000 as Time.Micro]);
+	writeGroupWithSequence(track, 1, [40_000 as Time.Micro, 60_000 as Time.Micro]);
+
+	// Skip group 2 entirely (simulating a dropped group).
+	// Write groups 3-6, spanning 120ms-260ms (140ms span > 100ms latency target).
+	writeGroupWithSequence(track, 3, [120_000 as Time.Micro, 140_000 as Time.Micro]);
+	writeGroupWithSequence(track, 4, [160_000 as Time.Micro, 180_000 as Time.Micro]);
+	writeGroupWithSequence(track, 5, [200_000 as Time.Micro, 220_000 as Time.Micro]);
+	writeGroupWithSequence(track, 6, [240_000 as Time.Micro, 260_000 as Time.Micro]);
+
+	track.close();
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	// The bug: after consuming group 1, #active becomes 2. But group 2 never arrives,
+	// so next() waits forever because groups[0].sequence (3) > #active (2).
+	// The fix: #checkLatency sees the span exceeds 100ms, advances #active past the
+	// gap, and skips old groups until within the latency target.
+	const frames = await consumeFrames(consumer, 500);
+
+	// All groups arrive at once, so the full span (0-260ms) exceeds the 100ms target.
+	// #checkLatency skips old groups (including past the gap) until within budget.
+	// The important thing: the consumer does NOT deadlock on the missing group 2.
+	assert.ok(frames.length >= 4, `Expected >= 4 frames, got ${frames.length}`);
+
+	consumer.close();
+});
+
+test("consumer recovers from gap at the start of sequence numbers", async () => {
+	const track = new Track("test");
+	// Latency target of 80ms. Groups span >80ms so #checkLatency fires.
+	const consumer = new Consumer(track, { latency: 80 as Time.Milli });
+
+	// First group has sequence 5 (simulating joining a stream mid-way).
+	// Group 6 is missing. Groups 7-10 arrive, spanning enough to trigger latency skip.
+	writeGroupWithSequence(track, 5, [0 as Time.Micro, 20_000 as Time.Micro]);
+	writeGroupWithSequence(track, 7, [80_000 as Time.Micro, 100_000 as Time.Micro]);
+	writeGroupWithSequence(track, 8, [120_000 as Time.Micro, 140_000 as Time.Micro]);
+	writeGroupWithSequence(track, 9, [160_000 as Time.Micro, 180_000 as Time.Micro]);
+
+	track.close();
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	const frames = await consumeFrames(consumer, 500);
+
+	// Group 5 is consumed normally (2 frames). Then #active = 6 (missing).
+	// Groups 7-9 accumulate, span = 100ms > 80ms, so latency skip fires.
+	assert.ok(frames.length >= 4, `Expected >= 4 frames, got ${frames.length}`);
+
+	consumer.close();
+});
+
 test("buffered signal updates as frames arrive and are consumed", async () => {
 	const track = new Track("test");
 	const producer = new Producer(track);
@@ -427,4 +506,98 @@ test("buffered signal updates as frames arrive and are consumed", async () => {
 	assert.ok(totalAfter <= totalBefore, "Buffered ranges should shrink after consumption");
 
 	consumer.close();
+});
+
+test("buffered merges consecutive done groups into one range", async () => {
+	const track = new Track("test");
+	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
+
+	// Write 3 sequential groups, each with a single frame (like audio).
+	// Without merging, each would be a zero-width point range.
+	writeGroupWithSequence(track, 0, [0 as Time.Micro]);
+	writeGroupWithSequence(track, 1, [23_000 as Time.Micro]);
+	writeGroupWithSequence(track, 2, [46_000 as Time.Micro]);
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	// All groups are done (fully received). Since they have consecutive sequence
+	// numbers, they should merge into a single contiguous range.
+	const ranges = consumer.buffered.peek();
+	assert.strictEqual(ranges.length, 1, `Expected 1 merged range, got ${ranges.length}: ${JSON.stringify(ranges)}`);
+	assert.strictEqual(ranges[0].start, 0);
+	assert.strictEqual(ranges[0].end, 46);
+
+	consumer.close();
+	track.close();
+});
+
+test("buffered shows gap when group sequence numbers are missing", async () => {
+	const track = new Track("test");
+	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
+
+	// Write groups 0, 1, and 3 (skipping 2).
+	writeGroupWithSequence(track, 0, [0 as Time.Micro]);
+	writeGroupWithSequence(track, 1, [23_000 as Time.Micro]);
+	// group 2 missing
+	writeGroupWithSequence(track, 3, [69_000 as Time.Micro]);
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	// Groups 0 and 1 should merge (consecutive, done).
+	// Group 3 should be a separate range (gap at group 2).
+	const ranges = consumer.buffered.peek();
+	assert.strictEqual(
+		ranges.length,
+		2,
+		`Expected 2 ranges (gap at group 2), got ${ranges.length}: ${JSON.stringify(ranges)}`,
+	);
+
+	// First range: groups 0-1
+	assert.strictEqual(ranges[0].start, 0);
+	assert.strictEqual(ranges[0].end, 23);
+
+	// Second range: group 3
+	assert.strictEqual(ranges[1].start, 69);
+	assert.strictEqual(ranges[1].end, 69);
+
+	consumer.close();
+	track.close();
+});
+
+test("buffered merges multi-frame groups with overlapping timestamps", async () => {
+	const track = new Track("test");
+	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
+
+	// Write 2 groups with multiple frames each, where the timestamp ranges overlap.
+	writeGroupWithSequence(track, 0, [0 as Time.Micro, 20_000 as Time.Micro, 40_000 as Time.Micro]);
+	writeGroupWithSequence(track, 1, [30_000 as Time.Micro, 50_000 as Time.Micro, 70_000 as Time.Micro]);
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	// Group 0 range: [0, 40]. Group 1 range: [30, 70].
+	// They overlap (40 >= 30), so they merge even without the sequential-done check.
+	const ranges = consumer.buffered.peek();
+	assert.strictEqual(ranges.length, 1, `Expected 1 merged range, got ${ranges.length}`);
+	assert.strictEqual(ranges[0].start, 0);
+	assert.strictEqual(ranges[0].end, 70);
+
+	consumer.close();
+	track.close();
+});
+
+test("buffered does not merge non-consecutive groups across a gap", async () => {
+	const track = new Track("test");
+	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
+
+	// Groups 0 and 2 (gap at 1). Even though both are done, they shouldn't merge.
+	writeGroupWithSequence(track, 0, [0 as Time.Micro]);
+	writeGroupWithSequence(track, 2, [46_000 as Time.Micro]);
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
+
+	const ranges = consumer.buffered.peek();
+	assert.strictEqual(ranges.length, 2, `Expected 2 ranges (gap at group 1), got ${ranges.length}`);
+
+	consumer.close();
+	track.close();
 });
