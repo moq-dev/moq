@@ -62,6 +62,15 @@ pub struct ClientConfig {
 	)]
 	pub max_streams: Option<u64>,
 
+	/// Force specific ALPN protocol string(s) for the QUIC connection.
+	///
+	/// By default, the client offers all supported ALPNs and lets the server choose.
+	/// Use this to force a specific version, e.g. `--alpn moq-00` for IETF draft 14.
+	/// Can be specified multiple times to offer a subset of protocols.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[arg(id = "alpn", long = "alpn", env = "MOQ_CLIENT_ALPN")]
+	pub alpn: Vec<String>,
+
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ClientTls,
@@ -84,6 +93,7 @@ impl Default for ClientConfig {
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
 			max_streams: None,
+			alpn: Vec::new(),
 			tls: ClientTls::default(),
 			#[cfg(feature = "websocket")]
 			websocket: super::ClientWebSocket::default(),

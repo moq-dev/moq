@@ -18,6 +18,7 @@ pub(crate) struct QuicheClient {
 	pub bind: net::SocketAddr,
 	pub disable_verify: bool,
 	pub max_streams: u64,
+	pub alpn: Vec<String>,
 }
 
 impl QuicheClient {
@@ -30,6 +31,7 @@ impl QuicheClient {
 			bind: config.bind,
 			disable_verify: config.tls.disable_verify.unwrap_or_default(),
 			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
+			alpn: config.alpn.clone(),
 		})
 	}
 
@@ -41,10 +43,14 @@ impl QuicheClient {
 			anyhow::bail!("fingerprint verification (http:// scheme) is not supported with the quiche backend");
 		}
 
-		let alpns = match url.scheme() {
-			"https" => vec![web_transport_quiche::ALPN.as_bytes().to_vec()],
-			"moqt" | "moql" => moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
-			_ => anyhow::bail!("url scheme must be 'https', 'moqt', or 'moql'"),
+		let alpns = if !self.alpn.is_empty() {
+			self.alpn.iter().map(|alpn| alpn.as_bytes().to_vec()).collect()
+		} else {
+			match url.scheme() {
+				"https" => vec![web_transport_quiche::ALPN.as_bytes().to_vec()],
+				"moqt" | "moql" => moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
+				_ => anyhow::bail!("url scheme must be 'https', 'moqt', or 'moql'"),
+			}
 		};
 
 		let mut settings = web_transport_quiche::Settings::default();

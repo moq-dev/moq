@@ -87,12 +87,13 @@ pub(crate) async fn connect(
 	}
 
 	// Convert URL scheme: http:// -> ws://, https:// -> wss://
+	// Custom protocols (moqt://, moql://) use raw QUIC and don't support WebSocket.
 	let needs_tls = match url.scheme() {
 		"http" => {
 			url.set_scheme("ws").expect("failed to set scheme");
 			false
 		}
-		"https" | "moql" | "moqt" => {
+		"https" => {
 			url.set_scheme("wss").expect("failed to set scheme");
 			true
 		}

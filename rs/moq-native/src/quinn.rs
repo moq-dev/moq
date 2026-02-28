@@ -17,6 +17,7 @@ use url::Url;
 pub(crate) struct QuinnClient {
 	pub quic: quinn::Endpoint,
 	pub transport: Arc<quinn::TransportConfig>,
+	pub alpn: Vec<String>,
 }
 
 impl QuinnClient {
@@ -44,7 +45,11 @@ impl QuinnClient {
 		let quic =
 			quinn::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
 
-		Ok(Self { quic, transport })
+		Ok(Self {
+			quic,
+			transport,
+			alpn: config.alpn.clone(),
+		})
 	}
 
 	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> anyhow::Result<web_transport_quinn::Session> {
@@ -85,10 +90,14 @@ impl QuinnClient {
 			url.set_scheme("https").expect("failed to set scheme");
 		}
 
-		let alpns = match url.scheme() {
-			"https" => vec![web_transport_quinn::ALPN.as_bytes().to_vec()],
-			"moqt" | "moql" => moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
-			_ => anyhow::bail!("url scheme must be 'https', 'moqt', or 'moql'"),
+		let alpns = if !self.alpn.is_empty() {
+			self.alpn.iter().map(|alpn| alpn.as_bytes().to_vec()).collect()
+		} else {
+			match url.scheme() {
+				"https" => vec![web_transport_quinn::ALPN.as_bytes().to_vec()],
+				"moqt" | "moql" => moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
+				_ => anyhow::bail!("url scheme must be 'https', 'moqt', or 'moql'"),
+			}
 		};
 
 		config.alpn_protocols = alpns;
