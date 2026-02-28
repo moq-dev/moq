@@ -27,6 +27,81 @@ export type Target = {
 };
 
 /**
+ * A filter that returns matching renditions sorted by preference (most preferred first).
+ * Must return at least one rendition.
+ */
+type RenditionFilter = (entries: [string, Catalog.VideoConfig][]) => string[];
+
+/**
+ * Rank renditions by proximity to a target pixel count.
+ * Prefers the smallest rendition >= target, then the largest < target.
+ * Renditions without resolution info are ranked last.
+ */
+function byPixels(target: number): RenditionFilter {
+	return (entries) => {
+		const larger: { name: string; size: number }[] = [];
+		const smaller: { name: string; size: number }[] = [];
+		const unknown: string[] = [];
+
+		for (const [name, config] of entries) {
+			if (config.codedWidth && config.codedHeight) {
+				const size = config.codedWidth * config.codedHeight;
+				if (size >= target) {
+					larger.push({ name, size });
+				} else {
+					smaller.push({ name, size });
+				}
+			} else {
+				unknown.push(name);
+			}
+		}
+
+		larger.sort((a, b) => a.size - b.size);
+		smaller.sort((a, b) => b.size - a.size);
+
+		return [...larger.map((e) => e.name), ...smaller.map((e) => e.name), ...unknown];
+	};
+}
+
+/**
+ * Filter and rank renditions by a maximum bitrate budget.
+ * Returns renditions within budget (highest bitrate first for best quality),
+ * followed by unknown-bitrate renditions. Over-budget renditions are excluded.
+ * If nothing is within budget, falls back to the single lowest-bitrate rendition.
+ */
+function byBitrate(target: number): RenditionFilter {
+	return (entries) => {
+		const within: { name: string; bitrate: number }[] = [];
+		const over: { name: string; bitrate: number }[] = [];
+		const unknown: string[] = [];
+
+		for (const [name, config] of entries) {
+			if (config.bitrate != null) {
+				if (config.bitrate <= target) {
+					within.push({ name, bitrate: config.bitrate });
+				} else {
+					over.push({ name, bitrate: config.bitrate });
+				}
+			} else {
+				unknown.push(name);
+			}
+		}
+
+		within.sort((a, b) => b.bitrate - a.bitrate);
+
+		const result = [...within.map((e) => e.name), ...unknown];
+
+		// Guarantee at least one — degrade to lowest over-budget if needed.
+		if (result.length === 0) {
+			over.sort((a, b) => a.bitrate - b.bitrate);
+			result.push(over[0].name);
+		}
+
+		return result;
+	};
+}
+
+/**
  * Source handles catalog extraction, support checking, and rendition selection
  * for video playback. It is used by both MSE and Decoder backends.
  */
@@ -114,72 +189,41 @@ export class Source {
 	}
 
 	/**
-	 * Select the best rendition based on target bitrate and pixel count.
+	 * Select the best rendition using a generic filter system.
 	 *
-	 * When a target bitrate is set, renditions within the bitrate budget are preferred.
-	 * Among those, the best match is chosen by pixel count (rounds up to the closest
-	 * larger rendition, or falls back to the largest smaller one).
-	 *
-	 * If no renditions fit the bitrate budget, the lowest-bitrate rendition is selected.
-	 * If no renditions have resolution info, bitrate is used as the sole criterion.
+	 * Each enabled filter returns matching renditions sorted by preference.
+	 * The first rendition present in every filter's output is selected.
+	 * If no rendition satisfies all filters, a warning is logged.
 	 */
 	#select(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
-		let entries = Object.entries(renditions);
+		const entries = Object.entries(renditions);
 		if (entries.length === 0) return undefined;
 		if (entries.length === 1) return entries[0][0];
 
-		// If a bitrate target is set, prefer renditions within budget.
-		const targetBitrate = target?.bitrate;
-		if (targetBitrate != null) {
-			const withinBudget = entries.filter(([, c]) => c.bitrate != null && c.bitrate <= targetBitrate);
+		// Build enabled filters based on the target.
+		const filters: RenditionFilter[] = [];
 
-			if (withinBudget.length > 0) {
-				entries = withinBudget;
-			} else {
-				// No renditions fit the budget — pick the lowest bitrate available.
-				const withBitrate = entries.filter(([, c]) => c.bitrate != null);
-				if (withBitrate.length > 0) {
-					withBitrate.sort((a, b) => (a[1].bitrate ?? 0) - (b[1].bitrate ?? 0));
-					return withBitrate[0][0];
-				}
-			}
+		// Pixels filter is always active — defaults to preferring the largest rendition.
+		filters.push(byPixels(target?.pixels ?? Number.MAX_SAFE_INTEGER / 2 - 1));
 
-			if (entries.length === 1) return entries[0][0];
+		if (target?.bitrate != null) {
+			filters.push(byBitrate(target.bitrate));
 		}
 
-		// Select by pixel count — round up to the closest larger rendition.
-		const pixels = target?.pixels ?? Number.MAX_SAFE_INTEGER / 2 - 1;
+		// Run each filter to get ranked preference lists.
+		const rankings = filters.map((f) => f(entries));
 
-		let larger: string | undefined;
-		let largerSize: number | undefined;
+		// Select the first rendition (in the first ranking's order) present in all rankings.
+		const sets = rankings.map((r) => new Set(r));
 
-		let smaller: string | undefined;
-		let smallerSize: number | undefined;
-
-		for (const [name, config] of entries) {
-			if (!config.codedHeight || !config.codedWidth) continue;
-
-			const size = config.codedHeight * config.codedWidth;
-			if (size > pixels && (!largerSize || size < largerSize)) {
-				larger = name;
-				largerSize = size;
-			} else if (size < pixels && (!smallerSize || size > smallerSize)) {
-				smaller = name;
-				smallerSize = size;
+		for (const name of rankings[0]) {
+			if (sets.every((s) => s.has(name))) {
+				return name;
 			}
 		}
-		if (larger) return larger;
-		if (smaller) return smaller;
 
-		// No resolution info — fall back to bitrate selection (prefer highest within budget).
-		const withBitrate = entries.filter(([, c]) => c.bitrate != null);
-		if (withBitrate.length > 0) {
-			withBitrate.sort((a, b) => (b[1].bitrate ?? 0) - (a[1].bitrate ?? 0));
-			return withBitrate[0][0];
-		}
-
-		console.warn("no width/height or bitrate information, choosing the first supported rendition");
-		return entries[0][0];
+		console.warn("conflicting rendition filters, no rendition satisfies all criteria");
+		return undefined;
 	}
 
 	close(): void {
