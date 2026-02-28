@@ -36,7 +36,7 @@ hex = "0.4"
 humantime = "2.3"
 humantime-serde = "1.1"
 
-moq-lite = { workspace = true }
+moq-lite = { workspace = true, features = ["serde"] }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 quinn = { version = "0.11", default-features = false, features = [
 	"platform-verifier",

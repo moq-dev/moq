@@ -87,6 +87,17 @@ pub struct ServerConfig {
 	)]
 	pub max_streams: Option<u64>,
 
+	/// Restrict the server to specific MoQ protocol version(s).
+	///
+	/// By default, the server accepts all supported versions.
+	/// Use this to restrict to specific versions, e.g. `--server-version moq-lite-02`.
+	/// Can be specified multiple times to accept a subset of versions.
+	///
+	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[arg(id = "server-version", long = "server-version", env = "MOQ_SERVER_VERSION")]
+	pub version: Vec<moq_lite::Version>,
+
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ServerTlsConfig,
@@ -96,6 +107,15 @@ impl ServerConfig {
 	pub fn init(self) -> anyhow::Result<Server> {
 		Server::new(self)
 	}
+
+	/// Returns the configured versions, defaulting to all if none specified.
+	pub fn versions(&self) -> moq_lite::Versions {
+		if self.version.is_empty() {
+			moq_lite::Versions::all()
+		} else {
+			moq_lite::Versions::from(self.version.clone())
+		}
+	}
 }
 
 /// Server for accepting MoQ connections over QUIC.
@@ -103,6 +123,7 @@ impl ServerConfig {
 /// Create via [`ServerConfig::init`] or [`Server::new`].
 pub struct Server {
 	moq: moq_lite::Server,
+	versions: moq_lite::Versions,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
@@ -127,6 +148,8 @@ impl Server {
 			panic!("no QUIC backend compiled; enable quinn or quiche feature");
 		});
 
+		let versions = config.versions();
+
 		#[cfg(feature = "quinn")]
 		#[allow(unreachable_patterns)]
 		let quinn = match backend {
@@ -142,7 +165,8 @@ impl Server {
 
 		Ok(Server {
 			accept: Default::default(),
-			moq: moq_lite::Server::new(),
+			moq: moq_lite::Server::new().with_versions(versions.clone()),
+			versions,
 			#[cfg(feature = "iroh")]
 			iroh: None,
 			#[cfg(feature = "quinn")]
@@ -231,27 +255,34 @@ impl Server {
 			let quiche_accept = async { None::<()> };
 
 			let server = self.moq.clone();
+			let versions = self.versions.clone();
 
 			tokio::select! {
 				Some(_conn) = quinn_accept => {
 					#[cfg(feature = "quinn")]
-					self.accept.push(async move {
-						let quinn = super::quinn::QuinnRequest::accept(_conn).await?;
-						Ok(Request {
-							server,
-							kind: RequestKind::Quinn(quinn),
-						})
-					}.boxed());
+					{
+						let alpns = versions.alpns();
+						self.accept.push(async move {
+							let quinn = super::quinn::QuinnRequest::accept(_conn, alpns).await?;
+							Ok(Request {
+								server,
+								kind: RequestKind::Quinn(quinn),
+							})
+						}.boxed());
+					}
 				}
 				Some(_conn) = quiche_accept => {
 					#[cfg(feature = "quiche")]
-					self.accept.push(async move {
-						let quiche = super::quiche::QuicheRequest::accept(_conn).await?;
-						Ok(Request {
-							server,
-							kind: RequestKind::Quiche(quiche),
-						})
-					}.boxed());
+					{
+						let alpns = versions.alpns();
+						self.accept.push(async move {
+							let quiche = super::quiche::QuicheRequest::accept(_conn, alpns).await?;
+							Ok(Request {
+								server,
+								kind: RequestKind::Quiche(quiche),
+							})
+						}.boxed());
+					}
 				}
 				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
