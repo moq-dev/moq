@@ -1,6 +1,16 @@
 import { For, type JSX } from "solid-js";
 import useWatchUIContext from "../hooks/use-watch-ui";
 
+function formatBitrate(bps: number): string {
+	if (bps >= 1_000_000) {
+		return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+	}
+	if (bps >= 1_000) {
+		return `${(bps / 1_000).toFixed(0)} kbps`;
+	}
+	return `${bps} bps`;
+}
+
 export default function QualitySelector() {
 	const context = useWatchUIContext();
 
@@ -26,6 +36,7 @@ export default function QualitySelector() {
 						<option value={rendition.name}>
 							{rendition.name}
 							{rendition.width && rendition.height ? ` (${rendition.width}x${rendition.height})` : ""}
+							{rendition.bitrate ? ` ${formatBitrate(rendition.bitrate)}` : ""}
 						</option>
 					)}
 				</For>

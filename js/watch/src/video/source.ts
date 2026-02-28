@@ -22,7 +22,8 @@ export type Target = {
 	// The desired size of the video in pixels.
 	pixels?: number;
 
-	// TODO bitrate
+	// Maximum desired bitrate in bits per second.
+	bitrate?: number;
 };
 
 /**
@@ -113,19 +114,41 @@ export class Source {
 	}
 
 	/**
-	 * Select the best rendition based on target pixel count.
-	 * Rounds up to the closest larger rendition, or falls back to the largest smaller one.
+	 * Select the best rendition based on target bitrate and pixel count.
+	 *
+	 * When a target bitrate is set, renditions within the bitrate budget are preferred.
+	 * Among those, the best match is chosen by pixel count (rounds up to the closest
+	 * larger rendition, or falls back to the largest smaller one).
+	 *
+	 * If no renditions fit the bitrate budget, the lowest-bitrate rendition is selected.
+	 * If no renditions have resolution info, bitrate is used as the sole criterion.
 	 */
 	#select(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
-		const entries = Object.entries(renditions);
+		let entries = Object.entries(renditions);
 		if (entries.length === 0) return undefined;
 		if (entries.length === 1) return entries[0][0];
 
-		// If we have no target, then choose the largest supported rendition.
-		const pixels = target?.pixels ?? Number.MAX_SAFE_INTEGER / 2 - 1;
+		// If a bitrate target is set, prefer renditions within budget.
+		const targetBitrate = target?.bitrate;
+		if (targetBitrate != null) {
+			const withinBudget = entries.filter(([, c]) => c.bitrate != null && c.bitrate <= targetBitrate);
 
-		// Round up to the closest rendition.
-		// Also keep track of the 2nd closest, just in case there's nothing larger.
+			if (withinBudget.length > 0) {
+				entries = withinBudget;
+			} else {
+				// No renditions fit the budget — pick the lowest bitrate available.
+				const withBitrate = entries.filter(([, c]) => c.bitrate != null);
+				if (withBitrate.length > 0) {
+					withBitrate.sort((a, b) => (a[1].bitrate ?? 0) - (b[1].bitrate ?? 0));
+					return withBitrate[0][0];
+				}
+			}
+
+			if (entries.length === 1) return entries[0][0];
+		}
+
+		// Select by pixel count — round up to the closest larger rendition.
+		const pixels = target?.pixels ?? Number.MAX_SAFE_INTEGER / 2 - 1;
 
 		let larger: string | undefined;
 		let largerSize: number | undefined;
@@ -148,7 +171,14 @@ export class Source {
 		if (larger) return larger;
 		if (smaller) return smaller;
 
-		console.warn("no width/height information, choosing the first supported rendition");
+		// No resolution info — fall back to bitrate selection (prefer highest within budget).
+		const withBitrate = entries.filter(([, c]) => c.bitrate != null);
+		if (withBitrate.length > 0) {
+			withBitrate.sort((a, b) => (b[1].bitrate ?? 0) - (a[1].bitrate ?? 0));
+			return withBitrate[0][0];
+		}
+
+		console.warn("no width/height or bitrate information, choosing the first supported rendition");
 		return entries[0][0];
 	}
 

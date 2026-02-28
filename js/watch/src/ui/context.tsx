@@ -16,6 +16,7 @@ export type Rendition = {
 	name: string;
 	width?: number;
 	height?: number;
+	bitrate?: number;
 };
 
 export type WatchUIContextValues = {
@@ -158,6 +159,7 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 			name,
 			width: config.codedWidth,
 			height: config.codedHeight,
+			bitrate: config.bitrate,
 		}));
 
 		setAvailableRenditions(renditionsList);
