@@ -1,3 +1,21 @@
+# Generate systemd service files from templates
+resource "local_file" "hang_bbb_service" {
+  content = templatefile("${path.module}/pub/hang-bbb.service.tftpl", {
+    domain = var.domain
+  })
+  filename = "${path.module}/pub/hang-bbb.service"
+}
+
+resource "local_file" "hang_bbb_prepare_service" {
+  content  = file("${path.module}/pub/hang-bbb-prepare.service.tftpl")
+  filename = "${path.module}/pub/hang-bbb-prepare.service"
+}
+
+resource "local_file" "pub_vacuum_service" {
+  content  = file("${path.module}/pub/vacuum.service.tftpl")
+  filename = "${path.module}/pub/vacuum.service"
+}
+
 # Publisher instance
 resource "linode_instance" "publisher" {
   label  = "publisher-moq"

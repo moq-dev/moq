@@ -19,6 +19,9 @@ result
 node_modules
 /.direnv
 
+# Don't leak generated service files (use .tftpl templates instead)
+*.service
+
 # Don't leak dev stuff
 *.mp4
 *.fmp4

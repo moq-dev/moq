@@ -14,6 +14,16 @@ resource "local_file" "moq_cert_service" {
   filename = "${path.module}/relay/moq-cert.service"
 }
 
+resource "local_file" "certbot_renew_service" {
+  content  = file("${path.module}/relay/certbot-renew.service.tftpl")
+  filename = "${path.module}/relay/certbot-renew.service"
+}
+
+resource "local_file" "relay_vacuum_service" {
+  content  = file("${path.module}/relay/vacuum.service.tftpl")
+  filename = "${path.module}/relay/vacuum.service"
+}
+
 # Create Linode instances
 resource "linode_instance" "relay" {
   for_each = local.relays
