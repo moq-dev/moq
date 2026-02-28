@@ -357,9 +357,10 @@ impl QuinnRequest {
 			} => Ok(web_transport_quinn::Session::raw(connection, request, response)),
 			QuinnRequest::WebTransport { request } => {
 				let mut response = web_transport_quinn::proto::ConnectResponse::OK;
-				// TODO actually pick a valid moq protocol
-				if let Some(alpn) = request.protocols.first() {
-					response = response.with_protocol(alpn);
+				// Pick the first sub-protocol that we actually support.
+				// This is the WebTransport equivalent of ALPN negotiation.
+				if let Some(protocol) = request.protocols.iter().find(|p| moq_lite::ALPNS.contains(&p.as_str())) {
+					response = response.with_protocol(protocol);
 				}
 				request.respond(response).await
 			}

@@ -70,4 +70,5 @@ anyhow = "1"
 bytes = "1"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 toml = "0.9"
+tracing-test = "0.2"
 url = "2"

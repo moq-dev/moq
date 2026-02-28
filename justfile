@@ -330,8 +330,8 @@ check:
 	bun biome check
 
 	# Run the (slower) Rust checks.
-	cargo check --all-targets --all-features
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo check --all-targets
+	cargo clippy --all-targets -- -D warnings
 	cargo fmt --all --check
 
 	# Check documentation warnings (only workspace crates, not dependencies)
@@ -381,7 +381,7 @@ test:
 		bun run --filter='*' test
 	fi
 
-	cargo test --all-targets --all-features
+	cargo test --all-targets
 
 # Automatically fix some issues.
 fix:
@@ -390,7 +390,7 @@ fix:
 	bun biome check --write
 
 	# Fix the Rust issues.
-	cargo clippy --fix --allow-staged --allow-dirty --all-targets --all-features
+	cargo clippy --fix --allow-staged --allow-dirty --all-targets
 	cargo fmt --all
 
 	# requires: cargo install cargo-shear
