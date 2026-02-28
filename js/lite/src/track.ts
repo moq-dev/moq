@@ -51,12 +51,11 @@ export class Track {
 	writeGroup(group: Group) {
 		if (this.state.closed.peek()) throw new Error("track is closed");
 
-		if (group.sequence < (this.#next ?? 0)) {
-			group.close();
-			return;
+		// Only advance #next upward (for appendGroup auto-increment).
+		if (group.sequence >= (this.#next ?? 0)) {
+			this.#next = group.sequence + 1;
 		}
 
-		this.#next = group.sequence + 1;
 		this.state.groups.mutate((groups) => {
 			groups.push(group);
 			groups.sort((a, b) => a.sequence - b.sequence);

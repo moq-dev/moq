@@ -87,6 +87,8 @@ export class Consumer {
 	// Wake up the consumer when a new frame is available.
 	#notify?: () => void;
 
+	#error?: Error;
+
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
@@ -149,6 +151,22 @@ export class Consumer {
 				if (!next) break;
 
 				const { data, timestamp } = Consumer.#decode(next);
+
+				// Validate that timestamps agree with sequence ordering.
+				// All timestamps in group N must be >= all timestamps in groups < N.
+				for (const other of this.#groups) {
+					if (other === group || other.latest === undefined) continue;
+
+					if (other.consumer.sequence < group.consumer.sequence && timestamp < other.latest) {
+						this.#error = new Error(
+							`group ${group.consumer.sequence} has timestamp ${timestamp}us before group ${other.consumer.sequence} at ${other.latest}us`,
+						);
+						this.#notify?.();
+						this.#notify = undefined;
+						return;
+					}
+				}
+
 				const frame = {
 					data,
 					timestamp,
@@ -246,6 +264,8 @@ export class Consumer {
 	// If frame is undefined, the group is done.
 	async next(): Promise<{ frame: Frame | undefined; group: number } | undefined> {
 		for (;;) {
+			if (this.#error) throw this.#error;
+
 			if (
 				this.#groups.length > 0 &&
 				this.#active !== undefined &&
