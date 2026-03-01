@@ -6,6 +6,7 @@
     moq = {
       # Pin to a release tag via: just pin
       url = "github:moq-dev/moq";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
