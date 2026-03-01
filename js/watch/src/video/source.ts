@@ -61,9 +61,14 @@ function byPixels(target: number): RenditionFilter {
 			return within.map((e) => e.name);
 		}
 
-		// Guarantee at least one — degrade to smallest resolution.
-		rest.sort((a, b) => a.size - b.size);
-		return [rest[0].name];
+		// Degrade to smallest over-budget resolution.
+		if (rest.length > 0) {
+			rest.sort((a, b) => a.size - b.size);
+			return [rest[0].name];
+		}
+
+		// No entries had resolution metadata — return all names unranked.
+		return entries.map(([name]) => name);
 	};
 }
 
@@ -93,9 +98,14 @@ function byBitrate(target: number): RenditionFilter {
 			return within.map((e) => e.name);
 		}
 
-		// Guarantee at least one — degrade to lowest bitrate.
-		rest.sort((a, b) => a.bitrate - b.bitrate);
-		return [rest[0].name];
+		// Degrade to lowest over-budget bitrate.
+		if (rest.length > 0) {
+			rest.sort((a, b) => a.bitrate - b.bitrate);
+			return [rest[0].name];
+		}
+
+		// No entries had bitrate metadata — return all names unranked.
+		return entries.map(([name]) => name);
 	};
 }
 
