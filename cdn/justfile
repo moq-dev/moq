@@ -126,6 +126,19 @@ logs-pub:
 	HOST=$(just host pub)
 	ssh root@$HOST "journalctl -u hang-bbb -f"
 
+# Profile moq-relay on a node using perf (built via nix)
+perf node *args:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	HOST=$(just host {{node}})
+	echo "Building perf on $HOST..."
+	ssh root@$HOST "cd /var/lib/moq && nix build .#perf -o perf"
+	echo "Recording on $HOST... (Ctrl+C to stop)"
+	ssh -t root@$HOST "/var/lib/moq/perf/bin/perf record -g -p \$(pidof moq-relay) {{args}}"
+	echo "Copying perf.data..."
+	scp root@$HOST:~/perf.data .
+	echo "Run 'perf report -i perf.data' to analyze."
+
 # Run health checks against all relay nodes
 health:
 	./health.sh

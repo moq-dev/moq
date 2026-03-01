@@ -8,10 +8,6 @@
 //! - WebSocket fallback: for restrictive networks
 //! - HTTP API: health checks and metrics via [`Web`]
 
-#[cfg(feature = "jemalloc")]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 mod auth;
 mod cluster;
 mod config;

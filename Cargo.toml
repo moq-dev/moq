@@ -37,4 +37,8 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[profile.profiling]
+inherits = "release"
 debug = "line-tables-only"
+frame-pointer = "always"

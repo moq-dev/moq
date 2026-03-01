@@ -27,7 +27,10 @@
         {
           default = pkgs.certbot.withPlugins (ps: [ ps.certbot-dns-google ]);
           certbot = pkgs.certbot.withPlugins (ps: [ ps.certbot-dns-google ]);
-          moq-relay = moq.packages.${system}.moq-relay;
+          moq-relay = moq.packages.${system}.moq-relay.overrideAttrs {
+            CARGO_PROFILE = "profiling";
+          };
+          perf = pkgs.linuxPackages.perf;
           cachix = pkgs.cachix;
           ffmpeg = pkgs.ffmpeg;
           moq-cli = moq.packages.${system}.moq-cli;

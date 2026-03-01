@@ -12,7 +12,7 @@ in
     crateInfo ../rs/moq-relay/Cargo.toml
     // {
       src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p moq-relay --features jemalloc";
+      cargoExtraArgs = "-p moq-relay";
     }
   );
 
