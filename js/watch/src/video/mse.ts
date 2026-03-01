@@ -75,17 +75,11 @@ export class Mse implements Backend {
 			this.#buffered.set(timeRangesToArray(sourceBuffer.buffered));
 		});
 
-		// Gate the subscription on not being paused to avoid wasting bandwidth.
-		effect.run((inner) => {
-			const paused = inner.get(this.muxer.paused);
-			if (paused) return;
-
-			if (config.container.kind === "cmaf") {
-				this.#runCmafMedia(inner, active, track, config, sourceBuffer, element);
-			} else {
-				this.#runLegacyMedia(inner, active, track, config, sourceBuffer, element);
-			}
-		});
+		if (config.container.kind === "cmaf") {
+			this.#runCmafMedia(effect, active, track, config, sourceBuffer, element);
+		} else {
+			this.#runLegacyMedia(effect, active, track, config, sourceBuffer, element);
+		}
 	}
 
 	async #appendBuffer(sourceBuffer: SourceBuffer, buffer: Uint8Array): Promise<void> {
