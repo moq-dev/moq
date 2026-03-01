@@ -199,7 +199,7 @@ export class Encoder {
 				throw new Error(`unknown codec: ${codec}`);
 			}
 
-			bitrate = Math.min(bitrate, user.maxBitrate || bitrate);
+			bitrate = Math.round(Math.min(bitrate, user.maxBitrate || bitrate));
 
 			const config: VideoEncoderConfig = {
 				codec,
