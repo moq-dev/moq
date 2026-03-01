@@ -21,6 +21,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_version: Option<&str>) {
 	let client_version: Option<moq_lite::Version> = client_version.map(|v| v.parse().expect("invalid client version"));
 	let server_version: Option<moq_lite::Version> = server_version.map(|v| v.parse().expect("invalid server version"));
+
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
