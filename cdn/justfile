@@ -2,8 +2,13 @@
 default:
   just --list
 
+# Update moq to latest main (may require building from source if not cached)
 update:
 	nix flake update
+
+# Pin moq to a specific release tag for cached deployments (e.g., just pin moq-relay-v0.10.6)
+pin tag:
+	nix flake update moq --override-input moq github:moq-dev/moq/{{tag}}
 
 # Get the hostname for a node
 host node:
@@ -39,7 +44,7 @@ deploy node:
 	rsync -az --exclude='*.tftpl' relay/ common/ root@$HOST:/etc/systemd/system/
 	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/
 
-	echo "  Building and caching packages..."
+	echo "  Fetching packages (from Cachix or building)..."
 	ssh root@$HOST "cd /var/lib/moq && nix build .#moq-relay -o relay && nix build .#certbot -o cert && nix build .#jq -o jq"
 
 	echo "  Enabling and starting services..."
@@ -92,7 +97,7 @@ deploy-pub:
 	rsync -az --exclude='*.tftpl' pub/ common/ root@$HOST:/etc/systemd/system/
 	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/
 
-	echo "  Building and caching packages..."
+	echo "  Fetching packages (from Cachix or building)..."
 	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o result && nix build .#moq-cli -o result-moq-cli && nix build .#jq -o jq"
 
 	echo "  Enabling and starting services..."
