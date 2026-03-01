@@ -109,7 +109,15 @@ export class Decoder implements Backend {
 
 		effect.cleanup(() => active.close());
 
-		effect.proxy(this.#frame, active.frame);
+		// Clone the frame so we own it independently of the DecoderTrack.
+		// proxy() would share the same reference, allowing the source to close our frame.
+		effect.run((inner) => {
+			const frame = inner.get(active.frame);
+			this.#frame.update((prev) => {
+				prev?.close();
+				return frame?.clone();
+			});
+		});
 		effect.proxy(this.#timestamp, active.timestamp);
 		effect.proxy(this.#buffered, active.buffered);
 	}
