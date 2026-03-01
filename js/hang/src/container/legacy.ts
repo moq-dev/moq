@@ -159,7 +159,7 @@ export class Consumer {
 
 				group.frames.push(frame);
 
-				if (!group.latest || timestamp > group.latest) {
+				if (group.latest === undefined || timestamp > group.latest) {
 					group.latest = timestamp;
 				}
 
@@ -212,7 +212,7 @@ export class Consumer {
 			let max: number | undefined;
 
 			for (const group of this.#groups) {
-				if (!group.latest) continue;
+				if (group.latest === undefined) continue;
 
 				const frame = group.frames.at(0)?.timestamp ?? group.latest;
 				if (min === undefined || frame < min) min = frame;
@@ -222,7 +222,7 @@ export class Consumer {
 			if (min === undefined || max === undefined) break;
 
 			const latency = max - min;
-			if (latency < threshold) break;
+			if (latency <= threshold) break;
 
 			const first = this.#groups.shift()!;
 			this.#active = this.#groups[0]?.consumer.sequence;
