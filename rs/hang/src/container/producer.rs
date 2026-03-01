@@ -118,6 +118,17 @@ impl OrderedProducer {
 		Ok(())
 	}
 
+	/// Finish the producer, closing the current group and track.
+	///
+	/// After calling this, any further calls to `write()` will return an error.
+	pub fn finish(&mut self) -> Result<(), Error> {
+		if let Some(mut group) = self.group.take() {
+			group.finish()?;
+		}
+		self.track.finish()?;
+		Ok(())
+	}
+
 	/// Create a consumer for this track.
 	///
 	/// Multiple consumers can be created from the same producer, each receiving
