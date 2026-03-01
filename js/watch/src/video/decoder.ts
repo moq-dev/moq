@@ -105,6 +105,9 @@ export class Decoder implements Backend {
 			// #runActive will be in charge of it now.
 			this.#active.set(pending);
 			pending = undefined;
+
+			// This effect is done; close it to avoid a useless re-run.
+			effect.close();
 		});
 	}
 
