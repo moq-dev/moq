@@ -197,15 +197,16 @@ export class Decoder {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
-			let warmGroup: number | undefined;
+			let warmed = 0;
 
 			const decoder = new AudioDecoder({
 				output: (data) => {
-					if (warmGroup !== undefined) {
-						// First group: prime the decoder but don't emit audio.
+					if (warmed < 3) {
+						// Drop the first 3 frames to prime the decoder.
 						data.close();
 						return;
 					}
+					warmed++;
 					this.#emit(data);
 				},
 				error: (error) => console.error(error),
@@ -222,19 +223,8 @@ export class Decoder {
 				const next = await consumer.next();
 				if (!next) break;
 
-				const { frame, group } = next;
-				if (!frame) {
-					// Group done notification — if this was the warm-up group, we're done warming.
-					if (warmGroup !== undefined && group === warmGroup) {
-						warmGroup = undefined;
-					}
-					continue;
-				}
-
-				// Track the first group for warm-up.
-				if (warmGroup === undefined && this.#stats.peek() === undefined) {
-					warmGroup = group;
-				}
+				const { frame } = next;
+				if (!frame) continue;
 
 				this.#stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
