@@ -14,10 +14,18 @@ use std::time::Duration;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Publish a broadcast on the server, subscribe on the client, and verify
-/// the data arrives correctly for the given URL scheme and optional version.
-async fn broadcast_test(scheme: &str, version: Option<&str>) {
-	let version: Option<moq_lite::Version> = version.map(|v| v.parse().expect("invalid version"));
-	let label = version.map_or("default".to_string(), |v| v.to_string());
+/// the data arrives correctly for the given URL scheme and version configuration.
+///
+/// `client_version` and `server_version` can differ to test version negotiation.
+/// `None` means "support all versions" (empty version vec).
+async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_version: Option<&str>) {
+	let client_version: Option<moq_lite::Version> = client_version.map(|v| v.parse().expect("invalid client version"));
+	let server_version: Option<moq_lite::Version> = server_version.map(|v| v.parse().expect("invalid server version"));
+	let label = format!(
+		"client={}, server={}",
+		client_version.map_or("all".to_string(), |v| v.to_string()),
+		server_version.map_or("all".to_string(), |v| v.to_string()),
+	);
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
@@ -34,7 +42,7 @@ async fn broadcast_test(scheme: &str, version: Option<&str>) {
 	let mut server_config = moq_native::ServerConfig::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
-	if let Some(v) = version {
+	if let Some(v) = server_version {
 		server_config.version = vec![v];
 	}
 
@@ -47,7 +55,7 @@ async fn broadcast_test(scheme: &str, version: Option<&str>) {
 
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(true);
-	if let Some(v) = version {
+	if let Some(v) = client_version {
 		client_config.version = vec![v];
 	}
 
@@ -109,84 +117,236 @@ async fn broadcast_test(scheme: &str, version: Option<&str>) {
 	let _ = server_handle.await;
 }
 
-// ── Raw QUIC (moqt://) ─────────────────────────────────────────────
+// ── Raw QUIC (moqt://) – same version on both sides ─────────────────
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_01() {
-	broadcast_test("moqt", Some("moq-lite-01")).await;
+	broadcast_test("moqt", Some("moq-lite-01"), Some("moq-lite-01")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_02() {
-	broadcast_test("moqt", Some("moq-lite-02")).await;
+	broadcast_test("moqt", Some("moq-lite-02"), Some("moq-lite-02")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_03() {
-	broadcast_test("moqt", Some("moq-lite-03")).await;
+	broadcast_test("moqt", Some("moq-lite-03"), Some("moq-lite-03")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_transport_14() {
-	broadcast_test("moqt", Some("moq-transport-14")).await;
+	broadcast_test("moqt", Some("moq-transport-14"), Some("moq-transport-14")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_transport_15() {
-	broadcast_test("moqt", Some("moq-transport-15")).await;
+	broadcast_test("moqt", Some("moq-transport-15"), Some("moq-transport-15")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_transport_16() {
-	broadcast_test("moqt", Some("moq-transport-16")).await;
+	broadcast_test("moqt", Some("moq-transport-16"), Some("moq-transport-16")).await;
 }
 
-// ── WebTransport (https://) ─────────────────────────────────────────
+// ── Raw QUIC – server supports all versions, client pins one ─────────
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_server_all_client_lite_01() {
+	broadcast_test("moqt", Some("moq-lite-01"), None).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_server_all_client_lite_02() {
+	broadcast_test("moqt", Some("moq-lite-02"), None).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_server_all_client_lite_03() {
+	broadcast_test("moqt", Some("moq-lite-03"), None).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_server_all_client_transport_14() {
+	broadcast_test("moqt", Some("moq-transport-14"), None).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_server_all_client_transport_15() {
+	broadcast_test("moqt", Some("moq-transport-15"), None).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_server_all_client_transport_16() {
+	broadcast_test("moqt", Some("moq-transport-16"), None).await;
+}
+
+// ── Raw QUIC – client supports all versions, server pins one ─────────
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_client_all_server_lite_01() {
+	broadcast_test("moqt", None, Some("moq-lite-01")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_client_all_server_lite_02() {
+	broadcast_test("moqt", None, Some("moq-lite-02")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_client_all_server_lite_03() {
+	broadcast_test("moqt", None, Some("moq-lite-03")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_client_all_server_transport_14() {
+	broadcast_test("moqt", None, Some("moq-transport-14")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_client_all_server_transport_15() {
+	broadcast_test("moqt", None, Some("moq-transport-15")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_negotiate_client_all_server_transport_16() {
+	broadcast_test("moqt", None, Some("moq-transport-16")).await;
+}
+
+// ── WebTransport (https://) – same version on both sides ────────────
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport() {
-	broadcast_test("https", None).await;
+	broadcast_test("https", None, None).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_lite_01() {
-	broadcast_test("https", Some("moq-lite-01")).await;
+	broadcast_test("https", Some("moq-lite-01"), Some("moq-lite-01")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_lite_02() {
-	broadcast_test("https", Some("moq-lite-02")).await;
+	broadcast_test("https", Some("moq-lite-02"), Some("moq-lite-02")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_lite_03() {
-	broadcast_test("https", Some("moq-lite-03")).await;
+	broadcast_test("https", Some("moq-lite-03"), Some("moq-lite-03")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_transport_14() {
-	broadcast_test("https", Some("moq-transport-14")).await;
+	broadcast_test("https", Some("moq-transport-14"), Some("moq-transport-14")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_transport_15() {
-	broadcast_test("https", Some("moq-transport-15")).await;
+	broadcast_test("https", Some("moq-transport-15"), Some("moq-transport-15")).await;
 }
 
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_transport_16() {
-	broadcast_test("https", Some("moq-transport-16")).await;
+	broadcast_test("https", Some("moq-transport-16"), Some("moq-transport-16")).await;
+}
+
+// ── WebTransport – server supports all, client pins one ─────────────
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_server_all_client_lite_01() {
+	broadcast_test("https", Some("moq-lite-01"), None).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_server_all_client_lite_02() {
+	broadcast_test("https", Some("moq-lite-02"), None).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_server_all_client_lite_03() {
+	broadcast_test("https", Some("moq-lite-03"), None).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_server_all_client_transport_14() {
+	broadcast_test("https", Some("moq-transport-14"), None).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_server_all_client_transport_15() {
+	broadcast_test("https", Some("moq-transport-15"), None).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_server_all_client_transport_16() {
+	broadcast_test("https", Some("moq-transport-16"), None).await;
+}
+
+// ── WebTransport – client supports all, server pins one ─────────────
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_client_all_server_lite_01() {
+	broadcast_test("https", None, Some("moq-lite-01")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_client_all_server_lite_02() {
+	broadcast_test("https", None, Some("moq-lite-02")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_client_all_server_lite_03() {
+	broadcast_test("https", None, Some("moq-lite-03")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_client_all_server_transport_14() {
+	broadcast_test("https", None, Some("moq-transport-14")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_client_all_server_transport_15() {
+	broadcast_test("https", None, Some("moq-transport-15")).await;
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_webtransport_negotiate_client_all_server_transport_16() {
+	broadcast_test("https", None, Some("moq-transport-16")).await;
 }
