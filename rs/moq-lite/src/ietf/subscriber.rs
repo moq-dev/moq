@@ -375,10 +375,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track.producer.create_group(group)?
 		};
 
-		let res = tokio::select! {
-			_ = producer.unused() => Err(Error::Cancel),
-			res = self.run_group(group, stream, producer.clone()) => res,
-		};
+		// NOTE: We don't check group.unused() because it's being written to a cache.
+		// This matches the lite subscriber behavior — the publisher task creates
+		// GroupConsumers asynchronously via next_group(), so checking unused() here
+		// would race and cancel groups before consumers can attach.
+		let res = self.run_group(group, stream, producer.clone()).await;
 
 		match res {
 			Err(Error::Cancel) => {
@@ -432,12 +433,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			} else {
 				let mut frame = producer.create_frame(Frame { size })?;
 
-				let res = tokio::select! {
-					_ = frame.unused() => Err(Error::Cancel),
-					res = self.run_frame(stream, frame.clone()) => res,
-				};
-
-				if let Err(err) = res {
+				// NOTE: Don't check frame.unused() for the same reason as group.unused() above.
+				if let Err(err) = self.run_frame(stream, frame.clone()).await {
 					let _ = frame.close(err.clone());
 					return Err(err);
 				}
