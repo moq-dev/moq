@@ -201,11 +201,16 @@ export class Source {
 		// Build enabled filters based on the target.
 		const filters: RenditionFilter[] = [];
 
-		// Pixels filter is always active — defaults to preferring the largest rendition.
-		filters.push(byPixels(target?.pixels ?? Number.MAX_SAFE_INTEGER / 2 - 1));
-
+		if (target?.pixels != null) {
+			filters.push(byPixels(target.pixels));
+		}
 		if (target?.bitrate != null) {
 			filters.push(byBitrate(target.bitrate));
+		}
+
+		// No filters — all renditions are valid.
+		if (filters.length === 0) {
+			return entries[0][0];
 		}
 
 		// Run each filter to get ranked preference lists.
