@@ -184,7 +184,6 @@ export class Effect {
 
 	#stack?: string;
 	#scheduled = false;
-	#ran = false;
 
 	#stop!: () => void;
 	#stopped: Promise<void>;
@@ -282,7 +281,6 @@ export class Effect {
 
 			if (
 				DEV &&
-				!this.#ran &&
 				this.#dispose !== undefined &&
 				this.#unwatch.length === 0 &&
 				this.#dispose.length === 0 &&
@@ -290,8 +288,6 @@ export class Effect {
 			) {
 				console.warn("Effect did not subscribe to any signals; it will never rerun.", this.#stack);
 			}
-
-			this.#ran = true;
 		}
 	}
 
