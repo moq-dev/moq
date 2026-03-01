@@ -2,6 +2,10 @@ use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
 
+// Make a new audio group every 100ms.
+// NOTE: We could do this per-frame, but there's not much benefit to it.
+const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestamp::from_millis_unchecked(100);
+
 /// Opus decoder, initialized via a OpusHead. Does not support Ogg.
 pub struct Opus {
 	broadcast: moq_lite::BroadcastProducer,
@@ -58,11 +62,7 @@ impl Opus {
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
 		let track = self.broadcast.create_track(track)?;
-		const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestamp::from_millis_unchecked(100);
-		self.track = Some(hang::container::OrderedProducer::with_max_group_duration(
-			track,
-			MAX_GROUP_DURATION,
-		));
+		self.track = Some(hang::container::OrderedProducer::new(track).with_max_group_duration(MAX_GROUP_DURATION));
 
 		Ok(())
 	}

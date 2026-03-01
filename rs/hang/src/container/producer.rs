@@ -20,14 +20,11 @@ pub struct OrderedProducer {
 	// The timestamp of the first frame in the current group.
 	group_start: Option<Timestamp>,
 
-	// The previous frame's timestamp, used to estimate frame interval.
-	prev_timestamp: Option<Timestamp>,
+	// The number of frames written in the current group, used to estimate frame duration.
+	group_frames: u64,
 
 	// When set, automatically manage group boundaries based on duration.
 	max_group_duration: Option<Timestamp>,
-
-	// Whether keyframe() was called and the next write() should start a new group.
-	pending_keyframe: bool,
 }
 
 impl OrderedProducer {
@@ -37,25 +34,18 @@ impl OrderedProducer {
 			track: inner,
 			group: None,
 			group_start: None,
-			prev_timestamp: None,
+			group_frames: 0,
 			max_group_duration: None,
-			pending_keyframe: false,
 		}
 	}
 
-	/// Create a new OrderedProducer with automatic group duration management.
+	/// Set the maximum group duration for automatic group management.
 	///
 	/// Groups will be automatically closed and new ones started when the estimated
-	/// next frame would exceed the max group duration.
-	pub fn with_max_group_duration(inner: moq_lite::TrackProducer, duration: Timestamp) -> Self {
-		Self {
-			track: inner,
-			group: None,
-			group_start: None,
-			prev_timestamp: None,
-			max_group_duration: Some(duration),
-			pending_keyframe: false,
-		}
+	/// next frame would exceed this duration.
+	pub fn with_max_group_duration(mut self, duration: Timestamp) -> Self {
+		self.max_group_duration = Some(duration);
+		self
 	}
 
 	/// Signal that the next frame starts a new group (keyframe).
@@ -66,7 +56,6 @@ impl OrderedProducer {
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
 		}
-		self.pending_keyframe = true;
 		Ok(())
 	}
 
@@ -83,39 +72,48 @@ impl OrderedProducer {
 	pub fn write(&mut self, frame: Frame) -> Result<(), Error> {
 		tracing::trace!(?frame, "write frame");
 
-		// Check if we should auto-close the current group based on duration.
-		if let (Some(max_duration), Some(group_start), Some(prev_timestamp)) =
-			(self.max_group_duration, self.group_start, self.prev_timestamp)
+		// Safety check: close the group if this frame already exceeds the max duration.
+		if let (Some(max_duration), Some(group_start)) = (self.max_group_duration, self.group_start)
 			&& self.group.is_some()
+			&& frame.timestamp.checked_sub(group_start).unwrap_or(Timestamp::ZERO) >= max_duration
+			&& let Some(mut group) = self.group.take()
 		{
-			// Estimate the next frame's timestamp assuming constant FPS.
-			let frame_interval = frame.timestamp.checked_sub(prev_timestamp).unwrap_or(Timestamp::ZERO);
-			let estimated_next = frame.timestamp.checked_add(frame_interval)?;
+			group.finish()?;
+		}
 
-			if estimated_next.checked_sub(group_start).unwrap_or(Timestamp::ZERO) >= max_duration
+		// Start a new group if needed (first frame, after keyframe(), or after auto-close).
+		if self.group.is_none() {
+			let group = self.track.append_group()?;
+			self.group = Some(group);
+			self.group_start = Some(frame.timestamp);
+			self.group_frames = 0;
+		}
+
+		// Encode the frame.
+		let mut group = self.group.take().expect("group should exist");
+		frame.encode(&mut group)?;
+		self.group.replace(group);
+
+		self.group_frames += 1;
+
+		// Estimate the next frame's timestamp and close the group now if it would exceed the limit.
+		// avg_frame_duration = elapsed / group_frames
+		// estimated_next_elapsed = elapsed + avg_frame_duration
+		// Rearranged to avoid division: elapsed * (frames + 1) >= max_duration * frames
+		if let (Some(max_duration), Some(group_start)) = (self.max_group_duration, self.group_start) {
+			let elapsed = frame
+				.timestamp
+				.checked_sub(group_start)
+				.unwrap_or(Timestamp::ZERO)
+				.as_micros();
+			let max = max_duration.as_micros();
+
+			if elapsed * (self.group_frames as u128 + 1) >= max * self.group_frames as u128
 				&& let Some(mut group) = self.group.take()
 			{
 				group.finish()?;
 			}
 		}
-
-		// Start a new group if needed (first frame, after keyframe(), or after auto-close).
-		if self.group.is_none() || self.pending_keyframe {
-			if let Some(mut group) = self.group.take() {
-				group.finish()?;
-			}
-
-			let group = self.track.append_group()?;
-			self.group = Some(group);
-			self.group_start = Some(frame.timestamp);
-			self.pending_keyframe = false;
-		}
-
-		let mut group = self.group.take().expect("group should exist");
-		frame.encode(&mut group)?;
-		self.group.replace(group);
-
-		self.prev_timestamp = Some(frame.timestamp);
 
 		Ok(())
 	}

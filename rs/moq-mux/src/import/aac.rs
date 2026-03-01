@@ -2,6 +2,10 @@ use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
 
+// Make a new audio group every 100ms.
+// NOTE: We could do this per-frame, but there's not much benefit to it.
+const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestamp::from_millis_unchecked(100);
+
 /// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
 pub struct Aac {
 	broadcast: moq_lite::BroadcastProducer,
@@ -110,11 +114,8 @@ impl Aac {
 		let track = catalog.audio.create_track("aac", config.clone());
 		tracing::debug!(name = ?track.name, ?config, "starting track");
 
-		const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestamp::from_millis_unchecked(100);
-		self.track = Some(hang::container::OrderedProducer::with_max_group_duration(
-			self.broadcast.create_track(track)?,
-			MAX_GROUP_DURATION,
-		));
+		let track = self.broadcast.create_track(track)?;
+		self.track = Some(hang::container::OrderedProducer::new(track).with_max_group_duration(MAX_GROUP_DURATION));
 
 		Ok(())
 	}
