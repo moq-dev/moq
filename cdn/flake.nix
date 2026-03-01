@@ -27,8 +27,10 @@
         {
           default = pkgs.certbot.withPlugins (ps: [ ps.certbot-dns-google ]);
           certbot = pkgs.certbot.withPlugins (ps: [ ps.certbot-dns-google ]);
+          # TODO use CARGO_PROFILE = "profiling" once the profile lands on main
+          # Frame pointers are needed for perf to walk the call stack.
           moq-relay = moq.packages.${system}.moq-relay.overrideAttrs {
-            CARGO_PROFILE = "profiling";
+            RUSTFLAGS = "-C force-frame-pointers=yes";
           };
           perf = pkgs.linuxPackages.perf;
           cachix = pkgs.cachix;

@@ -50,5 +50,5 @@ resource "local_file" "memory_alert_service" {
   content = templatefile("${path.module}/common/memory-alert.service.tftpl", {
     webhook = var.webhook
   })
-  filename = "${path.module}/common/memory-alert.service"
+  filename = "${path.module}/gen/memory-alert.service"
 }

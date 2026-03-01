@@ -3,7 +3,7 @@ resource "local_file" "moq_relay_service" {
   content = templatefile("${path.module}/relay/moq-relay.service.tftpl", {
     domain = var.domain
   })
-  filename = "${path.module}/relay/moq-relay.service"
+  filename = "${path.module}/gen/moq-relay.service"
 }
 
 resource "local_file" "moq_cert_service" {
@@ -11,17 +11,7 @@ resource "local_file" "moq_cert_service" {
     domain = var.domain
     email  = var.email
   })
-  filename = "${path.module}/relay/moq-cert.service"
-}
-
-resource "local_file" "certbot_renew_service" {
-  content  = file("${path.module}/relay/certbot-renew.service.tftpl")
-  filename = "${path.module}/relay/certbot-renew.service"
-}
-
-resource "local_file" "relay_vacuum_service" {
-  content  = file("${path.module}/relay/vacuum.service.tftpl")
-  filename = "${path.module}/relay/vacuum.service"
+  filename = "${path.module}/gen/moq-cert.service"
 }
 
 # Create Linode instances

@@ -36,8 +36,8 @@ deploy node:
 	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwk /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
-	rsync -az --exclude='*.tftpl' relay/ root@$HOST:/etc/systemd/system/
-	rsync -az --exclude='*.tftpl' common/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='*.tftpl' relay/ common/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
 	ssh root@$HOST "cd /var/lib/moq && nix build .#moq-relay -o relay && nix build .#certbot -o cert && nix build .#jq -o jq"
@@ -89,8 +89,8 @@ deploy-pub:
 	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
-	rsync -az --exclude='*.tftpl' pub/ root@$HOST:/etc/systemd/system/
-	rsync -az --exclude='*.tftpl' common/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='*.tftpl' pub/ common/ root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
 	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o result && nix build .#moq-cli -o result-moq-cli && nix build .#jq -o jq"
