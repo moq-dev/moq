@@ -166,7 +166,11 @@ impl Versions {
 	/// Return only versions present in both self and other, or `None` if the intersection is empty.
 	pub fn filter(&self, other: &Versions) -> Option<Versions> {
 		let filtered: Vec<Version> = self.0.iter().filter(|v| other.0.contains(v)).copied().collect();
-		if filtered.is_empty() { None } else { Some(Versions(filtered)) }
+		if filtered.is_empty() {
+			None
+		} else {
+			Some(Versions(filtered))
+		}
 	}
 
 	/// Check if a specific version is in this set.

@@ -53,19 +53,30 @@ impl Client {
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
 			Some(ietf::ALPN_16) => {
-				let v = self.versions.select(Version::Ietf(ietf::Version::Draft16)).ok_or(Error::Version)?;
+				let v = self
+					.versions
+					.select(ietf::Version::Draft16.into())
+					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
 			Some(ietf::ALPN_15) => {
-				let v = self.versions.select(Version::Ietf(ietf::Version::Draft15)).ok_or(Error::Version)?;
+				let v = self
+					.versions
+					.select(ietf::Version::Draft15.into())
+					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
 			Some(ietf::ALPN_14) => {
-				let v = self.versions.select(Version::Ietf(ietf::Version::Draft14)).ok_or(Error::Version)?;
+				let v = self
+					.versions
+					.select(ietf::Version::Draft14.into())
+					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
 			Some(lite::ALPN_03) => {
-				self.versions.select(Version::Lite(lite::Version::Draft03)).ok_or(Error::Version)?;
+				self.versions
+					.select(lite::Version::Draft03.into())
+					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
 				lite::start(
@@ -82,7 +93,7 @@ impl Client {
 			}
 			Some(lite::ALPN) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
-				(Version::Ietf(ietf::Version::Draft14), supported)
+				(ietf::Version::Draft14.into(), supported)
 			}
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};

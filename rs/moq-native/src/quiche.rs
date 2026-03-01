@@ -146,7 +146,12 @@ impl QuicheServer {
 		}));
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
-		let mut alpns: Vec<Vec<u8>> = config.versions().alpns().iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
+		let mut alpns: Vec<Vec<u8>> = config
+			.versions()
+			.alpns()
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.collect();
 		alpns.push(b"h3".to_vec());
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);

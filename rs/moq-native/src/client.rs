@@ -408,17 +408,26 @@ mod tests {
 		"#;
 
 		let mut config: ClientConfig = toml::from_str(toml).unwrap();
-		assert_eq!(config.version, vec!["moq-lite-02".parse::<moq_lite::Version>().unwrap()]);
+		assert_eq!(
+			config.version,
+			vec!["moq-lite-02".parse::<moq_lite::Version>().unwrap()]
+		);
 
 		// Simulate: TOML loaded, then CLI args re-applied (no --client-version flag).
 		config.update_from(["test"]);
-		assert_eq!(config.version, vec!["moq-lite-02".parse::<moq_lite::Version>().unwrap()]);
+		assert_eq!(
+			config.version,
+			vec!["moq-lite-02".parse::<moq_lite::Version>().unwrap()]
+		);
 	}
 
 	#[test]
 	fn test_cli_version() {
 		let config = ClientConfig::parse_from(["test", "--client-version", "moq-lite-03"]);
-		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_lite::Version>().unwrap()]);
+		assert_eq!(
+			config.version,
+			vec!["moq-lite-03".parse::<moq_lite::Version>().unwrap()]
+		);
 	}
 
 	#[test]
