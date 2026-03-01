@@ -316,7 +316,7 @@ impl QuicheRequest {
 	pub fn url(&self) -> Option<&Url> {
 		match self {
 			QuicheRequest::Raw { .. } => None,
-			QuicheRequest::WebTransport { request } => Some(&request.url),
+			QuicheRequest::WebTransport { request, .. } => Some(&request.url),
 		}
 	}
 
