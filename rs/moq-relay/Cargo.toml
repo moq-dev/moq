@@ -22,6 +22,7 @@ iroh = ["moq-native/iroh"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
 websocket = ["moq-native/websocket", "dep:web-transport-ws", "axum/ws"]
+jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -48,6 +49,8 @@ tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 url = { version = "2", features = ["serde"] }
 web-transport-ws = { workspace = true, optional = true }
+
+tikv-jemallocator = { version = "0.6", features = ["profiling"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 sd-notify = "0.4"
