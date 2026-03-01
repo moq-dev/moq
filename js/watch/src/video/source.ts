@@ -33,71 +33,69 @@ export type Target = {
 type RenditionFilter = (entries: [string, Catalog.VideoConfig][]) => string[];
 
 /**
- * Rank renditions by proximity to a target pixel count.
- * Prefers the smallest rendition >= target, then the largest < target.
- * Renditions without resolution info are ranked last.
+ * Filter and rank renditions by a maximum pixel count.
+ * Returns renditions within budget (largest first for best quality).
+ * Over-budget and unknown-resolution renditions are excluded.
+ * If nothing is within budget, falls back to the single smallest rendition.
  */
 function byPixels(target: number): RenditionFilter {
 	return (entries) => {
-		const larger: { name: string; size: number }[] = [];
-		const smaller: { name: string; size: number }[] = [];
-		const unknown: string[] = [];
+		const within: { name: string; size: number }[] = [];
+		const rest: { name: string; size: number }[] = [];
 
 		for (const [name, config] of entries) {
 			if (config.codedWidth && config.codedHeight) {
 				const size = config.codedWidth * config.codedHeight;
-				if (size >= target) {
-					larger.push({ name, size });
+				if (size <= target) {
+					within.push({ name, size });
 				} else {
-					smaller.push({ name, size });
+					rest.push({ name, size });
 				}
-			} else {
-				unknown.push(name);
 			}
 		}
 
-		larger.sort((a, b) => a.size - b.size);
-		smaller.sort((a, b) => b.size - a.size);
+		// Best quality within budget
+		within.sort((a, b) => b.size - a.size);
 
-		return [...larger.map((e) => e.name), ...smaller.map((e) => e.name), ...unknown];
+		if (within.length > 0) {
+			return within.map((e) => e.name);
+		}
+
+		// Guarantee at least one — degrade to smallest resolution.
+		rest.sort((a, b) => a.size - b.size);
+		return [rest[0].name];
 	};
 }
 
 /**
  * Filter and rank renditions by a maximum bitrate budget.
- * Returns renditions within budget (highest bitrate first for best quality),
- * followed by unknown-bitrate renditions. Over-budget renditions are excluded.
+ * Returns renditions within budget (highest bitrate first for best quality).
+ * Over-budget and unknown-bitrate renditions are excluded.
  * If nothing is within budget, falls back to the single lowest-bitrate rendition.
  */
 function byBitrate(target: number): RenditionFilter {
 	return (entries) => {
 		const within: { name: string; bitrate: number }[] = [];
-		const over: { name: string; bitrate: number }[] = [];
-		const unknown: string[] = [];
+		const rest: { name: string; bitrate: number }[] = [];
 
 		for (const [name, config] of entries) {
-			if (config.bitrate != null) {
-				if (config.bitrate <= target) {
-					within.push({ name, bitrate: config.bitrate });
-				} else {
-					over.push({ name, bitrate: config.bitrate });
-				}
-			} else {
-				unknown.push(name);
+			if (config.bitrate != null && config.bitrate <= target) {
+				within.push({ name, bitrate: config.bitrate });
+			} else if (config.bitrate != null) {
+				rest.push({ name, bitrate: config.bitrate });
 			}
 		}
 
+		// Best quality within budget
 		within.sort((a, b) => b.bitrate - a.bitrate);
 
-		const result = [...within.map((e) => e.name), ...unknown];
-
-		// Guarantee at least one — degrade to lowest over-budget if needed.
-		if (result.length === 0) {
-			over.sort((a, b) => a.bitrate - b.bitrate);
-			result.push(over[0].name);
+		if (within.length > 0) {
+			return within.map((e) => e.name);
 		}
 
-		return result;
+		// Guarantee at least one — degrade to lowest bitrate.
+		rest.sort((a, b) => a.bitrate - b.bitrate);
+		return [rest[0].name];
 	};
 }
 
