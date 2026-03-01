@@ -100,6 +100,34 @@ function byBitrate(target: number): RenditionFilter {
 }
 
 /**
+ * Pick the best rendition when no filters are active.
+ * Prefers the largest resolution, falls back to highest bitrate,
+ * then falls back to the first entry.
+ */
+function bestRendition(entries: [string, Catalog.VideoConfig][]): string {
+	let best = entries[0];
+
+	for (const entry of entries) {
+		const [, config] = entry;
+		const [, bestConfig] = best;
+
+		const size = (config.codedWidth ?? 0) * (config.codedHeight ?? 0);
+		const bestSize = (bestConfig.codedWidth ?? 0) * (bestConfig.codedHeight ?? 0);
+
+		if (size !== bestSize) {
+			if (size > bestSize) best = entry;
+			continue;
+		}
+
+		if ((config.bitrate ?? 0) > (bestConfig.bitrate ?? 0)) {
+			best = entry;
+		}
+	}
+
+	return best[0];
+}
+
+/**
  * Source handles catalog extraction, support checking, and rendition selection
  * for video playback. It is used by both MSE and Decoder backends.
  */
@@ -208,9 +236,9 @@ export class Source {
 			filters.push(byBitrate(target.bitrate));
 		}
 
-		// No filters — all renditions are valid.
+		// No filters — pick the best rendition by quality.
 		if (filters.length === 0) {
-			return entries[0][0];
+			return bestRendition(entries);
 		}
 
 		// Run each filter to get ranked preference lists.
