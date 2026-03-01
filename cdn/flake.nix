@@ -31,6 +31,7 @@
           cachix = pkgs.cachix;
           ffmpeg = pkgs.ffmpeg;
           moq-cli = moq.packages.${system}.moq-cli;
+          jq = pkgs.jq;
         };
     };
 }

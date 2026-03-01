@@ -1,9 +1,11 @@
 [Unit]
-Description=Watch systemd services for memory limit breaches
+Description=Alert when system memory is low
 
 [Service]
 Type=simple
-ExecStart=/etc/systemd/system/memory-alert.py --webhook ${webhook}
+Environment=MEMORY_ALERT_WEBHOOK=${webhook}
+Environment=PATH=/var/lib/moq/jq/bin:/usr/bin:/bin
+ExecStart=/etc/systemd/system/memory-alert.sh
 Restart=on-failure
 RestartSec=10
 

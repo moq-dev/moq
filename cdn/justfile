@@ -40,7 +40,7 @@ deploy node:
 	rsync -az --exclude='*.tftpl' common/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
-	ssh root@$HOST "cd /var/lib/moq && nix build .#moq-relay -o relay && nix build .#certbot -o cert"
+	ssh root@$HOST "cd /var/lib/moq && nix build .#moq-relay -o relay && nix build .#certbot -o cert && nix build .#jq -o jq"
 
 	echo "  Enabling and starting services..."
 	ssh root@$HOST "\
@@ -93,7 +93,7 @@ deploy-pub:
 	rsync -az --exclude='*.tftpl' common/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
-	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o result && nix build .#moq-cli -o result-moq-cli"
+	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o result && nix build .#moq-cli -o result-moq-cli && nix build .#jq -o jq"
 
 	echo "  Enabling and starting services..."
 	ssh root@$HOST "\
