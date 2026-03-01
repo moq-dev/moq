@@ -110,7 +110,11 @@ export class Decoder implements Backend {
 
 	#runActive(effect: Effect): void {
 		const active = effect.get(this.#active);
-		if (!active) return;
+		if (!active) {
+			// Clear stale data when disabled (e.g. paused or not visible).
+			this.#buffered.set([]);
+			return;
+		}
 
 		effect.cleanup(() => active.close());
 
