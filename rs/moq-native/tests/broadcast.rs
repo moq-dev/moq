@@ -21,12 +21,6 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_version: Option<&str>) {
 	let client_version: Option<moq_lite::Version> = client_version.map(|v| v.parse().expect("invalid client version"));
 	let server_version: Option<moq_lite::Version> = server_version.map(|v| v.parse().expect("invalid server version"));
-	let label = format!(
-		"client={}, server={}",
-		client_version.map_or("all".to_string(), |v| v.to_string()),
-		server_version.map_or("all".to_string(), |v| v.to_string()),
-	);
-
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
@@ -79,38 +73,38 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	let client = client.with_consume(sub_origin);
 	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
-		.unwrap_or_else(|_| panic!("client connect timed out for {label}"))
-		.unwrap_or_else(|e| panic!("client connect failed for {label}: {e}"));
+		.expect("client connect timed out")
+		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
 	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
 		.await
-		.unwrap_or_else(|_| panic!("announce timed out for {label}"))
-		.unwrap_or_else(|| panic!("origin closed for {label}"));
+		.expect("announce timed out")
+		.expect("origin closed");
 
-	assert_eq!(path.as_str(), "test", "wrong broadcast path for {label}");
-	let bc = bc.unwrap_or_else(|| panic!("expected announce, got unannounce for {label}"));
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.expect("expected announce, got unannounce");
 
 	// Subscribe to the track.
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))
-		.unwrap_or_else(|e| panic!("subscribe_track failed for {label}: {e}"));
+		.expect("subscribe_track failed");
 
 	// Read one group.
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
 		.await
-		.unwrap_or_else(|_| panic!("next_group timed out for {label}"))
-		.unwrap_or_else(|e| panic!("next_group failed for {label}: {e}"))
-		.unwrap_or_else(|| panic!("track closed prematurely for {label}"));
+		.expect("next_group timed out")
+		.expect("next_group failed")
+		.expect("track closed prematurely");
 
 	// Read one frame and verify the payload.
 	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
 		.await
-		.unwrap_or_else(|_| panic!("read_frame timed out for {label}"))
-		.unwrap_or_else(|e| panic!("read_frame failed for {label}: {e}"))
-		.unwrap_or_else(|| panic!("group closed prematurely for {label}"));
+		.expect("read_frame timed out")
+		.expect("read_frame failed")
+		.expect("group closed prematurely");
 
-	assert_eq!(&*frame, b"hello", "wrong frame content for {label}");
+	assert_eq!(&*frame, b"hello");
 
 	// Tear down: dropping the session closes the QUIC connection.
 	drop(session);
