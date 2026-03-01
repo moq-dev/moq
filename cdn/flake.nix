@@ -35,7 +35,7 @@
           perf = pkgs.linuxPackages.perf;
           cachix = pkgs.cachix;
           ffmpeg = pkgs.ffmpeg;
-          moq-cli = moq.packages.${system}.moq-cli;
+          moq-cli = moq.packages.${system}.moq;
           jq = pkgs.jq;
         };
     };
