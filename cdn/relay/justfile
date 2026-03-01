@@ -2,6 +2,25 @@
 default:
   just --list
 
+# Pin to the latest moq-relay release tag (or a specific tag)
+pin tag="":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	TAG="{{tag}}"
+	if [ -z "$TAG" ]; then
+		TAG=$(git ls-remote --tags --sort=-v:refname https://github.com/moq-dev/moq.git 'refs/tags/moq-relay-v*' | grep -v '\^{}' | head -1 | sed 's|.*/||')
+	fi
+	if [ -z "$TAG" ]; then
+		echo "error: no moq-relay tags found" >&2
+		exit 1
+	fi
+	echo "Pinning to $TAG..."
+	nix flake lock --override-input moq "github:moq-dev/moq/$TAG"
+
+# Update all flake inputs to latest
+update:
+	nix flake update
+
 # Get the hostname for a node
 host node:
 	#!/usr/bin/env bash
@@ -26,7 +45,7 @@ deploy node:
 	echo "Deploying to $HOST..."
 
 	echo "  Copying flake files to /var/lib/moq"
-	rsync -az ../flake.nix ../flake.lock root@$HOST:/var/lib/moq/
+	rsync -az flake.nix flake.lock root@$HOST:/var/lib/moq/
 
 	echo "  Copying secrets to /var/lib/moq"
 	rsync -az ../secrets/ root@$HOST:/var/lib/moq/

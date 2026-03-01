@@ -2,6 +2,25 @@
 default:
   just --list
 
+# Pin to the latest moq-cli release tag (or a specific tag)
+pin tag="":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	TAG="{{tag}}"
+	if [ -z "$TAG" ]; then
+		TAG=$(git ls-remote --tags --sort=-v:refname https://github.com/moq-dev/moq.git 'refs/tags/moq-cli-v*' | grep -v '\^{}' | head -1 | sed 's|.*/||')
+	fi
+	if [ -z "$TAG" ]; then
+		echo "error: no moq-cli tags found" >&2
+		exit 1
+	fi
+	echo "Pinning to $TAG..."
+	nix flake lock --override-input moq "github:moq-dev/moq/$TAG"
+
+# Update all flake inputs to latest
+update:
+	nix flake update
+
 # Get the hostname for the publisher
 host:
 	#!/usr/bin/env bash
@@ -16,7 +35,7 @@ deploy:
 	echo "Deploying to $HOST..."
 
 	echo "  Copying flake files to /var/lib/moq"
-	rsync -az ../flake.nix ../flake.lock root@$HOST:/var/lib/moq/
+	rsync -az flake.nix flake.lock root@$HOST:/var/lib/moq/
 
 	echo "  Copying secrets to /var/lib/moq"
 	rsync -az ../secrets/ root@$HOST:/var/lib/moq/
@@ -29,7 +48,7 @@ deploy:
 	rsync -az --exclude='.gitignore' ../common/gen/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
-	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o result && nix build .#moq-cli -o result-moq-cli && nix build .#jq -o jq"
+	ssh root@$HOST "cd /var/lib/moq && nix build .#ffmpeg -o ffmpeg && nix build .#moq-cli -o moq-cli && nix build .#jq -o jq"
 
 	echo "  Enabling and starting services..."
 	ssh root@$HOST "\

@@ -5,8 +5,15 @@ mod pub
 default:
   just --list
 
+# Pin relay and pub to their latest release tags
+pin:
+	just relay::pin
+	just pub::pin
+
+# Update all flake inputs to latest
 update:
-	nix flake update
+	nix flake update --flake relay
+	nix flake update --flake pub
 
 # Run health checks against all relay nodes
 health:
