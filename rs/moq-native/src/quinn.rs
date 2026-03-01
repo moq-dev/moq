@@ -232,7 +232,12 @@ impl QuinnServer {
 			.with_cert_resolver(certs.clone());
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
-		let mut alpns: Vec<Vec<u8>> = config.versions().alpns().iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
+		let mut alpns: Vec<Vec<u8>> = config
+			.versions()
+			.alpns()
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.collect();
 		alpns.push(web_transport_quinn::ALPN.as_bytes().to_vec());
 
 		tls.alpn_protocols = alpns;
@@ -361,6 +366,9 @@ impl QuinnRequest {
 				let mut response = web_transport_quinn::proto::ConnectResponse::OK;
 				// Pick the first sub-protocol that we actually support.
 				// This is the WebTransport equivalent of ALPN negotiation.
+				// If no match is found, we default to no sub-protocol to support older
+				// clients that don't use ALPN. We assume moq-transport-14/moq-lite-02
+				// and perform the SETUP_x exchange instead.
 				if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 					response = response.with_protocol(protocol);
 				}
