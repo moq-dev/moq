@@ -375,8 +375,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track.producer.create_group(group)?
 		};
 
-		// NOTE: We don't check `producer.unused()` because the group is being
-		// written to a cache and the consumer may not exist yet.
+		// NOTE: We don't check `producer.unused()` because it's being written to a cache.
 		match self.run_group(group, stream, producer.clone()).await {
 			Err(Error::Cancel) => {
 				tracing::trace!(group = %producer.info.sequence, "group cancelled");
@@ -429,8 +428,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			} else {
 				let mut frame = producer.create_frame(Frame { size })?;
 
-				// NOTE: We don't check `frame.unused()` because the frame is being
-				// written to a cache and the consumer may not exist yet.
 				if let Err(err) = self.run_frame(stream, frame.clone()).await {
 					let _ = frame.close(err.clone());
 					return Err(err);
