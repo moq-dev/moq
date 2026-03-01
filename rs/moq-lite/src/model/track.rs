@@ -272,6 +272,19 @@ pub(crate) struct TrackWeak {
 }
 
 impl TrackWeak {
+	pub fn close(&self, err: Error) {
+		// Upgrade to a temporary Producer so we can modify the state.
+		let Ok(producer) = self.state.produce() else { return };
+		let Ok(mut state) = producer.modify() else { return };
+
+		// Cascade close to all groups.
+		for (group, _) in state.groups.iter_mut().flatten() {
+			group.close(err.clone()).ok();
+		}
+
+		state.close(err);
+	}
+
 	pub fn is_closed(&self) -> bool {
 		self.state.is_closed()
 	}

@@ -165,6 +165,10 @@ impl GroupProducer {
 		}
 	}
 
+	pub async fn closed(&self) -> Error {
+		self.state.closed().await
+	}
+
 	pub async fn unused(&self) -> Result<()> {
 		self.state.unused().await
 	}

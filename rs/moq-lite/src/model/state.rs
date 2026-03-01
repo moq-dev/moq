@@ -128,6 +128,20 @@ impl<T> Producer<T> {
 		Poll::Pending
 	}
 
+	pub async fn closed(&self) -> Error {
+		waiter_fn(move |waiter| self.poll_closed(waiter)).await
+	}
+
+	fn poll_closed(&self, waiter: &Waiter) -> Poll<Error> {
+		let mut state = self.state.lock();
+		if let Err(err) = state.closed.clone() {
+			return Poll::Ready(err);
+		}
+
+		waiter.register(&mut state.waiters);
+		Poll::Pending
+	}
+
 	pub async fn unused(&self) -> Result<(), Error> {
 		waiter_fn(move |waiter| self.poll_unused(waiter)).await
 	}

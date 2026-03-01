@@ -376,7 +376,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		};
 
 		let res = tokio::select! {
-			_ = producer.unused() => Err(Error::Cancel),
+			err = producer.closed() => Err(err),
 			res = self.run_group(group, stream, producer.clone()) => res,
 		};
 

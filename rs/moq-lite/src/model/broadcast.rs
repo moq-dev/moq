@@ -102,7 +102,19 @@ impl BroadcastProducer {
 	}
 
 	pub fn close(&mut self, err: Error) -> Result<(), Error> {
-		self.state.close(err)?;
+		let mut state = self.state.modify()?;
+
+		// Cascade close to all child tracks.
+		for weak in state.tracks.values() {
+			weak.close(err.clone());
+		}
+
+		// Close any pending dynamic track requests.
+		for mut request in state.requests.drain(..) {
+			request.close(err.clone()).ok();
+		}
+
+		state.close(err);
 		Ok(())
 	}
 
@@ -308,33 +320,27 @@ mod test {
 	#[tokio::test]
 	async fn closed() {
 		let mut producer = BroadcastProducer::new();
-		let dynamic = producer.dynamic();
+		let _dynamic = producer.dynamic();
 
 		let consumer = producer.consume();
 		consumer.assert_not_closed();
 
 		// Create a new track and insert it into the broadcast.
-		let mut track1 = producer.assert_create_track(&Track::new("track1"));
-		track1.append_group().unwrap();
-
-		let mut track1c = consumer.assert_subscribe_track(&track1.info);
+		let track1 = producer.assert_create_track(&Track::new("track1"));
+		let track1c = consumer.assert_subscribe_track(&track1.info);
 		let track2 = consumer.assert_subscribe_track(&Track::new("track2"));
 
-		drop(producer);
-		drop(dynamic);
-		consumer.assert_closed();
+		// Explicitly closing the broadcast should cascade to child tracks.
+		producer.close(Error::Cancel).unwrap();
 
-		// The requested TrackProducer should have been aborted, so the track should be closed.
-		track2.assert_closed();
+		// The requested TrackProducer should have been aborted.
+		track2.assert_error();
 
-		// But track1 is still open because we currently don't cascade the closed state.
-		track1c.assert_group();
-		track1c.assert_no_group();
-		track1c.assert_not_closed();
+		// track1 should also be closed because close() cascades.
+		track1c.assert_error();
 
-		// TODO: We should probably cascade the closed state.
-		drop(track1);
-		track1c.assert_closed();
+		// track1's producer should also be closed.
+		assert!(track1.is_closed());
 	}
 
 	#[tokio::test]
