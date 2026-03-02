@@ -1,6 +1,6 @@
 # Generate systemd service files from templates
 resource "local_file" "hang_bbb_service" {
-  content = templatefile("${path.module}/pub/hang-bbb.service.tftpl", {
+  content = templatefile("${path.module}/hang-bbb.service.tftpl", {
     domain = var.domain
   })
   filename = "${path.module}/gen/hang-bbb.service"
@@ -21,10 +21,10 @@ resource "linode_instance" "publisher" {
   firewall_id = linode_firewall.publisher.id
 
   # Bootstrap script - only installs Nix and creates directories
-  stackscript_id = linode_stackscript.bootstrap.id
+  stackscript_id = var.stackscript_id
   stackscript_data = {
     hostname    = "pub.${var.domain}"
-    gcp_account = google_service_account_key.relay.private_key
+    gcp_account = var.gcp_account_key
   }
 
   tags = ["publisher", "moq"]

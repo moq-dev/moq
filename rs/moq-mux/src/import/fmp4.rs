@@ -395,16 +395,20 @@ impl Fmp4 {
 				}
 
 				let bitrate = desc.avg_bitrate.max(desc.max_bitrate);
+				let profile = desc.dec_specific.profile;
+				let sample_rate = mp4a.audio.sample_rate.integer() as u32;
+				let channel_count = mp4a.audio.channel_count as u32;
+
+				// Build the AudioSpecificConfig (ISO 14496-3 §1.6.2.1)
+				// This is what GStreamer/WebCodecs need as codec_data.
+				let description = build_aac_audio_specific_config(profile, sample_rate, channel_count);
 
 				AudioConfig {
-					codec: AAC {
-						profile: desc.dec_specific.profile,
-					}
-					.into(),
-					sample_rate: mp4a.audio.sample_rate.integer() as _,
-					channel_count: mp4a.audio.channel_count as _,
+					codec: AAC { profile }.into(),
+					sample_rate,
+					channel_count,
 					bitrate: Some(bitrate.into()),
-					description: None, // TODO?
+					description: Some(description),
 					container,
 					jitter: None,
 				}
@@ -668,5 +672,50 @@ impl Drop for Fmp4 {
 				TrackKind::Audio => catalog.audio.remove_track(&track.producer.info).is_some(),
 			};
 		}
+	}
+}
+
+/// Reconstruct the AudioSpecificConfig from parsed fields.
+///
+/// Layout (ISO 14496-3):
+///   audioObjectType      (5 bits)  — the AAC profile (2 = AAC-LC)
+///   samplingFreqIndex    (4 bits)  — index into the standard table, or 0xF
+///   [samplingFrequency  (24 bits)] — only if index == 0xF
+///   channelConfiguration (4 bits)
+///
+/// For standard sample rates this produces exactly 2 bytes (e.g. 0x12 0x10
+/// for AAC-LC / 44100 Hz / stereo).
+fn build_aac_audio_specific_config(profile: u8, sample_rate: u32, channels: u32) -> Bytes {
+	let freq_index: u8 = match sample_rate {
+		96000 => 0,
+		88200 => 1,
+		64000 => 2,
+		48000 => 3,
+		44100 => 4,
+		32000 => 5,
+		24000 => 6,
+		22050 => 7,
+		16000 => 8,
+		12000 => 9,
+		11025 => 10,
+		8000 => 11,
+		7350 => 12,
+		_ => 0xF, // explicit 24-bit frequency follows
+	};
+
+	if freq_index != 0xF {
+		// 5 + 4 + 4 = 13 bits → 2 bytes (3 bits padding)
+		let b0 = (profile << 3) | (freq_index >> 1);
+		let b1 = ((freq_index & 1) << 7) | ((channels as u8 & 0x0F) << 3);
+		Bytes::from(vec![b0, b1])
+	} else {
+		// 5 + 4 + 24 + 4 = 37 bits → 5 bytes (3 bits padding)
+		let mut bits: u64 = 0;
+		bits |= (profile as u64) << 35;
+		bits |= 0xF_u64 << 31;
+		bits |= (sample_rate as u64) << 7;
+		bits |= ((channels as u64) & 0xF) << 3;
+		let all = bits.to_be_bytes();
+		Bytes::copy_from_slice(&all[3..8])
 	}
 }
