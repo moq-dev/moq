@@ -101,7 +101,7 @@ jobs:
           echo "Previous tag: ${prev_tag:-none}"
 
       - name: Download artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
