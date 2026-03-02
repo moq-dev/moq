@@ -686,6 +686,9 @@ impl Drop for Fmp4 {
 /// For standard sample rates this produces exactly 2 bytes (e.g. 0x12 0x10
 /// for AAC-LC / 44100 Hz / stereo).
 fn build_aac_audio_specific_config(profile: u8, sample_rate: u32, channels: u32) -> Bytes {
+	// audioObjectType is a 5-bit field; mask to prevent shift overflow.
+	let profile = profile & 0x1F;
+
 	let freq_index: u8 = match sample_rate {
 		96000 => 0,
 		88200 => 1,
