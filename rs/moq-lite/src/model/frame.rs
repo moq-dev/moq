@@ -104,9 +104,12 @@ impl FrameState {
 	}
 }
 
-/// Used to write a frame's worth of data in chunks.
+/// Writes a frame's payload in one or more chunks.
+///
+/// The total bytes written must exactly match [Frame::size].
+/// Call [Self::finish] after writing all bytes to verify correctness.
 pub struct FrameProducer {
-	// Immutable stream state.
+	/// The frame header containing the expected size.
 	pub info: Frame,
 
 	// Mutable stream state.
@@ -114,6 +117,7 @@ pub struct FrameProducer {
 }
 
 impl FrameProducer {
+	/// Create a new frame producer for the given frame header.
 	pub fn new(info: Frame) -> Self {
 		let state = FrameState {
 			chunks: Vec::new(),
@@ -125,13 +129,26 @@ impl FrameProducer {
 		}
 	}
 
-	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
+	/// Write a chunk of data to the frame.
+	///
+	/// Returns [Error::WrongSize] if the total bytes written would exceed [Frame::size].
+	pub fn write<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
 		let chunk = chunk.into();
 		let mut state = self.state.modify()?;
 		state.write_chunk(chunk)
 	}
 
-	/// Optional: mark the frame as finished when all bytes have been written.
+	/// Write a chunk of data to the frame.
+	///
+	/// Deprecated: use [`Self::write`] instead.
+	#[deprecated(note = "use write(chunk) instead")]
+	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
+		self.write(chunk)
+	}
+
+	/// Verify that all bytes have been written.
+	///
+	/// Returns [Error::WrongSize] if the bytes written don't match [Frame::size].
 	pub fn finish(&mut self) -> Result<()> {
 		let state = self.state.modify()?;
 		if state.remaining != 0 {
@@ -140,8 +157,9 @@ impl FrameProducer {
 		Ok(())
 	}
 
-	pub fn close(&mut self, err: Error) -> Result<()> {
-		self.state.close(err)
+	/// Abort the frame with the given error.
+	pub fn abort(&mut self, err: Error) -> Result<()> {
+		self.state.abort(err)
 	}
 
 	/// Create a new consumer for the frame.
@@ -153,6 +171,7 @@ impl FrameProducer {
 		}
 	}
 
+	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
 		self.state.unused().await
 	}
