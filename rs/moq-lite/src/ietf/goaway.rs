@@ -12,6 +12,8 @@ use super::Version;
 #[derive(Clone, Debug)]
 pub struct GoAway<'a> {
 	pub new_session_uri: Cow<'a, str>,
+	/// Draft-17: timeout in milliseconds before closing the session
+	pub timeout: u64,
 }
 
 impl Message for GoAway<'_> {
@@ -19,12 +21,23 @@ impl Message for GoAway<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.new_session_uri.encode(w, version)?;
+		if version == Version::Draft17 {
+			self.timeout.encode(w, version)?;
+		}
 		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let new_session_uri = Cow::<str>::decode(r, version)?;
-		Ok(Self { new_session_uri })
+		let timeout = if version == Version::Draft17 {
+			u64::decode(r, version)?
+		} else {
+			0
+		};
+		Ok(Self {
+			new_session_uri,
+			timeout,
+		})
 	}
 }
 
@@ -48,6 +61,7 @@ mod tests {
 	fn test_goaway_with_url() {
 		let msg = GoAway {
 			new_session_uri: "https://example.com/new".into(),
+			timeout: 0,
 		};
 
 		let encoded = encode_message(&msg);
@@ -60,11 +74,29 @@ mod tests {
 	fn test_goaway_empty() {
 		let msg = GoAway {
 			new_session_uri: "".into(),
+			timeout: 0,
 		};
 
 		let encoded = encode_message(&msg);
 		let decoded: GoAway = decode_message(&encoded).unwrap();
 
 		assert_eq!(decoded.new_session_uri, "");
+	}
+
+	#[test]
+	fn test_goaway_v17_timeout() {
+		let msg = GoAway {
+			new_session_uri: "https://example.com/new".into(),
+			timeout: 5000,
+		};
+
+		let mut buf = BytesMut::new();
+		msg.encode_msg(&mut buf, Version::Draft17).unwrap();
+
+		let mut bytes = bytes::Bytes::from(buf.to_vec());
+		let decoded: GoAway = GoAway::decode_msg(&mut bytes, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.new_session_uri, "https://example.com/new");
+		assert_eq!(decoded.timeout, 5000);
 	}
 }

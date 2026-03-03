@@ -54,6 +54,9 @@ impl Message for Subscribe<'_> {
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
+		if version == Version::Draft17 {
+			let _required_request_id_delta = u64::decode(r, version)?;
+		}
 		let track_namespace = decode_namespace(r, version)?;
 		let track_name = Cow::<str>::decode(r, version)?;
 
@@ -90,8 +93,7 @@ impl Message for Subscribe<'_> {
 					filter_type,
 				})
 			}
-			Version::Draft15 | Version::Draft16 => {
-				// v15: fields moved into parameters
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let params = MessageParameters::decode(r, version)?;
 
 				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
@@ -114,12 +116,14 @@ impl Message for Subscribe<'_> {
 					filter_type,
 				})
 			}
-			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
+		if version == Version::Draft17 {
+			0u64.encode(w, version)?; // required_request_id_delta = 0
+		}
 		encode_namespace(w, &self.track_namespace, version)?;
 		self.track_name.encode(w, version)?;
 
@@ -137,16 +141,13 @@ impl Message for Subscribe<'_> {
 				self.filter_type.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let mut params = MessageParameters::default();
 				params.set_subscriber_priority(self.subscriber_priority);
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.set_forward(true);
 				params.set_subscription_filter(self.filter_type)?;
 				params.encode(w, version)?;
-			}
-			Version::Draft17 => {
-				return Err(EncodeError::Version);
 			}
 		}
 
@@ -165,7 +166,9 @@ impl Message for SubscribeOk {
 	const ID: u64 = 0x04;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		if version != Version::Draft17 {
+			self.request_id.encode(w, version)?;
+		}
 		self.track_alias.encode(w, version)?;
 
 		match version {
@@ -175,14 +178,11 @@ impl Message for SubscribeOk {
 				false.encode(w, version)?; // no content
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 => {
-				// v15: just parameters after track_alias
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				// v15+: just parameters after track_alias
 				let mut params = MessageParameters::default();
 				params.set_group_order(u8::from(GroupOrder::Descending) as u64);
 				params.encode(w, version)?;
-			}
-			Version::Draft17 => {
-				return Err(EncodeError::Version);
 			}
 		}
 
@@ -190,7 +190,11 @@ impl Message for SubscribeOk {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
+		let request_id = if version == Version::Draft17 {
+			RequestId(0) // placeholder — Phase 3 will get from stream context
+		} else {
+			RequestId::decode(r, version)?
+		};
 		let track_alias = u64::decode(r, version)?;
 
 		match version {
@@ -209,11 +213,8 @@ impl Message for SubscribeOk {
 
 				let _params = Parameters::decode(r, version)?;
 			}
-			Version::Draft15 | Version::Draft16 => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let _params = MessageParameters::decode(r, version)?;
-			}
-			Version::Draft17 => {
-				return Err(DecodeError::Version);
 			}
 		}
 
@@ -310,7 +311,14 @@ impl Message for SubscribeUpdate {
 				params.encode(w, version)?;
 			}
 			Version::Draft17 => {
-				return Err(EncodeError::Version);
+				// REQUEST_UPDATE: request_id, required_request_id_delta, params
+				self.request_id.encode(w, version)?;
+				0u64.encode(w, version)?; // required_request_id_delta = 0
+				let mut params = MessageParameters::default();
+				params.set_subscriber_priority(self.subscriber_priority);
+				params.set_forward(self.forward);
+				params.set_subscription_filter(FilterType::LargestObject)?;
+				params.encode(w, version)?;
 			}
 		}
 
@@ -354,7 +362,24 @@ impl Message for SubscribeUpdate {
 					forward,
 				})
 			}
-			Version::Draft17 => Err(DecodeError::Version),
+			Version::Draft17 => {
+				// REQUEST_UPDATE: request_id, required_request_id_delta, params
+				let request_id = RequestId::decode(r, version)?;
+				let _required_request_id_delta = u64::decode(r, version)?;
+				let params = MessageParameters::decode(r, version)?;
+
+				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
+				let forward = params.forward().unwrap_or(true);
+
+				Ok(Self {
+					request_id,
+					subscription_request_id: RequestId(0),
+					start_location: Location { group: 0, object: 0 },
+					end_group: 0,
+					subscriber_priority,
+					forward,
+				})
+			}
 		}
 	}
 }
@@ -561,5 +586,59 @@ mod tests {
 
 		let result: Result<SubscribeOk, _> = decode_message(&invalid_bytes, Version::Draft14);
 		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_subscribe_v17_round_trip() {
+		let msg = Subscribe {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: FilterType::LargestObject,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: Subscribe = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test");
+		assert_eq!(decoded.track_name, "video");
+		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	#[test]
+	fn test_subscribe_ok_v17_round_trip() {
+		let msg = SubscribeOk {
+			request_id: RequestId(42),
+			track_alias: 42,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft17).unwrap();
+
+		// request_id is placeholder (0) in v17
+		assert_eq!(decoded.request_id, RequestId(0));
+		assert_eq!(decoded.track_alias, 42);
+	}
+
+	#[test]
+	fn test_subscribe_update_v17_round_trip() {
+		let msg = SubscribeUpdate {
+			request_id: RequestId(10),
+			subscription_request_id: RequestId(5),
+			start_location: Location { group: 0, object: 0 },
+			end_group: 0,
+			subscriber_priority: 200,
+			forward: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: SubscribeUpdate = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(10));
+		assert_eq!(decoded.subscriber_priority, 200);
+		assert!(decoded.forward);
 	}
 }

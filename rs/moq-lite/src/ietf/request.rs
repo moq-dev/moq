@@ -95,13 +95,19 @@ impl Message for RequestOk {
 	const ID: u64 = 0x07;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		if version != Version::Draft17 {
+			self.request_id.encode(w, version)?;
+		}
 		self.parameters.encode(w, version)?;
 		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
+		let request_id = if version == Version::Draft17 {
+			RequestId(0)
+		} else {
+			RequestId::decode(r, version)?
+		};
 		let parameters = MessageParameters::decode(r, version)?;
 		Ok(Self { request_id, parameters })
 	}
@@ -123,7 +129,9 @@ impl Message for RequestError<'_> {
 	const ID: u64 = 0x05;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		if version != Version::Draft17 {
+			self.request_id.encode(w, version)?;
+		}
 		self.error_code.encode(w, version)?;
 		if version == Version::Draft16 || version == Version::Draft17 {
 			self.retry_interval.encode(w, version)?;
@@ -133,7 +141,11 @@ impl Message for RequestError<'_> {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
+		let request_id = if version == Version::Draft17 {
+			RequestId(0)
+		} else {
+			RequestId::decode(r, version)?
+		};
 		let error_code = u64::decode(r, version)?;
 		let retry_interval = match version {
 			Version::Draft16 | Version::Draft17 => u64::decode(r, version)?,

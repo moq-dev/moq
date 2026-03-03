@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use crate::{
 	Path,
 	coding::*,
-	ietf::{Parameters, RequestId},
+	ietf::{MessageParameters, Parameters, RequestId},
 };
 
 use super::Message;
@@ -28,24 +28,35 @@ impl Message for SubscribeNamespace<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
+		if version == Version::Draft17 {
+			0u64.encode(w, version)?; // required_request_id_delta = 0
+		}
 		encode_namespace(w, &self.namespace, version)?;
-		if version == Version::Draft16 {
+		if version == Version::Draft16 || version == Version::Draft17 {
 			self.subscribe_options.encode(w, version)?;
 		}
-		0u8.encode(w, version)?; // no parameters
+		let params = MessageParameters::default();
+		params.encode(w, version)?;
 		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
+		if version == Version::Draft17 {
+			let _required_request_id_delta = u64::decode(r, version)?;
+		}
 		let namespace = decode_namespace(r, version)?;
 		let subscribe_options = match version {
-			Version::Draft16 => u64::decode(r, version)?,
-			Version::Draft14 | Version::Draft15 | Version::Draft17 => 0x01,
+			Version::Draft16 | Version::Draft17 => u64::decode(r, version)?,
+			Version::Draft14 | Version::Draft15 => 0x01,
 		};
 
-		// Ignore parameters, who cares.
-		let _params = Parameters::decode(r, version)?;
+		// Ignore parameters
+		if version == Version::Draft17 {
+			let _params = MessageParameters::decode(r, version)?;
+		} else {
+			let _params = Parameters::decode(r, version)?;
+		}
 
 		Ok(Self {
 			namespace,
@@ -144,6 +155,31 @@ impl Message for Namespace<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let suffix = decode_namespace(r, version)?;
 		Ok(Self { suffix })
+	}
+}
+
+/// PUBLISH_BLOCKED message (0x0F) — draft-17 only
+/// Indicates a track within a namespace is blocked from publishing.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // Will be used in Phase 3 bidi stream handling
+pub struct PublishBlocked<'a> {
+	pub suffix: Path<'a>,
+	pub track_name: Cow<'a, str>,
+}
+
+impl Message for PublishBlocked<'_> {
+	const ID: u64 = 0x0F;
+
+	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		encode_namespace(w, &self.suffix, version)?;
+		self.track_name.encode(w, version)?;
+		Ok(())
+	}
+
+	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let suffix = decode_namespace(r, version)?;
+		let track_name = Cow::<str>::decode(r, version)?;
+		Ok(Self { suffix, track_name })
 	}
 }
 

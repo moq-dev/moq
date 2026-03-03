@@ -87,6 +87,18 @@ async fn run_control_read<S: web_transport_trait::Session>(
 		let mut data = reader.read_exact(size as usize).await?;
 		tracing::trace!(hex = %hex::encode(&data), "decoding control message");
 
+		// Draft-17: only GOAWAY is allowed on the control/SETUP stream
+		if version == Version::Draft17 {
+			match id {
+				ietf::GoAway::ID => {
+					let msg = ietf::GoAway::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "received control message");
+					return Err(Error::Unsupported);
+				}
+				_ => return Err(Error::UnexpectedMessage),
+			}
+		}
+
 		match id {
 			ietf::Subscribe::ID => {
 				let msg = ietf::Subscribe::decode_msg(&mut data, version)?;

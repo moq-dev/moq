@@ -36,7 +36,7 @@ use publisher::*;
 pub use request::*;
 pub use session::*;
 pub use subscribe::*;
-pub use subscribe_namespace::*;
+pub use subscribe_namespace::*; // includes PublishBlocked
 use subscriber::*;
 pub use track::*;
 pub use version::Version;

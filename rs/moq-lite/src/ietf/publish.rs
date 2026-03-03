@@ -132,7 +132,9 @@ impl Message for PublishDone<'_> {
 	const ID: u64 = 0x0b;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		if version != Version::Draft17 {
+			self.request_id.encode(w, version)?;
+		}
 		self.status_code.encode(w, version)?;
 		self.stream_count.encode(w, version)?;
 		self.reason_phrase.encode(w, version)?;
@@ -140,7 +142,11 @@ impl Message for PublishDone<'_> {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
+		let request_id = if version == Version::Draft17 {
+			RequestId(0)
+		} else {
+			RequestId::decode(r, version)?
+		};
 		let status_code = u64::decode(r, version)?;
 		let stream_count = u64::decode(r, version)?;
 		let reason_phrase = Cow::<str>::decode(r, version)?;
@@ -171,6 +177,9 @@ impl Message for Publish<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
+		if version == Version::Draft17 {
+			0u64.encode(w, version)?; // required_request_id_delta = 0
+		}
 		encode_namespace(w, &self.track_namespace, version)?;
 		self.track_name.encode(w, version)?;
 		self.track_alias.encode(w, version)?;
@@ -189,7 +198,7 @@ impl Message for Publish<'_> {
 				// parameters
 				0u8.encode(w, version)?;
 			}
-			Version::Draft15 | Version::Draft16 => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let mut params = MessageParameters::default();
 				params.set_group_order(u8::from(self.group_order) as u64);
 				if let Some(location) = &self.largest_location {
@@ -198,9 +207,6 @@ impl Message for Publish<'_> {
 				params.set_forward(self.forward);
 				params.encode(w, version)?;
 			}
-			Version::Draft17 => {
-				return Err(EncodeError::Version);
-			}
 		}
 
 		Ok(())
@@ -208,6 +214,9 @@ impl Message for Publish<'_> {
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
+		if version == Version::Draft17 {
+			let _required_request_id_delta = u64::decode(r, version)?;
+		}
 		let track_namespace = decode_namespace(r, version)?;
 		let track_name = Cow::<str>::decode(r, version)?;
 		let track_alias = u64::decode(r, version)?;
@@ -234,7 +243,7 @@ impl Message for Publish<'_> {
 					forward,
 				})
 			}
-			Version::Draft15 | Version::Draft16 => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let params = MessageParameters::decode(r, version)?;
 
 				let group_order = match params.group_order() {
@@ -258,7 +267,6 @@ impl Message for Publish<'_> {
 					forward,
 				})
 			}
-			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -277,7 +285,9 @@ impl Message for PublishOk {
 	const ID: u64 = 0x1E;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		if version != Version::Draft17 {
+			self.request_id.encode(w, version)?;
+		}
 
 		match version {
 			Version::Draft14 => {
@@ -292,7 +302,7 @@ impl Message for PublishOk {
 				// no parameters
 				0u8.encode(w, version)?;
 			}
-			Version::Draft15 | Version::Draft16 => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let mut params = MessageParameters::default();
 				params.set_forward(self.forward);
 				params.set_subscriber_priority(self.subscriber_priority);
@@ -300,16 +310,17 @@ impl Message for PublishOk {
 				params.set_subscription_filter(self.filter_type)?;
 				params.encode(w, version)?;
 			}
-			Version::Draft17 => {
-				return Err(EncodeError::Version);
-			}
 		}
 
 		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
+		let request_id = if version == Version::Draft17 {
+			RequestId(0) // placeholder — Phase 3 will get from stream context
+		} else {
+			RequestId::decode(r, version)?
+		};
 
 		match version {
 			Version::Draft14 => {
@@ -339,7 +350,7 @@ impl Message for PublishOk {
 					filter_type,
 				})
 			}
-			Version::Draft15 | Version::Draft16 => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let params = MessageParameters::decode(r, version)?;
 
 				let forward = params.forward().unwrap_or(true);
@@ -362,7 +373,6 @@ impl Message for PublishOk {
 					filter_type,
 				})
 			}
-			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
