@@ -27,7 +27,7 @@ in
     }
   );
 
-  moq = craneLib.buildPackage (
+  moq-cli = craneLib.buildPackage (
     crateInfo ../rs/moq-cli/Cargo.toml
     // {
       src = craneLib.cleanCargoSource ../.;
