@@ -266,7 +266,7 @@ impl Consume {
 				timestamp: ordered.timestamp,
 				payload: new_payload,
 				group: ordered.group,
-				frame: ordered.frame,
+				index: ordered.index,
 			};
 
 			// Important: Don't hold the mutex during this callback.
@@ -302,7 +302,7 @@ impl Consume {
 			payload: chunk.as_ptr(),
 			payload_size: chunk.len(),
 			timestamp_us,
-			keyframe: ordered.frame == 0,
+			keyframe: ordered.is_keyframe(),
 		};
 
 		Ok(())
