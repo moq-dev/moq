@@ -2,25 +2,16 @@ use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
 
-/// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
-pub struct Aac {
-	broadcast: moq_lite::BroadcastProducer,
-	catalog: crate::CatalogProducer,
-	track: Option<hang::container::OrderedProducer>,
-	zero: Option<tokio::time::Instant>,
+/// Typed AAC configuration for initialization without binary blobs.
+pub struct AacConfig {
+	pub profile: u8,
+	pub sample_rate: u32,
+	pub channel_count: u32,
 }
 
-impl Aac {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
-		Self {
-			broadcast,
-			catalog,
-			track: None,
-			zero: None,
-		}
-	}
-
-	pub fn initialize<T: Buf>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+impl AacConfig {
+	/// Parse an AudioSpecificConfig buffer into an AacConfig.
+	pub fn parse<T: Buf>(buf: &mut T) -> anyhow::Result<Self> {
 		anyhow::ensure!(buf.remaining() >= 2, "AudioSpecificConfig must be at least 2 bytes");
 
 		// Parse AudioSpecificConfig (ISO 14496-3)
@@ -96,28 +87,57 @@ impl Aac {
 			(object_type, sample_rate, channel_count)
 		};
 
-		let mut catalog = self.catalog.lock();
-
-		let config = hang::catalog::AudioConfig {
-			codec: hang::catalog::AAC { profile }.into(),
+		Ok(Self {
+			profile,
 			sample_rate,
 			channel_count,
-			bitrate: None,
-			description: None,
-			container: hang::catalog::Container::Legacy,
-			jitter: None,
+		})
+	}
+}
+
+/// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
+pub struct Aac {
+	catalog: crate::CatalogProducer,
+	track: hang::container::OrderedProducer,
+	zero: Option<tokio::time::Instant>,
+}
+
+impl Aac {
+	pub fn new(
+		mut broadcast: moq_lite::BroadcastProducer,
+		mut catalog: crate::CatalogProducer,
+		config: AacConfig,
+	) -> anyhow::Result<Self> {
+		let track = {
+			let mut cat = catalog.lock();
+
+			let audio_config = hang::catalog::AudioConfig {
+				codec: hang::catalog::AAC {
+					profile: config.profile,
+				}
+				.into(),
+				sample_rate: config.sample_rate,
+				channel_count: config.channel_count,
+				bitrate: None,
+				description: None,
+				container: hang::catalog::Container::Legacy,
+				jitter: None,
+			};
+			let track = cat.audio.create_track("aac", audio_config.clone());
+			tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
+
+			broadcast.create_track(track)?
 		};
-		let track = catalog.audio.create_track("aac", config.clone());
-		tracing::debug!(name = ?track.name, ?config, "starting track");
 
-		self.track = Some(self.broadcast.create_track(track)?.into());
-
-		Ok(())
+		Ok(Self {
+			catalog,
+			track: track.into(),
+			zero: None,
+		})
 	}
 
 	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
-		let track = self.track.as_mut().context("not initialized")?;
 
 		// Create a BufList at chunk boundaries, potentially avoiding allocations.
 		let mut payload = BufList::new();
@@ -131,14 +151,10 @@ impl Aac {
 			payload,
 		};
 
-		track.write(frame)?;
-		track.flush()?; // We know the next frame will be a keyframe, so flush the current group.
+		self.track.write(frame)?;
+		self.track.flush()?; // We know the next frame will be a keyframe, so flush the current group.
 
 		Ok(())
-	}
-
-	pub fn is_initialized(&self) -> bool {
-		self.track.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
@@ -155,10 +171,8 @@ impl Aac {
 
 impl Drop for Aac {
 	fn drop(&mut self) {
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.info.name, "ending track");
-			self.catalog.lock().audio.remove_track(&track.info);
-		}
+		tracing::debug!(name = ?self.track.info.name, "ending track");
+		self.catalog.lock().audio.remove_track(&self.track.info);
 	}
 }
 

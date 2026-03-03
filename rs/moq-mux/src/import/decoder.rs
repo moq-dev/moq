@@ -270,51 +270,55 @@ pub struct Decoder {
 }
 
 impl Decoder {
-	/// Create a new decoder with the given format.
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer, format: DecoderFormat) -> Self {
-		let decoder = match format {
-			#[cfg(feature = "h264")]
-			DecoderFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),
-			#[cfg(feature = "mp4")]
-			DecoderFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default())).into(),
-			#[cfg(feature = "h265")]
-			DecoderFormat::Hev1 => super::Hev1::new(broadcast, catalog).into(),
-			#[cfg(feature = "av1")]
-			DecoderFormat::Av01 => super::Av01::new(broadcast, catalog).into(),
-			#[cfg(feature = "aac")]
-			DecoderFormat::Aac => super::Aac::new(broadcast, catalog).into(),
-			#[cfg(feature = "opus")]
-			DecoderFormat::Opus => super::Opus::new(broadcast, catalog).into(),
-		};
-
-		Self { decoder }
-	}
-
-	/// Initialize the decoder with the given buffer and populate the broadcast.
-	///
-	/// This is not required for self-describing formats like fMP4 or AVC3.
-	/// However, some formats, like AAC, use a separate encoding for its initialization data.
+	/// Create a new decoder with the given format and initialization data.
 	///
 	/// The buffer will be fully consumed, or an error will be returned.
-	pub fn initialize<T: Buf + AsRef<[u8]>>(&mut self, buf: &mut T) -> anyhow::Result<()> {
-		match self.decoder {
+	pub fn new<T: Buf + AsRef<[u8]>>(
+		broadcast: moq_lite::BroadcastProducer,
+		catalog: crate::CatalogProducer,
+		format: DecoderFormat,
+		buf: &mut T,
+	) -> anyhow::Result<Self> {
+		let decoder = match format {
 			#[cfg(feature = "h264")]
-			DecoderKind::Avc3(ref mut decoder) => decoder.initialize(buf)?,
+			DecoderFormat::Avc3 => {
+				let mut decoder = super::Avc3::new(broadcast, catalog);
+				decoder.initialize(buf)?;
+				decoder.into()
+			}
 			#[cfg(feature = "mp4")]
-			DecoderKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
+			DecoderFormat::Fmp4 => {
+				let mut decoder = Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default()));
+				decoder.decode(buf)?;
+				decoder.into()
+			}
 			#[cfg(feature = "h265")]
-			DecoderKind::Hev1(ref mut decoder) => decoder.initialize(buf)?,
+			DecoderFormat::Hev1 => {
+				let mut decoder = super::Hev1::new(broadcast, catalog);
+				decoder.initialize(buf)?;
+				decoder.into()
+			}
 			#[cfg(feature = "av1")]
-			DecoderKind::Av01(ref mut decoder) => decoder.initialize(buf)?,
+			DecoderFormat::Av01 => {
+				let mut decoder = super::Av01::new(broadcast, catalog);
+				decoder.initialize(buf)?;
+				decoder.into()
+			}
 			#[cfg(feature = "aac")]
-			DecoderKind::Aac(ref mut decoder) => decoder.initialize(buf)?,
+			DecoderFormat::Aac => {
+				let config = super::AacConfig::parse(buf)?;
+				super::Aac::new(broadcast, catalog, config)?.into()
+			}
 			#[cfg(feature = "opus")]
-			DecoderKind::Opus(ref mut decoder) => decoder.initialize(buf)?,
-		}
+			DecoderFormat::Opus => {
+				let config = super::OpusConfig::parse(buf)?;
+				super::Opus::new(broadcast, catalog, config)?.into()
+			}
+		};
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
 
-		Ok(())
+		Ok(Self { decoder })
 	}
 
 	/// Decode a frame from the given buffer.
@@ -350,22 +354,18 @@ impl Decoder {
 
 		Ok(())
 	}
+}
 
-	/// Check if the decoder has read enough data to be initialized.
-	pub fn is_initialized(&self) -> bool {
-		match self.decoder {
-			#[cfg(feature = "h264")]
-			DecoderKind::Avc3(ref decoder) => decoder.is_initialized(),
-			#[cfg(feature = "mp4")]
-			DecoderKind::Fmp4(ref decoder) => decoder.is_initialized(),
-			#[cfg(feature = "h265")]
-			DecoderKind::Hev1(ref decoder) => decoder.is_initialized(),
-			#[cfg(feature = "av1")]
-			DecoderKind::Av01(ref decoder) => decoder.is_initialized(),
-			#[cfg(feature = "aac")]
-			DecoderKind::Aac(ref decoder) => decoder.is_initialized(),
-			#[cfg(feature = "opus")]
-			DecoderKind::Opus(ref decoder) => decoder.is_initialized(),
-		}
+#[cfg(feature = "opus")]
+impl From<super::Opus> for Decoder {
+	fn from(opus: super::Opus) -> Self {
+		Self { decoder: opus.into() }
+	}
+}
+
+#[cfg(feature = "aac")]
+impl From<super::Aac> for Decoder {
+	fn from(aac: super::Aac) -> Self {
+		Self { decoder: aac.into() }
 	}
 }
