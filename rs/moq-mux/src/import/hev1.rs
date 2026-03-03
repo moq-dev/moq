@@ -197,6 +197,12 @@ impl Hev1 {
 				let sps = SpsNALUnit::parse(&mut &nal[..]).context("failed to parse SPS NAL unit")?;
 				self.init(&sps)?;
 
+				// PPS is tied to SPS context; drop cached PPS when SPS changes.
+				if self.cached_sps.as_ref().is_some_and(|cached| cached != &nal) {
+					self.cached_pps = None;
+					self.current.contains_pps = false;
+				}
+
 				self.cached_sps = Some(nal.clone());
 				self.current.contains_sps = true;
 			}
@@ -222,18 +228,21 @@ impl Hev1 {
 				{
 					self.current.chunks.push_chunk(START_CODE.clone());
 					self.current.chunks.push_chunk(vps.clone());
+					self.current.contains_vps = true;
 				}
 				if !self.current.contains_sps
 					&& let Some(sps) = &self.cached_sps
 				{
 					self.current.chunks.push_chunk(START_CODE.clone());
 					self.current.chunks.push_chunk(sps.clone());
+					self.current.contains_sps = true;
 				}
 				if !self.current.contains_pps
 					&& let Some(pps) = &self.cached_pps
 				{
 					self.current.chunks.push_chunk(START_CODE.clone());
 					self.current.chunks.push_chunk(pps.clone());
+					self.current.contains_pps = true;
 				}
 
 				self.current.contains_idr = true;
