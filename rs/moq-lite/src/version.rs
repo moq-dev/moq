@@ -6,7 +6,7 @@ use crate::{coding, ietf, lite};
 /// The versions of MoQ that are negotiated via SETUP.
 ///
 /// Ordered by preference, with the client's preference taking priority.
-/// This intentionally includes only SETUP-negotiated versions (Lite01, Lite02, Draft14);
+/// This intentionally includes only SETUP-negotiated versions (Lite02, Lite01, Draft14);
 /// Lite03 and newer IETF drafts negotiate via dedicated ALPNs instead.
 pub(crate) const NEGOTIATED: [Version; 3] = [
 	Version::Lite(lite::Version::Lite02),

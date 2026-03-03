@@ -305,6 +305,30 @@ mod tests {
 	}
 
 	#[test]
+	fn test_publish_namespace_done_v17_rejected() {
+		let msg = PublishNamespaceDone {
+			track_namespace: Path::default(),
+			request_id: RequestId(42),
+		};
+
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+	}
+
+	#[test]
+	fn test_publish_namespace_cancel_v17_rejected() {
+		let msg = PublishNamespaceCancel {
+			track_namespace: Path::default(),
+			request_id: RequestId(7),
+			error_code: 1,
+			reason_phrase: "Shutdown".into(),
+		};
+
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+	}
+
+	#[test]
 	fn test_announce_rejects_parameters() {
 		#[rustfmt::skip]
 		let invalid_bytes = vec![

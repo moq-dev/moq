@@ -451,6 +451,30 @@ mod tests {
 	}
 
 	#[test]
+	fn test_message_parameters_v17_round_trip() {
+		use crate::ietf::{FilterType, Location};
+
+		let mut params = MessageParameters::default();
+		params.set_subscriber_priority(200);
+		params.set_group_order(2);
+		params.set_forward(true);
+		params.set_largest_object(&Location { group: 5, object: 3 }).unwrap();
+		params.set_subscription_filter(FilterType::LargestObject).unwrap();
+
+		let mut buf = BytesMut::new();
+		params.encode(&mut buf, Version::Draft17).unwrap();
+
+		let mut bytes = buf.freeze();
+		let decoded = MessageParameters::decode(&mut bytes, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.subscriber_priority(), Some(200));
+		assert_eq!(decoded.group_order(), Some(2));
+		assert_eq!(decoded.forward(), Some(true));
+		assert_eq!(decoded.largest_object(), Some(Location { group: 5, object: 3 }));
+		assert_eq!(decoded.subscription_filter(), Some(FilterType::LargestObject));
+	}
+
+	#[test]
 	fn test_message_parameters_empty_v16() {
 		let params = MessageParameters::default();
 

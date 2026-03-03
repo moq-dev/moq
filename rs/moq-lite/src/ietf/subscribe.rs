@@ -15,7 +15,7 @@ use super::namespace::{decode_namespace, encode_namespace};
 
 use super::Version;
 
-#[derive(Clone, Copy, Debug, TryFromPrimitive, IntoPrimitive)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum FilterType {
 	NextGroup = 0x01,

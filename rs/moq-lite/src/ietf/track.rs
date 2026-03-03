@@ -153,6 +153,18 @@ mod tests {
 	}
 
 	#[test]
+	fn test_track_status_v17_rejected() {
+		let msg = TrackStatus {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+		};
+
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+	}
+
+	#[test]
 	fn test_track_status_v16_round_trip() {
 		let msg = TrackStatus {
 			request_id: RequestId(1),
