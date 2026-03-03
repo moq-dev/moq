@@ -287,9 +287,13 @@ impl Hev1 {
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
+
+		if self.current.contains_idr {
+			track.keyframe()?;
+		}
+
 		let frame = hang::container::Frame {
 			timestamp: pts,
-			keyframe: self.current.contains_idr,
 			payload,
 		};
 
@@ -301,6 +305,13 @@ impl Hev1 {
 		self.current.contains_sps = false;
 		self.current.contains_pps = false;
 
+		Ok(())
+	}
+
+	/// Finish the track, flushing the current group.
+	pub fn finish(&mut self) -> anyhow::Result<()> {
+		let track = self.track.as_mut().context("not initialized")?;
+		track.finish()?;
 		Ok(())
 	}
 

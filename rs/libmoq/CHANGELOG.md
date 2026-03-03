@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10](https://github.com/moq-dev/moq/compare/libmoq-v0.2.9...libmoq-v0.2.10) - 2026-03-03
+
+### Other
+
+- OrderedProducer API with max_group_duration ([#1007](https://github.com/moq-dev/moq/pull/1007))
+- Add typed initialization for Opus and AAC in moq-mux ([#1034](https://github.com/moq-dev/moq/pull/1034))
+- Add moq-msf crate for MSF catalog support ([#993](https://github.com/moq-dev/moq/pull/993))
+- Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
+
 ## [0.2.8](https://github.com/moq-dev/moq/compare/libmoq-v0.2.7...libmoq-v0.2.8) - 2026-02-12
 
 ### Other

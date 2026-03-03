@@ -62,13 +62,32 @@ enum TrackKind {
 	Audio,
 }
 
+// Make a new audio group every 100ms.
+const MAX_AUDIO_GROUP_DURATION: Timestamp = Timestamp::from_millis_unchecked(100);
+
+enum Fmp4Producer {
+	/// Manual group management (video, passthrough audio).
+	Manual {
+		track: moq_lite::TrackProducer,
+		group: Option<moq_lite::GroupProducer>,
+	},
+	/// Automatic duration-based group management (non-passthrough audio).
+	Ordered(hang::container::OrderedProducer),
+}
+
+impl Fmp4Producer {
+	fn info(&self) -> &moq_lite::Track {
+		match self {
+			Self::Manual { track, .. } => &track.info,
+			Self::Ordered(ordered) => &ordered.track.info,
+		}
+	}
+}
+
 struct Fmp4Track {
 	kind: TrackKind,
 
-	producer: moq_lite::TrackProducer,
-
-	// The current group being written, only used for passthrough mode.
-	group: Option<moq_lite::GroupProducer>,
+	producer: Fmp4Producer,
 
 	// The minimum buffer required for the track.
 	jitter: Option<Timestamp>,
@@ -78,19 +97,6 @@ struct Fmp4Track {
 
 	// The minimum duration between frames for this track.
 	min_duration: Option<Timestamp>,
-}
-
-impl Fmp4Track {
-	fn new(kind: TrackKind, producer: moq_lite::TrackProducer) -> Self {
-		Self {
-			kind,
-			producer,
-			group: None,
-			jitter: None,
-			last_timestamp: None,
-			min_duration: None,
-		}
-	}
 }
 
 impl Fmp4 {
@@ -176,16 +182,17 @@ impl Fmp4 {
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
 			let handler = &trak.mdia.hdlr.handler;
+			let ext = if self.config.passthrough { "m4s" } else { "hang" };
 
 			let (kind, track) = match handler.as_ref() {
 				b"vide" => {
 					let config = self.init_video(trak)?;
-					let track = catalog.video.create_track("m4s", config.clone());
+					let track = catalog.video.create_track(ext, config.clone());
 					(TrackKind::Video, track)
 				}
 				b"soun" => {
 					let config = self.init_audio(trak)?;
-					let track = catalog.audio.create_track("m4s", config.clone());
+					let track = catalog.audio.create_track(ext, config.clone());
 					(TrackKind::Audio, track)
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
@@ -194,7 +201,24 @@ impl Fmp4 {
 
 			let track = self.broadcast.create_track(track)?;
 
-			self.tracks.insert(track_id, Fmp4Track::new(kind, track));
+			let producer = if kind == TrackKind::Audio && !self.config.passthrough {
+				Fmp4Producer::Ordered(
+					hang::container::OrderedProducer::new(track).with_max_group_duration(MAX_AUDIO_GROUP_DURATION),
+				)
+			} else {
+				Fmp4Producer::Manual { track, group: None }
+			};
+
+			self.tracks.insert(
+				track_id,
+				Fmp4Track {
+					kind,
+					producer,
+					jitter: None,
+					last_timestamp: None,
+					min_duration: None,
+				},
+			);
 		}
 
 		drop(catalog);
@@ -538,38 +562,26 @@ impl Fmp4 {
 
 						let frame = hang::container::Frame {
 							timestamp,
-							keyframe,
 							payload: payload.into(),
 						};
 
-						// NOTE: We inline some of the hang::TrackProducer logic so we get more control over the group creation.
-						// This is completely optional; you can use hang::TrackProducer if you want.
-						let mut group = match track.kind {
-							// If this is a video keyframe, we create a new group.
-							TrackKind::Video if keyframe => {
-								if let Some(mut group) = track.group.take() {
-									// Close the previous group if it exists.
-									group.finish()?;
-								}
-								track.producer.append_group()?
+						match &mut track.producer {
+							Fmp4Producer::Manual { track: raw, group } => {
+								let mut g = if keyframe {
+									if let Some(mut prev) = group.take() {
+										prev.finish()?;
+									}
+									raw.append_group()?
+								} else {
+									group.take().context("no keyframe at start")?
+								};
+								frame.encode(&mut g)?;
+								*group = Some(g);
 							}
-							// If this is a video non-keyframe, we use the previous group.
-							TrackKind::Video => track.group.take().context("no keyframe at start")?,
-							TrackKind::Audio => {
-								// For audio, we send the entire fragment as a single group.
-								// This is an optimization to avoid a burst of tiny groups, possibly hitting MAX_STREAMS, when it doesn't really matter.
-								// ex. 2s of audio: 1 group instead of 90 groups.
-								// Technically, individual groups are better for skipping, but it's a moot point if fMP4 is introducing so much latency.
-								match track.group.take() {
-									Some(group) => group,
-									None => track.producer.append_group()?,
-								}
+							Fmp4Producer::Ordered(ordered) => {
+								ordered.write(frame)?;
 							}
-						};
-
-						// Encode the frame and update the group.
-						frame.encode(&mut group)?;
-						track.group = Some(group);
+						}
 					}
 
 					if timestamp >= max_timestamp.unwrap_or(Timestamp::ZERO) {
@@ -595,20 +607,23 @@ impl Fmp4 {
 
 			// If we're doing passthrough mode, then we write one giant fragment instead of individual frames.
 			if self.config.passthrough {
-				let mut group = if contains_keyframe {
-					if let Some(mut group) = track.group.take() {
-						group.finish()?;
-					}
+				let Fmp4Producer::Manual { track: raw, group } = &mut track.producer else {
+					unreachable!("passthrough always uses Manual");
+				};
 
-					track.producer.append_group()?
+				let mut g = if contains_keyframe {
+					if let Some(mut prev) = group.take() {
+						prev.finish()?;
+					}
+					raw.append_group()?
 				} else {
-					track.group.take().context("no keyframe at start")?
+					group.take().context("no keyframe at start")?
 				};
 
 				let moof_raw = self.moof_raw.as_ref().context("missing moof box")?;
 
 				// To avoid an extra allocation, we use the chunked API to write the moof and mdat atoms separately.
-				let mut frame = group.create_frame(moq_lite::Frame {
+				let mut frame = g.create_frame(moq_lite::Frame {
 					size: moof_raw.len() as u64 + mdat_raw.len() as u64,
 				})?;
 
@@ -616,12 +631,7 @@ impl Fmp4 {
 				frame.write(Bytes::copy_from_slice(mdat_raw))?;
 				frame.finish()?;
 
-				track.group = Some(group);
-			} else if track.kind == TrackKind::Audio {
-				// Close the audio group if it exists.
-				if let Some(mut group) = track.group.take() {
-					group.finish()?;
-				}
+				*group = Some(g);
 			}
 
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
@@ -641,7 +651,7 @@ impl Fmp4 {
 							let config = catalog
 								.video
 								.renditions
-								.get_mut(&track.producer.info.name)
+								.get_mut(&track.producer.info().name)
 								.context("missing video config")?;
 							config.jitter = Some(jitter.convert()?);
 						}
@@ -649,7 +659,7 @@ impl Fmp4 {
 							let config = catalog
 								.audio
 								.renditions
-								.get_mut(&track.producer.info.name)
+								.get_mut(&track.producer.info().name)
 								.context("missing audio config")?;
 							config.jitter = Some(jitter.convert()?);
 						}
@@ -662,14 +672,34 @@ impl Fmp4 {
 	}
 }
 
+impl Fmp4 {
+	/// Finish all tracks, flushing current groups.
+	pub fn finish(&mut self) -> anyhow::Result<()> {
+		for track in self.tracks.values_mut() {
+			match &mut track.producer {
+				Fmp4Producer::Manual { track: raw, group } => {
+					if let Some(mut g) = group.take() {
+						g.finish()?;
+					}
+					raw.finish()?;
+				}
+				Fmp4Producer::Ordered(ordered) => {
+					ordered.finish()?;
+				}
+			}
+		}
+		Ok(())
+	}
+}
+
 impl Drop for Fmp4 {
 	fn drop(&mut self) {
 		let mut catalog = self.catalog.lock();
 
 		for track in self.tracks.values() {
 			match track.kind {
-				TrackKind::Video => catalog.video.remove_track(&track.producer.info).is_some(),
-				TrackKind::Audio => catalog.audio.remove_track(&track.producer.info).is_some(),
+				TrackKind::Video => catalog.video.remove_track(track.producer.info()).is_some(),
+				TrackKind::Audio => catalog.audio.remove_track(track.producer.info()).is_some(),
 			};
 		}
 	}

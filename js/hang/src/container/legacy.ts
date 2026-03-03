@@ -224,7 +224,8 @@ export class Consumer {
 			const latency = max - min;
 			if (latency <= threshold) break;
 
-			const first = this.#groups.shift()!;
+			const first = this.#groups.shift();
+			if (!first) break;
 			this.#active = this.#groups[0]?.consumer.sequence;
 			console.warn(`skipping slow group: ${first.consumer.sequence} -> ${this.#active}`);
 

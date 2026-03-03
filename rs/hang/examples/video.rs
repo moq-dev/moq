@@ -102,48 +102,44 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<m
 async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin.
 	let mut broadcast = moq_lite::Broadcast::produce();
-	let mut track = create_track(&mut broadcast)?;
+	let track = create_track(&mut broadcast)?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// OPTIONAL: We publish after inserting the tracks just to avoid a nearly impossible race condition.
 	origin.publish_broadcast("", broadcast.consume());
 
-	// Create a new group.
-	let mut group = track.append_group()?;
+	// Wrap in OrderedProducer for group management.
+	let mut producer = hang::container::OrderedProducer::new(track);
 
 	// Not real frames of course.
+	// Signal a keyframe to start the first group.
+	producer.keyframe()?;
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(1).unwrap(),
-		keyframe: true,
 		payload: Bytes::from_static(b"keyframe NAL data").into(),
 	};
-	frame.encode(&mut group)?;
+	producer.write(frame)?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(2).unwrap(),
-		keyframe: false,
 		payload: Bytes::from_static(b"delta NAL data").into(),
 	};
-	frame.encode(&mut group)?;
-	group.finish()?;
+	producer.write(frame)?;
 
 	tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-	// Create a new group for each keyframe.
-	let mut group = track.append_group()?;
+	// Signal a new keyframe to start a new group.
+	producer.keyframe()?;
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(3).unwrap(),
-		keyframe: true,
 		payload: Bytes::from_static(b"keyframe NAL data").into(),
 	};
-	frame.encode(&mut group)?;
+	producer.write(frame)?;
 
 	// Sleep before exiting and closing the broadcast.
 	tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-	group.finish()?;
 
 	Ok(())
 }

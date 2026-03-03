@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/moq-dev/moq/compare/moq-mux-v0.2.1...moq-mux-v0.3.0) - 2026-03-03
+
+### Fixed
+
+- mask AAC profile to 5 bits to prevent shift overflow ([#1028](https://github.com/moq-dev/moq/pull/1028))
+- `Fmp4::init_audio()` doesn't populate description for AAC, causing downstream format mismatch ([#1024](https://github.com/moq-dev/moq/pull/1024))
+
+### Other
+
+- OrderedProducer API with max_group_duration ([#1007](https://github.com/moq-dev/moq/pull/1007))
+- Tweak the API to revert some breaking changes. ([#1036](https://github.com/moq-dev/moq/pull/1036))
+- Add typed initialization for Opus and AAC in moq-mux ([#1034](https://github.com/moq-dev/moq/pull/1034))
+- Cache and re-insert parameter sets before keyframes in H.264/H.265 ([#1030](https://github.com/moq-dev/moq/pull/1030))
+- Add moq-msf crate for MSF catalog support ([#993](https://github.com/moq-dev/moq/pull/993))
+- Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
+
 ## [0.2.1](https://github.com/moq-dev/moq/compare/moq-mux-v0.2.0...moq-mux-v0.2.1) - 2026-02-12
 
 ### Other

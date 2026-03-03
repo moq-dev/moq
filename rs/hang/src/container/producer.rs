@@ -1,22 +1,30 @@
 use super::{Frame, OrderedConsumer, Timestamp};
 use crate::Error;
 
-/// A producer for media tracks with keyframe-based group management.
+/// A producer for media tracks with group management.
 ///
 /// This wraps a `moq_lite::TrackProducer` and adds hang-specific functionality
-/// like automatic timestamp encoding and keyframe-based group management.
+/// like automatic timestamp encoding and group management.
 ///
 /// ## Group Management
 ///
-/// Groups are automatically created and managed based on keyframes:
-/// - When a keyframe is written, the current group is finished and a new one begins.
-/// - Non-keyframes are appended to the current group.
-/// - Each frame includes a timestamp header for proper playback timing.
+/// Groups can be managed explicitly via [`keyframe()`](Self::keyframe) or automatically
+/// via [`with_max_group_duration()`](Self::with_max_group_duration):
+/// - Explicit: call `keyframe()` before writing a keyframe to start a new group.
+/// - Automatic: set a max group duration and groups are created/closed based on timestamps.
 #[derive(Clone)]
 pub struct OrderedProducer {
 	pub track: moq_lite::TrackProducer,
 	group: Option<moq_lite::GroupProducer>,
-	keyframe: Option<Timestamp>,
+
+	// The timestamp of the first frame in the current group.
+	group_start: Option<Timestamp>,
+
+	// The number of frames written in the current group, used to estimate frame duration.
+	group_frames: u64,
+
+	// When set, automatically manage group boundaries based on duration.
+	max_group_duration: Option<Timestamp>,
 }
 
 impl OrderedProducer {
@@ -25,57 +33,99 @@ impl OrderedProducer {
 		Self {
 			track: inner,
 			group: None,
-			keyframe: None,
+			group_start: None,
+			group_frames: 0,
+			max_group_duration: None,
 		}
+	}
+
+	/// Set the maximum group duration for automatic group management.
+	///
+	/// Groups will be automatically closed and new ones started when the estimated
+	/// next frame would exceed this duration.
+	pub fn with_max_group_duration(mut self, duration: Timestamp) -> Self {
+		self.max_group_duration = Some(duration);
+		self
+	}
+
+	/// Signal that the next frame starts a new group (keyframe).
+	///
+	/// Finishes the current group if one exists. The next call to `write()`
+	/// will create a new group.
+	pub fn keyframe(&mut self) -> Result<(), Error> {
+		if let Some(mut group) = self.group.take() {
+			group.finish()?;
+		}
+		Ok(())
 	}
 
 	/// Write a frame to the track.
 	///
-	/// The frame's timestamp is automatically encoded as a header, and keyframes
-	/// trigger the creation of new groups for efficient seeking and caching.
+	/// The frame's timestamp is automatically encoded as a header.
 	///
 	/// All frames should be in *decode order*.
 	///
-	/// The timestamp is usually monotonically increasing, but it depends on the encoding.
-	/// For example, H.264 B-frames will introduce jitter and reordering.
+	/// Group boundaries are managed either:
+	/// - Explicitly: call `keyframe()` before writing a keyframe.
+	/// - Automatically: if `max_group_duration` is set, groups close when the
+	///   estimated next frame would exceed the duration.
 	pub fn write(&mut self, frame: Frame) -> Result<(), Error> {
 		tracing::trace!(?frame, "write frame");
 
-		if frame.keyframe {
-			if let Some(mut group) = self.group.take() {
-				group.finish()?;
-			}
-
-			// Make sure this frame's timestamp doesn't go backwards relative to the last keyframe.
-			// We can't really enforce this for frames generally because b-frames suck.
-			if let Some(keyframe) = self.keyframe
-				&& frame.timestamp < keyframe
-			{
-				return Err(Error::TimestampBackwards);
-			}
-
-			self.keyframe = Some(frame.timestamp);
+		// Safety check: close the group if this frame already exceeds the max duration.
+		if let (Some(max_duration), Some(group_start)) = (self.max_group_duration, self.group_start)
+			&& self.group.is_some()
+			&& frame.timestamp.checked_sub(group_start).unwrap_or(Timestamp::ZERO) >= max_duration
+			&& let Some(mut group) = self.group.take()
+		{
+			group.finish()?;
 		}
 
-		let mut group = match self.group.take() {
-			Some(group) => group,
-			None if frame.keyframe => self.track.append_group()?,
-			// The first frame must be a keyframe.
-			None => return Err(Error::MissingKeyframe),
-		};
+		// Start a new group if needed (first frame, after keyframe(), or after auto-close).
+		if self.group.is_none() {
+			let group = self.track.append_group()?;
+			self.group = Some(group);
+			self.group_start = Some(frame.timestamp);
+			self.group_frames = 0;
+		}
 
+		// Encode the frame.
+		let mut group = self.group.take().expect("group should exist");
 		frame.encode(&mut group)?;
-
 		self.group.replace(group);
+
+		self.group_frames += 1;
+
+		// Estimate the next frame's timestamp and close the group now if it would exceed the limit.
+		// avg_frame_duration = elapsed / group_frames
+		// estimated_next_elapsed = elapsed + avg_frame_duration
+		// Rearranged to avoid division: elapsed * (frames + 1) >= max_duration * frames
+		if let (Some(max_duration), Some(group_start)) = (self.max_group_duration, self.group_start) {
+			let elapsed = frame
+				.timestamp
+				.checked_sub(group_start)
+				.unwrap_or(Timestamp::ZERO)
+				.as_micros();
+			let max = max_duration.as_micros();
+
+			if elapsed * (self.group_frames as u128 + 1) >= max * self.group_frames as u128
+				&& let Some(mut group) = self.group.take()
+			{
+				group.finish()?;
+			}
+		}
 
 		Ok(())
 	}
 
-	/// An explicit way to end the current group.
+	/// Finish the producer, closing the current group and track.
 	///
-	/// This is useful to flush when you know the next frame will be a keyframe.
-	pub fn flush(&mut self) -> Result<(), Error> {
-		self.group.take().ok_or(Error::MissingKeyframe)?.finish()?;
+	/// After calling this, any further calls to `write()` will return an error.
+	pub fn finish(&mut self) -> Result<(), Error> {
+		if let Some(mut group) = self.group.take() {
+			group.finish()?;
+		}
+		self.track.finish()?;
 		Ok(())
 	}
 

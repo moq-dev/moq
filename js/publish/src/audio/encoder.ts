@@ -21,9 +21,9 @@ export type EncoderProps = {
 	muted?: boolean | Signal<boolean>;
 	volume?: number | Signal<number>;
 
-	// The size of each group. Larger groups mean fewer drops but the viewer can fall further behind.
+	// The maximum duration of each group. Larger groups mean fewer drops but the viewer can fall further behind.
 	// NOTE: Each frame is always flushed to the network immediately.
-	maxLatency?: Time.Milli;
+	groupDuration?: Time.Milli;
 
 	container?: Catalog.Container;
 };
@@ -36,7 +36,7 @@ export class Encoder {
 
 	muted: Signal<boolean>;
 	volume: Signal<number>;
-	maxLatency: Time.Milli;
+	groupDuration: Time.Milli;
 
 	source: Signal<Source | undefined>;
 
@@ -60,7 +60,7 @@ export class Encoder {
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
-		this.maxLatency = props?.maxLatency ?? (100 as Time.Milli); // Default is a group every 100ms
+		this.groupDuration = props?.groupDuration ?? (100 as Time.Milli); // Default is a group every 100ms
 
 		this.#signals.run(this.#runSource.bind(this));
 		this.#signals.run(this.#runConfig.bind(this));
@@ -167,7 +167,7 @@ export class Encoder {
 					}
 
 					let keyframe = false;
-					if (!lastKeyframe || lastKeyframe + Time.Micro.fromMilli(this.maxLatency) <= frame.timestamp) {
+					if (!lastKeyframe || lastKeyframe + Time.Micro.fromMilli(this.groupDuration) <= frame.timestamp) {
 						lastKeyframe = frame.timestamp as Time.Micro;
 						keyframe = true;
 					}
