@@ -6,7 +6,7 @@ use bytes::{Buf, Bytes};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
 
 /// A decoder for H.265 with inline SPS/PPS.
-/// Only supports single layer streams, ignores VPS.
+/// Only supports single layer streams (VPS is cached but not parsed).
 pub struct Hev1 {
 	// The broadcast being produced.
 	broadcast: moq_lite::BroadcastProducer,
@@ -26,6 +26,11 @@ pub struct Hev1 {
 
 	// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
+
+	// Cached parameter set NALs for re-insertion before keyframes.
+	cached_vps: Option<Bytes>,
+	cached_sps: Option<Bytes>,
+	cached_pps: Option<Bytes>,
 }
 
 impl Hev1 {
@@ -37,6 +42,9 @@ impl Hev1 {
 			config: None,
 			current: Default::default(),
 			zero: None,
+			cached_vps: None,
+			cached_sps: None,
+			cached_pps: None,
 		}
 	}
 
@@ -176,15 +184,35 @@ impl Hev1 {
 		let nal_type = NALUnitType::from(nal_unit_type);
 
 		match nal_type {
+			NALUnitType::VpsNut => {
+				self.maybe_start_frame(pts)?;
+
+				self.cached_vps = Some(nal.clone());
+				self.current.contains_vps = true;
+			}
 			NALUnitType::SpsNut => {
 				self.maybe_start_frame(pts)?;
 
 				// Try to reinitialize the track if the SPS has changed.
 				let sps = SpsNALUnit::parse(&mut &nal[..]).context("failed to parse SPS NAL unit")?;
 				self.init(&sps)?;
+
+				// PPS is tied to SPS context; drop cached PPS when SPS changes.
+				if self.cached_sps.as_ref().is_some_and(|cached| cached != &nal) {
+					self.cached_pps = None;
+					self.current.contains_pps = false;
+				}
+
+				self.cached_sps = Some(nal.clone());
+				self.current.contains_sps = true;
 			}
-			// TODO parse the SPS again and reinitialize the track if needed
-			NALUnitType::AudNut | NALUnitType::PpsNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
+			NALUnitType::PpsNut => {
+				self.maybe_start_frame(pts)?;
+
+				self.cached_pps = Some(nal.clone());
+				self.current.contains_pps = true;
+			}
+			NALUnitType::AudNut | NALUnitType::PrefixSeiNut | NALUnitType::SuffixSeiNut => {
 				self.maybe_start_frame(pts)?;
 			}
 			// Keyframe containing slices
@@ -194,6 +222,29 @@ impl Hev1 {
 			| NALUnitType::BlaWRadl
 			| NALUnitType::BlaWLp
 			| NALUnitType::CraNut => {
+				// Insert cached VPS/SPS/PPS before keyframes if not already present in this frame.
+				if !self.current.contains_vps
+					&& let Some(vps) = &self.cached_vps
+				{
+					self.current.chunks.push_chunk(START_CODE.clone());
+					self.current.chunks.push_chunk(vps.clone());
+					self.current.contains_vps = true;
+				}
+				if !self.current.contains_sps
+					&& let Some(sps) = &self.cached_sps
+				{
+					self.current.chunks.push_chunk(START_CODE.clone());
+					self.current.chunks.push_chunk(sps.clone());
+					self.current.contains_sps = true;
+				}
+				if !self.current.contains_pps
+					&& let Some(pps) = &self.cached_pps
+				{
+					self.current.chunks.push_chunk(START_CODE.clone());
+					self.current.chunks.push_chunk(pps.clone());
+					self.current.contains_pps = true;
+				}
+
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
 			}
@@ -246,6 +297,9 @@ impl Hev1 {
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
+		self.current.contains_vps = false;
+		self.current.contains_sps = false;
+		self.current.contains_pps = false;
 
 		Ok(())
 	}
@@ -292,6 +346,9 @@ struct Frame {
 	chunks: BufList,
 	contains_idr: bool,
 	contains_slice: bool,
+	contains_vps: bool,
+	contains_sps: bool,
+	contains_pps: bool,
 }
 
 #[derive(Default)]

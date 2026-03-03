@@ -150,20 +150,20 @@ pub name url="http://localhost:4443/anon" *args:
 	# Download the sample media.
 	just download "{{name}}"
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin moq
+	cargo build --bin moq-cli
 	# Publish the media with the moq cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin moq -- \
+	cargo run --bin moq-cli -- \
 		{{args}} publish --url "{{url}}" --name "{{name}}" fmp4
 
 pub-iroh name url prefix="":
 	# Download the sample media.
 	just download "{{name}}"
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin moq
+	cargo build --bin moq-cli
 	# Publish the media with the moq cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin moq -- \
+	cargo run --bin moq-cli -- \
 		--iroh-enabled publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4
 
 # Generate and ingest an HLS stream from a video file.
@@ -250,7 +250,7 @@ pub-hls name relay="http://localhost:4443/anon":
 
 	# Run moq to ingest from local files
 	echo ">>> Running with --passthrough flag"
-	cargo run --bin moq -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
+	cargo run --bin moq-cli -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
 	EXIT_CODE=$?
 
 	# Cleanup after cargo run completes (success or failure)
@@ -265,7 +265,7 @@ pub-h264 name url="http://localhost:4443/anon" *args:
 	just download "{{name}}"
 
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin moq
+	cargo build --bin moq-cli
 
 	# Run ffmpeg and pipe H.264 Annex B output to moq
 	ffmpeg -hide_banner -v quiet \
@@ -274,7 +274,7 @@ pub-h264 name url="http://localhost:4443/anon" *args:
 		-c:v copy -an \
 		-bsf:v h264_mp4toannexb \
 		-f h264 \
-		- | cargo run --bin moq -- publish --url "{{url}}" --name "{{name}}" --format annex-b {{args}}
+		- | cargo run --bin moq-cli -- publish --url "{{url}}" --name "{{name}}" --format annex-b {{args}}
 
 # Publish/subscribe using gstreamer - see https://github.com/moq-dev/gstreamer
 pub-gst name url='http://localhost:4443/anon':
@@ -293,11 +293,11 @@ serve name *args:
 	just download "{{name}}"
 
 	# Pre-build the binary so we don't queue media while compiling.
-	cargo build --bin moq
+	cargo build --bin moq-cli
 
 	# Run ffmpeg and pipe the output to moq
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
-	cargo run --bin moq -- \
+	cargo run --bin moq-cli -- \
 		{{args}} serve --listen "[::]:4443" --tls-generate "localhost" \
 		--name "{{name}}" fmp4
 

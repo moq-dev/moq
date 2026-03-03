@@ -1,6 +1,6 @@
 [Unit]
-Description=Prepare video for hang-bbb publisher
-Before=hang-bbb.service
+Description=Prepare video for demo-bbb publisher
+Before=demo-bbb.service
 
 [Service]
 Type=oneshot

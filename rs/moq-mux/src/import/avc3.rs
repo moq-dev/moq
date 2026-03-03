@@ -25,6 +25,10 @@ pub struct Avc3 {
 
 	// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
+
+	// Cached parameter set NALs for re-insertion before keyframes.
+	cached_sps: Option<Bytes>,
+	cached_pps: Option<Bytes>,
 }
 
 impl Avc3 {
@@ -36,6 +40,8 @@ impl Avc3 {
 			config: None,
 			current: Default::default(),
 			zero: None,
+			cached_sps: None,
+			cached_pps: None,
 		}
 	}
 
@@ -185,15 +191,45 @@ impl Avc3 {
 				self.maybe_start_frame(pts)?;
 
 				// Try to reinitialize the track if the SPS has changed.
-				let nal = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
-				let sps = h264_parser::Sps::parse(&nal)?;
+				let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[1..]);
+				let sps = h264_parser::Sps::parse(&rbsp)?;
 				self.init(&sps)?;
+
+				// PPS is tied to SPS context; drop cached PPS when SPS changes.
+				if self.cached_sps.as_ref().is_some_and(|cached| cached != &nal) {
+					self.cached_pps = None;
+					self.current.contains_pps = false;
+				}
+
+				self.cached_sps = Some(nal.clone());
+				self.current.contains_sps = true;
 			}
-			// TODO parse the SPS again and reinitialize the track if needed
-			Some(NalType::Aud) | Some(NalType::Pps) | Some(NalType::Sei) => {
+			Some(NalType::Pps) => {
+				self.maybe_start_frame(pts)?;
+
+				self.cached_pps = Some(nal.clone());
+				self.current.contains_pps = true;
+			}
+			Some(NalType::Aud) | Some(NalType::Sei) => {
 				self.maybe_start_frame(pts)?;
 			}
 			Some(NalType::IdrSlice) => {
+				// Insert cached SPS/PPS before keyframes if not already present in this frame.
+				if !self.current.contains_sps
+					&& let Some(sps) = &self.cached_sps
+				{
+					self.current.chunks.push_chunk(START_CODE.clone());
+					self.current.chunks.push_chunk(sps.clone());
+					self.current.contains_sps = true;
+				}
+				if !self.current.contains_pps
+					&& let Some(pps) = &self.cached_pps
+				{
+					self.current.chunks.push_chunk(START_CODE.clone());
+					self.current.chunks.push_chunk(pps.clone());
+					self.current.contains_pps = true;
+				}
+
 				self.current.contains_idr = true;
 				self.current.contains_slice = true;
 			}
@@ -242,6 +278,8 @@ impl Avc3 {
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
+		self.current.contains_sps = false;
+		self.current.contains_pps = false;
 
 		Ok(())
 	}
@@ -298,4 +336,6 @@ struct Frame {
 	chunks: BufList,
 	contains_idr: bool,
 	contains_slice: bool,
+	contains_sps: bool,
+	contains_pps: bool,
 }

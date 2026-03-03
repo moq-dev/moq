@@ -1,9 +1,9 @@
 # Generate systemd service files from templates
-resource "local_file" "hang_bbb_service" {
-  content = templatefile("${path.module}/hang-bbb.service.tftpl", {
+resource "local_file" "demo_bbb_service" {
+  content = templatefile("${path.module}/demo-bbb.service.tftpl", {
     domain = var.domain
   })
-  filename = "${path.module}/gen/hang-bbb.service"
+  filename = "${path.module}/gen/demo-bbb.service"
 }
 
 # Publisher instance

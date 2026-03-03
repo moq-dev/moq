@@ -87,7 +87,7 @@
             paths = [
               moq-relay
               moq-clock
-              moq
+              moq-cli
               moq-token
             ];
           };
@@ -96,7 +96,7 @@
           inherit (overlayPkgs)
             moq-relay
             moq-clock
-            moq
+            moq-cli
             moq-token
             ;
         };
