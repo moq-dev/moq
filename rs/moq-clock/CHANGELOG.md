@@ -49,6 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- release ([#1039](https://github.com/moq-dev/moq/pull/1039))
+- Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
+
+## [0.10.7](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.6...moq-clock-v0.10.7) - 2026-03-03
+
+### Other
+
 - Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
 
 ## [0.10.6](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.5...moq-clock-v0.10.6) - 2026-02-12

@@ -68,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- release ([#1039](https://github.com/moq-dev/moq/pull/1039))
+- Tweak the API to revert some breaking changes. ([#1036](https://github.com/moq-dev/moq/pull/1036))
+- Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
+- Increase MAX_STREAMS default and make it configurable ([#955](https://github.com/moq-dev/moq/pull/955))
+
+## [0.10.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.6...moq-relay-v0.10.7) - 2026-03-03
+
+### Other
+
 - Tweak the API to revert some breaking changes. ([#1036](https://github.com/moq-dev/moq/pull/1036))
 - Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
 - Increase MAX_STREAMS default and make it configurable ([#955](https://github.com/moq-dev/moq/pull/955))
