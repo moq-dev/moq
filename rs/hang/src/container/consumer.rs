@@ -254,12 +254,17 @@ mod tests {
 	}
 
 	/// Drain all available frames with a per-read timeout.
-	async fn read_all(consumer: &mut OrderedConsumer) -> Vec<Frame> {
+	async fn read_all(consumer: &mut OrderedConsumer) -> Result<Vec<Frame>, crate::Error> {
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(200), consumer.read()).await {
-			frames.push(frame);
+		loop {
+			match tokio::time::timeout(Duration::from_millis(200), consumer.read()).await {
+				Ok(Ok(Some(frame))) => frames.push(frame),
+				Ok(Ok(None)) => break,
+				Ok(Err(e)) => return Err(e),
+				Err(_) => break, // timeout
+			}
 		}
-		frames
+		Ok(frames)
 	}
 
 	// ---- Basic Reading ----
@@ -273,7 +278,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0)]);
 		track.finish().unwrap();
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert!(frames[0].keyframe);
@@ -291,7 +296,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0), ts(33_000), ts(66_000)]);
 		track.finish().unwrap();
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 3);
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[1].timestamp, ts(33_000));
@@ -315,7 +320,7 @@ mod tests {
 		}
 		track.finish().unwrap();
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 5);
 	}
 
@@ -357,7 +362,7 @@ mod tests {
 			group0.finish().unwrap();
 		});
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		// Group 0's 5 frames + some later groups (earlier ones skipped by latency)
 		assert!(frames.len() >= 25, "Expected >= 25 frames, got {}", frames.len());
 	}
@@ -394,7 +399,7 @@ mod tests {
 			group0.finish().unwrap();
 		});
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		// Group 0's 1 frame + skipped groups 1-7 + groups 8-9 (6 frames).
 		// Total without skip = 28. With skip, should be <= 7.
 		assert!(
@@ -432,7 +437,7 @@ mod tests {
 			group0.finish().unwrap();
 		});
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(!frames.is_empty(), "Expected at least some frames");
 
 		// Some groups should have been skipped (fewer frames than total 10)
@@ -487,7 +492,7 @@ mod tests {
 			group0.finish().unwrap();
 		});
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 3);
 
 		// Pending queue sorts by sequence, so delivery order is 0, 1, 2
@@ -506,7 +511,7 @@ mod tests {
 		write_group(&mut track, 1, &[ts(30_000)]);
 		track.finish().unwrap();
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[1].timestamp, ts(30_000));
@@ -524,7 +529,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0), ts(66_000), ts(33_000)]);
 		track.finish().unwrap();
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 3);
 		// Delivered in write order (decode order), not presentation order
 		assert_eq!(frames[0].timestamp, ts(0));
@@ -545,8 +550,8 @@ mod tests {
 		let result = tokio::time::timeout(Duration::from_millis(200), consumer.read()).await;
 		match result {
 			Ok(Ok(None)) => {}    // expected: track ended
-			Ok(Ok(Some(_))) => {} // acceptable: got a frame somehow
-			Ok(Err(_)) => {}      // also acceptable: error
+			Ok(Ok(Some(_))) => panic!("expected None for empty track, got Some"),
+			Ok(Err(e)) => panic!("expected None for empty track, got error: {e}"),
 			Err(_) => panic!("should not hang on empty track"),
 		}
 	}
@@ -614,7 +619,7 @@ mod tests {
 		track.finish().unwrap();
 
 		// Consumer must not deadlock on the missing group 2
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(frames.len() >= 4, "Expected >= 4 frames, got {}", frames.len());
 	}
 
@@ -631,7 +636,7 @@ mod tests {
 		write_group(&mut track, 9, &[ts(160_000), ts(180_000)]);
 		track.finish().unwrap();
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(frames.len() >= 4, "Expected >= 4 frames, got {}", frames.len());
 	}
 
@@ -646,7 +651,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0), ts(33_333), ts(66_666)]);
 		track.finish().unwrap();
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 3);
 
 		assert_eq!(frames[0].timestamp, ts(0));
@@ -677,7 +682,7 @@ mod tests {
 		group.finish().unwrap();
 		track.finish().unwrap();
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 
 		use bytes::Buf;
@@ -757,7 +762,7 @@ mod tests {
 		write_group(&mut track, 0, &[ts(one_hour)]);
 		track.finish().unwrap();
 
-		let frames = read_all(&mut consumer).await;
+		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(one_hour));
 		assert_eq!(frames[0].timestamp.as_micros(), one_hour as u128);
