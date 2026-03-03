@@ -6,7 +6,7 @@ use crate::coding::*;
 
 use super::Message;
 
-type Version = super::Version;
+use super::Version;
 
 /// GoAway message (0x10)
 #[derive(Clone, Debug)]

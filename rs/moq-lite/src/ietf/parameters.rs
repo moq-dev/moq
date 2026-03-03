@@ -4,7 +4,7 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::coding::*;
 
-type Version = super::Version;
+use super::Version;
 
 const MAX_PARAMS: u64 = 64;
 const PARAM_SUBVALUE_VERSION: Version = Version::Draft15;

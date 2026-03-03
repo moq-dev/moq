@@ -9,7 +9,7 @@ use super::BoundsExceeded;
 #[non_exhaustive]
 pub enum EncodeError {
 	#[error("bounds exceeded")]
-	BoundsExceeded(#[from] BoundsExceeded),
+	BoundsExceeded,
 	#[error("too large")]
 	TooLarge,
 	#[error("short buffer")]
@@ -20,6 +20,12 @@ pub enum EncodeError {
 	TooMany,
 	#[error("unsupported version")]
 	Version,
+}
+
+impl From<BoundsExceeded> for EncodeError {
+	fn from(_: BoundsExceeded) -> Self {
+		Self::BoundsExceeded
+	}
 }
 
 /// Check that the writer has enough remaining capacity.

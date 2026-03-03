@@ -11,7 +11,7 @@ use crate::{
 use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
 
-type Version = super::Version;
+use super::Version;
 
 /// SubscribeNamespace message (0x11)
 /// In v16, this moves from the control stream to its own bidirectional stream.

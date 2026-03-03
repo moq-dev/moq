@@ -1,6 +1,6 @@
 use crate::{Path, coding::*};
 
-type Version = super::Version;
+use super::Version;
 
 /// Helper function to encode namespace as tuple of strings
 pub fn encode_namespace<W: bytes::BufMut>(w: &mut W, namespace: &Path, version: Version) -> Result<(), EncodeError> {
@@ -10,6 +10,12 @@ pub fn encode_namespace<W: bytes::BufMut>(w: &mut W, namespace: &Path, version: 
 		0u64.encode(w, version)?;
 	} else {
 		let parts: Vec<&str> = path_str.split('/').collect();
+
+		// The IETF draft limits namespaces to 32 parts.
+		if parts.len() > 32 {
+			return Err(BoundsExceeded.into());
+		}
+
 		(parts.len() as u64).encode(w, version)?;
 		for part in parts {
 			part.encode(w, version)?;
@@ -20,13 +26,19 @@ pub fn encode_namespace<W: bytes::BufMut>(w: &mut W, namespace: &Path, version: 
 
 /// Helper function to decode namespace from tuple of strings
 pub fn decode_namespace<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Path<'static>, DecodeError> {
-	let count = usize::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::CountOverflow)?;
+	let count = u64::decode(r, version)?;
 
 	if count == 0 {
 		return Ok(Path::from(String::new()));
 	}
 
-	let mut parts = Vec::with_capacity(count.min(16));
+	// The IETF draft limits namespaces to 32 parts.
+	if count > 32 {
+		return Err(DecodeError::BoundsExceeded);
+	}
+
+	let count = count as usize;
+	let mut parts = Vec::with_capacity(count);
 	for _ in 0..count {
 		let part = String::decode(r, version)?;
 		parts.push(part);

@@ -116,12 +116,9 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		// Switch the stream to the negotiated version.
-		stream.set_version(version);
-
 		match version {
 			Version::Lite(v) => {
-				let stream = stream.map_version(v);
+				let stream = stream.with_version(v);
 				lite::start(
 					session.clone(),
 					Some(stream),
@@ -139,7 +136,7 @@ impl Client {
 						.unwrap_or_default(),
 				);
 
-				let stream = stream.map_version(v);
+				let stream = stream.with_version(v);
 				ietf::start(
 					session.clone(),
 					stream,

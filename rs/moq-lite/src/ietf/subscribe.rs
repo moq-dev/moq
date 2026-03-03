@@ -13,7 +13,7 @@ use crate::{
 use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
 
-type Version = super::Version;
+use super::Version;
 
 #[derive(Clone, Copy, Debug, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]

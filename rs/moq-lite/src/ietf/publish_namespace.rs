@@ -11,7 +11,7 @@ use crate::{
 use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
 
-type Version = super::Version;
+use super::Version;
 
 /// PublishNamespace message (0x06)
 /// Sent by the publisher to announce the availability of a namespace.

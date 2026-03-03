@@ -8,7 +8,7 @@ use crate::Version;
 /// The size prefix format depends on the version:
 /// - Lite versions use varint size prefix
 /// - IETF versions use u16 size prefix
-pub(crate) trait Message: Sized + std::fmt::Debug {
+pub trait Message: Sized + std::fmt::Debug {
 	/// Encode this message body (without size prefix).
 	fn encode_msg<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError>;
 
@@ -17,7 +17,7 @@ pub(crate) trait Message: Sized + std::fmt::Debug {
 }
 
 /// IETF messages have a message type ID used for control stream dispatch.
-pub(crate) trait IetfMessage: Message {
+pub trait IetfMessage: Message {
 	const ID: u64;
 }
 

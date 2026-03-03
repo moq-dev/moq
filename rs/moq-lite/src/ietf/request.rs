@@ -7,7 +7,7 @@ use crate::{
 
 use super::Message;
 
-type Version = super::Version;
+use super::Version;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RequestId(pub u64);

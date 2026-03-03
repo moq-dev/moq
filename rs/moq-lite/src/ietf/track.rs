@@ -13,7 +13,7 @@ use crate::{
 use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
 
-type Version = super::Version;
+use super::Version;
 
 /// TrackStatus message (0x0d)
 /// v14: own format (TrackStatusRequest-like with subscribe fields)

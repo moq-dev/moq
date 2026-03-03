@@ -7,7 +7,7 @@ use super::Version;
 /// A trait for lite messages that are automatically size-prefixed during encoding/decoding.
 ///
 /// Lite messages use a varint size prefix.
-pub(crate) trait Message: Sized + std::fmt::Debug {
+pub trait Message: Sized + std::fmt::Debug {
 	/// Encode this message body (without size prefix).
 	fn encode_msg<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError>;
 

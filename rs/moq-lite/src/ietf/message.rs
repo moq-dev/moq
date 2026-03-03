@@ -7,7 +7,7 @@ use super::Version;
 /// A trait for IETF messages that are automatically size-prefixed during encoding/decoding.
 ///
 /// IETF messages use a u16 size prefix and have a message type ID for control stream dispatch.
-pub(crate) trait Message: Sized + std::fmt::Debug {
+pub trait Message: Sized + std::fmt::Debug {
 	const ID: u64;
 
 	/// Encode this message body (without size prefix).

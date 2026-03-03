@@ -37,9 +37,6 @@ pub enum DecodeError {
 	#[error("bounds exceeded")]
 	BoundsExceeded,
 
-	#[error("count overflow")]
-	CountOverflow,
-
 	#[error("expected end")]
 	ExpectedEnd,
 

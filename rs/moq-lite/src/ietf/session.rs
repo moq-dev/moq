@@ -6,7 +6,7 @@ use crate::{
 
 use super::{Message, Publisher, Subscriber, Version};
 
-pub(crate) fn start<S: web_transport_trait::Session>(
+pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	setup: Stream<S, Version>,
 	request_id_max: RequestId,

@@ -117,7 +117,7 @@ use crate::{
 
 use super::Message;
 
-type Version = super::Version;
+use super::Version;
 
 /// Used to be called SubscribeDone
 #[derive(Clone, Debug)]

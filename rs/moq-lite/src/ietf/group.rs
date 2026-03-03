@@ -2,7 +2,7 @@ use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-type Version = super::Version;
+use super::Version;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]

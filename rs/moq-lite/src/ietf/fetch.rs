@@ -11,7 +11,7 @@ use crate::{
 
 use super::Message;
 
-type Version = super::Version;
+use super::Version;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchType<'a> {
