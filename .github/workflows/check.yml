@@ -1,4 +1,4 @@
-name: Main
+name: Check
 
 permissions:
   id-token: write
@@ -6,7 +6,6 @@ permissions:
 
 on:
   pull_request:
-    branches: ["main"]
 
 jobs:
   check:
