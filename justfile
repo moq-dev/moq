@@ -368,10 +368,10 @@ ci:
 	echo "Checking all feature combinations..."
 	cargo hack check --workspace --each-feature --no-dev-deps
 
-	# Check semver compatibility against crates.io
-	# requires: cargo install cargo-semver-checks
-	# libmoq is an internal C-ABI crate and is intentionally excluded from published-crate semver checks.
-	echo "Checking semver compatibility..."
+# Check semver compatibility against crates.io
+# requires: cargo install cargo-semver-checks
+# libmoq is an internal C-ABI crate and is intentionally excluded from published-crate semver checks.
+semver:
 	cargo semver-checks check-release --workspace --exclude libmoq
 
 # Update versions and changelogs via release-plz

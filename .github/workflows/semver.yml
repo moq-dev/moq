@@ -1,4 +1,4 @@
-name: Check
+name: Semver
 
 permissions:
   id-token: write
@@ -6,7 +6,7 @@ permissions:
 
 on:
   pull_request:
-    branches: ["dev"]
+    branches: ["main"]
 
 jobs:
   check:
@@ -28,4 +28,4 @@ jobs:
           cache-on-failure: true
 
       # Run checks with cached dependencies
-      - run: nix develop --command just check
+      - run: nix develop --command just semver
