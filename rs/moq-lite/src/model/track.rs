@@ -14,9 +14,8 @@
 
 use crate::{Error, Result};
 
-use super::state::{Consumer, Producer, Weak};
-use super::waiter::waiter_fn;
 use super::{Group, GroupConsumer, GroupProducer};
+use conducer::{Consumer, Producer, Weak, wait};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -251,7 +250,7 @@ impl TrackProducer {
 			group.abort(err.clone()).ok();
 		}
 
-		state.abort(err);
+		state.close(conducer::Error::Closed);
 		Ok(())
 	}
 
@@ -269,7 +268,7 @@ impl TrackProducer {
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state.unused().await
+		Ok(self.state.unused().await?)
 	}
 
 	/// Return true if the track has been closed.
@@ -324,7 +323,7 @@ impl TrackWeak {
 			group.abort(err.clone()).ok();
 		}
 
-		state.abort(err);
+		state.close(conducer::Error::Closed);
 	}
 
 	pub fn is_closed(&self) -> bool {
@@ -343,7 +342,7 @@ impl TrackWeak {
 	}
 
 	pub async fn unused(&self) -> crate::Result<()> {
-		self.state.unused().await
+		Ok(self.state.unused().await?)
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {
@@ -365,7 +364,7 @@ impl TrackConsumer {
 	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
 		let index = self.index;
-		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_next_group(index))).await?;
+		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_group(index))).await?;
 		let consumer = res.map(|(producer, found_index)| {
 			self.index = found_index + 1;
 			producer.consume()
@@ -377,17 +376,14 @@ impl TrackConsumer {
 	///
 	/// Returns None if the group is not in the cache and a newer group exists.
 	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
-		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_get_group(sequence))).await?;
+		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_get_group(sequence))).await?;
 		Ok(res.map(|producer| producer.consume()))
 	}
 
 	/// Block until the track is closed.
 	pub async fn closed(&self) -> Result<()> {
-		let err = self.state.closed().await;
-		match err {
-			Error::Closed | Error::Dropped => Ok(()),
-			err => Err(err),
-		}
+		let _ = self.state.closed().await;
+		Ok(())
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {
@@ -421,14 +417,6 @@ impl TrackConsumer {
 
 	pub fn assert_closed(&self) {
 		assert!(self.closed().now_or_never().is_some(), "should be closed");
-	}
-
-	// TODO assert specific errors after implementing PartialEq
-	pub fn assert_error(&self) {
-		assert!(
-			self.closed().now_or_never().expect("should not block").is_err(),
-			"should be error"
-		);
 	}
 
 	pub fn assert_is_clone(&self, other: &Self) {

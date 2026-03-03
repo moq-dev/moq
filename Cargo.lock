@@ -734,6 +734,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75984efb6ed102a0d42db99afb6c1948f0380d1d91808d5529916e6c08b49d8d"
 
 [[package]]
+name = "conducer"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e00f0528195585507a362c3c206c15f73d577bdddb0208de24d93ef46b4c8e4e"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "console-api"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3089,6 +3098,7 @@ name = "moq-lite"
 version = "0.15.0"
 dependencies = [
  "bytes",
+ "conducer",
  "futures",
  "hex",
  "num_enum",

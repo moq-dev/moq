@@ -3,14 +3,9 @@ use std::{
 	task::Poll,
 };
 
-use crate::{
-	Error, TrackConsumer, TrackProducer,
-	model::{
-		state::{Consumer, Producer},
-		track::TrackWeak,
-		waiter::{Waiter, waiter_fn},
-	},
-};
+use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
+
+use conducer::{Consumer, Producer, Waiter, wait};
 
 use super::Track;
 
@@ -120,7 +115,7 @@ impl BroadcastProducer {
 			request.abort(err.clone()).ok();
 		}
 
-		state.abort(err);
+		state.close(conducer::Error::Closed);
 		Ok(())
 	}
 
@@ -161,7 +156,7 @@ impl BroadcastDynamic {
 		Self { state }
 	}
 
-	fn poll_requested_track(&self, waiter: &Waiter) -> Poll<Result<Option<TrackProducer>, Error>> {
+	fn poll_requested_track(&self, waiter: &Waiter) -> Poll<conducer::Result<Option<TrackProducer>>> {
 		self.state.poll_modify(waiter, |state| {
 			if state.requests.is_empty() {
 				return Poll::Pending;
@@ -172,7 +167,7 @@ impl BroadcastDynamic {
 
 	/// Block until a consumer requests a track, returning its producer.
 	pub async fn requested_track(&mut self) -> Result<Option<TrackProducer>, Error> {
-		waiter_fn(move |waiter| self.poll_requested_track(waiter)).await
+		Ok(wait(move |waiter| self.poll_requested_track(waiter)).await?)
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -196,7 +191,7 @@ impl BroadcastDynamic {
 			request.abort(err.clone()).ok();
 		}
 
-		state.abort(err);
+		state.close(conducer::Error::Closed);
 		Ok(())
 	}
 
@@ -291,7 +286,7 @@ impl BroadcastConsumer {
 	}
 
 	pub async fn closed(&self) -> Error {
-		self.state.closed().await
+		self.state.closed().await.into()
 	}
 
 	/// Check if this is the exact same instance of a broadcast.
@@ -362,10 +357,10 @@ mod test {
 		producer.abort(Error::Cancel).unwrap();
 
 		// The requested TrackProducer should have been aborted.
-		track2.assert_error();
+		track2.assert_closed();
 
 		// track1 should also be closed because close() cascades.
-		track1c.assert_error();
+		track1c.assert_closed();
 
 		// track1's producer should also be closed.
 		assert!(track1.is_closed());
@@ -402,8 +397,8 @@ mod test {
 		let track4 = consumer.assert_subscribe_track(&Track::new("track2"));
 		drop(producer);
 
-		// Make sure the track is errored, not closed.
-		track4.assert_error();
+		// Make sure the track is closed when the producer is dropped.
+		track4.assert_closed();
 
 		let track5 = consumer2.subscribe_track(&Track::new("track3"));
 		assert!(track5.is_err(), "should have errored");

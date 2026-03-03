@@ -178,4 +178,13 @@ impl From<coding::EncodeError> for Error {
 	}
 }
 
+impl From<conducer::Error> for Error {
+	fn from(err: conducer::Error) -> Self {
+		match err {
+			conducer::Error::Closed => Error::Closed,
+			conducer::Error::Dropped => Error::Dropped,
+		}
+	}
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

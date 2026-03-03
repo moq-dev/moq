@@ -4,8 +4,7 @@ use bytes::{Bytes, BytesMut};
 
 use crate::{Error, Result};
 
-use super::state::{Consumer, Producer};
-use super::waiter::waiter_fn;
+use conducer::{Consumer, Producer, wait};
 
 /// A chunk of data with an upfront size.
 ///
@@ -158,8 +157,9 @@ impl FrameProducer {
 	}
 
 	/// Abort the frame with the given error.
-	pub fn abort(&mut self, err: Error) -> Result<()> {
-		self.state.abort(err)
+	pub fn abort(&mut self, _err: Error) -> Result<()> {
+		self.state.close(conducer::Error::Closed)?;
+		Ok(())
 	}
 
 	/// Create a new consumer for the frame.
@@ -173,7 +173,7 @@ impl FrameProducer {
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state.unused().await
+		Ok(self.state.unused().await?)
 	}
 }
 
@@ -210,7 +210,7 @@ impl FrameConsumer {
 	/// Return the next chunk.
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
 		let index = self.index;
-		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_read_chunk(index))).await?;
+		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_chunk(index))).await?;
 		if res.is_some() {
 			self.index += 1;
 		}
@@ -221,7 +221,7 @@ impl FrameConsumer {
 	/// Cancel-safe: returns all or nothing.
 	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>> {
 		let index = self.index;
-		let chunks = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_read_chunks(index))).await?;
+		let chunks = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_chunks(index))).await?;
 		self.index += chunks.len();
 		Ok(chunks)
 	}
@@ -230,7 +230,7 @@ impl FrameConsumer {
 	/// Cancel-safe: returns all or nothing.
 	pub async fn read_all(&mut self) -> Result<Bytes> {
 		let index = self.index;
-		let data = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_read_all(index))).await?;
+		let data = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_all(index))).await?;
 		self.index = usize::MAX; // consumed everything
 		Ok(data)
 	}

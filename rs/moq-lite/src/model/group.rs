@@ -13,9 +13,8 @@ use bytes::Bytes;
 
 use crate::{Error, Result};
 
-use super::state::{Consumer, Producer};
-use super::waiter::waiter_fn;
 use super::{Frame, FrameConsumer, FrameProducer};
+use conducer::{Consumer, Producer, wait};
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
@@ -157,7 +156,7 @@ impl GroupProducer {
 			frame.abort(err.clone()).ok();
 		}
 
-		state.abort(err);
+		state.close(conducer::Error::Closed);
 		Ok(())
 	}
 
@@ -172,12 +171,12 @@ impl GroupProducer {
 
 	/// Block until the group is closed or aborted.
 	pub async fn closed(&self) -> Error {
-		self.state.closed().await
+		self.state.closed().await.into()
 	}
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state.unused().await
+		Ok(self.state.unused().await?)
 	}
 }
 
@@ -218,7 +217,7 @@ impl GroupConsumer {
 	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
 		// Step 1: Get the next frame producer from the group state.
 		let index = self.index;
-		let frame = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
+		let frame = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
 
 		let Some(frame) = frame else {
 			return Ok(None);
@@ -237,14 +236,14 @@ impl GroupConsumer {
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub async fn get_frame(&self, index: usize) -> Result<Option<FrameConsumer>> {
-		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
+		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
 		Ok(res.map(|producer| producer.consume()))
 	}
 
 	/// Return a consumer for the next frame for chunked reading.
 	pub async fn next_frame(&mut self) -> Result<Option<FrameConsumer>> {
 		let index = self.index;
-		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
+		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
 		let consumer = res.map(|producer| {
 			self.index += 1;
 			producer.consume()
