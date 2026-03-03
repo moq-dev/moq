@@ -26,11 +26,14 @@ impl<T: Message> Encode<Version> for T {
 		let mut sizer = Sizer::default();
 		self.encode_msg(&mut sizer, version)?;
 
-		if version.is_lite() {
-			sizer.size.encode(w, version)?;
-		} else {
-			let size: u16 = sizer.size.try_into().map_err(|_| EncodeError::TooLarge)?;
-			size.encode(w, version)?;
+		match version {
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => {
+				sizer.size.encode(w, version)?;
+			}
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				let size: u16 = sizer.size.try_into().map_err(|_| EncodeError::TooLarge)?;
+				size.encode(w, version)?;
+			}
 		}
 
 		self.encode_msg(w, version)
@@ -39,10 +42,11 @@ impl<T: Message> Encode<Version> for T {
 
 impl<T: Message> Decode<Version> for T {
 	fn decode<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
-		let size = if version.is_lite() {
-			usize::decode(buf, version)?
-		} else {
-			u16::decode(buf, version)? as usize
+		let size = match version {
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => usize::decode(buf, version)?,
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				u16::decode(buf, version)? as usize
+			}
 		};
 
 		let mut limited = buf.take(size);

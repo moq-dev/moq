@@ -105,32 +105,35 @@ impl Client {
 		// Switch the stream to the negotiated version.
 		stream.set_version(version);
 
-		if version.is_lite() {
-			lite::start(
-				session.clone(),
-				Some(stream),
-				self.publish.clone(),
-				self.consume.clone(),
-				version,
-			)?;
-		} else {
-			// Decode the parameters to get the initial request ID.
-			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
-			let request_id_max = ietf::RequestId(
-				parameters
-					.get_varint(ietf::ParameterVarInt::MaxRequestId)
-					.unwrap_or_default(),
-			);
+		match version {
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => {
+				lite::start(
+					session.clone(),
+					Some(stream),
+					self.publish.clone(),
+					self.consume.clone(),
+					version,
+				)?;
+			}
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				// Decode the parameters to get the initial request ID.
+				let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
+				let request_id_max = ietf::RequestId(
+					parameters
+						.get_varint(ietf::ParameterVarInt::MaxRequestId)
+						.unwrap_or_default(),
+				);
 
-			ietf::start(
-				session.clone(),
-				stream,
-				request_id_max,
-				true,
-				self.publish.clone(),
-				self.consume.clone(),
-				version,
-			)?;
+				ietf::start(
+					session.clone(),
+					stream,
+					request_id_max,
+					true,
+					self.publish.clone(),
+					self.consume.clone(),
+					version,
+				)?;
+			}
 		}
 
 		tracing::debug!(version = ?server.version, "connected");
