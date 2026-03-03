@@ -9,13 +9,13 @@ const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestam
 /// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
 pub struct Aac {
 	broadcast: moq_lite::BroadcastProducer,
-	catalog: hang::catalog::CatalogProducer,
+	catalog: crate::CatalogProducer,
 	track: Option<hang::container::OrderedProducer>,
 	zero: Option<tokio::time::Instant>,
 }
 
 impl Aac {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::catalog::CatalogProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
 		Self {
 			broadcast,
 			catalog,

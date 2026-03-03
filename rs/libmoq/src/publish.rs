@@ -8,7 +8,7 @@ use crate::{Error, Id, NonZeroSlab};
 #[derive(Default)]
 pub struct Publish {
 	/// Active broadcast producers for publishing.
-	broadcasts: NonZeroSlab<(moq_lite::BroadcastProducer, hang::CatalogProducer)>,
+	broadcasts: NonZeroSlab<(moq_lite::BroadcastProducer, moq_mux::CatalogProducer)>,
 
 	/// Active media encoders/decoders for publishing.
 	media: NonZeroSlab<import::Decoder>,
@@ -17,8 +17,7 @@ pub struct Publish {
 impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
 		let mut broadcast = moq_lite::BroadcastProducer::new();
-		let catalog = broadcast.create_track(hang::Catalog::default_track())?;
-		let catalog = hang::CatalogProducer::new(catalog, hang::Catalog::default());
+		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog));
 		Ok(id)

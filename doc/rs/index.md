@@ -99,7 +99,7 @@ Opinionated helpers to configure a Quinn QUIC endpoint.
 
 ### moq-cli
 
-Command-line tool for media operations (binary name: `moq`).
+Command-line tool for media operations (binary name: `moq-cli`).
 
 **Features:**
 - Publish video from files or FFmpeg
@@ -114,10 +114,10 @@ cargo install moq-cli
 **Usage:**
 ```bash
 # Publish a video file
-moq publish video.mp4
+moq-cli publish video.mp4
 
 # Publish from FFmpeg
-ffmpeg -i input.mp4 -f mpegts - | moq publish -
+ffmpeg -i input.mp4 -f mpegts - | moq-cli publish -
 ```
 
 [Learn more](/app/cli)
@@ -189,7 +189,7 @@ cargo build --release
 nix build github:moq-dev/moq#moq-relay
 
 # Build moq-cli
-nix build github:moq-dev/moq#moq
+nix build github:moq-dev/moq#moq-cli
 ```
 
 ## Quick Start

@@ -9,13 +9,13 @@ const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestam
 /// Opus decoder, initialized via a OpusHead. Does not support Ogg.
 pub struct Opus {
 	broadcast: moq_lite::BroadcastProducer,
-	catalog: hang::CatalogProducer,
+	catalog: crate::CatalogProducer,
 	track: Option<hang::container::OrderedProducer>,
 	zero: Option<tokio::time::Instant>,
 }
 
 impl Opus {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: hang::CatalogProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
 		Self {
 			broadcast,
 			catalog,

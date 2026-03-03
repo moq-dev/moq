@@ -11,11 +11,6 @@ edition = "2024"
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-[[bin]]
-name = "moq"
-path = "src/main.rs"
-doc = false
-
 [features]
 default = ["iroh", "quinn", "websocket"]
 iroh = ["moq-native/iroh"]

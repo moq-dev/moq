@@ -25,6 +25,19 @@ jobs:
           name: kixelated
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
-      - run: nix build ./rs --print-build-logs
+      # Build each package individually so their closures are all cached.
+      # This ensures CDN nodes can download pre-built binaries instead of compiling.
+      - name: Build and cache moq-relay
+        run: |
+          nix build .#moq-relay --print-build-logs
+          cachix push kixelated ./result
 
-      - run: cachix push kixelated ./result
+      - name: Build and cache moq-cli
+        run: |
+          nix build .#moq-cli --print-build-logs
+          cachix push kixelated ./result
+
+      - name: Build and cache moq-token
+        run: |
+          nix build .#moq-token --print-build-logs
+          cachix push kixelated ./result

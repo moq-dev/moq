@@ -62,6 +62,17 @@ pub struct ClientConfig {
 	)]
 	pub max_streams: Option<u64>,
 
+	/// Restrict the client to specific MoQ protocol version(s).
+	///
+	/// By default, the client offers all supported versions and lets the server choose.
+	/// Use this to force a specific version, e.g. `--client-version moq-lite-02`.
+	/// Can be specified multiple times to offer a subset of versions.
+	///
+	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[arg(id = "client-version", long = "client-version", env = "MOQ_CLIENT_VERSION")]
+	pub version: Vec<moq_lite::Version>,
+
 	#[command(flatten)]
 	#[serde(default)]
 	pub tls: ClientTls,
@@ -76,6 +87,15 @@ impl ClientConfig {
 	pub fn init(self) -> anyhow::Result<Client> {
 		Client::new(self)
 	}
+
+	/// Returns the configured versions, defaulting to all if none specified.
+	pub fn versions(&self) -> moq_lite::Versions {
+		if self.version.is_empty() {
+			moq_lite::Versions::all()
+		} else {
+			moq_lite::Versions::from(self.version.clone())
+		}
+	}
 }
 
 impl Default for ClientConfig {
@@ -84,6 +104,7 @@ impl Default for ClientConfig {
 			bind: "[::]:0".parse().unwrap(),
 			backend: None,
 			max_streams: None,
+			version: Vec::new(),
 			tls: ClientTls::default(),
 			#[cfg(feature = "websocket")]
 			websocket: super::ClientWebSocket::default(),
@@ -190,7 +211,7 @@ impl Client {
 		};
 
 		Ok(Self {
-			moq: moq_lite::Client::new(),
+			moq: moq_lite::Client::new().with_versions(config.versions()),
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
@@ -378,5 +399,42 @@ mod tests {
 	fn test_cli_no_disable_verify() {
 		let config = ClientConfig::parse_from(["test"]);
 		assert_eq!(config.tls.disable_verify, None);
+	}
+
+	#[test]
+	fn test_toml_version_survives_update_from() {
+		let toml = r#"
+			version = ["moq-lite-02"]
+		"#;
+
+		let mut config: ClientConfig = toml::from_str(toml).unwrap();
+		assert_eq!(
+			config.version,
+			vec!["moq-lite-02".parse::<moq_lite::Version>().unwrap()]
+		);
+
+		// Simulate: TOML loaded, then CLI args re-applied (no --client-version flag).
+		config.update_from(["test"]);
+		assert_eq!(
+			config.version,
+			vec!["moq-lite-02".parse::<moq_lite::Version>().unwrap()]
+		);
+	}
+
+	#[test]
+	fn test_cli_version() {
+		let config = ClientConfig::parse_from(["test", "--client-version", "moq-lite-03"]);
+		assert_eq!(
+			config.version,
+			vec!["moq-lite-03".parse::<moq_lite::Version>().unwrap()]
+		);
+	}
+
+	#[test]
+	fn test_cli_no_version_defaults_to_all() {
+		let config = ClientConfig::parse_from(["test"]);
+		assert!(config.version.is_empty());
+		// versions() helper returns all when none specified
+		assert_eq!(config.versions().alpns().len(), moq_lite::ALPNS.len());
 	}
 }

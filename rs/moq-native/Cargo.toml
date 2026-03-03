@@ -36,7 +36,7 @@ hex = "0.4"
 humantime = "2.3"
 humantime-serde = "1.1"
 
-moq-lite = { workspace = true }
+moq-lite = { workspace = true, features = ["serde"] }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 quinn = { version = "0.11", default-features = false, features = [
 	"platform-verifier",
@@ -70,4 +70,5 @@ anyhow = "1"
 bytes = "1"
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 toml = "0.9"
+tracing-test = "0.2"
 url = "2"

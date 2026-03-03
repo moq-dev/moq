@@ -44,3 +44,30 @@ resource "google_project_service" "all" {
   disable_dependent_services = false
   disable_on_destroy         = false
 }
+
+# Shared memory alert service (used by both relay and publisher)
+resource "local_file" "memory_alert_service" {
+  content = templatefile("${path.module}/common/memory-alert.service.tftpl", {
+    webhook = var.webhook
+  })
+  filename = "${path.module}/common/gen/memory-alert.service"
+}
+
+module "relay" {
+  source          = "./relay"
+  domain          = var.domain
+  email           = var.email
+  ssh_keys        = var.ssh_keys
+  relays          = local.relays
+  stackscript_id  = linode_stackscript.bootstrap.id
+  gcp_account_key = google_service_account_key.relay.private_key
+  dns_zone_name   = google_dns_managed_zone.relay.name
+}
+
+module "pub" {
+  source          = "./pub"
+  domain          = var.domain
+  ssh_keys        = var.ssh_keys
+  stackscript_id  = linode_stackscript.bootstrap.id
+  gcp_account_key = google_service_account_key.relay.private_key
+}

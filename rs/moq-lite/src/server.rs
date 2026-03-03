@@ -2,7 +2,7 @@
 // use std::sync::Arc;
 
 use crate::{
-	Error, NEGOTIATED, OriginConsumer, OriginProducer, Session, Version,
+	Error, NEGOTIATED, OriginConsumer, OriginProducer, Session, Version, Versions,
 	coding::{Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -12,6 +12,7 @@ use crate::{
 pub struct Server {
 	publish: Option<OriginConsumer>,
 	consume: Option<OriginProducer>,
+	versions: Versions,
 	// TODO: Uncomment when observability feature is merged
 	// stats: Option<Arc<dyn crate::Stats>>,
 }
@@ -31,6 +32,11 @@ impl Server {
 		self
 	}
 
+	pub fn with_versions(mut self, versions: Versions) -> Self {
+		self.versions = versions;
+		self
+	}
+
 	// TODO: Uncomment when observability feature is merged
 	// pub fn with_stats(mut self, stats: impl Into<Option<Arc<dyn crate::Stats>>>) -> Self {
 	// 	self.stats = stats.into();
@@ -44,19 +50,32 @@ impl Server {
 		}
 
 		let (encoding, supported) = match session.protocol() {
-			Some(ietf::ALPN_16) => (
-				Version::Ietf(ietf::Version::Draft16),
-				vec![ietf::Version::Draft16.into()],
-			),
-			Some(ietf::ALPN_15) => (
-				Version::Ietf(ietf::Version::Draft15),
-				vec![ietf::Version::Draft15.into()],
-			),
-			Some(ietf::ALPN_14) => (
-				Version::Ietf(ietf::Version::Draft14),
-				vec![ietf::Version::Draft14.into()],
-			),
+			Some(ietf::ALPN_16) => {
+				let v = self
+					.versions
+					.select(ietf::Version::Draft16.into())
+					.ok_or(Error::Version)?;
+				(v, v.into())
+			}
+			Some(ietf::ALPN_15) => {
+				let v = self
+					.versions
+					.select(ietf::Version::Draft15.into())
+					.ok_or(Error::Version)?;
+				(v, v.into())
+			}
+			Some(ietf::ALPN_14) => {
+				let v = self
+					.versions
+					.select(ietf::Version::Draft14.into())
+					.ok_or(Error::Version)?;
+				(v, v.into())
+			}
 			Some(lite::ALPN_03) => {
+				self.versions
+					.select(lite::Version::Draft03.into())
+					.ok_or(Error::Version)?;
+
 				// Starting with draft-03, there's no more SETUP control stream.
 				lite::start(
 					session.clone(),
@@ -70,7 +89,10 @@ impl Server {
 
 				return Ok(Session::new(session));
 			}
-			Some(lite::ALPN) | None => (Version::Ietf(ietf::Version::Draft14), NEGOTIATED.to_vec()),
+			Some(lite::ALPN) | None => {
+				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
+				(ietf::Version::Draft14.into(), supported)
+			}
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 

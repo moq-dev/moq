@@ -75,6 +75,7 @@ interface Group {
 	consumer: Moq.Group;
 	frames: Frame[]; // decode order
 	latest?: Time.Micro; // The timestamp of the latest known frame
+	done?: boolean; // Set when #runGroup finishes reading all frames
 }
 
 export class Consumer {
@@ -158,7 +159,7 @@ export class Consumer {
 
 				group.frames.push(frame);
 
-				if (!group.latest || timestamp > group.latest) {
+				if (group.latest === undefined || timestamp > group.latest) {
 					group.latest = timestamp;
 				}
 
@@ -175,62 +176,70 @@ export class Consumer {
 		} catch (_err) {
 			// Ignore errors, we close groups on purpose to skip them.
 		} finally {
+			group.done = true;
+
 			if (group.consumer.sequence === this.#active) {
 				// Advance to the next group.
 				this.#active += 1;
-
-				this.#notify?.();
-				this.#notify = undefined;
 			}
+
+			// Recompute buffered ranges now that this group is done,
+			// so consecutive done groups can merge into a single range.
+			this.#updateBuffered();
+
+			// Always notify - the consumer may need to advance past this group
+			// even if it wasn't active when this task finished.
+			this.#notify?.();
+			this.#notify = undefined;
 
 			group.consumer.close();
 		}
 	}
 
 	#checkLatency() {
-		// We can only skip if there are at least two groups.
-		if (this.#groups.length < 2) return;
+		if (this.#active === undefined) return;
 
-		const first = this.#groups[0];
+		let skipped = false;
 
-		// Check the difference between the earliest known frame and the latest known frame
-		let min: number | undefined;
-		let max: number | undefined;
+		// Keep skipping the oldest group while the buffered span exceeds the latency target.
+		// This also handles gaps in group sequence numbers: if #active points to a missing
+		// group, the latency span proves the missing content is too old to wait for.
+		while (this.#groups.length >= 2) {
+			const threshold = Moq.Time.Micro.fromMilli(this.#latency.peek());
 
-		for (const group of this.#groups) {
-			if (!group.latest) continue;
+			// Check the difference between the earliest and latest known frames.
+			let min: number | undefined;
+			let max: number | undefined;
 
-			// Use the earliest unconsumed frame in the group.
-			const frame = group.frames.at(0)?.timestamp ?? group.latest;
-			if (min === undefined || frame < min) {
-				min = frame;
+			for (const group of this.#groups) {
+				if (group.latest === undefined) continue;
+
+				const frame = group.frames.at(0)?.timestamp ?? group.latest;
+				if (min === undefined || frame < min) min = frame;
+				if (max === undefined || group.latest > max) max = group.latest;
 			}
 
-			if (max === undefined || group.latest > max) {
-				max = group.latest;
-			}
-		}
+			if (min === undefined || max === undefined) break;
 
-		if (min === undefined || max === undefined) return;
+			const latency = max - min;
+			if (latency <= threshold) break;
 
-		const latency = max - min;
-		if (latency < Moq.Time.Micro.fromMilli(this.#latency.peek())) return;
-
-		if (this.#active !== undefined && first.consumer.sequence <= this.#active) {
-			this.#groups.shift();
-
+			const first = this.#groups.shift()!;
 			this.#active = this.#groups[0]?.consumer.sequence;
-			console.warn(`skipping slow group: ${first.consumer.sequence} < ${this.#active}`);
+			console.warn(`skipping slow group: ${first.consumer.sequence} -> ${this.#active}`);
 
 			first.consumer.close();
 			first.frames.length = 0;
+			skipped = true;
 		}
 
-		this.#updateBuffered();
+		if (skipped) {
+			this.#updateBuffered();
 
-		// Wake up any consumers waiting for a new frame.
-		this.#notify?.();
-		this.#notify = undefined;
+			// Wake up any consumers waiting for a new frame.
+			this.#notify?.();
+			this.#notify = undefined;
+		}
 	}
 
 	// Returns the next frame in order, along with the group number.
@@ -249,11 +258,18 @@ export class Consumer {
 				}
 
 				// Check if the group is done and then remove it.
-				if (this.#active > this.#groups[0].consumer.sequence) {
+				// A group is removable when #active has advanced past it, OR when
+				// its #runGroup task has finished (done) and all frames are consumed.
+				// The latter handles the case where #runGroup finished before
+				// #active reached this group (e.g. after a latency skip).
+				if (this.#active > this.#groups[0].consumer.sequence || this.#groups[0].done) {
+					if (this.#groups[0].consumer.sequence === this.#active) {
+						this.#active += 1;
+					}
+
 					const group = this.#groups.shift();
 					if (group) {
 						this.#updateBuffered();
-						// Always true
 						return { frame: undefined, group: group.consumer.sequence };
 					}
 				}
@@ -286,20 +302,27 @@ export class Consumer {
 		// Each contiguous sequence of groups forms a buffered range
 		const ranges: BufferedRanges = [];
 
+		let prev: Group | undefined;
+
 		for (const group of this.#groups) {
 			const first = group.frames.at(0);
-			if (!first || !group.latest) continue;
+			if (!first || group.latest === undefined) continue;
 
 			const start = Moq.Time.Milli.fromMicro(first.timestamp);
 			const end = Moq.Time.Milli.fromMicro(group.latest);
 
-			// Try to merge with the last range if contiguous
+			// Merge with the previous range if it overlaps, or if the previous group
+			// is done and sequential (the audio is contiguous even though frame
+			// timestamps don't overlap, since each frame has a nonzero duration).
 			const last = ranges.at(-1);
-			if (last && last.end >= start) {
+			const contiguous = prev?.done && prev.consumer.sequence + 1 === group.consumer.sequence;
+			if (last && (last.end >= start || contiguous)) {
 				last.end = Moq.Time.Milli.max(last.end, end);
 			} else {
 				ranges.push({ start, end });
 			}
+
+			prev = group;
 		}
 
 		this.#buffered.set(ranges);

@@ -17,6 +17,7 @@ use url::Url;
 pub(crate) struct QuinnClient {
 	pub quic: quinn::Endpoint,
 	pub transport: Arc<quinn::TransportConfig>,
+	pub versions: moq_lite::Versions,
 }
 
 impl QuinnClient {
@@ -44,7 +45,11 @@ impl QuinnClient {
 		let quic =
 			quinn::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
 
-		Ok(Self { quic, transport })
+		Ok(Self {
+			quic,
+			transport,
+			versions: config.versions(),
+		})
 	}
 
 	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> anyhow::Result<web_transport_quinn::Session> {
@@ -85,9 +90,14 @@ impl QuinnClient {
 			url.set_scheme("https").expect("failed to set scheme");
 		}
 
-		let alpns = match url.scheme() {
+		let alpns: Vec<Vec<u8>> = match url.scheme() {
 			"https" => vec![web_transport_quinn::ALPN.as_bytes().to_vec()],
-			"moqt" | "moql" => moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
+			"moqt" | "moql" => self
+				.versions
+				.alpns()
+				.iter()
+				.map(|alpn| alpn.as_bytes().to_vec())
+				.collect(),
 			_ => anyhow::bail!("url scheme must be 'https', 'moqt', or 'moql'"),
 		};
 
@@ -104,7 +114,7 @@ impl QuinnClient {
 		tracing::Span::current().record("id", connection.stable_id());
 
 		let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
-		for alpn in moq_lite::ALPNS {
+		for alpn in self.versions.alpns() {
 			request = request.with_protocol(alpn.to_string());
 		}
 
@@ -222,7 +232,12 @@ impl QuinnServer {
 			.with_cert_resolver(certs.clone());
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
-		let mut alpns: Vec<Vec<u8>> = moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
+		let mut alpns: Vec<Vec<u8>> = config
+			.versions()
+			.alpns()
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.collect();
 		alpns.push(web_transport_quinn::ALPN.as_bytes().to_vec());
 
 		tls.alpn_protocols = alpns;
@@ -290,11 +305,12 @@ pub(crate) enum QuinnRequest {
 	},
 	WebTransport {
 		request: web_transport_quinn::Request,
+		alpns: Vec<&'static str>,
 	},
 }
 
 impl QuinnRequest {
-	pub async fn accept(conn: quinn::Incoming) -> anyhow::Result<Self> {
+	pub async fn accept(conn: quinn::Incoming, alpns: Vec<&'static str>) -> anyhow::Result<Self> {
 		let mut conn = conn.accept()?;
 
 		let handshake = conn
@@ -322,7 +338,7 @@ impl QuinnRequest {
 				let request = web_transport_quinn::Request::accept(conn)
 					.await
 					.context("failed to receive WebTransport request")?;
-				Ok(Self::WebTransport { request })
+				Ok(Self::WebTransport { request, alpns })
 			}
 			alpn if moq_lite::ALPNS.contains(&alpn) => {
 				let url = format!("moqt://{}", host).parse::<Url>().unwrap();
@@ -346,11 +362,15 @@ impl QuinnRequest {
 				request,
 				response,
 			} => Ok(web_transport_quinn::Session::raw(connection, request, response)),
-			QuinnRequest::WebTransport { request } => {
+			QuinnRequest::WebTransport { request, alpns } => {
 				let mut response = web_transport_quinn::proto::ConnectResponse::OK;
-				// TODO actually pick a valid moq protocol
-				if let Some(alpn) = request.protocols.first() {
-					response = response.with_protocol(alpn);
+				// Pick the first sub-protocol that we actually support.
+				// This is the WebTransport equivalent of ALPN negotiation.
+				// If no match is found, we default to no sub-protocol to support older
+				// clients that don't use ALPN. We assume moq-transport-14/moq-lite-02
+				// and perform the SETUP_x exchange instead.
+				if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
+					response = response.with_protocol(protocol);
 				}
 				request.respond(response).await
 			}
@@ -361,7 +381,7 @@ impl QuinnRequest {
 	pub fn url(&self) -> Option<&Url> {
 		match self {
 			QuinnRequest::Raw { .. } => None,
-			QuinnRequest::WebTransport { request } => Some(&request.url),
+			QuinnRequest::WebTransport { request, .. } => Some(&request.url),
 		}
 	}
 
@@ -375,7 +395,7 @@ impl QuinnRequest {
 				connection.close(status.as_u16().into(), status.as_str().as_bytes());
 				Ok(())
 			}
-			QuinnRequest::WebTransport { request, .. } => request.reject(status).await,
+			QuinnRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
 		}
 	}
 }

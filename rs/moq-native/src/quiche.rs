@@ -18,6 +18,7 @@ pub(crate) struct QuicheClient {
 	pub bind: net::SocketAddr,
 	pub disable_verify: bool,
 	pub max_streams: u64,
+	pub versions: moq_lite::Versions,
 }
 
 impl QuicheClient {
@@ -30,6 +31,7 @@ impl QuicheClient {
 			bind: config.bind,
 			disable_verify: config.tls.disable_verify.unwrap_or_default(),
 			max_streams: config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS),
+			versions: config.versions(),
 		})
 	}
 
@@ -41,9 +43,14 @@ impl QuicheClient {
 			anyhow::bail!("fingerprint verification (http:// scheme) is not supported with the quiche backend");
 		}
 
-		let alpns = match url.scheme() {
+		let alpns: Vec<Vec<u8>> = match url.scheme() {
 			"https" => vec![web_transport_quiche::ALPN.as_bytes().to_vec()],
-			"moqt" | "moql" => moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
+			"moqt" | "moql" => self
+				.versions
+				.alpns()
+				.iter()
+				.map(|alpn| alpn.as_bytes().to_vec())
+				.collect(),
 			_ => anyhow::bail!("url scheme must be 'https', 'moqt', or 'moql'"),
 		};
 
@@ -60,7 +67,7 @@ impl QuicheClient {
 		tracing::debug!(%url, "connecting via quiche");
 
 		let mut request = web_transport_quiche::proto::ConnectRequest::new(url.clone());
-		for alpn in moq_lite::ALPNS {
+		for alpn in self.versions.alpns() {
 			request = request.with_protocol(alpn.to_string());
 		}
 
@@ -139,7 +146,12 @@ impl QuicheServer {
 		}));
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
-		let mut alpns: Vec<Vec<u8>> = moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
+		let mut alpns: Vec<Vec<u8>> = config
+			.versions()
+			.alpns()
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.collect();
 		alpns.push(b"h3".to_vec());
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
@@ -243,11 +255,15 @@ pub(crate) enum QuicheRequest {
 	},
 	WebTransport {
 		request: web_transport_quiche::h3::Request,
+		alpns: Vec<&'static str>,
 	},
 }
 
 impl QuicheRequest {
-	pub async fn accept(incoming: web_transport_quiche::ez::Incoming) -> anyhow::Result<Self> {
+	pub async fn accept(
+		incoming: web_transport_quiche::ez::Incoming,
+		alpns: Vec<&'static str>,
+	) -> anyhow::Result<Self> {
 		tracing::debug!(ip = %incoming.peer_addr(), "accepting via quiche");
 
 		// Accept the connection and wait for it to be established
@@ -264,7 +280,7 @@ impl QuicheRequest {
 				let request = web_transport_quiche::h3::Request::accept(conn)
 					.await
 					.context("failed to accept WebTransport request")?;
-				Ok(Self::WebTransport { request })
+				Ok(Self::WebTransport { request, alpns })
 			}
 			alpn if moq_lite::ALPNS.contains(&alpn) => Ok(Self::Raw {
 				connection: conn,
@@ -284,14 +300,13 @@ impl QuicheRequest {
 				request,
 				response,
 			} => Ok(web_transport_quiche::Connection::raw(connection, request, response)),
-			QuicheRequest::WebTransport { request } => {
+			QuicheRequest::WebTransport { request, alpns } => {
 				let mut response = web_transport_quiche::proto::ConnectResponse::OK;
-
-				// TODO actually pick a valid moq protocol
-				if let Some(alpn) = request.protocols.first() {
-					response = response.with_protocol(alpn);
+				// Pick the first sub-protocol that we actually support.
+				// This is the WebTransport equivalent of ALPN negotiation.
+				if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
+					response = response.with_protocol(protocol);
 				}
-
 				request.respond(response).await
 			}
 		}
@@ -301,7 +316,7 @@ impl QuicheRequest {
 	pub fn url(&self) -> Option<&Url> {
 		match self {
 			QuicheRequest::Raw { .. } => None,
-			QuicheRequest::WebTransport { request } => Some(&request.url),
+			QuicheRequest::WebTransport { request, .. } => Some(&request.url),
 		}
 	}
 
@@ -315,7 +330,7 @@ impl QuicheRequest {
 				let _: () = connection.close(status.as_u16().into(), status.as_str());
 				Ok(())
 			}
-			QuicheRequest::WebTransport { request } => request.reject(status).await,
+			QuicheRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
 		}
 	}
 }

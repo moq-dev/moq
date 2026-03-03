@@ -54,24 +54,12 @@
 	box-sizing: border-box;
 }
 
-.watch-ui__buffer-range {
+.watch-ui__buffer-canvas {
 	position: absolute;
-	display: flex;
-	align-items: center;
-	justify-content: flex-end;
-	top: var(--spacing-2);
-	height: calc(100% - var(--spacing-4));
-	border-radius: var(--spacing-2);
-	min-width: var(--spacing-2);
-	opacity: 0.85;
-	overflow: hidden;
-}
-
-.watch-ui__buffer-overflow-label {
-	font-size: 0.5625rem;
-	font-weight: 500;
-	color: var(--color-black-alpha-70);
-	padding-right: var(--spacing-4);
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 100%;
 }
 
 .watch-ui__buffer-target-area {

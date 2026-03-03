@@ -254,8 +254,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track.create_group(group)?
 		};
 
-		// NOTE: We don't check `group.unused()` because it's being written to a cache.
-		match self.run_group(stream, &mut group).await {
+		let res = tokio::select! {
+			err = group.closed() => Err(err),
+			res = self.run_group(stream, group.clone()) => res,
+		};
+
+		match res {
 			Err(Error::Cancel) => {
 				tracing::trace!(group = %group.info.sequence, "group cancelled");
 				let _ = group.close(Error::Cancel);
@@ -276,7 +280,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_group(
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
-		group: &mut GroupProducer,
+		mut group: GroupProducer,
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
 			let mut frame = group.create_frame(Frame { size })?;

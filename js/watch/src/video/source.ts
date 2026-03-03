@@ -22,8 +22,120 @@ export type Target = {
 	// The desired size of the video in pixels.
 	pixels?: number;
 
-	// TODO bitrate
+	// Maximum desired bitrate in bits per second.
+	bitrate?: number;
 };
+
+/**
+ * A filter that returns matching renditions sorted by preference (most preferred first).
+ * Must return at least one rendition.
+ */
+type RenditionFilter = (entries: [string, Catalog.VideoConfig][]) => string[];
+
+/**
+ * Filter and rank renditions by a maximum pixel count.
+ * Returns renditions within budget (largest first for best quality).
+ * Over-budget and unknown-resolution renditions are excluded.
+ * If nothing is within budget, falls back to the single smallest rendition.
+ */
+function byPixels(target: number): RenditionFilter {
+	return (entries) => {
+		const within: { name: string; size: number }[] = [];
+		const rest: { name: string; size: number }[] = [];
+
+		for (const [name, config] of entries) {
+			if (config.codedWidth && config.codedHeight) {
+				const size = config.codedWidth * config.codedHeight;
+				if (size <= target) {
+					within.push({ name, size });
+				} else {
+					rest.push({ name, size });
+				}
+			}
+		}
+
+		// Best quality within budget
+		within.sort((a, b) => b.size - a.size);
+
+		if (within.length > 0) {
+			return within.map((e) => e.name);
+		}
+
+		// Degrade to smallest over-budget resolution.
+		if (rest.length > 0) {
+			rest.sort((a, b) => a.size - b.size);
+			return [rest[0].name];
+		}
+
+		// No entries had resolution metadata — return all names unranked.
+		return entries.map(([name]) => name);
+	};
+}
+
+/**
+ * Filter and rank renditions by a maximum bitrate budget.
+ * Returns renditions within budget (highest bitrate first for best quality).
+ * Over-budget and unknown-bitrate renditions are excluded.
+ * If nothing is within budget, falls back to the single lowest-bitrate rendition.
+ */
+function byBitrate(target: number): RenditionFilter {
+	return (entries) => {
+		const within: { name: string; bitrate: number }[] = [];
+		const rest: { name: string; bitrate: number }[] = [];
+
+		for (const [name, config] of entries) {
+			if (config.bitrate != null && config.bitrate <= target) {
+				within.push({ name, bitrate: config.bitrate });
+			} else if (config.bitrate != null) {
+				rest.push({ name, bitrate: config.bitrate });
+			}
+		}
+
+		// Best quality within budget
+		within.sort((a, b) => b.bitrate - a.bitrate);
+
+		if (within.length > 0) {
+			return within.map((e) => e.name);
+		}
+
+		// Degrade to lowest over-budget bitrate.
+		if (rest.length > 0) {
+			rest.sort((a, b) => a.bitrate - b.bitrate);
+			return [rest[0].name];
+		}
+
+		// No entries had bitrate metadata — return all names unranked.
+		return entries.map(([name]) => name);
+	};
+}
+
+/**
+ * Pick the best rendition when no filters are active.
+ * Prefers the largest resolution, falls back to highest bitrate,
+ * then falls back to the first entry.
+ */
+function bestRendition(entries: [string, Catalog.VideoConfig][]): string {
+	let best = entries[0];
+
+	for (const entry of entries) {
+		const [, config] = entry;
+		const [, bestConfig] = best;
+
+		const size = (config.codedWidth ?? 0) * (config.codedHeight ?? 0);
+		const bestSize = (bestConfig.codedWidth ?? 0) * (bestConfig.codedHeight ?? 0);
+
+		if (size !== bestSize) {
+			if (size > bestSize) best = entry;
+			continue;
+		}
+
+		if ((config.bitrate ?? 0) > (bestConfig.bitrate ?? 0)) {
+			best = entry;
+		}
+	}
+
+	return best[0];
+}
 
 /**
  * Source handles catalog extraction, support checking, and rendition selection
@@ -113,43 +225,46 @@ export class Source {
 	}
 
 	/**
-	 * Select the best rendition based on target pixel count.
-	 * Rounds up to the closest larger rendition, or falls back to the largest smaller one.
+	 * Select the best rendition using a generic filter system.
+	 *
+	 * Each enabled filter returns matching renditions sorted by preference.
+	 * The first rendition present in every filter's output is selected.
+	 * If no rendition satisfies all filters, a warning is logged.
 	 */
 	#select(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
 		const entries = Object.entries(renditions);
 		if (entries.length === 0) return undefined;
 		if (entries.length === 1) return entries[0][0];
 
-		// If we have no target, then choose the largest supported rendition.
-		const pixels = target?.pixels ?? Number.MAX_SAFE_INTEGER / 2 - 1;
+		// Build enabled filters based on the target.
+		const filters: RenditionFilter[] = [];
 
-		// Round up to the closest rendition.
-		// Also keep track of the 2nd closest, just in case there's nothing larger.
+		if (target?.pixels != null) {
+			filters.push(byPixels(target.pixels));
+		}
+		if (target?.bitrate != null) {
+			filters.push(byBitrate(target.bitrate));
+		}
 
-		let larger: string | undefined;
-		let largerSize: number | undefined;
+		// No filters — pick the best rendition by quality.
+		if (filters.length === 0) {
+			return bestRendition(entries);
+		}
 
-		let smaller: string | undefined;
-		let smallerSize: number | undefined;
+		// Run each filter to get ranked preference lists.
+		const rankings = filters.map((f) => f(entries));
 
-		for (const [name, config] of entries) {
-			if (!config.codedHeight || !config.codedWidth) continue;
+		// Select the first rendition (in the first ranking's order) present in all rankings.
+		const sets = rankings.map((r) => new Set(r));
 
-			const size = config.codedHeight * config.codedWidth;
-			if (size > pixels && (!largerSize || size < largerSize)) {
-				larger = name;
-				largerSize = size;
-			} else if (size < pixels && (!smallerSize || size > smallerSize)) {
-				smaller = name;
-				smallerSize = size;
+		for (const name of rankings[0]) {
+			if (sets.every((s) => s.has(name))) {
+				return name;
 			}
 		}
-		if (larger) return larger;
-		if (smaller) return smaller;
 
-		console.warn("no width/height information, choosing the first supported rendition");
-		return entries[0][0];
+		console.warn("conflicting rendition filters, no rendition satisfies all criteria");
+		return undefined;
 	}
 
 	close(): void {

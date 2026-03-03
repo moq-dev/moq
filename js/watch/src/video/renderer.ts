@@ -58,11 +58,14 @@ export class Renderer {
 		const paused = effect.get(this.paused);
 		if (paused) return;
 
-		// Detect when the canvas is not visible.
+		let intersecting = false;
+
+		// Detect when the canvas is scrolled out of the viewport.
 		const observer = new IntersectionObserver(
 			(entries) => {
 				for (const entry of entries) {
-					this.decoder.enabled.set(entry.isIntersecting);
+					intersecting = entry.isIntersecting;
+					this.decoder.enabled.set(intersecting && !document.hidden);
 				}
 			},
 			{
@@ -70,6 +73,13 @@ export class Renderer {
 				threshold: 0.01,
 			},
 		);
+
+		// Detect when the tab is minimized or hidden.
+		const onVisibility = () => {
+			this.decoder.enabled.set(intersecting && !document.hidden);
+		};
+		document.addEventListener("visibilitychange", onVisibility);
+		effect.cleanup(() => document.removeEventListener("visibilitychange", onVisibility));
 
 		effect.cleanup(() => this.decoder.enabled.set(false));
 

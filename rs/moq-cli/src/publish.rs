@@ -36,9 +36,7 @@ pub struct Publish {
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
 		let mut broadcast = moq_lite::BroadcastProducer::default();
-
-		let catalog = hang::Catalog::default().produce();
-		broadcast.insert_track(&catalog.track)?;
+		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {

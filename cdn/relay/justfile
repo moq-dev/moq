@@ -1,0 +1,106 @@
+# List all of the available commands.
+default:
+  just --list
+
+# Pin to the latest moq-relay release tag (or a specific tag)
+pin tag="":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	TAG="{{tag}}"
+	if [ -z "$TAG" ]; then
+		TAG=$(git ls-remote --tags --sort=-v:refname https://github.com/moq-dev/moq.git 'refs/tags/moq-relay-v*' | grep -v '\^{}' | head -1 | sed 's|.*/||')
+	fi
+	if [ -z "$TAG" ]; then
+		echo "error: no moq-relay tags found" >&2
+		exit 1
+	fi
+	echo "Pinning to $TAG..."
+	nix flake lock --override-input moq "github:moq-dev/moq/$TAG"
+
+# Update all flake inputs to latest
+update:
+	nix flake update
+
+# Get the hostname for a node
+host node:
+	#!/usr/bin/env bash
+	DOMAIN=$(cd .. && tofu output -raw domain)
+	echo "{{node}}.$DOMAIN"
+
+# List the available nodes.
+nodes:
+	@echo "usc: Dallas, TX"
+	@echo "euc: Frankfurt, Germany"
+	@echo "sea: Singapore"
+
+# Deploy moq-relay and moq-cert to all nodes
+[parallel]
+deploy-all: (deploy "usc") (deploy "euc") (deploy "sea")
+
+# Deploy moq-relay and moq-cert to a specific node
+deploy node:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	HOST=$(just host {{node}})
+	echo "Deploying to $HOST..."
+
+	echo "  Copying flake files to /var/lib/moq"
+	rsync -az flake.nix flake.lock root@$HOST:/var/lib/moq/
+
+	echo "  Copying secrets to /var/lib/moq"
+	rsync -az ../secrets/ root@$HOST:/var/lib/moq/
+	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwk /var/lib/moq/*.jwt"
+
+	echo "  Copying systemd units to /etc/systemd/system/..."
+	rsync -az certbot-renew.service certbot-renew.timer root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/
+	rsync -az ../common/vacuum.service ../common/vacuum.timer ../common/memory-alert.sh root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='.gitignore' ../common/gen/ root@$HOST:/etc/systemd/system/
+
+	echo "  Building and caching packages..."
+	ssh root@$HOST "cd /var/lib/moq && nix build .#moq-relay -o relay && nix build .#certbot -o cert && nix build .#jq -o jq"
+
+	echo "  Enabling and starting services..."
+	ssh root@$HOST "\
+		systemctl daemon-reload && \
+		systemctl enable moq-cert.service && \
+		systemctl enable certbot-renew.timer && \
+		systemctl enable vacuum.timer && \
+		systemctl enable memory-alert.service && \
+		systemctl enable moq-relay.service && \
+		systemctl start certbot-renew.timer && \
+		systemctl start vacuum.timer && \
+		systemctl start moq-cert.service && \
+		systemctl restart memory-alert.service && \
+		systemctl restart moq-relay.service"
+
+# Check status of a node
+status node:
+	#!/usr/bin/env bash
+	HOST=$(just host {{node}})
+	echo "=== $HOST ==="
+	ssh root@$HOST "systemctl status moq-relay --no-pager"
+
+status-all: (status "usc") (status "euc") (status "sea")
+
+ssh node:
+	#!/usr/bin/env bash
+	ssh root@$(just host {{node}})
+
+# View logs from a specific node
+logs node:
+	#!/usr/bin/env bash
+	ssh root@$(just host {{node}}) "journalctl -u moq-relay -f"
+
+# Profile moq-relay on a node using perf (built via nix)
+perf node *args:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	HOST=$(just host {{node}})
+	echo "Building perf on $HOST..."
+	ssh root@$HOST "cd /var/lib/moq && nix build .#perf -o perf"
+	echo "Recording on $HOST... (Ctrl+C to stop)"
+	ssh -t root@$HOST "/var/lib/moq/perf/bin/perf record -g -p \$(pidof moq-relay) {{args}}"
+	echo "Copying perf.data..."
+	scp root@$HOST:~/perf.data .
+	echo "Run 'perf report -i perf.data' to analyze."
