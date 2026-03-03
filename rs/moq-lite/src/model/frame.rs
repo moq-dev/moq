@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 
 use crate::{Error, Result};
 
-use conducer::{Consumer, Producer, Weak, wait};
+use conducer::{Consumer, Producer, ProducerMut, Weak, wait};
 
 /// A chunk of data with an upfront size.
 ///
@@ -136,12 +136,16 @@ impl FrameProducer {
 		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
 	}
 
+	fn modify(&self) -> Result<ProducerMut<'_, FrameState>> {
+		self.state.modify().ok_or_else(|| self.err())
+	}
+
 	/// Write a chunk of data to the frame.
 	///
 	/// Returns [Error::WrongSize] if the total bytes written would exceed [Frame::size].
 	pub fn write<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
 		let chunk = chunk.into();
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 		state.write_chunk(chunk)
 	}
 
@@ -157,7 +161,7 @@ impl FrameProducer {
 	///
 	/// Returns [Error::WrongSize] if the bytes written don't match [Frame::size].
 	pub fn finish(&mut self) -> Result<()> {
-		let state = self.state.modify().ok_or_else(|| self.err())?;
+		let state = self.modify()?;
 		if state.remaining != 0 {
 			return Err(Error::WrongSize);
 		}
@@ -166,7 +170,7 @@ impl FrameProducer {
 
 	/// Abort the frame with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 		state.abort = Some(err);
 		state.close();
 		Ok(())

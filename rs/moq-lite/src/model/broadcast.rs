@@ -5,7 +5,7 @@ use std::{
 
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
-use conducer::{Consumer, Producer, Waiter, Weak, wait};
+use conducer::{Consumer, Producer, ProducerMut, Waiter, Weak, wait};
 
 use super::Track;
 
@@ -65,11 +65,15 @@ impl BroadcastProducer {
 		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
 	}
 
+	fn modify(&self) -> Result<ProducerMut<'_, State>, Error> {
+		self.state.modify().ok_or_else(|| self.err())
+	}
+
 	/// Insert a track into the lookup, returning an error on duplicate.
 	///
 	/// NOTE: You probably want to [TrackProducer::clone] first to keep publishing to the track.
 	pub fn insert_track(&mut self, track: &TrackProducer) -> Result<(), Error> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 
 		let hash_map::Entry::Vacant(entry) = state.tracks.entry(track.info.name.clone()) else {
 			return Err(Error::Duplicate);
@@ -82,7 +86,7 @@ impl BroadcastProducer {
 
 	/// Remove a track from the lookup.
 	pub fn remove_track(&mut self, name: &str) -> Result<(), Error> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 
 		state.tracks.remove(name).ok_or(Error::NotFound)?;
 
@@ -111,7 +115,7 @@ impl BroadcastProducer {
 
 	/// Abort the broadcast and all child tracks with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 
 		// Cascade abort to all child tracks.
 		for weak in state.tracks.values() {
@@ -169,6 +173,10 @@ impl BroadcastDynamic {
 		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
 	}
 
+	fn modify(&self) -> Result<ProducerMut<'_, State>, Error> {
+		self.state.modify().ok_or_else(|| self.err())
+	}
+
 	fn poll_requested_track(&self, waiter: &Waiter) -> Poll<Option<TrackProducer>> {
 		self.state.poll_modify(waiter, |state| match state.requests.pop() {
 			Some(track) => Poll::Ready(track),
@@ -191,7 +199,7 @@ impl BroadcastDynamic {
 
 	/// Abort the broadcast with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 
 		// Cascade abort to all child tracks.
 		for weak in state.tracks.values() {

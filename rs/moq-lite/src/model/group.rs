@@ -14,7 +14,7 @@ use bytes::Bytes;
 use crate::{Error, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
-use conducer::{Consumer, Producer, Weak, wait};
+use conducer::{Consumer, Producer, ProducerMut, Weak, wait};
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
@@ -112,6 +112,10 @@ impl GroupProducer {
 		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
 	}
 
+	fn modify(&self) -> Result<ProducerMut<'_, GroupState>> {
+		self.state.modify().ok_or_else(|| self.err())
+	}
+
 	/// A helper method to write a frame from a single byte buffer.
 	///
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
@@ -136,7 +140,7 @@ impl GroupProducer {
 
 	/// Append a frame producer to the group.
 	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 		if state.fin {
 			return Err(Error::Closed);
 		}
@@ -146,7 +150,7 @@ impl GroupProducer {
 
 	/// Mark the group as complete; no more frames will be written.
 	pub fn finish(&mut self) -> Result<()> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 		state.fin = true;
 		Ok(())
 	}
@@ -155,7 +159,7 @@ impl GroupProducer {
 	///
 	/// No updates can be made after this point.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 
 		// Abort all frames still in progress.
 		for frame in state.frames.iter_mut() {

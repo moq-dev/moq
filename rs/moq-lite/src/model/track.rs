@@ -15,7 +15,7 @@
 use crate::{Error, Result};
 
 use super::{Group, GroupConsumer, GroupProducer};
-use conducer::{Consumer, Producer, Weak, wait};
+use conducer::{Consumer, Producer, ProducerMut, Weak, wait};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -150,11 +150,15 @@ impl TrackProducer {
 		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
 	}
 
+	fn modify(&self) -> Result<ProducerMut<'_, State>> {
+		self.state.modify().ok_or_else(|| self.err())
+	}
+
 	/// Create a new group with the given sequence number.
 	pub fn create_group(&mut self, info: Group) -> Result<GroupProducer> {
 		let group = info.produce();
 
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence
 			&& group.info.sequence >= fin
 		{
@@ -175,7 +179,7 @@ impl TrackProducer {
 
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&mut self) -> Result<GroupProducer> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 		let sequence = match state.max_sequence {
 			Some(s) => s.checked_add(1).ok_or(Error::BoundsExceeded)?,
 			None => 0,
@@ -211,7 +215,7 @@ impl TrackProducer {
 	/// No new groups at or above this sequence can be appended.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish(&mut self) -> Result<()> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 		if state.final_sequence.is_some() {
 			return Err(Error::Closed);
 		}
@@ -238,7 +242,7 @@ impl TrackProducer {
 	/// No new groups at or above that sequence can be created.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish_at(&mut self, sequence: u64) -> Result<()> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 		let max = state.max_sequence.ok_or(Error::Closed)?;
 		if state.final_sequence.is_some() || sequence != max {
 			return Err(Error::Closed);
@@ -249,7 +253,7 @@ impl TrackProducer {
 
 	/// Abort the track with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		let mut state = self.modify()?;
 
 		// Abort all groups still in progress.
 		for (group, _) in state.groups.iter_mut().flatten() {
