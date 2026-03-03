@@ -14,7 +14,7 @@ use bytes::Bytes;
 use crate::{Error, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
-use conducer::{Consumer, Producer, wait};
+use conducer::{Consumer, Producer, Weak, wait};
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
@@ -69,6 +69,9 @@ struct GroupState {
 
 	// Whether the group has been finalized (no more frames).
 	fin: bool,
+
+	// The error set when the group is aborted.
+	abort: Option<Error>,
 }
 
 impl GroupState {
@@ -105,6 +108,10 @@ impl GroupProducer {
 		}
 	}
 
+	fn err(&self) -> Error {
+		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
+	}
+
 	/// A helper method to write a frame from a single byte buffer.
 	///
 	/// If you want to write multiple chunks, use [Self::create_frame] to get a frame producer.
@@ -129,7 +136,7 @@ impl GroupProducer {
 
 	/// Append a frame producer to the group.
 	pub fn append_frame(&mut self, frame: FrameProducer) -> Result<()> {
-		let mut state = self.state.modify()?;
+		let mut state = self.state.modify().ok_or_else(|| self.err())?;
 		if state.fin {
 			return Err(Error::Closed);
 		}
@@ -139,7 +146,7 @@ impl GroupProducer {
 
 	/// Mark the group as complete; no more frames will be written.
 	pub fn finish(&mut self) -> Result<()> {
-		let mut state = self.state.modify()?;
+		let mut state = self.state.modify().ok_or_else(|| self.err())?;
 		state.fin = true;
 		Ok(())
 	}
@@ -148,7 +155,7 @@ impl GroupProducer {
 	///
 	/// No updates can be made after this point.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut state = self.state.modify()?;
+		let mut state = self.state.modify().ok_or_else(|| self.err())?;
 
 		// Abort all frames still in progress.
 		for frame in state.frames.iter_mut() {
@@ -156,7 +163,8 @@ impl GroupProducer {
 			frame.abort(err.clone()).ok();
 		}
 
-		state.close(conducer::Error::Closed);
+		state.abort = Some(err);
+		state.close();
 		Ok(())
 	}
 
@@ -164,6 +172,7 @@ impl GroupProducer {
 	pub fn consume(&self) -> GroupConsumer {
 		GroupConsumer {
 			info: self.info.clone(),
+			weak: self.state.weak(),
 			state: self.state.consume(),
 			index: 0,
 		}
@@ -171,12 +180,13 @@ impl GroupProducer {
 
 	/// Block until the group is closed or aborted.
 	pub async fn closed(&self) -> Error {
-		self.state.closed().await.into()
+		self.state.closed().await;
+		self.err()
 	}
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		Ok(self.state.unused().await?)
+		self.state.unused().await.ok_or_else(|| self.err())
 	}
 }
 
@@ -201,6 +211,9 @@ pub struct GroupConsumer {
 	// Shared state with the producer.
 	state: Consumer<GroupState>,
 
+	// Used to read the abort error after the channel closes.
+	weak: Weak<GroupState>,
+
 	// Immutable stream state.
 	pub info: Group,
 
@@ -210,6 +223,10 @@ pub struct GroupConsumer {
 }
 
 impl GroupConsumer {
+	fn err(&self) -> Error {
+		self.weak.borrow().abort.clone().unwrap_or(Error::Dropped)
+	}
+
 	/// Read the next frame's data all at once.
 	///
 	/// Cancel-safe: if cancelled after obtaining the frame but before reading,
@@ -217,7 +234,9 @@ impl GroupConsumer {
 	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
 		// Step 1: Get the next frame producer from the group state.
 		let index = self.index;
-		let frame = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
+		let frame = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index)))
+			.await
+			.ok_or_else(|| self.err())?;
 
 		let Some(frame) = frame else {
 			return Ok(None);
@@ -236,14 +255,18 @@ impl GroupConsumer {
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub async fn get_frame(&self, index: usize) -> Result<Option<FrameConsumer>> {
-		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
+		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index)))
+			.await
+			.ok_or_else(|| self.err())?;
 		Ok(res.map(|producer| producer.consume()))
 	}
 
 	/// Return a consumer for the next frame for chunked reading.
 	pub async fn next_frame(&mut self) -> Result<Option<FrameConsumer>> {
 		let index = self.index;
-		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index))).await?;
+		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index)))
+			.await
+			.ok_or_else(|| self.err())?;
 		let consumer = res.map(|producer| {
 			self.index += 1;
 			producer.consume()

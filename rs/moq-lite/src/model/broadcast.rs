@@ -5,7 +5,7 @@ use std::{
 
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
-use conducer::{Consumer, Producer, Waiter, wait};
+use conducer::{Consumer, Producer, Waiter, Weak, wait};
 
 use super::Track;
 
@@ -34,6 +34,9 @@ struct State {
 	// The current number of dynamic producers.
 	// If this is 0, requests must be empty.
 	dynamic: usize,
+
+	// The error set when the broadcast is aborted.
+	abort: Option<Error>,
 }
 
 /// Manages tracks within a broadcast.
@@ -58,11 +61,15 @@ impl BroadcastProducer {
 		}
 	}
 
+	fn err(&self) -> Error {
+		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
+	}
+
 	/// Insert a track into the lookup, returning an error on duplicate.
 	///
 	/// NOTE: You probably want to [TrackProducer::clone] first to keep publishing to the track.
 	pub fn insert_track(&mut self, track: &TrackProducer) -> Result<(), Error> {
-		let mut state = self.state.modify()?;
+		let mut state = self.state.modify().ok_or_else(|| self.err())?;
 
 		let hash_map::Entry::Vacant(entry) = state.tracks.entry(track.info.name.clone()) else {
 			return Err(Error::Duplicate);
@@ -75,7 +82,7 @@ impl BroadcastProducer {
 
 	/// Remove a track from the lookup.
 	pub fn remove_track(&mut self, name: &str) -> Result<(), Error> {
-		let mut state = self.state.modify()?;
+		let mut state = self.state.modify().ok_or_else(|| self.err())?;
 
 		state.tracks.remove(name).ok_or(Error::NotFound)?;
 
@@ -97,13 +104,14 @@ impl BroadcastProducer {
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
+			weak: self.state.weak(),
 			state: self.state.consume(),
 		}
 	}
 
 	/// Abort the broadcast and all child tracks with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
-		let mut state = self.state.modify()?;
+		let mut state = self.state.modify().ok_or_else(|| self.err())?;
 
 		// Cascade abort to all child tracks.
 		for weak in state.tracks.values() {
@@ -115,7 +123,8 @@ impl BroadcastProducer {
 			request.abort(err.clone()).ok();
 		}
 
-		state.close(conducer::Error::Closed);
+		state.abort = Some(err);
+		state.close();
 		Ok(())
 	}
 
@@ -148,7 +157,7 @@ pub struct BroadcastDynamic {
 
 impl BroadcastDynamic {
 	fn new(state: Producer<State>) -> Self {
-		if let Ok(mut state) = state.modify() {
+		if let Some(mut state) = state.modify() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
 		}
@@ -156,30 +165,33 @@ impl BroadcastDynamic {
 		Self { state }
 	}
 
-	fn poll_requested_track(&self, waiter: &Waiter) -> Poll<conducer::Result<Option<TrackProducer>>> {
-		self.state.poll_modify(waiter, |state| {
-			if state.requests.is_empty() {
-				return Poll::Pending;
-			}
-			Poll::Ready(state.requests.pop())
+	fn err(&self) -> Error {
+		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
+	}
+
+	fn poll_requested_track(&self, waiter: &Waiter) -> Poll<Option<TrackProducer>> {
+		self.state.poll_modify(waiter, |state| match state.requests.pop() {
+			Some(track) => Poll::Ready(track),
+			None => Poll::Pending,
 		})
 	}
 
 	/// Block until a consumer requests a track, returning its producer.
 	pub async fn requested_track(&mut self) -> Result<Option<TrackProducer>, Error> {
-		Ok(wait(move |waiter| self.poll_requested_track(waiter)).await?)
+		Ok(wait(move |waiter| self.poll_requested_track(waiter)).await)
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
+			weak: self.state.weak(),
 			state: self.state.consume(),
 		}
 	}
 
 	/// Abort the broadcast with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
-		let mut state = self.state.modify()?;
+		let mut state = self.state.modify().ok_or_else(|| self.err())?;
 
 		// Cascade abort to all child tracks.
 		for weak in state.tracks.values() {
@@ -191,7 +203,8 @@ impl BroadcastDynamic {
 			request.abort(err.clone()).ok();
 		}
 
-		state.close(conducer::Error::Closed);
+		state.abort = Some(err);
+		state.close();
 		Ok(())
 	}
 
@@ -203,7 +216,7 @@ impl BroadcastDynamic {
 
 impl Drop for BroadcastDynamic {
 	fn drop(&mut self) {
-		if let Ok(mut state) = self.state.modify() {
+		if let Some(mut state) = self.state.modify() {
 			// We do a saturating sub so Producer::dynamic() can avoid returning an error.
 			state.dynamic = state.dynamic.saturating_sub(1);
 			if state.dynamic != 0 {
@@ -239,14 +252,19 @@ impl BroadcastDynamic {
 /// Subscribe to arbitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
+	weak: Weak<State>,
 	state: Consumer<State>,
 }
 
 impl BroadcastConsumer {
+	fn err(&self) -> Error {
+		self.weak.borrow().abort.clone().unwrap_or(Error::Dropped)
+	}
+
 	pub fn subscribe_track(&self, track: &Track) -> Result<TrackConsumer, Error> {
 		// Upgrade to a temporary producer so we can modify the state.
-		let producer = self.state.produce()?;
-		let mut state = producer.modify()?;
+		let producer = self.state.produce().ok_or_else(|| self.err())?;
+		let mut state = producer.modify().ok_or_else(|| self.err())?;
 
 		if let Some(weak) = state.tracks.get(&track.name) {
 			if !weak.is_closed() {
@@ -273,8 +291,8 @@ impl BroadcastConsumer {
 		let consumer_state = self.state.clone();
 		web_async::spawn(async move {
 			let _ = weak.unused().await;
-			if let Ok(producer) = consumer_state.produce()
-				&& let Ok(mut state) = producer.modify()
+			if let Some(producer) = consumer_state.produce()
+				&& let Some(mut state) = producer.modify()
 				&& let Some(current) = state.tracks.remove(&weak.info.name)
 				&& !current.is_clone(&weak)
 			{
@@ -286,7 +304,8 @@ impl BroadcastConsumer {
 	}
 
 	pub async fn closed(&self) -> Error {
-		self.state.closed().await.into()
+		self.state.closed().await;
+		self.err()
 	}
 
 	/// Check if this is the exact same instance of a broadcast.

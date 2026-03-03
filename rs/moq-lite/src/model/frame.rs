@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 
 use crate::{Error, Result};
 
-use conducer::{Consumer, Producer, wait};
+use conducer::{Consumer, Producer, Weak, wait};
 
 /// A chunk of data with an upfront size.
 ///
@@ -54,6 +54,9 @@ struct FrameState {
 
 	// The number of bytes remaining to be written.
 	remaining: u64,
+
+	// The error set when the frame is aborted.
+	abort: Option<Error>,
 }
 
 impl FrameState {
@@ -121,6 +124,7 @@ impl FrameProducer {
 		let state = FrameState {
 			chunks: Vec::new(),
 			remaining: info.size,
+			abort: None,
 		};
 		Self {
 			info,
@@ -128,12 +132,16 @@ impl FrameProducer {
 		}
 	}
 
+	fn err(&self) -> Error {
+		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
+	}
+
 	/// Write a chunk of data to the frame.
 	///
 	/// Returns [Error::WrongSize] if the total bytes written would exceed [Frame::size].
 	pub fn write<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
 		let chunk = chunk.into();
-		let mut state = self.state.modify()?;
+		let mut state = self.state.modify().ok_or_else(|| self.err())?;
 		state.write_chunk(chunk)
 	}
 
@@ -149,7 +157,7 @@ impl FrameProducer {
 	///
 	/// Returns [Error::WrongSize] if the bytes written don't match [Frame::size].
 	pub fn finish(&mut self) -> Result<()> {
-		let state = self.state.modify()?;
+		let state = self.state.modify().ok_or_else(|| self.err())?;
 		if state.remaining != 0 {
 			return Err(Error::WrongSize);
 		}
@@ -157,8 +165,10 @@ impl FrameProducer {
 	}
 
 	/// Abort the frame with the given error.
-	pub fn abort(&mut self, _err: Error) -> Result<()> {
-		self.state.close(conducer::Error::Closed)?;
+	pub fn abort(&mut self, err: Error) -> Result<()> {
+		let mut state = self.state.modify().ok_or_else(|| self.err())?;
+		state.abort = Some(err);
+		state.close();
 		Ok(())
 	}
 
@@ -166,6 +176,7 @@ impl FrameProducer {
 	pub fn consume(&self) -> FrameConsumer {
 		FrameConsumer {
 			info: self.info.clone(),
+			weak: self.state.weak(),
 			state: self.state.consume(),
 			index: 0,
 		}
@@ -173,7 +184,7 @@ impl FrameProducer {
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		Ok(self.state.unused().await?)
+		self.state.unused().await.ok_or_else(|| self.err())
 	}
 }
 
@@ -198,6 +209,9 @@ pub struct FrameConsumer {
 	// Immutable stream state.
 	pub info: Frame,
 
+	// Used to read the abort error after the channel closes.
+	weak: Weak<FrameState>,
+
 	// Shared state with the producer.
 	state: Consumer<FrameState>,
 
@@ -207,10 +221,16 @@ pub struct FrameConsumer {
 }
 
 impl FrameConsumer {
+	fn err(&self) -> Error {
+		self.weak.borrow().abort.clone().unwrap_or(Error::Dropped)
+	}
+
 	/// Return the next chunk.
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
 		let index = self.index;
-		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_chunk(index))).await?;
+		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_chunk(index)))
+			.await
+			.ok_or_else(|| self.err())?;
 		if res.is_some() {
 			self.index += 1;
 		}
@@ -221,7 +241,9 @@ impl FrameConsumer {
 	/// Cancel-safe: returns all or nothing.
 	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>> {
 		let index = self.index;
-		let chunks = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_chunks(index))).await?;
+		let chunks = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_chunks(index)))
+			.await
+			.ok_or_else(|| self.err())?;
 		self.index += chunks.len();
 		Ok(chunks)
 	}
@@ -230,7 +252,9 @@ impl FrameConsumer {
 	/// Cancel-safe: returns all or nothing.
 	pub async fn read_all(&mut self) -> Result<Bytes> {
 		let index = self.index;
-		let data = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_all(index))).await?;
+		let data = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_all(index)))
+			.await
+			.ok_or_else(|| self.err())?;
 		self.index = usize::MAX; // consumed everything
 		Ok(data)
 	}
