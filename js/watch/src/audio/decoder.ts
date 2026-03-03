@@ -197,8 +197,18 @@ export class Decoder {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
+			let warmed = 0;
+
 			const decoder = new AudioDecoder({
-				output: (data) => this.#emit(data),
+				output: (data) => {
+					warmed++;
+					if (warmed <= 3) {
+						// Drop the first 3 frames to prime the decoder.
+						data.close();
+						return;
+					}
+					this.#emit(data);
+				},
 				error: (error) => console.error(error),
 			});
 			effect.cleanup(() => decoder.close());
@@ -214,7 +224,7 @@ export class Decoder {
 				if (!next) break;
 
 				const { frame } = next;
-				if (!frame) continue; // Skip over group done notifications.
+				if (!frame) continue;
 
 				this.#stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
