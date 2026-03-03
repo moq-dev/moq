@@ -41,7 +41,10 @@ struct State {
 	dynamic: usize,
 }
 
-/// Receive broadcast/track requests and return if we can fulfill them.
+/// Manages tracks within a broadcast.
+///
+/// Insert tracks statically with [Self::insert_track] / [Self::create_track],
+/// or handle on-demand requests via [Self::dynamic].
 #[derive(Clone)]
 pub struct BroadcastProducer {
 	state: Producer<State>,
@@ -91,33 +94,37 @@ impl BroadcastProducer {
 		Ok(track)
 	}
 
+	/// Create a dynamic producer that handles on-demand track requests from consumers.
 	pub fn dynamic(&self) -> BroadcastDynamic {
 		BroadcastDynamic::new(self.state.clone())
 	}
 
+	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
 			state: self.state.consume(),
 		}
 	}
 
-	pub fn close(&mut self, err: Error) -> Result<(), Error> {
+	/// Abort the broadcast and all child tracks with the given error.
+	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
 		let mut state = self.state.modify()?;
 
-		// Cascade close to all child tracks.
+		// Cascade abort to all child tracks.
 		for weak in state.tracks.values() {
-			weak.close(err.clone());
+			weak.abort(err.clone());
 		}
 
-		// Close any pending dynamic track requests.
+		// Abort any pending dynamic track requests.
 		for mut request in state.requests.drain(..) {
-			request.close(err.clone()).ok();
+			request.abort(err.clone()).ok();
 		}
 
-		state.close(err);
+		state.abort(err);
 		Ok(())
 	}
 
+	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.is_clone(&other.state)
 	}
@@ -134,6 +141,11 @@ impl BroadcastProducer {
 	}
 }
 
+/// Handles on-demand track creation for a broadcast.
+///
+/// When a consumer requests a track that doesn't exist, a [TrackProducer] is created
+/// and queued for the dynamic producer to fulfill via [Self::requested_track].
+/// Dropped when no longer needed; pending requests are automatically aborted.
 #[derive(Clone)]
 pub struct BroadcastDynamic {
 	state: Producer<State>,
@@ -158,21 +170,37 @@ impl BroadcastDynamic {
 		})
 	}
 
+	/// Block until a consumer requests a track, returning its producer.
 	pub async fn requested_track(&mut self) -> Result<Option<TrackProducer>, Error> {
 		waiter_fn(move |waiter| self.poll_requested_track(waiter)).await
 	}
 
+	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
 			state: self.state.consume(),
 		}
 	}
 
-	pub fn close(&mut self, err: Error) -> Result<(), Error> {
-		self.state.close(err)?;
+	/// Abort the broadcast with the given error.
+	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
+		let mut state = self.state.modify()?;
+
+		// Cascade abort to all child tracks.
+		for weak in state.tracks.values() {
+			weak.abort(err.clone());
+		}
+
+		// Abort any pending dynamic track requests.
+		for mut request in state.requests.drain(..) {
+			request.abort(err.clone()).ok();
+		}
+
+		state.abort(err);
 		Ok(())
 	}
 
+	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.is_clone(&other.state)
 	}
@@ -189,7 +217,7 @@ impl Drop for BroadcastDynamic {
 
 			// Abort all pending requests since there's no dynamic producer to handle them.
 			for mut request in state.requests.drain(..) {
-				request.close(Error::Cancel).ok();
+				request.abort(Error::Cancel).ok();
 			}
 		}
 	}
@@ -330,8 +358,8 @@ mod test {
 		let track1c = consumer.assert_subscribe_track(&track1.info);
 		let track2 = consumer.assert_subscribe_track(&Track::new("track2"));
 
-		// Explicitly closing the broadcast should cascade to child tracks.
-		producer.close(Error::Cancel).unwrap();
+		// Explicitly aborting the broadcast should cascade to child tracks.
+		producer.abort(Error::Cancel).unwrap();
 
 		// The requested TrackProducer should have been aborted.
 		track2.assert_error();

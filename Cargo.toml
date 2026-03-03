@@ -24,7 +24,7 @@ moq-token = { version = "0.5", path = "rs/moq-token" }
 
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
-web-async = { version = "0.1.2", features = ["tracing"] }
+web-async = { version = "0.1.3", features = ["tracing"] }
 web-transport-iroh = "0.2"
 web-transport-proto = "0.5"
 web-transport-quiche = "0.2"

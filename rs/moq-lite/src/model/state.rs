@@ -98,8 +98,8 @@ impl<T> Producer<T> {
 		}
 	}
 
-	pub fn close(&mut self, err: Error) -> Result<(), Error> {
-		self.modify()?.close(err);
+	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
+		self.modify()?.abort(err);
 		Ok(())
 	}
 
@@ -324,7 +324,7 @@ impl<'a, T> ProducerMut<'a, T> {
 	}
 
 	/// NOTE: This takes self so it's impossible to be in a closed state.
-	pub fn close(mut self, err: Error) {
+	pub fn abort(mut self, err: Error) {
 		let state = self.state.as_mut().unwrap();
 		// We don't need to check for state.closed because we checked when making ProducerMut
 		state.closed = Err(err);

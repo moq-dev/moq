@@ -42,7 +42,7 @@ deploy:
 	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
-	rsync -az hang-bbb-prepare.service root@$HOST:/etc/systemd/system/
+	rsync -az demo-bbb-prepare.service root@$HOST:/etc/systemd/system/
 	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/
 	rsync -az ../common/vacuum.service ../common/vacuum.timer ../common/memory-alert.sh root@$HOST:/etc/systemd/system/
 	rsync -az --exclude='.gitignore' ../common/gen/ root@$HOST:/etc/systemd/system/
@@ -53,21 +53,21 @@ deploy:
 	echo "  Enabling and starting services..."
 	ssh root@$HOST "\
 		systemctl daemon-reload && \
-		systemctl enable hang-bbb-prepare.service && \
-		systemctl enable hang-bbb.service && \
+		systemctl enable demo-bbb-prepare.service && \
+		systemctl enable demo-bbb.service && \
 		systemctl enable vacuum.timer && \
 		systemctl enable memory-alert.service && \
-		systemctl start hang-bbb-prepare.service && \
+		systemctl start demo-bbb-prepare.service && \
 		systemctl start vacuum.timer && \
 		systemctl restart memory-alert.service && \
-		systemctl restart hang-bbb.service"
+		systemctl restart demo-bbb.service"
 
 # Check status of publisher
 status:
 	#!/usr/bin/env bash
 	HOST=$(just host)
 	echo "=== $HOST ==="
-	ssh root@$HOST "systemctl status hang-bbb --no-pager"
+	ssh root@$HOST "systemctl status demo-bbb --no-pager"
 
 # SSH into publisher
 ssh:
@@ -79,4 +79,4 @@ ssh:
 logs:
 	#!/usr/bin/env bash
 	HOST=$(just host)
-	ssh root@$HOST "journalctl -u hang-bbb -f"
+	ssh root@$HOST "journalctl -u demo-bbb -f"

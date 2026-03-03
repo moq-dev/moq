@@ -26,7 +26,7 @@ Another tool does the encoding (ex. ffmpeg), making it easy to pipe any media in
 
 ```bash
 # Publish your webcam
-ffmpeg -f avfoundation -i "0" -f mp4 - | moq publish https://relay.example.com my-stream
+ffmpeg -f avfoundation -i "0" -f mp4 - | moq-cli publish https://relay.example.com my-stream
 ```
 
 ## [OBS Plugin](/app/obs)

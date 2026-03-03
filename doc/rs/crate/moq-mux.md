@@ -156,10 +156,10 @@ For command-line importing, use [moq-cli](/app/cli):
 cargo install moq-cli
 
 # Publish a video file
-moq publish video.mp4
+moq-cli publish video.mp4
 
 # Publish from FFmpeg
-ffmpeg -i input.mp4 -f mpegts - | moq publish -
+ffmpeg -i input.mp4 -f mpegts - | moq-cli publish -
 ```
 
 ## Next Steps

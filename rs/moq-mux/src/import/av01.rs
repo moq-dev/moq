@@ -373,11 +373,13 @@ impl Av01 {
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
-		let is_keyframe = self.current.contains_keyframe;
+
+		if self.current.contains_keyframe {
+			track.keyframe()?;
+		}
 
 		let frame = hang::container::Frame {
 			timestamp: pts,
-			keyframe: is_keyframe,
 			payload,
 		};
 
@@ -386,6 +388,13 @@ impl Av01 {
 		self.current.contains_keyframe = false;
 		self.current.contains_frame = false;
 
+		Ok(())
+	}
+
+	/// Finish the track, flushing the current group.
+	pub fn finish(&mut self) -> anyhow::Result<()> {
+		let track = self.track.as_mut().context("not initialized")?;
+		track.finish()?;
 		Ok(())
 	}
 

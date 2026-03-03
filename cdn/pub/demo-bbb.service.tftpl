@@ -1,8 +1,8 @@
 [Unit]
 Description=MoQ Publisher - Big Buck Bunny
-After=network-online.target hang-bbb-prepare.service
+After=network-online.target demo-bbb-prepare.service
 Wants=network-online.target
-Requires=hang-bbb-prepare.service
+Requires=demo-bbb-prepare.service
 
 [Service]
 Type=simple
@@ -22,7 +22,7 @@ ExecStart=/bin/bash -c '\
     -f mp4 \
     -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
     - | \
-  /var/lib/moq/moq-cli/bin/moq publish \
+  /var/lib/moq/moq-cli/bin/moq-cli publish \
     --url "https://${domain}/demo?jwt=$(cat /var/lib/moq/demo-pub.jwt)" \
     --name bbb'
 

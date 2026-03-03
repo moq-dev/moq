@@ -56,7 +56,7 @@ struct State {
 	duplicates: HashSet<u64>,
 	offset: usize,
 	max_sequence: Option<u64>,
-	fin: bool,
+	final_sequence: Option<u64>,
 }
 
 impl State {
@@ -71,27 +71,29 @@ impl State {
 			}
 		}
 
-		if self.fin { Poll::Ready(None) } else { Poll::Pending }
+		if self.final_sequence.is_some() {
+			Poll::Ready(None)
+		} else {
+			Poll::Pending
+		}
 	}
 
 	fn poll_get_group(&self, sequence: u64) -> Poll<Option<GroupProducer>> {
 		// Search for the group with the matching sequence, skipping tombstones.
-		// NOTE: Returns Ready(None) if the group was evicted (tombstoned) since
-		// it won't be found and max_sequence >= sequence.
 		for (group, _) in self.groups.iter().flatten() {
 			if group.info.sequence == sequence {
 				return Poll::Ready(Some(group.clone()));
 			}
 		}
 
-		// If we've already seen a newer sequence, the group is gone (or was evicted).
-		if let Some(max) = self.max_sequence
-			&& max >= sequence
+		// Once final_sequence is set, groups at or past it can never exist.
+		if let Some(fin) = self.final_sequence
+			&& sequence >= fin
 		{
 			return Poll::Ready(None);
 		}
 
-		if self.fin {
+		if self.final_sequence.is_some() {
 			return Poll::Ready(None);
 		}
 
@@ -147,7 +149,9 @@ impl TrackProducer {
 		let group = info.produce();
 
 		let mut state = self.state.modify()?;
-		if state.fin && group.info.sequence >= state.max_sequence.unwrap_or(0) {
+		if let Some(fin) = state.final_sequence
+			&& group.info.sequence >= fin
+		{
 			return Err(Error::Closed);
 		}
 
@@ -166,14 +170,19 @@ impl TrackProducer {
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&mut self) -> Result<GroupProducer> {
 		let mut state = self.state.modify()?;
-		if state.fin {
+		let sequence = match state.max_sequence {
+			Some(s) => s.checked_add(1).ok_or(Error::BoundsExceeded)?,
+			None => 0,
+		};
+		if let Some(fin) = state.final_sequence
+			&& sequence >= fin
+		{
 			return Err(Error::Closed);
 		}
 
-		let now = tokio::time::Instant::now();
-		let sequence = state.max_sequence.map_or(0, |s| s + 1);
 		let group = Group { sequence }.produce();
 
+		let now = tokio::time::Instant::now();
 		state.duplicates.insert(sequence);
 		state.max_sequence = Some(sequence);
 		state.groups.push_back(Some((group.clone(), now)));
@@ -190,26 +199,59 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Mark the last group of the track.
+	/// Mark the track as finished after the last appended group.
 	///
-	/// NOTE: The track is not closed yet; old groups can still arrive.
+	/// Sets the final sequence to one past the current max_sequence.
+	/// No new groups at or above this sequence can be appended.
+	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = self.state.modify()?;
-		state.fin = true;
+		if state.final_sequence.is_some() {
+			return Err(Error::Closed);
+		}
+		state.final_sequence = Some(match state.max_sequence {
+			Some(max) => max.checked_add(1).ok_or(Error::BoundsExceeded)?,
+			None => 0,
+		});
+		Ok(())
+	}
+
+	/// Mark the track as finished after the last appended group.
+	///
+	/// Deprecated: use [`Self::finish`] for this behavior, or
+	/// [`Self::finish_at`] to set an explicit final sequence.
+	#[deprecated(note = "use finish() or finish_at(sequence) instead")]
+	pub fn close(&mut self) -> Result<()> {
+		self.finish()
+	}
+
+	/// Mark the track as finished at an exact final sequence.
+	///
+	/// The caller must pass the current max_sequence exactly.
+	/// Freezes the final boundary at one past the current max_sequence.
+	/// No new groups at or above that sequence can be created.
+	/// NOTE: Old groups with lower sequence numbers can still arrive.
+	pub fn finish_at(&mut self, sequence: u64) -> Result<()> {
+		let mut state = self.state.modify()?;
+		let max = state.max_sequence.ok_or(Error::Closed)?;
+		if state.final_sequence.is_some() || sequence != max {
+			return Err(Error::Closed);
+		}
+		state.final_sequence = Some(max.checked_add(1).ok_or(Error::BoundsExceeded)?);
 		Ok(())
 	}
 
 	/// Abort the track with the given error.
-	pub fn close(&mut self, err: Error) -> Result<()> {
+	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut state = self.state.modify()?;
 
 		// Abort all groups still in progress.
 		for (group, _) in state.groups.iter_mut().flatten() {
 			// Ignore errors, we don't care if the group was already closed.
-			group.close(err.clone()).ok();
+			group.abort(err.clone()).ok();
 		}
 
-		state.close(err);
+		state.abort(err);
 		Ok(())
 	}
 
@@ -272,17 +314,17 @@ pub(crate) struct TrackWeak {
 }
 
 impl TrackWeak {
-	pub fn close(&self, err: Error) {
+	pub fn abort(&self, err: Error) {
 		// Upgrade to a temporary Producer so we can modify the state.
 		let Ok(producer) = self.state.produce() else { return };
 		let Ok(mut state) = producer.modify() else { return };
 
-		// Cascade close to all groups.
+		// Cascade abort to all groups.
 		for (group, _) in state.groups.iter_mut().flatten() {
-			group.close(err.clone()).ok();
+			group.abort(err.clone()).ok();
 		}
 
-		state.close(err);
+		state.abort(err);
 	}
 
 	pub fn is_closed(&self) -> bool {
@@ -585,5 +627,99 @@ mod test {
 		let group = consumer.assert_group();
 		// consume() starts at the last slot (seq 2).
 		assert_eq!(group.info.sequence, 2);
+	}
+
+	#[test]
+	fn append_finish_cannot_be_rewritten() {
+		let mut producer = Track::new("test").produce();
+
+		// Finishing an empty track is valid (fin = 0, total groups = 0).
+		assert!(producer.finish().is_ok());
+		assert!(producer.finish().is_err());
+		assert!(producer.append_group().is_err());
+	}
+
+	#[test]
+	fn finish_after_groups() {
+		let mut producer = Track::new("test").produce();
+
+		producer.append_group().unwrap();
+		assert!(producer.finish().is_ok());
+		assert!(producer.finish().is_err());
+		assert!(producer.append_group().is_err());
+	}
+
+	#[test]
+	fn insert_finish_validates_sequence_and_freezes_to_max() {
+		let mut producer = Track::new("test").produce();
+		producer.create_group(Group { sequence: 5 }).unwrap();
+
+		assert!(producer.finish_at(4).is_err());
+		assert!(producer.finish_at(10).is_err());
+		assert!(producer.finish_at(5).is_ok());
+
+		{
+			let state = producer.state.borrow();
+			assert_eq!(state.final_sequence, Some(6));
+		}
+
+		assert!(producer.finish_at(5).is_err());
+		assert!(producer.create_group(Group { sequence: 4 }).is_ok());
+		assert!(producer.create_group(Group { sequence: 5 }).is_err());
+	}
+
+	#[tokio::test]
+	async fn next_group_finishes_without_waiting_for_gaps() {
+		let mut producer = Track::new("test").produce();
+		producer.create_group(Group { sequence: 1 }).unwrap();
+		producer.finish_at(1).unwrap();
+
+		let mut consumer = producer.consume();
+		assert_eq!(consumer.assert_group().info.sequence, 1);
+
+		let done = consumer
+			.next_group()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored");
+		assert!(done.is_none(), "track should finish without waiting for gaps");
+	}
+
+	#[tokio::test]
+	async fn get_group_finishes_without_waiting_for_gaps() {
+		let mut producer = Track::new("test").produce();
+		producer.create_group(Group { sequence: 1 }).unwrap();
+		producer.finish_at(1).unwrap();
+
+		let consumer = producer.consume();
+		assert!(
+			consumer
+				.get_group(0)
+				.now_or_never()
+				.expect("should not block")
+				.expect("would have errored")
+				.is_none(),
+			"sequence below fin should not block forever"
+		);
+		assert!(
+			consumer
+				.get_group(2)
+				.now_or_never()
+				.expect("sequence at-or-after fin should resolve")
+				.expect("should not error")
+				.is_none(),
+			"sequence at-or-after fin should not exist"
+		);
+	}
+
+	#[test]
+	fn append_group_returns_bounds_exceeded_on_sequence_overflow() {
+		let mut producer = Track::new("test").produce();
+		{
+			let mut state = producer.state.modify().unwrap();
+			state.max_sequence = Some(u64::MAX);
+		}
+
+		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded)));
 	}
 }

@@ -241,23 +241,23 @@ This is handled automatically based on frame metadata.
 
 ## CLI Tool
 
-The `moq-cli` package provides a command-line tool (binary name: `moq`):
+The `moq-cli` package provides a command-line tool (binary name: `moq-cli`):
 
 ```bash
 # Install
 cargo install moq-cli
 
 # Publish a video file
-moq publish video.mp4
+moq-cli publish video.mp4
 
 # Publish from FFmpeg
-ffmpeg -i input.mp4 -f mpegts - | moq publish -
+ffmpeg -i input.mp4 -f mpegts - | moq-cli publish -
 
 # Custom encoding settings
-moq publish --codec h264 --bitrate 2000000 video.mp4
+moq-cli publish --codec h264 --bitrate 2000000 video.mp4
 ```
 
-See `moq --help` for all options, or [FFmpeg documentation](/app/cli).
+See `moq-cli --help` for all options, or [FFmpeg documentation](/app/cli).
 
 ## API Reference
 
