@@ -56,7 +56,7 @@ struct State {
 	duplicates: HashSet<u64>,
 	offset: usize,
 	max_sequence: Option<u64>,
-	fin: Option<u64>,
+	final_sequence: Option<u64>,
 }
 
 impl State {
@@ -71,7 +71,7 @@ impl State {
 			}
 		}
 
-		if self.fin.is_some() {
+		if self.final_sequence.is_some() {
 			Poll::Ready(None)
 		} else {
 			Poll::Pending
@@ -86,14 +86,14 @@ impl State {
 			}
 		}
 
-		// Once a fin boundary is set, groups at-or-after fin can never exist.
-		if let Some(fin) = self.fin
+		// Once final_sequence is set, groups at or past it can never exist.
+		if let Some(fin) = self.final_sequence
 			&& sequence >= fin
 		{
 			return Poll::Ready(None);
 		}
 
-		if self.fin.is_some() {
+		if self.final_sequence.is_some() {
 			return Poll::Ready(None);
 		}
 
@@ -149,7 +149,7 @@ impl TrackProducer {
 		let group = info.produce();
 
 		let mut state = self.state.modify()?;
-		if let Some(fin) = state.fin
+		if let Some(fin) = state.final_sequence
 			&& group.info.sequence >= fin
 		{
 			return Err(Error::Closed);
@@ -174,7 +174,7 @@ impl TrackProducer {
 			Some(s) => s.checked_add(1).ok_or(Error::BoundsExceeded)?,
 			None => 0,
 		};
-		if let Some(fin) = state.fin
+		if let Some(fin) = state.final_sequence
 			&& sequence >= fin
 		{
 			return Err(Error::Closed);
@@ -201,16 +201,18 @@ impl TrackProducer {
 
 	/// Mark the track as finished after the last appended group.
 	///
-	/// Sets the final sequence to the current max_sequence.
+	/// Sets the final sequence to one past the current max_sequence.
 	/// No new groups at or above this sequence can be appended.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = self.state.modify()?;
-		if state.fin.is_some() {
+		if state.final_sequence.is_some() {
 			return Err(Error::Closed);
 		}
-		let max = state.max_sequence.ok_or(Error::Closed)?;
-		state.fin = Some(max);
+		state.final_sequence = Some(match state.max_sequence {
+			Some(max) => max.checked_add(1).ok_or(Error::BoundsExceeded)?,
+			None => 0,
+		});
 		Ok(())
 	}
 
@@ -226,16 +228,16 @@ impl TrackProducer {
 	/// Mark the track as finished at an exact final sequence.
 	///
 	/// The caller must pass the current max_sequence exactly.
-	/// Freezes the final boundary at the current max_sequence.
+	/// Freezes the final boundary at one past the current max_sequence.
 	/// No new groups at or above that sequence can be created.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish_at(&mut self, sequence: u64) -> Result<()> {
 		let mut state = self.state.modify()?;
 		let max = state.max_sequence.ok_or(Error::Closed)?;
-		if state.fin.is_some() || sequence != max {
+		if state.final_sequence.is_some() || sequence != max {
 			return Err(Error::Closed);
 		}
-		state.fin = Some(max);
+		state.final_sequence = Some(max.checked_add(1).ok_or(Error::BoundsExceeded)?);
 		Ok(())
 	}
 
@@ -628,10 +630,18 @@ mod test {
 	}
 
 	#[test]
-	fn append_finish_requires_max_and_cannot_be_rewritten() {
+	fn append_finish_cannot_be_rewritten() {
 		let mut producer = Track::new("test").produce();
 
+		// Finishing an empty track is valid (fin = 0, total groups = 0).
+		assert!(producer.finish().is_ok());
 		assert!(producer.finish().is_err());
+		assert!(producer.append_group().is_err());
+	}
+
+	#[test]
+	fn finish_after_groups() {
+		let mut producer = Track::new("test").produce();
 
 		producer.append_group().unwrap();
 		assert!(producer.finish().is_ok());
@@ -650,7 +660,7 @@ mod test {
 
 		{
 			let state = producer.state.borrow();
-			assert_eq!(state.fin, Some(5));
+			assert_eq!(state.final_sequence, Some(6));
 		}
 
 		assert!(producer.finish_at(5).is_err());

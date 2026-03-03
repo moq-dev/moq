@@ -184,7 +184,19 @@ impl BroadcastDynamic {
 
 	/// Abort the broadcast with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
-		self.state.abort(err)?;
+		let mut state = self.state.modify()?;
+
+		// Cascade abort to all child tracks.
+		for weak in state.tracks.values() {
+			weak.abort(err.clone());
+		}
+
+		// Abort any pending dynamic track requests.
+		for mut request in state.requests.drain(..) {
+			request.abort(err.clone()).ok();
+		}
+
+		state.abort(err);
 		Ok(())
 	}
 
