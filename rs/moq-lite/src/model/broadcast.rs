@@ -5,7 +5,7 @@ use std::{
 
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
-use conducer::{Consumer, Producer, ProducerAccess, ProducerMut, Waiter, Weak, wait};
+use conducer::{Consumer, Producer, ProducerAccess, ProducerMut, Waiter, wait};
 
 use super::Track;
 
@@ -107,7 +107,6 @@ impl BroadcastProducer {
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
-			weak: self.state.weak(),
 			state: self.state.consume(),
 		}
 	}
@@ -190,7 +189,6 @@ impl BroadcastDynamic {
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
-			weak: self.state.weak(),
 			state: self.state.consume(),
 		}
 	}
@@ -258,19 +256,19 @@ impl BroadcastDynamic {
 /// Subscribe to arbitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
-	weak: Weak<State>,
 	state: Consumer<State>,
 }
 
 impl BroadcastConsumer {
-	fn err(&self) -> Error {
-		self.weak.borrow().abort.clone().unwrap_or(Error::Dropped)
-	}
-
 	pub fn subscribe_track(&self, track: &Track) -> Result<TrackConsumer, Error> {
 		// Upgrade to a temporary producer so we can modify the state.
-		let producer = self.state.produce().ok_or_else(|| self.err())?;
-		let mut state = producer.modify().ok_or_else(|| self.err())?;
+		let producer = self.state.produce().ok_or(Error::Dropped)?;
+		let mut state = match producer.access() {
+			ProducerAccess::Mut(state) => state,
+			ProducerAccess::Ref(state) => {
+				return Err(state.abort.clone().unwrap_or(Error::Dropped))
+			}
+		};
 
 		if let Some(weak) = state.tracks.get(&track.name) {
 			if !weak.is_closed() {
@@ -309,9 +307,8 @@ impl BroadcastConsumer {
 		Ok(consumer)
 	}
 
-	pub async fn closed(&self) -> Error {
+	pub async fn closed(&self) {
 		self.state.closed().await;
-		self.err()
 	}
 
 	/// Check if this is the exact same instance of a broadcast.

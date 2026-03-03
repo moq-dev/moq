@@ -65,26 +65,28 @@ impl State {
 	/// Find the next non-tombstoned group at or after `index`.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
-	fn poll_next_group(&self, index: usize) -> Poll<Option<(GroupProducer, usize)>> {
+	fn poll_next_group(&self, index: usize) -> Poll<Result<Option<(GroupProducer, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
 			if let Some((group, _)) = slot {
-				return Poll::Ready(Some((group.clone(), self.offset + i)));
+				return Poll::Ready(Ok(Some((group.clone(), self.offset + i))));
 			}
 		}
 
 		if self.final_sequence.is_some() {
-			Poll::Ready(None)
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
 	}
 
-	fn poll_get_group(&self, sequence: u64) -> Poll<Option<GroupProducer>> {
+	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<GroupProducer>>> {
 		// Search for the group with the matching sequence, skipping tombstones.
 		for (group, _) in self.groups.iter().flatten() {
 			if group.info.sequence == sequence {
-				return Poll::Ready(Some(group.clone()));
+				return Poll::Ready(Ok(Some(group.clone())));
 			}
 		}
 
@@ -92,11 +94,15 @@ impl State {
 		if let Some(fin) = self.final_sequence
 			&& sequence >= fin
 		{
-			return Poll::Ready(None);
+			return Poll::Ready(Ok(None));
 		}
 
 		if self.final_sequence.is_some() {
-			return Poll::Ready(None);
+			return Poll::Ready(Ok(None));
+		}
+
+		if let Some(err) = &self.abort {
+			return Poll::Ready(Err(err.clone()));
 		}
 
 		Poll::Pending
@@ -276,7 +282,6 @@ impl TrackProducer {
 
 		TrackConsumer {
 			info: self.info.clone(),
-			weak: self.state.weak(),
 			state: self.state.consume(),
 			index,
 		}
@@ -361,7 +366,6 @@ impl TrackWeak {
 
 		TrackConsumer {
 			info: self.info.clone(),
-			weak: self.state.clone(),
 			state: self.state.consume(),
 			index,
 		}
@@ -380,16 +384,11 @@ impl TrackWeak {
 #[derive(Clone)]
 pub struct TrackConsumer {
 	pub info: Track,
-	weak: Weak<State>,
 	state: Consumer<State>,
 	index: usize,
 }
 
 impl TrackConsumer {
-	fn err(&self) -> Error {
-		self.weak.borrow().abort.clone().unwrap_or(Error::Dropped)
-	}
-
 	/// Return the next group in order.
 	///
 	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
@@ -397,7 +396,7 @@ impl TrackConsumer {
 		let index = self.index;
 		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_group(index)))
 			.await
-			.ok_or_else(|| self.err())?;
+			.ok_or(Error::Dropped)??;
 		let consumer = res.map(|(producer, found_index)| {
 			self.index = found_index + 1;
 			producer.consume()
@@ -411,7 +410,7 @@ impl TrackConsumer {
 	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
 		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_get_group(sequence)))
 			.await
-			.ok_or_else(|| self.err())?;
+			.ok_or(Error::Dropped)??;
 		Ok(res.map(|producer| producer.consume()))
 	}
 

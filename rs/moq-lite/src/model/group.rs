@@ -14,7 +14,7 @@ use bytes::Bytes;
 use crate::{Error, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
-use conducer::{Consumer, Producer, ProducerAccess, ProducerMut, Weak, wait};
+use conducer::{Consumer, Producer, ProducerAccess, ProducerMut, wait};
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
@@ -75,11 +75,13 @@ struct GroupState {
 }
 
 impl GroupState {
-	fn poll_next_frame(&self, index: usize) -> Poll<Option<FrameProducer>> {
+	fn poll_next_frame(&self, index: usize) -> Poll<Result<Option<FrameProducer>>> {
 		if let Some(frame) = self.frames.get(index) {
-			Poll::Ready(Some(frame.clone()))
+			Poll::Ready(Ok(Some(frame.clone())))
 		} else if self.fin {
-			Poll::Ready(None)
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
@@ -179,7 +181,6 @@ impl GroupProducer {
 	pub fn consume(&self) -> GroupConsumer {
 		GroupConsumer {
 			info: self.info.clone(),
-			weak: self.state.weak(),
 			state: self.state.consume(),
 			index: 0,
 		}
@@ -218,9 +219,6 @@ pub struct GroupConsumer {
 	// Shared state with the producer.
 	state: Consumer<GroupState>,
 
-	// Used to read the abort error after the channel closes.
-	weak: Weak<GroupState>,
-
 	// Immutable stream state.
 	pub info: Group,
 
@@ -230,10 +228,6 @@ pub struct GroupConsumer {
 }
 
 impl GroupConsumer {
-	fn err(&self) -> Error {
-		self.weak.borrow().abort.clone().unwrap_or(Error::Dropped)
-	}
-
 	/// Read the next frame's data all at once.
 	///
 	/// Cancel-safe: if cancelled after obtaining the frame but before reading,
@@ -243,7 +237,7 @@ impl GroupConsumer {
 		let index = self.index;
 		let frame = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index)))
 			.await
-			.ok_or_else(|| self.err())?;
+			.ok_or(Error::Dropped)??;
 
 		let Some(frame) = frame else {
 			return Ok(None);
@@ -264,7 +258,7 @@ impl GroupConsumer {
 	pub async fn get_frame(&self, index: usize) -> Result<Option<FrameConsumer>> {
 		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index)))
 			.await
-			.ok_or_else(|| self.err())?;
+			.ok_or(Error::Dropped)??;
 		Ok(res.map(|producer| producer.consume()))
 	}
 
@@ -273,7 +267,7 @@ impl GroupConsumer {
 		let index = self.index;
 		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_next_frame(index)))
 			.await
-			.ok_or_else(|| self.err())?;
+			.ok_or(Error::Dropped)??;
 		let consumer = res.map(|producer| {
 			self.index += 1;
 			producer.consume()

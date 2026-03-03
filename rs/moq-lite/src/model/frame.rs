@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 
 use crate::{Error, Result};
 
-use conducer::{Consumer, Producer, ProducerAccess, ProducerMut, Weak, wait};
+use conducer::{Consumer, Producer, ProducerAccess, ProducerMut, wait};
 
 /// A chunk of data with an upfront size.
 ///
@@ -66,34 +66,41 @@ impl FrameState {
 		Ok(())
 	}
 
-	fn poll_read_chunk(&self, index: usize) -> Poll<Option<Bytes>> {
+	fn poll_read_chunk(&self, index: usize) -> Poll<Result<Option<Bytes>>> {
 		if let Some(chunk) = self.chunks.get(index).cloned() {
-			Poll::Ready(Some(chunk))
+			Poll::Ready(Ok(Some(chunk)))
 		} else if self.remaining == 0 {
-			Poll::Ready(None)
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
 	}
 
-	fn poll_read_chunks(&self, index: usize) -> Poll<Vec<Bytes>> {
+	fn poll_read_chunks(&self, index: usize) -> Poll<Result<Vec<Bytes>>> {
 		if index >= self.chunks.len() && self.remaining == 0 {
-			return Poll::Ready(Vec::new());
+			return Poll::Ready(Ok(Vec::new()));
 		}
 		if self.remaining == 0 {
-			Poll::Ready(self.chunks[index..].to_vec())
+			Poll::Ready(Ok(self.chunks[index..].to_vec()))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
 	}
 
-	fn poll_read_all(&self, index: usize) -> Poll<Bytes> {
+	fn poll_read_all(&self, index: usize) -> Poll<Result<Bytes>> {
 		if self.remaining > 0 {
+			if let Some(err) = &self.abort {
+				return Poll::Ready(Err(err.clone()));
+			}
 			return Poll::Pending;
 		}
 
 		if index >= self.chunks.len() {
-			return Poll::Ready(Bytes::new());
+			return Poll::Ready(Ok(Bytes::new()));
 		}
 
 		let chunks = &self.chunks[index..];
@@ -102,7 +109,7 @@ impl FrameState {
 		for chunk in chunks {
 			buf.extend_from_slice(chunk);
 		}
-		Poll::Ready(buf.freeze())
+		Poll::Ready(Ok(buf.freeze()))
 	}
 }
 
@@ -183,7 +190,6 @@ impl FrameProducer {
 	pub fn consume(&self) -> FrameConsumer {
 		FrameConsumer {
 			info: self.info.clone(),
-			weak: self.state.weak(),
 			state: self.state.consume(),
 			index: 0,
 		}
@@ -216,9 +222,6 @@ pub struct FrameConsumer {
 	// Immutable stream state.
 	pub info: Frame,
 
-	// Used to read the abort error after the channel closes.
-	weak: Weak<FrameState>,
-
 	// Shared state with the producer.
 	state: Consumer<FrameState>,
 
@@ -228,16 +231,12 @@ pub struct FrameConsumer {
 }
 
 impl FrameConsumer {
-	fn err(&self) -> Error {
-		self.weak.borrow().abort.clone().unwrap_or(Error::Dropped)
-	}
-
 	/// Return the next chunk.
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
 		let index = self.index;
 		let res = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_chunk(index)))
 			.await
-			.ok_or_else(|| self.err())?;
+			.ok_or(Error::Dropped)??;
 		if res.is_some() {
 			self.index += 1;
 		}
@@ -250,7 +249,7 @@ impl FrameConsumer {
 		let index = self.index;
 		let chunks = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_chunks(index)))
 			.await
-			.ok_or_else(|| self.err())?;
+			.ok_or(Error::Dropped)??;
 		self.index += chunks.len();
 		Ok(chunks)
 	}
@@ -261,7 +260,7 @@ impl FrameConsumer {
 		let index = self.index;
 		let data = wait(|waiter| self.state.poll(waiter, |state| state.poll_read_all(index)))
 			.await
-			.ok_or_else(|| self.err())?;
+			.ok_or(Error::Dropped)??;
 		self.index = usize::MAX; // consumed everything
 		Ok(data)
 	}
