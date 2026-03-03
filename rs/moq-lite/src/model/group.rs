@@ -84,16 +84,21 @@ impl GroupState {
 	}
 }
 
-/// Create a group, frame-by-frame.
+/// Writes frames to a group in order.
+///
+/// Each group is delivered independently over a QUIC stream.
+/// Use [Self::write_frame] for simple single-buffer frames,
+/// or [Self::create_frame] for multi-chunk streaming writes.
 pub struct GroupProducer {
 	// Mutable stream state.
 	state: Producer<GroupState>,
 
-	// Immutable stream state.
+	/// The group header containing the sequence number.
 	pub info: Group,
 }
 
 impl GroupProducer {
+	/// Create a new group producer.
 	pub fn new(info: Group) -> Self {
 		Self {
 			info,
@@ -111,7 +116,7 @@ impl GroupProducer {
 			size: data.len() as u64,
 		};
 		let mut frame = self.create_frame(frame)?;
-		frame.write_chunk(data)?;
+		frame.write(data)?;
 		frame.finish()?;
 		Ok(())
 	}
@@ -133,26 +138,26 @@ impl GroupProducer {
 		Ok(())
 	}
 
-	/// Clean termination of the group.
+	/// Mark the group as complete; no more frames will be written.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = self.state.modify()?;
 		state.fin = true;
 		Ok(())
 	}
 
-	/// Close the group with the given error.
+	/// Abort the group with the given error.
 	///
 	/// No updates can be made after this point.
-	pub fn close(&mut self, err: Error) -> Result<()> {
+	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut state = self.state.modify()?;
 
 		// Abort all frames still in progress.
 		for frame in state.frames.iter_mut() {
 			// Ignore errors, we don't care if the frame was already closed.
-			frame.close(err.clone()).ok();
+			frame.abort(err.clone()).ok();
 		}
 
-		state.close(err);
+		state.abort(err);
 		Ok(())
 	}
 
@@ -165,10 +170,12 @@ impl GroupProducer {
 		}
 	}
 
+	/// Block until the group is closed or aborted.
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await
 	}
 
+	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
 		self.state.unused().await
 	}

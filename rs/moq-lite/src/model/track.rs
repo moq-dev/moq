@@ -56,7 +56,7 @@ struct State {
 	duplicates: HashSet<u64>,
 	offset: usize,
 	max_sequence: Option<u64>,
-	fin: bool,
+	fin: Option<u64>,
 }
 
 impl State {
@@ -71,7 +71,11 @@ impl State {
 			}
 		}
 
-		if self.fin { Poll::Ready(None) } else { Poll::Pending }
+		if self.fin.is_some() {
+			Poll::Ready(None)
+		} else {
+			Poll::Pending
+		}
 	}
 
 	fn poll_get_group(&self, sequence: u64) -> Poll<Option<GroupProducer>> {
@@ -91,7 +95,7 @@ impl State {
 			return Poll::Ready(None);
 		}
 
-		if self.fin {
+		if self.fin.is_some() {
 			return Poll::Ready(None);
 		}
 
@@ -147,7 +151,9 @@ impl TrackProducer {
 		let group = info.produce();
 
 		let mut state = self.state.modify()?;
-		if state.fin && group.info.sequence >= state.max_sequence.unwrap_or(0) {
+		if let Some(fin) = state.fin
+			&& group.info.sequence >= fin
+		{
 			return Err(Error::Closed);
 		}
 
@@ -166,7 +172,7 @@ impl TrackProducer {
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&mut self) -> Result<GroupProducer> {
 		let mut state = self.state.modify()?;
-		if state.fin {
+		if state.fin.is_some() {
 			return Err(Error::Closed);
 		}
 
@@ -190,26 +196,39 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Mark the last group of the track.
+	/// Mark the track as finished after the last appended group.
 	///
-	/// NOTE: The track is not closed yet; old groups can still arrive.
-	pub fn finish(&mut self) -> Result<()> {
+	/// Sets the final sequence to the current max_sequence.
+	/// No new groups at or above this sequence can be appended.
+	/// NOTE: Old groups with lower sequence numbers can still arrive.
+	pub fn append_finish(&mut self) -> Result<()> {
 		let mut state = self.state.modify()?;
-		state.fin = true;
+		let sequence = state.max_sequence.unwrap_or(0);
+		state.fin = Some(sequence);
+		Ok(())
+	}
+
+	/// Mark a specific group sequence as the final group.
+	///
+	/// No new groups at or above this sequence can be created.
+	/// NOTE: Old groups with lower sequence numbers can still arrive.
+	pub fn insert_finish(&mut self, sequence: u64) -> Result<()> {
+		let mut state = self.state.modify()?;
+		state.fin = Some(sequence);
 		Ok(())
 	}
 
 	/// Abort the track with the given error.
-	pub fn close(&mut self, err: Error) -> Result<()> {
+	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut state = self.state.modify()?;
 
 		// Abort all groups still in progress.
 		for (group, _) in state.groups.iter_mut().flatten() {
 			// Ignore errors, we don't care if the group was already closed.
-			group.close(err.clone()).ok();
+			group.abort(err.clone()).ok();
 		}
 
-		state.close(err);
+		state.abort(err);
 		Ok(())
 	}
 
@@ -272,17 +291,17 @@ pub(crate) struct TrackWeak {
 }
 
 impl TrackWeak {
-	pub fn close(&self, err: Error) {
+	pub fn abort(&self, err: Error) {
 		// Upgrade to a temporary Producer so we can modify the state.
 		let Ok(producer) = self.state.produce() else { return };
 		let Ok(mut state) = producer.modify() else { return };
 
-		// Cascade close to all groups.
+		// Cascade abort to all groups.
 		for (group, _) in state.groups.iter_mut().flatten() {
-			group.close(err.clone()).ok();
+			group.abort(err.clone()).ok();
 		}
 
-		state.close(err);
+		state.abort(err);
 	}
 
 	pub fn is_closed(&self) -> bool {

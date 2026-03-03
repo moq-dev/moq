@@ -58,8 +58,8 @@ impl CatalogProducer {
 
 	/// Finish publishing to this catalog.
 	pub fn finish(&mut self) -> Result<(), moq_lite::Error> {
-		self.hang_track.finish()?;
-		self.msf_track.finish()?;
+		self.hang_track.append_finish()?;
+		self.msf_track.append_finish()?;
 		Ok(())
 	}
 }

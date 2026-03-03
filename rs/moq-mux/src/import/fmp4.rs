@@ -612,8 +612,8 @@ impl Fmp4 {
 					size: moof_raw.len() as u64 + mdat_raw.len() as u64,
 				})?;
 
-				frame.write_chunk(moof_raw.clone())?;
-				frame.write_chunk(Bytes::copy_from_slice(mdat_raw))?;
+				frame.write(moof_raw.clone())?;
+				frame.write(Bytes::copy_from_slice(mdat_raw))?;
 				frame.finish()?;
 
 				track.group = Some(group);
