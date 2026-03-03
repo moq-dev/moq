@@ -1,4 +1,4 @@
-name: Stable
+name: Main
 
 permissions:
   id-token: write
