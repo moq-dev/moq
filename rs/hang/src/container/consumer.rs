@@ -570,7 +570,7 @@ mod tests {
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
-		track.close(moq_lite::Error::Cancel).unwrap();
+		track.abort(moq_lite::Error::Cancel).unwrap();
 
 		// Consumer should not hang; it should return frames or error gracefully
 		let result = tokio::time::timeout(Duration::from_millis(500), async {

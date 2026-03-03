@@ -206,7 +206,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			_ => {
 				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe complete");
-				let _ = track.append_finish();
+				let _ = track.finish();
 			}
 		}
 	}

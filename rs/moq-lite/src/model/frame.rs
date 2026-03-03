@@ -138,6 +138,14 @@ impl FrameProducer {
 		state.write_chunk(chunk)
 	}
 
+	/// Write a chunk of data to the frame.
+	///
+	/// Deprecated: use [`Self::write`] instead.
+	#[deprecated(note = "use write(chunk) instead")]
+	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
+		self.write(chunk)
+	}
+
 	/// Verify that all bytes have been written.
 	///
 	/// Returns [Error::WrongSize] if the bytes written don't match [Frame::size].

@@ -204,7 +204,7 @@ impl TrackProducer {
 	/// Sets the final sequence to the current max_sequence.
 	/// No new groups at or above this sequence can be appended.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
-	pub fn append_finish(&mut self) -> Result<()> {
+	pub fn finish(&mut self) -> Result<()> {
 		let mut state = self.state.modify()?;
 		if state.fin.is_some() {
 			return Err(Error::Closed);
@@ -214,13 +214,22 @@ impl TrackProducer {
 		Ok(())
 	}
 
+	/// Mark the track as finished after the last appended group.
+	///
+	/// Deprecated: use [`Self::finish`] for this behavior, or
+	/// [`Self::finish_at`] to set an explicit final sequence.
+	#[deprecated(note = "use finish() or finish_at(sequence) instead")]
+	pub fn close(&mut self) -> Result<()> {
+		self.finish()
+	}
+
 	/// Mark the track as finished at an exact final sequence.
 	///
 	/// The caller must pass the current max_sequence exactly.
 	/// Freezes the final boundary at the current max_sequence.
 	/// No new groups at or above that sequence can be created.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
-	pub fn insert_finish(&mut self, sequence: u64) -> Result<()> {
+	pub fn finish_at(&mut self, sequence: u64) -> Result<()> {
 		let mut state = self.state.modify()?;
 		let max = state.max_sequence.ok_or(Error::Closed)?;
 		if state.fin.is_some() || sequence != max {
@@ -622,11 +631,11 @@ mod test {
 	fn append_finish_requires_max_and_cannot_be_rewritten() {
 		let mut producer = Track::new("test").produce();
 
-		assert!(producer.append_finish().is_err());
+		assert!(producer.finish().is_err());
 
 		producer.append_group().unwrap();
-		assert!(producer.append_finish().is_ok());
-		assert!(producer.append_finish().is_err());
+		assert!(producer.finish().is_ok());
+		assert!(producer.finish().is_err());
 		assert!(producer.append_group().is_err());
 	}
 
@@ -635,16 +644,16 @@ mod test {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 5 }).unwrap();
 
-		assert!(producer.insert_finish(4).is_err());
-		assert!(producer.insert_finish(10).is_err());
-		assert!(producer.insert_finish(5).is_ok());
+		assert!(producer.finish_at(4).is_err());
+		assert!(producer.finish_at(10).is_err());
+		assert!(producer.finish_at(5).is_ok());
 
 		{
 			let state = producer.state.borrow();
 			assert_eq!(state.fin, Some(5));
 		}
 
-		assert!(producer.insert_finish(5).is_err());
+		assert!(producer.finish_at(5).is_err());
 		assert!(producer.create_group(Group { sequence: 4 }).is_ok());
 		assert!(producer.create_group(Group { sequence: 5 }).is_err());
 	}
@@ -653,7 +662,7 @@ mod test {
 	async fn next_group_finishes_without_waiting_for_gaps() {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 1 }).unwrap();
-		producer.insert_finish(1).unwrap();
+		producer.finish_at(1).unwrap();
 
 		let mut consumer = producer.consume();
 		assert_eq!(consumer.assert_group().info.sequence, 1);
@@ -670,7 +679,7 @@ mod test {
 	async fn get_group_finishes_without_waiting_for_gaps() {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 1 }).unwrap();
-		producer.insert_finish(1).unwrap();
+		producer.finish_at(1).unwrap();
 
 		let consumer = producer.consume();
 		assert!(

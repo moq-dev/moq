@@ -234,7 +234,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut state = self.state.lock();
 
 		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
-			let _ = track.producer.append_finish();
+			let _ = track.producer.finish();
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}

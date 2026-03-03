@@ -408,7 +408,7 @@ mod test {
 		// Get the requested producer and close it (simulating publisher disconnect)
 		let mut producer1 = broadcast.assert_request();
 		producer1.append_group().unwrap();
-		producer1.append_finish().unwrap();
+		producer1.finish().unwrap();
 		drop(producer1);
 
 		// The consumer should see the track as closed
