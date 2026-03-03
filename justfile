@@ -11,7 +11,7 @@ default:
 # Install any dependencies.
 install:
 	bun install
-	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-hack cargo-sweep
+	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-hack cargo-sweep cargo-semver-checks release-plz
 
 # Alias for dev.
 all: dev
@@ -367,6 +367,16 @@ ci:
 	# requires: cargo install cargo-hack
 	echo "Checking all feature combinations..."
 	cargo hack check --workspace --each-feature --no-dev-deps
+
+# Check semver compatibility against crates.io
+# requires: cargo install cargo-semver-checks
+# libmoq is an internal C-ABI crate and is intentionally excluded from published-crate semver checks.
+semver:
+	cargo semver-checks check-release --workspace --exclude libmoq
+
+# Update versions and changelogs via release-plz
+bump:
+	release-plz update
 
 # Run the unit tests
 test:
