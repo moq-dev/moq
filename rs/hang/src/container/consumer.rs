@@ -261,7 +261,10 @@ mod tests {
 				Ok(Ok(Some(frame))) => frames.push(frame),
 				Ok(Ok(None)) => break,
 				Ok(Err(e)) => return Err(e),
-				Err(_) => break, // timeout
+				Err(_) => panic!(
+					"read_all: OrderedConsumer::read timed out after 200ms ({} frames collected so far)",
+					frames.len()
+				),
 			}
 		}
 		Ok(frames)
