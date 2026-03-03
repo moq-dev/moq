@@ -1,50 +1,111 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::{coding, ietf, lite};
+use crate::coding;
 
 /// The versions of MoQ that are negotiated via SETUP.
 ///
 /// Ordered by preference, with the client's preference taking priority.
-pub(crate) const NEGOTIATED: [Version; 3] = [
-	Version::Lite(lite::Version::Draft02),
-	Version::Lite(lite::Version::Draft01),
-	Version::Ietf(ietf::Version::Draft14),
-];
+pub(crate) const NEGOTIATED: [Version; 3] = [Version::Lite02, Version::Lite01, Version::Draft14];
 
 /// ALPN strings for supported versions.
-pub const ALPNS: &[&str] = &[lite::ALPN_03, lite::ALPN, ietf::ALPN_16, ietf::ALPN_15, ietf::ALPN_14];
+// NOTE: ALPN_17 intentionally excluded until draft-17 support is complete.
+pub const ALPNS: &[&str] = &[ALPN_LITE_03, ALPN_LITE, ALPN_16, ALPN_15, ALPN_14];
 
-/// A MoQ protocol version, combining both IETF and Lite variants.
+// ALPN constants
+pub const ALPN_LITE: &str = "moql";
+pub const ALPN_LITE_03: &str = "moq-lite-03";
+pub const ALPN_14: &str = "moq-00";
+pub const ALPN_15: &str = "moqt-15";
+pub const ALPN_16: &str = "moqt-16";
+pub const ALPN_17: &str = "moqt-17";
+
+/// A MoQ protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[repr(u64)]
 pub enum Version {
-	Ietf(ietf::Version),
-	Lite(lite::Version),
+	Lite01 = 0xff0dad01,
+	Lite02 = 0xff0dad02,
+	Lite03 = 0xff0dad03,
+	Draft14 = 0xff00000e,
+	Draft15 = 0xff00000f,
+	Draft16 = 0xff000010,
+	Draft17 = 0xff000011,
 }
 
 impl Version {
+	/// Parse from wire version code (used during SETUP negotiation).
+	pub fn from_code(code: u64) -> Option<Self> {
+		match code {
+			0xff0dad01 => Some(Self::Lite01),
+			0xff0dad02 => Some(Self::Lite02),
+			0xff0dad03 => Some(Self::Lite03),
+			0xff00000e => Some(Self::Draft14),
+			0xff00000f => Some(Self::Draft15),
+			0xff000010 => Some(Self::Draft16),
+			0xff000011 => Some(Self::Draft17),
+			_ => None,
+		}
+	}
+
+	/// Get the wire version code.
+	pub fn code(&self) -> u64 {
+		*self as u64
+	}
+
+	/// Parse from ALPN string.
+	pub fn from_alpn(alpn: &str) -> Option<Self> {
+		match alpn {
+			ALPN_LITE => None, // Multiple versions share this ALPN, need SETUP negotiation
+			ALPN_LITE_03 => Some(Self::Lite03),
+			ALPN_14 => Some(Self::Draft14),
+			ALPN_15 => Some(Self::Draft15),
+			ALPN_16 => Some(Self::Draft16),
+			ALPN_17 => Some(Self::Draft17),
+			_ => None,
+		}
+	}
+
 	/// Returns the ALPN string for this version.
 	pub fn alpn(&self) -> &'static str {
 		match self {
-			Self::Lite(lite::Version::Draft03) => lite::ALPN_03,
-			Self::Lite(lite::Version::Draft01 | lite::Version::Draft02) => lite::ALPN,
-			Self::Ietf(ietf::Version::Draft14) => ietf::ALPN_14,
-			Self::Ietf(ietf::Version::Draft15) => ietf::ALPN_15,
-			Self::Ietf(ietf::Version::Draft16) => ietf::ALPN_16,
+			Self::Lite03 => ALPN_LITE_03,
+			Self::Lite01 | Self::Lite02 => ALPN_LITE,
+			Self::Draft14 => ALPN_14,
+			Self::Draft15 => ALPN_15,
+			Self::Draft16 => ALPN_16,
+			Self::Draft17 => ALPN_17,
 		}
+	}
+
+	/// Whether this version uses SETUP version-code negotiation
+	/// (as opposed to ALPN-only).
+	pub fn uses_setup_negotiation(&self) -> bool {
+		matches!(self, Self::Lite01 | Self::Lite02 | Self::Draft14)
+	}
+
+	/// Whether this is a lite protocol version.
+	pub fn is_lite(&self) -> bool {
+		matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03)
+	}
+
+	/// Whether this is an IETF protocol version.
+	pub fn is_ietf(&self) -> bool {
+		matches!(self, Self::Draft14 | Self::Draft15 | Self::Draft16 | Self::Draft17)
 	}
 }
 
 impl fmt::Display for Version {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::Lite(lite::Version::Draft01) => write!(f, "moq-lite-01"),
-			Self::Lite(lite::Version::Draft02) => write!(f, "moq-lite-02"),
-			Self::Lite(lite::Version::Draft03) => write!(f, "moq-lite-03"),
-			Self::Ietf(ietf::Version::Draft14) => write!(f, "moq-transport-14"),
-			Self::Ietf(ietf::Version::Draft15) => write!(f, "moq-transport-15"),
-			Self::Ietf(ietf::Version::Draft16) => write!(f, "moq-transport-16"),
+			Self::Lite01 => write!(f, "moq-lite-01"),
+			Self::Lite02 => write!(f, "moq-lite-02"),
+			Self::Lite03 => write!(f, "moq-lite-03"),
+			Self::Draft14 => write!(f, "moq-transport-14"),
+			Self::Draft15 => write!(f, "moq-transport-15"),
+			Self::Draft16 => write!(f, "moq-transport-16"),
+			Self::Draft17 => write!(f, "moq-transport-17"),
 		}
 	}
 }
@@ -54,12 +115,13 @@ impl FromStr for Version {
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
-			"moq-lite-01" => Ok(Self::Lite(lite::Version::Draft01)),
-			"moq-lite-02" => Ok(Self::Lite(lite::Version::Draft02)),
-			"moq-lite-03" => Ok(Self::Lite(lite::Version::Draft03)),
-			"moq-transport-14" => Ok(Self::Ietf(ietf::Version::Draft14)),
-			"moq-transport-15" => Ok(Self::Ietf(ietf::Version::Draft15)),
-			"moq-transport-16" => Ok(Self::Ietf(ietf::Version::Draft16)),
+			"moq-lite-01" => Ok(Self::Lite01),
+			"moq-lite-02" => Ok(Self::Lite02),
+			"moq-lite-03" => Ok(Self::Lite03),
+			"moq-transport-14" => Ok(Self::Draft14),
+			"moq-transport-15" => Ok(Self::Draft15),
+			"moq-transport-16" => Ok(Self::Draft16),
+			"moq-transport-17" => Ok(Self::Draft17),
 			_ => Err(format!("unknown version: {s}")),
 		}
 	}
@@ -80,50 +142,29 @@ impl<'de> serde::Deserialize<'de> for Version {
 	}
 }
 
-impl From<ietf::Version> for Version {
-	fn from(value: ietf::Version) -> Self {
-		Self::Ietf(value)
-	}
-}
-
-impl From<lite::Version> for Version {
-	fn from(value: lite::Version) -> Self {
-		Self::Lite(value)
-	}
-}
-
 impl TryFrom<coding::Version> for Version {
 	type Error = ();
 
 	fn try_from(value: coding::Version) -> Result<Self, Self::Error> {
-		ietf::Version::try_from(value)
-			.map(Self::Ietf)
-			.or_else(|_| lite::Version::try_from(value).map(Self::Lite))
+		Self::from_code(value.0).ok_or(())
 	}
 }
 
-impl<V> coding::Decode<V> for Version {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, coding::DecodeError> {
+impl coding::Decode<Version> for Version {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, coding::DecodeError> {
 		coding::Version::decode(r, version).and_then(|v| v.try_into().map_err(|_| coding::DecodeError::InvalidValue))
 	}
 }
 
-impl<V> coding::Encode<V> for Version {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, v: V) -> Result<(), coding::EncodeError> {
-		match self {
-			Self::Ietf(version) => coding::Version::from(*version).encode(w, v)?,
-			Self::Lite(version) => coding::Version::from(*version).encode(w, v)?,
-		}
-		Ok(())
+impl coding::Encode<Version> for Version {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, v: Version) -> Result<(), coding::EncodeError> {
+		coding::Version::from(*self).encode(w, v)
 	}
 }
 
 impl From<Version> for coding::Version {
 	fn from(value: Version) -> Self {
-		match value {
-			Version::Ietf(version) => version.into(),
-			Version::Lite(version) => version.into(),
-		}
+		Self(value.code())
 	}
 }
 
@@ -142,12 +183,12 @@ impl Versions {
 	/// All supported versions.
 	pub fn all() -> Self {
 		Self(vec![
-			Version::Lite(lite::Version::Draft03),
-			Version::Lite(lite::Version::Draft02),
-			Version::Lite(lite::Version::Draft01),
-			Version::Ietf(ietf::Version::Draft16),
-			Version::Ietf(ietf::Version::Draft15),
-			Version::Ietf(ietf::Version::Draft14),
+			Version::Lite03,
+			Version::Lite02,
+			Version::Lite01,
+			Version::Draft16,
+			Version::Draft15,
+			Version::Draft14,
 		])
 	}
 

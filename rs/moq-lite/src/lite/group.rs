@@ -1,6 +1,6 @@
 use crate::{
-	coding::*,
-	lite::{Message, Version},
+	Version,
+	coding::{Message, *},
 };
 
 #[derive(Clone, Debug)]

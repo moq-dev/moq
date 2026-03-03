@@ -5,10 +5,12 @@ use std::borrow::Cow;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-	Path,
+	Path, Version,
 	coding::*,
-	ietf::{FilterType, GroupOrder, Message, MessageParameters, Parameters, RequestId, Version},
+	ietf::{FilterType, GroupOrder, MessageParameters, Parameters, RequestId},
 };
+
+use crate::coding::{IetfMessage, Message};
 
 use super::namespace::{decode_namespace, encode_namespace};
 
@@ -23,8 +25,6 @@ pub struct TrackStatus<'a> {
 }
 
 impl Message for TrackStatus<'_> {
-	const ID: u64 = 0x0d;
-
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.track_namespace, version)?;
@@ -43,6 +43,7 @@ impl Message for TrackStatus<'_> {
 				let params = MessageParameters::default();
 				params.encode(w, version)?;
 			}
+			_ => return Err(EncodeError::Version),
 		}
 		Ok(())
 	}
@@ -63,6 +64,7 @@ impl Message for TrackStatus<'_> {
 			Version::Draft15 | Version::Draft16 => {
 				let _params = MessageParameters::decode(r, version)?;
 			}
+			_ => return Err(DecodeError::Version),
 		}
 
 		Ok(Self {
@@ -71,6 +73,10 @@ impl Message for TrackStatus<'_> {
 			track_name,
 		})
 	}
+}
+
+impl IetfMessage for TrackStatus<'_> {
+	const ID: u64 = 0x0d;
 }
 
 #[derive(Clone, Copy, Debug, TryFromPrimitive, IntoPrimitive)]
@@ -82,15 +88,15 @@ pub enum TrackStatusCode {
 	Ended = 0x03,
 }
 
-impl<V> Encode<V> for TrackStatusCode {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for TrackStatusCode {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		u64::from(*self).encode(w, version)?;
 		Ok(())
 	}
 }
 
-impl<V> Decode<V> for TrackStatusCode {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for TrackStatusCode {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		Self::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
 	}
 }

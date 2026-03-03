@@ -85,14 +85,9 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 		self.stream.as_mut().unwrap().set_priority(priority);
 	}
 
-	/// Cast the writer to a different version, used during version negotiation.
-	pub fn with_version<O>(mut self, version: O) -> Writer<S, O> {
-		Writer {
-			// We need to use an Option so Drop doesn't reset the stream.
-			stream: self.stream.take(),
-			buffer: std::mem::take(&mut self.buffer),
-			version,
-		}
+	/// Change the version, used after SETUP negotiation.
+	pub fn set_version(&mut self, version: V) {
+		self.version = version;
 	}
 }
 

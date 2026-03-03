@@ -1,9 +1,8 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-	Path,
-	coding::*,
-	lite::{Message, Version},
+	Path, Version,
+	coding::{Message, *},
 };
 
 /// Sent by the publisher to announce the availability of a track.
@@ -28,8 +27,9 @@ impl Message for Announce<'_> {
 		let status = AnnounceStatus::decode(r, version)?;
 		let suffix = Path::decode(r, version)?;
 		let hops = match version {
-			Version::Draft03 => u64::decode(r, version)?,
-			Version::Draft01 | Version::Draft02 => 0,
+			Version::Lite03 => u64::decode(r, version)?,
+			Version::Lite01 | Version::Lite02 => 0,
+			_ => return Err(DecodeError::Version),
 		};
 
 		Ok(match status {
@@ -44,16 +44,18 @@ impl Message for Announce<'_> {
 				AnnounceStatus::Active.encode(w, version)?;
 				suffix.encode(w, version)?;
 				match version {
-					Version::Draft03 => hops.encode(w, version)?,
-					Version::Draft01 | Version::Draft02 => {}
+					Version::Lite03 => hops.encode(w, version)?,
+					Version::Lite01 | Version::Lite02 => {}
+					_ => return Err(EncodeError::Version),
 				}
 			}
 			Self::Ended { suffix, hops } => {
 				AnnounceStatus::Ended.encode(w, version)?;
 				suffix.encode(w, version)?;
 				match version {
-					Version::Draft03 => hops.encode(w, version)?,
-					Version::Draft01 | Version::Draft02 => {}
+					Version::Lite03 => hops.encode(w, version)?,
+					Version::Lite01 | Version::Lite02 => {}
+					_ => return Err(EncodeError::Version),
 				}
 			}
 		}
@@ -90,15 +92,15 @@ enum AnnounceStatus {
 	Active = 1,
 }
 
-impl<V> Decode<V> for AnnounceStatus {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for AnnounceStatus {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let status = u8::decode(r, version)?;
 		status.try_into().map_err(|_| DecodeError::InvalidValue)
 	}
 }
 
-impl<V> Encode<V> for AnnounceStatus {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for AnnounceStatus {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		(*self as u8).encode(w, version)
 	}
 }
@@ -117,8 +119,8 @@ pub struct AnnounceInit<'a> {
 impl Message for AnnounceInit<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Draft01 | Version::Draft02 => {}
-			Version::Draft03 => return Err(DecodeError::Version),
+			Version::Lite01 | Version::Lite02 => {}
+			Version::Lite03 | _ => return Err(DecodeError::Version),
 		}
 
 		let count = u64::decode(r, version)?;
@@ -135,8 +137,8 @@ impl Message for AnnounceInit<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Draft01 | Version::Draft02 => {}
-			Version::Draft03 => return Err(EncodeError::Version),
+			Version::Lite01 | Version::Lite02 => {}
+			Version::Lite03 | _ => return Err(EncodeError::Version),
 		}
 
 		(self.suffixes.len() as u64).encode(w, version)?;

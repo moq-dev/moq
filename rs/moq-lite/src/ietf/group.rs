@@ -1,3 +1,4 @@
+use crate::Version;
 use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -20,15 +21,15 @@ impl GroupOrder {
 	}
 }
 
-impl<V> Encode<V> for GroupOrder {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for GroupOrder {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		u8::from(*self).encode(w, version)?;
 		Ok(())
 	}
 }
 
-impl<V> Decode<V> for GroupOrder {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for GroupOrder {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		Self::try_from(u8::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
 	}
 }
@@ -138,18 +139,18 @@ pub struct GroupHeader {
 	pub flags: GroupFlags,
 }
 
-impl<V: Clone> Encode<V> for GroupHeader {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		self.flags.encode()?.encode(w, version.clone())?;
-		self.track_alias.encode(w, version.clone())?;
-		self.group_id.encode(w, version.clone())?;
+impl Encode<Version> for GroupHeader {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.flags.encode()?.encode(w, version)?;
+		self.track_alias.encode(w, version)?;
+		self.group_id.encode(w, version)?;
 
 		if !self.flags.has_subgroup && self.sub_group_id != 0 {
 			return Err(EncodeError::InvalidState);
 		}
 
 		if self.flags.has_subgroup {
-			self.sub_group_id.encode(w, version.clone())?;
+			self.sub_group_id.encode(w, version)?;
 		}
 
 		// Publisher priority (only if has_priority flag is set)
@@ -160,14 +161,14 @@ impl<V: Clone> Encode<V> for GroupHeader {
 	}
 }
 
-impl<V: Clone> Decode<V> for GroupHeader {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
-		let flags = GroupFlags::decode(u64::decode(r, version.clone())?)?;
-		let track_alias = u64::decode(r, version.clone())?;
-		let group_id = u64::decode(r, version.clone())?;
+impl Decode<Version> for GroupHeader {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let flags = GroupFlags::decode(u64::decode(r, version)?)?;
+		let track_alias = u64::decode(r, version)?;
+		let group_id = u64::decode(r, version)?;
 
 		let sub_group_id = match flags.has_subgroup {
-			true => u64::decode(r, version.clone())?,
+			true => u64::decode(r, version)?,
 			false => 0,
 		};
 

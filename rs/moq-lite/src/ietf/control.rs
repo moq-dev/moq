@@ -3,10 +3,12 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
 use crate::{
-	Error,
+	Error, Version,
 	coding::{Encode, Writer},
-	ietf::{Message, RequestId, Version},
+	ietf::RequestId,
 };
+
+use crate::coding::IetfMessage;
 
 struct ControlState {
 	request_id_next: RequestId,
@@ -39,7 +41,7 @@ impl Control {
 		}
 	}
 
-	pub fn send<T: Message>(&self, msg: T) -> Result<(), Error> {
+	pub fn send<T: IetfMessage>(&self, msg: T) -> Result<(), Error> {
 		tracing::debug!(message = ?msg, "sending control message");
 
 		let mut buf = Vec::new();

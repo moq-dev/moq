@@ -5,14 +5,13 @@ use web_async::{FuturesExt, Lock};
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer, Version,
 	coding::Writer,
-	ietf::{
-		self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, Message, MessageParameters, RequestId,
-		Version,
-	},
+	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, MessageParameters, RequestId},
 	model::GroupConsumer,
 };
+
+use crate::coding::IetfMessage;
 
 #[derive(Clone)]
 pub(super) struct Publisher<S: web_transport_trait::Session> {
@@ -181,6 +180,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				reason_phrase: reason.into(),
 				retry_interval: 0,
 			}),
+			_ => Err(Error::Version),
 		}
 	}
 
@@ -454,6 +454,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				request_id,
 				parameters: MessageParameters::default(),
 			}),
+			_ => Err(Error::Version),
 		}
 	}
 
@@ -471,6 +472,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				reason_phrase: reason.into(),
 				retry_interval: 0,
 			}),
+			_ => Err(Error::Version),
 		}
 	}
 

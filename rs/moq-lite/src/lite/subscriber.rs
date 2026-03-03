@@ -5,9 +5,9 @@ use std::{
 
 use crate::{
 	AsPath, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path,
-	PathOwned, TrackProducer,
+	PathOwned, TrackProducer, Version,
 	coding::{Reader, Stream},
-	lite::{self, Version},
+	lite,
 	model::BroadcastProducer,
 };
 
@@ -89,15 +89,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut producers = HashMap::new();
 
 		match self.version {
-			Version::Draft01 | Version::Draft02 => {
+			Version::Lite01 | Version::Lite02 => {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
 				for path in msg.suffixes {
 					self.start_announce(path, &mut producers)?;
 				}
 			}
-			Version::Draft03 => {
-				// Draft03: no AnnounceInit, initial state comes via Announce messages.
+			Version::Lite03 => {
+				// Lite03: no AnnounceInit, initial state comes via Announce messages.
 			}
+			_ => unreachable!("non-lite version in lite session"),
 		}
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {

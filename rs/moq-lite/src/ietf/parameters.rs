@@ -4,7 +4,7 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::coding::*;
 
-use super::Version;
+use crate::Version;
 
 const MAX_PARAMS: u64 = 64;
 
@@ -339,15 +339,19 @@ impl MessageParameters {
 	pub fn largest_object(&self) -> Option<super::Location> {
 		let data = self.bytes.get(&Self::LARGEST_OBJECT)?;
 		let mut buf = bytes::Bytes::from(data.clone());
-		let group = u64::decode(&mut buf, ()).ok()?;
-		let object = u64::decode(&mut buf, ()).ok()?;
+		// Sub-values within parameters always use QUIC varint encoding.
+		let v = Version::Draft15;
+		let group = u64::decode(&mut buf, v).ok()?;
+		let object = u64::decode(&mut buf, v).ok()?;
 		Some(super::Location { group, object })
 	}
 
 	pub fn set_largest_object(&mut self, loc: &super::Location) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
-		loc.group.encode(&mut buf, ())?;
-		loc.object.encode(&mut buf, ())?;
+		// Sub-values within parameters always use QUIC varint encoding.
+		let v = Version::Draft15;
+		loc.group.encode(&mut buf, v)?;
+		loc.object.encode(&mut buf, v)?;
 		self.bytes.insert(Self::LARGEST_OBJECT, buf);
 		Ok(())
 	}
@@ -356,12 +360,14 @@ impl MessageParameters {
 	pub fn subscription_filter(&self) -> Option<super::FilterType> {
 		let data = self.bytes.get(&Self::SUBSCRIPTION_FILTER)?;
 		let mut buf = bytes::Bytes::from(data.clone());
-		super::FilterType::decode(&mut buf, ()).ok()
+		// Sub-values within parameters always use QUIC varint encoding.
+		super::FilterType::decode(&mut buf, Version::Draft15).ok()
 	}
 
 	pub fn set_subscription_filter(&mut self, ft: super::FilterType) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
-		ft.encode(&mut buf, ())?;
+		// Sub-values within parameters always use QUIC varint encoding.
+		ft.encode(&mut buf, Version::Draft15)?;
 		self.bytes.insert(Self::SUBSCRIPTION_FILTER, buf);
 		Ok(())
 	}

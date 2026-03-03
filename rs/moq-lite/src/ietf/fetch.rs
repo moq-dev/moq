@@ -1,13 +1,15 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path,
+	Path, Version,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		GroupOrder, Location, Message, MessageParameters, Parameters, RequestId, Version,
+		GroupOrder, Location, MessageParameters, Parameters, RequestId,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
+
+use crate::coding::{IetfMessage, Message};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchType<'a> {
@@ -28,8 +30,8 @@ pub enum FetchType<'a> {
 	},
 }
 
-impl<V: Copy> Encode<V> for FetchType<'_> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for FetchType<'_> {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match self {
 			FetchType::Standalone {
 				namespace,
@@ -64,8 +66,8 @@ impl<V: Copy> Encode<V> for FetchType<'_> {
 	}
 }
 
-impl<V: Copy> Decode<V> for FetchType<'_> {
-	fn decode<B: bytes::Buf>(buf: &mut B, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for FetchType<'_> {
+	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		let fetch_type = u64::decode(buf, version)?;
 		Ok(match fetch_type {
 			0x1 => {
@@ -110,8 +112,6 @@ pub struct Fetch<'a> {
 }
 
 impl Message for Fetch<'_> {
-	const ID: u64 = 0x16;
-
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 
@@ -130,6 +130,7 @@ impl Message for Fetch<'_> {
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.encode(w, version)?;
 			}
+			_ => return Err(EncodeError::Version),
 		}
 		Ok(())
 	}
@@ -171,8 +172,13 @@ impl Message for Fetch<'_> {
 					fetch_type,
 				})
 			}
+			_ => Err(DecodeError::Version),
 		}
 	}
+}
+
+impl IetfMessage for Fetch<'_> {
+	const ID: u64 = 0x16;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,8 +189,6 @@ pub struct FetchOk {
 	pub end_location: Location,
 }
 impl Message for FetchOk {
-	const ID: u64 = 0x18;
-
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 
@@ -203,6 +207,7 @@ impl Message for FetchOk {
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.encode(w, version)?;
 			}
+			_ => return Err(EncodeError::Version),
 		}
 		Ok(())
 	}
@@ -244,8 +249,13 @@ impl Message for FetchOk {
 					end_location,
 				})
 			}
+			_ => Err(DecodeError::Version),
 		}
 	}
+}
+
+impl IetfMessage for FetchOk {
+	const ID: u64 = 0x18;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,8 +266,6 @@ pub struct FetchError<'a> {
 }
 
 impl Message for FetchError<'_> {
-	const ID: u64 = 0x19;
-
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.error_code.encode(w, version)?;
@@ -277,13 +285,15 @@ impl Message for FetchError<'_> {
 	}
 }
 
+impl IetfMessage for FetchError<'_> {
+	const ID: u64 = 0x19;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchCancel {
 	pub request_id: RequestId,
 }
 impl Message for FetchCancel {
-	const ID: u64 = 0x17;
-
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
@@ -295,6 +305,10 @@ impl Message for FetchCancel {
 	}
 }
 
+impl IetfMessage for FetchCancel {
+	const ID: u64 = 0x17;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchHeader {
 	pub request_id: RequestId,
@@ -304,15 +318,15 @@ impl FetchHeader {
 	pub const TYPE: u64 = 0x5;
 }
 
-impl<V> Encode<V> for FetchHeader {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for FetchHeader {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
 	}
 }
 
-impl<V> Decode<V> for FetchHeader {
-	fn decode<B: bytes::Buf>(buf: &mut B, version: V) -> Result<Self, DecodeError> {
+impl Decode<Version> for FetchHeader {
+	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
 		Ok(Self { request_id })
 	}

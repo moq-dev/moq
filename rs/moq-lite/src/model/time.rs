@@ -190,12 +190,14 @@ impl<const SCALE: u64> Timescale<SCALE> {
 	}
 
 	pub fn encode<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
-		self.0.encode(w, ())?;
+		// Version-independent: uses QUIC varint encoding.
+		self.0.encode(w, crate::Version::Lite01)?;
 		Ok(())
 	}
 
 	pub fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, Error> {
-		let v = VarInt::decode(r, ())?;
+		// Version-independent: uses QUIC varint encoding.
+		let v = VarInt::decode(r, crate::Version::Lite01)?;
 		Ok(Self(v))
 	}
 }
@@ -297,15 +299,15 @@ impl<const SCALE: u64> From<tokio::time::Instant> for Timescale<SCALE> {
 	}
 }
 
-impl<const SCALE: u64, V> Decode<V> for Timescale<SCALE> {
-	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
+impl<const SCALE: u64> Decode<crate::Version> for Timescale<SCALE> {
+	fn decode<R: bytes::Buf>(r: &mut R, version: crate::Version) -> Result<Self, DecodeError> {
 		let v = VarInt::decode(r, version)?;
 		Ok(Self(v))
 	}
 }
 
-impl<const SCALE: u64, V> Encode<V> for Timescale<SCALE> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl<const SCALE: u64> Encode<crate::Version> for Timescale<SCALE> {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: crate::Version) -> Result<(), EncodeError> {
 		self.0.encode(w, version)?;
 		Ok(())
 	}

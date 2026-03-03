@@ -1,8 +1,4 @@
-use crate::{
-	Error, OriginConsumer, OriginProducer,
-	coding::Stream,
-	lite::{SessionInfo, Version},
-};
+use crate::{Error, OriginConsumer, OriginProducer, Version, coding::Stream, lite::SessionInfo};
 
 use super::{Publisher, Subscriber};
 

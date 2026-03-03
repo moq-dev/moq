@@ -164,12 +164,8 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		self.stream.stop(err.to_code());
 	}
 
-	/// Cast the reader to a different version, used during version negotiation.
-	pub fn with_version<O>(self, version: O) -> Reader<S, O> {
-		Reader {
-			stream: self.stream,
-			buffer: self.buffer,
-			version,
-		}
+	/// Change the version, used after SETUP negotiation.
+	pub fn set_version(&mut self, version: V) {
+		self.version = version;
 	}
 }

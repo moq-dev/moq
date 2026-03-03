@@ -34,11 +34,12 @@ impl<S: web_transport_trait::Session, V> Stream<S, V> {
 		Ok(Stream { writer, reader })
 	}
 
-	/// Cast the stream to a different version, used during version negotiation.
-	pub fn with_version<O: Clone>(self, version: O) -> Stream<S, O> {
-		Stream {
-			writer: self.writer.with_version(version.clone()),
-			reader: self.reader.with_version(version),
-		}
+	/// Change the version on both reader and writer, used after SETUP negotiation.
+	pub fn set_version(&mut self, version: V)
+	where
+		V: Clone,
+	{
+		self.writer.set_version(version.clone());
+		self.reader.set_version(version);
 	}
 }

@@ -3,6 +3,7 @@ use std::{borrow::Cow, sync::Arc};
 use bytes::{Bytes, BytesMut};
 
 use super::BoundsExceeded;
+use crate::Version;
 
 /// An error that occurs during encoding.
 #[derive(thiserror::Error, Debug, Clone)]
@@ -69,14 +70,14 @@ impl<V> Encode<V> for u16 {
 	}
 }
 
-impl<V> Encode<V> for String {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for String {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.as_str().encode(w, version)
 	}
 }
 
-impl<V> Encode<V> for &str {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for &str {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.len().encode(w, version)?;
 		check_remaining(&*w, self.len())?;
 		w.put(self.as_bytes());
@@ -95,18 +96,18 @@ impl<V> Encode<V> for i8 {
 	}
 }
 
-impl<T: Encode<V>, V: Clone> Encode<V> for &[T] {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		self.len().encode(w, version.clone())?;
+impl<T: Encode<Version>> Encode<Version> for &[T] {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.len().encode(w, version)?;
 		for item in self.iter() {
-			item.encode(w, version.clone())?;
+			item.encode(w, version)?;
 		}
 		Ok(())
 	}
 }
 
-impl<V> Encode<V> for Vec<u8> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for Vec<u8> {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.len().encode(w, version)?;
 		check_remaining(&*w, self.len())?;
 		w.put_slice(self);
@@ -114,8 +115,8 @@ impl<V> Encode<V> for Vec<u8> {
 	}
 }
 
-impl<V> Encode<V> for bytes::Bytes {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for bytes::Bytes {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.len().encode(w, version)?;
 		check_remaining(&*w, self.len())?;
 		w.put_slice(self);
@@ -129,8 +130,8 @@ impl<T: Encode<V>, V> Encode<V> for Arc<T> {
 	}
 }
 
-impl<V> Encode<V> for Cow<'_, str> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for Cow<'_, str> {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.len().encode(w, version)?;
 		check_remaining(&*w, self.len())?;
 		w.put(self.as_bytes());
@@ -138,8 +139,8 @@ impl<V> Encode<V> for Cow<'_, str> {
 	}
 }
 
-impl<V> Encode<V> for Option<u64> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for Option<u64> {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match self {
 			Some(value) => value.checked_add(1).ok_or(EncodeError::TooLarge)?.encode(w, version),
 			None => 0u64.encode(w, version),
@@ -147,8 +148,8 @@ impl<V> Encode<V> for Option<u64> {
 	}
 }
 
-impl<V> Encode<V> for std::time::Duration {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+impl Encode<Version> for std::time::Duration {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		let ms = super::VarInt::try_from(self.as_millis())?;
 		ms.encode(w, version)
 	}

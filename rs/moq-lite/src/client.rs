@@ -1,8 +1,6 @@
-// TODO: Uncomment when observability feature is merged
-// use std::sync::Arc;
-
 use crate::{
-	Error, NEGOTIATED, OriginConsumer, OriginProducer, Session, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_LITE, ALPN_LITE_03, Error, NEGOTIATED, OriginConsumer, OriginProducer, Session,
+	Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -13,8 +11,6 @@ pub struct Client {
 	publish: Option<OriginConsumer>,
 	consume: Option<OriginProducer>,
 	versions: Versions,
-	// TODO: Uncomment when observability feature is merged
-	// stats: Option<Arc<dyn crate::Stats>>,
 }
 
 impl Client {
@@ -37,12 +33,6 @@ impl Client {
 		self
 	}
 
-	// TODO: Uncomment when observability feature is merged
-	// pub fn with_stats(mut self, stats: impl Into<Option<Arc<dyn crate::Stats>>>) -> Self {
-	// 	self.stats = stats.into();
-	// 	self
-	// }
-
 	/// Perform the MoQ handshake as a client negotiating the version.
 	pub async fn connect<S: web_transport_trait::Session>(&self, session: S) -> Result<Session, Error> {
 		if self.publish.is_none() && self.consume.is_none() {
@@ -52,31 +42,20 @@ impl Client {
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
-			Some(ietf::ALPN_16) => {
-				let v = self
-					.versions
-					.select(ietf::Version::Draft16.into())
-					.ok_or(Error::Version)?;
+			Some(ALPN_16) => {
+				let v = self.versions.select(Version::Draft16).ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(ietf::ALPN_15) => {
-				let v = self
-					.versions
-					.select(ietf::Version::Draft15.into())
-					.ok_or(Error::Version)?;
+			Some(ALPN_15) => {
+				let v = self.versions.select(Version::Draft15).ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(ietf::ALPN_14) => {
-				let v = self
-					.versions
-					.select(ietf::Version::Draft14.into())
-					.ok_or(Error::Version)?;
+			Some(ALPN_14) => {
+				let v = self.versions.select(Version::Draft14).ok_or(Error::Version)?;
 				(v, v.into())
 			}
-			Some(lite::ALPN_03) => {
-				self.versions
-					.select(lite::Version::Draft03.into())
-					.ok_or(Error::Version)?;
+			Some(ALPN_LITE_03) => {
+				self.versions.select(Version::Lite03).ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
 				lite::start(
@@ -84,30 +63,26 @@ impl Client {
 					None,
 					self.publish.clone(),
 					self.consume.clone(),
-					lite::Version::Draft03,
+					Version::Lite03,
 				)?;
 
-				tracing::debug!(version = ?lite::Version::Draft03, "connected");
+				tracing::debug!(version = ?Version::Lite03, "connected");
 
 				return Ok(Session::new(session));
 			}
-			Some(lite::ALPN) | None => {
+			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
-				(ietf::Version::Draft14.into(), supported)
+				(Version::Draft14, supported)
 			}
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
 		let mut stream = Stream::open(&session, encoding).await?;
 
-		let ietf_version = match encoding {
-			Version::Ietf(v) => v,
-			_ => ietf::Version::Draft14,
-		};
 		let mut parameters = ietf::Parameters::default();
 		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-		let parameters = parameters.encode_bytes(ietf_version)?;
+		let parameters = parameters.encode_bytes(encoding)?;
 
 		let client = setup::Client {
 			versions: supported.clone().into(),
@@ -127,37 +102,35 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		match version {
-			Version::Lite(version) => {
-				let stream = stream.with_version(version);
-				lite::start(
-					session.clone(),
-					Some(stream),
-					self.publish.clone(),
-					self.consume.clone(),
-					version,
-				)?;
-			}
-			Version::Ietf(version) => {
-				// Decode the parameters to get the initial request ID.
-				let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
-				let request_id_max = ietf::RequestId(
-					parameters
-						.get_varint(ietf::ParameterVarInt::MaxRequestId)
-						.unwrap_or_default(),
-				);
+		// Switch the stream to the negotiated version.
+		stream.set_version(version);
 
-				let stream = stream.with_version(version);
-				ietf::start(
-					session.clone(),
-					stream,
-					request_id_max,
-					true,
-					self.publish.clone(),
-					self.consume.clone(),
-					version,
-				)?;
-			}
+		if version.is_lite() {
+			lite::start(
+				session.clone(),
+				Some(stream),
+				self.publish.clone(),
+				self.consume.clone(),
+				version,
+			)?;
+		} else {
+			// Decode the parameters to get the initial request ID.
+			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
+			let request_id_max = ietf::RequestId(
+				parameters
+					.get_varint(ietf::ParameterVarInt::MaxRequestId)
+					.unwrap_or_default(),
+			);
+
+			ietf::start(
+				session.clone(),
+				stream,
+				request_id_max,
+				true,
+				self.publish.clone(),
+				self.consume.clone(),
+				version,
+			)?;
 		}
 
 		tracing::debug!(version = ?server.version, "connected");

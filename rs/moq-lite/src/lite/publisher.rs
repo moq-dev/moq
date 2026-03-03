@@ -5,10 +5,10 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer, Version,
 	coding::{Stream, Writer},
 	lite::{
-		self, Version,
+		self,
 		priority::{PriorityHandle, PriorityQueue},
 	},
 	model::GroupConsumer,
@@ -159,7 +159,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let prefix = prefix.as_path();
 
 		match version {
-			Version::Draft01 | Version::Draft02 => {
+			Version::Lite01 | Version::Lite02 => {
 				let mut init = Vec::new();
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths
@@ -180,9 +180,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.encode(&announce_init).await?;
 			}
-			Version::Draft03 => {
-				// No more announce init in Draft03.
+			Version::Lite03 => {
+				// No more announce init in Lite03.
 			}
+			_ => unreachable!("non-lite version in lite session"),
 		}
 
 		// Send updates as they arrive.

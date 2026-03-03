@@ -3,10 +3,12 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path,
+	Path, Version,
 	coding::*,
-	ietf::{Message, Parameters, RequestId, Version},
+	ietf::{Parameters, RequestId},
 };
+
+use crate::coding::{IetfMessage, Message};
 
 use super::namespace::{decode_namespace, encode_namespace};
 
@@ -19,8 +21,6 @@ pub struct PublishNamespace<'a> {
 }
 
 impl Message for PublishNamespace<'_> {
-	const ID: u64 = 0x06;
-
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.track_namespace, version)?;
@@ -42,6 +42,10 @@ impl Message for PublishNamespace<'_> {
 	}
 }
 
+impl IetfMessage for PublishNamespace<'_> {
+	const ID: u64 = 0x06;
+}
+
 /// PublishNamespaceOk message (0x07)
 #[derive(Clone, Debug)]
 pub struct PublishNamespaceOk {
@@ -49,8 +53,6 @@ pub struct PublishNamespaceOk {
 }
 
 impl Message for PublishNamespaceOk {
-	const ID: u64 = 0x07;
-
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
@@ -62,6 +64,10 @@ impl Message for PublishNamespaceOk {
 	}
 }
 
+impl IetfMessage for PublishNamespaceOk {
+	const ID: u64 = 0x07;
+}
+
 /// PublishNamespaceError message (0x08)
 #[derive(Clone, Debug)]
 pub struct PublishNamespaceError<'a> {
@@ -71,8 +77,6 @@ pub struct PublishNamespaceError<'a> {
 }
 
 impl Message for PublishNamespaceError<'_> {
-	const ID: u64 = 0x08;
-
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.error_code.encode(w, version)?;
@@ -92,6 +96,10 @@ impl Message for PublishNamespaceError<'_> {
 		})
 	}
 }
+
+impl IetfMessage for PublishNamespaceError<'_> {
+	const ID: u64 = 0x08;
+}
 /// PublishNamespaceDone message (0x09)
 /// v14/v15: uses track_namespace. v16: uses request_id.
 #[derive(Clone, Debug)]
@@ -103,8 +111,6 @@ pub struct PublishNamespaceDone<'a> {
 }
 
 impl Message for PublishNamespaceDone<'_> {
-	const ID: u64 = 0x09;
-
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft14 | Version::Draft15 => {
@@ -113,6 +119,7 @@ impl Message for PublishNamespaceDone<'_> {
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
 			}
+			_ => return Err(EncodeError::Version),
 		}
 		Ok(())
 	}
@@ -133,8 +140,13 @@ impl Message for PublishNamespaceDone<'_> {
 					request_id,
 				})
 			}
+			_ => Err(DecodeError::Version),
 		}
 	}
+}
+
+impl IetfMessage for PublishNamespaceDone<'_> {
+	const ID: u64 = 0x09;
 }
 
 /// PublishNamespaceCancel message (0x0c)
@@ -150,8 +162,6 @@ pub struct PublishNamespaceCancel<'a> {
 }
 
 impl Message for PublishNamespaceCancel<'_> {
-	const ID: u64 = 0x0c;
-
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft14 | Version::Draft15 => {
@@ -160,6 +170,7 @@ impl Message for PublishNamespaceCancel<'_> {
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
 			}
+			_ => return Err(EncodeError::Version),
 		}
 		self.error_code.encode(w, version)?;
 		self.reason_phrase.encode(w, version)?;
@@ -176,6 +187,7 @@ impl Message for PublishNamespaceCancel<'_> {
 				let request_id = RequestId::decode(r, version)?;
 				(Path::default(), request_id)
 			}
+			_ => return Err(DecodeError::Version),
 		};
 		let error_code = u64::decode(r, version)?;
 		let reason_phrase = Cow::<str>::decode(r, version)?;
@@ -186,6 +198,10 @@ impl Message for PublishNamespaceCancel<'_> {
 			reason_phrase,
 		})
 	}
+}
+
+impl IetfMessage for PublishNamespaceCancel<'_> {
+	const ID: u64 = 0x0c;
 }
 
 #[cfg(test)]

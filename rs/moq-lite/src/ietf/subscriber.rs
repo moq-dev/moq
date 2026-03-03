@@ -2,9 +2,9 @@ use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
-	Track, TrackProducer,
+	Track, TrackProducer, Version,
 	coding::Reader,
-	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, MessageParameters, RequestId, Version},
+	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, MessageParameters, RequestId},
 	model::BroadcastProducer,
 };
 
@@ -87,6 +87,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				parameters: MessageParameters::default(),
 			}),
+			_ => Err(Error::Version),
 		}
 	}
 
@@ -104,6 +105,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				reason_phrase: reason.into(),
 				retry_interval: 0,
 			}),
+			_ => Err(Error::Version),
 		}
 	}
 
@@ -183,6 +185,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					Ok(())
 				}
 			}
+			_ => Err(Error::Version),
 		}
 	}
 
@@ -498,6 +501,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						retry_interval: 0,
 					})?;
 				}
+				_ => return Err(Error::Version),
 			}
 		} else {
 			match self.version {
@@ -516,6 +520,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						parameters: MessageParameters::default(),
 					})?;
 				}
+				_ => return Err(Error::Version),
 			}
 		}
 
