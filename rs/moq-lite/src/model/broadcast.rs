@@ -5,7 +5,7 @@ use std::{
 
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
-use conducer::{Consumer, Producer, ProducerMut, Waiter, Weak, wait};
+use conducer::{Consumer, Producer, ProducerAccess, ProducerMut, Waiter, Weak, wait};
 
 use super::Track;
 
@@ -61,12 +61,11 @@ impl BroadcastProducer {
 		}
 	}
 
-	fn err(&self) -> Error {
-		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
-	}
-
 	fn modify(&self) -> Result<ProducerMut<'_, State>, Error> {
-		self.state.modify().ok_or_else(|| self.err())
+		match self.state.access() {
+			ProducerAccess::Mut(state) => Ok(state),
+			ProducerAccess::Ref(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		}
 	}
 
 	/// Insert a track into the lookup, returning an error on duplicate.
@@ -169,12 +168,11 @@ impl BroadcastDynamic {
 		Self { state }
 	}
 
-	fn err(&self) -> Error {
-		self.state.borrow().abort.clone().unwrap_or(Error::Dropped)
-	}
-
 	fn modify(&self) -> Result<ProducerMut<'_, State>, Error> {
-		self.state.modify().ok_or_else(|| self.err())
+		match self.state.access() {
+			ProducerAccess::Mut(state) => Ok(state),
+			ProducerAccess::Ref(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		}
 	}
 
 	fn poll_requested_track(&self, waiter: &Waiter) -> Poll<Option<TrackProducer>> {

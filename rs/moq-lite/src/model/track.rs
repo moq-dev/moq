@@ -15,7 +15,7 @@
 use crate::{Error, Result};
 
 use super::{Group, GroupConsumer, GroupProducer};
-use conducer::{Consumer, Producer, ProducerMut, Weak, wait};
+use conducer::{Consumer, Producer, ProducerAccess, ProducerMut, Weak, wait};
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -151,7 +151,10 @@ impl TrackProducer {
 	}
 
 	fn modify(&self) -> Result<ProducerMut<'_, State>> {
-		self.state.modify().ok_or_else(|| self.err())
+		match self.state.access() {
+			ProducerAccess::Mut(state) => Ok(state),
+			ProducerAccess::Ref(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		}
 	}
 
 	/// Create a new group with the given sequence number.

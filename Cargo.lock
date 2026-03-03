@@ -735,9 +735,9 @@ checksum = "75984efb6ed102a0d42db99afb6c1948f0380d1d91808d5529916e6c08b49d8d"
 
 [[package]]
 name = "conducer"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d98845c41a24ba234aca5da9af2605542f723abd00bba86aae0443a99234c4bb"
+checksum = "211f7f68ad4244377dce18c7a3fe3e7c205a72a45469e83379cd4a7f28bc9998"
 
 [[package]]
 name = "console-api"

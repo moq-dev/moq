@@ -14,7 +14,7 @@ use bytes::Bytes;
 use crate::{Error, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
-use conducer::{Consumer, Producer, ProducerMut, Weak, wait};
+use conducer::{Consumer, Producer, ProducerAccess, ProducerMut, Weak, wait};
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
@@ -113,7 +113,10 @@ impl GroupProducer {
 	}
 
 	fn modify(&self) -> Result<ProducerMut<'_, GroupState>> {
-		self.state.modify().ok_or_else(|| self.err())
+		match self.state.access() {
+			ProducerAccess::Mut(state) => Ok(state),
+			ProducerAccess::Ref(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		}
 	}
 
 	/// A helper method to write a frame from a single byte buffer.

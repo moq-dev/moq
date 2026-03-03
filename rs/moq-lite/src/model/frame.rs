@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 
 use crate::{Error, Result};
 
-use conducer::{Consumer, Producer, ProducerMut, Weak, wait};
+use conducer::{Consumer, Producer, ProducerAccess, ProducerMut, Weak, wait};
 
 /// A chunk of data with an upfront size.
 ///
@@ -137,7 +137,10 @@ impl FrameProducer {
 	}
 
 	fn modify(&self) -> Result<ProducerMut<'_, FrameState>> {
-		self.state.modify().ok_or_else(|| self.err())
+		match self.state.access() {
+			ProducerAccess::Mut(state) => Ok(state),
+			ProducerAccess::Ref(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		}
 	}
 
 	/// Write a chunk of data to the frame.
