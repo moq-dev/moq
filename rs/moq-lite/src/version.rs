@@ -63,6 +63,9 @@ impl Version {
 	}
 
 	/// Parse from ALPN string.
+	///
+	/// Returns `None` for `ALPN_LITE` since multiple versions share
+	/// that ALPN, requiring SETUP negotiation to determine the version.
 	pub fn from_alpn(alpn: &str) -> Option<Self> {
 		match alpn {
 			ALPN_LITE => None, // Multiple versions share this ALPN, need SETUP negotiation

@@ -68,12 +68,11 @@ where
 
 impl<V: Copy> Encode<V> for Versions
 where
-	usize: Encode<V>,
 	u64: Encode<V>,
 {
 	/// Encode the version list.
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
-		self.0.len().encode(w, version)?;
+		(self.0.len() as u64).encode(w, version)?;
 
 		for v in &self.0 {
 			v.encode(w, version)?;

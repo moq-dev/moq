@@ -4,7 +4,7 @@ use super::{Message, Version};
 
 /// Sent to probe the available bitrate.
 ///
-/// Draft03 only.
+/// Lite03 only.
 #[derive(Clone, Debug)]
 pub struct Probe {
 	pub bitrate: u64,

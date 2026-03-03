@@ -220,10 +220,11 @@ mod tests {
 
 		async fn wait_for_first_close(&self) -> (u32, String) {
 			loop {
+				let notified = self.state.close_notify.notified();
 				if let Some(close) = self.state.close_events.lock().unwrap().first().cloned() {
 					return close;
 				}
-				self.state.close_notify.notified().await;
+				notified.await;
 			}
 		}
 	}
