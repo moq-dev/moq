@@ -370,6 +370,7 @@ ci:
 
 	# Check semver compatibility against crates.io
 	# requires: cargo install cargo-semver-checks
+	# libmoq is an internal C-ABI crate and is intentionally excluded from published-crate semver checks.
 	echo "Checking semver compatibility..."
 	cargo semver-checks check-release --workspace --exclude libmoq
 
