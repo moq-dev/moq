@@ -201,12 +201,12 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => {
-					if (warmed < 3) {
+					warmed++;
+					if (warmed <= 3) {
 						// Drop the first 3 frames to prime the decoder.
 						data.close();
 						return;
 					}
-					warmed++;
 					this.#emit(data);
 				},
 				error: (error) => console.error(error),
