@@ -170,7 +170,10 @@ impl TrackProducer {
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&mut self) -> Result<GroupProducer> {
 		let mut state = self.state.modify()?;
-		let sequence = state.max_sequence.map_or(0, |s| s + 1);
+		let sequence = match state.max_sequence {
+			Some(s) => s.checked_add(1).ok_or(Error::BoundsExceeded)?,
+			None => 0,
+		};
 		if let Some(fin) = state.fin
 			&& sequence >= fin
 		{
@@ -211,15 +214,16 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Mark the track as finished, validating the caller's expected final sequence.
+	/// Mark the track as finished at an exact final sequence.
 	///
+	/// The caller must pass the current max_sequence exactly.
 	/// Freezes the final boundary at the current max_sequence.
 	/// No new groups at or above that sequence can be created.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn insert_finish(&mut self, sequence: u64) -> Result<()> {
 		let mut state = self.state.modify()?;
 		let max = state.max_sequence.ok_or(Error::Closed)?;
-		if state.fin.is_some() || sequence < max {
+		if state.fin.is_some() || sequence != max {
 			return Err(Error::Closed);
 		}
 		state.fin = Some(max);
@@ -632,19 +636,20 @@ mod test {
 		producer.create_group(Group { sequence: 5 }).unwrap();
 
 		assert!(producer.insert_finish(4).is_err());
-		assert!(producer.insert_finish(10).is_ok());
+		assert!(producer.insert_finish(10).is_err());
+		assert!(producer.insert_finish(5).is_ok());
 
 		{
 			let state = producer.state.borrow();
 			assert_eq!(state.fin, Some(5));
 		}
 
-		assert!(producer.insert_finish(10).is_err());
+		assert!(producer.insert_finish(5).is_err());
 		assert!(producer.create_group(Group { sequence: 4 }).is_ok());
 		assert!(producer.create_group(Group { sequence: 5 }).is_err());
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn next_group_finishes_without_waiting_for_gaps() {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 1 }).unwrap();
@@ -661,7 +666,7 @@ mod test {
 		assert!(done.is_none(), "track should finish without waiting for gaps");
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn get_group_finishes_without_waiting_for_gaps() {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 1 }).unwrap();
@@ -686,5 +691,16 @@ mod test {
 				.is_none(),
 			"sequence at-or-after fin should not exist"
 		);
+	}
+
+	#[test]
+	fn append_group_returns_bounds_exceeded_on_sequence_overflow() {
+		let mut producer = Track::new("test").produce();
+		{
+			let mut state = producer.state.modify().unwrap();
+			state.max_sequence = Some(u64::MAX);
+		}
+
+		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded)));
 	}
 }
