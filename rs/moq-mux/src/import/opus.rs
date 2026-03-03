@@ -81,6 +81,12 @@ impl Opus {
 		})
 	}
 
+	/// Finish the track, flushing the current group.
+	pub fn finish(&mut self) -> anyhow::Result<()> {
+		self.track.finish()?;
+		Ok(())
+	}
+
 	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 

@@ -247,6 +247,23 @@ impl StreamDecoder {
 		}
 	}
 
+	/// Finish the decoder, flushing any buffered data.
+	///
+	/// This should be called when the input stream ends to ensure the last
+	/// group is properly finalized.
+	pub fn finish(&mut self) -> anyhow::Result<()> {
+		match self.decoder {
+			#[cfg(feature = "h264")]
+			StreamKind::Avc3(ref mut decoder) => decoder.finish(),
+			#[cfg(feature = "mp4")]
+			StreamKind::Fmp4(ref mut decoder) => decoder.finish(),
+			#[cfg(feature = "h265")]
+			StreamKind::Hev1(ref mut decoder) => decoder.finish(),
+			#[cfg(feature = "av1")]
+			StreamKind::Av01(ref mut decoder) => decoder.finish(),
+		}
+	}
+
 	/// Check if the decoder has read enough data to be initialized.
 	pub fn is_initialized(&self) -> bool {
 		match self.decoder {
@@ -319,6 +336,27 @@ impl Decoder {
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
 
 		Ok(Self { decoder })
+	}
+
+	/// Finish the decoder, flushing any buffered data.
+	///
+	/// This should be called when the input stream ends to ensure the last
+	/// group is properly finalized.
+	pub fn finish(&mut self) -> anyhow::Result<()> {
+		match self.decoder {
+			#[cfg(feature = "h264")]
+			DecoderKind::Avc3(ref mut decoder) => decoder.finish(),
+			#[cfg(feature = "mp4")]
+			DecoderKind::Fmp4(ref mut decoder) => decoder.finish(),
+			#[cfg(feature = "h265")]
+			DecoderKind::Hev1(ref mut decoder) => decoder.finish(),
+			#[cfg(feature = "av1")]
+			DecoderKind::Av01(ref mut decoder) => decoder.finish(),
+			#[cfg(feature = "aac")]
+			DecoderKind::Aac(ref mut decoder) => decoder.finish(),
+			#[cfg(feature = "opus")]
+			DecoderKind::Opus(ref mut decoder) => decoder.finish(),
+		}
 	}
 
 	/// Decode a frame from the given buffer.

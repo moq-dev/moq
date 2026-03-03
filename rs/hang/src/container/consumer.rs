@@ -18,10 +18,14 @@ pub struct OrderedFrame {
 	/// The group sequence number this frame belongs to.
 	pub group: u64,
 
-	/// The frame index within the group (0 = first frame / keyframe).
+	/// The frame index within the group (0 = first frame in the group).
+	///
+	/// With duration-based grouping (e.g. audio), the first frame is not
+	/// necessarily a keyframe — it only denotes position within the group.
 	pub frame: usize,
 }
 
+/// Lossy conversion: discards ordering metadata (`group` and `frame` fields).
 impl From<OrderedFrame> for Frame {
 	fn from(ordered: OrderedFrame) -> Self {
 		Frame {

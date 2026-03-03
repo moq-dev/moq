@@ -182,17 +182,16 @@ impl Fmp4 {
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
 			let handler = &trak.mdia.hdlr.handler;
+			let ext = if self.config.passthrough { "m4s" } else { "hang" };
 
 			let (kind, track) = match handler.as_ref() {
 				b"vide" => {
 					let config = self.init_video(trak)?;
-					let ext = if self.config.passthrough { "m4s" } else { "hang" };
 					let track = catalog.video.create_track(ext, config.clone());
 					(TrackKind::Video, track)
 				}
 				b"soun" => {
 					let config = self.init_audio(trak)?;
-					let ext = if self.config.passthrough { "m4s" } else { "hang" };
 					let track = catalog.audio.create_track(ext, config.clone());
 					(TrackKind::Audio, track)
 				}
@@ -669,6 +668,26 @@ impl Fmp4 {
 			}
 		}
 
+		Ok(())
+	}
+}
+
+impl Fmp4 {
+	/// Finish all tracks, flushing current groups.
+	pub fn finish(&mut self) -> anyhow::Result<()> {
+		for track in self.tracks.values_mut() {
+			match &mut track.producer {
+				Fmp4Producer::Manual { track: raw, group } => {
+					if let Some(mut g) = group.take() {
+						g.finish()?;
+					}
+					raw.finish()?;
+				}
+				Fmp4Producer::Ordered(ordered) => {
+					ordered.finish()?;
+				}
+			}
+		}
 		Ok(())
 	}
 }

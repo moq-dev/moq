@@ -308,6 +308,13 @@ impl Hev1 {
 		Ok(())
 	}
 
+	/// Finish the track, flushing the current group.
+	pub fn finish(&mut self) -> anyhow::Result<()> {
+		let track = self.track.as_mut().context("not initialized")?;
+		track.finish()?;
+		Ok(())
+	}
+
 	pub fn is_initialized(&self) -> bool {
 		self.track.is_some()
 	}

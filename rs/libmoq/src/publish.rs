@@ -68,7 +68,8 @@ impl Publish {
 	}
 
 	pub fn media_close(&mut self, media: Id) -> Result<(), Error> {
-		self.media.remove(media).ok_or(Error::NotFound)?;
+		let mut decoder = self.media.remove(media).ok_or(Error::NotFound)?;
+		decoder.finish().map_err(|err| Error::DecodeFailed(Arc::new(err)))?;
 		Ok(())
 	}
 }
