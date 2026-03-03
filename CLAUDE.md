@@ -88,6 +88,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 - Run `just check` to execute all tests and linting.
 - Run `just fix` to automatically fix formating and easy things.
 - Rust tests are integrated within source files
+- Async tests should use `#[tokio::test(start_paused = true)]` to simulate time
 
 ## Workflow
 
