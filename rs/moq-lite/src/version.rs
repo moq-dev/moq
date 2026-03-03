@@ -6,6 +6,8 @@ use crate::coding;
 /// The versions of MoQ that are negotiated via SETUP.
 ///
 /// Ordered by preference, with the client's preference taking priority.
+/// This intentionally includes only SETUP-negotiated versions (Lite01, Lite02, Draft14);
+/// Lite03 and newer IETF drafts negotiate via dedicated ALPNs instead.
 pub(crate) const NEGOTIATED: [Version; 3] = [Version::Lite02, Version::Lite01, Version::Draft14];
 
 /// ALPN strings for supported versions.
@@ -180,7 +182,9 @@ impl From<Vec<Version>> for coding::Versions {
 pub struct Versions(Vec<Version>);
 
 impl Versions {
-	/// All supported versions.
+	/// All supported versions exposed by default.
+	///
+	/// This list intentionally omits Draft17 while draft-17 support remains incomplete.
 	pub fn all() -> Self {
 		Self(vec![
 			Version::Lite03,

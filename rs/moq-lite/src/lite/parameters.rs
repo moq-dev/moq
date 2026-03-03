@@ -34,6 +34,10 @@ impl Decode<Version> for Parameters {
 
 impl Encode<Version> for Parameters {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		if self.0.len() as u64 > MAX_PARAMS {
+			return Err(EncodeError::TooMany);
+		}
+
 		self.0.len().encode(w, version)?;
 
 		for (kind, value) in self.0.iter() {

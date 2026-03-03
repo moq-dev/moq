@@ -119,7 +119,8 @@ impl Message for PublishNamespaceDone<'_> {
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
 			}
-			_ => return Err(EncodeError::Version),
+			Version::Draft17 => return Err(EncodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => return Err(EncodeError::Version),
 		}
 		Ok(())
 	}
@@ -140,7 +141,8 @@ impl Message for PublishNamespaceDone<'_> {
 					request_id,
 				})
 			}
-			_ => Err(DecodeError::Version),
+			Version::Draft17 => Err(DecodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -170,7 +172,9 @@ impl Message for PublishNamespaceCancel<'_> {
 			Version::Draft16 => {
 				self.request_id.encode(w, version)?;
 			}
-			_ => return Err(EncodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 		self.error_code.encode(w, version)?;
 		self.reason_phrase.encode(w, version)?;
@@ -187,7 +191,9 @@ impl Message for PublishNamespaceCancel<'_> {
 				let request_id = RequestId::decode(r, version)?;
 				(Path::default(), request_id)
 			}
-			_ => return Err(DecodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				return Err(DecodeError::Version);
+			}
 		};
 		let error_code = u64::decode(r, version)?;
 		let reason_phrase = Cow::<str>::decode(r, version)?;

@@ -7,6 +7,7 @@ use crate::coding::*;
 use crate::Version;
 
 const MAX_PARAMS: u64 = 64;
+const PARAM_SUBVALUE_VERSION: Version = Version::Draft15;
 
 // ---- Setup Parameters (used in CLIENT_SETUP/SERVER_SETUP) ----
 
@@ -57,7 +58,12 @@ impl Decode<Version> for Parameters {
 					prev_type = abs;
 					abs
 				}
-				_ => u64::decode(r, version)?,
+				Version::Lite01
+				| Version::Lite02
+				| Version::Lite03
+				| Version::Draft14
+				| Version::Draft15
+				| Version::Draft17 => u64::decode(r, version)?,
 			};
 
 			if kind % 2 == 0 {
@@ -117,7 +123,12 @@ impl Encode<Version> for Parameters {
 					}
 				}
 			}
-			_ => {
+			Version::Lite01
+			| Version::Lite02
+			| Version::Lite03
+			| Version::Draft14
+			| Version::Draft15
+			| Version::Draft17 => {
 				for (kind, value) in self.vars.iter() {
 					u64::from(*kind).encode(w, version)?;
 					value.encode(w, version)?;
@@ -184,7 +195,12 @@ impl Decode<Version> for MessageParameters {
 					prev_type = abs;
 					abs
 				}
-				_ => u64::decode(r, version)?,
+				Version::Lite01
+				| Version::Lite02
+				| Version::Lite03
+				| Version::Draft14
+				| Version::Draft15
+				| Version::Draft17 => u64::decode(r, version)?,
 			};
 
 			if kind % 2 == 0 {
@@ -240,7 +256,12 @@ impl Encode<Version> for MessageParameters {
 					}
 				}
 			}
-			_ => {
+			Version::Lite01
+			| Version::Lite02
+			| Version::Lite03
+			| Version::Draft14
+			| Version::Draft15
+			| Version::Draft17 => {
 				for (kind, value) in self.vars.iter() {
 					kind.encode(w, version)?;
 					value.encode(w, version)?;
@@ -340,7 +361,7 @@ impl MessageParameters {
 		let data = self.bytes.get(&Self::LARGEST_OBJECT)?;
 		let mut buf = bytes::Bytes::from(data.clone());
 		// Sub-values within parameters always use QUIC varint encoding.
-		let v = Version::Draft15;
+		let v = PARAM_SUBVALUE_VERSION;
 		let group = u64::decode(&mut buf, v).ok()?;
 		let object = u64::decode(&mut buf, v).ok()?;
 		Some(super::Location { group, object })
@@ -349,7 +370,7 @@ impl MessageParameters {
 	pub fn set_largest_object(&mut self, loc: &super::Location) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
 		// Sub-values within parameters always use QUIC varint encoding.
-		let v = Version::Draft15;
+		let v = PARAM_SUBVALUE_VERSION;
 		loc.group.encode(&mut buf, v)?;
 		loc.object.encode(&mut buf, v)?;
 		self.bytes.insert(Self::LARGEST_OBJECT, buf);
@@ -361,13 +382,13 @@ impl MessageParameters {
 		let data = self.bytes.get(&Self::SUBSCRIPTION_FILTER)?;
 		let mut buf = bytes::Bytes::from(data.clone());
 		// Sub-values within parameters always use QUIC varint encoding.
-		super::FilterType::decode(&mut buf, Version::Draft15).ok()
+		super::FilterType::decode(&mut buf, PARAM_SUBVALUE_VERSION).ok()
 	}
 
 	pub fn set_subscription_filter(&mut self, ft: super::FilterType) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
 		// Sub-values within parameters always use QUIC varint encoding.
-		ft.encode(&mut buf, Version::Draft15)?;
+		ft.encode(&mut buf, PARAM_SUBVALUE_VERSION)?;
 		self.bytes.insert(Self::SUBSCRIPTION_FILTER, buf);
 		Ok(())
 	}

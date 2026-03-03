@@ -12,6 +12,10 @@ use crate::coding::{IetfMessage, Message};
 pub struct RequestId(pub u64);
 
 impl RequestId {
+	/// Returns the previous request ID and advances by 2.
+	///
+	/// IDs increment by 2 so peers keep parity separation:
+	/// clients use even IDs and servers use odd IDs.
 	pub fn increment(&mut self) -> RequestId {
 		let prev = self.0;
 		self.0 += 2;
@@ -136,7 +140,12 @@ impl Message for RequestError<'_> {
 		let error_code = u64::decode(r, version)?;
 		let retry_interval = match version {
 			Version::Draft16 => u64::decode(r, version)?,
-			_ => 0,
+			Version::Lite01
+			| Version::Lite02
+			| Version::Lite03
+			| Version::Draft14
+			| Version::Draft15
+			| Version::Draft17 => 0,
 		};
 		let reason_phrase = Cow::<str>::decode(r, version)?;
 		Ok(Self {

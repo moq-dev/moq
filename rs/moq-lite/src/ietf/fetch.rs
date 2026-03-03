@@ -130,7 +130,9 @@ impl Message for Fetch<'_> {
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.encode(w, version)?;
 			}
-			_ => return Err(EncodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 		Ok(())
 	}
@@ -172,7 +174,7 @@ impl Message for Fetch<'_> {
 					fetch_type,
 				})
 			}
-			_ => Err(DecodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -207,7 +209,9 @@ impl Message for FetchOk {
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.encode(w, version)?;
 			}
-			_ => return Err(EncodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 		Ok(())
 	}
@@ -249,7 +253,7 @@ impl Message for FetchOk {
 					end_location,
 				})
 			}
-			_ => Err(DecodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }

@@ -36,7 +36,9 @@ impl Message for Subscribe<'_> {
 				(ordered, max_latency, start_group, end_group)
 			}
 			Version::Lite01 | Version::Lite02 => (false, std::time::Duration::ZERO, None, None),
-			_ => return Err(DecodeError::Version),
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				return Err(DecodeError::Version);
+			}
 		};
 
 		Ok(Self {
@@ -65,7 +67,9 @@ impl Message for Subscribe<'_> {
 				self.end_group.encode(w, version)?;
 			}
 			Version::Lite01 | Version::Lite02 => {}
-			_ => return Err(EncodeError::Version),
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 
 		Ok(())
@@ -95,7 +99,9 @@ impl Message for SubscribeOk {
 				self.priority.encode(w, version)?;
 			}
 			Version::Lite02 => {}
-			_ => return Err(EncodeError::Version),
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 
 		Ok(())
@@ -132,7 +138,7 @@ impl Message for SubscribeOk {
 				start_group: None,
 				end_group: None,
 			}),
-			_ => Err(DecodeError::Version),
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -154,7 +160,12 @@ impl Message for SubscribeUpdate {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite03 => {}
-			Version::Lite01 | Version::Lite02 | _ => {
+			Version::Lite01
+			| Version::Lite02
+			| Version::Draft14
+			| Version::Draft15
+			| Version::Draft16
+			| Version::Draft17 => {
 				return Err(DecodeError::Version);
 			}
 		}
@@ -183,7 +194,12 @@ impl Message for SubscribeUpdate {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite03 => {}
-			Version::Lite01 | Version::Lite02 | _ => {
+			Version::Lite01
+			| Version::Lite02
+			| Version::Draft14
+			| Version::Draft15
+			| Version::Draft16
+			| Version::Draft17 => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -235,7 +251,12 @@ impl Message for SubscribeDrop {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite03 => {}
-			Version::Lite01 | Version::Lite02 | _ => {
+			Version::Lite01
+			| Version::Lite02
+			| Version::Draft14
+			| Version::Draft15
+			| Version::Draft16
+			| Version::Draft17 => {
 				return Err(DecodeError::Version);
 			}
 		}
@@ -250,7 +271,12 @@ impl Message for SubscribeDrop {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite03 => {}
-			Version::Lite01 | Version::Lite02 | _ => {
+			Version::Lite01
+			| Version::Lite02
+			| Version::Draft14
+			| Version::Draft15
+			| Version::Draft16
+			| Version::Draft17 => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -307,7 +333,9 @@ impl Encode<Version> for SubscribeResponse {
 					return Err(EncodeError::Version);
 				}
 			},
-			_ => return Err(EncodeError::Version),
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 
 		Ok(())
@@ -326,7 +354,7 @@ impl Decode<Version> for SubscribeResponse {
 				}
 			}
 			Version::Lite01 | Version::Lite02 => Ok(Self::Ok(SubscribeOk::decode(buf, version)?)),
-			_ => Err(DecodeError::Version),
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }

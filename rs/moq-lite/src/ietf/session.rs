@@ -118,7 +118,9 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					subscriber.recv_request_error(&msg)?;
 					publisher.recv_request_error(&msg)?;
 				}
-				_ => return Err(Error::UnexpectedMessage),
+				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+					return Err(Error::UnexpectedMessage);
+				}
 			},
 			ietf::PublishNamespace::ID => {
 				let msg = ietf::PublishNamespace::decode_msg(&mut data, version)?;
@@ -138,7 +140,9 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					subscriber.recv_request_ok(&msg)?;
 					publisher.recv_request_ok(&msg)?;
 				}
-				_ => return Err(Error::UnexpectedMessage),
+				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+					return Err(Error::UnexpectedMessage);
+				}
 			},
 			// 0x08: PublishNamespaceError in v14, NAMESPACE in v16, removed in v15
 			ietf::PublishNamespaceError::ID => match version {
@@ -148,7 +152,9 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					publisher.recv_publish_namespace_error(msg)?;
 				}
 				Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				_ => return Err(Error::UnexpectedMessage),
+				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+					return Err(Error::UnexpectedMessage);
+				}
 			},
 			ietf::PublishNamespaceDone::ID => {
 				let msg = ietf::PublishNamespaceDone::decode_msg(&mut data, version)?;
@@ -188,7 +194,9 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					publisher.recv_subscribe_namespace(msg)?;
 				}
 				Version::Draft16 => return Err(Error::UnexpectedMessage),
-				_ => return Err(Error::UnexpectedMessage),
+				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+					return Err(Error::UnexpectedMessage);
+				}
 			},
 			// 0x12: SubscribeNamespaceOk in v14, removed in v15+
 			ietf::SubscribeNamespaceOk::ID => match version {
@@ -198,7 +206,9 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					subscriber.recv_subscribe_namespace_ok(msg)?;
 				}
 				Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				_ => return Err(Error::UnexpectedMessage),
+				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+					return Err(Error::UnexpectedMessage);
+				}
 			},
 			// 0x13: SubscribeNamespaceError in v14, removed in v15+
 			ietf::SubscribeNamespaceError::ID => match version {
@@ -208,7 +218,9 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					subscriber.recv_subscribe_namespace_error(msg)?;
 				}
 				Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				_ => return Err(Error::UnexpectedMessage),
+				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+					return Err(Error::UnexpectedMessage);
+				}
 			},
 			// 0x14: UnsubscribeNamespace — v14/v15: control stream, v16: removed (use stream close)
 			ietf::UnsubscribeNamespace::ID => match version {
@@ -218,7 +230,9 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					publisher.recv_unsubscribe_namespace(msg)?;
 				}
 				Version::Draft16 => return Err(Error::UnexpectedMessage),
-				_ => return Err(Error::UnexpectedMessage),
+				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+					return Err(Error::UnexpectedMessage);
+				}
 			},
 			ietf::MaxRequestId::ID => {
 				let msg = ietf::MaxRequestId::decode_msg(&mut data, version)?;
@@ -253,7 +267,9 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					subscriber.recv_fetch_error(msg)?;
 				}
 				Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				_ => return Err(Error::UnexpectedMessage),
+				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+					return Err(Error::UnexpectedMessage);
+				}
 			},
 			ietf::Publish::ID => {
 				let msg = ietf::Publish::decode_msg(&mut data, version)?;
@@ -263,12 +279,16 @@ async fn run_control_read<S: web_transport_trait::Session>(
 			// 0x1E: PublishOk — v14: unsupported, v15+: removed (replaced by RequestOk 0x07)
 			ietf::PublishOk::ID => match version {
 				Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				_ => return Err(Error::UnexpectedMessage),
+				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+					return Err(Error::UnexpectedMessage);
+				}
 			},
 			// 0x1F: PublishError — v14: unsupported, v15+: removed (replaced by RequestError 0x05)
 			ietf::PublishError::ID => match version {
 				Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				_ => return Err(Error::UnexpectedMessage),
+				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+					return Err(Error::UnexpectedMessage);
+				}
 			},
 			_ => return Err(Error::UnexpectedMessage),
 		}

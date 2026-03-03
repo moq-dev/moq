@@ -29,7 +29,9 @@ impl Message for Announce<'_> {
 		let hops = match version {
 			Version::Lite03 => u64::decode(r, version)?,
 			Version::Lite01 | Version::Lite02 => 0,
-			_ => return Err(DecodeError::Version),
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				return Err(DecodeError::Version);
+			}
 		};
 
 		Ok(match status {
@@ -46,7 +48,9 @@ impl Message for Announce<'_> {
 				match version {
 					Version::Lite03 => hops.encode(w, version)?,
 					Version::Lite01 | Version::Lite02 => {}
-					_ => return Err(EncodeError::Version),
+					Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+						return Err(EncodeError::Version);
+					}
 				}
 			}
 			Self::Ended { suffix, hops } => {
@@ -55,7 +59,9 @@ impl Message for Announce<'_> {
 				match version {
 					Version::Lite03 => hops.encode(w, version)?,
 					Version::Lite01 | Version::Lite02 => {}
-					_ => return Err(EncodeError::Version),
+					Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+						return Err(EncodeError::Version);
+					}
 				}
 			}
 		}
@@ -120,7 +126,9 @@ impl Message for AnnounceInit<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
-			Version::Lite03 | _ => return Err(DecodeError::Version),
+			Version::Lite03 | Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				return Err(DecodeError::Version);
+			}
 		}
 
 		let count = u64::decode(r, version)?;
@@ -138,7 +146,9 @@ impl Message for AnnounceInit<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
-			Version::Lite03 | _ => return Err(EncodeError::Version),
+			Version::Lite03 | Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 
 		(self.suffixes.len() as u64).encode(w, version)?;

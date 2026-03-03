@@ -18,7 +18,7 @@ pub fn encode_namespace<W: bytes::BufMut>(w: &mut W, namespace: &Path, version: 
 
 /// Helper function to decode namespace from tuple of strings
 pub fn decode_namespace<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Path<'static>, DecodeError> {
-	let count = u64::decode(r, version)? as usize;
+	let count = usize::try_from(u64::decode(r, version)?).map_err(|_| DecodeError::CountOverflow)?;
 
 	if count == 0 {
 		return Ok(Path::from(String::new()));

@@ -183,7 +183,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			Version::Lite03 => {
 				// No more announce init in Lite03.
 			}
-			_ => unreachable!("non-lite version in lite session"),
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				return Err(Error::Version);
+			}
 		}
 
 		// Send updates as they arrive.

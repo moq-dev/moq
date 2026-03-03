@@ -38,7 +38,12 @@ impl Message for SubscribeNamespace<'_> {
 		let namespace = decode_namespace(r, version)?;
 		let subscribe_options = match version {
 			Version::Draft16 => u64::decode(r, version)?,
-			_ => 0x01,
+			Version::Lite01
+			| Version::Lite02
+			| Version::Lite03
+			| Version::Draft14
+			| Version::Draft15
+			| Version::Draft17 => 0x01,
 		};
 
 		// Ignore parameters, who cares.

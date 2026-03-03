@@ -43,7 +43,9 @@ impl Message for TrackStatus<'_> {
 				let params = MessageParameters::default();
 				params.encode(w, version)?;
 			}
-			_ => return Err(EncodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 		Ok(())
 	}
@@ -64,7 +66,9 @@ impl Message for TrackStatus<'_> {
 			Version::Draft15 | Version::Draft16 => {
 				let _params = MessageParameters::decode(r, version)?;
 			}
-			_ => return Err(DecodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				return Err(DecodeError::Version);
+			}
 		}
 
 		Ok(Self {
@@ -143,6 +147,22 @@ mod tests {
 
 		let encoded = encode_message(&msg, Version::Draft15);
 		let decoded: TrackStatus = decode_message(&encoded, Version::Draft15).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+	}
+
+	#[test]
+	fn test_track_status_v16_round_trip() {
+		let msg = TrackStatus {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft16);
+		let decoded: TrackStatus = decode_message(&encoded, Version::Draft16).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(1));
 		assert_eq!(decoded.track_namespace.as_str(), "test/ns");

@@ -485,3 +485,38 @@ impl Decode<Version> for u32 {
 		Ok(v)
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::VarInt;
+	use bytes::Bytes;
+
+	#[test]
+	fn leading_ones_boundaries_round_trip() {
+		let cases = [
+			((1u64 << 7) - 1, 1usize),
+			(1u64 << 7, 2usize),
+			((1u64 << 14) - 1, 2usize),
+			(1u64 << 14, 3usize),
+			((1u64 << 56) - 1, 8usize),
+			(1u64 << 56, 9usize),
+		];
+
+		for (value, expected_len) in cases {
+			let varint = VarInt::from_u64(value).expect("value should be representable as VarInt");
+			let mut encoded = Vec::new();
+			varint
+				.encode_leading_ones(&mut encoded)
+				.expect("leading-ones encode should succeed");
+			assert_eq!(
+				encoded.len(),
+				expected_len,
+				"unexpected encoded length for value {value}"
+			);
+
+			let mut bytes = Bytes::from(encoded);
+			let decoded = VarInt::decode_leading_ones(&mut bytes).expect("leading-ones decode should succeed");
+			assert_eq!(decoded.into_inner(), value, "round-trip mismatch for value {value}");
+		}
+	}
+}

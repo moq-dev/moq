@@ -196,7 +196,9 @@ impl Message for Publish<'_> {
 				params.set_forward(self.forward);
 				params.encode(w, version)?;
 			}
-			_ => return Err(EncodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 
 		Ok(())
@@ -254,7 +256,7 @@ impl Message for Publish<'_> {
 					forward,
 				})
 			}
-			_ => Err(DecodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -298,7 +300,9 @@ impl Message for PublishOk {
 				params.set_subscription_filter(self.filter_type)?;
 				params.encode(w, version)?;
 			}
-			_ => return Err(EncodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				return Err(EncodeError::Version);
+			}
 		}
 
 		Ok(())
@@ -358,7 +362,7 @@ impl Message for PublishOk {
 					filter_type,
 				})
 			}
-			_ => Err(DecodeError::Version),
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
