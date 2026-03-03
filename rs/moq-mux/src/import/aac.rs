@@ -2,6 +2,13 @@ use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
 
+/// Typed AAC configuration for initialization without binary blobs.
+pub struct AacConfig {
+	pub profile: u8,
+	pub sample_rate: u32,
+	pub channel_count: u32,
+}
+
 /// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
 pub struct Aac {
 	broadcast: moq_lite::BroadcastProducer,
@@ -96,19 +103,31 @@ impl Aac {
 			(object_type, sample_rate, channel_count)
 		};
 
-		let mut catalog = self.catalog.lock();
-
-		let config = hang::catalog::AudioConfig {
-			codec: hang::catalog::AAC { profile }.into(),
+		self.initialize_with(AacConfig {
+			profile,
 			sample_rate,
 			channel_count,
+		})
+	}
+
+	/// Initialize from typed configuration, without needing a binary AudioSpecificConfig blob.
+	pub fn initialize_with(&mut self, config: AacConfig) -> anyhow::Result<()> {
+		let mut catalog = self.catalog.lock();
+
+		let audio_config = hang::catalog::AudioConfig {
+			codec: hang::catalog::AAC {
+				profile: config.profile,
+			}
+			.into(),
+			sample_rate: config.sample_rate,
+			channel_count: config.channel_count,
 			bitrate: None,
 			description: None,
 			container: hang::catalog::Container::Legacy,
 			jitter: None,
 		};
-		let track = catalog.audio.create_track("aac", config.clone());
-		tracing::debug!(name = ?track.name, ?config, "starting track");
+		let track = catalog.audio.create_track("aac", audio_config.clone());
+		tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
 
 		self.track = Some(self.broadcast.create_track(track)?.into());
 

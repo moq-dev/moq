@@ -2,6 +2,12 @@ use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
 
+/// Typed Opus configuration for initialization without binary blobs.
+pub struct OpusConfig {
+	pub sample_rate: u32,
+	pub channel_count: u32,
+}
+
 /// Opus decoder, initialized via a OpusHead. Does not support Ogg.
 pub struct Opus {
 	broadcast: moq_lite::BroadcastProducer,
@@ -42,20 +48,28 @@ impl Opus {
 			buf.advance(buf.remaining());
 		}
 
-		let mut catalog = self.catalog.lock();
-
-		let config = hang::catalog::AudioConfig {
-			codec: hang::catalog::AudioCodec::Opus,
+		self.initialize_with(OpusConfig {
 			sample_rate,
 			channel_count,
+		})
+	}
+
+	/// Initialize from typed configuration, without needing a binary OpusHead blob.
+	pub fn initialize_with(&mut self, config: OpusConfig) -> anyhow::Result<()> {
+		let mut catalog = self.catalog.lock();
+
+		let audio_config = hang::catalog::AudioConfig {
+			codec: hang::catalog::AudioCodec::Opus,
+			sample_rate: config.sample_rate,
+			channel_count: config.channel_count,
 			bitrate: None,
 			description: None,
 			container: hang::catalog::Container::Legacy,
 			jitter: None,
 		};
 
-		let track = catalog.audio.create_track("opus", config.clone());
-		tracing::debug!(name = ?track.name, ?config, "starting track");
+		let track = catalog.audio.create_track("opus", audio_config.clone());
+		tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
 
 		let track = self.broadcast.create_track(track)?;
 		self.track = Some(track.into());

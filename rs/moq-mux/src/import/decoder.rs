@@ -369,3 +369,17 @@ impl Decoder {
 		}
 	}
 }
+
+#[cfg(feature = "opus")]
+impl From<super::Opus> for Decoder {
+	fn from(opus: super::Opus) -> Self {
+		Self { decoder: opus.into() }
+	}
+}
+
+#[cfg(feature = "aac")]
+impl From<super::Aac> for Decoder {
+	fn from(aac: super::Aac) -> Self {
+		Self { decoder: aac.into() }
+	}
+}
