@@ -1,4 +1,4 @@
-name: Check
+name: Stable
 
 permissions:
   id-token: write
@@ -29,3 +29,4 @@ jobs:
 
       # Run checks with cached dependencies
       - run: nix develop --command just ci
+

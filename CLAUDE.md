@@ -89,6 +89,13 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 - Run `just fix` to automatically fix formating and easy things.
 - Rust tests are integrated within source files
 
+## Branching Strategy
+
+- **`main`**: Stable branch for patch releases. Only non-breaking fixes and additions.
+- **`dev`**: Development branch for breaking API changes. PRs with major API changes should target `dev`.
+- When ready for a new minor/major release, merge `dev` into `main`.
+- `cargo-semver-checks` enforces this on PRs to `main`.
+
 ## Workflow
 
 When making changes to the codebase:

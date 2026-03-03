@@ -62,6 +62,7 @@
           cargo-edit
           cargo-hack
           cargo-sweep
+          cargo-semver-checks
         ];
 
         # JavaScript dependencies
