@@ -1,4 +1,3 @@
-use anyhow::Context;
 use buf_list::BufList;
 use bytes::Buf;
 
@@ -8,25 +7,9 @@ pub struct OpusConfig {
 	pub channel_count: u32,
 }
 
-/// Opus decoder, initialized via a OpusHead. Does not support Ogg.
-pub struct Opus {
-	broadcast: moq_lite::BroadcastProducer,
-	catalog: crate::CatalogProducer,
-	track: Option<hang::container::OrderedProducer>,
-	zero: Option<tokio::time::Instant>,
-}
-
-impl Opus {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
-		Self {
-			broadcast,
-			catalog,
-			track: None,
-			zero: None,
-		}
-	}
-
-	pub fn initialize<T: Buf>(&mut self, buf: &mut T) -> anyhow::Result<()> {
+impl OpusConfig {
+	/// Parse an OpusHead buffer into an OpusConfig.
+	pub fn parse<T: Buf>(buf: &mut T) -> anyhow::Result<Self> {
 		// Parse OpusHead (https://datatracker.ietf.org/doc/html/rfc7845#section-5.1)
 		//  - Verifies "OpusHead" magic signature
 		//  - Reads channel count
@@ -48,38 +31,54 @@ impl Opus {
 			buf.advance(buf.remaining());
 		}
 
-		self.initialize_with(OpusConfig {
+		Ok(Self {
 			sample_rate,
 			channel_count,
 		})
 	}
+}
 
-	/// Initialize from typed configuration, without needing a binary OpusHead blob.
-	pub fn initialize_with(&mut self, config: OpusConfig) -> anyhow::Result<()> {
-		let mut catalog = self.catalog.lock();
+/// Opus decoder, initialized via a OpusHead. Does not support Ogg.
+pub struct Opus {
+	catalog: crate::CatalogProducer,
+	track: hang::container::OrderedProducer,
+	zero: Option<tokio::time::Instant>,
+}
 
-		let audio_config = hang::catalog::AudioConfig {
-			codec: hang::catalog::AudioCodec::Opus,
-			sample_rate: config.sample_rate,
-			channel_count: config.channel_count,
-			bitrate: None,
-			description: None,
-			container: hang::catalog::Container::Legacy,
-			jitter: None,
+impl Opus {
+	pub fn new(
+		mut broadcast: moq_lite::BroadcastProducer,
+		mut catalog: crate::CatalogProducer,
+		config: OpusConfig,
+	) -> anyhow::Result<Self> {
+		let track = {
+			let mut cat = catalog.lock();
+
+			let audio_config = hang::catalog::AudioConfig {
+				codec: hang::catalog::AudioCodec::Opus,
+				sample_rate: config.sample_rate,
+				channel_count: config.channel_count,
+				bitrate: None,
+				description: None,
+				container: hang::catalog::Container::Legacy,
+				jitter: None,
+			};
+
+			let track = cat.audio.create_track("opus", audio_config.clone());
+			tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
+
+			broadcast.create_track(track)?
 		};
 
-		let track = catalog.audio.create_track("opus", audio_config.clone());
-		tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
-
-		let track = self.broadcast.create_track(track)?;
-		self.track = Some(track.into());
-
-		Ok(())
+		Ok(Self {
+			catalog,
+			track: track.into(),
+			zero: None,
+		})
 	}
 
 	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
-		let track = self.track.as_mut().context("not initialized")?;
 
 		// Create a BufList at chunk boundaries, potentially avoiding allocations.
 		let mut payload = BufList::new();
@@ -93,14 +92,10 @@ impl Opus {
 			payload,
 		};
 
-		track.write(frame)?;
-		track.flush()?; // Flush the current group because we know the next frame will be a keyframe.
+		self.track.write(frame)?;
+		self.track.flush()?; // Flush the current group because we know the next frame will be a keyframe.
 
 		Ok(())
-	}
-
-	pub fn is_initialized(&self) -> bool {
-		self.track.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
@@ -117,9 +112,7 @@ impl Opus {
 
 impl Drop for Opus {
 	fn drop(&mut self) {
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.info.name, "ending track");
-			self.catalog.lock().audio.remove_track(&track.info);
-		}
+		tracing::debug!(name = ?self.track.info.name, "ending track");
+		self.catalog.lock().audio.remove_track(&self.track.info);
 	}
 }
