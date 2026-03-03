@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.14.0...moq-lite-v0.15.0) - 2026-03-03
+
+### Other
+
+- Tweak the API to revert some breaking changes. ([#1036](https://github.com/moq-dev/moq/pull/1036))
+- Cascade close and select on group.closed() in subscribers ([#1013](https://github.com/moq-dev/moq/pull/1013))
+- Fix IETF subscriber race cancelling groups before consumers attach ([#1012](https://github.com/moq-dev/moq/pull/1012))
+- Replace --alpn with --client-version / --server-version ([#1009](https://github.com/moq-dev/moq/pull/1009))
+- Add group eviction by age to track cache ([#1002](https://github.com/moq-dev/moq/pull/1002))
+- Make Encode trait fallible ([#1000](https://github.com/moq-dev/moq/pull/1000))
+- Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
+- Switch SUBSCRIBE_DROP to use start/end instead of start/count ([#997](https://github.com/moq-dev/moq/pull/997))
+- Implement moq-lite-03 PROBE streams ([#998](https://github.com/moq-dev/moq/pull/998))
+- moq-lite-03 wire changes ([#992](https://github.com/moq-dev/moq/pull/992))
+- Also fix the close bug for publish namespace. ([#983](https://github.com/moq-dev/moq/pull/983))
+- Abort the IETF publisher on session close. ([#981](https://github.com/moq-dev/moq/pull/981))
+- Return a 404 when you try to get old groups. ([#972](https://github.com/moq-dev/moq/pull/972))
+- Fix AsPath for String not normalizing paths ([#954](https://github.com/moq-dev/moq/pull/954))
+
 ## [0.14.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.13.1...moq-lite-v0.14.0) - 2026-02-12
 
 ### Other
