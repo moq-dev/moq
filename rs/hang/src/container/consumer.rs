@@ -272,7 +272,7 @@ mod tests {
 
 	// ---- Basic Reading ----
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn read_single_group() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -290,7 +290,7 @@ mod tests {
 		assert!(consumer.read().await.unwrap().is_none());
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn read_multiple_frames_single_group() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -311,7 +311,7 @@ mod tests {
 		assert!(!frames[2].keyframe);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn read_multiple_groups_within_latency() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -334,8 +334,9 @@ mod tests {
 	// Meanwhile, subsequent finished groups accumulate in the pending queue via
 	// next_group, allowing buffer_until to trigger latency-based skipping.
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn latency_skip_delivers_recent_groups() {
+		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
@@ -371,8 +372,9 @@ mod tests {
 		finisher.await.expect("finisher task panicked");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn zero_latency_skips_aggressively() {
+		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::ZERO);
@@ -415,8 +417,9 @@ mod tests {
 		finisher.await.expect("finisher task panicked");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn latency_skip_correctness() {
+		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
@@ -471,8 +474,9 @@ mod tests {
 
 	// ---- Group Ordering ----
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn groups_delivered_in_sequence_order() {
+		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
@@ -508,7 +512,7 @@ mod tests {
 		finisher.await.expect("finisher task panicked");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn adjacent_group_flushed_immediately() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -526,7 +530,7 @@ mod tests {
 
 	// ---- B-frames ----
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn bframes_within_group() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -546,8 +550,9 @@ mod tests {
 
 	// ---- Track Lifecycle ----
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn empty_track_returns_none() {
+		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
@@ -563,14 +568,15 @@ mod tests {
 		}
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn track_closed_with_error() {
+		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
-		track.close(moq_lite::Error::Cancel).unwrap();
+		track.abort(moq_lite::Error::Cancel).unwrap();
 
 		// Consumer should not hang; it should return frames or error gracefully
 		let result = tokio::time::timeout(Duration::from_millis(500), async {
@@ -585,8 +591,9 @@ mod tests {
 		assert!(result.is_ok(), "Consumer should not hang after track error");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn closed_resolves_when_track_ends() {
+		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
@@ -611,7 +618,7 @@ mod tests {
 
 	// ---- Gap Recovery ----
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn gap_in_group_sequence_recovery() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -632,7 +639,7 @@ mod tests {
 		assert!(frames.len() >= 4, "Expected >= 4 frames, got {}", frames.len());
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn gap_at_start_of_sequence() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -651,7 +658,7 @@ mod tests {
 
 	// ---- Frame Decoding ----
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn frame_timestamp_and_keyframe_decoding() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -673,7 +680,7 @@ mod tests {
 		assert!(!frames[2].keyframe);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn frame_payload_preserved() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -714,8 +721,9 @@ mod tests {
 	/// causes the select! to restart, creating a new buffer_until for group 1
 	/// which now has buffered frames. With the fix, read_unbuffered returns None
 	/// and blocks; with the bug, read() re-reads buffered frames infinitely.
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn no_infinite_loop_with_buffered_frames() {
+		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_secs(10));
@@ -761,7 +769,7 @@ mod tests {
 
 	// ---- Edge Cases ----
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn large_timestamps() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -778,7 +786,7 @@ mod tests {
 		assert_eq!(frames[0].timestamp.as_micros(), one_hour as u128);
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn set_max_latency_changes_behavior() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
@@ -807,8 +815,9 @@ mod tests {
 	/// Setup: group 0 is unfinished with B-frames, group 1 at ts(100ms), latency = 40ms.
 	/// Bug:   cutoff = 33ms + 40ms = 73ms → group 1's buffer_until sees 100ms >= 73ms → skip
 	/// Fix:   cutoff = 66ms + 40ms = 106ms → 100ms < 106ms → no skip, all groups delivered
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn max_timestamp_tracks_through_bframes() {
+		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(40));
