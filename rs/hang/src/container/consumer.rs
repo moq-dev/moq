@@ -357,7 +357,7 @@ mod tests {
 		track.finish().unwrap();
 
 		// Finish group 0 after consumer has had time to accumulate pending groups
-		tokio::spawn(async move {
+		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
@@ -365,6 +365,7 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		// Group 0's 5 frames + some later groups (earlier ones skipped by latency)
 		assert!(frames.len() >= 25, "Expected >= 25 frames, got {}", frames.len());
+		finisher.await.expect("finisher task panicked");
 	}
 
 	#[tokio::test]
@@ -394,7 +395,7 @@ mod tests {
 		}
 		track.finish().unwrap();
 
-		tokio::spawn(async move {
+		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
@@ -408,6 +409,7 @@ mod tests {
 			frames.len()
 		);
 		assert!(!frames.is_empty(), "Expected at least some frames");
+		finisher.await.expect("finisher task panicked");
 	}
 
 	#[tokio::test]
@@ -432,7 +434,7 @@ mod tests {
 		}
 		track.finish().unwrap();
 
-		tokio::spawn(async move {
+		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
@@ -461,6 +463,7 @@ mod tests {
 				total_span
 			);
 		}
+		finisher.await.expect("finisher task panicked");
 	}
 
 	// ---- Group Ordering ----
@@ -487,7 +490,7 @@ mod tests {
 		track.finish().unwrap();
 
 		// Finish group 0 so the consumer can proceed to pending groups
-		tokio::spawn(async move {
+		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(10)).await;
 			group0.finish().unwrap();
 		});
@@ -499,6 +502,7 @@ mod tests {
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[1].timestamp, ts(30_000));
 		assert_eq!(frames[2].timestamp, ts(60_000));
+		finisher.await.expect("finisher task panicked");
 	}
 
 	#[tokio::test]
@@ -549,7 +553,7 @@ mod tests {
 
 		let result = tokio::time::timeout(Duration::from_millis(200), consumer.read()).await;
 		match result {
-			Ok(Ok(None)) => {}    // expected: track ended
+			Ok(Ok(None)) => {} // expected: track ended
 			Ok(Ok(Some(_))) => panic!("expected None for empty track, got Some"),
 			Ok(Err(e)) => panic!("expected None for empty track, got error: {e}"),
 			Err(_) => panic!("should not hang on empty track"),
@@ -596,8 +600,10 @@ mod tests {
 		drop(track);
 
 		// closed() should resolve now
-		let result = tokio::time::timeout(Duration::from_millis(200), consumer.closed()).await;
-		assert!(result.is_ok(), "closed() should resolve after track is dropped");
+		tokio::time::timeout(Duration::from_millis(200), consumer.closed())
+			.await
+			.expect("timeout expired waiting for closed()")
+			.expect("consumer.closed() returned an error");
 	}
 
 	// ---- Gap Recovery ----
@@ -724,7 +730,7 @@ mod tests {
 		// Group 1: finished (buffer_until will buffer its frames)
 		write_group(&mut track, 1, &[ts(100_000)]);
 
-		tokio::spawn(async move {
+		let finisher = tokio::spawn(async move {
 			// After consumer has buffered group 1's frames via buffer_until...
 			tokio::time::sleep(Duration::from_millis(20)).await;
 			// Write group 2: next_group fires, drops current buffer_until for group 1
@@ -747,6 +753,7 @@ mod tests {
 		.expect("consumer hung — possible infinite loop regression");
 
 		assert_eq!(frames.len(), 3);
+		finisher.await.expect("finisher task panicked");
 	}
 
 	// ---- Edge Cases ----
@@ -820,7 +827,7 @@ mod tests {
 		track.finish().unwrap();
 
 		// Finish group 0 after consumer has had time to accumulate pending groups
-		tokio::spawn(async move {
+		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
@@ -840,5 +847,6 @@ mod tests {
 		assert_eq!(frames[1].timestamp, ts(66_000));
 		assert_eq!(frames[2].timestamp, ts(33_000));
 		assert_eq!(frames[3].timestamp, ts(100_000));
+		finisher.await.expect("finisher task panicked");
 	}
 }
