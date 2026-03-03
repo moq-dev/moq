@@ -668,7 +668,7 @@ mod test {
 		assert!(producer.create_group(Group { sequence: 5 }).is_err());
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn next_group_finishes_without_waiting_for_gaps() {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 1 }).unwrap();
@@ -685,7 +685,7 @@ mod test {
 		assert!(done.is_none(), "track should finish without waiting for gaps");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn get_group_finishes_without_waiting_for_gaps() {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 1 }).unwrap();
