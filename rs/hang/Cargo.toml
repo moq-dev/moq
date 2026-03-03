@@ -15,7 +15,6 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [dependencies]
 buf-list = "1"
 bytes = "1"
-futures = "0.3"
 hex = "0.4"
 lazy_static = "1"
 moq-lite = { workspace = true, features = ["serde"] }
@@ -27,6 +26,7 @@ thiserror = "2"
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = "0.1"
 url = "2"
+web-async = { workspace = true }
 
 [dependencies.derive_more]
 version = "2"

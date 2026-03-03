@@ -1928,7 +1928,6 @@ dependencies = [
  "buf-list",
  "bytes",
  "derive_more",
- "futures",
  "hex",
  "lazy_static",
  "moq-lite",
@@ -1941,6 +1940,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "web-async",
 ]
 
 [[package]]

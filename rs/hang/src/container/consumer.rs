@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
+use std::task::Poll;
 
 use buf_list::BufList;
-use futures::{StreamExt, stream::FuturesUnordered};
 
 use super::{Frame, Timestamp};
 use crate::Error;
@@ -13,22 +13,42 @@ use crate::Error;
 ///
 /// ## Latency Management
 ///
-/// The consumer can skip groups that are too far behind to maintain low latency.
-/// Configure the maximum acceptable delay through the consumer's latency settings.
+/// The consumer monitors the timestamp span of pending groups. When the span
+/// (max - min across all pending groups) exceeds `max_latency`, the consumer
+/// skips forward to the oldest pending group.
 pub struct OrderedConsumer {
 	pub track: moq_lite::TrackConsumer,
 
-	// The current group that we are reading from.
-	current: Option<GroupReader>,
+	// The current group being read from.
+	active: Option<GroupReader>,
 
-	// Future groups that we are monitoring, deciding based on [latency] whether to skip.
-	pending: VecDeque<GroupReader>,
+	// Future groups with background timestamp parsers.
+	pending: VecDeque<PendingGroup>,
 
-	// The maximum timestamp seen thus far, or zero because that's easier than None.
-	max_timestamp: Timestamp,
+	// The next expected group sequence number, or None before the first group.
+	desired: Option<u64>,
 
 	// The maximum buffer size before skipping a group.
 	max_latency: std::time::Duration,
+}
+
+struct PendingGroup {
+	reader: GroupReader,
+	// Consumer side of timestamp range — poll() registers waiter, gets woken on change.
+	timestamps: moq_lite::state::Consumer<TimestampRange>,
+}
+
+#[derive(Default, Clone, Debug)]
+struct TimestampRange {
+	min: Option<Timestamp>,
+	max: Option<Timestamp>,
+}
+
+struct GroupReader {
+	group: moq_lite::GroupConsumer,
+	index: usize,
+	buffered: VecDeque<Frame>,
+	done: bool,
 }
 
 impl OrderedConsumer {
@@ -36,9 +56,9 @@ impl OrderedConsumer {
 	pub fn new(track: moq_lite::TrackConsumer, max_latency: std::time::Duration) -> Self {
 		Self {
 			track,
-			current: None,
+			active: None,
 			pending: VecDeque::new(),
-			max_timestamp: Timestamp::default(),
+			desired: None,
 			max_latency,
 		}
 	}
@@ -51,77 +71,135 @@ impl OrderedConsumer {
 	///
 	/// Returns `None` when the track has ended.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
-		let latency = self.max_latency.try_into()?;
 		loop {
-			let cutoff = self.max_timestamp.checked_add(latency)?;
-
-			// Keep track of all pending groups, buffering until we detect a timestamp far enough in the future.
-			// This is a race; only the first group will succeed.
-			// TODO is there a way to do this without FuturesUnordered?
-			let mut buffering = FuturesUnordered::new();
-			for (index, pending) in self.pending.iter_mut().enumerate() {
-				buffering.push(async move { (index, pending.buffer_until(cutoff).await) })
+			// STEP 1: Drain buffered frames from active (sync)
+			if let Some(active) = &mut self.active
+				&& let Some(frame) = active.buffered.pop_front()
+			{
+				return Ok(Some(frame));
 			}
 
+			// STEP 2: Advance if active is fully consumed
+			if self.active.as_ref().is_some_and(|a| a.done) {
+				self.advance_active();
+				continue;
+			}
+
+			let threshold: Timestamp = self.max_latency.try_into()?;
+
+			// STEP 3: select! — each arm borrows different fields
 			tokio::select! {
 				biased;
-				Some(res) = async { Some(self.current.as_mut()?.read().await) } => {
-					drop(buffering);
 
+				// (a) Read from active group
+				Some(res) = async {
+					Some(self.active.as_mut()?.read_unbuffered().await)
+				} => {
 					match res {
-						// Got the next frame.
-						Ok(Some(frame)) => {
-							tracing::trace!(?frame, "read frame");
-							self.max_timestamp = self.max_timestamp.max(frame.timestamp);
-							return Ok(Some(frame));
-						}
-						Ok(None) | Err(_) => {
-							// Group ended, instantly move to the next group.
-							// We don't care about errors, which will happen if the group is closed early.
-							self.current = self.pending.pop_front();
-							continue;
-						}
-					};
-				},
-				Some(res) = async { self.track.next_group().await.transpose() } => {
-					let group = GroupReader::new(res?);
-					drop(buffering);
-
-					match self.current.as_ref() {
-						Some(current) if group.info.sequence < current.info.sequence => {
-							// Ignore old groups
-							tracing::debug!(old = ?group.info.sequence, current = ?current.info.sequence, "skipping old group");
-						},
-						Some(_) => {
-							// Insert into pending based on the sequence number ascending.
-							let index = self.pending.partition_point(|g| g.info.sequence < group.info.sequence);
-							self.pending.insert(index, group);
-						},
-						None => self.current = Some(group),
-					};
-				},
-				Some((index, timestamp)) = buffering.next() => {
-					if self.current.is_some() {
-						tracing::debug!(old = ?self.max_timestamp, new = ?timestamp, buffer = ?self.max_latency, "skipping slow group");
+						Ok(Some(frame)) => return Ok(Some(frame)),
+						_ => { self.advance_active(); continue; }
 					}
+				},
 
-					drop(buffering);
+				// (b) Accept new group from track
+				Some(res) = async {
+					self.track.next_group().await.transpose()
+				} => {
+					self.insert_group(res?);
+					continue;
+				},
 
-					if index > 0 {
-						self.pending.drain(0..index);
-						tracing::debug!(count = index, "skipping additional groups");
+				// (c) Wait for pending span to exceed threshold.
+				// Returns None when pending is empty so the branch disables
+				// and the else arm can fire.
+				Some(()) = async {
+					if self.pending.is_empty() {
+						return None;
 					}
+					moq_lite::waiter::waiter_fn(|waiter| {
+						poll_pending_latency(&self.pending, waiter, threshold)
+					}).await;
+					Some(())
+				} => {
+					self.skip_to_oldest_pending();
+					continue;
+				},
 
-					self.current = self.pending.pop_front();
-				}
 				else => return Ok(None),
 			}
 		}
 	}
 
+	fn advance_active(&mut self) {
+		self.active = None;
+		if let Some(desired) = &mut self.desired {
+			*desired += 1;
+		}
+		self.try_promote();
+	}
+
+	fn try_promote(&mut self) {
+		let Some(desired) = self.desired else { return };
+		loop {
+			let Some(front) = self.pending.front() else { return };
+			let seq = front.reader.group.info.sequence;
+			if seq == desired {
+				let pg = self.pending.pop_front().unwrap();
+				self.active = Some(pg.reader);
+				// pg.timestamps (Consumer) dropped → parser stops cooperatively
+				return;
+			} else if seq < desired {
+				self.pending.pop_front();
+				// discard old, continue loop
+			} else {
+				return; // seq > desired, wait
+			}
+		}
+	}
+
+	fn insert_group(&mut self, group: moq_lite::GroupConsumer) {
+		let seq = group.info.sequence;
+
+		match self.desired {
+			None => {
+				// First ever group — set desired and make active directly
+				self.desired = Some(seq);
+				self.active = Some(GroupReader::new(group));
+				return;
+			}
+			Some(desired) if seq < desired => return,
+			Some(desired) if seq == desired => {
+				if self.active.is_none() {
+					self.active = Some(GroupReader::new(group));
+				}
+				return;
+			}
+			Some(_) => {} // seq > desired, fall through to add to pending
+		}
+
+		// Clone the consumer for the background timestamp parser
+		let producer = moq_lite::state::Producer::new(TimestampRange::default());
+		let consumer = producer.consume();
+		spawn_timestamp_parser(group.clone(), producer);
+
+		let pg = PendingGroup {
+			reader: GroupReader::new(group),
+			timestamps: consumer,
+		};
+
+		let index = self.pending.partition_point(|p| p.reader.group.info.sequence < seq);
+		self.pending.insert(index, pg);
+	}
+
+	fn skip_to_oldest_pending(&mut self) {
+		self.active = None;
+		if let Some(front) = self.pending.front() {
+			self.desired = Some(front.reader.group.info.sequence);
+		}
+		self.try_promote();
+	}
+
 	/// Set the maximum latency tolerance for this consumer.
-	///
-	/// Groups with timestamps older than `max_timestamp - max_latency` will be skipped.
 	pub fn set_max_latency(&mut self, max: std::time::Duration) {
 		self.max_latency = max;
 	}
@@ -146,19 +224,75 @@ impl std::ops::Deref for OrderedConsumer {
 	}
 }
 
-/// Internal reader for a group of frames.
-struct GroupReader {
-	// The group.
-	group: moq_lite::GroupConsumer,
+/// Check if the timestamp span of pending groups exceeds the threshold.
+///
+/// Registers the waiter on ALL pending group timestamp consumers so we get
+/// woken when ANY parser updates its timestamps.
+fn poll_pending_latency(
+	pending: &VecDeque<PendingGroup>,
+	waiter: &moq_lite::waiter::Waiter,
+	threshold: Timestamp,
+) -> Poll<()> {
+	if pending.is_empty() {
+		return Poll::Pending; // Nothing to check, just wait
+	}
 
-	// The current frame index
-	index: usize,
+	let mut min_ts: Option<Timestamp> = None;
+	let mut max_ts: Option<Timestamp> = None;
 
-	// The any buffered frames in the group.
-	buffered: VecDeque<Frame>,
+	for pg in pending {
+		// poll() locks state, runs callback (reads timestamps), registers waiter if Pending.
+		// If poll returns Ready(Err(Dropped)): parser finished, timestamps are final.
+		// We already read them in the callback, so just continue.
+		let _ = pg.timestamps.poll(waiter, |ts_ref| {
+			let ts: &TimestampRange = ts_ref;
+			if let Some(m) = ts.min {
+				min_ts = Some(min_ts.map_or(m, |v| v.min(m)));
+			}
+			if let Some(m) = ts.max {
+				max_ts = Some(max_ts.map_or(m, |v| v.max(m)));
+			}
+			Poll::<()>::Pending // Always register waiter
+		});
+	}
 
-	// The max timestamp in the group
-	max_timestamp: Option<Timestamp>,
+	// Check span
+	if let (Some(min), Some(max)) = (min_ts, max_ts)
+		&& max.as_micros().saturating_sub(min.as_micros()) >= threshold.as_micros()
+	{
+		return Poll::Ready(());
+	}
+
+	Poll::Pending
+}
+
+/// Background task that reads frames from a cloned GroupConsumer to discover timestamps.
+fn spawn_timestamp_parser(group: moq_lite::GroupConsumer, producer: moq_lite::state::Producer<TimestampRange>) {
+	web_async::spawn(async move {
+		let mut group = group;
+		loop {
+			let Ok(Some(mut frame)) = group.next_frame().await else {
+				break;
+			};
+			let Ok(payload) = frame.read_chunks().await else {
+				break;
+			};
+			let mut payload = BufList::from_iter(payload);
+			let Ok(timestamp) = Timestamp::decode(&mut payload) else {
+				break;
+			};
+
+			// Update min/max — only uses DerefMut (and thus wakes consumers) if changed
+			let Ok(mut state) = producer.modify() else { break };
+			let needs_update = state.min.is_none_or(|m| timestamp < m) || state.max.is_none_or(|m| timestamp > m);
+			if needs_update {
+				let range = &mut *state; // DerefMut → sets modified=true → wakes on drop
+				range.min = Some(range.min.map_or(timestamp, |m| m.min(timestamp)));
+				range.max = Some(range.max.map_or(timestamp, |m| m.max(timestamp)));
+			}
+		}
+		// Producer dropped here → state closes → consumers get woken with Err(Dropped)
+	});
 }
 
 impl GroupReader {
@@ -167,20 +301,13 @@ impl GroupReader {
 			group,
 			index: 0,
 			buffered: VecDeque::new(),
-			max_timestamp: None,
-		}
-	}
-
-	async fn read(&mut self) -> Result<Option<Frame>, Error> {
-		if let Some(frame) = self.buffered.pop_front() {
-			Ok(Some(frame))
-		} else {
-			self.read_unbuffered().await
+			done: false,
 		}
 	}
 
 	async fn read_unbuffered(&mut self) -> Result<Option<Frame>, Error> {
 		let Some(mut frame) = self.group.next_frame().await? else {
+			self.done = true;
 			return Ok(None);
 		};
 		let payload = frame.read_chunks().await?;
@@ -196,34 +323,8 @@ impl GroupReader {
 		};
 
 		self.index += 1;
-		self.max_timestamp = Some(self.max_timestamp.unwrap_or_default().max(timestamp));
 
 		Ok(Some(frame))
-	}
-
-	// Keep reading and buffering new frames, returning when `max` is larger than or equal to the cutoff.
-	// This will BLOCK FOREVER if the group has ended early; it's intended to be used within select!
-	async fn buffer_until(&mut self, cutoff: Timestamp) -> Timestamp {
-		loop {
-			match self.max_timestamp {
-				Some(timestamp) if timestamp >= cutoff => return timestamp,
-				_ => (),
-			}
-
-			match self.read_unbuffered().await {
-				Ok(Some(frame)) => self.buffered.push_back(frame),
-				// Otherwise block forever so we don't return from FuturesUnordered
-				_ => std::future::pending().await,
-			}
-		}
-	}
-}
-
-impl std::ops::Deref for GroupReader {
-	type Target = moq_lite::GroupConsumer;
-
-	fn deref(&self) -> &Self::Target {
-		&self.group
 	}
 }
 
@@ -328,11 +429,6 @@ mod tests {
 	}
 
 	// ---- Latency Skipping ----
-	//
-	// These tests use an "unfinished group 0" pattern: group 0 is created but not
-	// finished, causing the consumer's biased select! to block on current.read().
-	// Meanwhile, subsequent finished groups accumulate in the pending queue via
-	// next_group, allowing buffer_until to trigger latency-based skipping.
 
 	#[tokio::test(start_paused = true)]
 	async fn latency_skip_delivers_recent_groups() {
@@ -366,20 +462,18 @@ mod tests {
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		// Group 0's 5 frames + some later groups (earlier ones skipped by latency)
-		assert!(frames.len() >= 25, "Expected >= 25 frames, got {}", frames.len());
+		// Should have group 0's frames + at least some later groups
+		assert!(frames.len() >= 10, "Expected >= 10 frames, got {}", frames.len());
 		finisher.await.expect("finisher task panicked");
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn zero_latency_skips_aggressively() {
+	async fn zero_latency_skips_blocked_active() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::ZERO);
 
-		// Group 0: 1 frame at a HIGH timestamp, NOT finished.
-		// This makes the cutoff high (max_timestamp + 0 = 400ms), so
-		// buffer_until blocks for groups whose timestamps are < 400ms.
+		// Group 0: 1 frame, NOT finished (blocks consumer after reading frame 0)
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
 			keyframe: false,
@@ -390,8 +484,6 @@ mod tests {
 		.unwrap();
 
 		// Groups 1-9: finished, 50ms spacing, 3 frames each
-		// Groups 1-7 have max timestamps < 400ms (blocked by buffer_until)
-		// Group 8+ have timestamps >= 400ms (trigger latency skip)
 		for g in 1..10u64 {
 			let timestamps: Vec<_> = (0..3).map(|f| ts(g * 50_000 + f * 5_000)).collect();
 			write_group(&mut track, g, &timestamps);
@@ -404,24 +496,28 @@ mod tests {
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		// Group 0's 1 frame + skipped groups 1-7 + groups 8-9 (6 frames).
-		// Total without skip = 28. With skip, should be <= 7.
-		assert!(
-			frames.len() < 28,
-			"Expected skipping with 0ms latency, got {} frames",
-			frames.len()
-		);
 		assert!(!frames.is_empty(), "Expected at least some frames");
+
+		// With 0ms latency, the blocked group 0 is dropped as soon as pending
+		// groups have any span > 0. Group 0's single frame is delivered first,
+		// then the consumer skips to the oldest pending group.
+		assert_eq!(frames[0].timestamp, ts(400_000), "First frame should be from group 0");
+		// Second frame should be from group 1 (oldest pending), not group 0 continuation
+		assert_eq!(
+			frames[1].timestamp,
+			ts(50_000),
+			"Should skip to group 1 after group 0 blocks"
+		);
 		finisher.await.expect("finisher task panicked");
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn latency_skip_correctness() {
+	async fn latency_skip_drops_blocked_active() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
 
-		// Group 0: 1 frame, NOT finished
+		// Group 0: 1 frame, NOT finished (blocks consumer)
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
 			keyframe: false,
@@ -432,6 +528,7 @@ mod tests {
 		.unwrap();
 
 		// Groups 1-9: 30ms spacing, 1 frame each
+		// Pending span: max=270000 - min=30000 = 240000µs = 240ms > 100ms
 		for g in 1..10u64 {
 			write_group(&mut track, g, &[ts(g * 30_000)]);
 		}
@@ -445,27 +542,13 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(!frames.is_empty(), "Expected at least some frames");
 
-		// Some groups should have been skipped (fewer frames than total 10)
-		let post_skip: Vec<_> = frames.iter().filter(|f| f.timestamp > ts(0)).collect();
-		assert!(
-			post_skip.len() < 9,
-			"Expected some groups to be skipped, got {} post-skip frames",
-			post_skip.len()
-		);
+		// Group 0's frame is delivered, then skip fires (pending span > 100ms).
+		// Consumer drops blocked group 0, promotes oldest pending (group 1).
+		assert_eq!(frames[0].timestamp, ts(0), "First frame from group 0");
+		assert_eq!(frames[1].timestamp, ts(30_000), "Skip to oldest pending (group 1)");
 
-		// Post-skip frames should span a bounded range
-		if post_skip.len() >= 2 {
-			let max_ts = post_skip.iter().map(|f| f.timestamp).max().unwrap();
-			let min_ts = post_skip.iter().map(|f| f.timestamp).min().unwrap();
-			let span_micros = max_ts.as_micros() - min_ts.as_micros();
-			let total_span = 9u128 * 30_000; // full span without skipping
-			assert!(
-				span_micros < total_span,
-				"Post-skip span {}us should be less than total span {}us",
-				span_micros,
-				total_span
-			);
-		}
+		// All groups 1-9 delivered after the skip (finished groups consumed instantly)
+		assert_eq!(frames.len(), 10, "Group 0 frame + groups 1-9");
 		finisher.await.expect("finisher task panicked");
 	}
 
@@ -705,15 +788,8 @@ mod tests {
 
 	// ---- Regression ----
 
-	/// Regression test for de92d2c7: buffer_until previously called self.read()
-	/// instead of self.read_unbuffered(), causing an infinite loop when a pending
-	/// group had buffered frames from a prior (dropped) buffer_until call.
-	///
-	/// Setup: group 0 is unfinished (blocks current.read), group 1 is finished
-	/// (accumulates buffered frames via buffer_until). A delayed group 2 arrival
-	/// causes the select! to restart, creating a new buffer_until for group 1
-	/// which now has buffered frames. With the fix, read_unbuffered returns None
-	/// and blocks; with the bug, read() re-reads buffered frames infinitely.
+	/// Regression test: group 0 unfinished, group 1 finished, delayed group 2,
+	/// then group 0 finishes. Should complete without hanging.
 	#[tokio::test(start_paused = true)]
 	async fn no_infinite_loop_with_buffered_frames() {
 		let mut track = moq_lite::Track::new("test").produce();
@@ -730,21 +806,18 @@ mod tests {
 		.encode(&mut group0)
 		.unwrap();
 
-		// Group 1: finished (buffer_until will buffer its frames)
+		// Group 1: finished
 		write_group(&mut track, 1, &[ts(100_000)]);
 
 		let finisher = tokio::spawn(async move {
-			// After consumer has buffered group 1's frames via buffer_until...
 			tokio::time::sleep(Duration::from_millis(20)).await;
-			// Write group 2: next_group fires, drops current buffer_until for group 1
 			write_group(&mut track, 2, &[ts(200_000)]);
-			// Then finish group 0: consumer proceeds, re-creates buffer_until for group 1
 			tokio::time::sleep(Duration::from_millis(20)).await;
 			group0.finish().unwrap();
 			track.finish().unwrap();
 		});
 
-		// Must complete within 2 seconds (with the bug, this would hang)
+		// Must complete within 2 seconds
 		let frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
@@ -798,15 +871,8 @@ mod tests {
 		assert!(consumer.read().await.unwrap().is_none());
 	}
 
-	/// Verify max_timestamp tracks the true maximum through B-frame reordering.
-	///
-	/// With B-frame decode order [0, 66ms, 33ms], the bug assigned max_timestamp = 33ms
-	/// (last frame) instead of 66ms (true max). This lowered the latency cutoff, causing
-	/// premature skipping of subsequent groups under tight latency settings.
-	///
-	/// Setup: group 0 is unfinished with B-frames, group 1 at ts(100ms), latency = 40ms.
-	/// Bug:   cutoff = 33ms + 40ms = 73ms → group 1's buffer_until sees 100ms >= 73ms → skip
-	/// Fix:   cutoff = 66ms + 40ms = 106ms → 100ms < 106ms → no skip, all groups delivered
+	/// With span-based latency, B-frames within a single group don't cause
+	/// spurious skips since we only check span across PENDING groups.
 	#[tokio::test(start_paused = true)]
 	async fn max_timestamp_tracks_through_bframes() {
 		let mut track = moq_lite::Track::new("test").produce();
@@ -826,6 +892,8 @@ mod tests {
 		}
 
 		// Group 1: finished, at ts(100ms)
+		// With span-based latency, the span of one pending group is just its own range.
+		// Group 1 alone: min=100ms, max=100ms, span=0 < 40ms threshold. No skip.
 		write_group(&mut track, 1, &[ts(100_000)]);
 		track.finish().unwrap();
 
@@ -851,5 +919,164 @@ mod tests {
 		assert_eq!(frames[2].timestamp, ts(33_000));
 		assert_eq!(frames[3].timestamp, ts(100_000));
 		finisher.await.expect("finisher task panicked");
+	}
+
+	// ---- New span-based tests ----
+
+	/// Missing group is skipped when pending span exceeds max_latency.
+	#[tokio::test(start_paused = true)]
+	async fn missing_group_skipped_on_span() {
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		// max_latency = 1.5s
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(1500));
+
+		// Group 0 finishes normally
+		write_group(&mut track, 0, &[ts(0)]);
+
+		// Group 1 never arrives (gap). Groups 2 and 3 arrive.
+		// Group 2: ts=1s, Group 3: ts=3s → span = 2s > 1.5s → skip to group 2
+		write_group(&mut track, 2, &[ts(1_000_000)]);
+		write_group(&mut track, 3, &[ts(3_000_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		// Group 0 (1 frame) + skip to group 2 (1 frame) + group 3 (1 frame) = 3 frames
+		assert_eq!(frames.len(), 3, "Expected 3 frames, got {}", frames.len());
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[1].timestamp, ts(1_000_000));
+		assert_eq!(frames[2].timestamp, ts(3_000_000));
+	}
+
+	/// Missing group waits when pending span is small enough.
+	#[tokio::test(start_paused = true)]
+	async fn missing_group_waits_when_span_small() {
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(200));
+
+		// Group 0 finishes normally
+		write_group(&mut track, 0, &[ts(0)]);
+
+		// Group 1 missing initially. Groups 2 and 3 have small span.
+		// Group 2: ts=100ms, Group 3: ts=150ms → span = 50ms < 200ms → no skip
+		write_group(&mut track, 2, &[ts(100_000)]);
+		write_group(&mut track, 3, &[ts(150_000)]);
+
+		// Group 1 arrives late
+		let writer = tokio::spawn(async move {
+			tokio::time::sleep(Duration::from_millis(10)).await;
+			write_group(&mut track, 1, &[ts(50_000)]);
+			track.finish().unwrap();
+		});
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		// All 4 groups delivered in order: 0, 1, 2, 3
+		assert_eq!(frames.len(), 4, "Expected 4 frames, got {}", frames.len());
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[1].timestamp, ts(50_000));
+		assert_eq!(frames[2].timestamp, ts(100_000));
+		assert_eq!(frames[3].timestamp, ts(150_000));
+		writer.await.expect("writer task panicked");
+	}
+
+	/// Skip targets oldest pending, not next sequential.
+	#[tokio::test(start_paused = true)]
+	async fn skip_to_oldest_pending() {
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
+
+		// Group 0 finishes. Desired becomes 1, which never arrives.
+		write_group(&mut track, 0, &[ts(0)]);
+
+		// Groups 3, 4, 5 arrive (not 1 or 2).
+		// Span of pending: min=300ms, max=500ms → span=200ms > 100ms → skip to group 3
+		write_group(&mut track, 3, &[ts(300_000)]);
+		write_group(&mut track, 4, &[ts(400_000)]);
+		write_group(&mut track, 5, &[ts(500_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		// Group 0 + skip to group 3 + groups 4, 5
+		assert_eq!(frames.len(), 4, "Expected 4 frames, got {}", frames.len());
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert_eq!(frames[1].timestamp, ts(300_000)); // Skipped to group 3, not 1 or 2
+		assert_eq!(frames[2].timestamp, ts(400_000));
+		assert_eq!(frames[3].timestamp, ts(500_000));
+	}
+
+	/// Same scenario run multiple times produces identical output.
+	#[tokio::test(start_paused = true)]
+	async fn deterministic_output() {
+		async fn run_scenario() -> Vec<Timestamp> {
+			let mut track = moq_lite::Track::new("test").produce();
+			let consumer_track = track.consume();
+			let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
+
+			write_group(&mut track, 0, &[ts(0)]);
+			// Gap at 1
+			write_group(&mut track, 2, &[ts(200_000)]);
+			write_group(&mut track, 3, &[ts(300_000)]);
+			write_group(&mut track, 4, &[ts(400_000)]);
+			track.finish().unwrap();
+
+			let frames = read_all(&mut consumer).await.unwrap();
+			frames.into_iter().map(|f| f.timestamp).collect()
+		}
+
+		let first = run_scenario().await;
+		for _ in 0..4 {
+			let result = run_scenario().await;
+			assert_eq!(first, result, "Non-deterministic output detected");
+		}
+	}
+
+	/// Slow active group is dropped when pending span exceeds threshold.
+	#[tokio::test(start_paused = true)]
+	async fn slow_active_skipped_on_span() {
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
+
+		// Group 0: active but unfinished (slow)
+		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
+		Frame {
+			keyframe: false,
+			timestamp: ts(0),
+			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
+		}
+		.encode(&mut group0)
+		.unwrap();
+
+		// Groups 1-3 arrive spanning > max_latency
+		// min=100ms, max=300ms, span=200ms > 100ms
+		write_group(&mut track, 1, &[ts(100_000)]);
+		write_group(&mut track, 2, &[ts(200_000)]);
+		write_group(&mut track, 3, &[ts(300_000)]);
+		track.finish().unwrap();
+
+		let finisher = tokio::spawn(async move {
+			// Don't finish group 0 — it should get dropped by the skip
+			tokio::time::sleep(Duration::from_secs(5)).await;
+			group0.finish().unwrap();
+		});
+
+		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+			let mut frames = Vec::new();
+			while let Ok(Some(frame)) = consumer.read().await {
+				frames.push(frame);
+			}
+			frames
+		})
+		.await
+		.expect("consumer hung waiting for slow active group");
+
+		// Group 0 should have been dropped. Group 1 becomes active.
+		assert!(!frames.is_empty());
+		// First frame from group 0 was read before skip, then groups 1-3
+		let has_group1 = frames.iter().any(|f| f.timestamp == ts(100_000));
+		assert!(has_group1, "Expected group 1 to be delivered after skip");
+		finisher.abort();
 	}
 }

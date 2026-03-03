@@ -68,6 +68,10 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 /cdn/                 # CDN infrastructure (Terraform)
 ```
 
+## Key Libraries
+
+- **web-async**: Wrapper around `tokio`/`std::sync::Mutex` for WASM compatibility.
+
 ## Development Tips
 
 1. The project uses `just` as the task runner - check `justfile` for all available commands
