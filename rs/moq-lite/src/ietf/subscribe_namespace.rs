@@ -3,14 +3,15 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path, Version,
+	Path,
 	coding::*,
 	ietf::{Parameters, RequestId},
 };
 
-use crate::coding::{IetfMessage, Message};
-
+use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
+
+type Version = super::Version;
 
 /// SubscribeNamespace message (0x11)
 /// In v16, this moves from the control stream to its own bidirectional stream.
@@ -23,6 +24,8 @@ pub struct SubscribeNamespace<'a> {
 }
 
 impl Message for SubscribeNamespace<'_> {
+	const ID: u64 = 0x11;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.namespace, version)?;
@@ -38,12 +41,7 @@ impl Message for SubscribeNamespace<'_> {
 		let namespace = decode_namespace(r, version)?;
 		let subscribe_options = match version {
 			Version::Draft16 => u64::decode(r, version)?,
-			Version::Lite01
-			| Version::Lite02
-			| Version::Lite03
-			| Version::Draft14
-			| Version::Draft15
-			| Version::Draft17 => 0x01,
+			Version::Draft14 | Version::Draft15 | Version::Draft17 => 0x01,
 		};
 
 		// Ignore parameters, who cares.
@@ -57,10 +55,6 @@ impl Message for SubscribeNamespace<'_> {
 	}
 }
 
-impl IetfMessage for SubscribeNamespace<'_> {
-	const ID: u64 = 0x11;
-}
-
 /// SubscribeNamespaceOk message (0x12) — v14 only
 #[derive(Clone, Debug)]
 pub struct SubscribeNamespaceOk {
@@ -68,6 +62,8 @@ pub struct SubscribeNamespaceOk {
 }
 
 impl Message for SubscribeNamespaceOk {
+	const ID: u64 = 0x12;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
@@ -79,10 +75,6 @@ impl Message for SubscribeNamespaceOk {
 	}
 }
 
-impl IetfMessage for SubscribeNamespaceOk {
-	const ID: u64 = 0x12;
-}
-
 /// SubscribeNamespaceError message (0x13) — v14 only
 #[derive(Clone, Debug)]
 pub struct SubscribeNamespaceError<'a> {
@@ -92,6 +84,8 @@ pub struct SubscribeNamespaceError<'a> {
 }
 
 impl Message for SubscribeNamespaceError<'_> {
+	const ID: u64 = 0x13;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.error_code.encode(w, version)?;
@@ -112,10 +106,6 @@ impl Message for SubscribeNamespaceError<'_> {
 	}
 }
 
-impl IetfMessage for SubscribeNamespaceError<'_> {
-	const ID: u64 = 0x13;
-}
-
 /// UnsubscribeNamespace message (0x14) — v14/v15 only (v16 uses stream close)
 #[derive(Clone, Debug)]
 pub struct UnsubscribeNamespace {
@@ -123,6 +113,8 @@ pub struct UnsubscribeNamespace {
 }
 
 impl Message for UnsubscribeNamespace {
+	const ID: u64 = 0x14;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
@@ -134,10 +126,6 @@ impl Message for UnsubscribeNamespace {
 	}
 }
 
-impl IetfMessage for UnsubscribeNamespace {
-	const ID: u64 = 0x14;
-}
-
 /// NAMESPACE message (0x08) — v16 only, sent on SUBSCRIBE_NAMESPACE bidi stream
 /// Indicates a namespace suffix matching the subscribed prefix is active.
 #[derive(Clone, Debug)]
@@ -146,6 +134,8 @@ pub struct Namespace<'a> {
 }
 
 impl Message for Namespace<'_> {
+	const ID: u64 = 0x08;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		encode_namespace(w, &self.suffix, version)?;
 		Ok(())
@@ -155,10 +145,6 @@ impl Message for Namespace<'_> {
 		let suffix = decode_namespace(r, version)?;
 		Ok(Self { suffix })
 	}
-}
-
-impl IetfMessage for Namespace<'_> {
-	const ID: u64 = 0x08;
 }
 
 /// NAMESPACE_DONE message (0x0E) — v16 only, sent on SUBSCRIBE_NAMESPACE bidi stream
@@ -169,6 +155,8 @@ pub struct NamespaceDone<'a> {
 }
 
 impl Message for NamespaceDone<'_> {
+	const ID: u64 = 0x0E;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		encode_namespace(w, &self.suffix, version)?;
 		Ok(())
@@ -178,8 +166,4 @@ impl Message for NamespaceDone<'_> {
 		let suffix = decode_namespace(r, version)?;
 		Ok(Self { suffix })
 	}
-}
-
-impl IetfMessage for NamespaceDone<'_> {
-	const ID: u64 = 0x0E;
 }

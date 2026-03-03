@@ -5,14 +5,15 @@ use std::borrow::Cow;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-	Path, Version,
+	Path,
 	coding::*,
 	ietf::{GroupOrder, Location, MessageParameters, Parameters, RequestId},
 };
 
-use crate::coding::{IetfMessage, Message};
-
+use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
+
+type Version = super::Version;
 
 #[derive(Clone, Copy, Debug, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
@@ -49,6 +50,8 @@ pub struct Subscribe<'a> {
 }
 
 impl Message for Subscribe<'_> {
+	const ID: u64 = 0x03;
+
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let track_namespace = decode_namespace(r, version)?;
@@ -111,7 +114,7 @@ impl Message for Subscribe<'_> {
 					filter_type,
 				})
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(DecodeError::Version),
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 
@@ -142,17 +145,13 @@ impl Message for Subscribe<'_> {
 				params.set_subscription_filter(self.filter_type)?;
 				params.encode(w, version)?;
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+			Version::Draft17 => {
 				return Err(EncodeError::Version);
 			}
 		}
 
 		Ok(())
 	}
-}
-
-impl IetfMessage for Subscribe<'_> {
-	const ID: u64 = 0x03;
 }
 
 /// SubscribeOk message (0x04)
@@ -163,6 +162,8 @@ pub struct SubscribeOk {
 }
 
 impl Message for SubscribeOk {
+	const ID: u64 = 0x04;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.track_alias.encode(w, version)?;
@@ -180,7 +181,7 @@ impl Message for SubscribeOk {
 				params.set_group_order(u8::from(GroupOrder::Descending) as u64);
 				params.encode(w, version)?;
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+			Version::Draft17 => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -211,7 +212,7 @@ impl Message for SubscribeOk {
 			Version::Draft15 | Version::Draft16 => {
 				let _params = MessageParameters::decode(r, version)?;
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+			Version::Draft17 => {
 				return Err(DecodeError::Version);
 			}
 		}
@@ -223,10 +224,6 @@ impl Message for SubscribeOk {
 	}
 }
 
-impl IetfMessage for SubscribeOk {
-	const ID: u64 = 0x04;
-}
-
 /// SubscribeError message (0x05)
 #[derive(Clone, Debug)]
 pub struct SubscribeError<'a> {
@@ -236,12 +233,15 @@ pub struct SubscribeError<'a> {
 }
 
 impl Message for SubscribeError<'_> {
+	const ID: u64 = 0x05;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.error_code.encode(w, version)?;
 		self.reason_phrase.encode(w, version)?;
 		Ok(())
 	}
+
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		let error_code = u64::decode(r, version)?;
@@ -255,10 +255,6 @@ impl Message for SubscribeError<'_> {
 	}
 }
 
-impl IetfMessage for SubscribeError<'_> {
-	const ID: u64 = 0x05;
-}
-
 /// Unsubscribe message (0x0a)
 #[derive(Clone, Debug)]
 pub struct Unsubscribe {
@@ -266,6 +262,8 @@ pub struct Unsubscribe {
 }
 
 impl Message for Unsubscribe {
+	const ID: u64 = 0x0a;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
@@ -275,10 +273,6 @@ impl Message for Unsubscribe {
 		let request_id = RequestId::decode(r, version)?;
 		Ok(Self { request_id })
 	}
-}
-
-impl IetfMessage for Unsubscribe {
-	const ID: u64 = 0x0a;
 }
 
 /// SubscribeUpdate message (0x02)
@@ -293,6 +287,8 @@ pub struct SubscribeUpdate {
 }
 
 impl Message for SubscribeUpdate {
+	const ID: u64 = 0x02;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Draft14 => {
@@ -313,7 +309,7 @@ impl Message for SubscribeUpdate {
 				params.set_subscription_filter(FilterType::LargestObject)?;
 				params.encode(w, version)?;
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+			Version::Draft17 => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -358,13 +354,9 @@ impl Message for SubscribeUpdate {
 					forward,
 				})
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(DecodeError::Version),
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
-}
-
-impl IetfMessage for SubscribeUpdate {
-	const ID: u64 = 0x02;
 }
 
 #[cfg(test)]

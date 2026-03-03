@@ -191,13 +191,13 @@ impl<const SCALE: u64> Timescale<SCALE> {
 
 	pub fn encode<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
 		// Version-independent: uses QUIC varint encoding.
-		self.0.encode(w, crate::Version::Lite01)?;
+		self.0.encode(w, crate::lite::Version::Lite01)?;
 		Ok(())
 	}
 
 	pub fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, Error> {
 		// Version-independent: uses QUIC varint encoding.
-		let v = VarInt::decode(r, crate::Version::Lite01)?;
+		let v = VarInt::decode(r, crate::lite::Version::Lite01)?;
 		Ok(Self(v))
 	}
 }

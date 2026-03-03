@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer, Version,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -13,6 +13,8 @@ use crate::{
 	},
 	model::GroupConsumer,
 };
+
+use super::Version;
 
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
@@ -182,9 +184,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 			Version::Lite03 => {
 				// No more announce init in Lite03.
-			}
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				return Err(Error::Version);
 			}
 		}
 

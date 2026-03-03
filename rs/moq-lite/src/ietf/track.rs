@@ -5,14 +5,15 @@ use std::borrow::Cow;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{
-	Path, Version,
+	Path,
 	coding::*,
 	ietf::{FilterType, GroupOrder, MessageParameters, Parameters, RequestId},
 };
 
-use crate::coding::{IetfMessage, Message};
-
+use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
+
+type Version = super::Version;
 
 /// TrackStatus message (0x0d)
 /// v14: own format (TrackStatusRequest-like with subscribe fields)
@@ -25,6 +26,8 @@ pub struct TrackStatus<'a> {
 }
 
 impl Message for TrackStatus<'_> {
+	const ID: u64 = 0x0d;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.track_namespace, version)?;
@@ -43,7 +46,7 @@ impl Message for TrackStatus<'_> {
 				let params = MessageParameters::default();
 				params.encode(w, version)?;
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+			Version::Draft17 => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -66,7 +69,7 @@ impl Message for TrackStatus<'_> {
 			Version::Draft15 | Version::Draft16 => {
 				let _params = MessageParameters::decode(r, version)?;
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+			Version::Draft17 => {
 				return Err(DecodeError::Version);
 			}
 		}
@@ -77,10 +80,6 @@ impl Message for TrackStatus<'_> {
 			track_name,
 		})
 	}
-}
-
-impl IetfMessage for TrackStatus<'_> {
-	const ID: u64 = 0x0d;
 }
 
 #[derive(Clone, Copy, Debug, TryFromPrimitive, IntoPrimitive)]

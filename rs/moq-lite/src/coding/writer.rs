@@ -89,6 +89,14 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 	pub fn set_version(&mut self, version: V) {
 		self.version = version;
 	}
+
+	/// Convert to a writer with a different version type.
+	pub fn map_version<V2>(self, version: V2) -> Writer<S, V2> {
+		// SAFETY: We need to take the stream out without triggering Drop.
+		// We use ManuallyDrop to prevent the old Writer from resetting the stream.
+		let mut this = std::mem::ManuallyDrop::new(self);
+		Writer::new(this.stream.take().unwrap(), version)
+	}
 }
 
 impl<S: web_transport_trait::SendStream, V> Drop for Writer<S, V> {

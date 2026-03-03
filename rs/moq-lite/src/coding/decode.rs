@@ -1,8 +1,6 @@
 use std::{borrow::Cow, string::FromUtf8Error};
 use thiserror::Error;
 
-use crate::Version;
-
 /// Read the from the buffer using the given version.
 ///
 /// If [DecodeError::Short] is returned, the caller should try again with more data.
@@ -89,9 +87,12 @@ impl<V> Decode<V> for u16 {
 	}
 }
 
-impl Decode<Version> for String {
+impl<V: Copy> Decode<V> for String
+where
+	usize: Decode<V>,
+{
 	/// Decode a string with a varint length prefix.
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let v = Vec::<u8>::decode(r, version)?;
 		let str = String::from_utf8(v)?;
 
@@ -99,8 +100,11 @@ impl Decode<Version> for String {
 	}
 }
 
-impl Decode<Version> for Vec<u8> {
-	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
+impl<V: Copy> Decode<V> for Vec<u8>
+where
+	usize: Decode<V>,
+{
+	fn decode<B: bytes::Buf>(buf: &mut B, version: V) -> Result<Self, DecodeError> {
 		let size = usize::decode(buf, version)?;
 
 		if buf.remaining() < size {
@@ -125,8 +129,11 @@ impl<V> Decode<V> for i8 {
 	}
 }
 
-impl Decode<Version> for bytes::Bytes {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+impl<V: Copy> Decode<V> for bytes::Bytes
+where
+	usize: Decode<V>,
+{
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let len = usize::decode(r, version)?;
 		if r.remaining() < len {
 			return Err(DecodeError::Short);
@@ -137,15 +144,21 @@ impl Decode<Version> for bytes::Bytes {
 }
 
 // TODO Support borrowed strings.
-impl Decode<Version> for Cow<'_, str> {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+impl<V: Copy> Decode<V> for Cow<'_, str>
+where
+	usize: Decode<V>,
+{
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let s = String::decode(r, version)?;
 		Ok(Cow::Owned(s))
 	}
 }
 
-impl Decode<Version> for Option<u64> {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+impl<V: Copy> Decode<V> for Option<u64>
+where
+	u64: Decode<V>,
+{
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		match u64::decode(r, version)? {
 			0 => Ok(None),
 			value => Ok(Some(value - 1)),
@@ -153,8 +166,11 @@ impl Decode<Version> for Option<u64> {
 	}
 }
 
-impl Decode<Version> for std::time::Duration {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+impl<V: Copy> Decode<V> for std::time::Duration
+where
+	u64: Decode<V>,
+{
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let value = u64::decode(r, version)?;
 		Ok(Self::from_millis(value))
 	}

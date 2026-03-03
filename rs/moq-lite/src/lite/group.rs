@@ -1,7 +1,6 @@
-use crate::{
-	Version,
-	coding::{Message, *},
-};
+use crate::coding::*;
+
+use super::{Message, Version};
 
 #[derive(Clone, Debug)]
 pub struct Group {

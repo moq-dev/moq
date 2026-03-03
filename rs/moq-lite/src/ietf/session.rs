@@ -1,12 +1,10 @@
 use crate::{
-	Error, OriginConsumer, OriginProducer, Version,
+	Error, OriginConsumer, OriginProducer,
 	coding::{Reader, Stream},
 	ietf::{self, Control, RequestId},
 };
 
-use crate::coding::{IetfMessage, Message};
-
-use super::{Publisher, Subscriber};
+use super::{Message, Publisher, Subscriber, Version};
 
 pub(crate) fn start<S: web_transport_trait::Session>(
 	session: S,
@@ -118,7 +116,7 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					subscriber.recv_request_error(&msg)?;
 					publisher.recv_request_error(&msg)?;
 				}
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				Version::Draft17 => {
 					return Err(Error::UnexpectedMessage);
 				}
 			},
@@ -140,7 +138,7 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					subscriber.recv_request_ok(&msg)?;
 					publisher.recv_request_ok(&msg)?;
 				}
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				Version::Draft17 => {
 					return Err(Error::UnexpectedMessage);
 				}
 			},
@@ -151,8 +149,7 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					tracing::debug!(message = ?msg, "received control message");
 					publisher.recv_publish_namespace_error(msg)?;
 				}
-				Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 					return Err(Error::UnexpectedMessage);
 				}
 			},
@@ -193,8 +190,7 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					tracing::debug!(message = ?msg, "received control message");
 					publisher.recv_subscribe_namespace(msg)?;
 				}
-				Version::Draft16 => return Err(Error::UnexpectedMessage),
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				Version::Draft16 | Version::Draft17 => {
 					return Err(Error::UnexpectedMessage);
 				}
 			},
@@ -205,8 +201,7 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					tracing::debug!(message = ?msg, "received control message");
 					subscriber.recv_subscribe_namespace_ok(msg)?;
 				}
-				Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 					return Err(Error::UnexpectedMessage);
 				}
 			},
@@ -217,8 +212,7 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					tracing::debug!(message = ?msg, "received control message");
 					subscriber.recv_subscribe_namespace_error(msg)?;
 				}
-				Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 					return Err(Error::UnexpectedMessage);
 				}
 			},
@@ -229,8 +223,7 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					tracing::debug!(message = ?msg, "received control message");
 					publisher.recv_unsubscribe_namespace(msg)?;
 				}
-				Version::Draft16 => return Err(Error::UnexpectedMessage),
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				Version::Draft16 | Version::Draft17 => {
 					return Err(Error::UnexpectedMessage);
 				}
 			},
@@ -266,8 +259,7 @@ async fn run_control_read<S: web_transport_trait::Session>(
 					tracing::debug!(message = ?msg, "received control message");
 					subscriber.recv_fetch_error(msg)?;
 				}
-				Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 					return Err(Error::UnexpectedMessage);
 				}
 			},
@@ -277,19 +269,13 @@ async fn run_control_read<S: web_transport_trait::Session>(
 				subscriber.recv_publish(msg)?;
 			}
 			// 0x1E: PublishOk — v14: unsupported, v15+: removed (replaced by RequestOk 0x07)
-			ietf::PublishOk::ID => match version {
-				Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
-					return Err(Error::UnexpectedMessage);
-				}
-			},
+			ietf::PublishOk::ID => {
+				return Err(Error::UnexpectedMessage);
+			}
 			// 0x1F: PublishError — v14: unsupported, v15+: removed (replaced by RequestError 0x05)
-			ietf::PublishError::ID => match version {
-				Version::Draft14 | Version::Draft15 | Version::Draft16 => return Err(Error::UnexpectedMessage),
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
-					return Err(Error::UnexpectedMessage);
-				}
-			},
+			ietf::PublishError::ID => {
+				return Err(Error::UnexpectedMessage);
+			}
 			_ => return Err(Error::UnexpectedMessage),
 		}
 
@@ -307,10 +293,13 @@ async fn run_bidi_streams<S: web_transport_trait::Session>(
 	version: Version,
 ) -> Result<(), Error> {
 	// Only v16 uses bidi streams for SUBSCRIBE_NAMESPACE
-	if version != Version::Draft16 {
-		// Park forever — we don't accept bidi streams for v14/v15.
-		std::future::pending::<()>().await;
-		return Ok(());
+	match version {
+		Version::Draft16 => {}
+		Version::Draft14 | Version::Draft15 | Version::Draft17 => {
+			// Park forever — we don't accept bidi streams for v14/v15/v17.
+			std::future::pending::<()>().await;
+			return Ok(());
+		}
 	}
 
 	loop {

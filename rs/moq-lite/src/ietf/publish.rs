@@ -107,7 +107,7 @@ The namespace or track is not of interest to the endpoint.
 use std::borrow::Cow;
 
 use crate::{
-	Path, Version,
+	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
 		FilterType, GroupOrder, Location, MessageParameters, Parameters, RequestId,
@@ -115,7 +115,9 @@ use crate::{
 	},
 };
 
-use crate::coding::{IetfMessage, Message};
+use super::Message;
+
+type Version = super::Version;
 
 /// Used to be called SubscribeDone
 #[derive(Clone, Debug)]
@@ -127,6 +129,8 @@ pub struct PublishDone<'a> {
 }
 
 impl Message for PublishDone<'_> {
+	const ID: u64 = 0x0b;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.status_code.encode(w, version)?;
@@ -150,10 +154,6 @@ impl Message for PublishDone<'_> {
 	}
 }
 
-impl IetfMessage for PublishDone<'_> {
-	const ID: u64 = 0x0b;
-}
-
 #[derive(Debug)]
 pub struct Publish<'a> {
 	pub request_id: RequestId,
@@ -167,6 +167,8 @@ pub struct Publish<'a> {
 }
 
 impl Message for Publish<'_> {
+	const ID: u64 = 0x1D;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.track_namespace, version)?;
@@ -196,7 +198,7 @@ impl Message for Publish<'_> {
 				params.set_forward(self.forward);
 				params.encode(w, version)?;
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+			Version::Draft17 => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -256,13 +258,9 @@ impl Message for Publish<'_> {
 					forward,
 				})
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(DecodeError::Version),
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
-}
-
-impl IetfMessage for Publish<'_> {
-	const ID: u64 = 0x1D;
 }
 
 #[derive(Debug)]
@@ -276,6 +274,8 @@ pub struct PublishOk {
 }
 
 impl Message for PublishOk {
+	const ID: u64 = 0x1E;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 
@@ -300,7 +300,7 @@ impl Message for PublishOk {
 				params.set_subscription_filter(self.filter_type)?;
 				params.encode(w, version)?;
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+			Version::Draft17 => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -362,13 +362,9 @@ impl Message for PublishOk {
 					filter_type,
 				})
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(DecodeError::Version),
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
-}
-
-impl IetfMessage for PublishOk {
-	const ID: u64 = 0x1E;
 }
 
 #[derive(Debug)]
@@ -378,6 +374,8 @@ pub struct PublishError<'a> {
 	pub reason_phrase: Cow<'a, str>,
 }
 impl Message for PublishError<'_> {
+	const ID: u64 = 0x1F;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.error_code.encode(w, version)?;
@@ -395,10 +393,6 @@ impl Message for PublishError<'_> {
 			reason_phrase,
 		})
 	}
-}
-
-impl IetfMessage for PublishError<'_> {
-	const ID: u64 = 0x1F;
 }
 
 #[cfg(test)]

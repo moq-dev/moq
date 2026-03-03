@@ -168,4 +168,13 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	pub fn set_version(&mut self, version: V) {
 		self.version = version;
 	}
+
+	/// Convert to a reader with a different version type.
+	pub fn map_version<V2>(self, version: V2) -> Reader<S, V2> {
+		Reader {
+			stream: self.stream,
+			buffer: self.buffer,
+			version,
+		}
+	}
 }

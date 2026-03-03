@@ -1,6 +1,6 @@
-use crate::{Error, OriginConsumer, OriginProducer, Version, coding::Stream, lite::SessionInfo};
+use crate::{Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo};
 
-use super::{Publisher, Subscriber};
+use super::{Publisher, Subscriber, Version};
 
 pub(crate) fn start<S: web_transport_trait::Session>(
 	session: S,

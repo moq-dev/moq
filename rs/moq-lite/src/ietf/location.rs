@@ -1,5 +1,6 @@
-use crate::Version;
 use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+
+type Version = super::Version;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {

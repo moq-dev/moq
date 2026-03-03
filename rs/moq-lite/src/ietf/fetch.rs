@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path, Version,
+	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
 		GroupOrder, Location, MessageParameters, Parameters, RequestId,
@@ -9,7 +9,9 @@ use crate::{
 	},
 };
 
-use crate::coding::{IetfMessage, Message};
+use super::Message;
+
+type Version = super::Version;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchType<'a> {
@@ -112,6 +114,8 @@ pub struct Fetch<'a> {
 }
 
 impl Message for Fetch<'_> {
+	const ID: u64 = 0x16;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 
@@ -130,7 +134,7 @@ impl Message for Fetch<'_> {
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.encode(w, version)?;
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+			Version::Draft17 => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -174,13 +178,9 @@ impl Message for Fetch<'_> {
 					fetch_type,
 				})
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(DecodeError::Version),
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
-}
-
-impl IetfMessage for Fetch<'_> {
-	const ID: u64 = 0x16;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +191,8 @@ pub struct FetchOk {
 	pub end_location: Location,
 }
 impl Message for FetchOk {
+	const ID: u64 = 0x18;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 
@@ -209,7 +211,7 @@ impl Message for FetchOk {
 				params.set_group_order(u8::from(self.group_order) as u64);
 				params.encode(w, version)?;
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+			Version::Draft17 => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -253,13 +255,9 @@ impl Message for FetchOk {
 					end_location,
 				})
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(DecodeError::Version),
+			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
-}
-
-impl IetfMessage for FetchOk {
-	const ID: u64 = 0x18;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +268,8 @@ pub struct FetchError<'a> {
 }
 
 impl Message for FetchError<'_> {
+	const ID: u64 = 0x19;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.error_code.encode(w, version)?;
@@ -289,15 +289,13 @@ impl Message for FetchError<'_> {
 	}
 }
 
-impl IetfMessage for FetchError<'_> {
-	const ID: u64 = 0x19;
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchCancel {
 	pub request_id: RequestId,
 }
 impl Message for FetchCancel {
+	const ID: u64 = 0x17;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
@@ -307,10 +305,6 @@ impl Message for FetchCancel {
 		let request_id = RequestId::decode(buf, version)?;
 		Ok(Self { request_id })
 	}
-}
-
-impl IetfMessage for FetchCancel {
-	const ID: u64 = 0x17;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

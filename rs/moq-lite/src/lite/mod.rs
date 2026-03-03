@@ -8,6 +8,7 @@ mod announce;
 mod fetch;
 mod group;
 mod info;
+pub(crate) mod message;
 mod parameters;
 mod priority;
 mod probe;
@@ -16,12 +17,14 @@ mod session;
 mod stream;
 mod subscribe;
 mod subscriber;
+mod version;
 
 pub use announce::*;
 #[allow(unused_imports)]
 pub use fetch::*;
 pub use group::*;
 pub use info::*;
+pub(crate) use message::Message;
 pub use parameters::*;
 pub use probe::*;
 use publisher::*;
@@ -29,3 +32,4 @@ pub(super) use session::*;
 pub use stream::*;
 pub use subscribe::*;
 use subscriber::*;
+pub use version::Version;

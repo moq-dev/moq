@@ -41,19 +41,30 @@ impl Server {
 
 		let (encoding, supported) = match session.protocol() {
 			Some(ALPN_16) => {
-				let v = self.versions.select(Version::Draft16).ok_or(Error::Version)?;
+				let v = self
+					.versions
+					.select(Version::Ietf(ietf::Version::Draft16))
+					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
 			Some(ALPN_15) => {
-				let v = self.versions.select(Version::Draft15).ok_or(Error::Version)?;
+				let v = self
+					.versions
+					.select(Version::Ietf(ietf::Version::Draft15))
+					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
 			Some(ALPN_14) => {
-				let v = self.versions.select(Version::Draft14).ok_or(Error::Version)?;
+				let v = self
+					.versions
+					.select(Version::Ietf(ietf::Version::Draft14))
+					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
 			Some(ALPN_LITE_03) => {
-				self.versions.select(Version::Lite03).ok_or(Error::Version)?;
+				self.versions
+					.select(Version::Lite(lite::Version::Lite03))
+					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
 				lite::start(
@@ -61,16 +72,16 @@ impl Server {
 					None,
 					self.publish.clone(),
 					self.consume.clone(),
-					Version::Lite03,
+					lite::Version::Lite03,
 				)?;
 
-				tracing::debug!(version = ?Version::Lite03, "connected");
+				tracing::debug!(version = ?Version::Lite(lite::Version::Lite03), "connected");
 
 				return Ok(Session::new(session));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
-				(Version::Draft14, supported)
+				(Version::Ietf(ietf::Version::Draft14), supported)
 			}
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
@@ -88,14 +99,15 @@ impl Server {
 			.find(|v| supported.contains(v))
 			.ok_or(Error::Version)?;
 
-		// Only encode parameters if we're using the IETF draft because it has max_request_id
-		let parameters = if version.is_ietf() {
-			let mut parameters = ietf::Parameters::default();
-			parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
-			parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-			parameters.encode_bytes(version)?
-		} else {
-			lite::Parameters::default().encode_bytes(version)?
+		// Encode parameters using the version-appropriate type.
+		let parameters = match version {
+			Version::Ietf(v) => {
+				let mut parameters = ietf::Parameters::default();
+				parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
+				parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+				parameters.encode_bytes(v)?
+			}
+			Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,
 		};
 
 		let server = setup::Server {
@@ -109,21 +121,23 @@ impl Server {
 		stream.set_version(version);
 
 		match version {
-			Version::Lite01 | Version::Lite02 | Version::Lite03 => {
+			Version::Lite(v) => {
+				let stream = stream.map_version(v);
 				lite::start(
 					session.clone(),
 					Some(stream),
 					self.publish.clone(),
 					self.consume.clone(),
-					version,
+					v,
 				)?;
 			}
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			Version::Ietf(v) => {
 				// Decode the client's parameters to get their max request ID.
-				let parameters = ietf::Parameters::decode(&mut client.parameters, version)?;
+				let parameters = ietf::Parameters::decode(&mut client.parameters, v)?;
 				let request_id_max =
 					ietf::RequestId(parameters.get_varint(ietf::ParameterVarInt::MaxRequestId).unwrap_or(0));
 
+				let stream = stream.map_version(v);
 				ietf::start(
 					session.clone(),
 					stream,
@@ -131,7 +145,7 @@ impl Server {
 					false,
 					self.publish.clone(),
 					self.consume.clone(),
-					version,
+					v,
 				)?;
 			}
 		};

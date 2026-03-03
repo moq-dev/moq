@@ -43,19 +43,30 @@ impl Client {
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
 			Some(ALPN_16) => {
-				let v = self.versions.select(Version::Draft16).ok_or(Error::Version)?;
+				let v = self
+					.versions
+					.select(Version::Ietf(ietf::Version::Draft16))
+					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
 			Some(ALPN_15) => {
-				let v = self.versions.select(Version::Draft15).ok_or(Error::Version)?;
+				let v = self
+					.versions
+					.select(Version::Ietf(ietf::Version::Draft15))
+					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
 			Some(ALPN_14) => {
-				let v = self.versions.select(Version::Draft14).ok_or(Error::Version)?;
+				let v = self
+					.versions
+					.select(Version::Ietf(ietf::Version::Draft14))
+					.ok_or(Error::Version)?;
 				(v, v.into())
 			}
 			Some(ALPN_LITE_03) => {
-				self.versions.select(Version::Lite03).ok_or(Error::Version)?;
+				self.versions
+					.select(Version::Lite(lite::Version::Lite03))
+					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
 				lite::start(
@@ -63,26 +74,29 @@ impl Client {
 					None,
 					self.publish.clone(),
 					self.consume.clone(),
-					Version::Lite03,
+					lite::Version::Lite03,
 				)?;
 
-				tracing::debug!(version = ?Version::Lite03, "connected");
+				tracing::debug!(version = ?Version::Lite(lite::Version::Lite03), "connected");
 
 				return Ok(Session::new(session));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
-				(Version::Draft14, supported)
+				(Version::Ietf(ietf::Version::Draft14), supported)
 			}
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
 		let mut stream = Stream::open(&session, encoding).await?;
 
+		// The encoding is always an IETF version for SETUP negotiation.
+		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
+
 		let mut parameters = ietf::Parameters::default();
 		parameters.set_varint(ietf::ParameterVarInt::MaxRequestId, u32::MAX as u64);
 		parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-		let parameters = parameters.encode_bytes(encoding)?;
+		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
 			versions: supported.clone().into(),
@@ -106,24 +120,26 @@ impl Client {
 		stream.set_version(version);
 
 		match version {
-			Version::Lite01 | Version::Lite02 | Version::Lite03 => {
+			Version::Lite(v) => {
+				let stream = stream.map_version(v);
 				lite::start(
 					session.clone(),
 					Some(stream),
 					self.publish.clone(),
 					self.consume.clone(),
-					version,
+					v,
 				)?;
 			}
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+			Version::Ietf(v) => {
 				// Decode the parameters to get the initial request ID.
-				let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
+				let parameters = ietf::Parameters::decode(&mut server.parameters, v)?;
 				let request_id_max = ietf::RequestId(
 					parameters
 						.get_varint(ietf::ParameterVarInt::MaxRequestId)
 						.unwrap_or_default(),
 				);
 
+				let stream = stream.map_version(v);
 				ietf::start(
 					session.clone(),
 					stream,
@@ -131,7 +147,7 @@ impl Client {
 					true,
 					self.publish.clone(),
 					self.consume.clone(),
-					version,
+					v,
 				)?;
 			}
 		}
@@ -321,27 +337,44 @@ mod tests {
 			version: negotiated.into(),
 			parameters: Bytes::new(),
 		};
-		server.encode(&mut encoded, Version::Draft14).unwrap();
+		server
+			.encode(&mut encoded, Version::Ietf(ietf::Version::Draft14))
+			.unwrap();
 
 		// Add a setup-stream SessionInfo frame using the negotiated Lite version.
 		let info = lite::SessionInfo { bitrate: Some(1) };
-		info.encode(&mut encoded, negotiated).unwrap();
+		let lite_v = lite::Version::try_from(negotiated).unwrap();
+		info.encode(&mut encoded, lite_v).unwrap();
 
 		encoded
 	}
 
 	async fn run_alpn_lite_fallback_case(protocol: Option<&'static str>) {
-		let fake = FakeSession::new(protocol, mock_server_setup(Version::Lite01));
-		let client =
-			Client::new().with_versions([Version::Lite03, Version::Lite02, Version::Lite01, Version::Draft14].into());
+		let fake = FakeSession::new(protocol, mock_server_setup(Version::Lite(lite::Version::Lite01)));
+		let client = Client::new().with_versions(
+			[
+				Version::Lite(lite::Version::Lite03),
+				Version::Lite(lite::Version::Lite02),
+				Version::Lite(lite::Version::Lite01),
+				Version::Ietf(ietf::Version::Draft14),
+			]
+			.into(),
+		);
 
 		let _session = client.connect(fake.clone()).await.unwrap();
 
 		// Verify the client setup was encoded using Draft14 framing (ALPN_LITE fallback path).
 		let mut setup_bytes = Bytes::from(fake.control_writes());
-		let setup = setup::Client::decode(&mut setup_bytes, Version::Draft14).unwrap();
+		let setup = setup::Client::decode(&mut setup_bytes, Version::Ietf(ietf::Version::Draft14)).unwrap();
 		let advertised: Vec<Version> = setup.versions.iter().map(|v| Version::try_from(*v).unwrap()).collect();
-		assert_eq!(advertised, vec![Version::Lite02, Version::Lite01, Version::Draft14]);
+		assert_eq!(
+			advertised,
+			vec![
+				Version::Lite(lite::Version::Lite02),
+				Version::Lite(lite::Version::Lite01),
+				Version::Ietf(ietf::Version::Draft14),
+			]
+		);
 
 		// The first close comes from the background lite session task.
 		// Code 0 ("cancelled") means SessionInfo decoded successfully after set_version().

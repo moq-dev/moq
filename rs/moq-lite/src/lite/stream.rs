@@ -1,5 +1,6 @@
-use crate::Version;
 use crate::coding::*;
+
+use super::Version;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 

@@ -2,11 +2,13 @@ use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
-	Track, TrackProducer, Version,
+	Track, TrackProducer,
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, MessageParameters, RequestId},
 	model::BroadcastProducer,
 };
+
+use super::Version;
 
 use web_async::Lock;
 
@@ -87,7 +89,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				parameters: MessageParameters::default(),
 			}),
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(Error::Version),
+			Version::Draft17 => Err(Error::Version),
 		}
 	}
 
@@ -105,7 +107,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				reason_phrase: reason.into(),
 				retry_interval: 0,
 			}),
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(Error::Version),
+			Version::Draft17 => Err(Error::Version),
 		}
 	}
 
@@ -185,7 +187,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					Ok(())
 				}
 			}
-			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => Err(Error::Version),
+			Version::Draft17 => Err(Error::Version),
 		}
 	}
 
@@ -501,7 +503,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						retry_interval: 0,
 					})?;
 				}
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				Version::Draft17 => {
 					return Err(Error::Version);
 				}
 			}
@@ -522,7 +524,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 						parameters: MessageParameters::default(),
 					})?;
 				}
-				Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Draft17 => {
+				Version::Draft17 => {
 					return Err(Error::Version);
 				}
 			}

@@ -416,70 +416,110 @@ impl VarInt {
 	}
 }
 
-use crate::Version;
+use crate::{Version, ietf, lite};
+
+// All lite versions use QUIC-style varint encoding.
+impl Encode<lite::Version> for VarInt {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, _: lite::Version) -> Result<(), EncodeError> {
+		self.encode_quic(w)
+	}
+}
+
+impl Decode<lite::Version> for VarInt {
+	fn decode<R: bytes::Buf>(r: &mut R, _: lite::Version) -> Result<Self, DecodeError> {
+		Self::decode_quic(r)
+	}
+}
+
+// IETF versions use QUIC-style except Draft17 which uses leading-ones.
+impl Encode<ietf::Version> for VarInt {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: ietf::Version) -> Result<(), EncodeError> {
+		match version {
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => self.encode_quic(w),
+			ietf::Version::Draft17 => self.encode_leading_ones(w),
+		}
+	}
+}
+
+impl Decode<ietf::Version> for VarInt {
+	fn decode<R: bytes::Buf>(r: &mut R, version: ietf::Version) -> Result<Self, DecodeError> {
+		match version {
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => Self::decode_quic(r),
+			ietf::Version::Draft17 => Self::decode_leading_ones(r),
+		}
+	}
+}
+
+// The top-level Version delegates to the sub-version impls.
+impl Encode<Version> for VarInt {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		match version {
+			Version::Lite(v) => self.encode(w, v),
+			Version::Ietf(v) => self.encode(w, v),
+		}
+	}
+}
 
 impl Decode<Version> for VarInt {
 	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Draft17 => Self::decode_leading_ones(r),
-			Version::Lite01
-			| Version::Lite02
-			| Version::Lite03
-			| Version::Draft14
-			| Version::Draft15
-			| Version::Draft16 => Self::decode_quic(r),
+			Version::Lite(v) => Self::decode(r, v),
+			Version::Ietf(v) => Self::decode(r, v),
 		}
 	}
 }
 
-impl Encode<Version> for VarInt {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		match version {
-			Version::Draft17 => self.encode_leading_ones(w),
-			Version::Lite01
-			| Version::Lite02
-			| Version::Lite03
-			| Version::Draft14
-			| Version::Draft15
-			| Version::Draft16 => self.encode_quic(w),
-		}
+// Blanket impls for integer types that delegate to VarInt.
+impl<V: Copy> Encode<V> for u64
+where
+	VarInt: Encode<V>,
+{
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		VarInt::try_from(*self)?.encode(w, version)
 	}
 }
 
-impl Encode<Version> for u64 {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		let v = VarInt::try_from(*self)?;
-		v.encode(w, version)
-	}
-}
-
-impl Decode<Version> for u64 {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+impl<V: Copy> Decode<V> for u64
+where
+	VarInt: Decode<V>,
+{
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		VarInt::decode(r, version).map(|v| v.into_inner())
 	}
 }
 
-impl Encode<Version> for usize {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		let v = VarInt::try_from(*self)?;
-		v.encode(w, version)
+impl<V: Copy> Encode<V> for usize
+where
+	VarInt: Encode<V>,
+{
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		VarInt::try_from(*self)?.encode(w, version)
 	}
 }
 
-impl Decode<Version> for usize {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+impl<V: Copy> Decode<V> for usize
+where
+	VarInt: Decode<V>,
+{
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		VarInt::decode(r, version).map(|v| v.into_inner() as usize)
 	}
 }
 
-impl Encode<Version> for u32 {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+impl<V: Copy> Encode<V> for u32
+where
+	VarInt: Encode<V>,
+{
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		VarInt::from(*self).encode(w, version)
 	}
 }
 
-impl Decode<Version> for u32 {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+impl<V: Copy> Decode<V> for u32
+where
+	VarInt: Decode<V>,
+{
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		let v = VarInt::decode(r, version)?;
 		let v = v.try_into().map_err(|_| DecodeError::BoundsExceeded)?;
 		Ok(v)

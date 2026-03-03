@@ -1,7 +1,6 @@
 use std::borrow::Cow;
 use std::fmt::{self, Display};
 
-use crate::Version;
 use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 /// An owned version of [`Path`] with a `'static` lifetime.
@@ -290,14 +289,20 @@ impl Display for Path<'_> {
 	}
 }
 
-impl Decode<Version> for Path<'_> {
-	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+impl<V: Copy> Decode<V> for Path<'_>
+where
+	String: Decode<V>,
+{
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
 		Ok(String::decode(r, version)?.into())
 	}
 }
 
-impl Encode<Version> for Path<'_> {
-	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+impl<V: Copy> Encode<V> for Path<'_>
+where
+	for<'a> &'a str: Encode<V>,
+{
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
 		self.as_str().encode(w, version)?;
 		Ok(())
 	}

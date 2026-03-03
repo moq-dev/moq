@@ -1,12 +1,13 @@
 use std::borrow::Cow;
 
 use crate::{
-	Version,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::MessageParameters,
 };
 
-use crate::coding::{IetfMessage, Message};
+use super::Message;
+
+type Version = super::Version;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RequestId(pub u64);
@@ -49,6 +50,8 @@ pub struct MaxRequestId {
 }
 
 impl Message for MaxRequestId {
+	const ID: u64 = 0x15;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
@@ -58,10 +61,6 @@ impl Message for MaxRequestId {
 		let request_id = RequestId::decode(r, version)?;
 		Ok(Self { request_id })
 	}
-}
-
-impl IetfMessage for MaxRequestId {
-	const ID: u64 = 0x15;
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +69,8 @@ pub struct RequestsBlocked {
 }
 
 impl Message for RequestsBlocked {
+	const ID: u64 = 0x1a;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		Ok(())
@@ -79,10 +80,6 @@ impl Message for RequestsBlocked {
 		let request_id = RequestId::decode(r, version)?;
 		Ok(Self { request_id })
 	}
-}
-
-impl IetfMessage for RequestsBlocked {
-	const ID: u64 = 0x1a;
 }
 
 /// REQUEST_OK (0x07 in v15) - Generic success response for any request.
@@ -95,6 +92,8 @@ pub struct RequestOk {
 }
 
 impl Message for RequestOk {
+	const ID: u64 = 0x07;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.parameters.encode(w, version)?;
@@ -106,10 +105,6 @@ impl Message for RequestOk {
 		let parameters = MessageParameters::decode(r, version)?;
 		Ok(Self { request_id, parameters })
 	}
-}
-
-impl IetfMessage for RequestOk {
-	const ID: u64 = 0x07;
 }
 
 /// REQUEST_ERROR (0x05 in v15) - Generic error response for any request.
@@ -125,6 +120,8 @@ pub struct RequestError<'a> {
 }
 
 impl Message for RequestError<'_> {
+	const ID: u64 = 0x05;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
 		self.error_code.encode(w, version)?;
@@ -140,12 +137,7 @@ impl Message for RequestError<'_> {
 		let error_code = u64::decode(r, version)?;
 		let retry_interval = match version {
 			Version::Draft16 => u64::decode(r, version)?,
-			Version::Lite01
-			| Version::Lite02
-			| Version::Lite03
-			| Version::Draft14
-			| Version::Draft15
-			| Version::Draft17 => 0,
+			Version::Draft14 | Version::Draft15 | Version::Draft17 => 0,
 		};
 		let reason_phrase = Cow::<str>::decode(r, version)?;
 		Ok(Self {
@@ -155,10 +147,6 @@ impl Message for RequestError<'_> {
 			retry_interval,
 		})
 	}
-}
-
-impl IetfMessage for RequestError<'_> {
-	const ID: u64 = 0x05;
 }
 
 #[cfg(test)]

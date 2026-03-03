@@ -1,4 +1,6 @@
-use crate::{Path, Version, coding::*};
+use crate::{Path, coding::*};
+
+type Version = super::Version;
 
 /// Helper function to encode namespace as tuple of strings
 pub fn encode_namespace<W: bytes::BufMut>(w: &mut W, namespace: &Path, version: Version) -> Result<(), EncodeError> {

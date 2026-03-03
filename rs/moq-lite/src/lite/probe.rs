@@ -1,7 +1,6 @@
-use crate::{
-	Version,
-	coding::{Message, *},
-};
+use crate::coding::*;
+
+use super::{Message, Version};
 
 /// Sent to probe the available bitrate.
 ///
@@ -15,12 +14,7 @@ impl Message for Probe {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite03 => {}
-			Version::Lite01
-			| Version::Lite02
-			| Version::Draft14
-			| Version::Draft15
-			| Version::Draft16
-			| Version::Draft17 => {
+			Version::Lite01 | Version::Lite02 => {
 				return Err(DecodeError::Version);
 			}
 		}
@@ -33,12 +27,7 @@ impl Message for Probe {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite03 => {}
-			Version::Lite01
-			| Version::Lite02
-			| Version::Draft14
-			| Version::Draft15
-			| Version::Draft16
-			| Version::Draft17 => {
+			Version::Lite01 | Version::Lite02 => {
 				return Err(EncodeError::Version);
 			}
 		}

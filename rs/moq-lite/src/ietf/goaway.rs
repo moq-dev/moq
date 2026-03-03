@@ -2,9 +2,11 @@
 
 use std::borrow::Cow;
 
-use crate::{Version, coding::*};
+use crate::coding::*;
 
-use crate::coding::{IetfMessage, Message};
+use super::Message;
+
+type Version = super::Version;
 
 /// GoAway message (0x10)
 #[derive(Clone, Debug)]
@@ -13,6 +15,8 @@ pub struct GoAway<'a> {
 }
 
 impl Message for GoAway<'_> {
+	const ID: u64 = 0x10;
+
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.new_session_uri.encode(w, version)?;
 		Ok(())
@@ -22,10 +26,6 @@ impl Message for GoAway<'_> {
 		let new_session_uri = Cow::<str>::decode(r, version)?;
 		Ok(Self { new_session_uri })
 	}
-}
-
-impl IetfMessage for GoAway<'_> {
-	const ID: u64 = 0x10;
 }
 
 #[cfg(test)]

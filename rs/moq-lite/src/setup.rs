@@ -3,6 +3,7 @@ use bytes::Bytes;
 use crate::{
 	Version,
 	coding::{self, Decode, DecodeError, Encode, EncodeError, Sizer},
+	ietf, lite,
 };
 
 const CLIENT_SETUP: u8 = 0x20;
@@ -19,10 +20,10 @@ enum SetupVersion {
 impl SetupVersion {
 	fn from_version(v: Version) -> Self {
 		match v {
-			Version::Draft14 => Self::Draft14,
-			Version::Draft15 | Version::Draft16 => Self::Draft15Plus,
-			Version::Lite01 | Version::Lite02 => Self::LiteLegacy,
-			Version::Lite03 | Version::Draft17 => Self::Unsupported,
+			Version::Ietf(ietf::Version::Draft14) => Self::Draft14,
+			Version::Ietf(ietf::Version::Draft15) | Version::Ietf(ietf::Version::Draft16) => Self::Draft15Plus,
+			Version::Lite(lite::Version::Lite01) | Version::Lite(lite::Version::Lite02) => Self::LiteLegacy,
+			Version::Lite(lite::Version::Lite03) | Version::Ietf(ietf::Version::Draft17) => Self::Unsupported,
 		}
 	}
 }

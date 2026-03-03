@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use crate::Version;
 use crate::coding::*;
+
+use super::Version;
 
 const MAX_PARAMS: u64 = 64;
 

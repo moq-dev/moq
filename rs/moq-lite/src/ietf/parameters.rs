@@ -4,7 +4,7 @@ use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::coding::*;
 
-use crate::Version;
+type Version = super::Version;
 
 const MAX_PARAMS: u64 = 64;
 const PARAM_SUBVALUE_VERSION: Version = Version::Draft15;
@@ -58,12 +58,7 @@ impl Decode<Version> for Parameters {
 					prev_type = abs;
 					abs
 				}
-				Version::Lite01
-				| Version::Lite02
-				| Version::Lite03
-				| Version::Draft14
-				| Version::Draft15
-				| Version::Draft17 => u64::decode(r, version)?,
+				Version::Draft14 | Version::Draft15 | Version::Draft17 => u64::decode(r, version)?,
 			};
 
 			if kind % 2 == 0 {
@@ -123,12 +118,7 @@ impl Encode<Version> for Parameters {
 					}
 				}
 			}
-			Version::Lite01
-			| Version::Lite02
-			| Version::Lite03
-			| Version::Draft14
-			| Version::Draft15
-			| Version::Draft17 => {
+			Version::Draft14 | Version::Draft15 | Version::Draft17 => {
 				for (kind, value) in self.vars.iter() {
 					u64::from(*kind).encode(w, version)?;
 					value.encode(w, version)?;
@@ -195,12 +185,7 @@ impl Decode<Version> for MessageParameters {
 					prev_type = abs;
 					abs
 				}
-				Version::Lite01
-				| Version::Lite02
-				| Version::Lite03
-				| Version::Draft14
-				| Version::Draft15
-				| Version::Draft17 => u64::decode(r, version)?,
+				Version::Draft14 | Version::Draft15 | Version::Draft17 => u64::decode(r, version)?,
 			};
 
 			if kind % 2 == 0 {
@@ -256,12 +241,7 @@ impl Encode<Version> for MessageParameters {
 					}
 				}
 			}
-			Version::Lite01
-			| Version::Lite02
-			| Version::Lite03
-			| Version::Draft14
-			| Version::Draft15
-			| Version::Draft17 => {
+			Version::Draft14 | Version::Draft15 | Version::Draft17 => {
 				for (kind, value) in self.vars.iter() {
 					kind.encode(w, version)?;
 					value.encode(w, version)?;

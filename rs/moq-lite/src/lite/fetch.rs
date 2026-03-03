@@ -1,9 +1,11 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path, Version,
-	coding::{Decode, DecodeError, Encode, EncodeError, Message},
+	Path,
+	coding::{Decode, DecodeError, Encode, EncodeError},
 };
+
+use super::{Message, Version};
 
 /// Sent by the subscriber to fetch a specific group from a track.
 ///
@@ -21,12 +23,7 @@ impl Message for Fetch<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite03 => {}
-			Version::Lite01
-			| Version::Lite02
-			| Version::Draft14
-			| Version::Draft15
-			| Version::Draft16
-			| Version::Draft17 => {
+			Version::Lite01 | Version::Lite02 => {
 				return Err(DecodeError::Version);
 			}
 		}
@@ -47,12 +44,7 @@ impl Message for Fetch<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite03 => {}
-			Version::Lite01
-			| Version::Lite02
-			| Version::Draft14
-			| Version::Draft15
-			| Version::Draft16
-			| Version::Draft17 => {
+			Version::Lite01 | Version::Lite02 => {
 				return Err(EncodeError::Version);
 			}
 		}

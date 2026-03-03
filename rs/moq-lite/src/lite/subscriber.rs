@@ -5,11 +5,13 @@ use std::{
 
 use crate::{
 	AsPath, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path,
-	PathOwned, TrackProducer, Version,
+	PathOwned, TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
 };
+
+use super::Version;
 
 use web_async::Lock;
 
@@ -97,9 +99,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Version::Lite03 => {
 				// Lite03: no AnnounceInit, initial state comes via Announce messages.
-			}
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				return Err(Error::Version);
 			}
 		}
 

@@ -42,4 +42,12 @@ impl<S: web_transport_trait::Session, V> Stream<S, V> {
 		self.writer.set_version(version.clone());
 		self.reader.set_version(version);
 	}
+
+	/// Convert to a stream with a different version type.
+	pub fn map_version<V2: Clone>(self, version: V2) -> Stream<S, V2> {
+		Stream {
+			writer: self.writer.map_version(version.clone()),
+			reader: self.reader.map_version(version),
+		}
+	}
 }
