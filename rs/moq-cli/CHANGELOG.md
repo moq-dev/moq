@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.8](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.7...moq-cli-v0.7.8) - 2026-03-03
+
+### Other
+
+- Rename `moq` binary to `moq-cli` ([#1023](https://github.com/moq-dev/moq/pull/1023))
+- Add moq-msf crate for MSF catalog support ([#993](https://github.com/moq-dev/moq/pull/993))
+- Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
+
 ## [0.7.7](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.6...moq-cli-v0.7.7) - 2026-02-12
 
 ### Other

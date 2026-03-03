@@ -22,7 +22,14 @@ pub struct OrderedFrame {
 	///
 	/// With duration-based grouping (e.g. audio), the first frame is not
 	/// necessarily a keyframe — it only denotes position within the group.
-	pub frame: usize,
+	pub index: usize,
+}
+
+impl OrderedFrame {
+	/// Returns true if this is the first frame in the group (index 0).
+	pub fn is_keyframe(&self) -> bool {
+		self.index == 0
+	}
 }
 
 /// Lossy conversion: discards ordering metadata (`group` and `frame` fields).
@@ -217,8 +224,8 @@ impl GroupReader {
 		let mut payload = BufList::from_iter(payload);
 
 		let timestamp = Timestamp::decode(&mut payload)?;
-		let sequence = self.group.info.sequence;
-		let frame_index = self.index;
+		let group = self.group.info.sequence;
+		let index = self.index;
 
 		self.index += 1;
 		self.max_timestamp = Some(self.max_timestamp.unwrap_or_default().max(timestamp));
@@ -226,8 +233,8 @@ impl GroupReader {
 		Ok(Some(OrderedFrame {
 			timestamp,
 			payload,
-			group: sequence,
-			frame: frame_index,
+			group,
+			index,
 		}))
 	}
 
@@ -312,7 +319,7 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(0));
-		assert_eq!(frames[0].frame, 0);
+		assert_eq!(frames[0].index, 0);
 
 		// Next read returns None (track ended)
 		assert!(consumer.read().await.unwrap().is_none());
@@ -333,9 +340,9 @@ mod tests {
 		assert_eq!(frames[1].timestamp, ts(33_000));
 		assert_eq!(frames[2].timestamp, ts(66_000));
 
-		assert_eq!(frames[0].frame, 0);
-		assert_eq!(frames[1].frame, 1);
-		assert_eq!(frames[2].frame, 2);
+		assert_eq!(frames[0].index, 0);
+		assert_eq!(frames[1].index, 1);
+		assert_eq!(frames[2].index, 2);
 	}
 
 	#[tokio::test]
@@ -694,13 +701,13 @@ mod tests {
 		assert_eq!(frames.len(), 3);
 
 		assert_eq!(frames[0].timestamp, ts(0));
-		assert_eq!(frames[0].frame, 0);
+		assert_eq!(frames[0].index, 0);
 
 		assert_eq!(frames[1].timestamp, ts(33_333));
-		assert_eq!(frames[1].frame, 1);
+		assert_eq!(frames[1].index, 1);
 
 		assert_eq!(frames[2].timestamp, ts(66_666));
-		assert_eq!(frames[2].frame, 2);
+		assert_eq!(frames[2].index, 2);
 	}
 
 	#[tokio::test]

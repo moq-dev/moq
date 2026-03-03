@@ -83,7 +83,7 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	while let Some(frame) = ordered.read().await? {
 		tracing::info!(
 			timestamp = ?frame.timestamp,
-			keyframe = (frame.frame == 0),
+			keyframe = frame.is_keyframe(),
 			group = frame.group,
 			bytes = frame.payload.num_bytes(),
 			"received frame"
