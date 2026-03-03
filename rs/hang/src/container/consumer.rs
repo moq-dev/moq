@@ -265,12 +265,10 @@ mod tests {
 	}
 
 	/// Write a finished group with explicit sequence and timestamps.
-	/// First frame is marked as keyframe by the consumer (index == 0).
 	fn write_group(track: &mut moq_lite::TrackProducer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_lite::Group { sequence }).unwrap();
 		for &timestamp in timestamps {
 			let frame = Frame {
-				keyframe: false, // ignored by encode; consumer sets keyframe based on index
 				timestamp,
 				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 			};
@@ -280,7 +278,7 @@ mod tests {
 	}
 
 	/// Drain all available frames with a per-read timeout.
-	async fn read_all(consumer: &mut OrderedConsumer) -> Result<Vec<Frame>, crate::Error> {
+	async fn read_all(consumer: &mut OrderedConsumer) -> Result<Vec<OrderedFrame>, crate::Error> {
 		let mut frames = Vec::new();
 		loop {
 			match tokio::time::timeout(Duration::from_millis(200), consumer.read()).await {
@@ -310,7 +308,7 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(0));
-		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].frame, 0);
 
 		// Next read returns None (track ended)
 		assert!(consumer.read().await.unwrap().is_none());
@@ -331,10 +329,9 @@ mod tests {
 		assert_eq!(frames[1].timestamp, ts(33_000));
 		assert_eq!(frames[2].timestamp, ts(66_000));
 
-		// Only first frame is keyframe
-		assert!(frames[0].keyframe);
-		assert!(!frames[1].keyframe);
-		assert!(!frames[2].keyframe);
+		assert_eq!(frames[0].frame, 0);
+		assert_eq!(frames[1].frame, 1);
+		assert_eq!(frames[2].frame, 2);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -370,7 +367,6 @@ mod tests {
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for f in 0..5u64 {
 			Frame {
-				keyframe: false,
 				timestamp: ts(f * 2_000),
 				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 			}
@@ -408,7 +404,6 @@ mod tests {
 		// buffer_until blocks for groups whose timestamps are < 400ms.
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
-			keyframe: false,
 			timestamp: ts(400_000),
 			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 		}
@@ -450,7 +445,6 @@ mod tests {
 		// Group 0: 1 frame, NOT finished
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
-			keyframe: false,
 			timestamp: ts(0),
 			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 		}
@@ -506,7 +500,6 @@ mod tests {
 		// Group 0: 1 frame, NOT finished (blocks consumer, lets groups 2 and 1 accumulate in pending)
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
-			keyframe: false,
 			timestamp: ts(0),
 			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 		}
@@ -678,7 +671,7 @@ mod tests {
 	// ---- Frame Decoding ----
 
 	#[tokio::test(start_paused = true)]
-	async fn frame_timestamp_and_keyframe_decoding() {
+	async fn frame_timestamp_and_index_decoding() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
 		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
@@ -690,13 +683,13 @@ mod tests {
 		assert_eq!(frames.len(), 3);
 
 		assert_eq!(frames[0].timestamp, ts(0));
-		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].frame, 0);
 
 		assert_eq!(frames[1].timestamp, ts(33_333));
-		assert!(!frames[1].keyframe);
+		assert_eq!(frames[1].frame, 1);
 
 		assert_eq!(frames[2].timestamp, ts(66_666));
-		assert!(!frames[2].keyframe);
+		assert_eq!(frames[2].frame, 2);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -708,7 +701,6 @@ mod tests {
 		let payload_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05];
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
-			keyframe: false,
 			timestamp: ts(0),
 			payload: BufList::from_iter(vec![Bytes::from(payload_bytes.clone())]),
 		}
@@ -749,7 +741,6 @@ mod tests {
 		// Group 0: 1 frame, NOT finished
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		Frame {
-			keyframe: false,
 			timestamp: ts(0),
 			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 		}
@@ -843,7 +834,6 @@ mod tests {
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for &timestamp in &[ts(0), ts(66_000), ts(33_000)] {
 			Frame {
-				keyframe: false,
 				timestamp,
 				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
 			}
