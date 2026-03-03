@@ -224,8 +224,8 @@ impl GroupReader {
 		let mut payload = BufList::from_iter(payload);
 
 		let timestamp = Timestamp::decode(&mut payload)?;
-		let sequence = self.group.info.sequence;
-		let frame_index = self.index;
+		let group = self.group.info.sequence;
+		let index = self.index;
 
 		self.index += 1;
 		self.max_timestamp = Some(self.max_timestamp.unwrap_or_default().max(timestamp));
@@ -233,8 +233,8 @@ impl GroupReader {
 		Ok(Some(OrderedFrame {
 			timestamp,
 			payload,
-			group: sequence,
-			index: frame_index,
+			group,
+			index,
 		}))
 	}
 
