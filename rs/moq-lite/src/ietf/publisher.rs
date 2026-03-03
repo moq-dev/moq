@@ -129,7 +129,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		subscribes.insert(request_id, tx);
 
 		self.control.send(ietf::SubscribeOk {
-			request_id,
+			request_id: Some(request_id),
 			track_alias: request_id.0, // NOTE: using track alias as request id for now
 		})?;
 
@@ -143,7 +143,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if let Err(err) = Self::run_track(session, track, request_id, rx, version).await {
 				control
 					.send(ietf::PublishDone {
-						request_id,
+						request_id: Some(request_id),
 						status_code: 500,
 						stream_count: 0, // TODO send the correct value if we want the peer to block.
 						reason_phrase: err.to_string().into(),
@@ -152,7 +152,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			} else {
 				control
 					.send(ietf::PublishDone {
-						request_id,
+						request_id: Some(request_id),
 						status_code: 200,
 						stream_count: 0, // TODO send the correct value if we want the peer to block.
 						reason_phrase: "OK".into(),
@@ -175,7 +175,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				reason_phrase: reason.into(),
 			}),
 			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestError {
-				request_id,
+				request_id: Some(request_id),
 				error_code,
 				reason_phrase: reason.into(),
 				retry_interval: 0,
@@ -445,13 +445,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	fn send_fetch_ok(&self, request_id: RequestId) -> Result<(), Error> {
 		match self.version {
 			Version::Draft14 => self.control.send(ietf::FetchOk {
-				request_id,
+				request_id: Some(request_id),
 				group_order: GroupOrder::Descending,
 				end_of_track: false,
 				end_location: Location { group: 0, object: 0 },
 			}),
 			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestOk {
-				request_id,
+				request_id: Some(request_id),
 				parameters: MessageParameters::default(),
 			}),
 			Version::Draft17 => Err(Error::Version),
@@ -467,7 +467,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				reason_phrase: reason.into(),
 			}),
 			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestError {
-				request_id,
+				request_id: Some(request_id),
 				error_code,
 				reason_phrase: reason.into(),
 				retry_interval: 0,
@@ -519,7 +519,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream
 			.writer
 			.encode(&ietf::RequestOk {
-				request_id: msg.request_id,
+				request_id: Some(msg.request_id),
 				parameters: ietf::MessageParameters::default(),
 			})
 			.await?;

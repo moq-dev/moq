@@ -171,12 +171,16 @@ impl Message for PublishBlocked<'_> {
 	const ID: u64 = 0x0F;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		assert!(version == Version::Draft17, "PublishBlocked is draft17 only");
 		encode_namespace(w, &self.suffix, version)?;
 		self.track_name.encode(w, version)?;
 		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		if version != Version::Draft17 {
+			return Err(DecodeError::Unsupported);
+		}
 		let suffix = decode_namespace(r, version)?;
 		let track_name = Cow::<str>::decode(r, version)?;
 		Ok(Self { suffix, track_name })

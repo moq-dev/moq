@@ -186,7 +186,7 @@ impl Message for Fetch<'_> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchOk {
-	pub request_id: RequestId,
+	pub request_id: Option<RequestId>,
 	pub group_order: GroupOrder,
 	pub end_of_track: bool,
 	pub end_location: Location,
@@ -196,7 +196,11 @@ impl Message for FetchOk {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		if version != Version::Draft17 {
-			self.request_id.encode(w, version)?;
+			self.request_id
+				.expect("request_id required for draft14-16")
+				.encode(w, version)?;
+		} else {
+			assert!(self.request_id.is_none(), "request_id must be None for draft17");
 		}
 
 		match version {
@@ -219,9 +223,9 @@ impl Message for FetchOk {
 
 	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		let request_id = if version == Version::Draft17 {
-			RequestId(0)
+			None
 		} else {
-			RequestId::decode(buf, version)?
+			Some(RequestId::decode(buf, version)?)
 		};
 
 		match version {
@@ -393,7 +397,7 @@ mod tests {
 	#[test]
 	fn test_fetch_ok_v14_round_trip() {
 		let msg = FetchOk {
-			request_id: RequestId(2),
+			request_id: Some(RequestId(2)),
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
@@ -402,7 +406,7 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft14);
 		let decoded: FetchOk = decode_message(&encoded, Version::Draft14).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(2));
+		assert_eq!(decoded.request_id, Some(RequestId(2)));
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
 	}
@@ -452,7 +456,7 @@ mod tests {
 	#[test]
 	fn test_fetch_ok_v15_round_trip() {
 		let msg = FetchOk {
-			request_id: RequestId(2),
+			request_id: Some(RequestId(2)),
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
@@ -461,7 +465,7 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft15);
 		let decoded: FetchOk = decode_message(&encoded, Version::Draft15).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(2));
+		assert_eq!(decoded.request_id, Some(RequestId(2)));
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
 	}
@@ -469,7 +473,7 @@ mod tests {
 	#[test]
 	fn test_fetch_ok_v16_round_trip() {
 		let msg = FetchOk {
-			request_id: RequestId(2),
+			request_id: Some(RequestId(2)),
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
@@ -478,7 +482,7 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft16);
 		let decoded: FetchOk = decode_message(&encoded, Version::Draft16).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(2));
+		assert_eq!(decoded.request_id, Some(RequestId(2)));
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
 	}
@@ -486,7 +490,7 @@ mod tests {
 	#[test]
 	fn test_fetch_ok_v17_round_trip() {
 		let msg = FetchOk {
-			request_id: RequestId(2),
+			request_id: None,
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
@@ -495,8 +499,7 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft17);
 		let decoded: FetchOk = decode_message(&encoded, Version::Draft17).unwrap();
 
-		// request_id is placeholder (0) in v17
-		assert_eq!(decoded.request_id, RequestId(0));
+		assert_eq!(decoded.request_id, None);
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
 	}

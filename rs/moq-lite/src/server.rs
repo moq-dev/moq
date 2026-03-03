@@ -2,8 +2,7 @@ use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_LITE, ALPN_LITE_03, Error, NEGOTIATED, OriginConsumer, OriginProducer,
 	Session, Version, Versions,
 	coding::{Decode, Encode, Reader, Stream, Writer},
-	ietf::{self, RequestId},
-	lite, setup,
+	ietf, lite, setup,
 };
 
 /// A MoQ server session builder.
@@ -96,7 +95,7 @@ impl Server {
 				ietf::start(
 					session.clone(),
 					stream,
-					RequestId(0),
+					None, // Draft-17 removed MaxRequestId
 					false,
 					self.publish.clone(),
 					self.consume.clone(),
@@ -197,8 +196,9 @@ impl Server {
 			Version::Ietf(v) => {
 				// Decode the client's parameters to get their max request ID.
 				let parameters = ietf::Parameters::decode(&mut client.parameters, v)?;
-				let request_id_max =
-					ietf::RequestId(parameters.get_varint(ietf::ParameterVarInt::MaxRequestId).unwrap_or(0));
+				let request_id_max = parameters
+					.get_varint(ietf::ParameterVarInt::MaxRequestId)
+					.map(ietf::RequestId);
 
 				let stream = stream.with_version(v);
 				ietf::start(

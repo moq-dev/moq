@@ -9,7 +9,7 @@ use super::{Message, Publisher, Subscriber, Version};
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	setup: Stream<S, Version>,
-	request_id_max: RequestId,
+	request_id_max: Option<RequestId>,
 	client: bool,
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
@@ -48,7 +48,7 @@ pub fn start<S: web_transport_trait::Session>(
 async fn run<S: web_transport_trait::Session>(
 	session: S,
 	setup: Stream<S, Version>,
-	request_id_max: RequestId,
+	request_id_max: Option<RequestId>,
 	client: bool,
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,

@@ -158,7 +158,7 @@ impl Message for Subscribe<'_> {
 /// SubscribeOk message (0x04)
 #[derive(Clone, Debug)]
 pub struct SubscribeOk {
-	pub request_id: RequestId,
+	pub request_id: Option<RequestId>,
 	pub track_alias: u64,
 }
 
@@ -167,7 +167,11 @@ impl Message for SubscribeOk {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		if version != Version::Draft17 {
-			self.request_id.encode(w, version)?;
+			self.request_id
+				.expect("request_id required for draft14-16")
+				.encode(w, version)?;
+		} else {
+			assert!(self.request_id.is_none(), "request_id must be None for draft17");
 		}
 		self.track_alias.encode(w, version)?;
 
@@ -191,9 +195,9 @@ impl Message for SubscribeOk {
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = if version == Version::Draft17 {
-			RequestId(0) // placeholder — Phase 3 will get from stream context
+			None
 		} else {
-			RequestId::decode(r, version)?
+			Some(RequestId::decode(r, version)?)
 		};
 		let track_alias = u64::decode(r, version)?;
 
@@ -280,7 +284,7 @@ impl Message for Unsubscribe {
 #[derive(Debug)]
 pub struct SubscribeUpdate {
 	pub request_id: RequestId,
-	pub subscription_request_id: RequestId,
+	pub subscription_request_id: Option<RequestId>,
 	pub start_location: Location,
 	pub end_group: u64,
 	pub subscriber_priority: u8,
@@ -294,7 +298,9 @@ impl Message for SubscribeUpdate {
 		match version {
 			Version::Draft14 => {
 				self.request_id.encode(w, version)?;
-				self.subscription_request_id.encode(w, version)?;
+				self.subscription_request_id
+					.expect("subscription_request_id required for draft14")
+					.encode(w, version)?;
 				self.start_location.encode(w, version)?;
 				self.end_group.encode(w, version)?;
 				self.subscriber_priority.encode(w, version)?;
@@ -303,7 +309,9 @@ impl Message for SubscribeUpdate {
 			}
 			Version::Draft15 | Version::Draft16 => {
 				self.request_id.encode(w, version)?;
-				self.subscription_request_id.encode(w, version)?;
+				self.subscription_request_id
+					.expect("subscription_request_id required for draft15-16")
+					.encode(w, version)?;
 				let mut params = MessageParameters::default();
 				params.set_subscriber_priority(self.subscriber_priority);
 				params.set_forward(self.forward);
@@ -311,6 +319,10 @@ impl Message for SubscribeUpdate {
 				params.encode(w, version)?;
 			}
 			Version::Draft17 => {
+				assert!(
+					self.subscription_request_id.is_none(),
+					"subscription_request_id must be None for draft17"
+				);
 				// REQUEST_UPDATE: request_id, required_request_id_delta, params
 				self.request_id.encode(w, version)?;
 				0u64.encode(w, version)?; // required_request_id_delta = 0
@@ -329,7 +341,7 @@ impl Message for SubscribeUpdate {
 		match version {
 			Version::Draft14 => {
 				let request_id = RequestId::decode(r, version)?;
-				let subscription_request_id = RequestId::decode(r, version)?;
+				let subscription_request_id = Some(RequestId::decode(r, version)?);
 				let start_location = Location::decode(r, version)?;
 				let end_group = u64::decode(r, version)?;
 				let subscriber_priority = u8::decode(r, version)?;
@@ -347,7 +359,7 @@ impl Message for SubscribeUpdate {
 			}
 			Version::Draft15 | Version::Draft16 => {
 				let request_id = RequestId::decode(r, version)?;
-				let subscription_request_id = RequestId::decode(r, version)?;
+				let subscription_request_id = Some(RequestId::decode(r, version)?);
 				let params = MessageParameters::decode(r, version)?;
 
 				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
@@ -373,7 +385,7 @@ impl Message for SubscribeUpdate {
 
 				Ok(Self {
 					request_id,
-					subscription_request_id: RequestId(0),
+					subscription_request_id: None,
 					start_location: Location { group: 0, object: 0 },
 					end_group: 0,
 					subscriber_priority,
@@ -460,27 +472,27 @@ mod tests {
 	#[test]
 	fn test_subscribe_ok() {
 		let msg = SubscribeOk {
-			request_id: RequestId(42),
+			request_id: Some(RequestId(42)),
 			track_alias: 42,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
 		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft14).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(42));
+		assert_eq!(decoded.request_id, Some(RequestId(42)));
 	}
 
 	#[test]
 	fn test_subscribe_ok_v15() {
 		let msg = SubscribeOk {
-			request_id: RequestId(42),
+			request_id: Some(RequestId(42)),
 			track_alias: 42,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
 		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft15).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(42));
+		assert_eq!(decoded.request_id, Some(RequestId(42)));
 		assert_eq!(decoded.track_alias, 42);
 	}
 
@@ -535,7 +547,7 @@ mod tests {
 	fn test_subscribe_update_v15_round_trip() {
 		let msg = SubscribeUpdate {
 			request_id: RequestId(10),
-			subscription_request_id: RequestId(5),
+			subscription_request_id: Some(RequestId(5)),
 			start_location: Location { group: 0, object: 0 },
 			end_group: 0,
 			subscriber_priority: 200,
@@ -546,7 +558,7 @@ mod tests {
 		let decoded: SubscribeUpdate = decode_message(&encoded, Version::Draft15).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(10));
-		assert_eq!(decoded.subscription_request_id, RequestId(5));
+		assert_eq!(decoded.subscription_request_id, Some(RequestId(5)));
 		assert_eq!(decoded.subscriber_priority, 200);
 		assert!(decoded.forward);
 	}
@@ -555,7 +567,7 @@ mod tests {
 	fn test_subscribe_update_v14_round_trip() {
 		let msg = SubscribeUpdate {
 			request_id: RequestId(10),
-			subscription_request_id: RequestId(5),
+			subscription_request_id: Some(RequestId(5)),
 			start_location: Location { group: 1, object: 2 },
 			end_group: 100,
 			subscriber_priority: 200,
@@ -566,7 +578,7 @@ mod tests {
 		let decoded: SubscribeUpdate = decode_message(&encoded, Version::Draft14).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(10));
-		assert_eq!(decoded.subscription_request_id, RequestId(5));
+		assert_eq!(decoded.subscription_request_id, Some(RequestId(5)));
 		assert_eq!(decoded.start_location, Location { group: 1, object: 2 });
 		assert_eq!(decoded.end_group, 100);
 		assert_eq!(decoded.subscriber_priority, 200);
@@ -611,15 +623,14 @@ mod tests {
 	#[test]
 	fn test_subscribe_ok_v17_round_trip() {
 		let msg = SubscribeOk {
-			request_id: RequestId(42),
+			request_id: None,
 			track_alias: 42,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
 		let decoded: SubscribeOk = decode_message(&encoded, Version::Draft17).unwrap();
 
-		// request_id is placeholder (0) in v17
-		assert_eq!(decoded.request_id, RequestId(0));
+		assert_eq!(decoded.request_id, None);
 		assert_eq!(decoded.track_alias, 42);
 	}
 
@@ -627,7 +638,7 @@ mod tests {
 	fn test_subscribe_update_v17_round_trip() {
 		let msg = SubscribeUpdate {
 			request_id: RequestId(10),
-			subscription_request_id: RequestId(5),
+			subscription_request_id: None,
 			start_location: Location { group: 0, object: 0 },
 			end_group: 0,
 			subscriber_priority: 200,
@@ -638,6 +649,7 @@ mod tests {
 		let decoded: SubscribeUpdate = decode_message(&encoded, Version::Draft17).unwrap();
 
 		assert_eq!(decoded.request_id, RequestId(10));
+		assert_eq!(decoded.subscription_request_id, None);
 		assert_eq!(decoded.subscriber_priority, 200);
 		assert!(decoded.forward);
 	}

@@ -333,7 +333,10 @@ impl Encode<Version> for MessageParameters {
 							// Type-specific value encoding for draft-17
 							match *kind {
 								// uint8 types
-								0x10 | 0x20 | 0x22 => (**v as u8).encode(w, version)?,
+								0x10 | 0x20 | 0x22 => {
+									let byte = u8::try_from(**v).map_err(|_| EncodeError::BoundsExceeded)?;
+									byte.encode(w, version)?;
+								}
 								// varint types (including unknown even)
 								_ => v.encode(w, version)?,
 							}

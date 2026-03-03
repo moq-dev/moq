@@ -87,7 +87,7 @@ impl Message for RequestsBlocked {
 /// Also used as response to SubscribeUpdate and TrackStatus in v15.
 #[derive(Clone, Debug)]
 pub struct RequestOk {
-	pub request_id: RequestId,
+	pub request_id: Option<RequestId>,
 	pub parameters: MessageParameters,
 }
 
@@ -96,7 +96,11 @@ impl Message for RequestOk {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		if version != Version::Draft17 {
-			self.request_id.encode(w, version)?;
+			self.request_id
+				.expect("request_id required for draft14-16")
+				.encode(w, version)?;
+		} else {
+			assert!(self.request_id.is_none(), "request_id must be None for draft17");
 		}
 		self.parameters.encode(w, version)?;
 		Ok(())
@@ -104,9 +108,9 @@ impl Message for RequestOk {
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = if version == Version::Draft17 {
-			RequestId(0)
+			None
 		} else {
-			RequestId::decode(r, version)?
+			Some(RequestId::decode(r, version)?)
 		};
 		let parameters = MessageParameters::decode(r, version)?;
 		Ok(Self { request_id, parameters })
@@ -118,7 +122,7 @@ impl Message for RequestOk {
 /// SubscribeNamespaceError, FetchError in v15.
 #[derive(Clone, Debug)]
 pub struct RequestError<'a> {
-	pub request_id: RequestId,
+	pub request_id: Option<RequestId>,
 	pub error_code: u64,
 	pub reason_phrase: Cow<'a, str>,
 	/// v16+: retry interval in milliseconds
@@ -130,7 +134,11 @@ impl Message for RequestError<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		if version != Version::Draft17 {
-			self.request_id.encode(w, version)?;
+			self.request_id
+				.expect("request_id required for draft14-16")
+				.encode(w, version)?;
+		} else {
+			assert!(self.request_id.is_none(), "request_id must be None for draft17");
 		}
 		self.error_code.encode(w, version)?;
 		if version == Version::Draft16 || version == Version::Draft17 {
@@ -142,9 +150,9 @@ impl Message for RequestError<'_> {
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = if version == Version::Draft17 {
-			RequestId(0)
+			None
 		} else {
-			RequestId::decode(r, version)?
+			Some(RequestId::decode(r, version)?)
 		};
 		let error_code = u64::decode(r, version)?;
 		let retry_interval = match version {
@@ -180,20 +188,20 @@ mod tests {
 	#[test]
 	fn test_request_ok_round_trip() {
 		let msg = RequestOk {
-			request_id: RequestId(42),
+			request_id: Some(RequestId(42)),
 			parameters: MessageParameters::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
 		let decoded: RequestOk = decode_message(&encoded, Version::Draft15).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(42));
+		assert_eq!(decoded.request_id, Some(RequestId(42)));
 	}
 
 	#[test]
 	fn test_request_error_round_trip() {
 		let msg = RequestError {
-			request_id: RequestId(99),
+			request_id: Some(RequestId(99)),
 			error_code: 500,
 			reason_phrase: "Internal error".into(),
 			retry_interval: 0,
@@ -202,7 +210,7 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft15);
 		let decoded: RequestError = decode_message(&encoded, Version::Draft15).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(99));
+		assert_eq!(decoded.request_id, Some(RequestId(99)));
 		assert_eq!(decoded.error_code, 500);
 		assert_eq!(decoded.reason_phrase, "Internal error");
 		assert_eq!(decoded.retry_interval, 0);
@@ -211,7 +219,7 @@ mod tests {
 	#[test]
 	fn test_request_error_v16_retry_interval() {
 		let msg = RequestError {
-			request_id: RequestId(99),
+			request_id: Some(RequestId(99)),
 			error_code: 500,
 			reason_phrase: "Internal error".into(),
 			retry_interval: 5000,
@@ -220,9 +228,40 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft16);
 		let decoded: RequestError = decode_message(&encoded, Version::Draft16).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(99));
+		assert_eq!(decoded.request_id, Some(RequestId(99)));
 		assert_eq!(decoded.error_code, 500);
 		assert_eq!(decoded.reason_phrase, "Internal error");
 		assert_eq!(decoded.retry_interval, 5000);
+	}
+
+	#[test]
+	fn test_request_ok_v17_round_trip() {
+		let msg = RequestOk {
+			request_id: None,
+			parameters: MessageParameters::default(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: RequestOk = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+	}
+
+	#[test]
+	fn test_request_error_v17_round_trip() {
+		let msg = RequestError {
+			request_id: None,
+			error_code: 500,
+			reason_phrase: "Internal error".into(),
+			retry_interval: 3000,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: RequestError = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+		assert_eq!(decoded.error_code, 500);
+		assert_eq!(decoded.reason_phrase, "Internal error");
+		assert_eq!(decoded.retry_interval, 3000);
 	}
 }
