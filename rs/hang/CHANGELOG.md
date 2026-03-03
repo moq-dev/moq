@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0](https://github.com/moq-dev/moq/compare/hang-v0.14.0...hang-v0.15.0) - 2026-03-03
+
+### Other
+
+- OrderedProducer API with max_group_duration ([#1007](https://github.com/moq-dev/moq/pull/1007))
+- Tweak the API to revert some breaking changes. ([#1036](https://github.com/moq-dev/moq/pull/1036))
+- Add some tests for the ordered consumer. ([#1029](https://github.com/moq-dev/moq/pull/1029))
+- Fix an infinite loop in OrderedConsumer ([#1027](https://github.com/moq-dev/moq/pull/1027))
+- Add moq-msf crate for MSF catalog support ([#993](https://github.com/moq-dev/moq/pull/993))
+- Make Encode trait fallible ([#1000](https://github.com/moq-dev/moq/pull/1000))
+- Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
+
 ## [0.14.0](https://github.com/moq-dev/moq/compare/hang-v0.13.1...hang-v0.14.0) - 2026-02-12
 
 ### Other

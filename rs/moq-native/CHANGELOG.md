@@ -44,6 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2](https://github.com/moq-dev/moq/compare/moq-native-v0.13.1...moq-native-v0.13.2) - 2026-03-03
+
+### Fixed
+
+- prevent panic in Server::close() on ctrl+c ([#982](https://github.com/moq-dev/moq/pull/982))
+
+### Other
+
+- Add broadcast integration tests and fix producer cache handling ([#1011](https://github.com/moq-dev/moq/pull/1011))
+- Replace --alpn with --client-version / --server-version ([#1009](https://github.com/moq-dev/moq/pull/1009))
+- Replace tokio::sync::watch with custom Producer/Subscriber ([#996](https://github.com/moq-dev/moq/pull/996))
+
 ## [0.13.0](https://github.com/moq-dev/moq/compare/moq-native-v0.12.2...moq-native-v0.13.0) - 2026-02-12
 
 ### Other
