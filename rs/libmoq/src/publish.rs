@@ -39,16 +39,8 @@ impl Publish {
 		let (broadcast, catalog) = self.broadcasts.get(broadcast).ok_or(Error::NotFound)?;
 
 		let format = import::DecoderFormat::from_str(format).map_err(|_| Error::UnknownFormat(format.to_string()))?;
-		let mut decoder = import::Decoder::new(broadcast.clone(), catalog.clone(), format);
-
-		decoder
-			.initialize(&mut init)
+		let decoder = import::Decoder::new(broadcast.clone(), catalog.clone(), format, &mut init)
 			.map_err(|err| Error::InitFailed(Arc::new(err)))?;
-		if init.has_remaining() {
-			return Err(Error::InitFailed(Arc::new(anyhow::anyhow!(
-				"buffer was not fully consumed"
-			))));
-		}
 
 		let id = self.media.insert(decoder);
 		Ok(id)
