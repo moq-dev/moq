@@ -63,7 +63,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   demo/              # Demo applications
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
-  spec/              # moq-lite and hang protocol specifications
+  spec/              # Raw IETF specification texts (drafts for moq-transport and moq-lite)
 /dev/                 # Development config and test media files
 /cdn/                 # CDN infrastructure (Terraform)
 ```
@@ -73,6 +73,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 1. The project uses `just` as the task runner - check `justfile` for all available commands
 2. For Rust development, the workspace is configured in the root `Cargo.toml`
 3. For JS/TS development, bun workspaces are used with configuration in the root `package.json`
+4. Consult `doc/` for documentation and `doc/spec/` for raw IETF specification drafts when working on protocol-level code
 
 ## Tooling
 
