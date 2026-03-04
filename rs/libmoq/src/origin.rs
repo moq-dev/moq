@@ -4,9 +4,7 @@ use crate::ffi::OnStatus;
 use crate::{Error, Id, NonZeroSlab, State};
 
 #[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
-use std::ffi::c_char;
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
-use crate::moq_announced;
+use {crate::moq_announced, std::ffi::c_char};
 
 /// Global state managing all active resources.
 ///
