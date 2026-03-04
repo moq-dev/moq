@@ -218,44 +218,52 @@ impl Parameters {
 /// Trait for encoding/decoding parameter values with version-specific formats.
 ///
 /// Parameter encoding differs from field encoding:
-/// - Draft-14/15/16: even-key params use varint, odd-key use length-prefixed bytes
-/// - Draft-17: type-specific encoding per key
-pub trait ParamValue: Sized {
+/// - Draft-14/15/16: u8 and bool are encoded as varints (cast to u64)
+/// - Draft-17: type-specific encoding (u8 as raw byte, bool as raw byte, etc.)
+///
+/// Use `_ =>` for the newest draft behavior so future versions default forward.
+pub trait Param: Sized {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError>;
 	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError>;
+
+	/// Whether this parameter should be encoded. Returns false to skip.
+	fn param_present(&self) -> bool {
+		true
+	}
 }
 
-impl ParamValue for u8 {
+impl Param for u8 {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Draft17 => Encode::encode(self, w, version),
-			_ => (*self as u64).encode(w, version),
+			// Draft-14/15/16: u8 encoded as varint (cast to u64)
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => (*self as u64).encode(w, version),
+			_ => Encode::encode(self, w, version),
 		}
 	}
 
 	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Draft17 => u8::decode(r, version),
-			_ => {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let v = u64::decode(r, version)?;
 				u8::try_from(v).map_err(|_| DecodeError::InvalidValue)
 			}
+			_ => u8::decode(r, version),
 		}
 	}
 }
 
-impl ParamValue for bool {
+impl Param for bool {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Draft17 => Encode::encode(self, w, version),
-			_ => (*self as u64).encode(w, version),
+			// Draft-14/15/16: bool encoded as varint (cast to u64)
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => (*self as u64).encode(w, version),
+			_ => Encode::encode(self, w, version),
 		}
 	}
 
 	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Draft17 => bool::decode(r, version),
-			_ => {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let v = u64::decode(r, version)?;
 				match v {
 					0 => Ok(false),
@@ -263,11 +271,12 @@ impl ParamValue for bool {
 					_ => Err(DecodeError::InvalidValue),
 				}
 			}
+			_ => bool::decode(r, version),
 		}
 	}
 }
 
-impl ParamValue for u64 {
+impl Param for u64 {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.encode(w, version)
 	}
@@ -277,15 +286,10 @@ impl ParamValue for u64 {
 	}
 }
 
-impl ParamValue for Location {
+impl Param for Location {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Draft17 => {
-				self.group.encode(w, version)?;
-				self.object.encode(w, version)?;
-				Ok(())
-			}
-			_ => {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				// Length-prefixed bytes containing two QUIC varints
 				let mut buf = Vec::new();
 				self.group.encode(&mut buf, Version::Draft15)?;
@@ -293,17 +297,17 @@ impl ParamValue for Location {
 				buf.encode(w, version)?;
 				Ok(())
 			}
+			_ => {
+				self.group.encode(w, version)?;
+				self.object.encode(w, version)?;
+				Ok(())
+			}
 		}
 	}
 
 	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Draft17 => {
-				let group = u64::decode(r, version)?;
-				let object = u64::decode(r, version)?;
-				Ok(Location { group, object })
-			}
-			_ => {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				// Length-prefixed bytes containing two QUIC varints
 				let data = Vec::<u8>::decode(r, version)?;
 				let mut buf = bytes::Bytes::from(data);
@@ -311,18 +315,23 @@ impl ParamValue for Location {
 				let object = u64::decode(&mut buf, Version::Draft15)?;
 				Ok(Location { group, object })
 			}
+			_ => {
+				let group = u64::decode(r, version)?;
+				let object = u64::decode(r, version)?;
+				Ok(Location { group, object })
+			}
 		}
 	}
 }
 
-impl ParamValue for FilterType {
+impl Param for FilterType {
 	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		let mut buf = Vec::new();
 		// Use version-specific varint encoding for the inner value.
 		// Fixes draft-17 interop: inner varints now use leading-ones, not QUIC.
 		let sv = match version {
-			Version::Draft17 => Version::Draft17,
-			_ => Version::Draft15,
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => Version::Draft15,
+			_ => version,
 		};
 		self.encode(&mut buf, sv)?;
 		buf.encode(w, version)?;
@@ -333,40 +342,27 @@ impl ParamValue for FilterType {
 		let data = Vec::<u8>::decode(r, version)?;
 		let mut buf = bytes::Bytes::from(data);
 		let sv = match version {
-			Version::Draft17 => Version::Draft17,
-			_ => Version::Draft15,
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => Version::Draft15,
+			_ => version,
 		};
 		FilterType::decode(&mut buf, sv)
 	}
 }
 
-/// Trait for values that may or may not be present as parameters.
-/// Implemented for `ParamValue` types (always present) and `Option<T>` (present when `Some`).
-pub trait MaybeParam {
-	fn param_present(&self) -> bool;
-	fn param_encode_value<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError>;
-}
-
-impl<T: ParamValue> MaybeParam for T {
-	fn param_present(&self) -> bool {
-		true
-	}
-
-	fn param_encode_value<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		self.param_encode(w, version)
-	}
-}
-
-impl<T: ParamValue> MaybeParam for Option<T> {
+impl<T: Param> Param for Option<T> {
 	fn param_present(&self) -> bool {
 		self.is_some()
 	}
 
-	fn param_encode_value<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match self {
 			Some(v) => v.param_encode(w, version),
 			None => Ok(()),
 		}
+	}
+
+	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		Ok(Some(T::param_decode(r, version)?))
 	}
 }
 
@@ -401,7 +397,7 @@ macro_rules! encode_params {
 
 		#[allow(unused_mut)]
 		let mut _count: usize = 0;
-		$(_count += if $crate::ietf::MaybeParam::param_present(&$val) { 1 } else { 0 };)*
+		$(_count += if $crate::ietf::Param::param_present(&$val) { 1 } else { 0 };)*
 		_count.encode($w, _version)?;
 
 		#[allow(unused_mut, unused_assignments)]
@@ -409,20 +405,20 @@ macro_rules! encode_params {
 		#[allow(unused_mut, unused_assignments)]
 		let mut _first: bool = true;
 		$(
-			if $crate::ietf::MaybeParam::param_present(&$val) {
+			if $crate::ietf::Param::param_present(&$val) {
 				let _key: u64 = $key;
 				match _version {
-					$crate::ietf::Version::Draft16 | $crate::ietf::Version::Draft17 => {
-						let _delta = if _first { _key } else { _key - _prev_key };
-						_delta.encode($w, _version)?;
+					$crate::ietf::Version::Draft14 | $crate::ietf::Version::Draft15 => {
+						_key.encode($w, _version)?;
 					}
 					_ => {
-						_key.encode($w, _version)?;
+						let _delta = if _first { _key } else { _key - _prev_key };
+						_delta.encode($w, _version)?;
 					}
 				}
 				_prev_key = _key;
 				_first = false;
-				$crate::ietf::MaybeParam::param_encode_value(&$val, $w, _version)?;
+				$crate::ietf::Param::param_encode(&$val, $w, _version)?;
 			}
 		)*
 	}};
@@ -430,16 +426,20 @@ macro_rules! encode_params {
 
 /// Decode message parameters with compile-time sorted keys.
 ///
-/// Each declared variable becomes `Option<T>` in the enclosing scope.
+/// The declared type is the final type of each variable. Use `Option<T>` for
+/// optional parameters (defaults to `None` when absent) and bare types like `u8`
+/// for parameters where `T::default()` is an acceptable fallback.
+///
 /// Unknown parameters cause `DecodeError::InvalidValue`.
 /// Duplicate parameters cause `DecodeError::Duplicate`.
 ///
 /// ```ignore
 /// decode_params!(r, version,
-///     0x10 => forward: bool,
-///     0x20 => subscriber_priority: u8,
+///     0x10 => forward: Option<bool>,
+///     0x20 => subscriber_priority: Option<u8>,
 /// );
 /// // forward: Option<bool> and subscriber_priority: Option<u8> are now in scope
+/// let subscriber_priority = subscriber_priority.unwrap_or(128);
 /// ```
 #[macro_export]
 macro_rules! decode_params {
@@ -454,7 +454,8 @@ macro_rules! decode_params {
 			}
 		};
 
-		$(#[allow(unused_mut)] let mut $name: Option<$ty> = None;)*
+		// Use internal Option wrapper for duplicate detection, then shadow with Default.
+		$(#[allow(unused_mut, non_snake_case)] let mut $name: Option<$ty> = None;)*
 
 		{
 			#[allow(unused_imports)]
@@ -470,7 +471,10 @@ macro_rules! decode_params {
 			let mut _prev_key: u64 = 0;
 			for _i in 0.._count {
 				let _key: u64 = match _version {
-					$crate::ietf::Version::Draft16 | $crate::ietf::Version::Draft17 => {
+					$crate::ietf::Version::Draft14 | $crate::ietf::Version::Draft15 => {
+						<u64 as $crate::coding::Decode<$crate::ietf::Version>>::decode($r, _version)?
+					}
+					_ => {
 						let _delta = <u64 as $crate::coding::Decode<$crate::ietf::Version>>::decode($r, _version)?;
 						let _abs = if _i == 0 {
 							_delta
@@ -480,7 +484,6 @@ macro_rules! decode_params {
 						_prev_key = _abs;
 						_abs
 					}
-					_ => <u64 as $crate::coding::Decode<$crate::ietf::Version>>::decode($r, _version)?,
 				};
 
 				match _key {
@@ -488,12 +491,15 @@ macro_rules! decode_params {
 						if $name.is_some() {
 							return Err($crate::coding::DecodeError::Duplicate);
 						}
-						$name = Some(<$ty as $crate::ietf::ParamValue>::param_decode($r, _version)?);
+						$name = Some(<$ty as $crate::ietf::Param>::param_decode($r, _version)?);
 					})*
 					_ => return Err($crate::coding::DecodeError::InvalidValue),
 				}
 			}
 		}
+
+		// Shadow with unwrap_or_default: Option<T> defaults to None, T defaults to T::default()
+		$(#[allow(unused_variables)] let $name: $ty = $name.unwrap_or_default();)*
 	};
 }
 
@@ -601,7 +607,7 @@ mod tests {
 					Ok(())
 				},
 				|r, v| {
-					decode_params!(r, v, 0x20 => val: u8);
+					decode_params!(r, v, 0x20 => val: Option<u8>);
 					assert_eq!(val, Some(200));
 					Ok(())
 				},
@@ -619,7 +625,7 @@ mod tests {
 					Ok(())
 				},
 				|r, v| {
-					decode_params!(r, v, 0x10 => val: bool);
+					decode_params!(r, v, 0x10 => val: Option<bool>);
 					assert_eq!(val, Some(true));
 					Ok(())
 				},
@@ -638,7 +644,7 @@ mod tests {
 					Ok(())
 				},
 				|r, v| {
-					decode_params!(r, v, 0x09 => val: Location);
+					decode_params!(r, v, 0x09 => val: Option<Location>);
 					assert_eq!(val, Some(Location { group: 5, object: 3 }));
 					Ok(())
 				},
@@ -656,7 +662,7 @@ mod tests {
 					Ok(())
 				},
 				|r, v| {
-					decode_params!(r, v, 0x21 => val: FilterType);
+					decode_params!(r, v, 0x21 => val: Option<FilterType>);
 					assert_eq!(val, Some(FilterType::LargestObject));
 					Ok(())
 				},
@@ -680,10 +686,10 @@ mod tests {
 				},
 				|r, v| {
 					decode_params!(r, v,
-						0x10 => forward: bool,
-						0x20 => sub_pri: u8,
-						0x21 => filter: FilterType,
-						0x22 => group_order: u8,
+						0x10 => forward: Option<bool>,
+						0x20 => sub_pri: Option<u8>,
+						0x21 => filter: Option<FilterType>,
+						0x22 => group_order: Option<u8>,
 					);
 					assert_eq!(forward, Some(true));
 					assert_eq!(sub_pri, Some(200));
@@ -727,8 +733,8 @@ mod tests {
 				},
 				|r, v| {
 					decode_params!(r, v,
-						0x09 => loc: Location,
-						0x10 => forward: bool,
+						0x09 => loc: Option<Location>,
+						0x10 => forward: Option<bool>,
 					);
 					assert_eq!(loc, None);
 					assert_eq!(forward, Some(true));
@@ -753,11 +759,35 @@ mod tests {
 				},
 				|r, v| {
 					decode_params!(r, v,
-						0x09 => loc: Location,
-						0x10 => forward: bool,
+						0x09 => loc: Option<Location>,
+						0x10 => forward: Option<bool>,
 					);
 					assert_eq!(loc, Some(Location { group: 10, object: 5 }));
 					assert_eq!(forward, Some(true));
+					Ok(())
+				},
+			);
+		}
+	}
+
+	#[test]
+	fn test_param_bare_type_defaults() {
+		// Bare types use T::default() when the parameter is absent
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+			round_trip_params(
+				version,
+				|w, v| {
+					// Encode only 0x10, not 0x20
+					encode_params!(w, v, 0x10 => true);
+					Ok(())
+				},
+				|r, v| {
+					decode_params!(r, v,
+						0x10 => forward: bool,
+						0x20 => priority: u8,
+					);
+					assert!(forward);
+					assert_eq!(priority, 0); // u8::default()
 					Ok(())
 				},
 			);
@@ -775,7 +805,7 @@ mod tests {
 
 			let mut bytes = buf.freeze();
 			let result: Result<(), DecodeError> = (|| {
-				decode_params!(&mut bytes, version, 0x20 => val: u8);
+				decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
 				let _ = val;
 				Ok(())
 			})();
@@ -814,7 +844,7 @@ mod tests {
 
 			let mut bytes = buf.freeze();
 			let result: Result<(), DecodeError> = (|| {
-				decode_params!(&mut bytes, version, 0x20 => val: u8);
+				decode_params!(&mut bytes, version, 0x20 => val: Option<u8>);
 				let _ = val;
 				Ok(())
 			})();

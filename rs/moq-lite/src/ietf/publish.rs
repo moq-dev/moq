@@ -206,7 +206,7 @@ impl Message for Publish<'_> {
 				encode_params!(w, version,
 					0x09 => self.largest_location,
 					0x10 => self.forward,
-					0x22 => u8::from(self.group_order),
+					0x22 => self.group_order,
 				);
 			}
 		}
@@ -247,15 +247,12 @@ impl Message for Publish<'_> {
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				decode_params!(r, version,
-					0x09 => largest_location: Location,
-					0x10 => forward: bool,
-					0x22 => group_order: u8,
+					0x09 => largest_location: Option<Location>,
+					0x10 => forward: Option<bool>,
+					0x22 => group_order: Option<GroupOrder>,
 				);
 
-				let group_order = group_order
-					.and_then(|v| GroupOrder::try_from(v).ok())
-					.map(GroupOrder::any_to_descending)
-					.unwrap_or(GroupOrder::Descending);
+				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 				let forward = forward.unwrap_or(true);
 
 				Ok(Self {
@@ -312,7 +309,7 @@ impl Message for PublishOk {
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter_type,
-					0x22 => u8::from(self.group_order),
+					0x22 => self.group_order,
 				);
 			}
 		}
@@ -357,18 +354,15 @@ impl Message for PublishOk {
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				decode_params!(r, version,
-					0x10 => forward: bool,
-					0x20 => subscriber_priority: u8,
-					0x21 => filter_type: FilterType,
-					0x22 => group_order: u8,
+					0x10 => forward: Option<bool>,
+					0x20 => subscriber_priority: Option<u8>,
+					0x21 => filter_type: Option<FilterType>,
+					0x22 => group_order: Option<GroupOrder>,
 				);
 
 				let forward = forward.unwrap_or(true);
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
-				let group_order = group_order
-					.and_then(|v| GroupOrder::try_from(v).ok())
-					.map(GroupOrder::any_to_descending)
-					.unwrap_or(GroupOrder::Descending);
+				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
 
 				Ok(Self {

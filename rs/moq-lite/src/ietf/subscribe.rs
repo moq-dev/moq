@@ -15,10 +15,11 @@ use super::namespace::{decode_namespace, encode_namespace};
 
 use super::Version;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u64)]
 pub enum FilterType {
 	NextGroup = 0x01,
+	#[default]
 	LargestObject = 0x2,
 	AbsoluteStart = 0x3,
 	AbsoluteRange = 0x4,
@@ -95,18 +96,14 @@ impl Message for Subscribe<'_> {
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				decode_params!(r, version,
-					0x10 => forward: bool,
-					0x20 => subscriber_priority: u8,
-					0x21 => filter_type: FilterType,
-					0x22 => group_order: u8,
+					0x10 => _forward: Option<bool>,
+					0x20 => subscriber_priority: Option<u8>,
+					0x21 => filter_type: Option<FilterType>,
+					0x22 => group_order: Option<GroupOrder>,
 				);
 
-				let _ = forward;
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
-				let group_order = group_order
-					.and_then(|v| GroupOrder::try_from(v).ok())
-					.map(GroupOrder::any_to_descending)
-					.unwrap_or(GroupOrder::Descending);
+				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
 
 				Ok(Self {
@@ -148,7 +145,7 @@ impl Message for Subscribe<'_> {
 					0x10 => true,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter_type,
-					0x22 => u8::from(self.group_order),
+					0x22 => self.group_order,
 				);
 			}
 		}
@@ -186,7 +183,7 @@ impl Message for SubscribeOk {
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				encode_params!(w, version,
-					0x22 => u8::from(GroupOrder::Descending),
+					0x22 => GroupOrder::Descending,
 				);
 			}
 		}
@@ -220,7 +217,7 @@ impl Message for SubscribeOk {
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				decode_params!(r, version,
-					0x22 => _group_order: u8,
+					0x22 => _group_order: Option<GroupOrder>,
 				);
 			}
 		}
@@ -364,9 +361,9 @@ impl Message for SubscribeUpdate {
 				let request_id = RequestId::decode(r, version)?;
 				let subscription_request_id = Some(RequestId::decode(r, version)?);
 				decode_params!(r, version,
-					0x10 => forward: bool,
-					0x20 => subscriber_priority: u8,
-					0x21 => _filter_type: FilterType,
+					0x10 => forward: Option<bool>,
+					0x20 => subscriber_priority: Option<u8>,
+					0x21 => _filter_type: Option<FilterType>,
 				);
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
@@ -386,9 +383,9 @@ impl Message for SubscribeUpdate {
 				let request_id = RequestId::decode(r, version)?;
 				let _required_request_id_delta = u64::decode(r, version)?;
 				decode_params!(r, version,
-					0x10 => forward: bool,
-					0x20 => subscriber_priority: u8,
-					0x21 => _filter_type: FilterType,
+					0x10 => forward: Option<bool>,
+					0x20 => subscriber_priority: Option<u8>,
+					0x21 => _filter_type: Option<FilterType>,
 				);
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
