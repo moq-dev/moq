@@ -16,7 +16,7 @@ serde = ["dep:serde"]
 
 [dependencies]
 bytes = "1"
-conducer = "0.2"
+conducer = { workspace = true }
 futures = "0.3"
 hex = "0.4"
 num_enum = "0.7"
