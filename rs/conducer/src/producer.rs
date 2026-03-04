@@ -82,12 +82,28 @@ impl<T> Producer<T> {
 			return Poll::Ready(Some(res));
 		}
 
-		// Reset modified so the drop doesn't immediately wake the waiter we're about to register.
+		let inner = state.state.as_mut().unwrap();
+
+		// Take existing waiters if f modified the state, so we can notify consumers.
+		let waiters = if state.modified {
+			Some(inner.waiters.take())
+		} else {
+			None
+		};
+
+		// Register ourselves for future notifications.
+		waiter.register(&mut inner.waiters);
+
+		// Prevent Drop from re-waking the waiter we just registered.
 		state.modified = false;
 
-		// Re-extract state from producer_state to register
-		let state = state.state.as_mut().unwrap();
-		waiter.register(&mut state.waiters);
+		// Release the lock before waking consumers.
+		drop(state);
+
+		if let Some(waiters) = waiters {
+			waiters.wake();
+		}
+
 		Poll::Pending
 	}
 
@@ -132,13 +148,13 @@ impl<T> Producer<T> {
 	}
 
 	fn poll_unused(&self, waiter: &Waiter) -> Poll<Option<()>> {
-		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
-			return Poll::Ready(Some(()));
-		}
-
 		let mut state = self.state.lock();
 		if state.closed {
 			return Poll::Ready(None);
+		}
+
+		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
+			return Poll::Ready(Some(()));
 		}
 
 		waiter.register(&mut state.waiters);
