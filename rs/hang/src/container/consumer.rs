@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::pin::Pin;
 
 use buf_list::BufList;
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -65,6 +66,12 @@ pub struct OrderedConsumer {
 
 	// The maximum buffer size before skipping a group.
 	max_latency: std::time::Duration,
+
+	// The expected next group sequence number after consuming a group.
+	next_sequence: Option<u64>,
+
+	// Timeout for waiting on a missing sequence before skipping the gap.
+	pending_timeout: Option<Pin<Box<tokio::time::Sleep>>>,
 }
 
 impl OrderedConsumer {
@@ -76,6 +83,8 @@ impl OrderedConsumer {
 			pending: VecDeque::new(),
 			max_timestamp: Timestamp::default(),
 			max_latency,
+			next_sequence: None,
+			pending_timeout: None,
 		}
 	}
 
@@ -89,6 +98,19 @@ impl OrderedConsumer {
 	pub async fn read(&mut self) -> Result<Option<OrderedFrame>, Error> {
 		let latency = self.max_latency.try_into()?;
 		loop {
+			// Try to promote from pending to current when there's no gap.
+			if self.current.is_none() {
+				let should_promote = match self.next_sequence {
+					Some(expected) => self.pending.front().is_some_and(|g| g.info.sequence == expected),
+					None => !self.pending.is_empty(), // first group ever
+				};
+				if should_promote {
+					self.pending_timeout = None;
+					self.current = self.pending.pop_front();
+					continue;
+				}
+			}
+
 			let cutoff = self.max_timestamp.checked_add(latency)?;
 
 			// Keep track of all pending groups, buffering until we detect a timestamp far enough in the future.
@@ -112,9 +134,12 @@ impl OrderedConsumer {
 							return Ok(Some(frame));
 						}
 						Ok(None) | Err(_) => {
-							// Group ended, instantly move to the next group.
+							// Group ended, update expected sequence.
 							// We don't care about errors, which will happen if the group is closed early.
-							self.current = self.pending.pop_front();
+							// Let promotion logic at loop top decide the next current.
+							self.next_sequence = self.current.as_ref().map(|c| c.info.sequence + 1);
+							self.pending_timeout = None;
+							self.current = None;
 							continue;
 						}
 					};
@@ -133,7 +158,14 @@ impl OrderedConsumer {
 							let index = self.pending.partition_point(|g| g.info.sequence < group.info.sequence);
 							self.pending.insert(index, group);
 						},
-						None => self.current = Some(group),
+						None => {
+							// Always insert sorted by sequence; promotion happens at loop top.
+							let index = self.pending.partition_point(|g| g.info.sequence < group.info.sequence);
+							self.pending.insert(index, group);
+							if self.pending_timeout.is_none() {
+								self.pending_timeout = Some(Box::pin(tokio::time::sleep(self.max_latency)));
+							}
+						}
 					};
 				},
 				Some((index, timestamp)) = buffering.next() => {
@@ -149,6 +181,21 @@ impl OrderedConsumer {
 					}
 
 					self.current = self.pending.pop_front();
+					self.next_sequence = self.current.as_ref().map(|c| c.info.sequence + 1);
+					self.pending_timeout = None;
+				}
+				// Timeout waiting for a missing sequence — skip the gap.
+				() = async {
+					match &mut self.pending_timeout {
+						Some(sleep) => sleep.as_mut().await,
+						None => std::future::pending().await,
+					}
+				} => {
+					drop(buffering);
+					self.pending_timeout = None;
+					self.next_sequence = self.pending.front().map(|g| g.info.sequence);
+					self.current = self.pending.pop_front();
+					continue;
 				}
 				else => return Ok(None),
 			}
@@ -887,5 +934,153 @@ mod tests {
 		assert_eq!(frames[2].timestamp, ts(33_000));
 		assert_eq!(frames[3].timestamp, ts(100_000));
 		finisher.await.expect("finisher task panicked");
+	}
+
+	/// Write a single audio frame as its own group with the given sequence and timestamp.
+	fn write_audio_group(track: &mut moq_lite::TrackProducer, sequence: u64, timestamp_us: u64) {
+		let mut group = track.create_group(moq_lite::Group { sequence }).unwrap();
+		let frame = Frame {
+			timestamp: Timestamp::from_micros(timestamp_us).unwrap(),
+			payload: BufList::from(bytes::Bytes::from_static(b"audio")),
+		};
+		frame.encode(&mut group).unwrap();
+		group.finish().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn audio_in_order() {
+		let mut track = moq_lite::Track::new("audio").produce();
+		let consumer = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer, Duration::from_millis(500));
+
+		write_audio_group(&mut track, 0, 0);
+		write_audio_group(&mut track, 1, 20_000);
+		write_audio_group(&mut track, 2, 40_000);
+		track.finish().unwrap();
+
+		let f0 = consumer.read().await.unwrap().unwrap();
+		let f1 = consumer.read().await.unwrap().unwrap();
+		let f2 = consumer.read().await.unwrap().unwrap();
+
+		assert_eq!(f0.timestamp.as_micros(), 0);
+		assert_eq!(f1.timestamp.as_micros(), 20_000);
+		assert_eq!(f2.timestamp.as_micros(), 40_000);
+
+		// Timestamps are monotonically increasing
+		assert!(f0.timestamp <= f1.timestamp);
+		assert!(f1.timestamp <= f2.timestamp);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn audio_out_of_order_reorders() {
+		let mut track = moq_lite::Track::new("audio").produce();
+		let consumer = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer, Duration::from_millis(500));
+
+		// Write seq 0, read it to establish next_sequence = 1
+		write_audio_group(&mut track, 0, 0);
+		let f0 = consumer.read().await.unwrap().unwrap();
+		assert_eq!(f0.timestamp.as_micros(), 0);
+
+		// Write seq 2 first (out of order), then seq 1 (fills gap)
+		write_audio_group(&mut track, 2, 40_000);
+		write_audio_group(&mut track, 1, 20_000);
+
+		let f1 = consumer.read().await.unwrap().unwrap();
+		let f2 = consumer.read().await.unwrap().unwrap();
+
+		// Should be delivered in sequence order, not arrival order
+		assert_eq!(f1.timestamp.as_micros(), 20_000);
+		assert_eq!(f2.timestamp.as_micros(), 40_000);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn audio_missing_group_timeout() {
+		let mut track = moq_lite::Track::new("audio").produce();
+		let consumer = track.consume();
+		let max_latency = Duration::from_millis(100);
+		let mut consumer = OrderedConsumer::new(consumer, max_latency);
+
+		// Write and read seq 0
+		write_audio_group(&mut track, 0, 0);
+		let f0 = consumer.read().await.unwrap().unwrap();
+		assert_eq!(f0.timestamp.as_micros(), 0);
+
+		// Write seq 2 — gap at seq 1, never filled
+		write_audio_group(&mut track, 2, 40_000);
+
+		// Consumer should NOT resolve immediately (waiting for seq 1)
+		let result = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		assert!(result.is_err(), "should be waiting for missing seq 1");
+
+		// Advance past the timeout
+		tokio::time::advance(Duration::from_millis(60)).await;
+
+		// Now seq 2 should be delivered (skipped the gap)
+		let f2 = consumer.read().await.unwrap().unwrap();
+		assert_eq!(f2.timestamp.as_micros(), 40_000);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn audio_multiple_gaps() {
+		let mut track = moq_lite::Track::new("audio").produce();
+		let consumer = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer, Duration::from_millis(500));
+
+		// Write and read seq 0
+		write_audio_group(&mut track, 0, 0);
+		let f0 = consumer.read().await.unwrap().unwrap();
+		assert_eq!(f0.timestamp.as_micros(), 0);
+
+		// Write seq 3, seq 1, seq 2 (arrive in this order from network)
+		write_audio_group(&mut track, 3, 60_000);
+		write_audio_group(&mut track, 1, 20_000);
+		write_audio_group(&mut track, 2, 40_000);
+
+		let f1 = consumer.read().await.unwrap().unwrap();
+		let f2 = consumer.read().await.unwrap().unwrap();
+		let f3 = consumer.read().await.unwrap().unwrap();
+
+		// Should be fully reordered
+		assert_eq!(f1.timestamp.as_micros(), 20_000);
+		assert_eq!(f2.timestamp.as_micros(), 40_000);
+		assert_eq!(f3.timestamp.as_micros(), 60_000);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn video_multiframe_group_unchanged() {
+		let track = moq_lite::Track::new("video").produce();
+		let consumer = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer, Duration::from_millis(500));
+
+		// Write a multi-frame group via OrderedProducer
+		let mut producer = super::super::OrderedProducer::new(track);
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(0).unwrap(),
+				payload: BufList::from(bytes::Bytes::from_static(b"keyframe")),
+			})
+			.unwrap();
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(16_000).unwrap(),
+				payload: BufList::from(bytes::Bytes::from_static(b"inter1")),
+			})
+			.unwrap();
+		producer
+			.write(Frame {
+				timestamp: Timestamp::from_micros(33_000).unwrap(),
+				payload: BufList::from(bytes::Bytes::from_static(b"inter2")),
+			})
+			.unwrap();
+		producer.finish().unwrap();
+
+		let f0 = consumer.read().await.unwrap().unwrap();
+		let f1 = consumer.read().await.unwrap().unwrap();
+		let f2 = consumer.read().await.unwrap().unwrap();
+
+		assert_eq!(f0.timestamp.as_micros(), 0);
+		assert_eq!(f1.timestamp.as_micros(), 16_000);
+		assert_eq!(f2.timestamp.as_micros(), 33_000);
 	}
 }
