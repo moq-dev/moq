@@ -8,6 +8,8 @@ use crate::coding::*;
 use super::Version;
 
 const MAX_PARAMS: u64 = 64;
+/// Maximum byte value length in Key-Value-Pairs per spec Section 1.4.3.
+const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
 const PARAM_SUBVALUE_VERSION: Version = Version::Draft15;
 
 // ---- Setup Parameters (used in CLIENT_SETUP/SERVER_SETUP) ----
@@ -15,6 +17,7 @@ const PARAM_SUBVALUE_VERSION: Version = Version::Draft15;
 #[derive(Debug, Copy, Clone, FromPrimitive, IntoPrimitive, Eq, Hash, PartialEq)]
 #[repr(u64)]
 pub enum ParameterVarInt {
+	/// Removed in draft-17; only used in draft-14/15/16.
 	MaxRequestId = 2,
 	MaxAuthTokenCacheSize = 4,
 	#[num_enum(catch_all)]
@@ -54,7 +57,11 @@ impl Decode<Version> for Parameters {
 						return Err(DecodeError::TooMany);
 					}
 					let delta = u64::decode(&mut r, version)?;
-					let abs = if i == 0 { delta } else { prev_type + delta };
+					let abs = if i == 0 {
+						delta
+					} else {
+						prev_type.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?
+					};
 					prev_type = abs;
 					i += 1;
 
@@ -66,9 +73,13 @@ impl Decode<Version> for Parameters {
 						};
 					} else {
 						let kind = ParameterBytes::from(abs);
+						let val = Vec::<u8>::decode(&mut r, version)?;
+						if val.len() > MAX_KVP_VALUE_LEN {
+							return Err(DecodeError::BoundsExceeded);
+						}
 						match bytes.entry(kind) {
 							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(Vec::<u8>::decode(&mut r, version)?),
+							hash_map::Entry::Vacant(entry) => entry.insert(val),
 						};
 					}
 				}
@@ -86,11 +97,16 @@ impl Decode<Version> for Parameters {
 					let kind = match version {
 						Version::Draft16 => {
 							let delta = u64::decode(r, version)?;
-							let abs = if i == 0 { delta } else { prev_type + delta };
+							let abs = if i == 0 {
+								delta
+							} else {
+								prev_type.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?
+							};
 							prev_type = abs;
 							abs
 						}
-						Version::Draft14 | Version::Draft15 | Version::Draft17 => u64::decode(r, version)?,
+						Version::Draft14 | Version::Draft15 => u64::decode(r, version)?,
+						Version::Draft17 => unreachable!("handled above"),
 					};
 
 					if kind % 2 == 0 {
@@ -101,9 +117,13 @@ impl Decode<Version> for Parameters {
 						};
 					} else {
 						let kind = ParameterBytes::from(kind);
+						let val = Vec::<u8>::decode(&mut r, version)?;
+						if val.len() > MAX_KVP_VALUE_LEN {
+							return Err(DecodeError::BoundsExceeded);
+						}
 						match bytes.entry(kind) {
 							hash_map::Entry::Occupied(_) => return Err(DecodeError::Duplicate),
-							hash_map::Entry::Vacant(entry) => entry.insert(Vec::<u8>::decode(&mut r, version)?),
+							hash_map::Entry::Vacant(entry) => entry.insert(val),
 						};
 					}
 				}
@@ -220,7 +240,11 @@ impl Decode<Version> for MessageParameters {
 			let kind = match version {
 				Version::Draft16 | Version::Draft17 => {
 					let delta = u64::decode(r, version)?;
-					let abs = if i == 0 { delta } else { prev_type + delta };
+					let abs = if i == 0 {
+						delta
+					} else {
+						prev_type.checked_add(delta).ok_or(DecodeError::BoundsExceeded)?
+					};
 					prev_type = abs;
 					abs
 				}
@@ -601,7 +625,7 @@ mod tests {
 	fn test_parameters_v17_round_trip() {
 		let mut params = Parameters::default();
 		params.set_bytes(ParameterBytes::Path, b"/test".to_vec());
-		params.set_varint(ParameterVarInt::MaxRequestId, 100);
+		params.set_varint(ParameterVarInt::MaxAuthTokenCacheSize, 4096);
 		params.set_bytes(ParameterBytes::Implementation, b"test-impl".to_vec());
 
 		let mut buf = BytesMut::new();
@@ -611,7 +635,7 @@ mod tests {
 		let decoded = Parameters::decode(&mut bytes, Version::Draft17).unwrap();
 
 		assert_eq!(decoded.get_bytes(ParameterBytes::Path), Some(b"/test".as_ref()));
-		assert_eq!(decoded.get_varint(ParameterVarInt::MaxRequestId), Some(100));
+		assert_eq!(decoded.get_varint(ParameterVarInt::MaxAuthTokenCacheSize), Some(4096));
 		assert_eq!(
 			decoded.get_bytes(ParameterBytes::Implementation),
 			Some(b"test-impl".as_ref())
