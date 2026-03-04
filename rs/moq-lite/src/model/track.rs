@@ -369,6 +369,28 @@ pub struct TrackConsumer {
 }
 
 impl TrackConsumer {
+	/// Poll for the next group without blocking.
+	///
+	/// Returns `Poll::Ready(Some(Ok(group)))` when a group is available,
+	/// `Poll::Ready(None)` when the track is finished,
+	/// `Poll::Ready(Some(Err(e)))` when the track has been aborted, or
+	/// `Poll::Pending` when no group is available yet.
+	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Option<Result<GroupConsumer>>> {
+		let index = self.index;
+		match self.state.poll(waiter, |state| state.poll_next_group(index)) {
+			Poll::Ready(Some(Some((producer, found_index)))) => {
+				self.index = found_index + 1;
+				Poll::Ready(Some(Ok(producer.consume())))
+			}
+			Poll::Ready(Some(None)) => Poll::Ready(None),
+			Poll::Ready(None) => {
+				let err = self.state.read().abort.clone().unwrap_or(Error::Dropped);
+				Poll::Ready(Some(Err(err)))
+			}
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
 	/// Return the next group in order.
 	///
 	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.

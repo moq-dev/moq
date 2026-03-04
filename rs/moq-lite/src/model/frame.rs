@@ -218,6 +218,22 @@ pub struct FrameConsumer {
 }
 
 impl FrameConsumer {
+	/// Poll for all remaining data without blocking.
+	pub fn poll_read_all(&mut self, waiter: &conducer::Waiter) -> Poll<Option<Result<Bytes>>> {
+		let index = self.index;
+		match self.state.poll(waiter, |state| state.poll_read_all(index)) {
+			Poll::Ready(Some(data)) => {
+				self.index = usize::MAX;
+				Poll::Ready(Some(Ok(data)))
+			}
+			Poll::Ready(None) => {
+				let err = self.state.read().abort.clone().unwrap_or(Error::Dropped);
+				Poll::Ready(Some(Err(err)))
+			}
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
 	/// Return the next chunk.
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
 		let index = self.index;

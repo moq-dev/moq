@@ -221,6 +221,23 @@ pub struct GroupConsumer {
 }
 
 impl GroupConsumer {
+	/// Poll for the next frame without blocking.
+	pub fn poll_next_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Option<Result<FrameConsumer>>> {
+		let index = self.index;
+		match self.state.poll(waiter, |state| state.poll_next_frame(index)) {
+			Poll::Ready(Some(Some(producer))) => {
+				self.index += 1;
+				Poll::Ready(Some(Ok(producer.consume())))
+			}
+			Poll::Ready(Some(None)) => Poll::Ready(None),
+			Poll::Ready(None) => {
+				let err = self.state.read().abort.clone().unwrap_or(Error::Dropped);
+				Poll::Ready(Some(Err(err)))
+			}
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
 	/// Read the next frame's data all at once.
 	///
 	/// Cancel-safe: if cancelled after obtaining the frame but before reading,
