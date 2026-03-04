@@ -7,7 +7,7 @@
 //! The reader can be cloned, in which case each reader receives a copy of each frame. (fanout)
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
@@ -74,11 +74,13 @@ struct GroupState {
 }
 
 impl GroupState {
-	fn poll_next_frame(&self, index: usize) -> Poll<Option<FrameProducer>> {
+	fn poll_get_frame(&self, index: usize) -> Poll<Result<Option<FrameConsumer>>> {
 		if let Some(frame) = self.frames.get(index) {
-			Poll::Ready(Some(frame.clone()))
+			Poll::Ready(Ok(Some(frame.consume())))
 		} else if self.fin {
-			Poll::Ready(None)
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
@@ -221,73 +223,80 @@ pub struct GroupConsumer {
 }
 
 impl GroupConsumer {
-	/// Poll for the next frame without blocking.
-	pub fn poll_next_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Option<Result<FrameConsumer>>> {
-		let index = self.index;
-		match self.state.poll(waiter, |state| state.poll_next_frame(index)) {
-			Poll::Ready(Some(Some(producer))) => {
-				self.index += 1;
-				Poll::Ready(Some(Ok(producer.consume())))
-			}
-			Poll::Ready(Some(None)) => Poll::Ready(None),
-			Poll::Ready(None) => {
-				let err = self.state.read().abort.clone().unwrap_or(Error::Dropped);
-				Poll::Ready(Some(Err(err)))
-			}
-			Poll::Pending => Poll::Pending,
-		}
-	}
-
-	/// Read the next frame's data all at once.
-	///
-	/// Cancel-safe: if cancelled after obtaining the frame but before reading,
-	/// we retry from the same index and create a fresh consumer.
-	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
-		// Step 1: Get the next frame producer from the group state.
-		let index = self.index;
-		let frame = self
-			.state
-			.wait(|state| state.poll_next_frame(index))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-
-		let Some(frame) = frame else {
-			return Ok(None);
-		};
-
-		// Step 2: Read all data from the frame via a temporary consumer.
-		// Cancel-safe because read_all returns all or nothing.
-		let mut consumer = frame.consume();
-		let data = consumer.read_all().await?;
-
-		self.index += 1;
-		Ok(Some(data))
+	// A helper to automatically apply Dropped if the state is closed without an error.
+	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R>>
+	where
+		F: Fn(&conducer::Ref<'_, GroupState>) -> Poll<Result<R>>,
+	{
+		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
+			Ok(res) => res,
+			// We try to clone abort just in case the function forgot to check for terminal state.
+			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		})
 	}
 
 	/// Block until the frame at the given index is available.
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub async fn get_frame(&self, index: usize) -> Result<Option<FrameConsumer>> {
-		let res = self
-			.state
-			.wait(|state| state.poll_next_frame(index))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-		Ok(res.map(|producer| producer.consume()))
+		conducer::wait(|waiter| self.poll_get_frame(waiter, index)).await
+	}
+
+	/// Poll for the frame at the given index, without blocking.
+	///
+	/// Returns None if the group is finished and the index is out of range.
+	pub fn poll_get_frame(&self, waiter: &conducer::Waiter, index: usize) -> Poll<Result<Option<FrameConsumer>>> {
+		self.poll(waiter, |state| state.poll_get_frame(index))
 	}
 
 	/// Return a consumer for the next frame for chunked reading.
 	pub async fn next_frame(&mut self) -> Result<Option<FrameConsumer>> {
-		let index = self.index;
-		let res = self
-			.state
-			.wait(|state| state.poll_next_frame(index))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-		let consumer = res.map(|producer| {
-			self.index += 1;
-			producer.consume()
-		});
-		Ok(consumer)
+		conducer::wait(|waiter| self.poll_next_frame(waiter)).await
+	}
+
+	/// Poll for the next frame, without blocking.
+	///
+	/// Returns None if the group is finished and the index is out of range.
+	pub fn poll_next_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<FrameConsumer>>> {
+		let Some(frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		self.index += 1;
+		Poll::Ready(Ok(Some(frame)))
+	}
+
+	/// Read the next frame's data all at once, without blocking.
+	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Bytes>>> {
+		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		let data = ready!(frame.poll_read_all(waiter))?;
+		self.index += 1;
+
+		Poll::Ready(Ok(Some(data)))
+	}
+
+	/// Read the next frame's data all at once.
+	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
+		conducer::wait(|waiter| self.poll_read_frame(waiter)).await
+	}
+
+	/// Read all of the chunks of the next frame, without blocking.
+	pub fn poll_read_frame_chunks(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Vec<Bytes>>>> {
+		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		let data = ready!(frame.poll_read_all_chunks(waiter))?;
+		self.index += 1;
+
+		Poll::Ready(Ok(Some(data)))
+	}
+
+	/// Read all of the chunks of the next frame.
+	pub async fn read_frame_chunks(&mut self) -> Result<Option<Vec<Bytes>>> {
+		conducer::wait(|waiter| self.poll_read_frame_chunks(waiter)).await
 	}
 }

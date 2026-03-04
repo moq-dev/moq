@@ -27,8 +27,8 @@ impl<T> Consumer<T> {
 	///
 	/// Calls `f` with a [`Ref`]. If `f` returns [`Poll::Pending`] and the
 	/// channel is still open, registers the waiter for notification. Returns
-	/// `None` if the channel is closed while pending.
-	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Option<R>>
+	/// `Err(Ref)` if the channel and the condition is still Pending.
+	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<R>,
 	{
@@ -36,11 +36,11 @@ impl<T> Consumer<T> {
 		let consumer_state = Ref { state };
 
 		if let Poll::Ready(res) = f(&consumer_state) {
-			return Poll::Ready(Some(res));
+			return Poll::Ready(Ok(res));
 		}
 
 		if consumer_state.state.closed {
-			return Poll::Ready(None);
+			return Poll::Ready(Err(consumer_state));
 		}
 
 		// Re-extract state from consumer_state to register
@@ -70,10 +70,7 @@ impl<T> Consumer<T> {
 		F: FnMut(&Ref<'_, T>) -> Poll<R> + Unpin,
 		R: Unpin,
 	{
-		match crate::wait(move |waiter| self.poll(waiter, &mut f)).await {
-			Some(r) => Ok(r),
-			None => Err(self.read()),
-		}
+		crate::wait(move |waiter| self.poll(waiter, &mut f)).await
 	}
 
 	/// Wait until the channel is closed.

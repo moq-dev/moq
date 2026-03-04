@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use buf_list::BufList;
 
@@ -54,20 +54,18 @@ impl From<OrderedFrame> for Frame {
 pub struct OrderedConsumer {
 	pub track: moq_lite::TrackConsumer,
 
-	// The current group that we are reading from.
-	current: Option<GroupReader>,
+	// The current group that we want to read from
+	current: u64,
 
-	// Future groups that we are monitoring, sorted by sequence ascending.
-	pending: VecDeque<GroupReader>,
+	// Groups that we are monitoring, sorted by sequence ascending.
+	pending: VecDeque<GroupBuffer>,
 
-	// The maximum timestamp seen thus far, or zero because that's easier than None.
-	max_timestamp: Timestamp,
+	// When true, we haven't returned a frame yet and need to select the first group.
+	// We wait until we have at least one frame before finalizing `current`
+	startup: bool,
 
 	// The maximum buffer size before skipping a group.
 	max_latency: std::time::Duration,
-
-	// Whether the track has signaled completion.
-	track_finished: bool,
 }
 
 impl OrderedConsumer {
@@ -75,11 +73,10 @@ impl OrderedConsumer {
 	pub fn new(track: moq_lite::TrackConsumer, max_latency: std::time::Duration) -> Self {
 		Self {
 			track,
-			current: None,
+			current: 0,
 			pending: VecDeque::new(),
-			max_timestamp: Timestamp::default(),
+			startup: true,
 			max_latency,
-			track_finished: false,
 		}
 	}
 
@@ -91,128 +88,131 @@ impl OrderedConsumer {
 	///
 	/// Returns `None` when the track has ended.
 	pub async fn read(&mut self) -> Result<Option<OrderedFrame>, Error> {
-		conducer::wait(|waiter| self.poll_next(waiter)).await
+		conducer::wait(|waiter| self.poll_read(waiter)).await
 	}
 
 	/// Poll-based implementation of the read loop.
 	///
 	/// Uses a single waiter that gets registered on all relevant conducer channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<OrderedFrame>, Error>> {
+	fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<OrderedFrame>, Error>> {
+		if let Poll::Ready(res) = self.poll_read_finish(waiter) {
+			// Return if there are no more groups to read.
+			return Poll::Ready(res.map(|_| None));
+		}
+
+		// On startup, we want to poll every pending group and advance self.current to the first with a frame.
+		if self.startup {
+			// NOTE: We loop in ascending order, so earlier groups will win the race.
+			for (i, group) in self.pending.iter_mut().enumerate() {
+				// We call poll_min_timestamp to try to buffer at least one frame per group.
+				// This returns Ready if there is a buffered frame.
+				if group.poll_min_timestamp(waiter).is_pending() {
+					continue;
+				}
+
+				// Start reading from this group and skip any previous groups.
+				self.current = group.info.sequence;
+				self.startup = false;
+				self.pending.drain(0..i);
+				break;
+			}
+		}
+
 		loop {
-			// Phase 1: Drain new groups from track.
-			if !self.track_finished {
-				loop {
-					match self.track.poll_next_group(waiter) {
-						Poll::Ready(Some(Ok(group))) => {
-							let reader = GroupReader::new(group);
-							match &self.current {
-								Some(current) if reader.group.info.sequence < current.group.info.sequence => {
-									tracing::debug!(
-										old = ?reader.group.info.sequence,
-										current = ?current.group.info.sequence,
-										"skipping old group"
-									);
-								}
-								Some(_) => {
-									let idx = self
-										.pending
-										.partition_point(|g| g.group.info.sequence < reader.group.info.sequence);
-									self.pending.insert(idx, reader);
-								}
-								None => {
-									self.current = Some(reader);
-								}
-							}
-						}
-						Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e.into())),
-						Poll::Ready(None) => {
-							self.track_finished = true;
-							break;
-						}
-						Poll::Pending => break,
+			// Return the next frame from the current group if possible.
+			// If the current group is finished or errored, advance to the next group.
+			while let Some(group) = self.pending.front_mut()
+				&& group.info.sequence > self.current
+			{
+				match group.poll_read(waiter) {
+					Poll::Ready(Ok(Some(frame))) => return Poll::Ready(Ok(Some(frame))),
+					// Still blocked on this group, don't skip it yet.
+					Poll::Pending => break,
+					Poll::Ready(Err(e)) => {
+						tracing::warn!(error = ?e, "error reading current group, skipping");
 					}
+					// No more frames, advance to next group.
+					Poll::Ready(Ok(None)) => {}
+				}
+
+				self.pending.pop_front();
+				self.current += 1
+			}
+
+			// Loop in ascending order to get the min, avoiding spurious wakeups.
+			let mut min_timestamp = std::time::Duration::MAX;
+			let mut min_idx = None;
+
+			for (i, group) in self.pending.iter_mut().enumerate() {
+				if group.info.sequence <= self.current {
+					continue;
+				}
+
+				if let Poll::Ready(ts) = group.poll_min_timestamp(waiter) {
+					min_timestamp = min_timestamp.min(ts?.into());
+					min_idx = Some(i);
+					break; // We know future groups won't be older than this.
 				}
 			}
 
-			// Phase 2: Read from current group.
-			let current_blocked = 'phase2: {
-				loop {
-					let Some(current) = &mut self.current else {
-						break 'phase2 false;
-					};
-
-					if let Some(frame) = current.pop_buffered() {
-						self.max_timestamp = self.max_timestamp.max(frame.timestamp);
-						return Poll::Ready(Ok(Some(frame)));
-					}
-
-					match current.poll_next_frame(waiter) {
-						Poll::Ready(Some(Ok(frame))) => {
-							self.max_timestamp = self.max_timestamp.max(frame.timestamp);
-							return Poll::Ready(Ok(Some(frame)));
-						}
-						Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {
-							// Group ended or errored, advance to next pending group.
-							self.current = self.pending.pop_front();
-							continue;
-						}
-						Poll::Pending => break 'phase2 true,
-					}
+			// Loop in descending order to get the max, avoiding spurious wakeups.
+			let mut max_timestamp = std::time::Duration::ZERO;
+			for group in self.pending.iter_mut().rev() {
+				if group.info.sequence <= self.current {
+					break;
 				}
+
+				if let Poll::Ready(ts) = group.poll_max_timestamp(waiter) {
+					max_timestamp = max_timestamp.max(ts?.into());
+					break; // We know older groups won't be newer than this.
+				}
+			}
+
+			if let Some(new_idx) = min_idx
+				&& max_timestamp - min_timestamp >= self.max_latency
+			{
+				self.pending.drain(0..new_idx);
+				let new_current = self.pending.front().map(|g| g.info.sequence).unwrap();
+
+				tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
+
+				self.current = new_current;
+				continue;
+			}
+
+			return Poll::Pending;
+		}
+	}
+
+	// Reads any new groups from the track until we're completely finished.
+	//
+	// Returns Pending until all groups have been consumed.
+	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), Error>> {
+		loop {
+			let group = match ready!(self.track.poll_next_group(waiter)?) {
+				Some(group) => group,
+				// No more groups to read, and the track is finished.
+				None if self.pending.is_empty() => return Poll::Ready(Ok(())),
+				// We still have pending groups, so we need to wait for them.
+				None => return Poll::Pending,
 			};
 
-			// Phase 3: Latency skip (only when current is blocked on Pending).
-			//
-			// Compare pending group timestamps against self.max_timestamp + latency.
-			// Walk ascending through pending groups to find the first one whose
-			// timestamp exceeds the cutoff, then skip to it.
-			if current_blocked && !self.pending.is_empty() {
-				let latency: Timestamp = match self.max_latency.try_into() {
-					Ok(l) => l,
-					Err(e) => return Poll::Ready(Err(e.into())),
-				};
-
-				if let Ok(cutoff) = self.max_timestamp.checked_add(latency) {
-					let mut skip_idx = None;
-					for (i, pending) in self.pending.iter_mut().enumerate() {
-						match pending.poll_max_timestamp(waiter) {
-							Poll::Ready(Some(ts)) if ts >= cutoff => {
-								skip_idx = Some(i);
-								break;
-							}
-							Poll::Ready(Some(_)) | Poll::Ready(None) => continue,
-							Poll::Pending => continue, // waiter registered, keep walking
-						}
-					}
-
-					if let Some(idx) = skip_idx {
-						if self.current.is_some() {
-							tracing::debug!(
-								max_timestamp = ?self.max_timestamp,
-								buffer = ?self.max_latency,
-								"skipping slow group"
-							);
-						}
-
-						if idx > 0 {
-							tracing::debug!(count = idx, "skipping additional groups");
-							self.pending.drain(0..idx);
-						}
-
-						self.current = self.pending.pop_front();
-						continue; // Loop back to Phase 2
-					}
-				}
+			let reader = GroupBuffer::new(group);
+			if reader.group.info.sequence < self.current {
+				tracing::debug!(
+					old = ?reader.group.info.sequence,
+					current = ?self.current,
+					"skipping old group"
+				);
+				continue;
 			}
 
-			// Phase 4: Terminal check.
-			if self.current.is_none() && self.pending.is_empty() && self.track_finished {
-				return Poll::Ready(Ok(None));
-			}
-
-			// Waiter is already registered on all relevant channels.
-			return Poll::Pending;
+			// TODO Use a min heap?
+			let idx = self
+				.pending
+				.partition_point(|g| g.group.info.sequence < reader.group.info.sequence);
+			self.pending.insert(idx, reader);
 		}
 	}
 
@@ -247,130 +247,116 @@ impl std::ops::Deref for OrderedConsumer {
 ///
 /// Handles two-phase frame reading (get FrameConsumer, then read all data),
 /// timestamp parsing, and min/max timestamp tracking for latency decisions.
-struct GroupReader {
+struct GroupBuffer {
 	group: moq_lite::GroupConsumer,
 
 	// The current frame index within the group.
 	index: usize,
 
-	// Frames read ahead by poll_min/max_timestamp that haven't been consumed yet.
+	// Read frames that haven't been consumed yet.
 	buffered: VecDeque<OrderedFrame>,
 
-	// Cached max timestamp discovered from reading frames.
+	// The minimum timestamp in the group.
+	min_timestamp: Option<Timestamp>,
+
+	// The maximum timestamp in the group.
 	max_timestamp: Option<Timestamp>,
-
-	// A partially-read frame (we have the FrameConsumer but haven't read its data yet).
-	pending_frame: Option<moq_lite::FrameConsumer>,
-
-	// Whether the group has been fully consumed or errored.
-	finished: bool,
 }
 
-impl GroupReader {
+impl GroupBuffer {
 	fn new(group: moq_lite::GroupConsumer) -> Self {
 		Self {
 			group,
 			index: 0,
 			buffered: VecDeque::new(),
 			max_timestamp: None,
-			pending_frame: None,
-			finished: false,
+			min_timestamp: None,
 		}
-	}
-
-	/// Return the next buffered frame, if any.
-	fn pop_buffered(&mut self) -> Option<OrderedFrame> {
-		self.buffered.pop_front()
 	}
 
 	/// Poll for the next frame from this group.
-	///
-	/// Two-phase: first obtains a FrameConsumer, then reads all its data.
-	fn poll_next_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Option<Result<OrderedFrame, Error>>> {
-		// Phase 1: Get a FrameConsumer if we don't have one.
-		if self.pending_frame.is_none() && !self.finished {
-			match self.group.poll_next_frame(waiter) {
-				Poll::Ready(Some(Ok(frame))) => {
-					self.pending_frame = Some(frame);
-				}
-				Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e.into()))),
-				Poll::Ready(None) => {
-					self.finished = true;
-					return Poll::Ready(None);
-				}
-				Poll::Pending => return Poll::Pending,
-			}
+	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<OrderedFrame>, Error>> {
+		if let Some(frame) = self.buffered.pop_front() {
+			return Poll::Ready(Ok(Some(frame)));
 		}
 
-		if self.finished {
-			return Poll::Ready(None);
-		}
-
-		// Phase 2: Read all data from the pending frame.
-		let frame_consumer = self.pending_frame.as_mut().unwrap();
-		match frame_consumer.poll_read_all(waiter) {
-			Poll::Ready(Some(Ok(data))) => {
-				self.pending_frame = None;
-
-				let mut payload = BufList::from_iter(vec![data]);
-				let timestamp = match Timestamp::decode(&mut payload) {
-					Ok(ts) => ts,
-					Err(e) => return Poll::Ready(Some(Err(e.into()))),
-				};
-
-				let group = self.group.info.sequence;
-				let index = self.index;
-				self.index += 1;
-
-				self.max_timestamp = Some(match self.max_timestamp {
-					Some(existing) => existing.max(timestamp),
-					None => timestamp,
-				});
-
-				Poll::Ready(Some(Ok(OrderedFrame {
-					timestamp,
-					payload,
-					group,
-					index,
-				})))
-			}
-			Poll::Ready(Some(Err(e))) => {
-				self.pending_frame = None;
-				Poll::Ready(Some(Err(e.into())))
-			}
-			Poll::Ready(None) => {
-				// Frame channel closed before data was ready.
-				self.pending_frame = None;
-				Poll::Ready(Some(Err(moq_lite::Error::Dropped.into())))
-			}
-			Poll::Pending => Poll::Pending,
+		match ready!(self.buffer_one(waiter)?) {
+			true => Poll::Ready(Ok(Some(self.buffered.pop_front().unwrap()))),
+			false => Poll::Ready(Ok(None)),
 		}
 	}
 
-	/// Poll for the maximum timestamp in this group.
-	///
-	/// Returns the cached max if already known. Otherwise tries to read one frame
-	/// to discover it, buffering the frame for later consumption.
-	fn poll_max_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Option<Timestamp>> {
-		if let Some(max) = self.max_timestamp {
-			return Poll::Ready(Some(max));
-		}
-		if self.finished {
-			return Poll::Ready(None);
-		}
+	// Add one more frame to the buffer if possible.
+	//
+	// Returns false if the track is finished.
+	fn buffer_once(&mut self, waiter: &conducer::Waiter) -> Poll<Result<bool, Error>> {
+		let Some(chunks) = ready!(self.group.poll_read_frame_chunks(waiter)?) else {
+			return Poll::Ready(Ok(false));
+		};
 
-		match self.poll_next_frame(waiter) {
-			Poll::Ready(Some(Ok(frame))) => {
-				self.buffered.push_back(frame);
-				Poll::Ready(self.max_timestamp)
-			}
-			Poll::Ready(Some(Err(_))) | Poll::Ready(None) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
+		let payload = BufList::from_iter(chunks);
+		let mut temp = payload.clone(); // TODO is there a way to avoid clone?
+		let timestamp = Timestamp::decode(&mut temp)?;
+
+		self.min_timestamp = Some(match self.min_timestamp {
+			Some(existing) => existing.min(timestamp),
+			None => timestamp,
+		});
+
+		self.max_timestamp = Some(match self.max_timestamp {
+			Some(existing) => existing.max(timestamp),
+			None => timestamp,
+		});
+
+		let index = self.index;
+		self.index += 1;
+
+		self.buffered.push_back(OrderedFrame {
+			timestamp,
+			payload,
+			group: self.group.info.sequence,
+			index,
+		});
+
+		Poll::Ready(Ok(true))
+	}
+
+	fn buffer_one(&mut self, waiter: &conducer::Waiter) -> Poll<Result<bool, Error>> {
+		if self.buffered.is_empty() {
+			self.buffer_once(waiter)
+		} else {
+			Poll::Ready(Ok(true))
+		}
+	}
+
+	fn buffer_all(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), Error>> {
+		while ready!(self.buffer_once(waiter)?) {}
+		Poll::Ready(Ok(()))
+	}
+
+	/// Poll for the maximum timestamp in this group.
+	pub fn poll_max_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Timestamp, Error>> {
+		// Keep reading more frames just to advance the max timestamp.
+		let _ = self.buffer_all(waiter)?;
+
+		match self.max_timestamp {
+			Some(max) => Poll::Ready(Ok(max)),
+			// TODO Technically, we should return None if the group is errored/finished.
+			None => Poll::Pending,
+		}
+	}
+
+	pub fn poll_min_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Timestamp, Error>> {
+		let _ = self.buffer_one(waiter)?;
+
+		match self.min_timestamp {
+			Some(min) => Poll::Ready(Ok(min)),
+			None => Poll::Pending,
 		}
 	}
 }
 
-impl std::ops::Deref for GroupReader {
+impl std::ops::Deref for GroupBuffer {
 	type Target = moq_lite::GroupConsumer;
 
 	fn deref(&self) -> &Self::Target {

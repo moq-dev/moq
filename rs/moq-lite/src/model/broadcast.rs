@@ -1,6 +1,6 @@
 use std::{
 	collections::{HashMap, hash_map},
-	task::Poll,
+	task::{Poll, ready},
 };
 
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
@@ -38,7 +38,10 @@ struct State {
 }
 
 fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>, Error> {
-	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	match state.write() {
+		Ok(state) => Ok(state),
+		Err(r) => Err(r.abort.clone().unwrap_or(Error::Dropped)),
+	}
 }
 
 /// Manages tracks within a broadcast.
@@ -81,9 +84,7 @@ impl BroadcastProducer {
 	/// Remove a track from the lookup.
 	pub fn remove_track(&mut self, name: &str) -> Result<(), Error> {
 		let mut state = modify(&self.state)?;
-
 		state.tracks.remove(name).ok_or(Error::NotFound)?;
-
 		Ok(())
 	}
 
@@ -162,17 +163,27 @@ impl BroadcastDynamic {
 		Self { state }
 	}
 
+	// A helper to automatically apply Dropped if the state is closed without an error.
+	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R, Error>>
+	where
+		F: FnMut(&mut conducer::Mut<'_, State>) -> Poll<R>,
+	{
+		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
+			Ok(r) => Ok(r),
+			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		})
+	}
+
+	pub fn poll_requested_track(&mut self, waiter: &conducer::Waiter) -> Poll<Result<TrackProducer, Error>> {
+		self.poll(waiter, |state| match state.requests.pop() {
+			Some(producer) => Poll::Ready(producer),
+			None => Poll::Pending,
+		})
+	}
+
 	/// Block until a consumer requests a track, returning its producer.
-	pub async fn requested_track(&mut self) -> Result<Option<TrackProducer>, Error> {
-		self.state
-			.wait(|state| {
-				if state.requests.is_empty() {
-					return Poll::Pending;
-				}
-				Poll::Ready(state.requests.pop())
-			})
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	pub async fn requested_track(&mut self) -> Result<TrackProducer, Error> {
+		conducer::wait(|waiter| self.poll_requested_track(waiter)).await
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -234,7 +245,6 @@ impl BroadcastDynamic {
 			.now_or_never()
 			.expect("should not have blocked")
 			.expect("should not have errored")
-			.expect("should be a request")
 	}
 
 	pub fn assert_no_request(&mut self) {
