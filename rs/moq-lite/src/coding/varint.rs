@@ -528,7 +528,7 @@ where
 
 #[cfg(test)]
 mod tests {
-	use super::VarInt;
+	use super::{DecodeError, VarInt};
 	use bytes::Bytes;
 
 	/// Test vectors from the draft-17 spec (Table 2: Example Integer Encodings),
@@ -566,12 +566,12 @@ mod tests {
 			// Test round-trip encode:
 			// - Skip non-minimal encoding (0x8025 for 37)
 			// - Skip u64::MAX which exceeds VarInt::MAX (2^62-1) but is decodable
-			if let Some(varint) = VarInt::from_u64(*expected) {
-				if bytes.len() == 1 || *expected != 37 {
-					let mut encoded = Vec::new();
-					varint.encode_leading_ones(&mut encoded).expect("encode should succeed");
-					assert_eq!(&encoded, bytes, "encode mismatch for value {expected}");
-				}
+			if let Some(varint) = VarInt::from_u64(*expected)
+				&& (bytes.len() == 1 || *expected != 37)
+			{
+				let mut encoded = Vec::new();
+				varint.encode_leading_ones(&mut encoded).expect("encode should succeed");
+				assert_eq!(&encoded, bytes, "encode mismatch for value {expected}");
 			}
 		}
 	}
@@ -580,8 +580,10 @@ mod tests {
 	#[test]
 	fn leading_ones_invalid_0xfc() {
 		let mut buf = Bytes::from_static(&[0xFC]);
-		let result = VarInt::decode_leading_ones(&mut buf);
-		assert!(result.is_err(), "0xFC should be rejected as invalid");
+		assert!(
+			matches!(VarInt::decode_leading_ones(&mut buf), Err(DecodeError::InvalidValue)),
+			"0xFC should be rejected as invalid"
+		);
 	}
 
 	#[test]
