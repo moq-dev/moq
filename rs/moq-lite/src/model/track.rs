@@ -130,10 +130,7 @@ impl State {
 }
 
 fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>> {
-	match state.access() {
-		conducer::Access::Write(guard) => Ok(guard),
-		conducer::Access::Read(guard) => Err(guard.abort.clone().unwrap_or(Error::Dropped)),
-	}
+	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 }
 
 /// A producer for a track, used to create new groups.
@@ -279,7 +276,7 @@ impl TrackProducer {
 		self.state
 			.unused()
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
 	/// Return true if the track has been closed.
@@ -325,7 +322,7 @@ pub(crate) struct TrackWeak {
 
 impl TrackWeak {
 	pub fn abort(&self, err: Error) {
-		let Some(mut guard) = self.state.write() else { return };
+		let Ok(mut guard) = self.state.write() else { return };
 
 		// Cascade abort to all groups.
 		for (group, _) in guard.groups.iter_mut().flatten() {
@@ -355,7 +352,7 @@ impl TrackWeak {
 		self.state
 			.unused()
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {
@@ -381,7 +378,7 @@ impl TrackConsumer {
 			.state
 			.wait(|state| state.poll_next_group(index))
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		let consumer = res.map(|(producer, found_index)| {
 			self.index = found_index + 1;
 			producer.consume()
@@ -397,7 +394,7 @@ impl TrackConsumer {
 			.state
 			.wait(|state| state.poll_get_group(sequence))
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		Ok(res.map(|producer| producer.consume()))
 	}
 
@@ -736,7 +733,7 @@ mod test {
 	fn append_group_returns_bounds_exceeded_on_sequence_overflow() {
 		let mut producer = Track::new("test").produce();
 		{
-			let mut state = producer.state.write().unwrap();
+			let mut state = producer.state.write().ok().unwrap();
 			state.max_sequence = Some(u64::MAX);
 		}
 

@@ -3,10 +3,7 @@ use std::{
 	task::Poll,
 };
 
-use crate::{
-	Error, TrackConsumer, TrackProducer,
-	model::track::TrackWeak,
-};
+use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
 use super::Track;
 
@@ -41,10 +38,7 @@ struct State {
 }
 
 fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>, Error> {
-	match state.access() {
-		conducer::Access::Write(guard) => Ok(guard),
-		conducer::Access::Read(guard) => Err(guard.abort.clone().unwrap_or(Error::Dropped)),
-	}
+	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 }
 
 /// Manages tracks within a broadcast.
@@ -160,7 +154,7 @@ pub struct BroadcastDynamic {
 
 impl BroadcastDynamic {
 	fn new(state: conducer::Producer<State>) -> Self {
-		if let Some(mut state) = state.write() {
+		if let Ok(mut state) = state.write() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
 		}
@@ -178,7 +172,7 @@ impl BroadcastDynamic {
 				Poll::Ready(state.requests.pop())
 			})
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -215,7 +209,7 @@ impl BroadcastDynamic {
 
 impl Drop for BroadcastDynamic {
 	fn drop(&mut self) {
-		if let Some(mut state) = self.state.write() {
+		if let Ok(mut state) = self.state.write() {
 			// We do a saturating sub so Producer::dynamic() can avoid returning an error.
 			state.dynamic = state.dynamic.saturating_sub(1);
 			if state.dynamic != 0 {
@@ -289,7 +283,7 @@ impl BroadcastConsumer {
 		web_async::spawn(async move {
 			let _ = weak.unused().await;
 			if let Some(producer) = consumer_state.produce()
-				&& let Some(mut state) = producer.write()
+				&& let Ok(mut state) = producer.write()
 				&& let Some(current) = state.tracks.remove(&weak.info.name)
 				&& !current.is_clone(&weak)
 			{

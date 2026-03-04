@@ -86,10 +86,7 @@ impl GroupState {
 }
 
 fn modify(state: &conducer::Producer<GroupState>) -> Result<conducer::Mut<'_, GroupState>> {
-	match state.access() {
-		conducer::Access::Write(guard) => Ok(guard),
-		conducer::Access::Read(guard) => Err(guard.abort.clone().unwrap_or(Error::Dropped)),
-	}
+	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 }
 
 /// Writes frames to a group in order.
@@ -190,7 +187,7 @@ impl GroupProducer {
 		self.state
 			.unused()
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 }
 
@@ -235,7 +232,7 @@ impl GroupConsumer {
 			.state
 			.wait(|state| state.poll_next_frame(index))
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 
 		let Some(frame) = frame else {
 			return Ok(None);
@@ -258,7 +255,7 @@ impl GroupConsumer {
 			.state
 			.wait(|state| state.poll_next_frame(index))
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		Ok(res.map(|producer| producer.consume()))
 	}
 
@@ -269,7 +266,7 @@ impl GroupConsumer {
 			.state
 			.wait(|state| state.poll_next_frame(index))
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		let consumer = res.map(|producer| {
 			self.index += 1;
 			producer.consume()

@@ -105,10 +105,7 @@ impl FrameState {
 }
 
 fn modify(state: &conducer::Producer<FrameState>) -> Result<conducer::Mut<'_, FrameState>> {
-	match state.access() {
-		conducer::Access::Write(guard) => Ok(guard),
-		conducer::Access::Read(guard) => Err(guard.abort.clone().unwrap_or(Error::Dropped)),
-	}
+	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 }
 
 /// Writes a frame's payload in one or more chunks.
@@ -187,7 +184,7 @@ impl FrameProducer {
 		self.state
 			.unused()
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 }
 
@@ -228,7 +225,7 @@ impl FrameConsumer {
 			.state
 			.wait(|state| state.poll_read_chunk(index))
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		if res.is_some() {
 			self.index += 1;
 		}
@@ -243,7 +240,7 @@ impl FrameConsumer {
 			.state
 			.wait(|state| state.poll_read_chunks(index))
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		self.index += chunks.len();
 		Ok(chunks)
 	}
@@ -256,7 +253,7 @@ impl FrameConsumer {
 			.state
 			.wait(|state| state.poll_read_all(index))
 			.await
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		self.index = usize::MAX; // consumed everything
 		Ok(data)
 	}
