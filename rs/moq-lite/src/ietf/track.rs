@@ -7,7 +7,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{FilterType, GroupOrder, MessageParameters, Parameters, RequestId},
+	ietf::{FilterType, GroupOrder, Parameters, RequestId},
 };
 
 use super::Message;
@@ -45,8 +45,7 @@ impl Message for TrackStatus<'_> {
 				0u8.encode(w, version)?; // no parameters
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				let params = MessageParameters::default();
-				params.encode(w, version)?;
+				encode_params!(w, version,);
 			}
 		}
 		Ok(())
@@ -69,7 +68,7 @@ impl Message for TrackStatus<'_> {
 				let _params = Parameters::decode(r, version)?;
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				let _params = MessageParameters::decode(r, version)?;
+				decode_params!(r, version,);
 			}
 		}
 

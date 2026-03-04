@@ -4,6 +4,8 @@
 //!
 //! You should not use this module directly; see [crate] for the high-level API.
 
+#[macro_use]
+mod parameters;
 mod control;
 mod fetch;
 mod goaway;
@@ -11,7 +13,6 @@ mod group;
 mod location;
 pub mod message;
 mod namespace;
-mod parameters;
 mod publish;
 mod publish_namespace;
 mod publisher;

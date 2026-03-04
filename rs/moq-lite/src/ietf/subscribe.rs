@@ -7,7 +7,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{GroupOrder, Location, MessageParameters, Parameters, RequestId},
+	ietf::{GroupOrder, Location, Parameters, RequestId},
 };
 
 use super::Message;
@@ -94,18 +94,20 @@ impl Message for Subscribe<'_> {
 				})
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				let params = MessageParameters::decode(r, version)?;
+				decode_params!(r, version,
+					0x10 => forward: bool,
+					0x20 => subscriber_priority: u8,
+					0x21 => filter_type: FilterType,
+					0x22 => group_order: u8,
+				);
 
-				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
-				let group_order = match params.group_order() {
-					Some(v) => u8::try_from(v)
-						.ok()
-						.and_then(|v| GroupOrder::try_from(v).ok())
-						.map(GroupOrder::any_to_descending)
-						.unwrap_or(GroupOrder::Descending),
-					None => GroupOrder::Descending,
-				};
-				let filter_type = params.subscription_filter().unwrap_or(FilterType::LargestObject);
+				let _ = forward;
+				let subscriber_priority = subscriber_priority.unwrap_or(128);
+				let group_order = group_order
+					.and_then(|v| GroupOrder::try_from(v).ok())
+					.map(GroupOrder::any_to_descending)
+					.unwrap_or(GroupOrder::Descending);
+				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
 
 				Ok(Self {
 					request_id,
@@ -142,12 +144,12 @@ impl Message for Subscribe<'_> {
 				0u8.encode(w, version)?; // no parameters
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				let mut params = MessageParameters::default();
-				params.set_subscriber_priority(self.subscriber_priority);
-				params.set_group_order(u8::from(self.group_order) as u64);
-				params.set_forward(true);
-				params.set_subscription_filter(self.filter_type)?;
-				params.encode(w, version)?;
+				encode_params!(w, version,
+					0x10 => true,
+					0x20 => self.subscriber_priority,
+					0x21 => self.filter_type,
+					0x22 => u8::from(self.group_order),
+				);
 			}
 		}
 
@@ -183,10 +185,9 @@ impl Message for SubscribeOk {
 				0u8.encode(w, version)?; // no parameters
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				// v15+: just parameters after track_alias
-				let mut params = MessageParameters::default();
-				params.set_group_order(u8::from(GroupOrder::Descending) as u64);
-				params.encode(w, version)?;
+				encode_params!(w, version,
+					0x22 => u8::from(GroupOrder::Descending),
+				);
 			}
 		}
 
@@ -218,7 +219,9 @@ impl Message for SubscribeOk {
 				let _params = Parameters::decode(r, version)?;
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				let _params = MessageParameters::decode(r, version)?;
+				decode_params!(r, version,
+					0x22 => _group_order: u8,
+				);
 			}
 		}
 
@@ -312,11 +315,11 @@ impl Message for SubscribeUpdate {
 				self.subscription_request_id
 					.expect("subscription_request_id required for draft15-16")
 					.encode(w, version)?;
-				let mut params = MessageParameters::default();
-				params.set_subscriber_priority(self.subscriber_priority);
-				params.set_forward(self.forward);
-				params.set_subscription_filter(FilterType::LargestObject)?;
-				params.encode(w, version)?;
+				encode_params!(w, version,
+					0x10 => self.forward,
+					0x20 => self.subscriber_priority,
+					0x21 => FilterType::LargestObject,
+				);
 			}
 			Version::Draft17 => {
 				assert!(
@@ -326,11 +329,11 @@ impl Message for SubscribeUpdate {
 				// REQUEST_UPDATE: request_id, required_request_id_delta, params
 				self.request_id.encode(w, version)?;
 				0u64.encode(w, version)?; // required_request_id_delta = 0
-				let mut params = MessageParameters::default();
-				params.set_subscriber_priority(self.subscriber_priority);
-				params.set_forward(self.forward);
-				params.set_subscription_filter(FilterType::LargestObject)?;
-				params.encode(w, version)?;
+				encode_params!(w, version,
+					0x10 => self.forward,
+					0x20 => self.subscriber_priority,
+					0x21 => FilterType::LargestObject,
+				);
 			}
 		}
 
@@ -360,10 +363,14 @@ impl Message for SubscribeUpdate {
 			Version::Draft15 | Version::Draft16 => {
 				let request_id = RequestId::decode(r, version)?;
 				let subscription_request_id = Some(RequestId::decode(r, version)?);
-				let params = MessageParameters::decode(r, version)?;
+				decode_params!(r, version,
+					0x10 => forward: bool,
+					0x20 => subscriber_priority: u8,
+					0x21 => _filter_type: FilterType,
+				);
 
-				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
-				let forward = params.forward().unwrap_or(true);
+				let subscriber_priority = subscriber_priority.unwrap_or(128);
+				let forward = forward.unwrap_or(true);
 
 				Ok(Self {
 					request_id,
@@ -378,10 +385,14 @@ impl Message for SubscribeUpdate {
 				// REQUEST_UPDATE: request_id, required_request_id_delta, params
 				let request_id = RequestId::decode(r, version)?;
 				let _required_request_id_delta = u64::decode(r, version)?;
-				let params = MessageParameters::decode(r, version)?;
+				decode_params!(r, version,
+					0x10 => forward: bool,
+					0x20 => subscriber_priority: u8,
+					0x21 => _filter_type: FilterType,
+				);
 
-				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
-				let forward = params.forward().unwrap_or(true);
+				let subscriber_priority = subscriber_priority.unwrap_or(128);
+				let forward = forward.unwrap_or(true);
 
 				Ok(Self {
 					request_id,

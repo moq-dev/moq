@@ -2,11 +2,7 @@
 
 use std::borrow::Cow;
 
-use crate::{
-	Path,
-	coding::*,
-	ietf::{MessageParameters, Parameters, RequestId},
-};
+use crate::{Path, coding::*, ietf::RequestId};
 
 use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
@@ -30,8 +26,7 @@ impl Message for PublishNamespace<'_> {
 			0u64.encode(w, version)?; // required_request_id_delta = 0
 		}
 		encode_namespace(w, &self.track_namespace, version)?;
-		let params = MessageParameters::default();
-		params.encode(w, version)?;
+		encode_params!(w, version,);
 		Ok(())
 	}
 
@@ -43,11 +38,7 @@ impl Message for PublishNamespace<'_> {
 		let track_namespace = decode_namespace(r, version)?;
 
 		// Ignore parameters
-		if version == Version::Draft17 {
-			let _params = MessageParameters::decode(r, version)?;
-		} else {
-			let _params = Parameters::decode(r, version)?;
-		}
+		decode_params!(r, version,);
 
 		Ok(Self {
 			request_id,

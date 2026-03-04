@@ -2,11 +2,7 @@
 
 use std::borrow::Cow;
 
-use crate::{
-	Path,
-	coding::*,
-	ietf::{MessageParameters, Parameters, RequestId},
-};
+use crate::{Path, coding::*, ietf::RequestId};
 
 use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
@@ -35,8 +31,7 @@ impl Message for SubscribeNamespace<'_> {
 		if version == Version::Draft16 || version == Version::Draft17 {
 			self.subscribe_options.encode(w, version)?;
 		}
-		let params = MessageParameters::default();
-		params.encode(w, version)?;
+		encode_params!(w, version,);
 		Ok(())
 	}
 
@@ -52,11 +47,7 @@ impl Message for SubscribeNamespace<'_> {
 		};
 
 		// Ignore parameters
-		if version == Version::Draft17 {
-			let _params = MessageParameters::decode(r, version)?;
-		} else {
-			let _params = Parameters::decode(r, version)?;
-		}
+		decode_params!(r, version,);
 
 		Ok(Self {
 			namespace,

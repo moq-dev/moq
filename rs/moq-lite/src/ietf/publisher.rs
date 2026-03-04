@@ -7,7 +7,7 @@ use web_transport_trait::SendStream;
 use crate::{
 	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
 	coding::Writer,
-	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, MessageParameters, RequestId},
+	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	model::GroupConsumer,
 };
 
@@ -452,7 +452,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}),
 			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestOk {
 				request_id: Some(request_id),
-				parameters: MessageParameters::default(),
 			}),
 			Version::Draft17 => Err(Error::Version),
 		}
@@ -520,7 +519,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.writer
 			.encode(&ietf::RequestOk {
 				request_id: Some(msg.request_id),
-				parameters: ietf::MessageParameters::default(),
 			})
 			.await?;
 

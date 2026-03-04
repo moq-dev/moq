@@ -1,9 +1,6 @@
 use std::borrow::Cow;
 
-use crate::{
-	coding::{Decode, DecodeError, Encode, EncodeError},
-	ietf::MessageParameters,
-};
+use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 use super::Message;
 
@@ -88,7 +85,6 @@ impl Message for RequestsBlocked {
 #[derive(Clone, Debug)]
 pub struct RequestOk {
 	pub request_id: Option<RequestId>,
-	pub parameters: MessageParameters,
 }
 
 impl Message for RequestOk {
@@ -102,7 +98,7 @@ impl Message for RequestOk {
 		} else {
 			assert!(self.request_id.is_none(), "request_id must be None for draft17");
 		}
-		self.parameters.encode(w, version)?;
+		encode_params!(w, version,);
 		Ok(())
 	}
 
@@ -112,8 +108,8 @@ impl Message for RequestOk {
 		} else {
 			Some(RequestId::decode(r, version)?)
 		};
-		let parameters = MessageParameters::decode(r, version)?;
-		Ok(Self { request_id, parameters })
+		decode_params!(r, version,);
+		Ok(Self { request_id })
 	}
 }
 
@@ -189,7 +185,6 @@ mod tests {
 	fn test_request_ok_round_trip() {
 		let msg = RequestOk {
 			request_id: Some(RequestId(42)),
-			parameters: MessageParameters::default(),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -236,10 +231,7 @@ mod tests {
 
 	#[test]
 	fn test_request_ok_v17_round_trip() {
-		let msg = RequestOk {
-			request_id: None,
-			parameters: MessageParameters::default(),
-		};
+		let msg = RequestOk { request_id: None };
 
 		let encoded = encode_message(&msg, Version::Draft17);
 		let decoded: RequestOk = decode_message(&encoded, Version::Draft17).unwrap();

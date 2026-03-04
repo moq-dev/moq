@@ -4,7 +4,7 @@ use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
 	Track, TrackProducer,
 	coding::Reader,
-	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, MessageParameters, RequestId},
+	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId},
 	model::BroadcastProducer,
 };
 
@@ -87,7 +87,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			Version::Draft14 => self.control.send(ietf::PublishNamespaceOk { request_id }),
 			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestOk {
 				request_id: Some(request_id),
-				parameters: MessageParameters::default(),
 			}),
 			Version::Draft17 => Err(Error::Version),
 		}
@@ -533,7 +532,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				Version::Draft15 | Version::Draft16 => {
 					self.control.send(ietf::RequestOk {
 						request_id: Some(msg.request_id),
-						parameters: MessageParameters::default(),
 					})?;
 				}
 				Version::Draft17 => {

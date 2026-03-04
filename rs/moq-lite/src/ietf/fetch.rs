@@ -4,7 +4,7 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		GroupOrder, Location, MessageParameters, Parameters, RequestId,
+		GroupOrder, Location, Parameters, RequestId,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
@@ -131,10 +131,10 @@ impl Message for Fetch<'_> {
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				self.fetch_type.encode(w, version)?;
-				let mut params = MessageParameters::default();
-				params.set_subscriber_priority(self.subscriber_priority);
-				params.set_group_order(u8::from(self.group_order) as u64);
-				params.encode(w, version)?;
+				encode_params!(w, version,
+					0x20 => self.subscriber_priority,
+					0x22 => u8::from(self.group_order),
+				);
 			}
 		}
 		Ok(())
@@ -161,17 +161,16 @@ impl Message for Fetch<'_> {
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let fetch_type = FetchType::decode(buf, version)?;
-				let params = MessageParameters::decode(buf, version)?;
+				decode_params!(buf, version,
+					0x20 => subscriber_priority: u8,
+					0x22 => group_order: u8,
+				);
 
-				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
-				let group_order = match params.group_order() {
-					Some(v) => u8::try_from(v)
-						.ok()
-						.and_then(|v| GroupOrder::try_from(v).ok())
-						.map(GroupOrder::any_to_descending)
-						.unwrap_or(GroupOrder::Descending),
-					None => GroupOrder::Descending,
-				};
+				let subscriber_priority = subscriber_priority.unwrap_or(128);
+				let group_order = group_order
+					.and_then(|v| GroupOrder::try_from(v).ok())
+					.map(GroupOrder::any_to_descending)
+					.unwrap_or(GroupOrder::Descending);
 
 				Ok(Self {
 					request_id,
@@ -213,9 +212,9 @@ impl Message for FetchOk {
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				self.end_of_track.encode(w, version)?;
 				self.end_location.encode(w, version)?;
-				let mut params = MessageParameters::default();
-				params.set_group_order(u8::from(self.group_order) as u64);
-				params.encode(w, version)?;
+				encode_params!(w, version,
+					0x22 => u8::from(self.group_order),
+				);
 			}
 		}
 		Ok(())
@@ -244,16 +243,14 @@ impl Message for FetchOk {
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let end_of_track = bool::decode(buf, version)?;
 				let end_location = Location::decode(buf, version)?;
-				let params = MessageParameters::decode(buf, version)?;
+				decode_params!(buf, version,
+					0x22 => group_order: u8,
+				);
 
-				let group_order = match params.group_order() {
-					Some(v) => u8::try_from(v)
-						.ok()
-						.and_then(|v| GroupOrder::try_from(v).ok())
-						.map(GroupOrder::any_to_descending)
-						.unwrap_or(GroupOrder::Descending),
-					None => GroupOrder::Descending,
-				};
+				let group_order = group_order
+					.and_then(|v| GroupOrder::try_from(v).ok())
+					.map(GroupOrder::any_to_descending)
+					.unwrap_or(GroupOrder::Descending);
 
 				Ok(Self {
 					request_id,

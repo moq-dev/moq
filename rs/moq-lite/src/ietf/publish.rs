@@ -110,7 +110,7 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		FilterType, GroupOrder, Location, MessageParameters, Parameters, RequestId,
+		FilterType, GroupOrder, Location, Parameters, RequestId,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
@@ -203,13 +203,11 @@ impl Message for Publish<'_> {
 				0u8.encode(w, version)?;
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				let mut params = MessageParameters::default();
-				params.set_group_order(u8::from(self.group_order) as u64);
-				if let Some(location) = &self.largest_location {
-					params.set_largest_object(location)?;
-				}
-				params.set_forward(self.forward);
-				params.encode(w, version)?;
+				encode_params!(w, version,
+					0x09 => self.largest_location,
+					0x10 => self.forward,
+					0x22 => u8::from(self.group_order),
+				);
 			}
 		}
 
@@ -248,18 +246,17 @@ impl Message for Publish<'_> {
 				})
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				let params = MessageParameters::decode(r, version)?;
+				decode_params!(r, version,
+					0x09 => largest_location: Location,
+					0x10 => forward: bool,
+					0x22 => group_order: u8,
+				);
 
-				let group_order = match params.group_order() {
-					Some(v) => u8::try_from(v)
-						.ok()
-						.and_then(|v| GroupOrder::try_from(v).ok())
-						.map(GroupOrder::any_to_descending)
-						.unwrap_or(GroupOrder::Descending),
-					None => GroupOrder::Descending,
-				};
-				let largest_location = params.largest_object();
-				let forward = params.forward().unwrap_or(true);
+				let group_order = group_order
+					.and_then(|v| GroupOrder::try_from(v).ok())
+					.map(GroupOrder::any_to_descending)
+					.unwrap_or(GroupOrder::Descending);
+				let forward = forward.unwrap_or(true);
 
 				Ok(Self {
 					request_id,
@@ -311,12 +308,12 @@ impl Message for PublishOk {
 				0u8.encode(w, version)?;
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				let mut params = MessageParameters::default();
-				params.set_forward(self.forward);
-				params.set_subscriber_priority(self.subscriber_priority);
-				params.set_group_order(u8::from(self.group_order) as u64);
-				params.set_subscription_filter(self.filter_type)?;
-				params.encode(w, version)?;
+				encode_params!(w, version,
+					0x10 => self.forward,
+					0x20 => self.subscriber_priority,
+					0x21 => self.filter_type,
+					0x22 => u8::from(self.group_order),
+				);
 			}
 		}
 
@@ -359,19 +356,20 @@ impl Message for PublishOk {
 				})
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-				let params = MessageParameters::decode(r, version)?;
+				decode_params!(r, version,
+					0x10 => forward: bool,
+					0x20 => subscriber_priority: u8,
+					0x21 => filter_type: FilterType,
+					0x22 => group_order: u8,
+				);
 
-				let forward = params.forward().unwrap_or(true);
-				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
-				let group_order = match params.group_order() {
-					Some(v) => u8::try_from(v)
-						.ok()
-						.and_then(|v| GroupOrder::try_from(v).ok())
-						.map(GroupOrder::any_to_descending)
-						.unwrap_or(GroupOrder::Descending),
-					None => GroupOrder::Descending,
-				};
-				let filter_type = params.subscription_filter().unwrap_or(FilterType::LargestObject);
+				let forward = forward.unwrap_or(true);
+				let subscriber_priority = subscriber_priority.unwrap_or(128);
+				let group_order = group_order
+					.and_then(|v| GroupOrder::try_from(v).ok())
+					.map(GroupOrder::any_to_descending)
+					.unwrap_or(GroupOrder::Descending);
+				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
 
 				Ok(Self {
 					request_id,
