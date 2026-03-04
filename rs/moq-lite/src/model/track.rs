@@ -402,6 +402,7 @@ impl TrackConsumer {
 	pub async fn closed(&self) -> Result<()> {
 		self.state.closed().await;
 		match self.state.read().abort.clone() {
+			// Error::Closed represents a normal producer-initiated shutdown, not an error.
 			None | Some(Error::Closed) => Ok(()),
 			Some(err) => Err(err),
 		}

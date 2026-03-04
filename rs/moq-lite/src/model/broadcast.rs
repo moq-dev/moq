@@ -282,9 +282,16 @@ impl BroadcastConsumer {
 		let consumer_state = self.state.clone();
 		web_async::spawn(async move {
 			let _ = weak.unused().await;
-			if let Some(producer) = consumer_state.produce()
-				&& let Ok(mut state) = producer.write()
-				&& let Some(current) = state.tracks.remove(&weak.info.name)
+
+			let Some(producer) = consumer_state.produce() else {
+				return;
+			};
+			let Ok(mut state) = producer.write() else {
+				return;
+			};
+
+			// Remove the entry, but reinsert if it was replaced by a different reference.
+			if let Some(current) = state.tracks.remove(&weak.info.name)
 				&& !current.is_clone(&weak)
 			{
 				state.tracks.insert(current.info.name.clone(), current);
