@@ -12,7 +12,7 @@ Environment="RUST_LOG=info"
 
 # Stream fragmented video in a loop and pipe to hang publish
 ExecStart=/bin/bash -c '\
-  /var/lib/moq/ffmpeg/bin/ffmpeg \
+  /var/lib/moq/pkg/bin/ffmpeg \
     -stream_loop -1 \
     -hide_banner \
     -v quiet \
@@ -22,9 +22,10 @@ ExecStart=/bin/bash -c '\
     -f mp4 \
     -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
     - | \
-  /var/lib/moq/moq-cli/bin/moq-cli publish \
+  /var/lib/moq/pkg/bin/moq-cli publish \
     --url "https://${domain}/demo?jwt=$(cat /var/lib/moq/demo-pub.jwt)" \
-    --name bbb'
+    --name bbb \
+    fmp4'
 
 # Restart with exponential backoff
 Restart=always

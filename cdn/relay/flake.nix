@@ -23,10 +23,15 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          moq-relay = moq.packages.${system}.moq-relay;
-          certbot = pkgs.certbot.withPlugins (ps: [ ps.certbot-dns-google ]);
-          jq = pkgs.jq;
-          perf = pkgs.linuxPackages.perf;
+          default = pkgs.symlinkJoin {
+            name = "moq-relay";
+            paths = [
+              moq.packages.${system}.moq-relay
+              (pkgs.certbot.withPlugins (ps: [ ps.certbot-dns-google ]))
+              pkgs.jq
+              pkgs.perf
+            ];
+          };
         };
     };
 }

@@ -23,9 +23,15 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          moq-cli = moq.packages.${system}.moq;
-          ffmpeg = pkgs.ffmpeg;
-          jq = pkgs.jq;
+          default = pkgs.symlinkJoin {
+            name = "moq-pub";
+            paths = [
+              moq.packages.${system}.moq-cli
+              pkgs.ffmpeg
+              pkgs.wget
+              pkgs.jq
+            ];
+          };
         };
     };
 }

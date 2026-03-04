@@ -4,7 +4,7 @@ Description=Alert when system memory is low
 [Service]
 Type=simple
 Environment=MEMORY_ALERT_WEBHOOK=${webhook}
-Environment=PATH=/var/lib/moq/jq/bin:/usr/bin:/bin
+Environment=PATH=/var/lib/moq/pkg/bin:/usr/bin:/bin
 ExecStart=/etc/systemd/system/memory-alert.sh
 Restart=on-failure
 RestartSec=10
