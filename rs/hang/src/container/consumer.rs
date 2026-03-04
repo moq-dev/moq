@@ -263,7 +263,10 @@ impl GroupReader {
 	}
 
 	async fn read_unbuffered(&mut self) -> Result<Option<OrderedFrame>, Error> {
-		let Some(mut raw_frame) = self.group.next_frame().await? else {
+		// Cancel-safe: get_frame() does not advance the group's index.
+		// If this future is dropped before we increment self.index,
+		// the next call will retry the same frame.
+		let Some(mut raw_frame) = self.group.get_frame(self.index).await? else {
 			return Ok(None);
 		};
 		let payload = raw_frame.read_chunks().await?;
@@ -274,6 +277,7 @@ impl GroupReader {
 		let group = self.group.info.sequence;
 		let index = self.index;
 
+		// Only advance after full success — this is the cancel-safety guarantee.
 		self.index += 1;
 		self.max_timestamp = Some(self.max_timestamp.unwrap_or_default().max(timestamp));
 
