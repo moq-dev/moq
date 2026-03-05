@@ -198,10 +198,12 @@ impl OrderedConsumer {
 					self.pending_timeout = None;
 				}
 				// Timeout waiting for a missing sequence — skip the gap.
-				() = async {
-					match &mut self.pending_timeout {
-						Some(sleep) => sleep.as_mut().await,
-						None => std::future::pending().await,
+				Some(()) = async {
+					if let Some(sleep) = &mut self.pending_timeout {
+						sleep.as_mut().await;
+						Some(())
+					} else {
+						None
 					}
 				} => {
 					drop(buffering);
