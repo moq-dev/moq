@@ -103,7 +103,7 @@ impl Server {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session));
+				return Ok(Session::new(session, v));
 			}
 			Some(ALPN_16) => {
 				let v = self
