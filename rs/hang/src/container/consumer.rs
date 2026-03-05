@@ -207,7 +207,6 @@ impl OrderedConsumer {
 				continue;
 			}
 
-			// TODO Use a min heap?
 			let idx = self
 				.pending
 				.partition_point(|g| g.group.info.sequence < reader.group.info.sequence);
