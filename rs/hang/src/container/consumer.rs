@@ -96,10 +96,8 @@ impl OrderedConsumer {
 	/// Uses a single waiter that gets registered on all relevant conducer channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
 	fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<OrderedFrame>, Error>> {
-		if let Poll::Ready(res) = self.poll_read_finish(waiter) {
-			// Return if there are no more groups to read.
-			return Poll::Ready(res.map(|_| None));
-		}
+		// Grab any new groups from the track, recording whether the track is finished.
+		let finished = self.poll_read_finish(waiter)?.is_ready();
 
 		// On startup, we want to poll every pending group and advance self.current to the first with a frame.
 		if self.startup {
@@ -123,7 +121,7 @@ impl OrderedConsumer {
 			// Return the next frame from the current group if possible.
 			// If the current group is finished or errored, advance to the next group.
 			while let Some(group) = self.pending.front_mut()
-				&& group.info.sequence > self.current
+				&& group.info.sequence <= self.current
 			{
 				match group.poll_read(waiter) {
 					Poll::Ready(Ok(Some(frame))) => return Poll::Ready(Ok(Some(frame))),
@@ -181,6 +179,10 @@ impl OrderedConsumer {
 				continue;
 			}
 
+			if finished && self.pending.is_empty() {
+				return Poll::Ready(Ok(None));
+			}
+
 			return Poll::Pending;
 		}
 	}
@@ -190,12 +192,9 @@ impl OrderedConsumer {
 	// Returns Pending until all groups have been consumed.
 	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), Error>> {
 		loop {
-			let group = match ready!(self.track.poll_next_group(waiter)?) {
-				Some(group) => group,
-				// No more groups to read, and the track is finished.
-				None if self.pending.is_empty() => return Poll::Ready(Ok(())),
-				// We still have pending groups, so we need to wait for them.
-				None => return Poll::Pending,
+			let Some(group) = ready!(self.track.poll_next_group(waiter)?) else {
+				// Track is finished.
+				return Poll::Ready(Ok(()));
 			};
 
 			let reader = GroupBuffer::new(group);
@@ -294,9 +293,8 @@ impl GroupBuffer {
 			return Poll::Ready(Ok(false));
 		};
 
-		let payload = BufList::from_iter(chunks);
-		let mut temp = payload.clone(); // TODO is there a way to avoid clone?
-		let timestamp = Timestamp::decode(&mut temp)?;
+		let mut payload = BufList::from_iter(chunks);
+		let timestamp = Timestamp::decode(&mut payload)?;
 
 		self.min_timestamp = Some(match self.min_timestamp {
 			Some(existing) => existing.min(timestamp),
@@ -537,13 +535,10 @@ mod tests {
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		// Group 0's 1 frame + skipped groups 1-7 + groups 8-9 (6 frames).
-		// Total without skip = 28. With skip, should be <= 7.
-		assert!(
-			frames.len() < 28,
-			"Expected skipping with 0ms latency, got {} frames",
-			frames.len()
-		);
+		// The latency skip bridges past the blocking group 0 to the nearest
+		// pending group with data. All subsequent finished groups are delivered
+		// instantly. Group 0's 1 frame + groups 1-9 (3 frames each) = 28.
+		assert_eq!(frames.len(), 28, "Expected group 0 frame + groups 1-9");
 		assert!(!frames.is_empty(), "Expected at least some frames");
 		finisher.await.expect("finisher task panicked");
 	}
@@ -578,26 +573,16 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(!frames.is_empty(), "Expected at least some frames");
 
-		// Some groups should have been skipped (fewer frames than total 10)
-		let post_skip: Vec<_> = frames.iter().filter(|f| f.timestamp > ts(0)).collect();
-		assert!(
-			post_skip.len() < 9,
-			"Expected some groups to be skipped, got {} post-skip frames",
-			post_skip.len()
-		);
+		// The latency skip bridges past the blocking group 0 to the nearest
+		// pending group with data. All subsequent groups are delivered since
+		// they can be read instantly (already finished). Group 0's frame (ts=0)
+		// is returned before the skip, then groups 1-9 after.
+		assert_eq!(frames.len(), 10, "Expected group 0 frame + groups 1-9");
+		assert_eq!(frames[0].timestamp, ts(0));
 
-		// Post-skip frames should span a bounded range
-		if post_skip.len() >= 2 {
-			let max_ts = post_skip.iter().map(|f| f.timestamp).max().unwrap();
-			let min_ts = post_skip.iter().map(|f| f.timestamp).min().unwrap();
-			let span_micros = max_ts.as_micros() - min_ts.as_micros();
-			let total_span = 9u128 * 30_000; // full span without skipping
-			assert!(
-				span_micros < total_span,
-				"Post-skip span {}us should be less than total span {}us",
-				span_micros,
-				total_span
-			);
+		// Groups should be delivered in sequence order
+		for i in 1..10u64 {
+			assert_eq!(frames[i as usize].timestamp, ts(i * 30_000));
 		}
 		finisher.await.expect("finisher task panicked");
 	}
