@@ -268,15 +268,12 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Create a new consumer for the track, starting at the latest group.
+	/// Create a new consumer for the track, starting at the beginning.
 	pub fn consume(&self) -> TrackConsumer {
-		let state = self.state.read();
-		let index = state.offset + state.groups.len().saturating_sub(1);
-
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			index,
+			index: 0,
 		}
 	}
 
@@ -353,13 +350,10 @@ impl TrackWeak {
 	}
 
 	pub fn consume(&self) -> TrackConsumer {
-		let state = self.state.read();
-		let index = state.offset + state.groups.len().saturating_sub(1);
-
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			index,
+			index: 0,
 		}
 	}
 
@@ -678,8 +672,8 @@ mod test {
 		// Consumer should still be able to read through the hole.
 		let mut consumer = producer.consume();
 		let group = consumer.assert_group();
-		// consume() starts at the last slot (seq 2).
-		assert_eq!(group.info.sequence, 2);
+		// consume() starts at index 0, first non-tombstoned group is seq 5.
+		assert_eq!(group.info.sequence, 5);
 	}
 
 	#[test]
@@ -745,14 +739,10 @@ mod test {
 		producer.finish_at(1).unwrap();
 
 		let consumer = producer.consume();
+		// get_group(0) blocks because group 0 is below final_sequence and could still arrive.
 		assert!(
-			consumer
-				.get_group(0)
-				.now_or_never()
-				.expect("should not block")
-				.expect("would have errored")
-				.is_none(),
-			"sequence below fin should not block forever"
+			consumer.get_group(0).now_or_never().is_none(),
+			"sequence below fin should block (group could still arrive)"
 		);
 		assert!(
 			consumer

@@ -19,6 +19,16 @@ impl Waiter {
 		Self { waker: Arc::new(waker) }
 	}
 
+	/// Create a no-op waiter that discards registrations.
+	///
+	/// Registrations are stored as `Weak<Waker>` refs, so a noop waiter's
+	/// weak ref will just be cleaned up on the next register call.
+	pub fn noop() -> Self {
+		Self {
+			waker: Arc::new(std::task::Waker::noop().clone()),
+		}
+	}
+
 	/// Register this waiter with a [`WaiterList`] for future notification.
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);

@@ -1,3 +1,4 @@
+use std::task::Poll;
 use std::time::Duration;
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -297,6 +298,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		version: Version,
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
+
+		// Skip to the latest available group so we don't serve stale data.
+		let noop = conducer::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_group))) = track.poll_next_group(&noop) {}
 
 		loop {
 			let group = tokio::select! {

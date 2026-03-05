@@ -969,4 +969,237 @@ mod tests {
 		assert_eq!(frames[3].timestamp, ts(100_000));
 		finisher.await.expect("finisher task panicked");
 	}
+
+	// ---- Startup Behavior ----
+
+	#[tokio::test]
+	async fn startup_selects_earliest_group() {
+		tokio::time::pause();
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		// max_latency = 100ms.
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
+
+		// Groups 3, 5, 7 — non-sequential with gaps.
+		// After startup selects group 3 (earliest with data), consumer reads it,
+		// then blocks on gap (waiting for group 4 which never arrives).
+		write_group(&mut track, 3, &[ts(0)]);
+		write_group(&mut track, 5, &[ts(150_000)]);
+
+		// Group 7: write one frame now, push a second later to trigger the latency skip.
+		let mut group7 = track.create_group(moq_lite::Group { sequence: 7 }).unwrap();
+		Frame {
+			timestamp: ts(300_000),
+			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
+		}
+		.encode(&mut group7)
+		.unwrap();
+
+		let finisher = tokio::spawn(async move {
+			// Wait for the consumer to process groups 3 and 5, then push
+			// a second frame on group 7 with a high enough timestamp to
+			// trigger the latency skip past the gap at group 6.
+			tokio::time::sleep(Duration::from_millis(50)).await;
+			Frame {
+				timestamp: ts(400_000),
+				payload: BufList::from_iter(vec![Bytes::from_static(&[0xBE, 0xEF])]),
+			}
+			.encode(&mut group7)
+			.unwrap();
+			group7.finish().unwrap();
+			track.finish().unwrap();
+		});
+
+		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+			let mut frames = Vec::new();
+			while let Some(frame) = consumer.read().await.unwrap() {
+				frames.push(frame);
+			}
+			frames
+		})
+		.await
+		.expect("should not hang");
+
+		// Startup picks group 3 (earliest with data), reads it.
+		// Blocks on gap at 4. Latency skip: min(5)=150ms, max(7)=400ms → skip to 5.
+		// Reads group 5, blocks on gap at 6. Another skip to group 7.
+		assert_eq!(frames[0].group, 3);
+		assert_eq!(frames[1].group, 5);
+		assert!(frames.iter().skip(2).all(|f| f.group == 7));
+		finisher.await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn startup_skips_groups_without_data() {
+		tokio::time::pause();
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+
+		// Group 5: no frames written yet (pending)
+		let _group5 = track.create_group(moq_lite::Group { sequence: 5 }).unwrap();
+		// Group 7: has data
+		write_group(&mut track, 7, &[ts(210_000)]);
+		track.finish().unwrap();
+
+		let frames = tokio::time::timeout(Duration::from_millis(500), async {
+			let mut frames = Vec::new();
+			while let Some(frame) = consumer.read().await.unwrap() {
+				frames.push(frame);
+			}
+			frames
+		})
+		.await
+		.expect("should not hang");
+
+		assert!(!frames.is_empty());
+		// Group 7 should be selected since group 5 has no data.
+		assert_eq!(frames[0].group, 7);
+	}
+
+	#[tokio::test]
+	async fn startup_single_group_mid_stream() {
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+
+		// Only group 100 exists.
+		write_group(&mut track, 100, &[ts(3_000_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].group, 100);
+	}
+
+	#[tokio::test]
+	async fn multiple_sequential_latency_skips() {
+		tokio::time::pause();
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(50));
+
+		// Group 0: blocks
+		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
+		Frame {
+			timestamp: ts(0),
+			payload: BufList::from_iter(vec![Bytes::from_static(&[0xAA])]),
+		}
+		.encode(&mut group0)
+		.unwrap();
+
+		// Groups 1-3: each 100ms apart, triggering skips (> 50ms latency)
+		write_group(&mut track, 1, &[ts(100_000)]);
+		write_group(&mut track, 2, &[ts(200_000)]);
+		write_group(&mut track, 3, &[ts(300_000)]);
+		track.finish().unwrap();
+
+		let finisher = tokio::spawn(async move {
+			tokio::time::sleep(Duration::from_millis(20)).await;
+			group0.finish().unwrap();
+		});
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert!(!frames.is_empty());
+		finisher.await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn latency_skip_boundary_exact() {
+		tokio::time::pause();
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
+
+		// Group 0: blocks
+		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
+		Frame {
+			timestamp: ts(0),
+			payload: BufList::from_iter(vec![Bytes::from_static(&[0xAA])]),
+		}
+		.encode(&mut group0)
+		.unwrap();
+
+		// Group 1: exactly 100ms span (>= max_latency should trigger skip)
+		write_group(&mut track, 1, &[ts(100_000)]);
+		track.finish().unwrap();
+
+		let finisher = tokio::spawn(async move {
+			tokio::time::sleep(Duration::from_millis(20)).await;
+			group0.finish().unwrap();
+		});
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert!(!frames.is_empty());
+		finisher.await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn group_error_skips_to_next() {
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+
+		// Group 0: aborted
+		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
+		group0.abort(moq_lite::Error::Cancel).unwrap();
+
+		// Group 1: valid
+		write_group(&mut track, 1, &[ts(30_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].group, 1);
+	}
+
+	#[tokio::test]
+	async fn track_finishes_while_reading() {
+		tokio::time::pause();
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+
+		write_group(&mut track, 0, &[ts(0)]);
+
+		// Finish the track after a delay, simulating incremental arrival.
+		let finisher = tokio::spawn(async move {
+			tokio::time::sleep(Duration::from_millis(20)).await;
+			write_group(&mut track, 1, &[ts(30_000)]);
+			tokio::time::sleep(Duration::from_millis(20)).await;
+			track.finish().unwrap();
+		});
+
+		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+			let mut frames = Vec::new();
+			while let Some(frame) = consumer.read().await.unwrap() {
+				frames.push(frame);
+			}
+			frames
+		})
+		.await
+		.expect("consumer should not hang");
+
+		assert_eq!(frames.len(), 2);
+		finisher.await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn empty_group_advances() {
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+
+		// Group 0: empty (no frames, just finished)
+		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
+		group0.finish().unwrap();
+
+		// Group 1: has data
+		write_group(&mut track, 1, &[ts(30_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].group, 1);
+	}
 }

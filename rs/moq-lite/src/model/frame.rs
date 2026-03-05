@@ -299,3 +299,112 @@ impl FrameConsumer {
 		conducer::wait(|waiter| self.poll_read_chunks(waiter)).await
 	}
 }
+
+#[cfg(test)]
+mod test {
+	use super::*;
+	use futures::FutureExt;
+
+	#[test]
+	fn single_chunk_roundtrip() {
+		let mut producer = Frame { size: 5 }.produce();
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, Bytes::from_static(b"hello"));
+	}
+
+	#[test]
+	fn multi_chunk_read_all() {
+		let mut producer = Frame { size: 10 }.produce();
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		producer.write(Bytes::from_static(b"world")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, Bytes::from_static(b"helloworld"));
+	}
+
+	#[test]
+	fn read_chunk_sequential() {
+		let mut producer = Frame { size: 10 }.produce();
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		producer.write(Bytes::from_static(b"world")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let c1 = consumer.read_chunk().now_or_never().unwrap().unwrap();
+		assert_eq!(c1, Some(Bytes::from_static(b"hello")));
+		let c2 = consumer.read_chunk().now_or_never().unwrap().unwrap();
+		assert_eq!(c2, Some(Bytes::from_static(b"world")));
+		let c3 = consumer.read_chunk().now_or_never().unwrap().unwrap();
+		assert_eq!(c3, None);
+	}
+
+	#[test]
+	fn read_all_chunks() {
+		let mut producer = Frame { size: 10 }.produce();
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		producer.write(Bytes::from_static(b"world")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let chunks = consumer.read_chunks().now_or_never().unwrap().unwrap();
+		assert_eq!(chunks.len(), 2);
+		assert_eq!(chunks[0], Bytes::from_static(b"hello"));
+		assert_eq!(chunks[1], Bytes::from_static(b"world"));
+	}
+
+	#[test]
+	fn finish_checks_remaining() {
+		let mut producer = Frame { size: 5 }.produce();
+		producer.write(Bytes::from_static(b"hi")).unwrap();
+		let err = producer.finish().unwrap_err();
+		assert!(matches!(err, Error::WrongSize));
+	}
+
+	#[test]
+	fn write_too_many_bytes() {
+		let mut producer = Frame { size: 3 }.produce();
+		let err = producer.write(Bytes::from_static(b"toolong")).unwrap_err();
+		assert!(matches!(err, Error::WrongSize));
+	}
+
+	#[test]
+	fn abort_propagates() {
+		let mut producer = Frame { size: 5 }.produce();
+		let mut consumer = producer.consume();
+		producer.abort(Error::Cancel).unwrap();
+
+		let err = consumer.read_all().now_or_never().unwrap().unwrap_err();
+		assert!(matches!(err, Error::Cancel));
+	}
+
+	#[test]
+	fn empty_frame() {
+		let mut producer = Frame { size: 0 }.produce();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, Bytes::new());
+	}
+
+	#[tokio::test]
+	async fn pending_then_ready() {
+		let mut producer = Frame { size: 5 }.produce();
+		let mut consumer = producer.consume();
+
+		// Consumer blocks because no data yet.
+		assert!(consumer.read_all().now_or_never().is_none());
+
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		producer.finish().unwrap();
+
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, Bytes::from_static(b"hello"));
+	}
+}

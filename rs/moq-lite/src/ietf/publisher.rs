@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::task::Poll;
 
 use tokio::sync::oneshot;
 use web_async::{FuturesExt, Lock};
@@ -195,6 +196,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut cancel: oneshot::Receiver<()>,
 		version: Version,
 	) -> Result<(), Error> {
+		// Skip to the latest available group so we don't serve stale data.
+		let noop = conducer::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_group))) = track.poll_next_group(&noop) {}
+
 		// TODO use a BTreeMap serve the latest N groups by sequence.
 		// Until then, we'll implement N=2 manually.
 		// Also, this is more complicated because we can't use tokio because of WASM.
