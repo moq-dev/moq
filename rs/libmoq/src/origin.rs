@@ -38,6 +38,8 @@ impl Origin {
 		let consumer = origin.consume();
 		let channel = oneshot::channel();
 
+		let id = self.announced_task.insert(channel.0);
+
 		tokio::spawn(async move {
 			tokio::select! {
 				res = Self::run_announced(consumer, &mut on_announce) => on_announce.call(res),
@@ -47,7 +49,6 @@ impl Origin {
 			State::lock().origin.announced_task.remove(id);
 		});
 
-		let id = self.announced_task.insert(channel.0);
 		Ok(id)
 	}
 
