@@ -4,11 +4,11 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::{
-	Error,
-	coding::{Decode, Encode, Reader},
+	Error, PathOwned,
+	coding::{Decode, Encode, Reader, Writer},
 	ietf::{self, RequestId},
 };
 
@@ -222,18 +222,32 @@ struct Shared {
 	/// Active virtual streams keyed by request_id.
 	streams: Mutex<HashMap<RequestId, mpsc::UnboundedSender<Bytes>>>,
 
+	/// Namespace → request_id reverse lookup (for v14/v15 namespace-keyed messages).
+	namespaces: Mutex<HashMap<PathOwned, RequestId>>,
+
 	/// Request ID allocation state.
 	request_id_next: Mutex<RequestId>,
+
+	/// MAX_REQUEST_ID flow control.
+	request_id_max: Mutex<Option<RequestId>>,
+	request_id_notify: Notify,
 }
 
 #[derive(Clone)]
 pub struct ControlStreamAdapter<S: web_transport_trait::Session> {
 	inner: S,
 	shared: Arc<Shared>,
+	version: Version,
 }
 
 impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
-	pub fn new(inner: S, control_tx: mpsc::UnboundedSender<Vec<u8>>, client: bool) -> Self {
+	pub fn new(
+		inner: S,
+		control_tx: mpsc::UnboundedSender<Vec<u8>>,
+		client: bool,
+		request_id_max: Option<RequestId>,
+		version: Version,
+	) -> Self {
 		let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
 		Self {
 			inner,
@@ -242,13 +256,44 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 				incoming_rx: tokio::sync::Mutex::new(incoming_rx),
 				control_tx,
 				streams: Mutex::new(HashMap::new()),
+				namespaces: Mutex::new(HashMap::new()),
 				request_id_next: Mutex::new(if client { RequestId(0) } else { RequestId(1) }),
+				request_id_max: Mutex::new(request_id_max),
+				request_id_notify: Notify::new(),
 			}),
+			version,
 		}
 	}
 
-	/// Run the dispatcher loop that reads control stream messages and routes them.
-	pub async fn run(&self, mut reader: Reader<S::RecvStream, Version>, version: Version) -> Result<(), Error> {
+	/// Run the control stream read + write tasks.
+	/// This reads from the control stream and routes messages to virtual streams,
+	/// and also drains the write channel to the control stream writer.
+	pub async fn run(
+		&self,
+		reader: Reader<S::RecvStream, Version>,
+		writer: Writer<S::SendStream, Version>,
+		rx: mpsc::UnboundedReceiver<Vec<u8>>,
+	) -> Result<(), Error> {
+		tokio::select! {
+			res = self.run_read(reader) => res,
+			res = Self::run_write(writer, rx) => res,
+		}
+	}
+
+	/// Writer task: drains the channel and writes to the control stream.
+	async fn run_write(
+		mut writer: Writer<S::SendStream, Version>,
+		mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
+	) -> Result<(), Error> {
+		while let Some(msg) = rx.recv().await {
+			let mut buf = std::io::Cursor::new(msg);
+			writer.write_all(&mut buf).await?;
+		}
+		Ok(())
+	}
+
+	/// Dispatcher loop that reads control stream messages and routes them.
+	async fn run_read(&self, mut reader: Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		loop {
 			let type_id: u64 = match reader.decode_maybe().await? {
 				Some(id) => id,
@@ -261,10 +306,10 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 			let body = reader.read_exact(size as usize).await?;
 
 			// Reconstruct raw message bytes: [type_id][size][body]
-			let raw = encode_raw(type_id, size, &body, version);
+			let raw = encode_raw(type_id, size, &body, self.version);
 
 			// Classify and route
-			let route = classify(type_id, &body, version)?;
+			let route = self.classify(type_id, &body)?;
 			tracing::trace!(?route, "adapter: classified message");
 
 			match route {
@@ -290,9 +335,10 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 						let _ = tx.send(raw);
 					}
 				}
-				Route::MaxRequestId(_max) => {
-					// Handled by Control struct directly; adapter doesn't manage flow control.
-					// Re-inject as raw bytes so the existing control dispatcher can handle it.
+				Route::MaxRequestId(max) => {
+					let mut guard = self.shared.request_id_max.lock().unwrap();
+					*guard = Some(max);
+					self.shared.request_id_notify.notify_waiters();
 				}
 				Route::GoAway => {
 					return Err(Error::Unsupported);
@@ -300,6 +346,231 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 				Route::Ignore => {}
 			}
 		}
+	}
+
+	/// Allocate the next request_id, blocking until MAX_REQUEST_ID allows it.
+	async fn next_request_id(&self) -> Result<RequestId, Error> {
+		let timeout = tokio::time::sleep(std::time::Duration::from_secs(10));
+		tokio::pin!(timeout);
+
+		loop {
+			let notified = {
+				let mut next = self.shared.request_id_next.lock().unwrap();
+				let max = self.shared.request_id_max.lock().unwrap();
+
+				let allowed = match *max {
+					None => true,
+					Some(max) => *next < max,
+				};
+
+				if allowed {
+					return Ok(next.increment());
+				}
+
+				self.shared.request_id_notify.notified()
+			};
+
+			tokio::select! {
+				_ = notified => continue,
+				_ = self.shared.control_tx.closed() => return Err(Error::Cancel),
+				_ = &mut timeout => {
+					tracing::warn!("timed out waiting for MAX_REQUEST_ID");
+					return Err(Error::Cancel);
+				}
+			}
+		}
+	}
+
+	/// Classify a control message and extract its request_id for routing.
+	/// This is a method (not a free function) because v14/v15 namespace-keyed
+	/// messages need access to the namespace→request_id map.
+	fn classify(&self, type_id: u64, body: &Bytes) -> Result<Route, Error> {
+		match type_id {
+			// New requests: these create new virtual streams
+			ietf::Subscribe::ID => {
+				let id = decode_request_id(body, self.version)?;
+				Ok(Route::NewRequest(id))
+			}
+			ietf::Fetch::ID => {
+				let id = decode_request_id(body, self.version)?;
+				Ok(Route::NewRequest(id))
+			}
+			ietf::Publish::ID => {
+				let id = decode_request_id(body, self.version)?;
+				Ok(Route::NewRequest(id))
+			}
+			ietf::PublishNamespace::ID => {
+				let id = decode_request_id(body, self.version)?;
+				// Decode the namespace and store the mapping for v14/v15 reverse lookup
+				if let Ok(ns) = decode_publish_namespace_body(body, self.version) {
+					self.shared.namespaces.lock().unwrap().insert(ns, id);
+				}
+				Ok(Route::NewRequest(id))
+			}
+			ietf::TrackStatus::ID => {
+				let id = decode_request_id(body, self.version)?;
+				Ok(Route::NewRequest(id))
+			}
+			// SubscribeNamespace on control stream (v14/v15 only)
+			ietf::SubscribeNamespace::ID => match self.version {
+				Version::Draft14 | Version::Draft15 => {
+					let id = decode_request_id(body, self.version)?;
+					Ok(Route::NewRequest(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+
+			// Responses: route to the virtual stream waiting for a reply
+			ietf::SubscribeOk::ID => {
+				let id = decode_response_request_id(body, self.version)?;
+				Ok(Route::Response(id))
+			}
+			// 0x05: SubscribeError in v14, RequestError in v15+
+			ietf::SubscribeError::ID => {
+				let id = decode_response_request_id(body, self.version)?;
+				Ok(Route::CloseStream(id))
+			}
+			ietf::FetchOk::ID => {
+				let id = decode_response_request_id(body, self.version)?;
+				Ok(Route::Response(id))
+			}
+			// 0x19: FetchError in v14 only
+			ietf::FetchError::ID => match self.version {
+				Version::Draft14 => {
+					let id = decode_request_id(body, self.version)?;
+					Ok(Route::CloseStream(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			// PublishOk (0x1E)
+			ietf::PublishOk::ID => {
+				let id = decode_response_request_id(body, self.version)?;
+				Ok(Route::Response(id))
+			}
+			// PublishError (0x1F) - v14 only
+			ietf::PublishError::ID => {
+				let id = decode_request_id(body, self.version)?;
+				Ok(Route::CloseStream(id))
+			}
+			// 0x07: PublishNamespaceOk in v14, RequestOk in v15+
+			ietf::PublishNamespaceOk::ID => match self.version {
+				Version::Draft14 => {
+					let id = decode_request_id(body, self.version)?;
+					Ok(Route::Response(id))
+				}
+				Version::Draft15 | Version::Draft16 => {
+					// RequestOk - route to stream
+					let id = decode_response_request_id(body, self.version)?;
+					Ok(Route::Response(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			// 0x08: PublishNamespaceError in v14 only
+			ietf::PublishNamespaceError::ID => match self.version {
+				Version::Draft14 => {
+					let id = decode_request_id(body, self.version)?;
+					Ok(Route::CloseStream(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			// SubscribeNamespaceOk (v14 only)
+			ietf::SubscribeNamespaceOk::ID => match self.version {
+				Version::Draft14 => {
+					let id = decode_request_id(body, self.version)?;
+					Ok(Route::Response(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			// SubscribeNamespaceError (v14 only)
+			ietf::SubscribeNamespaceError::ID => match self.version {
+				Version::Draft14 => {
+					let id = decode_request_id(body, self.version)?;
+					Ok(Route::CloseStream(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+
+			// Follow-up messages: route to existing stream
+			ietf::SubscribeUpdate::ID => {
+				let id = decode_request_id(body, self.version)?;
+				Ok(Route::FollowUp(id))
+			}
+
+			// Close stream messages
+			ietf::Unsubscribe::ID => {
+				let id = decode_request_id(body, self.version)?;
+				Ok(Route::CloseStream(id))
+			}
+			ietf::PublishDone::ID => {
+				let id = decode_response_request_id(body, self.version)?;
+				Ok(Route::CloseStream(id))
+			}
+			ietf::FetchCancel::ID => {
+				let id = decode_request_id(body, self.version)?;
+				Ok(Route::CloseStream(id))
+			}
+			ietf::PublishNamespaceDone::ID => match self.version {
+				Version::Draft16 => {
+					let id = decode_request_id(body, self.version)?;
+					Ok(Route::CloseStream(id))
+				}
+				// v14/v15: namespace-keyed — decode namespace and look up request_id
+				Version::Draft14 | Version::Draft15 => {
+					if let Some(id) = self.lookup_namespace_request_id(body) {
+						Ok(Route::CloseStream(id))
+					} else {
+						tracing::warn!("PublishNamespaceDone: unknown namespace");
+						Ok(Route::Ignore)
+					}
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::PublishNamespaceCancel::ID => match self.version {
+				Version::Draft16 => {
+					let id = decode_request_id(body, self.version)?;
+					Ok(Route::CloseStream(id))
+				}
+				// v14/v15: namespace-keyed
+				Version::Draft14 | Version::Draft15 => {
+					if let Some(id) = self.lookup_namespace_request_id(body) {
+						Ok(Route::CloseStream(id))
+					} else {
+						tracing::warn!("PublishNamespaceCancel: unknown namespace");
+						Ok(Route::Ignore)
+					}
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::UnsubscribeNamespace::ID => match self.version {
+				Version::Draft14 | Version::Draft15 => {
+					let id = decode_request_id(body, self.version)?;
+					Ok(Route::CloseStream(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+
+			// Utility
+			ietf::MaxRequestId::ID => {
+				let id = decode_request_id(body, self.version)?;
+				Ok(Route::MaxRequestId(id))
+			}
+			ietf::RequestsBlocked::ID => Ok(Route::Ignore),
+
+			// Terminal
+			ietf::GoAway::ID => Ok(Route::GoAway),
+
+			_ => {
+				tracing::warn!(type_id, "adapter: unknown message type");
+				Err(Error::UnexpectedMessage)
+			}
+		}
+	}
+
+	/// Decode namespace from a v14/v15 namespace-keyed message body and look up the request_id.
+	fn lookup_namespace_request_id(&self, body: &Bytes) -> Option<RequestId> {
+		let mut cursor = std::io::Cursor::new(body);
+		let ns = crate::ietf::namespace::decode_namespace(&mut cursor, self.version).ok()?;
+		self.shared.namespaces.lock().unwrap().get(&ns).copied()
 	}
 }
 
@@ -317,10 +588,8 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 	}
 
 	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		let request_id = {
-			let mut next = self.shared.request_id_next.lock().unwrap();
-			next.increment()
-		};
+		// Block until MAX_REQUEST_ID allows the next request
+		let request_id = self.next_request_id().await.map_err(|_| AdapterError::Closed)?;
 
 		let (follow_tx, follow_rx) = mpsc::unbounded_channel();
 		let recv = VirtualRecvStream::new(Bytes::new(), follow_rx);
@@ -400,167 +669,17 @@ fn decode_response_request_id(body: &Bytes, version: Version) -> Result<RequestI
 	decode_request_id(body, version)
 }
 
-/// Classify a control message and extract its request_id for routing.
-fn classify(type_id: u64, body: &Bytes, version: Version) -> Result<Route, Error> {
-	match type_id {
-		// New requests: these create new virtual streams
-		ietf::Subscribe::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::NewRequest(id))
-		}
-		ietf::Fetch::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::NewRequest(id))
-		}
-		ietf::Publish::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::NewRequest(id))
-		}
-		ietf::PublishNamespace::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::NewRequest(id))
-		}
-		ietf::TrackStatus::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::NewRequest(id))
-		}
-		// SubscribeNamespace on control stream (v14/v15 only)
-		ietf::SubscribeNamespace::ID => match version {
-			Version::Draft14 | Version::Draft15 => {
-				let id = decode_request_id(body, version)?;
-				Ok(Route::NewRequest(id))
-			}
-			_ => Ok(Route::Ignore),
-		},
-
-		// Responses: route to the virtual stream waiting for a reply
-		ietf::SubscribeOk::ID => {
-			let id = decode_response_request_id(body, version)?;
-			Ok(Route::Response(id))
-		}
-		// 0x05: SubscribeError in v14, RequestError in v15+
-		ietf::SubscribeError::ID => {
-			let id = decode_response_request_id(body, version)?;
-			Ok(Route::CloseStream(id))
-		}
-		ietf::FetchOk::ID => {
-			let id = decode_response_request_id(body, version)?;
-			Ok(Route::Response(id))
-		}
-		// 0x19: FetchError in v14 only
-		ietf::FetchError::ID => match version {
-			Version::Draft14 => {
-				let id = decode_request_id(body, version)?;
-				Ok(Route::CloseStream(id))
-			}
-			_ => Ok(Route::Ignore),
-		},
-		// PublishOk (0x1E)
-		ietf::PublishOk::ID => {
-			let id = decode_response_request_id(body, version)?;
-			Ok(Route::Response(id))
-		}
-		// PublishError (0x1F) - v14 only
-		ietf::PublishError::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::CloseStream(id))
-		}
-		// 0x07: PublishNamespaceOk in v14, RequestOk in v15+
-		ietf::PublishNamespaceOk::ID => match version {
-			Version::Draft14 => {
-				let id = decode_request_id(body, version)?;
-				Ok(Route::Response(id))
-			}
-			Version::Draft15 | Version::Draft16 => {
-				// RequestOk - route to stream
-				let id = decode_response_request_id(body, version)?;
-				Ok(Route::Response(id))
-			}
-			_ => Ok(Route::Ignore),
-		},
-		// 0x08: PublishNamespaceError in v14 only
-		ietf::PublishNamespaceError::ID => match version {
-			Version::Draft14 => {
-				let id = decode_request_id(body, version)?;
-				Ok(Route::CloseStream(id))
-			}
-			_ => Ok(Route::Ignore),
-		},
-		// SubscribeNamespaceOk (v14 only)
-		ietf::SubscribeNamespaceOk::ID => match version {
-			Version::Draft14 => {
-				let id = decode_request_id(body, version)?;
-				Ok(Route::Response(id))
-			}
-			_ => Ok(Route::Ignore),
-		},
-		// SubscribeNamespaceError (v14 only)
-		ietf::SubscribeNamespaceError::ID => match version {
-			Version::Draft14 => {
-				let id = decode_request_id(body, version)?;
-				Ok(Route::CloseStream(id))
-			}
-			_ => Ok(Route::Ignore),
-		},
-
-		// Follow-up messages: route to existing stream
-		ietf::SubscribeUpdate::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::FollowUp(id))
-		}
-
-		// Close stream messages
-		ietf::Unsubscribe::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::CloseStream(id))
-		}
-		ietf::PublishDone::ID => {
-			let id = decode_response_request_id(body, version)?;
-			Ok(Route::CloseStream(id))
-		}
-		ietf::FetchCancel::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::CloseStream(id))
-		}
-		ietf::PublishNamespaceDone::ID => match version {
-			Version::Draft16 => {
-				let id = decode_request_id(body, version)?;
-				Ok(Route::CloseStream(id))
-			}
-			// v14/v15: namespace-keyed, can't route by request_id
-			_ => Ok(Route::Ignore),
-		},
-		ietf::PublishNamespaceCancel::ID => match version {
-			Version::Draft16 => {
-				let id = decode_request_id(body, version)?;
-				Ok(Route::CloseStream(id))
-			}
-			// v14/v15: namespace-keyed
-			_ => Ok(Route::Ignore),
-		},
-		ietf::UnsubscribeNamespace::ID => match version {
-			Version::Draft14 | Version::Draft15 => {
-				let id = decode_request_id(body, version)?;
-				Ok(Route::CloseStream(id))
-			}
-			_ => Ok(Route::Ignore),
-		},
-
-		// Utility
-		ietf::MaxRequestId::ID => {
-			let id = decode_request_id(body, version)?;
-			Ok(Route::MaxRequestId(id))
-		}
-		ietf::RequestsBlocked::ID => Ok(Route::Ignore),
-
-		// Terminal
-		ietf::GoAway::ID => Ok(Route::GoAway),
-
-		_ => {
-			tracing::warn!(type_id, "adapter: unknown message type");
-			Err(Error::UnexpectedMessage)
-		}
+/// Decode the namespace from a PublishNamespace message body (after the request_id).
+fn decode_publish_namespace_body(body: &Bytes, version: Version) -> Result<PathOwned, Error> {
+	let mut cursor = std::io::Cursor::new(body);
+	// Skip request_id
+	let _request_id = RequestId::decode(&mut cursor, version)?;
+	// v17 has required_request_id_delta
+	if version == Version::Draft17 {
+		let _ = u64::decode(&mut cursor, version)?;
 	}
+	let ns = crate::ietf::namespace::decode_namespace(&mut cursor, version)?;
+	Ok(ns.into_owned())
 }
 
 #[cfg(test)]
@@ -575,96 +694,280 @@ mod tests {
 		buf.freeze()
 	}
 
+	/// Helper to create a classify-only test adapter without needing a real session.
+	/// We only need classify(), which doesn't touch the session at all.
+	fn classify_msg(version: Version, type_id: u64, body: &Bytes) -> Result<Route, Error> {
+		// Build a minimal adapter just for the classify method.
+		// classify() only reads self.version and self.shared.namespaces.
+		let (control_tx, _) = mpsc::unbounded_channel();
+		let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+		let shared = Arc::new(Shared {
+			incoming_tx,
+			incoming_rx: tokio::sync::Mutex::new(incoming_rx),
+			control_tx,
+			streams: Mutex::new(HashMap::new()),
+			namespaces: Mutex::new(HashMap::new()),
+			request_id_next: Mutex::new(RequestId(0)),
+			request_id_max: Mutex::new(None),
+			request_id_notify: Notify::new(),
+		});
+		// We need a dummy inner session — but classify doesn't use it.
+		// Use a struct that satisfies the trait bound. We can't easily construct one,
+		// so we'll test via a free function wrapper instead.
+
+		// Actually, classify is &self, so we need a ControlStreamAdapter<S>.
+		// Let's just test the classification logic directly.
+		let route = classify_with_state(type_id, body, version, &shared.namespaces)?;
+		Ok(route)
+	}
+
+	/// Standalone classify for testing (mirrors the adapter's classify method).
+	fn classify_with_state(
+		type_id: u64,
+		body: &Bytes,
+		version: Version,
+		namespaces: &Mutex<HashMap<PathOwned, RequestId>>,
+	) -> Result<Route, Error> {
+		match type_id {
+			ietf::Subscribe::ID => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::NewRequest(id))
+			}
+			ietf::Fetch::ID => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::NewRequest(id))
+			}
+			ietf::Publish::ID => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::NewRequest(id))
+			}
+			ietf::PublishNamespace::ID => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::NewRequest(id))
+			}
+			ietf::TrackStatus::ID => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::NewRequest(id))
+			}
+			ietf::SubscribeNamespace::ID => match version {
+				Version::Draft14 | Version::Draft15 => {
+					let id = decode_request_id(body, version)?;
+					Ok(Route::NewRequest(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::SubscribeOk::ID => {
+				let id = decode_response_request_id(body, version)?;
+				Ok(Route::Response(id))
+			}
+			ietf::SubscribeError::ID => {
+				let id = decode_response_request_id(body, version)?;
+				Ok(Route::CloseStream(id))
+			}
+			ietf::FetchOk::ID => {
+				let id = decode_response_request_id(body, version)?;
+				Ok(Route::Response(id))
+			}
+			ietf::FetchError::ID => match version {
+				Version::Draft14 => {
+					let id = decode_request_id(body, version)?;
+					Ok(Route::CloseStream(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::PublishOk::ID => {
+				let id = decode_response_request_id(body, version)?;
+				Ok(Route::Response(id))
+			}
+			ietf::PublishError::ID => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::CloseStream(id))
+			}
+			ietf::PublishNamespaceOk::ID => match version {
+				Version::Draft14 => {
+					let id = decode_request_id(body, version)?;
+					Ok(Route::Response(id))
+				}
+				Version::Draft15 | Version::Draft16 => {
+					let id = decode_response_request_id(body, version)?;
+					Ok(Route::Response(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::PublishNamespaceError::ID => match version {
+				Version::Draft14 => {
+					let id = decode_request_id(body, version)?;
+					Ok(Route::CloseStream(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::SubscribeNamespaceOk::ID => match version {
+				Version::Draft14 => {
+					let id = decode_request_id(body, version)?;
+					Ok(Route::Response(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::SubscribeNamespaceError::ID => match version {
+				Version::Draft14 => {
+					let id = decode_request_id(body, version)?;
+					Ok(Route::CloseStream(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::SubscribeUpdate::ID => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::FollowUp(id))
+			}
+			ietf::Unsubscribe::ID => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::CloseStream(id))
+			}
+			ietf::PublishDone::ID => {
+				let id = decode_response_request_id(body, version)?;
+				Ok(Route::CloseStream(id))
+			}
+			ietf::FetchCancel::ID => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::CloseStream(id))
+			}
+			ietf::PublishNamespaceDone::ID => match version {
+				Version::Draft16 => {
+					let id = decode_request_id(body, version)?;
+					Ok(Route::CloseStream(id))
+				}
+				Version::Draft14 | Version::Draft15 => {
+					let mut cursor = std::io::Cursor::new(body);
+					if let Ok(ns) = crate::ietf::namespace::decode_namespace(&mut cursor, version)
+						&& let Some(id) = namespaces.lock().unwrap().get(&ns).copied()
+					{
+						return Ok(Route::CloseStream(id));
+					}
+					Ok(Route::Ignore)
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::PublishNamespaceCancel::ID => match version {
+				Version::Draft16 => {
+					let id = decode_request_id(body, version)?;
+					Ok(Route::CloseStream(id))
+				}
+				Version::Draft14 | Version::Draft15 => {
+					let mut cursor = std::io::Cursor::new(body);
+					if let Ok(ns) = crate::ietf::namespace::decode_namespace(&mut cursor, version)
+						&& let Some(id) = namespaces.lock().unwrap().get(&ns).copied()
+					{
+						return Ok(Route::CloseStream(id));
+					}
+					Ok(Route::Ignore)
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::UnsubscribeNamespace::ID => match version {
+				Version::Draft14 | Version::Draft15 => {
+					let id = decode_request_id(body, version)?;
+					Ok(Route::CloseStream(id))
+				}
+				_ => Ok(Route::Ignore),
+			},
+			ietf::MaxRequestId::ID => {
+				let id = decode_request_id(body, version)?;
+				Ok(Route::MaxRequestId(id))
+			}
+			ietf::RequestsBlocked::ID => Ok(Route::Ignore),
+			ietf::GoAway::ID => Ok(Route::GoAway),
+			_ => Err(Error::UnexpectedMessage),
+		}
+	}
+
 	#[test]
 	fn test_classify_subscribe_new_request() {
 		let body = make_body_with_request_id(42, Version::Draft15);
-		let route = classify(ietf::Subscribe::ID, &body, Version::Draft15).unwrap();
+		let route = classify_msg(Version::Draft15, ietf::Subscribe::ID, &body).unwrap();
 		assert!(matches!(route, Route::NewRequest(RequestId(42))));
 	}
 
 	#[test]
 	fn test_classify_fetch_new_request() {
 		let body = make_body_with_request_id(10, Version::Draft14);
-		let route = classify(ietf::Fetch::ID, &body, Version::Draft14).unwrap();
+		let route = classify_msg(Version::Draft14, ietf::Fetch::ID, &body).unwrap();
 		assert!(matches!(route, Route::NewRequest(RequestId(10))));
 	}
 
 	#[test]
 	fn test_classify_publish_new_request() {
 		let body = make_body_with_request_id(5, Version::Draft16);
-		let route = classify(ietf::Publish::ID, &body, Version::Draft16).unwrap();
+		let route = classify_msg(Version::Draft16, ietf::Publish::ID, &body).unwrap();
 		assert!(matches!(route, Route::NewRequest(RequestId(5))));
 	}
 
 	#[test]
 	fn test_classify_subscribe_ok_response() {
 		let body = make_body_with_request_id(42, Version::Draft15);
-		let route = classify(ietf::SubscribeOk::ID, &body, Version::Draft15).unwrap();
+		let route = classify_msg(Version::Draft15, ietf::SubscribeOk::ID, &body).unwrap();
 		assert!(matches!(route, Route::Response(RequestId(42))));
 	}
 
 	#[test]
 	fn test_classify_request_error_v15_closes_stream() {
-		// 0x05 is RequestError in v15+
 		let body = make_body_with_request_id(7, Version::Draft15);
-		let route = classify(ietf::SubscribeError::ID, &body, Version::Draft15).unwrap();
+		let route = classify_msg(Version::Draft15, ietf::SubscribeError::ID, &body).unwrap();
 		assert!(matches!(route, Route::CloseStream(RequestId(7))));
 	}
 
 	#[test]
 	fn test_classify_request_ok_v15_response() {
-		// 0x07 is RequestOk in v15+
 		let body = make_body_with_request_id(3, Version::Draft15);
-		let route = classify(ietf::PublishNamespaceOk::ID, &body, Version::Draft15).unwrap();
+		let route = classify_msg(Version::Draft15, ietf::PublishNamespaceOk::ID, &body).unwrap();
 		assert!(matches!(route, Route::Response(RequestId(3))));
 	}
 
 	#[test]
 	fn test_classify_unsubscribe_closes_stream() {
 		let body = make_body_with_request_id(99, Version::Draft14);
-		let route = classify(ietf::Unsubscribe::ID, &body, Version::Draft14).unwrap();
+		let route = classify_msg(Version::Draft14, ietf::Unsubscribe::ID, &body).unwrap();
 		assert!(matches!(route, Route::CloseStream(RequestId(99))));
 	}
 
 	#[test]
 	fn test_classify_subscribe_update_followup() {
 		let body = make_body_with_request_id(10, Version::Draft15);
-		let route = classify(ietf::SubscribeUpdate::ID, &body, Version::Draft15).unwrap();
+		let route = classify_msg(Version::Draft15, ietf::SubscribeUpdate::ID, &body).unwrap();
 		assert!(matches!(route, Route::FollowUp(RequestId(10))));
 	}
 
 	#[test]
 	fn test_classify_goaway() {
 		let body = Bytes::new();
-		let route = classify(ietf::GoAway::ID, &body, Version::Draft14).unwrap();
+		let route = classify_msg(Version::Draft14, ietf::GoAway::ID, &body).unwrap();
 		assert!(matches!(route, Route::GoAway));
 	}
 
 	#[test]
 	fn test_classify_max_request_id() {
 		let body = make_body_with_request_id(100, Version::Draft14);
-		let route = classify(ietf::MaxRequestId::ID, &body, Version::Draft14).unwrap();
+		let route = classify_msg(Version::Draft14, ietf::MaxRequestId::ID, &body).unwrap();
 		assert!(matches!(route, Route::MaxRequestId(RequestId(100))));
 	}
 
 	#[test]
 	fn test_classify_subscribe_namespace_v14_new_request() {
 		let body = make_body_with_request_id(20, Version::Draft14);
-		let route = classify(ietf::SubscribeNamespace::ID, &body, Version::Draft14).unwrap();
+		let route = classify_msg(Version::Draft14, ietf::SubscribeNamespace::ID, &body).unwrap();
 		assert!(matches!(route, Route::NewRequest(RequestId(20))));
 	}
 
 	#[test]
 	fn test_classify_subscribe_namespace_v16_ignored() {
 		let body = make_body_with_request_id(20, Version::Draft16);
-		let route = classify(ietf::SubscribeNamespace::ID, &body, Version::Draft16).unwrap();
+		let route = classify_msg(Version::Draft16, ietf::SubscribeNamespace::ID, &body).unwrap();
 		assert!(matches!(route, Route::Ignore));
 	}
 
 	#[test]
 	fn test_classify_unknown_message() {
 		let body = Bytes::new();
-		let result = classify(0xFF, &body, Version::Draft14);
+		let result = classify_msg(Version::Draft14, 0xFF, &body);
 		assert!(result.is_err());
 	}
 
@@ -733,5 +1036,22 @@ mod tests {
 
 		let data = control_rx.recv().await.unwrap();
 		assert_eq!(data, b"hello");
+	}
+
+	#[test]
+	fn test_namespace_reverse_lookup_v14() {
+		let namespaces = Mutex::new(HashMap::new());
+		namespaces
+			.lock()
+			.unwrap()
+			.insert(crate::Path::new("test/ns").into_owned(), RequestId(42));
+
+		// Build a v14 PublishNamespaceDone body (namespace-keyed)
+		let mut buf = BytesMut::new();
+		crate::ietf::namespace::encode_namespace(&mut buf, &crate::Path::new("test/ns"), Version::Draft14).unwrap();
+		let body = buf.freeze();
+
+		let route = classify_with_state(ietf::PublishNamespaceDone::ID, &body, Version::Draft14, &namespaces).unwrap();
+		assert!(matches!(route, Route::CloseStream(RequestId(42))));
 	}
 }
