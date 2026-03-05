@@ -3,11 +3,11 @@ use std::{
 	sync::{LazyLock, Mutex},
 };
 
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+#[cfg(feature = "c-api")]
 use std::ffi::c_char;
 
 
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+#[cfg(feature = "c-api")]
 use url::Url;
 
 use crate::{Error, Id};
@@ -34,7 +34,7 @@ pub static RUNTIME: LazyLock<Mutex<tokio::runtime::Handle>> = LazyLock::new(|| {
 ///
 /// Uses a mutex to ensure Handle::enter() guards are dropped in LIFO order,
 /// as required by tokio to avoid panics in multi-threaded FFI contexts.
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+#[cfg(feature = "c-api")]
 pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
 	// NOTE: I think we need a mutex because Handle::enter() needs to be dropped in LIFO order.
 	// If this starts to become a bottleneck, we might have to rethink our runtime model.
@@ -65,7 +65,7 @@ impl OnStatus {
 	/// # Safety
 	/// - The caller must ensure user_data remains valid for the callback's lifetime.
 	/// - The callback function pointer must be valid if provided.
-	#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+	#[cfg(feature = "c-api")]
 	pub unsafe fn new(
 		user_data: *mut c_void,
 		on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
@@ -186,7 +186,7 @@ pub fn parse_id_optional(id: u32) -> Result<Option<Id>, Error> {
 }
 
 /// Parse a C string pointer into a Url.
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+#[cfg(feature = "c-api")]
 pub fn parse_url(url: *const c_char, url_len: usize) -> Result<Url, Error> {
 	let url = unsafe { parse_str(url, url_len)? };
 	Ok(Url::parse(url)?)
@@ -198,7 +198,7 @@ pub fn parse_url(url: *const c_char, url_len: usize) -> Result<Url, Error> {
 ///
 /// # Safety
 /// The caller must ensure that cstr is valid for 'a.
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+#[cfg(feature = "c-api")]
 pub unsafe fn parse_str<'a>(cstr: *const c_char, cstr_len: usize) -> Result<&'a str, Error> {
 	let slice = unsafe { parse_slice(cstr as *const u8, cstr_len)? };
 	let string = std::str::from_utf8(slice)?;
@@ -211,7 +211,7 @@ pub unsafe fn parse_str<'a>(cstr: *const c_char, cstr_len: usize) -> Result<&'a 
 ///
 /// # Safety
 /// The caller must ensure that data is valid for 'a.
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+#[cfg(feature = "c-api")]
 pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], Error> {
 	if data.is_null() {
 		if size == 0 {

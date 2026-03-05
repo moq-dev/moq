@@ -1,8 +1,8 @@
 //! FFI bindings for [`moq_lite`].
 //!
 //! Provides a C-compatible API (via the `c-api` feature, default) or a UniFFI-based API
-//! (via the `uniffi-api` feature) for real-time pub/sub over QUIC. If both features are
-//! enabled, the UniFFI API takes precedence.
+//! (via the `uniffi-api` feature) for real-time pub/sub over QUIC. These features are
+//! mutually exclusive; enabling both will produce a compile error.
 //!
 //! ## Concepts
 //!
@@ -18,7 +18,10 @@
 //! All functions return negative error codes on failure or non-negative values on success.
 //! Resources are managed through opaque integer handles that must be explicitly closed.
 
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+#[cfg(all(feature = "c-api", feature = "uniffi-api"))]
+compile_error!("Features `c-api` and `uniffi-api` are mutually exclusive. Enable only one.");
+
+#[cfg(feature = "c-api")]
 mod api;
 mod consume;
 mod error;
@@ -31,7 +34,7 @@ mod state;
 #[cfg(feature = "uniffi-api")]
 mod uniffi_api;
 
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+#[cfg(feature = "c-api")]
 pub use api::*;
 pub use error::*;
 pub use id::*;

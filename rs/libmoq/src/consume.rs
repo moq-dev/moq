@@ -4,9 +4,9 @@ use tokio::sync::oneshot;
 use crate::ffi::OnStatus;
 use crate::{Error, Id, NonZeroSlab, State};
 
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+#[cfg(feature = "c-api")]
 use crate::{moq_audio_config, moq_frame, moq_video_config};
-#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+#[cfg(feature = "c-api")]
 use std::ffi::c_char;
 
 struct ConsumeCatalog {
@@ -102,7 +102,7 @@ impl Consume {
 		Ok(())
 	}
 
-	#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+	#[cfg(feature = "c-api")]
 	pub fn video_config(&mut self, catalog: Id, index: usize, dst: &mut moq_video_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 
@@ -166,7 +166,7 @@ impl Consume {
 		))
 	}
 
-	#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+	#[cfg(feature = "c-api")]
 	pub fn audio_config(&mut self, catalog: Id, index: usize, dst: &mut moq_audio_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 
@@ -343,7 +343,7 @@ impl Consume {
 	}
 
 	// NOTE: You're supposed to call this multiple times to get all of the chunks.
-	#[cfg(all(feature = "c-api", not(feature = "uniffi-api")))]
+	#[cfg(feature = "c-api")]
 	pub fn frame_chunk(&self, frame: Id, index: usize, dst: &mut moq_frame) -> Result<(), Error> {
 		let ordered = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
 		let chunk = ordered.payload.get_chunk(index).ok_or(Error::NoIndex)?;
