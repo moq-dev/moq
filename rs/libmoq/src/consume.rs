@@ -430,7 +430,7 @@ impl Consume {
 			.try_into()
 			.map_err(|_| moq_lite::TimeOverflow)?;
 
-		Ok((payload, timestamp_us, frame.keyframe))
+		Ok((payload, timestamp_us, frame.is_keyframe()))
 	}
 
 	pub fn frame_close(&mut self, frame: Id) -> Result<(), Error> {
