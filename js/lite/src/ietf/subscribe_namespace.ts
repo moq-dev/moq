@@ -30,8 +30,11 @@ export class SubscribeNamespace {
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
+		if (version === Version.DRAFT_17) {
+			await w.u62(0n); // required_request_id_delta = 0
+		}
 		await Namespace.encode(w, this.namespace);
-		if (version === Version.DRAFT_16) {
+		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			await w.u53(this.subscribeOptions);
 		}
 		await w.u53(0); // no parameters
@@ -47,9 +50,12 @@ export class SubscribeNamespace {
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeNamespace> {
 		const requestId = await r.u62();
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // required_request_id_delta
+		}
 		const namespace = await Namespace.decode(r);
 		let subscribeOptions = 1;
-		if (version === Version.DRAFT_16) {
+		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			subscribeOptions = await r.u53();
 		}
 		await Parameters.decode(r, version);

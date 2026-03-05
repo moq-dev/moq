@@ -2,7 +2,7 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import type { IetfVersion } from "./version.ts";
+import { type IetfVersion, Version } from "./version.ts";
 
 export class TrackStatusRequest {
 	static id = 0x0d;
@@ -65,7 +65,12 @@ export class TrackStatus {
 		this.lastObjectId = lastObjectId;
 	}
 
-	async #encode(w: Writer): Promise<void> {
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (version === Version.DRAFT_17) {
+			// d17: TrackStatus is a request message with requiredRequestIdDelta
+			await w.u62(0n); // request_id = 0
+			await w.u62(0n); // required_request_id_delta = 0
+		}
 		await Namespace.encode(w, this.trackNamespace);
 		await w.string(this.trackName);
 		await w.u62(BigInt(this.statusCode));
@@ -73,15 +78,19 @@ export class TrackStatus {
 		await w.u62(this.lastObjectId);
 	}
 
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (mw) => this.#encode(mw, version));
 	}
 
-	static async decode(r: Reader, _version: IetfVersion): Promise<TrackStatus> {
-		return Message.decode(r, TrackStatus.#decode);
+	static async decode(r: Reader, version: IetfVersion): Promise<TrackStatus> {
+		return Message.decode(r, (mr) => TrackStatus.#decode(mr, version));
 	}
 
-	static async #decode(r: Reader): Promise<TrackStatus> {
+	static async #decode(r: Reader, version: IetfVersion): Promise<TrackStatus> {
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // request_id
+			await r.u62(); // required_request_id_delta
+		}
 		const trackNamespace = await Namespace.decode(r);
 		const trackName = await r.string();
 		const statusCode = Number(await r.u62());

@@ -17,8 +17,11 @@ export class PublishNamespace {
 		this.trackNamespace = trackNamespace;
 	}
 
-	async #encode(w: Writer, _version: IetfVersion): Promise<void> {
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
+		if (version === Version.DRAFT_17) {
+			await w.u62(0n); // required_request_id_delta = 0
+		}
 		await Namespace.encode(w, this.trackNamespace);
 		await w.u53(0); // size of parameters
 	}
@@ -33,6 +36,9 @@ export class PublishNamespace {
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespace> {
 		const requestId = await r.u62();
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // required_request_id_delta
+		}
 		const trackNamespace = await Namespace.decode(r);
 		await Parameters.decode(r, version); // ignore parameters
 		return new PublishNamespace({ requestId, trackNamespace });
@@ -105,6 +111,7 @@ export class PublishNamespaceError {
 	}
 }
 
+// Removed in d17
 export class PublishNamespaceCancel {
 	static id = 0x0c;
 
@@ -164,6 +171,7 @@ export class PublishNamespaceCancel {
 
 // In draft-14, UNANNOUNCE is renamed to PUBLISH_NAMESPACE_DONE
 // In draft-16, uses request_id instead of track_namespace
+// Removed in d17
 export class PublishNamespaceDone {
 	static readonly id = 0x09;
 
