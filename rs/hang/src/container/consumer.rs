@@ -100,6 +100,14 @@ impl OrderedConsumer {
 		loop {
 			// Try to promote from pending to current when there's no gap.
 			if self.current.is_none() {
+				// Arm gap timeout if we're waiting on a missing sequence but have later groups queued.
+				if let Some(expected) = self.next_sequence {
+					let gap_exists = self.pending.front().is_some_and(|g| g.info.sequence > expected);
+					if gap_exists && self.pending_timeout.is_none() {
+						self.pending_timeout = Some(Box::pin(tokio::time::sleep(self.max_latency)));
+					}
+				}
+
 				let should_promote = match self.next_sequence {
 					Some(expected) => self.pending.front().is_some_and(|g| g.info.sequence == expected),
 					None => !self.pending.is_empty(), // first group ever
@@ -159,6 +167,11 @@ impl OrderedConsumer {
 							self.pending.insert(index, group);
 						},
 						None => {
+							if let Some(expected) = self.next_sequence && group.info.sequence < expected {
+								  tracing::debug!(old = ?group.info.sequence, expected, "skipping old group");
+								  continue;
+							}
+
 							// Always insert sorted by sequence; promotion happens at loop top.
 							let index = self.pending.partition_point(|g| g.info.sequence < group.info.sequence);
 							self.pending.insert(index, group);
