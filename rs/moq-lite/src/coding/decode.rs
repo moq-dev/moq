@@ -52,6 +52,9 @@ pub enum DecodeError {
 	#[error("unsupported")]
 	Unsupported,
 
+	#[error("trailing bytes")]
+	TrailingBytes,
+
 	#[error("unsupported version")]
 	Version,
 }

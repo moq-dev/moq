@@ -171,7 +171,12 @@ impl Encode<Version> for Parameters {
 
 					match val {
 						ParamRef::Var(v) => v.encode(w, version)?,
-						ParamRef::Bytes(v) => v.encode(w, version)?,
+						ParamRef::Bytes(v) => {
+							if v.len() > MAX_KVP_VALUE_LEN {
+								return Err(EncodeError::BoundsExceeded);
+							}
+							v.encode(w, version)?;
+						}
 					}
 				}
 			}
@@ -184,6 +189,9 @@ impl Encode<Version> for Parameters {
 				}
 
 				for (kind, value) in self.bytes.iter() {
+					if value.len() > MAX_KVP_VALUE_LEN {
+						return Err(EncodeError::BoundsExceeded);
+					}
 					u64::from(*kind).encode(w, version)?;
 					value.encode(w, version)?;
 				}
@@ -313,6 +321,9 @@ impl Param for Location {
 				let mut buf = bytes::Bytes::from(data);
 				let group = u64::decode(&mut buf, Version::Draft15)?;
 				let object = u64::decode(&mut buf, Version::Draft15)?;
+				if buf.has_remaining() {
+					return Err(DecodeError::TrailingBytes);
+				}
 				Ok(Location { group, object })
 			}
 			_ => {
@@ -345,7 +356,11 @@ impl Param for FilterType {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => Version::Draft15,
 			_ => version,
 		};
-		FilterType::decode(&mut buf, sv)
+		let filter = FilterType::decode(&mut buf, sv)?;
+		if buf.has_remaining() {
+			return Err(DecodeError::TrailingBytes);
+		}
+		Ok(filter)
 	}
 }
 

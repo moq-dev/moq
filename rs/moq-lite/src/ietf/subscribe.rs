@@ -96,11 +96,15 @@ impl Message for Subscribe<'_> {
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				decode_params!(r, version,
-					0x10 => _forward: Option<bool>,
+					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter_type: Option<FilterType>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
+
+				if forward == Some(false) {
+					return Err(DecodeError::Unsupported);
+				}
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
