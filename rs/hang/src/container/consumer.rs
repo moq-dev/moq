@@ -104,8 +104,8 @@ impl OrderedConsumer {
 			// NOTE: We loop in ascending order, so earlier groups will win the race.
 			for (i, group) in self.pending.iter_mut().enumerate() {
 				// We call poll_min_timestamp to try to buffer at least one frame per group.
-				// This returns Ready if there is a buffered frame.
-				if group.poll_min_timestamp(waiter).is_pending() {
+				// This returns Ready(Ok) if there is a buffered frame.
+				if !matches!(group.poll_min_timestamp(waiter), Poll::Ready(Ok(_))) {
 					continue;
 				}
 
@@ -147,7 +147,7 @@ impl OrderedConsumer {
 					continue;
 				}
 
-				if let Poll::Ready(Some(ts)) = group.poll_min_timestamp(waiter)? {
+				if let Poll::Ready(Ok(ts)) = group.poll_min_timestamp(waiter) {
 					min_timestamp = min_timestamp.min(ts.into());
 					min_idx = Some(i);
 					break; // We know future groups won't be older than this.
@@ -161,14 +161,14 @@ impl OrderedConsumer {
 					break;
 				}
 
-				if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter)? {
+				if let Poll::Ready(Ok(ts)) = group.poll_max_timestamp(waiter) {
 					max_timestamp = max_timestamp.max(ts.into());
 					break; // We know older groups won't be newer than this.
 				}
 			}
 
 			if let Some(new_idx) = min_idx
-				&& max_timestamp - min_timestamp >= self.max_latency
+				&& max_timestamp.saturating_sub(min_timestamp) >= self.max_latency
 			{
 				self.pending.drain(0..new_idx);
 				let new_current = self.pending.front().map(|g| g.info.sequence).unwrap();
@@ -332,32 +332,30 @@ impl GroupBuffer {
 	}
 
 	/// Poll for the maximum timestamp in this group.
-	pub fn poll_max_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Timestamp>, Error>> {
+	pub fn poll_max_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Timestamp, Error>> {
 		// Keep reading more frames just to advance the max timestamp.
 		let _ = self.buffer_all(waiter)?;
 
 		if let Some(max) = self.max_timestamp {
-			return Poll::Ready(Ok(Some(max)));
+			return Poll::Ready(Ok(max));
 		}
 
 		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			assert_eq!(_frames, 0, "group should have no frames");
-			return Poll::Ready(Ok(None));
+			return Poll::Ready(Err(Error::EmptyGroup));
 		}
 
 		Poll::Pending
 	}
 
-	pub fn poll_min_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Timestamp>, Error>> {
+	pub fn poll_min_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Timestamp, Error>> {
 		let _ = self.buffer_one(waiter)?;
 
 		if let Some(min) = self.min_timestamp {
-			return Poll::Ready(Ok(Some(min)));
+			return Poll::Ready(Ok(min));
 		}
 
 		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			assert_eq!(_frames, 0, "group should have no frames");
-			return Poll::Ready(Ok(None));
+			return Poll::Ready(Err(Error::EmptyGroup));
 		}
 
 		Poll::Pending
