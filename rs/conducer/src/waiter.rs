@@ -14,29 +14,21 @@ pub struct Waiter {
 }
 
 impl Waiter {
+	/// Create a new waiter from an async [`Waker`].
 	pub fn new(waker: Waker) -> Self {
 		Self { waker: Arc::new(waker) }
 	}
 
+	/// Register this waiter with a [`WaiterList`] for future notification.
 	pub fn register(&self, list: &mut WaiterList) {
 		list.register(self);
 	}
-
-	/*
-	/// Create a no-op waiter for synchronous polling (won't register)
-	pub fn noop() -> Self {
-		Self {
-			waker: Arc::new(Waker::noop().clone()),
-		}
-	}
-	*/
 }
 
 /// A list of weak wakers waiting for notification
 ///
 /// Uses a ring buffer that self-cleans dead entries on register.
 pub struct WaiterList {
-	// TODO replace with an inline array, avoiding heap allocations for small collections.
 	entries: VecDeque<Weak<Waker>>,
 }
 
@@ -64,13 +56,14 @@ impl WaiterList {
 		self.entries.push_back(Arc::downgrade(&waiter.waker));
 	}
 
+	/// Drain all entries into a new [`WaiterList`], leaving this one empty.
 	pub fn take(&mut self) -> Self {
 		Self {
 			entries: std::mem::take(&mut self.entries),
 		}
 	}
 
-	// TODO Reuse the list instead of taking ownership.
+	/// Wake all live waiters, consuming the list.
 	pub fn wake(mut self) {
 		for waker in self.entries.drain(..).filter_map(|w| w.upgrade()) {
 			waker.wake_by_ref();
@@ -90,16 +83,21 @@ impl fmt::Debug for WaiterList {
 	}
 }
 
-/// Future wrapper that manages waiter state
-pub struct WaiterFn<F, R> {
+/// Future that drives a poll function, managing waiter lifetime across polls.
+struct WaiterFn<F, R> {
 	poll: F,
 	waiter: Option<Waiter>, // Store the previous waiter to avoid dropping it.
 	_marker: PhantomData<R>,
 }
 
-pub fn waiter_fn<F, R>(poll: F) -> WaiterFn<F, R>
+/// Create a [`Future`] from a poll function that receives a [`Waiter`].
+///
+/// The waiter is kept alive between polls so its registration in a
+/// [`WaiterList`] remains valid until the next poll replaces it.
+pub fn wait<F, R>(poll: F) -> impl Future<Output = R>
 where
 	F: FnMut(&Waiter) -> Poll<R> + Unpin,
+	R: Unpin,
 {
 	WaiterFn {
 		poll,

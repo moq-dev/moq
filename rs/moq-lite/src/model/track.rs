@@ -14,8 +14,6 @@
 
 use crate::{Error, Result};
 
-use super::state::{Consumer, Producer, Weak};
-use super::waiter::waiter_fn;
 use super::{Group, GroupConsumer, GroupProducer};
 
 use std::{
@@ -57,6 +55,7 @@ struct State {
 	offset: usize,
 	max_sequence: Option<u64>,
 	final_sequence: Option<u64>,
+	abort: Option<Error>,
 }
 
 impl State {
@@ -130,17 +129,21 @@ impl State {
 	}
 }
 
+fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>> {
+	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+}
+
 /// A producer for a track, used to create new groups.
 pub struct TrackProducer {
 	pub info: Track,
-	state: Producer<State>,
+	state: conducer::Producer<State>,
 }
 
 impl TrackProducer {
 	pub fn new(info: Track) -> Self {
 		Self {
 			info,
-			state: Producer::default(),
+			state: conducer::Producer::default(),
 		}
 	}
 
@@ -148,7 +151,7 @@ impl TrackProducer {
 	pub fn create_group(&mut self, info: Group) -> Result<GroupProducer> {
 		let group = info.produce();
 
-		let mut state = self.state.modify()?;
+		let mut state = modify(&self.state)?;
 		if let Some(fin) = state.final_sequence
 			&& group.info.sequence >= fin
 		{
@@ -169,7 +172,7 @@ impl TrackProducer {
 
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&mut self) -> Result<GroupProducer> {
-		let mut state = self.state.modify()?;
+		let mut state = modify(&self.state)?;
 		let sequence = match state.max_sequence {
 			Some(s) => s.checked_add(1).ok_or(Error::BoundsExceeded)?,
 			None => 0,
@@ -205,7 +208,7 @@ impl TrackProducer {
 	/// No new groups at or above this sequence can be appended.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish(&mut self) -> Result<()> {
-		let mut state = self.state.modify()?;
+		let mut state = modify(&self.state)?;
 		if state.final_sequence.is_some() {
 			return Err(Error::Closed);
 		}
@@ -232,7 +235,7 @@ impl TrackProducer {
 	/// No new groups at or above that sequence can be created.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish_at(&mut self, sequence: u64) -> Result<()> {
-		let mut state = self.state.modify()?;
+		let mut state = modify(&self.state)?;
 		let max = state.max_sequence.ok_or(Error::Closed)?;
 		if state.final_sequence.is_some() || sequence != max {
 			return Err(Error::Closed);
@@ -243,21 +246,22 @@ impl TrackProducer {
 
 	/// Abort the track with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut state = self.state.modify()?;
+		let mut guard = modify(&self.state)?;
 
 		// Abort all groups still in progress.
-		for (group, _) in state.groups.iter_mut().flatten() {
+		for (group, _) in guard.groups.iter_mut().flatten() {
 			// Ignore errors, we don't care if the group was already closed.
 			group.abort(err.clone()).ok();
 		}
 
-		state.abort(err);
+		guard.abort = Some(err);
+		guard.close();
 		Ok(())
 	}
 
 	/// Create a new consumer for the track, starting at the latest group.
 	pub fn consume(&self) -> TrackConsumer {
-		let state = self.state.borrow();
+		let state = self.state.read();
 		let index = state.offset + state.groups.len().saturating_sub(1);
 
 		TrackConsumer {
@@ -269,17 +273,20 @@ impl TrackProducer {
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state.unused().await
+		self.state
+			.unused()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
 	/// Return true if the track has been closed.
 	pub fn is_closed(&self) -> bool {
-		self.state.borrow().is_closed()
+		self.state.read().is_closed()
 	}
 
 	/// Return true if this is the same track.
 	pub fn is_clone(&self, other: &Self) -> bool {
-		self.state.is_clone(&other.state)
+		self.state.same_channel(&other.state)
 	}
 
 	/// Create a weak reference that doesn't prevent auto-close.
@@ -310,21 +317,20 @@ impl From<Track> for TrackProducer {
 #[derive(Clone)]
 pub(crate) struct TrackWeak {
 	pub info: Track,
-	state: Weak<State>,
+	state: conducer::Weak<State>,
 }
 
 impl TrackWeak {
 	pub fn abort(&self, err: Error) {
-		// Upgrade to a temporary Producer so we can modify the state.
-		let Ok(producer) = self.state.produce() else { return };
-		let Ok(mut state) = producer.modify() else { return };
+		let Ok(mut guard) = self.state.write() else { return };
 
 		// Cascade abort to all groups.
-		for (group, _) in state.groups.iter_mut().flatten() {
+		for (group, _) in guard.groups.iter_mut().flatten() {
 			group.abort(err.clone()).ok();
 		}
 
-		state.abort(err);
+		guard.abort = Some(err);
+		guard.close();
 	}
 
 	pub fn is_closed(&self) -> bool {
@@ -332,7 +338,7 @@ impl TrackWeak {
 	}
 
 	pub fn consume(&self) -> TrackConsumer {
-		let state = self.state.borrow();
+		let state = self.state.read();
 		let index = state.offset + state.groups.len().saturating_sub(1);
 
 		TrackConsumer {
@@ -343,11 +349,14 @@ impl TrackWeak {
 	}
 
 	pub async fn unused(&self) -> crate::Result<()> {
-		self.state.unused().await
+		self.state
+			.unused()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {
-		self.state.is_clone(&other.state)
+		self.state.same_channel(&other.state)
 	}
 }
 
@@ -355,7 +364,7 @@ impl TrackWeak {
 #[derive(Clone)]
 pub struct TrackConsumer {
 	pub info: Track,
-	state: Consumer<State>,
+	state: conducer::Consumer<State>,
 	index: usize,
 }
 
@@ -365,7 +374,11 @@ impl TrackConsumer {
 	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
 		let index = self.index;
-		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_next_group(index))).await?;
+		let res = self
+			.state
+			.wait(|state| state.poll_next_group(index))
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		let consumer = res.map(|(producer, found_index)| {
 			self.index = found_index + 1;
 			producer.consume()
@@ -377,21 +390,26 @@ impl TrackConsumer {
 	///
 	/// Returns None if the group is not in the cache and a newer group exists.
 	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
-		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_get_group(sequence))).await?;
+		let res = self
+			.state
+			.wait(|state| state.poll_get_group(sequence))
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		Ok(res.map(|producer| producer.consume()))
 	}
 
 	/// Block until the track is closed.
 	pub async fn closed(&self) -> Result<()> {
-		let err = self.state.closed().await;
-		match err {
-			Error::Closed | Error::Dropped => Ok(()),
-			err => Err(err),
+		self.state.closed().await;
+		match self.state.read().abort.clone() {
+			// Error::Closed represents a normal producer-initiated shutdown, not an error.
+			None | Some(Error::Closed) => Ok(()),
+			Some(err) => Err(err),
 		}
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {
-		self.state.is_clone(&other.state)
+		self.state.same_channel(&other.state)
 	}
 }
 
@@ -466,7 +484,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 2
 
 		{
-			let state = producer.state.borrow();
+			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 3);
 			assert_eq!(state.offset, 0);
 		}
@@ -480,7 +498,7 @@ mod test {
 		// Groups 0, 1, 2 are expired but seq 3 (max_sequence) is kept.
 		// Leading tombstones are trimmed, so only seq 3 remains.
 		{
-			let state = producer.state.borrow();
+			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 1);
 			assert_eq!(first_live_sequence(&state), 3);
 			assert_eq!(state.offset, 3);
@@ -505,7 +523,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 1
 
 		{
-			let state = producer.state.borrow();
+			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 1);
 			assert_eq!(first_live_sequence(&state), 1);
 			assert_eq!(state.offset, 1);
@@ -522,7 +540,7 @@ mod test {
 		producer.append_group().unwrap(); // seq 2
 
 		{
-			let state = producer.state.borrow();
+			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 3);
 			assert_eq!(state.offset, 0);
 		}
@@ -558,7 +576,7 @@ mod test {
 
 		// max_sequence = 5, which is at the front of the VecDeque.
 		{
-			let state = producer.state.borrow();
+			let state = producer.state.read();
 			assert_eq!(state.max_sequence, Some(5));
 		}
 
@@ -571,7 +589,7 @@ mod test {
 		// Seq 3, 4, 5 are all expired. Seq 5 was the old max_sequence but now 6 is.
 		// All old groups are evicted.
 		{
-			let state = producer.state.borrow();
+			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 1);
 			assert_eq!(first_live_sequence(&state), 6);
 			assert!(!state.duplicates.contains(&3));
@@ -598,7 +616,7 @@ mod test {
 		// Seq 5 is max_sequence (protected). Seq 3 is not expired (just created).
 		// Nothing should be evicted.
 		{
-			let state = producer.state.borrow();
+			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 2);
 			assert_eq!(state.offset, 0);
 		}
@@ -614,7 +632,7 @@ mod test {
 		// Seq 2 is fresh → kept.
 		// VecDeque: [Some(5), None, Some(2)]. Leading entry is Some, so offset stays.
 		{
-			let state = producer.state.borrow();
+			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 2);
 			assert_eq!(state.offset, 0);
 			assert!(state.duplicates.contains(&5));
@@ -659,7 +677,7 @@ mod test {
 		assert!(producer.finish_at(5).is_ok());
 
 		{
-			let state = producer.state.borrow();
+			let state = producer.state.read();
 			assert_eq!(state.final_sequence, Some(6));
 		}
 
@@ -716,7 +734,7 @@ mod test {
 	fn append_group_returns_bounds_exceeded_on_sequence_overflow() {
 		let mut producer = Track::new("test").produce();
 		{
-			let mut state = producer.state.modify().unwrap();
+			let mut state = producer.state.write().ok().unwrap();
 			state.max_sequence = Some(u64::MAX);
 		}
 

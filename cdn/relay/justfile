@@ -58,7 +58,7 @@ deploy node:
 	rsync -az --exclude='.gitignore' ../common/gen/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
-	ssh root@$HOST "cd /var/lib/moq && nix build .#moq-relay -o relay && nix build .#certbot -o cert && nix build .#jq -o jq"
+	ssh root@$HOST "cd /var/lib/moq && nix build -o pkg"
 
 	echo "  Enabling and starting services..."
 	ssh root@$HOST "\
@@ -98,9 +98,8 @@ perf node *args:
 	set -euo pipefail
 	HOST=$(just host {{node}})
 	echo "Building perf on $HOST..."
-	ssh root@$HOST "cd /var/lib/moq && nix build .#perf -o perf"
 	echo "Recording on $HOST... (Ctrl+C to stop)"
-	ssh -t root@$HOST "/var/lib/moq/perf/bin/perf record -g -p \$(pidof moq-relay) {{args}}"
+	ssh -t root@$HOST "/var/lib/moq/pkg/bin/perf record -g -p \$(pidof moq-relay) {{args}}"
 	echo "Copying perf.data..."
 	scp root@$HOST:~/perf.data .
 	echo "Run 'perf report -i perf.data' to analyze."

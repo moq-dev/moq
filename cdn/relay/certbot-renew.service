@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 # Renew certificates if they're close to expiration
-ExecStart=/var/lib/moq/cert/bin/certbot renew
+ExecStart=/var/lib/moq/pkg/bin/certbot renew
 
 StandardOutput=journal
 StandardError=journal

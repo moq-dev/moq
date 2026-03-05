@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin};
 
-use crate::Error;
+use crate::{Error, Version};
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
@@ -9,15 +9,22 @@ use crate::Error;
 /// - [`crate::Server::accept`] for servers.
 pub struct Session {
 	session: Box<dyn SessionInner>,
+	version: Version,
 	closed: bool,
 }
 
 impl Session {
-	pub(super) fn new<S: web_transport_trait::Session>(session: S) -> Self {
+	pub(super) fn new<S: web_transport_trait::Session>(session: S, version: Version) -> Self {
 		Self {
 			session: Box::new(session),
+			version,
 			closed: false,
 		}
+	}
+
+	/// Returns the negotiated protocol version.
+	pub fn version(&self) -> Version {
+		self.version
 	}
 
 	/// Close the underlying transport session.

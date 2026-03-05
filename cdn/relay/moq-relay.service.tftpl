@@ -11,7 +11,7 @@ WorkingDirectory=/var/lib/moq
 Environment="RUST_LOG=info"
 Environment="RUST_BACKTRACE=1"
 
-ExecStart=/var/lib/moq/relay/bin/moq-relay \
+ExecStart=/var/lib/moq/pkg/bin/moq-relay \
   --listen [::]:443 \
   --tls-cert /etc/letsencrypt/live/${domain}/fullchain.pem \
   --tls-key /etc/letsencrypt/live/${domain}/privkey.pem \

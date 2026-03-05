@@ -4,9 +4,6 @@ use bytes::{Bytes, BytesMut};
 
 use crate::{Error, Result};
 
-use super::state::{Consumer, Producer};
-use super::waiter::waiter_fn;
-
 /// A chunk of data with an upfront size.
 ///
 /// Note that this is just the header.
@@ -55,6 +52,9 @@ struct FrameState {
 
 	// The number of bytes remaining to be written.
 	remaining: u64,
+
+	// The error that caused the frame to be aborted, if any.
+	abort: Option<Error>,
 }
 
 impl FrameState {
@@ -104,6 +104,10 @@ impl FrameState {
 	}
 }
 
+fn modify(state: &conducer::Producer<FrameState>) -> Result<conducer::Mut<'_, FrameState>> {
+	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+}
+
 /// Writes a frame's payload in one or more chunks.
 ///
 /// The total bytes written must exactly match [Frame::size].
@@ -113,7 +117,7 @@ pub struct FrameProducer {
 	pub info: Frame,
 
 	// Mutable stream state.
-	state: Producer<FrameState>,
+	state: conducer::Producer<FrameState>,
 }
 
 impl FrameProducer {
@@ -122,10 +126,11 @@ impl FrameProducer {
 		let state = FrameState {
 			chunks: Vec::new(),
 			remaining: info.size,
+			abort: None,
 		};
 		Self {
 			info,
-			state: Producer::new(state),
+			state: conducer::Producer::new(state),
 		}
 	}
 
@@ -134,7 +139,7 @@ impl FrameProducer {
 	/// Returns [Error::WrongSize] if the total bytes written would exceed [Frame::size].
 	pub fn write<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
 		let chunk = chunk.into();
-		let mut state = self.state.modify()?;
+		let mut state = modify(&self.state)?;
 		state.write_chunk(chunk)
 	}
 
@@ -150,7 +155,7 @@ impl FrameProducer {
 	///
 	/// Returns [Error::WrongSize] if the bytes written don't match [Frame::size].
 	pub fn finish(&mut self) -> Result<()> {
-		let state = self.state.modify()?;
+		let state = modify(&self.state)?;
 		if state.remaining != 0 {
 			return Err(Error::WrongSize);
 		}
@@ -159,7 +164,10 @@ impl FrameProducer {
 
 	/// Abort the frame with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		self.state.abort(err)
+		let mut guard = modify(&self.state)?;
+		guard.abort = Some(err);
+		guard.close();
+		Ok(())
 	}
 
 	/// Create a new consumer for the frame.
@@ -173,7 +181,10 @@ impl FrameProducer {
 
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state.unused().await
+		self.state
+			.unused()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 }
 
@@ -199,7 +210,7 @@ pub struct FrameConsumer {
 	pub info: Frame,
 
 	// Shared state with the producer.
-	state: Consumer<FrameState>,
+	state: conducer::Consumer<FrameState>,
 
 	// The number of chunks we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
@@ -210,7 +221,11 @@ impl FrameConsumer {
 	/// Return the next chunk.
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
 		let index = self.index;
-		let res = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_read_chunk(index))).await?;
+		let res = self
+			.state
+			.wait(|state| state.poll_read_chunk(index))
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		if res.is_some() {
 			self.index += 1;
 		}
@@ -221,7 +236,11 @@ impl FrameConsumer {
 	/// Cancel-safe: returns all or nothing.
 	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>> {
 		let index = self.index;
-		let chunks = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_read_chunks(index))).await?;
+		let chunks = self
+			.state
+			.wait(|state| state.poll_read_chunks(index))
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		self.index += chunks.len();
 		Ok(chunks)
 	}
@@ -230,7 +249,11 @@ impl FrameConsumer {
 	/// Cancel-safe: returns all or nothing.
 	pub async fn read_all(&mut self) -> Result<Bytes> {
 		let index = self.index;
-		let data = waiter_fn(|waiter| self.state.poll(waiter, |state| state.poll_read_all(index))).await?;
+		let data = self
+			.state
+			.wait(|state| state.poll_read_all(index))
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
 		self.index = usize::MAX; // consumed everything
 		Ok(data)
 	}

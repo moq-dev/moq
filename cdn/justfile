@@ -5,6 +5,11 @@ mod pub
 default:
   just --list
 
+deploy:
+	tofu apply
+	just relay::deploy-all
+	just pub::deploy
+
 # Pin relay and pub to their latest release tags
 pin:
 	just relay::pin
@@ -12,8 +17,8 @@ pin:
 
 # Update all flake inputs to latest
 update:
-	nix flake update --flake relay
-	nix flake update --flake pub
+	just relay::update
+	just pub::update
 
 # Run health checks against all relay nodes
 health:
