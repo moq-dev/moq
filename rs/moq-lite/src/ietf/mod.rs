@@ -6,6 +6,8 @@
 
 #[macro_use]
 mod parameters;
+#[allow(dead_code)]
+mod adapter;
 mod control;
 mod fetch;
 mod goaway;
