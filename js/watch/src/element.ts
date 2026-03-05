@@ -185,6 +185,30 @@ export default class MoqWatch extends HTMLElement {
 		this.backend.paused.set(value);
 	}
 
+	get volume(): number {
+		return this.backend.audio.volume.peek();
+	}
+
+	set volume(value: number) {
+		this.backend.audio.volume.set(value);
+	}
+
+	get muted(): boolean {
+		return this.backend.audio.muted.peek();
+	}
+
+	set muted(value: boolean) {
+		this.backend.audio.muted.set(value);
+	}
+
+	get reload(): boolean {
+		return this.broadcast.reload.peek();
+	}
+
+	set reload(value: boolean) {
+		this.broadcast.reload.set(value);
+	}
+
 	get jitter(): Time.Milli {
 		return this.backend.jitter.peek();
 	}

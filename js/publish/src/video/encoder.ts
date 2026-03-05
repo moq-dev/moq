@@ -157,8 +157,10 @@ export class Encoder {
 		const bitrateScale = user.bitrateScale ?? 0.07;
 
 		effect.spawn(async () => {
-			const codec = await this.#bestCodec(effect);
-			if (!codec) return;
+			const detectedCodec = await this.#bestCodec(effect);
+			if (!detectedCodec) return;
+
+			const { codec, hardwareAcceleration } = detectedCodec;
 
 			// TARGET BITRATE CALCULATION (h264)
 			// 480p@30 = 1.0mbps
@@ -211,7 +213,7 @@ export class Encoder {
 				// @ts-expect-error Typescript needs to be updated.
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 				latencyMode: "realtime",
-				hardwareAcceleration: "prefer-hardware",
+				hardwareAcceleration,
 			};
 
 			effect.set(this.#config, config);
@@ -236,7 +238,13 @@ export class Encoder {
 	}
 
 	// Try to determine the best config for the given settings.
-	async #bestCodec(effect: Effect): Promise<string | undefined> {
+	async #bestCodec(effect: Effect): Promise<
+		| {
+				codec: string;
+				hardwareAcceleration: HardwareAcceleration;
+		  }
+		| undefined
+	> {
 		const config = effect.get(this.config);
 		const required = config?.codec ?? "";
 
@@ -306,19 +314,21 @@ export class Encoder {
 			for (const codec of HARDWARE_CODECS) {
 				if (!codec.startsWith(required)) continue;
 
+				const hardwareAcceleration: HardwareAcceleration = "prefer-hardware";
+
 				const hardware: VideoEncoderConfig = {
 					codec,
 					width: dimensions.width,
 					height: dimensions.height,
 					latencyMode: "realtime",
-					hardwareAcceleration: "prefer-hardware",
+					hardwareAcceleration,
 					avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
 					// @ts-expect-error Typescript needs to be updated.
 					hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 				};
 
 				const { supported } = await VideoEncoder.isConfigSupported(hardware);
-				if (supported) return codec;
+				if (supported) return { codec, hardwareAcceleration };
 			}
 		}
 
@@ -326,19 +336,21 @@ export class Encoder {
 		for (const codec of SOFTWARE_CODECS) {
 			if (!codec.startsWith(required)) continue;
 
+			const hardwareAcceleration: HardwareAcceleration = "prefer-software";
+
 			const software: VideoEncoderConfig = {
 				codec,
 				width: dimensions.width,
 				height: dimensions.height,
 				latencyMode: "realtime",
-				hardwareAcceleration: "prefer-software",
+				hardwareAcceleration,
 				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
 				// @ts-expect-error Typescript needs to be updated.
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 			};
 
 			const { supported } = await VideoEncoder.isConfigSupported(software);
-			if (supported) return codec;
+			if (supported) return { codec, hardwareAcceleration };
 		}
 
 		throw new Error("no supported codec");
