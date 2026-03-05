@@ -114,8 +114,10 @@ impl FrameState {
 			Poll::Pending
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
-		} else {
+		} else if index < self.chunks.len() {
 			Poll::Ready(Ok(&self.chunks[index..]))
+		} else {
+			Poll::Ready(Ok(&[]))
 		}
 	}
 }

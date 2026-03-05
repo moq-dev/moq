@@ -147,8 +147,8 @@ impl OrderedConsumer {
 					continue;
 				}
 
-				if let Poll::Ready(ts) = group.poll_min_timestamp(waiter) {
-					min_timestamp = min_timestamp.min(ts?.into());
+				if let Poll::Ready(Some(ts)) = group.poll_min_timestamp(waiter)? {
+					min_timestamp = min_timestamp.min(ts.into());
 					min_idx = Some(i);
 					break; // We know future groups won't be older than this.
 				}
@@ -161,8 +161,8 @@ impl OrderedConsumer {
 					break;
 				}
 
-				if let Poll::Ready(ts) = group.poll_max_timestamp(waiter) {
-					max_timestamp = max_timestamp.max(ts?.into());
+				if let Poll::Ready(Some(ts)) = group.poll_max_timestamp(waiter)? {
+					max_timestamp = max_timestamp.max(ts.into());
 					break; // We know older groups won't be newer than this.
 				}
 			}
@@ -333,24 +333,35 @@ impl GroupBuffer {
 	}
 
 	/// Poll for the maximum timestamp in this group.
-	pub fn poll_max_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Timestamp, Error>> {
+	pub fn poll_max_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Timestamp>, Error>> {
 		// Keep reading more frames just to advance the max timestamp.
 		let _ = self.buffer_all(waiter)?;
 
-		match self.max_timestamp {
-			Some(max) => Poll::Ready(Ok(max)),
-			// TODO Technically, we should return None if the group is errored/finished.
-			None => Poll::Pending,
+		if let Some(max) = self.max_timestamp {
+			return Poll::Ready(Ok(Some(max)));
 		}
+
+		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
+			assert_eq!(_frames, 0, "group should have no frames");
+			return Poll::Ready(Ok(None));
+		}
+
+		Poll::Pending
 	}
 
-	pub fn poll_min_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Timestamp, Error>> {
+	pub fn poll_min_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Timestamp>, Error>> {
 		let _ = self.buffer_one(waiter)?;
 
-		match self.min_timestamp {
-			Some(min) => Poll::Ready(Ok(min)),
-			None => Poll::Pending,
+		if let Some(min) = self.min_timestamp {
+			return Poll::Ready(Ok(Some(min)));
 		}
+
+		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
+			assert_eq!(_frames, 0, "group should have no frames");
+			return Poll::Ready(Ok(None));
+		}
+
+		Poll::Pending
 	}
 }
 

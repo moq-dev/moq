@@ -85,6 +85,16 @@ impl GroupState {
 			Poll::Pending
 		}
 	}
+
+	fn poll_finished(&self) -> Poll<Result<u64>> {
+		if self.fin {
+			Poll::Ready(Ok(self.frames.len() as u64))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
 }
 
 fn modify(state: &conducer::Producer<GroupState>) -> Result<conducer::Mut<'_, GroupState>> {
@@ -298,6 +308,16 @@ impl GroupConsumer {
 	/// Read all of the chunks of the next frame.
 	pub async fn read_frame_chunks(&mut self) -> Result<Option<Vec<Bytes>>> {
 		conducer::wait(|waiter| self.poll_read_frame_chunks(waiter)).await
+	}
+
+	/// Poll for the final number of frames in the group.
+	pub fn poll_finished(&mut self, waiter: &conducer::Waiter) -> Poll<Result<u64>> {
+		self.poll(waiter, |state| state.poll_finished())
+	}
+
+	/// Block until the group is finished, returning the number of frames in the group.
+	pub async fn finished(&mut self) -> Result<u64> {
+		conducer::wait(|waiter| self.poll_finished(waiter)).await
 	}
 }
 
