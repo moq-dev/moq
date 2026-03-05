@@ -23,20 +23,20 @@ There's also a [CMakeLists.txt](CMakeLists.txt) file that can be used to import/
 The `uniffi-api` feature enables the UniFFI surface instead of the C API. First build the library:
 
 ```bash
-cargo build --release --features uniffi-api
+cargo build --release --no-default-features --features uniffi-api
 ```
 
 Then generate the language bindings:
 
 ```bash
-cargo run --features uniffi-api \
+cargo run --no-default-features --features uniffi-api \
   --bin uniffi-bindgen \
   generate \
   --library ../../target/release/libmoq.dylib \
   --language kotlin \
   --out-dir out/
 
-cargo run --features uniffi-api \
+cargo run --no-default-features --features uniffi-api \
   --bin uniffi-bindgen \
   generate \
   --library ../../target/release/libmoq.a \

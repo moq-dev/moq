@@ -43,6 +43,8 @@ impl Origin {
 				res = Self::run_announced(consumer, &mut on_announce) => on_announce.call(res),
 				_ = channel.1 => (),
 			};
+
+			State::lock().origin.announced_task.remove(id);
 		});
 
 		let id = self.announced_task.insert(channel.0);
