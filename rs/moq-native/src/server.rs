@@ -422,6 +422,18 @@ impl Request {
 		}
 	}
 
+	/// Returns the transport type as a string (e.g. "quic", "iroh").
+	pub fn transport(&self) -> &'static str {
+		match self.kind {
+			#[cfg(feature = "quinn")]
+			RequestKind::Quinn(_) => "quic",
+			#[cfg(feature = "quiche")]
+			RequestKind::Quiche(_) => "quic",
+			#[cfg(feature = "iroh")]
+			RequestKind::Iroh(_) => "iroh",
+		}
+	}
+
 	/// Returns the URL provided by the client.
 	pub fn url(&self) -> Option<&Url> {
 		#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]

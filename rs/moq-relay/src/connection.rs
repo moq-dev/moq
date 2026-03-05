@@ -31,16 +31,17 @@ impl Connection {
 		let publish = self.cluster.publisher(&token);
 		let subscribe = self.cluster.subscriber(&token);
 		let registration = self.cluster.register(&token);
+		let transport = self.request.transport();
 
 		match (&publish, &subscribe) {
 			(Some(publish), Some(subscribe)) => {
-				tracing::info!(root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
+				tracing::info!(transport, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
 			}
 			(Some(publish), None) => {
-				tracing::info!(root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
+				tracing::info!(transport, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
 			}
 			(None, Some(subscribe)) => {
-				tracing::info!(root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
+				tracing::info!(transport, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
 			}
 			_ => anyhow::bail!("invalid session; no allowed paths"),
 		}
@@ -57,6 +58,8 @@ impl Connection {
 			// .with_stats(stats)
 			.ok()
 			.await?;
+
+		tracing::info!(version = %session.version(), transport, "negotiated");
 
 		// Wait until the session is closed.
 		// Keep registration alive so the cluster node stays announced.

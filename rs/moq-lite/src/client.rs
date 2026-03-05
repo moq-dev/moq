@@ -77,9 +77,7 @@ impl Client {
 					lite::Version::Lite03,
 				)?;
 
-				tracing::debug!(version = ?Version::Lite(lite::Version::Lite03), "connected");
-
-				return Ok(Session::new(session));
+				return Ok(Session::new(session, lite::Version::Lite03.into()));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -149,9 +147,7 @@ impl Client {
 			}
 		}
 
-		tracing::debug!(version = ?server.version, "connected");
-
-		Ok(Session::new(session))
+		Ok(Session::new(session, version))
 	}
 }
 
