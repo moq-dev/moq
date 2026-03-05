@@ -6,7 +6,7 @@
 
 #[macro_use]
 mod parameters;
-mod control;
+mod adapter;
 mod fetch;
 mod goaway;
 mod group;
@@ -24,7 +24,6 @@ mod subscriber;
 mod track;
 mod version;
 
-use control::*;
 pub use fetch::*;
 pub use goaway::*;
 pub use group::*;
