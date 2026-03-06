@@ -15,6 +15,10 @@ categories = ["multimedia", "network-programming", "web-programming"]
 name = "moq_ffi"
 crate-type = ["staticlib", "cdylib"]
 
+[[bin]]
+name = "uniffi-bindgen"
+path = "./uniffi-bindgen.rs"
+
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = "1"
@@ -26,12 +30,8 @@ slab = "0.4"
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }
 tracing = "0.1"
-uniffi = { version = "0.31", features = [ "cli" ] }
+uniffi = { version = "0.31", features = ["cli"] }
 url = "2"
 
 [build-dependencies]
-uniffi = { version = "0.31", features = [ "build" ] }
-
-[[bin]]
-name = "uniffi-bindgen"
-path = "./uniffi-bindgen.rs"
+uniffi = { version = "0.31", features = ["build"] }
