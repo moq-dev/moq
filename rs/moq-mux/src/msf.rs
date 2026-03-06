@@ -12,15 +12,16 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 	for (name, config) in &catalog.video.renditions {
 		let packaging = match &config.container {
 			hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
-			// TODO: For CMAF packaging, build proper CMAF init segments (ftyp+moov).
-			// See draft-ietf-moq-cmsf-00 for the required structure.
 			_ => moq_msf::Packaging::Legacy,
 		};
 
-		let init_data = config
-			.description
-			.as_ref()
-			.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref()));
+		let init_data = match &config.container {
+			hang::catalog::Container::Cmaf { init_data } => Some(init_data.clone()),
+			_ => config
+				.description
+				.as_ref()
+				.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref())),
+		};
 
 		tracks.push(moq_msf::Track {
 			name: name.clone(),
@@ -47,10 +48,13 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 			_ => moq_msf::Packaging::Legacy,
 		};
 
-		let init_data = config
-			.description
-			.as_ref()
-			.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref()));
+		let init_data = match &config.container {
+			hang::catalog::Container::Cmaf { init_data } => Some(init_data.clone()),
+			_ => config
+				.description
+				.as_ref()
+				.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref())),
+		};
 
 		tracks.push(moq_msf::Track {
 			name: name.clone(),
@@ -242,8 +246,7 @@ mod test {
 				framerate: None,
 				optimize_for_latency: None,
 				container: Container::Cmaf {
-					timescale: 90000,
-					track_id: 1,
+					init_data: "AAAYZ2Z0eXA=".to_string(),
 				},
 				jitter: None,
 			},
@@ -262,5 +265,6 @@ mod test {
 		let msf = to_msf(&catalog);
 		let video = &msf.tracks[0];
 		assert_eq!(video.packaging, moq_msf::Packaging::Cmaf);
+		assert_eq!(video.init_data, Some("AAAYZ2Z0eXA=".to_string()));
 	}
 }

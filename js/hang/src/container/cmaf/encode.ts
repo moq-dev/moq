@@ -232,17 +232,14 @@ function createAvc1Box(width: number, height: number, avcC: Uint8Array): Uint8Ar
  * ```
  */
 export function createVideoInitSegment(config: Catalog.VideoConfig): Uint8Array {
-	const { codedWidth, codedHeight, description, container } = config;
+	const { codedWidth, codedHeight, description } = config;
 	if (!codedWidth || !codedHeight || !description) {
-		// TODO: We could
 		throw new Error("Missing required fields to create video init segment");
 	}
 
-	// Use timescale from CMAF container, or microseconds for legacy
-	const timescale = container.kind === "cmaf" ? container.timescale : 1_000_000;
-
-	// Use track_id from CMAF container, or default to 1 for legacy
-	const trackId = container.kind === "cmaf" ? container.trackId : 1;
+	// Legacy container always uses microsecond timescale and track ID 1
+	const timescale = 1_000_000;
+	const trackId = 1;
 
 	// ftyp - File Type Box
 	const ftyp: FileTypeBox = {
@@ -442,13 +439,11 @@ export function createVideoInitSegment(config: Catalog.VideoConfig): Uint8Array 
  * Supports AAC (mp4a) and Opus codecs.
  */
 export function createAudioInitSegment(config: Catalog.AudioConfig): Uint8Array {
-	const { sampleRate, numberOfChannels, description, codec, container } = config;
+	const { sampleRate, numberOfChannels, description, codec } = config;
 
-	// Use timescale from CMAF container, or microseconds for legacy
-	const timescale = container.kind === "cmaf" ? container.timescale : 1_000_000;
-
-	// Use track_id from CMAF container, or default to 1 for legacy
-	const trackId = container.kind === "cmaf" ? container.trackId : 1;
+	// Legacy container always uses microsecond timescale and track ID 1
+	const timescale = 1_000_000;
+	const trackId = 1;
 
 	// ftyp - File Type Box
 	const ftyp: FileTypeBox = {
