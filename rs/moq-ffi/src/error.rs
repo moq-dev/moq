@@ -2,16 +2,7 @@ use std::sync::Arc;
 
 use crate::ffi;
 
-/// Status code returned by FFI functions.
-///
-/// Negative values indicate errors, zero indicates success,
-/// and positive values are valid resource handles.
-pub type Status = i32;
-
 /// Error types that can occur in the FFI layer.
-///
-/// Each error variant maps to a specific negative error code
-/// returned to C callers.
 #[derive(Debug, thiserror::Error, Clone)]
 #[non_exhaustive]
 pub enum Error {
@@ -34,10 +25,6 @@ pub enum Error {
 	/// Connection establishment error.
 	#[error("connect error: {0}")]
 	Connect(Arc<anyhow::Error>),
-
-	/// Null or invalid pointer passed from C.
-	#[error("invalid pointer")]
-	InvalidPointer,
 
 	/// Invalid resource ID.
 	#[error("invalid id")]
@@ -103,10 +90,6 @@ pub enum Error {
 	#[error("invalid code")]
 	InvalidCode,
 
-	/// Panic occurred in Rust code.
-	#[error("panic")]
-	Panic,
-
 	/// Session is offline.
 	#[error("offline")]
 	Offline,
@@ -118,10 +101,6 @@ pub enum Error {
 	/// Index out of bounds.
 	#[error("no index")]
 	NoIndex,
-
-	/// Null byte found in C string.
-	#[error("nul error")]
-	NulError(#[from] std::ffi::NulError),
 }
 
 impl From<tracing::metadata::ParseLevelError> for Error {
@@ -139,7 +118,6 @@ impl ffi::ReturnCode for Error {
 			Error::Url(_) => -3,
 			Error::Utf8(_) => -4,
 			Error::Connect(_) => -5,
-			Error::InvalidPointer => -6,
 			Error::InvalidId => -7,
 			Error::NotFound => -8,
 			Error::UnknownFormat(_) => -9,
@@ -148,11 +126,9 @@ impl ffi::ReturnCode for Error {
 			Error::TimestampOverflow(_) => -13,
 			Error::Level(_) => -14,
 			Error::InvalidCode => -15,
-			Error::Panic => -16,
 			Error::Offline => -17,
 			Error::Hang(_) => -18,
 			Error::NoIndex => -19,
-			Error::NulError(_) => -20,
 			Error::SessionNotFound => -21,
 			Error::OriginNotFound => -22,
 			Error::AnnouncementNotFound => -23,

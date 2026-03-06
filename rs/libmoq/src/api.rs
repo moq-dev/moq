@@ -380,7 +380,7 @@ pub unsafe extern "C" fn moq_consume_catalog(
 	})
 }
 
-/// Close a catalog consumer and clean up its resources.
+/// Close a catalog consumer and cancel its background task.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -388,6 +388,17 @@ pub extern "C" fn moq_consume_catalog_close(catalog: u32) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		State::lock().consume.catalog_close(catalog)
+	})
+}
+
+/// Close a catalog snapshot received via the [moq_consume_catalog] callback.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_catalog_snapshot_close(catalog: u32) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		State::lock().consume.catalog_snapshot_close(catalog)
 	})
 }
 

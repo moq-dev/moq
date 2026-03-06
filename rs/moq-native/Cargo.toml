@@ -38,11 +38,7 @@ humantime-serde = "1.1"
 
 moq-lite = { workspace = true, features = ["serde"] }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
-quinn = { version = "0.11", default-features = false, features = [
-	"platform-verifier",
-	"runtime-tokio",
-	"bloom",
-], optional = true }
+quinn = { version = "0.11", default-features = false, features = ["platform-verifier", "runtime-tokio", "bloom"], optional = true }
 rand = "0.9.2"
 rcgen = { version = "0.14", default-features = false, optional = true }
 reqwest = { version = "0.12", default-features = false, optional = true }
@@ -61,9 +57,7 @@ web-transport-iroh = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
-web-transport-ws = { workspace = true, features = [
-	"rustls-tls-webpki-roots",
-], optional = true }
+web-transport-ws = { workspace = true, features = ["rustls-tls-webpki-roots"], optional = true }
 
 [dev-dependencies]
 anyhow = "1"
