@@ -117,6 +117,7 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
 /// The callback is called on success (status 0) and later when closed (status non-zero).
+/// The `on_status` callback will NOT be called after [moq_session_close].
 ///
 /// # Safety
 /// - The caller must ensure that url is a valid pointer to url_len bytes of data.
@@ -206,7 +207,7 @@ pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, pa
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_announce` is valid until [moq_origin_announced_close] is called.
+/// - The caller must ensure that `on_announce` remains valid until the task exits (it may be called after [moq_origin_announced_close] returns).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_announced(
 	origin: u32,
@@ -366,7 +367,7 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_catalog` is valid until [moq_consume_catalog_close] is called.
+/// - The caller must ensure that `on_catalog` remains valid until the task exits (it may be called after [moq_consume_catalog_close] returns).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_catalog(
 	broadcast: u32,
@@ -382,6 +383,10 @@ pub unsafe extern "C" fn moq_consume_catalog(
 
 /// Close a catalog consumer and cancel its background task.
 ///
+/// This only stops the background subscription; catalog snapshots previously
+/// delivered via the [moq_consume_catalog] callback remain valid until freed
+/// with [moq_consume_catalog_free].
+///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_consume_catalog_close(catalog: u32) -> i32 {
@@ -392,6 +397,9 @@ pub extern "C" fn moq_consume_catalog_close(catalog: u32) -> i32 {
 }
 
 /// Free a catalog snapshot received via the [moq_consume_catalog] callback.
+///
+/// This releases the snapshot and invalidates any borrowed references (e.g. pointers
+/// returned by [moq_consume_video_config] or [moq_consume_audio_config]).
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -410,7 +418,7 @@ pub extern "C" fn moq_consume_catalog_free(catalog: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_video_config] struct.
-/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst: *mut moq_video_config) -> i32 {
 	ffi::enter(move || {
@@ -429,7 +437,7 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_audio_config] struct.
-/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst: *mut moq_audio_config) -> i32 {
 	ffi::enter(move || {

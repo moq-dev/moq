@@ -8,7 +8,8 @@ use crate::{Error, Id, NonZeroSlab, State, ffi};
 #[derive(Default)]
 pub struct Session {
 	/// Session task cancellation channels.
-	task: NonZeroSlab<oneshot::Sender<()>>,
+	/// The Option is taken on close to signal shutdown, but the slot remains until the task exits.
+	task: NonZeroSlab<Option<oneshot::Sender<()>>>,
 }
 
 impl Session {
@@ -22,7 +23,7 @@ impl Session {
 		// Used just to notify when the session is removed from the map.
 		let closed = oneshot::channel();
 
-		let id = self.task.insert(closed.0);
+		let id = self.task.insert(Some(closed.0));
 		tokio::spawn(async move {
 			tokio::select! {
 				// No more receiver, which means [session_close] was called.
@@ -62,7 +63,9 @@ impl Session {
 	}
 
 	pub fn close(&mut self, id: Id) -> Result<(), Error> {
-		self.task.remove(id).ok_or(Error::SessionNotFound)?;
+		let sender = self.task.get_mut(id).ok_or(Error::SessionNotFound)?;
+		// Take the sender to signal shutdown, but leave the slot occupied until the task exits.
+		sender.take().ok_or(Error::SessionNotFound)?;
 		Ok(())
 	}
 }

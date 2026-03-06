@@ -19,7 +19,8 @@ pub struct Origin {
 	announced: NonZeroSlab<(String, bool)>,
 
 	/// Announcement listener task cancellation channels.
-	announced_task: NonZeroSlab<oneshot::Sender<()>>,
+	/// The Option is taken on close to signal shutdown, but the slot remains until the task exits.
+	announced_task: NonZeroSlab<Option<oneshot::Sender<()>>>,
 }
 
 impl Origin {
@@ -36,7 +37,7 @@ impl Origin {
 		let consumer = origin.consume();
 		let channel = oneshot::channel();
 
-		let id = self.announced_task.insert(channel.0);
+		let id = self.announced_task.insert(Some(channel.0));
 
 		tokio::spawn(async move {
 			tokio::select! {
@@ -73,9 +74,12 @@ impl Origin {
 	}
 
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {
-		self.announced_task
-			.remove(announced)
+		let sender = self
+			.announced_task
+			.get_mut(announced)
 			.ok_or(Error::AnnouncementNotFound)?;
+		// Take the sender to signal shutdown, but leave the slot occupied until the task exits.
+		sender.take().ok_or(Error::AnnouncementNotFound)?;
 		Ok(())
 	}
 

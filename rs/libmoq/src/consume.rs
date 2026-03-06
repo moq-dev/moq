@@ -24,13 +24,14 @@ pub struct Consume {
 	catalog: NonZeroSlab<ConsumeCatalog>,
 
 	/// Catalog consumer task cancellation channels.
-	catalog_task: NonZeroSlab<oneshot::Sender<()>>,
+	/// The Option is taken on close to signal shutdown, but the slot remains until the task exits.
+	catalog_task: NonZeroSlab<Option<oneshot::Sender<()>>>,
 
 	/// Audio track consumer task cancellation channels.
-	audio_task: NonZeroSlab<oneshot::Sender<()>>,
+	audio_task: NonZeroSlab<Option<oneshot::Sender<()>>>,
 
 	/// Video track consumer task cancellation channels.
-	video_task: NonZeroSlab<oneshot::Sender<()>>,
+	video_task: NonZeroSlab<Option<oneshot::Sender<()>>>,
 
 	/// Buffered frames ready for consumption.
 	frame: NonZeroSlab<hang::container::OrderedFrame>,
@@ -46,7 +47,7 @@ impl Consume {
 		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
-		let id = self.catalog_task.insert(channel.0);
+		let id = self.catalog_task.insert(Some(channel.0));
 
 		tokio::spawn(async move {
 			tokio::select! {
@@ -54,6 +55,7 @@ impl Consume {
 				_ = channel.1 => (),
 			};
 
+			// Remove the slot only from the task epilogue to prevent ID reuse races.
 			State::lock().consume.catalog_task.remove(id);
 		});
 
@@ -166,7 +168,9 @@ impl Consume {
 	}
 
 	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {
-		self.catalog_task.remove(catalog).ok_or(Error::CatalogNotFound)?;
+		let sender = self.catalog_task.get_mut(catalog).ok_or(Error::CatalogNotFound)?;
+		// Take the sender to signal shutdown, but leave the slot occupied until the task exits.
+		sender.take().ok_or(Error::CatalogNotFound)?;
 		Ok(())
 	}
 
@@ -189,7 +193,7 @@ impl Consume {
 			.renditions
 			.keys()
 			.nth(index)
-			.ok_or(Error::TrackNotFound)?;
+			.ok_or(Error::NoIndex)?;
 
 		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
@@ -198,7 +202,7 @@ impl Consume {
 		let track = hang::container::OrderedConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
-		let id = self.video_task.insert(channel.0);
+		let id = self.video_task.insert(Some(channel.0));
 
 		tokio::spawn(async move {
 			tokio::select! {
@@ -206,7 +210,7 @@ impl Consume {
 				_ = channel.1 => (),
 			};
 
-			// Make sure we clean up the task on exit.
+			// Remove the slot only from the task epilogue to prevent ID reuse races.
 			State::lock().consume.video_task.remove(id);
 		});
 
@@ -227,7 +231,7 @@ impl Consume {
 			.renditions
 			.keys()
 			.nth(index)
-			.ok_or(Error::TrackNotFound)?;
+			.ok_or(Error::NoIndex)?;
 
 		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
@@ -236,7 +240,7 @@ impl Consume {
 		let track = hang::container::OrderedConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
-		let id = self.audio_task.insert(channel.0);
+		let id = self.audio_task.insert(Some(channel.0));
 
 		tokio::spawn(async move {
 			tokio::select! {
@@ -244,7 +248,7 @@ impl Consume {
 				_ = channel.1 => (),
 			};
 
-			// Make sure we clean up the task on exit.
+			// Remove the slot only from the task epilogue to prevent ID reuse races.
 			State::lock().consume.audio_task.remove(id);
 		});
 
@@ -279,12 +283,14 @@ impl Consume {
 	}
 
 	pub fn audio_close(&mut self, track: Id) -> Result<(), Error> {
-		self.audio_task.remove(track).ok_or(Error::TrackNotFound)?;
+		let sender = self.audio_task.get_mut(track).ok_or(Error::TrackNotFound)?;
+		sender.take().ok_or(Error::TrackNotFound)?;
 		Ok(())
 	}
 
 	pub fn video_close(&mut self, track: Id) -> Result<(), Error> {
-		self.video_task.remove(track).ok_or(Error::TrackNotFound)?;
+		let sender = self.video_task.get_mut(track).ok_or(Error::TrackNotFound)?;
+		sender.take().ok_or(Error::TrackNotFound)?;
 		Ok(())
 	}
 
