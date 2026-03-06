@@ -49,11 +49,10 @@ impl Consume {
 		let id = self.catalog_task.insert(channel.0);
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_catalog(broadcast, catalog.into(), &mut on_catalog) => res,
-				_ = channel.1 => Ok(()),
+			tokio::select! {
+				res = Self::run_catalog(broadcast, catalog.into(), &mut on_catalog) => on_catalog.call(res),
+				_ = channel.1 => (),
 			};
-			on_catalog.call(res);
 
 			State::lock().consume.catalog_task.remove(id);
 		});
@@ -202,11 +201,10 @@ impl Consume {
 		let id = self.video_task.insert(channel.0);
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_track(track, &mut on_frame) => res,
-				_ = channel.1 => Ok(()),
+			tokio::select! {
+				res = Self::run_track(track, &mut on_frame) => on_frame.call(res),
+				_ = channel.1 => (),
 			};
-			on_frame.call(res);
 
 			// Make sure we clean up the task on exit.
 			State::lock().consume.video_task.remove(id);
@@ -241,11 +239,10 @@ impl Consume {
 		let id = self.audio_task.insert(channel.0);
 
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_track(track, &mut on_frame) => res,
-				_ = channel.1 => Ok(()),
+			tokio::select! {
+				res = Self::run_track(track, &mut on_frame) => on_frame.call(res),
+				_ = channel.1 => (),
 			};
-			on_frame.call(res);
 
 			// Make sure we clean up the task on exit.
 			State::lock().consume.audio_task.remove(id);

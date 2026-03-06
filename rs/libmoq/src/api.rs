@@ -148,11 +148,11 @@ pub unsafe extern "C" fn moq_session_connect(
 	})
 }
 
-/// Close a connection to a MoQ server.
+/// Close a connection to a MoQ server and cancel its background task.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
-/// The [moq_session_connect] `on_status` callback will be called with [Error::Closed].
+/// The [moq_session_connect] `on_status` callback will NOT be called.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_session_close(session: u32) -> i32 {
 	ffi::enter(move || {
