@@ -1,5 +1,4 @@
 use std::ffi::c_char;
-
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
@@ -29,23 +28,25 @@ impl Origin {
 	}
 
 	pub fn get(&self, id: Id) -> Result<&moq_lite::OriginProducer, Error> {
-		self.active.get(id).ok_or(Error::NotFound)
+		self.active.get(id).ok_or(Error::OriginNotFound)
 	}
 
 	pub fn announced(&mut self, origin: Id, mut on_announce: OnStatus) -> Result<Id, Error> {
-		let origin = self.active.get_mut(origin).ok_or(Error::NotFound)?;
+		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
 		let consumer = origin.consume();
 		let channel = oneshot::channel();
 
+		let id = self.announced_task.insert(channel.0);
+
 		tokio::spawn(async move {
-			let res = tokio::select! {
-				res = Self::run_announced(consumer, &mut on_announce) => res,
-				_ = channel.1 => Ok(()),
+			tokio::select! {
+				res = Self::run_announced(consumer, &mut on_announce) => on_announce.call(res),
+				_ = channel.1 => (),
 			};
-			on_announce.call(res);
+
+			State::lock().origin.announced_task.remove(id);
 		});
 
-		let id = self.announced_task.insert(channel.0);
 		Ok(id)
 	}
 
@@ -62,7 +63,7 @@ impl Origin {
 	}
 
 	pub fn announced_info(&self, announced: Id, dst: &mut moq_announced) -> Result<(), Error> {
-		let announced = self.announced.get(announced).ok_or(Error::NotFound)?;
+		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
 		*dst = moq_announced {
 			path: announced.0.as_str().as_ptr() as *const c_char,
 			path_len: announced.0.len(),
@@ -72,13 +73,15 @@ impl Origin {
 	}
 
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {
-		self.announced_task.remove(announced).ok_or(Error::NotFound)?;
+		self.announced_task
+			.remove(announced)
+			.ok_or(Error::AnnouncementNotFound)?;
 		Ok(())
 	}
 
 	pub fn consume<P: moq_lite::AsPath>(&mut self, origin: Id, path: P) -> Result<moq_lite::BroadcastConsumer, Error> {
-		let origin = self.active.get_mut(origin).ok_or(Error::NotFound)?;
-		origin.consume().consume_broadcast(path).ok_or(Error::NotFound)
+		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
+		origin.consume().consume_broadcast(path).ok_or(Error::BroadcastNotFound)
 	}
 
 	pub fn publish<P: moq_lite::AsPath>(
@@ -87,13 +90,13 @@ impl Origin {
 		path: P,
 		broadcast: moq_lite::BroadcastConsumer,
 	) -> Result<(), Error> {
-		let origin = self.active.get_mut(origin).ok_or(Error::NotFound)?;
+		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
 		origin.publish_broadcast(path, broadcast);
 		Ok(())
 	}
 
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {
-		self.active.remove(origin).ok_or(Error::NotFound)?;
+		self.active.remove(origin).ok_or(Error::OriginNotFound)?;
 		Ok(())
 	}
 }

@@ -51,7 +51,7 @@ pub struct OnStatus {
 }
 
 impl OnStatus {
-	/// Create a new callback wrapper.
+	/// Create a new callback wrapper from a C function pointer.
 	///
 	/// # Safety
 	/// - The caller must ensure user_data remains valid for the callback's lifetime.

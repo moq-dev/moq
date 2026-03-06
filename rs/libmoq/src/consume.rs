@@ -1,6 +1,5 @@
-use std::ffi::c_char;
-
 use bytes::Buf;
+use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
@@ -43,7 +42,7 @@ impl Consume {
 	}
 
 	pub fn catalog(&mut self, broadcast: Id, mut on_catalog: OnStatus) -> Result<Id, Error> {
-		let broadcast = self.broadcast.get(broadcast).ok_or(Error::NotFound)?.clone();
+		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
 		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
@@ -100,7 +99,7 @@ impl Consume {
 	}
 
 	pub fn video_config(&mut self, catalog: Id, index: usize, dst: &mut moq_video_config) -> Result<(), Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 
 		let (rendition, config) = consume
 			.catalog
@@ -138,7 +137,7 @@ impl Consume {
 	}
 
 	pub fn audio_config(&mut self, catalog: Id, index: usize, dst: &mut moq_audio_config) -> Result<(), Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 
 		let (rendition, config) = consume
 			.catalog
@@ -168,7 +167,12 @@ impl Consume {
 	}
 
 	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {
-		self.catalog.remove(catalog).ok_or(Error::NotFound)?;
+		self.catalog_task.remove(catalog).ok_or(Error::CatalogNotFound)?;
+		Ok(())
+	}
+
+	pub fn catalog_free(&mut self, catalog: Id) -> Result<(), Error> {
+		self.catalog.remove(catalog).ok_or(Error::CatalogNotFound)?;
 		Ok(())
 	}
 
@@ -179,14 +183,14 @@ impl Consume {
 		latency: std::time::Duration,
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let rendition = consume
 			.catalog
 			.video
 			.renditions
 			.keys()
 			.nth(index)
-			.ok_or(Error::NotFound)?;
+			.ok_or(Error::TrackNotFound)?;
 
 		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
@@ -218,14 +222,14 @@ impl Consume {
 		latency: std::time::Duration,
 		mut on_frame: OnStatus,
 	) -> Result<Id, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::NotFound)?;
+		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let rendition = consume
 			.catalog
 			.audio
 			.renditions
 			.keys()
 			.nth(index)
-			.ok_or(Error::NotFound)?;
+			.ok_or(Error::TrackNotFound)?;
 
 		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
 			name: rendition.clone(),
@@ -278,18 +282,18 @@ impl Consume {
 	}
 
 	pub fn audio_close(&mut self, track: Id) -> Result<(), Error> {
-		self.audio_task.remove(track).ok_or(Error::NotFound)?;
+		self.audio_task.remove(track).ok_or(Error::TrackNotFound)?;
 		Ok(())
 	}
 
 	pub fn video_close(&mut self, track: Id) -> Result<(), Error> {
-		self.video_task.remove(track).ok_or(Error::NotFound)?;
+		self.video_task.remove(track).ok_or(Error::TrackNotFound)?;
 		Ok(())
 	}
 
 	// NOTE: You're supposed to call this multiple times to get all of the chunks.
 	pub fn frame_chunk(&self, frame: Id, index: usize, dst: &mut moq_frame) -> Result<(), Error> {
-		let ordered = self.frame.get(frame).ok_or(Error::NotFound)?;
+		let ordered = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
 		let chunk = ordered.payload.get_chunk(index).ok_or(Error::NoIndex)?;
 
 		let timestamp_us = ordered
@@ -309,12 +313,12 @@ impl Consume {
 	}
 
 	pub fn frame_close(&mut self, frame: Id) -> Result<(), Error> {
-		self.frame.remove(frame).ok_or(Error::NotFound)?;
+		self.frame.remove(frame).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 
 	pub fn close(&mut self, consume: Id) -> Result<(), Error> {
-		self.broadcast.remove(consume).ok_or(Error::NotFound)?;
+		self.broadcast.remove(consume).ok_or(Error::BroadcastNotFound)?;
 		Ok(())
 	}
 }
