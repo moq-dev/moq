@@ -1,13 +1,8 @@
 use std::{
-	ffi::c_void,
+	ffi::{c_char, c_void},
 	sync::{LazyLock, Mutex},
 };
 
-#[cfg(feature = "c-api")]
-use std::ffi::c_char;
-
-
-#[cfg(feature = "c-api")]
 use url::Url;
 
 use crate::{Error, Id};
@@ -34,7 +29,6 @@ pub static RUNTIME: LazyLock<Mutex<tokio::runtime::Handle>> = LazyLock::new(|| {
 ///
 /// Uses a mutex to ensure Handle::enter() guards are dropped in LIFO order,
 /// as required by tokio to avoid panics in multi-threaded FFI contexts.
-#[cfg(feature = "c-api")]
 pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
 	// NOTE: I think we need a mutex because Handle::enter() needs to be dropped in LIFO order.
 	// If this starts to become a bottleneck, we might have to rethink our runtime model.
@@ -50,13 +44,10 @@ pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
 /// Wrapper for C callback functions with user data.
 ///
 /// Stores a function pointer and user data pointer to call C callbacks
-/// from async Rust code. When built with the `uniffi-api` feature, can also
-/// wrap a Rust closure via [`OnStatus::from_fn`].
+/// from async Rust code.
 pub struct OnStatus {
 	user_data: *mut c_void,
 	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
-	#[cfg(feature = "uniffi-api")]
-	rust_fn: Option<Box<dyn FnMut(i32) + Send>>,
 }
 
 impl OnStatus {
@@ -65,38 +56,17 @@ impl OnStatus {
 	/// # Safety
 	/// - The caller must ensure user_data remains valid for the callback's lifetime.
 	/// - The callback function pointer must be valid if provided.
-	#[cfg(feature = "c-api")]
 	pub unsafe fn new(
 		user_data: *mut c_void,
 		on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
 	) -> Self {
-		Self {
-			user_data,
-			on_status,
-			#[cfg(feature = "uniffi-api")]
-			rust_fn: None,
-		}
-	}
-
-	/// Create a callback wrapper from a Rust closure.
-	#[cfg(feature = "uniffi-api")]
-	pub fn from_fn(callback: impl FnMut(i32) + Send + 'static) -> Self {
-		Self {
-			user_data: std::ptr::null_mut(),
-			on_status: None,
-			rust_fn: Some(Box::new(callback)),
-		}
+		Self { user_data, on_status }
 	}
 
 	/// Invoke the callback with a result code.
 	///
 	/// Using &mut avoids the need for Sync.
 	pub fn call<C: ReturnCode>(&mut self, ret: C) {
-		#[cfg(feature = "uniffi-api")]
-		if let Some(rust_fn) = &mut self.rust_fn {
-			rust_fn(ret.code());
-			return;
-		}
 		if let Some(on_status) = &self.on_status {
 			on_status(self.user_data, ret.code());
 		}
@@ -186,7 +156,6 @@ pub fn parse_id_optional(id: u32) -> Result<Option<Id>, Error> {
 }
 
 /// Parse a C string pointer into a Url.
-#[cfg(feature = "c-api")]
 pub fn parse_url(url: *const c_char, url_len: usize) -> Result<Url, Error> {
 	let url = unsafe { parse_str(url, url_len)? };
 	Ok(Url::parse(url)?)
@@ -198,7 +167,6 @@ pub fn parse_url(url: *const c_char, url_len: usize) -> Result<Url, Error> {
 ///
 /// # Safety
 /// The caller must ensure that cstr is valid for 'a.
-#[cfg(feature = "c-api")]
 pub unsafe fn parse_str<'a>(cstr: *const c_char, cstr_len: usize) -> Result<&'a str, Error> {
 	let slice = unsafe { parse_slice(cstr as *const u8, cstr_len)? };
 	let string = std::str::from_utf8(slice)?;
@@ -211,7 +179,6 @@ pub unsafe fn parse_str<'a>(cstr: *const c_char, cstr_len: usize) -> Result<&'a 
 ///
 /// # Safety
 /// The caller must ensure that data is valid for 'a.
-#[cfg(feature = "c-api")]
 pub unsafe fn parse_slice<'a>(data: *const u8, size: usize) -> Result<&'a [u8], Error> {
 	if data.is_null() {
 		if size == 0 {

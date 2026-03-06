@@ -3,11 +3,10 @@
 //! Provides a Kotlin/Swift-compatible API for real-time pub/sub over QUIC,
 //! mirroring the semantics of the C API in `api.rs` but using Rust-idiomatic types.
 //!
-//! Enable the `uniffi-api` feature (exclusive with `c-api`) to compile this module.
 //! After building, generate language bindings with:
 //! ```bash
-//! uniffi-bindgen-cli generate --library target/debug/libmoq.dylib --language kotlin --out-dir out/
-//! uniffi-bindgen-cli generate --library target/debug/libmoq.dylib --language swift --out-dir out/
+//! uniffi-bindgen-cli generate --library target/debug/libmoq_ffi.dylib --language kotlin --out-dir out/
+//! uniffi-bindgen-cli generate --library target/debug/libmoq_ffi.dylib --language swift --out-dir out/
 //! ```
 
 use url::Url;
@@ -100,7 +99,9 @@ fn run<T, F: FnOnce() -> Result<T, Error>>(f: F) -> Result<T, MoqError> {
 	let _guard = handle.enter();
 	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
 		Ok(ret) => ret.map_err(Into::into),
-		Err(_) => Err(MoqError::Error { msg: "panic in libmoq".to_string() }),
+		Err(_) => Err(MoqError::Error {
+			msg: "panic in libmoq".to_string(),
+		}),
 	}
 }
 
@@ -439,7 +440,11 @@ pub fn moq_consume_frame(frame: u32) -> Result<FrameData, MoqError> {
 	run(|| {
 		let frame = ffi::parse_id(frame)?;
 		let (payload, timestamp_us, keyframe) = State::lock().consume.frame_data(frame)?;
-		Ok(FrameData { payload, timestamp_us, keyframe })
+		Ok(FrameData {
+			payload,
+			timestamp_us,
+			keyframe,
+		})
 	})
 }
 

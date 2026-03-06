@@ -1,14 +1,9 @@
-use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State, moq_announced};
+use crate::{Error, Id, NonZeroSlab, State};
 
 /// Global state managing all active resources.
-///
-/// Stores all sessions, origins, broadcasts, tracks, and frames in slab allocators,
-/// returning opaque IDs to C callers. Also manages async tasks via oneshot channels
-/// for cancellation.
 // TODO split this up into separate structs/mutexes
 #[derive(Default)]
 pub struct Origin {
@@ -62,14 +57,10 @@ impl Origin {
 		Ok(())
 	}
 
-	pub fn announced_info(&self, announced: Id, dst: &mut moq_announced) -> Result<(), Error> {
+	/// Returns announcement info as owned Rust values.
+	pub fn announced_info_owned(&self, announced: Id) -> Result<(String, bool), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
-		*dst = moq_announced {
-			path: announced.0.as_str().as_ptr() as *const c_char,
-			path_len: announced.0.len(),
-			active: announced.1,
-		};
-		Ok(())
+		Ok((announced.0.clone(), announced.1))
 	}
 
 	pub fn announced_close(&mut self, announced: Id) -> Result<(), Error> {

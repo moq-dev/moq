@@ -3,6 +3,7 @@ members = [
     "rs/conducer",
     "rs/hang",
     "rs/libmoq",
+    "rs/moq-ffi",
     "rs/moq-cli",
     "rs/moq-clock",
     "rs/moq-lite",

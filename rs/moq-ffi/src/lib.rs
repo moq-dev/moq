@@ -1,6 +1,6 @@
-//! C bindings for [`moq_lite`].
+//! UniFFI bindings for [`moq_lite`].
 //!
-//! Provides a C-compatible API for real-time pub/sub over QUIC.
+//! Provides a Kotlin/Swift-compatible API for real-time pub/sub over QUIC.
 //!
 //! ## Concepts
 //!
@@ -10,11 +10,6 @@
 //! - **Track**: Named stream of groups
 //! - **Group**: Collection of frames
 //! - **Frame**: Sized payload with timestamp
-//!
-//! ## Error Handling
-//!
-//! All functions return negative error codes on failure or non-negative values on success.
-//! Resources are managed through opaque integer handles that must be explicitly closed.
 
 mod api;
 mod consume;
@@ -26,9 +21,10 @@ mod publish;
 mod session;
 mod state;
 
-pub use api::*;
 pub use error::*;
 pub use id::*;
+
+uniffi::setup_scaffolding!("moq");
 
 pub(crate) use consume::*;
 pub(crate) use origin::*;
