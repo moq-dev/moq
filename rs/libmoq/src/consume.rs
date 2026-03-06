@@ -10,6 +10,22 @@ use crate::{moq_audio_config, moq_frame, moq_video_config};
 #[cfg(feature = "c-api")]
 use std::ffi::c_char;
 
+pub struct VideoConfigData {
+	pub name: String,
+	pub codec: String,
+	pub description: Option<Vec<u8>>,
+	pub coded_width: Option<u32>,
+	pub coded_height: Option<u32>,
+}
+
+pub struct AudioConfigData {
+	pub name: String,
+	pub codec: String,
+	pub description: Option<Vec<u8>>,
+	pub sample_rate: u32,
+	pub channel_count: u32,
+}
+
 struct ConsumeCatalog {
 	broadcast: moq_lite::BroadcastConsumer,
 
@@ -164,11 +180,7 @@ impl Consume {
 
 	/// Returns video config fields as owned Rust values (no C struct needed).
 	#[cfg(feature = "uniffi-api")]
-	pub fn video_config_data(
-		&self,
-		catalog: Id,
-		index: usize,
-	) -> Result<(String, String, Option<Vec<u8>>, Option<u32>, Option<u32>), Error> {
+	pub fn video_config_data(&self, catalog: Id, index: usize) -> Result<VideoConfigData, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let (rendition, config) = consume
 			.catalog
@@ -178,13 +190,13 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
-		Ok((
-			rendition.clone(),
-			codec.clone(),
-			config.description.as_ref().map(|d| d.to_vec()),
-			config.coded_width,
-			config.coded_height,
-		))
+		Ok(VideoConfigData {
+			name: rendition.clone(),
+			codec: codec.clone(),
+			description: config.description.as_ref().map(|d| d.to_vec()),
+			coded_width: config.coded_width,
+			coded_height: config.coded_height,
+		})
 	}
 
 	#[cfg(feature = "c-api")]
@@ -220,11 +232,7 @@ impl Consume {
 
 	/// Returns audio config fields as owned Rust values (no C struct needed).
 	#[cfg(feature = "uniffi-api")]
-	pub fn audio_config_data(
-		&self,
-		catalog: Id,
-		index: usize,
-	) -> Result<(String, String, Option<Vec<u8>>, u32, u32), Error> {
+	pub fn audio_config_data(&self, catalog: Id, index: usize) -> Result<AudioConfigData, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let (rendition, config) = consume
 			.catalog
@@ -234,13 +242,13 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
-		Ok((
-			rendition.clone(),
-			codec.clone(),
-			config.description.as_ref().map(|d| d.to_vec()),
-			config.sample_rate,
-			config.channel_count,
-		))
+		Ok(AudioConfigData {
+			name: rendition.clone(),
+			codec: codec.clone(),
+			description: config.description.as_ref().map(|d| d.to_vec()),
+			sample_rate: config.sample_rate,
+			channel_count: config.channel_count,
+		})
 	}
 
 	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {

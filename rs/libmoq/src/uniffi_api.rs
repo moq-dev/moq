@@ -331,9 +331,14 @@ pub fn moq_consume_catalog_close(catalog: u32) -> Result<(), MoqError> {
 pub fn moq_consume_video_config(catalog: u32, index: u32) -> Result<VideoConfig, MoqError> {
 	run(|| {
 		let catalog = ffi::parse_id(catalog)?;
-		let (name, codec, description, coded_width, coded_height) =
-			State::lock().consume.video_config_data(catalog, index as usize)?;
-		Ok(VideoConfig { name, codec, description, coded_width, coded_height })
+		let data = State::lock().consume.video_config_data(catalog, index as usize)?;
+		Ok(VideoConfig {
+			name: data.name,
+			codec: data.codec,
+			description: data.description,
+			coded_width: data.coded_width,
+			coded_height: data.coded_height,
+		})
 	})
 }
 
@@ -342,9 +347,14 @@ pub fn moq_consume_video_config(catalog: u32, index: u32) -> Result<VideoConfig,
 pub fn moq_consume_audio_config(catalog: u32, index: u32) -> Result<AudioConfig, MoqError> {
 	run(|| {
 		let catalog = ffi::parse_id(catalog)?;
-		let (name, codec, description, sample_rate, channel_count) =
-			State::lock().consume.audio_config_data(catalog, index as usize)?;
-		Ok(AudioConfig { name, codec, description, sample_rate, channel_count })
+		let data = State::lock().consume.audio_config_data(catalog, index as usize)?;
+		Ok(AudioConfig {
+			name: data.name,
+			codec: data.codec,
+			description: data.description,
+			sample_rate: data.sample_rate,
+			channel_count: data.channel_count,
+		})
 	})
 }
 
