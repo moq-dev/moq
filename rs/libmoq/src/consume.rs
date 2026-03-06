@@ -167,6 +167,11 @@ impl Consume {
 	}
 
 	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {
+		self.catalog_task.remove(catalog).ok_or(Error::CatalogNotFound)?;
+		Ok(())
+	}
+
+	pub fn catalog_snapshot_close(&mut self, catalog: Id) -> Result<(), Error> {
 		self.catalog.remove(catalog).ok_or(Error::CatalogNotFound)?;
 		Ok(())
 	}
