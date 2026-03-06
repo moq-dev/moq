@@ -4,7 +4,7 @@ use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
 	Track, TrackProducer,
 	coding::Reader,
-	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, MessageParameters, RequestId},
+	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId},
 	model::BroadcastProducer,
 };
 
@@ -86,8 +86,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match self.version {
 			Version::Draft14 => self.control.send(ietf::PublishNamespaceOk { request_id }),
 			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestOk {
-				request_id,
-				parameters: MessageParameters::default(),
+				request_id: Some(request_id),
 			}),
 			Version::Draft17 => Err(Error::Version),
 		}
@@ -102,7 +101,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				reason_phrase: reason.into(),
 			}),
 			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestError {
-				request_id,
+				request_id: Some(request_id),
 				error_code,
 				reason_phrase: reason.into(),
 				retry_interval: 0,
@@ -192,11 +191,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub fn recv_subscribe_ok(&mut self, msg: ietf::SubscribeOk) -> Result<(), Error> {
+		let Some(request_id) = msg.request_id else {
+			return Ok(());
+		};
+
 		// Save the track alias
 		let mut state = self.state.lock();
-		if let Some(subscribe) = state.subscribes.get_mut(&msg.request_id) {
+		if let Some(subscribe) = state.subscribes.get_mut(&request_id) {
 			subscribe.alias = Some(msg.track_alias);
-			state.aliases.insert(msg.track_alias, msg.request_id);
+			state.aliases.insert(msg.track_alias, request_id);
 		}
 
 		Ok(())
@@ -222,10 +225,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub fn recv_request_error(&mut self, msg: &ietf::RequestError<'_>) -> Result<(), Error> {
+		let Some(request_id) = msg.request_id else {
+			return Ok(());
+		};
+
 		// v15: generic error response. Check if it's a subscribe error.
 		let mut state = self.state.lock();
 
-		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
+		if let Some(mut track) = state.subscribes.remove(&request_id) {
 			let _ = track.producer.abort(Error::Cancel);
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
@@ -236,16 +243,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub fn recv_publish_done(&mut self, msg: ietf::PublishDone<'_>) -> Result<(), Error> {
+		let Some(request_id) = msg.request_id else {
+			return Ok(());
+		};
+
 		let mut state = self.state.lock();
 
-		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
+		if let Some(mut track) = state.subscribes.remove(&request_id) {
 			let _ = track.producer.finish();
 			if let Some(alias) = track.alias {
 				state.aliases.remove(&alias);
 			}
 		}
 
-		if let Some(path) = state.publishes.remove(&msg.request_id) {
+		if let Some(path) = state.publishes.remove(&request_id) {
 			drop(state);
 			self.stop_announce(path)?;
 		}
@@ -496,7 +507,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 				Version::Draft15 | Version::Draft16 => {
 					self.control.send(ietf::RequestError {
-						request_id: msg.request_id,
+						request_id: Some(msg.request_id),
 						error_code: 400,
 						reason_phrase: err.to_string().into(),
 						retry_interval: 0,
@@ -510,7 +521,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			match self.version {
 				Version::Draft14 => {
 					self.control.send(ietf::PublishOk {
-						request_id: msg.request_id,
+						request_id: Some(msg.request_id),
 						forward: true,
 						subscriber_priority: 0,
 						group_order: GroupOrder::Descending,
@@ -519,8 +530,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 				Version::Draft15 | Version::Draft16 => {
 					self.control.send(ietf::RequestOk {
-						request_id: msg.request_id,
-						parameters: MessageParameters::default(),
+						request_id: Some(msg.request_id),
 					})?;
 				}
 				Version::Draft17 => {

@@ -4,7 +4,7 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		GroupOrder, Location, MessageParameters, Parameters, RequestId,
+		GroupOrder, Location, Parameters, RequestId,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
@@ -118,6 +118,9 @@ impl Message for Fetch<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
+		if version == Version::Draft17 {
+			0u64.encode(w, version)?; // required_request_id_delta = 0
+		}
 
 		match version {
 			Version::Draft14 => {
@@ -126,16 +129,12 @@ impl Message for Fetch<'_> {
 				self.fetch_type.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 => {
-				// v15: request_id, fetch_type, parameters (with subscriber_priority, group_order)
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				self.fetch_type.encode(w, version)?;
-				let mut params = MessageParameters::default();
-				params.set_subscriber_priority(self.subscriber_priority);
-				params.set_group_order(u8::from(self.group_order) as u64);
-				params.encode(w, version)?;
-			}
-			Version::Draft17 => {
-				return Err(EncodeError::Version);
+				encode_params!(w, version,
+					0x20 => self.subscriber_priority,
+					0x22 => self.group_order,
+				);
 			}
 		}
 		Ok(())
@@ -143,6 +142,9 @@ impl Message for Fetch<'_> {
 
 	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(buf, version)?;
+		if version == Version::Draft17 {
+			let _required_request_id_delta = u64::decode(buf, version)?;
+		}
 
 		match version {
 			Version::Draft14 => {
@@ -157,19 +159,15 @@ impl Message for Fetch<'_> {
 					fetch_type,
 				})
 			}
-			Version::Draft15 | Version::Draft16 => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let fetch_type = FetchType::decode(buf, version)?;
-				let params = MessageParameters::decode(buf, version)?;
+				decode_params!(buf, version,
+					0x20 => subscriber_priority: Option<u8>,
+					0x22 => group_order: Option<GroupOrder>,
+				);
 
-				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
-				let group_order = match params.group_order() {
-					Some(v) => u8::try_from(v)
-						.ok()
-						.and_then(|v| GroupOrder::try_from(v).ok())
-						.map(GroupOrder::any_to_descending)
-						.unwrap_or(GroupOrder::Descending),
-					None => GroupOrder::Descending,
-				};
+				let subscriber_priority = subscriber_priority.unwrap_or(128);
+				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 
 				Ok(Self {
 					request_id,
@@ -178,14 +176,13 @@ impl Message for Fetch<'_> {
 					fetch_type,
 				})
 			}
-			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchOk {
-	pub request_id: RequestId,
+	pub request_id: Option<RequestId>,
 	pub group_order: GroupOrder,
 	pub end_of_track: bool,
 	pub end_location: Location,
@@ -194,7 +191,13 @@ impl Message for FetchOk {
 	const ID: u64 = 0x18;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		if version != Version::Draft17 {
+			self.request_id
+				.expect("request_id required for draft14-16")
+				.encode(w, version)?;
+		} else {
+			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+		}
 
 		match version {
 			Version::Draft14 => {
@@ -203,23 +206,23 @@ impl Message for FetchOk {
 				self.end_location.encode(w, version)?;
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 => {
-				// v15: request_id, end_of_track(8), end_location, parameters
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				self.end_of_track.encode(w, version)?;
 				self.end_location.encode(w, version)?;
-				let mut params = MessageParameters::default();
-				params.set_group_order(u8::from(self.group_order) as u64);
-				params.encode(w, version)?;
-			}
-			Version::Draft17 => {
-				return Err(EncodeError::Version);
+				encode_params!(w, version,
+					0x22 => self.group_order,
+				);
 			}
 		}
 		Ok(())
 	}
 
 	fn decode_msg<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(buf, version)?;
+		let request_id = if version == Version::Draft17 {
+			None
+		} else {
+			Some(RequestId::decode(buf, version)?)
+		};
 
 		match version {
 			Version::Draft14 => {
@@ -234,19 +237,14 @@ impl Message for FetchOk {
 					end_location,
 				})
 			}
-			Version::Draft15 | Version::Draft16 => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
 				let end_of_track = bool::decode(buf, version)?;
 				let end_location = Location::decode(buf, version)?;
-				let params = MessageParameters::decode(buf, version)?;
+				decode_params!(buf, version,
+					0x22 => group_order: Option<GroupOrder>,
+				);
 
-				let group_order = match params.group_order() {
-					Some(v) => u8::try_from(v)
-						.ok()
-						.and_then(|v| GroupOrder::try_from(v).ok())
-						.map(GroupOrder::any_to_descending)
-						.unwrap_or(GroupOrder::Descending),
-					None => GroupOrder::Descending,
-				};
+				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 
 				Ok(Self {
 					request_id,
@@ -255,7 +253,6 @@ impl Message for FetchOk {
 					end_location,
 				})
 			}
-			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -391,7 +388,7 @@ mod tests {
 	#[test]
 	fn test_fetch_ok_v14_round_trip() {
 		let msg = FetchOk {
-			request_id: RequestId(2),
+			request_id: Some(RequestId(2)),
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
@@ -400,7 +397,7 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft14);
 		let decoded: FetchOk = decode_message(&encoded, Version::Draft14).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(2));
+		assert_eq!(decoded.request_id, Some(RequestId(2)));
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
 	}
@@ -427,7 +424,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_fetch_v17_rejected() {
+	fn test_fetch_v17_round_trip() {
 		let msg = Fetch {
 			request_id: RequestId(1),
 			subscriber_priority: 128,
@@ -440,14 +437,17 @@ mod tests {
 			},
 		};
 
-		let mut buf = BytesMut::new();
-		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: Fetch = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.subscriber_priority, 128);
 	}
 
 	#[test]
 	fn test_fetch_ok_v15_round_trip() {
 		let msg = FetchOk {
-			request_id: RequestId(2),
+			request_id: Some(RequestId(2)),
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
@@ -456,7 +456,7 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft15);
 		let decoded: FetchOk = decode_message(&encoded, Version::Draft15).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(2));
+		assert_eq!(decoded.request_id, Some(RequestId(2)));
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
 	}
@@ -464,7 +464,7 @@ mod tests {
 	#[test]
 	fn test_fetch_ok_v16_round_trip() {
 		let msg = FetchOk {
-			request_id: RequestId(2),
+			request_id: Some(RequestId(2)),
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
@@ -473,21 +473,25 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft16);
 		let decoded: FetchOk = decode_message(&encoded, Version::Draft16).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(2));
+		assert_eq!(decoded.request_id, Some(RequestId(2)));
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
 	}
 
 	#[test]
-	fn test_fetch_ok_v17_rejected() {
+	fn test_fetch_ok_v17_round_trip() {
 		let msg = FetchOk {
-			request_id: RequestId(2),
+			request_id: None,
 			group_order: GroupOrder::Descending,
 			end_of_track: false,
 			end_location: Location { group: 5, object: 3 },
 		};
 
-		let mut buf = BytesMut::new();
-		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: FetchOk = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+		assert!(!decoded.end_of_track);
+		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
 	}
 }

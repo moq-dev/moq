@@ -1,7 +1,7 @@
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_LITE, ALPN_LITE_03, Error, NEGOTIATED, OriginConsumer, OriginProducer, Session,
-	Version, Versions,
-	coding::{Decode, Encode, Stream},
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_LITE, ALPN_LITE_03, Error, NEGOTIATED, OriginConsumer, OriginProducer,
+	Session, Version, Versions,
+	coding::{Decode, Encode, Reader, Stream, Writer},
 	ietf, lite, setup,
 };
 
@@ -40,6 +40,71 @@ impl Server {
 		}
 
 		let (encoding, supported) = match session.protocol() {
+			Some(ALPN_17) => {
+				let v = self
+					.versions
+					.select(Version::Ietf(ietf::Version::Draft17))
+					.ok_or(Error::Version)?;
+
+				let ietf_v = ietf::Version::Draft17;
+
+				// Draft-17: SETUP uses uni streams
+				let mut parameters = ietf::Parameters::default();
+				parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
+				let parameters = parameters.encode_bytes(ietf_v)?;
+
+				let server_setup = setup::Server {
+					version: v.into(),
+					parameters,
+				};
+
+				// Accept and send SETUP concurrently on uni streams
+				let recv_fut = async {
+					let recv = session.accept_uni().await.map_err(Error::from_transport)?;
+					let mut reader: Reader<S::RecvStream, Version> = Reader::new(recv, v);
+					// Read stream type
+					let stream_type: u64 = reader.decode().await?;
+					if stream_type != 0x2F00 {
+						return Err(Error::UnexpectedStream);
+					}
+					// Read client SETUP message
+					let _client: setup::Client = reader.decode().await?;
+					Ok::<_, Error>(reader)
+				};
+
+				let send_fut = async {
+					let send = session.open_uni().await.map_err(Error::from_transport)?;
+					let mut writer: Writer<S::SendStream, Version> = Writer::new(send, v);
+					// Write stream type 0x2F00
+					writer.encode(&0x2F00u64).await?;
+					// Write SETUP message
+					writer.encode(&server_setup).await?;
+					Ok::<_, Error>(writer)
+				};
+
+				let (recv_result, send_result) = tokio::join!(recv_fut, send_fut);
+				let reader = recv_result?;
+				let writer = send_result?;
+
+				// Construct a Stream from the uni streams for GOAWAY/control
+				let stream = Stream {
+					writer: writer.with_version(ietf_v),
+					reader: reader.with_version(ietf_v),
+				};
+
+				ietf::start(
+					session.clone(),
+					stream,
+					None, // Draft-17 removed MaxRequestId
+					false,
+					self.publish.clone(),
+					self.consume.clone(),
+					ietf_v,
+				)?;
+
+				tracing::debug!(version = ?v, "connected");
+				return Ok(Session::new(session, v));
+			}
 			Some(ALPN_16) => {
 				let v = self
 					.versions
@@ -129,8 +194,9 @@ impl Server {
 			Version::Ietf(v) => {
 				// Decode the client's parameters to get their max request ID.
 				let parameters = ietf::Parameters::decode(&mut client.parameters, v)?;
-				let request_id_max =
-					ietf::RequestId(parameters.get_varint(ietf::ParameterVarInt::MaxRequestId).unwrap_or(0));
+				let request_id_max = parameters
+					.get_varint(ietf::ParameterVarInt::MaxRequestId)
+					.map(ietf::RequestId);
 
 				let stream = stream.with_version(v);
 				ietf::start(

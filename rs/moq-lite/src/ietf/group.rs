@@ -3,6 +3,7 @@ use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use super::Version;
+use crate::ietf::Param;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u8)]
@@ -32,6 +33,19 @@ impl Encode<Version> for GroupOrder {
 impl Decode<Version> for GroupOrder {
 	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		Self::try_from(u8::decode(r, version)?).map_err(|_| DecodeError::InvalidValue)
+	}
+}
+
+impl Param for GroupOrder {
+	fn param_encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		u8::from(*self).param_encode(w, version)
+	}
+
+	fn param_decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let v = u8::param_decode(r, version)?;
+		Ok(GroupOrder::try_from(v)
+			.unwrap_or(GroupOrder::Descending)
+			.any_to_descending())
 	}
 }
 

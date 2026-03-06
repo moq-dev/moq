@@ -528,8 +528,63 @@ where
 
 #[cfg(test)]
 mod tests {
-	use super::VarInt;
+	use super::{DecodeError, VarInt};
 	use bytes::Bytes;
+
+	/// Test vectors from the draft-17 spec (Table 2: Example Integer Encodings),
+	/// excluding the known-buggy example 4 (0xdd7f3e7d).
+	#[test]
+	fn leading_ones_spec_examples() {
+		let cases: &[(&[u8], u64)] = &[
+			(&[0x25], 37),
+			(&[0x80, 0x25], 37),
+			(&[0xbb, 0xbd], 15_293),
+			// Example 4 (0xdd7f3e7d = 494,878,333) is omitted — the spec has a bug.
+			// See https://github.com/moq-wg/moq-transport/pull/1521
+			(&[0xfa, 0xa1, 0xa0, 0xe4, 0x03, 0xd8], 2_893_212_287_960),
+			(
+				&[0xfe, 0xfa, 0x31, 0x8f, 0xa8, 0xe3, 0xca, 0x11],
+				70_423_237_261_249_041,
+			),
+			(
+				&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+				18_446_744_073_709_551_615,
+			),
+		];
+
+		for (bytes, expected) in cases {
+			// Test decoding
+			let mut buf = Bytes::from(bytes.to_vec());
+			let decoded = VarInt::decode_leading_ones(&mut buf).expect("decode should succeed");
+			assert_eq!(
+				decoded.into_inner(),
+				*expected,
+				"decode mismatch for bytes {bytes:02x?}"
+			);
+			assert_eq!(buf.len(), 0, "all bytes should be consumed for {bytes:02x?}");
+
+			// Test round-trip encode:
+			// - Skip non-minimal encoding (0x8025 for 37)
+			// - Skip u64::MAX which exceeds VarInt::MAX (2^62-1) but is decodable
+			if let Some(varint) = VarInt::from_u64(*expected)
+				&& (bytes.len() == 1 || *expected != 37)
+			{
+				let mut encoded = Vec::new();
+				varint.encode_leading_ones(&mut encoded).expect("encode should succeed");
+				assert_eq!(&encoded, bytes, "encode mismatch for value {expected}");
+			}
+		}
+	}
+
+	/// 11111100 (0xFC) is an invalid code point per the spec.
+	#[test]
+	fn leading_ones_invalid_0xfc() {
+		let mut buf = Bytes::from_static(&[0xFC]);
+		assert!(
+			matches!(VarInt::decode_leading_ones(&mut buf), Err(DecodeError::InvalidValue)),
+			"0xFC should be rejected as invalid"
+		);
+	}
 
 	#[test]
 	fn leading_ones_boundaries_round_trip() {

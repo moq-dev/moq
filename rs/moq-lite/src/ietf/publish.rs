@@ -110,7 +110,7 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Encode, EncodeError},
 	ietf::{
-		FilterType, GroupOrder, Location, MessageParameters, Parameters, RequestId,
+		FilterType, GroupOrder, Location, Parameters, RequestId,
 		namespace::{decode_namespace, encode_namespace},
 	},
 };
@@ -122,7 +122,7 @@ use super::Version;
 /// Used to be called SubscribeDone
 #[derive(Clone, Debug)]
 pub struct PublishDone<'a> {
-	pub request_id: RequestId,
+	pub request_id: Option<RequestId>,
 	pub status_code: u64,
 	pub stream_count: u64,
 	pub reason_phrase: Cow<'a, str>,
@@ -132,7 +132,13 @@ impl Message for PublishDone<'_> {
 	const ID: u64 = 0x0b;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		if version != Version::Draft17 {
+			self.request_id
+				.expect("request_id required for draft14-16")
+				.encode(w, version)?;
+		} else {
+			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+		}
 		self.status_code.encode(w, version)?;
 		self.stream_count.encode(w, version)?;
 		self.reason_phrase.encode(w, version)?;
@@ -140,7 +146,11 @@ impl Message for PublishDone<'_> {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
+		let request_id = if version == Version::Draft17 {
+			None
+		} else {
+			Some(RequestId::decode(r, version)?)
+		};
 		let status_code = u64::decode(r, version)?;
 		let stream_count = u64::decode(r, version)?;
 		let reason_phrase = Cow::<str>::decode(r, version)?;
@@ -171,6 +181,9 @@ impl Message for Publish<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
+		if version == Version::Draft17 {
+			0u64.encode(w, version)?; // required_request_id_delta = 0
+		}
 		encode_namespace(w, &self.track_namespace, version)?;
 		self.track_name.encode(w, version)?;
 		self.track_alias.encode(w, version)?;
@@ -189,17 +202,12 @@ impl Message for Publish<'_> {
 				// parameters
 				0u8.encode(w, version)?;
 			}
-			Version::Draft15 | Version::Draft16 => {
-				let mut params = MessageParameters::default();
-				params.set_group_order(u8::from(self.group_order) as u64);
-				if let Some(location) = &self.largest_location {
-					params.set_largest_object(location)?;
-				}
-				params.set_forward(self.forward);
-				params.encode(w, version)?;
-			}
-			Version::Draft17 => {
-				return Err(EncodeError::Version);
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				encode_params!(w, version,
+					0x09 => self.largest_location,
+					0x10 => self.forward,
+					0x22 => self.group_order,
+				);
 			}
 		}
 
@@ -208,6 +216,9 @@ impl Message for Publish<'_> {
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
+		if version == Version::Draft17 {
+			let _required_request_id_delta = u64::decode(r, version)?;
+		}
 		let track_namespace = decode_namespace(r, version)?;
 		let track_name = Cow::<str>::decode(r, version)?;
 		let track_alias = u64::decode(r, version)?;
@@ -234,19 +245,15 @@ impl Message for Publish<'_> {
 					forward,
 				})
 			}
-			Version::Draft15 | Version::Draft16 => {
-				let params = MessageParameters::decode(r, version)?;
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				decode_params!(r, version,
+					0x09 => largest_location: Option<Location>,
+					0x10 => forward: Option<bool>,
+					0x22 => group_order: Option<GroupOrder>,
+				);
 
-				let group_order = match params.group_order() {
-					Some(v) => u8::try_from(v)
-						.ok()
-						.and_then(|v| GroupOrder::try_from(v).ok())
-						.map(GroupOrder::any_to_descending)
-						.unwrap_or(GroupOrder::Descending),
-					None => GroupOrder::Descending,
-				};
-				let largest_location = params.largest_object();
-				let forward = params.forward().unwrap_or(true);
+				let group_order = group_order.unwrap_or(GroupOrder::Descending);
+				let forward = forward.unwrap_or(true);
 
 				Ok(Self {
 					request_id,
@@ -258,14 +265,13 @@ impl Message for Publish<'_> {
 					forward,
 				})
 			}
-			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
 
 #[derive(Debug)]
 pub struct PublishOk {
-	pub request_id: RequestId,
+	pub request_id: Option<RequestId>,
 	pub forward: bool,
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
@@ -277,7 +283,13 @@ impl Message for PublishOk {
 	const ID: u64 = 0x1E;
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		if version != Version::Draft17 {
+			self.request_id
+				.expect("request_id required for draft14-16")
+				.encode(w, version)?;
+		} else {
+			assert!(self.request_id.is_none(), "request_id must be None for draft17");
+		}
 
 		match version {
 			Version::Draft14 => {
@@ -292,16 +304,13 @@ impl Message for PublishOk {
 				// no parameters
 				0u8.encode(w, version)?;
 			}
-			Version::Draft15 | Version::Draft16 => {
-				let mut params = MessageParameters::default();
-				params.set_forward(self.forward);
-				params.set_subscriber_priority(self.subscriber_priority);
-				params.set_group_order(u8::from(self.group_order) as u64);
-				params.set_subscription_filter(self.filter_type)?;
-				params.encode(w, version)?;
-			}
-			Version::Draft17 => {
-				return Err(EncodeError::Version);
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				encode_params!(w, version,
+					0x10 => self.forward,
+					0x20 => self.subscriber_priority,
+					0x21 => self.filter_type,
+					0x22 => self.group_order,
+				);
 			}
 		}
 
@@ -309,7 +318,11 @@ impl Message for PublishOk {
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
+		let request_id = if version == Version::Draft17 {
+			None
+		} else {
+			Some(RequestId::decode(r, version)?)
+		};
 
 		match version {
 			Version::Draft14 => {
@@ -339,20 +352,18 @@ impl Message for PublishOk {
 					filter_type,
 				})
 			}
-			Version::Draft15 | Version::Draft16 => {
-				let params = MessageParameters::decode(r, version)?;
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				decode_params!(r, version,
+					0x10 => forward: Option<bool>,
+					0x20 => subscriber_priority: Option<u8>,
+					0x21 => filter_type: Option<FilterType>,
+					0x22 => group_order: Option<GroupOrder>,
+				);
 
-				let forward = params.forward().unwrap_or(true);
-				let subscriber_priority = params.subscriber_priority().unwrap_or(128);
-				let group_order = match params.group_order() {
-					Some(v) => u8::try_from(v)
-						.ok()
-						.and_then(|v| GroupOrder::try_from(v).ok())
-						.map(GroupOrder::any_to_descending)
-						.unwrap_or(GroupOrder::Descending),
-					None => GroupOrder::Descending,
-				};
-				let filter_type = params.subscription_filter().unwrap_or(FilterType::LargestObject);
+				let forward = forward.unwrap_or(true);
+				let subscriber_priority = subscriber_priority.unwrap_or(128);
+				let group_order = group_order.unwrap_or(GroupOrder::Descending);
+				let filter_type = filter_type.unwrap_or(FilterType::LargestObject);
 
 				Ok(Self {
 					request_id,
@@ -362,7 +373,6 @@ impl Message for PublishOk {
 					filter_type,
 				})
 			}
-			Version::Draft17 => Err(DecodeError::Version),
 		}
 	}
 }
@@ -460,7 +470,7 @@ mod tests {
 	#[test]
 	fn test_publish_ok_v14_round_trip() {
 		let msg = PublishOk {
-			request_id: RequestId(7),
+			request_id: Some(RequestId(7)),
 			forward: true,
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -470,7 +480,7 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft14);
 		let decoded: PublishOk = decode_message(&encoded, Version::Draft14).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(7));
+		assert_eq!(decoded.request_id, Some(RequestId(7)));
 		assert!(decoded.forward);
 		assert_eq!(decoded.subscriber_priority, 128);
 	}
@@ -478,7 +488,7 @@ mod tests {
 	#[test]
 	fn test_publish_ok_v15_round_trip() {
 		let msg = PublishOk {
-			request_id: RequestId(7),
+			request_id: Some(RequestId(7)),
 			forward: true,
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -488,8 +498,67 @@ mod tests {
 		let encoded = encode_message(&msg, Version::Draft15);
 		let decoded: PublishOk = decode_message(&encoded, Version::Draft15).unwrap();
 
-		assert_eq!(decoded.request_id, RequestId(7));
+		assert_eq!(decoded.request_id, Some(RequestId(7)));
 		assert!(decoded.forward);
 		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	#[test]
+	fn test_publish_v17_round_trip() {
+		let msg = Publish {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+			track_alias: 42,
+			group_order: GroupOrder::Descending,
+			largest_location: Some(Location { group: 10, object: 5 }),
+			forward: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: Publish = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+		assert_eq!(decoded.track_alias, 42);
+		assert_eq!(decoded.largest_location, Some(Location { group: 10, object: 5 }));
+		assert!(decoded.forward);
+	}
+
+	#[test]
+	fn test_publish_ok_v17_round_trip() {
+		let msg = PublishOk {
+			request_id: None,
+			forward: true,
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: FilterType::LargestObject,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: PublishOk = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	#[test]
+	fn test_publish_done_v17_round_trip() {
+		let msg = PublishDone {
+			request_id: None,
+			status_code: 200,
+			stream_count: 5,
+			reason_phrase: "OK".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: PublishDone = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+		assert_eq!(decoded.status_code, 200);
+		assert_eq!(decoded.stream_count, 5);
+		assert_eq!(decoded.reason_phrase, "OK");
 	}
 }

@@ -62,10 +62,12 @@ impl State {
 	/// Find the next non-tombstoned group at or after `index`.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
-	fn poll_next_group(&self, index: usize) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
+	fn poll_next_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
-			if let Some((group, _)) = slot {
+			if let Some((group, _)) = slot
+				&& group.info.sequence >= min_sequence
+			{
 				return Poll::Ready(Ok(Some((group.consume(), self.offset + i))));
 			}
 		}
@@ -138,6 +140,16 @@ impl State {
 		while let Some(None) = self.groups.front() {
 			self.groups.pop_front();
 			self.offset += 1;
+		}
+	}
+
+	fn poll_finished(&self) -> Poll<Result<u64>> {
+		if let Some(fin) = self.final_sequence {
+			Poll::Ready(Ok(fin))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
 		}
 	}
 }
@@ -268,15 +280,13 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Create a new consumer for the track, starting at the latest group.
+	/// Create a new consumer for the track, starting at the beginning.
 	pub fn consume(&self) -> TrackConsumer {
-		let state = self.state.read();
-		let index = state.offset + state.groups.len().saturating_sub(1);
-
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			index,
+			index: 0,
+			min_sequence: 0,
 		}
 	}
 
@@ -353,13 +363,11 @@ impl TrackWeak {
 	}
 
 	pub fn consume(&self) -> TrackConsumer {
-		let state = self.state.read();
-		let index = state.offset + state.groups.len().saturating_sub(1);
-
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			index,
+			index: 0,
+			min_sequence: 0,
 		}
 	}
 
@@ -381,6 +389,8 @@ pub struct TrackConsumer {
 	pub info: Track,
 	state: conducer::Consumer<State>,
 	index: usize,
+
+	min_sequence: u64,
 }
 
 impl TrackConsumer {
@@ -403,7 +413,8 @@ impl TrackConsumer {
 	/// `Poll::Ready(Some(Err(e)))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
-		let Some((consumer, found_index)) = ready!(self.poll(waiter, |state| state.poll_next_group(self.index))?)
+		let Some((consumer, found_index)) =
+			ready!(self.poll(waiter, |state| state.poll_next_group(self.index, self.min_sequence))?)
 		else {
 			return Poll::Ready(Ok(None));
 		};
@@ -445,6 +456,26 @@ impl TrackConsumer {
 
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+
+	/// Poll for the total number of groups in the track.
+	pub fn poll_finished(&mut self, waiter: &conducer::Waiter) -> Poll<Result<u64>> {
+		self.poll(waiter, |state| state.poll_finished())
+	}
+
+	/// Block until the track is finished, returning the total number of groups.
+	pub async fn finished(&mut self) -> Result<u64> {
+		conducer::wait(|waiter| self.poll_finished(waiter)).await
+	}
+
+	/// Start the consumer at the specified sequence.
+	pub fn start_at(&mut self, sequence: u64) {
+		self.min_sequence = sequence;
+	}
+
+	/// Return the latest sequence number in the track.
+	pub fn latest(&self) -> Option<u64> {
+		self.state.read().max_sequence
 	}
 }
 
@@ -678,8 +709,8 @@ mod test {
 		// Consumer should still be able to read through the hole.
 		let mut consumer = producer.consume();
 		let group = consumer.assert_group();
-		// consume() starts at the last slot (seq 2).
-		assert_eq!(group.info.sequence, 2);
+		// consume() starts at index 0, first non-tombstoned group is seq 5.
+		assert_eq!(group.info.sequence, 5);
 	}
 
 	#[test]
@@ -745,14 +776,10 @@ mod test {
 		producer.finish_at(1).unwrap();
 
 		let consumer = producer.consume();
+		// get_group(0) blocks because group 0 is below final_sequence and could still arrive.
 		assert!(
-			consumer
-				.get_group(0)
-				.now_or_never()
-				.expect("should not block")
-				.expect("would have errored")
-				.is_none(),
-			"sequence below fin should not block forever"
+			consumer.get_group(0).now_or_never().is_none(),
+			"sequence below fin should block (group could still arrive)"
 		);
 		assert!(
 			consumer

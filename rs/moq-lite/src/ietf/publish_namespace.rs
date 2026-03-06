@@ -2,11 +2,7 @@
 
 use std::borrow::Cow;
 
-use crate::{
-	Path,
-	coding::*,
-	ietf::{Parameters, RequestId},
-};
+use crate::{Path, coding::*, ietf::RequestId};
 
 use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
@@ -26,17 +22,23 @@ impl Message for PublishNamespace<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
+		if version == Version::Draft17 {
+			0u64.encode(w, version)?; // required_request_id_delta = 0
+		}
 		encode_namespace(w, &self.track_namespace, version)?;
-		0u8.encode(w, version)?; // number of parameters
+		encode_params!(w, version,);
 		Ok(())
 	}
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
+		if version == Version::Draft17 {
+			let _required_request_id_delta = u64::decode(r, version)?;
+		}
 		let track_namespace = decode_namespace(r, version)?;
 
-		// Ignore parameters, who cares.
-		let _params = Parameters::decode(r, version)?;
+		// Ignore parameters
+		decode_params!(r, version,);
 
 		Ok(Self {
 			request_id,
@@ -302,6 +304,20 @@ mod tests {
 		assert_eq!(decoded.request_id, RequestId(7));
 		assert_eq!(decoded.error_code, 1);
 		assert_eq!(decoded.reason_phrase, "Shutdown");
+	}
+
+	#[test]
+	fn test_publish_namespace_v17_round_trip() {
+		let msg = PublishNamespace {
+			request_id: RequestId(5),
+			track_namespace: Path::new("v17/broadcast"),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: PublishNamespace = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(5));
+		assert_eq!(decoded.track_namespace.as_str(), "v17/broadcast");
 	}
 
 	#[test]

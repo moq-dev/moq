@@ -7,7 +7,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use crate::{
 	Path,
 	coding::*,
-	ietf::{FilterType, GroupOrder, MessageParameters, Parameters, RequestId},
+	ietf::{FilterType, GroupOrder, Parameters, RequestId},
 };
 
 use super::Message;
@@ -30,6 +30,9 @@ impl Message for TrackStatus<'_> {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
+		if version == Version::Draft17 {
+			0u64.encode(w, version)?; // required_request_id_delta = 0
+		}
 		encode_namespace(w, &self.track_namespace, version)?;
 		self.track_name.encode(w, version)?;
 
@@ -41,13 +44,8 @@ impl Message for TrackStatus<'_> {
 				FilterType::LargestObject.encode(w, version)?; // filter type
 				0u8.encode(w, version)?; // no parameters
 			}
-			Version::Draft15 | Version::Draft16 => {
-				// v15: same format as Subscribe - fields in parameters
-				let params = MessageParameters::default();
-				params.encode(w, version)?;
-			}
-			Version::Draft17 => {
-				return Err(EncodeError::Version);
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				encode_params!(w, version,);
 			}
 		}
 		Ok(())
@@ -55,6 +53,9 @@ impl Message for TrackStatus<'_> {
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
+		if version == Version::Draft17 {
+			let _required_request_id_delta = u64::decode(r, version)?;
+		}
 		let track_namespace = decode_namespace(r, version)?;
 		let track_name = Cow::<str>::decode(r, version)?;
 
@@ -66,11 +67,8 @@ impl Message for TrackStatus<'_> {
 				let _filter_type = u64::decode(r, version)?;
 				let _params = Parameters::decode(r, version)?;
 			}
-			Version::Draft15 | Version::Draft16 => {
-				let _params = MessageParameters::decode(r, version)?;
-			}
-			Version::Draft17 => {
-				return Err(DecodeError::Version);
+			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
+				decode_params!(r, version,);
 			}
 		}
 
@@ -153,15 +151,19 @@ mod tests {
 	}
 
 	#[test]
-	fn test_track_status_v17_rejected() {
+	fn test_track_status_v17_round_trip() {
 		let msg = TrackStatus {
 			request_id: RequestId(1),
 			track_namespace: Path::new("test/ns"),
 			track_name: "video".into(),
 		};
 
-		let mut buf = BytesMut::new();
-		assert!(msg.encode_msg(&mut buf, Version::Draft17).is_err());
+		let encoded = encode_message(&msg, Version::Draft17);
+		let decoded: TrackStatus = decode_message(&encoded, Version::Draft17).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
 	}
 
 	#[test]

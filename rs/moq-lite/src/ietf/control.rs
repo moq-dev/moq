@@ -12,7 +12,8 @@ use super::{Message, Version};
 
 struct ControlState {
 	request_id_next: RequestId,
-	request_id_max: RequestId,
+	/// None means no flow control (draft17 removed MaxRequestId).
+	request_id_max: Option<RequestId>,
 	request_id_notify: Arc<Notify>,
 }
 
@@ -26,7 +27,7 @@ pub(super) struct Control {
 impl Control {
 	pub fn new(
 		tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
-		request_id_max: RequestId,
+		request_id_max: Option<RequestId>,
 		client: bool,
 		version: Version,
 	) -> Self {
@@ -68,7 +69,7 @@ impl Control {
 
 	pub fn max_request_id(&self, max: RequestId) {
 		let mut state = self.state.lock().unwrap();
-		state.request_id_max = max;
+		state.request_id_max = Some(max);
 		state.request_id_notify.notify_waiters();
 	}
 
@@ -80,7 +81,13 @@ impl Control {
 			let notify = {
 				let mut state = self.state.lock().unwrap();
 
-				if state.request_id_next < state.request_id_max {
+				// None means no flow control (draft17).
+				let allowed = match state.request_id_max {
+					None => true,
+					Some(max) => state.request_id_next < max,
+				};
+
+				if allowed {
 					return Ok(state.request_id_next.increment());
 				}
 

@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 
 keywords = ["async", "producer", "consumer", "state", "sync"]

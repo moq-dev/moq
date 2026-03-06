@@ -26,8 +26,9 @@ impl<T> Consumer<T> {
 	/// Poll the shared state with a closure.
 	///
 	/// Calls `f` with a [`Ref`]. If `f` returns [`Poll::Pending`] and the
-	/// channel is still open, registers the waiter for notification. Returns
-	/// `Err(Ref)` if the channel and the condition is still Pending.
+	/// channel is still open, registers the [`Waiter`] for notification.
+	/// Returns `Err(`[`Ref`]`)` if the channel has been closed while the
+	/// condition returned by `f` is still pending.
 	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<R>,

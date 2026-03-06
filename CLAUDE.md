@@ -75,6 +75,18 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
 3. For JS/TS development, bun workspaces are used with configuration in the root `package.json`
 4. Consult `doc/` for documentation and `doc/spec/` for raw IETF specification drafts when working on protocol-level code
 
+## Version Matching Convention
+
+When matching on `Version` enums, default to the **newest** draft behavior so future versions default forward. Explicitly list older versions:
+
+```rust
+// CORRECT: future versions get draft-17+ behavior
+match version {
+    Version::Draft14 | Version::Draft15 | Version::Draft16 => { /* old behavior */ }
+    _ => { /* newest/draft-17 behavior */ }
+}
+```
+
 ## Tooling
 
 - **TypeScript**: Always use `bun` for all package management and script execution (not npm, yarn, or pnpm)
