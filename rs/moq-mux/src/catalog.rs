@@ -51,6 +51,11 @@ impl CatalogProducer {
 		}
 	}
 
+	/// Get a snapshot of the current catalog.
+	pub fn snapshot(&self) -> hang::Catalog {
+		self.current.lock().unwrap().clone()
+	}
+
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> hang::CatalogConsumer {
 		hang::CatalogConsumer::new(self.hang_track.consume())
