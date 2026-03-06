@@ -4,7 +4,7 @@ use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
 	Track, TrackProducer,
 	coding::{Reader, Stream},
-	ietf::{self, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId},
+	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId},
 	model::BroadcastProducer,
 };
 
@@ -43,68 +43,60 @@ struct BroadcastState {
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 	origin: Option<OriginProducer>,
+	control: Control,
 	state: Lock<State>,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: Option<OriginProducer>, version: Version) -> Self {
+	pub fn new(session: S, origin: Option<OriginProducer>, control: Control, version: Version) -> Self {
 		Self {
 			session,
 			origin,
+			control,
 			state: Default::default(),
 			version,
 		}
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
-		tokio::select! {
-			res = self.clone().run_accept() => res,
-			res = self.run_uni() => res,
-		}
+		self.run_uni().await
 	}
 
-	/// Accept incoming bidi streams for PUBLISH / PUBLISH_NAMESPACE from the publisher side.
-	async fn run_accept(self) -> Result<(), Error> {
-		loop {
-			let mut stream = Stream::accept(&self.session, self.version).await?;
-
-			let id: u64 = stream.reader.decode().await?;
-			let size: u16 = stream.reader.decode().await?;
-			let mut data = stream.reader.read_exact(size as usize).await?;
-
-			let mut this = self.clone();
-			match id {
-				ietf::Publish::ID => {
-					let msg = ietf::Publish::decode_msg(&mut data, this.version)?;
-					if !data.is_empty() {
-						return Err(Error::WrongSize);
+	/// Handle an incoming bidi stream dispatched by the session.
+	pub fn handle_stream(&mut self, id: u64, mut data: bytes::Bytes, stream: Stream<S, Version>) -> Result<(), Error> {
+		let mut this = self.clone();
+		match id {
+			ietf::Publish::ID => {
+				let msg = ietf::Publish::decode_msg(&mut data, this.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
+				}
+				tracing::debug!(message = ?msg, "received publish");
+				web_async::spawn(async move {
+					if let Err(err) = this.run_publish_stream(stream, msg).await {
+						tracing::debug!(%err, "publish stream error");
 					}
-					tracing::debug!(message = ?msg, "received publish");
-					web_async::spawn(async move {
-						if let Err(err) = this.run_publish_stream(stream, msg).await {
-							tracing::debug!(%err, "publish stream error");
-						}
-					});
+				});
+			}
+			ietf::PublishNamespace::ID => {
+				let msg = ietf::PublishNamespace::decode_msg(&mut data, this.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
 				}
-				ietf::PublishNamespace::ID => {
-					let msg = ietf::PublishNamespace::decode_msg(&mut data, this.version)?;
-					if !data.is_empty() {
-						return Err(Error::WrongSize);
+				tracing::debug!(message = ?msg, "received publish_namespace");
+				web_async::spawn(async move {
+					if let Err(err) = this.run_publish_namespace_stream(stream, msg).await {
+						tracing::debug!(%err, "publish_namespace stream error");
 					}
-					tracing::debug!(message = ?msg, "received publish_namespace");
-					web_async::spawn(async move {
-						if let Err(err) = this.run_publish_namespace_stream(stream, msg).await {
-							tracing::debug!(%err, "publish_namespace stream error");
-						}
-					});
-				}
-				_ => {
-					tracing::warn!(id, "unexpected bidi stream type in subscriber");
-					return Err(Error::UnexpectedStream);
-				}
+				});
+			}
+			_ => {
+				tracing::warn!(id, "unexpected bidi stream type for subscriber");
+				return Err(Error::UnexpectedStream);
 			}
 		}
+		Ok(())
 	}
 
 	/// Handle an incoming PUBLISH_NAMESPACE on its bidi stream.
@@ -467,6 +459,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_subscribe(&mut self, broadcast: Path<'_>, mut track: TrackProducer) {
+		let request_id = match self.control.next_request_id().await {
+			Ok(id) => id,
+			Err(err) => {
+				let _ = track.abort(err);
+				return;
+			}
+		};
+
 		let mut stream = match Stream::open(&self.session, self.version).await {
 			Ok(s) => s,
 			Err(err) => {
@@ -476,51 +476,60 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		let request_id = RequestId(0); // adapter allocates the real ID via open_bi
+		// Pre-register the track so group data arriving before SubscribeOk can be routed.
+		// The publisher uses request_id.0 as track_alias, and recv_group falls back to
+		// RequestId(track_alias) when no alias mapping exists, so this works.
+		{
+			let mut state = self.state.lock();
+			state.subscribes.insert(
+				request_id,
+				TrackState {
+					producer: track.clone(),
+					alias: None,
+				},
+			);
+		}
 
 		// Write Subscribe message
 		if let Err(err) = self.write_subscribe(&mut stream, request_id, &broadcast, &track).await {
 			tracing::debug!(%err, "failed to write subscribe");
+			self.state.lock().subscribes.remove(&request_id);
 			let _ = track.abort(err);
 			return;
 		}
 
-		tracing::info!(broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe started");
+		tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.info.name, "subscribe started");
 
-		// Read the response
+		// Read the response and register the alias mapping
 		let track_alias = match self.read_subscribe_response(&mut stream).await {
-			Ok(alias) => alias,
+			Ok(alias) => {
+				if let Some(alias) = alias {
+					let mut state = self.state.lock();
+					state.aliases.insert(alias, request_id);
+					if let Some(track_state) = state.subscribes.get_mut(&request_id) {
+						track_state.alias = Some(alias);
+					}
+				}
+				alias
+			}
 			Err(err) => {
 				tracing::debug!(%err, "subscribe response error");
+				self.state.lock().subscribes.remove(&request_id);
 				let _ = track.abort(err);
 				return;
 			}
 		};
 
-		// Register the alias
-		if let Some(alias) = track_alias {
-			let mut state = self.state.lock();
-			let rid = RequestId(alias); // use alias as a pseudo-id for group routing
-			state.subscribes.insert(
-				rid,
-				TrackState {
-					producer: track.clone(),
-					alias: Some(alias),
-				},
-			);
-			state.aliases.insert(alias, rid);
-		}
-
 		// Wait for track unused or PublishDone (stream reader close)
 		tokio::select! {
 			_ = track.unused() => {
-				tracing::info!(broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
+				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
 			res = stream.reader.closed() => {
 				match res {
 					Ok(()) => {
-						tracing::info!(broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe complete");
+						tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.info.name, "subscribe complete");
 						let _ = track.finish();
 					}
 					Err(err) => {
@@ -532,11 +541,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		// Clean up
+		self.state.lock().subscribes.remove(&request_id);
 		if let Some(alias) = track_alias {
-			let mut state = self.state.lock();
-			let rid = RequestId(alias);
-			state.subscribes.remove(&rid);
-			state.aliases.remove(&alias);
+			self.state.lock().aliases.remove(&alias);
 		}
 
 		stream.writer.finish().ok();

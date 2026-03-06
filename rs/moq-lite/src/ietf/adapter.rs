@@ -4,7 +4,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
 use crate::{
 	Error, PathOwned,
@@ -12,7 +12,7 @@ use crate::{
 	ietf::{self, RequestId},
 };
 
-use super::{Message, Version};
+use super::{Control, Message, Version};
 
 // === Virtual Streams ===
 
@@ -80,13 +80,69 @@ impl web_transport_trait::RecvStream for VirtualRecvStream {
 }
 
 /// A virtual send stream that forwards writes to the shared control stream writer.
+///
+/// For streams created by `open_bi` (outgoing requests), this also parses
+/// the first outgoing message to extract the request_id and register the
+/// stream for response routing.
 pub struct VirtualSendStream {
 	control_tx: mpsc::UnboundedSender<Vec<u8>>,
+	/// Present only for outgoing requests (from open_bi).
+	/// Accumulates bytes until the request_id can be parsed,
+	/// then registers the stream and flushes.
+	pending: Option<OutgoingRegistration>,
+}
+
+struct OutgoingRegistration {
+	follow_tx: mpsc::UnboundedSender<Bytes>,
+	shared: Arc<Shared>,
+	version: Version,
+	buf: Vec<u8>,
+}
+
+impl OutgoingRegistration {
+	/// Try to parse the request_id (and optionally namespace) from the accumulated bytes.
+	fn try_parse(&self) -> Option<RequestId> {
+		let mut cursor = std::io::Cursor::new(&self.buf);
+		let type_id = u64::decode(&mut cursor, self.version).ok()?;
+		let _size = u16::decode(&mut cursor, self.version).ok()?;
+		let request_id = RequestId::decode(&mut cursor, self.version).ok()?;
+
+		// For PublishNamespace, also extract the namespace for reverse lookup.
+		if type_id == ietf::PublishNamespace::ID {
+			if self.version == Version::Draft17 {
+				// v17 has required_request_id_delta after request_id
+				let _ = u64::decode(&mut cursor, self.version).ok()?;
+			}
+			if let Ok(ns) = crate::ietf::namespace::decode_namespace(&mut cursor, self.version) {
+				self.shared
+					.namespaces
+					.lock()
+					.unwrap()
+					.insert(ns.into_owned(), request_id);
+			}
+		}
+
+		Some(request_id)
+	}
+
+	fn register(self, request_id: RequestId) {
+		self.shared.streams.lock().unwrap().insert(request_id, self.follow_tx);
+	}
 }
 
 impl VirtualSendStream {
 	fn new(control_tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
-		Self { control_tx }
+		Self {
+			control_tx,
+			pending: None,
+		}
+	}
+
+	fn with_registration(control_tx: mpsc::UnboundedSender<Vec<u8>>, pending: OutgoingRegistration) -> Self {
+		Self {
+			control_tx,
+			pending: Some(pending),
+		}
 	}
 }
 
@@ -94,13 +150,33 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 	type Error = AdapterError;
 
 	async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-		self.control_tx.send(buf.to_vec()).map_err(|_| AdapterError::Closed)?;
-		Ok(buf.len())
+		let len = buf.len();
+
+		if let Some(pending) = &mut self.pending {
+			pending.buf.extend_from_slice(buf);
+
+			if let Some(request_id) = pending.try_parse() {
+				let pending = self.pending.take().unwrap();
+				let buf = pending.buf.clone();
+				pending.register(request_id);
+				self.control_tx.send(buf).map_err(|_| AdapterError::Closed)?;
+			}
+		} else {
+			self.control_tx.send(buf.to_vec()).map_err(|_| AdapterError::Closed)?;
+		}
+
+		Ok(len)
 	}
 
 	fn set_priority(&mut self, _order: u8) {}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
+		// Flush any remaining buffered data (e.g. if registration never completed).
+		if let Some(pending) = self.pending.take()
+			&& !pending.buf.is_empty()
+		{
+			let _ = self.control_tx.send(pending.buf);
+		}
 		Ok(())
 	}
 
@@ -224,30 +300,18 @@ struct Shared {
 
 	/// Namespace → request_id reverse lookup (for v14/v15 namespace-keyed messages).
 	namespaces: Mutex<HashMap<PathOwned, RequestId>>,
-
-	/// Request ID allocation state.
-	request_id_next: Mutex<RequestId>,
-
-	/// MAX_REQUEST_ID flow control.
-	request_id_max: Mutex<Option<RequestId>>,
-	request_id_notify: Notify,
 }
 
 #[derive(Clone)]
 pub struct ControlStreamAdapter<S: web_transport_trait::Session> {
 	inner: S,
 	shared: Arc<Shared>,
+	control: Control,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
-	pub fn new(
-		inner: S,
-		control_tx: mpsc::UnboundedSender<Vec<u8>>,
-		client: bool,
-		request_id_max: Option<RequestId>,
-		version: Version,
-	) -> Self {
+	pub fn new(inner: S, control_tx: mpsc::UnboundedSender<Vec<u8>>, control: Control, version: Version) -> Self {
 		let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
 		Self {
 			inner,
@@ -257,10 +321,8 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 				control_tx,
 				streams: Mutex::new(HashMap::new()),
 				namespaces: Mutex::new(HashMap::new()),
-				request_id_next: Mutex::new(if client { RequestId(0) } else { RequestId(1) }),
-				request_id_max: Mutex::new(request_id_max),
-				request_id_notify: Notify::new(),
 			}),
+			control,
 			version,
 		}
 	}
@@ -336,47 +398,12 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					}
 				}
 				Route::MaxRequestId(max) => {
-					let mut guard = self.shared.request_id_max.lock().unwrap();
-					*guard = Some(max);
-					self.shared.request_id_notify.notify_waiters();
+					self.control.max_request_id(max);
 				}
 				Route::GoAway => {
 					return Err(Error::Unsupported);
 				}
 				Route::Ignore => {}
-			}
-		}
-	}
-
-	/// Allocate the next request_id, blocking until MAX_REQUEST_ID allows it.
-	async fn next_request_id(&self) -> Result<RequestId, Error> {
-		let timeout = tokio::time::sleep(std::time::Duration::from_secs(10));
-		tokio::pin!(timeout);
-
-		loop {
-			let notified = {
-				let mut next = self.shared.request_id_next.lock().unwrap();
-				let max = self.shared.request_id_max.lock().unwrap();
-
-				let allowed = match *max {
-					None => true,
-					Some(max) => *next < max,
-				};
-
-				if allowed {
-					return Ok(next.increment());
-				}
-
-				self.shared.request_id_notify.notified()
-			};
-
-			tokio::select! {
-				_ = notified => continue,
-				_ = self.shared.control_tx.closed() => return Err(Error::Cancel),
-				_ = &mut timeout => {
-					tracing::warn!("timed out waiting for MAX_REQUEST_ID");
-					return Err(Error::Cancel);
-				}
 			}
 		}
 	}
@@ -588,13 +615,17 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 	}
 
 	async fn open_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
-		// Block until MAX_REQUEST_ID allows the next request
-		let request_id = self.next_request_id().await.map_err(|_| AdapterError::Closed)?;
-
 		let (follow_tx, follow_rx) = mpsc::unbounded_channel();
 		let recv = VirtualRecvStream::new(Bytes::new(), follow_rx);
-		let send = VirtualSendStream::new(self.shared.control_tx.clone());
-		self.shared.streams.lock().unwrap().insert(request_id, follow_tx);
+		let send = VirtualSendStream::with_registration(
+			self.shared.control_tx.clone(),
+			OutgoingRegistration {
+				follow_tx,
+				shared: Arc::clone(&self.shared),
+				version: self.version,
+				buf: Vec::new(),
+			},
+		);
 		Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv)))
 	}
 
@@ -707,9 +738,6 @@ mod tests {
 			control_tx,
 			streams: Mutex::new(HashMap::new()),
 			namespaces: Mutex::new(HashMap::new()),
-			request_id_next: Mutex::new(RequestId(0)),
-			request_id_max: Mutex::new(None),
-			request_id_notify: Notify::new(),
 		});
 		// We need a dummy inner session — but classify doesn't use it.
 		// Use a struct that satisfies the trait bound. We can't easily construct one,

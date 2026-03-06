@@ -7,7 +7,7 @@ use web_transport_trait::SendStream;
 use crate::{
 	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
 	coding::{Stream, Writer},
-	ietf::{self, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
+	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	model::GroupConsumer,
 };
 
@@ -17,83 +17,74 @@ use super::{Message, Version};
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
+	control: Control,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: Option<OriginConsumer>, version: Version) -> Self {
+	pub fn new(session: S, origin: Option<OriginConsumer>, control: Control, version: Version) -> Self {
 		let origin = origin.unwrap_or_else(|| Origin::produce().consume());
 		Self {
 			session,
 			origin,
+			control,
 			version,
 		}
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
-		tokio::select! {
-			res = self.clone().run_announce() => res,
-			res = self.run_accept() => res,
-		}
+		self.run_announce().await
 	}
 
-	/// Accept incoming bidi streams (virtual for v14-16 via adapter, real for v17).
-	async fn run_accept(self) -> Result<(), Error> {
-		loop {
-			let mut stream = Stream::accept(&self.session, self.version).await?;
-
-			let id: u64 = stream.reader.decode().await?;
-			let size: u16 = stream.reader.decode().await?;
-			let mut data = stream.reader.read_exact(size as usize).await?;
-
-			let this = self.clone();
-			match id {
-				ietf::Subscribe::ID => {
-					let msg = ietf::Subscribe::decode_msg(&mut data, this.version)?;
-					if !data.is_empty() {
-						return Err(Error::WrongSize);
+	/// Handle an incoming bidi stream dispatched by the session.
+	pub fn handle_stream(&self, id: u64, mut data: bytes::Bytes, stream: Stream<S, Version>) -> Result<(), Error> {
+		let this = self.clone();
+		match id {
+			ietf::Subscribe::ID => {
+				let msg = ietf::Subscribe::decode_msg(&mut data, this.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
+				}
+				tracing::debug!(message = ?msg, "received subscribe");
+				web_async::spawn(async move {
+					if let Err(err) = this.run_subscribe_stream(stream, msg).await {
+						tracing::debug!(%err, "subscribe stream error");
 					}
-					tracing::debug!(message = ?msg, "received subscribe");
-					web_async::spawn(async move {
-						if let Err(err) = this.run_subscribe_stream(stream, msg).await {
-							tracing::debug!(%err, "subscribe stream error");
-						}
-					});
+				});
+			}
+			ietf::Fetch::ID => {
+				let msg = ietf::Fetch::decode_msg(&mut data, this.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
 				}
-				ietf::Fetch::ID => {
-					let msg = ietf::Fetch::decode_msg(&mut data, this.version)?;
-					if !data.is_empty() {
-						return Err(Error::WrongSize);
+				tracing::debug!(message = ?msg, "received fetch");
+				web_async::spawn(async move {
+					if let Err(err) = this.run_fetch_stream(stream, msg).await {
+						tracing::debug!(%err, "fetch stream error");
 					}
-					tracing::debug!(message = ?msg, "received fetch");
-					web_async::spawn(async move {
-						if let Err(err) = this.run_fetch_stream(stream, msg).await {
-							tracing::debug!(%err, "fetch stream error");
-						}
-					});
+				});
+			}
+			ietf::SubscribeNamespace::ID => {
+				let msg = ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
 				}
-				ietf::SubscribeNamespace::ID => {
-					let msg = ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?;
-					if !data.is_empty() {
-						return Err(Error::WrongSize);
+				tracing::debug!(message = ?msg, "received subscribe_namespace");
+				web_async::spawn(async move {
+					if let Err(err) = this.run_subscribe_namespace_stream(stream, msg).await {
+						tracing::debug!(%err, "subscribe_namespace stream error");
 					}
-					tracing::debug!(message = ?msg, "received subscribe_namespace");
-					web_async::spawn(async move {
-						if let Err(err) = this.run_subscribe_namespace_stream(stream, msg).await {
-							tracing::debug!(%err, "subscribe_namespace stream error");
-						}
-					});
-				}
-				ietf::TrackStatus::ID => {
-					tracing::warn!("TrackStatus not supported");
-					// Just drop the stream
-				}
-				_ => {
-					tracing::warn!(id, "unexpected bidi stream type");
-					return Err(Error::UnexpectedStream);
-				}
+				});
+			}
+			ietf::TrackStatus::ID => {
+				tracing::warn!("TrackStatus not supported");
+			}
+			_ => {
+				tracing::warn!(id, "unexpected bidi stream type for publisher");
+				return Err(Error::UnexpectedStream);
 			}
 		}
+		Ok(())
 	}
 
 	/// Handle a SUBSCRIBE on its bidi stream.
@@ -448,7 +439,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	/// Outgoing PublishNamespace: announce each namespace via a bidi stream.
 	async fn run_announce(mut self) -> Result<(), Error> {
-		let mut namespace_streams: HashMap<crate::PathOwned, Stream<S, Version>> = HashMap::new();
+		let mut namespace_streams: HashMap<crate::PathOwned, (RequestId, Stream<S, Version>)> = HashMap::new();
 
 		loop {
 			let announced = tokio::select! {
@@ -466,6 +457,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			if active.is_some() {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
 
+				let request_id = self.control.next_request_id().await?;
 				let mut stream = Stream::open(&self.session, self.version).await?;
 
 				// Write the PublishNamespace message
@@ -473,16 +465,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				stream
 					.writer
 					.encode(&ietf::PublishNamespace {
-						request_id: RequestId(0), // adapter allocates the real ID via open_bi
+						request_id,
 						track_namespace: suffix.as_path(),
 					})
 					.await?;
 
 				// TODO: read response (RequestOk/RequestError) from stream.reader
-				namespace_streams.insert(suffix, stream);
+				namespace_streams.insert(suffix, (request_id, stream));
 			} else {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
-				if let Some(mut stream) = namespace_streams.remove(&suffix) {
+				if let Some((request_id, mut stream)) = namespace_streams.remove(&suffix) {
 					// For v14-16, send PublishNamespaceDone. For v17, just close the stream.
 					match self.version {
 						Version::Draft14 | Version::Draft15 | Version::Draft16 => {
@@ -491,7 +483,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								.writer
 								.encode(&ietf::PublishNamespaceDone {
 									track_namespace: suffix.as_path(),
-									request_id: RequestId(0),
+									request_id,
 								})
 								.await;
 						}
@@ -505,7 +497,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 
 		// Clean up remaining streams
-		for (suffix, mut stream) in namespace_streams {
+		for (suffix, (request_id, mut stream)) in namespace_streams {
 			match self.version {
 				Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 					let _ = stream.writer.encode(&ietf::PublishNamespaceDone::ID).await;
@@ -513,7 +505,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						.writer
 						.encode(&ietf::PublishNamespaceDone {
 							track_namespace: suffix.as_path(),
-							request_id: RequestId(0),
+							request_id,
 						})
 						.await;
 				}

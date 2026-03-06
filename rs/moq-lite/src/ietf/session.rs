@@ -4,7 +4,7 @@ use crate::{
 	ietf::{self, RequestId},
 };
 
-use super::{Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter};
+use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter};
 
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
@@ -58,7 +58,7 @@ async fn run<S: web_transport_trait::Session>(
 		Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 			run_adapted(session, setup, request_id_max, client, publish, subscribe, version).await
 		}
-		Version::Draft17 => run_native(session, setup, publish, subscribe, version).await,
+		Version::Draft17 => run_native(session, setup, client, publish, subscribe, version).await,
 	}
 }
 
@@ -73,13 +73,17 @@ async fn run_adapted<S: web_transport_trait::Session>(
 	version: Version,
 ) -> Result<(), Error> {
 	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-	let adapter = ControlStreamAdapter::new(session, tx, client, request_id_max, version);
+	let control = Control::new(request_id_max, client);
+	let adapter = ControlStreamAdapter::new(session, tx, control.clone(), version);
 
-	let publisher = Publisher::new(adapter.clone(), publish, version);
-	let subscriber = Subscriber::new(adapter.clone(), subscribe, version);
+	let publisher = Publisher::new(adapter.clone(), publish, control.clone(), version);
+	let subscriber = Subscriber::new(adapter.clone(), subscribe, control, version);
+
+	let dispatch_session = adapter.clone();
 
 	tokio::select! {
 		res = adapter.run(setup.reader, setup.writer, rx) => res,
+		res = run_dispatch(dispatch_session, publisher.clone(), subscriber.clone(), version) => res,
 		res = publisher.run() => res,
 		res = subscriber.run() => res,
 	}
@@ -89,17 +93,51 @@ async fn run_adapted<S: web_transport_trait::Session>(
 async fn run_native<S: web_transport_trait::Session>(
 	session: S,
 	setup: Stream<S, Version>,
+	client: bool,
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
 	version: Version,
 ) -> Result<(), Error> {
-	let publisher = Publisher::new(session.clone(), publish, version);
-	let subscriber = Subscriber::new(session, subscribe, version);
+	let control = Control::new(None, client);
+	let publisher = Publisher::new(session.clone(), publish, control.clone(), version);
+	let subscriber = Subscriber::new(session.clone(), subscribe, control, version);
 
 	tokio::select! {
 		res = run_goaway(setup.reader) => res,
+		res = run_dispatch(session, publisher.clone(), subscriber.clone(), version) => res,
 		res = publisher.run() => res,
 		res = subscriber.run() => res,
+	}
+}
+
+/// Accept incoming bidi streams and dispatch to the correct handler based on message type.
+async fn run_dispatch<S: web_transport_trait::Session>(
+	session: S,
+	publisher: Publisher<S>,
+	mut subscriber: Subscriber<S>,
+	version: Version,
+) -> Result<(), Error> {
+	loop {
+		let mut stream = Stream::accept(&session, version).await?;
+
+		let id: u64 = stream.reader.decode().await?;
+		let size: u16 = stream.reader.decode().await?;
+		let data = stream.reader.read_exact(size as usize).await?;
+
+		match id {
+			// Publisher handles: Subscribe, Fetch, SubscribeNamespace, TrackStatus
+			ietf::Subscribe::ID | ietf::Fetch::ID | ietf::SubscribeNamespace::ID | ietf::TrackStatus::ID => {
+				publisher.handle_stream(id, data, stream)?;
+			}
+			// Subscriber handles: Publish, PublishNamespace
+			ietf::Publish::ID | ietf::PublishNamespace::ID => {
+				subscriber.handle_stream(id, data, stream)?;
+			}
+			_ => {
+				tracing::warn!(id, "unexpected bidi stream type");
+				return Err(Error::UnexpectedStream);
+			}
+		}
 	}
 }
 
