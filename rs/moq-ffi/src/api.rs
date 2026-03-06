@@ -76,19 +76,19 @@ pub trait SessionCallback: Send {
 /// Callback invoked when a new catalog is available on a broadcast.
 #[uniffi::export(callback_interface)]
 pub trait CatalogCallback: Send {
-	fn on_catalog(&self, catalog_id: u32);
+	fn on_catalog(&self, catalog_id: i32);
 }
 
 /// Callback invoked when a new frame is available on a track.
 #[uniffi::export(callback_interface)]
 pub trait FrameCallback: Send {
-	fn on_frame(&self, frame_id: u32);
+	fn on_frame(&self, frame_id: i32);
 }
 
 /// Callback invoked when a broadcast is announced by an origin.
 #[uniffi::export(callback_interface)]
 pub trait AnnounceCallback: Send {
-	fn on_announce(&self, announced_id: u32);
+	fn on_announce(&self, announced_id: i32);
 }
 
 // ---- Runtime helper ----
@@ -195,9 +195,7 @@ pub fn moq_origin_announced(origin: u32, callback: Box<dyn AnnounceCallback>) ->
 	run(|| {
 		let origin = ffi::parse_id(origin)?;
 		let on_announce = ffi::OnStatus::from_fn(move |code| {
-			if code > 0 {
-				callback.on_announce(code as u32);
-			}
+			callback.on_announce(code);
 		});
 		State::lock().origin.announced(origin, on_announce).map(u32::from)
 	})
@@ -310,20 +308,27 @@ pub fn moq_consume_catalog(broadcast: u32, callback: Box<dyn CatalogCallback>) -
 	run(|| {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let on_catalog = ffi::OnStatus::from_fn(move |code| {
-			if code > 0 {
-				callback.on_catalog(code as u32);
-			}
+			callback.on_catalog(code);
 		});
 		State::lock().consume.catalog(broadcast, on_catalog).map(u32::from)
 	})
 }
 
-/// Close a catalog consumer and clean up its resources.
+/// Close a catalog consumer and cancel its background task.
 #[uniffi::export]
 pub fn moq_consume_catalog_close(catalog: u32) -> Result<(), MoqError> {
 	run(|| {
 		let catalog = ffi::parse_id(catalog)?;
 		State::lock().consume.catalog_close(catalog)
+	})
+}
+
+/// Close a catalog snapshot received via the catalog callback.
+#[uniffi::export]
+pub fn moq_consume_catalog_snapshot_close(catalog: u32) -> Result<(), MoqError> {
+	run(|| {
+		let catalog = ffi::parse_id(catalog)?;
+		State::lock().consume.catalog_snapshot_close(catalog)
 	})
 }
 
@@ -359,29 +364,27 @@ pub fn moq_consume_audio_config(catalog: u32, index: u32) -> Result<AudioConfig,
 	})
 }
 
-/// Consume a video track from a broadcast, delivering frames in decode order.
+/// Consume a video track from a catalog, delivering frames in decode order.
 ///
 /// `max_latency_ms` controls the maximum buffering before skipping a GoP.
 /// The callback receives a `frame_id` when each frame is available.
 /// Returns a non-zero handle that can be passed to [`moq_consume_video_close`].
 #[uniffi::export]
 pub fn moq_consume_video_ordered(
-	broadcast: u32,
+	catalog: u32,
 	index: u32,
 	max_latency_ms: u64,
 	callback: Box<dyn FrameCallback>,
 ) -> Result<u32, MoqError> {
 	run(|| {
-		let broadcast = ffi::parse_id(broadcast)?;
+		let catalog = ffi::parse_id(catalog)?;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = ffi::OnStatus::from_fn(move |code| {
-			if code > 0 {
-				callback.on_frame(code as u32);
-			}
+			callback.on_frame(code);
 		});
 		State::lock()
 			.consume
-			.video_ordered(broadcast, index as usize, max_latency, on_frame)
+			.video_ordered(catalog, index as usize, max_latency, on_frame)
 			.map(u32::from)
 	})
 }
@@ -395,29 +398,27 @@ pub fn moq_consume_video_close(track: u32) -> Result<(), MoqError> {
 	})
 }
 
-/// Consume an audio track from a broadcast, delivering frames in decode order.
+/// Consume an audio track from a catalog, delivering frames in decode order.
 ///
 /// `max_latency_ms` controls the maximum buffering before skipping frames.
 /// The callback receives a `frame_id` when each frame is available.
 /// Returns a non-zero handle that can be passed to [`moq_consume_audio_close`].
 #[uniffi::export]
 pub fn moq_consume_audio_ordered(
-	broadcast: u32,
+	catalog: u32,
 	index: u32,
 	max_latency_ms: u64,
 	callback: Box<dyn FrameCallback>,
 ) -> Result<u32, MoqError> {
 	run(|| {
-		let broadcast = ffi::parse_id(broadcast)?;
+		let catalog = ffi::parse_id(catalog)?;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = ffi::OnStatus::from_fn(move |code| {
-			if code > 0 {
-				callback.on_frame(code as u32);
-			}
+			callback.on_frame(code);
 		});
 		State::lock()
 			.consume
-			.audio_ordered(broadcast, index as usize, max_latency, on_frame)
+			.audio_ordered(catalog, index as usize, max_latency, on_frame)
 			.map(u32::from)
 	})
 }
