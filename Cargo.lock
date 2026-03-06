@@ -2965,7 +2965,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "uniffi",
  "url",
 ]
 
@@ -3189,6 +3188,24 @@ dependencies = [
  "moq-native",
  "tokio",
  "tracing",
+ "url",
+]
+
+[[package]]
+name = "moq-ffi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "hang",
+ "moq-lite",
+ "moq-mux",
+ "moq-native",
+ "slab",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uniffi",
  "url",
 ]
 

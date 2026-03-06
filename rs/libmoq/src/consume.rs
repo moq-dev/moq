@@ -3,28 +3,7 @@ use std::ffi::c_char;
 use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
-use crate::{Error, Id, NonZeroSlab, State};
-
-#[cfg(feature = "c-api")]
-use crate::{moq_audio_config, moq_frame, moq_video_config};
-#[cfg(feature = "c-api")]
-use std::ffi::c_char;
-
-pub struct VideoConfigData {
-	pub name: String,
-	pub codec: String,
-	pub description: Option<Vec<u8>>,
-	pub coded_width: Option<u32>,
-	pub coded_height: Option<u32>,
-}
-
-pub struct AudioConfigData {
-	pub name: String,
-	pub codec: String,
-	pub description: Option<Vec<u8>>,
-	pub sample_rate: u32,
-	pub channel_count: u32,
-}
+use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_video_config};
 
 struct ConsumeCatalog {
 	broadcast: moq_lite::BroadcastConsumer,
@@ -139,7 +118,6 @@ impl Consume {
 		Ok(())
 	}
 
-	#[cfg(feature = "c-api")]
 	pub fn video_config(&mut self, catalog: Id, index: usize, dst: &mut moq_video_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 
@@ -178,28 +156,6 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Returns video config fields as owned Rust values (no C struct needed).
-	#[cfg(feature = "uniffi-api")]
-	pub fn video_config_data(&self, catalog: Id, index: usize) -> Result<VideoConfigData, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (rendition, config) = consume
-			.catalog
-			.video
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
-		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
-		Ok(VideoConfigData {
-			name: rendition.clone(),
-			codec: codec.clone(),
-			description: config.description.as_ref().map(|d| d.to_vec()),
-			coded_width: config.coded_width,
-			coded_height: config.coded_height,
-		})
-	}
-
-	#[cfg(feature = "c-api")]
 	pub fn audio_config(&mut self, catalog: Id, index: usize, dst: &mut moq_audio_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 
@@ -228,27 +184,6 @@ impl Consume {
 		};
 
 		Ok(())
-	}
-
-	/// Returns audio config fields as owned Rust values (no C struct needed).
-	#[cfg(feature = "uniffi-api")]
-	pub fn audio_config_data(&self, catalog: Id, index: usize) -> Result<AudioConfigData, Error> {
-		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let (rendition, config) = consume
-			.catalog
-			.audio
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
-		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
-		Ok(AudioConfigData {
-			name: rendition.clone(),
-			codec: codec.clone(),
-			description: config.description.as_ref().map(|d| d.to_vec()),
-			sample_rate: config.sample_rate,
-			channel_count: config.channel_count,
-		})
 	}
 
 	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {
@@ -401,7 +336,6 @@ impl Consume {
 	}
 
 	// NOTE: You're supposed to call this multiple times to get all of the chunks.
-	#[cfg(feature = "c-api")]
 	pub fn frame_chunk(&self, frame: Id, index: usize, dst: &mut moq_frame) -> Result<(), Error> {
 		let ordered = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
 		let chunk = ordered.payload.get_chunk(index).ok_or(Error::NoIndex)?;
@@ -420,25 +354,6 @@ impl Consume {
 		};
 
 		Ok(())
-	}
-
-	/// Returns frame data as owned Rust values (no C struct needed).
-	#[cfg(feature = "uniffi-api")]
-	pub fn frame_data(&self, frame: Id) -> Result<(Vec<u8>, u64, bool), Error> {
-		let frame = self.frame.get(frame).ok_or(Error::FrameNotFound)?;
-
-		let payload: Vec<u8> = (0..frame.payload.num_chunks())
-			.filter_map(|i| frame.payload.get_chunk(i))
-			.flat_map(|chunk| chunk.iter().copied())
-			.collect();
-
-		let timestamp_us = frame
-			.timestamp
-			.as_micros()
-			.try_into()
-			.map_err(|_| moq_lite::TimeOverflow)?;
-
-		Ok((payload, timestamp_us, frame.is_keyframe()))
 	}
 
 	pub fn frame_close(&mut self, frame: Id) -> Result<(), Error> {

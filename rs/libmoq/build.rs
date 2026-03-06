@@ -9,18 +9,16 @@ fn main() {
 	let version = env::var("CARGO_PKG_VERSION").unwrap();
 	let target_dir = target_dir();
 
-	if env::var("CARGO_FEATURE_C_API").is_ok() {
-		// Generate C header into target/include/
-		let include_dir = target_dir.join("include");
-		fs::create_dir_all(&include_dir).expect("Failed to create include directory");
-		let header = include_dir.join(format!("{}.h", LIB_NAME));
-		cbindgen::Builder::new()
-			.with_crate(&crate_dir)
-			.with_language(cbindgen::Language::C)
-			.generate()
-			.expect("Unable to generate bindings")
-			.write_to_file(&header);
-	}
+	// Generate C header into target/include/
+	let include_dir = target_dir.join("include");
+	fs::create_dir_all(&include_dir).expect("Failed to create include directory");
+	let header = include_dir.join(format!("{}.h", LIB_NAME));
+	cbindgen::Builder::new()
+		.with_crate(&crate_dir)
+		.with_language(cbindgen::Language::C)
+		.generate()
+		.expect("Unable to generate bindings")
+		.write_to_file(&header);
 
 	// Generate pkg-config file into target/pkgconfig/
 	let pc_in = PathBuf::from(&crate_dir).join(format!("{}.pc.in", LIB_NAME));
