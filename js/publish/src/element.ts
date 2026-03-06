@@ -126,7 +126,7 @@ export default class MoqPublish extends HTMLElement {
 		if (name === "url") {
 			this.connection.url.set(newValue ? new URL(newValue) : undefined);
 		} else if (name === "name") {
-			this.broadcast.name.set(newValue ? Moq.Path.from(newValue) : undefined);
+			this.broadcast.name.set(newValue !== null ? Moq.Path.from(newValue) : undefined);
 		} else if (name === "source") {
 			if (newValue === "camera" || newValue === "screen" || newValue === "file" || newValue === null) {
 				this.state.source.set(newValue as SourceType | undefined);
@@ -232,7 +232,7 @@ export default class MoqPublish extends HTMLElement {
 	}
 
 	set name(value: string | Moq.Path.Valid | undefined) {
-		this.broadcast.name.set(value ? Moq.Path.from(value) : undefined);
+		this.broadcast.name.set(value !== undefined ? Moq.Path.from(value) : undefined);
 	}
 
 	get source(): SourceType | File | undefined {

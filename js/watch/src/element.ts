@@ -86,7 +86,7 @@ export default class MoqWatch extends HTMLElement {
 
 		this.signals.run((effect) => {
 			const name = effect.get(this.broadcast.name);
-			if (name) {
+			if (name !== undefined) {
 				this.setAttribute("name", name.toString());
 			} else {
 				this.removeAttribute("name");
@@ -143,7 +143,7 @@ export default class MoqWatch extends HTMLElement {
 		if (name === "url") {
 			this.connection.url.set(newValue ? new URL(newValue) : undefined);
 		} else if (name === "name") {
-			this.broadcast.name.set(newValue ? Moq.Path.from(newValue) : undefined);
+			this.broadcast.name.set(newValue !== null ? Moq.Path.from(newValue) : undefined);
 		} else if (name === "paused") {
 			this.backend.paused.set(newValue !== null);
 		} else if (name === "volume") {
@@ -174,7 +174,7 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set name(value: string | Moq.Path.Valid | undefined) {
-		this.broadcast.name.set(value ? Moq.Path.from(value) : undefined);
+		this.broadcast.name.set(value !== undefined ? Moq.Path.from(value) : undefined);
 	}
 
 	get paused(): boolean {
