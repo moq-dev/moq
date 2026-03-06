@@ -55,11 +55,11 @@ int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_con
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
 
 // Consuming: Video
-int32_t moq_consume_video_ordered(uint32_t broadcast, uint32_t index, uint64_t max_latency_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_video_ordered(uint32_t catalog, uint32_t index, uint64_t max_latency_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_video_close(uint32_t track);
 
 // Consuming: Audio
-int32_t moq_consume_audio_ordered(uint32_t broadcast, uint32_t index, uint64_t max_latency_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
+int32_t moq_consume_audio_ordered(uint32_t catalog, uint32_t index, uint64_t max_latency_ms, void (*on_frame)(void *user_data, int32_t frame), void *user_data);
 int32_t moq_consume_audio_close(uint32_t track);
 
 // Consuming: Frames

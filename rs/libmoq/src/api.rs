@@ -207,7 +207,7 @@ pub unsafe extern "C" fn moq_origin_publish(origin: u32, path: *const c_char, pa
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_announce` remains valid until the task exits (it may be called after [moq_origin_announced_close] returns).
+/// - The caller must ensure that `on_announce` is valid until [moq_origin_announced_close] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_origin_announced(
 	origin: u32,
@@ -367,7 +367,7 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_catalog` remains valid until the task exits (it may be called after [moq_consume_catalog_close] returns).
+/// - The caller must ensure that `on_catalog` is valid until [moq_consume_catalog_close] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_catalog(
 	broadcast: u32,
@@ -459,20 +459,20 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 /// - The caller must ensure that `on_frame` is valid until the track is closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video_ordered(
-	broadcast: u32,
+	catalog: u32,
 	index: u32,
 	max_latency_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
-		let broadcast = ffi::parse_id(broadcast)?;
+		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock()
 			.consume
-			.video_ordered(broadcast, index, max_latency, on_frame)
+			.video_ordered(catalog, index, max_latency, on_frame)
 	})
 }
 
@@ -483,7 +483,7 @@ pub unsafe extern "C" fn moq_consume_video_ordered(
 pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().consume.video_close(track)
+		State::lock().consume.track_close(track)
 	})
 }
 
@@ -498,20 +498,20 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 /// - The caller must ensure that `on_frame` is valid until [moq_consume_audio_close] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio_ordered(
-	broadcast: u32,
+	catalog: u32,
 	index: u32,
 	max_latency_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
-		let broadcast = ffi::parse_id(broadcast)?;
+		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock()
 			.consume
-			.audio_ordered(broadcast, index, max_latency, on_frame)
+			.audio_ordered(catalog, index, max_latency, on_frame)
 	})
 }
 
@@ -522,7 +522,7 @@ pub unsafe extern "C" fn moq_consume_audio_ordered(
 pub extern "C" fn moq_consume_audio_close(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().consume.audio_close(track)
+		State::lock().consume.track_close(track)
 	})
 }
 

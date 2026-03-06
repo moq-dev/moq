@@ -15,6 +15,14 @@ struct ConsumeCatalog {
 	video_codec: Vec<String>,
 }
 
+/// A spawned task entry: close sender to signal shutdown, callback to deliver status.
+/// Close revokes the callback by taking the entire entry.
+struct TaskEntry {
+	#[allow(dead_code)] // Dropping the sender signals the receiver.
+	close: oneshot::Sender<()>,
+	callback: OnStatus,
+}
+
 #[derive(Default)]
 pub struct Consume {
 	/// Active broadcast consumers.
@@ -23,15 +31,11 @@ pub struct Consume {
 	/// Active catalog consumers and their broadcast references.
 	catalog: NonZeroSlab<ConsumeCatalog>,
 
-	/// Catalog consumer task cancellation channels.
-	/// The Option is taken on close to signal shutdown, but the slot remains until the task exits.
-	catalog_task: NonZeroSlab<Option<oneshot::Sender<()>>>,
+	/// Catalog consumer tasks. Close takes the entry to revoke the callback.
+	catalog_task: NonZeroSlab<Option<TaskEntry>>,
 
-	/// Audio track consumer task cancellation channels.
-	audio_task: NonZeroSlab<Option<oneshot::Sender<()>>>,
-
-	/// Video track consumer task cancellation channels.
-	video_task: NonZeroSlab<Option<oneshot::Sender<()>>>,
+	/// Track consumer tasks (video and audio).
+	track_task: NonZeroSlab<Option<TaskEntry>>,
 
 	/// Buffered frames ready for consumption.
 	frame: NonZeroSlab<hang::container::OrderedFrame>,
@@ -42,30 +46,36 @@ impl Consume {
 		self.broadcast.insert(broadcast)
 	}
 
-	pub fn catalog(&mut self, broadcast: Id, mut on_catalog: OnStatus) -> Result<Id, Error> {
+	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
 		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
-		let id = self.catalog_task.insert(Some(channel.0));
+		let entry = TaskEntry {
+			close: channel.0,
+			callback: on_catalog,
+		};
+		let id = self.catalog_task.insert(Some(entry));
 
 		tokio::spawn(async move {
-			tokio::select! {
-				res = Self::run_catalog(broadcast, catalog.into(), &mut on_catalog) => on_catalog.call(res),
-				_ = channel.1 => (),
+			let res = tokio::select! {
+				res = Self::run_catalog(id, broadcast, catalog.into()) => res,
+				_ = channel.1 => Ok(()),
 			};
 
-			// Remove the slot only from the task epilogue to prevent ID reuse races.
-			State::lock().consume.catalog_task.remove(id);
+			// The lock is dropped before the callback is invoked.
+			if let Some(entry) = State::lock().consume.catalog_task.remove(id).flatten() {
+				entry.callback.call(res);
+			}
 		});
 
 		Ok(id)
 	}
 
 	async fn run_catalog(
+		task_id: Id,
 		broadcast: moq_lite::BroadcastConsumer,
 		mut catalog: hang::CatalogConsumer,
-		on_catalog: &mut OnStatus,
 	) -> Result<(), Error> {
 		while let Some(catalog) = catalog.next().await? {
 			// Unfortunately we need to store the codec information on the heap.
@@ -90,10 +100,19 @@ impl Consume {
 				video_codec,
 			};
 
-			let id = State::lock().consume.catalog.insert(catalog);
+			let mut state = State::lock();
 
-			// Important: Don't hold the mutex during this callback.
-			on_catalog.call(Ok(id));
+			// Stop if the callback was revoked by close.
+			let Some(Some(entry)) = state.consume.catalog_task.get(task_id) else {
+				return Ok(());
+			};
+			let callback = entry.callback;
+
+			let snapshot_id = state.consume.catalog.insert(catalog);
+			drop(state);
+
+			// The lock is dropped before the callback is invoked.
+			callback.call(Ok(snapshot_id));
 		}
 
 		Ok(())
@@ -168,9 +187,12 @@ impl Consume {
 	}
 
 	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {
-		let sender = self.catalog_task.get_mut(catalog).ok_or(Error::CatalogNotFound)?;
-		// Take the sender to signal shutdown, but leave the slot occupied until the task exits.
-		sender.take().ok_or(Error::CatalogNotFound)?;
+		// Take the entire entry: drops the sender (signals shutdown) and revokes the callback.
+		self.catalog_task
+			.get_mut(catalog)
+			.ok_or(Error::CatalogNotFound)?
+			.take()
+			.ok_or(Error::CatalogNotFound)?;
 		Ok(())
 	}
 
@@ -184,7 +206,7 @@ impl Consume {
 		catalog: Id,
 		index: usize,
 		latency: std::time::Duration,
-		mut on_frame: OnStatus,
+		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let rendition = consume
@@ -202,16 +224,22 @@ impl Consume {
 		let track = hang::container::OrderedConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
-		let id = self.video_task.insert(Some(channel.0));
+		let entry = TaskEntry {
+			close: channel.0,
+			callback: on_frame,
+		};
+		let id = self.track_task.insert(Some(entry));
 
 		tokio::spawn(async move {
-			tokio::select! {
-				res = Self::run_track(track, &mut on_frame) => on_frame.call(res),
-				_ = channel.1 => (),
+			let res = tokio::select! {
+				res = Self::run_track(id, track) => res,
+				_ = channel.1 => Ok(()),
 			};
 
-			// Remove the slot only from the task epilogue to prevent ID reuse races.
-			State::lock().consume.video_task.remove(id);
+			// The lock is dropped before the callback is invoked.
+			if let Some(entry) = State::lock().consume.track_task.remove(id).flatten() {
+				entry.callback.call(res);
+			}
 		});
 
 		Ok(id)
@@ -222,7 +250,7 @@ impl Consume {
 		catalog: Id,
 		index: usize,
 		latency: std::time::Duration,
-		mut on_frame: OnStatus,
+		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let rendition = consume
@@ -240,22 +268,28 @@ impl Consume {
 		let track = hang::container::OrderedConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
-		let id = self.audio_task.insert(Some(channel.0));
+		let entry = TaskEntry {
+			close: channel.0,
+			callback: on_frame,
+		};
+		let id = self.track_task.insert(Some(entry));
 
 		tokio::spawn(async move {
-			tokio::select! {
-				res = Self::run_track(track, &mut on_frame) => on_frame.call(res),
-				_ = channel.1 => (),
+			let res = tokio::select! {
+				res = Self::run_track(id, track) => res,
+				_ = channel.1 => Ok(()),
 			};
 
-			// Remove the slot only from the task epilogue to prevent ID reuse races.
-			State::lock().consume.audio_task.remove(id);
+			// The lock is dropped before the callback is invoked.
+			if let Some(entry) = State::lock().consume.track_task.remove(id).flatten() {
+				entry.callback.call(res);
+			}
 		});
 
 		Ok(id)
 	}
 
-	async fn run_track(mut track: hang::container::OrderedConsumer, on_frame: &mut OnStatus) -> Result<(), Error> {
+	async fn run_track(task_id: Id, mut track: hang::container::OrderedConsumer) -> Result<(), Error> {
 		while let Some(mut ordered) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::container::BufList::new();
@@ -274,23 +308,30 @@ impl Consume {
 				index: ordered.index,
 			};
 
-			// Important: Don't hold the mutex during this callback.
-			let id = State::lock().consume.frame.insert(new_frame);
-			on_frame.call(Ok(id));
+			let mut state = State::lock();
+
+			// Stop if the callback was revoked by close.
+			let Some(Some(entry)) = state.consume.track_task.get(task_id) else {
+				return Ok(());
+			};
+			let callback = entry.callback;
+
+			let frame_id = state.consume.frame.insert(new_frame);
+			drop(state);
+
+			// The lock is dropped before the callback is invoked.
+			callback.call(Ok(frame_id));
 		}
 
 		Ok(())
 	}
 
-	pub fn audio_close(&mut self, track: Id) -> Result<(), Error> {
-		let sender = self.audio_task.get_mut(track).ok_or(Error::TrackNotFound)?;
-		sender.take().ok_or(Error::TrackNotFound)?;
-		Ok(())
-	}
-
-	pub fn video_close(&mut self, track: Id) -> Result<(), Error> {
-		let sender = self.video_task.get_mut(track).ok_or(Error::TrackNotFound)?;
-		sender.take().ok_or(Error::TrackNotFound)?;
+	pub fn track_close(&mut self, track: Id) -> Result<(), Error> {
+		self.track_task
+			.get_mut(track)
+			.ok_or(Error::TrackNotFound)?
+			.take()
+			.ok_or(Error::TrackNotFound)?;
 		Ok(())
 	}
 
