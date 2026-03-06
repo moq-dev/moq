@@ -43,3 +43,6 @@ pub use hev1::*;
 #[cfg(feature = "hls")]
 pub use hls::*;
 pub use opus::*;
+
+#[cfg(test)]
+mod test;
