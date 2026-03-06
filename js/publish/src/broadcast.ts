@@ -11,7 +11,7 @@ import * as Video from "./video";
 export type BroadcastProps = {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
 	enabled?: boolean | Signal<boolean>;
-	name?: Moq.Path.Valid | Signal<Moq.Path.Valid | undefined>;
+	name?: Moq.Path.Valid | Signal<Moq.Path.Valid>;
 	audio?: Audio.EncoderProps;
 	video?: Video.Props;
 	location?: Location.Props;
@@ -25,7 +25,7 @@ export class Broadcast {
 
 	connection: Signal<Moq.Connection.Established | undefined>;
 	enabled: Signal<boolean>;
-	name: Signal<Moq.Path.Valid | undefined>;
+	name: Signal<Moq.Path.Valid>;
 
 	audio: Audio.Encoder;
 	video: Video.Root;
@@ -58,7 +58,6 @@ export class Broadcast {
 		const [_enabled, connection] = values;
 
 		const name = effect.get(this.name);
-		if (name === undefined) return;
 
 		const broadcast = new Moq.Broadcast();
 		effect.cleanup(() => broadcast.close());

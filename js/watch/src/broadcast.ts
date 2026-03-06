@@ -11,7 +11,7 @@ export interface BroadcastProps {
 	enabled?: boolean | Signal<boolean>;
 
 	// The broadcast name.
-	name?: Moq.Path.Valid | Signal<Moq.Path.Valid | undefined>;
+	name?: Moq.Path.Valid | Signal<Moq.Path.Valid>;
 
 	// Whether to reload the broadcast when it goes offline.
 	// Defaults to false; pass true to wait for an announcement before subscribing.
@@ -23,7 +23,7 @@ export class Broadcast {
 	connection: Signal<Moq.Connection.Established | undefined>;
 
 	enabled: Signal<boolean>;
-	name: Signal<Moq.Path.Valid | undefined>;
+	name: Signal<Moq.Path.Valid>;
 	status = new Signal<"offline" | "loading" | "live">("offline");
 	reload: Signal<boolean>;
 
@@ -64,7 +64,6 @@ export class Broadcast {
 		if (!conn) return;
 
 		const name = effect.get(this.name);
-		if (name === undefined) return;
 
 		const announced = conn.announced(name);
 		effect.cleanup(() => announced.close());
@@ -91,7 +90,6 @@ export class Broadcast {
 		const [_enabled, _announced, conn] = values;
 
 		const name = effect.get(this.name);
-		if (name === undefined) return;
 
 		const broadcast = conn.consume(name);
 		effect.cleanup(() => broadcast.close());
