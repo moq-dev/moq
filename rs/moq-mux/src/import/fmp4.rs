@@ -1,8 +1,9 @@
 use anyhow::Context;
+use base64::Engine;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AV1, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use hang::container::Timestamp;
-use mp4_atom::{Any, Atom, DecodeMaybe, Mdat, Moof, Moov, Trak};
+use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -186,12 +187,12 @@ impl Fmp4 {
 
 			let (kind, track) = match handler.as_ref() {
 				b"vide" => {
-					let config = self.init_video(trak)?;
+					let config = self.init_video(trak, &moov)?;
 					let track = catalog.video.create_track(ext, config.clone());
 					(TrackKind::Video, track)
 				}
 				b"soun" => {
-					let config = self.init_audio(trak)?;
+					let config = self.init_audio(trak, &moov)?;
 					let track = catalog.audio.create_track(ext, config.clone());
 					(TrackKind::Audio, track)
 				}
@@ -228,19 +229,52 @@ impl Fmp4 {
 		Ok(())
 	}
 
-	fn container(&self, trak: &Trak) -> Container {
+	fn container(&self, trak: &Trak, moov: &Moov) -> anyhow::Result<Container> {
 		if self.config.passthrough {
-			Container::Cmaf {
-				timescale: trak.mdia.mdhd.timescale as u64,
-				track_id: trak.tkhd.track_id,
-			}
+			// Build a single-track init segment (ftyp+moov) for this track.
+			let ftyp = mp4_atom::Ftyp {
+				major_brand: b"isom".into(),
+				minor_version: 0x200,
+				compatible_brands: vec![b"isom".into(), b"iso6".into(), b"mp41".into()],
+			};
+
+			// Build a moov with just this single track and matching mvex/trex.
+			let track_id = trak.tkhd.track_id;
+			let trex = moov
+				.mvex
+				.as_ref()
+				.and_then(|mvex| mvex.trex.iter().find(|trex| trex.track_id == track_id))
+				.cloned()
+				.unwrap_or(mp4_atom::Trex {
+					track_id,
+					default_sample_description_index: 1,
+					..Default::default()
+				});
+
+			let single_moov = Moov {
+				mvhd: moov.mvhd.clone(),
+				trak: vec![trak.clone()],
+				mvex: Some(mp4_atom::Mvex {
+					mehd: None,
+					trex: vec![trex],
+				}),
+				meta: None,
+				udta: None,
+			};
+
+			let mut buf = Vec::new();
+			ftyp.encode(&mut buf)?;
+			single_moov.encode(&mut buf)?;
+
+			let init_data = base64::engine::general_purpose::STANDARD.encode(&buf);
+			Ok(Container::Cmaf { init_data })
 		} else {
-			Container::Legacy
+			Ok(Container::Legacy)
 		}
 	}
 
-	fn init_video(&mut self, trak: &Trak) -> anyhow::Result<VideoConfig> {
-		let container = self.container(trak);
+	fn init_video(&mut self, trak: &Trak, moov: &Moov) -> anyhow::Result<VideoConfig> {
+		let container = self.container(trak, moov)?;
 		let stsd = &trak.mdia.minf.stbl.stsd;
 
 		let codec = match stsd.codecs.len() {
@@ -363,7 +397,6 @@ impl Fmp4 {
 		Ok(config)
 	}
 
-	// There's two almost identical hvcc atoms in the wild.
 	fn init_h265(
 		&mut self,
 		in_band: bool,
@@ -399,8 +432,8 @@ impl Fmp4 {
 		})
 	}
 
-	fn init_audio(&mut self, trak: &Trak) -> anyhow::Result<AudioConfig> {
-		let container = self.container(trak);
+	fn init_audio(&mut self, trak: &Trak, moov: &Moov) -> anyhow::Result<AudioConfig> {
+		let container = self.container(trak, moov)?;
 		let stsd = &trak.mdia.minf.stbl.stsd;
 
 		let codec = match stsd.codecs.len() {

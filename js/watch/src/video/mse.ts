@@ -107,12 +107,13 @@ export class Mse implements Backend {
 		const data = active.subscribe(track, Catalog.PRIORITY.video);
 		effect.cleanup(() => data.close());
 
-		const timescale = config.container.timescale;
+		// Decode the base64 init segment from the catalog
+		const initBytes = Uint8Array.from(atob(config.container.initData), (c) => c.charCodeAt(0));
+		const { timescale } = Container.Cmaf.decodeInitSegment(initBytes);
 
 		effect.spawn(async () => {
-			// Generate init segment from catalog config (uses track_id from container)
-			const initSegment = Container.Cmaf.createVideoInitSegment(config);
-			await this.#appendBuffer(sourceBuffer, initSegment);
+			// Append the passthrough init segment directly
+			await this.#appendBuffer(sourceBuffer, initBytes);
 
 			for (;;) {
 				// TODO: Use Frame.Consumer for CMAF so we can support higher latencies.
