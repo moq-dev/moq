@@ -40,7 +40,7 @@ export class Broadcast {
 	constructor(props?: BroadcastProps) {
 		this.connection = Signal.from(props?.connection);
 		this.enabled = Signal.from(props?.enabled ?? false);
-		this.name = Signal.from(props?.name);
+		this.name = Signal.from(props?.name ?? Moq.Path.empty());
 
 		this.audio = new Audio.Encoder(props?.audio);
 		this.video = new Video.Root(props?.video);

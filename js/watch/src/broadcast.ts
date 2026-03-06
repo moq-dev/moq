@@ -1,5 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
+import { Path } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
 export interface BroadcastProps {
@@ -39,7 +40,7 @@ export class Broadcast {
 
 	constructor(props?: BroadcastProps) {
 		this.connection = Signal.from(props?.connection);
-		this.name = Signal.from(props?.name);
+		this.name = Signal.from(props?.name ?? Path.empty());
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? false);
 
