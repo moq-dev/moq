@@ -191,6 +191,8 @@ export class Effect {
 	#close!: () => void;
 	#closed: Promise<void>;
 
+	#abort: AbortController = new AbortController();
+
 	// If a function is provided, it will be run with the effect as an argument.
 	constructor(fn?: (effect: Effect) => void) {
 		if (DEV) {
@@ -233,6 +235,9 @@ export class Effect {
 		if (this.#dispose === undefined) return; // closed, no error because this is a microtask
 
 		this.#stop();
+		this.#abort.abort();
+		this.#abort = new AbortController();
+
 		this.#stopped = new Promise((resolve) => {
 			this.#stop = resolve;
 		});
@@ -569,6 +574,7 @@ export class Effect {
 
 		this.#close();
 		this.#stop();
+		this.#abort.abort();
 
 		for (const fn of this.#dispose) fn();
 		this.#dispose = undefined;
@@ -589,6 +595,10 @@ export class Effect {
 
 	get cancel(): Promise<void> {
 		return this.#stopped;
+	}
+
+	get signal(): AbortSignal {
+		return this.#abort.signal;
 	}
 
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void {
