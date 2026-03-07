@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/moq-dev/moq/compare/hang-v0.15.1...hang-v0.15.2) - 2026-03-07
+
+### Other
+
+- Fix OrderedConsumer... for good? ([#1054](https://github.com/moq-dev/moq/pull/1054))
+
 ## [0.15.0](https://github.com/moq-dev/moq/compare/hang-v0.14.0...hang-v0.15.0) - 2026-03-03
 
 ### Other

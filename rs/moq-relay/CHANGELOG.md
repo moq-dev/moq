@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.7...moq-relay-v0.10.8) - 2026-03-07
+
+### Other
+
+- Log transport and version in relay connection ([#1052](https://github.com/moq-dev/moq/pull/1052))
+
 ## [0.10.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.6...moq-relay-v0.10.7) - 2026-03-03
 
 ### Other

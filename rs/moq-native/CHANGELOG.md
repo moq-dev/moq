@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3](https://github.com/moq-dev/moq/compare/moq-native-v0.13.2...moq-native-v0.13.3) - 2026-03-07
+
+### Other
+
+- Log transport and version in relay connection ([#1052](https://github.com/moq-dev/moq/pull/1052))
+- release ([#1040](https://github.com/moq-dev/moq/pull/1040))
+
 ## [0.13.2](https://github.com/moq-dev/moq/compare/moq-native-v0.13.1...moq-native-v0.13.2) - 2026-03-03
 
 ### Fixed
