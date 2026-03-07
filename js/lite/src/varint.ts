@@ -18,8 +18,12 @@ export const MAX_U53 = Number.MAX_SAFE_INTEGER;
 // 11111110 + 7B   → 8 bytes (56 bits)
 // 11111111 + 8B   → 9 bytes (64 bits)
 
+const MAX_U64 = (1n << 64n) - 1n;
+
 export function sizeLeadingOnes(v: number | bigint): number {
 	const b = BigInt(v);
+	if (b < 0n) throw new RangeError(`value is negative: ${v}`);
+	if (b > MAX_U64) throw new RangeError(`value exceeds 64 bits: ${v}`);
 	if (b < 1n << 7n) return 1;
 	if (b < 1n << 14n) return 2;
 	if (b < 1n << 21n) return 3;
@@ -32,7 +36,8 @@ export function sizeLeadingOnes(v: number | bigint): number {
 
 export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array {
 	const x = BigInt(v);
-	if (x < 0n) throw new Error(`underflow, value is negative: ${v}`);
+	if (x < 0n) throw new RangeError(`underflow, value is negative: ${v}`);
+	if (x > MAX_U64) throw new RangeError(`value exceeds 64 bits: ${v}`);
 
 	const view = new DataView(dst);
 

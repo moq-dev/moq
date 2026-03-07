@@ -71,6 +71,9 @@ export class Publish {
 			await w.u53(0); // size of parameters
 		} else {
 			// v15+: fields in parameters
+			if (this.contentExists !== !!this.largest) {
+				throw new Error("contentExists and largest must both be true or false");
+			}
 			const params = new MessageParameters();
 			params.groupOrder = this.groupOrder;
 			params.forward = this.forward;

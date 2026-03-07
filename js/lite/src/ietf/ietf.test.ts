@@ -42,7 +42,7 @@ async function encodeVersioned<T extends { encode(w: Writer, v: IetfVersion): Pr
 	version: IetfVersion,
 ): Promise<Uint8Array> {
 	const { stream, written } = createTestWritableStream();
-	const writer = new Writer(stream);
+	const writer = new Writer(stream, version);
 	await message.encode(writer, version);
 	writer.close();
 	await writer.closed;
@@ -55,7 +55,7 @@ async function decodeVersioned<T>(
 	decoder: (r: Reader, v: IetfVersion) => Promise<T>,
 	version: IetfVersion,
 ): Promise<T> {
-	const reader = new Reader(undefined, bytes);
+	const reader = new Reader(undefined, bytes, version);
 	return await decoder(reader, version);
 }
 
