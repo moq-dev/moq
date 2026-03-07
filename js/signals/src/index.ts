@@ -549,8 +549,11 @@ export class Effect {
 			return;
 		}
 
-		target.addEventListener(type, listener, options);
-		this.cleanup(() => target.removeEventListener(type, listener, options));
+		// Merge the abort signal so the listener is auto-removed on rerun/close.
+		const merged: AddEventListenerOptions =
+			typeof options === "boolean" ? { capture: options, signal: this.#abort.signal } : { ...options, signal: this.#abort.signal };
+
+		target.addEventListener(type, listener, merged);
 	}
 
 	// Register a cleanup function.
