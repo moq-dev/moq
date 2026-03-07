@@ -13,7 +13,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [lib]
 name = "moq"
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "lib"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
