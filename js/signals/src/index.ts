@@ -597,7 +597,7 @@ export class Effect {
 		return this.#stopped;
 	}
 
-	get signal(): AbortSignal {
+	get abort(): AbortSignal {
 		return this.#abort.signal;
 	}
 
