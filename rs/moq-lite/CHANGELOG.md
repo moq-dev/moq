@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.0...moq-lite-v0.15.1) - 2026-03-07
+
+### Other
+
+- Fix OrderedConsumer... for good? ([#1054](https://github.com/moq-dev/moq/pull/1054))
+- Draft-17 message types, SETUP handshake, and parameter encoding ([#1045](https://github.com/moq-dev/moq/pull/1045))
+- Log transport and version in relay connection ([#1052](https://github.com/moq-dev/moq/pull/1052))
+- Move conducer back into this repo. ([#1050](https://github.com/moq-dev/moq/pull/1050))
+- Migrate moq-lite from internal state.rs to conducer crate ([#1047](https://github.com/moq-dev/moq/pull/1047))
+- Initial draft-17 encoding support (Rust) ([#1032](https://github.com/moq-dev/moq/pull/1032))
+
 ## [0.15.0](https://github.com/moq-dev/moq/compare/moq-lite-v0.14.0...moq-lite-v0.15.0) - 2026-03-03
 
 ### Other
