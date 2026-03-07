@@ -105,10 +105,35 @@ const MessagesV16 = {
 	[RequestsBlocked.id]: RequestsBlocked,
 } as const;
 
+// v17 message map — uses unified Setup (0x2F00), removes several messages
+const MessagesV17 = {
+	[Setup.Setup.id]: Setup.Setup, // 0x2F00: unified SETUP
+	[Subscribe.id]: Subscribe,
+	[SubscribeOk.id]: SubscribeOk,
+	[RequestError.id]: RequestError, // 0x05
+	[PublishNamespace.id]: PublishNamespace,
+	[RequestOk.id]: RequestOk, // 0x07
+	// PublishNamespaceDone (0x09) removed in d17
+	// Unsubscribe (0x0a) removed in d17
+	[PublishDone.id]: PublishDone,
+	// PublishNamespaceCancel (0x0c) removed in d17
+	[TrackStatusRequest.id]: TrackStatusRequest,
+	[TrackStatus.id]: TrackStatus,
+	[GoAway.id]: GoAway,
+	[Fetch.id]: Fetch,
+	// FetchCancel (0x17) removed in d17
+	[FetchOk.id]: FetchOk,
+	[SubscribeNamespace.id]: SubscribeNamespace,
+	[Publish.id]: Publish,
+	// MaxRequestId (0x15) removed in d17
+	// RequestsBlocked (0x1a) removed in d17
+} as const;
+
 type V14MessageType = (typeof MessagesV14)[keyof typeof MessagesV14];
 type V15MessageType = (typeof MessagesV15)[keyof typeof MessagesV15];
 type V16MessageType = (typeof MessagesV16)[keyof typeof MessagesV16];
-type MessageType = V14MessageType | V15MessageType | V16MessageType;
+type V17MessageType = (typeof MessagesV17)[keyof typeof MessagesV17];
+type MessageType = V14MessageType | V15MessageType | V16MessageType | V17MessageType;
 
 // Type for control message instances (not constructors)
 export type Message = InstanceType<MessageType>;
@@ -139,6 +164,9 @@ export class Stream {
 	}) {
 		this.stream = stream;
 		this.version = version;
+		// Set version on reader/writer so varint encoding is version-aware
+		this.stream.reader.version = version;
+		this.stream.writer.version = version;
 		this.#maxRequestId = maxRequestId;
 		this.#maxRequestIdPromise = new Promise((resolve) => {
 			this.#maxRequestIdResolve = resolve;
@@ -169,18 +197,23 @@ export class Stream {
 		return await this.#readLock.runExclusive(async () => {
 			const messageType = await this.stream.reader.u53();
 
-			const messages =
-				this.version === Version.DRAFT_16
-					? MessagesV16
-					: this.version === Version.DRAFT_15
-						? MessagesV15
-						: MessagesV14;
+			let messages: Record<number, MessageType>;
+			if (this.version === Version.DRAFT_17) {
+				messages = MessagesV17 as unknown as Record<number, MessageType>;
+			} else if (this.version === Version.DRAFT_16) {
+				messages = MessagesV16 as unknown as Record<number, MessageType>;
+			} else if (this.version === Version.DRAFT_15) {
+				messages = MessagesV15 as unknown as Record<number, MessageType>;
+			} else {
+				messages = MessagesV14 as unknown as Record<number, MessageType>;
+			}
+
 			if (!(messageType in messages)) {
 				throw new Error(`Unknown control message type: ${messageType}`);
 			}
 
 			try {
-				const msgClass = messages[messageType as keyof typeof messages];
+				const msgClass = messages[messageType];
 				const msg = await msgClass.decode(this.stream.reader, this.version);
 				return msg;
 			} catch (err) {
@@ -207,6 +240,13 @@ export class Stream {
 	async nextRequestId(): Promise<bigint | undefined> {
 		while (true) {
 			const id = this.#requestId;
+
+			// d17: no flow control, always allowed
+			if (this.version === Version.DRAFT_17) {
+				this.#requestId += 2n;
+				return id;
+			}
+
 			if (id < this.#maxRequestId) {
 				this.#requestId += 2n;
 				return id;

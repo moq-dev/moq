@@ -3,7 +3,11 @@ import * as Varint from "../varint.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 export const Parameter = {
+	Path: 1n,
 	MaxRequestId: 2n,
+	AuthorizationToken: 3n,
+	MaxAuthTokenCacheSize: 4n,
+	Authority: 5n,
 	Implementation: 7n,
 } as const;
 
@@ -63,9 +67,12 @@ export class Parameters {
 	}
 
 	async encode(w: Writer, version: IetfVersion) {
-		await w.u53(this.vars.size + this.bytes.size);
+		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
+			// d17: no count prefix; d16: count prefix
+			if (version !== Version.DRAFT_17) {
+				await w.u53(this.vars.size + this.bytes.size);
+			}
 
-		if (version === Version.DRAFT_16) {
 			// Delta encoding: collect all keys, sort, encode deltas
 			const all: { key: bigint; isVar: boolean }[] = [];
 			for (const id of this.vars.keys()) all.push({ key: id, isVar: true });
@@ -90,6 +97,8 @@ export class Parameters {
 				}
 			}
 		} else {
+			await w.u53(this.vars.size + this.bytes.size);
+
 			for (const [id, value] of this.vars) {
 				await w.u62(id);
 				await w.u62(value);
@@ -104,34 +113,61 @@ export class Parameters {
 	}
 
 	static async decode(r: Reader, version: IetfVersion): Promise<Parameters> {
-		const count = await r.u53();
 		const params = new Parameters();
 
-		let prevType = 0n;
-
-		for (let i = 0; i < count; i++) {
-			let id: bigint;
-			if (version === Version.DRAFT_16) {
+		if (version === Version.DRAFT_17) {
+			// d17: no count prefix, read until reader is done
+			let prevType = 0n;
+			let i = 0;
+			while (!(await r.done())) {
 				const delta = await r.u62();
-				id = i === 0 ? delta : prevType + delta;
+				const id = i === 0 ? delta : prevType + delta;
 				prevType = id;
-			} else {
-				id = await r.u62();
-			}
+				i++;
 
-			if (id % 2n === 0n) {
-				if (params.vars.has(id)) {
-					throw new Error(`duplicate parameter id: ${id.toString()}`);
+				if (id % 2n === 0n) {
+					if (params.vars.has(id)) {
+						throw new Error(`duplicate parameter id: ${id.toString()}`);
+					}
+					const varint = await r.u62();
+					params.setVarint(id, varint);
+				} else {
+					if (params.bytes.has(id)) {
+						throw new Error(`duplicate parameter id: ${id.toString()}`);
+					}
+					const size = await r.u53();
+					const bytes = await r.read(size);
+					params.setBytes(id, bytes);
 				}
-				const varint = await r.u62();
-				params.setVarint(id, varint);
-			} else {
-				if (params.bytes.has(id)) {
-					throw new Error(`duplicate parameter id: ${id.toString()}`);
+			}
+		} else {
+			const count = await r.u53();
+			let prevType = 0n;
+
+			for (let i = 0; i < count; i++) {
+				let id: bigint;
+				if (version === Version.DRAFT_16) {
+					const delta = await r.u62();
+					id = i === 0 ? delta : prevType + delta;
+					prevType = id;
+				} else {
+					id = await r.u62();
 				}
-				const size = await r.u53();
-				const bytes = await r.read(size);
-				params.setBytes(id, bytes);
+
+				if (id % 2n === 0n) {
+					if (params.vars.has(id)) {
+						throw new Error(`duplicate parameter id: ${id.toString()}`);
+					}
+					const varint = await r.u62();
+					params.setVarint(id, varint);
+				} else {
+					if (params.bytes.has(id)) {
+						throw new Error(`duplicate parameter id: ${id.toString()}`);
+					}
+					const size = await r.u53();
+					const bytes = await r.read(size);
+					params.setBytes(id, bytes);
+				}
 			}
 		}
 
@@ -259,8 +295,19 @@ export class MessageParameters {
 	async encode(w: Writer, version: IetfVersion) {
 		await w.u53(this.vars.size + this.bytes.size);
 
-		if (version === Version.DRAFT_16) {
-			// Delta encoding: merge vars and bytes, sort by key
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+			for (const [id, value] of this.vars) {
+				await w.u62(id);
+				await w.u62(value);
+			}
+
+			for (const [id, value] of this.bytes) {
+				await w.u62(id);
+				await w.u53(value.length);
+				await w.write(value);
+			}
+		} else {
+			// d16+: Delta encoding, merge vars and bytes, sort by key
 			const all: { key: bigint; isVar: boolean }[] = [];
 			for (const id of this.vars.keys()) all.push({ key: id, isVar: true });
 			for (const id of this.bytes.keys()) all.push({ key: id, isVar: false });
@@ -283,17 +330,6 @@ export class MessageParameters {
 					await w.write(value);
 				}
 			}
-		} else {
-			for (const [id, value] of this.vars) {
-				await w.u62(id);
-				await w.u62(value);
-			}
-
-			for (const [id, value] of this.bytes) {
-				await w.u62(id);
-				await w.u53(value.length);
-				await w.write(value);
-			}
 		}
 	}
 
@@ -305,12 +341,13 @@ export class MessageParameters {
 
 		for (let i = 0; i < count; i++) {
 			let id: bigint;
-			if (version === Version.DRAFT_16) {
+			if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+				id = await r.u62();
+			} else {
+				// d16+: delta encoding
 				const delta = await r.u62();
 				id = i === 0 ? delta : prevType + delta;
 				prevType = id;
-			} else {
-				id = await r.u62();
 			}
 
 			if (id % 2n === 0n) {

@@ -4,7 +4,7 @@ import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
 import type { Track } from "../track.ts";
-import { error, unreachable } from "../util/error.ts";
+import { error } from "../util/error.ts";
 import type * as Control from "./control.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
 import { type Publish, type PublishDone, PublishError } from "./publish.ts";
@@ -253,6 +253,10 @@ export class Subscriber {
 	 * @internal
 	 */
 	async handleSubscribeOk(msg: SubscribeOk) {
+		if (msg.requestId === undefined) {
+			console.warn("handleSubscribeOk: no requestId (d17 not yet supported)");
+			return;
+		}
 		const callback = this.#subscribeCallbacks.get(msg.requestId);
 		if (callback) {
 			callback.resolve(msg);
@@ -332,14 +336,7 @@ export class Subscriber {
 	async handlePublish(msg: Publish) {
 		// TODO technically, we should send PUBLISH_OK if we had a SUBSCRIBE in flight for the same track.
 		// Otherwise, the peer will SUBSCRIBE_ERROR because duplicate subscriptions are not allowed :(
-		if (this.#control.version === Version.DRAFT_15 || this.#control.version === Version.DRAFT_16) {
-			const err = new RequestError({
-				requestId: msg.requestId,
-				errorCode: 500,
-				reasonPhrase: "publish not supported",
-			});
-			await this.#control.write(err);
-		} else if (this.#control.version === Version.DRAFT_14) {
+		if (this.#control.version === Version.DRAFT_14) {
 			const err = new PublishError({
 				requestId: msg.requestId,
 				errorCode: 500,
@@ -347,7 +344,13 @@ export class Subscriber {
 			});
 			await this.#control.write(err);
 		} else {
-			unreachable(this.#control.version);
+			// v15+: use RequestError (d17: no requestId on response)
+			const err = new RequestError({
+				requestId: this.#control.version === Version.DRAFT_17 ? undefined : msg.requestId,
+				errorCode: 500,
+				reasonPhrase: "publish not supported",
+			});
+			await this.#control.write(err);
 		}
 	}
 
@@ -356,6 +359,10 @@ export class Subscriber {
 	 * @param msg - The PUBLISH_DONE message
 	 */
 	async handlePublishDone(msg: PublishDone) {
+		if (msg.requestId === undefined) {
+			console.warn("handlePublishDone: no requestId (d17 not yet supported)");
+			return;
+		}
 		// For lite compatibility, we treat this as subscription completion
 		const callback = this.#subscribeCallbacks.get(msg.requestId);
 		if (callback) {
@@ -430,6 +437,10 @@ export class Subscriber {
 
 	// v15: REQUEST_ERROR replaces SubscribeNamespaceError, etc.
 	async handleRequestError(msg: RequestError) {
+		if (msg.requestId === undefined) {
+			console.warn("handleRequestError: no requestId (d17 not yet supported)");
+			return;
+		}
 		// In v15, RequestError replaces SubscribeError for subscribe requests
 		const callback = this.#subscribeCallbacks.get(msg.requestId);
 		if (callback) {

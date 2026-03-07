@@ -1,6 +1,5 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { MessageParameters, Parameters } from "./parameters.ts";
@@ -51,20 +50,14 @@ export class Publish {
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
+		if (version === Version.DRAFT_17) {
+			await w.u62(0n); // required_request_id_delta = 0
+		}
 		await Namespace.encode(w, this.trackNamespace);
 		await w.string(this.trackName);
 		await w.u62(this.trackAlias);
 
-		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			// v15: fields in parameters
-			const params = new MessageParameters();
-			params.groupOrder = this.groupOrder;
-			params.forward = this.forward;
-			if (this.largest) {
-				params.largest = this.largest;
-			}
-			await params.encode(w, version);
-		} else if (version === Version.DRAFT_14) {
+		if (version === Version.DRAFT_14) {
 			await w.u8(this.groupOrder);
 			await w.bool(this.contentExists);
 			if (this.contentExists !== !!this.largest) {
@@ -77,7 +70,17 @@ export class Publish {
 			await w.bool(this.forward);
 			await w.u53(0); // size of parameters
 		} else {
-			unreachable(version);
+			// v15+: fields in parameters
+			if (this.contentExists !== !!this.largest) {
+				throw new Error("contentExists and largest must both be true or false");
+			}
+			const params = new MessageParameters();
+			params.groupOrder = this.groupOrder;
+			params.forward = this.forward;
+			if (this.largest) {
+				params.largest = this.largest;
+			}
+			await params.encode(w, version);
 		}
 	}
 
@@ -91,26 +94,14 @@ export class Publish {
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<Publish> {
 		const requestId = await r.u62();
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // required_request_id_delta
+		}
 		const trackNamespace = await Namespace.decode(r);
 		const trackName = await r.string();
 		const trackAlias = await r.u62();
 
-		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			const params = await MessageParameters.decode(r, version);
-			const groupOrder = params.groupOrder ?? 0x02;
-			const forward = params.forward ?? true;
-			const largest = params.largest;
-			return new Publish({
-				requestId,
-				trackNamespace,
-				trackName,
-				trackAlias,
-				groupOrder,
-				contentExists: !!largest,
-				largest,
-				forward,
-			});
-		} else if (version === Version.DRAFT_14) {
+		if (version === Version.DRAFT_14) {
 			const groupOrder = await r.u8();
 			const contentExists = await r.bool();
 			const largest = contentExists ? { groupId: await r.u62(), objectId: await r.u62() } : undefined;
@@ -126,9 +117,22 @@ export class Publish {
 				largest,
 				forward,
 			});
-		} else {
-			unreachable(version);
 		}
+		// v15+
+		const params = await MessageParameters.decode(r, version);
+		const groupOrder = params.groupOrder ?? 0x02;
+		const forward = params.forward ?? true;
+		const largest = params.largest;
+		return new Publish({
+			requestId,
+			trackNamespace,
+			trackName,
+			trackAlias,
+			groupOrder,
+			contentExists: !!largest,
+			largest,
+			forward,
+		});
 	}
 }
 
@@ -195,7 +199,7 @@ export class PublishError {
 export class PublishDone {
 	static readonly id = 0x0b;
 
-	requestId: bigint;
+	requestId: bigint | undefined;
 	statusCode: number;
 	reasonPhrase: string;
 
@@ -203,29 +207,32 @@ export class PublishDone {
 		requestId,
 		statusCode,
 		reasonPhrase,
-	}: { requestId: bigint; statusCode: number; reasonPhrase: string }) {
+	}: { requestId?: bigint; statusCode: number; reasonPhrase: string }) {
 		this.requestId = requestId;
 		this.statusCode = statusCode;
 		this.reasonPhrase = reasonPhrase;
 	}
 
-	async #encode(w: Writer): Promise<void> {
-		await w.u62(this.requestId);
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (version !== Version.DRAFT_17) {
+			if (this.requestId === undefined) throw new Error("requestId required for draft14-16");
+			await w.u62(this.requestId);
+		}
 		await w.u62(BigInt(this.statusCode));
 		await w.u62(BigInt(0)); // stream_count = 0 (unsupported)
 		await w.string(this.reasonPhrase);
 	}
 
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (mw) => this.#encode(mw, version));
 	}
 
-	static async decode(r: Reader, _version: IetfVersion): Promise<PublishDone> {
-		return Message.decode(r, PublishDone.#decode);
+	static async decode(r: Reader, version: IetfVersion): Promise<PublishDone> {
+		return Message.decode(r, (mr) => PublishDone.#decode(mr, version));
 	}
 
-	static async #decode(r: Reader): Promise<PublishDone> {
-		const requestId = await r.u62();
+	static async #decode(r: Reader, version: IetfVersion): Promise<PublishDone> {
+		const requestId = version === Version.DRAFT_17 ? undefined : await r.u62();
 		const statusCode = Number(await r.u62());
 		await r.u62(); // ignore stream_count
 		const reasonPhrase = await r.string();
