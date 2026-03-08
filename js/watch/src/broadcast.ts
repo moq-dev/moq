@@ -68,10 +68,23 @@ export class Broadcast {
 		const announced = conn.announced(name);
 		effect.cleanup(() => announced.close());
 
+		// Warn if the relay doesn't support announcements (e.g. Cloudflare)
+		let warnTimer: ReturnType<typeof setTimeout> | undefined;
+		if (conn.url.hostname.endsWith("mediaoverquic.com")) {
+			warnTimer = setTimeout(() => {
+				console.warn(
+					"Cloudflare relay does not support the reload feature yet. Remove the `reload` attribute to connect without waiting for announcements.",
+				);
+			}, 1000);
+			effect.cleanup(() => clearTimeout(warnTimer));
+		}
+
 		effect.spawn(async () => {
 			for (;;) {
 				const update = await announced.next();
 				if (!update) break;
+
+				clearTimeout(warnTimer);
 
 				// Require full equality
 				if (update.path !== name) {
