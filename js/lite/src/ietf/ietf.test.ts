@@ -631,6 +631,28 @@ test("Publish v17: round trip with requiredRequestIdDelta", async () => {
 	assert.strictEqual(decoded.forward, true);
 });
 
+test("PublishNamespace v17: round trip", async () => {
+	const msg = new Announce.PublishNamespace({ requestId: 5n, trackNamespace: Path.from("live/stream") });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
+	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_17);
+
+	assert.strictEqual(decoded.requestId, 5n);
+	assert.strictEqual(decoded.trackNamespace, "live/stream");
+});
+
+test("PublishNamespaceDone v17: encode rejects", async () => {
+	const msg = new Announce.PublishNamespaceDone({ trackNamespace: Path.from("old/stream") });
+
+	await assert.rejects(() => encodeVersioned(msg, Version.DRAFT_17), /removed in draft-17/);
+});
+
+test("PublishNamespaceCancel v17: encode rejects", async () => {
+	const msg = new Announce.PublishNamespaceCancel({ trackNamespace: Path.from("canceled") });
+
+	await assert.rejects(() => encodeVersioned(msg, Version.DRAFT_17), /removed in draft-17/);
+});
+
 test("PublishDone v17: no requestId", async () => {
 	const msg = new PublishDone({ statusCode: 0, reasonPhrase: "done" });
 
