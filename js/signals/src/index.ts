@@ -550,8 +550,12 @@ export class Effect {
 		}
 
 		// Merge the abort signal so the listener is auto-removed on rerun/close.
+		const signal =
+			typeof options !== "boolean" && options?.signal
+				? AbortSignal.any([this.#abort.signal, options.signal])
+				: this.#abort.signal;
 		const merged: AddEventListenerOptions =
-			typeof options === "boolean" ? { capture: options, signal: this.#abort.signal } : { ...options, signal: this.#abort.signal };
+			typeof options === "boolean" ? { capture: options, signal } : { ...options, signal };
 
 		target.addEventListener(type, listener, merged);
 	}
