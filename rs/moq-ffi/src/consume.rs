@@ -180,7 +180,7 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn catalog_snapshot_close(&mut self, catalog: Id) -> Result<(), Error> {
+	pub fn catalog_free(&mut self, catalog: Id) -> Result<(), Error> {
 		self.catalog.remove(catalog).ok_or(Error::CatalogNotFound)?;
 		Ok(())
 	}

@@ -325,10 +325,10 @@ pub fn moq_consume_catalog_close(catalog: u32) -> Result<(), MoqError> {
 
 /// Close a catalog snapshot received via the catalog callback.
 #[uniffi::export]
-pub fn moq_consume_catalog_snapshot_close(catalog: u32) -> Result<(), MoqError> {
+pub fn moq_consume_catalog_free(catalog: u32) -> Result<(), MoqError> {
 	run(|| {
 		let catalog = ffi::parse_id(catalog)?;
-		State::lock().consume.catalog_snapshot_close(catalog)
+		State::lock().consume.catalog_free(catalog)
 	})
 }
 
