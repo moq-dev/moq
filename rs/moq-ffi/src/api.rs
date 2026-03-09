@@ -389,12 +389,12 @@ pub fn moq_consume_video_ordered(
 	})
 }
 
-/// Close a video track consumer and clean up its resources.
+/// Close a video track consumer and cancel its background task.
 #[uniffi::export]
 pub fn moq_consume_video_close(track: u32) -> Result<(), MoqError> {
 	run(|| {
 		let track = ffi::parse_id(track)?;
-		State::lock().consume.video_close(track)
+		State::lock().consume.track_close(track)
 	})
 }
 
@@ -423,12 +423,12 @@ pub fn moq_consume_audio_ordered(
 	})
 }
 
-/// Close an audio track consumer and clean up its resources.
+/// Close an audio track consumer and cancel its background task.
 #[uniffi::export]
 pub fn moq_consume_audio_close(track: u32) -> Result<(), MoqError> {
 	run(|| {
 		let track = ffi::parse_id(track)?;
-		State::lock().consume.audio_close(track)
+		State::lock().consume.track_close(track)
 	})
 }
 
