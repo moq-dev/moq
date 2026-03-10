@@ -32,8 +32,9 @@ All of this is *on purpose* and produces a better standard in the end.
 But the standard is too immature, full of bloat, and there's too much churn.
 If we had to gate every change behind IETF approval, it would take months to make even the smallest change.
 
-To that end we've created a subset of the standard called [moq-lite](/concept/layer/moq-lite) and [hang](/concept/layer/hang).
-The concepts are very similar to [MoqTransport](/concept/standard/moq-transport) and [MSF](/concept/standard/msf) respectively, with the intent to converge some day.
+To that end we've created a forwards-compatible subset of the standard called [moq-lite](/concept/layer/moq-lite) and [hang](/concept/layer/hang).
+moq-lite clients work with any moq-transport CDN — you're not locked in.
+The concepts are very similar to [MoqTransport](/concept/standard/moq-transport) and [MSF](/concept/standard/msf) respectively.
 
 - [Website](https://moq.dev)
 - [GitHub](https://github.com/moq-dev/moq)
