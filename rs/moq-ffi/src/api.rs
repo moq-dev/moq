@@ -154,6 +154,8 @@ pub struct MoqCatalogStream {
 #[derive(uniffi::Object)]
 pub struct MoqTrack {
 	inner: Arc<tokio::sync::Mutex<hang::container::OrderedConsumer>>,
+	close: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+	close_rx: Arc<tokio::sync::Mutex<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 #[derive(uniffi::Object)]
@@ -281,8 +283,8 @@ impl MoqSession {
 		Ok(())
 	}
 
-	/// Close the session.
-	pub fn close(&self) {
+	/// Disconnect the session.
+	pub fn disconnect(&self) {
 		if let Some(sender) = self.close.lock().unwrap().take() {
 			let _ = sender.send(());
 		}
@@ -316,24 +318,37 @@ impl MoqAnnounced {
 #[uniffi::export]
 impl MoqBroadcast {
 	/// Create a catalog consumer for this broadcast.
-	pub fn catalog(&self) -> Result<Arc<MoqCatalogStream>, MoqError> {
-		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
-		let consumer = hang::CatalogConsumer::from(track);
-		Ok(Arc::new(MoqCatalogStream {
-			inner: Arc::new(tokio::sync::Mutex::new(consumer)),
-		}))
+	pub async fn catalog(&self) -> Result<Arc<MoqCatalogStream>, MoqError> {
+		let inner = self.inner.clone();
+		ffi::HANDLE
+			.spawn(async move {
+				let track = inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
+				let consumer = hang::CatalogConsumer::from(track);
+				Ok(Arc::new(MoqCatalogStream {
+					inner: Arc::new(tokio::sync::Mutex::new(consumer)),
+				}))
+			})
+			.await?
 	}
 
 	/// Subscribe to a track by name, delivering frames in decode order.
 	///
 	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
-	pub fn subscribe_track(&self, name: String, max_latency_ms: u64) -> Result<Arc<MoqTrack>, MoqError> {
-		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
-		let latency = std::time::Duration::from_millis(max_latency_ms);
-		let consumer = hang::container::OrderedConsumer::new(track, latency);
-		Ok(Arc::new(MoqTrack {
-			inner: Arc::new(tokio::sync::Mutex::new(consumer)),
-		}))
+	pub async fn subscribe_track(&self, name: String, max_latency_ms: u64) -> Result<Arc<MoqTrack>, MoqError> {
+		let inner = self.inner.clone();
+		ffi::HANDLE
+			.spawn(async move {
+				let track = inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
+				let latency = std::time::Duration::from_millis(max_latency_ms);
+				let consumer = hang::container::OrderedConsumer::new(track, latency);
+				let (tx, rx) = tokio::sync::oneshot::channel();
+				Ok(Arc::new(MoqTrack {
+					inner: Arc::new(tokio::sync::Mutex::new(consumer)),
+					close: std::sync::Mutex::new(Some(tx)),
+					close_rx: Arc::new(tokio::sync::Mutex::new(rx)),
+				}))
+			})
+			.await?
 	}
 }
 
@@ -357,35 +372,47 @@ impl MoqCatalogStream {
 
 #[uniffi::export]
 impl MoqTrack {
-	/// Get the next frame. Returns `None` when the track ends.
+	/// Get the next frame. Returns `None` when the track ends or is closed.
 	pub async fn next(&self) -> Result<Option<FrameData>, MoqError> {
 		let inner = self.inner.clone();
+		let close_rx = self.close_rx.clone();
 		ffi::HANDLE
 			.spawn(async move {
 				let mut consumer = inner.lock().await;
-				match consumer.read().await {
-					Ok(Some(frame)) => {
-						let payload: Vec<u8> = (0..frame.payload.num_chunks())
-							.filter_map(|i| frame.payload.get_chunk(i))
-							.flat_map(|chunk| chunk.iter().copied())
-							.collect();
+				let mut close_rx = close_rx.lock().await;
+				tokio::select! {
+					_ = &mut *close_rx => Ok(None),
+					result = consumer.read() => match result {
+						Ok(Some(frame)) => {
+							let payload: Vec<u8> = (0..frame.payload.num_chunks())
+								.filter_map(|i| frame.payload.get_chunk(i))
+								.flat_map(|chunk| chunk.iter().copied())
+								.collect();
 
-						let timestamp_us: u64 =
-							frame.timestamp.as_micros().try_into().map_err(|_| MoqError::Error {
-								msg: "timestamp overflow".into(),
-							})?;
+							let timestamp_us: u64 =
+								frame.timestamp.as_micros().try_into().map_err(|_| MoqError::Error {
+									msg: "timestamp overflow".into(),
+								})?;
 
-						Ok(Some(FrameData {
-							payload,
-							timestamp_us,
-							keyframe: frame.is_keyframe(),
-						}))
+							Ok(Some(FrameData {
+								payload,
+								timestamp_us,
+								keyframe: frame.is_keyframe(),
+							}))
+						}
+						Ok(None) => Ok(None),
+						Err(e) => Err(MoqError::from(e)),
 					}
-					Ok(None) => Ok(None),
-					Err(e) => Err(MoqError::from(e)),
 				}
 			})
 			.await?
+	}
+
+	/// Unsubscribe from this track, causing any pending `next()` call to return `None`.
+	pub fn unsubscribe(&self) {
+		if let Some(sender) = self.close.lock().unwrap().take() {
+			let _ = sender.send(());
+		}
 	}
 }
 
@@ -454,8 +481,8 @@ impl MoqMedia {
 		Ok(())
 	}
 
-	/// Close this media track and finalize encoding.
-	pub fn close(&self) -> Result<(), MoqError> {
+	/// Finish this media track and finalize encoding.
+	pub fn finish(&self) -> Result<(), MoqError> {
 		let mut guard = self.inner.lock().unwrap();
 		if let Some(mut decoder) = guard.take() {
 			decoder.finish().map_err(|err| MoqError::Error {
