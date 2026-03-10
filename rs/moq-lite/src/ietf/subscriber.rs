@@ -437,10 +437,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			let track = tokio::select! {
 				producer = broadcast.requested_track() => match producer {
-					Ok(Some(producer)) => producer,
-					Ok(None) => break,
+					Ok(producer) => producer,
 					Err(err) => {
-						tracing::debug!(%err, "broadcast request error");
+						tracing::debug!(%err, "broadcast closed");
 						break;
 					}
 				},

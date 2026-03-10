@@ -191,6 +191,8 @@ export class Effect {
 	#close!: () => void;
 	#closed: Promise<void>;
 
+	#abort: AbortController = new AbortController();
+
 	// If a function is provided, it will be run with the effect as an argument.
 	constructor(fn?: (effect: Effect) => void) {
 		if (DEV) {
@@ -233,6 +235,9 @@ export class Effect {
 		if (this.#dispose === undefined) return; // closed, no error because this is a microtask
 
 		this.#stop();
+		this.#abort.abort();
+		this.#abort = new AbortController();
+
 		this.#stopped = new Promise((resolve) => {
 			this.#stop = resolve;
 		});
@@ -544,8 +549,15 @@ export class Effect {
 			return;
 		}
 
-		target.addEventListener(type, listener, options);
-		this.cleanup(() => target.removeEventListener(type, listener, options));
+		// Merge the abort signal so the listener is auto-removed on rerun/close.
+		const signal =
+			typeof options !== "boolean" && options?.signal
+				? AbortSignal.any([this.#abort.signal, options.signal])
+				: this.#abort.signal;
+		const merged: AddEventListenerOptions =
+			typeof options === "boolean" ? { capture: options, signal } : { ...options, signal };
+
+		target.addEventListener(type, listener, merged);
 	}
 
 	// Register a cleanup function.
@@ -569,6 +581,7 @@ export class Effect {
 
 		this.#close();
 		this.#stop();
+		this.#abort.abort();
 
 		for (const fn of this.#dispose) fn();
 		this.#dispose = undefined;
@@ -589,6 +602,10 @@ export class Effect {
 
 	get cancel(): Promise<void> {
 		return this.#stopped;
+	}
+
+	get abort(): AbortSignal {
+		return this.#abort.signal;
 	}
 
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void {

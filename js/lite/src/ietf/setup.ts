@@ -1,8 +1,35 @@
 import type { Reader, Writer } from "../stream.ts";
-import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import { Parameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
+
+// Draft-17 unified SETUP message (0x2F00)
+export class Setup {
+	static id = 0x2f00;
+
+	parameters: Parameters;
+
+	constructor({ parameters = new Parameters() }: { parameters?: Parameters } = {}) {
+		this.parameters = parameters;
+	}
+
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		await this.parameters.encode(w, version);
+	}
+
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (mw) => this.#encode(mw, version));
+	}
+
+	static async #decode(r: Reader, version: IetfVersion): Promise<Setup> {
+		const parameters = await Parameters.decode(r, version);
+		return new Setup({ parameters });
+	}
+
+	static async decode(r: Reader, version: IetfVersion): Promise<Setup> {
+		return Message.decode(r, (mr) => Setup.#decode(mr, version));
+	}
+}
 
 const MAX_VERSIONS = 128;
 
@@ -28,7 +55,8 @@ export class ClientSetup {
 			}
 			await this.parameters.encode(w, version);
 		} else {
-			unreachable(version);
+			// d17 uses unified Setup, not ClientSetup
+			throw new Error("ClientSetup not used for this version");
 		}
 	}
 
@@ -59,7 +87,8 @@ export class ClientSetup {
 
 			return new ClientSetup({ versions: supportedVersions, parameters });
 		} else {
-			unreachable(version);
+			// d17 uses unified Setup, not ClientSetup
+			throw new Error("ClientSetup not used for this version");
 		}
 	}
 
@@ -87,7 +116,8 @@ export class ServerSetup {
 			await w.u53(this.version);
 			await this.parameters.encode(w, version);
 		} else {
-			unreachable(version);
+			// d17 uses unified Setup, not ServerSetup
+			throw new Error("ServerSetup not used for this version");
 		}
 	}
 
@@ -105,7 +135,8 @@ export class ServerSetup {
 			const parameters = await Parameters.decode(r, version);
 			return new ServerSetup({ version: selectedVersion, parameters });
 		} else {
-			unreachable(version);
+			// d17 uses unified Setup, not ServerSetup
+			throw new Error("ServerSetup not used for this version");
 		}
 	}
 

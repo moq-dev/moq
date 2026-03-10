@@ -1,4 +1,4 @@
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use bytes::{Bytes, BytesMut};
 
@@ -59,53 +59,67 @@ struct FrameState {
 
 impl FrameState {
 	fn write_chunk(&mut self, chunk: Bytes) -> Result<()> {
+		if let Some(err) = &self.abort {
+			return Err(err.clone());
+		}
+
 		self.remaining = self.remaining.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
 		self.chunks.push(chunk);
 		Ok(())
 	}
 
-	fn poll_read_chunk(&self, index: usize) -> Poll<Option<Bytes>> {
+	fn poll_read_chunk(&self, index: usize) -> Poll<Result<Option<Bytes>>> {
 		if let Some(chunk) = self.chunks.get(index).cloned() {
-			Poll::Ready(Some(chunk))
+			Poll::Ready(Ok(Some(chunk)))
 		} else if self.remaining == 0 {
-			Poll::Ready(None)
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
 	}
 
-	fn poll_read_chunks(&self, index: usize) -> Poll<Vec<Bytes>> {
+	fn poll_read_chunks(&self, index: usize) -> Poll<Result<Vec<Bytes>>> {
 		if index >= self.chunks.len() && self.remaining == 0 {
-			return Poll::Ready(Vec::new());
-		}
-		if self.remaining == 0 {
-			Poll::Ready(self.chunks[index..].to_vec())
+			Poll::Ready(Ok(Vec::new()))
+		} else if self.remaining == 0 {
+			Poll::Ready(Ok(self.chunks[index..].to_vec()))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
 	}
 
-	fn poll_read_all(&self, index: usize) -> Poll<Bytes> {
-		if self.remaining > 0 {
-			return Poll::Pending;
-		}
+	fn poll_read_all(&self, index: usize) -> Poll<Result<Bytes>> {
+		let chunks = ready!(self.poll_read_all_chunks(index)?);
 
-		if index >= self.chunks.len() {
-			return Poll::Ready(Bytes::new());
-		}
-
-		let chunks = &self.chunks[index..];
-		let size = chunks.iter().map(Bytes::len).sum();
-		let mut buf = BytesMut::with_capacity(size);
-		for chunk in chunks {
-			buf.extend_from_slice(chunk);
-		}
-		Poll::Ready(buf.freeze())
+		Poll::Ready(Ok(match chunks.len() {
+			0 => Bytes::new(),
+			1 => chunks[0].clone(),
+			_ => {
+				let size = chunks.iter().map(Bytes::len).sum();
+				let mut buf = BytesMut::with_capacity(size);
+				for chunk in chunks {
+					buf.extend_from_slice(chunk.as_ref());
+				}
+				buf.freeze()
+			}
+		}))
 	}
-}
 
-fn modify(state: &conducer::Producer<FrameState>) -> Result<conducer::Mut<'_, FrameState>> {
-	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	fn poll_read_all_chunks(&self, index: usize) -> Poll<Result<&[Bytes]>> {
+		if self.remaining > 0 {
+			Poll::Pending
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else if index < self.chunks.len() {
+			Poll::Ready(Ok(&self.chunks[index..]))
+		} else {
+			Poll::Ready(Ok(&[]))
+		}
+	}
 }
 
 /// Writes a frame's payload in one or more chunks.
@@ -139,7 +153,7 @@ impl FrameProducer {
 	/// Returns [Error::WrongSize] if the total bytes written would exceed [Frame::size].
 	pub fn write<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
 		let chunk = chunk.into();
-		let mut state = modify(&self.state)?;
+		let mut state = self.modify()?;
 		state.write_chunk(chunk)
 	}
 
@@ -155,7 +169,7 @@ impl FrameProducer {
 	///
 	/// Returns [Error::WrongSize] if the bytes written don't match [Frame::size].
 	pub fn finish(&mut self) -> Result<()> {
-		let state = modify(&self.state)?;
+		let state = self.modify()?;
 		if state.remaining != 0 {
 			return Err(Error::WrongSize);
 		}
@@ -164,7 +178,7 @@ impl FrameProducer {
 
 	/// Abort the frame with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut guard = modify(&self.state)?;
+		let mut guard = self.modify()?;
 		guard.abort = Some(err);
 		guard.close();
 		Ok(())
@@ -184,6 +198,12 @@ impl FrameProducer {
 		self.state
 			.unused()
 			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	fn modify(&mut self) -> Result<conducer::Mut<'_, FrameState>> {
+		self.state
+			.write()
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 }
@@ -218,43 +238,175 @@ pub struct FrameConsumer {
 }
 
 impl FrameConsumer {
-	/// Return the next chunk.
-	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
-		let index = self.index;
-		let res = self
-			.state
-			.wait(|state| state.poll_read_chunk(index))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-		if res.is_some() {
-			self.index += 1;
-		}
-		Ok(res)
+	// A helper to automatically apply Dropped if the state is closed without an error.
+	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R>>
+	where
+		F: Fn(&conducer::Ref<'_, FrameState>) -> Poll<Result<R>>,
+	{
+		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
+			Ok(res) => res,
+			// We try to clone abort just in case the function forgot to check for terminal state.
+			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		})
 	}
 
-	/// Read all of the remaining chunks into a vector.
-	/// Cancel-safe: returns all or nothing.
-	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>> {
-		let index = self.index;
-		let chunks = self
-			.state
-			.wait(|state| state.poll_read_chunks(index))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-		self.index += chunks.len();
-		Ok(chunks)
+	/// Poll for all remaining data without blocking.
+	pub fn poll_read_all(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Bytes>> {
+		let data = ready!(self.poll(waiter, |state| state.poll_read_all(self.index))?);
+		self.index = usize::MAX;
+		Poll::Ready(Ok(data))
 	}
 
 	/// Return all of the remaining chunks concatenated together.
-	/// Cancel-safe: returns all or nothing.
 	pub async fn read_all(&mut self) -> Result<Bytes> {
-		let index = self.index;
-		let data = self
-			.state
-			.wait(|state| state.poll_read_all(index))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-		self.index = usize::MAX; // consumed everything
-		Ok(data)
+		conducer::wait(|waiter| self.poll_read_all(waiter)).await
+	}
+
+	/// Return all of the remaining chunks of the frame, without blocking.
+	pub fn poll_read_all_chunks(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Vec<Bytes>>> {
+		let chunks = ready!(self.poll(waiter, |state| {
+			// This is more complicated because we need to make a copy of the chunks while holding the lock..
+			state
+				.poll_read_all_chunks(self.index)
+				.map(|res| res.map(|chunks| chunks.to_vec()))
+		})?);
+		self.index += chunks.len();
+
+		Poll::Ready(Ok(chunks))
+	}
+
+	/// Poll for the next chunk, without blocking.
+	pub fn poll_read_chunk(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Bytes>>> {
+		let Some(chunk) = ready!(self.poll(waiter, |state| state.poll_read_chunk(self.index))?) else {
+			return Poll::Ready(Ok(None));
+		};
+		self.index += 1;
+		Poll::Ready(Ok(Some(chunk)))
+	}
+
+	/// Return the next chunk.
+	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
+		conducer::wait(|waiter| self.poll_read_chunk(waiter)).await
+	}
+
+	/// Poll for the next chunks, without blocking.
+	pub fn poll_read_chunks(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Vec<Bytes>>> {
+		let chunks = ready!(self.poll(waiter, |state| state.poll_read_chunks(self.index))?);
+		self.index += chunks.len();
+		Poll::Ready(Ok(chunks))
+	}
+
+	/// Read all of the remaining chunks into a vector.
+	pub async fn read_chunks(&mut self) -> Result<Vec<Bytes>> {
+		conducer::wait(|waiter| self.poll_read_chunks(waiter)).await
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+	use futures::FutureExt;
+
+	#[test]
+	fn single_chunk_roundtrip() {
+		let mut producer = Frame { size: 5 }.produce();
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, Bytes::from_static(b"hello"));
+	}
+
+	#[test]
+	fn multi_chunk_read_all() {
+		let mut producer = Frame { size: 10 }.produce();
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		producer.write(Bytes::from_static(b"world")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, Bytes::from_static(b"helloworld"));
+	}
+
+	#[test]
+	fn read_chunk_sequential() {
+		let mut producer = Frame { size: 10 }.produce();
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		producer.write(Bytes::from_static(b"world")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let c1 = consumer.read_chunk().now_or_never().unwrap().unwrap();
+		assert_eq!(c1, Some(Bytes::from_static(b"hello")));
+		let c2 = consumer.read_chunk().now_or_never().unwrap().unwrap();
+		assert_eq!(c2, Some(Bytes::from_static(b"world")));
+		let c3 = consumer.read_chunk().now_or_never().unwrap().unwrap();
+		assert_eq!(c3, None);
+	}
+
+	#[test]
+	fn read_all_chunks() {
+		let mut producer = Frame { size: 10 }.produce();
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		producer.write(Bytes::from_static(b"world")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let chunks = consumer.read_chunks().now_or_never().unwrap().unwrap();
+		assert_eq!(chunks.len(), 2);
+		assert_eq!(chunks[0], Bytes::from_static(b"hello"));
+		assert_eq!(chunks[1], Bytes::from_static(b"world"));
+	}
+
+	#[test]
+	fn finish_checks_remaining() {
+		let mut producer = Frame { size: 5 }.produce();
+		producer.write(Bytes::from_static(b"hi")).unwrap();
+		let err = producer.finish().unwrap_err();
+		assert!(matches!(err, Error::WrongSize));
+	}
+
+	#[test]
+	fn write_too_many_bytes() {
+		let mut producer = Frame { size: 3 }.produce();
+		let err = producer.write(Bytes::from_static(b"toolong")).unwrap_err();
+		assert!(matches!(err, Error::WrongSize));
+	}
+
+	#[test]
+	fn abort_propagates() {
+		let mut producer = Frame { size: 5 }.produce();
+		let mut consumer = producer.consume();
+		producer.abort(Error::Cancel).unwrap();
+
+		let err = consumer.read_all().now_or_never().unwrap().unwrap_err();
+		assert!(matches!(err, Error::Cancel));
+	}
+
+	#[test]
+	fn empty_frame() {
+		let mut producer = Frame { size: 0 }.produce();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, Bytes::new());
+	}
+
+	#[tokio::test]
+	async fn pending_then_ready() {
+		let mut producer = Frame { size: 5 }.produce();
+		let mut consumer = producer.consume();
+
+		// Consumer blocks because no data yet.
+		assert!(consumer.read_all().now_or_never().is_none());
+
+		producer.write(Bytes::from_static(b"hello")).unwrap();
+		producer.finish().unwrap();
+
+		let data = consumer.read_all().now_or_never().unwrap().unwrap();
+		assert_eq!(data, Bytes::from_static(b"hello"));
 	}
 }

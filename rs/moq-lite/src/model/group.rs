@@ -7,7 +7,7 @@
 //! The reader can be cloned, in which case each reader receives a copy of each frame. (fanout)
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use bytes::Bytes;
 
@@ -74,11 +74,23 @@ struct GroupState {
 }
 
 impl GroupState {
-	fn poll_next_frame(&self, index: usize) -> Poll<Option<FrameProducer>> {
+	fn poll_get_frame(&self, index: usize) -> Poll<Result<Option<FrameConsumer>>> {
 		if let Some(frame) = self.frames.get(index) {
-			Poll::Ready(Some(frame.clone()))
+			Poll::Ready(Ok(Some(frame.consume())))
 		} else if self.fin {
-			Poll::Ready(None)
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
+
+	fn poll_finished(&self) -> Poll<Result<u64>> {
+		if self.fin {
+			Poll::Ready(Ok(self.frames.len() as u64))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
@@ -221,56 +233,213 @@ pub struct GroupConsumer {
 }
 
 impl GroupConsumer {
-	/// Read the next frame's data all at once.
-	///
-	/// Cancel-safe: if cancelled after obtaining the frame but before reading,
-	/// we retry from the same index and create a fresh consumer.
-	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
-		// Step 1: Get the next frame producer from the group state.
-		let index = self.index;
-		let frame = self
-			.state
-			.wait(|state| state.poll_next_frame(index))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-
-		let Some(frame) = frame else {
-			return Ok(None);
-		};
-
-		// Step 2: Read all data from the frame via a temporary consumer.
-		// Cancel-safe because read_all returns all or nothing.
-		let mut consumer = frame.consume();
-		let data = consumer.read_all().await?;
-
-		self.index += 1;
-		Ok(Some(data))
+	// A helper to automatically apply Dropped if the state is closed without an error.
+	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R>>
+	where
+		F: Fn(&conducer::Ref<'_, GroupState>) -> Poll<Result<R>>,
+	{
+		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
+			Ok(res) => res,
+			// We try to clone abort just in case the function forgot to check for terminal state.
+			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		})
 	}
 
 	/// Block until the frame at the given index is available.
 	///
 	/// Returns None if the group is finished and the index is out of range.
 	pub async fn get_frame(&self, index: usize) -> Result<Option<FrameConsumer>> {
-		let res = self
-			.state
-			.wait(|state| state.poll_next_frame(index))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-		Ok(res.map(|producer| producer.consume()))
+		conducer::wait(|waiter| self.poll_get_frame(waiter, index)).await
+	}
+
+	/// Poll for the frame at the given index, without blocking.
+	///
+	/// Returns None if the group is finished and the index is out of range.
+	pub fn poll_get_frame(&self, waiter: &conducer::Waiter, index: usize) -> Poll<Result<Option<FrameConsumer>>> {
+		self.poll(waiter, |state| state.poll_get_frame(index))
 	}
 
 	/// Return a consumer for the next frame for chunked reading.
 	pub async fn next_frame(&mut self) -> Result<Option<FrameConsumer>> {
-		let index = self.index;
-		let res = self
-			.state
-			.wait(|state| state.poll_next_frame(index))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-		let consumer = res.map(|producer| {
-			self.index += 1;
-			producer.consume()
-		});
-		Ok(consumer)
+		conducer::wait(|waiter| self.poll_next_frame(waiter)).await
+	}
+
+	/// Poll for the next frame, without blocking.
+	///
+	/// Returns None if the group is finished and the index is out of range.
+	pub fn poll_next_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<FrameConsumer>>> {
+		let Some(frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		self.index += 1;
+		Poll::Ready(Ok(Some(frame)))
+	}
+
+	/// Read the next frame's data all at once, without blocking.
+	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Bytes>>> {
+		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		let data = ready!(frame.poll_read_all(waiter))?;
+		self.index += 1;
+
+		Poll::Ready(Ok(Some(data)))
+	}
+
+	/// Read the next frame's data all at once.
+	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
+		conducer::wait(|waiter| self.poll_read_frame(waiter)).await
+	}
+
+	/// Read all of the chunks of the next frame, without blocking.
+	pub fn poll_read_frame_chunks(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Vec<Bytes>>>> {
+		let Some(mut frame) = ready!(self.poll(waiter, |state| state.poll_get_frame(self.index))?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		let data = ready!(frame.poll_read_all_chunks(waiter))?;
+		self.index += 1;
+
+		Poll::Ready(Ok(Some(data)))
+	}
+
+	/// Read all of the chunks of the next frame.
+	pub async fn read_frame_chunks(&mut self) -> Result<Option<Vec<Bytes>>> {
+		conducer::wait(|waiter| self.poll_read_frame_chunks(waiter)).await
+	}
+
+	/// Poll for the final number of frames in the group.
+	pub fn poll_finished(&mut self, waiter: &conducer::Waiter) -> Poll<Result<u64>> {
+		self.poll(waiter, |state| state.poll_finished())
+	}
+
+	/// Block until the group is finished, returning the number of frames in the group.
+	pub async fn finished(&mut self) -> Result<u64> {
+		conducer::wait(|waiter| self.poll_finished(waiter)).await
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+	use futures::FutureExt;
+
+	#[test]
+	fn basic_frame_reading() {
+		let mut producer = Group { sequence: 0 }.produce();
+		producer.write_frame(Bytes::from_static(b"frame0")).unwrap();
+		producer.write_frame(Bytes::from_static(b"frame1")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let f0 = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(f0.info.size, 6);
+		let f1 = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(f1.info.size, 6);
+		let end = consumer.next_frame().now_or_never().unwrap().unwrap();
+		assert!(end.is_none());
+	}
+
+	#[test]
+	fn read_frame_all_at_once() {
+		let mut producer = Group { sequence: 0 }.produce();
+		producer.write_frame(Bytes::from_static(b"hello")).unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let data = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(data, Bytes::from_static(b"hello"));
+	}
+
+	#[test]
+	fn read_frame_chunks() {
+		let mut producer = Group { sequence: 0 }.produce();
+		let mut frame = producer.create_frame(Frame { size: 10 }).unwrap();
+		frame.write(Bytes::from_static(b"hello")).unwrap();
+		frame.write(Bytes::from_static(b"world")).unwrap();
+		frame.finish().unwrap();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let chunks = consumer.read_frame_chunks().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(chunks.len(), 2);
+		assert_eq!(chunks[0], Bytes::from_static(b"hello"));
+		assert_eq!(chunks[1], Bytes::from_static(b"world"));
+	}
+
+	#[test]
+	fn get_frame_by_index() {
+		let mut producer = Group { sequence: 0 }.produce();
+		producer.write_frame(Bytes::from_static(b"a")).unwrap();
+		producer.write_frame(Bytes::from_static(b"bb")).unwrap();
+		producer.finish().unwrap();
+
+		let consumer = producer.consume();
+		let f0 = consumer.get_frame(0).now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(f0.info.size, 1);
+		let f1 = consumer.get_frame(1).now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(f1.info.size, 2);
+		let f2 = consumer.get_frame(2).now_or_never().unwrap().unwrap();
+		assert!(f2.is_none());
+	}
+
+	#[test]
+	fn group_finish_returns_none() {
+		let mut producer = Group { sequence: 0 }.produce();
+		producer.finish().unwrap();
+
+		let mut consumer = producer.consume();
+		let end = consumer.next_frame().now_or_never().unwrap().unwrap();
+		assert!(end.is_none());
+	}
+
+	#[test]
+	fn abort_propagates() {
+		let mut producer = Group { sequence: 0 }.produce();
+		let mut consumer = producer.consume();
+		producer.abort(crate::Error::Cancel).unwrap();
+
+		let result = consumer.next_frame().now_or_never().unwrap();
+		assert!(matches!(result, Err(crate::Error::Cancel)));
+	}
+
+	#[tokio::test]
+	async fn pending_then_ready() {
+		let mut producer = Group { sequence: 0 }.produce();
+		let mut consumer = producer.consume();
+
+		// Consumer blocks because no frames yet.
+		assert!(consumer.next_frame().now_or_never().is_none());
+
+		producer.write_frame(Bytes::from_static(b"data")).unwrap();
+		producer.finish().unwrap();
+
+		let frame = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.info.size, 4);
+	}
+
+	#[test]
+	fn clone_consumer_independent() {
+		let mut producer = Group { sequence: 0 }.produce();
+		producer.write_frame(Bytes::from_static(b"a")).unwrap();
+
+		let mut c1 = producer.consume();
+		// Read one frame from c1
+		let _ = c1.next_frame().now_or_never().unwrap().unwrap().unwrap();
+
+		// Clone c1 — inherits index (past first frame)
+		let mut c2 = c1.clone();
+
+		producer.write_frame(Bytes::from_static(b"b")).unwrap();
+		producer.finish().unwrap();
+
+		// c2 should get the second frame (inherited index)
+		let f = c2.next_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(f.info.size, 1); // "b"
+
+		let end = c2.next_frame().now_or_never().unwrap().unwrap();
+		assert!(end.is_none());
 	}
 }

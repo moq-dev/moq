@@ -117,6 +117,7 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
 /// The callback is called on success (status 0) and later when closed (status non-zero).
+/// The `on_status` callback will NOT be called after [moq_session_close].
 ///
 /// # Safety
 /// - The caller must ensure that url is a valid pointer to url_len bytes of data.
@@ -148,11 +149,11 @@ pub unsafe extern "C" fn moq_session_connect(
 	})
 }
 
-/// Close a connection to a MoQ server.
+/// Close a connection to a MoQ server and cancel its background task.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
-/// The [moq_session_connect] `on_status` callback will be called with [Error::Closed].
+/// The [moq_session_connect] `on_status` callback will NOT be called.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_session_close(session: u32) -> i32 {
 	ffi::enter(move || {
@@ -380,7 +381,11 @@ pub unsafe extern "C" fn moq_consume_catalog(
 	})
 }
 
-/// Close a catalog consumer and clean up its resources.
+/// Close a catalog consumer and cancel its background task.
+///
+/// This only stops the background subscription; catalog snapshots previously
+/// delivered via the [moq_consume_catalog] callback remain valid until freed
+/// with [moq_consume_catalog_free].
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -388,6 +393,20 @@ pub extern "C" fn moq_consume_catalog_close(catalog: u32) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		State::lock().consume.catalog_close(catalog)
+	})
+}
+
+/// Free a catalog snapshot received via the [moq_consume_catalog] callback.
+///
+/// This releases the snapshot and invalidates any borrowed references (e.g. pointers
+/// returned by [moq_consume_video_config] or [moq_consume_audio_config]).
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_catalog_free(catalog: u32) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		State::lock().consume.catalog_free(catalog)
 	})
 }
 
@@ -399,7 +418,7 @@ pub extern "C" fn moq_consume_catalog_close(catalog: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_video_config] struct.
-/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst: *mut moq_video_config) -> i32 {
 	ffi::enter(move || {
@@ -418,7 +437,7 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_audio_config] struct.
-/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst: *mut moq_audio_config) -> i32 {
 	ffi::enter(move || {
@@ -440,20 +459,20 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 /// - The caller must ensure that `on_frame` is valid until the track is closed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video_ordered(
-	broadcast: u32,
+	catalog: u32,
 	index: u32,
 	max_latency_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
-		let broadcast = ffi::parse_id(broadcast)?;
+		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock()
 			.consume
-			.video_ordered(broadcast, index, max_latency, on_frame)
+			.video_ordered(catalog, index, max_latency, on_frame)
 	})
 }
 
@@ -464,7 +483,7 @@ pub unsafe extern "C" fn moq_consume_video_ordered(
 pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().consume.video_close(track)
+		State::lock().consume.track_close(track)
 	})
 }
 
@@ -479,20 +498,20 @@ pub extern "C" fn moq_consume_video_close(track: u32) -> i32 {
 /// - The caller must ensure that `on_frame` is valid until [moq_consume_audio_close] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio_ordered(
-	broadcast: u32,
+	catalog: u32,
 	index: u32,
 	max_latency_ms: u64,
 	on_frame: Option<extern "C" fn(user_data: *mut c_void, frame: i32)>,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
-		let broadcast = ffi::parse_id(broadcast)?;
+		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
 		let max_latency = std::time::Duration::from_millis(max_latency_ms);
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame) };
 		State::lock()
 			.consume
-			.audio_ordered(broadcast, index, max_latency, on_frame)
+			.audio_ordered(catalog, index, max_latency, on_frame)
 	})
 }
 
@@ -503,7 +522,7 @@ pub unsafe extern "C" fn moq_consume_audio_ordered(
 pub extern "C" fn moq_consume_audio_close(track: u32) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().consume.audio_close(track)
+		State::lock().consume.track_close(track)
 	})
 }
 

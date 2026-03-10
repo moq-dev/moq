@@ -2,7 +2,7 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { Parameters } from "./parameters.ts";
+import { MessageParameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // In draft-14, ANNOUNCE is renamed to PUBLISH_NAMESPACE
@@ -17,10 +17,13 @@ export class PublishNamespace {
 		this.trackNamespace = trackNamespace;
 	}
 
-	async #encode(w: Writer, _version: IetfVersion): Promise<void> {
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
+		if (version === Version.DRAFT_17) {
+			await w.u62(0n); // required_request_id_delta: only 0 supported until stream-per-request
+		}
 		await Namespace.encode(w, this.trackNamespace);
-		await w.u53(0); // size of parameters
+		await w.u53(0); // number of parameters
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -33,8 +36,11 @@ export class PublishNamespace {
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespace> {
 		const requestId = await r.u62();
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // required_request_id_delta
+		}
 		const trackNamespace = await Namespace.decode(r);
-		await Parameters.decode(r, version); // ignore parameters
+		await MessageParameters.decode(r, version); // ignore parameters
 		return new PublishNamespace({ requestId, trackNamespace });
 	}
 }
@@ -105,6 +111,7 @@ export class PublishNamespaceError {
 	}
 }
 
+// Removed in d17
 export class PublishNamespaceCancel {
 	static id = 0x0c;
 
@@ -131,6 +138,9 @@ export class PublishNamespaceCancel {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (version === Version.DRAFT_17) {
+			throw new Error("PublishNamespaceCancel removed in draft-17");
+		}
 		if (version === Version.DRAFT_16) {
 			await w.u62(this.requestId);
 		} else {
@@ -149,6 +159,9 @@ export class PublishNamespaceCancel {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceCancel> {
+		if (version === Version.DRAFT_17) {
+			throw new Error("PublishNamespaceCancel removed in draft-17");
+		}
 		let trackNamespace = "" as Path.Valid;
 		let requestId = 0n;
 		if (version === Version.DRAFT_16) {
@@ -164,6 +177,7 @@ export class PublishNamespaceCancel {
 
 // In draft-14, UNANNOUNCE is renamed to PUBLISH_NAMESPACE_DONE
 // In draft-16, uses request_id instead of track_namespace
+// Removed in d17
 export class PublishNamespaceDone {
 	static readonly id = 0x09;
 
@@ -182,6 +196,9 @@ export class PublishNamespaceDone {
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (version === Version.DRAFT_17) {
+			throw new Error("PublishNamespaceDone removed in draft-17");
+		}
 		if (version === Version.DRAFT_16) {
 			await w.u62(this.requestId);
 		} else {
@@ -198,6 +215,9 @@ export class PublishNamespaceDone {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceDone> {
+		if (version === Version.DRAFT_17) {
+			throw new Error("PublishNamespaceDone removed in draft-17");
+		}
 		if (version === Version.DRAFT_16) {
 			const requestId = await r.u62();
 			return new PublishNamespaceDone({ requestId });

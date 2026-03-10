@@ -298,6 +298,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
+		// Start the consumer at the specified sequence, otherwise start at the latest group.
+		if let Some(start_group) = subscribe.start_group.or_else(|| track.latest()) {
+			track.start_at(start_group);
+		}
+
 		loop {
 			let group = tokio::select! {
 				// Poll all active group futures; never matches but keeps them running.

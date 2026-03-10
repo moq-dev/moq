@@ -4,7 +4,7 @@ import type { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Stream, Writer } from "../stream.ts";
 import type { Track } from "../track.ts";
-import { error, unreachable } from "../util/error.ts";
+import { error } from "../util/error.ts";
 import type * as Control from "./control.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
@@ -98,14 +98,7 @@ export class Publisher {
 		const broadcast = this.#broadcasts.get(name);
 
 		if (!broadcast) {
-			if (this.#control.version === Version.DRAFT_15 || this.#control.version === Version.DRAFT_16) {
-				const errorMsg = new RequestError({
-					requestId: msg.requestId,
-					errorCode: 404,
-					reasonPhrase: "Broadcast not found",
-				});
-				await this.#control.write(errorMsg);
-			} else if (this.#control.version === Version.DRAFT_14) {
+			if (this.#control.version === Version.DRAFT_14) {
 				const errorMsg = new SubscribeError({
 					requestId: msg.requestId,
 					errorCode: 404,
@@ -113,7 +106,13 @@ export class Publisher {
 				});
 				await this.#control.write(errorMsg);
 			} else {
-				unreachable(this.#control.version);
+				// v15+: use RequestError (d17: no requestId on response)
+				const errorMsg = new RequestError({
+					requestId: this.#control.version === Version.DRAFT_17 ? undefined : msg.requestId,
+					errorCode: 404,
+					reasonPhrase: "Broadcast not found",
+				});
+				await this.#control.write(errorMsg);
 			}
 
 			return;
@@ -122,7 +121,10 @@ export class Publisher {
 		const track = broadcast.subscribe(msg.trackName, msg.subscriberPriority);
 
 		// Send SUBSCRIBE_OK response on control stream
-		const okMsg = new SubscribeOk({ requestId: msg.requestId, trackAlias: msg.requestId });
+		const okMsg = new SubscribeOk({
+			requestId: this.#control.version === Version.DRAFT_17 ? undefined : msg.requestId,
+			trackAlias: msg.requestId,
+		});
 		await this.#control.write(okMsg);
 		console.debug(`publish ok: broadcast=${name} track=${track.name}`);
 

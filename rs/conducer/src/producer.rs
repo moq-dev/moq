@@ -68,18 +68,16 @@ impl<T> Producer<T> {
 	/// Poll-based mutable access with waker registration.
 	///
 	/// Calls `f` with a [`Mut`] guard. If `f` returns [`Poll::Pending`],
-	/// registers the waiter for notification when the state next changes.
-	/// Returns `None` if the channel is closed.
-	pub fn poll_write<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Option<R>>
+	/// registers the [`Waiter`] for notification when the state next changes.
+	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
+	pub fn poll<F, R>(&self, waiter: &Waiter, mut f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnMut(&mut Mut<'_, T>) -> Poll<R>,
 	{
-		let Ok(mut state) = self.write() else {
-			return Poll::Ready(None);
-		};
+		let mut state = self.write()?;
 
 		if let Poll::Ready(res) = f(&mut state) {
-			return Poll::Ready(Some(res));
+			return Poll::Ready(Ok(res));
 		}
 
 		let inner = state.state.as_mut().unwrap();
@@ -116,10 +114,7 @@ impl<T> Producer<T> {
 		F: FnMut(&mut Mut<'_, T>) -> Poll<R> + Unpin,
 		R: Unpin,
 	{
-		match crate::wait(move |waiter| self.poll_write(waiter, &mut f)).await {
-			Some(r) => Ok(r),
-			None => Err(self.read()),
-		}
+		crate::wait(move |waiter| self.poll(waiter, &mut f)).await
 	}
 
 	/// Wait until the channel is closed.

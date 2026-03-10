@@ -15,7 +15,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [dependencies]
 buf-list = "1"
 bytes = "1"
-futures = "0.3"
+conducer = { workspace = true }
 hex = "0.4"
 lazy_static = "1"
 moq-lite = { workspace = true, features = ["serde"] }

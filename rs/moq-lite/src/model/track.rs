@@ -18,7 +18,7 @@ use super::{Group, GroupConsumer, GroupProducer};
 
 use std::{
 	collections::{HashSet, VecDeque},
-	task::Poll,
+	task::{Poll, ready},
 	time::Duration,
 };
 
@@ -62,26 +62,31 @@ impl State {
 	/// Find the next non-tombstoned group at or after `index`.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
-	fn poll_next_group(&self, index: usize) -> Poll<Option<(GroupProducer, usize)>> {
+	fn poll_next_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
-			if let Some((group, _)) = slot {
-				return Poll::Ready(Some((group.clone(), self.offset + i)));
+			if let Some((group, _)) = slot
+				&& group.info.sequence >= min_sequence
+			{
+				return Poll::Ready(Ok(Some((group.consume(), self.offset + i))));
 			}
 		}
 
+		// TODO once we have drop notifications, check if index == final_sequence.
 		if self.final_sequence.is_some() {
-			Poll::Ready(None)
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
 		}
 	}
 
-	fn poll_get_group(&self, sequence: u64) -> Poll<Option<GroupProducer>> {
+	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
 		// Search for the group with the matching sequence, skipping tombstones.
 		for (group, _) in self.groups.iter().flatten() {
 			if group.info.sequence == sequence {
-				return Poll::Ready(Some(group.clone()));
+				return Poll::Ready(Ok(Some(group.consume())));
 			}
 		}
 
@@ -89,14 +94,24 @@ impl State {
 		if let Some(fin) = self.final_sequence
 			&& sequence >= fin
 		{
-			return Poll::Ready(None);
+			return Poll::Ready(Ok(None));
 		}
 
-		if self.final_sequence.is_some() {
-			return Poll::Ready(None);
+		if let Some(err) = &self.abort {
+			return Poll::Ready(Err(err.clone()));
 		}
 
 		Poll::Pending
+	}
+
+	fn poll_closed(&self) -> Poll<Result<()>> {
+		if self.final_sequence.is_some() {
+			Poll::Ready(Ok(()))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
 	}
 
 	/// Evict groups older than MAX_GROUP_AGE, never evicting the max_sequence group.
@@ -127,10 +142,16 @@ impl State {
 			self.offset += 1;
 		}
 	}
-}
 
-fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>> {
-	state.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	fn poll_finished(&self) -> Poll<Result<u64>> {
+		if let Some(fin) = self.final_sequence {
+			Poll::Ready(Ok(fin))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
 }
 
 /// A producer for a track, used to create new groups.
@@ -151,7 +172,7 @@ impl TrackProducer {
 	pub fn create_group(&mut self, info: Group) -> Result<GroupProducer> {
 		let group = info.produce();
 
-		let mut state = modify(&self.state)?;
+		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence
 			&& group.info.sequence >= fin
 		{
@@ -172,7 +193,7 @@ impl TrackProducer {
 
 	/// Create a new group with the next sequence number.
 	pub fn append_group(&mut self) -> Result<GroupProducer> {
-		let mut state = modify(&self.state)?;
+		let mut state = self.modify()?;
 		let sequence = match state.max_sequence {
 			Some(s) => s.checked_add(1).ok_or(Error::BoundsExceeded)?,
 			None => 0,
@@ -208,7 +229,7 @@ impl TrackProducer {
 	/// No new groups at or above this sequence can be appended.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish(&mut self) -> Result<()> {
-		let mut state = modify(&self.state)?;
+		let mut state = self.modify()?;
 		if state.final_sequence.is_some() {
 			return Err(Error::Closed);
 		}
@@ -235,7 +256,7 @@ impl TrackProducer {
 	/// No new groups at or above that sequence can be created.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish_at(&mut self, sequence: u64) -> Result<()> {
-		let mut state = modify(&self.state)?;
+		let mut state = self.modify()?;
 		let max = state.max_sequence.ok_or(Error::Closed)?;
 		if state.final_sequence.is_some() || sequence != max {
 			return Err(Error::Closed);
@@ -246,7 +267,7 @@ impl TrackProducer {
 
 	/// Abort the track with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
-		let mut guard = modify(&self.state)?;
+		let mut guard = self.modify()?;
 
 		// Abort all groups still in progress.
 		for (group, _) in guard.groups.iter_mut().flatten() {
@@ -259,15 +280,13 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Create a new consumer for the track, starting at the latest group.
+	/// Create a new consumer for the track, starting at the beginning.
 	pub fn consume(&self) -> TrackConsumer {
-		let state = self.state.read();
-		let index = state.offset + state.groups.len().saturating_sub(1);
-
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			index,
+			index: 0,
+			min_sequence: 0,
 		}
 	}
 
@@ -295,6 +314,12 @@ impl TrackProducer {
 			info: self.info.clone(),
 			state: self.state.weak(),
 		}
+	}
+
+	fn modify(&self) -> Result<conducer::Mut<'_, State>> {
+		self.state
+			.write()
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 }
 
@@ -338,13 +363,11 @@ impl TrackWeak {
 	}
 
 	pub fn consume(&self) -> TrackConsumer {
-		let state = self.state.read();
-		let index = state.offset + state.groups.len().saturating_sub(1);
-
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			index,
+			index: 0,
+			min_sequence: 0,
 		}
 	}
 
@@ -366,50 +389,93 @@ pub struct TrackConsumer {
 	pub info: Track,
 	state: conducer::Consumer<State>,
 	index: usize,
+
+	min_sequence: u64,
 }
 
 impl TrackConsumer {
+	// A helper to automatically apply Dropped if the state is closed without an error.
+	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R>>
+	where
+		F: Fn(&conducer::Ref<'_, State>) -> Poll<Result<R>>,
+	{
+		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
+			Ok(res) => res,
+			// We try to clone abort just in case the function forgot to check for terminal state.
+			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		})
+	}
+
+	/// Poll for the next group without blocking.
+	///
+	/// Returns `Poll::Ready(Some(Ok(group)))` when a group is available,
+	/// `Poll::Ready(None)` when the track is finished,
+	/// `Poll::Ready(Some(Err(e)))` when the track has been aborted, or
+	/// `Poll::Pending` when no group is available yet.
+	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+		let Some((consumer, found_index)) =
+			ready!(self.poll(waiter, |state| state.poll_next_group(self.index, self.min_sequence))?)
+		else {
+			return Poll::Ready(Ok(None));
+		};
+
+		self.index = found_index + 1;
+		Poll::Ready(Ok(Some(consumer)))
+	}
+
 	/// Return the next group in order.
 	///
 	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
-		let index = self.index;
-		let res = self
-			.state
-			.wait(|state| state.poll_next_group(index))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-		let consumer = res.map(|(producer, found_index)| {
-			self.index = found_index + 1;
-			producer.consume()
-		});
-		Ok(consumer)
+		conducer::wait(|waiter| self.poll_next_group(waiter)).await
+	}
+
+	/// Poll for the group with the given sequence, without blocking.
+	pub fn poll_get_group(&self, waiter: &conducer::Waiter, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
+		self.poll(waiter, |state| state.poll_get_group(sequence))
 	}
 
 	/// Block until the group with the given sequence is available.
 	///
 	/// Returns None if the group is not in the cache and a newer group exists.
 	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
-		let res = self
-			.state
-			.wait(|state| state.poll_get_group(sequence))
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
-		Ok(res.map(|producer| producer.consume()))
+		conducer::wait(|waiter| self.poll_get_group(waiter, sequence)).await
+	}
+
+	/// Poll for track closure, without blocking.
+	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<Result<()>> {
+		self.poll(waiter, |state| state.poll_closed())
 	}
 
 	/// Block until the track is closed.
+	///
+	/// Returns Ok() is the track was cleanly finished.
 	pub async fn closed(&self) -> Result<()> {
-		self.state.closed().await;
-		match self.state.read().abort.clone() {
-			// Error::Closed represents a normal producer-initiated shutdown, not an error.
-			None | Some(Error::Closed) => Ok(()),
-			Some(err) => Err(err),
-		}
+		conducer::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+
+	/// Poll for the total number of groups in the track.
+	pub fn poll_finished(&mut self, waiter: &conducer::Waiter) -> Poll<Result<u64>> {
+		self.poll(waiter, |state| state.poll_finished())
+	}
+
+	/// Block until the track is finished, returning the total number of groups.
+	pub async fn finished(&mut self) -> Result<u64> {
+		conducer::wait(|waiter| self.poll_finished(waiter)).await
+	}
+
+	/// Start the consumer at the specified sequence.
+	pub fn start_at(&mut self, sequence: u64) {
+		self.min_sequence = sequence;
+	}
+
+	/// Return the latest sequence number in the track.
+	pub fn latest(&self) -> Option<u64> {
+		self.state.read().max_sequence
 	}
 }
 
@@ -643,8 +709,8 @@ mod test {
 		// Consumer should still be able to read through the hole.
 		let mut consumer = producer.consume();
 		let group = consumer.assert_group();
-		// consume() starts at the last slot (seq 2).
-		assert_eq!(group.info.sequence, 2);
+		// consume() starts at index 0, first non-tombstoned group is seq 5.
+		assert_eq!(group.info.sequence, 5);
 	}
 
 	#[test]
@@ -710,14 +776,10 @@ mod test {
 		producer.finish_at(1).unwrap();
 
 		let consumer = producer.consume();
+		// get_group(0) blocks because group 0 is below final_sequence and could still arrive.
 		assert!(
-			consumer
-				.get_group(0)
-				.now_or_never()
-				.expect("should not block")
-				.expect("would have errored")
-				.is_none(),
-			"sequence below fin should not block forever"
+			consumer.get_group(0).now_or_never().is_none(),
+			"sequence below fin should block (group could still arrive)"
 		);
 		assert!(
 			consumer

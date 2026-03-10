@@ -43,6 +43,10 @@ pub enum Error {
 	#[error("url parse error: {0}")]
 	Url(#[from] url::ParseError),
 
+	/// A group contained zero frames.
+	#[error("empty group")]
+	EmptyGroup,
+
 	/// The format is not recognized.
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),

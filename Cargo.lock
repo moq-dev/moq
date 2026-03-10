@@ -735,7 +735,7 @@ checksum = "75984efb6ed102a0d42db99afb6c1948f0380d1d91808d5529916e6c08b49d8d"
 
 [[package]]
 name = "conducer"
-version = "0.2.1"
+version = "0.3.0"
 
 [[package]]
 name = "console-api"
@@ -1931,8 +1931,8 @@ dependencies = [
  "anyhow",
  "buf-list",
  "bytes",
+ "conducer",
  "derive_more",
- "futures",
  "hex",
  "lazy_static",
  "moq-lite",
