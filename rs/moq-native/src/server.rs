@@ -279,7 +279,7 @@ impl Server {
 				}
 			};
 			#[cfg(not(feature = "websocket"))]
-			let ws_accept = std::future::pending::<Option<anyhow::Result<web_transport_ws::Session>>>();
+			let ws_accept = std::future::pending::<Option<anyhow::Result<()>>>();
 
 			let server = self.moq.clone();
 			let versions = self.versions.clone();
@@ -383,6 +383,10 @@ impl Server {
 		#[cfg(feature = "iroh")]
 		if let Some(iroh) = self.iroh.take() {
 			iroh.close().await;
+		}
+		#[cfg(feature = "websocket")]
+		{
+			let _ = self.websocket.take();
 		}
 		#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
 		unreachable!("no QUIC backend compiled");

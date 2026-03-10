@@ -131,7 +131,7 @@ pub(crate) async fn connect(
 
 /// Listens for incoming WebSocket connections on a TCP port.
 ///
-/// Use with [`Server::with_websocket`] to accept WebSocket connections
+/// Use with [`crate::Server::with_websocket`] to accept WebSocket connections
 /// alongside QUIC connections on a separate port.
 pub struct WebSocketListener {
 	listener: tokio::net::TcpListener,

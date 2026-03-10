@@ -109,7 +109,10 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// Tear down: dropping the session closes the QUIC connection.
 	drop(session);
-	let _ = server_handle.await;
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
 }
 
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────
@@ -445,7 +448,10 @@ async fn broadcast_websocket() {
 	assert_eq!(&*frame, b"hello");
 
 	drop(session);
-	let _ = server_handle.await;
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
 }
 
 /// Test WebSocket fallback when QUIC is unavailable.
@@ -547,5 +553,8 @@ async fn broadcast_websocket_fallback() {
 	assert_eq!(&*frame, b"hello");
 
 	drop(session);
-	let _ = server_handle.await;
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
 }
