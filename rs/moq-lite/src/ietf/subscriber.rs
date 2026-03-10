@@ -110,7 +110,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match self.start_announce(path.clone()) {
 			Ok(_) => {
-				self.write_ok(&mut stream, request_id).await?;
+				if let Err(err) = self.write_ok(&mut stream, request_id).await {
+					let _ = self.stop_announce(path);
+					return Err(err);
+				}
 			}
 			Err(err) => {
 				self.write_error(&mut stream, request_id, 400, &err.to_string()).await?;
@@ -141,12 +144,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(());
 		}
 
-		self.write_publish_ok(&mut stream, &msg).await?;
+		let res = self.write_publish_ok(&mut stream, &msg).await;
 
-		// Wait for PublishDone or stream close
-		let _ = stream.reader.closed().await;
+		if res.is_ok() {
+			// Wait for PublishDone or stream close
+			let _ = stream.reader.closed().await;
+		}
 
-		// Clean up
+		// Clean up (always runs after start_publish succeeds)
 		let mut state = self.state.lock();
 		if let Some(mut track) = state.subscribes.remove(&request_id) {
 			let _ = track.producer.finish();
@@ -156,10 +161,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 		if let Some(path) = state.publishes.remove(&request_id) {
 			drop(state);
-			self.stop_announce(path)?;
+			let _ = self.stop_announce(path);
 		}
 
-		Ok(())
+		res
 	}
 
 	/// Send OK on the bidi stream.
@@ -391,7 +396,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			Entry::Occupied(_) => return Err(Error::Duplicate),
 		};
 
-		state.aliases.insert(msg.track_alias, request_id);
+		match state.aliases.entry(msg.track_alias) {
+			Entry::Vacant(entry) => {
+				entry.insert(request_id);
+			}
+			Entry::Occupied(_) => {
+				state.subscribes.remove(&request_id);
+				return Err(Error::Duplicate);
+			}
+		}
 		state.publishes.insert(request_id, msg.track_namespace.to_owned());
 		drop(state);
 
