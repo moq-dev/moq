@@ -6546,10 +6546,9 @@ dependencies = [
 [[package]]
 name = "web-transport-iroh"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11bbd05b9a024cd4b9f906c263cd6e943b175d30877da8145bfe90ea5a573ce8"
 dependencies = [
  "bytes",
+ "derive_more",
  "http",
  "iroh",
  "n0-error",
@@ -6564,8 +6563,6 @@ dependencies = [
 [[package]]
 name = "web-transport-proto"
 version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5afe275c02f899650c5497b946552fcc04f3f378bd2c3bc1e8005ff915772b97"
 dependencies = [
  "bytes",
  "http",
@@ -6599,8 +6596,6 @@ dependencies = [
 [[package]]
 name = "web-transport-quinn"
 version = "0.11.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d356bedff779480f8d88d94bf50a2eb8dedabb84414442f73c16dfee9db55b8"
 dependencies = [
  "bytes",
  "futures",
@@ -6619,8 +6614,6 @@ dependencies = [
 [[package]]
 name = "web-transport-trait"
 version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "802d6aa508f2c63c9050ceabc17265bbf90ed4d6f4e4357e987583883628e79c"
 dependencies = [
  "bytes",
 ]
@@ -6628,8 +6621,6 @@ dependencies = [
 [[package]]
 name = "web-transport-ws"
 version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7b1cd89c36a28eae759329839e85f7dbca733896f048a6daaf5f8fc80f3bcba"
 dependencies = [
  "bytes",
  "futures",

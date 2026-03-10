@@ -27,12 +27,16 @@ moq-token = { version = "0.5", path = "rs/moq-token" }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
 web-async = { version = "0.1.3", features = ["tracing"] }
-web-transport-iroh = "0.2"
-web-transport-proto = "0.5"
+web-transport-iroh = { path = "../web-transport-iroh" }
+web-transport-proto = { path = "../web-transport/web-transport-proto" }
 web-transport-quiche = "0.2"
-web-transport-quinn = "0.11"
-web-transport-trait = "0.3.2"
-web-transport-ws = "0.2.2"
+web-transport-quinn = { path = "../web-transport/web-transport-quinn" }
+web-transport-trait = { path = "../web-transport/web-transport-trait" }
+web-transport-ws = { path = "../web-transport/web-transport-ws" }
+
+[patch.crates-io]
+web-transport-proto = { path = "../web-transport/web-transport-proto" }
+web-transport-trait = { path = "../web-transport/web-transport-trait" }
 
 [profile.dev]
 panic = "abort"
