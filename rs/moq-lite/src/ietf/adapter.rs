@@ -3,7 +3,7 @@ use std::{
 	sync::{Arc, Mutex},
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -18,7 +18,7 @@ use super::{Control, Message, Version};
 
 /// A virtual receive stream backed by an initial message buffer and a channel for follow-up messages.
 pub struct VirtualRecvStream {
-	buffer: BytesMut,
+	buffer: Bytes,
 	rx: mpsc::UnboundedReceiver<Bytes>,
 	closed: bool,
 }
@@ -26,41 +26,69 @@ pub struct VirtualRecvStream {
 impl VirtualRecvStream {
 	fn new(initial: Bytes, rx: mpsc::UnboundedReceiver<Bytes>) -> Self {
 		Self {
-			buffer: BytesMut::from(initial.as_ref()),
+			buffer: initial,
 			rx,
 			closed: false,
+		}
+	}
+
+	/// Fill the buffer from the channel if empty. Returns false if the stream is closed.
+	async fn fill(&mut self) -> bool {
+		if !self.buffer.is_empty() {
+			return true;
+		}
+
+		if self.closed {
+			return false;
+		}
+
+		match self.rx.recv().await {
+			Some(data) => {
+				self.buffer = data;
+				true
+			}
+			None => {
+				self.closed = true;
+				false
+			}
 		}
 	}
 }
 
 impl web_transport_trait::RecvStream for VirtualRecvStream {
-	type Error = AdapterError;
+	type Error = crate::Error;
 
 	async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-		loop {
-			// Drain buffer first
-			if !self.buffer.is_empty() {
-				let n = dst.len().min(self.buffer.len());
-				dst[..n].copy_from_slice(&self.buffer[..n]);
-				self.buffer = self.buffer.split_off(n);
-				return Ok(Some(n));
-			}
-
-			if self.closed {
-				return Ok(None);
-			}
-
-			// Wait for more data from channel
-			match self.rx.recv().await {
-				Some(data) => {
-					self.buffer = BytesMut::from(data.as_ref());
-				}
-				None => {
-					self.closed = true;
-					return Ok(None);
-				}
-			}
+		if !self.fill().await {
+			return Ok(None);
 		}
+
+		let n = dst.len().min(self.buffer.len());
+		dst[..n].copy_from_slice(&self.buffer[..n]);
+		self.buffer.advance(n);
+		Ok(Some(n))
+	}
+
+	async fn read_buf<B: BufMut + web_transport_trait::MaybeSend>(
+		&mut self,
+		buf: &mut B,
+	) -> Result<Option<usize>, Self::Error> {
+		if !self.fill().await {
+			return Ok(None);
+		}
+
+		let n = buf.remaining_mut().min(self.buffer.len());
+		buf.put(self.buffer.split_to(n));
+		Ok(Some(n))
+	}
+
+	async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Self::Error> {
+		if !self.fill().await {
+			return Ok(None);
+		}
+
+		let n = max.min(self.buffer.len());
+		Ok(Some(self.buffer.split_to(n)))
 	}
 
 	fn stop(&mut self, _code: u32) {
@@ -85,7 +113,7 @@ impl web_transport_trait::RecvStream for VirtualRecvStream {
 /// the first outgoing message to extract the request_id and register the
 /// stream for response routing.
 pub struct VirtualSendStream {
-	control_tx: mpsc::UnboundedSender<Vec<u8>>,
+	control_tx: mpsc::UnboundedSender<Bytes>,
 	/// Present only for outgoing requests (from open_bi).
 	/// Accumulates bytes until the request_id can be parsed,
 	/// then registers the stream and flushes.
@@ -96,22 +124,36 @@ struct OutgoingRegistration {
 	follow_tx: mpsc::UnboundedSender<Bytes>,
 	shared: Arc<Shared>,
 	version: Version,
-	buf: Vec<u8>,
+	buf: BytesMut,
 }
 
 impl OutgoingRegistration {
 	/// Try to parse the request_id (and optionally namespace) from the accumulated bytes.
-	fn try_parse(&self) -> Option<RequestId> {
+	/// Returns Ok(None) if not enough data yet, Err if the message is malformed.
+	fn try_parse(&self) -> Result<Option<RequestId>, crate::Error> {
 		let mut cursor = std::io::Cursor::new(&self.buf);
-		let type_id = u64::decode(&mut cursor, self.version).ok()?;
-		let _size = u16::decode(&mut cursor, self.version).ok()?;
-		let request_id = RequestId::decode(&mut cursor, self.version).ok()?;
+		let Ok(type_id) = u64::decode(&mut cursor, self.version) else {
+			return Ok(None);
+		};
+		let Ok(size) = u16::decode(&mut cursor, self.version) else {
+			return Ok(None);
+		};
+
+		// We know the full message size now: header bytes + body.
+		let header_len = cursor.position() as usize;
+		let message_len = header_len + size as usize;
+		if self.buf.len() < message_len {
+			return Ok(None);
+		}
+
+		// We have enough bytes for the full message; decoding must succeed.
+		let request_id = RequestId::decode(&mut cursor, self.version).map_err(|_| crate::Error::Decode)?;
 
 		// For PublishNamespace, also extract the namespace for reverse lookup.
 		if type_id == ietf::PublishNamespace::ID {
 			if self.version == Version::Draft17 {
 				// v17 has required_request_id_delta after request_id
-				let _ = u64::decode(&mut cursor, self.version).ok()?;
+				let _ = u64::decode(&mut cursor, self.version);
 			}
 			if let Ok(ns) = crate::ietf::namespace::decode_namespace(&mut cursor, self.version) {
 				self.shared
@@ -122,7 +164,7 @@ impl OutgoingRegistration {
 			}
 		}
 
-		Some(request_id)
+		Ok(Some(request_id))
 	}
 
 	fn register(self, request_id: RequestId) {
@@ -131,14 +173,14 @@ impl OutgoingRegistration {
 }
 
 impl VirtualSendStream {
-	fn new(control_tx: mpsc::UnboundedSender<Vec<u8>>) -> Self {
+	fn new(control_tx: mpsc::UnboundedSender<Bytes>) -> Self {
 		Self {
 			control_tx,
 			pending: None,
 		}
 	}
 
-	fn with_registration(control_tx: mpsc::UnboundedSender<Vec<u8>>, pending: OutgoingRegistration) -> Self {
+	fn with_registration(control_tx: mpsc::UnboundedSender<Bytes>, pending: OutgoingRegistration) -> Self {
 		Self {
 			control_tx,
 			pending: Some(pending),
@@ -147,7 +189,7 @@ impl VirtualSendStream {
 }
 
 impl web_transport_trait::SendStream for VirtualSendStream {
-	type Error = AdapterError;
+	type Error = crate::Error;
 
 	async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
 		let len = buf.len();
@@ -155,14 +197,16 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 		if let Some(pending) = &mut self.pending {
 			pending.buf.extend_from_slice(buf);
 
-			if let Some(request_id) = pending.try_parse() {
-				let pending = self.pending.take().unwrap();
-				let buf = pending.buf.clone();
+			if let Some(request_id) = pending.try_parse()? {
+				let mut pending = self.pending.take().unwrap();
+				let buf = std::mem::take(&mut pending.buf).freeze();
 				pending.register(request_id);
-				self.control_tx.send(buf).map_err(|_| AdapterError::Closed)?;
+				self.control_tx.send(buf).map_err(|_| crate::Error::Closed)?;
 			}
 		} else {
-			self.control_tx.send(buf.to_vec()).map_err(|_| AdapterError::Closed)?;
+			self.control_tx
+				.send(Bytes::copy_from_slice(buf))
+				.map_err(|_| crate::Error::Closed)?;
 		}
 
 		Ok(len)
@@ -175,7 +219,7 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 		if let Some(pending) = self.pending.take()
 			&& !pending.buf.is_empty()
 		{
-			let _ = self.control_tx.send(pending.buf);
+			let _ = self.control_tx.send(pending.buf.freeze());
 		}
 		Ok(())
 	}
@@ -187,29 +231,6 @@ impl web_transport_trait::SendStream for VirtualSendStream {
 	}
 }
 
-// === Adapter Error ===
-
-#[derive(Debug, Clone)]
-pub enum AdapterError {
-	Closed,
-}
-
-impl std::fmt::Display for AdapterError {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			AdapterError::Closed => write!(f, "adapter closed"),
-		}
-	}
-}
-
-impl std::error::Error for AdapterError {}
-
-impl web_transport_trait::Error for AdapterError {
-	fn session_error(&self) -> Option<(u32, String)> {
-		None
-	}
-}
-
 // === Adapter Send/Recv Enums ===
 
 pub enum AdapterSend<S: web_transport_trait::Session> {
@@ -218,11 +239,11 @@ pub enum AdapterSend<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> web_transport_trait::SendStream for AdapterSend<S> {
-	type Error = AdapterError;
+	type Error = crate::Error;
 
 	async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
 		match self {
-			Self::Real(s) => s.write(buf).await.map_err(|_| AdapterError::Closed),
+			Self::Real(s) => s.write(buf).await.map_err(|_| crate::Error::Closed),
 			Self::Virtual(s) => s.write(buf).await,
 		}
 	}
@@ -236,7 +257,7 @@ impl<S: web_transport_trait::Session> web_transport_trait::SendStream for Adapte
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		match self {
-			Self::Real(s) => s.finish().map_err(|_| AdapterError::Closed),
+			Self::Real(s) => s.finish().map_err(|_| crate::Error::Closed),
 			Self::Virtual(s) => s.finish(),
 		}
 	}
@@ -250,7 +271,7 @@ impl<S: web_transport_trait::Session> web_transport_trait::SendStream for Adapte
 
 	async fn closed(&mut self) -> Result<(), Self::Error> {
 		match self {
-			Self::Real(s) => s.closed().await.map_err(|_| AdapterError::Closed),
+			Self::Real(s) => s.closed().await.map_err(|_| crate::Error::Closed),
 			Self::Virtual(s) => s.closed().await,
 		}
 	}
@@ -262,12 +283,29 @@ pub enum AdapterRecv<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> web_transport_trait::RecvStream for AdapterRecv<S> {
-	type Error = AdapterError;
+	type Error = crate::Error;
 
 	async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
 		match self {
-			Self::Real(s) => s.read(dst).await.map_err(|_| AdapterError::Closed),
+			Self::Real(s) => s.read(dst).await.map_err(|_| crate::Error::Closed),
 			Self::Virtual(s) => s.read(dst).await,
+		}
+	}
+
+	async fn read_buf<B: BufMut + web_transport_trait::MaybeSend>(
+		&mut self,
+		buf: &mut B,
+	) -> Result<Option<usize>, Self::Error> {
+		match self {
+			Self::Real(s) => s.read_buf(buf).await.map_err(|_| crate::Error::Closed),
+			Self::Virtual(s) => s.read_buf(buf).await,
+		}
+	}
+
+	async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Self::Error> {
+		match self {
+			Self::Real(s) => s.read_chunk(max).await.map_err(|_| crate::Error::Closed),
+			Self::Virtual(s) => s.read_chunk(max).await,
 		}
 	}
 
@@ -280,7 +318,7 @@ impl<S: web_transport_trait::Session> web_transport_trait::RecvStream for Adapte
 
 	async fn closed(&mut self) -> Result<(), Self::Error> {
 		match self {
-			Self::Real(s) => s.closed().await.map_err(|_| AdapterError::Closed),
+			Self::Real(s) => s.closed().await.map_err(|_| crate::Error::Closed),
 			Self::Virtual(s) => s.closed().await,
 		}
 	}
@@ -293,7 +331,7 @@ struct Shared {
 	incoming_rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<(VirtualSendStream, VirtualRecvStream)>>,
 
 	/// Channel that VirtualSendStreams write to; the writer task reads from this.
-	control_tx: mpsc::UnboundedSender<Vec<u8>>,
+	control_tx: mpsc::UnboundedSender<Bytes>,
 
 	/// Active virtual streams keyed by request_id.
 	streams: Mutex<HashMap<RequestId, mpsc::UnboundedSender<Bytes>>>,
@@ -311,7 +349,7 @@ pub struct ControlStreamAdapter<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
-	pub fn new(inner: S, control_tx: mpsc::UnboundedSender<Vec<u8>>, control: Control, version: Version) -> Self {
+	pub fn new(inner: S, control_tx: mpsc::UnboundedSender<Bytes>, control: Control, version: Version) -> Self {
 		let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
 		Self {
 			inner,
@@ -334,7 +372,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 		&self,
 		reader: Reader<S::RecvStream, Version>,
 		writer: Writer<S::SendStream, Version>,
-		rx: mpsc::UnboundedReceiver<Vec<u8>>,
+		rx: mpsc::UnboundedReceiver<Bytes>,
 	) -> Result<(), Error> {
 		tokio::select! {
 			res = self.run_read(reader) => res,
@@ -345,7 +383,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 	/// Writer task: drains the channel and writes to the control stream.
 	async fn run_write(
 		mut writer: Writer<S::SendStream, Version>,
-		mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
+		mut rx: mpsc::UnboundedReceiver<Bytes>,
 	) -> Result<(), Error> {
 		while let Some(msg) = rx.recv().await {
 			let mut buf = std::io::Cursor::new(msg);
@@ -403,7 +441,6 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 				Route::GoAway => {
 					return Err(Error::Unsupported);
 				}
-				Route::Ignore => {}
 			}
 		}
 	}
@@ -444,7 +481,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					let id = decode_request_id(body, self.version)?;
 					Ok(Route::NewRequest(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 
 			// Responses: route to the virtual stream waiting for a reply
@@ -467,7 +504,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					let id = decode_request_id(body, self.version)?;
 					Ok(Route::CloseStream(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			// PublishOk (0x1E)
 			ietf::PublishOk::ID => {
@@ -490,7 +527,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					let id = decode_response_request_id(body, self.version)?;
 					Ok(Route::Response(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			// 0x08: PublishNamespaceError in v14 only
 			ietf::PublishNamespaceError::ID => match self.version {
@@ -498,7 +535,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					let id = decode_request_id(body, self.version)?;
 					Ok(Route::CloseStream(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			// SubscribeNamespaceOk (v14 only)
 			ietf::SubscribeNamespaceOk::ID => match self.version {
@@ -506,7 +543,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					let id = decode_request_id(body, self.version)?;
 					Ok(Route::Response(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			// SubscribeNamespaceError (v14 only)
 			ietf::SubscribeNamespaceError::ID => match self.version {
@@ -514,7 +551,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 					let id = decode_request_id(body, self.version)?;
 					Ok(Route::CloseStream(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 
 			// Follow-up messages: route to existing stream
@@ -543,14 +580,10 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 				}
 				// v14/v15: namespace-keyed — decode namespace and look up request_id
 				Version::Draft14 | Version::Draft15 => {
-					if let Some(id) = self.lookup_namespace_request_id(body) {
-						Ok(Route::CloseStream(id))
-					} else {
-						tracing::warn!("PublishNamespaceDone: unknown namespace");
-						Ok(Route::Ignore)
-					}
+					let id = self.lookup_namespace_request_id(body)?;
+					Ok(Route::CloseStream(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::PublishNamespaceCancel::ID => match self.version {
 				Version::Draft16 => {
@@ -559,21 +592,17 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 				}
 				// v14/v15: namespace-keyed
 				Version::Draft14 | Version::Draft15 => {
-					if let Some(id) = self.lookup_namespace_request_id(body) {
-						Ok(Route::CloseStream(id))
-					} else {
-						tracing::warn!("PublishNamespaceCancel: unknown namespace");
-						Ok(Route::Ignore)
-					}
+					let id = self.lookup_namespace_request_id(body)?;
+					Ok(Route::CloseStream(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::UnsubscribeNamespace::ID => match self.version {
 				Version::Draft14 | Version::Draft15 => {
 					let id = decode_request_id(body, self.version)?;
 					Ok(Route::CloseStream(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 
 			// Utility
@@ -581,36 +610,39 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 				let id = decode_request_id(body, self.version)?;
 				Ok(Route::MaxRequestId(id))
 			}
-			ietf::RequestsBlocked::ID => Ok(Route::Ignore),
+			ietf::RequestsBlocked::ID => Err(Error::UnexpectedMessage),
 
 			// Terminal
 			ietf::GoAway::ID => Ok(Route::GoAway),
 
-			_ => {
-				tracing::warn!(type_id, "adapter: unknown message type");
-				Err(Error::UnexpectedMessage)
-			}
+			_ => Err(Error::UnexpectedMessage),
 		}
 	}
 
 	/// Decode namespace from a v14/v15 namespace-keyed message body and look up the request_id.
-	fn lookup_namespace_request_id(&self, body: &Bytes) -> Option<RequestId> {
+	fn lookup_namespace_request_id(&self, body: &Bytes) -> Result<RequestId, Error> {
 		let mut cursor = std::io::Cursor::new(body);
-		let ns = crate::ietf::namespace::decode_namespace(&mut cursor, self.version).ok()?;
-		self.shared.namespaces.lock().unwrap().get(&ns).copied()
+		let ns = crate::ietf::namespace::decode_namespace(&mut cursor, self.version)?;
+		self.shared
+			.namespaces
+			.lock()
+			.unwrap()
+			.get(&ns)
+			.copied()
+			.ok_or(Error::NotFound)
 	}
 }
 
 impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlStreamAdapter<S> {
 	type SendStream = AdapterSend<S>;
 	type RecvStream = AdapterRecv<S>;
-	type Error = AdapterError;
+	type Error = crate::Error;
 
 	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
 		let mut rx = self.shared.incoming_rx.lock().await;
 		match rx.recv().await {
 			Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
-			None => Err(AdapterError::Closed),
+			None => Err(crate::Error::Closed),
 		}
 	}
 
@@ -623,28 +655,28 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 				follow_tx,
 				shared: Arc::clone(&self.shared),
 				version: self.version,
-				buf: Vec::new(),
+				buf: BytesMut::new(),
 			},
 		);
 		Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv)))
 	}
 
 	async fn open_uni(&self) -> Result<Self::SendStream, Self::Error> {
-		let s = self.inner.open_uni().await.map_err(|_| AdapterError::Closed)?;
+		let s = self.inner.open_uni().await.map_err(|_| crate::Error::Closed)?;
 		Ok(AdapterSend::Real(s))
 	}
 
 	async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
-		let s = self.inner.accept_uni().await.map_err(|_| AdapterError::Closed)?;
+		let s = self.inner.accept_uni().await.map_err(|_| crate::Error::Closed)?;
 		Ok(AdapterRecv::Real(s))
 	}
 
 	fn send_datagram(&self, payload: Bytes) -> Result<(), Self::Error> {
-		self.inner.send_datagram(payload).map_err(|_| AdapterError::Closed)
+		self.inner.send_datagram(payload).map_err(|_| crate::Error::Closed)
 	}
 
 	async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
-		self.inner.recv_datagram().await.map_err(|_| AdapterError::Closed)
+		self.inner.recv_datagram().await.map_err(|_| crate::Error::Closed)
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -661,7 +693,7 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 
 	async fn closed(&self) -> Self::Error {
 		let _ = self.inner.closed().await;
-		AdapterError::Closed
+		crate::Error::Closed
 	}
 }
 
@@ -675,7 +707,6 @@ enum Route {
 	CloseStream(RequestId),
 	MaxRequestId(RequestId),
 	GoAway,
-	Ignore,
 }
 
 /// Encode raw message bytes as [type_id varint][size u16][body].
@@ -782,7 +813,7 @@ mod tests {
 					let id = decode_request_id(body, version)?;
 					Ok(Route::NewRequest(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::SubscribeOk::ID => {
 				let id = decode_response_request_id(body, version)?;
@@ -801,7 +832,7 @@ mod tests {
 					let id = decode_request_id(body, version)?;
 					Ok(Route::CloseStream(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::PublishOk::ID => {
 				let id = decode_response_request_id(body, version)?;
@@ -820,28 +851,28 @@ mod tests {
 					let id = decode_response_request_id(body, version)?;
 					Ok(Route::Response(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::PublishNamespaceError::ID => match version {
 				Version::Draft14 => {
 					let id = decode_request_id(body, version)?;
 					Ok(Route::CloseStream(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::SubscribeNamespaceOk::ID => match version {
 				Version::Draft14 => {
 					let id = decode_request_id(body, version)?;
 					Ok(Route::Response(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::SubscribeNamespaceError::ID => match version {
 				Version::Draft14 => {
 					let id = decode_request_id(body, version)?;
 					Ok(Route::CloseStream(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::SubscribeUpdate::ID => {
 				let id = decode_request_id(body, version)?;
@@ -871,9 +902,9 @@ mod tests {
 					{
 						return Ok(Route::CloseStream(id));
 					}
-					Ok(Route::Ignore)
+					Err(Error::UnexpectedMessage)
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::PublishNamespaceCancel::ID => match version {
 				Version::Draft16 => {
@@ -887,22 +918,22 @@ mod tests {
 					{
 						return Ok(Route::CloseStream(id));
 					}
-					Ok(Route::Ignore)
+					Err(Error::UnexpectedMessage)
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::UnsubscribeNamespace::ID => match version {
 				Version::Draft14 | Version::Draft15 => {
 					let id = decode_request_id(body, version)?;
 					Ok(Route::CloseStream(id))
 				}
-				_ => Ok(Route::Ignore),
+				_ => Err(Error::UnexpectedMessage),
 			},
 			ietf::MaxRequestId::ID => {
 				let id = decode_request_id(body, version)?;
 				Ok(Route::MaxRequestId(id))
 			}
-			ietf::RequestsBlocked::ID => Ok(Route::Ignore),
+			ietf::RequestsBlocked::ID => Err(Error::UnexpectedMessage),
 			ietf::GoAway::ID => Ok(Route::GoAway),
 			_ => Err(Error::UnexpectedMessage),
 		}
@@ -986,10 +1017,10 @@ mod tests {
 	}
 
 	#[test]
-	fn test_classify_subscribe_namespace_v16_ignored() {
+	fn test_classify_subscribe_namespace_v16_errors() {
 		let body = make_body_with_request_id(20, Version::Draft16);
-		let route = classify_msg(Version::Draft16, ietf::SubscribeNamespace::ID, &body).unwrap();
-		assert!(matches!(route, Route::Ignore));
+		let result = classify_msg(Version::Draft16, ietf::SubscribeNamespace::ID, &body);
+		assert!(result.is_err());
 	}
 
 	#[test]
@@ -1063,7 +1094,7 @@ mod tests {
 		assert_eq!(n, 5);
 
 		let data = control_rx.recv().await.unwrap();
-		assert_eq!(data, b"hello");
+		assert_eq!(data, &b"hello"[..]);
 	}
 
 	#[test]

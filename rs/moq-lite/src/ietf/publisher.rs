@@ -478,18 +478,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					// For v14-16, send PublishNamespaceDone. For v17, just close the stream.
 					match self.version {
 						Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-							let _ = stream.writer.encode(&ietf::PublishNamespaceDone::ID).await;
 							let _ = stream
 								.writer
-								.encode(&ietf::PublishNamespaceDone {
+								.encode_message(&ietf::PublishNamespaceDone {
 									track_namespace: suffix.as_path(),
 									request_id,
 								})
 								.await;
 						}
-						Version::Draft17 => {
-							// In v17, just close the stream
-						}
+						Version::Draft17 => {}
 					}
 					stream.writer.finish().ok();
 				}
@@ -500,10 +497,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		for (suffix, (request_id, mut stream)) in namespace_streams {
 			match self.version {
 				Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-					let _ = stream.writer.encode(&ietf::PublishNamespaceDone::ID).await;
 					let _ = stream
 						.writer
-						.encode(&ietf::PublishNamespaceDone {
+						.encode_message(&ietf::PublishNamespaceDone {
 							track_namespace: suffix.as_path(),
 							request_id,
 						})
