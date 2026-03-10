@@ -71,7 +71,7 @@ where
 		+ 'static,
 {
 	// Wrap the WebSocket in a WebTransport compatibility layer.
-	let ws = web_transport_ws::Server::new().accept_ws(socket, None);
+	let ws = web_transport_ws::Session::accept(socket, None);
 	let session = moq_lite::Server::new()
 		.with_publish(subscribe)
 		.with_consume(publish)

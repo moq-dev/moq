@@ -184,7 +184,7 @@ impl Server {
 	///
 	/// This is useful for simple applications that want WebSocket on a dedicated port.
 	/// For applications that need WebSocket on the same HTTP port (e.g. moq-relay),
-	/// use `web_transport_ws::Server::accept_ws()` with your own HTTP framework instead.
+	/// use `web_transport_ws::Session::accept()` with your own HTTP framework instead.
 	#[cfg(feature = "websocket")]
 	pub fn with_websocket(mut self, websocket: Option<crate::websocket::WebSocketListener>) -> Self {
 		self.websocket = websocket;
