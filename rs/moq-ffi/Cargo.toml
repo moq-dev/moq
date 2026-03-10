@@ -20,7 +20,6 @@ name = "uniffi-bindgen"
 path = "./uniffi-bindgen.rs"
 
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
 bytes = "1"
 hang = { workspace = true }
 moq-lite = { workspace = true, features = ["serde"] }
