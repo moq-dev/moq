@@ -132,8 +132,8 @@ impl MoqCatalogConsumer {
 		}
 	}
 
-	/// Close this catalog stream, causing any pending `next()` to return `None`.
-	pub fn close(&self) {
+	/// Cancel this catalog stream, causing any pending `next()` to return `None`.
+	pub fn cancel(&self) {
 		self.abort.abort();
 	}
 }
@@ -175,8 +175,8 @@ impl MoqMediaConsumer {
 		}
 	}
 
-	/// Close this track, causing any pending `next()` call to return `None`.
-	pub fn close(&self) {
+	/// Cancel this track, causing any pending `next()` call to return `None`.
+	pub fn cancel(&self) {
 		self.abort.abort();
 	}
 }

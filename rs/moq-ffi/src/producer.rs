@@ -63,8 +63,8 @@ impl MoqBroadcastProducer {
 		}))
 	}
 
-	/// Close this publisher, finishing the catalog stream.
-	pub fn close(&self) -> Result<(), MoqError> {
+	/// Finish this publisher, finalizing the catalog stream.
+	pub fn finish(&self) -> Result<(), MoqError> {
 		let mut guard = self.state.lock().unwrap();
 		if let Some(mut state) = guard.take() {
 			state.catalog.finish()?;

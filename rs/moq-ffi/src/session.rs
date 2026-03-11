@@ -79,7 +79,7 @@ impl MoqClient {
 
 	/// Connect to a MoQ server and wait for the session to be established.
 	///
-	/// Can be cancelled by calling `close()`.
+	/// Can be cancelled by calling `cancel()`.
 	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
 		let url = Url::parse(&url)?;
 
@@ -117,7 +117,7 @@ impl MoqClient {
 	}
 
 	/// Cancel any outstanding `connect()` call.
-	pub fn close(&self) {
+	pub fn cancel(&self) {
 		self.abort.abort();
 	}
 }
@@ -133,8 +133,8 @@ impl MoqSession {
 		}
 	}
 
-	/// Close the session.
-	pub fn close(&self) {
+	/// Cancel the session.
+	pub fn cancel(&self) {
 		self.abort.abort();
 	}
 }

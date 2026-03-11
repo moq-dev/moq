@@ -114,8 +114,8 @@ impl MoqAnnounced {
 		}
 	}
 
-	/// Close this stream, causing any pending `next()` to return `None`.
-	pub fn close(&self) {
+	/// Cancel this stream, causing any pending `next()` to return `None`.
+	pub fn cancel(&self) {
 		self.abort.abort();
 	}
 }
@@ -167,8 +167,8 @@ impl MoqAnnouncedBroadcast {
 		}
 	}
 
-	/// Close this, causing any pending `broadcast()` call to return `Closed`.
-	pub fn close(&self) {
+	/// Cancel this, causing any pending `broadcast()` call to return `Closed`.
+	pub fn cancel(&self) {
 		self.abort.abort();
 	}
 }
