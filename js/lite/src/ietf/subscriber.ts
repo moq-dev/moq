@@ -2,33 +2,34 @@ import { Announced } from "../announced.ts";
 import { Broadcast, type TrackRequest } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
-import { type Reader, Stream } from "../stream.ts";
+import type { Reader, Stream } from "../stream.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
-import type * as Control from "./control.ts";
+import type { Session } from "./adapter.ts";
 import { Frame, type Group as GroupMessage } from "./object.ts";
-import { type Publish, type PublishDone, PublishError } from "./publish.ts";
-import type { PublishNamespace, PublishNamespaceDone } from "./publish_namespace.ts";
+import { type Publish, PublishError } from "./publish.ts";
+import type { PublishNamespace } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Subscribe, type SubscribeError, type SubscribeOk, Unsubscribe } from "./subscribe.ts";
+import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
-	type SubscribeNamespaceError,
-	type SubscribeNamespaceOk,
 	UnsubscribeNamespace,
 } from "./subscribe_namespace.ts";
-import type { TrackStatus } from "./track.ts";
 import { Version } from "./version.ts";
 
 /**
- * Handles subscribing to broadcasts using moq-transport protocol with lite-compatibility restrictions.
+ * Handles subscribing to broadcasts using moq-transport protocol.
+ * Uses the stream-per-request pattern (real bidi streams for v17, virtual for v14-v16).
  *
  * @internal
  */
 export class Subscriber {
-	#control: Control.Stream;
+	#session: Session;
+
+	// Our subscribed tracks — keyed by trackAlias for group routing
+	#subscribes = new Map<bigint, Track>();
 
 	// Any currently active announcements.
 	#announced = new Set<Path.Valid>();
@@ -36,53 +37,28 @@ export class Subscriber {
 	// Any consumers that want each new announcement.
 	#announcedConsumers = new Set<Announced>();
 
-	// Our subscribed tracks - keyed by request ID
-	#subscribes = new Map<bigint, Track>();
-
-	// A map of track aliases to request IDs
-	#trackAliases = new Map<bigint, bigint>();
-
-	// Track subscription responses - keyed by request ID
-	#subscribeCallbacks = new Map<
-		bigint,
-		{
-			resolve: (msg: SubscribeOk) => void;
-			reject: (msg: Error) => void;
-		}
-	>();
-
-	#quic: WebTransport;
-
 	/**
 	 * Creates a new Subscriber instance.
-	 * @param control - The control stream writer for sending control messages
-	 * @param quic - The WebTransport session (needed for v16 bidi streams)
+	 * @param session - The session abstraction for bidi streams and request IDs
 	 *
 	 * @internal
 	 */
-	constructor({ control, quic }: { control: Control.Stream; quic: WebTransport }) {
-		this.#control = control;
-		this.#quic = quic;
+	constructor(session: Session) {
+		this.#session = session;
 	}
 
 	/**
 	 * Gets an announced reader for the specified prefix.
-	 * @param prefix - The prefix for announcements
-	 * @returns An AnnounceConsumer instance
 	 */
 	announced(prefix = Path.empty()): Announced {
 		const announced = new Announced(prefix);
 		for (const active of this.#announced) {
 			if (!active.startsWith(prefix)) continue;
-
-			announced.append({
-				path: active,
-				active: true,
-			});
+			announced.append({ path: active, active: true });
 		}
-
 		this.#announcedConsumers.add(announced);
-		this.#runAnnounced(announced, prefix).finally(() => {
+
+		void this.#runAnnounced(announced, prefix).finally(() => {
 			this.#announcedConsumers.delete(announced);
 		});
 
@@ -90,87 +66,88 @@ export class Subscriber {
 	}
 
 	async #runAnnounced(announced: Announced, prefix: Path.Valid) {
-		if (this.#control.version === Version.DRAFT_16) {
-			await this.#runAnnouncedV16(announced, prefix);
-		} else {
-			await this.#runAnnouncedLegacy(announced, prefix);
-		}
-	}
+		const version = this.#session.version;
 
-	async #runAnnouncedLegacy(announced: Announced, prefix: Path.Valid) {
-		const requestId = await this.#control.nextRequestId();
+		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
+		// v16+: SubscribeNamespace on its own bidi stream
+		// Both paths work the same way with the adapter/native session.
+
+		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return;
 
 		try {
-			this.#control.write(new SubscribeNamespace({ namespace: prefix, requestId }));
-			await announced.closed;
-		} finally {
-			this.#control.write(new UnsubscribeNamespace({ requestId }));
-		}
-	}
+			const stream = await this.#session.openBi(requestId);
 
-	async #runAnnouncedV16(announced: Announced, prefix: Path.Valid) {
-		const requestId = await this.#control.nextRequestId();
-		if (requestId === undefined) return;
+			try {
+				// Write SubscribeNamespace
+				await stream.writer.u53(SubscribeNamespace.id);
+				const msg = new SubscribeNamespace({ namespace: prefix, requestId });
+				await msg.encode(stream.writer, version);
 
-		const version = this.#control.version;
+				// Read response
+				const respTypeId = await stream.reader.u53();
+				if (respTypeId === RequestOk.id) {
+					await RequestOk.decode(stream.reader, version);
+				} else if (respTypeId === 0x12) {
+					// v14: SubscribeNamespaceOk
+					const size = await stream.reader.u16();
+					await stream.reader.read(size);
+				} else {
+					throw new Error(`SubscribeNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
+				}
 
-		try {
-			// Open a bidi stream for SUBSCRIBE_NAMESPACE
-			const stream = await Stream.open(this.#quic);
+				// Loop reading Namespace/NamespaceDone entries
+				const readLoop = (async () => {
+					for (;;) {
+						const done = await stream.reader.done();
+						if (done) break;
 
-			// Write message type + SUBSCRIBE_NAMESPACE
-			await stream.writer.u53(SubscribeNamespace.id);
-			const msg = new SubscribeNamespace({ namespace: prefix, requestId });
-			await msg.encode(stream.writer, version);
+						const msgType = await stream.reader.u53();
+						if (msgType === SubscribeNamespaceEntry.id) {
+							const entry = await SubscribeNamespaceEntry.decode(stream.reader, version);
+							const path = Path.join(prefix, entry.suffix);
+							console.debug(`announced: broadcast=${path} active=true`);
 
-			// Read REQUEST_OK or REQUEST_ERROR
-			const responseType = await stream.reader.u53();
-			if (responseType === RequestOk.id) {
-				await RequestOk.decode(stream.reader, version);
-			} else if (responseType === RequestError.id) {
-				const err = await RequestError.decode(stream.reader, version);
-				throw new Error(`SUBSCRIBE_NAMESPACE error: code=${err.errorCode} reason=${err.reasonPhrase}`);
-			} else {
-				throw new Error(`unexpected response type: ${responseType}`);
-			}
+							this.#announced.add(path);
+							for (const consumer of this.#announcedConsumers) {
+								consumer.append({ path, active: true });
+							}
+						} else if (msgType === SubscribeNamespaceEntryDone.id) {
+							const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
+							const path = Path.join(prefix, entry.suffix);
+							console.debug(`announced: broadcast=${path} active=false`);
 
-			// Loop reading NAMESPACE / NAMESPACE_DONE messages
-			const readLoop = (async () => {
-				for (;;) {
-					const done = await stream.reader.done();
-					if (done) break;
-
-					const msgType = await stream.reader.u53();
-					if (msgType === SubscribeNamespaceEntry.id) {
-						const entry = await SubscribeNamespaceEntry.decode(stream.reader, version);
-						const path = Path.join(prefix, entry.suffix);
-						console.debug(`announced: broadcast=${path} active=true`);
-
-						this.#announced.add(path);
-						for (const consumer of this.#announcedConsumers) {
-							consumer.append({ path, active: true });
+							this.#announced.delete(path);
+							for (const consumer of this.#announcedConsumers) {
+								consumer.append({ path, active: false });
+							}
+						} else {
+							throw new Error(
+								`unexpected message on subscribe_namespace stream: 0x${msgType.toString(16)}`,
+							);
 						}
-					} else if (msgType === SubscribeNamespaceEntryDone.id) {
-						const entry = await SubscribeNamespaceEntryDone.decode(stream.reader, version);
-						const path = Path.join(prefix, entry.suffix);
-						console.debug(`announced: broadcast=${path} active=false`);
+					}
+				})();
 
-						this.#announced.delete(path);
-						for (const consumer of this.#announcedConsumers) {
-							consumer.append({ path, active: false });
-						}
-					} else {
-						throw new Error(`unexpected message type on subscribe_namespace stream: ${msgType}`);
+				// Wait for either the read loop or the announced to close
+				await Promise.race([readLoop, announced.closed]);
+
+				// For v14/v15: send UnsubscribeNamespace before closing
+				if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+					try {
+						await stream.writer.u53(UnsubscribeNamespace.id);
+						const unsub = new UnsubscribeNamespace({ requestId });
+						await unsub.encode(stream.writer, version);
+					} catch {
+						// Stream might already be closed
 					}
 				}
-			})();
 
-			// Wait for either the read loop to finish or the announced to close
-			await Promise.race([readLoop, announced.closed]);
-
-			// Close the bidi stream (replaces UnsubscribeNamespace)
-			stream.close();
+				stream.close();
+			} catch (err) {
+				stream.abort(error(err));
+				throw err;
+			}
 		} catch (err: unknown) {
 			const e = error(err);
 			console.warn(`subscribe_namespace error: ${e.message}`);
@@ -179,9 +156,6 @@ export class Subscriber {
 
 	/**
 	 * Consumes a broadcast from the connection.
-	 *
-	 * @param name - The name of the broadcast to consume
-	 * @returns A Broadcast instance
 	 */
 	consume(path: Path.Valid): Broadcast {
 		const broadcast = new Broadcast();
@@ -198,92 +172,166 @@ export class Subscriber {
 	}
 
 	async #runSubscribe(broadcast: Path.Valid, request: TrackRequest) {
-		const requestId = await this.#control.nextRequestId();
+		const version = this.#session.version;
+		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return;
-
-		this.#subscribes.set(requestId, request.track);
 
 		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
 
-		const msg = new Subscribe({
-			requestId,
-			trackNamespace: broadcast,
-			trackName: request.track.name,
-			subscriberPriority: request.priority,
-		});
-
-		// Send SUBSCRIBE message on control stream and wait for response
-		const responsePromise = new Promise<SubscribeOk>((resolve, reject) => {
-			this.#subscribeCallbacks.set(requestId, { resolve, reject });
-		});
-
-		await this.#control.write(msg);
-
 		try {
-			const ok = await responsePromise;
-			this.#trackAliases.set(ok.trackAlias, requestId);
-			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+			const stream = await this.#session.openBi(requestId);
 
 			try {
-				await request.track.closed;
+				// Write Subscribe
+				await stream.writer.u53(Subscribe.id);
+				const msg = new Subscribe({
+					requestId,
+					trackNamespace: broadcast,
+					trackName: request.track.name,
+					subscriberPriority: request.priority,
+				});
+				await msg.encode(stream.writer, version);
 
-				const msg = new Unsubscribe({ requestId });
-				await this.#control.write(msg);
-				console.debug(`unsubscribe: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
-			} finally {
-				this.#trackAliases.delete(ok.trackAlias);
+				// Read response (SubscribeOk or error)
+				const respTypeId = await stream.reader.u53();
+				if (respTypeId === SubscribeOk.id) {
+					const ok = await SubscribeOk.decode(stream.reader, version);
+					// Register trackAlias for group routing
+					this.#subscribes.set(ok.trackAlias, request.track);
+					console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
+
+					try {
+						// Wait for stream close (= PublishDone) or track close (= local unsubscribe)
+						await Promise.race([stream.reader.closed, request.track.closed]);
+
+						// For v14-v16: send Unsubscribe before closing
+						if (version !== Version.DRAFT_17) {
+							try {
+								await stream.writer.u53(Unsubscribe.id);
+								const unsub = new Unsubscribe({ requestId });
+								await unsub.encode(stream.writer, version);
+							} catch {
+								// Stream might already be closed
+							}
+						}
+
+						request.track.close();
+						stream.close();
+						console.debug(
+							`subscribe close: id=${requestId} broadcast=${broadcast} track=${request.track.name}`,
+						);
+					} finally {
+						this.#subscribes.delete(ok.trackAlias);
+					}
+				} else {
+					// Error response
+					let reasonPhrase = "unknown error";
+					try {
+						if (respTypeId === 0x05) {
+							// SubscribeError (v14) or RequestError (v15+)
+							const err =
+								version === Version.DRAFT_14
+									? await (await import("./subscribe.ts")).SubscribeError.decode(
+											stream.reader,
+											version,
+										)
+									: await RequestError.decode(stream.reader, version);
+							reasonPhrase = `code=${err.errorCode} reason=${err.reasonPhrase}`;
+						}
+					} catch {
+						// Decoding error response failed, use default message
+					}
+					throw new Error(`SUBSCRIBE error: ${reasonPhrase}`);
+				}
+			} catch (err) {
+				stream.abort(error(err));
+				throw err;
 			}
 		} catch (err) {
 			const e = error(err);
 			request.track.close(e);
-
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.track.name} error=${e.message}`,
 			);
-		} finally {
-			this.#subscribes.delete(requestId);
-			this.#subscribeCallbacks.delete(requestId);
 		}
 	}
 
 	/**
-	 * Handles a SUBSCRIBE_OK control message received on the control stream.
-	 * @param msg - The SUBSCRIBE_OK message
+	 * Handles an incoming PUBLISH_NAMESPACE on a bidi stream.
+	 * Tracks announced broadcasts and notifies consumers.
 	 *
 	 * @internal
 	 */
-	async handleSubscribeOk(msg: SubscribeOk) {
-		if (msg.requestId === undefined) {
-			console.warn("handleSubscribeOk: no requestId (d17 not yet supported)");
+	async runPublishNamespace(msg: PublishNamespace, stream: Stream) {
+		const version = this.#session.version;
+		const path = msg.trackNamespace;
+
+		if (this.#announced.has(path)) {
+			console.warn("duplicate PublishNamespace");
 			return;
 		}
-		const callback = this.#subscribeCallbacks.get(msg.requestId);
-		if (callback) {
-			callback.resolve(msg);
+
+		this.#announced.add(path);
+		console.debug(`announced: broadcast=${path} active=true`);
+
+		for (const consumer of this.#announcedConsumers) {
+			consumer.append({ path, active: true });
+		}
+
+		// Send RequestOk
+		if (version === Version.DRAFT_14) {
+			await stream.writer.u53(0x07); // PublishNamespaceOk
+			const ok = await import("./publish_namespace.ts").then(
+				(m) => new m.PublishNamespaceOk({ requestId: msg.requestId }),
+			);
+			await ok.encode(stream.writer, version);
 		} else {
-			console.warn("handleSubscribeOk unknown requestId", msg.requestId);
+			await stream.writer.u53(RequestOk.id);
+			const ok = new RequestOk({ requestId: version === Version.DRAFT_17 ? undefined : msg.requestId });
+			await ok.encode(stream.writer, version);
+		}
+
+		// Wait for stream close (= PublishNamespaceDone)
+		await stream.reader.closed;
+
+		this.#announced.delete(path);
+		console.debug(`announced: broadcast=${path} active=false`);
+
+		for (const consumer of this.#announcedConsumers) {
+			consumer.append({ path, active: false });
 		}
 	}
 
 	/**
-	 * Handles a SUBSCRIBE_ERROR control message received on the control stream.
-	 * @param msg - The SUBSCRIBE_ERROR message
+	 * Handles an incoming PUBLISH on a bidi stream.
+	 * We don't support reverse publish, so send error.
 	 *
 	 * @internal
 	 */
-	async handleSubscribeError(msg: SubscribeError) {
-		const callback = this.#subscribeCallbacks.get(msg.requestId);
-		if (callback) {
-			callback.reject(new Error(`SUBSCRIBE_ERROR: code=${msg.errorCode} reason=${msg.reasonPhrase}`));
+	async runPublish(msg: Publish, stream: Stream) {
+		const version = this.#session.version;
+
+		if (version === Version.DRAFT_14) {
+			await stream.writer.u53(PublishError.id);
+			const err = new PublishError({
+				requestId: msg.requestId,
+				errorCode: 500,
+				reasonPhrase: "publish not supported",
+			});
+			await err.encode(stream.writer, version);
 		} else {
-			console.warn("handleSubscribeError unknown requestId", msg.requestId);
+			await stream.writer.u53(RequestError.id);
+			const err = new RequestError({
+				requestId: version === Version.DRAFT_17 ? undefined : msg.requestId,
+				errorCode: 500,
+				reasonPhrase: "publish not supported",
+			});
+			await err.encode(stream.writer, version);
 		}
 	}
 
 	/**
-	 * Handles an ObjectStream message (moq-transport equivalent of moq-lite Group).
-	 * @param msg - The ObjectStream message
-	 * @param stream - The stream to read object data from
+	 * Handles an ObjectStream message (group + frames on uni stream).
 	 *
 	 * @internal
 	 */
@@ -295,24 +343,15 @@ export class Subscriber {
 		}
 
 		try {
-			let requestId = this.#trackAliases.get(group.trackAlias);
-			if (requestId === undefined) {
-				// Just hope the track alias is the request ID
-				requestId = group.trackAlias;
-				console.warn("unknown track alias, using request ID");
-			}
-
-			const track = this.#subscribes.get(requestId);
+			// Look up by trackAlias directly
+			const track = this.#subscribes.get(group.trackAlias);
 			if (!track) {
-				throw new Error(
-					`unknown track: trackAlias=${group.trackAlias} requestId=${this.#trackAliases.get(group.trackAlias)}`,
-				);
+				// Fallback: try treating trackAlias as requestId (for compat)
+				throw new Error(`unknown track: trackAlias=${group.trackAlias}`);
 			}
 
-			// Convert to Group (moq-lite equivalent)
 			track.writeGroup(producer);
 
-			// Read objects from the stream until end of group
 			for (;;) {
 				const done = await Promise.race([stream.done(), producer.closed, track.closed]);
 				if (done !== false) break;
@@ -320,7 +359,6 @@ export class Subscriber {
 				const frame = await Frame.decode(stream, group.flags);
 				if (frame.payload === undefined) break;
 
-				// Treat each object payload as a frame
 				producer.writeFrame(frame.payload);
 			}
 
@@ -329,124 +367,6 @@ export class Subscriber {
 			const e = error(err);
 			producer.close(e);
 			stream.stop(e);
-		}
-	}
-
-	// we don't support publish, so send PUBLISH_ERROR
-	async handlePublish(msg: Publish) {
-		// TODO technically, we should send PUBLISH_OK if we had a SUBSCRIBE in flight for the same track.
-		// Otherwise, the peer will SUBSCRIBE_ERROR because duplicate subscriptions are not allowed :(
-		if (this.#control.version === Version.DRAFT_14) {
-			const err = new PublishError({
-				requestId: msg.requestId,
-				errorCode: 500,
-				reasonPhrase: "publish not supported",
-			});
-			await this.#control.write(err);
-		} else {
-			// v15+: use RequestError (d17: no requestId on response)
-			const err = new RequestError({
-				requestId: this.#control.version === Version.DRAFT_17 ? undefined : msg.requestId,
-				errorCode: 500,
-				reasonPhrase: "publish not supported",
-			});
-			await this.#control.write(err);
-		}
-	}
-
-	/**
-	 * Handles a PUBLISH_DONE control message received on the control stream.
-	 * @param msg - The PUBLISH_DONE message
-	 */
-	async handlePublishDone(msg: PublishDone) {
-		if (msg.requestId === undefined) {
-			console.warn("handlePublishDone: no requestId (d17 not yet supported)");
-			return;
-		}
-		// For lite compatibility, we treat this as subscription completion
-		const callback = this.#subscribeCallbacks.get(msg.requestId);
-		if (callback) {
-			callback.reject(new Error(`PUBLISH_DONE: code=${msg.statusCode} reason=${msg.reasonPhrase}`));
-		}
-	}
-
-	/**
-	 * Handles a PUBLISH_NAMESPACE control message received on the control stream.
-	 * @param msg - The PUBLISH_NAMESPACE message
-	 */
-	async handlePublishNamespace(msg: PublishNamespace) {
-		if (this.#announced.has(msg.trackNamespace)) {
-			console.warn("duplicate PUBLISH_NAMESPACE message");
-			return;
-		}
-
-		this.#announced.add(msg.trackNamespace);
-		console.debug(`announced: broadcast=${msg.trackNamespace} active=true`);
-
-		for (const consumer of this.#announcedConsumers) {
-			consumer.append({
-				path: msg.trackNamespace,
-				active: true,
-			});
-		}
-	}
-
-	/**
-	 * Handles a PUBLISH_NAMESPACE_DONE control message received on the control stream.
-	 * @param msg - The PUBLISH_NAMESPACE_DONE message
-	 */
-	async handlePublishNamespaceDone(msg: PublishNamespaceDone) {
-		if (!this.#announced.has(msg.trackNamespace)) {
-			console.warn("unknown PUBLISH_NAMESPACE_DONE message");
-			return;
-		}
-
-		this.#announced.delete(msg.trackNamespace);
-		console.debug(`announced: broadcast=${msg.trackNamespace} active=false`);
-
-		for (const consumer of this.#announcedConsumers) {
-			consumer.append({
-				path: msg.trackNamespace,
-				active: false,
-			});
-		}
-	}
-
-	async handleSubscribeNamespaceOk(_msg: SubscribeNamespaceOk) {
-		// Don't care
-	}
-
-	async handleSubscribeNamespaceError(_msg: SubscribeNamespaceError) {
-		throw new Error("SUBSCRIBE_NAMESPACE_ERROR messages are not supported");
-	}
-
-	/**
-	 * Handles a TRACK_STATUS control message received on the control stream.
-	 * @param msg - The TRACK_STATUS message
-	 */
-	async handleTrackStatus(_msg: TrackStatus) {
-		throw new Error("TRACK_STATUS messages are not supported");
-	}
-
-	// v15: REQUEST_OK replaces SubscribeNamespaceOk, PublishNamespaceOk
-	async handleRequestOk(msg: RequestOk) {
-		// In v15, RequestOk is used for subscribe namespace acknowledgements
-		// Route by request_id — treat similarly to SubscribeNamespaceOk for now
-		console.debug("received REQUEST_OK", msg.requestId);
-	}
-
-	// v15: REQUEST_ERROR replaces SubscribeNamespaceError, etc.
-	async handleRequestError(msg: RequestError) {
-		if (msg.requestId === undefined) {
-			console.warn("handleRequestError: no requestId (d17 not yet supported)");
-			return;
-		}
-		// In v15, RequestError replaces SubscribeError for subscribe requests
-		const callback = this.#subscribeCallbacks.get(msg.requestId);
-		if (callback) {
-			callback.reject(new Error(`REQUEST_ERROR: code=${msg.errorCode} reason=${msg.reasonPhrase}`));
-		} else {
-			console.warn("handleRequestError unknown requestId", msg.requestId);
 		}
 	}
 }

@@ -1,3 +1,4 @@
+export * from "./adapter.ts";
 export * from "./connection.ts";
 export * from "./control.ts";
 export * from "./fetch.ts";
