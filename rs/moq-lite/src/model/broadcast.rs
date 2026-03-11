@@ -480,6 +480,7 @@ mod test {
 
 	#[tokio::test]
 	async fn requested_unused() {
+		tokio::time::pause();
 		let mut broadcast = Broadcast::new().produce().dynamic();
 
 		// Subscribe to a track that doesn't exist - this creates a request
@@ -518,8 +519,8 @@ mod test {
 			"track producer should be unused after consumer is dropped"
 		);
 
-		// TODO Unfortunately, we need to sleep for a little bit to detect when unused.
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		// Advance paused time to let the async cleanup task run.
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
 
 		// Now the cleanup task should have run and we can subscribe again to the unknown track.
 		let consumer3 = broadcast.consume().subscribe_track(&Track::new("unknown_track"));

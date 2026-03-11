@@ -109,6 +109,8 @@ impl Cluster {
 			.filter(|connect| Some(connect) != self.config.node.as_ref())
 		else {
 			tracing::info!("running as root, accepting leaf nodes");
+			// The root node has no active cluster loop — it only accepts incoming
+			// connections from leaf nodes. Block forever since there's nothing to do.
 			std::future::pending::<()>().await;
 			anyhow::bail!("unexpected return");
 		};
