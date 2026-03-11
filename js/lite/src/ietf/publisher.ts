@@ -14,6 +14,7 @@ import {
 	type SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
+	SubscribeNamespaceOk,
 } from "./subscribe_namespace.ts";
 import { TrackStatus, type TrackStatusRequest } from "./track.ts";
 import { Version } from "./version.ts";
@@ -142,6 +143,7 @@ export class Publisher {
 				});
 				await err.encode(stream.writer, version);
 			}
+			stream.close();
 			return;
 		}
 
@@ -247,10 +249,16 @@ export class Publisher {
 		const prefix = msg.namespace;
 
 		try {
-			// Send RequestOk
-			await stream.writer.u53(RequestOk.id);
-			const ok = new RequestOk({ requestId: msg.requestId });
-			await ok.encode(stream.writer, version);
+			// Send OK response
+			if (version === Version.DRAFT_14) {
+				await stream.writer.u53(SubscribeNamespaceOk.id);
+				const ok = new SubscribeNamespaceOk({ requestId: msg.requestId });
+				await ok.encode(stream.writer, version);
+			} else {
+				await stream.writer.u53(RequestOk.id);
+				const ok = new RequestOk({ requestId: msg.requestId });
+				await ok.encode(stream.writer, version);
+			}
 
 			// Create an Announced consumer and seed it with current broadcasts
 			const announced = new Announced(prefix);

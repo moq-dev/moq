@@ -52,7 +52,8 @@ const Route = {
 	CloseStream: 3, // Close stream recv (no bytes pushed)
 	FollowUp: 4, // Push follow-up message to existing stream
 	MaxRequestId: 5, // Update flow control
-	GoAway: 6, // Terminal
+	Ignore: 6, // Connection-level, no routing
+	GoAway: 7, // Terminal
 } as const;
 type Route = (typeof Route)[keyof typeof Route];
 
@@ -87,7 +88,7 @@ export class ControlStreamAdapter implements Session {
 	// Request ID flow control
 	#requestId = 0n;
 	#maxRequestId: bigint;
-	#maxRequestIdResolve?: () => void;
+	#maxRequestIdResolves: (() => void)[] = [];
 
 	#closed = false;
 
@@ -153,7 +154,7 @@ export class ControlStreamAdapter implements Session {
 				return id;
 			}
 			await new Promise<void>((resolve) => {
-				this.#maxRequestIdResolve = resolve;
+				this.#maxRequestIdResolves.push(resolve);
 			});
 		}
 	}
@@ -200,7 +201,8 @@ export class ControlStreamAdapter implements Session {
 						break;
 					case Route.MaxRequestId:
 						this.#maxRequestId = requestId;
-						this.#maxRequestIdResolve?.();
+						for (const resolve of this.#maxRequestIdResolves) resolve();
+						this.#maxRequestIdResolves = [];
 						break;
 				}
 			}
@@ -439,9 +441,9 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.MaxRequestId, requestId };
 			}
 			case 0x1a: {
-				// RequestsBlocked — ignore
-				const requestId = await readRequestId();
-				return { route: Route.FollowUp, requestId };
+				// RequestsBlocked — connection-level, consume and ignore
+				await readRequestId();
+				return { route: Route.Ignore, requestId: 0n };
 			}
 
 			// === Terminal ===
@@ -474,6 +476,7 @@ export class ControlStreamAdapter implements Session {
 		this.#incomingWaiters = [];
 
 		// Unblock maxRequestId waiters
-		this.#maxRequestIdResolve?.();
+		for (const resolve of this.#maxRequestIdResolves) resolve();
+		this.#maxRequestIdResolves = [];
 	}
 }

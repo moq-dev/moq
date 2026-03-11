@@ -110,6 +110,7 @@ export class Subscriber {
 
 							this.#announced.add(path);
 							for (const consumer of this.#announcedConsumers) {
+								if (!path.startsWith(consumer.prefix)) continue;
 								consumer.append({ path, active: true });
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
@@ -119,6 +120,7 @@ export class Subscriber {
 
 							this.#announced.delete(path);
 							for (const consumer of this.#announcedConsumers) {
+								if (!path.startsWith(consumer.prefix)) continue;
 								consumer.append({ path, active: false });
 							}
 						} else {
@@ -268,6 +270,25 @@ export class Subscriber {
 
 		if (this.#announced.has(path)) {
 			console.warn("duplicate PublishNamespace");
+			if (version === Version.DRAFT_14) {
+				const { PublishNamespaceError } = await import("./publish_namespace.ts");
+				await stream.writer.u53(PublishNamespaceError.id);
+				const err = new PublishNamespaceError({
+					requestId: msg.requestId,
+					errorCode: 409,
+					reasonPhrase: "duplicate namespace",
+				});
+				await err.encode(stream.writer, version);
+			} else {
+				await stream.writer.u53(RequestError.id);
+				const err = new RequestError({
+					requestId: version === Version.DRAFT_17 ? undefined : msg.requestId,
+					errorCode: 409,
+					reasonPhrase: "duplicate namespace",
+				});
+				await err.encode(stream.writer, version);
+			}
+			stream.close();
 			return;
 		}
 
@@ -275,30 +296,35 @@ export class Subscriber {
 		console.debug(`announced: broadcast=${path} active=true`);
 
 		for (const consumer of this.#announcedConsumers) {
+			const suffix = Path.stripPrefix(consumer.prefix, path);
+			if (suffix === null) continue;
 			consumer.append({ path, active: true });
 		}
 
-		// Send RequestOk
-		if (version === Version.DRAFT_14) {
-			await stream.writer.u53(0x07); // PublishNamespaceOk
-			const ok = await import("./publish_namespace.ts").then(
-				(m) => new m.PublishNamespaceOk({ requestId: msg.requestId }),
-			);
-			await ok.encode(stream.writer, version);
-		} else {
-			await stream.writer.u53(RequestOk.id);
-			const ok = new RequestOk({ requestId: version === Version.DRAFT_17 ? undefined : msg.requestId });
-			await ok.encode(stream.writer, version);
-		}
+		try {
+			// Send OK
+			if (version === Version.DRAFT_14) {
+				const { PublishNamespaceOk } = await import("./publish_namespace.ts");
+				await stream.writer.u53(PublishNamespaceOk.id);
+				const ok = new PublishNamespaceOk({ requestId: msg.requestId });
+				await ok.encode(stream.writer, version);
+			} else {
+				await stream.writer.u53(RequestOk.id);
+				const ok = new RequestOk({ requestId: version === Version.DRAFT_17 ? undefined : msg.requestId });
+				await ok.encode(stream.writer, version);
+			}
 
-		// Wait for stream close (= PublishNamespaceDone)
-		await stream.reader.closed;
+			// Wait for stream close (= PublishNamespaceDone)
+			await stream.reader.closed;
+		} finally {
+			this.#announced.delete(path);
+			console.debug(`announced: broadcast=${path} active=false`);
 
-		this.#announced.delete(path);
-		console.debug(`announced: broadcast=${path} active=false`);
-
-		for (const consumer of this.#announcedConsumers) {
-			consumer.append({ path, active: false });
+			for (const consumer of this.#announcedConsumers) {
+				const suffix = Path.stripPrefix(consumer.prefix, path);
+				if (suffix === null) continue;
+				consumer.append({ path, active: false });
+			}
 		}
 	}
 
@@ -328,6 +354,7 @@ export class Subscriber {
 			});
 			await err.encode(stream.writer, version);
 		}
+		stream.close();
 	}
 
 	/**
