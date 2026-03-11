@@ -14,6 +14,8 @@ pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 mod client;
 mod crypto;
 mod log;
+#[cfg(feature = "noq")]
+mod noq;
 #[cfg(feature = "quinn")]
 mod quinn;
 mod server;
@@ -30,6 +32,8 @@ pub use websocket::*;
 pub use moq_lite;
 pub use rustls;
 
+#[cfg(feature = "noq")]
+pub use web_transport_noq;
 #[cfg(feature = "quinn")]
 pub use web_transport_quinn;
 
@@ -47,6 +51,10 @@ pub use iroh::*;
 #[derive(Clone, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QuicBackend {
+	/// [web-transport-noq](https://crates.io/crates/web-transport-noq)
+	#[cfg(feature = "noq")]
+	Noq,
+
 	/// [web-transport-quinn](https://crates.io/crates/web-transport-quinn)
 	#[cfg(feature = "quinn")]
 	Quinn,

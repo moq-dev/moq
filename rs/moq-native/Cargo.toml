@@ -20,6 +20,12 @@ quinn = [
     "dep:reqwest",
     "dep:rustls-webpki",
 ]
+noq = [
+    "dep:web-transport-noq",
+    "dep:rcgen",
+    "dep:reqwest",
+    "dep:rustls-webpki",
+]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
@@ -58,6 +64,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 web-transport-iroh = { workspace = true, optional = true }
+web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
