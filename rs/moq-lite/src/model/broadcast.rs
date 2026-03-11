@@ -27,7 +27,11 @@ impl Broadcast {
 		self
 	}
 
-	pub fn produce(self) -> BroadcastProducer {
+	pub fn produce() -> BroadcastProducer {
+		BroadcastProducer::new(Self::default())
+	}
+
+	pub fn build(self) -> BroadcastProducer {
 		BroadcastProducer::new(self)
 	}
 }
@@ -450,7 +454,7 @@ mod test {
 
 	#[tokio::test]
 	async fn stale_producer() {
-		let mut broadcast = Broadcast::new().produce().dynamic();
+		let mut broadcast = Broadcast::produce().dynamic();
 		let consumer = broadcast.consume();
 
 		// Subscribe to a track, creating a request
@@ -480,7 +484,7 @@ mod test {
 
 	#[tokio::test]
 	async fn requested_unused() {
-		let mut broadcast = Broadcast::new().produce().dynamic();
+		let mut broadcast = Broadcast::produce().dynamic();
 
 		// Subscribe to a track that doesn't exist - this creates a request
 		let consumer1 = broadcast.consume().assert_subscribe_track(&Track::new("unknown_track"));

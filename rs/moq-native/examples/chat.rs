@@ -37,7 +37,7 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin..
 	// A broadcast is a collection of tracks, but in this example we'll only create one.
-	let mut broadcast = moq_lite::Broadcast::new().produce();
+	let mut broadcast = moq_lite::Broadcast::produce();
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.
