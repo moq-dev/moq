@@ -32,8 +32,8 @@ All of this is *on purpose* and produces a better standard in the end.
 But the standard is too immature, full of bloat, and there's too much churn.
 If we had to gate every change behind IETF approval, it would take months to make even the smallest change.
 
-To that end we've created a subset of [MoqTransport](/concept/standard/moq-transport) called [moq-lite](/concept/layer/moq-lite)
-moq-lite is forwards compatible with moq-transport so it works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn)).
+To that end, we've created a forwards-compatible subset of [MoqTransport](/concept/standard/moq-transport) called [moq-lite](/concept/layer/moq-lite).
+moq-lite is forwards compatible with moq-transport, so it works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn)).
 
 On the media side, there are the [MSF](/concept/standard/msf) (catalog) and [LOC](/concept/standard/loc) (container) drafts.
 They are too early/unstable to be useful, so we're using a custom [hang](/concept/layer/hang) media format instead.
