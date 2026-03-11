@@ -37,7 +37,7 @@
     },
     "js/demo": {
       "name": "@moq/demo",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/publish": "workspace:^",
@@ -58,7 +58,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.1.3",
+      "version": "0.2.0",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.8.8",
@@ -77,10 +77,10 @@
     },
     "js/lite": {
       "name": "@moq/lite",
-      "version": "0.1.3",
+      "version": "0.1.5",
       "dependencies": {
         "@moq/signals": "workspace:*",
-        "@moq/web-transport-ws": "^0.1.2",
+        "@moq/web-transport-ws": "^0.3.0",
         "async-mutex": "^0.5.0",
       },
       "devDependencies": {
@@ -97,7 +97,7 @@
     },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.1.0",
+      "version": "0.2.3",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/lite": "workspace:^",
@@ -173,7 +173,7 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.1.0",
+      "version": "0.2.3",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/lite": "workspace:^",
@@ -465,7 +465,7 @@
 
     "@moq/watch": ["@moq/watch@workspace:js/watch"],
 
-    "@moq/web-transport-ws": ["@moq/web-transport-ws@0.1.2", "", {}, "sha512-mYha+AkLNPT3uOGnTA5YWjpxc9LO/yriFSoWzKkR0zN3UMZb9RXbsD8Gbhg1pJZod6QD4tevHoOWTBADYN7yAQ=="],
+    "@moq/web-transport-ws": ["@moq/web-transport-ws@0.3.0", "", {}, "sha512-cuzx5dOsQbFGhP0vxF+rquaYSVFMx5WcNvHAGN7iHH+K2Umfxh2Ucq9Ik02h6xrz3Fg+8nfOrCCLbiVLTYDFmw=="],
 
     "@nodelib/fs.scandir": ["@nodelib/fs.scandir@2.1.5", "", { "dependencies": { "@nodelib/fs.stat": "2.0.5", "run-parallel": "^1.1.9" } }, "sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g=="],
 

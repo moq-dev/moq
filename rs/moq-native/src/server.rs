@@ -131,6 +131,8 @@ pub struct Server {
 	quinn: Option<crate::quinn::QuinnServer>,
 	#[cfg(feature = "quiche")]
 	quiche: Option<crate::quiche::QuicheServer>,
+	#[cfg(feature = "websocket")]
+	websocket: Option<crate::websocket::WebSocketListener>,
 }
 
 impl Server {
@@ -173,7 +175,20 @@ impl Server {
 			quinn,
 			#[cfg(feature = "quiche")]
 			quiche,
+			#[cfg(feature = "websocket")]
+			websocket: None,
 		})
+	}
+
+	/// Add a standalone WebSocket listener on a separate TCP port.
+	///
+	/// This is useful for simple applications that want WebSocket on a dedicated port.
+	/// For applications that need WebSocket on the same HTTP port (e.g. moq-relay),
+	/// use `web_transport_ws::Session::accept()` with your own HTTP framework instead.
+	#[cfg(feature = "websocket")]
+	pub fn with_websocket(mut self, websocket: Option<crate::websocket::WebSocketListener>) -> Self {
+		self.websocket = websocket;
+		self
 	}
 
 	#[cfg(feature = "iroh")]
@@ -254,6 +269,18 @@ impl Server {
 			#[cfg(not(feature = "quiche"))]
 			let quiche_accept = async { None::<()> };
 
+			#[cfg(feature = "websocket")]
+			let ws_ref = self.websocket.as_ref();
+			#[cfg(feature = "websocket")]
+			let ws_accept = async {
+				match ws_ref {
+					Some(ws) => ws.accept().await,
+					None => std::future::pending().await,
+				}
+			};
+			#[cfg(not(feature = "websocket"))]
+			let ws_accept = std::future::pending::<Option<anyhow::Result<()>>>();
+
 			let server = self.moq.clone();
 			let versions = self.versions.clone();
 
@@ -294,6 +321,18 @@ impl Server {
 						})
 					}.boxed());
 				}
+				Some(_res) = ws_accept => {
+					#[cfg(feature = "websocket")]
+					match _res {
+						Ok(session) => {
+							return Some(Request {
+								server,
+								kind: RequestKind::WebSocket(session),
+							});
+						}
+						Err(err) => tracing::debug!(%err, "failed to accept WebSocket session"),
+					}
+				}
 				Some(res) = self.accept.next() => {
 					match res {
 						Ok(session) => return Some(session),
@@ -325,6 +364,11 @@ impl Server {
 		unreachable!("no QUIC backend compiled");
 	}
 
+	#[cfg(feature = "websocket")]
+	pub fn websocket_local_addr(&self) -> Option<net::SocketAddr> {
+		self.websocket.as_ref().and_then(|ws| ws.local_addr().ok())
+	}
+
 	pub async fn close(&mut self) {
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_mut() {
@@ -340,6 +384,10 @@ impl Server {
 		if let Some(iroh) = self.iroh.take() {
 			iroh.close().await;
 		}
+		#[cfg(feature = "websocket")]
+		{
+			let _ = self.websocket.take();
+		}
 		#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
 		unreachable!("no QUIC backend compiled");
 	}
@@ -353,6 +401,8 @@ pub(crate) enum RequestKind {
 	Quiche(crate::quiche::QuicheRequest),
 	#[cfg(feature = "iroh")]
 	Iroh(crate::iroh::IrohRequest),
+	#[cfg(feature = "websocket")]
+	WebSocket(web_transport_ws::Session),
 }
 
 /// An incoming MoQ session that can be accepted or rejected.
@@ -389,6 +439,11 @@ impl Request {
 				request.close(status).await?;
 				Ok(())
 			}
+			#[cfg(feature = "websocket")]
+			RequestKind::WebSocket(_session) => {
+				// WebSocket doesn't support HTTP status codes; just drop to close.
+				Ok(())
+			}
 		}
 	}
 
@@ -419,6 +474,8 @@ impl Request {
 			}
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh(request) => Ok(self.server.accept(request.ok().await?).await?),
+			#[cfg(feature = "websocket")]
+			RequestKind::WebSocket(session) => Ok(self.server.accept(session).await?),
 		}
 	}
 
@@ -431,6 +488,8 @@ impl Request {
 			RequestKind::Quiche(_) => "quic",
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh(_) => "iroh",
+			#[cfg(feature = "websocket")]
+			RequestKind::WebSocket(_) => "websocket",
 		}
 	}
 
@@ -446,6 +505,8 @@ impl Request {
 			RequestKind::Quiche(ref request) => request.url(),
 			#[cfg(feature = "iroh")]
 			RequestKind::Iroh(ref request) => request.url(),
+			#[cfg(feature = "websocket")]
+			RequestKind::WebSocket(_) => None,
 		}
 	}
 }
