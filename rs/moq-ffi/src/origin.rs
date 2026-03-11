@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
-use crate::ffi::CloseSignal;
+use crate::ffi::Abort;
 use crate::producer::MoqBroadcastProducer;
 
 #[derive(uniffi::Object)]
@@ -18,7 +18,7 @@ pub struct MoqOriginConsumer {
 #[derive(uniffi::Object)]
 pub struct MoqAnnounced {
 	inner: tokio::sync::Mutex<moq_lite::OriginConsumer>,
-	close: CloseSignal,
+	abort: Abort,
 }
 
 /// A broadcast announcement from an origin.
@@ -32,7 +32,7 @@ pub struct MoqAnnouncement {
 #[derive(uniffi::Object)]
 pub struct MoqAnnouncedBroadcast {
 	inner: tokio::sync::Mutex<moq_lite::OriginConsumer>,
-	close: CloseSignal,
+	abort: Abort,
 }
 
 impl MoqOriginProducer {
@@ -73,7 +73,7 @@ impl MoqOriginConsumer {
 		let origin = self.inner.clone().with_root(prefix).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnounced {
 			inner: tokio::sync::Mutex::new(origin),
-			close: CloseSignal::new(),
+			abort: Abort::new(),
 		}))
 	}
 
@@ -82,7 +82,7 @@ impl MoqOriginConsumer {
 		let origin = self.inner.clone().with_root(path).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnouncedBroadcast {
 			inner: tokio::sync::Mutex::new(origin),
-			close: CloseSignal::new(),
+			abort: Abort::new(),
 		}))
 	}
 }
@@ -99,7 +99,7 @@ impl MoqAnnounced {
 		loop {
 			tokio::select! {
 				biased;
-				_ = self.close.closed() => return Ok(None),
+				_ = self.abort.aborted() => return Ok(None),
 				result = consumer.announced() => match result {
 					Some((path, Some(broadcast))) => {
 						return Ok(Some(Arc::new(MoqAnnouncement {
@@ -116,13 +116,13 @@ impl MoqAnnounced {
 
 	/// Close this stream, causing any pending `next()` to return `None`.
 	pub fn close(&self) {
-		self.close.close();
+		self.abort.abort();
 	}
 }
 
 impl Drop for MoqAnnounced {
 	fn drop(&mut self) {
-		self.close.close();
+		self.abort.abort();
 	}
 }
 
@@ -152,7 +152,7 @@ impl MoqAnnouncedBroadcast {
 		loop {
 			tokio::select! {
 				biased;
-				_ = self.close.closed() => return Err(MoqError::Closed),
+				_ = self.abort.aborted() => return Err(MoqError::Closed),
 				result = consumer.announced() => match result {
 					Some((_path, Some(broadcast))) => {
 						return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)));
@@ -169,12 +169,12 @@ impl MoqAnnouncedBroadcast {
 
 	/// Close this, causing any pending `broadcast()` call to return `Closed`.
 	pub fn close(&self) {
-		self.close.close();
+		self.abort.abort();
 	}
 }
 
 impl Drop for MoqAnnouncedBroadcast {
 	fn drop(&mut self) {
-		self.close.close();
+		self.abort.abort();
 	}
 }

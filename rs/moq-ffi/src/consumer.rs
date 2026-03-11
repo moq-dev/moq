@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bytes::Buf;
 
 use crate::error::MoqError;
-use crate::ffi::{self, CloseSignal};
+use crate::ffi::{self, Abort};
 
 // ---- Records ----
 
@@ -75,13 +75,13 @@ impl MoqBroadcastConsumer {
 #[derive(uniffi::Object)]
 pub struct MoqCatalogConsumer {
 	inner: tokio::sync::Mutex<hang::CatalogConsumer>,
-	close: CloseSignal,
+	abort: Abort,
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqMediaConsumer {
 	inner: tokio::sync::Mutex<hang::container::OrderedConsumer>,
-	close: CloseSignal,
+	abort: Abort,
 }
 
 // ---- Broadcast ----
@@ -95,7 +95,7 @@ impl MoqBroadcastConsumer {
 		let consumer = hang::CatalogConsumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
 			inner: tokio::sync::Mutex::new(consumer),
-			close: CloseSignal::new(),
+			abort: Abort::new(),
 		}))
 	}
 
@@ -109,7 +109,7 @@ impl MoqBroadcastConsumer {
 		let consumer = hang::container::OrderedConsumer::new(track, latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			inner: tokio::sync::Mutex::new(consumer),
-			close: CloseSignal::new(),
+			abort: Abort::new(),
 		}))
 	}
 }
@@ -123,7 +123,7 @@ impl MoqCatalogConsumer {
 		let mut consumer = self.inner.lock().await;
 		tokio::select! {
 			biased;
-			_ = self.close.closed() => Ok(None),
+			_ = self.abort.aborted() => Ok(None),
 			result = consumer.next() => match result {
 				Ok(Some(catalog)) => Ok(Some(convert_catalog(&catalog))),
 				Ok(None) => Ok(None),
@@ -134,13 +134,13 @@ impl MoqCatalogConsumer {
 
 	/// Close this catalog stream, causing any pending `next()` to return `None`.
 	pub fn close(&self) {
-		self.close.close();
+		self.abort.abort();
 	}
 }
 
 impl Drop for MoqCatalogConsumer {
 	fn drop(&mut self) {
-		self.close.close();
+		self.abort.abort();
 	}
 }
 
@@ -153,7 +153,7 @@ impl MoqMediaConsumer {
 		let mut consumer = self.inner.lock().await;
 		tokio::select! {
 			biased;
-			_ = self.close.closed() => Ok(None),
+			_ = self.abort.aborted() => Ok(None),
 			result = consumer.read() => match result {
 				Ok(Some(frame)) => {
 					let keyframe = frame.is_keyframe();
@@ -177,13 +177,13 @@ impl MoqMediaConsumer {
 
 	/// Close this track, causing any pending `next()` call to return `None`.
 	pub fn close(&self) {
-		self.close.close();
+		self.abort.abort();
 	}
 }
 
 impl Drop for MoqMediaConsumer {
 	fn drop(&mut self) {
-		self.close.close();
+		self.abort.abort();
 	}
 }
 
