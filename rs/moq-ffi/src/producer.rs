@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bytes::Buf;
 
 use crate::error::MoqError;
-use crate::ffi;
+use crate::ffi::Task;
 
 // ---- UniFFI Objects ----
 
@@ -38,7 +38,7 @@ impl MoqBroadcastProducer {
 	/// NOTE: This will do nothing until published to an origin.
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
-		let _guard = ffi::HANDLE.enter();
+		let _guard = Task::<()>::enter();
 		let mut broadcast = moq_lite::BroadcastProducer::new();
 		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 		Ok(Arc::new(Self {
@@ -50,16 +50,15 @@ impl MoqBroadcastProducer {
 	///
 	/// `format` controls the encoding of `init` and frame payloads.
 	pub fn publish_media(&self, format: String, init: Vec<u8>) -> Result<Arc<MoqMediaProducer>, MoqError> {
-		let _guard = ffi::HANDLE.enter();
+		let _guard = Task::<()>::enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 		let format = moq_mux::import::DecoderFormat::from_str(&format)
 			.map_err(|_| MoqError::Codec(format!("unknown format: {format}")))?;
 
 		let mut buf = init.as_slice();
-		let decoder =
-			moq_mux::import::Decoder::new(state.broadcast.clone(), state.catalog.clone(), format, &mut buf)
-				.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let decoder = moq_mux::import::Decoder::new(state.broadcast.clone(), state.catalog.clone(), format, &mut buf)
+			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		if buf.has_remaining() {
 			return Err(MoqError::Codec("init failed: trailing bytes".into()));
@@ -72,7 +71,7 @@ impl MoqBroadcastProducer {
 
 	/// Finish this publisher, finalizing the catalog stream.
 	pub fn finish(&self) -> Result<(), MoqError> {
-		let _guard = ffi::HANDLE.enter();
+		let _guard = Task::<()>::enter();
 		let mut guard = self.state.lock().unwrap();
 		if let Some(mut state) = guard.take() {
 			state.catalog.finish()?;
@@ -98,7 +97,7 @@ impl MoqMediaProducer {
 	///
 	/// `timestamp_us` is the presentation timestamp in microseconds.
 	pub fn write_frame(&self, payload: Vec<u8>, timestamp_us: u64) -> Result<(), MoqError> {
-		let _guard = ffi::HANDLE.enter();
+		let _guard = Task::<()>::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let decoder = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 
@@ -117,7 +116,7 @@ impl MoqMediaProducer {
 
 	/// Finish this media track and finalize encoding.
 	pub fn finish(&self) -> Result<(), MoqError> {
-		let _guard = ffi::HANDLE.enter();
+		let _guard = Task::<()>::enter();
 		let mut guard = self.inner.lock().unwrap();
 		if let Some(mut decoder) = guard.take() {
 			decoder

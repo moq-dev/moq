@@ -4,25 +4,57 @@ use std::sync::Arc;
 use url::Url;
 
 use crate::error::MoqError;
-use crate::ffi::{self, Abort};
+use crate::ffi::Task;
 use crate::origin::MoqOriginProducer;
 
-struct MoqClientState {
+struct ClientState {
 	config: moq_native::ClientConfig,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
 
+impl ClientState {
+	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
+		let client = self
+			.config
+			.clone()
+			.init()
+			.map_err(|err| MoqError::Connect(format!("{err}")))?;
+
+		let publish = self.publish.as_ref().map(|o| o.inner().consume());
+		let consume = self.consume.as_ref().map(|o| o.inner().clone());
+
+		let session = client
+			.with_publish(publish)
+			.with_consume(consume)
+			.connect(url)
+			.await
+			.map_err(|err| MoqError::Connect(format!("{err}")))?;
+
+		Ok(Arc::new(MoqSession {
+			task: Task::new(SessionState { inner: session }),
+		}))
+	}
+}
+
+struct SessionState {
+	inner: moq_lite::Session,
+}
+
+impl SessionState {
+	async fn closed(&self) -> Result<(), MoqError> {
+		self.inner.closed().await.map_err(Into::into)
+	}
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqClient {
-	state: std::sync::Mutex<MoqClientState>,
-	abort: Abort,
+	task: Task<ClientState>,
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqSession {
-	session: moq_lite::Session,
-	abort: Abort,
+	task: Task<SessionState>,
 }
 
 /// Initialize logging with a level string: "error", "warn", "info", "debug", "trace", or "".
@@ -47,35 +79,40 @@ pub fn moq_log_level(level: String) -> Result<(), MoqError> {
 	Ok(())
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl MoqClient {
 	/// Create a new MoQ client with default configuration.
 	#[uniffi::constructor]
 	pub fn new() -> Arc<Self> {
-		let _guard = ffi::HANDLE.enter();
+		let _guard = Task::<()>::enter();
 		Arc::new(Self {
-			state: std::sync::Mutex::new(MoqClientState {
+			task: Task::new(ClientState {
 				config: moq_native::ClientConfig::default(),
 				publish: None,
 				consume: None,
 			}),
-			abort: Abort::new(),
 		})
 	}
 
 	/// Disable TLS certificate verification (for development only).
 	pub fn set_tls_disable_verify(&self, disable: bool) {
-		self.state.lock().unwrap().config.tls.disable_verify = Some(disable);
+		let _ = self.task.with(|state| {
+			state.config.tls.disable_verify = Some(disable);
+		});
 	}
 
 	/// Set the origin to publish local broadcasts to the remote.
 	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		self.state.lock().unwrap().publish = origin;
+		let _ = self.task.with(|state| {
+			state.publish = origin;
+		});
 	}
 
 	/// Set the origin to consume remote broadcasts from the remote.
 	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		self.state.lock().unwrap().consume = origin;
+		let _ = self.task.with(|state| {
+			state.consume = origin;
+		});
 	}
 
 	/// Connect to a MoQ server and wait for the session to be established.
@@ -84,64 +121,34 @@ impl MoqClient {
 	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
 		let url = Url::parse(&url)?;
 
-		let (config, publish, consume) = {
-			let state = self.state.lock().unwrap();
-			(
-				state.config.clone(),
-				state.publish.as_ref().map(|o| o.inner().consume()),
-				state.consume.as_ref().map(|o| o.inner().clone()),
-			)
-		};
-
-		tokio::select! {
-			biased;
-			_ = self.abort.aborted() => Err(MoqError::Cancelled),
-			result = async {
-				let client = config
-					.init()
-					.map_err(|err| MoqError::Connect(format!("{err}")))?;
-
-				client
-					.with_publish(publish)
-					.with_consume(consume)
-					.connect(url)
-					.await
-					.map_err(|err| MoqError::Connect(format!("{err}")))
-			} => {
-				let session = result?;
-				Ok(Arc::new(MoqSession {
-					session,
-					abort: Abort::new(),
-				}))
-			}
-		}
+		self.task
+			.run(|state| async move {
+				let result = state.connect(url).await;
+				(state, result)
+			})
+			.await
 	}
 
 	/// Cancel any outstanding `connect()` call.
 	pub fn cancel(&self) {
-		self.abort.abort();
+		self.task.cancel();
 	}
 }
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl MoqSession {
 	/// Wait until the session is closed.
 	pub async fn closed(&self) -> Result<(), MoqError> {
-		tokio::select! {
-			biased;
-			_ = self.abort.aborted() => Ok(()),
-			res = self.session.closed() => res.map_err(Into::into),
-		}
+		self.task
+			.run(|state| async move {
+				let result = state.closed().await;
+				(state, result)
+			})
+			.await
 	}
 
 	/// Cancel the session.
 	pub fn cancel(&self) {
-		self.abort.abort();
-	}
-}
-
-impl Drop for MoqSession {
-	fn drop(&mut self) {
-		self.abort.abort();
+		self.task.cancel();
 	}
 }

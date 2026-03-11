@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bytes::Buf;
 
 use crate::error::MoqError;
-use crate::ffi::{self, Abort};
+use crate::ffi::Task;
 
 // ---- Records ----
 
@@ -74,14 +74,54 @@ impl MoqBroadcastConsumer {
 
 #[derive(uniffi::Object)]
 pub struct MoqCatalogConsumer {
-	inner: tokio::sync::Mutex<hang::CatalogConsumer>,
-	abort: Abort,
+	task: Task<CatalogState>,
+}
+
+struct CatalogState {
+	inner: hang::CatalogConsumer,
+}
+
+impl CatalogState {
+	async fn next(&mut self) -> Result<Option<MoqCatalog>, MoqError> {
+		match self.inner.next().await {
+			Ok(Some(catalog)) => Ok(Some(convert_catalog(&catalog))),
+			Ok(None) => Ok(None),
+			Err(e) => Err(e.into()),
+		}
+	}
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqMediaConsumer {
-	inner: tokio::sync::Mutex<hang::container::OrderedConsumer>,
-	abort: Abort,
+	task: Task<MediaState>,
+}
+
+struct MediaState {
+	inner: hang::container::OrderedConsumer,
+}
+
+impl MediaState {
+	async fn next(&mut self) -> Result<Option<MoqFrame>, MoqError> {
+		let Some(frame) = self.inner.read().await? else {
+			return Ok(None);
+		};
+
+		let keyframe = frame.is_keyframe();
+		let timestamp_us: u64 = frame
+			.timestamp
+			.as_micros()
+			.try_into()
+			.map_err(|_| MoqError::Codec("timestamp overflow".into()))?;
+
+		let mut buf = frame.payload;
+		let payload = buf.copy_to_bytes(buf.remaining()).to_vec();
+
+		Ok(Some(MoqFrame {
+			payload,
+			timestamp_us,
+			keyframe,
+		}))
+	}
 }
 
 // ---- Broadcast ----
@@ -90,12 +130,11 @@ pub struct MoqMediaConsumer {
 impl MoqBroadcastConsumer {
 	/// Subscribe to the catalog for this broadcast.
 	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
-		let _guard = ffi::HANDLE.enter();
+		let _guard = Task::<()>::enter();
 		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
 		let consumer = hang::CatalogConsumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
-			inner: tokio::sync::Mutex::new(consumer),
-			abort: Abort::new(),
+			task: Task::new(CatalogState { inner: consumer }),
 		}))
 	}
 
@@ -103,87 +142,53 @@ impl MoqBroadcastConsumer {
 	///
 	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
 	pub fn subscribe_media(&self, name: String, max_latency_ms: u64) -> Result<Arc<MoqMediaConsumer>, MoqError> {
-		let _guard = ffi::HANDLE.enter();
+		let _guard = Task::<()>::enter();
 		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = hang::container::OrderedConsumer::new(track, latency);
 		Ok(Arc::new(MoqMediaConsumer {
-			inner: tokio::sync::Mutex::new(consumer),
-			abort: Abort::new(),
+			task: Task::new(MediaState { inner: consumer }),
 		}))
 	}
 }
 
 // ---- Catalog Consumer ----
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl MoqCatalogConsumer {
 	/// Get the next catalog update. Returns `None` when the track ends or is closed.
 	pub async fn next(&self) -> Result<Option<MoqCatalog>, MoqError> {
-		let mut consumer = self.inner.lock().await;
-		tokio::select! {
-			biased;
-			_ = self.abort.aborted() => Ok(None),
-			result = consumer.next() => match result {
-				Ok(Some(catalog)) => Ok(Some(convert_catalog(&catalog))),
-				Ok(None) => Ok(None),
-				Err(e) => Err(e.into()),
-			}
-		}
+		self.task
+			.run(|mut state| async move {
+				let result = state.next().await;
+				(state, result)
+			})
+			.await
 	}
 
 	/// Cancel this catalog stream, causing any pending `next()` to return `None`.
 	pub fn cancel(&self) {
-		self.abort.abort();
-	}
-}
-
-impl Drop for MoqCatalogConsumer {
-	fn drop(&mut self) {
-		self.abort.abort();
+		self.task.cancel();
 	}
 }
 
 // ---- Media Consumer ----
 
-#[uniffi::export(async_runtime = "tokio")]
+#[uniffi::export]
 impl MoqMediaConsumer {
 	/// Get the next frame. Returns `None` when the track ends or is closed.
 	pub async fn next(&self) -> Result<Option<MoqFrame>, MoqError> {
-		let mut consumer = self.inner.lock().await;
-		tokio::select! {
-			biased;
-			_ = self.abort.aborted() => Ok(None),
-			result = consumer.read() => match result {
-				Ok(Some(frame)) => {
-					let keyframe = frame.is_keyframe();
-					let timestamp_us: u64 =
-						frame.timestamp.as_micros().try_into().map_err(|_| MoqError::Codec("timestamp overflow".into()))?;
-
-					let mut buf = frame.payload;
-					let payload = buf.copy_to_bytes(buf.remaining()).to_vec();
-
-					Ok(Some(MoqFrame {
-						payload,
-						timestamp_us,
-						keyframe,
-					}))
-				}
-				Ok(None) => Ok(None),
-				Err(e) => Err(e.into()),
-			}
-		}
+		self.task
+			.run(|mut state| async move {
+				let result = state.next().await;
+				(state, result)
+			})
+			.await
 	}
 
 	/// Cancel this track, causing any pending `next()` call to return `None`.
 	pub fn cancel(&self) {
-		self.abort.abort();
-	}
-}
-
-impl Drop for MoqMediaConsumer {
-	fn drop(&mut self) {
-		self.abort.abort();
+		self.task.cancel();
 	}
 }
 
