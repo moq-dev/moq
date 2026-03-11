@@ -73,16 +73,10 @@ export class Publisher {
 				const msg = new PublishNamespace({ requestId, trackNamespace: path });
 				await msg.encode(stream.writer, this.#session.version);
 
-				// Read response
+				// Read response (RequestOk and PublishNamespaceOk share 0x07 with same format)
 				const respTypeId = await stream.reader.u53();
 				if (respTypeId === RequestOk.id) {
 					await RequestOk.decode(stream.reader, this.#session.version);
-				} else if (respTypeId === PublishNamespace.id + 1) {
-					// v14: PublishNamespaceOk (0x07)
-					const r = stream.reader;
-					// Skip the size-prefixed body
-					const size = await r.u16();
-					await r.read(size);
 				} else {
 					throw new Error(`PublishNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
 				}

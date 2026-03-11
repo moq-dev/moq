@@ -311,6 +311,7 @@ export class ControlStreamAdapter implements Session {
 			const namespace = await Namespace.decode(r);
 			const requestId = this.#namespaces.get(namespace);
 			if (requestId === undefined) throw new Error(`unknown namespace: ${namespace}`);
+			this.#namespaces.delete(namespace);
 			return requestId;
 		};
 
@@ -483,6 +484,9 @@ export class ControlStreamAdapter implements Session {
 			waiter(undefined);
 		}
 		this.#incomingWaiters = [];
+
+		// Clear namespace mappings
+		this.#namespaces.clear();
 
 		// Unblock maxRequestId waiters
 		for (const resolve of this.#maxRequestIdResolves) resolve();

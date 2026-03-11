@@ -53,7 +53,7 @@ export class Subscriber {
 	announced(prefix = Path.empty()): Announced {
 		const announced = new Announced(prefix);
 		for (const active of this.#announced) {
-			if (!active.startsWith(prefix)) continue;
+			if (!Path.hasPrefix(prefix, active)) continue;
 			announced.append({ path: active, active: true });
 		}
 		this.#announcedConsumers.add(announced);
@@ -111,7 +111,7 @@ export class Subscriber {
 
 							this.#announced.add(path);
 							for (const consumer of this.#announcedConsumers) {
-								if (!path.startsWith(consumer.prefix)) continue;
+								if (!Path.hasPrefix(consumer.prefix, path)) continue;
 								consumer.append({ path, active: true });
 							}
 						} else if (msgType === SubscribeNamespaceEntryDone.id) {
@@ -121,7 +121,7 @@ export class Subscriber {
 
 							this.#announced.delete(path);
 							for (const consumer of this.#announcedConsumers) {
-								if (!path.startsWith(consumer.prefix)) continue;
+								if (!Path.hasPrefix(consumer.prefix, path)) continue;
 								consumer.append({ path, active: false });
 							}
 						} else {
