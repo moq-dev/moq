@@ -7,16 +7,21 @@ use crate::error::MoqError;
 
 // ---- UniFFI Objects ----
 
+struct MoqBroadcastProducerState {
+	broadcast: moq_lite::BroadcastProducer,
+	catalog: moq_mux::CatalogProducer,
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastProducer {
-	inner: std::sync::Mutex<Option<(moq_lite::BroadcastProducer, moq_mux::CatalogProducer)>>,
+	state: std::sync::Mutex<Option<MoqBroadcastProducerState>>,
 }
 
 impl MoqBroadcastProducer {
 	pub(crate) fn consume(&self) -> Result<moq_lite::BroadcastConsumer, MoqError> {
-		let guard = self.inner.lock().unwrap();
-		let inner = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(inner.0.consume())
+		let guard = self.state.lock().unwrap();
+		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		Ok(state.broadcast.consume())
 	}
 }
 
@@ -25,36 +30,33 @@ pub struct MoqMediaProducer {
 	inner: std::sync::Mutex<Option<moq_mux::import::Decoder>>,
 }
 
-// ---- Top-level functions ----
-
-/// Create a new broadcast for publishing media tracks.
-///
-/// NOTE: This will do nothing until published to an origin.
-#[uniffi::export]
-pub fn moq_broadcast_produce() -> Result<Arc<MoqBroadcastProducer>, MoqError> {
-	let mut broadcast = moq_lite::BroadcastProducer::new();
-	let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
-	Ok(Arc::new(MoqBroadcastProducer {
-		inner: std::sync::Mutex::new(Some((broadcast, catalog))),
-	}))
-}
-
-// ---- Publisher ----
-
 #[uniffi::export]
 impl MoqBroadcastProducer {
+	/// Create a new broadcast for publishing media tracks.
+	///
+	/// NOTE: This will do nothing until published to an origin.
+	#[uniffi::constructor]
+	pub fn new() -> Result<Arc<Self>, MoqError> {
+		let mut broadcast = moq_lite::BroadcastProducer::new();
+		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
+		Ok(Arc::new(Self {
+			state: std::sync::Mutex::new(Some(MoqBroadcastProducerState { broadcast, catalog })),
+		}))
+	}
+
 	/// Create a new media track for this broadcast.
 	///
 	/// `format` controls the encoding of `init` and frame payloads.
 	pub fn publish_media(&self, format: String, init: Vec<u8>) -> Result<Arc<MoqMediaProducer>, MoqError> {
-		let guard = self.inner.lock().unwrap();
-		let inner = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let guard = self.state.lock().unwrap();
+		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 		let format = moq_mux::import::DecoderFormat::from_str(&format)
 			.map_err(|_| MoqError::Codec(format!("unknown format: {format}")))?;
 
 		let mut buf = init.as_slice();
-		let decoder = moq_mux::import::Decoder::new(inner.0.clone(), inner.1.clone(), format, &mut buf)
-			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
+		let decoder =
+			moq_mux::import::Decoder::new(state.broadcast.clone(), state.catalog.clone(), format, &mut buf)
+				.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		Ok(Arc::new(MoqMediaProducer {
 			inner: std::sync::Mutex::new(Some(decoder)),
@@ -63,11 +65,20 @@ impl MoqBroadcastProducer {
 
 	/// Close this publisher, finishing the catalog stream.
 	pub fn close(&self) -> Result<(), MoqError> {
-		let mut guard = self.inner.lock().unwrap();
-		if let Some((_, mut catalog)) = guard.take() {
-			catalog.finish()?;
+		let mut guard = self.state.lock().unwrap();
+		if let Some(mut state) = guard.take() {
+			state.catalog.finish()?;
 		}
 		Ok(())
+	}
+}
+
+impl Drop for MoqBroadcastProducer {
+	fn drop(&mut self) {
+		let mut guard = self.state.lock().unwrap();
+		if let Some(mut state) = guard.take() {
+			let _ = state.catalog.finish();
+		}
 	}
 }
 

@@ -34,4 +34,7 @@ pub enum MoqError {
 
 	#[error("unauthorized")]
 	Unauthorized,
+
+	#[error("log: {0}")]
+	Log(String),
 }

@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bytes::Buf;
+
 use crate::error::MoqError;
-use crate::ffi;
+use crate::ffi::{self, CloseSignal};
 
 // ---- Records ----
 
@@ -51,7 +53,7 @@ pub struct MoqUser {
 
 /// A decoded media frame.
 #[derive(uniffi::Record)]
-pub struct FrameData {
+pub struct MoqFrame {
 	pub payload: Vec<u8>,
 	pub timestamp_us: u64,
 	pub keyframe: bool,
@@ -72,16 +74,14 @@ impl MoqBroadcastConsumer {
 
 #[derive(uniffi::Object)]
 pub struct MoqCatalogConsumer {
-	inner: Arc<tokio::sync::Mutex<hang::CatalogConsumer>>,
-	close: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-	close_rx: Arc<tokio::sync::Mutex<tokio::sync::oneshot::Receiver<()>>>,
+	inner: tokio::sync::Mutex<hang::CatalogConsumer>,
+	close: CloseSignal,
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqMediaConsumer {
-	inner: Arc<tokio::sync::Mutex<hang::container::OrderedConsumer>>,
-	close: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-	close_rx: Arc<tokio::sync::Mutex<tokio::sync::oneshot::Receiver<()>>>,
+	inner: tokio::sync::Mutex<hang::container::OrderedConsumer>,
+	close: CloseSignal,
 }
 
 // ---- Broadcast ----
@@ -93,11 +93,9 @@ impl MoqBroadcastConsumer {
 		let _guard = ffi::HANDLE.enter();
 		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
 		let consumer = hang::CatalogConsumer::from(track);
-		let (tx, rx) = tokio::sync::oneshot::channel();
 		Ok(Arc::new(MoqCatalogConsumer {
-			inner: Arc::new(tokio::sync::Mutex::new(consumer)),
-			close: std::sync::Mutex::new(Some(tx)),
-			close_rx: Arc::new(tokio::sync::Mutex::new(rx)),
+			inner: tokio::sync::Mutex::new(consumer),
+			close: CloseSignal::new(),
 		}))
 	}
 
@@ -109,11 +107,9 @@ impl MoqBroadcastConsumer {
 		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = hang::container::OrderedConsumer::new(track, latency);
-		let (tx, rx) = tokio::sync::oneshot::channel();
 		Ok(Arc::new(MoqMediaConsumer {
-			inner: Arc::new(tokio::sync::Mutex::new(consumer)),
-			close: std::sync::Mutex::new(Some(tx)),
-			close_rx: Arc::new(tokio::sync::Mutex::new(rx)),
+			inner: tokio::sync::Mutex::new(consumer),
+			close: CloseSignal::new(),
 		}))
 	}
 }
@@ -125,10 +121,9 @@ impl MoqCatalogConsumer {
 	/// Get the next catalog update. Returns `None` when the track ends or is closed.
 	pub async fn next(&self) -> Result<Option<MoqCatalog>, MoqError> {
 		let mut consumer = self.inner.lock().await;
-		let mut close_rx = self.close_rx.lock().await;
 		tokio::select! {
 			biased;
-			_ = &mut *close_rx => Ok(None),
+			_ = self.close.closed() => Ok(None),
 			result = consumer.next() => match result {
 				Ok(Some(catalog)) => Ok(Some(convert_catalog(&catalog))),
 				Ok(None) => Ok(None),
@@ -139,9 +134,13 @@ impl MoqCatalogConsumer {
 
 	/// Close this catalog stream, causing any pending `next()` to return `None`.
 	pub fn close(&self) {
-		if let Some(sender) = self.close.lock().unwrap().take() {
-			let _ = sender.send(());
-		}
+		self.close.close();
+	}
+}
+
+impl Drop for MoqCatalogConsumer {
+	fn drop(&mut self) {
+		self.close.close();
 	}
 }
 
@@ -150,26 +149,24 @@ impl MoqCatalogConsumer {
 #[uniffi::export]
 impl MoqMediaConsumer {
 	/// Get the next frame. Returns `None` when the track ends or is closed.
-	pub async fn next(&self) -> Result<Option<FrameData>, MoqError> {
+	pub async fn next(&self) -> Result<Option<MoqFrame>, MoqError> {
 		let mut consumer = self.inner.lock().await;
-		let mut close_rx = self.close_rx.lock().await;
 		tokio::select! {
 			biased;
-			_ = &mut *close_rx => Ok(None),
+			_ = self.close.closed() => Ok(None),
 			result = consumer.read() => match result {
 				Ok(Some(frame)) => {
-					let payload: Vec<u8> = (0..frame.payload.num_chunks())
-						.filter_map(|i| frame.payload.get_chunk(i))
-						.flat_map(|chunk| chunk.iter().copied())
-						.collect();
-
+					let keyframe = frame.is_keyframe();
 					let timestamp_us: u64 =
 						frame.timestamp.as_micros().try_into().map_err(|_| MoqError::Codec("timestamp overflow".into()))?;
 
-					Ok(Some(FrameData {
+					let mut buf = frame.payload;
+					let payload = buf.copy_to_bytes(buf.remaining()).to_vec();
+
+					Ok(Some(MoqFrame {
 						payload,
 						timestamp_us,
-						keyframe: frame.is_keyframe(),
+						keyframe,
 					}))
 				}
 				Ok(None) => Ok(None),
@@ -180,9 +177,13 @@ impl MoqMediaConsumer {
 
 	/// Close this track, causing any pending `next()` call to return `None`.
 	pub fn close(&self) {
-		if let Some(sender) = self.close.lock().unwrap().take() {
-			let _ = sender.send(());
-		}
+		self.close.close();
+	}
+}
+
+impl Drop for MoqMediaConsumer {
+	fn drop(&mut self) {
+		self.close.close();
 	}
 }
 
