@@ -13,7 +13,7 @@ The `@moq/lite` client specifically implements the networking layer called [moq-
 
 Check out [hang](../hang) for a higher-level media library that uses this package.
 
-> **Note:** moq-lite is a forwards-compatible subset of [MoqTransport](https://datatracker.ietf.org/group/moq/documents/) — moq-lite clients work with any moq-transport CDN. See the [compatibility docs](https://moq.dev/concept/layer/moq-lite#compatibility) for details.
+> **Note:** moq-lite is a forwards-compatible subset of [MoqTransport](https://datatracker.ietf.org/group/moq/documents/), so moq-lite clients work with any moq-transport CDN. See the [compatibility docs](https://moq.dev/concept/layer/moq-lite#compatibility) for details.
 
 ## Quick Start
 
