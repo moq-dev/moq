@@ -53,6 +53,14 @@ pub(crate) async fn race_handle(
 	if !config.enabled {
 		return None;
 	}
+
+	// Only attempt WebSocket for HTTP-based schemes.
+	// Custom protocols (moqt://, moql://) use raw QUIC and don't support WebSocket.
+	match url.scheme() {
+		"http" | "https" | "ws" | "wss" => {}
+		_ => return None,
+	}
+
 	let res = connect(config, tls, url).await;
 	if let Err(err) = &res {
 		tracing::warn!(%err, "WebSocket connection failed");
