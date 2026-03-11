@@ -1,4 +1,4 @@
-//! C FFI bindings for [`moq_lite`].
+//! C bindings for [`moq_lite`].
 //!
 //! Provides a C-compatible API for real-time pub/sub over QUIC.
 //!

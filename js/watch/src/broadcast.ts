@@ -1,5 +1,6 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
+import { Path } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
 export interface BroadcastProps {
@@ -10,7 +11,7 @@ export interface BroadcastProps {
 	enabled?: boolean | Signal<boolean>;
 
 	// The broadcast name.
-	name?: Moq.Path.Valid | Signal<Moq.Path.Valid | undefined>;
+	name?: Moq.Path.Valid | Signal<Moq.Path.Valid>;
 
 	// Whether to reload the broadcast when it goes offline.
 	// Defaults to false; pass true to wait for an announcement before subscribing.
@@ -22,7 +23,7 @@ export class Broadcast {
 	connection: Signal<Moq.Connection.Established | undefined>;
 
 	enabled: Signal<boolean>;
-	name: Signal<Moq.Path.Valid | undefined>;
+	name: Signal<Moq.Path.Valid>;
 	status = new Signal<"offline" | "loading" | "live">("offline");
 	reload: Signal<boolean>;
 
@@ -39,7 +40,7 @@ export class Broadcast {
 
 	constructor(props?: BroadcastProps) {
 		this.connection = Signal.from(props?.connection);
-		this.name = Signal.from(props?.name);
+		this.name = Signal.from(props?.name ?? Path.empty());
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? false);
 
@@ -63,15 +64,27 @@ export class Broadcast {
 		if (!conn) return;
 
 		const name = effect.get(this.name);
-		if (name === undefined) return;
 
 		const announced = conn.announced(name);
 		effect.cleanup(() => announced.close());
+
+		// Warn if the relay doesn't support announcements (e.g. Cloudflare)
+		let warnTimer: ReturnType<typeof setTimeout> | undefined;
+		if (conn.url.hostname.endsWith("mediaoverquic.com")) {
+			warnTimer = setTimeout(() => {
+				console.warn(
+					"Cloudflare relay does not support the reload feature yet. Remove the `reload` attribute to connect without waiting for announcements.",
+				);
+			}, 1000);
+			effect.cleanup(() => clearTimeout(warnTimer));
+		}
 
 		effect.spawn(async () => {
 			for (;;) {
 				const update = await announced.next();
 				if (!update) break;
+
+				clearTimeout(warnTimer);
 
 				// Require full equality
 				if (update.path !== name) {
@@ -90,7 +103,6 @@ export class Broadcast {
 		const [_enabled, _announced, conn] = values;
 
 		const name = effect.get(this.name);
-		if (name === undefined) return;
 
 		const broadcast = conn.consume(name);
 		effect.cleanup(() => broadcast.close());

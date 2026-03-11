@@ -45,13 +45,14 @@ pub fn enter<C: ReturnCode, F: FnOnce() -> C>(f: F) -> i32 {
 ///
 /// Stores a function pointer and user data pointer to call C callbacks
 /// from async Rust code.
+#[derive(Clone, Copy)]
 pub struct OnStatus {
 	user_data: *mut c_void,
 	on_status: Option<extern "C" fn(user_data: *mut c_void, code: i32)>,
 }
 
 impl OnStatus {
-	/// Create a new callback wrapper.
+	/// Create a new callback wrapper from a C function pointer.
 	///
 	/// # Safety
 	/// - The caller must ensure user_data remains valid for the callback's lifetime.
@@ -64,9 +65,7 @@ impl OnStatus {
 	}
 
 	/// Invoke the callback with a result code.
-	///
-	/// Using &mut avoids the need for Sync.
-	pub fn call<C: ReturnCode>(&mut self, ret: C) {
+	pub fn call<C: ReturnCode>(&self, ret: C) {
 		if let Some(on_status) = &self.on_status {
 			on_status(self.user_data, ret.code());
 		}

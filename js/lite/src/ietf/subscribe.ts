@@ -1,6 +1,5 @@
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { MessageParameters, Parameters } from "./parameters.ts";
@@ -36,25 +35,26 @@ export class Subscribe {
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
+		if (version === Version.DRAFT_17) {
+			await w.u62(0n); // required_request_id_delta = 0
+		}
 		await Namespace.encode(w, this.trackNamespace);
 		await w.string(this.trackName);
 
-		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			// v15: fields moved into parameters
-			const params = new MessageParameters();
-			params.subscriberPriority = this.subscriberPriority;
-			params.groupOrder = GROUP_ORDER;
-			params.forward = true;
-			params.subscriptionFilter = 0x2; // LargestObject
-			await params.encode(w, version);
-		} else if (version === Version.DRAFT_14) {
+		if (version === Version.DRAFT_14) {
 			await w.u8(this.subscriberPriority);
 			await w.u8(GROUP_ORDER);
 			await w.bool(true); // forward = true
 			await w.u53(0x2); // filter type = LargestObject
 			await w.u53(0); // no parameters
 		} else {
-			unreachable(version);
+			// v15+: fields moved into parameters
+			const params = new MessageParameters();
+			params.subscriberPriority = this.subscriberPriority;
+			params.groupOrder = GROUP_ORDER;
+			params.forward = true;
+			params.subscriptionFilter = 0x2; // LargestObject
+			await params.encode(w, version);
 		}
 	}
 
@@ -68,33 +68,13 @@ export class Subscribe {
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<Subscribe> {
 		const requestId = await r.u62();
+		if (version === Version.DRAFT_17) {
+			await r.u62(); // required_request_id_delta (read and ignore)
+		}
 		const trackNamespace = await Namespace.decode(r);
 		const trackName = await r.string();
 
-		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			// v15: fields are in parameters
-			const params = await MessageParameters.decode(r, version);
-			const subscriberPriority = params.subscriberPriority ?? 128;
-			let groupOrder = params.groupOrder ?? GROUP_ORDER;
-			if (groupOrder > 2) {
-				throw new Error(`unknown group order: ${groupOrder}`);
-			}
-			if (groupOrder === 0) {
-				groupOrder = GROUP_ORDER; // default to descending
-			}
-
-			const forward = params.forward ?? true;
-			if (!forward) {
-				throw new Error(`unsupported forward value: ${forward}`);
-			}
-
-			const filterType = params.subscriptionFilter ?? 0x2;
-			if (filterType !== 0x1 && filterType !== 0x2) {
-				throw new Error(`unsupported filter type: ${filterType}`);
-			}
-
-			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority });
-		} else if (version === Version.DRAFT_14) {
+		if (version === Version.DRAFT_14) {
 			const subscriberPriority = await r.u8();
 
 			let groupOrder = await r.u8();
@@ -118,39 +98,60 @@ export class Subscribe {
 			await Parameters.decode(r, version); // ignore parameters
 
 			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority });
-		} else {
-			unreachable(version);
 		}
+		// v15+: fields are in parameters
+		const params = await MessageParameters.decode(r, version);
+		const subscriberPriority = params.subscriberPriority ?? 128;
+		let groupOrder = params.groupOrder ?? GROUP_ORDER;
+		if (groupOrder > 2) {
+			throw new Error(`unknown group order: ${groupOrder}`);
+		}
+		if (groupOrder === 0) {
+			groupOrder = GROUP_ORDER; // default to descending
+		}
+
+		const forward = params.forward ?? true;
+		if (!forward) {
+			throw new Error(`unsupported forward value: ${forward}`);
+		}
+
+		const filterType = params.subscriptionFilter ?? 0x2;
+		if (filterType !== 0x1 && filterType !== 0x2) {
+			throw new Error(`unsupported filter type: ${filterType}`);
+		}
+
+		return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority });
 	}
 }
 
 export class SubscribeOk {
 	static id = 0x04;
 
-	requestId: bigint;
+	requestId: bigint | undefined;
 	trackAlias: bigint;
 
-	constructor({ requestId, trackAlias }: { requestId: bigint; trackAlias: bigint }) {
+	constructor({ requestId, trackAlias }: { requestId?: bigint; trackAlias: bigint }) {
 		this.requestId = requestId;
 		this.trackAlias = trackAlias;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
-		await w.u62(this.requestId);
+		if (version !== Version.DRAFT_17) {
+			if (this.requestId === undefined) throw new Error("requestId required for draft14-16");
+			await w.u62(this.requestId);
+		}
 		await w.u62(this.trackAlias);
 
-		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			// v15: just parameters after track_alias
-			const params = new MessageParameters();
-			params.groupOrder = GROUP_ORDER;
-			await params.encode(w, version);
-		} else if (version === Version.DRAFT_14) {
+		if (version === Version.DRAFT_14) {
 			await w.u62(0n); // expires = 0
 			await w.u8(GROUP_ORDER);
 			await w.bool(false); // content exists = false
 			await w.u53(0); // no parameters
 		} else {
-			unreachable(version);
+			// v15+: just parameters after track_alias
+			const params = new MessageParameters();
+			params.groupOrder = GROUP_ORDER;
+			await params.encode(w, version);
 		}
 	}
 
@@ -163,13 +164,10 @@ export class SubscribeOk {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeOk> {
-		const requestId = await r.u62();
+		const requestId = version === Version.DRAFT_17 ? undefined : await r.u62();
 		const trackAlias = await r.u62();
 
-		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			// v15: just parameters
-			await MessageParameters.decode(r, version);
-		} else if (version === Version.DRAFT_14) {
+		if (version === Version.DRAFT_14) {
 			const expires = await r.u62();
 			if (expires !== BigInt(0)) {
 				throw new Error(`unsupported expires: ${expires}`);
@@ -186,7 +184,8 @@ export class SubscribeOk {
 
 			await Parameters.decode(r, version); // ignore parameters
 		} else {
-			unreachable(version);
+			// v15+: just parameters
+			await MessageParameters.decode(r, version);
 		}
 
 		return new SubscribeOk({ requestId, trackAlias });

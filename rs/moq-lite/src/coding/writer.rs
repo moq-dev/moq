@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use crate::{Error, coding::*};
+use crate::{Error, coding::*, ietf};
 
 /// A wrapper around a [web_transport_trait::SendStream] that will reset on Drop.
 pub struct Writer<S: web_transport_trait::SendStream, V> {
@@ -93,6 +93,14 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 			buffer: std::mem::take(&mut self.buffer),
 			version,
 		}
+	}
+}
+
+impl<S: web_transport_trait::SendStream> Writer<S, ietf::Version> {
+	/// Encode an IETF [Message] to the stream, writing `[type_id][size][body]`.
+	pub async fn encode_message<T: ietf::Message>(&mut self, msg: &T) -> Result<(), Error> {
+		self.encode(&T::ID).await?;
+		self.encode(msg).await
 	}
 }
 
