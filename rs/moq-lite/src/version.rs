@@ -15,8 +15,7 @@ pub(crate) const NEGOTIATED: [Version; 3] = [
 ];
 
 /// ALPN strings for supported versions.
-// NOTE: ALPN_17 intentionally excluded until draft-17 support is complete.
-pub const ALPNS: &[&str] = &[ALPN_LITE_03, ALPN_LITE, ALPN_16, ALPN_15, ALPN_14];
+pub const ALPNS: &[&str] = &[ALPN_LITE_03, ALPN_LITE, ALPN_17, ALPN_16, ALPN_15, ALPN_14];
 
 // ALPN constants
 pub const ALPN_LITE: &str = "moql";
@@ -196,13 +195,12 @@ pub struct Versions(Vec<Version>);
 
 impl Versions {
 	/// All supported versions exposed by default.
-	///
-	/// This list intentionally omits Draft17 while draft-17 support remains incomplete.
 	pub fn all() -> Self {
 		Self(vec![
 			Version::Lite(lite::Version::Lite03),
 			Version::Lite(lite::Version::Lite02),
 			Version::Lite(lite::Version::Lite01),
+			Version::Ietf(ietf::Version::Draft17),
 			Version::Ietf(ietf::Version::Draft16),
 			Version::Ietf(ietf::Version::Draft15),
 			Version::Ietf(ietf::Version::Draft14),
