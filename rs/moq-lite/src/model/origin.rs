@@ -234,6 +234,8 @@ impl OriginNode {
 
 			// If there's a backup broadcast, pick the one with fewest hops (most recent as tiebreaker).
 			if !entry.backup.is_empty() {
+				let old_hops = broadcast.info.hops;
+
 				// Reverse enumerate so that ties prefer the most recently added (last in vec).
 				let best = entry
 					.backup
@@ -245,7 +247,13 @@ impl OriginNode {
 					.unwrap();
 				let active = entry.backup.swap_remove(best);
 				entry.active = active;
-				self.notify.lock().reannounce(full, &entry.active);
+
+				// Only reannounce if the new active has fewer or equal hops.
+				// If the new route is worse (higher hops), skip the reannounce to avoid
+				// cascading disruption downstream.
+				if entry.active.info.hops <= old_hops {
+					self.notify.lock().reannounce(full, &entry.active);
+				}
 			} else {
 				// No more backups, so remove the entry.
 				self.broadcast = None;
@@ -803,20 +811,17 @@ mod tests {
 		origin.publish_broadcast("test", farther_consumer.clone());
 		consumer.assert_next_wait();
 
-		// Drop the active (1 hop). Should reannounce with the best backup (3 hops, not 5).
+		// Drop the active (1 hop). Best backup is 3 hops, which is worse, so no reannounce.
 		drop(close);
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
-		consumer.assert_next_none("test");
-		consumer.assert_next("test", &far_consumer);
+		// The active is silently replaced with the 3-hop backup. No notification.
 		consumer.assert_next_wait();
 
-		// Drop the 3-hop broadcast. Should reannounce with the 5-hop backup.
+		// Drop the 3-hop broadcast. Best backup is 5 hops, which is worse, so no reannounce.
 		drop(far);
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
-		consumer.assert_next_none("test");
-		consumer.assert_next("test", &farther_consumer);
 		consumer.assert_next_wait();
 
 		// Drop the last one. Should unannounce.
