@@ -20,7 +20,7 @@ The core networking is delegated to a QUIC library but the rest is in applicatio
 - 🎯 **Multi-language** with both Rust (native) and TypeScript (web) libraries.
 - 🔧 **Generic** for any live data, not just media. Includes text chat as both an example and a core feature.
 
-> **Note:** This project implements [moq-lite](https://moq.dev/concept/layer/moq-lite), a forwards-compatible subset of the [IETF MoqTransport specification](https://datatracker.ietf.org/group/moq/documents/). moq-lite clients work with any moq-transport CDN. The focus is narrower, prioritizing simplicity and deployability.
+> **Note:** This project implements [moq-lite](https://moq.dev/concept/layer/moq-lite), a forwards-compatible subset of the [IETF MoqTransport specification](https://datatracker.ietf.org/group/moq/documents/). moq-lite clients work with any moq-transport CDN (ex. Cloudflare). The focus is narrower, prioritizing simplicity and deployability.
 
 
 ## Demo
