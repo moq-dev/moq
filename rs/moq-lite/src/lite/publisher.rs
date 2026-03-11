@@ -197,9 +197,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						Some((path, active)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 
-							if active.is_some() {
-								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-								let msg = lite::Announce::Active { suffix, hops: 0 };
+							if let Some(broadcast) = active {
+								tracing::debug!(broadcast = %origin.absolute(&path), hops = broadcast.info.hops, "announce");
+								let msg = lite::Announce::Active { suffix, hops: broadcast.info.hops };
 								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");

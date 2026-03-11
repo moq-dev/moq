@@ -3,7 +3,7 @@ use hang::catalog::Container;
 use mp4_atom::{Decode, Encode};
 
 fn run_fmp4(data: &[u8], passthrough: bool) -> hang::Catalog {
-	let mut broadcast = moq_lite::BroadcastProducer::new();
+	let mut broadcast = moq_lite::BroadcastProducer::default();
 	let catalog = crate::CatalogProducer::new(&mut broadcast).unwrap();
 
 	let config = super::Fmp4Config { passthrough };

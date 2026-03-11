@@ -145,11 +145,16 @@ impl OriginNode {
 			self.entry(dir).lock().publish(&full, broadcast, &relative);
 		} else if let Some(existing) = &mut self.broadcast {
 			// This node is a leaf with an existing broadcast.
-			let old = existing.active.clone();
-			existing.active = broadcast.clone();
-			existing.backup.push(old);
-
-			self.notify.lock().reannounce(full, broadcast);
+			if broadcast.info.hops < existing.active.info.hops {
+				// New broadcast has fewer hops, so it becomes active.
+				let old = existing.active.clone();
+				existing.active = broadcast.clone();
+				existing.backup.push(old);
+				self.notify.lock().reannounce(full, broadcast);
+			} else {
+				// Same or more hops, just add to backup.
+				existing.backup.push(broadcast.clone());
+			}
 		} else {
 			// This node is a leaf with no existing broadcast.
 			self.broadcast = Some(OriginBroadcast {
@@ -227,8 +232,18 @@ impl OriginNode {
 			// Okay so it must be the active broadcast or else we fucked up.
 			assert!(entry.active.is_clone(&broadcast));
 
-			// If there's a backup broadcast, then announce it.
-			if let Some(active) = entry.backup.pop() {
+			// If there's a backup broadcast, pick the one with fewest hops (most recent as tiebreaker).
+			if !entry.backup.is_empty() {
+				// Reverse enumerate so that ties prefer the most recently added (last in vec).
+				let best = entry
+					.backup
+					.iter()
+					.enumerate()
+					.rev()
+					.min_by_key(|(_, b)| b.info.hops)
+					.map(|(i, _)| i)
+					.unwrap();
+				let active = entry.backup.swap_remove(best);
 				entry.active = active;
 				self.notify.lock().reannounce(full, &entry.active);
 			} else {
@@ -360,7 +375,7 @@ impl OriginProducer {
 	/// This is a helper method when you only want to publish a broadcast to a single origin.
 	/// Returns [None] if the broadcast is not allowed to be published.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Option<BroadcastProducer> {
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 		self.publish_broadcast(path, broadcast.consume()).then_some(broadcast)
 	}
 
@@ -619,8 +634,8 @@ mod tests {
 	#[tokio::test]
 	async fn test_announce() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
 
 		let mut consumer1 = origin.consume();
 		// Make a new consumer that should get it.
@@ -684,9 +699,10 @@ mod tests {
 	async fn test_duplicate() {
 		let origin = Origin::produce();
 
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
-		let broadcast3 = Broadcast::produce();
+		// All same hops (0), so first becomes active, rest go to backup.
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
+		let broadcast3 = Broadcast::new().produce();
 
 		let consumer1 = broadcast1.consume();
 		let consumer2 = broadcast2.consume();
@@ -699,13 +715,11 @@ mod tests {
 		origin.publish_broadcast("test", consumer3.clone());
 		assert!(consumer.consume_broadcast("test").is_some());
 
+		// Only the first publish triggers an announce (same hops = no reannounce).
 		consumer.assert_next("test", &consumer1);
-		consumer.assert_next_none("test");
-		consumer.assert_next("test", &consumer2);
-		consumer.assert_next_none("test");
-		consumer.assert_next("test", &consumer3);
+		consumer.assert_next_wait();
 
-		// Drop the backup, nothing should change.
+		// Drop a backup, nothing should change.
 		drop(broadcast2);
 
 		// Wait for the async task to run.
@@ -714,18 +728,18 @@ mod tests {
 		assert!(consumer.consume_broadcast("test").is_some());
 		consumer.assert_next_wait();
 
-		// Drop the active, we should reannounce.
-		drop(broadcast3);
+		// Drop the active, we should reannounce with the remaining backup (broadcast3, most recent).
+		drop(broadcast1);
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
 		assert!(consumer.consume_broadcast("test").is_some());
 		consumer.assert_next_none("test");
-		consumer.assert_next("test", &consumer1);
+		consumer.assert_next("test", &consumer3);
 
 		// Drop the final broadcast, we should unannounce.
-		drop(broadcast1);
+		drop(broadcast3);
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
@@ -738,8 +752,8 @@ mod tests {
 	#[tokio::test]
 	async fn test_duplicate_reverse() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
 
 		origin.publish_broadcast("test", broadcast1.consume());
 		origin.publish_broadcast("test", broadcast2.consume());
@@ -760,9 +774,83 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn test_hops_ordering() {
+		let origin = Origin::produce();
+
+		// Publish a broadcast with 3 hops.
+		let far = Broadcast::new().with_hops(3).produce();
+		let far_consumer = far.consume();
+
+		let mut consumer = origin.consume();
+
+		origin.publish_broadcast("test", far_consumer.clone());
+		consumer.assert_next("test", &far_consumer);
+		consumer.assert_next_wait();
+
+		// Now publish a closer broadcast (1 hop). It should replace the active and reannounce.
+		let close = Broadcast::new().with_hops(1).produce();
+		let close_consumer = close.consume();
+
+		origin.publish_broadcast("test", close_consumer.clone());
+		consumer.assert_next_none("test");
+		consumer.assert_next("test", &close_consumer);
+		consumer.assert_next_wait();
+
+		// Publish a broadcast with more hops (5). Should go to backup silently.
+		let farther = Broadcast::new().with_hops(5).produce();
+		let farther_consumer = farther.consume();
+
+		origin.publish_broadcast("test", farther_consumer.clone());
+		consumer.assert_next_wait();
+
+		// Drop the active (1 hop). Should reannounce with the best backup (3 hops, not 5).
+		drop(close);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+		consumer.assert_next_none("test");
+		consumer.assert_next("test", &far_consumer);
+		consumer.assert_next_wait();
+
+		// Drop the 3-hop broadcast. Should reannounce with the 5-hop backup.
+		drop(far);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+		consumer.assert_next_none("test");
+		consumer.assert_next("test", &farther_consumer);
+		consumer.assert_next_wait();
+
+		// Drop the last one. Should unannounce.
+		drop(farther);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+		consumer.assert_next_none("test");
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_hops_same_no_reannounce() {
+		let origin = Origin::produce();
+
+		let b1 = Broadcast::new().with_hops(2).produce();
+		let b1c = b1.consume();
+
+		let mut consumer = origin.consume();
+
+		origin.publish_broadcast("test", b1c.clone());
+		consumer.assert_next("test", &b1c);
+
+		// Publish another broadcast with same hops. Should go to backup, no reannounce.
+		let b2 = Broadcast::new().with_hops(2).produce();
+		let _b2c = b2.consume();
+
+		origin.publish_broadcast("test", _b2c.clone());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
 	async fn test_double_publish() {
 		let origin = Origin::produce();
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		// Ensure it doesn't crash.
 		origin.publish_broadcast("test", broadcast.consume());
@@ -781,7 +869,7 @@ mod tests {
 	#[should_panic]
 	async fn test_128() {
 		let origin = Origin::produce();
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		let mut consumer = origin.consume();
 		for i in 0..256 {
@@ -796,7 +884,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_128_fix() {
 		let origin = Origin::produce();
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		let mut consumer = origin.consume();
 		for i in 0..256 {
@@ -812,7 +900,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_with_root_basic() {
 		let origin = Origin::produce();
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		// Create a producer with root "/foo"
 		let foo_producer = origin.with_root("foo").expect("should create root");
@@ -833,7 +921,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_with_root_nested() {
 		let origin = Origin::produce();
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		// Create nested roots
 		let foo_producer = origin.with_root("foo").expect("should create foo root");
@@ -855,7 +943,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_publish_only_allows() {
 		let origin = Origin::produce();
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		// Create a producer that can only publish to "allowed" paths
 		let limited_producer = origin
@@ -884,9 +972,9 @@ mod tests {
 	#[tokio::test]
 	async fn test_consume_only_filters() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
-		let broadcast3 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
+		let broadcast3 = Broadcast::new().produce();
 
 		let mut consumer = origin.consume();
 
@@ -914,9 +1002,9 @@ mod tests {
 	#[tokio::test]
 	async fn test_consume_only_multiple_prefixes() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
-		let broadcast3 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
+		let broadcast3 = Broadcast::new().produce();
 
 		origin.publish_broadcast("foo/test", broadcast1.consume());
 		origin.publish_broadcast("bar/test", broadcast2.consume());
@@ -935,7 +1023,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_with_root_and_publish_only() {
 		let origin = Origin::produce();
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		// User connects to /foo root
 		let foo_producer = origin.with_root("foo").expect("should create foo root");
@@ -968,9 +1056,9 @@ mod tests {
 	#[tokio::test]
 	async fn test_with_root_and_consume_only() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
-		let broadcast3 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
+		let broadcast3 = Broadcast::new().produce();
 
 		// Publish broadcasts
 		origin.publish_broadcast("foo/bar/test", broadcast1.consume());
@@ -1013,7 +1101,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_wildcard_permission() {
 		let origin = Origin::produce();
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		// Producer with root access (empty string means wildcard)
 		let root_producer = origin.clone();
@@ -1030,8 +1118,8 @@ mod tests {
 	#[tokio::test]
 	async fn test_consume_broadcast_with_permissions() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
 
 		origin.publish_broadcast("allowed/test", broadcast1.consume());
 		origin.publish_broadcast("notallowed/test", broadcast2.consume());
@@ -1058,7 +1146,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_nested_paths_with_permissions() {
 		let origin = Origin::produce();
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		// Create producer limited to "a/b/c"
 		let limited_producer = origin
@@ -1079,9 +1167,9 @@ mod tests {
 	#[tokio::test]
 	async fn test_multiple_consumers_with_different_permissions() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
-		let broadcast3 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
+		let broadcast3 = Broadcast::new().produce();
 
 		// Publish to different paths
 		origin.publish_broadcast("foo/test", broadcast1.consume());
@@ -1116,8 +1204,8 @@ mod tests {
 	#[tokio::test]
 	async fn test_select_with_empty_prefix() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
 
 		// User with root "demo" allowed to subscribe to "worm-node" and "foobar"
 		let demo_producer = origin.with_root("demo").expect("should create demo root");
@@ -1143,9 +1231,9 @@ mod tests {
 	#[tokio::test]
 	async fn test_select_narrowing_scope() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
-		let broadcast3 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
+		let broadcast3 = Broadcast::new().produce();
 
 		// User with root "demo" allowed to subscribe to "worm-node" and "foobar"
 		let demo_producer = origin.with_root("demo").expect("should create demo root");
@@ -1180,9 +1268,9 @@ mod tests {
 	#[tokio::test]
 	async fn test_select_multiple_roots_with_empty_prefix() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
-		let broadcast3 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
+		let broadcast3 = Broadcast::new().produce();
 
 		// Producer with multiple allowed roots
 		let limited_producer = origin
@@ -1209,7 +1297,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_publish_only_with_empty_prefix() {
 		let origin = Origin::produce();
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		// Producer with specific allowed paths
 		let limited_producer = origin
@@ -1231,9 +1319,9 @@ mod tests {
 	#[tokio::test]
 	async fn test_select_narrowing_to_deeper_path() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
-		let broadcast3 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
+		let broadcast3 = Broadcast::new().produce();
 
 		// Producer with broad permission
 		let limited_producer = origin
@@ -1330,8 +1418,8 @@ mod tests {
 	#[tokio::test]
 	async fn test_select_maintains_access_with_wider_prefix() {
 		let origin = Origin::produce();
-		let broadcast1 = Broadcast::produce();
-		let broadcast2 = Broadcast::produce();
+		let broadcast1 = Broadcast::new().produce();
+		let broadcast2 = Broadcast::new().produce();
 
 		// Setup: user with root "demo" allowed to subscribe to specific paths
 		let demo_producer = origin.with_root("demo").expect("should create demo root");
