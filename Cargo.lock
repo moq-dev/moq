@@ -6480,6 +6480,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0ef62e69762fbb9386dcb6c87cd3dd05d525fa8a3a579a290892e60ddbda47e"
 dependencies = [
  "anyhow",
+ "async-compat",
  "bytes",
  "once_cell",
  "static_assertions",

@@ -114,7 +114,7 @@ find_cdylib() {
     local target="$1"
     local target_dir="$TARGET_BASE_DIR/$target/release"
 
-    if [[ "$(uname)" == "Darwin" ]]; then
+    if [[ "$target" == *"-apple-"* ]]; then
         echo "$target_dir/libmoq_ffi.dylib"
     elif [[ "$target" == *"-windows-"* ]]; then
         echo "$target_dir/moq_ffi.dll"
@@ -196,7 +196,7 @@ if [[ "$TARGET" == "universal-apple-darwin" ]]; then
 
 elif [[ "$TARGET" == *"-windows-"* ]]; then
     TARGET_DIR="$TARGET_BASE_DIR/$TARGET/release"
-    cp "$TARGET_DIR/moq_ffi.dll" "$PACKAGE_DIR/lib/" 2>/dev/null || true
+    cp "$TARGET_DIR/moq_ffi.dll" "$PACKAGE_DIR/lib/"
     cp "$TARGET_DIR/moq_ffi.dll.lib" "$PACKAGE_DIR/lib/" 2>/dev/null || true
     cp "$TARGET_DIR/moq_ffi.lib" "$PACKAGE_DIR/lib/" 2>/dev/null || true
 
@@ -247,9 +247,14 @@ echo "Created: $OUTPUT_DIR/$ARCHIVE"
 # Generate bindings if we can run the library on this host
 cd "$WORKSPACE_DIR"
 if can_run_on_host "$TARGET"; then
-    # For universal builds, use the arm64 dylib (we're on an arm64 Mac)
+    # For universal builds, use the dylib matching the host arch
     if [[ "$TARGET" == "universal-apple-darwin" ]]; then
-        cdylib=$(find_cdylib "aarch64-apple-darwin")
+        host_arch=$(uname -m)
+        case "$host_arch" in
+            arm64|aarch64) cdylib=$(find_cdylib "aarch64-apple-darwin") ;;
+            x86_64)        cdylib=$(find_cdylib "x86_64-apple-darwin") ;;
+            *)             echo "Warning: unknown host arch $host_arch, skipping bindings"; cdylib="" ;;
+        esac
     else
         cdylib=$(find_cdylib "$TARGET")
     fi

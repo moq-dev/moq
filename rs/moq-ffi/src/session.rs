@@ -4,7 +4,7 @@ use std::sync::Arc;
 use url::Url;
 
 use crate::error::MoqError;
-use crate::ffi::Abort;
+use crate::ffi::{self, Abort};
 use crate::origin::MoqOriginProducer;
 
 struct MoqClientState {
@@ -47,11 +47,12 @@ pub fn moq_log_level(level: String) -> Result<(), MoqError> {
 	Ok(())
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl MoqClient {
 	/// Create a new MoQ client with default configuration.
 	#[uniffi::constructor]
 	pub fn new() -> Arc<Self> {
+		let _guard = ffi::HANDLE.enter();
 		Arc::new(Self {
 			state: std::sync::Mutex::new(MoqClientState {
 				config: moq_native::ClientConfig::default(),
@@ -122,7 +123,7 @@ impl MoqClient {
 	}
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl MoqSession {
 	/// Wait until the session is closed.
 	pub async fn closed(&self) -> Result<(), MoqError> {

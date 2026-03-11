@@ -116,7 +116,7 @@ impl MoqBroadcastConsumer {
 
 // ---- Catalog Consumer ----
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl MoqCatalogConsumer {
 	/// Get the next catalog update. Returns `None` when the track ends or is closed.
 	pub async fn next(&self) -> Result<Option<MoqCatalog>, MoqError> {
@@ -146,7 +146,7 @@ impl Drop for MoqCatalogConsumer {
 
 // ---- Media Consumer ----
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl MoqMediaConsumer {
 	/// Get the next frame. Returns `None` when the track ends or is closed.
 	pub async fn next(&self) -> Result<Option<MoqFrame>, MoqError> {

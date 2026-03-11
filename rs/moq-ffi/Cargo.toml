@@ -29,7 +29,7 @@ moq-native = { workspace = true, default-features = true }
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }
 tracing = "0.1"
-uniffi = { version = "0.31", features = ["cli"] }
+uniffi = { version = "0.31", features = ["cli", "tokio"] }
 url = "2"
 
 [build-dependencies]

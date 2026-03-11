@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
-use crate::ffi::Abort;
+use crate::ffi::{self, Abort};
 use crate::producer::MoqBroadcastProducer;
 
 #[derive(uniffi::Object)]
@@ -46,6 +46,7 @@ impl MoqOriginProducer {
 	/// Create a new origin for publishing and/or consuming broadcasts.
 	#[uniffi::constructor]
 	pub fn new() -> Arc<Self> {
+		let _guard = ffi::HANDLE.enter();
 		Arc::new(Self {
 			inner: moq_lite::OriginProducer::default(),
 		})
@@ -53,6 +54,7 @@ impl MoqOriginProducer {
 
 	/// Create a consumer for this origin.
 	pub fn consume(&self) -> Arc<MoqOriginConsumer> {
+		let _guard = ffi::HANDLE.enter();
 		Arc::new(MoqOriginConsumer {
 			inner: self.inner.consume(),
 		})
@@ -60,6 +62,7 @@ impl MoqOriginProducer {
 
 	/// Publish a broadcast to this origin under the given path.
 	pub fn publish(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
+		let _guard = ffi::HANDLE.enter();
 		let consumer = broadcast.consume()?;
 		self.inner.publish_broadcast(path.as_str(), consumer);
 		Ok(())
@@ -70,6 +73,7 @@ impl MoqOriginProducer {
 impl MoqOriginConsumer {
 	/// Subscribe to all broadcast announcements under a prefix.
 	pub fn announced(&self, prefix: String) -> Result<Arc<MoqAnnounced>, MoqError> {
+		let _guard = ffi::HANDLE.enter();
 		let origin = self.inner.clone().with_root(prefix).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnounced {
 			inner: tokio::sync::Mutex::new(origin),
@@ -79,6 +83,7 @@ impl MoqOriginConsumer {
 
 	/// Wait for a specific broadcast to be announced by path.
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
+		let _guard = ffi::HANDLE.enter();
 		let origin = self.inner.clone().with_root(path).ok_or(MoqError::Unauthorized)?;
 		Ok(Arc::new(MoqAnnouncedBroadcast {
 			inner: tokio::sync::Mutex::new(origin),
@@ -89,7 +94,7 @@ impl MoqOriginConsumer {
 
 // ---- MoqAnnounced ----
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl MoqAnnounced {
 	/// Get the next broadcast announcement. Returns `None` when the origin is closed.
 	///
@@ -141,7 +146,7 @@ impl MoqAnnouncement {
 
 // ---- MoqAnnouncedBroadcast ----
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl MoqAnnouncedBroadcast {
 	/// Wait until the broadcast is announced. Returns `Closed` if cancelled or the origin is closed.
 	///

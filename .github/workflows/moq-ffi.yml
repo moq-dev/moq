@@ -10,6 +10,7 @@ permissions:
 
 concurrency:
   group: moq-ffi-release
+  cancel-in-progress: true
 
 jobs:
   build:
