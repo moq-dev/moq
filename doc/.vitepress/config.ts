@@ -5,7 +5,32 @@ export default defineConfig({
 	description: "Real-time latency at massive scale",
 	base: "/",
 
-	head: [["link", { rel: "icon", href: "/icon.svg", type: "image/svg+xml" }]],
+	head: [
+		["link", { rel: "icon", href: "/icon.svg", type: "image/svg+xml" }],
+		["meta", { property: "og:type", content: "website" }],
+		["meta", { property: "og:title", content: "Media over QUIC" }],
+		[
+			"meta",
+			{
+				property: "og:description",
+				content: "Real-time latency at massive scale",
+			},
+		],
+		["meta", { property: "og:image", content: "https://moq.dev/og-image.png" }],
+		["meta", { property: "og:url", content: "https://moq.dev" }],
+		["meta", { property: "og:site_name", content: "Media over QUIC" }],
+		["meta", { name: "twitter:card", content: "summary_large_image" }],
+		["meta", { name: "twitter:title", content: "Media over QUIC" }],
+		[
+			"meta",
+			{
+				name: "twitter:description",
+				content: "Real-time latency at massive scale",
+			},
+		],
+		["meta", { name: "twitter:image", content: "https://moq.dev/og-image.png" }],
+		["meta", { name: "theme-color", content: "#0f172a" }],
+	],
 
 	appearance: "force-dark",
 
