@@ -15,6 +15,9 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+rust-version = "1.85"
+
 [workspace.dependencies]
 conducer = { version = "0.3", path = "rs/conducer" }
 hang = { version = "0.15", path = "rs/hang" }
