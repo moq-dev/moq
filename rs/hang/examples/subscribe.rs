@@ -5,7 +5,7 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_native to configure a logger.
-	moq_native::Log::new(tracing::Level::DEBUG).init();
+	moq_native::Log::new(tracing::Level::DEBUG).init()?;
 
 	// Create an origin that the session can publish incoming broadcasts to.
 	let origin = moq_lite::Origin::produce();

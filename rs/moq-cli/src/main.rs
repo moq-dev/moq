@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
 		.expect("failed to install default crypto provider");
 
 	let cli = Cli::parse();
-	cli.log.init();
+	cli.log.init()?;
 
 	let publish = Publish::new(match &cli.command {
 		Command::Serve { format, .. } => format,

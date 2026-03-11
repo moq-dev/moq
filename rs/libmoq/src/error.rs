@@ -99,6 +99,10 @@ pub enum Error {
 	#[error("level error: {0}")]
 	Level(Arc<tracing::metadata::ParseLevelError>),
 
+	/// Log initialization failed.
+	#[error("log init failed")]
+	LogInit,
+
 	/// Invalid error code conversion.
 	#[error("invalid code")]
 	InvalidCode,
@@ -153,6 +157,7 @@ impl ffi::ReturnCode for Error {
 			Error::Hang(_) => -18,
 			Error::NoIndex => -19,
 			Error::NulError(_) => -20,
+			Error::LogInit => -29,
 			Error::SessionNotFound => -21,
 			Error::OriginNotFound => -22,
 			Error::AnnouncementNotFound => -23,
