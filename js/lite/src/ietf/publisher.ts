@@ -65,6 +65,9 @@ export class Publisher {
 			const stream = await this.#session.openBi(requestId);
 
 			try {
+				// Register namespace for v14/v15 reverse lookup
+				this.#session.registerNamespace?.(path, requestId);
+
 				// Write PublishNamespace
 				await stream.writer.u53(PublishNamespace.id);
 				const msg = new PublishNamespace({ requestId, trackNamespace: path });
@@ -256,7 +259,7 @@ export class Publisher {
 				await ok.encode(stream.writer, version);
 			} else {
 				await stream.writer.u53(RequestOk.id);
-				const ok = new RequestOk({ requestId: msg.requestId });
+				const ok = new RequestOk({ requestId: version === Version.DRAFT_17 ? undefined : msg.requestId });
 				await ok.encode(stream.writer, version);
 			}
 

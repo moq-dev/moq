@@ -60,6 +60,7 @@ export class Subscriber {
 
 		void this.#runAnnounced(announced, prefix).finally(() => {
 			this.#announcedConsumers.delete(announced);
+			announced.close();
 		});
 
 		return announced;
@@ -176,7 +177,10 @@ export class Subscriber {
 	async #runSubscribe(broadcast: Path.Valid, request: TrackRequest) {
 		const version = this.#session.version;
 		const requestId = await this.#session.nextRequestId();
-		if (requestId === undefined) return;
+		if (requestId === undefined) {
+			request.track.close(new Error("session closed"));
+			return;
+		}
 
 		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
 

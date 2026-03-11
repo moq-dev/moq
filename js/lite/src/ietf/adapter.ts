@@ -12,6 +12,7 @@ export interface Session {
 	openBi(requestId: bigint): Stream | Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
 	nextRequestId(): Promise<bigint | undefined>;
+	registerNamespace?(namespace: string, requestId: bigint): void;
 	readonly version: IetfVersion;
 }
 
@@ -140,6 +141,14 @@ export class ControlStreamAdapter implements Session {
 
 		this.#streams.set(requestId, { controller });
 		return stream;
+	}
+
+	/**
+	 * Register a namespace → requestId mapping for outbound publishes.
+	 * Needed so inbound namespace-keyed messages (Cancel/Done) in v14/v15 can be routed.
+	 */
+	registerNamespace(namespace: string, requestId: bigint) {
+		this.#namespaces.set(namespace, requestId);
 	}
 
 	/**
