@@ -6,7 +6,7 @@ export default defineConfig({
 	base: "/",
 
 	head: [
-		["link", { rel: "icon", href: "/icon.svg", type: "image/svg+xml" }],
+		["link", { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" }],
 		["meta", { property: "og:type", content: "website" }],
 		["meta", { property: "og:title", content: "Media over QUIC" }],
 		[
@@ -16,8 +16,8 @@ export default defineConfig({
 				content: "Real-time latency at massive scale",
 			},
 		],
-		["meta", { property: "og:image", content: "https://moq.dev/og-image.png" }],
-		["meta", { property: "og:url", content: "https://moq.dev" }],
+		["meta", { property: "og:image", content: "https://doc.moq.dev/icon.png" }],
+		["meta", { property: "og:url", content: "https://doc.moq.dev" }],
 		["meta", { property: "og:site_name", content: "Media over QUIC" }],
 		["meta", { name: "twitter:card", content: "summary_large_image" }],
 		["meta", { name: "twitter:title", content: "Media over QUIC" }],
@@ -28,14 +28,14 @@ export default defineConfig({
 				content: "Real-time latency at massive scale",
 			},
 		],
-		["meta", { name: "twitter:image", content: "https://moq.dev/og-image.png" }],
+		["meta", { name: "twitter:image", content: "https://doc.moq.dev/icon.png" }],
 		["meta", { name: "theme-color", content: "#0f172a" }],
 	],
 
 	appearance: "force-dark",
 
 	themeConfig: {
-		logo: "/icon.svg",
+		logo: "/favicon.svg",
 
 		nav: [
 			{ text: "Setup", link: "/setup/" },
