@@ -87,7 +87,7 @@ impl Cluster {
 	// Returns a [ClusterRegistration] that should be kept alive for the duration of the session.
 	pub fn register(&self, token: &AuthToken) -> Option<ClusterRegistration> {
 		let node = token.register.clone()?;
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().produce();
 
 		let path = moq_lite::Path::new(&self.config.prefix).join(&node);
 		self.origin.publish_broadcast(path, broadcast.consume());
@@ -133,7 +133,7 @@ impl Cluster {
 		let local = self.config.node.clone().context("missing node")?;
 
 		// Create a dummy broadcast that we don't close so run_remote doesn't close.
-		let noop = Broadcast::produce();
+		let noop = Broadcast::new().produce();
 
 		// Despite returning a Result, we should NEVER return an Ok
 		tokio::select! {

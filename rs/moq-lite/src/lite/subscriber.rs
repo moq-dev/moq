@@ -131,7 +131,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		tracing::debug!(broadcast = %self.log_path(&path), hops, "announce");
 
-		let broadcast = Broadcast::new().with_hops(hops).build();
+		let broadcast = Broadcast::new().with_hops(hops).produce();
 
 		// Make sure the peer doesn't double announce.
 		match producers.entry(path.to_owned()) {
