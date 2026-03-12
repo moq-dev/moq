@@ -70,20 +70,27 @@ export class Subscriber {
 		const version = this.#session.version;
 
 		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
-		// v16+: SubscribeNamespace on its own bidi stream
-		// Both paths work the same way with the adapter/native session.
+		// v16+: SubscribeNamespace on its own real bidi stream
 
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return;
 
 		try {
-			const stream = await this.#session.openBi(requestId);
+			// v16: use a real bidi stream (not virtual control stream)
+			const stream =
+				version === Version.DRAFT_16 && this.#session.openNativeBi
+					? await this.#session.openNativeBi()
+					: await this.#session.openBi(requestId);
 
 			try {
+				// Register for v14/v15 follow-up routing (entries have no requestId)
+				this.#session.registerSubscribeNamespace?.(requestId);
+
 				// Write SubscribeNamespace
 				await stream.writer.u53(SubscribeNamespace.id);
 				const msg = new SubscribeNamespace({ namespace: prefix, requestId });
 				await msg.encode(stream.writer, version);
+				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 
 				// Read response
 				const respTypeId = await stream.reader.u53();
@@ -197,6 +204,7 @@ export class Subscriber {
 					subscriberPriority: request.priority,
 				});
 				await msg.encode(stream.writer, version);
+				console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
 
 				// Read response (SubscribeOk or error)
 				const respTypeId = await stream.reader.u53();
@@ -297,16 +305,11 @@ export class Subscriber {
 		}
 
 		this.#announced.add(path);
-		console.debug(`announced: broadcast=${path} active=true`);
-
-		for (const consumer of this.#announcedConsumers) {
-			const suffix = Path.stripPrefix(consumer.prefix, path);
-			if (suffix === null) continue;
-			consumer.append({ path, active: true });
-		}
 
 		try {
-			// Send OK
+			// Send OK first — must complete before notifying consumers,
+			// because consumers may trigger Subscribe writes that would
+			// interleave with our OK on the control stream.
 			if (version === Version.DRAFT_14) {
 				const { PublishNamespaceOk } = await import("./publish_namespace.ts");
 				await stream.writer.u53(PublishNamespaceOk.id);
@@ -318,8 +321,19 @@ export class Subscriber {
 				await ok.encode(stream.writer, version);
 			}
 
+			console.debug(`announced: broadcast=${path} active=true`);
+
+			// Notify consumers after OK is written
+			for (const consumer of this.#announcedConsumers) {
+				const suffix = Path.stripPrefix(consumer.prefix, path);
+				if (suffix === null) continue;
+				consumer.append({ path, active: true });
+			}
+
 			// Wait for stream close (= PublishNamespaceDone)
+			console.debug(`runPublishNamespace: awaiting stream.reader.closed for ${path}`);
 			await stream.reader.closed;
+			console.debug(`runPublishNamespace: stream.reader.closed resolved for ${path}`);
 		} finally {
 			this.#announced.delete(path);
 			console.debug(`announced: broadcast=${path} active=false`);
@@ -327,7 +341,11 @@ export class Subscriber {
 			for (const consumer of this.#announcedConsumers) {
 				const suffix = Path.stripPrefix(consumer.prefix, path);
 				if (suffix === null) continue;
-				consumer.append({ path, active: false });
+				try {
+					consumer.append({ path, active: false });
+				} catch {
+					// Consumer already closed, will be cleaned up
+				}
 			}
 		}
 	}

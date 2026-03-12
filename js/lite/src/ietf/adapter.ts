@@ -10,9 +10,11 @@ import { type IetfVersion, Version } from "./version.ts";
  */
 export interface Session {
 	openBi(requestId: bigint): Stream | Promise<Stream>;
+	openNativeBi?(): Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
 	nextRequestId(): Promise<bigint | undefined>;
 	registerNamespace?(namespace: string, requestId: bigint): void;
+	registerSubscribeNamespace?(requestId: bigint): void;
 	readonly version: IetfVersion;
 }
 
@@ -70,6 +72,9 @@ interface StreamEntry {
  * look like v17's stream-per-request model.
  */
 export class ControlStreamAdapter implements Session {
+	// WebTransport session (for opening real bidi streams in v16)
+	#quic: WebTransport;
+
 	// Control stream
 	#reader: Reader;
 	#writer: Writer;
@@ -82,6 +87,9 @@ export class ControlStreamAdapter implements Session {
 	// Namespace → requestId reverse lookup (v14/v15 namespace-keyed messages)
 	#namespaces = new Map<string, bigint>();
 
+	// SubscribeNamespace requestIds — for routing 0x08/0x0E entries that lack requestId (v14/v15)
+	#subscribeNamespaces = new Set<bigint>();
+
 	// Incoming stream queue (for acceptBi)
 	#incomingQueue: Stream[] = [];
 	#incomingWaiters: ((stream: Stream | undefined) => void)[] = [];
@@ -93,7 +101,8 @@ export class ControlStreamAdapter implements Session {
 
 	#closed = false;
 
-	constructor(controlStream: Stream, version: IetfVersion, maxRequestId: bigint) {
+	constructor(quic: WebTransport, controlStream: Stream, version: IetfVersion, maxRequestId: bigint) {
+		this.#quic = quic;
 		this.#reader = controlStream.reader;
 		this.#reader.version = version;
 		this.#writer = controlStream.writer;
@@ -151,6 +160,17 @@ export class ControlStreamAdapter implements Session {
 		this.#namespaces.set(namespace, requestId);
 	}
 
+	registerSubscribeNamespace(requestId: bigint) {
+		this.#subscribeNamespaces.add(requestId);
+	}
+
+	/**
+	 * Open a real WebTransport bidi stream (for v16 SubscribeNamespace).
+	 */
+	async openNativeBi(): Promise<Stream> {
+		return Stream.open(this.#quic);
+	}
+
 	/**
 	 * Allocate the next request ID, blocking if flow control limit reached.
 	 */
@@ -174,6 +194,11 @@ export class ControlStreamAdapter implements Session {
 	 */
 	async run(): Promise<void> {
 		try {
+			// v16: also accept real bidi streams (for SubscribeNamespace)
+			if (this.version === Version.DRAFT_16) {
+				void this.#acceptNativeBidis();
+			}
+
 			for (;;) {
 				const done = await this.#reader.done();
 				if (done) break;
@@ -217,6 +242,25 @@ export class ControlStreamAdapter implements Session {
 			}
 		} finally {
 			this.close();
+		}
+	}
+
+	/** Accept real WebTransport bidi streams and queue them for acceptBi (v16). */
+	async #acceptNativeBidis(): Promise<void> {
+		try {
+			for (;;) {
+				const stream = await Stream.accept(this.#quic);
+				if (!stream) break;
+
+				const waiter = this.#incomingWaiters.shift();
+				if (waiter) {
+					waiter(stream);
+				} else {
+					this.#incomingQueue.push(stream);
+				}
+			}
+		} catch {
+			// Session closed
 		}
 	}
 
@@ -267,7 +311,9 @@ export class ControlStreamAdapter implements Session {
 	#closeStream(requestId: bigint) {
 		const entry = this.#streams.get(requestId);
 		if (!entry) return;
+		console.debug(`adapter: closing stream requestId=${requestId}`);
 		this.#streams.delete(requestId);
+		this.#subscribeNamespaces.delete(requestId);
 		try {
 			entry.controller.close();
 		} catch {
@@ -389,10 +435,21 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.ErrorResponse, requestId };
 			}
 			case 0x08: {
-				// PublishNamespaceError (v14 only); in v16 this is SubscribeNamespaceEntry (bidi only)
-				if (this.version !== Version.DRAFT_14) throw new Error("unexpected message 0x08 on control stream");
-				const requestId = await readRequestId();
-				return { route: Route.ErrorResponse, requestId };
+				if (this.version === Version.DRAFT_14) {
+					// PublishNamespaceError
+					const requestId = await readRequestId();
+					return { route: Route.ErrorResponse, requestId };
+				}
+				// v15: Namespace entry (no requestId) — route to SubscribeNamespace stream
+				const subNs08 = this.#subscribeNamespaces.values().next().value;
+				if (subNs08 === undefined) throw new Error("unexpected message 0x08: no SubscribeNamespace stream");
+				return { route: Route.FollowUp, requestId: subNs08 };
+			}
+			case 0x0e: {
+				// v15: NamespaceDone entry (no requestId) — route to SubscribeNamespace stream
+				const subNs0e = this.#subscribeNamespaces.values().next().value;
+				if (subNs0e === undefined) throw new Error("unexpected message 0x0e: no SubscribeNamespace stream");
+				return { route: Route.FollowUp, requestId: subNs0e };
 			}
 			case 0x13: {
 				// SubscribeNamespaceError (v14 only)
@@ -468,6 +525,7 @@ export class ControlStreamAdapter implements Session {
 	close() {
 		if (this.#closed) return;
 		this.#closed = true;
+		console.debug("adapter: close() called");
 
 		// Close all virtual streams
 		for (const entry of this.#streams.values()) {
@@ -487,6 +545,7 @@ export class ControlStreamAdapter implements Session {
 
 		// Clear namespace mappings
 		this.#namespaces.clear();
+		this.#subscribeNamespaces.clear();
 
 		// Unblock maxRequestId waiters
 		for (const resolve of this.#maxRequestIdResolves) resolve();

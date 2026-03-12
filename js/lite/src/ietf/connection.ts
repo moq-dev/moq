@@ -71,7 +71,7 @@ export class Connection implements Established {
 			// v17: control/setup stream only carries GoAway
 			void this.#runGoAway(control);
 		} else {
-			const adapter = new ControlStreamAdapter(control, version, maxRequestId);
+			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId);
 			this.#session = adapter;
 			// Start the adapter read loop (routes control messages to virtual streams)
 			void adapter.run().catch((err: unknown) => {
