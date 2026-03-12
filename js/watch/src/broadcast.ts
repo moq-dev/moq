@@ -76,8 +76,7 @@ export class Broadcast {
 		const broadcast = conn.consume(name);
 		effect.cleanup(() => broadcast.close());
 
-		this.#active.set(broadcast, true);
-		effect.cleanup(() => this.#active.set(undefined, true));
+		effect.set(this.#active, broadcast, undefined);
 	}
 
 	#runCatalog(effect: Effect): void {
