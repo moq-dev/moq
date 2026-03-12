@@ -1,27 +1,3 @@
-// Deep equality for plain objects/arrays, === for class instances and primitives.
-// Class instances have identity semantics (e.g. two different Broadcast instances are never equal).
-function isEqual(a: unknown, b: unknown): boolean {
-	if (a === b) return true;
-	if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
-
-	const protoA = Object.getPrototypeOf(a);
-	const protoB = Object.getPrototypeOf(b);
-
-	// Both must be plain objects or both arrays to deep-compare.
-	if (protoA !== protoB) return false;
-	if (protoA !== Object.prototype && protoA !== Array.prototype) return false;
-
-	const keysA = Object.keys(a as Record<string, unknown>);
-	const keysB = Object.keys(b as Record<string, unknown>);
-	if (keysA.length !== keysB.length) return false;
-
-	for (const key of keysA) {
-		if (!isEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false;
-	}
-
-	return true;
-}
-
 export type Dispose = () => void;
 
 type Subscriber<T> = (value: T) => void;
@@ -641,4 +617,28 @@ export class Effect {
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void {
 		this.subscribe(src, (value) => dst.update(() => value));
 	}
+}
+
+// Deep equality for plain objects/arrays, === for class instances and primitives.
+// Class instances have identity semantics (e.g. two different Broadcast instances are never equal).
+function isEqual(a: unknown, b: unknown): boolean {
+	if (a === b) return true;
+	if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+
+	const protoA = Object.getPrototypeOf(a);
+	const protoB = Object.getPrototypeOf(b);
+
+	// Both must be plain objects or both arrays to deep-compare.
+	if (protoA !== protoB) return false;
+	if (protoA !== Object.prototype && protoA !== Array.prototype) return false;
+
+	const keysA = Object.keys(a as Record<string, unknown>);
+	const keysB = Object.keys(b as Record<string, unknown>);
+	if (keysA.length !== keysB.length) return false;
+
+	for (const key of keysA) {
+		if (!isEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false;
+	}
+
+	return true;
 }
