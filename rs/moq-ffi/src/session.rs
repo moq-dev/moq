@@ -66,15 +66,17 @@ pub fn moq_log_level(level: String) -> Result<(), MoqError> {
 	use tracing::Level;
 
 	static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+	let log = match level.as_str() {
+		"" => moq_native::Log::default(),
+		s => moq_native::Log::new(Level::from_str(s)?),
+	};
+
 	if INITIALIZED.swap(true, Ordering::SeqCst) {
 		return Err(MoqError::Log("logging already initialized".into()));
 	}
 
-	match level.as_str() {
-		"" => moq_native::Log::default(),
-		s => moq_native::Log::new(Level::from_str(s)?),
-	}
-	.init();
+	log.init();
 
 	Ok(())
 }

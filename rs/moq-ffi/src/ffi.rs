@@ -28,7 +28,7 @@ pub(crate) struct Task<T: Send + 'static> {
 
 struct TaskState<T> {
 	inner: Option<T>,
-	handles: Vec<AbortHandle>,
+	handle: Option<AbortHandle>,
 }
 
 impl<T: Send + 'static> Task<T> {
@@ -36,7 +36,7 @@ impl<T: Send + 'static> Task<T> {
 		Self {
 			state: Arc::new(std::sync::Mutex::new(TaskState {
 				inner: Some(inner),
-				handles: Vec::new(),
+				handle: None,
 			})),
 		}
 	}
@@ -74,7 +74,7 @@ impl<T: Send + 'static> Task<T> {
 				arc.lock().unwrap().inner = Some(inner);
 				result
 			});
-			state.handles.push(handle.abort_handle());
+			state.handle = Some(handle.abort_handle());
 			handle
 		};
 
@@ -89,7 +89,7 @@ impl<T: Send + 'static> Task<T> {
 	pub fn cancel(&self) {
 		let mut state = self.state.lock().unwrap();
 		state.inner = None;
-		for handle in state.handles.drain(..) {
+		if let Some(handle) = state.handle.take() {
 			handle.abort();
 		}
 	}

@@ -74,7 +74,7 @@ jobs:
         run: |
           ref=${GITHUB_REF#refs/tags/}
           if [[ "$ref" =~ ^moq-ffi-v([0-9.]+)$ ]]; then
-            echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
           else
             echo "Tag format not recognized: $ref" >&2
             exit 1
@@ -116,7 +116,7 @@ jobs:
         run: |
           ref=${GITHUB_REF#refs/tags/}
           if [[ "$ref" =~ ^moq-ffi-v([0-9.]+)$ ]]; then
-            echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
           else
             echo "Tag format not recognized: $ref" >&2
             exit 1
@@ -190,7 +190,7 @@ jobs:
         run: |
           ref=${GITHUB_REF#refs/tags/}
           if [[ "$ref" =~ ^moq-ffi-v([0-9.]+)$ ]]; then
-            echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
           else
             echo "Tag format not recognized: $ref" >&2
             exit 1
@@ -200,8 +200,8 @@ jobs:
         id: prev_tag
         run: |
           current_tag="moq-ffi-v${{ steps.parse.outputs.version }}"
-          prev_tag=$(git tag --list 'moq-ffi-v*' --sort=-v:refname | grep -v "^${current_tag}$" | head -n1)
-          echo "tag=${prev_tag}" >> $GITHUB_OUTPUT
+          prev_tag=$(git tag --list 'moq-ffi-v*' --sort=-v:refname | grep -v "^${current_tag}$" | head -n1 || true)
+          echo "tag=${prev_tag}" >> "$GITHUB_OUTPUT"
           echo "Previous tag: ${prev_tag:-none}"
 
       - name: Download artifacts

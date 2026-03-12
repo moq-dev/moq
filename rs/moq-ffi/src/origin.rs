@@ -95,7 +95,9 @@ impl MoqOriginProducer {
 	pub fn publish(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
 		let _guard = Task::<()>::enter();
 		let consumer = broadcast.consume()?;
-		self.inner.publish_broadcast(path.as_str(), consumer);
+		if !self.inner.publish_broadcast(path.as_str(), consumer) {
+			return Err(MoqError::Unauthorized);
+		}
 		Ok(())
 	}
 }
