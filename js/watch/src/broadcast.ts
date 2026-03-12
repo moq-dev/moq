@@ -76,7 +76,8 @@ export class Broadcast {
 		const broadcast = conn.consume(name);
 		effect.cleanup(() => broadcast.close());
 
-		effect.set(this.#active, broadcast);
+		this.#active.set(broadcast, true);
+		effect.cleanup(() => this.#active.set(undefined, true));
 	}
 
 	#runCatalog(effect: Effect): void {
@@ -89,26 +90,24 @@ export class Broadcast {
 		const catalog = broadcast.subscribe("catalog.json", Catalog.PRIORITY.catalog);
 		effect.cleanup(() => catalog.close());
 
-		effect.spawn(this.#fetchCatalog.bind(this, catalog));
-	}
+		effect.spawn(async () => {
+			try {
+				for (;;) {
+					const update = await Promise.race([effect.cancel, Catalog.fetch(catalog)]);
+					if (!update) break;
 
-	async #fetchCatalog(catalog: Moq.Track): Promise<void> {
-		try {
-			for (;;) {
-				const update = await Catalog.fetch(catalog);
-				if (!update) break;
+					console.debug("received catalog", this.name.peek(), update);
 
-				console.debug("received catalog", this.name.peek(), update);
-
-				this.#catalog.set(update);
-				this.status.set("live");
+					this.#catalog.set(update);
+					this.status.set("live");
+				}
+			} catch (err) {
+				console.warn("error fetching catalog", this.name.peek(), err);
+			} finally {
+				this.#catalog.set(undefined);
+				this.status.set("offline");
 			}
-		} catch (err) {
-			console.warn("error fetching catalog", this.name.peek(), err);
-		} finally {
-			this.#catalog.set(undefined);
-			this.status.set("offline");
-		}
+		});
 	}
 
 	close() {

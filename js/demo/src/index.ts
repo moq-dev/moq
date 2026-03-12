@@ -14,5 +14,5 @@ const urlParams = new URLSearchParams(window.location.search);
 const name = urlParams.get("broadcast") ?? urlParams.get("name");
 const url = urlParams.get("url");
 
-if (url) watch.setAttribute("url", url);
-if (name) watch.setAttribute("name", name);
+if (url) watch.url = url;
+if (name) watch.name = name;
