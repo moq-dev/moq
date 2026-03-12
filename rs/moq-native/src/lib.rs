@@ -19,6 +19,8 @@ mod noq;
 #[cfg(feature = "quinn")]
 mod quinn;
 mod server;
+#[cfg(any(feature = "noq", feature = "quinn"))]
+mod tls;
 #[cfg(feature = "websocket")]
 mod websocket;
 
