@@ -2,12 +2,12 @@ import "./highlight";
 import "@moq/watch/ui";
 import MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
-import MoqWatchConfig from "./config";
+import MoqAnnounced from "./announced";
 
-export { MoqWatchSupport, MoqWatch, MoqWatchConfig };
+export { MoqWatchSupport, MoqWatch, MoqAnnounced };
 
 const watch = document.querySelector("moq-watch") as MoqWatch | undefined;
-const config = document.querySelector("moq-watch-config") as MoqWatchConfig | undefined;
+const announced = document.querySelector("moq-announced") as MoqAnnounced | undefined;
 
 if (!watch) throw new Error("unable to find <moq-watch> element");
 
@@ -19,5 +19,5 @@ const url = urlParams.get("url");
 if (url) watch.setAttribute("url", url);
 if (name) watch.setAttribute("name", name);
 
-// Wire the config to use the watch element's connection and signals.
-if (config) config.watch = watch;
+// Wire the announced component to use the watch element's connection.
+if (announced) announced.watch = watch;

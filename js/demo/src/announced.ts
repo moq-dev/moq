@@ -2,11 +2,10 @@ import { Moq, Signals } from "@moq/hang";
 import type MoqWatch from "@moq/watch/element";
 
 /**
- * A simple web component for configuring the relay URL and broadcast name.
- * Uses the watch element's connection for discovery instead of creating its own.
+ * A simple web component that displays announced broadcasts.
+ * Clicking a broadcast name sets it on the watch element.
  */
-export default class MoqWatchConfig extends HTMLElement {
-	#urlInput: HTMLInputElement;
+export default class MoqAnnounced extends HTMLElement {
 	#pathInput: HTMLInputElement;
 	#suggestions: HTMLDivElement;
 	#signals = new Signals.Effect();
@@ -17,20 +16,6 @@ export default class MoqWatchConfig extends HTMLElement {
 
 	constructor() {
 		super();
-
-		// Create URL input
-		const urlLabel = document.createElement("label");
-		urlLabel.textContent = "Relay URL";
-		urlLabel.style.cssText = "display: block; font-size: 0.85rem; color: #888; margin-bottom: 0.25rem;";
-
-		this.#urlInput = document.createElement("input");
-		this.#urlInput.type = "url";
-		this.#urlInput.placeholder = "http://localhost:4443/anon";
-		this.#urlInput.style.cssText = `
-			width: 100%; padding: 0.5rem; margin-bottom: 0.75rem;
-			background: #111; border: 1px solid #333; border-radius: 4px;
-			color: #fff; font-family: monospace; font-size: 0.9rem;
-		`;
 
 		// Create path input
 		const pathLabel = document.createElement("label");
@@ -51,14 +36,11 @@ export default class MoqWatchConfig extends HTMLElement {
 		this.#suggestions.style.cssText = "margin-top: 0.5rem; font-size: 0.85rem;";
 
 		// Append elements
-		this.appendChild(urlLabel);
-		this.appendChild(this.#urlInput);
 		this.appendChild(pathLabel);
 		this.appendChild(this.#pathInput);
 		this.appendChild(this.#suggestions);
 
 		// Event listeners
-		this.#urlInput.addEventListener("input", () => this.#onUrlChange());
 		this.#pathInput.addEventListener("input", () => this.#onPathChange());
 	}
 
@@ -69,12 +51,6 @@ export default class MoqWatchConfig extends HTMLElement {
 		this.#watch = watch;
 		const effects = new Signals.Effect();
 		this.#watchEffects = effects;
-
-		// Sync the URL input with the watch element's URL.
-		effects.run((effect) => {
-			const url = effect.get(watch.connection.url);
-			this.#urlInput.value = url?.toString() ?? "";
-		});
 
 		// Sync the name input with the watch element's broadcast name.
 		effects.run((effect) => {
@@ -97,42 +73,6 @@ export default class MoqWatchConfig extends HTMLElement {
 	disconnectedCallback() {
 		this.#watchEffects?.close();
 		this.#signals.close();
-	}
-
-	static get observedAttributes() {
-		return ["url", "name"];
-	}
-
-	attributeChangedCallback(name: string, _oldValue: string | null, newValue: string | null) {
-		if (!this.#watch) return;
-
-		if (name === "url") {
-			try {
-				this.#watch.connection.url.set(newValue ? new URL(newValue) : undefined);
-			} catch {
-				this.#watch.connection.url.set(undefined);
-			}
-		} else if (name === "name") {
-			this.#watch.broadcast.name.set(Moq.Path.from(newValue ?? ""));
-		}
-	}
-
-	get url(): string {
-		return this.#urlInput.value;
-	}
-
-	get name(): string {
-		return this.#pathInput.value;
-	}
-
-	#onUrlChange() {
-		if (this.#watch) {
-			try {
-				this.#watch.connection.url.set(this.#urlInput.value ? new URL(this.#urlInput.value) : undefined);
-			} catch {
-				this.#watch.connection.url.set(undefined);
-			}
-		}
 	}
 
 	#onPathChange() {
@@ -201,4 +141,4 @@ export default class MoqWatchConfig extends HTMLElement {
 	}
 }
 
-customElements.define("moq-watch-config", MoqWatchConfig);
+customElements.define("moq-announced", MoqAnnounced);
