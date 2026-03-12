@@ -60,6 +60,7 @@ impl QuinnClient {
 		let port = url.port().unwrap_or(443);
 
 		// Look up the DNS entry.
+		// Quinn doesn't support happy eyeballs, so we use the first address.
 		let ip = tokio::net::lookup_host((host.clone(), port))
 			.await
 			.context("failed DNS lookup")?
@@ -341,7 +342,15 @@ impl QuinnRequest {
 				Ok(Self::WebTransport { request, alpns })
 			}
 			alpn if moq_lite::ALPNS.contains(&alpn) => {
-				let url = format!("moqt://{}", host).parse::<Url>().unwrap();
+				anyhow::ensure!(!host.is_empty(), "missing server name for raw QUIC connection");
+				let host_str = if host.contains(':') {
+					format!("[{}]", host)
+				} else {
+					host.clone()
+				};
+				let url = format!("moqt://{}", host_str)
+					.parse::<Url>()
+					.context("failed to construct URL from server name")?;
 				let request = web_transport_quinn::proto::ConnectRequest::new(url);
 				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
 				Ok(Self::Raw {

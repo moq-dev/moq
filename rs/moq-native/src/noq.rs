@@ -61,6 +61,7 @@ impl NoqClient {
 		let port = url.port().unwrap_or(443);
 
 		// Look up the DNS entry.
+		// Noq doesn't support happy eyeballs, so we use the first address.
 		let ip = tokio::net::lookup_host((host.clone(), port))
 			.await
 			.context("failed DNS lookup")?
