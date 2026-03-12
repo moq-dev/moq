@@ -16,18 +16,8 @@ const urlParams = new URLSearchParams(window.location.search);
 const name = urlParams.get("broadcast") ?? urlParams.get("name");
 const url = urlParams.get("url");
 
-if (name) {
-	watch.setAttribute("name", name);
-	config?.setAttribute("name", name);
-}
-if (url) {
-	watch.setAttribute("url", url);
-	config?.setAttribute("url", url);
-}
+if (url) watch.setAttribute("url", url);
+if (name) watch.setAttribute("name", name);
 
-// Sync config changes to the watch element.
-config?.addEventListener("change", (e) => {
-	const { url, name } = (e as CustomEvent).detail;
-	if (url) watch.setAttribute("url", url);
-	if (name) watch.setAttribute("name", name);
-});
+// Wire the config to use the watch element's connection and signals.
+if (config) config.watch = watch;

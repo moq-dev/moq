@@ -1,16 +1,24 @@
-import { Moq } from "@moq/hang";
+import { Moq, Signals } from "@moq/hang";
+import type MoqWatch from "@moq/watch/element";
+
+type Effect = Signals.Effect;
+const { Effect, Signal } = Signals;
 
 /**
  * A simple web component for configuring the relay URL and broadcast name.
- * Auto-discovers available broadcasts and shows them as clickable suggestions.
+ * Uses the watch element's connection for discovery instead of creating its own.
  */
 export default class MoqWatchConfig extends HTMLElement {
 	#urlInput: HTMLInputElement;
 	#pathInput: HTMLInputElement;
 	#suggestions: HTMLDivElement;
-	#discoveryConnection: Moq.Connection.Established | null = null;
-	#discoveryTimeout: ReturnType<typeof setTimeout> | null = null;
-	#discoveryAbort: AbortController | null = null;
+	#signals = new Effect();
+
+	// The watch element to use for connection and broadcast name.
+	#watch: MoqWatch | undefined;
+
+	// The list of discovered broadcast names, updated reactively.
+	#broadcasts = new Signal<string[]>([]);
 
 	constructor() {
 		super();
@@ -57,24 +65,40 @@ export default class MoqWatchConfig extends HTMLElement {
 		// Event listeners
 		this.#urlInput.addEventListener("input", () => this.#onUrlChange());
 		this.#pathInput.addEventListener("input", () => this.#onPathChange());
+
+		// Reactively discover broadcasts when the connection changes.
+		this.#signals.run(this.#runDiscovery.bind(this));
+
+		// Reactively render suggestions when broadcasts or selected name changes.
+		this.#signals.run(this.#runRender.bind(this));
+	}
+
+	set watch(watch: MoqWatch) {
+		this.#watch = watch;
+
+		// Sync the URL input with the watch element's URL.
+		this.#signals.run((effect) => {
+			const url = effect.get(watch.connection.url);
+			this.#urlInput.value = url?.toString() ?? "";
+		});
+
+		// Sync the name input with the watch element's broadcast name.
+		this.#signals.run((effect) => {
+			const name = effect.get(watch.broadcast.name);
+			this.#pathInput.value = name.toString();
+		});
+	}
+
+	get watch(): MoqWatch | undefined {
+		return this.#watch;
 	}
 
 	connectedCallback() {
 		this.style.cssText = "display: block; margin: 1rem 0;";
-
-		// Initialize from attributes
-		const url = this.getAttribute("url");
-		const name = this.getAttribute("name");
-
-		if (url) this.#urlInput.value = url;
-		if (name) this.#pathInput.value = name;
-
-		// Start discovery if URL is set
-		if (url) this.#scheduleDiscovery();
 	}
 
 	disconnectedCallback() {
-		this.#closeDiscovery();
+		this.#signals.close();
 	}
 
 	static get observedAttributes() {
@@ -82,11 +106,12 @@ export default class MoqWatchConfig extends HTMLElement {
 	}
 
 	attributeChangedCallback(name: string, _oldValue: string | null, newValue: string | null) {
-		if (name === "url" && newValue !== this.#urlInput.value) {
-			this.#urlInput.value = newValue || "";
-			this.#scheduleDiscovery();
-		} else if (name === "name" && newValue !== this.#pathInput.value) {
-			this.#pathInput.value = newValue || "";
+		if (!this.#watch) return;
+
+		if (name === "url") {
+			this.#watch.connection.url.set(newValue ? new URL(newValue) : undefined);
+		} else if (name === "name") {
+			this.#watch.broadcast.name.set(Moq.Path.from(newValue ?? ""));
 		}
 	}
 
@@ -99,131 +124,105 @@ export default class MoqWatchConfig extends HTMLElement {
 	}
 
 	#onUrlChange() {
-		this.setAttribute("url", this.#urlInput.value);
-		this.#dispatchChange();
-		this.#scheduleDiscovery();
+		if (this.#watch) {
+			this.#watch.connection.url.set(this.#urlInput.value ? new URL(this.#urlInput.value) : undefined);
+		}
 	}
 
 	#onPathChange() {
-		this.setAttribute("name", this.#pathInput.value);
-		this.#dispatchChange();
-	}
-
-	#dispatchChange() {
-		this.dispatchEvent(
-			new CustomEvent("change", {
-				detail: { url: this.url, name: this.name },
-				bubbles: true,
-			}),
-		);
-	}
-
-	#scheduleDiscovery() {
-		// Debounce discovery
-		if (this.#discoveryTimeout) {
-			clearTimeout(this.#discoveryTimeout);
+		if (this.#watch) {
+			this.#watch.broadcast.name.set(Moq.Path.from(this.#pathInput.value));
 		}
-		this.#discoveryTimeout = setTimeout(() => this.#discover(), 500);
 	}
 
-	async #discover() {
-		const relayUrl = this.#urlInput.value.trim();
-		if (!relayUrl) {
-			this.#suggestions.innerHTML = "";
+	#runDiscovery(effect: Effect) {
+		const watch = this.#watch;
+		if (!watch) return;
+
+		const connection = effect.get(watch.connection.established);
+		if (!connection) {
+			this.#broadcasts.set([]);
 			return;
 		}
 
-		// Abort any in-flight discovery to prevent orphaned connections
-		this.#discoveryAbort?.abort();
-		this.#discoveryAbort = new AbortController();
-		const signal = this.#discoveryAbort.signal;
+		const announced = connection.announced(Moq.Path.empty());
+		effect.cleanup(() => announced.close());
 
-		this.#closeDiscovery();
-		this.#suggestions.innerHTML = '<span style="color: #666;">Discovering...</span>';
+		const active = new Map<string, boolean>();
 
-		try {
-			const url = new URL(relayUrl);
-			const connection = await Moq.Connection.connect(url);
+		effect.spawn(async () => {
+			try {
+				for (;;) {
+					const entry = await Promise.race([effect.cancel, announced.next()]);
+					if (!entry) break;
 
-			// Check if this discovery was aborted while connecting
-			if (signal.aborted) {
-				connection.close();
-				return;
-			}
+					if (entry.active) {
+						active.set(entry.path, true);
+					} else {
+						active.delete(entry.path);
+					}
 
-			this.#discoveryConnection = connection;
-
-			const announced = connection.announced(Moq.Path.empty());
-			const broadcasts: string[] = [];
-			const timeout = 2000;
-			const startTime = Date.now();
-
-			while (Date.now() - startTime < timeout) {
-				const remaining = Math.max(0, timeout - (Date.now() - startTime));
-				const timeoutPromise = new Promise<undefined>((resolve) =>
-					setTimeout(() => resolve(undefined), remaining),
-				);
-
-				const entry = await Promise.race([announced.next(), timeoutPromise]);
-				if (entry === undefined) break;
-				if (entry.active) {
-					broadcasts.push(entry.path);
-					this.#renderSuggestions(broadcasts);
+					this.#broadcasts.set([...active.keys()]);
 				}
+			} catch {
+				// Connection closed or effect cancelled
 			}
-
-			announced.close();
-
-			if (broadcasts.length === 0) {
-				this.#suggestions.innerHTML = '<span style="color: #666;">No broadcasts found</span>';
-			}
-		} catch (err) {
-			console.error("Discovery error:", err);
-			this.#suggestions.innerHTML = '<span style="color: #666;">Discovery unavailable</span>';
-		} finally {
-			// Close the connection after discovery to avoid resource leaks
-			this.#closeDiscovery();
-		}
+		});
 	}
 
-	#renderSuggestions(broadcasts: string[]) {
-		this.#suggestions.innerHTML = "";
+	#runRender(effect: Effect) {
+		const broadcasts = effect.get(this.#broadcasts);
+
+		// Also react to the selected name changing.
+		const selected = this.#watch ? effect.get(this.#watch.broadcast.name).toString() : "";
+
+		this.#clearSuggestions();
+
+		if (broadcasts.length === 0) return;
 
 		const label = document.createElement("span");
 		label.textContent = "Available: ";
 		label.style.color = "#666";
 		this.#suggestions.appendChild(label);
 
-		broadcasts.forEach((name) => {
+		for (const name of broadcasts) {
+			const isSelected = name === selected;
 			const tag = document.createElement("button");
 			tag.type = "button";
 			tag.textContent = name;
+
+			const defaultBg = isSelected ? "#2d4a2d" : "#1a2e1a";
+			const defaultBorder = isSelected ? "#4ade80" : "#2d4a2d";
+
 			tag.style.cssText = `
-				background: #1a2e1a; color: #4ade80; border: 1px solid #2d4a2d;
+				background: ${defaultBg}; color: #4ade80; border: 1px solid ${defaultBorder};
 				padding: 0.2rem 0.5rem; margin: 0 0.25rem; border-radius: 4px;
 				font-size: 0.8rem; font-family: monospace; cursor: pointer;
+				font-weight: ${isSelected ? "bold" : "normal"};
 				transition: background 0.15s, border-color 0.15s;
 			`;
-			tag.addEventListener("mouseenter", () => {
-				tag.style.background = "#2d4a2d";
-				tag.style.borderColor = "#4ade80";
-			});
-			tag.addEventListener("mouseleave", () => {
-				tag.style.background = "#1a2e1a";
-				tag.style.borderColor = "#2d4a2d";
-			});
+			if (!isSelected) {
+				tag.addEventListener("mouseenter", () => {
+					tag.style.background = "#2d4a2d";
+					tag.style.borderColor = "#4ade80";
+				});
+				tag.addEventListener("mouseleave", () => {
+					tag.style.background = defaultBg;
+					tag.style.borderColor = defaultBorder;
+				});
+			}
 			tag.addEventListener("click", () => {
-				this.#pathInput.value = name;
-				this.#onPathChange();
+				if (this.#watch) {
+					this.#watch.broadcast.name.set(Moq.Path.from(name));
+				}
 			});
 			this.#suggestions.appendChild(tag);
-		});
+		}
 	}
 
-	#closeDiscovery() {
-		if (this.#discoveryConnection) {
-			this.#discoveryConnection.close();
-			this.#discoveryConnection = null;
+	#clearSuggestions() {
+		while (this.#suggestions.firstChild) {
+			this.#suggestions.removeChild(this.#suggestions.firstChild);
 		}
 	}
 }
