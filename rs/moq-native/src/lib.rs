@@ -50,11 +50,8 @@ pub use iroh::*;
 /// The QUIC backend to use for connections.
 #[derive(Clone, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum QuicBackend {
-	/// [web-transport-noq](https://crates.io/crates/web-transport-noq)
-	#[cfg(feature = "noq")]
-	Noq,
-
 	/// [web-transport-quinn](https://crates.io/crates/web-transport-quinn)
 	#[cfg(feature = "quinn")]
 	Quinn,
@@ -62,4 +59,8 @@ pub enum QuicBackend {
 	/// [web-transport-quiche](https://crates.io/crates/web-transport-quiche)
 	#[cfg(feature = "quiche")]
 	Quiche,
+
+	/// [web-transport-noq](https://crates.io/crates/web-transport-noq)
+	#[cfg(feature = "noq")]
+	Noq,
 }
