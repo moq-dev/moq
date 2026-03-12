@@ -1,4 +1,6 @@
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
+import type * as Path from "../path.ts";
+import { empty as emptyPath } from "../path.ts";
 import { type ConnectProps, connect, type WebSocketOptions } from "./connect.ts";
 import type { Established } from "./established.ts";
 
@@ -37,6 +39,10 @@ export class Reload {
 	status = new Signal<ReloadStatus>("disconnected");
 	established = new Signal<Established | undefined>(undefined);
 
+	// All actively announced broadcast paths, updated reactively.
+	#announced = new Signal<Set<Path.Valid>>(new Set());
+	readonly announced: Getter<Set<Path.Valid>> = this.#announced;
+
 	// WebTransport options (not reactive).
 	webtransport?: WebTransportOptions;
 
@@ -64,6 +70,7 @@ export class Reload {
 
 		// Create a reactive root so cleanup is easier.
 		this.signals.run(this.#connect.bind(this));
+		this.signals.run(this.#runAnnounced.bind(this));
 	}
 
 	#connect(effect: Effect): void {
@@ -104,6 +111,38 @@ export class Reload {
 				effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), this.#delay);
 
 				this.#delay = Math.min(this.#delay * this.delay.multiplier, this.delay.max);
+			}
+		});
+	}
+
+	#runAnnounced(effect: Effect): void {
+		const conn = effect.get(this.established);
+		if (!conn) {
+			this.#announced.set(new Set());
+			return;
+		}
+
+		const announced = conn.announced(emptyPath());
+		effect.cleanup(() => announced.close());
+
+		const active = new Set<Path.Valid>();
+
+		effect.spawn(async () => {
+			try {
+				for (;;) {
+					const entry = await Promise.race([effect.cancel, announced.next()]);
+					if (!entry) break;
+
+					if (entry.active) {
+						active.add(entry.path);
+					} else {
+						active.delete(entry.path);
+					}
+
+					this.#announced.set(new Set(active));
+				}
+			} catch {
+				// Connection closed or effect cancelled
 			}
 		});
 	}

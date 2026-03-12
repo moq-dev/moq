@@ -2,7 +2,7 @@ import { Moq, Signals } from "@moq/hang";
 import type MoqWatch from "@moq/watch/element";
 
 type Effect = Signals.Effect;
-const { Effect, Signal } = Signals;
+const { Effect } = Signals;
 
 /**
  * A simple web component for configuring the relay URL and broadcast name.
@@ -16,9 +16,7 @@ export default class MoqWatchConfig extends HTMLElement {
 
 	// The watch element to use for connection and broadcast name.
 	#watch: MoqWatch | undefined;
-
-	// The list of discovered broadcast names, updated reactively.
-	#broadcasts = new Signal<string[]>([]);
+	#watchEffects: Effect | undefined;
 
 	constructor() {
 		super();
@@ -66,24 +64,26 @@ export default class MoqWatchConfig extends HTMLElement {
 		this.#urlInput.addEventListener("input", () => this.#onUrlChange());
 		this.#pathInput.addEventListener("input", () => this.#onPathChange());
 
-		// Reactively discover broadcasts when the connection changes.
-		this.#signals.run(this.#runDiscovery.bind(this));
-
 		// Reactively render suggestions when broadcasts or selected name changes.
 		this.#signals.run(this.#runRender.bind(this));
 	}
 
 	set watch(watch: MoqWatch) {
+		// Clean up previous watch effects before creating new ones.
+		this.#watchEffects?.close();
+
 		this.#watch = watch;
+		const effects = new Effect();
+		this.#watchEffects = effects;
 
 		// Sync the URL input with the watch element's URL.
-		this.#signals.run((effect) => {
+		effects.run((effect) => {
 			const url = effect.get(watch.connection.url);
 			this.#urlInput.value = url?.toString() ?? "";
 		});
 
 		// Sync the name input with the watch element's broadcast name.
-		this.#signals.run((effect) => {
+		effects.run((effect) => {
 			const name = effect.get(watch.broadcast.name);
 			this.#pathInput.value = name.toString();
 		});
@@ -98,6 +98,7 @@ export default class MoqWatchConfig extends HTMLElement {
 	}
 
 	disconnectedCallback() {
+		this.#watchEffects?.close();
 		this.#signals.close();
 	}
 
@@ -109,7 +110,11 @@ export default class MoqWatchConfig extends HTMLElement {
 		if (!this.#watch) return;
 
 		if (name === "url") {
-			this.#watch.connection.url.set(newValue ? new URL(newValue) : undefined);
+			try {
+				this.#watch.connection.url.set(newValue ? new URL(newValue) : undefined);
+			} catch {
+				this.#watch.connection.url.set(undefined);
+			}
 		} else if (name === "name") {
 			this.#watch.broadcast.name.set(Moq.Path.from(newValue ?? ""));
 		}
@@ -125,7 +130,11 @@ export default class MoqWatchConfig extends HTMLElement {
 
 	#onUrlChange() {
 		if (this.#watch) {
-			this.#watch.connection.url.set(this.#urlInput.value ? new URL(this.#urlInput.value) : undefined);
+			try {
+				this.#watch.connection.url.set(this.#urlInput.value ? new URL(this.#urlInput.value) : undefined);
+			} catch {
+				this.#watch.connection.url.set(undefined);
+			}
 		}
 	}
 
@@ -135,50 +144,18 @@ export default class MoqWatchConfig extends HTMLElement {
 		}
 	}
 
-	#runDiscovery(effect: Effect) {
+	#runRender(effect: Effect) {
 		const watch = this.#watch;
 		if (!watch) return;
 
-		const connection = effect.get(watch.connection.established);
-		if (!connection) {
-			this.#broadcasts.set([]);
-			return;
-		}
-
-		const announced = connection.announced(Moq.Path.empty());
-		effect.cleanup(() => announced.close());
-
-		const active = new Map<string, boolean>();
-
-		effect.spawn(async () => {
-			try {
-				for (;;) {
-					const entry = await Promise.race([effect.cancel, announced.next()]);
-					if (!entry) break;
-
-					if (entry.active) {
-						active.set(entry.path, true);
-					} else {
-						active.delete(entry.path);
-					}
-
-					this.#broadcasts.set([...active.keys()]);
-				}
-			} catch {
-				// Connection closed or effect cancelled
-			}
-		});
-	}
-
-	#runRender(effect: Effect) {
-		const broadcasts = effect.get(this.#broadcasts);
+		const broadcasts = effect.get(watch.connection.announced);
 
 		// Also react to the selected name changing.
-		const selected = this.#watch ? effect.get(this.#watch.broadcast.name).toString() : "";
+		const selected = effect.get(watch.broadcast.name).toString();
 
 		this.#clearSuggestions();
 
-		if (broadcasts.length === 0) return;
+		if (broadcasts.size === 0) return;
 
 		const label = document.createElement("span");
 		label.textContent = "Available: ";

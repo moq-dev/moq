@@ -6,6 +6,9 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
 
+	// All actively announced broadcast paths from the connection.
+	announced?: Getter<Set<Moq.Path.Valid>>;
+
 	// Whether to start downloading the broadcast.
 	// Defaults to false so you can make sure everything is ready before starting.
 	enabled?: boolean | Signal<boolean>;
@@ -33,8 +36,8 @@ export class Broadcast {
 	#catalog = new Signal<Catalog.Root | undefined>(undefined);
 	readonly catalog: Getter<Catalog.Root | undefined> = this.#catalog;
 
-	// This signal is true when the broadcast has been announced, unless reloading is disabled.
-	#announced = new Signal(false);
+	// All actively announced broadcast paths from the connection.
+	#announced: Getter<Set<Moq.Path.Valid>>;
 
 	signals = new Effect();
 
@@ -44,63 +47,29 @@ export class Broadcast {
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? false);
 
-		this.signals.run(this.#runReload.bind(this));
+		this.#announced = props?.announced ?? new Signal(new Set());
+
 		this.signals.run(this.#runBroadcast.bind(this));
 		this.signals.run(this.#runCatalog.bind(this));
 	}
 
-	#runReload(effect: Effect): void {
-		const enabled = effect.get(this.enabled);
-		if (!enabled) return;
-
+	#isAnnounced(effect: Effect): boolean {
 		const reload = effect.get(this.reload);
-		if (!reload) {
-			// Mark as active without waiting for an announcement.
-			effect.set(this.#announced, true, false);
-			return;
-		}
-
-		const conn = effect.get(this.connection);
-		if (!conn) return;
+		if (!reload) return true;
 
 		const name = effect.get(this.name);
-
-		const announced = conn.announced(name);
-		effect.cleanup(() => announced.close());
-
-		// Warn if the relay doesn't support announcements (e.g. Cloudflare)
-		let warnTimer: ReturnType<typeof setTimeout> | undefined;
-		if (conn.url.hostname.endsWith("mediaoverquic.com")) {
-			warnTimer = setTimeout(() => {
-				console.warn(
-					"Cloudflare relay does not support the reload feature yet. Remove the `reload` attribute to connect without waiting for announcements.",
-				);
-			}, 1000);
-			effect.cleanup(() => clearTimeout(warnTimer));
-		}
-
-		effect.spawn(async () => {
-			for (;;) {
-				const update = await announced.next();
-				if (!update) break;
-
-				clearTimeout(warnTimer);
-
-				// Require full equality
-				if (update.path !== name) {
-					console.warn("ignoring announce", update.path);
-					continue;
-				}
-
-				effect.set(this.#announced, update.active, false);
-			}
-		});
+		const announced = effect.get(this.#announced);
+		return announced.has(name);
 	}
 
 	#runBroadcast(effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#announced, this.connection]);
-		if (!values) return;
-		const [_enabled, _announced, conn] = values;
+		const enabled = effect.get(this.enabled);
+		if (!enabled) return;
+
+		if (!this.#isAnnounced(effect)) return;
+
+		const conn = effect.get(this.connection);
+		if (!conn) return;
 
 		const name = effect.get(this.name);
 
