@@ -340,7 +340,15 @@ impl NoqRequest {
 				Ok(Self::WebTransport { request, alpns })
 			}
 			alpn if moq_lite::ALPNS.contains(&alpn) => {
-				let url = format!("moqt://{}", host).parse::<Url>().unwrap();
+				anyhow::ensure!(!host.is_empty(), "missing server name for raw QUIC connection");
+				let host_str = if host.contains(':') {
+					format!("[{}]", host)
+				} else {
+					host.clone()
+				};
+				let url = format!("moqt://{}", host_str)
+					.parse::<Url>()
+					.context("failed to construct URL from server name")?;
 				let request = web_transport_noq::proto::ConnectRequest::new(url);
 				let response = web_transport_noq::proto::ConnectResponse::OK.with_protocol(alpn);
 				Ok(Self::Raw {
