@@ -2858,7 +2858,6 @@ dependencies = [
  "moq-lite",
  "moq-mux",
  "moq-native",
- "slab",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
