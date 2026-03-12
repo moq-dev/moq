@@ -116,18 +116,26 @@ export class Reload {
 	}
 
 	#runAnnounced(effect: Effect): void {
-		const conn = effect.get(this.established);
-		if (!conn) {
-			this.#announced.set(new Set());
-			return;
-		}
-
 		this.#announced.set(new Set());
+
+		const conn = effect.get(this.established);
+		if (!conn) return;
+
+		effect.cleanup(() => this.#announced.set(new Set()));
+
+		// Warn if the relay doesn't support announcements (e.g. Cloudflare)
+		if (conn.url.hostname.endsWith("mediaoverquic.com")) {
+			effect.timer(() => {
+				if (this.#announced.peek().size === 0) {
+					console.warn(
+						"Cloudflare relay does not support the reload feature yet. Remove the `reload` attribute to connect without waiting for announcements.",
+					);
+				}
+			}, 1000);
+		}
 
 		const announced = conn.announced(emptyPath());
 		effect.cleanup(() => announced.close());
-
-		const active = new Set<Path.Valid>();
 
 		effect.spawn(async () => {
 			try {
@@ -135,16 +143,17 @@ export class Reload {
 					const entry = await Promise.race([effect.cancel, announced.next()]);
 					if (!entry) break;
 
-					if (entry.active) {
-						active.add(entry.path);
-					} else {
-						active.delete(entry.path);
-					}
-
-					this.#announced.set(new Set(active));
+					this.#announced.mutate((active) => {
+						if (entry.active) {
+							active.add(entry.path);
+						} else {
+							active.delete(entry.path);
+						}
+					});
 				}
-			} catch {
-				// Connection closed or effect cancelled
+			} catch (err) {
+				this.#announced.set(new Set());
+				throw err;
 			}
 		});
 	}
