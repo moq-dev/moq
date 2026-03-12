@@ -13,8 +13,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  parse-version:
+    name: Parse version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+
+    steps:
+      - name: Parse version from tag
+        id: parse
+        shell: bash
+        run: |
+          ref=${GITHUB_REF#refs/tags/}
+          if [[ "$ref" =~ ^moq-ffi-v([0-9.]+)$ ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag format not recognized: $ref" >&2
+            exit 1
+          fi
+
   build:
     name: Build (${{ matrix.target }})
+    needs: [parse-version]
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -68,23 +88,11 @@ jobs:
         if: contains(matrix.target, 'android')
         run: cargo install cargo-ndk
 
-      - name: Parse version
-        id: parse
-        shell: bash
-        run: |
-          ref=${GITHUB_REF#refs/tags/}
-          if [[ "$ref" =~ ^moq-ffi-v([0-9.]+)$ ]]; then
-            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-          else
-            echo "Tag format not recognized: $ref" >&2
-            exit 1
-          fi
-
       - name: Build and package
         shell: bash
         env:
           BUILD_TARGET: ${{ matrix.target }}
-          BUILD_VERSION: ${{ steps.parse.outputs.version }}
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
           ./rs/moq-ffi/build.sh \
             --target "$BUILD_TARGET" \
@@ -99,6 +107,7 @@ jobs:
 
   bindings:
     name: Generate bindings
+    needs: [parse-version]
     runs-on: ubuntu-latest
 
     steps:
@@ -110,21 +119,9 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Parse version
-        id: parse
-        shell: bash
-        run: |
-          ref=${GITHUB_REF#refs/tags/}
-          if [[ "$ref" =~ ^moq-ffi-v([0-9.]+)$ ]]; then
-            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-          else
-            echo "Tag format not recognized: $ref" >&2
-            exit 1
-          fi
-
       - name: Generate bindings
         env:
-          BUILD_VERSION: ${{ steps.parse.outputs.version }}
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
         run: |
           ./rs/moq-ffi/build.sh \
             --bindings-only \
@@ -139,6 +136,7 @@ jobs:
 
   python:
     name: Python wheels (${{ matrix.target }})
+    needs: [parse-version]
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -159,9 +157,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
+      - name: Set Cargo.toml version
+        shell: bash
+        run: |
+          VERSION="${{ needs.parse-version.outputs.version }}"
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" rs/moq-ffi/Cargo.toml
+          rm -f rs/moq-ffi/Cargo.toml.bak
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -177,7 +182,7 @@ jobs:
 
   release:
     name: Release
-    needs: [build, bindings, python]
+    needs: [parse-version, build, bindings, python]
     runs-on: ubuntu-latest
 
     steps:
@@ -185,21 +190,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Parse version
-        id: parse
-        run: |
-          ref=${GITHUB_REF#refs/tags/}
-          if [[ "$ref" =~ ^moq-ffi-v([0-9.]+)$ ]]; then
-            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-          else
-            echo "Tag format not recognized: $ref" >&2
-            exit 1
-          fi
-
       - name: Find previous tag
         id: prev_tag
+        shell: bash
         run: |
-          current_tag="moq-ffi-v${{ steps.parse.outputs.version }}"
+          current_tag="moq-ffi-v${{ needs.parse-version.outputs.version }}"
           prev_tag=$(git tag --list 'moq-ffi-v*' --sort=-v:refname | grep -v "^${current_tag}$" | head -n1 || true)
           echo "tag=${prev_tag}" >> "$GITHUB_OUTPUT"
           echo "Previous tag: ${prev_tag:-none}"
@@ -211,10 +206,11 @@ jobs:
           merge-multiple: true
 
       - name: Create release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REF_NAME: ${{ github.ref_name }}
-          VERSION: ${{ steps.parse.outputs.version }}
+          VERSION: ${{ needs.parse-version.outputs.version }}
           PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
         run: |
           if [ -n "$PREV_TAG" ]; then

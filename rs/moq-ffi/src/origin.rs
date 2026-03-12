@@ -31,9 +31,10 @@ impl Announced {
 				Some((path, Some(broadcast))) => {
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
-						broadcast: MoqBroadcastConsumer::new(broadcast),
+						broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
 					})));
 				}
+				// TODO moq-lite will change to not emit None (unannounce) events here.
 				Some((_path, None)) => continue,
 				None => return Ok(None),
 			}
@@ -46,6 +47,7 @@ impl Announced {
 				Some((_path, Some(broadcast))) => {
 					return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)));
 				}
+				// TODO moq-lite will change to not emit None (unannounce) events here.
 				Some((_path, None)) => continue,
 				None => return Err(MoqError::Closed),
 			}
@@ -57,7 +59,7 @@ impl Announced {
 #[derive(uniffi::Object)]
 pub struct MoqAnnouncement {
 	path: String,
-	broadcast: MoqBroadcastConsumer,
+	broadcast: Arc<MoqBroadcastConsumer>,
 }
 
 /// Waits for a specific broadcast to be announced.
@@ -149,7 +151,7 @@ impl MoqAnnouncement {
 
 	/// The broadcast consumer.
 	pub fn broadcast(&self) -> Arc<MoqBroadcastConsumer> {
-		Arc::new(self.broadcast.clone())
+		self.broadcast.clone()
 	}
 }
 
