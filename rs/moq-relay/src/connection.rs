@@ -28,9 +28,9 @@ impl Connection {
 			}
 		};
 
-		let publish = self.cluster.publisher(&token);
-		let subscribe = self.cluster.subscriber(&token);
-		let registration = self.cluster.register(&token);
+		let origin = self.cluster.origin.with_root(&token.root);
+		let publish = origin.as_ref().and_then(|o| o.publish_only(&token.publish));
+		let subscribe = origin.as_ref().and_then(|o| o.consume_only(&token.subscribe));
 		let transport = self.request.transport();
 
 		match (&publish, &subscribe) {
@@ -62,9 +62,7 @@ impl Connection {
 		tracing::info!(version = %session.version(), transport, "negotiated");
 
 		// Wait until the session is closed.
-		// Keep registration alive so the cluster node stays announced.
 		session.closed().await?;
-		drop(registration);
 		Ok(())
 	}
 }

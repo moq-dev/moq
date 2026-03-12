@@ -139,6 +139,7 @@ pub async fn load_keys(jwks_uri: &str) -> anyhow::Result<KeySet> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
 	use super::*;
 	use crate::Algorithm;
