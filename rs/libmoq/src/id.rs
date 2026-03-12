@@ -31,11 +31,11 @@ pub(crate) struct NonZeroSlab<T> {
 }
 
 impl<T> NonZeroSlab<T> {
-	pub fn insert(&mut self, value: T) -> Id {
+	pub fn insert(&mut self, value: T) -> Result<Id, Error> {
 		let raw = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-		let id = Id(NonZero::new(raw).expect("id counter wrapped to zero"));
+		let id = Id(NonZero::new(raw).ok_or(Error::IdOverflow)?);
 		self.map.insert(id, value);
-		id
+		Ok(id)
 	}
 
 	pub fn get(&self, id: Id) -> Option<&T> {

@@ -30,7 +30,7 @@ pub struct Origin {
 }
 
 impl Origin {
-	pub fn create(&mut self) -> Id {
+	pub fn create(&mut self) -> Result<Id, Error> {
 		self.active.insert(moq_lite::OriginProducer::default())
 	}
 
@@ -47,7 +47,7 @@ impl Origin {
 			close: channel.0,
 			callback: on_announce,
 		};
-		let id = self.announced_task.insert(Some(entry));
+		let id = self.announced_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
@@ -74,7 +74,7 @@ impl Origin {
 			};
 			let callback = entry.callback;
 
-			let announced_id = state.origin.announced.insert((path.to_string(), broadcast.is_some()));
+			let announced_id = state.origin.announced.insert((path.to_string(), broadcast.is_some()))?;
 			drop(state);
 
 			// The lock is dropped before the callback is invoked.

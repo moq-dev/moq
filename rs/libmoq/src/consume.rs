@@ -42,7 +42,7 @@ pub struct Consume {
 }
 
 impl Consume {
-	pub fn start(&mut self, broadcast: moq_lite::BroadcastConsumer) -> Id {
+	pub fn start(&mut self, broadcast: moq_lite::BroadcastConsumer) -> Result<Id, Error> {
 		self.broadcast.insert(broadcast)
 	}
 
@@ -55,7 +55,7 @@ impl Consume {
 			close: channel.0,
 			callback: on_catalog,
 		};
-		let id = self.catalog_task.insert(Some(entry));
+		let id = self.catalog_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
@@ -108,7 +108,7 @@ impl Consume {
 			};
 			let callback = entry.callback;
 
-			let snapshot_id = state.consume.catalog.insert(catalog);
+			let snapshot_id = state.consume.catalog.insert(catalog)?;
 			drop(state);
 
 			// The lock is dropped before the callback is invoked.
@@ -228,7 +228,7 @@ impl Consume {
 			close: channel.0,
 			callback: on_frame,
 		};
-		let id = self.track_task.insert(Some(entry));
+		let id = self.track_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
@@ -272,7 +272,7 @@ impl Consume {
 			close: channel.0,
 			callback: on_frame,
 		};
-		let id = self.track_task.insert(Some(entry));
+		let id = self.track_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
@@ -316,7 +316,7 @@ impl Consume {
 			};
 			let callback = entry.callback;
 
-			let frame_id = state.consume.frame.insert(new_frame);
+			let frame_id = state.consume.frame.insert(new_frame)?;
 			drop(state);
 
 			// The lock is dropped before the callback is invoked.
