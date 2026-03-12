@@ -122,6 +122,8 @@ export class Reload {
 			return;
 		}
 
+		this.#announced.set(new Set());
+
 		const announced = conn.announced(emptyPath());
 		effect.cleanup(() => announced.close());
 

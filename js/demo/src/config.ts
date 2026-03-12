@@ -1,9 +1,6 @@
 import { Moq, Signals } from "@moq/hang";
 import type MoqWatch from "@moq/watch/element";
 
-type Effect = Signals.Effect;
-const { Effect } = Signals;
-
 /**
  * A simple web component for configuring the relay URL and broadcast name.
  * Uses the watch element's connection for discovery instead of creating its own.
@@ -12,11 +9,11 @@ export default class MoqWatchConfig extends HTMLElement {
 	#urlInput: HTMLInputElement;
 	#pathInput: HTMLInputElement;
 	#suggestions: HTMLDivElement;
-	#signals = new Effect();
+	#signals = new Signals.Effect();
 
 	// The watch element to use for connection and broadcast name.
 	#watch: MoqWatch | undefined;
-	#watchEffects: Effect | undefined;
+	#watchEffects: Signals.Effect | undefined;
 
 	constructor() {
 		super();
@@ -63,9 +60,6 @@ export default class MoqWatchConfig extends HTMLElement {
 		// Event listeners
 		this.#urlInput.addEventListener("input", () => this.#onUrlChange());
 		this.#pathInput.addEventListener("input", () => this.#onPathChange());
-
-		// Reactively render suggestions when broadcasts or selected name changes.
-		this.#signals.run(this.#runRender.bind(this));
 	}
 
 	set watch(watch: MoqWatch) {
@@ -73,7 +67,7 @@ export default class MoqWatchConfig extends HTMLElement {
 		this.#watchEffects?.close();
 
 		this.#watch = watch;
-		const effects = new Effect();
+		const effects = new Signals.Effect();
 		this.#watchEffects = effects;
 
 		// Sync the URL input with the watch element's URL.
@@ -87,6 +81,9 @@ export default class MoqWatchConfig extends HTMLElement {
 			const name = effect.get(watch.broadcast.name);
 			this.#pathInput.value = name.toString();
 		});
+
+		// Reactively render suggestions when broadcasts or selected name changes.
+		effects.run(this.#runRender.bind(this));
 	}
 
 	get watch(): MoqWatch | undefined {
@@ -144,7 +141,7 @@ export default class MoqWatchConfig extends HTMLElement {
 		}
 	}
 
-	#runRender(effect: Effect) {
+	#runRender(effect: Signals.Effect) {
 		const watch = this.#watch;
 		if (!watch) return;
 
