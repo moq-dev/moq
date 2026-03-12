@@ -67,6 +67,7 @@ module "relay" {
 module "pub" {
   source          = "./pub"
   domain          = var.domain
+  relay           = "use.${var.domain}"
   ssh_keys        = var.ssh_keys
   stackscript_id  = linode_stackscript.bootstrap.id
   gcp_account_key = google_service_account_key.relay.private_key

@@ -16,8 +16,9 @@ variable "ssh_keys" {
 variable "relays" {
   description = "Map of relay node configurations"
   type = map(object({
-    region = string
-    type   = string
+    region  = string
+    type    = string
+    connect = list(string)
   }))
 }
 

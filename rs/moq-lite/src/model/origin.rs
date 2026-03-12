@@ -5,8 +5,14 @@ use std::{
 use tokio::sync::mpsc;
 use web_async::Lock;
 
+use std::time::Duration;
+
 use super::BroadcastConsumer;
 use crate::{AsPath, Broadcast, BroadcastProducer, Path, PathOwned};
+
+/// Delay before reannouncing a promoted backup broadcast.
+/// This avoids churn when a cascade of closures propagates through the network.
+const REANNOUNCE_HOLD_DOWN: Duration = Duration::from_millis(250);
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -201,64 +207,90 @@ impl OriginNode {
 		}
 	}
 
-	// Returns true if the broadcast should be unannounced.
-	fn remove(&mut self, full: impl AsPath, broadcast: BroadcastConsumer, relative: impl AsPath) {
+	/// Remove a broadcast from this node.
+	///
+	/// Returns `Some(promoted)` if a backup was promoted to active and needs a delayed reannounce.
+	/// Unannounces immediately if there are no backups.
+	fn remove(
+		&mut self,
+		full: impl AsPath,
+		broadcast: BroadcastConsumer,
+		relative: impl AsPath,
+	) -> Option<BroadcastConsumer> {
 		let full = full.as_path();
 		let relative = relative.as_path();
 
 		if let Some((dir, relative)) = relative.next_part() {
 			let nested = self.entry(dir);
 			let mut locked = nested.lock();
-			locked.remove(&full, broadcast, &relative);
+			let result = locked.remove(&full, broadcast, &relative);
 
 			if locked.is_empty() {
 				drop(locked);
 				self.nested.remove(dir);
 			}
+
+			return result;
+		}
+
+		let entry = match &mut self.broadcast {
+			Some(existing) => existing,
+			None => return None,
+		};
+
+		// See if we can remove the broadcast from the backup list.
+		let pos = entry.backup.iter().position(|b| b.is_clone(&broadcast));
+		if let Some(pos) = pos {
+			entry.backup.remove(pos);
+			return None;
+		}
+
+		// Okay so it must be the active broadcast or else we fucked up.
+		assert!(entry.active.is_clone(&broadcast));
+
+		// If there's a backup broadcast, pick the one with fewest hops (most recent as tiebreaker).
+		if !entry.backup.is_empty() {
+			// Reverse enumerate so that ties prefer the most recently added (last in vec).
+			let best = entry
+				.backup
+				.iter()
+				.enumerate()
+				.rev()
+				.min_by_key(|(_, b)| b.info.hops)
+				.map(|(i, _)| i)
+				.unwrap();
+			let active = entry.backup.swap_remove(best);
+			entry.active = active.clone();
+
+			// Don't reannounce immediately — return the promoted backup so the caller
+			// can schedule a delayed reannounce (hold-down timer) to avoid churn when
+			// a cascade of closures is propagating through the network.
+			Some(active)
 		} else {
-			let entry = match &mut self.broadcast {
-				Some(existing) => existing,
-				None => return,
-			};
+			// No more backups, unannounce immediately.
+			self.broadcast = None;
+			self.notify.lock().unannounce(full);
+			None
+		}
+	}
 
-			// See if we can remove the broadcast from the backup list.
-			let pos = entry.backup.iter().position(|b| b.is_clone(&broadcast));
-			if let Some(pos) = pos {
-				entry.backup.remove(pos);
-				// Nothing else to do
-				return;
+	/// Reannounce a promoted backup if it's still the active broadcast.
+	///
+	/// Called after the hold-down delay. If a better broadcast arrived in the meantime
+	/// (via publish with fewer hops), the promoted one will no longer be active and
+	/// this is a no-op.
+	fn maybe_reannounce(&mut self, full: impl AsPath, relative: impl AsPath, promoted: &BroadcastConsumer) {
+		let full = full.as_path();
+		let relative = relative.as_path();
+
+		if let Some((dir, relative)) = relative.next_part() {
+			if let Some(nested) = self.nested.get(dir) {
+				nested.lock().maybe_reannounce(&full, &relative, promoted);
 			}
-
-			// Okay so it must be the active broadcast or else we fucked up.
-			assert!(entry.active.is_clone(&broadcast));
-
-			// If there's a backup broadcast, pick the one with fewest hops (most recent as tiebreaker).
-			if !entry.backup.is_empty() {
-				let old_hops = broadcast.info.hops;
-
-				// Reverse enumerate so that ties prefer the most recently added (last in vec).
-				let best = entry
-					.backup
-					.iter()
-					.enumerate()
-					.rev()
-					.min_by_key(|(_, b)| b.info.hops)
-					.map(|(i, _)| i)
-					.unwrap();
-				let active = entry.backup.swap_remove(best);
-				entry.active = active;
-
-				// Only reannounce if the new active has fewer or equal hops.
-				// If the new route is worse (higher hops), skip the reannounce to avoid
-				// cascading disruption downstream.
-				if entry.active.info.hops <= old_hops {
-					self.notify.lock().reannounce(full, &entry.active);
-				}
-			} else {
-				// No more backups, so remove the entry.
-				self.broadcast = None;
-				self.notify.lock().unannounce(full);
-			}
+		} else if let Some(entry) = &self.broadcast
+			&& entry.active.is_clone(promoted)
+		{
+			self.notify.lock().reannounce(full, &entry.active);
 		}
 	}
 
@@ -390,9 +422,9 @@ impl OriginProducer {
 	/// Publish a broadcast, announcing it to all consumers.
 	///
 	/// The broadcast will be unannounced when it is closed.
-	/// If there is already a broadcast with the same path, then it will be replaced and reannounced.
-	/// If the old broadcast is closed before the new one, then nothing will happen.
-	/// If the new broadcast is closed before the old one, then the old broadcast will be reannounced.
+	/// If there is already a broadcast with the same path and more hops, it will be replaced and reannounced.
+	/// If the old broadcast is closed before the new one, the new broadcast will be reannounced after a hold-down delay.
+	/// If the new broadcast is closed before the old one, then nothing will happen.
 	///
 	/// Returns false if the broadcast is not allowed to be published.
 	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
@@ -410,7 +442,15 @@ impl OriginProducer {
 
 		web_async::spawn(async move {
 			broadcast.closed().await;
-			root.lock().remove(&full, broadcast, &rest);
+			let promoted = root.lock().remove(&full, broadcast, &rest);
+
+			if let Some(promoted) = promoted {
+				// Hold-down timer: delay the reannounce to avoid churn when a cascade
+				// of closures propagates through the network. If a better path arrives
+				// during this window, it will reannounce immediately and this becomes a no-op.
+				tokio::time::sleep(REANNOUNCE_HOLD_DOWN).await;
+				root.lock().maybe_reannounce(&full, &rest, &promoted);
+			}
 		});
 
 		true
@@ -641,6 +681,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_announce() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
@@ -705,6 +747,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_duplicate() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 
 		// All same hops (0), so first becomes active, rest go to backup.
@@ -730,26 +774,29 @@ mod tests {
 		// Drop a backup, nothing should change.
 		drop(broadcast2);
 
-		// Wait for the async task to run.
+		// Wait for the async cleanup task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
 		assert!(consumer.consume_broadcast("test").is_some());
 		consumer.assert_next_wait();
 
-		// Drop the active, we should reannounce with the remaining backup (broadcast3, most recent).
+		// Drop the active — backup is promoted but reannounce is delayed (hold-down timer).
 		drop(broadcast1);
 
-		// Wait for the async task to run.
+		// Wait for the remove task to run, but not the hold-down.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+		consumer.assert_next_wait();
+
+		// Advance past the hold-down timer. Now the reannounce should fire.
+		tokio::time::sleep(REANNOUNCE_HOLD_DOWN + tokio::time::Duration::from_millis(1)).await;
 
 		assert!(consumer.consume_broadcast("test").is_some());
 		consumer.assert_next_none("test");
 		consumer.assert_next("test", &consumer3);
 
-		// Drop the final broadcast, we should unannounce.
+		// Drop the final broadcast, we should unannounce immediately.
 		drop(broadcast3);
 
-		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 		assert!(consumer.consume_broadcast("test").is_none());
 
@@ -759,6 +806,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_duplicate_reverse() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
@@ -770,19 +819,19 @@ mod tests {
 		// This is harder, dropping the new broadcast first.
 		drop(broadcast2);
 
-		// Wait for the cleanup async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 		assert!(origin.consume_broadcast("test").is_some());
 
 		drop(broadcast1);
 
-		// Wait for the cleanup async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 		assert!(origin.consume_broadcast("test").is_none());
 	}
 
 	#[tokio::test]
 	async fn test_hops_ordering() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 
 		// Publish a broadcast with 3 hops.
@@ -795,7 +844,7 @@ mod tests {
 		consumer.assert_next("test", &far_consumer);
 		consumer.assert_next_wait();
 
-		// Now publish a closer broadcast (1 hop). It should replace the active and reannounce.
+		// Now publish a closer broadcast (1 hop). It should replace the active and reannounce immediately.
 		let close = Broadcast::new().with_hops(1).produce();
 		let close_consumer = close.consume();
 
@@ -811,20 +860,26 @@ mod tests {
 		origin.publish_broadcast("test", farther_consumer.clone());
 		consumer.assert_next_wait();
 
-		// Drop the active (1 hop). Best backup is 3 hops, which is worse, so no reannounce.
+		// Drop the active (1 hop). Best backup is 3 hops. Reannounce is delayed.
 		drop(close);
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-
-		// The active is silently replaced with the 3-hop backup. No notification.
 		consumer.assert_next_wait();
 
-		// Drop the 3-hop broadcast. Best backup is 5 hops, which is worse, so no reannounce.
+		// After the hold-down, the 3-hop backup is reannounced.
+		tokio::time::sleep(REANNOUNCE_HOLD_DOWN + tokio::time::Duration::from_millis(1)).await;
+		consumer.assert_next_none("test");
+		consumer.assert_next("test", &far_consumer);
+
+		// Drop the 3-hop broadcast. Best backup is 5 hops. Reannounce is delayed.
 		drop(far);
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-
 		consumer.assert_next_wait();
 
-		// Drop the last one. Should unannounce.
+		tokio::time::sleep(REANNOUNCE_HOLD_DOWN + tokio::time::Duration::from_millis(1)).await;
+		consumer.assert_next_none("test");
+		consumer.assert_next("test", &farther_consumer);
+
+		// Drop the last one. Should unannounce immediately.
 		drop(farther);
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
@@ -852,8 +907,129 @@ mod tests {
 		consumer.assert_next_wait();
 	}
 
+	/// When the active closes and a backup is promoted, a better publish arriving
+	/// during the hold-down should reannounce immediately and cancel the delayed one.
+	#[tokio::test]
+	async fn test_hold_down_superseded_by_better_publish() {
+		tokio::time::pause();
+
+		let origin = Origin::produce();
+
+		let b1 = Broadcast::new().with_hops(1).produce();
+		let b1c = b1.consume();
+		let b2 = Broadcast::new().with_hops(3).produce();
+		let b2c = b2.consume();
+
+		let mut consumer = origin.consume();
+
+		origin.publish_broadcast("test", b1c.clone());
+		origin.publish_broadcast("test", b2c.clone());
+		consumer.assert_next("test", &b1c);
+		consumer.assert_next_wait();
+
+		// Drop the active (1 hop). Backup (3 hops) is promoted, hold-down starts.
+		drop(b1);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+		consumer.assert_next_wait(); // No reannounce yet.
+
+		// During hold-down, a better broadcast arrives (0 hops).
+		let b3 = Broadcast::new().with_hops(0).produce();
+		let b3c = b3.consume();
+		origin.publish_broadcast("test", b3c.clone());
+
+		// The better broadcast reannounces immediately.
+		consumer.assert_next_none("test");
+		consumer.assert_next("test", &b3c);
+		consumer.assert_next_wait();
+
+		// After the hold-down expires, nothing happens (superseded).
+		tokio::time::sleep(REANNOUNCE_HOLD_DOWN).await;
+		consumer.assert_next_wait();
+	}
+
+	/// When the active closes and the promoted backup also closes during the hold-down,
+	/// we should unannounce immediately.
+	#[tokio::test]
+	async fn test_hold_down_backup_also_closes() {
+		tokio::time::pause();
+
+		let origin = Origin::produce();
+
+		let b1 = Broadcast::new().produce();
+		let b1c = b1.consume();
+		let b2 = Broadcast::new().produce();
+		let b2c = b2.consume();
+
+		let mut consumer = origin.consume();
+
+		origin.publish_broadcast("test", b1c.clone());
+		origin.publish_broadcast("test", b2c.clone());
+		consumer.assert_next("test", &b1c);
+		consumer.assert_next_wait();
+
+		// Drop the active. Backup promoted, hold-down starts.
+		drop(b1);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+		consumer.assert_next_wait();
+
+		// Drop the promoted backup during the hold-down.
+		drop(b2);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+
+		// Should unannounce immediately.
+		consumer.assert_next_none("test");
+		consumer.assert_next_wait();
+		assert!(origin.consume_broadcast("test").is_none());
+
+		// After the hold-down expires, nothing happens.
+		tokio::time::sleep(REANNOUNCE_HOLD_DOWN).await;
+		consumer.assert_next_wait();
+	}
+
+	/// Cascading closures: active closes, backup promoted, backup closes too.
+	/// The hold-down prevents churn — downstream only sees the final state.
+	#[tokio::test]
+	async fn test_hold_down_cascade() {
+		tokio::time::pause();
+
+		let origin = Origin::produce();
+
+		let b1 = Broadcast::new().with_hops(1).produce();
+		let b1c = b1.consume();
+		let b2 = Broadcast::new().with_hops(2).produce();
+		let b2c = b2.consume();
+		let b3 = Broadcast::new().with_hops(3).produce();
+		let b3c = b3.consume();
+
+		let mut consumer = origin.consume();
+
+		origin.publish_broadcast("test", b1c.clone());
+		origin.publish_broadcast("test", b2c.clone());
+		origin.publish_broadcast("test", b3c.clone());
+		consumer.assert_next("test", &b1c);
+		consumer.assert_next_wait();
+
+		// Drop b1 (active). b2 promoted, hold-down starts.
+		drop(b1);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+		consumer.assert_next_wait();
+
+		// Drop b2 (promoted) during hold-down. b3 promoted, new hold-down starts.
+		drop(b2);
+		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+		consumer.assert_next_wait();
+
+		// After the hold-down, b3 is reannounced.
+		tokio::time::sleep(REANNOUNCE_HOLD_DOWN + tokio::time::Duration::from_millis(1)).await;
+		consumer.assert_next_none("test");
+		consumer.assert_next("test", &b3c);
+		consumer.assert_next_wait();
+	}
+
 	#[tokio::test]
 	async fn test_double_publish() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 		let broadcast = Broadcast::new().produce();
 
@@ -865,7 +1041,6 @@ mod tests {
 
 		drop(broadcast);
 
-		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 		assert!(origin.consume_broadcast("test").is_none());
 	}
@@ -1404,6 +1579,8 @@ mod tests {
 	// Verify unannounce also doesn't panic with trailing slash
 	#[tokio::test]
 	async fn test_with_root_trailing_slash_unannounce() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 
 		let prefix = "some_prefix/".to_string();

@@ -36,17 +36,25 @@ variable "webhook" {
 # instance types: https://api.linode.com/v4/linode/types
 locals {
   relays = {
-    usc = {
-      region = "us-central"    # Dallas, TX
-      type   = "g6-standard-2" # 4GB RAM, 2 vCPU, $24/mo, 4TB out
+    usw = {
+      region  = "us-west"       # Fremont, CA
+      type    = "g6-standard-2" # 4GB RAM, 2 vCPU, $24/mo, 4TB out
+      connect = ["use"]
+    }
+    use = {
+      region  = "us-east" # Newark, NJ
+      type    = "g6-standard-2"
+      connect = ["usw", "euc"]
     }
     euc = {
-      region = "eu-central" # Frankfurt, Germany
-      type   = "g6-standard-2"
+      region  = "eu-central" # Frankfurt, Germany
+      type    = "g6-standard-2"
+      connect = ["use"]
     }
     sea = {
-      region = "ap-south" # Singapore
-      type   = "g6-standard-2"
+      region  = "ap-south" # Singapore
+      type    = "g6-standard-2"
+      connect = ["use"]
     }
   }
 }

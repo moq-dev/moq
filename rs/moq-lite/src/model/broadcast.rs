@@ -3,6 +3,8 @@ use std::{
 	task::{Poll, ready},
 };
 
+use std::ops::Deref;
+
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
 use super::Track;
@@ -146,6 +148,14 @@ impl BroadcastProducer {
 	}
 }
 
+impl Deref for BroadcastProducer {
+	type Target = Broadcast;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 #[cfg(test)]
 impl BroadcastProducer {
 	pub fn assert_create_track(&mut self, track: &Track) -> TrackProducer {
@@ -275,6 +285,14 @@ pub struct BroadcastConsumer {
 	state: conducer::Consumer<State>,
 }
 
+impl Deref for BroadcastConsumer {
+	type Target = Broadcast;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 impl BroadcastConsumer {
 	pub fn subscribe_track(&self, track: &Track) -> Result<TrackConsumer, Error> {
 		// Upgrade to a temporary producer so we can modify the state.
@@ -360,7 +378,7 @@ mod test {
 
 	#[tokio::test]
 	async fn insert() {
-		let mut producer = BroadcastProducer::default();
+		let mut producer = Broadcast::new().produce();
 		let mut track1 = Track::new("track1").produce();
 
 		// Make sure we can insert before a consumer is created.
@@ -386,7 +404,7 @@ mod test {
 
 	#[tokio::test]
 	async fn closed() {
-		let mut producer = BroadcastProducer::default();
+		let mut producer = Broadcast::new().produce();
 		let _dynamic = producer.dynamic();
 
 		let consumer = producer.consume();
@@ -412,7 +430,7 @@ mod test {
 
 	#[tokio::test]
 	async fn requests() {
-		let mut producer = BroadcastProducer::default().dynamic();
+		let mut producer = Broadcast::new().produce().dynamic();
 
 		let consumer = producer.consume();
 		let consumer2 = consumer.clone();

@@ -102,6 +102,7 @@ match version {
 - Run `just fix` to automatically fix formating and easy things.
 - Rust tests are integrated within source files
 - Async tests that sleep should call `tokio::time::pause()` at the start to simulate time instantly
+- Use `tokio::time::sleep()` (not `advance()`) to move time forward in paused-time tests — `sleep` both advances the clock and yields to the runtime so spawned tasks can run
 
 ## Branching Strategy
 

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context;
 use moq_lite::{Broadcast, BroadcastConsumer, BroadcastProducer, Origin, OriginConsumer, OriginProducer};
@@ -12,30 +12,21 @@ use crate::AuthToken;
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
 pub struct ClusterConfig {
-	/// Connect to this hostname in order to discover other nodes.
-	#[serde(alias = "connect")]
+	/// Connect to these hostnames to form the cluster.
 	#[arg(
-		id = "cluster-root",
-		long = "cluster-root",
-		env = "MOQ_CLUSTER_ROOT",
-		alias = "cluster-connect"
+		id = "cluster-connect",
+		long = "cluster-connect",
+		env = "MOQ_CLUSTER_CONNECT",
+		value_delimiter = ','
 	)]
-	pub root: Option<String>,
+	pub connect: Vec<String>,
 
 	/// Use the token in this file when connecting to other nodes.
 	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
 	pub token: Option<PathBuf>,
 
 	/// Our hostname which we advertise to other nodes.
-	///
-	// TODO Remove alias once we've migrated to the new name.
-	#[serde(alias = "advertise")]
-	#[arg(
-		id = "cluster-node",
-		long = "cluster-node",
-		env = "MOQ_CLUSTER_NODE",
-		alias = "cluster-advertise"
-	)]
+	#[arg(id = "cluster-node", long = "cluster-node", env = "MOQ_CLUSTER_NODE")]
 	pub node: Option<String>,
 
 	/// The prefix to use for cluster announcements.
@@ -100,27 +91,12 @@ impl Cluster {
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
-		// If we're using a root node, then we have to connect to it.
-		// Otherwise, we're the root node so we wait for other nodes to connect to us.
-		let Some(root) = self
-			.config
-			.root
-			.clone()
-			.filter(|connect| Some(connect) != self.config.node.as_ref())
-		else {
-			tracing::info!("running as root, accepting leaf nodes");
-			// The root node has no active cluster loop — it only accepts incoming
-			// connections from leaf nodes. Block forever since there's nothing to do.
+		if self.config.connect.is_empty() {
+			// No peers configured, just accept incoming connections.
+			tracing::info!("no cluster peers configured, accepting incoming connections only");
 			std::future::pending::<()>().await;
 			anyhow::bail!("unexpected return");
-		};
-
-		// Subscribe to available origins to discover other cluster nodes.
-		// Use with_root to automatically strip the prefix from announced paths.
-		let origins = self
-			.origin
-			.with_root(&self.config.prefix)
-			.context("no authorized origins")?;
+		}
 
 		// If the token is provided, read it from the disk and use it in the query parameter.
 		// TODO put this in an AUTH header once WebTransport supports it.
@@ -132,91 +108,38 @@ impl Cluster {
 			None => "".to_string(),
 		};
 
-		let local = self.config.node.clone().context("missing node")?;
-
-		// Create a dummy broadcast that we don't close so run_remote doesn't close.
-		let noop = Broadcast::new().produce();
-
-		// Despite returning a Result, we should NEVER return an Ok
-		tokio::select! {
-			res = self.clone().run_remote(&root, Some(local.as_str()), token.clone(), noop.consume()) => {
-				res.context("failed to connect to root")?;
-				anyhow::bail!("connection to root closed");
-			}
-			res = self.clone().run_remotes(origins.consume(), token) => {
-				res.context("failed to connect to remotes")?;
-				anyhow::bail!("connection to remotes closed");
-			}
-		}
-	}
-
-	async fn run_remotes(self, mut origins: OriginConsumer, token: String) -> anyhow::Result<()> {
-		// Cancel tasks when the origin is closed.
-		let mut active: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
-
-		// Discover other origins.
-		// NOTE: The root node will connect to all other nodes as a client, ignoring the existing (server) connection.
-		// This ensures that nodes are advertising a valid hostname before any tracks get announced.
-		while let Some((node, origin)) = origins.announced().await {
-			if self.config.node.as_deref() == Some(node.as_str()) {
-				// Skip ourselves.
-				continue;
-			}
-
-			let Some(origin) = origin else {
-				tracing::info!(%node, "origin cancelled");
-				active.remove(node.as_str()).unwrap().abort();
-				continue;
-			};
-
-			tracing::info!(%node, "discovered origin");
-
+		let mut tasks = tokio::task::JoinSet::new();
+		for remote in self.config.connect.clone() {
 			let this = self.clone();
 			let token = token.clone();
-			let node2 = node.clone();
+			tasks.spawn(async move { this.run_remote(&remote, token).await }.in_current_span());
+		}
 
-			let handle = tokio::spawn(
-				async move {
-					match this.run_remote(node2.as_str(), None, token, origin).await {
-						Ok(()) => tracing::info!(%node2, "origin closed"),
-						Err(err) => tracing::warn!(%err, %node2, "origin error"),
-					}
-				}
-				.in_current_span(),
-			);
-
-			active.insert(node.to_string(), handle.abort_handle());
+		// If any connection fails permanently, propagate the error.
+		while let Some(res) = tasks.join_next().await {
+			res??;
 		}
 
 		Ok(())
 	}
 
 	#[tracing::instrument("remote", skip_all, err, fields(%remote))]
-	async fn run_remote(
-		mut self,
-		remote: &str,
-		register: Option<&str>,
-		token: String,
-		origin: BroadcastConsumer,
-	) -> anyhow::Result<()> {
+	async fn run_remote(mut self, remote: &str, token: String) -> anyhow::Result<()> {
 		let mut url = Url::parse(&format!("https://{remote}/"))?;
 		{
 			let mut q = url.query_pairs_mut();
 			if !token.is_empty() {
 				q.append_pair("jwt", &token);
 			}
-			if let Some(register) = register {
+			if let Some(register) = &self.config.node {
 				q.append_pair("register", register);
 			}
 		}
+
 		let mut backoff = 1;
 
 		loop {
-			let res = tokio::select! {
-				biased;
-				_ = origin.closed() => break,
-				res = self.run_remote_once(&url) => res,
-			};
+			let res = self.run_remote_once(&url).await;
 
 			match res {
 				Ok(()) => backoff = 1,
@@ -234,8 +157,6 @@ impl Cluster {
 
 			tokio::time::sleep(timeout).await;
 		}
-
-		Ok(())
 	}
 
 	async fn run_remote_once(&mut self, url: &Url) -> anyhow::Result<()> {
