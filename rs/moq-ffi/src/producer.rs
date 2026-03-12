@@ -4,18 +4,17 @@ use std::sync::Arc;
 use bytes::Buf;
 
 use crate::error::MoqError;
-use crate::ffi::Task;
 
 // ---- UniFFI Objects ----
 
-struct MoqBroadcastProducerState {
+struct BroadcastProducer {
 	broadcast: moq_lite::BroadcastProducer,
 	catalog: moq_mux::CatalogProducer,
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastProducer {
-	state: std::sync::Mutex<Option<MoqBroadcastProducerState>>,
+	state: std::sync::Mutex<Option<BroadcastProducer>>,
 }
 
 impl MoqBroadcastProducer {
@@ -38,11 +37,11 @@ impl MoqBroadcastProducer {
 	/// NOTE: This will do nothing until published to an origin.
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
-		let _guard = Task::<()>::enter();
+		let _guard = crate::ffi::RUNTIME.enter();
 		let mut broadcast = moq_lite::BroadcastProducer::new();
 		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 		Ok(Arc::new(Self {
-			state: std::sync::Mutex::new(Some(MoqBroadcastProducerState { broadcast, catalog })),
+			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		}))
 	}
 
@@ -50,7 +49,7 @@ impl MoqBroadcastProducer {
 	///
 	/// `format` controls the encoding of `init` and frame payloads.
 	pub fn publish_media(&self, format: String, init: Vec<u8>) -> Result<Arc<MoqMediaProducer>, MoqError> {
-		let _guard = Task::<()>::enter();
+		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 		let format = moq_mux::import::DecoderFormat::from_str(&format)
@@ -71,21 +70,11 @@ impl MoqBroadcastProducer {
 
 	/// Finish this publisher, finalizing the catalog stream.
 	pub fn finish(&self) -> Result<(), MoqError> {
-		let _guard = Task::<()>::enter();
+		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.state.lock().unwrap();
-		if let Some(mut state) = guard.take() {
-			state.catalog.finish()?;
-		}
+		let mut state = guard.take().ok_or_else(|| MoqError::Closed)?;
+		state.catalog.finish()?;
 		Ok(())
-	}
-}
-
-impl Drop for MoqBroadcastProducer {
-	fn drop(&mut self) {
-		let mut guard = self.state.lock().unwrap();
-		if let Some(mut state) = guard.take() {
-			let _ = state.catalog.finish();
-		}
 	}
 }
 
@@ -97,7 +86,7 @@ impl MoqMediaProducer {
 	///
 	/// `timestamp_us` is the presentation timestamp in microseconds.
 	pub fn write_frame(&self, payload: Vec<u8>, timestamp_us: u64) -> Result<(), MoqError> {
-		let _guard = Task::<()>::enter();
+		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let decoder = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 
@@ -116,22 +105,12 @@ impl MoqMediaProducer {
 
 	/// Finish this media track and finalize encoding.
 	pub fn finish(&self) -> Result<(), MoqError> {
-		let _guard = Task::<()>::enter();
+		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
-		if let Some(mut decoder) = guard.take() {
-			decoder
-				.finish()
-				.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
-		}
+		let mut decoder = guard.take().ok_or_else(|| MoqError::Closed)?;
+		decoder
+			.finish()
+			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
 		Ok(())
-	}
-}
-
-impl Drop for MoqMediaProducer {
-	fn drop(&mut self) {
-		let mut guard = self.inner.lock().unwrap();
-		if let Some(mut decoder) = guard.take() {
-			let _ = decoder.finish();
-		}
 	}
 }

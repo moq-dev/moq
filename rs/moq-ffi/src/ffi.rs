@@ -1,11 +1,9 @@
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
 
-use tokio::task::AbortHandle;
-
 use crate::error::MoqError;
 
-static HANDLE: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
+pub(crate) static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
@@ -23,75 +21,61 @@ static HANDLE: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {
 });
 
 pub(crate) struct Task<T: Send + 'static> {
-	state: Arc<std::sync::Mutex<TaskState<T>>>,
-}
-
-struct TaskState<T> {
-	inner: Option<T>,
-	handle: Option<AbortHandle>,
+	state: Arc<tokio::sync::Mutex<T>>,
+	cancel: tokio::sync::watch::Sender<bool>,
 }
 
 impl<T: Send + 'static> Task<T> {
 	pub fn new(inner: T) -> Self {
 		Self {
-			state: Arc::new(std::sync::Mutex::new(TaskState {
-				inner: Some(inner),
-				handle: None,
-			})),
+			state: Arc::new(tokio::sync::Mutex::new(inner)),
+			cancel: tokio::sync::watch::Sender::new(false),
 		}
 	}
 
-	/// Enter the tokio runtime context (for sync methods).
-	pub fn enter() -> tokio::runtime::EnterGuard<'static> {
-		HANDLE.enter()
+	/// Try to lock the state synchronously. Returns `None` if a task is running.
+	pub fn lock(&self) -> Option<tokio::sync::OwnedMutexGuard<T>> {
+		self.state.clone().try_lock_owned().ok()
 	}
 
-	/// Access state synchronously.
-	pub fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> Result<R, MoqError> {
-		let mut state = self.state.lock().unwrap();
-		let inner = state.inner.as_mut().ok_or(MoqError::Cancelled)?;
-		Ok(f(inner))
-	}
-
-	/// Spawn an async closure on the runtime, taking ownership of the inner state.
+	/// Spawn an async closure on the runtime.
 	///
-	/// The closure receives owned `T` and must return `(T, Result<R, MoqError>)`.
-	/// State is put back automatically by the spawned task.
-	/// If cancelled/aborted, the state is lost (which is fine — the object is being destroyed).
+	/// The closure receives an [OwnedMutexGuard] which derefs to `T`.
+	/// If two calls are made concurrently, the second waits for the first to finish.
 	pub async fn run<R, F, Fut>(&self, f: F) -> Result<R, MoqError>
 	where
 		R: Send + 'static,
-		F: FnOnce(T) -> Fut + Send + 'static,
-		Fut: Future<Output = (T, Result<R, MoqError>)> + Send + 'static,
+		F: FnOnce(tokio::sync::OwnedMutexGuard<T>) -> Fut + Send + 'static,
+		Fut: Future<Output = Result<R, MoqError>> + Send + 'static,
 	{
-		let join_handle = {
-			let mut state = self.state.lock().unwrap();
-			let inner = state.inner.take().ok_or(MoqError::Cancelled)?;
-			let arc = self.state.clone();
+		let mut cancel = self.cancel.subscribe();
+		let state = self.state.clone();
 
-			let handle = HANDLE.spawn(async move {
-				let (inner, result) = f(inner).await;
-				arc.lock().unwrap().inner = Some(inner);
-				result
-			});
-			state.handle = Some(handle.abort_handle());
-			handle
-		};
+		let handle = RUNTIME.spawn(async move {
+			let state = tokio::select! {
+				biased;
+				Ok(_) = cancel.wait_for(|&c| c) => return Err(MoqError::Cancelled),
+				state = state.lock_owned() => state,
+			};
 
-		match join_handle.await {
+			let mut cancel = cancel;
+			tokio::select! {
+				biased;
+				Ok(_) = cancel.wait_for(|&c| c) => Err(MoqError::Cancelled),
+				result = f(state) => result,
+			}
+		});
+
+		match handle.await {
 			Ok(result) => result,
 			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
 			Err(e) => Err(MoqError::Task(e)),
 		}
 	}
 
-	/// Cancel all outstanding tasks and drop the inner state.
+	/// Cancel all current and future [Self::run] calls, causing them to return [MoqError::Cancelled].
 	pub fn cancel(&self) {
-		let mut state = self.state.lock().unwrap();
-		state.inner = None;
-		if let Some(handle) = state.handle.take() {
-			handle.abort();
-		}
+		let _ = self.cancel.send(true);
 	}
 }
 

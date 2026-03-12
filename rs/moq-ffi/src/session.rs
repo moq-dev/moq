@@ -1,19 +1,19 @@
-use std::str::FromStr;
 use std::sync::Arc;
 
+use moq_lite::Session;
 use url::Url;
 
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::MoqOriginProducer;
 
-struct ClientState {
+struct Client {
 	config: moq_native::ClientConfig,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
 
-impl ClientState {
+impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
 		let client = self
 			.config
@@ -32,53 +32,15 @@ impl ClientState {
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
 		Ok(Arc::new(MoqSession {
-			task: Task::new(SessionState { inner: session }),
+			inner: session.clone(),
+			closed: Task::new(session),
 		}))
-	}
-}
-
-struct SessionState {
-	inner: moq_lite::Session,
-}
-
-impl SessionState {
-	async fn closed(&self) -> Result<(), MoqError> {
-		self.inner.closed().await.map_err(Into::into)
 	}
 }
 
 #[derive(uniffi::Object)]
 pub struct MoqClient {
-	task: Task<ClientState>,
-}
-
-#[derive(uniffi::Object)]
-pub struct MoqSession {
-	task: Task<SessionState>,
-}
-
-/// Initialize logging with a level string: "error", "warn", "info", "debug", "trace", or "".
-///
-/// Returns an error if called more than once.
-#[uniffi::export]
-pub fn moq_log_level(level: String) -> Result<(), MoqError> {
-	use std::sync::atomic::{AtomicBool, Ordering};
-	use tracing::Level;
-
-	static INITIALIZED: AtomicBool = AtomicBool::new(false);
-
-	let log = match level.as_str() {
-		"" => moq_native::Log::default(),
-		s => moq_native::Log::new(Level::from_str(s)?),
-	};
-
-	if INITIALIZED.swap(true, Ordering::SeqCst) {
-		return Err(MoqError::Log("logging already initialized".into()));
-	}
-
-	log.init();
-
-	Ok(())
+	task: Task<Client>,
 }
 
 #[uniffi::export]
@@ -86,9 +48,9 @@ impl MoqClient {
 	/// Create a new MoQ client with default configuration.
 	#[uniffi::constructor]
 	pub fn new() -> Arc<Self> {
-		let _guard = Task::<()>::enter();
+		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(Self {
-			task: Task::new(ClientState {
+			task: Task::new(Client {
 				config: moq_native::ClientConfig::default(),
 				publish: None,
 				consume: None,
@@ -98,23 +60,23 @@ impl MoqClient {
 
 	/// Disable TLS certificate verification (for development only).
 	pub fn set_tls_disable_verify(&self, disable: bool) {
-		let _ = self.task.with(|state| {
+		if let Some(mut state) = self.task.lock() {
 			state.config.tls.disable_verify = Some(disable);
-		});
+		}
 	}
 
 	/// Set the origin to publish local broadcasts to the remote.
 	pub fn set_publish(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		let _ = self.task.with(|state| {
+		if let Some(mut state) = self.task.lock() {
 			state.publish = origin;
-		});
+		}
 	}
 
 	/// Set the origin to consume remote broadcasts from the remote.
 	pub fn set_consume(&self, origin: Option<Arc<MoqOriginProducer>>) {
-		let _ = self.task.with(|state| {
+		if let Some(mut state) = self.task.lock() {
 			state.consume = origin;
-		});
+		}
 	}
 
 	/// Connect to a MoQ server and wait for the session to be established.
@@ -123,34 +85,35 @@ impl MoqClient {
 	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
 		let url = Url::parse(&url)?;
 
-		self.task
-			.run(|state| async move {
-				let result = state.connect(url).await;
-				(state, result)
-			})
-			.await
+		self.task.run(|state| async move { state.connect(url).await }).await
 	}
 
-	/// Cancel any outstanding `connect()` call.
+	/// Cancel all current and future `connect()` calls.
 	pub fn cancel(&self) {
 		self.task.cancel();
 	}
+}
+
+#[derive(uniffi::Object)]
+pub struct MoqSession {
+	inner: moq_lite::Session,
+	closed: Task<Session>,
 }
 
 #[uniffi::export]
 impl MoqSession {
 	/// Wait until the session is closed.
 	pub async fn closed(&self) -> Result<(), MoqError> {
-		self.task
-			.run(|state| async move {
-				let result = state.closed().await;
-				(state, result)
-			})
+		// We have a task to run all of the closed calls juuuuust so they use the same tokio runtime.
+		self.closed
+			.run(|session| async move { session.closed().await.map_err(Into::into) })
 			.await
 	}
 
-	/// Cancel the session.
-	pub fn cancel(&self) {
-		self.task.cancel();
+	/// Close the session with the given error code.
+	pub fn cancel(&self, code: u32) {
+		self.inner.clone().close(moq_lite::Error::from_code(code));
+		// NOTE: we don't abort the closed Task because it will be aborted via above ^
+		// We'll get a slightly better error message instead of Cancelled.
 	}
 }

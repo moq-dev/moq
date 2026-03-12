@@ -6,6 +6,8 @@
 mod consumer;
 mod error;
 mod ffi;
+mod log;
+mod media;
 mod origin;
 mod producer;
 mod session;
