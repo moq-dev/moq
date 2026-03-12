@@ -16,25 +16,10 @@ tls.generate = ["localhost"]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
 listen = "[::]:4445"
 
-# This clustering scheme is very very simple for now.
-#
-# There is a root node that is used to connect leaf nodes together.
-# Announcements flow from leaf -> root -> leaf, but any subscriptions are leaf -> leaf.
-# The root node can serve (user) subscriptions too.
-#
-# The root node is either missing the "root" field below or it's identical to the "node" field.
-# This node acts a server only, accepting incoming connections from leaf nodes and users alike.
-#
-# There can be any number of leaf nodes.
-# These nodes will connect to the specified root address and announce themselves via MoQ as a "broadcast".
-# All nodes will discover these broadcasts and connect to other nodes.
-#
-# This forms an NxN mesh of nodes.
-# Broadcasts are announced between all nodes with no collision detection, so duplicates are possible.
-# Subscriptions will be relayed from leaf to leaf, so at most you can have:
-#  user -> leaf -> leaf -> user
+# Clustering: each node explicitly connects to its peers.
+# Announcements propagate with hop counts for shortest-path routing.
 [cluster]
-# Connect to this hostname in order to discover other nodes.
+# Connect to these peers to form the cluster.
 connect = "localhost:4443"
 
 # Use the token in this file when connecting to other nodes.

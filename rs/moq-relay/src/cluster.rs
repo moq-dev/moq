@@ -19,6 +19,7 @@ pub struct ClusterConfig {
 		env = "MOQ_CLUSTER_CONNECT",
 		value_delimiter = ','
 	)]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub connect: Vec<String>,
 
 	/// Use the token in this file when connecting to other nodes.
