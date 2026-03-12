@@ -115,6 +115,10 @@ pub enum Error {
 	#[error("hang error: {0}")]
 	Hang(#[from] hang::Error),
 
+	/// ID counter overflow (all u32 IDs exhausted).
+	#[error("id overflow")]
+	IdOverflow,
+
 	/// Index out of bounds.
 	#[error("no index")]
 	NoIndex,
@@ -161,6 +165,7 @@ impl ffi::ReturnCode for Error {
 			Error::MediaNotFound => -26,
 			Error::TrackNotFound => -27,
 			Error::FrameNotFound => -28,
+			Error::IdOverflow => -29,
 		}
 	}
 }

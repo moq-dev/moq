@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::num::NonZero;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::Error;
 
@@ -16,32 +18,36 @@ impl std::fmt::Display for Id {
 	}
 }
 
-/// Slab allocator that only returns non-zero IDs.
+/// Global monotonic counter so IDs are never reused across the process lifetime.
+static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+
+/// Map that assigns globally unique, never-reused IDs.
 ///
-/// Wraps [slab::Slab] to ensure all IDs start from 1 instead of 0,
-/// allowing 0 to represent null/none in the FFI layer.
-pub(crate) struct NonZeroSlab<T>(slab::Slab<T>);
+/// Unlike a slab, freed IDs are not recycled. This avoids races where
+/// parallel consumers of the same global state accidentally alias each
+/// other's resources.
+pub(crate) struct NonZeroSlab<T> {
+	map: HashMap<Id, T>,
+}
 
 impl<T> NonZeroSlab<T> {
-	pub fn insert(&mut self, value: T) -> Id {
-		let id = self.0.insert(value) + 1;
-		let id = u32::try_from(id).expect("u32 overflow");
-		Id(unsafe { NonZero::new_unchecked(id) })
+	pub fn insert(&mut self, value: T) -> Result<Id, Error> {
+		let raw = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+		let id = Id(NonZero::new(raw).ok_or(Error::IdOverflow)?);
+		self.map.insert(id, value);
+		Ok(id)
 	}
 
 	pub fn get(&self, id: Id) -> Option<&T> {
-		let id = (id.0.get() - 1) as usize;
-		self.0.get(id)
+		self.map.get(&id)
 	}
 
 	pub fn get_mut(&mut self, id: Id) -> Option<&mut T> {
-		let id = (id.0.get() - 1) as usize;
-		self.0.get_mut(id)
+		self.map.get_mut(&id)
 	}
 
 	pub fn remove(&mut self, id: Id) -> Option<T> {
-		let id = (id.0.get() - 1) as usize;
-		self.0.try_remove(id)
+		self.map.remove(&id)
 	}
 }
 
@@ -77,6 +83,6 @@ impl TryFrom<Id> for i32 {
 
 impl<T> Default for NonZeroSlab<T> {
 	fn default() -> Self {
-		Self(slab::Slab::new())
+		Self { map: HashMap::new() }
 	}
 }

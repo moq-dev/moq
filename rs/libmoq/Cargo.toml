@@ -23,7 +23,6 @@ hang = { workspace = true }
 moq-lite = { workspace = true, features = ["serde"] }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
-slab = "0.4"
 thiserror = "2"
 tokio = { workspace = true, features = ["macros"] }
 tracing = "0.1"
