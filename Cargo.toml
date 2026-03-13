@@ -5,6 +5,7 @@ members = [
     "rs/libmoq",
     "rs/moq-cli",
     "rs/moq-clock",
+    "rs/moq-ffi",
     "rs/moq-lite",
     "rs/moq-msf",
     "rs/moq-mux",
@@ -47,3 +48,7 @@ panic = "abort"
 inherits = "release"
 debug = "line-tables-only"
 # frame pointers: pass RUSTFLAGS="-C force-frame-pointers=yes" when building
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true

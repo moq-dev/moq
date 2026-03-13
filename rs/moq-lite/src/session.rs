@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{Error, Version};
 
@@ -7,8 +7,9 @@ use crate::{Error, Version};
 /// Created via:
 /// - [`crate::Client::connect`] for clients.
 /// - [`crate::Server::accept`] for servers.
+#[derive(Clone)]
 pub struct Session {
-	session: Box<dyn SessionInner>,
+	session: Arc<dyn SessionInner>,
 	version: Version,
 	closed: bool,
 }
@@ -16,7 +17,7 @@ pub struct Session {
 impl Session {
 	pub(super) fn new<S: web_transport_trait::Session>(session: S, version: Version) -> Self {
 		Self {
-			session: Box::new(session),
+			session: Arc::new(session),
 			version,
 			closed: false,
 		}

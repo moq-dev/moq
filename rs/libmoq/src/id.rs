@@ -33,7 +33,7 @@ pub(crate) struct NonZeroSlab<T> {
 impl<T> NonZeroSlab<T> {
 	pub fn insert(&mut self, value: T) -> Result<Id, Error> {
 		let raw = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-		let id = Id(NonZero::new(raw).ok_or(Error::IdOverflow)?);
+		let id = Id::try_from(raw)?;
 		self.map.insert(id, value);
 		Ok(id)
 	}
@@ -63,6 +63,8 @@ impl TryFrom<u32> for Id {
 	type Error = Error;
 
 	fn try_from(value: u32) -> Result<Self, Self::Error> {
+		// IDs must fit in i32 (positive) for the C FFI layer.
+		i32::try_from(value).map_err(|_| Error::InvalidId)?;
 		NonZero::try_from(value).map(Id).map_err(|_| Error::InvalidId)
 	}
 }
@@ -73,11 +75,10 @@ impl From<Id> for u32 {
 	}
 }
 
-impl TryFrom<Id> for i32 {
-	type Error = Error;
-
-	fn try_from(value: Id) -> Result<Self, Self::Error> {
-		i32::try_from(u32::from(value)).map_err(|_| Error::InvalidId)
+impl From<Id> for i32 {
+	fn from(value: Id) -> Self {
+		// Safety: TryFrom<u32> guarantees the value fits in i32.
+		value.0.get() as i32
 	}
 }
 
