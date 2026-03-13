@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12](https://github.com/moq-dev/moq/compare/libmoq-v0.2.11...libmoq-v0.2.12) - 2026-03-13
+
+### Other
+
+- Validate libmoq IDs fit in i32 at creation time ([#1087](https://github.com/moq-dev/moq/pull/1087))
+- Fix libmoq test races by using monotonic IDs ([#1086](https://github.com/moq-dev/moq/pull/1086))
+- Set MSRV to 1.85 (edition 2024) ([#1083](https://github.com/moq-dev/moq/pull/1083))
+- Add comprehensive FFI integration tests for libmoq broadcast ([#1068](https://github.com/moq-dev/moq/pull/1068))
+- Improve libmoq C bindings ([#1061](https://github.com/moq-dev/moq/pull/1061))
+
 ## [0.2.10](https://github.com/moq-dev/moq/compare/libmoq-v0.2.9...libmoq-v0.2.10) - 2026-03-03
 
 ### Other

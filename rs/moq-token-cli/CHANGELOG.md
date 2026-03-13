@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.13](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.12...moq-token-cli-v0.5.13) - 2026-03-13
+
+### Other
+
+- Set MSRV to 1.85 (edition 2024) ([#1083](https://github.com/moq-dev/moq/pull/1083))
+
 ## [0.5.12](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.11...moq-token-cli-v0.5.12) - 2026-03-03
 
 ### Other

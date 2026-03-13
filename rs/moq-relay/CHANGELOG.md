@@ -64,6 +64,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.8](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.7...moq-relay-v0.10.8) - 2026-03-13
+
+### Other
+
+- Switch to qmux with ALPN negotiation and TLS 1.2 ([#1096](https://github.com/moq-dev/moq/pull/1096))
+- Uniffi async objects ([#1071](https://github.com/moq-dev/moq/pull/1071))
+- Switch from web-transport-ws to qmux ([#1089](https://github.com/moq-dev/moq/pull/1089))
+- Set MSRV to 1.85 (edition 2024) ([#1083](https://github.com/moq-dev/moq/pull/1083))
+- Add WebSocket server support to moq-native ([#1072](https://github.com/moq-dev/moq/pull/1072))
+- Log transport and version in relay connection ([#1052](https://github.com/moq-dev/moq/pull/1052))
+
 ## [0.10.7](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.6...moq-relay-v0.10.7) - 2026-03-03
 
 ### Other
