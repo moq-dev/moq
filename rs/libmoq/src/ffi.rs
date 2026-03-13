@@ -114,7 +114,7 @@ impl ReturnCode for Result<usize, Error> {
 impl ReturnCode for Result<Id, Error> {
 	fn code(&self) -> i32 {
 		match self {
-			Ok(id) => i32::try_from(*id).unwrap_or_else(|_| Error::InvalidCode.code()),
+			Ok(id) => i32::from(*id),
 			Err(e) => e.code(),
 		}
 	}
@@ -137,7 +137,7 @@ impl ReturnCode for usize {
 
 impl ReturnCode for Id {
 	fn code(&self) -> i32 {
-		i32::try_from(*self).unwrap_or_else(|_| Error::InvalidCode.code())
+		i32::from(*self)
 	}
 }
 

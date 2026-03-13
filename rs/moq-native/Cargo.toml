@@ -5,8 +5,9 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.13.2"
+version = "0.13.3"
 edition = "2024"
+rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
@@ -20,10 +21,16 @@ quinn = [
     "dep:reqwest",
     "dep:rustls-webpki",
 ]
+noq = [
+    "dep:web-transport-noq",
+    "dep:rcgen",
+    "dep:reqwest",
+    "dep:rustls-webpki",
+]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
-websocket = ["dep:web-transport-ws"]
+websocket = ["dep:qmux"]
 ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring"]
 tokio-console = ["dep:console-subscriber"]
 
@@ -38,6 +45,7 @@ humantime-serde = "1.1"
 
 moq-lite = { workspace = true, features = ["serde"] }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
+qmux = { workspace = true, features = ["wss"], optional = true }
 quinn = { version = "0.11", default-features = false, features = [
 	"platform-verifier",
 	"runtime-tokio",
@@ -58,12 +66,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 web-transport-iroh = { workspace = true, optional = true }
+web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
-web-transport-ws = { workspace = true, features = [
-	"rustls-tls-webpki-roots",
-], optional = true }
 
 [dev-dependencies]
 anyhow = "1"

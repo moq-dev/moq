@@ -152,9 +152,19 @@ impl IrohRequest {
 	}
 }
 
-pub(crate) async fn connect(endpoint: &IrohEndpoint, url: Url) -> anyhow::Result<web_transport_iroh::Session> {
+pub(crate) async fn connect(
+	endpoint: &IrohEndpoint,
+	url: Url,
+	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
+) -> anyhow::Result<web_transport_iroh::Session> {
 	let host = url.host().context("Invalid URL: missing host")?.to_string();
 	let endpoint_id: iroh::EndpointId = host.parse().context("Invalid URL: host is not an iroh endpoint id")?;
+
+	// Build an EndpointAddr with any direct IP addresses provided.
+	let mut endpoint_addr = iroh::EndpointAddr::new(endpoint_id);
+	for addr in addrs {
+		endpoint_addr = endpoint_addr.with_ip_addr(addr);
+	}
 
 	// We need to use this API to provide multiple ALPNs.
 	// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
@@ -166,7 +176,7 @@ pub(crate) async fn connect(endpoint: &IrohEndpoint, url: Url) -> anyhow::Result
 	additional.push(b"h3".to_vec());
 	let opts = iroh::endpoint::ConnectOptions::new().with_additional_alpns(additional);
 
-	let mut connecting = endpoint.connect_with_opts(endpoint_id, alpn, opts).await?;
+	let mut connecting = endpoint.connect_with_opts(endpoint_addr, alpn, opts).await?;
 	let alpn = connecting.alpn().await?;
 	let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
 

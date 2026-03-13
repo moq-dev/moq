@@ -32,7 +32,7 @@ impl Session {
 			close: closed.0,
 			callback,
 		};
-		let id = self.task.insert(Some(entry));
+		let id = self.task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
 			let res = tokio::select! {

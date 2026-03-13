@@ -7,7 +7,7 @@ pub fn provider() -> Provider {
 	if let Some(provider) = rustls::crypto::CryptoProvider::get_default().cloned() {
 		return provider;
 	}
-	#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
+	#[cfg(feature = "aws-lc-rs")]
 	return Arc::new(rustls::crypto::aws_lc_rs::default_provider());
 	#[cfg(all(feature = "ring", not(feature = "aws-lc-rs")))]
 	return Arc::new(rustls::crypto::ring::default_provider());

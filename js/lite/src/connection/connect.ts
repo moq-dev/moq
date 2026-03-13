@@ -1,4 +1,4 @@
-import WebTransportWs from "@moq/web-transport-ws";
+import Session from "@moq/qmux";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { Stream } from "../stream.ts";
@@ -65,7 +65,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	if (!session) throw new Error("no transport available");
 
 	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
-	if (session instanceof WebTransportWs) {
+	if (session instanceof Session) {
 		console.warn(url.toString(), "using WebSocket fallback; the user experience may be degraded");
 		websocketWon.add(url.toString());
 	}
@@ -200,7 +200,7 @@ async function connectWebTransport(
 }
 
 // TODO accept arguments to control the port/path used.
-async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>): Promise<WebTransportWs | undefined> {
+async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>): Promise<Session | undefined> {
 	const timer = new Promise<void>((resolve) => setTimeout(resolve, delay));
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
@@ -210,7 +210,7 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 		console.debug(url.toString(), `no WebTransport after ${delay}ms, attempting WebSocket fallback`);
 	}
 
-	const quic = new WebTransportWs(url);
+	const quic = new Session(url);
 
 	// Wait for the WebSocket to connect, or for the cancel promise to resolve.
 	// Close the connection if we lost the race.

@@ -35,7 +35,8 @@ MoQ clients will automatically race the QUIC and WebSocket connections in parall
 It sucks but sometimes *media over QUIC* isn't actually an option.
 
 ## MoQ Transport
-[moq-lite](/concept/layer/moq-lite) is a subset of the [MoqTransport](/concept/standard/moq-transport) specification.
+[moq-lite](/concept/layer/moq-lite) is a forwards-compatible subset of the [MoqTransport](/concept/standard/moq-transport) specification.
+moq-lite clients work with any moq-transport CDN, so you're not locked in.
 
 The goal is a generic pub/sub protocol that can be scaled up via a CDN (see [moq-relay](/app/relay/)).
 The CDN doesn't know anything about media, it just knows track/group/frame boundaries and what it should do during congestion.
