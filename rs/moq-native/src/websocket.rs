@@ -121,13 +121,8 @@ pub(crate) async fn connect(
 		tokio_tungstenite::Connector::Plain
 	};
 
-	let mut ws_config = qmux::tungstenite::protocol::WebSocketConfig::default();
-	ws_config.max_message_size = Some(64 << 20); // 64 MB
-	ws_config.max_frame_size = Some(16 << 20); // 16 MB
-
 	let session = qmux::Client::new()
 		.with_protocols(alpns)
-		.with_config(ws_config)
 		.with_connector(connector)
 		.connect(url.as_str())
 		.await
