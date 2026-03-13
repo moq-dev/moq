@@ -16,6 +16,13 @@ tls.generate = ["localhost"]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
 listen = "[::]:4444"
 
+# Clustering: connect to the root node.
+# In this example, leaf nodes don't connect directly to each other; traffic gets proxied through the root.
+# `connect` can be an array to connect to multiple peers, creating a tiered CDN.
+[cluster]
+connect = "localhost:4443"
+token = "dev/root.jwt"
+
 [client]
 # QUIC uses TLS to have the client verify the server's identity.
 # However if you're not worried about man-in-the-middle attacks, you can disable verification:

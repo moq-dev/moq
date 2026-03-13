@@ -46,16 +46,20 @@ async fn main() -> anyhow::Result<()> {
 	let client = config.client.init()?;
 
 	#[cfg(feature = "iroh")]
-	let (mut server, _client) = {
+	let (mut server, client) = {
 		let iroh = config.iroh.bind().await?;
 		(server.with_iroh(iroh.clone()), client.with_iroh(iroh))
 	};
 
 	let auth = config.auth.init().await?;
 
-	let cluster = Cluster::new(config.cluster);
+	let cluster = Cluster::new(config.cluster, client);
 	let cloned = cluster.clone();
-	tokio::spawn(async move { cloned.run().await.expect("cluster failed") });
+	tokio::spawn(async move {
+		if let Err(err) = cloned.run().await {
+			panic!("cluster failed: {err}");
+		}
+	});
 
 	// Create a web server too.
 	let web = Web::new(

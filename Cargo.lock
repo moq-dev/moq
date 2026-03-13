@@ -3386,6 +3386,7 @@ dependencies = [
  "rustls",
  "sd-notify",
  "serde",
+ "serde_with",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
