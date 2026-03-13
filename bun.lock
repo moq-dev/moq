@@ -119,9 +119,6 @@
     "js/signals": {
       "name": "@moq/signals",
       "version": "0.1.3",
-      "dependencies": {
-        "dequal": "^2.0.3",
-      },
       "devDependencies": {
         "@types/react": "^19.1.8",
         "rimraf": "^6.0.1",
