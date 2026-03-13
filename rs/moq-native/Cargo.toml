@@ -24,7 +24,7 @@ quinn = [
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
-websocket = ["dep:web-transport-ws"]
+websocket = ["dep:qmux"]
 ring = ["rustls/ring", "rcgen?/ring", "quinn?/rustls-ring"]
 tokio-console = ["dep:console-subscriber"]
 
@@ -39,6 +39,7 @@ humantime-serde = "1.1"
 
 moq-lite = { workspace = true, features = ["serde"] }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
+qmux = { workspace = true, features = ["wss"], optional = true }
 quinn = { version = "0.11", default-features = false, features = [
 	"platform-verifier",
 	"runtime-tokio",
@@ -62,9 +63,6 @@ web-transport-iroh = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
-web-transport-ws = { workspace = true, features = [
-	"rustls-tls-webpki-roots",
-], optional = true }
 
 [dev-dependencies]
 anyhow = "1"

@@ -22,7 +22,7 @@ default = ["iroh", "quinn", "websocket"]
 iroh = ["moq-native/iroh"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
-websocket = ["moq-native/websocket", "dep:web-transport-ws", "axum/ws"]
+websocket = ["moq-native/websocket", "dep:qmux", "axum/ws"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -37,6 +37,7 @@ moq-native = { workspace = true, default-features = false, features = [
 	"aws-lc-rs",
 ] }
 moq-token = { workspace = true, features = ["jwks-loader"] }
+qmux = { workspace = true, features = ["ws"], optional = true }
 rustls = { version = "0.23", features = [
 	"aws-lc-rs",
 ], default-features = false }
@@ -48,7 +49,6 @@ toml = "0.9"
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 url = { version = "2", features = ["serde"] }
-web-transport-ws = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 sd-notify = "0.4"

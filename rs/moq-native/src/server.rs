@@ -184,7 +184,7 @@ impl Server {
 	///
 	/// This is useful for simple applications that want WebSocket on a dedicated port.
 	/// For applications that need WebSocket on the same HTTP port (e.g. moq-relay),
-	/// use `web_transport_ws::Session::accept()` with your own HTTP framework instead.
+	/// use `qmux::Session::accept()` with your own HTTP framework instead.
 	#[cfg(feature = "websocket")]
 	pub fn with_websocket(mut self, websocket: Option<crate::websocket::WebSocketListener>) -> Self {
 		self.websocket = websocket;
@@ -402,7 +402,7 @@ pub(crate) enum RequestKind {
 	#[cfg(feature = "iroh")]
 	Iroh(crate::iroh::IrohRequest),
 	#[cfg(feature = "websocket")]
-	WebSocket(web_transport_ws::Session),
+	WebSocket(qmux::Session),
 }
 
 /// An incoming MoQ session that can be accepted or rejected.
