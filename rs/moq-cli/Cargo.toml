@@ -26,12 +26,8 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }
 moq-mux = { workspace = true }
-moq-native = { workspace = true, default-features = false, features = [
-	"aws-lc-rs",
-] }
-rustls = { version = "0.23", features = [
-	"aws-lc-rs",
-], default-features = false }
+moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
 tokio = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 tracing = "0.1"
