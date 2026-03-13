@@ -165,9 +165,6 @@ impl NoqServer {
 		certs.load_certs(&config.tls)?;
 		let certs = Arc::new(certs);
 
-		#[cfg(unix)]
-		tokio::spawn(crate::tls::reload_certs(certs.clone(), config.tls.clone()));
-
 		let mut tls = rustls::ServerConfig::builder_with_provider(provider)
 			.with_protocol_versions(&[&rustls::version::TLS13])?
 			.with_no_client_auth()
@@ -215,6 +212,11 @@ impl NoqServer {
 		// Create the generic QUIC endpoint.
 		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime)
 			.context("failed to create QUIC endpoint")?;
+
+		// Spawn cert reload listener only after endpoint creation succeeds,
+		// so we don't leave a dangling signal listener on failure.
+		#[cfg(unix)]
+		tokio::spawn(crate::tls::reload_certs(certs.clone(), config.tls.clone()));
 
 		Ok(Self { quic, certs })
 	}
