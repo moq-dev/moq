@@ -16,6 +16,9 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+rust-version = "1.85"
+
 [workspace.dependencies]
 conducer = { version = "0.3", path = "rs/conducer" }
 hang = { version = "0.15", path = "rs/hang" }
@@ -24,6 +27,7 @@ moq-msf = { version = "0.1", path = "rs/moq-msf" }
 moq-mux = { version = "0.3", path = "rs/moq-mux" }
 moq-native = { version = "0.13", path = "rs/moq-native", default-features = false }
 moq-token = { version = "0.5", path = "rs/moq-token" }
+qmux = { version = "0.0.3", default-features = false }
 
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
@@ -32,8 +36,7 @@ web-transport-iroh = "0.2"
 web-transport-proto = "0.5"
 web-transport-quiche = "0.2"
 web-transport-quinn = "0.11"
-web-transport-trait = "0.3.2"
-web-transport-ws = "0.2.2"
+web-transport-trait = "0.3.4"
 
 [profile.dev]
 panic = "abort"

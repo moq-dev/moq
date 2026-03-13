@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 version = "0.3.1"
 edition = "2024"
+rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]

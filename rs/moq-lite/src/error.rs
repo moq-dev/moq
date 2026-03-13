@@ -178,4 +178,10 @@ impl From<coding::EncodeError> for Error {
 	}
 }
 
+impl web_transport_trait::Error for Error {
+	fn session_error(&self) -> Option<(u32, String)> {
+		None
+	}
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

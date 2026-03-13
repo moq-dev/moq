@@ -68,7 +68,7 @@ pub struct ClientConfig {
 	/// Use this to force a specific version, e.g. `--client-version moq-lite-02`.
 	/// Can be specified multiple times to offer a subset of versions.
 	///
-	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16
+	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16, moq-transport-17
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "client-version", long = "client-version", env = "MOQ_CLIENT_VERSION")]
 	pub version: Vec<moq_lite::Version>,

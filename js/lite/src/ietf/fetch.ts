@@ -68,9 +68,9 @@ export class Fetch {
 export class FetchOk {
 	static id = 0x18;
 
-	requestId: bigint;
+	requestId: bigint | undefined;
 
-	constructor({ requestId }: { requestId: bigint }) {
+	constructor({ requestId }: { requestId?: bigint }) {
 		this.requestId = requestId;
 	}
 
@@ -125,6 +125,7 @@ export class FetchError {
 	}
 }
 
+// Removed in d17
 export class FetchCancel {
 	static id = 0x17;
 

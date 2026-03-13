@@ -4,11 +4,12 @@ description: A fraction of the calories with none of the fat.
 ---
 
 # moq-lite
-[moq-lite](/spec/draft-lcurley-moq-lite) is a subset of the [MoqTransport](/concept/standard/moq-transport) specification. See the [specification](/spec/draft-lcurley-moq-lite) for wire-level details.
-The goal is to keep the core transport layer simple and focused on practical use-cases.
+This website uses [moq-lite](/concept/layer/moq-lite), a subset of the IETF [moq-transport](/concept/standard/moq-transport) draft.
+moq-lite is forwards compatible with moq-transport so it works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn)).
+The principles behind MoQ are fantastic, but standards are **SLOW** and involve too much arguing.
+My goal is to build something simple that you can use *now*, even if it's not a standard *yet*.
 
-There's too much fringe functionality in the MoqTransport draft that's not practical to implement.
-Most of it is specific to Cisco's implementation and bizarre requirements, so it probably won't impact you.
+See the [specification](/spec/draft-lcurley-moq-lite) for low-level details.
 
 ## API
 

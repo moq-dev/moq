@@ -1,7 +1,18 @@
+import type { IetfVersion } from "./ietf/version.ts";
+import { Version } from "./ietf/version.ts";
 import * as Varint from "./varint.ts";
 
 const MAX_U31 = 2 ** 31 - 1;
 const MAX_READ_SIZE = 1024 * 1024 * 64; // don't allocate more than 64MB for a message
+
+function isLeadingOnes(version?: IetfVersion): boolean {
+	return (
+		version !== undefined &&
+		version !== Version.DRAFT_14 &&
+		version !== Version.DRAFT_15 &&
+		version !== Version.DRAFT_16
+	);
+}
 
 export class Stream {
 	reader: Reader;
@@ -48,14 +59,16 @@ export class Reader {
 	#buffer: Uint8Array;
 	#stream?: ReadableStream<Uint8Array>; // if undefined, the buffer is consumed then EOF
 	#reader?: ReadableStreamDefaultReader<Uint8Array>;
+	version?: IetfVersion;
 
 	// Either stream or buffer MUST be provided.
-	constructor(stream: ReadableStream<Uint8Array>, buffer?: Uint8Array);
-	constructor(stream: undefined, buffer: Uint8Array);
-	constructor(stream?: ReadableStream<Uint8Array>, buffer?: Uint8Array) {
+	constructor(stream: ReadableStream<Uint8Array>, buffer?: Uint8Array, version?: IetfVersion);
+	constructor(stream: undefined, buffer: Uint8Array, version?: IetfVersion);
+	constructor(stream?: ReadableStream<Uint8Array>, buffer?: Uint8Array, version?: IetfVersion) {
 		this.#buffer = buffer ?? new Uint8Array();
 		this.#stream = stream;
 		this.#reader = this.#stream?.getReader();
+		this.version = version;
 	}
 
 	// Adds more data to the buffer, returning true if more data was added.
@@ -164,6 +177,13 @@ export class Reader {
 
 	// NOTE: Returns a bigint instead of a number since it may be larger than 53-bits
 	async u62(): Promise<bigint> {
+		if (isLeadingOnes(this.version)) {
+			return this.#readLeadingOnes();
+		}
+		return this.#readQuicVarint();
+	}
+
+	async #readQuicVarint(): Promise<bigint> {
 		await this.#fillTo(1);
 		const size = (this.#buffer[0] & 0xc0) >> 6;
 
@@ -192,6 +212,31 @@ export class Reader {
 		return view.getBigUint64(0) & 0x3fffffffffffffffn;
 	}
 
+	async #readLeadingOnes(): Promise<bigint> {
+		await this.#fillTo(1);
+		const b = this.#buffer[0];
+
+		// Count leading 1-bits
+		let ones = 0;
+		for (let bit = 7; bit >= 0; bit--) {
+			if (b & (1 << bit)) ones++;
+			else break;
+		}
+
+		if (ones === 6) throw new Error("invalid leading-ones varint: 1111110x prefix is reserved");
+
+		let totalSize: number;
+		if (ones <= 5) totalSize = ones + 1;
+		else if (ones === 7) totalSize = 8;
+		else totalSize = 9; // ones === 8
+
+		await this.#fillTo(totalSize);
+		const slice = this.#slice(totalSize);
+
+		const [value] = Varint.decodeLeadingOnes(slice);
+		return value;
+	}
+
 	// Returns false if there is more data to read, blocking if it hasn't been received yet.
 	async done(): Promise<boolean> {
 		if (this.#buffer.byteLength > 0) return false;
@@ -213,13 +258,16 @@ export class Writer {
 	#stream: WritableStream<Uint8Array>;
 
 	// Scratch buffer for writing varints.
-	// Fixed at 8 bytes.
+	// Fixed at 9 bytes (leading-ones max).
 	#scratch: ArrayBuffer;
 
-	constructor(stream: WritableStream<Uint8Array>) {
+	version?: IetfVersion;
+
+	constructor(stream: WritableStream<Uint8Array>, version?: IetfVersion) {
 		this.#stream = stream;
-		this.#scratch = new ArrayBuffer(8);
+		this.#scratch = new ArrayBuffer(9);
 		this.#writer = this.#stream.getWriter();
+		this.version = version;
 	}
 
 	async bool(v: boolean) {
@@ -248,11 +296,19 @@ export class Writer {
 		if (v > Varint.MAX_U53) {
 			throw new Error(`overflow, value larger than 53-bits: ${v.toString()}`);
 		}
-		await this.write(Varint.encodeTo(this.#scratch, v));
+		if (isLeadingOnes(this.version)) {
+			await this.write(Varint.encodeLeadingOnesTo(this.#scratch, v));
+		} else {
+			await this.write(Varint.encodeTo(this.#scratch, v));
+		}
 	}
 
 	async u62(v: bigint) {
-		await this.write(Varint.encodeTo(this.#scratch, v));
+		if (isLeadingOnes(this.version)) {
+			await this.write(Varint.encodeLeadingOnesTo(this.#scratch, v));
+		} else {
+			await this.write(Varint.encodeTo(this.#scratch, v));
+		}
 	}
 
 	async write(v: Uint8Array) {

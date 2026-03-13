@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 version = "0.10.7"
 edition = "2024"
+rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
@@ -21,7 +22,7 @@ default = ["iroh", "quinn", "websocket"]
 iroh = ["moq-native/iroh"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
-websocket = ["moq-native/websocket", "dep:web-transport-ws", "axum/ws"]
+websocket = ["moq-native/websocket", "dep:qmux", "axum/ws"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -34,7 +35,10 @@ http-body = "1"
 moq-lite = { workspace = true, features = ["serde"] }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-token = { workspace = true, features = ["jwks-loader"] }
-rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
+qmux = { workspace = true, features = ["ws"], optional = true }
+rustls = { version = "0.23", features = [
+	"aws-lc-rs",
+], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["json", "base64"] }
 thiserror = "2"
@@ -43,7 +47,6 @@ toml = "0.9"
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 url = { version = "2", features = ["serde"] }
-web-transport-ws = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 sd-notify = "0.4"

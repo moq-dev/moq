@@ -85,9 +85,9 @@ const effect = new Effect((effect) => {
 age.set(21); // only the nested effect reruns: "You are 21 years old!"
 ```
 
-### effect.spawn
-Run async work that blocks the effect from re-running until it completes.
-The promise should monitor the `effect.cancel` Promise to detect when the effect wants to rerun.
+### effect.abort
+An `AbortSignal` that is aborted when the effect reruns or closes.
+Pass it to any API that accepts an `AbortSignal` — `fetch`, `addEventListener`, streams, etc.
 
 ```ts
 const url = new Signal("/api/data");
@@ -96,9 +96,8 @@ const effect = new Effect((effect) => {
   const endpoint = effect.get(url);
 
   effect.spawn(async () => {
-    const request = fetch(endpoint);
-    const res = await Promise.race([request, effect.cancel]);
-    if (!res) return; // effect cancelled, stop the request
+    const res = await fetch(endpoint, { signal: effect.abort });
+    // automatically aborted on rerun/close
 
     // ...
   });
@@ -113,7 +112,7 @@ Effects also provide lifecycle helpers that auto-cleanup:
 - **`effect.timer(fn, ms)`** - `setTimeout` that cancels on cleanup
 - **`effect.interval(fn, ms)`** - `setInterval` that cancels on cleanup
 - **`effect.animate(fn)`** - `requestAnimationFrame` that cancels on cleanup
-- **`effect.event(target, type, fn)`** - `addEventListener` that removes on cleanup
+- **`effect.event(target, type, fn)`** - `addEventListener` that removes on cleanup/rerun via `AbortSignal`
 - **`effect.subscribe(signal, fn)`** - shorthand: run `fn` each time `signal` changes
 - **`effect.getAll(signals)`** - get the values of multiple signals, only if they are all truthy
 

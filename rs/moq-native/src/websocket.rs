@@ -1,9 +1,9 @@
 use anyhow::Context;
+use qmux::tokio_tungstenite;
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time;
+use std::{net, time};
 use url::Url;
-use web_transport_ws::{tokio_tungstenite, tungstenite};
 
 // Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -49,10 +49,18 @@ pub(crate) async fn race_handle(
 	config: &ClientWebSocket,
 	tls: &rustls::ClientConfig,
 	url: Url,
-) -> Option<anyhow::Result<web_transport_ws::Session>> {
+) -> Option<anyhow::Result<qmux::Session>> {
 	if !config.enabled {
 		return None;
 	}
+
+	// Only attempt WebSocket for HTTP-based schemes.
+	// Custom protocols (moqt://, moql://) use raw QUIC and don't support WebSocket.
+	match url.scheme() {
+		"http" | "https" | "ws" | "wss" => {}
+		_ => return None,
+	}
+
 	let res = connect(config, tls, url).await;
 	if let Err(err) = &res {
 		tracing::warn!(%err, "WebSocket connection failed");
@@ -64,7 +72,7 @@ pub(crate) async fn connect(
 	config: &ClientWebSocket,
 	tls: &rustls::ClientConfig,
 	mut url: Url,
-) -> anyhow::Result<web_transport_ws::Session> {
+) -> anyhow::Result<qmux::Session> {
 	anyhow::ensure!(config.enabled, "WebSocket support is disabled");
 
 	let host = url.host_str().context("missing hostname")?.to_string();
@@ -106,32 +114,62 @@ pub(crate) async fn connect(
 
 	// Use the existing TLS config (which respects tls-disable-verify) for secure connections
 	let connector = if needs_tls {
-		Some(tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone())))
+		tokio_tungstenite::Connector::Rustls(Arc::new(tls.clone()))
 	} else {
-		None
+		tokio_tungstenite::Connector::Plain
 	};
 
-	// Connect using tokio-tungstenite
-	let (ws_stream, _response) = tokio_tungstenite::connect_async_tls_with_config(
-		url.as_str(),
-		Some(tungstenite::protocol::WebSocketConfig {
+	let session = qmux::Client::new()
+		.with_config(qmux::tungstenite::protocol::WebSocketConfig {
 			max_message_size: Some(64 << 20), // 64 MB
 			max_frame_size: Some(16 << 20),   // 16 MB
 			accept_unmasked_frames: false,
 			..Default::default()
-		}),
-		false, // disable_nagle
-		connector,
-	)
-	.await
-	.context("failed to connect WebSocket")?;
-
-	// Wrap WebSocket in WebTransport compatibility layer
-	// Similar to what the relay does: web_transport_ws::Session::new(socket, true)
-	let session = web_transport_ws::Session::new(ws_stream, false);
+		})
+		.with_connector(connector)
+		.connect(url.as_str())
+		.await
+		.context("failed to connect WebSocket")?;
 
 	tracing::warn!(%url, "using WebSocket fallback");
 	WEBSOCKET_WON.lock().unwrap().insert(key);
 
 	Ok(session)
+}
+
+/// Listens for incoming WebSocket connections on a TCP port.
+///
+/// Use with [`crate::Server::with_websocket`] to accept WebSocket connections
+/// alongside QUIC connections on a separate port.
+pub struct WebSocketListener {
+	listener: tokio::net::TcpListener,
+	server: qmux::Server,
+}
+
+impl WebSocketListener {
+	pub async fn bind(addr: net::SocketAddr) -> anyhow::Result<Self> {
+		let listener = tokio::net::TcpListener::bind(addr).await?;
+		let server = qmux::Server::new();
+		Ok(Self { listener, server })
+	}
+
+	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
+		Ok(self.listener.local_addr()?)
+	}
+
+	pub async fn accept(&self) -> Option<anyhow::Result<qmux::Session>> {
+		match self.listener.accept().await {
+			Ok((stream, addr)) => {
+				tracing::debug!(%addr, "accepted WebSocket TCP connection");
+				let server = self.server.clone();
+				Some(
+					server
+						.accept(stream)
+						.await
+						.map_err(|e| anyhow::anyhow!("WebSocket accept failed: {e}")),
+				)
+			}
+			Err(e) => Some(Err(e.into())),
+		}
+	}
 }

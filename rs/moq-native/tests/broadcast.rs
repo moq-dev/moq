@@ -109,7 +109,10 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// Tear down: dropping the session closes the QUIC connection.
 	drop(session);
-	let _ = server_handle.await;
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
 }
 
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────
@@ -344,4 +347,214 @@ async fn broadcast_webtransport_negotiate_client_all_server_transport_15() {
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_transport_16() {
 	broadcast_test("https", None, Some("moq-transport-16")).await;
+}
+
+// ── WebSocket (ws://) ───────────────────────────────────────────────
+
+/// Test WebSocket transport end-to-end.
+///
+/// The server binds a WebSocket TCP listener on a separate port.
+/// The client connects directly via ws://, bypassing QUIC entirely.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_websocket() {
+	use moq_native::moq_lite::{Origin, Track};
+
+	// ── publisher (server) ──────────────────────────────────────────
+	let pub_origin = Origin::produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut track = broadcast
+		.create_track(Track::new("video"))
+		.expect("failed to create track");
+
+	let mut group = track.append_group().expect("failed to append group");
+	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.finish().expect("failed to finish group");
+
+	// Server with both QUIC (required) and WebSocket listeners.
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+
+	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+		.await
+		.expect("failed to bind WebSocket listener");
+	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
+
+	let mut server = server_config
+		.init()
+		.expect("failed to init server")
+		.with_websocket(Some(ws_listener));
+
+	// ── subscriber (client) ─────────────────────────────────────────
+	let sub_origin = Origin::produce();
+	let mut announcements = sub_origin.consume();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	// Disable WebSocket delay so client connects immediately via ws://
+	client_config.websocket.delay = None;
+
+	let client = client_config.init().expect("failed to init client");
+	let url: url::Url = format!("ws://localhost:{}", ws_addr.port()).parse().unwrap();
+
+	// ── run server and client concurrently ──────────────────────────
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		assert_eq!(request.transport(), "websocket");
+		let session = request.with_publish(pub_origin.consume()).ok().await?;
+
+		let _broadcast = broadcast;
+		let _track = track;
+
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_consume(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	// Wait for the broadcast announcement.
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.expect("expected announce, got unannounce");
+
+	// Subscribe to the track.
+	let mut track_sub = bc
+		.subscribe_track(&Track::new("video"))
+		.expect("subscribe_track failed");
+
+	// Read one group.
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
+		.await
+		.expect("next_group timed out")
+		.expect("next_group failed")
+		.expect("track closed prematurely");
+
+	// Read one frame and verify the payload.
+	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+		.await
+		.expect("read_frame timed out")
+		.expect("read_frame failed")
+		.expect("group closed prematurely");
+
+	assert_eq!(&*frame, b"hello");
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
+}
+
+/// Test WebSocket fallback when QUIC is unavailable.
+///
+/// The client connects via `http://` to the WebSocket port. QUIC tries to
+/// reach that port over UDP and fails (no QUIC listener there). The WebSocket
+/// fallback converts `http://` → `ws://` and connects over TCP, succeeding.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn broadcast_websocket_fallback() {
+	use moq_native::moq_lite::{Origin, Track};
+
+	// ── publisher (server) ──────────────────────────────────────────
+	let pub_origin = Origin::produce();
+	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut track = broadcast
+		.create_track(Track::new("video"))
+		.expect("failed to create track");
+
+	let mut group = track.append_group().expect("failed to append group");
+	group.write_frame(b"hello".as_ref()).expect("failed to write frame");
+	group.finish().expect("failed to finish group");
+
+	// QUIC binds on its own port; WebSocket on a different port.
+	let mut server_config = moq_native::ServerConfig::default();
+	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.tls.generate = vec!["localhost".into()];
+
+	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+		.await
+		.expect("failed to bind WebSocket listener");
+	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
+
+	let mut server = server_config
+		.init()
+		.expect("failed to init server")
+		.with_websocket(Some(ws_listener));
+
+	// ── subscriber (client) ─────────────────────────────────────────
+	let sub_origin = Origin::produce();
+	let mut announcements = sub_origin.consume();
+
+	let mut client_config = moq_native::ClientConfig::default();
+	client_config.tls.disable_verify = Some(true);
+	// No delay — race QUIC and WebSocket simultaneously.
+	client_config.websocket.delay = None;
+
+	let client = client_config.init().expect("failed to init client");
+
+	// Connect via http:// to the WebSocket port.
+	// QUIC will try UDP on this port and fail; WebSocket will try ws:// and succeed.
+	let url: url::Url = format!("http://localhost:{}", ws_addr.port()).parse().unwrap();
+
+	// ── run server and client concurrently ──────────────────────────
+	let server_handle = tokio::spawn(async move {
+		let request = server.accept().await.expect("no incoming connection");
+		assert_eq!(request.transport(), "websocket");
+		let session = request.with_publish(pub_origin.consume()).ok().await?;
+
+		let _broadcast = broadcast;
+		let _track = track;
+
+		let _ = session.closed().await;
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let client = client.with_consume(sub_origin);
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("client connect timed out")
+		.expect("client connect failed");
+
+	// Wait for the broadcast announcement.
+	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+		.await
+		.expect("announce timed out")
+		.expect("origin closed");
+
+	assert_eq!(path.as_str(), "test");
+	let bc = bc.expect("expected announce, got unannounce");
+
+	// Subscribe to the track.
+	let mut track_sub = bc
+		.subscribe_track(&Track::new("video"))
+		.expect("subscribe_track failed");
+
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
+		.await
+		.expect("next_group timed out")
+		.expect("next_group failed")
+		.expect("track closed prematurely");
+
+	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+		.await
+		.expect("read_frame timed out")
+		.expect("read_frame failed")
+		.expect("group closed prematurely");
+
+	assert_eq!(&*frame, b"hello");
+
+	drop(session);
+	server_handle
+		.await
+		.expect("server task panicked")
+		.expect("server task failed");
 }

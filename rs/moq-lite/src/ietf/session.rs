@@ -1,10 +1,10 @@
 use crate::{
 	Error, OriginConsumer, OriginProducer,
 	coding::{Reader, Stream},
-	ietf::{self, Control, RequestId},
+	ietf::{self, RequestId},
 };
 
-use super::{Message, Publisher, Subscriber, Version};
+use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter};
 
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
@@ -54,285 +54,108 @@ async fn run<S: web_transport_trait::Session>(
 	subscribe: Option<OriginProducer>,
 	version: Version,
 ) -> Result<(), Error> {
-	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-	let control = Control::new(tx, request_id_max, client, version);
-	let publisher = Publisher::new(session.clone(), publish, control.clone(), version);
-	let subscriber = Subscriber::new(session.clone(), subscribe, control.clone(), version);
-
-	tokio::select! {
-		res = subscriber.clone().run() => res,
-		res = publisher.clone().run() => res,
-		res = run_control_read(setup.reader, control, publisher.clone(), subscriber, version) => res,
-		res = Control::run::<S>(setup.writer, rx) => res,
-		res = run_bidi_streams(session, publisher, version) => res,
+	match version {
+		Version::Draft14 | Version::Draft15 | Version::Draft16 => {
+			run_adapted(session, setup, request_id_max, client, publish, subscribe, version).await
+		}
+		Version::Draft17 => run_native(session, setup, client, publish, subscribe, version).await,
 	}
 }
 
-async fn run_control_read<S: web_transport_trait::Session>(
-	mut reader: Reader<S::RecvStream, Version>,
-	control: Control,
-	mut publisher: Publisher<S>,
+/// v14-16: Use the ControlStreamAdapter to multiplex control messages into virtual bidi streams.
+async fn run_adapted<S: web_transport_trait::Session>(
+	session: S,
+	setup: Stream<S, Version>,
+	request_id_max: Option<RequestId>,
+	client: bool,
+	publish: Option<OriginConsumer>,
+	subscribe: Option<OriginProducer>,
+	version: Version,
+) -> Result<(), Error> {
+	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+	let control = Control::new(request_id_max, client);
+	let adapter = ControlStreamAdapter::new(session, tx, control.clone(), version);
+
+	let publisher = Publisher::new(adapter.clone(), publish, control.clone(), version);
+	let subscriber = Subscriber::new(adapter.clone(), subscribe, control, version);
+
+	let dispatch_session = adapter.clone();
+
+	tokio::select! {
+		res = adapter.run(setup.reader, setup.writer, rx) => res,
+		res = run_dispatch(dispatch_session, publisher.clone(), subscriber.clone(), version) => res,
+		res = publisher.run() => res,
+		res = subscriber.run() => res,
+	}
+}
+
+/// v17: Use real bidi streams directly. Control stream only for GOAWAY.
+async fn run_native<S: web_transport_trait::Session>(
+	session: S,
+	setup: Stream<S, Version>,
+	client: bool,
+	publish: Option<OriginConsumer>,
+	subscribe: Option<OriginProducer>,
+	version: Version,
+) -> Result<(), Error> {
+	let control = Control::new(None, client);
+	let publisher = Publisher::new(session.clone(), publish, control.clone(), version);
+	let subscriber = Subscriber::new(session.clone(), subscribe, control, version);
+
+	tokio::select! {
+		res = run_goaway(setup.reader) => res,
+		res = run_dispatch(session, publisher.clone(), subscriber.clone(), version) => res,
+		res = publisher.run() => res,
+		res = subscriber.run() => res,
+	}
+}
+
+/// Accept incoming bidi streams and dispatch to the correct handler based on message type.
+async fn run_dispatch<S: web_transport_trait::Session>(
+	session: S,
+	publisher: Publisher<S>,
 	mut subscriber: Subscriber<S>,
 	version: Version,
 ) -> Result<(), Error> {
 	loop {
-		let id: u64 = match reader.decode_maybe().await? {
-			Some(id) => id,
-			None => return Ok(()),
-		};
-
-		let size: u16 = reader.decode::<u16>().await?;
-		tracing::trace!(id, size, "reading control message");
-
-		let mut data = reader.read_exact(size as usize).await?;
-		tracing::trace!(hex = %hex::encode(&data), "decoding control message");
-
-		// Draft-17: only GOAWAY is allowed on the control/SETUP stream
-		if version == Version::Draft17 {
-			match id {
-				ietf::GoAway::ID => {
-					let msg = ietf::GoAway::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					return Err(Error::Unsupported);
-				}
-				_ => return Err(Error::UnexpectedMessage),
-			}
-		}
-
-		match id {
-			ietf::Subscribe::ID => {
-				let msg = ietf::Subscribe::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				publisher.recv_subscribe(msg)?;
-			}
-			ietf::SubscribeUpdate::ID => {
-				let msg = ietf::SubscribeUpdate::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				publisher.recv_subscribe_update(msg)?;
-			}
-			ietf::SubscribeOk::ID => {
-				let msg = ietf::SubscribeOk::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				subscriber.recv_subscribe_ok(msg)?;
-			}
-			// 0x05: SubscribeError in v14, REQUEST_ERROR in v15+
-			ietf::SubscribeError::ID => match version {
-				Version::Draft14 => {
-					let msg = ietf::SubscribeError::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					subscriber.recv_subscribe_error(msg)?;
-				}
-				Version::Draft15 | Version::Draft16 => {
-					let msg = ietf::RequestError::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					subscriber.recv_request_error(&msg)?;
-					publisher.recv_request_error(&msg)?;
-				}
-				Version::Draft17 => {
-					return Err(Error::UnexpectedMessage);
-				}
-			},
-			ietf::PublishNamespace::ID => {
-				let msg = ietf::PublishNamespace::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				subscriber.recv_publish_namespace(msg)?;
-			}
-			// 0x07: PublishNamespaceOk in v14, REQUEST_OK in v15+
-			ietf::PublishNamespaceOk::ID => match version {
-				Version::Draft14 => {
-					let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					publisher.recv_publish_namespace_ok(msg)?;
-				}
-				Version::Draft15 | Version::Draft16 => {
-					let msg = ietf::RequestOk::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					subscriber.recv_request_ok(&msg)?;
-					publisher.recv_request_ok(&msg)?;
-				}
-				Version::Draft17 => {
-					return Err(Error::UnexpectedMessage);
-				}
-			},
-			// 0x08: PublishNamespaceError in v14, NAMESPACE in v16, removed in v15
-			ietf::PublishNamespaceError::ID => match version {
-				Version::Draft14 => {
-					let msg = ietf::PublishNamespaceError::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					publisher.recv_publish_namespace_error(msg)?;
-				}
-				Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-					return Err(Error::UnexpectedMessage);
-				}
-			},
-			ietf::PublishNamespaceDone::ID => {
-				let msg = ietf::PublishNamespaceDone::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				subscriber.recv_publish_namespace_done(msg)?;
-			}
-			ietf::Unsubscribe::ID => {
-				let msg = ietf::Unsubscribe::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				publisher.recv_unsubscribe(msg)?;
-			}
-			ietf::PublishDone::ID => {
-				let msg = ietf::PublishDone::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				subscriber.recv_publish_done(msg)?;
-			}
-			ietf::PublishNamespaceCancel::ID => {
-				let msg = ietf::PublishNamespaceCancel::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				publisher.recv_publish_namespace_cancel(msg)?;
-			}
-			ietf::TrackStatus::ID => {
-				let msg = ietf::TrackStatus::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				publisher.recv_track_status(msg)?;
-			}
-			ietf::GoAway::ID => {
-				let msg = ietf::GoAway::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				return Err(Error::Unsupported);
-			}
-			// 0x11: SubscribeNamespace — v14/v15: control stream, v16: bidi stream only
-			ietf::SubscribeNamespace::ID => match version {
-				Version::Draft14 | Version::Draft15 => {
-					let msg = ietf::SubscribeNamespace::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					publisher.recv_subscribe_namespace(msg)?;
-				}
-				Version::Draft16 | Version::Draft17 => {
-					return Err(Error::UnexpectedMessage);
-				}
-			},
-			// 0x12: SubscribeNamespaceOk in v14, removed in v15+
-			ietf::SubscribeNamespaceOk::ID => match version {
-				Version::Draft14 => {
-					let msg = ietf::SubscribeNamespaceOk::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					subscriber.recv_subscribe_namespace_ok(msg)?;
-				}
-				Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-					return Err(Error::UnexpectedMessage);
-				}
-			},
-			// 0x13: SubscribeNamespaceError in v14, removed in v15+
-			ietf::SubscribeNamespaceError::ID => match version {
-				Version::Draft14 => {
-					let msg = ietf::SubscribeNamespaceError::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					subscriber.recv_subscribe_namespace_error(msg)?;
-				}
-				Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-					return Err(Error::UnexpectedMessage);
-				}
-			},
-			// 0x14: UnsubscribeNamespace — v14/v15: control stream, v16: removed (use stream close)
-			ietf::UnsubscribeNamespace::ID => match version {
-				Version::Draft14 | Version::Draft15 => {
-					let msg = ietf::UnsubscribeNamespace::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					publisher.recv_unsubscribe_namespace(msg)?;
-				}
-				Version::Draft16 | Version::Draft17 => {
-					return Err(Error::UnexpectedMessage);
-				}
-			},
-			ietf::MaxRequestId::ID => {
-				let msg = ietf::MaxRequestId::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				control.max_request_id(msg.request_id);
-			}
-			ietf::RequestsBlocked::ID => {
-				let msg = ietf::RequestsBlocked::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				tracing::warn!(?msg, "ignoring requests blocked");
-			}
-			ietf::Fetch::ID => {
-				let msg = ietf::Fetch::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				publisher.recv_fetch(msg)?;
-			}
-			ietf::FetchCancel::ID => {
-				let msg = ietf::FetchCancel::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				publisher.recv_fetch_cancel(msg)?;
-			}
-			ietf::FetchOk::ID => {
-				let msg = ietf::FetchOk::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				subscriber.recv_fetch_ok(msg)?;
-			}
-			// 0x19: FetchError in v14, removed in v15+
-			ietf::FetchError::ID => match version {
-				Version::Draft14 => {
-					let msg = ietf::FetchError::decode_msg(&mut data, version)?;
-					tracing::debug!(message = ?msg, "received control message");
-					subscriber.recv_fetch_error(msg)?;
-				}
-				Version::Draft15 | Version::Draft16 | Version::Draft17 => {
-					return Err(Error::UnexpectedMessage);
-				}
-			},
-			ietf::Publish::ID => {
-				let msg = ietf::Publish::decode_msg(&mut data, version)?;
-				tracing::debug!(message = ?msg, "received control message");
-				subscriber.recv_publish(msg)?;
-			}
-			// 0x1E: PublishOk — v14: unsupported, v15+: removed (replaced by RequestOk 0x07)
-			ietf::PublishOk::ID => {
-				return Err(Error::UnexpectedMessage);
-			}
-			// 0x1F: PublishError — v14: unsupported, v15+: removed (replaced by RequestError 0x05)
-			ietf::PublishError::ID => {
-				return Err(Error::UnexpectedMessage);
-			}
-			_ => return Err(Error::UnexpectedMessage),
-		}
-
-		if !data.is_empty() {
-			return Err(Error::WrongSize);
-		}
-	}
-}
-
-/// Accept bidirectional streams for v16 SUBSCRIBE_NAMESPACE.
-/// For v14/v15, no bidi streams are expected (other than the control stream).
-async fn run_bidi_streams<S: web_transport_trait::Session>(
-	session: S,
-	publisher: Publisher<S>,
-	version: Version,
-) -> Result<(), Error> {
-	// Only v16 uses bidi streams for SUBSCRIBE_NAMESPACE
-	match version {
-		Version::Draft16 => {}
-		Version::Draft14 | Version::Draft15 | Version::Draft17 => {
-			// Park forever — we don't accept bidi streams for v14/v15/v17.
-			std::future::pending::<()>().await;
-			return Ok(());
-		}
-	}
-
-	loop {
 		let mut stream = Stream::accept(&session, version).await?;
 
-		// Read the first message type ID to determine the stream type
 		let id: u64 = stream.reader.decode().await?;
+		let size: u16 = stream.reader.decode().await?;
+		let data = stream.reader.read_exact(size as usize).await?;
 
 		match id {
-			ietf::SubscribeNamespace::ID => {
-				let mut pub_clone = publisher.clone();
-				web_async::spawn(async move {
-					if let Err(err) = pub_clone.recv_subscribe_namespace_stream(stream).await {
-						tracing::debug!(%err, "subscribe_namespace stream error");
-					}
-				});
+			// Publisher handles: Subscribe, Fetch, SubscribeNamespace, TrackStatus
+			ietf::Subscribe::ID | ietf::Fetch::ID | ietf::SubscribeNamespace::ID | ietf::TrackStatus::ID => {
+				publisher.handle_stream(id, data, stream)?;
+			}
+			// Subscriber handles: Publish, PublishNamespace
+			ietf::Publish::ID | ietf::PublishNamespace::ID => {
+				subscriber.handle_stream(id, data, stream)?;
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type");
 				return Err(Error::UnexpectedStream);
 			}
 		}
+	}
+}
+
+/// Read the control/SETUP stream for v17 — only GOAWAY is expected.
+async fn run_goaway<R: web_transport_trait::RecvStream>(mut reader: Reader<R, Version>) -> Result<(), Error> {
+	let id: u64 = match reader.decode_maybe().await? {
+		Some(id) => id,
+		None => return Ok(()),
+	};
+
+	let size: u16 = reader.decode::<u16>().await?;
+	let mut data = reader.read_exact(size as usize).await?;
+
+	if id == ietf::GoAway::ID {
+		let msg = ietf::GoAway::decode_msg(&mut data, Version::Draft17)?;
+		tracing::debug!(message = ?msg, "received GOAWAY");
+		Err(Error::Unsupported)
+	} else {
+		Err(Error::UnexpectedMessage)
 	}
 }

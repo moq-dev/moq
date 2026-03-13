@@ -3,12 +3,12 @@ use std::collections::{HashMap, hash_map::Entry};
 use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
 	Track, TrackProducer,
-	coding::Reader,
+	coding::{Reader, Stream},
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId},
 	model::BroadcastProducer,
 };
 
-use super::Version;
+use super::{Message, Version};
 
 use web_async::Lock;
 
@@ -25,9 +25,6 @@ struct State {
 
 	// Each PUBLISH message that is implicitly causing a PUBLISH_NAMESPACE message.
 	publishes: HashMap<RequestId, PathOwned>,
-
-	// Maps PublishNamespace request_id → track_namespace (for v16 PublishNamespaceDone)
-	publish_namespace_ids: HashMap<RequestId, PathOwned>,
 }
 
 struct TrackState {
@@ -45,11 +42,9 @@ struct BroadcastState {
 #[derive(Clone)]
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
-
 	origin: Option<OriginProducer>,
-	state: Lock<State>,
 	control: Control,
-
+	state: Lock<State>,
 	version: Version,
 }
 
@@ -58,56 +53,269 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Self {
 			session,
 			origin,
-			state: Default::default(),
 			control,
+			state: Default::default(),
 			version,
 		}
 	}
 
-	pub fn recv_publish_namespace(&mut self, msg: ietf::PublishNamespace) -> Result<(), Error> {
+	pub async fn run(self) -> Result<(), Error> {
+		self.run_uni().await
+	}
+
+	/// Handle an incoming bidi stream dispatched by the session.
+	pub fn handle_stream(&mut self, id: u64, mut data: bytes::Bytes, stream: Stream<S, Version>) -> Result<(), Error> {
+		let mut this = self.clone();
+		match id {
+			ietf::Publish::ID => {
+				let msg = ietf::Publish::decode_msg(&mut data, this.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
+				}
+				tracing::debug!(message = ?msg, "received publish");
+				web_async::spawn(async move {
+					if let Err(err) = this.run_publish_stream(stream, msg).await {
+						tracing::debug!(%err, "publish stream error");
+					}
+				});
+			}
+			ietf::PublishNamespace::ID => {
+				let msg = ietf::PublishNamespace::decode_msg(&mut data, this.version)?;
+				if !data.is_empty() {
+					return Err(Error::WrongSize);
+				}
+				tracing::debug!(message = ?msg, "received publish_namespace");
+				web_async::spawn(async move {
+					if let Err(err) = this.run_publish_namespace_stream(stream, msg).await {
+						tracing::debug!(%err, "publish_namespace stream error");
+					}
+				});
+			}
+			_ => {
+				tracing::warn!(id, "unexpected bidi stream type for subscriber");
+				return Err(Error::UnexpectedStream);
+			}
+		}
+		Ok(())
+	}
+
+	/// Handle an incoming PUBLISH_NAMESPACE on its bidi stream.
+	async fn run_publish_namespace_stream(
+		&mut self,
+		mut stream: Stream<S, Version>,
+		msg: ietf::PublishNamespace<'_>,
+	) -> Result<(), Error> {
+		let request_id = msg.request_id;
+		let path = msg.track_namespace.to_owned();
+
+		match self.start_announce(path.clone()) {
+			Ok(_) => {
+				if let Err(err) = self.write_ok(&mut stream, request_id).await {
+					let _ = self.stop_announce(path);
+					return Err(err);
+				}
+			}
+			Err(err) => {
+				self.write_error(&mut stream, request_id, 400, &err.to_string()).await?;
+				return Ok(());
+			}
+		}
+
+		// Wait for stream close (PublishNamespaceDone in v14-16 comes as stream close via adapter,
+		// in v17 the stream simply closes).
+		let _ = stream.reader.closed().await;
+
+		self.stop_announce(path)?;
+
+		Ok(())
+	}
+
+	/// Handle an incoming PUBLISH on its bidi stream.
+	async fn run_publish_stream(
+		&mut self,
+		mut stream: Stream<S, Version>,
+		msg: ietf::Publish<'_>,
+	) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		// Track the request_id → namespace mapping for v16 PublishNamespaceDone
-		{
-			let mut state = self.state.lock();
-			state
-				.publish_namespace_ids
-				.insert(request_id, msg.track_namespace.to_owned());
+		if let Err(err) = self.start_publish(&msg) {
+			self.write_publish_error(&mut stream, request_id, 400, &err.to_string())
+				.await?;
+			return Ok(());
 		}
 
-		match self.start_announce(msg.track_namespace.to_owned()) {
-			Ok(_) => self.send_ok(request_id),
-			Err(err) => self.send_error(request_id, 400, &err.to_string()),
+		let res = self.write_publish_ok(&mut stream, &msg).await;
+
+		if res.is_ok() {
+			// Wait for PublishDone or stream close
+			let _ = stream.reader.closed().await;
 		}
+
+		// Clean up (always runs after start_publish succeeds)
+		let mut state = self.state.lock();
+		if let Some(mut track) = state.subscribes.remove(&request_id) {
+			let _ = track.producer.finish();
+			if let Some(alias) = track.alias {
+				state.aliases.remove(&alias);
+			}
+		}
+		if let Some(path) = state.publishes.remove(&request_id) {
+			drop(state);
+			let _ = self.stop_announce(path);
+		}
+
+		res
 	}
 
-	/// Send a generic OK response, using the version-appropriate message.
-	fn send_ok(&self, request_id: RequestId) -> Result<(), Error> {
+	/// Send OK on the bidi stream.
+	async fn write_ok(&self, stream: &mut Stream<S, Version>, request_id: RequestId) -> Result<(), Error> {
 		match self.version {
-			Version::Draft14 => self.control.send(ietf::PublishNamespaceOk { request_id }),
-			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestOk {
-				request_id: Some(request_id),
-			}),
-			Version::Draft17 => Err(Error::Version),
+			Version::Draft14 => {
+				stream.writer.encode(&ietf::PublishNamespaceOk::ID).await?;
+				stream.writer.encode(&ietf::PublishNamespaceOk { request_id }).await?;
+			}
+			Version::Draft15 | Version::Draft16 => {
+				stream.writer.encode(&ietf::RequestOk::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::RequestOk {
+						request_id: Some(request_id),
+					})
+					.await?;
+			}
+			Version::Draft17 => {
+				stream.writer.encode(&ietf::RequestOk::ID).await?;
+				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
+			}
 		}
+		Ok(())
 	}
 
-	/// Send a generic error response, using the version-appropriate message.
-	fn send_error(&self, request_id: RequestId, error_code: u64, reason: &str) -> Result<(), Error> {
+	/// Send error on the bidi stream.
+	async fn write_error(
+		&self,
+		stream: &mut Stream<S, Version>,
+		request_id: RequestId,
+		error_code: u64,
+		reason: &str,
+	) -> Result<(), Error> {
 		match self.version {
-			Version::Draft14 => self.control.send(ietf::PublishNamespaceError {
-				request_id,
-				error_code,
-				reason_phrase: reason.into(),
-			}),
-			Version::Draft15 | Version::Draft16 => self.control.send(ietf::RequestError {
-				request_id: Some(request_id),
-				error_code,
-				reason_phrase: reason.into(),
-				retry_interval: 0,
-			}),
-			Version::Draft17 => Err(Error::Version),
+			Version::Draft14 => {
+				stream.writer.encode(&ietf::PublishNamespaceError::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::PublishNamespaceError {
+						request_id,
+						error_code,
+						reason_phrase: reason.into(),
+					})
+					.await?;
+			}
+			Version::Draft15 | Version::Draft16 => {
+				stream.writer.encode(&ietf::RequestError::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::RequestError {
+						request_id: Some(request_id),
+						error_code,
+						reason_phrase: reason.into(),
+						retry_interval: 0,
+					})
+					.await?;
+			}
+			Version::Draft17 => {
+				stream.writer.encode(&ietf::RequestError::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::RequestError {
+						request_id: None,
+						error_code,
+						reason_phrase: reason.into(),
+						retry_interval: 0,
+					})
+					.await?;
+			}
 		}
+		Ok(())
+	}
+
+	async fn write_publish_ok(&self, stream: &mut Stream<S, Version>, msg: &ietf::Publish<'_>) -> Result<(), Error> {
+		match self.version {
+			Version::Draft14 => {
+				stream.writer.encode(&ietf::PublishOk::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::PublishOk {
+						request_id: Some(msg.request_id),
+						forward: true,
+						subscriber_priority: 0,
+						group_order: GroupOrder::Descending,
+						filter_type: FilterType::LargestObject,
+					})
+					.await?;
+			}
+			Version::Draft15 | Version::Draft16 => {
+				stream.writer.encode(&ietf::RequestOk::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::RequestOk {
+						request_id: Some(msg.request_id),
+					})
+					.await?;
+			}
+			Version::Draft17 => {
+				stream.writer.encode(&ietf::RequestOk::ID).await?;
+				stream.writer.encode(&ietf::RequestOk { request_id: None }).await?;
+			}
+		}
+		Ok(())
+	}
+
+	async fn write_publish_error(
+		&self,
+		stream: &mut Stream<S, Version>,
+		request_id: RequestId,
+		error_code: u64,
+		reason: &str,
+	) -> Result<(), Error> {
+		match self.version {
+			Version::Draft14 => {
+				stream.writer.encode(&ietf::PublishError::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::PublishError {
+						request_id,
+						error_code,
+						reason_phrase: reason.into(),
+					})
+					.await?;
+			}
+			Version::Draft15 | Version::Draft16 => {
+				stream.writer.encode(&ietf::RequestError::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::RequestError {
+						request_id: Some(request_id),
+						error_code,
+						reason_phrase: reason.into(),
+						retry_interval: 0,
+					})
+					.await?;
+			}
+			Version::Draft17 => {
+				stream.writer.encode(&ietf::RequestError::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::RequestError {
+						request_id: None,
+						error_code,
+						reason_phrase: reason.into(),
+						retry_interval: 0,
+					})
+					.await?;
+			}
+		}
+		Ok(())
 	}
 
 	fn start_announce(&mut self, path: PathOwned) -> Result<BroadcastProducer, Error> {
@@ -134,7 +342,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 
-		let mut this = self.clone();
+		let this = self.clone();
 		let producer = broadcast.clone();
 
 		web_async::spawn(async move {
@@ -154,7 +362,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let mut state = self.state.lock();
 
-		// Close the producer if this was the last announce.
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(mut entry) => {
 				entry.get_mut().count -= 1;
@@ -169,102 +376,46 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	pub fn recv_publish_namespace_done(&mut self, msg: ietf::PublishNamespaceDone) -> Result<(), Error> {
-		match self.version {
-			Version::Draft14 | Version::Draft15 => self.stop_announce(msg.track_namespace.to_owned()),
-			Version::Draft16 => {
-				// In v16, PublishNamespaceDone uses request_id instead of track_namespace
-				let state = self.state.lock();
-				let path = state.publish_namespace_ids.get(&msg.request_id).cloned();
-				drop(state);
+	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
+		let request_id = msg.request_id;
 
-				if let Some(path) = path {
-					self.state.lock().publish_namespace_ids.remove(&msg.request_id);
-					self.stop_announce(path)
-				} else {
-					tracing::warn!(request_id = %msg.request_id, "unknown publish_namespace request_id in done");
-					Ok(())
-				}
-			}
-			Version::Draft17 => Err(Error::Version),
+		let track = Track {
+			name: msg.track_name.to_string(),
+			priority: 0,
 		}
-	}
+		.produce();
 
-	pub fn recv_subscribe_ok(&mut self, msg: ietf::SubscribeOk) -> Result<(), Error> {
-		let Some(request_id) = msg.request_id else {
-			return Ok(());
+		let mut state = self.state.lock();
+		match state.subscribes.entry(request_id) {
+			Entry::Vacant(entry) => {
+				entry.insert(TrackState {
+					producer: track.clone(),
+					alias: Some(msg.track_alias),
+				});
+			}
+			Entry::Occupied(_) => return Err(Error::Duplicate),
 		};
 
-		// Save the track alias
-		let mut state = self.state.lock();
-		if let Some(subscribe) = state.subscribes.get_mut(&request_id) {
-			subscribe.alias = Some(msg.track_alias);
-			state.aliases.insert(msg.track_alias, request_id);
-		}
-
-		Ok(())
-	}
-
-	pub fn recv_subscribe_error(&mut self, msg: ietf::SubscribeError) -> Result<(), Error> {
-		let mut state = self.state.lock();
-
-		if let Some(mut track) = state.subscribes.remove(&msg.request_id) {
-			let _ = track.producer.abort(Error::Cancel);
-			if let Some(alias) = track.alias {
-				state.aliases.remove(&alias);
+		match state.aliases.entry(msg.track_alias) {
+			Entry::Vacant(entry) => {
+				entry.insert(request_id);
+			}
+			Entry::Occupied(_) => {
+				state.subscribes.remove(&request_id);
+				return Err(Error::Duplicate);
 			}
 		}
+		state.publishes.insert(request_id, msg.track_namespace.to_owned());
+		drop(state);
+
+		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
+		broadcast.insert_track(&track)?;
 
 		Ok(())
 	}
 
-	pub fn recv_request_ok(&mut self, _msg: &ietf::RequestOk) -> Result<(), Error> {
-		// v15: generic OK response. SubscribeOk is still separate (0x04).
-		// Other request types (publish_namespace, fetch) are no-ops for us.
-		Ok(())
-	}
-
-	pub fn recv_request_error(&mut self, msg: &ietf::RequestError<'_>) -> Result<(), Error> {
-		let Some(request_id) = msg.request_id else {
-			return Ok(());
-		};
-
-		// v15: generic error response. Check if it's a subscribe error.
-		let mut state = self.state.lock();
-
-		if let Some(mut track) = state.subscribes.remove(&request_id) {
-			let _ = track.producer.abort(Error::Cancel);
-			if let Some(alias) = track.alias {
-				state.aliases.remove(&alias);
-			}
-		}
-
-		Ok(())
-	}
-
-	pub fn recv_publish_done(&mut self, msg: ietf::PublishDone<'_>) -> Result<(), Error> {
-		let Some(request_id) = msg.request_id else {
-			return Ok(());
-		};
-
-		let mut state = self.state.lock();
-
-		if let Some(mut track) = state.subscribes.remove(&request_id) {
-			let _ = track.producer.finish();
-			if let Some(alias) = track.alias {
-				state.aliases.remove(&alias);
-			}
-		}
-
-		if let Some(path) = state.publishes.remove(&request_id) {
-			drop(state);
-			self.stop_announce(path)?;
-		}
-
-		Ok(())
-	}
-
-	pub async fn run(self) -> Result<(), Error> {
+	/// Accept uni streams (group data).
+	async fn run_uni(self) -> Result<(), Error> {
 		loop {
 			let stream = self.session.accept_uni().await.map_err(Error::from_transport)?;
 
@@ -295,11 +446,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_broadcast(&mut self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
-		// Actually start serving subscriptions.
+	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
 		loop {
-			// Keep serving requests until there are no more consumers.
-			// This way we'll clean up the task when the broadcast is no longer needed.
 			let track = tokio::select! {
 				producer = broadcast.requested_track() => match producer {
 					Ok(producer) => producer,
@@ -311,9 +459,39 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				_ = self.session.closed() => break,
 			};
 
-			let request_id = self.control.next_request_id().await?;
 			let mut this = self.clone();
 
+			let path = path.to_owned();
+			web_async::spawn(async move {
+				this.run_subscribe(path, track).await;
+			});
+		}
+
+		Ok(())
+	}
+
+	async fn run_subscribe(&mut self, broadcast: Path<'_>, mut track: TrackProducer) {
+		let request_id = match self.control.next_request_id().await {
+			Ok(id) => id,
+			Err(err) => {
+				let _ = track.abort(err);
+				return;
+			}
+		};
+
+		let mut stream = match Stream::open(&self.session, self.version).await {
+			Ok(s) => s,
+			Err(err) => {
+				tracing::debug!(%err, "failed to open subscribe stream");
+				let _ = track.abort(err);
+				return;
+			}
+		};
+
+		// Pre-register the track so group data arriving before SubscribeOk can be routed.
+		// The publisher uses request_id.0 as track_alias, and recv_group falls back to
+		// RequestId(track_alias) when no alias mapping exists, so this works.
+		{
 			let mut state = self.state.lock();
 			state.subscribes.insert(
 				request_id,
@@ -322,46 +500,113 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					alias: None,
 				},
 			);
-
-			let path = path.to_owned();
-			web_async::spawn(async move {
-				if let Err(err) = this.run_subscribe(request_id, path, track).await {
-					tracing::debug!(%err, id = %request_id, "error running subscribe");
-				}
-				this.state.lock().subscribes.remove(&request_id);
-			});
 		}
 
+		// Write Subscribe message
+		if let Err(err) = self.write_subscribe(&mut stream, request_id, &broadcast, &track).await {
+			tracing::debug!(%err, "failed to write subscribe");
+			self.state.lock().subscribes.remove(&request_id);
+			let _ = track.abort(err);
+			return;
+		}
+
+		tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.info.name, "subscribe started");
+
+		// Read the response and register the alias mapping
+		let track_alias = match self.read_subscribe_response(&mut stream).await {
+			Ok(alias) => {
+				if let Some(alias) = alias {
+					let mut state = self.state.lock();
+					state.aliases.insert(alias, request_id);
+					if let Some(track_state) = state.subscribes.get_mut(&request_id) {
+						track_state.alias = Some(alias);
+					}
+				}
+				alias
+			}
+			Err(err) => {
+				tracing::debug!(%err, "subscribe response error");
+				self.state.lock().subscribes.remove(&request_id);
+				let _ = track.abort(err);
+				return;
+			}
+		};
+
+		// Wait for track unused or PublishDone (stream reader close)
+		tokio::select! {
+			_ = track.unused() => {
+				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
+				let _ = track.abort(Error::Cancel);
+			}
+			res = stream.reader.closed() => {
+				match res {
+					Ok(()) => {
+						tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.info.name, "subscribe complete");
+						let _ = track.finish();
+					}
+					Err(err) => {
+						tracing::debug!(%err, "subscribe stream closed with error");
+						let _ = track.abort(err);
+					}
+				}
+			}
+		}
+
+		// Clean up
+		self.state.lock().subscribes.remove(&request_id);
+		if let Some(alias) = track_alias {
+			self.state.lock().aliases.remove(&alias);
+		}
+
+		stream.writer.finish().ok();
+	}
+
+	async fn write_subscribe(
+		&self,
+		stream: &mut Stream<S, Version>,
+		request_id: RequestId,
+		broadcast: &Path<'_>,
+		track: &TrackProducer,
+	) -> Result<(), Error> {
+		stream.writer.encode(&ietf::Subscribe::ID).await?;
+		stream
+			.writer
+			.encode(&ietf::Subscribe {
+				request_id,
+				track_namespace: broadcast.to_owned(),
+				track_name: (&track.info.name).into(),
+				subscriber_priority: track.info.priority,
+				group_order: GroupOrder::Descending,
+				filter_type: FilterType::LargestObject,
+			})
+			.await?;
 		Ok(())
 	}
 
-	async fn run_subscribe(
-		&mut self,
-		request_id: RequestId,
-		broadcast: Path<'_>,
-		mut track: TrackProducer,
-	) -> Result<(), Error> {
-		self.control.send(ietf::Subscribe {
-			request_id,
-			track_namespace: broadcast.to_owned(),
-			track_name: (&track.info.name).into(),
-			subscriber_priority: track.info.priority,
-			group_order: GroupOrder::Descending,
-			// we want largest group
-			filter_type: FilterType::LargestObject,
-		})?;
+	async fn read_subscribe_response(&self, stream: &mut Stream<S, Version>) -> Result<Option<u64>, Error> {
+		// Read type_id + size + body from the stream
+		let type_id: u64 = stream.reader.decode().await?;
+		let size: u16 = stream.reader.decode().await?;
+		let mut data = stream.reader.read_exact(size as usize).await?;
 
-		// TODO we should send a joining fetch, but it's annoying to implement.
-		// We hope instead that publisher start subscriptions at group boundaries.
-
-		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe started");
-
-		let _ = track.unused().await;
-		tracing::info!(id = %request_id, broadcast = %self.origin.as_ref().unwrap().absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
-
-		let _ = track.abort(Error::Cancel);
-
-		Ok(())
+		match type_id {
+			ietf::SubscribeOk::ID => {
+				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
+				tracing::debug!(message = ?msg, "received subscribe ok");
+				Ok(Some(msg.track_alias))
+			}
+			ietf::SubscribeError::ID if self.version == Version::Draft14 => {
+				let msg = ietf::SubscribeError::decode_msg(&mut data, self.version)?;
+				tracing::warn!(message = ?msg, "subscribe error");
+				Err(Error::Cancel)
+			}
+			ietf::RequestError::ID => {
+				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
+				tracing::warn!(message = ?msg, "request error");
+				Err(Error::Cancel)
+			}
+			_ => Err(Error::UnexpectedMessage),
+		}
 	}
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
@@ -432,14 +677,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			let size: u64 = stream.decode().await?;
 			if size == 0 {
-				// Have to read the object status.
 				let status: u64 = stream.decode().await?;
 				if status == 0 {
-					// Empty frame
 					let mut frame = producer.create_frame(Frame { size: 0 })?;
 					frame.finish()?;
 				} else if status == 3 && !group.flags.has_end {
-					// End of group
 					break;
 				} else {
 					return Err(Error::Unsupported);
@@ -475,101 +717,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		tracing::trace!(size = %frame.info.size, "read frame");
-
-		Ok(())
-	}
-
-	pub fn recv_subscribe_namespace_ok(&mut self, _msg: ietf::SubscribeNamespaceOk) -> Result<(), Error> {
-		Err(Error::Unsupported)
-	}
-
-	pub fn recv_subscribe_namespace_error(&mut self, _msg: ietf::SubscribeNamespaceError<'_>) -> Result<(), Error> {
-		Err(Error::Unsupported)
-	}
-
-	pub fn recv_fetch_ok(&mut self, _msg: ietf::FetchOk) -> Result<(), Error> {
-		Err(Error::Unsupported)
-	}
-
-	pub fn recv_fetch_error(&mut self, _msg: ietf::FetchError<'_>) -> Result<(), Error> {
-		Err(Error::Unsupported)
-	}
-
-	pub fn recv_publish(&mut self, msg: ietf::Publish<'_>) -> Result<(), Error> {
-		if let Err(err) = self.start_publish(&msg) {
-			match self.version {
-				Version::Draft14 => {
-					self.control.send(ietf::PublishError {
-						request_id: msg.request_id,
-						error_code: 400,
-						reason_phrase: err.to_string().into(),
-					})?;
-				}
-				Version::Draft15 | Version::Draft16 => {
-					self.control.send(ietf::RequestError {
-						request_id: Some(msg.request_id),
-						error_code: 400,
-						reason_phrase: err.to_string().into(),
-						retry_interval: 0,
-					})?;
-				}
-				Version::Draft17 => {
-					return Err(Error::Version);
-				}
-			}
-		} else {
-			match self.version {
-				Version::Draft14 => {
-					self.control.send(ietf::PublishOk {
-						request_id: Some(msg.request_id),
-						forward: true,
-						subscriber_priority: 0,
-						group_order: GroupOrder::Descending,
-						filter_type: FilterType::LargestObject,
-					})?;
-				}
-				Version::Draft15 | Version::Draft16 => {
-					self.control.send(ietf::RequestOk {
-						request_id: Some(msg.request_id),
-					})?;
-				}
-				Version::Draft17 => {
-					return Err(Error::Version);
-				}
-			}
-		}
-
-		Ok(())
-	}
-
-	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
-		let request_id = msg.request_id;
-
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: 0,
-		}
-		.produce();
-
-		let mut state = self.state.lock();
-		match state.subscribes.entry(request_id) {
-			Entry::Vacant(entry) => {
-				entry.insert(TrackState {
-					producer: track.clone(),
-					alias: Some(msg.track_alias),
-				});
-			}
-			Entry::Occupied(_) => return Err(Error::Duplicate),
-		};
-
-		// Save that we're implicitly announcing this track.
-		state.publishes.insert(request_id, msg.track_namespace.to_owned());
-		drop(state);
-
-		// Announce our namespace if we haven't already.
-		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
-		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-		broadcast.insert_track(&track)?;
 
 		Ok(())
 	}

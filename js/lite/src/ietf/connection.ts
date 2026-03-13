@@ -109,8 +109,8 @@ export class Connection implements Established {
 	async #run(): Promise<void> {
 		const tasks: Promise<void>[] = [this.#runControlStream(), this.#runObjectStreams()];
 
-		// v16: accept bidi streams for SUBSCRIBE_NAMESPACE
-		if (this.#control.version === Version.DRAFT_16) {
+		// v16+: accept bidi streams for SUBSCRIBE_NAMESPACE
+		if (this.#control.version === Version.DRAFT_16 || this.#control.version === Version.DRAFT_17) {
 			tasks.push(this.#runBidiStreams());
 		}
 
@@ -230,6 +230,9 @@ export class Connection implements Established {
 					// v15: Route RequestError to both publisher and subscriber
 					await this.#publisher.handleRequestError(msg);
 					await this.#subscriber.handleRequestError(msg);
+				} else if (msg instanceof Setup.Setup) {
+					console.error("Unexpected SETUP message received after connection established");
+					this.close();
 				} else {
 					unreachable(msg);
 				}

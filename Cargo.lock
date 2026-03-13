@@ -2331,7 +2331,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.6",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2656,7 +2656,7 @@ dependencies = [
  "tracing",
  "url",
  "wasm-bindgen-futures",
- "webpki-roots 1.0.6",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2808,7 +2808,7 @@ dependencies = [
  "tracing",
  "url",
  "vergen-gitcl",
- "webpki-roots 1.0.6",
+ "webpki-roots",
  "ws_stream_wasm",
  "z32",
 ]
@@ -2961,7 +2961,6 @@ dependencies = [
  "moq-lite",
  "moq-mux",
  "moq-native",
- "slab",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3214,7 +3213,6 @@ dependencies = [
  "bytes",
  "conducer",
  "futures",
- "hex",
  "num_enum",
  "rand 0.9.2",
  "serde",
@@ -3272,6 +3270,7 @@ dependencies = [
  "humantime-serde",
  "moq-lite",
  "parking_lot",
+ "qmux",
  "quinn",
  "rand 0.9.2",
  "rcgen",
@@ -3290,10 +3289,9 @@ dependencies = [
  "tracing-test",
  "url",
  "web-transport-iroh",
- "web-transport-proto",
+ "web-transport-proto 0.5.4",
  "web-transport-quiche",
  "web-transport-quinn",
- "web-transport-ws",
 ]
 
 [[package]]
@@ -3310,6 +3308,7 @@ dependencies = [
  "moq-lite",
  "moq-native",
  "moq-token",
+ "qmux",
  "rustls",
  "sd-notify",
  "serde",
@@ -3321,7 +3320,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
- "web-transport-ws",
 ]
 
 [[package]]
@@ -4443,6 +4441,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "qmux"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7501d231269d77ad5e6ee965e9ddcaf2ea61f8466f36232ff7aa6e46c1bd38bb"
+dependencies = [
+ "bytes",
+ "futures",
+ "rustls",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "web-transport-proto 0.6.0",
+ "web-transport-trait",
+]
+
+[[package]]
 name = "quanta"
 version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4510,9 +4524,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.13"
+version = "0.11.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1906b49b0c3bc04b5fe5d86a77925ae6524a19b816ae38ce1e426255f1d8a31"
+checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -4754,7 +4768,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots 1.0.6",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -6014,11 +6028,11 @@ dependencies = [
  "futures-util",
  "log",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
  "tungstenite 0.24.0",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -6848,11 +6862,12 @@ dependencies = [
 
 [[package]]
 name = "web-transport-iroh"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11bbd05b9a024cd4b9f906c263cd6e943b175d30877da8145bfe90ea5a573ce8"
+checksum = "9e7c7c00efe0ba6bdc42cabe47646e8bc4df96d45d19892f92cb154f81b943a8"
 dependencies = [
  "bytes",
+ "derive_more",
  "http",
  "iroh",
  "n0-error",
@@ -6860,7 +6875,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "web-transport-proto",
+ "web-transport-proto 0.5.4",
  "web-transport-trait",
 ]
 
@@ -6869,6 +6884,20 @@ name = "web-transport-proto"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5afe275c02f899650c5497b946552fcc04f3f378bd2c3bc1e8005ff915772b97"
+dependencies = [
+ "bytes",
+ "http",
+ "sfv",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "web-transport-proto"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0225d295c8ac00a2e9a498aefeaf3f3c6186da12a251c938189b15b82ea22808"
 dependencies = [
  "bytes",
  "http",
@@ -6895,7 +6924,7 @@ dependencies = [
  "tokio-quiche",
  "tracing",
  "url",
- "web-transport-proto",
+ "web-transport-proto 0.5.4",
  "web-transport-trait",
 ]
 
@@ -6915,32 +6944,17 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "web-transport-proto",
+ "web-transport-proto 0.5.4",
  "web-transport-trait",
 ]
 
 [[package]]
 name = "web-transport-trait"
-version = "0.3.3"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "802d6aa508f2c63c9050ceabc17265bbf90ed4d6f4e4357e987583883628e79c"
+checksum = "cb67841c4a481ca3c1412ee4c9f463987401991e1ddc000903df2124f3dc85e9"
 dependencies = [
  "bytes",
-]
-
-[[package]]
-name = "web-transport-ws"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7b1cd89c36a28eae759329839e85f7dbca733896f048a6daaf5f8fc80f3bcba"
-dependencies = [
- "bytes",
- "futures",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.24.0",
- "web-transport-proto",
- "web-transport-trait",
 ]
 
 [[package]]
@@ -6950,15 +6964,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "804f18a4ac2676ffb4e8b5b5fa9ae38af06df08162314f96a68d2a363e21a8ca"
 dependencies = [
  "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.6",
 ]
 
 [[package]]
