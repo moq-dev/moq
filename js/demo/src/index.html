@@ -14,30 +14,30 @@
 	<!-- Always show this banner to flex browser support. -->
 	<moq-watch-support show="always"></moq-watch-support>
 
-	<!-- This optional component shows some simple controls for the inner <moq-watch> component. -->
-	<moq-watch-ui>
-		<!--
-			Some supported attributes are:
-			- `url`: The URL of the (relay) server; feel free to use `https://cdn.moq.dev/anon` for public access.
-			- `name`: The broadcast name, otherwise we use the last part of the URL.
-			- `paused`: Video and audio are paused.
-			- `muted`: Audio is muted.
-			- `volume`: The audio volume (0-1).
-			- `jitter`: The target jitter buffer size in milliseconds.
-			- `reload`: Whether to automatically reconnect when the broadcast goes offline/online.
+	<!-- Live discovers new broadcasts available at the given URL. -->
+	<moq-discover>
+		<!-- This optional component shows some simple controls for the inner <moq-watch> component. -->
+		<moq-watch-ui>
+			<!--
+				Some supported attributes are:
+				- `url`: The URL of the (relay) server; feel free to use `https://cdn.moq.dev/anon` for public access.
+				- `name`: The broadcast name, otherwise we use the last part of the URL.
+				- `paused`: Video and audio are paused.
+				- `muted`: Audio is muted.
+				- `volume`: The audio volume (0-1).
+				- `jitter`: The target jitter buffer size in milliseconds.
+				- `reload`: Whether to automatically reconnect when the broadcast goes offline/online.
 
-			NOTE: Cloudflare doesn't support reload yet.
-		-->
-		<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" muted jitter="100" reload>
-			<!-- Provide a canvas element to render the video via WebCodecs. -->
-			<canvas style="width: 100%; height: auto;"></canvas>
-			<!-- Or provide a video element to use the (higher latency) MSE backend. -->
-			<!-- <video style="width: 100%; height: auto;" autoplay muted></video> -->
-		</moq-watch>
-	</moq-watch-ui>
-
-	<!-- (optional) Configure the relay URL and broadcast name. Auto-discovers available broadcasts. -->
-	<moq-watch-config id="config" url="%VITE_RELAY_URL%" name="bbb"></moq-watch-config>
+				NOTE: Cloudflare doesn't support reload yet.
+			-->
+			<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" muted jitter="100" reload>
+				<!-- Provide a canvas element to render the video via WebCodecs. -->
+				<canvas style="width: 100%; height: auto;"></canvas>
+				<!-- Or provide a video element to use the (higher latency) MSE backend. -->
+				<!-- <video style="width: 100%; height: auto;" autoplay muted></video> -->
+			</moq-watch>
+		</moq-watch-ui>
+	</moq-discover>
 
 	<h3>Other demos:</h3>
 	<ul>

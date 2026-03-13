@@ -1,0 +1,248 @@
+name: moq-ffi
+
+on:
+  push:
+    tags:
+      - "moq-ffi-v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: moq-ffi-release
+  cancel-in-progress: true
+
+jobs:
+  parse-version:
+    name: Parse version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+
+    steps:
+      - name: Parse version from tag
+        id: parse
+        shell: bash
+        run: |
+          ref=${GITHUB_REF#refs/tags/}
+          if [[ "$ref" =~ ^moq-ffi-v([0-9.]+)$ ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag format not recognized: $ref" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: [parse-version]
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Desktop/Server
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: universal-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          # iOS
+          - target: aarch64-apple-ios
+            os: macos-latest
+          - target: aarch64-apple-ios-sim
+            os: macos-latest
+          # Android
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target == 'universal-apple-darwin' && 'x86_64-apple-darwin,aarch64-apple-darwin' || matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install cargo-ndk (Android)
+        if: contains(matrix.target, 'android')
+        run: cargo install cargo-ndk
+
+      - name: Build and package
+        shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./rs/moq-ffi/build.sh \
+            --target "$BUILD_TARGET" \
+            --version "$BUILD_VERSION" \
+            --output dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: moq-ffi-${{ matrix.target }}
+          path: dist/*
+
+  bindings:
+    name: Generate bindings
+    needs: [parse-version]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate bindings
+        env:
+          BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+        run: |
+          ./rs/moq-ffi/build.sh \
+            --bindings-only \
+            --version "$BUILD_VERSION" \
+            --output dist
+
+      - name: Upload bindings
+        uses: actions/upload-artifact@v7
+        with:
+          name: moq-ffi-bindings
+          path: dist/*
+
+  python:
+    name: Python wheels (${{ matrix.target }})
+    needs: [parse-version]
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set Cargo.toml version
+        shell: bash
+        run: |
+          VERSION="${{ needs.parse-version.outputs.version }}"
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" rs/moq-ffi/Cargo.toml
+          rm -f rs/moq-ffi/Cargo.toml.bak
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --out dist -m rs/moq-ffi/Cargo.toml
+          target: ${{ matrix.target }}
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-${{ matrix.target }}
+          path: dist/*.whl
+
+  release:
+    name: Release
+    needs: [parse-version, build, bindings, python]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Find previous tag
+        id: prev_tag
+        shell: bash
+        run: |
+          current_tag="moq-ffi-v${{ needs.parse-version.outputs.version }}"
+          prev_tag=$(git tag --list 'moq-ffi-v*' --sort=-v:refname | grep -v "^${current_tag}$" | head -n1 || true)
+          echo "tag=${prev_tag}" >> "$GITHUB_OUTPUT"
+          echo "Previous tag: ${prev_tag:-none}"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.parse-version.outputs.version }}
+          PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: |
+          if [ -n "$PREV_TAG" ]; then
+            gh release create "$REF_NAME" \
+              --title "moq-ffi v${VERSION}" \
+              --generate-notes \
+              --notes-start-tag "$PREV_TAG" \
+              artifacts/*
+          else
+            gh release create "$REF_NAME" \
+              --title "moq-ffi v${VERSION}" \
+              --generate-notes \
+              artifacts/*
+          fi
+
+  publish-python:
+    name: Publish to PyPI
+    needs: [release]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/moq-ffi
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: python-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

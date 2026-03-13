@@ -68,7 +68,7 @@ pub struct ClientConfig {
 	/// Use this to force a specific version, e.g. `--client-version moq-lite-02`.
 	/// Can be specified multiple times to offer a subset of versions.
 	///
-	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16
+	/// Valid values: moq-lite-01, moq-lite-02, moq-lite-03, moq-transport-14, moq-transport-15, moq-transport-16, moq-transport-17
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "client-version", long = "client-version", env = "MOQ_CLIENT_VERSION")]
 	pub version: Vec<moq_lite::Version>,
@@ -121,34 +121,42 @@ pub struct Client {
 	#[cfg(feature = "websocket")]
 	websocket: super::ClientWebSocket,
 	tls: rustls::ClientConfig,
+	#[cfg(feature = "noq")]
+	noq: Option<crate::noq::NoqClient>,
 	#[cfg(feature = "quinn")]
 	quinn: Option<crate::quinn::QuinnClient>,
 	#[cfg(feature = "quiche")]
 	quiche: Option<crate::quiche::QuicheClient>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<web_transport_iroh::iroh::Endpoint>,
+	#[cfg(feature = "iroh")]
+	iroh_addrs: Vec<std::net::SocketAddr>,
 }
 
 impl Client {
-	#[cfg(not(any(feature = "quinn", feature = "quiche")))]
+	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
 	pub fn new(_config: ClientConfig) -> anyhow::Result<Self> {
-		anyhow::bail!("no QUIC backend compiled; enable quinn or quiche feature");
+		anyhow::bail!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
 	}
 
 	/// Create a new client
-	#[cfg(any(feature = "quinn", feature = "quiche"))]
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 	pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
 		let backend = config.backend.clone().unwrap_or({
 			#[cfg(feature = "quinn")]
 			{
 				QuicBackend::Quinn
 			}
-			#[cfg(all(feature = "quiche", not(feature = "quinn")))]
+			#[cfg(all(feature = "noq", not(feature = "quinn")))]
+			{
+				QuicBackend::Noq
+			}
+			#[cfg(all(feature = "quiche", not(feature = "quinn"), not(feature = "noq")))]
 			{
 				QuicBackend::Quiche
 			}
-			#[cfg(all(not(feature = "quiche"), not(feature = "quinn")))]
-			panic!("no QUIC backend compiled; enable quinn or quiche feature");
+			#[cfg(all(not(feature = "quiche"), not(feature = "quinn"), not(feature = "noq")))]
+			panic!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
 		});
 
 		let provider = crypto::provider();
@@ -197,6 +205,13 @@ impl Client {
 			tls.dangerous().set_certificate_verifier(Arc::new(noop));
 		}
 
+		#[cfg(feature = "noq")]
+		#[allow(unreachable_patterns)]
+		let noq = match backend {
+			QuicBackend::Noq => Some(crate::noq::NoqClient::new(&config)?),
+			_ => None,
+		};
+
 		#[cfg(feature = "quinn")]
 		#[allow(unreachable_patterns)]
 		let quinn = match backend {
@@ -215,18 +230,32 @@ impl Client {
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
+			#[cfg(feature = "noq")]
+			noq,
 			#[cfg(feature = "quinn")]
 			quinn,
 			#[cfg(feature = "quiche")]
 			quiche,
 			#[cfg(feature = "iroh")]
 			iroh: None,
+			#[cfg(feature = "iroh")]
+			iroh_addrs: Vec::new(),
 		})
 	}
 
 	#[cfg(feature = "iroh")]
 	pub fn with_iroh(mut self, iroh: Option<web_transport_iroh::iroh::Endpoint>) -> Self {
 		self.iroh = iroh;
+		self
+	}
+
+	/// Set direct IP addresses for connecting to iroh peers.
+	///
+	/// This is useful when the peer's IP addresses are known ahead of time,
+	/// bypassing the need for peer discovery (e.g. in tests or local networks).
+	#[cfg(feature = "iroh")]
+	pub fn with_iroh_addrs(mut self, addrs: Vec<std::net::SocketAddr>) -> Self {
+		self.iroh_addrs = addrs;
 		self
 	}
 
@@ -240,19 +269,49 @@ impl Client {
 		self
 	}
 
-	#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
+	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
 	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_lite::Session> {
-		anyhow::bail!("no QUIC backend compiled; enable quinn, quiche, or iroh feature");
+		anyhow::bail!("no QUIC backend compiled; enable noq, quinn, quiche, or iroh feature");
 	}
 
-	#[cfg(any(feature = "quinn", feature = "quiche", feature = "iroh"))]
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh"))]
 	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
-			let session = crate::iroh::connect(endpoint, url).await?;
+			let session = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
 			let session = self.moq.connect(session).await?;
 			return Ok(session);
+		}
+
+		#[cfg(feature = "noq")]
+		if let Some(noq) = self.noq.as_ref() {
+			let tls = self.tls.clone();
+			let quic_url = url.clone();
+			let quic_handle = async {
+				let res = noq.connect(&tls, quic_url).await;
+				if let Err(err) = &res {
+					tracing::warn!(%err, "QUIC connection failed");
+				}
+				res
+			};
+
+			#[cfg(feature = "websocket")]
+			{
+				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url);
+
+				return Ok(tokio::select! {
+					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
+					Some(Ok(ws)) = ws_handle => self.moq.connect(ws).await?,
+					else => anyhow::bail!("failed to connect to server"),
+				});
+			}
+
+			#[cfg(not(feature = "websocket"))]
+			{
+				let session = quic_handle.await?;
+				return Ok(self.moq.connect(session).await?);
+			}
 		}
 
 		#[cfg(feature = "quinn")]
@@ -314,7 +373,7 @@ impl Client {
 			}
 		}
 
-		anyhow::bail!("no QUIC backend compiled; enable quinn or quiche feature");
+		anyhow::bail!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
 	}
 }
 

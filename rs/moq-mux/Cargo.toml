@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 version = "0.3.1"
 edition = "2024"
+rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
@@ -33,16 +34,9 @@ hang = { workspace = true }
 m3u8-rs = { version = "5", optional = true }
 moq-lite = { workspace = true, features = ["serde"] }
 moq-msf = { workspace = true }
-mp4-atom = { version = "0.10.0", features = [
-	"tokio",
-	"bytes",
-	"serde",
-], optional = true }
+mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"], optional = true }
 num_enum = "0.7"
-reqwest = { version = "0.12", default-features = false, features = [
-	"rustls-tls",
-	"gzip",
-], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"], optional = true }
 scuffle-av1 = { version = "0.1.4", optional = true }
 scuffle-h265 = { version = "0.2.2", optional = true }
 tokio = { workspace = true, features = ["macros", "fs"] }

@@ -16,9 +16,9 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"async-mutex": "^0.5.0",
+		"@moq/qmux": "^0.0.1",
 		"@moq/signals": "workspace:*",
-		"@moq/web-transport-ws": "^0.3.0"
+		"async-mutex": "^0.5.0"
 	},
 	"peerDependencies": {
 		"zod": "^4.1.0"

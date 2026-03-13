@@ -1,9 +1,9 @@
 use anyhow::Context;
+use qmux::tokio_tungstenite;
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::{net, time};
 use url::Url;
-use web_transport_ws::tokio_tungstenite;
 
 // Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -49,7 +49,7 @@ pub(crate) async fn race_handle(
 	config: &ClientWebSocket,
 	tls: &rustls::ClientConfig,
 	url: Url,
-) -> Option<anyhow::Result<web_transport_ws::Session>> {
+) -> Option<anyhow::Result<qmux::Session>> {
 	if !config.enabled {
 		return None;
 	}
@@ -72,7 +72,7 @@ pub(crate) async fn connect(
 	config: &ClientWebSocket,
 	tls: &rustls::ClientConfig,
 	mut url: Url,
-) -> anyhow::Result<web_transport_ws::Session> {
+) -> anyhow::Result<qmux::Session> {
 	anyhow::ensure!(config.enabled, "WebSocket support is disabled");
 
 	let host = url.host_str().context("missing hostname")?.to_string();
@@ -119,8 +119,8 @@ pub(crate) async fn connect(
 		tokio_tungstenite::Connector::Plain
 	};
 
-	let session = web_transport_ws::Client::new()
-		.with_config(web_transport_ws::tungstenite::protocol::WebSocketConfig {
+	let session = qmux::Client::new()
+		.with_config(qmux::tungstenite::protocol::WebSocketConfig {
 			max_message_size: Some(64 << 20), // 64 MB
 			max_frame_size: Some(16 << 20),   // 16 MB
 			accept_unmasked_frames: false,
@@ -143,13 +143,13 @@ pub(crate) async fn connect(
 /// alongside QUIC connections on a separate port.
 pub struct WebSocketListener {
 	listener: tokio::net::TcpListener,
-	server: web_transport_ws::Server,
+	server: qmux::Server,
 }
 
 impl WebSocketListener {
 	pub async fn bind(addr: net::SocketAddr) -> anyhow::Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
-		let server = web_transport_ws::Server::new();
+		let server = qmux::Server::new();
 		Ok(Self { listener, server })
 	}
 
@@ -157,7 +157,7 @@ impl WebSocketListener {
 		Ok(self.listener.local_addr()?)
 	}
 
-	pub async fn accept(&self) -> Option<anyhow::Result<web_transport_ws::Session>> {
+	pub async fn accept(&self) -> Option<anyhow::Result<qmux::Session>> {
 		match self.listener.accept().await {
 			Ok((stream, addr)) => {
 				tracing::debug!(%addr, "accepted WebSocket TCP connection");

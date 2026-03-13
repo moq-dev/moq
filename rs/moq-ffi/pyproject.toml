@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "moq-ffi"
+dynamic = ["version"]
+description = "Media over QUIC - Python bindings"
+requires-python = ">=3.8"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Luke Curley", email = "kixelated@gmail.com" }]
+keywords = ["quic", "media", "live", "streaming", "webtransport"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Video",
+]
+
+[project.urls]
+Homepage = "https://github.com/moq-dev/moq"
+Repository = "https://github.com/moq-dev/moq"
+
+[tool.maturin]
+bindings = "uniffi"

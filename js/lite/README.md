@@ -8,12 +8,12 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
 A TypeScript [Media over QUIC](https://moq.dev/) (MoQ) client for both browsers and server JS/TS environments.
-The `@moq/lite` client specifically implements the networking layer called [moq-lite](https://moq.dev/blog/moq-lite), handling real-time data delivery to/from moq relays.
+The `@moq/lite` client specifically implements the networking layer called [moq-lite](https://doc.moq.dev/concept/layer/moq-lite), handling real-time data delivery to/from moq relays.
 
 
 Check out [hang](../hang) for a higher-level media library that uses this package.
 
-> **Note:** This project is a [fork](https://moq.dev/blog/transfork) of the [IETF MoQ specification](https://datatracker.ietf.org/group/moq/documents/), optimized for practical deployment with a narrower focus and exponentially simpler implementation.
+> **Note:** moq-lite is a subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite is forwards compatible with moq-transport, so it works with any moq-transport CDN (ex. [Cloudflare](https://doc.moq.dev/blog/first-cdn)). See the [compatibility docs](https://doc.moq.dev/concept/layer/moq-lite#compatibility) for details.
 
 ## Quick Start
 
