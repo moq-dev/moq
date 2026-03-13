@@ -93,6 +93,9 @@ jobs:
         env:
           BUILD_TARGET: ${{ matrix.target }}
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
+          # Set iOS deployment target to avoid ___chkstk_darwin linker errors
+          # when aws-lc-sys compiles C code for a newer iOS than the linker expects.
+          IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
         run: |
           ./rs/moq-ffi/build.sh \
             --target "$BUILD_TARGET" \
@@ -147,6 +150,10 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+            # Use manylinux_2_28 for aarch64-linux to get a newer GCC.
+            # manylinux2014 ships GCC 4.8.5 which can't compile aws-lc-sys.
+            # See: https://github.com/aws/aws-lc-rs/issues/1022
+            manylinux: 2_28
           - target: x86_64-apple-darwin
             os: macos-15-intel
           - target: aarch64-apple-darwin
@@ -173,6 +180,7 @@ jobs:
         with:
           args: --release --out dist -m rs/moq-ffi/Cargo.toml
           target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7
