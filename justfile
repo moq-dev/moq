@@ -363,6 +363,9 @@ ci:
 	# Make sure everything builds
 	just build
 
+	# Run tests with all features to exercise all QUIC backends
+	cargo test --all-targets --all-features
+
 	# Check all feature combinations for all crates
 	# requires: cargo install cargo-hack
 	echo "Checking all feature combinations..."
