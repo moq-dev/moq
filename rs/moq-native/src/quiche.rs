@@ -140,7 +140,7 @@ impl QuicheServer {
 			.collect();
 
 		let info = Arc::new(RwLock::new(ServerTlsInfo {
-			#[cfg(feature = "quinn")]
+			#[cfg(any(feature = "noq", feature = "quinn"))]
 			certs: Vec::new(),
 			fingerprints,
 		}));

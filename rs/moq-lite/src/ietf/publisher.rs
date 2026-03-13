@@ -470,8 +470,34 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					})
 					.await?;
 
-				// TODO: read response (RequestOk/RequestError) from stream.reader
-				namespace_streams.insert(suffix, (request_id, stream));
+				// Read response from stream.reader
+				let type_id: u64 = stream.reader.decode().await?;
+				let size: u16 = stream.reader.decode().await?;
+				let mut data = stream.reader.read_exact(size as usize).await?;
+
+				match (self.version, type_id) {
+					// Draft14 uses PublishNamespaceOk (0x07) / PublishNamespaceError (0x08)
+					(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
+						let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, self.version)?;
+						tracing::debug!(message = ?msg, "publish namespace ok");
+						namespace_streams.insert(suffix, (request_id, stream));
+					}
+					(Version::Draft14, ietf::PublishNamespaceError::ID) => {
+						let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
+						tracing::warn!(message = ?msg, "publish namespace error");
+					}
+					// Draft15+ uses RequestOk (0x07) / RequestError (0x05)
+					(_, ietf::RequestOk::ID) => {
+						let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
+						tracing::debug!(message = ?msg, "publish namespace ok");
+						namespace_streams.insert(suffix, (request_id, stream));
+					}
+					(_, ietf::RequestError::ID) => {
+						let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
+						tracing::warn!(message = ?msg, "publish namespace error");
+					}
+					_ => return Err(Error::UnexpectedMessage),
+				}
 			} else {
 				tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
 				if let Some((request_id, mut stream)) = namespace_streams.remove(&suffix) {
