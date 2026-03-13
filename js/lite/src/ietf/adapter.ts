@@ -9,12 +9,10 @@ import { type IetfVersion, Version } from "./version.ts";
  * Implemented by both ControlStreamAdapter (v14-v16) and NativeSession (v17).
  */
 export interface Session {
-	openBi(requestId: bigint): Stream | Promise<Stream>;
+	openBi(): Stream | Promise<Stream>;
 	openNativeBi?(): Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
 	nextRequestId(): Promise<bigint | undefined>;
-	registerNamespace?(namespace: string, requestId: bigint): void;
-	registerSubscribeNamespace?(requestId: bigint): void;
 	close?(): void;
 	readonly version: IetfVersion;
 }
@@ -33,7 +31,7 @@ export class NativeSession implements Session {
 		this.version = version;
 	}
 
-	async openBi(_requestId: bigint): Promise<Stream> {
+	async openBi(): Promise<Stream> {
 		return Stream.open(this.#quic);
 	}
 
@@ -131,41 +129,62 @@ export class ControlStreamAdapter implements Session {
 	}
 
 	/**
-	 * Open an outgoing virtual bidi stream for the given requestId.
-	 * The caller must write the request message to the returned stream.
-	 * Writes are forwarded to the control stream; responses are routed back.
+	 * Open an outgoing virtual bidi stream.
+	 * Buffers writes until the first full message is available, parses the
+	 * requestId (and namespace for PublishNamespace), self-registers, then
+	 * flushes. Subsequent writes go directly to the control stream.
 	 */
-	openBi(requestId: bigint): Stream {
+	openBi(): Stream {
 		let controller!: ReadableStreamDefaultController<Uint8Array>;
+		let registeredRequestId: bigint | undefined;
+
 		const readable = new ReadableStream<Uint8Array>({
 			start(c) {
 				controller = c;
 			},
 			cancel: () => {
-				this.#streams.delete(requestId);
+				if (registeredRequestId !== undefined) {
+					this.#streams.delete(registeredRequestId);
+				}
 			},
 		});
 
-		const sendWritable = this.#createSendWritable();
+		let buffer = new Uint8Array(0);
+		let registered = false;
+
+		const sendWritable = new WritableStream<Uint8Array>({
+			write: async (chunk) => {
+				if (registered) {
+					await this.#writeMutex.runExclusive(() => this.#writer.write(chunk));
+					return;
+				}
+
+				// Accumulate bytes
+				const newBuf = new Uint8Array(buffer.length + chunk.length);
+				newBuf.set(buffer);
+				newBuf.set(chunk, buffer.length);
+				buffer = newBuf;
+
+				// Try to parse the first message
+				const parsed = this.#tryParseOutgoing(buffer);
+				if (!parsed) return;
+
+				// Register before flushing so responses can be routed
+				registeredRequestId = parsed.requestId;
+				this.#streams.set(parsed.requestId, { controller });
+				registered = true;
+
+				// Flush all buffered bytes
+				const toFlush = buffer;
+				buffer = new Uint8Array(0);
+				await this.#writeMutex.runExclusive(() => this.#writer.write(toFlush));
+			},
+		});
 
 		const stream = new Stream({ readable, writable: sendWritable });
 		stream.reader.version = this.version;
 		stream.writer.version = this.version;
-
-		this.#streams.set(requestId, { controller });
 		return stream;
-	}
-
-	/**
-	 * Register a namespace → requestId mapping for outbound publishes.
-	 * Needed so inbound namespace-keyed messages (Cancel/Done) in v14/v15 can be routed.
-	 */
-	registerNamespace(namespace: string, requestId: bigint) {
-		this.#namespaces.set(namespace, requestId);
-	}
-
-	registerSubscribeNamespace(requestId: bigint) {
-		this.#subscribeNamespaces.add(requestId);
 	}
 
 	/**
@@ -328,6 +347,70 @@ export class ControlStreamAdapter implements Session {
 		} catch {
 			// Already closed
 		}
+	}
+
+	/**
+	 * Try to parse the first outgoing message from accumulated bytes.
+	 * Returns the requestId if enough data is available, undefined otherwise.
+	 */
+	#tryParseOutgoing(buffer: Uint8Array): { requestId: bigint } | undefined {
+		if (buffer.length === 0) return undefined;
+
+		// Check typeId varint size before decoding
+		const typeSize = 1 << ((buffer[0] & 0xc0) >> 6);
+		if (buffer.length < typeSize) return undefined;
+
+		const [typeId, afterType] = Varint.decode(buffer);
+
+		// Need 2 bytes for u16 size
+		if (afterType.length < 2) return undefined;
+
+		const size = (afterType[0] << 8) | afterType[1];
+		const bodyStart = afterType.subarray(2);
+
+		// Need full body
+		if (bodyStart.length < size) return undefined;
+
+		const body = bodyStart.subarray(0, size);
+
+		// Decode requestId from body (QUIC varint)
+		const [reqId] = Varint.decode(body);
+		const requestId = BigInt(reqId);
+
+		// PublishNamespace (0x06): also parse namespace for v14/v15 reverse lookup
+		if (typeId === 0x06) {
+			try {
+				const [, afterReqId] = Varint.decode(body);
+				this.#parseAndRegisterNamespace(afterReqId, requestId);
+			} catch {
+				// Non-critical: only needed for v14/v15 PublishNamespaceDone/Cancel
+			}
+		}
+
+		// SubscribeNamespace (0x11): register for follow-up routing
+		if (typeId === 0x11) {
+			this.#subscribeNamespaces.add(requestId);
+		}
+
+		return { requestId };
+	}
+
+	/**
+	 * Parse a namespace from raw bytes and register it for reverse lookup.
+	 */
+	#parseAndRegisterNamespace(buf: Uint8Array, requestId: bigint) {
+		const decoder = new TextDecoder();
+		const [partCount, afterCount] = Varint.decode(buf);
+		let cursor = afterCount;
+		const parts: string[] = [];
+		for (let i = 0; i < partCount; i++) {
+			const [len, afterLen] = Varint.decode(cursor);
+			parts.push(decoder.decode(afterLen.subarray(0, len)));
+			cursor = afterLen.subarray(len);
+		}
+		const namespace = parts.join("/");
+		this.#namespaces.set(namespace, requestId);
+		this.#namespacesByRequestId.set(requestId, namespace);
 	}
 
 	/** Create a WritableStream that forwards writes to the control stream under mutex. */

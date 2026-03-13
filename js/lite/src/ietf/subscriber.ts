@@ -81,12 +81,9 @@ export class Subscriber {
 			const stream =
 				version === Version.DRAFT_16 && this.#session.openNativeBi
 					? await this.#session.openNativeBi()
-					: await this.#session.openBi(requestId);
+					: await this.#session.openBi();
 
 			try {
-				// Register for v14/v15 follow-up routing (entries have no requestId)
-				this.#session.registerSubscribeNamespace?.(requestId);
-
 				// Write SubscribeNamespace
 				await stream.writer.u53(SubscribeNamespace.id);
 				const msg = new SubscribeNamespace({ namespace: prefix, requestId });
@@ -193,7 +190,7 @@ export class Subscriber {
 		console.debug(`subscribe start: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
 
 		try {
-			const stream = await this.#session.openBi(requestId);
+			const stream = await this.#session.openBi();
 
 			try {
 				// Write Subscribe
