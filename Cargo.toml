@@ -5,6 +5,7 @@ members = [
     "rs/libmoq",
     "rs/moq-cli",
     "rs/moq-clock",
+    "rs/moq-ffi",
     "rs/moq-lite",
     "rs/moq-msf",
     "rs/moq-mux",
@@ -32,6 +33,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
 web-async = { version = "0.1.3", features = ["tracing"] }
 web-transport-iroh = "0.2"
+web-transport-noq = "0.0.3"
 web-transport-proto = "0.5"
 web-transport-quiche = "0.2"
 web-transport-quinn = "0.11"
@@ -47,3 +49,7 @@ panic = "abort"
 inherits = "release"
 debug = "line-tables-only"
 # frame pointers: pass RUSTFLAGS="-C force-frame-pointers=yes" when building
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true

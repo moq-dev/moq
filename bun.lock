@@ -79,8 +79,8 @@
       "name": "@moq/lite",
       "version": "0.1.5",
       "dependencies": {
+        "@moq/qmux": "^0.0.1",
         "@moq/signals": "workspace:*",
-        "@moq/web-transport-ws": "^0.3.0",
         "async-mutex": "^0.5.0",
       },
       "devDependencies": {
@@ -454,6 +454,8 @@
 
     "@moq/publish": ["@moq/publish@workspace:js/publish"],
 
+    "@moq/qmux": ["@moq/qmux@0.0.1", "", {}, "sha512-t5HJYkxjM9DQY1BJ7KZY/Umu6cZU68SPPlup4/Oya9Kf2EWY8N+SlQmQKncCWeXXPxuzMT2XmN4Yn9W91QYB7Q=="],
+
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 
     "@moq/token": ["@moq/token@workspace:js/token"],
@@ -461,8 +463,6 @@
     "@moq/ui-core": ["@moq/ui-core@workspace:js/ui-core"],
 
     "@moq/watch": ["@moq/watch@workspace:js/watch"],
-
-    "@moq/web-transport-ws": ["@moq/web-transport-ws@0.3.0", "", {}, "sha512-cuzx5dOsQbFGhP0vxF+rquaYSVFMx5WcNvHAGN7iHH+K2Umfxh2Ucq9Ik02h6xrz3Fg+8nfOrCCLbiVLTYDFmw=="],
 
     "@nodelib/fs.scandir": ["@nodelib/fs.scandir@2.1.5", "", { "dependencies": { "@nodelib/fs.stat": "2.0.5", "run-parallel": "^1.1.9" } }, "sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g=="],
 

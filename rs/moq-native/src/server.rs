@@ -127,6 +127,8 @@ pub struct Server {
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
+	#[cfg(feature = "noq")]
+	noq: Option<crate::noq::NoqServer>,
 	#[cfg(feature = "quinn")]
 	quinn: Option<crate::quinn::QuinnServer>,
 	#[cfg(feature = "quiche")]
@@ -142,15 +144,26 @@ impl Server {
 			{
 				QuicBackend::Quinn
 			}
-			#[cfg(all(feature = "quiche", not(feature = "quinn")))]
+			#[cfg(all(feature = "noq", not(feature = "quinn")))]
+			{
+				QuicBackend::Noq
+			}
+			#[cfg(all(feature = "quiche", not(feature = "quinn"), not(feature = "noq")))]
 			{
 				QuicBackend::Quiche
 			}
-			#[cfg(all(not(feature = "quiche"), not(feature = "quinn")))]
-			panic!("no QUIC backend compiled; enable quinn or quiche feature");
+			#[cfg(all(not(feature = "quiche"), not(feature = "quinn"), not(feature = "noq")))]
+			panic!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
 		});
 
 		let versions = config.versions();
+
+		#[cfg(feature = "noq")]
+		#[allow(unreachable_patterns)]
+		let noq = match backend {
+			QuicBackend::Noq => Some(crate::noq::NoqServer::new(config.clone())?),
+			_ => None,
+		};
 
 		#[cfg(feature = "quinn")]
 		#[allow(unreachable_patterns)]
@@ -171,6 +184,8 @@ impl Server {
 			versions,
 			#[cfg(feature = "iroh")]
 			iroh: None,
+			#[cfg(feature = "noq")]
+			noq,
 			#[cfg(feature = "quinn")]
 			quinn,
 			#[cfg(feature = "quiche")]
@@ -209,6 +224,10 @@ impl Server {
 
 	// Return the SHA256 fingerprints of all our certificates.
 	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
+		#[cfg(feature = "noq")]
+		if let Some(noq) = self.noq.as_ref() {
+			return noq.tls_info();
+		}
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_ref() {
 			return quinn.tls_info();
@@ -220,9 +239,9 @@ impl Server {
 		unreachable!("no QUIC backend compiled");
 	}
 
-	#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
+	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
 	pub async fn accept(&mut self) -> Option<Request> {
-		unreachable!("no QUIC backend compiled; enable quinn, quiche, or iroh feature");
+		unreachable!("no QUIC backend compiled; enable noq, quinn, quiche, or iroh feature");
 	}
 
 	/// Returns the next partially established QUIC or WebTransport session.
@@ -232,10 +251,21 @@ impl Server {
 	///
 	/// The [Request] is either a WebTransport or a raw QUIC request.
 	/// Call [Request::ok] or [Request::close] to complete the handshake.
-	#[cfg(any(feature = "quinn", feature = "quiche", feature = "iroh"))]
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh"))]
 	pub async fn accept(&mut self) -> Option<Request> {
 		loop {
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
+			#[cfg(feature = "noq")]
+			let noq_accept = async {
+				#[cfg(feature = "noq")]
+				if let Some(noq) = self.noq.as_mut() {
+					return noq.accept().await;
+				}
+				None
+			};
+			#[cfg(not(feature = "noq"))]
+			let noq_accept = async { None::<()> };
+
 			#[cfg(feature = "iroh")]
 			let iroh_accept = async {
 				#[cfg(feature = "iroh")]
@@ -285,6 +315,19 @@ impl Server {
 			let versions = self.versions.clone();
 
 			tokio::select! {
+				Some(_conn) = noq_accept => {
+					#[cfg(feature = "noq")]
+					{
+						let alpns = versions.alpns();
+						self.accept.push(async move {
+							let noq = super::noq::NoqRequest::accept(_conn, alpns).await?;
+							Ok(Request {
+								server,
+								kind: RequestKind::Noq(noq),
+							})
+						}.boxed());
+					}
+				}
 				Some(_conn) = quinn_accept => {
 					#[cfg(feature = "quinn")]
 					{
@@ -353,6 +396,10 @@ impl Server {
 	}
 
 	pub fn local_addr(&self) -> anyhow::Result<net::SocketAddr> {
+		#[cfg(feature = "noq")]
+		if let Some(noq) = self.noq.as_ref() {
+			return noq.local_addr();
+		}
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_ref() {
 			return quinn.local_addr();
@@ -370,6 +417,11 @@ impl Server {
 	}
 
 	pub async fn close(&mut self) {
+		#[cfg(feature = "noq")]
+		if let Some(noq) = self.noq.as_mut() {
+			noq.close();
+			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+		}
 		#[cfg(feature = "quinn")]
 		if let Some(quinn) = self.quinn.as_mut() {
 			quinn.close();
@@ -388,13 +440,15 @@ impl Server {
 		{
 			let _ = self.websocket.take();
 		}
-		#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
+		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
 		unreachable!("no QUIC backend compiled");
 	}
 }
 
 /// An incoming connection that can be accepted or rejected.
 pub(crate) enum RequestKind {
+	#[cfg(feature = "noq")]
+	Noq(crate::noq::NoqRequest),
 	#[cfg(feature = "quinn")]
 	Quinn(crate::quinn::QuinnRequest),
 	#[cfg(feature = "quiche")]
@@ -418,6 +472,12 @@ impl Request {
 	/// Reject the session, returning your favorite HTTP status code.
 	pub async fn close(self, _code: u16) -> anyhow::Result<()> {
 		match self.kind {
+			#[cfg(feature = "noq")]
+			RequestKind::Noq(request) => {
+				let status = web_transport_noq::http::StatusCode::from_u16(_code).context("invalid status code")?;
+				request.close(status).await?;
+				Ok(())
+			}
 			#[cfg(feature = "quinn")]
 			RequestKind::Quinn(request) => {
 				let status = web_transport_quinn::http::StatusCode::from_u16(_code).context("invalid status code")?;
@@ -462,6 +522,8 @@ impl Request {
 	/// Accept the session, performing rest of the MoQ handshake.
 	pub async fn ok(self) -> anyhow::Result<Session> {
 		match self.kind {
+			#[cfg(feature = "noq")]
+			RequestKind::Noq(request) => Ok(self.server.accept(request.ok().await?).await?),
 			#[cfg(feature = "quinn")]
 			RequestKind::Quinn(request) => Ok(self.server.accept(request.ok().await?).await?),
 			#[cfg(feature = "quiche")]
@@ -482,6 +544,8 @@ impl Request {
 	/// Returns the transport type as a string (e.g. "quic", "iroh").
 	pub fn transport(&self) -> &'static str {
 		match self.kind {
+			#[cfg(feature = "noq")]
+			RequestKind::Noq(_) => "quic",
 			#[cfg(feature = "quinn")]
 			RequestKind::Quinn(_) => "quic",
 			#[cfg(feature = "quiche")]
@@ -495,10 +559,12 @@ impl Request {
 
 	/// Returns the URL provided by the client.
 	pub fn url(&self) -> Option<&Url> {
-		#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
-		unreachable!("no QUIC backend compiled; enable quinn, quiche, or iroh feature");
+		#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
+		unreachable!("no QUIC backend compiled; enable noq, quinn, quiche, or iroh feature");
 
 		match self.kind {
+			#[cfg(feature = "noq")]
+			RequestKind::Noq(ref request) => request.url(),
 			#[cfg(feature = "quinn")]
 			RequestKind::Quinn(ref request) => request.url(),
 			#[cfg(feature = "quiche")]
@@ -514,7 +580,7 @@ impl Request {
 /// TLS certificate information including fingerprints.
 #[derive(Debug)]
 pub struct ServerTlsInfo {
-	#[cfg(feature = "quinn")]
+	#[cfg(any(feature = "noq", feature = "quinn"))]
 	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
 	pub fingerprints: Vec<String>,
 }
