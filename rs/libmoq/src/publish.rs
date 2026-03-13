@@ -19,7 +19,7 @@ impl Publish {
 		let mut broadcast = moq_lite::BroadcastProducer::new();
 		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 
-		let id = self.broadcasts.insert((broadcast, catalog));
+		let id = self.broadcasts.insert((broadcast, catalog))?;
 		Ok(id)
 	}
 
@@ -42,7 +42,7 @@ impl Publish {
 		let decoder = import::Decoder::new(broadcast.clone(), catalog.clone(), format, &mut init)
 			.map_err(|err| Error::InitFailed(Arc::new(err)))?;
 
-		let id = self.media.insert(decoder);
+		let id = self.media.insert(decoder)?;
 		Ok(id)
 	}
 

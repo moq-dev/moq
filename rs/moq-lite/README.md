@@ -7,6 +7,7 @@
 A Rust implementation of the [Media over QUIC](https://moq.dev) transport.
 
 This crate provides the core networking layer, implementing the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/).
+moq-lite is a forwards-compatible subset of [MoqTransport](https://datatracker.ietf.org/group/moq/documents/), so moq-lite clients work with any moq-transport CDN.
 Live media is built on top of this layer using something like [hang](../hang).
 
 - **Broadcasts**: Discoverable collections of tracks.

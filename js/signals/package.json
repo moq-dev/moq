@@ -16,9 +16,6 @@
 		"check": "tsc --noEmit",
 		"release": "bun ../common/release.ts"
 	},
-	"dependencies": {
-		"dequal": "^2.0.3"
-	},
 	"devDependencies": {
 		"typescript": "^5.9.2",
 		"rimraf": "^6.0.1",
