@@ -39,7 +39,7 @@ humantime-serde = "1.1"
 
 moq-lite = { workspace = true, features = ["serde"] }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
-qmux = { workspace = true, features = ["wss"], optional = true }
+qmux = { workspace = true, features = ["wss", "tls"], optional = true }
 quinn = { version = "0.11", default-features = false, features = [
 	"platform-verifier",
 	"runtime-tokio",

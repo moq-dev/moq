@@ -376,7 +376,7 @@ async fn broadcast_websocket() {
 	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap(), moq_lite::ALPNS)
 		.await
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
@@ -480,7 +480,7 @@ async fn broadcast_websocket_fallback() {
 	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap(), moq_lite::ALPNS)
 		.await
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
