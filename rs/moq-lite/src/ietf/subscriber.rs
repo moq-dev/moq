@@ -70,7 +70,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	/// Send SUBSCRIBE_NAMESPACE on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+).
-	pub async fn run_subscribe_namespace<T: web_transport_trait::Session>(&mut self, mut stream: Stream<T, Version>) -> Result<(), Error> {
+	pub async fn run_subscribe_namespace<T: web_transport_trait::Session>(
+		&mut self,
+		mut stream: Stream<T, Version>,
+	) -> Result<(), Error> {
 		let prefix = self.origin.as_ref().ok_or(Error::InvalidRole)?.root().to_owned();
 		let request_id = self.control.next_request_id().await?;
 

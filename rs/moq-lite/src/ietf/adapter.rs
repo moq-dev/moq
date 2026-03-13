@@ -667,12 +667,10 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 				}
 			}
 			// v14/v15: Only virtual streams from control stream.
-			_ => {
-				match rx.recv().await {
-					Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
-					None => Err(crate::Error::Closed),
-				}
-			}
+			_ => match rx.recv().await {
+				Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
+				None => Err(crate::Error::Closed),
+			},
 		}
 	}
 

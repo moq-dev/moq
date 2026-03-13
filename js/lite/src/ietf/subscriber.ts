@@ -15,6 +15,7 @@ import {
 	SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
+	SubscribeNamespaceOk,
 	UnsubscribeNamespace,
 } from "./subscribe_namespace.ts";
 import { Version } from "./version.ts";
@@ -96,7 +97,7 @@ export class Subscriber {
 				const respTypeId = await stream.reader.u53();
 				if (respTypeId === RequestOk.id) {
 					await RequestOk.decode(stream.reader, version);
-				} else if (respTypeId === 0x12) {
+				} else if (respTypeId === SubscribeNamespaceOk.id) {
 					// v14: SubscribeNamespaceOk
 					const size = await stream.reader.u16();
 					await stream.reader.read(size);
@@ -241,7 +242,7 @@ export class Subscriber {
 					// Error response
 					let reasonPhrase = "unknown error";
 					try {
-						if (respTypeId === 0x05) {
+						if (respTypeId === RequestError.id) {
 							// SubscribeError (v14) or RequestError (v15+)
 							const err =
 								version === Version.DRAFT_14

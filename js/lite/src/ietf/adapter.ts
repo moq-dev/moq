@@ -15,6 +15,7 @@ export interface Session {
 	nextRequestId(): Promise<bigint | undefined>;
 	registerNamespace?(namespace: string, requestId: bigint): void;
 	registerSubscribeNamespace?(requestId: bigint): void;
+	close?(): void;
 	readonly version: IetfVersion;
 }
 
@@ -86,6 +87,9 @@ export class ControlStreamAdapter implements Session {
 
 	// Namespace → requestId reverse lookup (v14/v15 namespace-keyed messages)
 	#namespaces = new Map<string, bigint>();
+
+	// requestId → namespace reverse lookup (for cleanup in #closeStream)
+	#namespacesByRequestId = new Map<bigint, string>();
 
 	// SubscribeNamespace requestIds — for routing 0x08/0x0E entries that lack requestId (v14/v15)
 	#subscribeNamespaces = new Set<bigint>();
@@ -314,6 +318,11 @@ export class ControlStreamAdapter implements Session {
 		console.debug(`adapter: closing stream requestId=${requestId}`);
 		this.#streams.delete(requestId);
 		this.#subscribeNamespaces.delete(requestId);
+		const namespace = this.#namespacesByRequestId.get(requestId);
+		if (namespace !== undefined) {
+			this.#namespaces.delete(namespace);
+			this.#namespacesByRequestId.delete(requestId);
+		}
 		try {
 			entry.controller.close();
 		} catch {
@@ -377,6 +386,7 @@ export class ControlStreamAdapter implements Session {
 				const requestId = await r.u62();
 				const namespace = await Namespace.decode(r);
 				this.#namespaces.set(namespace, requestId);
+				this.#namespacesByRequestId.set(requestId, namespace);
 				return { route: Route.NewRequest, requestId };
 			}
 			case 0x11: {
@@ -545,6 +555,7 @@ export class ControlStreamAdapter implements Session {
 
 		// Clear namespace mappings
 		this.#namespaces.clear();
+		this.#namespacesByRequestId.clear();
 		this.#subscribeNamespaces.clear();
 
 		// Unblock maxRequestId waiters

@@ -94,9 +94,7 @@ export class Connection implements Established {
 
 		this.#closed = true;
 
-		if ("close" in this.#session) {
-			(this.#session as ControlStreamAdapter).close();
-		}
+		this.#session.close?.();
 
 		try {
 			this.#quic.close();
