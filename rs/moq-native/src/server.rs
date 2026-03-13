@@ -336,7 +336,7 @@ impl Server {
 							let quinn = super::quinn::QuinnRequest::accept(_conn, alpns).await?;
 							Ok(Request {
 								server,
-								kind: RequestKind::Quinn(quinn),
+								kind: RequestKind::Quinn(Box::new(quinn)),
 							})
 						}.boxed());
 					}
@@ -450,7 +450,7 @@ pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
 	Noq(crate::noq::NoqRequest),
 	#[cfg(feature = "quinn")]
-	Quinn(crate::quinn::QuinnRequest),
+	Quinn(Box<crate::quinn::QuinnRequest>),
 	#[cfg(feature = "quiche")]
 	Quiche(crate::quiche::QuicheRequest),
 	#[cfg(feature = "iroh")]
