@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.13.2"
+version = "0.13.3"
 edition = "2024"
 rust-version.workspace = true
 
@@ -17,6 +17,12 @@ default = ["quinn", "aws-lc-rs", "websocket"]
 quinn = [
     "dep:quinn",
     "dep:web-transport-quinn",
+    "dep:rcgen",
+    "dep:reqwest",
+    "dep:rustls-webpki",
+]
+noq = [
+    "dep:web-transport-noq",
     "dep:rcgen",
     "dep:reqwest",
     "dep:rustls-webpki",
@@ -60,6 +66,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 web-transport-iroh = { workspace = true, optional = true }
+web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }

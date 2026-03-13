@@ -7,39 +7,40 @@ use std::time::Duration;
 use std::{net, time};
 use url::Url;
 
+use web_transport_noq::noq;
+
 // ── Client ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub(crate) struct QuinnClient {
-	pub quic: quinn::Endpoint,
-	pub transport: Arc<quinn::TransportConfig>,
+pub(crate) struct NoqClient {
+	pub quic: noq::Endpoint,
+	pub transport: Arc<noq::TransportConfig>,
 	pub versions: moq_lite::Versions,
 }
 
-impl QuinnClient {
+impl NoqClient {
 	pub fn new(config: &ClientConfig) -> anyhow::Result<Self> {
 		let socket = std::net::UdpSocket::bind(config.bind).context("failed to bind UDP socket")?;
 
-		// TODO Validate the BBR implementation before enabling it
-		let mut transport = quinn::TransportConfig::default();
+		let mut transport = noq::TransportConfig::default();
 		transport.max_idle_timeout(Some(time::Duration::from_secs(10).try_into().unwrap()));
 		transport.keep_alive_interval(Some(time::Duration::from_secs(4)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
-		let max_streams = quinn::VarInt::from_u64(max_streams).unwrap_or(quinn::VarInt::MAX);
+		let max_streams = noq::VarInt::from_u64(max_streams).unwrap_or(noq::VarInt::MAX);
 		transport.max_concurrent_bidi_streams(max_streams);
 		transport.max_concurrent_uni_streams(max_streams);
 
 		let transport = Arc::new(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
-		let runtime = quinn::default_runtime().context("no async runtime")?;
-		let endpoint_config = quinn::EndpointConfig::default();
+		let runtime = noq::default_runtime().context("no async runtime")?;
+		let endpoint_config = noq::EndpointConfig::default();
 
 		// Create the generic QUIC endpoint.
 		let quic =
-			quinn::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
+			noq::Endpoint::new(endpoint_config, None, socket, runtime).context("failed to create QUIC endpoint")?;
 
 		Ok(Self {
 			quic,
@@ -48,7 +49,7 @@ impl QuinnClient {
 		})
 	}
 
-	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> anyhow::Result<web_transport_quinn::Session> {
+	pub async fn connect(&self, tls: &rustls::ClientConfig, url: Url) -> anyhow::Result<web_transport_noq::Session> {
 		let mut url = url;
 		let mut config = tls.clone();
 
@@ -56,7 +57,7 @@ impl QuinnClient {
 		let port = url.port().unwrap_or(443);
 
 		// Look up the DNS entry.
-		// Quinn doesn't support happy eyeballs, so we use the first address.
+		// Noq doesn't support happy eyeballs, so we use the first address.
 		let ip = tokio::net::lookup_host((host.clone(), port))
 			.await
 			.context("failed DNS lookup")?
@@ -88,7 +89,7 @@ impl QuinnClient {
 		}
 
 		let alpns: Vec<Vec<u8>> = match url.scheme() {
-			"https" => vec![web_transport_quinn::ALPN.as_bytes().to_vec()],
+			"https" => vec![web_transport_noq::ALPN.as_bytes().to_vec()],
 			"moqt" | "moql" => self
 				.versions
 				.alpns()
@@ -101,8 +102,8 @@ impl QuinnClient {
 		config.alpn_protocols = alpns;
 		config.key_log = Arc::new(rustls::KeyLogFile::new());
 
-		let config: quinn::crypto::rustls::QuicClientConfig = config.try_into()?;
-		let mut config = quinn::ClientConfig::new(Arc::new(config));
+		let config: noq::crypto::rustls::QuicClientConfig = config.try_into()?;
+		let mut config = noq::ClientConfig::new(Arc::new(config));
 		config.transport_config(self.transport.clone());
 
 		tracing::debug!(%url, %ip, "connecting");
@@ -110,25 +111,25 @@ impl QuinnClient {
 		let connection = self.quic.connect_with(config, ip, &host)?.await?;
 		tracing::Span::current().record("id", connection.stable_id());
 
-		let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
+		let mut request = web_transport_noq::proto::ConnectRequest::new(url.clone());
 		for alpn in self.versions.alpns() {
 			request = request.with_protocol(alpn.to_string());
 		}
 
 		let session = match url.scheme() {
-			"https" => web_transport_quinn::Session::connect(connection, request).await?,
+			"https" => web_transport_noq::Session::connect(connection, request).await?,
 			"moqt" | "moql" => {
 				let handshake = connection
 					.handshake_data()
 					.context("missing handshake data")?
-					.downcast::<quinn::crypto::rustls::HandshakeData>()
+					.downcast::<noq::crypto::rustls::HandshakeData>()
 					.unwrap();
 
 				let alpn = handshake.protocol.context("missing ALPN")?;
 				let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
 
-				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
-				web_transport_quinn::Session::raw(connection, request, response)
+				let response = web_transport_noq::proto::ConnectResponse::OK.with_protocol(alpn);
+				web_transport_noq::Session::raw(connection, request, response)
 			}
 			_ => anyhow::bail!("unsupported URL scheme: {}", url.scheme()),
 		};
@@ -139,22 +140,20 @@ impl QuinnClient {
 
 // ── Server ──────────────────────────────────────────────────────────
 
-pub(crate) struct QuinnServer {
-	pub quic: quinn::Endpoint,
+pub(crate) struct NoqServer {
+	pub quic: noq::Endpoint,
 	pub certs: Arc<ServeCerts>,
 }
 
-impl QuinnServer {
+impl NoqServer {
 	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
-		// Enable BBR congestion control
-		// TODO Validate the BBR implementation before enabling it
-		let mut transport = quinn::TransportConfig::default();
+		let mut transport = noq::TransportConfig::default();
 		transport.max_idle_timeout(Some(Duration::from_secs(10).try_into().unwrap()));
 		transport.keep_alive_interval(Some(Duration::from_secs(4)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
-		let max_streams = quinn::VarInt::from_u64(max_streams).unwrap_or(quinn::VarInt::MAX);
+		let max_streams = noq::VarInt::from_u64(max_streams).unwrap_or(noq::VarInt::MAX);
 		transport.max_concurrent_bidi_streams(max_streams);
 		transport.max_concurrent_uni_streams(max_streams);
 
@@ -178,20 +177,20 @@ impl QuinnServer {
 			.iter()
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.collect();
-		alpns.push(web_transport_quinn::ALPN.as_bytes().to_vec());
+		alpns.push(web_transport_noq::ALPN.as_bytes().to_vec());
 
 		tls.alpn_protocols = alpns;
 		tls.key_log = Arc::new(rustls::KeyLogFile::new());
 
-		let tls: quinn::crypto::rustls::QuicServerConfig = tls.try_into()?;
-		let mut tls = quinn::ServerConfig::with_crypto(Arc::new(tls));
+		let tls: noq::crypto::rustls::QuicServerConfig = tls.try_into()?;
+		let mut tls = noq::ServerConfig::with_crypto(Arc::new(tls));
 		tls.transport_config(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
-		let runtime = quinn::default_runtime().context("no async runtime")?;
+		let runtime = noq::default_runtime().context("no async runtime")?;
 
 		// Configure connection ID generator with server ID if provided
-		let mut endpoint_config = quinn::EndpointConfig::default();
+		let mut endpoint_config = noq::EndpointConfig::default();
 		if let Some(server_id) = config.quic_lb_id {
 			let nonce_len = config.quic_lb_nonce.unwrap_or(8);
 			anyhow::ensure!(nonce_len >= 4, "quic_lb_nonce must be at least 4");
@@ -211,7 +210,7 @@ impl QuinnServer {
 		let socket = std::net::UdpSocket::bind(listen).context("failed to bind UDP socket")?;
 
 		// Create the generic QUIC endpoint.
-		let quic = quinn::Endpoint::new(endpoint_config, Some(tls), socket, runtime)
+		let quic = noq::Endpoint::new(endpoint_config, Some(tls), socket, runtime)
 			.context("failed to create QUIC endpoint")?;
 
 		// Spawn cert reload listener only after endpoint creation succeeds,
@@ -222,7 +221,7 @@ impl QuinnServer {
 		Ok(Self { quic, certs })
 	}
 
-	pub fn accept(&self) -> impl std::future::Future<Output = Option<quinn::Incoming>> + '_ {
+	pub fn accept(&self) -> impl std::future::Future<Output = Option<noq::Incoming>> + '_ {
 		self.quic.accept()
 	}
 
@@ -235,33 +234,33 @@ impl QuinnServer {
 	}
 
 	pub fn close(&self) {
-		self.quic.close(quinn::VarInt::from_u32(0), b"server shutdown");
+		self.quic.close(noq::VarInt::from_u32(0), b"server shutdown");
 	}
 }
 
-// ── QuinnRequest ────────────────────────────────────────────────────
+// ── NoqRequest ──────────────────────────────────────────────────────
 
-/// A raw QUIC connection request without WebTransport framing (quinn backend).
-pub(crate) enum QuinnRequest {
+/// A raw QUIC connection request without WebTransport framing (noq backend).
+pub(crate) enum NoqRequest {
 	Raw {
-		request: web_transport_quinn::proto::ConnectRequest,
-		response: web_transport_quinn::proto::ConnectResponse,
-		connection: quinn::Connection,
+		request: web_transport_noq::proto::ConnectRequest,
+		response: web_transport_noq::proto::ConnectResponse,
+		connection: noq::Connection,
 	},
 	WebTransport {
-		request: web_transport_quinn::Request,
+		request: web_transport_noq::Request,
 		alpns: Vec<&'static str>,
 	},
 }
 
-impl QuinnRequest {
-	pub async fn accept(conn: quinn::Incoming, alpns: Vec<&'static str>) -> anyhow::Result<Self> {
+impl NoqRequest {
+	pub async fn accept(conn: noq::Incoming, alpns: Vec<&'static str>) -> anyhow::Result<Self> {
 		let mut conn = conn.accept()?;
 
 		let handshake = conn
 			.handshake_data()
 			.await?
-			.downcast::<quinn::crypto::rustls::HandshakeData>()
+			.downcast::<noq::crypto::rustls::HandshakeData>()
 			.unwrap();
 
 		let alpn = handshake.protocol.context("missing ALPN")?;
@@ -274,13 +273,13 @@ impl QuinnRequest {
 		let conn = conn.await.context("failed to establish QUIC connection")?;
 
 		let span = tracing::Span::current();
-		span.record("id", conn.stable_id()); // TODO can we get this earlier?
+		span.record("id", conn.stable_id());
 		tracing::debug!(%host, ip = %conn.remote_address(), %alpn, "accepted");
 
 		match alpn.as_str() {
-			web_transport_quinn::ALPN => {
+			web_transport_noq::ALPN => {
 				// Wait for the CONNECT request.
-				let request = web_transport_quinn::Request::accept(conn)
+				let request = web_transport_noq::Request::accept(conn)
 					.await
 					.context("failed to receive WebTransport request")?;
 				Ok(Self::WebTransport { request, alpns })
@@ -295,8 +294,8 @@ impl QuinnRequest {
 				let url = format!("moqt://{}", host_str)
 					.parse::<Url>()
 					.context("failed to construct URL from server name")?;
-				let request = web_transport_quinn::proto::ConnectRequest::new(url);
-				let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
+				let request = web_transport_noq::proto::ConnectRequest::new(url);
+				let response = web_transport_noq::proto::ConnectResponse::OK.with_protocol(alpn);
 				Ok(Self::Raw {
 					connection: conn,
 					request,
@@ -308,20 +307,15 @@ impl QuinnRequest {
 	}
 
 	/// Accept the session, returning a 200 OK if using WebTransport.
-	pub async fn ok(self) -> Result<web_transport_quinn::Session, web_transport_quinn::ServerError> {
+	pub async fn ok(self) -> Result<web_transport_noq::Session, web_transport_noq::ServerError> {
 		match self {
-			QuinnRequest::Raw {
+			NoqRequest::Raw {
 				connection,
 				request,
 				response,
-			} => Ok(web_transport_quinn::Session::raw(connection, request, response)),
-			QuinnRequest::WebTransport { request, alpns } => {
-				let mut response = web_transport_quinn::proto::ConnectResponse::OK;
-				// Pick the first sub-protocol that we actually support.
-				// This is the WebTransport equivalent of ALPN negotiation.
-				// If no match is found, we default to no sub-protocol to support older
-				// clients that don't use ALPN. We assume moq-transport-14/moq-lite-02
-				// and perform the SETUP_x exchange instead.
+			} => Ok(web_transport_noq::Session::raw(connection, request, response)),
+			NoqRequest::WebTransport { request, alpns } => {
+				let mut response = web_transport_noq::proto::ConnectResponse::OK;
 				if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 					response = response.with_protocol(protocol);
 				}
@@ -333,22 +327,22 @@ impl QuinnRequest {
 	/// Returns the URL provided by the client.
 	pub fn url(&self) -> Option<&Url> {
 		match self {
-			QuinnRequest::Raw { .. } => None,
-			QuinnRequest::WebTransport { request, .. } => Some(&request.url),
+			NoqRequest::Raw { .. } => None,
+			NoqRequest::WebTransport { request, .. } => Some(&request.url),
 		}
 	}
 
 	/// Reject the session with a status code.
 	pub async fn close(
 		self,
-		status: web_transport_quinn::http::StatusCode,
-	) -> Result<(), web_transport_quinn::ServerError> {
+		status: web_transport_noq::http::StatusCode,
+	) -> Result<(), web_transport_noq::ServerError> {
 		match self {
-			QuinnRequest::Raw { connection, .. } => {
+			NoqRequest::Raw { connection, .. } => {
 				connection.close(status.as_u16().into(), status.as_str().as_bytes());
 				Ok(())
 			}
-			QuinnRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
+			NoqRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
 		}
 	}
 }
@@ -366,8 +360,8 @@ impl ServerIdGenerator {
 	}
 }
 
-impl quinn::ConnectionIdGenerator for ServerIdGenerator {
-	fn generate_cid(&mut self) -> quinn::ConnectionId {
+impl noq::ConnectionIdGenerator for ServerIdGenerator {
+	fn generate_cid(&mut self) -> noq::ConnectionId {
 		use rand::Rng;
 		let cid_len = self.cid_len();
 		let mut cid = Vec::with_capacity(cid_len);
@@ -375,7 +369,7 @@ impl quinn::ConnectionIdGenerator for ServerIdGenerator {
 		cid.push((cid_len - 1) as u8);
 		cid.extend(self.server_id.0.iter());
 		cid.extend(rand::rng().random_iter::<u8>().take(self.nonce_len));
-		quinn::ConnectionId::new(cid.as_slice())
+		noq::ConnectionId::new(cid.as_slice())
 	}
 
 	fn cid_len(&self) -> usize {
