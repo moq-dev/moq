@@ -357,14 +357,11 @@ ci:
 	# Run the standard checks first
 	just check
 
-	# Run the unit tests
-	just test
+	# Run the unit tests with all features to exercise all QUIC backends
+	just test --all-features
 
 	# Make sure everything builds
 	just build
-
-	# Run tests with all features to exercise all QUIC backends
-	cargo test --all-targets --all-features
 
 	# Check all feature combinations for all crates
 	# requires: cargo install cargo-hack
@@ -382,7 +379,7 @@ bump:
 	release-plz update
 
 # Run the unit tests
-test:
+test *args:
 	#!/usr/bin/env bash
 	set -euo pipefail
 
@@ -394,7 +391,7 @@ test:
 		bun run --filter='*' test
 	fi
 
-	cargo test --all-targets
+	cargo test --all-targets {{ args }}
 
 # Automatically fix some issues.
 fix:
