@@ -144,7 +144,11 @@ pub struct WebSocketListener {
 }
 
 impl WebSocketListener {
-	pub async fn bind(addr: net::SocketAddr, alpns: &[&str]) -> anyhow::Result<Self> {
+	pub async fn bind(addr: net::SocketAddr) -> anyhow::Result<Self> {
+		Self::bind_with_alpns(addr, moq_lite::ALPNS).await
+	}
+
+	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> anyhow::Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
 		let server = qmux::Server::new().with_protocols(alpns);
 		Ok(Self { listener, server })
