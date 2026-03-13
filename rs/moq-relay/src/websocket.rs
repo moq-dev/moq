@@ -1,10 +1,10 @@
 use futures::{SinkExt, StreamExt};
+use qmux::tungstenite;
 use std::{
 	future::Future,
 	pin::Pin,
 	sync::{Arc, atomic::Ordering},
 };
-use web_transport_ws::tungstenite;
 
 use axum::{
 	extract::{Path, Query, State, WebSocketUpgrade},
@@ -71,7 +71,7 @@ where
 		+ 'static,
 {
 	// Wrap the WebSocket in a WebTransport compatibility layer.
-	let ws = web_transport_ws::Session::accept(socket, None);
+	let ws = qmux::ws::accept(socket, None);
 	let session = moq_lite::Server::new()
 		.with_publish(subscribe)
 		.with_consume(publish)
