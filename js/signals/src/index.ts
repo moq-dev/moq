@@ -33,6 +33,7 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	// Microtask coalescing state
 	#pending = false;
 	#oldValue: T | undefined;
+	#hasCapturedOldValue = false;
 	#forceNotify = false;
 
 	// Brand to identify this as a Signal across package instances
@@ -63,8 +64,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	// If notify is undefined, we'll check if the value has changed after the microtask.
 	set(value: T, notify?: boolean): void {
 		// Capture old value before the first set in this microtask.
-		if (!this.#pending) {
+		if (!this.#hasCapturedOldValue) {
 			this.#oldValue = this.#value;
+			this.#hasCapturedOldValue = true;
 		}
 
 		this.#value = value;
@@ -86,6 +88,7 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	#flush(): void {
 		this.#pending = false;
+		this.#hasCapturedOldValue = false;
 		const old = this.#oldValue;
 		this.#oldValue = undefined;
 
