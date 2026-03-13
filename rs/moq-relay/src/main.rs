@@ -55,7 +55,11 @@ async fn main() -> anyhow::Result<()> {
 
 	let cluster = Cluster::new(config.cluster, client);
 	let cloned = cluster.clone();
-	tokio::spawn(async move { cloned.run().await.expect("cluster failed") });
+	tokio::spawn(async move {
+		if let Err(err) = cloned.run().await {
+			panic!("cluster failed: {err}");
+		}
+	});
 
 	// Create a web server too.
 	let web = Web::new(

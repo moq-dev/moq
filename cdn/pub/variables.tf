@@ -3,6 +3,11 @@ variable "domain" {
   type        = string
 }
 
+variable "relay" {
+  description = "Relay hostname to publish to (e.g. use.example.com)"
+  type        = string
+}
+
 variable "ssh_keys" {
   description = "SSH public keys for root access"
   type        = list(string)

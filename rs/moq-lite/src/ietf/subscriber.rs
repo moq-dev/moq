@@ -330,7 +330,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Ok(entry.get().producer.clone());
 			}
 			Entry::Vacant(entry) => {
-				let broadcast = Broadcast::produce();
+				// IETF protocol doesn't have hops; use 1 (remote source).
+				let broadcast = Broadcast::new().with_hops(1).produce();
 				origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),

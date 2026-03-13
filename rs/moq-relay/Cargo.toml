@@ -40,7 +40,7 @@ rustls = { version = "0.23", features = [
 	"aws-lc-rs",
 ], default-features = false }
 serde = { version = "1", features = ["derive"] }
-serde_with = { version = "3", features = ["json", "base64"] }
+serde_with = "3"
 thiserror = "2"
 tokio = { workspace = true, features = ["full"] }
 toml = "0.9"

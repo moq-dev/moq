@@ -49,10 +49,8 @@ enum Commands {
 		#[arg(long)]
 		publish: Vec<String>,
 
-		/// If true, then this client is considered a cluster node.
-		/// Both the client and server will only announce broadcasts from non-cluster clients.
-		/// This avoids convoluted routing, as only the primary origin will announce.
-		#[arg(long)]
+		/// Deprecated: Previously used to mark cluster nodes. No longer has any effect.
+		#[arg(long, hide = true)]
 		cluster: bool,
 
 		/// If specified, the user can subscribe to any matching path prefixes.
@@ -90,6 +88,7 @@ fn main() -> anyhow::Result<()> {
 			key.to_file(&cli.key)?;
 		}
 
+		#[allow(deprecated)]
 		Commands::Sign {
 			root,
 			publish,
@@ -100,6 +99,7 @@ fn main() -> anyhow::Result<()> {
 		} => {
 			let key = moq_token::Key::from_file(cli.key)?;
 
+			#[allow(deprecated)]
 			let payload = moq_token::Claims {
 				root,
 				publish,

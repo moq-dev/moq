@@ -159,7 +159,6 @@ async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct AuthQuery {
 	pub(crate) jwt: Option<String>,
-	pub(crate) register: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -231,10 +230,10 @@ async fn serve_announced(
 	let params = AuthParams {
 		path: prefix,
 		jwt: query.jwt,
-		register: query.register,
 	};
 	let token = state.auth.verify(&params)?;
-	let Some(mut origin) = state.cluster.subscriber(&token) else {
+	let scoped = state.cluster.origin.with_root(&token.root);
+	let Some(mut origin) = scoped.and_then(|o| o.consume_only(&token.subscribe)) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
@@ -268,11 +267,11 @@ async fn serve_fetch(
 	let auth = AuthParams {
 		path: broadcast.clone(),
 		jwt: params.auth.jwt,
-		register: params.auth.register,
 	};
 	let token = state.auth.verify(&auth)?;
 
-	let Some(origin) = state.cluster.subscriber(&token) else {
+	let scoped = state.cluster.origin.with_root(&token.root);
+	let Some(origin) = scoped.and_then(|o| o.consume_only(&token.subscribe)) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
