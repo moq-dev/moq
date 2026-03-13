@@ -303,7 +303,8 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url);
+				let alpns = self.versions.alpns();
+				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
 
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
