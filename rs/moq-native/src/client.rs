@@ -129,6 +129,8 @@ pub struct Client {
 	quiche: Option<crate::quiche::QuicheClient>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<web_transport_iroh::iroh::Endpoint>,
+	#[cfg(feature = "iroh")]
+	iroh_addrs: Vec<std::net::SocketAddr>,
 }
 
 impl Client {
@@ -236,12 +238,24 @@ impl Client {
 			quiche,
 			#[cfg(feature = "iroh")]
 			iroh: None,
+			#[cfg(feature = "iroh")]
+			iroh_addrs: Vec::new(),
 		})
 	}
 
 	#[cfg(feature = "iroh")]
 	pub fn with_iroh(mut self, iroh: Option<web_transport_iroh::iroh::Endpoint>) -> Self {
 		self.iroh = iroh;
+		self
+	}
+
+	/// Set direct IP addresses for connecting to iroh peers.
+	///
+	/// This is useful when the peer's IP addresses are known ahead of time,
+	/// bypassing the need for peer discovery (e.g. in tests or local networks).
+	#[cfg(feature = "iroh")]
+	pub fn with_iroh_addrs(mut self, addrs: Vec<std::net::SocketAddr>) -> Self {
+		self.iroh_addrs = addrs;
 		self
 	}
 
@@ -265,7 +279,7 @@ impl Client {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
-			let session = crate::iroh::connect(endpoint, url).await?;
+			let session = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
 			let session = self.moq.connect(session).await?;
 			return Ok(session);
 		}

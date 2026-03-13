@@ -11,7 +11,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Publish a broadcast on the server, subscribe on the client, and verify
 /// the data arrives correctly using the specified QUIC backend and URL scheme.
-#[cfg(any(feature = "quinn", feature = "quiche"))]
+#[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
 async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
@@ -132,7 +132,6 @@ async fn quiche_webtransport() {
 #[cfg(feature = "iroh")]
 #[tracing_test::traced_test]
 #[tokio::test]
-#[ignore = "iroh peer discovery requires network; needs direct addressing support in moq-native"]
 async fn iroh_connect() {
 	use moq_native::IrohEndpointConfig;
 
@@ -155,6 +154,10 @@ async fn iroh_connect() {
 		.await
 		.expect("failed to bind server iroh endpoint")
 		.expect("server iroh endpoint not enabled");
+
+	// Get the server's direct addresses before moving it into the server.
+	let server_addr = server_endpoint.addr();
+	let server_addrs: Vec<std::net::SocketAddr> = server_addr.ip_addrs().copied().collect();
 
 	let server_endpoint_id = server_endpoint.id();
 
@@ -187,7 +190,8 @@ async fn iroh_connect() {
 	let client = client_config
 		.init()
 		.expect("failed to init client")
-		.with_iroh(Some(client_endpoint));
+		.with_iroh(Some(client_endpoint))
+		.with_iroh_addrs(server_addrs);
 
 	let url: url::Url = format!("iroh://{server_endpoint_id}").parse().unwrap();
 
@@ -240,4 +244,20 @@ async fn iroh_connect() {
 		.await
 		.expect("server task panicked")
 		.expect("server task failed");
+}
+
+// ── Noq backend ─────────────────────────────────────────────────────
+
+#[cfg(feature = "noq")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn noq_raw_quic() {
+	backend_test("moqt", moq_native::QuicBackend::Noq).await;
+}
+
+#[cfg(feature = "noq")]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn noq_webtransport() {
+	backend_test("https", moq_native::QuicBackend::Noq).await;
 }
