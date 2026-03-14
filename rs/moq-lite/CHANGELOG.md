@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.1...moq-lite-v0.15.2) - 2026-03-14
+
+### Other
+
+- Discard track properties ([#1105](https://github.com/moq-dev/moq/pull/1105))
+- Fix draft-17 SETUP handshake: remove duplicate 0x2F00 stream type ([#1104](https://github.com/moq-dev/moq/pull/1104))
+
 ## [0.15.1](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.0...moq-lite-v0.15.1) - 2026-03-13
 
 ### Other
