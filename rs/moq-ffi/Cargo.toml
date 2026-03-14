@@ -13,7 +13,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [lib]
 name = "moq_ffi"
-crate-type = ["staticlib", "cdylib"]
+crate-type = ["staticlib", "cdylib", "lib"]
 
 [[bin]]
 name = "uniffi-bindgen"
@@ -33,3 +33,6 @@ url = "2"
 
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
