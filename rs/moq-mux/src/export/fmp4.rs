@@ -21,7 +21,17 @@ struct Fmp4ExportTrack {
 
 impl Fmp4 {
 	/// Build from catalog configuration.
+	///
+	/// Currently only supports single-track exports. Multi-track fMP4 requires
+	/// merging moov atoms which is not yet implemented.
 	pub fn new(catalog: &Catalog) -> anyhow::Result<Self> {
+		let total_tracks = catalog.video.renditions.len() + catalog.audio.renditions.len();
+		anyhow::ensure!(
+			total_tracks <= 1,
+			"multi-track fMP4 export is not yet supported ({total_tracks} tracks); \
+			 init segment merging is required for multi-track moov construction"
+		);
+
 		let mut tracks = Vec::new();
 		let mut track_id = 1u32;
 
@@ -104,8 +114,8 @@ impl Fmp4 {
 		let seq = track.sequence_number;
 		track.sequence_number += 1;
 
-		// First pass to get moof size
-		let moof = build_moof(seq, track.track_id, dts, payload.len() as u32, flags, None);
+		// First pass to get moof size (use Some(0) so trun includes the data_offset field)
+		let moof = build_moof(seq, track.track_id, dts, payload.len() as u32, flags, Some(0));
 		let mut buf = Vec::new();
 		moof.encode(&mut buf)?;
 		let moof_size = buf.len();

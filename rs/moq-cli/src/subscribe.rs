@@ -45,6 +45,14 @@ impl Subscribe {
 		let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
 		let catalog = catalog_consumer.next().await?.context("empty catalog")?;
 
+		// Reject multi-track catalogs until concurrent multiplexing is implemented
+		let total_tracks = catalog.video.renditions.len() + catalog.audio.renditions.len();
+		anyhow::ensure!(
+			total_tracks <= 1,
+			"multi-track fMP4 export is not yet supported ({total_tracks} tracks found); \
+			 concurrent track multiplexing to stdout requires interleaving which is not implemented"
+		);
+
 		// Check if we need to convert to CMAF first
 		let needs_convert = catalog
 			.video

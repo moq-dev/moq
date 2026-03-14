@@ -552,7 +552,52 @@ impl Fmp4 {
 				}
 			}
 
-			// Write one complete moof+mdat fragment as a single MoQ frame (passthrough).
+			// Build a per-track moof containing only this traf, and a per-track mdat
+			// with only the samples belonging to this track.
+			let single_traf_moof = Moof {
+				mfhd: moof.mfhd.clone(),
+				traf: vec![traf.clone()],
+			};
+
+			// Compute the data range within the original mdat for this traf's samples.
+			let track_data_start = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
+			let track_data_end = offset; // offset was advanced past all samples above
+
+			// Adjust the trun data_offset to point into the new per-track mdat.
+			let mut adjusted_moof = single_traf_moof;
+			let mut moof_buf = Vec::new();
+			adjusted_moof.encode(&mut moof_buf)?;
+			let new_moof_size = moof_buf.len();
+
+			// Slice out this track's data from the full mdat
+			let track_mdat_data = if track_data_start < mdat.data.len() && track_data_end <= mdat.data.len() {
+				&mdat.data[track_data_start..track_data_end]
+			} else {
+				// Fallback: use the full mdat data (single-track case)
+				&mdat.data[..]
+			};
+
+			// Re-encode moof with corrected data_offset for the per-track fragment
+			let mdat_header_size_new = 8u64; // 4 bytes size + 4 bytes 'mdat'
+			for traf_mut in &mut adjusted_moof.traf {
+				for trun_mut in &mut traf_mut.trun {
+					trun_mut.data_offset = Some((new_moof_size as u64 + mdat_header_size_new) as i32);
+				}
+				// Clear base_data_offset since data_offset is now relative to moof start
+				traf_mut.tfhd.base_data_offset = None;
+			}
+
+			moof_buf.clear();
+			adjusted_moof.encode(&mut moof_buf)?;
+
+			let per_track_mdat = Mdat {
+				data: track_mdat_data.to_vec(),
+			};
+			per_track_mdat.encode(&mut moof_buf)?;
+
+			let fragment_bytes = Bytes::from(moof_buf);
+
+			// Write the per-track fragment as a single MoQ frame (passthrough).
 			let mut g = if contains_keyframe {
 				if let Some(mut prev) = track.group.take() {
 					prev.finish()?;
@@ -562,15 +607,7 @@ impl Fmp4 {
 				track.group.take().context("no keyframe at start")?
 			};
 
-			let moof_raw = self.moof_raw.as_ref().context("missing moof box")?;
-
-			let mut frame = g.create_frame(moq_lite::Frame {
-				size: moof_raw.len() as u64 + mdat_raw.len() as u64,
-			})?;
-
-			frame.write(moof_raw.clone())?;
-			frame.write(Bytes::copy_from_slice(mdat_raw))?;
-			frame.finish()?;
+			g.write_frame(fragment_bytes)?;
 
 			track.group = Some(g);
 

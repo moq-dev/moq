@@ -38,6 +38,10 @@ pub struct Publish {
 
 impl Publish {
 	pub fn new(args: &PublishArgs) -> anyhow::Result<Self> {
+		if args.export.is_some() {
+			anyhow::bail!("--export is not yet implemented; publish uses the import's native format");
+		}
+
 		let mut broadcast = moq_lite::Broadcast::new().produce();
 		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 

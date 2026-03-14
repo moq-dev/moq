@@ -53,7 +53,12 @@ impl Hang {
 						name: name.clone(),
 						priority: 1,
 					})?;
-					tokio::spawn(passthrough_track(input_track, output_track));
+					let track_name = name.clone();
+					tokio::spawn(async move {
+						if let Err(e) = passthrough_track(input_track, output_track).await {
+							tracing::error!(%e, track = %track_name, "passthrough_track failed");
+						}
+					});
 				}
 				Container::Cmaf { init_data } => {
 					let init_bytes = base64::engine::general_purpose::STANDARD
@@ -71,7 +76,12 @@ impl Hang {
 						priority: 1,
 					})?;
 
-					tokio::spawn(convert_cmaf_to_legacy(input_track, output_track, timescale, true));
+					let track_name = name.clone();
+					tokio::spawn(async move {
+						if let Err(e) = convert_cmaf_to_legacy(input_track, output_track, timescale, true).await {
+							tracing::error!(%e, track = %track_name, "convert_cmaf_to_legacy failed");
+						}
+					});
 				}
 			}
 		}
@@ -90,7 +100,12 @@ impl Hang {
 						name: name.clone(),
 						priority: 2,
 					})?;
-					tokio::spawn(passthrough_track(input_track, output_track));
+					let track_name = name.clone();
+					tokio::spawn(async move {
+						if let Err(e) = passthrough_track(input_track, output_track).await {
+							tracing::error!(%e, track = %track_name, "passthrough_track failed");
+						}
+					});
 				}
 				Container::Cmaf { init_data } => {
 					let init_bytes = base64::engine::general_purpose::STANDARD
@@ -108,7 +123,12 @@ impl Hang {
 						priority: 2,
 					})?;
 
-					tokio::spawn(convert_cmaf_to_legacy(input_track, output_track, timescale, false));
+					let track_name = name.clone();
+					tokio::spawn(async move {
+						if let Err(e) = convert_cmaf_to_legacy(input_track, output_track, timescale, false).await {
+							tracing::error!(%e, track = %track_name, "convert_cmaf_to_legacy failed");
+						}
+					});
 				}
 			}
 		}
@@ -220,17 +240,17 @@ fn extract_from_moof_mdat(
 	for traf in &moof.traf {
 		let tfdt = traf.tfdt.as_ref().context("missing tfdt")?;
 		let mut dts = tfdt.base_media_decode_time;
+		let mut offset = 0usize;
 
 		for trun in &traf.trun {
-			let mut offset = 0usize;
-
-			if let Some(data_offset) = trun.data_offset {
-				// data_offset is relative to start of moof, but we only have mdat data.
-				// We need to subtract the moof size and mdat header.
-				// Since we don't have the raw moof size here, we assume offset starts at 0
-				// for the mdat data directly.
+			if trun.data_offset.is_some() {
+				// data_offset is relative to start of moof. Since we converted the
+				// fragment ourselves (build_moof_mdat sets data_offset = moof_size + 8),
+				// we subtract those to get an offset into mdat.data.
+				// For fragments we produce, data_offset points past the mdat header,
+				// so the offset into mdat.data is 0 for the first sample.
+				// For external fragments we don't have moof_size, so we reset to 0.
 				offset = 0;
-				let _ = data_offset; // consumed by the offset computation in the import path
 			}
 
 			for entry in &trun.entries {
@@ -247,10 +267,14 @@ fn extract_from_moof_mdat(
 					depends_on_no_other && !non_sync
 				};
 
-				if offset + size <= mdat.data.len() {
-					let payload = Bytes::copy_from_slice(&mdat.data[offset..offset + size]);
-					samples.push((timestamp, payload, keyframe));
-				}
+				anyhow::ensure!(
+					offset + size <= mdat.data.len(),
+					"sample extends past mdat: offset={offset} size={size} mdat_len={}",
+					mdat.data.len()
+				);
+
+				let payload = Bytes::copy_from_slice(&mdat.data[offset..offset + size]);
+				samples.push((timestamp, payload, keyframe));
 
 				dts += duration as u64;
 				offset += size;

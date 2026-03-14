@@ -46,7 +46,12 @@ impl Fmp4 {
 						name: name.clone(),
 						priority: 1,
 					})?;
-					tokio::spawn(passthrough_track(input_track, output_track));
+					let track_name = name.clone();
+					tokio::spawn(async move {
+						if let Err(e) = passthrough_track(input_track, output_track).await {
+							tracing::error!(%e, track = %track_name, "passthrough_track failed");
+						}
+					});
 				}
 				Container::Legacy => {
 					let init_data = build_video_init(config)?;
@@ -63,7 +68,12 @@ impl Fmp4 {
 						priority: 1,
 					})?;
 
-					tokio::spawn(convert_legacy_to_cmaf(input_track, output_track, timescale, true));
+					let track_name = name.clone();
+					tokio::spawn(async move {
+						if let Err(e) = convert_legacy_to_cmaf(input_track, output_track, timescale, true).await {
+							tracing::error!(%e, track = %track_name, "convert_legacy_to_cmaf failed");
+						}
+					});
 				}
 			}
 		}
@@ -81,7 +91,12 @@ impl Fmp4 {
 						name: name.clone(),
 						priority: 2,
 					})?;
-					tokio::spawn(passthrough_track(input_track, output_track));
+					let track_name = name.clone();
+					tokio::spawn(async move {
+						if let Err(e) = passthrough_track(input_track, output_track).await {
+							tracing::error!(%e, track = %track_name, "passthrough_track failed");
+						}
+					});
 				}
 				Container::Legacy => {
 					let init_data = build_audio_init(config)?;
@@ -98,7 +113,12 @@ impl Fmp4 {
 					})?;
 
 					let timescale = config.sample_rate as u64;
-					tokio::spawn(convert_legacy_to_cmaf(input_track, output_track, timescale, false));
+					let track_name = name.clone();
+					tokio::spawn(async move {
+						if let Err(e) = convert_legacy_to_cmaf(input_track, output_track, timescale, false).await {
+							tracing::error!(%e, track = %track_name, "convert_legacy_to_cmaf failed");
+						}
+					});
 				}
 			}
 		}
@@ -166,8 +186,8 @@ async fn convert_legacy_to_cmaf(
 fn build_moof_mdat(seq: u32, track_id: u32, dts: u64, data: &[u8], keyframe: bool) -> anyhow::Result<Bytes> {
 	let flags = if keyframe { 0x0200_0000 } else { 0x0001_0000 };
 
-	// First pass to get moof size
-	let moof = build_moof(seq, track_id, dts, data.len() as u32, flags, None);
+	// First pass to get moof size (use Some(0) so trun includes the data_offset field)
+	let moof = build_moof(seq, track_id, dts, data.len() as u32, flags, Some(0));
 	let mut buf = Vec::new();
 	moof.encode(&mut buf)?;
 	let moof_size = buf.len();
@@ -392,7 +412,7 @@ fn build_video_codec(config: &VideoConfig) -> anyhow::Result<mp4_atom::Codec> {
 			av1c: mp4_atom::Av1c {
 				seq_profile: av1.profile,
 				seq_level_idx_0: av1.level,
-				seq_tier_0: av1.bitdepth >= 10,
+				seq_tier_0: av1.tier == 'H',
 				high_bitdepth: av1.bitdepth >= 10,
 				twelve_bit: av1.bitdepth >= 12,
 				monochrome: av1.mono_chrome,
