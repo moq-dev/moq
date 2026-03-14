@@ -2,12 +2,11 @@ use base64::Engine;
 use hang::catalog::Container;
 use mp4_atom::{Decode, Encode};
 
-fn run_fmp4(data: &[u8], passthrough: bool) -> hang::Catalog {
+fn run_fmp4(data: &[u8]) -> hang::Catalog {
 	let mut broadcast = moq_lite::Broadcast::new().produce();
 	let catalog = crate::CatalogProducer::new(&mut broadcast).unwrap();
 
-	let config = super::Fmp4Config { passthrough };
-	let mut fmp4 = super::Fmp4::new(broadcast, catalog.clone(), config);
+	let mut fmp4 = super::Fmp4::new(broadcast, catalog.clone());
 
 	let mut buf = bytes::BytesMut::from(data);
 	// Ignore errors from incomplete/malformed trailing fragments in test files.
@@ -27,9 +26,9 @@ fn decode_init_data(init_data: &str) -> (mp4_atom::Ftyp, mp4_atom::Moov) {
 }
 
 #[test]
-fn test_bbb_passthrough_catalog() {
+fn test_bbb_catalog() {
 	let data = include_bytes!("bbb.mp4");
-	let catalog = run_fmp4(data, true);
+	let catalog = run_fmp4(data);
 
 	assert_eq!(catalog.video.renditions.len(), 1);
 	assert_eq!(catalog.audio.renditions.len(), 1);
@@ -48,9 +47,9 @@ fn test_bbb_passthrough_catalog() {
 }
 
 #[test]
-fn test_bbb_passthrough_init_data_roundtrip() {
+fn test_bbb_init_data_roundtrip() {
 	let data = include_bytes!("bbb.mp4");
-	let catalog = run_fmp4(data, true);
+	let catalog = run_fmp4(data);
 
 	// Check video init data
 	let video = catalog.video.renditions.values().next().unwrap();
@@ -90,30 +89,9 @@ fn test_bbb_passthrough_init_data_roundtrip() {
 }
 
 #[test]
-fn test_bbb_legacy_catalog() {
-	let data = include_bytes!("bbb.mp4");
-	let catalog = run_fmp4(data, false);
-
-	assert_eq!(catalog.video.renditions.len(), 1);
-	assert_eq!(catalog.audio.renditions.len(), 1);
-
-	let video = catalog.video.renditions.values().next().unwrap();
-	assert_eq!(video.codec.to_string(), "avc1.64001f");
-	assert_eq!(video.coded_width, Some(1280));
-	assert_eq!(video.coded_height, Some(720));
-	assert!(matches!(video.container, Container::Legacy));
-
-	let audio = catalog.audio.renditions.values().next().unwrap();
-	assert_eq!(audio.codec.to_string(), "mp4a.40.2");
-	assert_eq!(audio.sample_rate, 44100);
-	assert_eq!(audio.channel_count, 2);
-	assert!(matches!(audio.container, Container::Legacy));
-}
-
-#[test]
-fn test_av1_passthrough_catalog() {
+fn test_av1_catalog() {
 	let data = include_bytes!("av1.mp4");
-	let catalog = run_fmp4(data, true);
+	let catalog = run_fmp4(data);
 
 	assert_eq!(catalog.video.renditions.len(), 1);
 	assert_eq!(catalog.audio.renditions.len(), 0);
@@ -134,9 +112,9 @@ fn test_av1_passthrough_catalog() {
 }
 
 #[test]
-fn test_vp9_passthrough_catalog() {
+fn test_vp9_catalog() {
 	let data = include_bytes!("vp9.mp4");
-	let catalog = run_fmp4(data, true);
+	let catalog = run_fmp4(data);
 
 	assert_eq!(catalog.video.renditions.len(), 1);
 	assert_eq!(catalog.audio.renditions.len(), 0);

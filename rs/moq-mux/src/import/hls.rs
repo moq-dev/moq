@@ -19,7 +19,7 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use super::{Fmp4, Fmp4Config};
+use super::Fmp4;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
@@ -30,20 +30,11 @@ pub struct HlsConfig {
 	/// An optional HTTP client to use for fetching the playlist and segments.
 	/// If not provided, a default client will be created.
 	pub client: Option<Client>,
-
-	/// Enable passthrough mode for CMAF fragment transport.
-	/// When enabled, complete fMP4 fragments (moof+mdat) are transported directly
-	/// instead of being decomposed into individual samples.
-	pub passthrough: bool,
 }
 
 impl HlsConfig {
 	pub fn new(playlist: String) -> Self {
-		Self {
-			playlist,
-			client: None,
-			passthrough: false,
-		}
+		Self { playlist, client: None }
 	}
 
 	/// Parse the playlist string into a URL.
@@ -97,7 +88,6 @@ pub struct Hls {
 	video: Vec<TrackState>,
 	/// Optional audio track shared across variants.
 	audio: Option<TrackState>,
-	passthrough: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,12 +126,10 @@ impl Hls {
 				.build()
 				.unwrap()
 		});
-		let passthrough = cfg.passthrough;
 		Ok(Self {
 			broadcast,
 			catalog,
 			video_importers: Vec::new(),
-			passthrough,
 			audio_importer: None,
 			client,
 			base_url,
@@ -487,13 +475,7 @@ impl Hls {
 	/// independent while still contributing to the same shared catalog.
 	fn ensure_video_importer_for(&mut self, index: usize) -> &mut Fmp4 {
 		while self.video_importers.len() <= index {
-			let importer = Fmp4::new(
-				self.broadcast.clone(),
-				self.catalog.clone(),
-				Fmp4Config {
-					passthrough: self.passthrough,
-				},
-			);
+			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone());
 			self.video_importers.push(importer);
 		}
 
@@ -502,9 +484,8 @@ impl Hls {
 
 	/// Create or retrieve the fMP4 importer for the audio rendition.
 	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
-		let passthrough = self.passthrough;
 		self.audio_importer
-			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), self.catalog.clone(), Fmp4Config { passthrough }))
+			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), self.catalog.clone()))
 	}
 
 	#[cfg(test)]
