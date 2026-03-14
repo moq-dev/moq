@@ -17,6 +17,8 @@ export default defineConfig({
 			},
 		],
 		["meta", { property: "og:image", content: "https://doc.moq.dev/icon.png" }],
+		["meta", { property: "og:image:width", content: "325" }],
+		["meta", { property: "og:image:height", content: "300" }],
 		["meta", { property: "og:url", content: "https://doc.moq.dev" }],
 		["meta", { property: "og:site_name", content: "Media over QUIC" }],
 		["meta", { name: "twitter:card", content: "summary_large_image" }],
