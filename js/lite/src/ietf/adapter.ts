@@ -154,30 +154,33 @@ export class ControlStreamAdapter implements Session {
 
 		const sendWritable = new WritableStream<Uint8Array>({
 			write: async (chunk) => {
-				if (registered) {
-					await this.#writeMutex.runExclusive(() => this.#writer.write(chunk));
-					return;
-				}
-
-				// Accumulate bytes
+				// Always accumulate bytes and flush only complete messages
+				// to prevent interleaving of partial messages from concurrent virtual streams.
 				const newBuf = new Uint8Array(buffer.length + chunk.length);
 				newBuf.set(buffer);
 				newBuf.set(chunk, buffer.length);
 				buffer = newBuf;
 
-				// Try to parse the first message
-				const parsed = this.#tryParseOutgoing(buffer);
-				if (!parsed) return;
+				// Try to flush complete messages from the buffer
+				for (;;) {
+					const boundary = this.#messageSize(buffer);
+					if (boundary === undefined) break;
 
-				// Register before flushing so responses can be routed
-				registeredRequestId = parsed.requestId;
-				this.#streams.set(parsed.requestId, { controller });
-				registered = true;
+					const toFlush = buffer.subarray(0, boundary);
+					buffer = buffer.subarray(boundary);
 
-				// Flush all buffered bytes
-				const toFlush = buffer;
-				buffer = new Uint8Array(0);
-				await this.#writeMutex.runExclusive(() => this.#writer.write(toFlush));
+					if (!registered) {
+						// First message: extract requestId and register before flushing
+						const parsed = this.#tryParseOutgoing(toFlush);
+						if (parsed) {
+							registeredRequestId = parsed.requestId;
+							this.#streams.set(parsed.requestId, { controller });
+							registered = true;
+						}
+					}
+
+					await this.#writeMutex.runExclusive(() => this.#writer.write(toFlush));
+				}
 			},
 		});
 
@@ -350,6 +353,27 @@ export class ControlStreamAdapter implements Session {
 	}
 
 	/**
+	 * Returns the total byte size of the first complete message in buffer,
+	 * or undefined if the buffer doesn't contain a complete message yet.
+	 * Message format: [typeId varint][size u16 BE][body of `size` bytes]
+	 */
+	#messageSize(buffer: Uint8Array): number | undefined {
+		if (buffer.length === 0) return undefined;
+
+		const typeSize = 1 << ((buffer[0] & 0xc0) >> 6);
+		if (buffer.length < typeSize) return undefined;
+
+		const [, afterType] = Varint.decode(buffer);
+		if (afterType.length < 2) return undefined;
+
+		const size = (afterType[0] << 8) | afterType[1];
+		const totalSize = buffer.length - afterType.length + 2 + size;
+		if (buffer.length < totalSize) return undefined;
+
+		return totalSize;
+	}
+
+	/**
 	 * Try to parse the first outgoing message from accumulated bytes.
 	 * Returns the requestId if enough data is available, undefined otherwise.
 	 */
@@ -413,10 +437,25 @@ export class ControlStreamAdapter implements Session {
 		this.#namespacesByRequestId.set(requestId, namespace);
 	}
 
-	/** Create a WritableStream that forwards writes to the control stream under mutex. */
+	/** Create a WritableStream that buffers and writes complete messages to the control stream under mutex. */
 	#createSendWritable(): WritableStream<Uint8Array> {
+		let buffer = new Uint8Array(0);
 		return new WritableStream<Uint8Array>({
-			write: (chunk) => this.#writeMutex.runExclusive(() => this.#writer.write(chunk)),
+			write: async (chunk) => {
+				const newBuf = new Uint8Array(buffer.length + chunk.length);
+				newBuf.set(buffer);
+				newBuf.set(chunk, buffer.length);
+				buffer = newBuf;
+
+				for (;;) {
+					const boundary = this.#messageSize(buffer);
+					if (boundary === undefined) break;
+
+					const toFlush = buffer.subarray(0, boundary);
+					buffer = buffer.subarray(boundary);
+					await this.#writeMutex.runExclusive(() => this.#writer.write(toFlush));
+				}
+			},
 		});
 	}
 

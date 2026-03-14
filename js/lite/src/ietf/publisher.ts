@@ -7,7 +7,7 @@ import { error } from "../util/error.ts";
 import type { Session } from "./adapter.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
-import { PublishNamespace, PublishNamespaceDone } from "./publish_namespace.ts";
+import { PublishNamespace, PublishNamespaceDone, PublishNamespaceOk } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { type Subscribe, SubscribeError, SubscribeOk } from "./subscribe.ts";
 import {
@@ -70,10 +70,15 @@ export class Publisher {
 				const msg = new PublishNamespace({ requestId, trackNamespace: path });
 				await msg.encode(stream.writer, this.#session.version);
 
-				// Read response (RequestOk and PublishNamespaceOk share 0x07 with same format)
+				// Read response (RequestOk and PublishNamespaceOk share 0x07)
 				const respTypeId = await stream.reader.u53();
 				if (respTypeId === RequestOk.id) {
-					await RequestOk.decode(stream.reader, this.#session.version);
+					// Draft-14 sends PublishNamespaceOk (requestId only, no parameters)
+					if (this.#session.version === Version.DRAFT_14) {
+						await PublishNamespaceOk.decode(stream.reader, this.#session.version);
+					} else {
+						await RequestOk.decode(stream.reader, this.#session.version);
+					}
 				} else {
 					throw new Error(`PublishNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
 				}

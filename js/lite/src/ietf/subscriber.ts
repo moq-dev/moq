@@ -204,12 +204,19 @@ export class Subscriber {
 				await msg.encode(stream.writer, version);
 				console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
 
+				// Pre-register with requestId so early group uni streams aren't dropped.
+				// The publisher typically uses requestId as the trackAlias.
+				this.#subscribes.set(requestId, request.track);
+
 				// Read response (SubscribeOk or error)
 				const respTypeId = await stream.reader.u53();
 				if (respTypeId === SubscribeOk.id) {
 					const ok = await SubscribeOk.decode(stream.reader, version);
-					// Register trackAlias for group routing
-					this.#subscribes.set(ok.trackAlias, request.track);
+					// Update registration to use the actual trackAlias from SubscribeOk
+					if (ok.trackAlias !== requestId) {
+						this.#subscribes.delete(requestId);
+						this.#subscribes.set(ok.trackAlias, request.track);
+					}
 					console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.track.name}`);
 
 					try {
@@ -236,6 +243,9 @@ export class Subscriber {
 						this.#subscribes.delete(ok.trackAlias);
 					}
 				} else {
+					// Clean up pre-registered entry on error
+					this.#subscribes.delete(requestId);
+
 					// Error response
 					let reasonPhrase = "unknown error";
 					try {
@@ -256,6 +266,7 @@ export class Subscriber {
 					throw new Error(`SUBSCRIBE error: ${reasonPhrase}`);
 				}
 			} catch (err) {
+				this.#subscribes.delete(requestId);
 				stream.abort(error(err));
 				throw err;
 			}
