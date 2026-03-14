@@ -23,8 +23,8 @@ fn build_avcc_description() -> Bytes {
 		avc_level_indication: 0x1F,
 		length_size: 4,
 		sequence_parameter_sets: vec![vec![
-			0x67, 0x64, 0x00, 0x1F, 0xAC, 0xD9, 0x40, 0x50, 0x05, 0xBB, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00,
-			0x10, 0x00, 0x00, 0x03, 0x03, 0xC0, 0xF1, 0x62, 0xE4, 0x80,
+			0x67, 0x64, 0x00, 0x1F, 0xAC, 0xD9, 0x40, 0x50, 0x05, 0xBB, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00, 0x10, 0x00,
+			0x00, 0x03, 0x03, 0xC0, 0xF1, 0x62, 0xE4, 0x80,
 		]],
 		picture_parameter_sets: vec![vec![0x68, 0xEB, 0xE3, 0xCB, 0x22, 0xC0]],
 		..Default::default()
@@ -83,7 +83,10 @@ fn setup_input(video_config: &VideoConfig) -> InputBroadcast {
 	// Create and write catalog
 	let mut catalog_track = broadcast.create_track(hang::Catalog::default_track()).unwrap();
 	let mut catalog = hang::Catalog::default();
-	catalog.video.renditions.insert("video".to_string(), video_config.clone());
+	catalog
+		.video
+		.renditions
+		.insert("video".to_string(), video_config.clone());
 
 	let catalog_json = catalog.to_string().unwrap();
 	let mut group = catalog_track.append_group().unwrap();
@@ -169,8 +172,7 @@ async fn read_legacy_frames(broadcast: &moq_lite::BroadcastProducer) -> Vec<(Tim
 		})
 		.unwrap();
 
-	let mut ordered =
-		crate::consumer::OrderedConsumer::new(track, crate::consumer::Legacy, Duration::MAX);
+	let mut ordered = crate::consumer::OrderedConsumer::new(track, crate::consumer::Legacy, Duration::MAX);
 
 	let mut result = Vec::new();
 	while let Some(frame) = tokio::time::timeout(Duration::from_millis(500), ordered.read())
@@ -203,11 +205,10 @@ async fn read_cmaf_raw_frames(broadcast: &moq_lite::BroadcastProducer) -> Vec<By
 		.expect("read_cmaf_raw_frames error")
 	{
 		let mut reader = group;
-		while let Some(data) =
-			tokio::time::timeout(Duration::from_millis(500), reader.read_frame())
-				.await
-				.expect("read_cmaf_raw_frames timed out on frame")
-				.expect("read_cmaf_raw_frames frame error")
+		while let Some(data) = tokio::time::timeout(Duration::from_millis(500), reader.read_frame())
+			.await
+			.expect("read_cmaf_raw_frames timed out on frame")
+			.expect("read_cmaf_raw_frames frame error")
 		{
 			result.push(data);
 		}
@@ -266,9 +267,7 @@ async fn legacy_to_cmaf_video() {
 	let video_config = catalog.video.renditions.get("video").unwrap();
 	match &video_config.container {
 		Container::Cmaf { init_data } => {
-			let init_bytes = base64::engine::general_purpose::STANDARD
-				.decode(init_data)
-				.unwrap();
+			let init_bytes = base64::engine::general_purpose::STANDARD.decode(init_data).unwrap();
 			let mut cursor = std::io::Cursor::new(&init_bytes);
 			let mut found_ftyp = false;
 			let mut found_moov = false;
@@ -405,10 +404,7 @@ async fn cmaf_passthrough() {
 #[tokio::test]
 async fn legacy_passthrough() {
 	let config = test_video_config();
-	let frames = vec![
-		(ts(0), vec![0xAA, 0xBB], true),
-		(ts(33_000), vec![0xCC, 0xDD], false),
-	];
+	let frames = vec![(ts(0), vec![0xAA, 0xBB], true), (ts(33_000), vec![0xCC, 0xDD], false)];
 
 	let mut input = setup_input(&config);
 	let converter = super::Hang::new(input.consumer);

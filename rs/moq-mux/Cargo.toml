@@ -29,6 +29,7 @@ anyhow = "1"
 base64 = "0.22"
 buf-list = "1"
 bytes = "1"
+conducer = { workspace = true }
 h264-parser = { version = "0.4.0", optional = true }
 hang = { workspace = true }
 m3u8-rs = { version = "5", optional = true }
@@ -39,6 +40,7 @@ num_enum = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"], optional = true }
 scuffle-av1 = { version = "0.1.4", optional = true }
 scuffle-h265 = { version = "0.2.2", optional = true }
+thiserror = "2"
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = "0.1"
 url = "2"
@@ -46,3 +48,6 @@ url = "2"
 [dependencies.derive_more]
 version = "2"
 features = ["from", "display", "debug"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
