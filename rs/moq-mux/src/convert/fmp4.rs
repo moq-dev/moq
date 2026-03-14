@@ -150,7 +150,7 @@ async fn convert_legacy_to_cmaf(
 	timescale: u64,
 	is_video: bool,
 ) -> anyhow::Result<()> {
-	let mut consumer = hang::container::OrderedConsumer::new(input, std::time::Duration::MAX);
+	let mut consumer = crate::consumer::OrderedConsumer::new(input, crate::consumer::Legacy, std::time::Duration::MAX);
 	let mut seq: u32 = 1;
 	let mut current_group: Option<moq_lite::GroupProducer> = None;
 
@@ -183,7 +183,7 @@ async fn convert_legacy_to_cmaf(
 	Ok(())
 }
 
-fn build_moof_mdat(seq: u32, track_id: u32, dts: u64, data: &[u8], keyframe: bool) -> anyhow::Result<Bytes> {
+pub(crate) fn build_moof_mdat(seq: u32, track_id: u32, dts: u64, data: &[u8], keyframe: bool) -> anyhow::Result<Bytes> {
 	let flags = if keyframe { 0x0200_0000 } else { 0x0001_0000 };
 
 	// First pass to get moof size (use Some(0) so trun includes the data_offset field)
@@ -228,7 +228,7 @@ fn build_moof(seq: u32, track_id: u32, dts: u64, size: u32, flags: u32, data_off
 	}
 }
 
-fn build_video_init(config: &VideoConfig) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn build_video_init(config: &VideoConfig) -> anyhow::Result<Vec<u8>> {
 	let ftyp = mp4_atom::Ftyp {
 		major_brand: b"isom".into(),
 		minor_version: 0x200,
@@ -290,7 +290,7 @@ fn build_video_init(config: &VideoConfig) -> anyhow::Result<Vec<u8>> {
 	Ok(buf)
 }
 
-fn build_audio_init(config: &AudioConfig) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn build_audio_init(config: &AudioConfig) -> anyhow::Result<Vec<u8>> {
 	let ftyp = mp4_atom::Ftyp {
 		major_brand: b"isom".into(),
 		minor_version: 0x200,
