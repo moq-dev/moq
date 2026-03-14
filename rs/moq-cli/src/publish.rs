@@ -1,31 +1,34 @@
-use clap::Subcommand;
+use clap::ValueEnum;
 use hang::moq_lite;
-use moq_mux::import;
+use moq_mux::producer;
 
-#[derive(Subcommand, Clone)]
-pub enum PublishFormat {
+#[derive(ValueEnum, Clone, Copy)]
+pub enum InputFormat {
+	Fmp4,
 	Avc3,
-	Fmp4 {
-		/// Transmit the fMP4 container directly instead of decoding it.
-		#[arg(long)]
-		passthrough: bool,
-	},
-	// NOTE: No aac support because it needs framing.
-	Hls {
-		/// URL or file path of an HLS playlist to ingest.
-		#[arg(long)]
-		playlist: String,
+}
 
-		/// Transmit the fMP4 segments directly instead of decoding them.
-		#[arg(long)]
-		passthrough: bool,
-	},
+#[derive(ValueEnum, Clone, Copy)]
+pub enum ExportFormat {
+	Hang,
+	Fmp4,
+}
+
+#[derive(clap::Args, Clone)]
+pub struct PublishArgs {
+	/// Input format (what's being read from stdin)
+	#[arg(long)]
+	pub input: InputFormat,
+
+	/// Optional: convert to a different format before publishing.
+	/// If not specified, publishes in the import's native format.
+	#[arg(long)]
+	pub export: Option<ExportFormat>,
 }
 
 enum PublishDecoder {
-	Avc3(Box<import::Avc3>),
-	Fmp4(Box<import::Fmp4>),
-	Hls(Box<import::Hls>),
+	Avc3(Box<producer::Avc3>),
+	Fmp4(Box<producer::Fmp4>),
 }
 
 pub struct Publish {
@@ -34,36 +37,22 @@ pub struct Publish {
 }
 
 impl Publish {
-	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
+	pub fn new(args: &PublishArgs) -> anyhow::Result<Self> {
+		if args.export.is_some() {
+			anyhow::bail!("--export is not yet implemented; publish uses the import's native format");
+		}
+
 		let mut broadcast = moq_lite::Broadcast::new().produce();
 		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 
-		let decoder = match format {
-			PublishFormat::Avc3 => {
-				let avc3 = import::Avc3::new(broadcast.clone(), catalog.clone());
+		let decoder = match args.input {
+			InputFormat::Avc3 => {
+				let avc3 = producer::Avc3::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
-			PublishFormat::Fmp4 { passthrough } => {
-				let fmp4 = import::Fmp4::new(
-					broadcast.clone(),
-					catalog.clone(),
-					import::Fmp4Config {
-						passthrough: *passthrough,
-					},
-				);
+			InputFormat::Fmp4 => {
+				let fmp4 = producer::Fmp4::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Fmp4(Box::new(fmp4))
-			}
-			PublishFormat::Hls { playlist, passthrough } => {
-				let hls = import::Hls::new(
-					broadcast.clone(),
-					catalog.clone(),
-					import::HlsConfig {
-						playlist: playlist.clone(),
-						client: None,
-						passthrough: *passthrough,
-					},
-				)?;
-				PublishDecoder::Hls(Box::new(hls))
 			}
 		};
 
@@ -82,7 +71,6 @@ impl Publish {
 		match &mut self.decoder {
 			PublishDecoder::Avc3(decoder) => decoder.decode_from(&mut stdin).await,
 			PublishDecoder::Fmp4(decoder) => decoder.decode_from(&mut stdin).await,
-			PublishDecoder::Hls(decoder) => decoder.run().await,
 		}
 	}
 }

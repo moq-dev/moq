@@ -193,7 +193,7 @@ impl StreamDecoder {
 			#[cfg(feature = "h264")]
 			StreamFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),
 			#[cfg(feature = "mp4")]
-			StreamFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default())).into(),
+			StreamFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog)).into(),
 			#[cfg(feature = "h265")]
 			StreamFormat::Hev1 => super::Hev1::new(broadcast, catalog).into(),
 			#[cfg(feature = "av1")]
@@ -305,7 +305,7 @@ impl Decoder {
 			}
 			#[cfg(feature = "mp4")]
 			DecoderFormat::Fmp4 => {
-				let mut decoder = Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default()));
+				let mut decoder = Box::new(super::Fmp4::new(broadcast, catalog));
 				decoder.decode(buf)?;
 				decoder.into()
 			}

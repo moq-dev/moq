@@ -5,6 +5,8 @@ use tokio::sync::oneshot;
 use crate::ffi::OnStatus;
 use crate::{Error, Id, NonZeroSlab, State, moq_audio_config, moq_frame, moq_video_config};
 
+type LegacyConsumer = moq_mux::consumer::OrderedConsumer<moq_mux::consumer::Legacy>;
+
 struct ConsumeCatalog {
 	broadcast: moq_lite::BroadcastConsumer,
 
@@ -38,7 +40,7 @@ pub struct Consume {
 	track_task: NonZeroSlab<Option<TaskEntry>>,
 
 	/// Buffered frames ready for consumption.
-	frame: NonZeroSlab<hang::container::OrderedFrame>,
+	frame: NonZeroSlab<moq_mux::consumer::OrderedFrame>,
 }
 
 impl Consume {
@@ -221,7 +223,7 @@ impl Consume {
 			name: rendition.clone(),
 			priority: 1, // TODO: Remove priority
 		})?;
-		let track = hang::container::OrderedConsumer::new(track, latency);
+		let track = LegacyConsumer::new(track, moq_mux::consumer::Legacy, latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -265,7 +267,7 @@ impl Consume {
 			name: rendition.clone(),
 			priority: 2, // TODO: Remove priority
 		})?;
-		let track = hang::container::OrderedConsumer::new(track, latency);
+		let track = LegacyConsumer::new(track, moq_mux::consumer::Legacy, latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -289,7 +291,7 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_track(task_id: Id, mut track: hang::container::OrderedConsumer) -> Result<(), Error> {
+	async fn run_track(task_id: Id, mut track: LegacyConsumer) -> Result<(), Error> {
 		while let Some(mut ordered) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::container::BufList::new();
@@ -301,7 +303,7 @@ impl Consume {
 				ordered.payload.copy_to_bytes(ordered.payload.num_bytes())
 			});
 
-			let new_frame = hang::container::OrderedFrame {
+			let new_frame = moq_mux::consumer::OrderedFrame {
 				timestamp: ordered.timestamp,
 				payload: new_payload,
 				group: ordered.group,
