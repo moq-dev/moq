@@ -10,6 +10,7 @@ import * as Announce from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import * as Setup from "./setup.ts";
 import * as Subscribe from "./subscribe.ts";
+import * as SubscribeNamespace from "./subscribe_namespace.ts";
 import * as Track from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -247,16 +248,21 @@ test("GoAway: empty", async () => {
 
 // Track tests
 test("TrackStatusRequest: round trip", async () => {
-	const msg = new Track.TrackStatusRequest({ trackNamespace: Path.from("video/stream"), trackName: "main" });
+	const msg = new Track.TrackStatusRequest({
+		requestId: 0n,
+		trackNamespace: Path.from("video/stream"),
+		trackName: "main",
+	});
 
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Track.TrackStatusRequest.decode, Version.DRAFT_14);
 
+	assert.strictEqual(decoded.requestId, 0n);
 	assert.strictEqual(decoded.trackNamespace, "video/stream");
 	assert.strictEqual(decoded.trackName, "main");
 });
 
-test("TrackStatus: round trip", async () => {
+test("TrackStatus v14: round trip", async () => {
 	const msg = new Track.TrackStatus({
 		trackNamespace: Path.from("test"),
 		trackName: "status",
@@ -662,4 +668,87 @@ test("PublishDone v17: no requestId", async () => {
 	assert.strictEqual(decoded.requestId, undefined);
 	assert.strictEqual(decoded.statusCode, 0);
 	assert.strictEqual(decoded.reasonPhrase, "done");
+});
+
+// --- SubscribeUpdate tests ---
+
+test("SubscribeUpdate v14: round trip", async () => {
+	const msg = new Subscribe.SubscribeUpdate({ requestId: 5n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_14);
+
+	assert.strictEqual(decoded.requestId, 5n);
+});
+
+test("SubscribeUpdate v15: round trip", async () => {
+	const msg = new Subscribe.SubscribeUpdate({ requestId: 10n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_15);
+
+	assert.strictEqual(decoded.requestId, 10n);
+});
+
+test("SubscribeUpdate v17: round trip with requiredRequestIdDelta", async () => {
+	const msg = new Subscribe.SubscribeUpdate({ requestId: 42n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_17);
+
+	assert.strictEqual(decoded.requestId, 42n);
+});
+
+// --- PublishBlocked tests ---
+
+test("PublishBlocked v17: round trip", async () => {
+	const msg = new SubscribeNamespace.PublishBlocked({
+		suffix: Path.from("stream1"),
+		trackName: "video",
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
+	const decoded = await decodeVersioned(encoded, SubscribeNamespace.PublishBlocked.decode, Version.DRAFT_17);
+
+	assert.strictEqual(decoded.suffix, "stream1");
+	assert.strictEqual(decoded.trackName, "video");
+});
+
+// --- TrackStatusRequest version-aware tests ---
+
+test("TrackStatusRequest v14: round trip with subscribe fields", async () => {
+	const msg = new Track.TrackStatusRequest({
+		requestId: 1n,
+		trackNamespace: Path.from("video/stream"),
+		trackName: "main",
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const decoded = await decodeVersioned(encoded, Track.TrackStatusRequest.decode, Version.DRAFT_14);
+
+	assert.strictEqual(decoded.requestId, 1n);
+	assert.strictEqual(decoded.trackNamespace, "video/stream");
+	assert.strictEqual(decoded.trackName, "main");
+});
+
+test("TrackStatusRequest v15: round trip with params", async () => {
+	const msg = new Track.TrackStatusRequest({ requestId: 2n, trackNamespace: Path.from("test"), trackName: "audio" });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+	const decoded = await decodeVersioned(encoded, Track.TrackStatusRequest.decode, Version.DRAFT_15);
+
+	assert.strictEqual(decoded.requestId, 2n);
+	assert.strictEqual(decoded.trackNamespace, "test");
+	assert.strictEqual(decoded.trackName, "audio");
+});
+
+test("TrackStatusRequest v17: round trip with requiredRequestIdDelta", async () => {
+	const msg = new Track.TrackStatusRequest({ requestId: 3n, trackNamespace: Path.from("live"), trackName: "data" });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
+	const decoded = await decodeVersioned(encoded, Track.TrackStatusRequest.decode, Version.DRAFT_17);
+
+	assert.strictEqual(decoded.requestId, 3n);
+	assert.strictEqual(decoded.trackNamespace, "live");
+	assert.strictEqual(decoded.trackName, "data");
 });

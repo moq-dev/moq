@@ -12,6 +12,7 @@ import type { PublishNamespace } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
+	PublishBlocked,
 	SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
@@ -129,6 +130,9 @@ export class Subscriber {
 								if (!Path.hasPrefix(consumer.prefix, path)) continue;
 								consumer.append({ path, active: false });
 							}
+						} else if (msgType === PublishBlocked.id && version === Version.DRAFT_17) {
+							const blocked = await PublishBlocked.decode(stream.reader, version);
+							console.debug(`publish_blocked: suffix=${blocked.suffix} track=${blocked.trackName}`);
 						} else {
 							throw new Error(
 								`unexpected message on subscribe_namespace stream: 0x${msgType.toString(16)}`,

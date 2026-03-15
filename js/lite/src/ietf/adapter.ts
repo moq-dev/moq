@@ -493,6 +493,13 @@ export class ControlStreamAdapter implements Session {
 		};
 
 		switch (typeId) {
+			// === FollowUp: route to existing stream ===
+			case 0x02: {
+				// SubscribeUpdate / REQUEST_UPDATE
+				const requestId = await readRequestId();
+				return { route: Route.FollowUp, requestId };
+			}
+
 			// === NewRequest: create virtual stream ===
 			case 0x03: // Subscribe
 			case 0x16: // Fetch

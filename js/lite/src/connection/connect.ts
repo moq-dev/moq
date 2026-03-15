@@ -1,7 +1,7 @@
 import Session from "@moq/qmux";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
-import { Stream } from "../stream.ts";
+import { Reader, Stream, Writer } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
 import type { Established } from "./established.ts";
 
@@ -76,7 +76,61 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
 	let setupVersion: Ietf.Version;
-	if (protocol === Ietf.ALPN.DRAFT_16) {
+	if (protocol === Ietf.ALPN.DRAFT_17) {
+		// Draft-17: SETUP uses uni streams with 0x2F00 stream type
+		const encoder = new TextEncoder();
+		const params = new Ietf.Parameters();
+		params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+
+		const setupMsg = new Ietf.Setup({ parameters: params });
+
+		// Send and receive SETUP concurrently on uni streams
+		const [sendWriter, recvReader] = await Promise.all([
+			// Send: open uni stream, write 0x2F00 stream type + Setup message
+			(async () => {
+				const writable = (await (
+					session as WebTransport
+				).createUnidirectionalStream()) as WritableStream<Uint8Array>;
+				const writer = new Writer(writable, Ietf.Version.DRAFT_17);
+				await writer.u53(Ietf.Setup.id); // 0x2F00 stream type
+				await setupMsg.encode(writer, Ietf.Version.DRAFT_17);
+				return { writable, writer };
+			})(),
+			// Recv: accept uni stream, read 0x2F00 stream type + Setup message
+			(async () => {
+				const uniReader = (
+					session as WebTransport
+				).incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<ReadableStream<Uint8Array>>;
+				const next = await uniReader.read();
+				uniReader.releaseLock();
+				if (next.done) throw new Error("no incoming uni stream for SETUP");
+				const readable = next.value;
+				const reader = new Reader(readable, undefined, Ietf.Version.DRAFT_17);
+				const streamType = await reader.u53();
+				if (streamType !== Ietf.Setup.id) {
+					throw new Error(`unexpected stream type on setup uni: 0x${streamType.toString(16)}`);
+				}
+				const serverSetup = await Ietf.Setup.decode(reader, Ietf.Version.DRAFT_17);
+				console.debug(url.toString(), "received server setup (d17)", serverSetup);
+				return { readable, reader };
+			})(),
+		]);
+
+		// Construct a synthetic bidi Stream from the two uni streams for GoAway
+		const controlStream = new Stream({
+			writable: sendWriter.writable,
+			readable: recvReader.readable,
+		});
+
+		console.debug(url.toString(), "moq-ietf draft-17 session established");
+		return new Ietf.Connection({
+			url,
+			quic: session as WebTransport,
+			control: controlStream,
+			maxRequestId: 0n,
+			version: Ietf.Version.DRAFT_17,
+		});
+	} else if (protocol === Ietf.ALPN.DRAFT_16) {
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
@@ -155,7 +209,7 @@ async function connectWebTransport(
 		allowPooling: false,
 		congestionControl: "low-latency",
 		// @ts-expect-error - TODO: add protocols to WebTransportOptions
-		protocols: [Lite.ALPN_03, Lite.ALPN, Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
+		protocols: [Lite.ALPN_03, Lite.ALPN, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
 		...options,
 	};
 
