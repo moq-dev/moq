@@ -310,15 +310,23 @@ export class Publisher {
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
 		const version = this.#session.version;
 
-		await stream.writer.u53(TrackStatus.id);
-		const status = new TrackStatus({
-			trackNamespace: msg.trackNamespace,
-			trackName: msg.trackName,
-			statusCode: TrackStatus.STATUS_NOT_FOUND,
-			lastGroupId: 0n,
-			lastObjectId: 0n,
-		});
-		await status.encode(stream.writer, version);
+		if (version === Version.DRAFT_14) {
+			// v14: respond with TrackStatus (0x0E = TRACK_STATUS_OK)
+			await stream.writer.u53(TrackStatus.id);
+			const status = new TrackStatus({
+				trackNamespace: msg.trackNamespace,
+				trackName: msg.trackName,
+				statusCode: TrackStatus.STATUS_NOT_FOUND,
+				lastGroupId: 0n,
+				lastObjectId: 0n,
+			});
+			await status.encode(stream.writer, version);
+		} else {
+			// v15+: respond with RequestOk (0x07)
+			await stream.writer.u53(RequestOk.id);
+			const ok = new RequestOk({ requestId: version === Version.DRAFT_17 ? undefined : msg.requestId });
+			await ok.encode(stream.writer, version);
+		}
 		stream.close();
 	}
 

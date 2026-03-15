@@ -214,6 +214,38 @@ export class SubscribeNamespaceEntryDone {
 	}
 }
 
+/// PUBLISH_BLOCKED message (0x0F) — draft-17 only, sent on SUBSCRIBE_NAMESPACE bidi stream
+export class PublishBlocked {
+	static id = 0x0f;
+
+	suffix: Path.Valid;
+	trackName: string;
+
+	constructor({ suffix, trackName }: { suffix: Path.Valid; trackName: string }) {
+		this.suffix = suffix;
+		this.trackName = trackName;
+	}
+
+	async #encode(w: Writer): Promise<void> {
+		await Namespace.encode(w, this.suffix);
+		await w.string(this.trackName);
+	}
+
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
+		return Message.encode(w, this.#encode.bind(this));
+	}
+
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishBlocked> {
+		return Message.decode(r, PublishBlocked.#decode);
+	}
+
+	static async #decode(r: Reader): Promise<PublishBlocked> {
+		const suffix = await Namespace.decode(r);
+		const trackName = await r.string();
+		return new PublishBlocked({ suffix, trackName });
+	}
+}
+
 // Backward compatibility aliases
 export const SubscribeAnnounces = SubscribeNamespace;
 export const SubscribeAnnouncesOk = SubscribeNamespaceOk;
