@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.2...moq-lite-v0.15.3) - 2026-03-15
+
+### Other
+
+- Add ControlStreamAdapter to JS @moq/lite ([#1080](https://github.com/moq-dev/moq/pull/1080))
+
 ## [0.15.2](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.1...moq-lite-v0.15.2) - 2026-03-14
 
 ### Other

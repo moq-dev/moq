@@ -3244,7 +3244,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "anyhow",
  "axum",
@@ -3263,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "moq-clock"
-version = "0.10.8"
+version = "0.10.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3277,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "bytes",
  "hang",
@@ -3293,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "moq-lite"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "bytes",
  "conducer",
@@ -3382,7 +3382,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.10.8"
+version = "0.10.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -3428,7 +3428,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.13"
+version = "0.5.14"
 dependencies = [
  "anyhow",
  "clap",
@@ -6102,9 +6102,9 @@ dependencies = [
 
 [[package]]
 name = "tinyvec"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfa5fdc3bce6191a1dbc8c02d5c8bffcf557bafa17c124c5264a458f1b0613fa"
+checksum = "3e61e67053d25a4e82c844e8424039d9745781b3fc4f32b8d55ed50f5f667ef3"
 dependencies = [
  "tinyvec_macros",
 ]
