@@ -166,8 +166,15 @@ async fn run_unis<S: web_transport_trait::Session>(
 				let _client: setup::Client = reader.decode().await?;
 			}
 
-			// Block on GOAWAY — this never returns Ok unless GOAWAY or stream close.
-			return run_goaway(reader.with_version(version)).await;
+			// Monitor for GOAWAY in the background while we continue accepting unis.
+			web_async::spawn(async move {
+				if let Err(err) = run_goaway(reader.with_version(version)).await {
+					tracing::warn!(%err, "goaway error");
+				}
+			});
+
+			// Continue the loop to accept group data streams.
+			continue;
 		}
 
 		// Group data — spawn a handler for each stream.
