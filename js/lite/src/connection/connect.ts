@@ -24,6 +24,10 @@ export interface ConnectProps {
 
 	// WebSocket (fallback) options.
 	websocket?: WebSocketOptions;
+
+	// Use a pre-existing WebTransport session instead of connecting.
+	// When provided, skips WebTransport/WebSocket race and uses this directly.
+	transport?: WebTransport;
 }
 
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
@@ -36,6 +40,10 @@ const websocketWon = new Set<string>();
  * @returns A promise that resolves to a Connection instance
  */
 export async function connect(url: URL, props?: ConnectProps): Promise<Established> {
+	if (props?.transport) {
+		return connectTransport(url, props.transport);
+	}
+
 	// Create a cancel promise to kill whichever is still connecting.
 	let done: (() => void) | undefined;
 	const cancel = new Promise<void>((resolve) => {
@@ -186,6 +194,116 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
 		console.debug(url.toString(), "moq-ietf session established, version:", server.version.toString(16));
+		return new Ietf.Connection({
+			url,
+			quic: session,
+			control: stream,
+			maxRequestId,
+			version: server.version as Ietf.IetfVersion,
+		});
+	} else {
+		throw new Error(`unsupported server version: ${server.version.toString()}`);
+	}
+}
+
+async function connectTransport(url: URL, session: WebTransport): Promise<Established> {
+	// @ts-expect-error - TODO: add protocol to WebTransport
+	const protocol: string | undefined = session.protocol;
+
+	// Choose setup encoding based on negotiated WebTransport protocol (if any).
+	let setupVersion: Ietf.Version;
+	if (protocol === Ietf.ALPN.DRAFT_17) {
+		// Draft-17: SETUP uses uni streams with 0x2F00 stream type
+		const encoder = new TextEncoder();
+		const params = new Ietf.Parameters();
+		params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+
+		const setupMsg = new Ietf.Setup({ parameters: params });
+
+		// Open send uni and accept recv uni concurrently
+		const [sendWritable, recvReadable] = await Promise.all([
+			session.createUnidirectionalStream() as Promise<WritableStream<Uint8Array>>,
+			(async () => {
+				const uniReader = session.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
+					ReadableStream<Uint8Array>
+				>;
+				const next = await uniReader.read();
+				uniReader.releaseLock();
+				if (next.done) throw new Error("no incoming uni stream for SETUP");
+				return next.value;
+			})(),
+		]);
+
+		// Create control stream from the uni pair (this locks readable/writable once)
+		const controlStream = new Stream({ writable: sendWritable, readable: recvReadable });
+		controlStream.writer.version = Ietf.Version.DRAFT_17;
+		controlStream.reader.version = Ietf.Version.DRAFT_17;
+
+		// Send and receive SETUP concurrently using the control stream's reader/writer
+		await Promise.all([
+			(async () => {
+				await controlStream.writer.u53(Ietf.Setup.id);
+				await setupMsg.encode(controlStream.writer, Ietf.Version.DRAFT_17);
+			})(),
+			(async () => {
+				const streamType = await controlStream.reader.u53();
+				if (streamType !== Ietf.Setup.id) {
+					throw new Error(`unexpected stream type on setup uni: 0x${streamType.toString(16)}`);
+				}
+				await Ietf.Setup.decode(controlStream.reader, Ietf.Version.DRAFT_17);
+			})(),
+		]);
+
+		return new Ietf.Connection({
+			url,
+			quic: session,
+			control: controlStream,
+			maxRequestId: 0n,
+			version: Ietf.Version.DRAFT_17,
+		});
+	} else if (protocol === Ietf.ALPN.DRAFT_16) {
+		setupVersion = Ietf.Version.DRAFT_16;
+	} else if (protocol === Ietf.ALPN.DRAFT_15) {
+		setupVersion = Ietf.Version.DRAFT_15;
+	} else if (protocol === Lite.ALPN_03) {
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_03, undefined);
+	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
+		setupVersion = Ietf.Version.DRAFT_14;
+	} else {
+		throw new Error(`unsupported WebTransport protocol: ${protocol}`);
+	}
+
+	const stream = await Stream.open(session);
+	await stream.writer.u53(Lite.StreamId.ClientCompat);
+
+	const encoder = new TextEncoder();
+
+	const params = new Ietf.Parameters();
+	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n);
+	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+
+	const client = new Ietf.ClientSetup({
+		versions:
+			setupVersion === Ietf.Version.DRAFT_16
+				? [Ietf.Version.DRAFT_16]
+				: setupVersion === Ietf.Version.DRAFT_15
+					? [Ietf.Version.DRAFT_15]
+					: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
+		parameters: params,
+	});
+	await client.encode(stream.writer, setupVersion);
+
+	const serverCompat = await stream.reader.u53();
+	if (serverCompat !== Lite.StreamId.ServerCompat) {
+		throw new Error(`unsupported server message type: ${serverCompat.toString()}`);
+	}
+
+	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
+
+	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
+		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
+	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
+		const maxRequestId = server.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
 			url,
 			quic: session,
