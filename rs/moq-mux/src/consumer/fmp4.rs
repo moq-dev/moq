@@ -64,28 +64,26 @@ impl Fmp4 {
 	/// For multi-track output, decodes each track's init_data, extracts trak+trex,
 	/// and builds a merged ftyp+moov with renumbered track IDs.
 	pub fn init(&self, catalog: &Catalog) -> anyhow::Result<Bytes> {
-		// Encode trait is already imported at the module level
-
 		let mut traks = Vec::new();
 		let mut trexs = Vec::new();
 		let mut ftyp_data = None;
 
-		// Collect all track names and their init data
-		let mut track_inits: Vec<(&str, &str)> = Vec::new();
-		for (name, config) in &catalog.video.renditions {
+		// Collect all track init data
+		let mut track_inits: Vec<&str> = Vec::new();
+		for config in catalog.video.renditions.values() {
 			match &config.container {
-				Container::Cmaf { init_data } => track_inits.push((name, init_data)),
-				Container::Legacy => anyhow::bail!("track {name} is not CMAF"),
+				Container::Cmaf { init_data } => track_inits.push(init_data),
+				Container::Legacy => anyhow::bail!("track is not CMAF"),
 			}
 		}
-		for (name, config) in &catalog.audio.renditions {
+		for config in catalog.audio.renditions.values() {
 			match &config.container {
-				Container::Cmaf { init_data } => track_inits.push((name, init_data)),
-				Container::Legacy => anyhow::bail!("track {name} is not CMAF"),
+				Container::Cmaf { init_data } => track_inits.push(init_data),
+				Container::Legacy => anyhow::bail!("track is not CMAF"),
 			}
 		}
 
-		for (name, init_data_b64) in &track_inits {
+		for init_data_b64 in &track_inits {
 			let data = base64::engine::general_purpose::STANDARD
 				.decode(init_data_b64)
 				.context("invalid base64 init_data")?;
@@ -99,22 +97,13 @@ impl Fmp4 {
 						}
 					}
 					mp4_atom::Any::Moov(moov) => {
-						// Find matching track_id from our tracks list
-						let export_track = self
-							.tracks
-							.iter()
-							.find(|t| t.name == *name)
-							.context("track not in export list")?;
-
-						for mut trak in moov.trak {
-							// Renumber track_id
-							trak.tkhd.track_id = export_track.track_id;
+						// Preserve original track IDs to match CMAF passthrough fragments
+						for trak in moov.trak {
 							traks.push(trak);
 						}
 
 						if let Some(mvex) = moov.mvex {
-							for mut trex in mvex.trex {
-								trex.track_id = export_track.track_id;
+							for trex in mvex.trex {
 								trexs.push(trex);
 							}
 						}

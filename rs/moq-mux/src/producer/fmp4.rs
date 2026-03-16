@@ -475,6 +475,7 @@ impl Fmp4 {
 			let timescale = trak.mdia.mdhd.timescale as u64;
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
+			let mut track_data_start: Option<usize> = None;
 
 			if traf.trun.is_empty() {
 				anyhow::bail!("missing trun box");
@@ -500,6 +501,11 @@ impl Fmp4 {
 					offset = base_offset
 						.checked_add(relative_offset)
 						.context("invalid data offset: overflow")?;
+				}
+
+				// Capture the actual start offset for this traf before consuming samples
+				if track_data_start.is_none() {
+					track_data_start = Some(offset);
 				}
 
 				for entry in &trun.entries {
@@ -560,7 +566,7 @@ impl Fmp4 {
 			};
 
 			// Compute the data range within the original mdat for this traf's samples.
-			let track_data_start = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
+			let track_data_start = track_data_start.unwrap_or(0);
 			let track_data_end = offset; // offset was advanced past all samples above
 
 			// Adjust the trun data_offset to point into the new per-track mdat.
@@ -577,14 +583,29 @@ impl Fmp4 {
 				&mdat.data[..]
 			};
 
-			// Re-encode moof with corrected data_offset for the per-track fragment
+			// Re-encode moof with corrected per-trun data_offset for the per-track fragment.
+			// Each trun's data_offset points to the start of that run's data within the new mdat.
 			let mdat_header_size_new = 8u64; // 4 bytes size + 4 bytes 'mdat'
+			let mut cumulative_offset = 0u64;
 			for traf_mut in &mut adjusted_moof.traf {
-				for trun_mut in &mut traf_mut.trun {
-					trun_mut.data_offset = Some((new_moof_size as u64 + mdat_header_size_new) as i32);
-				}
 				// Clear base_data_offset since data_offset is now relative to moof start
 				traf_mut.tfhd.base_data_offset = None;
+
+				for trun_mut in &mut traf_mut.trun {
+					trun_mut.data_offset =
+						Some((new_moof_size as u64 + mdat_header_size_new + cumulative_offset) as i32);
+
+					// Advance past this trun's sample data
+					let trun_data_size: u64 = trun_mut
+						.entries
+						.iter()
+						.map(|e| {
+							e.size
+								.unwrap_or(traf_mut.tfhd.default_sample_size.unwrap_or(default_sample_size)) as u64
+						})
+						.sum();
+					cumulative_offset += trun_data_size;
+				}
 			}
 
 			moof_buf.clear();

@@ -107,23 +107,32 @@ impl<F: ContainerFormat> OrderedConsumer<F> {
 				self.current += 1
 			}
 
-			// Loop in ascending order to get the min, avoiding spurious wakeups.
-			let mut min_timestamp = std::time::Duration::MAX;
-			let mut min_idx = None;
+			// Get the current group's min timestamp as the reference for latency comparison.
+			let oldest_timestamp = if let Some(current) = self.pending.front_mut()
+				&& current.info.sequence <= self.current
+			{
+				match current.poll_min_timestamp(waiter, &self.format) {
+					Poll::Ready(Ok(ts)) => Some::<std::time::Duration>(ts.into()),
+					_ => None,
+				}
+			} else {
+				None
+			};
 
+			// Find the first newer group with data (our skip target).
+			let mut min_idx = None;
 			for (i, group) in self.pending.iter_mut().enumerate() {
 				if group.info.sequence <= self.current {
 					continue;
 				}
 
-				if let Poll::Ready(Ok(ts)) = group.poll_min_timestamp(waiter, &self.format) {
-					min_timestamp = min_timestamp.min(ts.into());
+				if let Poll::Ready(Ok(_)) = group.poll_min_timestamp(waiter, &self.format) {
 					min_idx = Some(i);
-					break; // We know future groups won't be older than this.
+					break;
 				}
 			}
 
-			// Loop in descending order to get the max, avoiding spurious wakeups.
+			// Find the max timestamp across all newer groups.
 			let mut max_timestamp = std::time::Duration::ZERO;
 			for group in self.pending.iter_mut().rev() {
 				if group.info.sequence <= self.current {
@@ -136,8 +145,21 @@ impl<F: ContainerFormat> OrderedConsumer<F> {
 				}
 			}
 
+			let should_skip = if min_idx.is_some() {
+				if let Some(oldest) = oldest_timestamp {
+					// Current group is blocking: skip if newer groups exceed latency threshold
+					max_timestamp.saturating_sub(oldest) >= self.max_latency
+				} else {
+					// Sequence gap: current group consumed but next sequence missing.
+					// Only skip if track is fully received (no more groups coming).
+					finished
+				}
+			} else {
+				false
+			};
+
 			if let Some(new_idx) = min_idx
-				&& max_timestamp.saturating_sub(min_timestamp) >= self.max_latency
+				&& should_skip
 			{
 				self.pending.drain(0..new_idx);
 				let new_current = self.pending.front().map(|g| g.info.sequence).unwrap();
@@ -859,7 +881,9 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Legacy, Duration::from_millis(40));
+		// max_latency must exceed (group1_max - group0_min) = 100ms - 0ms = 100ms
+		// to avoid the latency skip and test B-frame timestamp tracking.
+		let mut consumer = OrderedConsumer::new(consumer_track, Legacy, Duration::from_millis(110));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for &timestamp in &[ts(0), ts(66_000), ts(33_000)] {
@@ -1040,6 +1064,65 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(!frames.is_empty());
 		finisher.await.unwrap();
+	}
+
+	/// Regression: a single stalled group with one newer group should trigger
+	/// a latency skip when the timestamp difference exceeds max_latency.
+	/// Previously, the span was computed across newer groups only (zero for one
+	/// group), so the skip never fired.
+	#[tokio::test]
+	async fn single_newer_group_triggers_skip() {
+		tokio::time::pause();
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Legacy, Duration::from_millis(100));
+
+		// Group 0: stalled at ts=0, NOT finished
+		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
+		Frame {
+			timestamp: ts(0),
+			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
+		}
+		.encode(&mut group0)
+		.unwrap();
+
+		// Group 1: finished, 200ms ahead (well beyond 100ms max_latency)
+		write_group(&mut track, 1, &[ts(200_000)]);
+		track.finish().unwrap();
+
+		let finisher = tokio::spawn(async move {
+			tokio::time::sleep(Duration::from_millis(50)).await;
+			group0.finish().unwrap();
+		});
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 2, "Expected group 0 frame + group 1 frame");
+		assert_eq!(frames[0].group, 0);
+		assert_eq!(frames[1].group, 1);
+		finisher.await.unwrap();
+	}
+
+	/// Regression: when the current group is fully consumed and the next sequence
+	/// is missing (gap), the consumer should skip to the next available group
+	/// once the track is fully received, rather than hanging forever.
+	#[tokio::test]
+	async fn single_missing_sequence_near_eof_skips() {
+		tokio::time::pause();
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = track.consume();
+		let mut consumer = OrderedConsumer::new(consumer_track, Legacy, Duration::from_millis(100));
+
+		// Group 0: finished normally
+		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
+		// Group 2: finished (group 1 is missing — sequence gap)
+		write_group(&mut track, 2, &[ts(200_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 3, "Expected group 0 (2 frames) + group 2 (1 frame)");
+		assert_eq!(frames[0].group, 0);
+		assert_eq!(frames[1].group, 0);
+		assert_eq!(frames[2].group, 2);
 	}
 
 	#[tokio::test]
