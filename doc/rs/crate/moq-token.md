@@ -37,6 +37,25 @@ cargo install moq-token-cli
 
 The binary is named `moq-token`.
 
+#### Using Nix
+
+```bash
+# Run directly
+nix run github:moq-dev/moq#moq-token-cli
+
+# Or build and find the binary in ./result/bin/
+nix build github:moq-dev/moq#moq-token-cli
+```
+
+#### Using Docker
+
+```bash
+docker pull kixelated/moq-token-cli
+docker run kixelated/moq-token-cli --key root.jwk generate
+```
+
+Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/kixelated/moq-token-cli).
+
 ## CLI Usage
 
 ### Generate a Key

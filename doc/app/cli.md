@@ -18,8 +18,21 @@ cargo install moq-cli
 ### Using Nix
 
 ```bash
+# Run directly
+nix run github:moq-dev/moq#moq-cli
+
+# Or build and find the binary in ./result/bin/
 nix build github:moq-dev/moq#moq-cli
 ```
+
+### Using Docker
+
+```bash
+docker pull kixelated/moq-cli
+docker run kixelated/moq-cli publish video.mp4 https://relay.example.com/anon/stream
+```
+
+Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/kixelated/moq-cli).
 
 ### From Source
 

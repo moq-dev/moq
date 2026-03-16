@@ -35,7 +35,7 @@ in
     }
   );
 
-  moq-token = craneLib.buildPackage (
+  moq-token-cli = craneLib.buildPackage (
     crateInfo ../rs/moq-token-cli/Cargo.toml
     // {
       src = craneLib.cleanCargoSource ../.;

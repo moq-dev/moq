@@ -88,7 +88,7 @@
               moq-relay
               moq-clock
               moq-cli
-              moq-token
+              moq-token-cli
             ];
           };
 
@@ -97,7 +97,7 @@
             moq-relay
             moq-clock
             moq-cli
-            moq-token
+            moq-token-cli
             ;
         };
 
