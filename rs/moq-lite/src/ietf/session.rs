@@ -187,11 +187,9 @@ async fn run_recv<S: web_transport_trait::Session>(
 	let outer_version = crate::Version::Ietf(version);
 
 	loop {
-		tracing::debug!("run_recv: waiting for uni stream");
 		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
 		let mut reader = Reader::new(recv, outer_version);
 		let kind: u64 = reader.decode_peek().await?;
-		tracing::debug!(kind = format!("0x{:x}", kind), "run_recv: accepted uni stream");
 
 		if kind == setup::SETUP_V17 {
 			// Read the peer's SETUP message.
@@ -200,22 +198,19 @@ async fn run_recv<S: web_transport_trait::Session>(
 			} else {
 				let _client: setup::Client = reader.decode().await?;
 			}
-			tracing::debug!("run_recv: SETUP received, switching to GOAWAY mode");
 
 			// Hand off remaining uni stream acceptance to the subscriber.
 			let sub = subscriber;
 			web_async::spawn(async move {
-				let _ = sub.run().await;
+				if let Err(err) = sub.run().await {
+					tracing::warn!(%err, "subscriber uni-stream handler failed");
+				}
 			});
 
 			// This stream is now the GOAWAY channel — block until GOAWAY or close.
 			return run_goaway(reader.with_version(version)).await;
 		}
 
-		tracing::debug!(
-			kind = format!("0x{:x}", kind),
-			"run_recv: non-SETUP uni stream, dispatching to subscriber"
-		);
 		// Non-SETUP uni stream: dispatch to subscriber for group data.
 		let mut sub = subscriber.clone();
 		web_async::spawn(async move {

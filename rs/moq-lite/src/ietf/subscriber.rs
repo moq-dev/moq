@@ -202,8 +202,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Err(err) => {
 				self.write_error(&mut stream, request_id, 400, &err.to_string()).await?;
-				stream.writer.finish()?;
-				stream.writer.closed().await?;
+				let _ = stream.writer.finish();
+				let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stream.writer.closed()).await;
 				return Ok(());
 			}
 		}
