@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use moq_ffi::origin::*;
 use moq_ffi::producer::*;
+use moq_ffi::session::MoqClient;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -327,4 +328,48 @@ async fn announced_broadcast() {
 
 	// The broadcast consumer should be usable.
 	let _catalog = announcement.broadcast().subscribe_catalog().unwrap();
+}
+
+/// Verify FFI objects work on a thread with no tokio runtime.
+///
+/// If any FFI method (including Drop) forgets to enter the RUNTIME,
+/// the thread panics and `.join().unwrap()` catches it.
+#[test]
+fn without_runtime() {
+	// Use a plain thread — no tokio runtime anywhere.
+	std::thread::spawn(|| {
+		// Create and use FFI origin objects.
+		let origin = MoqOriginProducer::new();
+		let consumer = origin.consume();
+
+		// Publish a broadcast via FFI.
+		let broadcast = MoqBroadcastProducer::new().unwrap();
+		let init = opus_head();
+		let media = broadcast.publish_media("opus".into(), init).unwrap();
+		media.write_frame(b"hello".to_vec(), 1000).unwrap();
+		origin.publish("test".into(), &broadcast).unwrap();
+
+		// Subscribe to announcements via FFI.
+		let announced = consumer.announced("".into()).unwrap();
+		let announcement = pollster::block_on(announced.next()).unwrap().unwrap();
+		assert_eq!(announcement.path(), "test");
+		let _bc = announcement.broadcast();
+
+		// Create a client (but don't connect — that needs a server).
+		let client = MoqClient::new();
+		client.set_tls_disable_verify(true);
+		client.set_consume(Some(origin));
+
+		// Cancel and drop everything — no runtime on this thread.
+		announced.cancel();
+		client.cancel();
+		media.finish().unwrap();
+		broadcast.finish().unwrap();
+		drop(client);
+		drop(consumer);
+		drop(announcement);
+		drop(announced);
+	})
+	.join()
+	.expect("client thread panicked — FFI method missing runtime guard");
 }

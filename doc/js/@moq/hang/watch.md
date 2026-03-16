@@ -35,52 +35,23 @@ The simplest way to watch a stream:
 | `muted` | boolean | false | Mute audio |
 | `volume` | number | 1 | Audio volume (0-1) |
 
-### Events
-
-```typescript
-const watch = document.querySelector("moq-watch") as MoqWatch;
-
-watch.addEventListener("play", () => {
-    console.log("Playback started");
-});
-
-watch.addEventListener("pause", () => {
-    console.log("Playback paused");
-});
-
-watch.addEventListener("error", (e) => {
-    console.error("Error:", e.detail);
-});
-```
-
 ## JavaScript API
 
-For more control:
+For more control, use `@moq/watch` directly:
 
 ```typescript
-import * as Hang from "@moq/hang";
+import * as Moq from "@moq/lite";
+import * as Watch from "@moq/watch";
 
-const connection = new Hang.Connection("https://relay.example.com/anon");
+const connection = await Moq.Connection.connect(
+    new URL("https://relay.example.com/anon")
+);
 
-const watch = new Hang.Watch.Broadcast(connection, {
+const watch = new Watch.Broadcast({
+    connection,
     enabled: true,
     name: "alice",
-    video: { enabled: true },
-    audio: { enabled: true },
-});
-
-// Access the video stream
-watch.video.media.subscribe((stream) => {
-    if (stream) {
-        videoElement.srcObject = stream;
-    }
-});
-
-// Access audio
-watch.audio.media.subscribe((stream) => {
-    if (stream) {
-        audioElement.srcObject = stream;
-    }
+    reload: true,
 });
 ```
 
@@ -92,146 +63,19 @@ watch.audio.media.subscribe((stream) => {
 // Using attribute
 watch.setAttribute("paused", "");
 watch.removeAttribute("paused");
-
-// Using JavaScript property
-watch.paused.set(true);
-watch.paused.set(false);
 ```
 
-### Volume Control
+### Volume Control (Web Component)
 
 ```typescript
+const el = document.querySelector("moq-watch");
+
 // Set volume (0-1)
-watch.volume.set(0.5);
+el.setAttribute("volume", "0.5");
 
 // Mute/unmute
-watch.muted.set(true);
-watch.muted.set(false);
-```
-
-### Playback State
-
-```typescript
-// Subscribe to state changes
-watch.paused.subscribe((isPaused) => {
-    console.log("Paused:", isPaused);
-});
-
-watch.volume.subscribe((vol) => {
-    console.log("Volume:", vol);
-});
-```
-
-## Track Selection
-
-When a broadcast has multiple tracks (e.g., multiple quality levels):
-
-```typescript
-const watch = new Hang.Watch.Broadcast(connection, {
-    name: "stream",
-    video: {
-        enabled: true,
-        // Optionally specify track name
-        track: "video-720p",
-    },
-});
-
-// Switch tracks
-watch.video.track.set("video-1080p");
-```
-
-## Quality Selection
-
-Access track information from the catalog:
-
-```typescript
-// Subscribe to catalog updates
-watch.catalog.subscribe((catalog) => {
-    if (catalog) {
-        console.log("Available tracks:", catalog.tracks);
-
-        // Find video tracks
-        const videoTracks = catalog.tracks.filter(t => t.kind === "video");
-        console.log("Video qualities:", videoTracks.map(t => ({
-            name: t.name,
-            width: t.width,
-            height: t.height,
-            bitrate: t.bitrate,
-        })));
-    }
-});
-```
-
-## Buffering and Latency
-
-Monitor connection status:
-
-```typescript
-// Check connection state
-watch.connection.state.subscribe((state) => {
-    console.log("Connection state:", state);
-});
-
-// Monitor for buffering
-watch.video.buffering.subscribe((isBuffering) => {
-    if (isBuffering) {
-        showLoadingSpinner();
-    } else {
-        hideLoadingSpinner();
-    }
-});
-```
-
-## Error Handling
-
-```typescript
-watch.error.subscribe((error) => {
-    if (error) {
-        console.error("Watch error:", error);
-
-        // Handle specific errors
-        if (error.code === "NOT_FOUND") {
-            showMessage("Stream not found");
-        } else if (error.code === "PERMISSION_DENIED") {
-            showMessage("Access denied");
-        }
-    }
-});
-```
-
-## React Integration
-
-```tsx
-import { useEffect, useRef } from "react";
-import "@moq/watch/element";
-import MoqWatch from "@moq/watch/element";
-
-function VideoPlayer({ url, name }) {
-    const watchRef = useRef<MoqWatch>(null);
-
-    useEffect(() => {
-        const watch = watchRef.current;
-        if (!watch) return;
-
-        // Subscribe to events
-        const handleError = (e) => console.error(e.detail);
-        watch.addEventListener("error", handleError);
-
-        return () => {
-            watch.removeEventListener("error", handleError);
-        };
-    }, []);
-
-    return (
-        <moq-watch
-            ref={watchRef}
-            url={url}
-            name={name}
-            controls>
-            <canvas style={{ width: "100%" }} />
-        </moq-watch>
-    );
-}
+el.setAttribute("muted", "");
+el.removeAttribute("muted");
 ```
 
 ## SolidJS Integration
