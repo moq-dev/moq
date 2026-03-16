@@ -19,7 +19,9 @@ pub fn start<S: web_transport_trait::Session>(
 	web_async::spawn(async move {
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				let setup = setup.expect("setup stream required for v14-16");
+				let Some(setup) = setup else {
+					return session.close(Error::ProtocolViolation.to_code(), "setup stream required");
+				};
 				let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), tx, control.clone(), version);
@@ -54,7 +56,7 @@ pub fn start<S: web_transport_trait::Session>(
 					} => Err(err),
 				}
 			}
-			Version::Draft17 => {
+			_ => {
 				// Spawn SETUP sender (keeps stream alive for GOAWAY).
 				web_async::spawn({
 					let session = session.clone();
