@@ -35,4 +35,5 @@ url = "2"
 uniffi = { version = "0.31", features = ["build"] }
 
 [dev-dependencies]
+pollster = "0.4"
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
