@@ -1,7 +1,7 @@
 # Interoperability
 Want to test some standards against this code?
 
-It's recommended that you run the code locally for easier debugging. See the [Setup Guide](/dev/setup), it's pretty easy.
+It's recommended that you run the code locally for easier debugging. See the [Setup Guide](/setup/dev), it's pretty easy.
 
 ## Transport
 [moq-lite](/concept/layer/moq-lite) is a forwards-compatible subset of moq-transport.
@@ -29,6 +29,8 @@ just pub bbb https://<your relay>
 # Javascript: Subscribes to a media broadcast
 just web https://<your relay>
 ```
+
+> **Note:** WebTransport automatically prepends the URL path (e.g., `/anon`) to broadcast names. Raw QUIC and iroh have no HTTP layer, so you must manually include that prefix in the broadcast name (e.g., publish as `/anon/bbb`).
 
 The publisher sends a `PUBLISH_NAMESPACE` and the subscriber **requires** a `SUBSCRIBE_NAMESPACE`.
 If you haven't implemented the latter yet, remove `reload` in `js/demo/src/index.html`.

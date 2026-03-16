@@ -38,8 +38,8 @@ It's gross but required for web browsers, so we suck it up.
 
 Here's a list of currently supported ALPNs:
 - `moql`: moq-lite, the version is negotiated via `SETUP`.
-- `moql-03`: moq-lite draft 3
-- `moqt-00`: moq-transport draft <15, the version is negotiated via `SETUP`.
+- `moq-lite-03`: moq-lite draft 3
+- `moq-00`: moq-transport draft 14, the version is negotiated via `SETUP`.
 - `moqt-15`: moq-transport draft 15
 - `moqt-16`: moq-transport draft 16
 - `moqt-17`: moq-transport draft 17

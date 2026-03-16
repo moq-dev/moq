@@ -1,5 +1,5 @@
 ---
 title: CMAF
-description: The MP4 thing
+description: Common Media Application Format (CMAF) for streaming media
 ---
 TODO
