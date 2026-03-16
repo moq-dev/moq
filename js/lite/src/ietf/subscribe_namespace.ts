@@ -37,7 +37,7 @@ export class SubscribeNamespace {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			await w.u53(this.subscribeOptions);
 		}
-		// v14/v15 use SETUP-level Parameters (no count); v16+ (including draft-17) use MessageParameters (count-prefixed).
+		// v14/v15 use SETUP-style Parameters; v16+ use MessageParameters (delta-encoded keys).
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
 			await new Parameters().encode(w, version);
 		} else {
@@ -63,7 +63,7 @@ export class SubscribeNamespace {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			subscribeOptions = await r.u53();
 		}
-		// v14/v15 use SETUP-level Parameters; v16+ use MessageParameters (always has count).
+		// v14/v15 use SETUP-style Parameters; v16+ use MessageParameters (delta-encoded keys).
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
 			await Parameters.decode(r, version);
 		} else {
