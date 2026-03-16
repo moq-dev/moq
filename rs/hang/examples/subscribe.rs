@@ -77,7 +77,8 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	};
 
 	let track_consumer = broadcast.subscribe_track(&track)?;
-	let mut ordered = hang::container::OrderedConsumer::new(track_consumer, Duration::from_millis(500));
+	let mut ordered =
+		moq_mux::consumer::OrderedConsumer::new(track_consumer, moq_mux::consumer::Legacy, Duration::from_millis(500));
 
 	// Read frames in presentation order.
 	while let Some(frame) = ordered.read().await? {

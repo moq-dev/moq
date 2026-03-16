@@ -2,8 +2,9 @@ use anyhow::Context;
 use base64::Engine;
 use bytes::Bytes;
 use hang::catalog::{Catalog, Container, VideoConfig};
-use hang::container::OrderedFrame;
 use mp4_atom::{DecodeMaybe, Encode};
+
+use super::OrderedFrame;
 
 /// Produces fMP4 init segments and per-frame moof+mdat fragments from catalog info.
 ///
@@ -21,17 +22,7 @@ struct Fmp4ExportTrack {
 
 impl Fmp4 {
 	/// Build from catalog configuration.
-	///
-	/// Currently only supports single-track exports. Multi-track fMP4 requires
-	/// merging moov atoms which is not yet implemented.
 	pub fn new(catalog: &Catalog) -> anyhow::Result<Self> {
-		let total_tracks = catalog.video.renditions.len() + catalog.audio.renditions.len();
-		anyhow::ensure!(
-			total_tracks <= 1,
-			"multi-track fMP4 export is not yet supported ({total_tracks} tracks); \
-			 init segment merging is required for multi-track moov construction"
-		);
-
 		let mut tracks = Vec::new();
 		let mut track_id = 1u32;
 
@@ -70,31 +61,94 @@ impl Fmp4 {
 
 	/// Generate the init segment (ftyp + moov) for all tracks.
 	///
-	/// For CMAF tracks, the init data is already in the catalog; for multi-track
-	/// output we'd need to merge them. For now, returns the first track's init data
-	/// if all tracks are CMAF, or builds one from scratch.
+	/// For multi-track output, decodes each track's init_data, extracts trak+trex,
+	/// and builds a merged ftyp+moov with renumbered track IDs.
 	pub fn init(&self, catalog: &Catalog) -> anyhow::Result<Bytes> {
-		// For single-track CMAF, just decode and return the init data
-		// For multi-track, we'd need to merge moov atoms (complex, deferred)
-		// For now, find the first CMAF track and use its init data
-		for config in catalog.video.renditions.values() {
-			if let Container::Cmaf { init_data } = &config.container {
-				let data = base64::engine::general_purpose::STANDARD
-					.decode(init_data)
-					.context("invalid base64 init_data")?;
-				return Ok(Bytes::from(data));
+		// Encode trait is already imported at the module level
+
+		let mut traks = Vec::new();
+		let mut trexs = Vec::new();
+		let mut ftyp_data = None;
+
+		// Collect all track names and their init data
+		let mut track_inits: Vec<(&str, &str)> = Vec::new();
+		for (name, config) in &catalog.video.renditions {
+			match &config.container {
+				Container::Cmaf { init_data } => track_inits.push((name, init_data)),
+				Container::Legacy => anyhow::bail!("track {name} is not CMAF"),
 			}
 		}
-		for config in catalog.audio.renditions.values() {
-			if let Container::Cmaf { init_data } = &config.container {
-				let data = base64::engine::general_purpose::STANDARD
-					.decode(init_data)
-					.context("invalid base64 init_data")?;
-				return Ok(Bytes::from(data));
+		for (name, config) in &catalog.audio.renditions {
+			match &config.container {
+				Container::Cmaf { init_data } => track_inits.push((name, init_data)),
+				Container::Legacy => anyhow::bail!("track {name} is not CMAF"),
 			}
 		}
 
-		anyhow::bail!("no CMAF tracks found in catalog")
+		for (name, init_data_b64) in &track_inits {
+			let data = base64::engine::general_purpose::STANDARD
+				.decode(init_data_b64)
+				.context("invalid base64 init_data")?;
+
+			let mut cursor = std::io::Cursor::new(&data);
+			while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
+				match atom {
+					mp4_atom::Any::Ftyp(f) => {
+						if ftyp_data.is_none() {
+							ftyp_data = Some(f);
+						}
+					}
+					mp4_atom::Any::Moov(moov) => {
+						// Find matching track_id from our tracks list
+						let export_track = self
+							.tracks
+							.iter()
+							.find(|t| t.name == *name)
+							.context("track not in export list")?;
+
+						for mut trak in moov.trak {
+							// Renumber track_id
+							trak.tkhd.track_id = export_track.track_id;
+							traks.push(trak);
+						}
+
+						if let Some(mvex) = moov.mvex {
+							for mut trex in mvex.trex {
+								trex.track_id = export_track.track_id;
+								trexs.push(trex);
+							}
+						}
+					}
+					_ => {}
+				}
+			}
+		}
+
+		let ftyp = ftyp_data.context("no ftyp found in any init segment")?;
+
+		let timescale = traks.first().map(|t| t.mdia.mdhd.timescale).unwrap_or(90000);
+
+		let moov = mp4_atom::Moov {
+			mvhd: mp4_atom::Mvhd {
+				timescale,
+				..Default::default()
+			},
+			trak: traks,
+			mvex: if trexs.is_empty() {
+				None
+			} else {
+				Some(mp4_atom::Mvex {
+					trex: trexs,
+					..Default::default()
+				})
+			},
+			..Default::default()
+		};
+
+		let mut buf = Vec::new();
+		ftyp.encode(&mut buf)?;
+		moov.encode(&mut buf)?;
+		Ok(Bytes::from(buf))
 	}
 
 	/// Encode a single frame as a moof+mdat fragment.

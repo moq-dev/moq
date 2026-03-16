@@ -1,6 +1,6 @@
 use clap::ValueEnum;
 use hang::moq_lite;
-use moq_mux::import;
+use moq_mux::producer;
 
 #[derive(ValueEnum, Clone, Copy)]
 pub enum InputFormat {
@@ -27,8 +27,8 @@ pub struct PublishArgs {
 }
 
 enum PublishDecoder {
-	Avc3(Box<import::Avc3>),
-	Fmp4(Box<import::Fmp4>),
+	Avc3(Box<producer::Avc3>),
+	Fmp4(Box<producer::Fmp4>),
 }
 
 pub struct Publish {
@@ -47,11 +47,11 @@ impl Publish {
 
 		let decoder = match args.input {
 			InputFormat::Avc3 => {
-				let avc3 = import::Avc3::new(broadcast.clone(), catalog.clone());
+				let avc3 = producer::Avc3::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
 			InputFormat::Fmp4 => {
-				let fmp4 = import::Fmp4::new(broadcast.clone(), catalog.clone());
+				let fmp4 = producer::Fmp4::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 		};

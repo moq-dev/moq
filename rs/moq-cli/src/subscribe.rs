@@ -45,14 +45,6 @@ impl Subscribe {
 		let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
 		let catalog = catalog_consumer.next().await?.context("empty catalog")?;
 
-		// Reject multi-track catalogs until concurrent multiplexing is implemented
-		let total_tracks = catalog.video.renditions.len() + catalog.audio.renditions.len();
-		anyhow::ensure!(
-			total_tracks <= 1,
-			"multi-track fMP4 export is not yet supported ({total_tracks} tracks found); \
-			 concurrent track multiplexing to stdout requires interleaving which is not implemented"
-		);
-
 		// Check if we need to convert to CMAF first
 		let needs_convert = catalog
 			.video
@@ -75,17 +67,16 @@ impl Subscribe {
 			(self.broadcast, catalog)
 		};
 
-		// Build exporter from catalog
-		let mut exporter = moq_mux::export::Fmp4::new(&catalog)?;
+		// Build exporter from catalog (for init segment)
+		let exporter = moq_mux::consumer::Fmp4::new(&catalog)?;
 
-		// Write init segment
+		// Write init segment (merged multi-track moov)
 		let init = exporter.init(&catalog)?;
 		stdout.write_all(&init).await?;
 		stdout.flush().await?;
 
-		// For each track, create an OrderedConsumer and stream frames
-		// For simplicity, handle single video + single audio track
-		let mut consumers = Vec::new();
+		// Build OrderedMuxer from all track consumers (all CMAF after conversion)
+		let mut muxer_tracks = Vec::new();
 
 		for (name, config) in &catalog.video.renditions {
 			let track = broadcast.subscribe_track(&moq_lite::Track {
@@ -93,15 +84,16 @@ impl Subscribe {
 				priority: 1,
 			})?;
 
-			match &config.container {
-				hang::catalog::Container::Cmaf { .. } => {
-					// CMAF frames are already moof+mdat, write directly
-					consumers.push((name.clone(), track, true));
-				}
+			let timescale = match &config.container {
+				hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
 				hang::catalog::Container::Legacy => {
-					consumers.push((name.clone(), track, false));
+					anyhow::bail!("unexpected Legacy track after conversion")
 				}
-			}
+			};
+
+			let consumer =
+				moq_mux::consumer::OrderedConsumer::new(track, moq_mux::consumer::Cmaf { timescale }, max_latency);
+			muxer_tracks.push((name.clone(), consumer));
 		}
 
 		for (name, config) in &catalog.audio.renditions {
@@ -110,49 +102,47 @@ impl Subscribe {
 				priority: 2,
 			})?;
 
-			match &config.container {
-				hang::catalog::Container::Cmaf { .. } => {
-					consumers.push((name.clone(), track, true));
-				}
+			let timescale = match &config.container {
+				hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
 				hang::catalog::Container::Legacy => {
-					consumers.push((name.clone(), track, false));
+					anyhow::bail!("unexpected Legacy track after conversion")
 				}
-			}
+			};
+
+			let consumer =
+				moq_mux::consumer::OrderedConsumer::new(track, moq_mux::consumer::Cmaf { timescale }, max_latency);
+			muxer_tracks.push((name.clone(), consumer));
 		}
 
-		// Simple single-track streaming for now
-		// TODO: multiplex multiple tracks
-		for (name, track, is_cmaf) in consumers {
-			if is_cmaf {
-				// CMAF passthrough: frames are already moof+mdat
-				// For CMAF, the frames are raw moof+mdat, not hang-encoded.
-				// OrderedConsumer expects hang timestamp prefix, so we read raw instead.
+		// Use OrderedMuxer for timestamp-ordered multi-track merge
+		let mut muxer = moq_mux::consumer::OrderedMuxer::new(muxer_tracks);
 
-				// Re-subscribe for raw access
-				let track = broadcast.subscribe_track(&moq_lite::Track {
-					name: name.clone(),
-					priority: 1,
-				})?;
-
-				let mut track = track;
-				while let Some(group) = track.next_group().await? {
-					let mut reader = group;
-					while let Some(data) = reader.read_frame().await? {
-						stdout.write_all(&data).await?;
-						stdout.flush().await?;
-					}
-				}
-			} else {
-				// Legacy: use OrderedConsumer + exporter
-				let mut consumer = hang::container::OrderedConsumer::new(track, max_latency);
-				while let Some(frame) = consumer.read().await? {
-					let data = exporter.frame(&name, &frame)?;
-					stdout.write_all(&data).await?;
-					stdout.flush().await?;
-				}
+		while let Some(muxed) = muxer.read().await? {
+			// CMAF passthrough: payload is already moof+mdat
+			for chunk in &muxed.frame.payload {
+				stdout.write_all(chunk).await?;
 			}
+			stdout.flush().await?;
 		}
 
 		Ok(())
 	}
+}
+
+fn parse_timescale_from_init(init_data_b64: &str) -> anyhow::Result<u64> {
+	use anyhow::Context;
+	use base64::Engine;
+	use mp4_atom::DecodeMaybe;
+
+	let data = base64::engine::general_purpose::STANDARD
+		.decode(init_data_b64)
+		.context("invalid base64")?;
+	let mut cursor = std::io::Cursor::new(&data);
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			let trak = moov.trak.first().context("no tracks in moov")?;
+			return Ok(trak.mdia.mdhd.timescale as u64);
+		}
+	}
+	anyhow::bail!("no moov in init data")
 }
