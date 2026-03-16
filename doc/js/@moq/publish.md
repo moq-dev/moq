@@ -68,7 +68,8 @@ The `<moq-publish-ui>` element automatically discovers the nested `<moq-publish>
 ```typescript
 import * as Publish from "@moq/publish";
 
-const broadcast = new Publish.Broadcast(connection, {
+const broadcast = new Publish.Broadcast({
+    connection,
     enabled: true,
     name: "alice",
     video: { enabled: true, device: "camera" },

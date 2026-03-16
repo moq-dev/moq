@@ -32,7 +32,9 @@ yarn add @moq/lite
 import * as Moq from "@moq/lite";
 
 // Connect to a MoQ relay server
-const connection = await Moq.connect("https://relay.example.com/anon");
+const connection = await Moq.Connection.connect(
+    new URL("https://relay.example.com/anon")
+);
 console.log("Connected to MoQ relay!");
 ```
 
@@ -41,13 +43,15 @@ console.log("Connected to MoQ relay!");
 ```typescript
 import * as Moq from "@moq/lite";
 
-const connection = await Moq.connect("https://relay.example.com/anon");
+const connection = await Moq.Connection.connect(
+    new URL("https://relay.example.com/anon")
+);
 
 // Create a broadcast
-const broadcast = new Moq.BroadcastProducer();
+const broadcast = new Moq.Broadcast();
 
-// Create a track
-const track = broadcast.createTrack("chat");
+// Subscribe to a track (creates it for writing)
+const track = broadcast.subscribe("chat", 0);
 
 // Send data in groups
 const group = track.appendGroup();
@@ -55,7 +59,7 @@ group.writeString("Hello, MoQ!");
 group.close();
 
 // Publish to the relay
-connection.publish("my-broadcast", broadcast.consume());
+connection.publish("my-broadcast", broadcast);
 ```
 
 ### Subscribing to Data
@@ -63,24 +67,29 @@ connection.publish("my-broadcast", broadcast.consume());
 ```typescript
 import * as Moq from "@moq/lite";
 
-const connection = await Moq.connect("https://relay.example.com/anon");
+const connection = await Moq.Connection.connect(
+    new URL("https://relay.example.com/anon")
+);
 
 // Subscribe to a broadcast
 const broadcast = connection.consume("my-broadcast");
 
-// Subscribe to a track
-const track = await broadcast.subscribe("chat");
+// Wait for a track request
+const request = await broadcast.requested();
+if (request) {
+    const track = request.track;
 
-// Read data as it arrives
-for (;;) {
-    const group = await track.nextGroup();
-    if (!group) break;
-
+    // Read data as it arrives
     for (;;) {
-        const frame = await group.readString();
-        if (!frame) break;
+        const group = await track.nextGroup();
+        if (!group) break;
 
-        console.log("Received:", frame);
+        for (;;) {
+            const frame = await group.readString();
+            if (!frame) break;
+
+            console.log("Received:", frame);
+        }
     }
 }
 ```
@@ -90,18 +99,23 @@ for (;;) {
 ```typescript
 import * as Moq from "@moq/lite";
 
-const connection = await Moq.connect("https://relay.example.com/anon");
+const connection = await Moq.Connection.connect(
+    new URL("https://relay.example.com/anon")
+);
 
 // Discover broadcasts announced by the server
-let announcement = await connection.announced();
-while (announcement) {
-    console.log("New stream available:", announcement.name);
+const announced = connection.announced();
+for (;;) {
+    const entry = await announced.next();
+    if (!entry) break;
 
-    // Subscribe to the broadcast
-    const broadcast = connection.consume(announcement.name);
-    // ... handle the broadcast
+    console.log("Broadcast:", entry.path, entry.active ? "online" : "offline");
 
-    announcement = await connection.announced();
+    if (entry.active) {
+        // Subscribe to the broadcast
+        const broadcast = connection.consume(entry.path);
+        // ... handle the broadcast
+    }
 }
 ```
 
@@ -112,15 +126,15 @@ while (announcement) {
 A collection of related tracks:
 
 ```typescript
-const broadcast = new Moq.BroadcastProducer();
+const broadcast = new Moq.Broadcast();
 ```
 
 ### Tracks
 
-Named streams within a broadcast:
+Named streams within a broadcast, created via `subscribe`:
 
 ```typescript
-const track = broadcast.createTrack("video");
+const track = broadcast.subscribe("video", 0);
 ```
 
 ### Groups
@@ -129,7 +143,7 @@ Collections of frames (usually aligned with keyframes):
 
 ```typescript
 const group = track.appendGroup();
-group.write(frameData);
+group.writeFrame(frameData);
 group.close();
 ```
 
@@ -139,7 +153,7 @@ Individual data chunks:
 
 ```typescript
 // Write raw bytes
-group.write(new Uint8Array([1, 2, 3]));
+group.writeFrame(new Uint8Array([1, 2, 3]));
 
 // Write string (convenience method)
 group.writeString("Hello!");
@@ -152,8 +166,8 @@ group.writeString("Hello!");
 Pass JWT tokens via query parameters:
 
 ```typescript
-const connection = await Moq.connect(
-    `https://relay.example.com/room/123?jwt=${token}`
+const connection = await Moq.Connection.connect(
+    new URL(`https://relay.example.com/room/123?jwt=${token}`)
 );
 ```
 
@@ -161,40 +175,10 @@ See [Authentication guide](/app/relay/auth) for details.
 
 ### Priority
 
-Set priority for groups:
+Set priority when subscribing to a track:
 
 ```typescript
-const group = track.appendGroup();
-group.priority = 10; // Higher priority
-group.write(keyframeData);
-```
-
-### Error Handling
-
-```typescript
-try {
-    await connection.publish("my-broadcast", broadcast.consume());
-} catch (error) {
-    if (error instanceof Moq.ConnectionClosedError) {
-        console.error("Connection closed");
-    } else if (error instanceof Moq.InvalidPathError) {
-        console.error("Invalid path:", error.path);
-    } else {
-        console.error("Unexpected error:", error);
-    }
-}
-```
-
-### Closing Connections
-
-```typescript
-// Close when done
-await connection.close();
-
-// Or handle connection close events
-connection.addEventListener("close", () => {
-    console.log("Connection closed");
-});
+const track = broadcast.subscribe("video", 10); // Higher priority
 ```
 
 ## Running Server-Side
@@ -208,7 +192,9 @@ globalThis.WebTransport = WebTransport;
 import * as Moq from "@moq/lite";
 
 await quicheLoaded;
-const connection = await Moq.connect("https://relay.example.com/anon");
+const connection = await Moq.Connection.connect(
+    new URL("https://relay.example.com/anon")
+);
 // Same API as browser
 ```
 
@@ -217,11 +203,10 @@ const connection = await Moq.connect("https://relay.example.com/anon");
 Full TypeScript support with type definitions:
 
 ```typescript
-import type { Connection, BroadcastProducer, Track } from "@moq/lite";
+import type { Broadcast, Track } from "@moq/lite";
 
-const connection: Connection = await Moq.connect("...");
-const broadcast: BroadcastProducer = new Moq.BroadcastProducer();
-const track: Track = broadcast.createTrack("video");
+const broadcast: Broadcast = new Moq.Broadcast();
+const track: Track = broadcast.subscribe("video", 0);
 ```
 
 ## Browser Compatibility
