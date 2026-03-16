@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AuthConfig, ClusterConfig, WebConfig};
 
+/// Top-level relay configuration, loadable from CLI arguments, environment
+/// variables, or a TOML file.
 #[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
@@ -48,6 +50,8 @@ pub struct Config {
 }
 
 impl Config {
+	/// Parses configuration from CLI arguments, optionally merging with a
+	/// TOML file specified via `--file`. Also initializes the logger.
 	pub fn load() -> anyhow::Result<Self> {
 		// Parse just the CLI arguments initially.
 		let mut config = Config::parse();
