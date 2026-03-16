@@ -124,10 +124,13 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 			})(),
 		]);
 
-		// Construct a synthetic bidi Stream from the two uni streams for GoAway
+		// Construct a synthetic bidi Stream from the two uni streams for GoAway.
+		// Pass existing Writer/Reader to avoid double-locking the streams.
 		const controlStream = new Stream({
 			writable: sendWriter.writable,
 			readable: recvReader.readable,
+			writer: sendWriter.writer,
+			reader: recvReader.reader,
 		});
 
 		console.debug(url.toString(), "moq-ietf draft-17 session established");
@@ -135,6 +138,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 			url,
 			quic: session as WebTransport,
 			control: controlStream,
+			// v17 uses NativeSession which manages its own request IDs; maxRequestId is unused.
 			maxRequestId: 0n,
 			version: Ietf.Version.DRAFT_17,
 		});
@@ -258,6 +262,7 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 			url,
 			quic: session,
 			control: controlStream,
+			// v17 uses NativeSession which manages its own request IDs; maxRequestId is unused.
 			maxRequestId: 0n,
 			version: Ietf.Version.DRAFT_17,
 		});

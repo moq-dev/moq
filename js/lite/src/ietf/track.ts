@@ -28,7 +28,7 @@ export class TrackStatusRequest {
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
 		if (version === Version.DRAFT_17) {
-			await w.u62(0n); // required_request_id_delta
+			await w.u62(0n); // required_request_id_delta — always 0, not supported
 		}
 		await Namespace.encode(w, this.trackNamespace);
 		await w.string(this.trackName);

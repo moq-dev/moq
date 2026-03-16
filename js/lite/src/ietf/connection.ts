@@ -170,9 +170,8 @@ export class Connection implements Established {
 
 		switch (typeId) {
 			case SubscribeUpdate.id: {
-				// REQUEST_UPDATE (0x02) — follow-up on existing SUBSCRIBE stream
-				console.warn("received REQUEST_UPDATE, ignoring");
-				stream.close();
+				// REQUEST_UPDATE (0x02) is a follow-up, not a valid initial message
+				stream.abort(new Error("unexpected REQUEST_UPDATE as initial message"));
 				break;
 			}
 			// Publisher handles incoming requests

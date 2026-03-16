@@ -80,6 +80,7 @@ async function acceptDraft17(transport: WebTransport, url: URL): Promise<Establi
 		url,
 		quic: transport,
 		control: controlStream,
+		// v17 uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
 		version: Ietf.Version.DRAFT_17,
 	});

@@ -21,9 +21,11 @@ export class Stream {
 	constructor(props: {
 		writable: WritableStream<Uint8Array>;
 		readable: ReadableStream<Uint8Array>;
+		writer?: Writer;
+		reader?: Reader;
 	}) {
-		this.writer = new Writer(props.writable);
-		this.reader = new Reader(props.readable);
+		this.writer = props.writer ?? new Writer(props.writable);
+		this.reader = props.reader ?? new Reader(props.readable);
 	}
 
 	static async accept(quic: WebTransport): Promise<Stream | undefined> {
