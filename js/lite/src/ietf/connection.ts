@@ -2,32 +2,17 @@ import type { Announced } from "../announced.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
-import { type Reader, Readers, Stream } from "../stream.ts";
-import { unreachable } from "../util/index.ts";
-import * as Control from "./control.ts";
-import { Fetch, FetchCancel, FetchError, FetchOk } from "./fetch.ts";
+import { type Reader, Readers, type Stream } from "../stream.ts";
+import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import { GoAway } from "./goaway.ts";
 import { Group } from "./object.ts";
-import { Publish, PublishDone, PublishError, PublishOk } from "./publish.ts";
-import {
-	PublishNamespace,
-	PublishNamespaceCancel,
-	PublishNamespaceDone,
-	PublishNamespaceError,
-	PublishNamespaceOk,
-} from "./publish_namespace.ts";
+import { Publish } from "./publish.ts";
+import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
-import { MaxRequestId, RequestError, RequestOk, RequestsBlocked } from "./request.ts";
-import * as Setup from "./setup.ts";
-import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
-import {
-	SubscribeNamespace,
-	SubscribeNamespaceError,
-	SubscribeNamespaceOk,
-	UnsubscribeNamespace,
-} from "./subscribe_namespace.ts";
+import { Subscribe } from "./subscribe.ts";
+import { SubscribeNamespace } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
-import { TrackStatus, TrackStatusRequest } from "./track.ts";
+import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
@@ -42,8 +27,8 @@ export class Connection implements Established {
 	// The established WebTransport session.
 	#quic: WebTransport;
 
-	// The single bidirectional control stream for control messages
-	#control: Control.Stream;
+	// Session abstraction: adapter for v14-v16, native for v17.
+	#session: Session;
 
 	// Module for contributing tracks.
 	#publisher: Publisher;
@@ -58,7 +43,7 @@ export class Connection implements Established {
 	 * Creates a new Connection instance.
 	 * @param url - The URL of the connection
 	 * @param quic - The WebTransport session
-	 * @param controlStream - The control stream
+	 * @param control - The control/setup stream
 	 * @param maxRequestId - The initial max request ID
 	 * @param version - The negotiated protocol version
 	 *
@@ -79,14 +64,24 @@ export class Connection implements Established {
 	}) {
 		this.url = url;
 		this.#quic = quic;
-		this.#control = new Control.Stream({ stream: control, maxRequestId, version });
 
-		this.#quic.closed.finally(() => {
-			this.#control.close();
-		});
+		// Two-path dispatch: v14-v16 uses adapter, v17 uses native bidi streams
+		if (version === Version.DRAFT_17) {
+			this.#session = new NativeSession(quic, version);
+			// v17: control/setup stream only carries GoAway
+			void this.#runGoAway(control);
+		} else {
+			const adapter = new ControlStreamAdapter(quic, control, version, maxRequestId);
+			this.#session = adapter;
+			// Start the adapter read loop (routes control messages to virtual streams)
+			void adapter.run().catch((err: unknown) => {
+				if (!this.#closed) console.error("adapter error", err);
+				this.close();
+			});
+		}
 
-		this.#publisher = new Publisher({ quic: this.#quic, control: this.#control });
-		this.#subscriber = new Subscriber({ control: this.#control, quic: this.#quic });
+		this.#publisher = new Publisher(this.#quic, this.#session);
+		this.#subscriber = new Subscriber(this.#session);
 
 		void this.#run();
 	}
@@ -99,6 +94,8 @@ export class Connection implements Established {
 
 		this.#closed = true;
 
+		this.#session.close?.();
+
 		try {
 			this.#quic.close();
 		} catch {
@@ -107,15 +104,8 @@ export class Connection implements Established {
 	}
 
 	async #run(): Promise<void> {
-		const tasks: Promise<void>[] = [this.#runControlStream(), this.#runObjectStreams()];
-
-		// v16+: accept bidi streams for SUBSCRIBE_NAMESPACE
-		if (this.#control.version === Version.DRAFT_16 || this.#control.version === Version.DRAFT_17) {
-			tasks.push(this.#runBidiStreams());
-		}
-
 		try {
-			await Promise.all(tasks);
+			await Promise.all([this.#runBidis(), this.#runUnis()]);
 		} catch (err) {
 			if (!this.#closed) {
 				console.error("fatal error running connection", err);
@@ -137,7 +127,7 @@ export class Connection implements Established {
 	/**
 	 * Gets an announced reader for the specified prefix.
 	 * @param prefix - The prefix for announcements
-	 * @returns An AnnounceConsumer instance
+	 * @returns An Announced instance
 	 */
 	announced(prefix = Path.empty()): Announced {
 		return this.#subscriber.announced(prefix);
@@ -157,136 +147,74 @@ export class Connection implements Established {
 	}
 
 	/**
-	 * Handles control messages on the single bidirectional control stream.
+	 * Accepts bidi streams (virtual for v14-v16, real for v17) and dispatches.
 	 */
-	async #runControlStream() {
+	async #runBidis() {
 		for (;;) {
-			try {
-				const msg = await this.#control.read();
+			const stream = await this.#session.acceptBi();
+			if (!stream) break;
 
-				// Route control messages to appropriate handlers based on type
-				// Messages sent by Subscriber, received by Publisher:
-				if (msg instanceof Subscribe) {
-					await this.#publisher.handleSubscribe(msg);
-				} else if (msg instanceof Unsubscribe) {
-					await this.#publisher.handleUnsubscribe(msg);
-				} else if (msg instanceof TrackStatusRequest) {
-					await this.#publisher.handleTrackStatusRequest(msg);
-				} else if (msg instanceof PublishNamespaceOk) {
-					await this.#publisher.handlePublishNamespaceOk(msg);
-				} else if (msg instanceof PublishNamespaceError) {
-					await this.#publisher.handlePublishNamespaceError(msg);
-				} else if (msg instanceof PublishNamespaceCancel) {
-					await this.#publisher.handlePublishNamespaceCancel(msg);
-				} else if (msg instanceof PublishNamespace) {
-					await this.#subscriber.handlePublishNamespace(msg);
-				} else if (msg instanceof PublishNamespaceDone) {
-					await this.#subscriber.handlePublishNamespaceDone(msg);
-				} else if (msg instanceof SubscribeOk) {
-					await this.#subscriber.handleSubscribeOk(msg);
-				} else if (msg instanceof SubscribeError) {
-					await this.#subscriber.handleSubscribeError(msg);
-				} else if (msg instanceof PublishDone) {
-					await this.#subscriber.handlePublishDone(msg);
-				} else if (msg instanceof TrackStatus) {
-					await this.#subscriber.handleTrackStatus(msg);
-				} else if (msg instanceof GoAway) {
-					await this.#handleGoAway(msg);
-				} else if (msg instanceof Setup.ClientSetup) {
-					await this.#handleClientSetup(msg);
-				} else if (msg instanceof Setup.ServerSetup) {
-					await this.#handleServerSetup(msg);
-				} else if (msg instanceof SubscribeNamespace) {
-					await this.#publisher.handleSubscribeNamespace(msg);
-				} else if (msg instanceof SubscribeNamespaceOk) {
-					await this.#subscriber.handleSubscribeNamespaceOk(msg);
-				} else if (msg instanceof SubscribeNamespaceError) {
-					await this.#subscriber.handleSubscribeNamespaceError(msg);
-				} else if (msg instanceof UnsubscribeNamespace) {
-					await this.#publisher.handleUnsubscribeNamespace(msg);
-				} else if (msg instanceof Publish) {
-					await this.#subscriber.handlePublish(msg);
-				} else if (msg instanceof PublishOk) {
-					throw new Error("PUBLISH_OK messages are not supported");
-				} else if (msg instanceof PublishError) {
-					throw new Error("PUBLISH_ERROR messages are not supported");
-				} else if (msg instanceof Fetch) {
-					throw new Error("FETCH messages are not supported");
-				} else if (msg instanceof FetchOk) {
-					throw new Error("FETCH_OK messages are not supported");
-				} else if (msg instanceof FetchError) {
-					throw new Error("FETCH_ERROR messages are not supported");
-				} else if (msg instanceof FetchCancel) {
-					throw new Error("FETCH_CANCEL messages are not supported");
-				} else if (msg instanceof MaxRequestId) {
-					this.#control.maxRequestId(msg.requestId);
-				} else if (msg instanceof RequestsBlocked) {
-					console.warn("ignoring REQUESTS_BLOCKED message");
-				} else if (msg instanceof RequestOk) {
-					// v15: Route RequestOk to both publisher and subscriber
-					await this.#publisher.handleRequestOk(msg);
-					await this.#subscriber.handleRequestOk(msg);
-				} else if (msg instanceof RequestError) {
-					// v15: Route RequestError to both publisher and subscriber
-					await this.#publisher.handleRequestError(msg);
-					await this.#subscriber.handleRequestError(msg);
-				} else if (msg instanceof Setup.Setup) {
-					console.error("Unexpected SETUP message received after connection established");
-					this.close();
-				} else {
-					unreachable(msg);
-				}
-			} catch (err) {
-				console.error("error processing control message", err);
+			void this.#runBidi(stream).catch((err: unknown) => {
+				console.error("error processing bidi stream", err);
+				stream.abort(new Error("bidi stream error"));
+			});
+		}
+	}
+
+	/**
+	 * Unified bidi stream dispatch — reads typeId and routes to handler.
+	 * Matches the lite module's runBidi pattern.
+	 */
+	async #runBidi(stream: Stream) {
+		const typeId = await stream.reader.u53();
+
+		switch (typeId) {
+			// Publisher handles incoming requests
+			case Subscribe.id: {
+				const msg = await Subscribe.decode(stream.reader, this.#session.version);
+				await this.#publisher.runSubscribe(msg, stream);
 				break;
 			}
+			case SubscribeNamespace.id: {
+				const msg = await SubscribeNamespace.decode(stream.reader, this.#session.version);
+				await this.#publisher.runSubscribeNamespace(msg, stream);
+				break;
+			}
+			case TrackStatusRequest.id: {
+				const msg = await TrackStatusRequest.decode(stream.reader, this.#session.version);
+				await this.#publisher.runTrackStatusRequest(msg, stream);
+				break;
+			}
+
+			// Subscriber handles incoming notifications
+			case PublishNamespace.id: {
+				const msg = await PublishNamespace.decode(stream.reader, this.#session.version);
+				await this.#subscriber.runPublishNamespace(msg, stream);
+				break;
+			}
+			case Publish.id: {
+				const msg = await Publish.decode(stream.reader, this.#session.version);
+				await this.#subscriber.runPublish(msg, stream);
+				break;
+			}
+
+			default:
+				console.warn(`unexpected bidi stream type: 0x${typeId.toString(16)}`);
+				stream.abort(new Error("unexpected stream type"));
 		}
-
-		console.warn("control stream closed");
 	}
 
 	/**
-	 * Handles a GoAway control message.
-	 * @param msg - The GoAway message
+	 * Handles unidirectional streams for media delivery (groups).
 	 */
-	async #handleGoAway(msg: GoAway) {
-		console.warn(`MOQLITE_INCOMPATIBLE: Received GOAWAY with redirect URI: ${msg.newSessionUri}`);
-		// In moq-lite compatibility mode, we don't support session redirection
-		// Just close the connection
-		this.close();
-	}
-
-	/**
-	 * Handles an unexpected CLIENT_SETUP control message.
-	 * @param msg - The CLIENT_SETUP message
-	 */
-	async #handleClientSetup(_msg: Setup.ClientSetup) {
-		console.error("Unexpected CLIENT_SETUP message received after connection established");
-		this.close();
-	}
-
-	/**
-	 * Handles an unexpected SERVER_SETUP control message.
-	 * @param msg - The SERVER_SETUP message
-	 */
-	async #handleServerSetup(_msg: Setup.ServerSetup) {
-		console.error("Unexpected SERVER_SETUP message received after connection established");
-		this.close();
-	}
-
-	/**
-	 * Handles object streams (unidirectional streams for media delivery).
-	 */
-	async #runObjectStreams() {
+	async #runUnis() {
 		const readers = new Readers(this.#quic);
 
 		for (;;) {
 			const stream = await readers.next();
-			if (!stream) {
-				break;
-			}
+			if (!stream) break;
 
-			this.#runObjectStream(stream)
+			this.#runUni(stream)
 				.then(() => {
 					stream.stop(new Error("cancel"));
 				})
@@ -297,41 +225,32 @@ export class Connection implements Established {
 		}
 	}
 
-	/**
-	 * Handles a single object stream.
-	 */
-	async #runObjectStream(stream: Reader) {
-		// we don't support other stream types yet
+	async #runUni(stream: Reader) {
 		const header = await Group.decode(stream);
 		await this.#subscriber.handleGroup(header, stream);
 	}
 
 	/**
-	 * Accepts bidirectional streams for v16 SUBSCRIBE_NAMESPACE.
+	 * v17 only: reads GoAway from the setup/control stream.
 	 */
-	async #runBidiStreams() {
-		for (;;) {
-			const stream = await Stream.accept(this.#quic);
-			if (!stream) break;
+	async #runGoAway(controlStream: Stream) {
+		try {
+			const done = await controlStream.reader.done();
+			if (done) return;
 
-			void this.#runBidiStream(stream).catch((err: unknown) => {
-				console.error("error processing bidi stream", err);
-				stream.abort(new Error("bidi stream error"));
-			});
-		}
-	}
-
-	/**
-	 * Handles a single incoming bidi stream.
-	 */
-	async #runBidiStream(stream: Stream) {
-		const messageType = await stream.reader.u53();
-
-		if (messageType === SubscribeNamespace.id) {
-			await this.#publisher.handleSubscribeNamespaceStream(stream);
-		} else {
-			console.warn(`unexpected bidi stream type: ${messageType}`);
-			stream.abort(new Error("unexpected stream type"));
+			const typeId = await controlStream.reader.u53();
+			if (typeId === GoAway.id) {
+				const msg = await GoAway.decode(controlStream.reader, Version.DRAFT_17);
+				console.warn(`received GOAWAY with redirect URI: ${msg.newSessionUri}`);
+			} else {
+				console.warn(`unexpected message on setup stream: 0x${typeId.toString(16)}`);
+			}
+		} catch (err) {
+			if (!this.#closed) {
+				console.error("error reading setup stream", err);
+			}
+		} finally {
+			this.close();
 		}
 	}
 

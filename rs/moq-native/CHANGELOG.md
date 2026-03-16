@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.4](https://github.com/moq-dev/moq/compare/moq-native-v0.13.3...moq-native-v0.13.4) - 2026-03-13
+
+### Other
+
+- Switch to qmux with ALPN negotiation and TLS 1.2 ([#1096](https://github.com/moq-dev/moq/pull/1096))
+- Fix iroh test and add noq backend tests ([#1093](https://github.com/moq-dev/moq/pull/1093))
+- Fix clippy large_enum_variant warning for RequestKind ([#1092](https://github.com/moq-dev/moq/pull/1092))
+
 ## [0.13.2](https://github.com/moq-dev/moq/compare/moq-native-v0.13.1...moq-native-v0.13.2) - 2026-03-03
 
 ### Fixed

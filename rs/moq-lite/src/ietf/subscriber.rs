@@ -59,8 +59,94 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
+	pub fn has_origin(&self) -> bool {
+		self.origin.is_some()
+	}
+
 	pub async fn run(self) -> Result<(), Error> {
 		self.run_uni().await
+	}
+
+	/// Send SUBSCRIBE_NAMESPACE on a bidi stream.
+	/// The caller is responsible for opening the appropriate stream type
+	/// (virtual for v14/v15, real bidi for v16+).
+	pub async fn run_subscribe_namespace<T: web_transport_trait::Session>(
+		&mut self,
+		mut stream: Stream<T, Version>,
+	) -> Result<(), Error> {
+		let prefix = self.origin.as_ref().ok_or(Error::InvalidRole)?.root().to_owned();
+		let request_id = self.control.next_request_id().await?;
+
+		// Write SubscribeNamespace
+		stream.writer.encode(&ietf::SubscribeNamespace::ID).await?;
+		stream
+			.writer
+			.encode(&ietf::SubscribeNamespace {
+				request_id,
+				namespace: prefix.clone(),
+				subscribe_options: 0x01, // NAMESPACE only
+			})
+			.await?;
+
+		tracing::debug!(%prefix, "subscribe_namespace sent");
+
+		// Read response
+		let type_id: u64 = stream.reader.decode().await?;
+		let size: u16 = stream.reader.decode().await?;
+		let mut data = stream.reader.read_exact(size as usize).await?;
+
+		match type_id {
+			ietf::SubscribeNamespaceOk::ID if self.version == Version::Draft14 => {
+				let _msg = ietf::SubscribeNamespaceOk::decode_msg(&mut data, self.version)?;
+			}
+			ietf::RequestOk::ID => {
+				let _msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
+			}
+			ietf::SubscribeNamespaceError::ID if self.version == Version::Draft14 => {
+				let msg = ietf::SubscribeNamespaceError::decode_msg(&mut data, self.version)?;
+				tracing::warn!(error_code = %msg.error_code, reason = %msg.reason_phrase, "subscribe_namespace error");
+				return Err(Error::Cancel);
+			}
+			ietf::RequestError::ID => {
+				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
+				tracing::warn!(error_code = %msg.error_code, reason = %msg.reason_phrase, "subscribe_namespace error");
+				return Err(Error::Cancel);
+			}
+			_ => return Err(Error::UnexpectedMessage),
+		}
+
+		tracing::debug!(%prefix, "subscribe_namespace ok");
+
+		// Loop reading Namespace/NamespaceDone entries
+		loop {
+			let type_id: u64 = match stream.reader.decode_maybe().await? {
+				Some(id) => id,
+				None => break, // Stream closed
+			};
+			let size: u16 = stream.reader.decode().await?;
+			let mut data = stream.reader.read_exact(size as usize).await?;
+
+			match type_id {
+				ietf::Namespace::ID => {
+					let msg = ietf::Namespace::decode_msg(&mut data, self.version)?;
+					let path = prefix.join(&msg.suffix);
+					tracing::debug!(%path, "namespace");
+					self.start_announce(path)?;
+				}
+				ietf::NamespaceDone::ID => {
+					let msg = ietf::NamespaceDone::decode_msg(&mut data, self.version)?;
+					let path = prefix.join(&msg.suffix);
+					tracing::debug!(%path, "namespace_done");
+					let _ = self.stop_announce(path);
+				}
+				_ => {
+					tracing::warn!(type_id, "unexpected message on subscribe_namespace stream");
+					return Err(Error::UnexpectedMessage);
+				}
+			}
+		}
+
+		Ok(())
 	}
 
 	/// Handle an incoming bidi stream dispatched by the session.

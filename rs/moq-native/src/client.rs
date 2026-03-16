@@ -118,6 +118,7 @@ impl Default for ClientConfig {
 #[derive(Clone)]
 pub struct Client {
 	moq: moq_lite::Client,
+	versions: moq_lite::Versions,
 	#[cfg(feature = "websocket")]
 	websocket: super::ClientWebSocket,
 	tls: rustls::ClientConfig,
@@ -191,9 +192,11 @@ impl Client {
 			}
 		}
 
-		// Create the TLS configuration we'll use as a client (relay -> relay)
+		// Create the TLS configuration we'll use as a client.
+		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
+		// QUIC always negotiates TLS 1.3 regardless of this setting.
 		let mut tls = rustls::ClientConfig::builder_with_provider(provider.clone())
-			.with_protocol_versions(&[&rustls::version::TLS13])?
+			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
 			.with_root_certificates(roots)
 			.with_no_client_auth();
 
@@ -225,8 +228,10 @@ impl Client {
 			_ => None,
 		};
 
+		let versions = config.versions();
 		Ok(Self {
-			moq: moq_lite::Client::new().with_versions(config.versions()),
+			moq: moq_lite::Client::new().with_versions(versions.clone()),
+			versions,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
@@ -298,7 +303,8 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url);
+				let alpns = self.versions.alpns();
+				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
 
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
@@ -328,7 +334,8 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url);
+				let alpns = self.versions.alpns();
+				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
 
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
@@ -357,7 +364,8 @@ impl Client {
 
 			#[cfg(feature = "websocket")]
 			{
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url);
+				let alpns = self.versions.alpns();
+				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
 
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,

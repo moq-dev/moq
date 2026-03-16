@@ -62,12 +62,7 @@ impl Server {
 				let recv_fut = async {
 					let recv = session.accept_uni().await.map_err(Error::from_transport)?;
 					let mut reader: Reader<S::RecvStream, Version> = Reader::new(recv, v);
-					// Read stream type
-					let stream_type: u64 = reader.decode().await?;
-					if stream_type != 0x2F00 {
-						return Err(Error::UnexpectedStream);
-					}
-					// Read client SETUP message
+					// Read client SETUP message (includes stream type 0x2F00)
 					let _client: setup::Client = reader.decode().await?;
 					Ok::<_, Error>(reader)
 				};
@@ -75,9 +70,7 @@ impl Server {
 				let send_fut = async {
 					let send = session.open_uni().await.map_err(Error::from_transport)?;
 					let mut writer: Writer<S::SendStream, Version> = Writer::new(send, v);
-					// Write stream type 0x2F00
-					writer.encode(&0x2F00u64).await?;
-					// Write SETUP message
+					// Write SETUP message (includes stream type 0x2F00)
 					writer.encode(&server_setup).await?;
 					Ok::<_, Error>(writer)
 				};

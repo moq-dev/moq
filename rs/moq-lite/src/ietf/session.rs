@@ -80,12 +80,34 @@ async fn run_adapted<S: web_transport_trait::Session>(
 	let subscriber = Subscriber::new(adapter.clone(), subscribe, control, version);
 
 	let dispatch_session = adapter.clone();
+	let mut sub_ns = subscriber.clone();
+	let sub_ns_adapter = adapter.clone();
 
 	tokio::select! {
 		res = adapter.run(setup.reader, setup.writer, rx) => res,
 		res = run_dispatch(dispatch_session, publisher.clone(), subscriber.clone(), version) => res,
 		res = publisher.run() => res,
 		res = subscriber.run() => res,
+		res = async {
+			if !sub_ns.has_origin() {
+				// No origin, nothing to subscribe to — just wait forever.
+				std::future::pending::<Result<(), Error>>().await
+			} else {
+				// v16: SubscribeNamespace on its own real bidi stream
+				// v14/v15: SubscribeNamespace on virtual control stream
+				let stream = match version {
+					Version::Draft16 => {
+						let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+						Stream {
+							writer: crate::coding::Writer::new(send, version),
+							reader: crate::coding::Reader::new(recv, version),
+						}
+					}
+					_ => Stream::open(&sub_ns_adapter, version).await?,
+				};
+				sub_ns.run_subscribe_namespace(stream).await
+			}
+		} => res,
 	}
 }
 
@@ -102,11 +124,22 @@ async fn run_native<S: web_transport_trait::Session>(
 	let publisher = Publisher::new(session.clone(), publish, control.clone(), version);
 	let subscriber = Subscriber::new(session.clone(), subscribe, control, version);
 
+	let sub_ns_session = session.clone();
+	let mut sub_ns = subscriber.clone();
+
 	tokio::select! {
 		res = run_goaway(setup.reader) => res,
 		res = run_dispatch(session, publisher.clone(), subscriber.clone(), version) => res,
 		res = publisher.run() => res,
 		res = subscriber.run() => res,
+		res = async {
+			if !sub_ns.has_origin() {
+				std::future::pending::<Result<(), Error>>().await
+			} else {
+				let stream = Stream::open(&sub_ns_session, version).await?;
+				sub_ns.run_subscribe_namespace(stream).await
+			}
+		} => res,
 	}
 }
 

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.10](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.9...moq-cli-v0.7.10) - 2026-03-13
+
+### Other
+
+- Uniffi async objects ([#1071](https://github.com/moq-dev/moq/pull/1071))
+- Set MSRV to 1.85 (edition 2024) ([#1083](https://github.com/moq-dev/moq/pull/1083))
+
 ## [0.7.8](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.7...moq-cli-v0.7.8) - 2026-03-03
 
 ### Other

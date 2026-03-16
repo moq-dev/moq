@@ -580,43 +580,54 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
-		// Send initial NAMESPACE messages for currently active namespaces
-		while let Some((path, active)) = origin.try_announced() {
-			let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
-			if active.is_some() {
-				tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
-				stream.writer.encode(&ietf::Namespace::ID).await?;
-				stream
-					.writer
-					.encode(&ietf::Namespace {
-						suffix: suffix.to_owned(),
-					})
-					.await?;
+		match self.version {
+			// v14/v15: Namespace/NamespaceDone don't exist. After OK, the publisher
+			// sends PUBLISH_NAMESPACE/PUBLISH_NAMESPACE_DONE as separate control
+			// stream messages (handled by run_announce). Just wait for stream close.
+			Version::Draft14 | Version::Draft15 => {
+				return stream.reader.closed().await;
 			}
-		}
+			// v16+: Send Namespace/NamespaceDone entries on this bidi stream.
+			_ => {
+				// Send initial NAMESPACE messages for currently active namespaces
+				while let Some((path, active)) = origin.try_announced() {
+					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
+					if active.is_some() {
+						tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
+						stream.writer.encode(&ietf::Namespace::ID).await?;
+						stream
+							.writer
+							.encode(&ietf::Namespace {
+								suffix: suffix.to_owned(),
+							})
+							.await?;
+					}
+				}
 
-		// Stream updates
-		loop {
-			tokio::select! {
-				biased;
-				res = stream.reader.closed() => return res,
-				announced = origin.announced() => {
-					match announced {
-						Some((path, active)) => {
-							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
-							if active.is_some() {
-								tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
-								stream.writer.encode(&ietf::Namespace::ID).await?;
-								stream.writer.encode(&ietf::Namespace { suffix }).await?;
-							} else {
-								tracing::debug!(broadcast = %origin.absolute(&path), "namespace_done");
-								stream.writer.encode(&ietf::NamespaceDone::ID).await?;
-								stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
+				// Stream updates
+				loop {
+					tokio::select! {
+						biased;
+						res = stream.reader.closed() => return res,
+						announced = origin.announced() => {
+							match announced {
+								Some((path, active)) => {
+									let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
+									if active.is_some() {
+										tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
+										stream.writer.encode(&ietf::Namespace::ID).await?;
+										stream.writer.encode(&ietf::Namespace { suffix }).await?;
+									} else {
+										tracing::debug!(broadcast = %origin.absolute(&path), "namespace_done");
+										stream.writer.encode(&ietf::NamespaceDone::ID).await?;
+										stream.writer.encode(&ietf::NamespaceDone { suffix }).await?;
+									}
+								}
+								None => {
+									stream.writer.finish()?;
+									return stream.writer.closed().await;
+								}
 							}
-						}
-						None => {
-							stream.writer.finish()?;
-							return stream.writer.closed().await;
 						}
 					}
 				}

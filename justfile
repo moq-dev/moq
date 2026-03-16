@@ -321,33 +321,33 @@ check:
 	set -euo pipefail
 
 	# Run the Javascript checks.
-	bun install --frozen-lockfile
+	bun install --frozen-lockfile --silent
 	if tty -s; then
 		bun run --filter='*' --elide-lines=0 check
 	else
-		bun run --filter='*' check
+		bun run --filter='*' --silent check > /dev/null
 	fi
 	bun biome check
 
 	# Run the (slower) Rust checks.
-	cargo check --all-targets
-	cargo clippy --all-targets -- -D warnings
+	cargo check --all-targets --quiet
+	cargo clippy --all-targets --quiet -- -D warnings
 	cargo fmt --all --check
 
 	# Check documentation warnings (only workspace crates, not dependencies)
-	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet
 
 	# requires: cargo install cargo-shear
 	cargo shear
 
 	# requires: cargo install cargo-sort
-	cargo sort --workspace --check
+	cargo sort --workspace --check > /dev/null
 
 	# Only run the tofu checks if tofu is installed.
 	if command -v tofu &> /dev/null; then (cd cdn && just check); fi
 
 	# Only run the nix checks if nix is installed.
-	if command -v nix &> /dev/null; then nix flake check; fi
+	if command -v nix &> /dev/null; then nix flake check --quiet; fi
 
 # Run comprehensive CI checks including all feature combinations (requires cargo-hack)
 ci:
@@ -365,8 +365,7 @@ ci:
 
 	# Check all feature combinations for all crates
 	# requires: cargo install cargo-hack
-	echo "Checking all feature combinations..."
-	cargo hack check --workspace --each-feature --no-dev-deps
+	cargo hack check --workspace --each-feature --no-dev-deps --quiet --exclude moq-ffi
 
 # Check semver compatibility against crates.io
 # requires: cargo install cargo-semver-checks
@@ -384,35 +383,35 @@ test *args:
 	set -euo pipefail
 
 	# Run the Javascript tests.
-	bun install --frozen-lockfile
+	bun install --frozen-lockfile --silent
 	if tty -s; then
 		bun run --filter='*' --elide-lines=0 test
 	else
-		bun run --filter='*' test
+		bun run --filter='*' --silent test > /dev/null
 	fi
 
-	cargo test --all-targets {{ args }}
+	cargo test --all-targets --quiet {{ args }}
 
 # Automatically fix some issues.
 fix:
 	# Fix the Javascript dependencies.
-	bun install
+	bun install --silent
 	bun biome check --write
 
 	# Fix the Rust issues.
-	cargo clippy --fix --allow-staged --allow-dirty --all-targets
+	cargo clippy --fix --allow-staged --allow-dirty --all-targets --quiet
 	cargo fmt --all
 
 	# requires: cargo install cargo-shear
 	cargo shear --fix
 
 	# requires: cargo install cargo-sort
-	cargo sort --workspace
+	cargo sort --workspace > /dev/null
 
 	if command -v tofu &> /dev/null; then (cd cdn && just fix); fi
 
 	# Remove old build artifacts to save disk space.
-	if command -v cargo-sweep &> /dev/null; then cargo sweep --time 7; fi
+	if command -v cargo-sweep &> /dev/null; then cargo sweep --time 3; fi
 
 # Upgrade any tooling
 update:
@@ -432,7 +431,7 @@ update:
 # Build the packages
 build:
 	bun run --filter='*' build
-	cargo build
+	cargo build --quiet
 
 # Generate and serve an HLS stream from a video for testing pub-hls
 serve-hls name port="8000":

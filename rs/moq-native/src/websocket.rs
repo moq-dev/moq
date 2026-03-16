@@ -49,6 +49,7 @@ pub(crate) async fn race_handle(
 	config: &ClientWebSocket,
 	tls: &rustls::ClientConfig,
 	url: Url,
+	alpns: &[&str],
 ) -> Option<anyhow::Result<qmux::Session>> {
 	if !config.enabled {
 		return None;
@@ -61,7 +62,7 @@ pub(crate) async fn race_handle(
 		_ => return None,
 	}
 
-	let res = connect(config, tls, url).await;
+	let res = connect(config, tls, url, alpns).await;
 	if let Err(err) = &res {
 		tracing::warn!(%err, "WebSocket connection failed");
 	}
@@ -72,6 +73,7 @@ pub(crate) async fn connect(
 	config: &ClientWebSocket,
 	tls: &rustls::ClientConfig,
 	mut url: Url,
+	alpns: &[&str],
 ) -> anyhow::Result<qmux::Session> {
 	anyhow::ensure!(config.enabled, "WebSocket support is disabled");
 
@@ -120,12 +122,7 @@ pub(crate) async fn connect(
 	};
 
 	let session = qmux::Client::new()
-		.with_config(qmux::tungstenite::protocol::WebSocketConfig {
-			max_message_size: Some(64 << 20), // 64 MB
-			max_frame_size: Some(16 << 20),   // 16 MB
-			accept_unmasked_frames: false,
-			..Default::default()
-		})
+		.with_protocols(alpns)
 		.with_connector(connector)
 		.connect(url.as_str())
 		.await
@@ -148,8 +145,12 @@ pub struct WebSocketListener {
 
 impl WebSocketListener {
 	pub async fn bind(addr: net::SocketAddr) -> anyhow::Result<Self> {
+		Self::bind_with_alpns(addr, moq_lite::ALPNS).await
+	}
+
+	pub async fn bind_with_alpns(addr: net::SocketAddr, alpns: &[&str]) -> anyhow::Result<Self> {
 		let listener = tokio::net::TcpListener::bind(addr).await?;
-		let server = qmux::Server::new();
+		let server = qmux::Server::new().with_protocols(alpns);
 		Ok(Self { listener, server })
 	}
 

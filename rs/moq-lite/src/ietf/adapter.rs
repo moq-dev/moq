@@ -365,6 +365,13 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 		}
 	}
 
+	/// Open a real (non-virtual) bidi stream, bypassing control stream multiplexing.
+	/// Used for v16 SubscribeNamespace which moved to its own bidi stream.
+	pub async fn open_native_bi(&self) -> Result<(AdapterSend<S>, AdapterRecv<S>), crate::Error> {
+		let (send, recv) = self.inner.open_bi().await.map_err(|_| crate::Error::Closed)?;
+		Ok((AdapterSend::Real(send), AdapterRecv::Real(recv)))
+	}
+
 	/// Run the control stream read + write tasks.
 	/// This reads from the control stream and routes messages to virtual streams,
 	/// and also drains the write channel to the control stream writer.
@@ -640,9 +647,30 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 
 	async fn accept_bi(&self) -> Result<(Self::SendStream, Self::RecvStream), Self::Error> {
 		let mut rx = self.shared.incoming_rx.lock().await;
-		match rx.recv().await {
-			Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
-			None => Err(crate::Error::Closed),
+
+		match self.version {
+			// v16: SubscribeNamespace uses real bidi streams, so race both sources.
+			Version::Draft16 => {
+				tokio::select! {
+					result = rx.recv() => {
+						match result {
+							Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
+							None => Err(crate::Error::Closed),
+						}
+					}
+					result = self.inner.accept_bi() => {
+						match result {
+							Ok((send, recv)) => Ok((AdapterSend::Real(send), AdapterRecv::Real(recv))),
+							Err(_) => Err(crate::Error::Closed),
+						}
+					}
+				}
+			}
+			// v14/v15: Only virtual streams from control stream.
+			_ => match rx.recv().await {
+				Some((send, recv)) => Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))),
+				None => Err(crate::Error::Closed),
+			},
 		}
 	}
 

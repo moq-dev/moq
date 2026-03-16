@@ -85,10 +85,10 @@ fn axum_to_tungstenite(
 ) -> Result<tungstenite::Message, tungstenite::Error> {
 	match message {
 		Ok(msg) => Ok(match msg {
-			axum::extract::ws::Message::Text(text) => tungstenite::Message::Text(text.to_string()),
-			axum::extract::ws::Message::Binary(bin) => tungstenite::Message::Binary(bin.into()),
-			axum::extract::ws::Message::Ping(ping) => tungstenite::Message::Ping(ping.into()),
-			axum::extract::ws::Message::Pong(pong) => tungstenite::Message::Pong(pong.into()),
+			axum::extract::ws::Message::Text(text) => tungstenite::Message::Text(text.to_string().into()),
+			axum::extract::ws::Message::Binary(bin) => tungstenite::Message::Binary(Vec::from(bin).into()),
+			axum::extract::ws::Message::Ping(ping) => tungstenite::Message::Ping(Vec::from(ping).into()),
+			axum::extract::ws::Message::Pong(pong) => tungstenite::Message::Pong(Vec::from(pong).into()),
 			axum::extract::ws::Message::Close(close) => {
 				tungstenite::Message::Close(close.map(|c| tungstenite::protocol::CloseFrame {
 					code: c.code.into(),
@@ -106,10 +106,10 @@ fn tungstenite_to_axum(
 ) -> Pin<Box<dyn Future<Output = Result<axum::extract::ws::Message, tungstenite::Error>> + Send + Sync>> {
 	Box::pin(async move {
 		Ok(match message {
-			tungstenite::Message::Text(text) => axum::extract::ws::Message::Text(text.into()),
-			tungstenite::Message::Binary(bin) => axum::extract::ws::Message::Binary(bin.into()),
-			tungstenite::Message::Ping(ping) => axum::extract::ws::Message::Ping(ping.into()),
-			tungstenite::Message::Pong(pong) => axum::extract::ws::Message::Pong(pong.into()),
+			tungstenite::Message::Text(text) => axum::extract::ws::Message::Text(text.to_string().into()),
+			tungstenite::Message::Binary(bin) => axum::extract::ws::Message::Binary(Vec::from(bin).into()),
+			tungstenite::Message::Ping(ping) => axum::extract::ws::Message::Ping(Vec::from(ping).into()),
+			tungstenite::Message::Pong(pong) => axum::extract::ws::Message::Pong(Vec::from(pong).into()),
 			tungstenite::Message::Frame(_frame) => unreachable!(),
 			tungstenite::Message::Close(close) => {
 				axum::extract::ws::Message::Close(close.map(|c| axum::extract::ws::CloseFrame {
