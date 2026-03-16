@@ -1,7 +1,7 @@
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_LITE, ALPN_LITE_03, Error, NEGOTIATED, OriginConsumer, OriginProducer,
 	Session, Version, Versions,
-	coding::{Decode, Encode, Reader, Stream, Writer},
+	coding::{Decode, Encode, Stream},
 	ietf, lite, setup,
 };
 
@@ -46,53 +46,15 @@ impl Server {
 					.select(Version::Ietf(ietf::Version::Draft17))
 					.ok_or(Error::Version)?;
 
-				let ietf_v = ietf::Version::Draft17;
-
-				// Draft-17: SETUP uses uni streams
-				let mut parameters = ietf::Parameters::default();
-				parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-				let parameters = parameters.encode_bytes(ietf_v)?;
-
-				let server_setup = setup::Server {
-					version: v.into(),
-					parameters,
-				};
-
-				// Accept and send SETUP concurrently on uni streams
-				let recv_fut = async {
-					let recv = session.accept_uni().await.map_err(Error::from_transport)?;
-					let mut reader: Reader<S::RecvStream, Version> = Reader::new(recv, v);
-					// Read client SETUP message (includes stream type 0x2F00)
-					let _client: setup::Client = reader.decode().await?;
-					Ok::<_, Error>(reader)
-				};
-
-				let send_fut = async {
-					let send = session.open_uni().await.map_err(Error::from_transport)?;
-					let mut writer: Writer<S::SendStream, Version> = Writer::new(send, v);
-					// Write SETUP message (includes stream type 0x2F00)
-					writer.encode(&server_setup).await?;
-					Ok::<_, Error>(writer)
-				};
-
-				let (recv_result, send_result) = tokio::join!(recv_fut, send_fut);
-				let reader = recv_result?;
-				let writer = send_result?;
-
-				// Construct a Stream from the uni streams for GOAWAY/control
-				let stream = Stream {
-					writer: writer.with_version(ietf_v),
-					reader: reader.with_version(ietf_v),
-				};
-
+				// Draft-17: SETUP is exchanged in the background by the session.
 				ietf::start(
 					session.clone(),
-					stream,
-					None, // Draft-17 removed MaxRequestId
+					None,
+					None,
 					false,
 					self.publish.clone(),
 					self.consume.clone(),
-					ietf_v,
+					ietf::Version::Draft17,
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -194,7 +156,7 @@ impl Server {
 				let stream = stream.with_version(v);
 				ietf::start(
 					session.clone(),
-					stream,
+					Some(stream),
 					request_id_max,
 					false,
 					self.publish.clone(),

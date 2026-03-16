@@ -10,7 +10,7 @@ const CLIENT_SETUP: u8 = 0x20;
 const SERVER_SETUP: u8 = 0x21;
 
 /// Draft-17 unified SETUP message type (varint 0x2F00)
-const SETUP_V17: u64 = 0x2F00;
+pub(crate) const SETUP_V17: u64 = 0x2F00;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SetupVersion {

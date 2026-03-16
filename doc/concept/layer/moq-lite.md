@@ -1,6 +1,6 @@
 ---
 title: MoQ Lite
-description: A fraction of the calories with none of the fat.
+description: A simple, forwards-compatible subset of MoQ Transport. Avoids some of the more complex (and dangerous) functionality.
 ---
 
 # moq-lite
@@ -38,9 +38,11 @@ It's gross but required for web browsers, so we suck it up.
 
 Here's a list of currently supported ALPNs:
 - `moql`: moq-lite, the version is negotiated via `SETUP`.
-- `moqt-00`: moq-transport draft <15, the version is negotiated via `SETUP`.
+- `moq-lite-03`: moq-lite draft 3
+- `moq-00`: moq-transport draft 14, the version is negotiated via `SETUP`.
 - `moqt-15`: moq-transport draft 15
 - `moqt-16`: moq-transport draft 16
+- `moqt-17`: moq-transport draft 17
 - etc...
 
 See the Compatibility section below for more details about `moq-transport` support.

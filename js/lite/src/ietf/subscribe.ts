@@ -232,6 +232,73 @@ export class SubscribeError {
 	}
 }
 
+export class SubscribeUpdate {
+	static id = 0x02;
+
+	requestId: bigint;
+
+	constructor({ requestId }: { requestId: bigint }) {
+		this.requestId = requestId;
+	}
+
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
+		if (version === Version.DRAFT_14) {
+			await w.u62(this.requestId);
+			await w.u62(0n); // subscription_request_id
+			await w.u62(0n); // start_group
+			await w.u62(0n); // start_object
+			await w.u62(0n); // end_group
+			await w.u8(128); // subscriber_priority
+			await w.bool(true); // forward
+			await w.u53(0); // no parameters
+		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			await w.u62(this.requestId);
+			await w.u62(0n); // subscription_request_id
+			const params = new MessageParameters();
+			await params.encode(w, version);
+		} else {
+			// v17: request_id, required_request_id_delta, params
+			await w.u62(this.requestId);
+			await w.u62(0n); // required_request_id_delta
+			const params = new MessageParameters();
+			await params.encode(w, version);
+		}
+	}
+
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		return Message.encode(w, (mw) => this.#encode(mw, version));
+	}
+
+	static async decode(r: Reader, version: IetfVersion): Promise<SubscribeUpdate> {
+		return Message.decode(r, (mr) => SubscribeUpdate.#decode(mr, version));
+	}
+
+	static async #decode(r: Reader, version: IetfVersion): Promise<SubscribeUpdate> {
+		if (version === Version.DRAFT_14) {
+			const requestId = await r.u62();
+			await r.u62(); // subscription_request_id
+			await r.u62(); // start_group
+			await r.u62(); // start_object
+			await r.u62(); // end_group
+			await r.u8(); // subscriber_priority
+			await r.bool(); // forward
+			await Parameters.decode(r, version); // parameters
+			return new SubscribeUpdate({ requestId });
+		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+			const requestId = await r.u62();
+			await r.u62(); // subscription_request_id
+			await MessageParameters.decode(r, version);
+			return new SubscribeUpdate({ requestId });
+		} else {
+			// v17
+			const requestId = await r.u62();
+			await r.u62(); // required_request_id_delta
+			await MessageParameters.decode(r, version);
+			return new SubscribeUpdate({ requestId });
+		}
+	}
+}
+
 export class Unsubscribe {
 	static readonly id = 0x0a;
 

@@ -34,7 +34,9 @@ export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
 	await temp.closed;
 
 	await writer.u53(scratch.byteLength);
-	await writer.write(scratch);
+	if (scratch.byteLength > 0) {
+		await writer.write(scratch);
+	}
 }
 
 // Reads a message with a varint size prefix.

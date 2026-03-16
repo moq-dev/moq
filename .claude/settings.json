@@ -2,35 +2,17 @@
 	"$schema": "https://json.schemastore.org/claude-code-settings.json",
 	"permissions": {
 		"allow": [
-			"Bash(ls:*)",
-			"Bash(grep:*)",
-			"Bash(find:*)",
-			"Bash(git status:*)",
-			"Bash(git diff:*)",
-			"Bash(git log:*)",
-			"Bash(git add:*)",
-			"Bash(git commit:*)",
-			"Bash(git push:*)",
-			"Bash(git pull:*)",
-			"Bash(git checkout:*)",
-			"Bash(git branch:*)",
 			"Bash(just *)",
 			"Bash(cargo *)",
-			"Bash(bun run *)",
+			"Bash(bun *)",
 			"Bash(ffprobe:*)",
 			"Bash(rs/libmoq/build.sh:*)",
-			"Bash(xargs dirname:*)",
-			"Bash(git fetch:*)",
-			"Bash(lsof:*)",
-			"Bash(kill:*)",
-			"Bash(bun install:*)",
-			"Bash(gh pr view:*)",
-			"Bash(git fetch:*)",
-			"Bash(gh pr list:*)",
-			"Bash(gh issue view:*)",
-			"Bash(gh pr diff:*)",
-
-			"WebSearch"
+			"WebFetch(domain:www.ietf.org)",
+			"WebFetch(domain:datatracker.ietf.org)",
+			"WebFetch(domain:docs.rs)",
+			"WebFetch(domain:moq-wg.github.io)",
+			"WebFetch(domain:moq.dev)",
+			"WebFetch(domain:doc.moq.dev)"
 		]
 	}
 }

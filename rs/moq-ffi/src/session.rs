@@ -32,7 +32,7 @@ impl Client {
 			.map_err(|err| MoqError::Connect(format!("{err}")))?;
 
 		Ok(Arc::new(MoqSession {
-			inner: session.clone(),
+			inner: Some(session.clone()),
 			closed: Task::new(session),
 		}))
 	}
@@ -96,8 +96,15 @@ impl MoqClient {
 
 #[derive(uniffi::Object)]
 pub struct MoqSession {
-	inner: moq_lite::Session,
+	inner: Option<moq_lite::Session>,
 	closed: Task<Session>,
+}
+
+impl Drop for MoqSession {
+	fn drop(&mut self) {
+		let _guard = crate::ffi::RUNTIME.enter();
+		self.inner.take();
+	}
 }
 
 #[uniffi::export]
@@ -112,7 +119,10 @@ impl MoqSession {
 
 	/// Close the session with the given error code.
 	pub fn cancel(&self, code: u32) {
-		self.inner.clone().close(moq_lite::Error::from_code(code));
+		let _guard = crate::ffi::RUNTIME.enter();
+		if let Some(inner) = &self.inner {
+			inner.clone().close(moq_lite::Error::from_code(code));
+		}
 		// NOTE: we don't abort the closed Task because it will be aborted via above ^
 		// We'll get a slightly better error message instead of Cancelled.
 	}

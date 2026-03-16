@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.5](https://github.com/moq-dev/moq/compare/moq-native-v0.13.4...moq-native-v0.13.5) - 2026-03-16
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.13.4](https://github.com/moq-dev/moq/compare/moq-native-v0.13.3...moq-native-v0.13.4) - 2026-03-13
 
 ### Other

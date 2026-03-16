@@ -9,7 +9,7 @@ import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
-import { Subscribe } from "./subscribe.ts";
+import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespace } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusRequest } from "./track.ts";
@@ -169,6 +169,11 @@ export class Connection implements Established {
 		const typeId = await stream.reader.u53();
 
 		switch (typeId) {
+			case SubscribeUpdate.id: {
+				// REQUEST_UPDATE (0x02) is a follow-up, not a valid initial message
+				stream.abort(new Error("unexpected REQUEST_UPDATE as initial message"));
+				break;
+			}
 			// Publisher handles incoming requests
 			case Subscribe.id: {
 				const msg = await Subscribe.decode(stream.reader, this.#session.version);
@@ -208,7 +213,7 @@ export class Connection implements Established {
 	 * Handles unidirectional streams for media delivery (groups).
 	 */
 	async #runUnis() {
-		const readers = new Readers(this.#quic);
+		const readers = new Readers(this.#quic, this.#session.version);
 
 		for (;;) {
 			const stream = await readers.next();

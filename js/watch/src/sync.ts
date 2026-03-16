@@ -27,8 +27,7 @@ export class Sync {
 
 	// A ghetto way to learn when the reference/latency changes.
 	// There's probably a way to use Effect, but lets keep it simple for now.
-	#update: Promise<void>;
-	#resolve!: () => void;
+	#update: PromiseWithResolvers<void>;
 
 	signals = new Effect();
 
@@ -37,9 +36,7 @@ export class Sync {
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
 
-		this.#update = new Promise((resolve) => {
-			this.#resolve = resolve;
-		});
+		this.#update = Promise.withResolvers();
 
 		this.signals.run(this.#runLatency.bind(this));
 	}
@@ -52,11 +49,8 @@ export class Sync {
 		const latency = Time.Milli.add(Time.Milli.max(video, audio), jitter);
 		this.#latency.set(latency);
 
-		this.#resolve();
-
-		this.#update = new Promise((resolve) => {
-			this.#resolve = resolve;
-		});
+		this.#update.resolve();
+		this.#update = Promise.withResolvers();
 	}
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
@@ -68,11 +62,8 @@ export class Sync {
 			return;
 		}
 		this.#reference.set(ref);
-		this.#resolve();
-
-		this.#update = new Promise((resolve) => {
-			this.#resolve = resolve;
-		});
+		this.#update.resolve();
+		this.#update = Promise.withResolvers();
 	}
 
 	// Sleep until it's time to render this frame.
@@ -95,7 +86,7 @@ export class Sync {
 			if (sleep <= 0) return;
 			const wait = new Promise((resolve) => setTimeout(resolve, sleep)).then(() => true);
 
-			const ok = await Promise.race([this.#update, wait]);
+			const ok = await Promise.race([this.#update.promise, wait]);
 			if (ok) return;
 		}
 	}
