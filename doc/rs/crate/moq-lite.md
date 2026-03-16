@@ -19,8 +19,8 @@ The core pub/sub transport protocol implementing the [moq-lite specification](/s
 
 - **Broadcasts** — Discoverable collections of tracks
 - **Tracks** — Named streams of data, split into groups
-- **Groups** — Sequential collections of frames, independently decodable
-- **Frames** — Timed chunks of data
+- **Groups** — Sequenced collections of frames that can be processed independently
+- **Frames** — Discrete data units within a group
 
 ## Installation
 

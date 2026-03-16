@@ -86,7 +86,7 @@ if (request) {
 
         for (;;) {
             const frame = await group.readString();
-            if (!frame) break;
+            if (frame == null) break;
 
             console.log("Received:", frame);
         }
