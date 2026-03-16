@@ -147,8 +147,7 @@ export class Stream {
 
 	#maxRequestId: bigint;
 
-	#maxRequestIdPromise?: Promise<void>; // unblocks when there's a new max request id
-	#maxRequestIdResolve!: () => void; // resolves the max request id promise
+	#maxRequestIdUpdate?: PromiseWithResolvers<void>;
 
 	#writeLock = new Mutex();
 	#readLock = new Mutex();
@@ -168,9 +167,7 @@ export class Stream {
 		this.stream.reader.version = version;
 		this.stream.writer.version = version;
 		this.#maxRequestId = maxRequestId;
-		this.#maxRequestIdPromise = new Promise((resolve) => {
-			this.#maxRequestIdResolve = resolve;
-		});
+		this.#maxRequestIdUpdate = Promise.withResolvers();
 	}
 
 	/**
@@ -231,10 +228,8 @@ export class Stream {
 		}
 
 		this.#maxRequestId = max;
-		this.#maxRequestIdResolve();
-		this.#maxRequestIdPromise = new Promise((resolve) => {
-			this.#maxRequestIdResolve = resolve;
-		});
+		this.#maxRequestIdUpdate?.resolve();
+		this.#maxRequestIdUpdate = Promise.withResolvers();
 	}
 
 	async nextRequestId(): Promise<bigint | undefined> {
@@ -252,17 +247,17 @@ export class Stream {
 				return id;
 			}
 
-			if (!this.#maxRequestIdPromise) {
+			if (!this.#maxRequestIdUpdate) {
 				return undefined;
 			}
 
 			console.warn("blocked on max request id");
-			await this.#maxRequestIdPromise;
+			await this.#maxRequestIdUpdate.promise;
 		}
 	}
 
 	close(): void {
-		this.#maxRequestIdResolve();
-		this.#maxRequestIdPromise = undefined;
+		this.#maxRequestIdUpdate?.resolve();
+		this.#maxRequestIdUpdate = undefined;
 	}
 }
