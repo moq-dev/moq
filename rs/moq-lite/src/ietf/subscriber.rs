@@ -4,7 +4,7 @@ use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
 	Track, TrackProducer,
 	coding::{Reader, Stream},
-	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId},
+	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
 };
 
@@ -61,10 +61,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	pub fn has_origin(&self) -> bool {
 		self.origin.is_some()
-	}
-
-	pub async fn run(self) -> Result<(), Error> {
-		self.run_uni().await
 	}
 
 	/// Send SUBSCRIBE_NAMESPACE on a bidi stream.
@@ -203,7 +199,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			Err(err) => {
 				self.write_error(&mut stream, request_id, 400, &err.to_string()).await?;
 				let _ = stream.writer.finish();
-				let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stream.writer.closed()).await;
+				let _ = stream.writer.closed().await;
 				return Ok(());
 			}
 		}
@@ -497,38 +493,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
 		broadcast.insert_track(&track)?;
-
-		Ok(())
-	}
-
-	/// Accept uni streams (group data).
-	async fn run_uni(self) -> Result<(), Error> {
-		loop {
-			let stream = self.session.accept_uni().await.map_err(Error::from_transport)?;
-
-			let stream = Reader::new(stream, self.version);
-			let this = self.clone();
-
-			web_async::spawn(async move {
-				if let Err(err) = this.run_uni_stream(stream).await {
-					tracing::debug!(%err, "error running uni stream");
-				}
-			});
-		}
-	}
-
-	async fn run_uni_stream(mut self, mut stream: Reader<S::RecvStream, Version>) -> Result<(), Error> {
-		let kind: u64 = stream.decode_peek().await?;
-
-		match kind {
-			FetchHeader::TYPE => return Err(Error::Unsupported),
-			GroupFlags::START..=GroupFlags::END | GroupFlags::START_NO_PRIORITY..=GroupFlags::END_NO_PRIORITY => {}
-			_ => return Err(Error::UnexpectedStream),
-		}
-
-		if let Err(err) = self.recv_group(&mut stream).await {
-			stream.abort(&err);
-		}
 
 		Ok(())
 	}
