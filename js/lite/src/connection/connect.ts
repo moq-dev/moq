@@ -78,8 +78,13 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		websocketWon.add(url.toString());
 	}
 
-	// @ts-expect-error - TODO: add protocol to WebTransport
-	const protocol: string | undefined = session instanceof WebTransport ? session.protocol : undefined;
+	// Get the negotiated protocol. qmux Session exposes it directly;
+	// native WebTransport doesn't have a standard .protocol property yet.
+	const protocol: string | undefined =
+		session instanceof Session
+			? session.protocol || undefined
+			: // @ts-expect-error - TODO: add protocol to WebTransport
+				session.protocol;
 	console.debug(url.toString(), "negotiated ALPN:", protocol ?? "(none)");
 
 	// Choose setup encoding based on negotiated WebTransport protocol (if any).
