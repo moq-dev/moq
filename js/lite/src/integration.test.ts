@@ -77,11 +77,9 @@ test("integration: ietf draft-16", async () => {
 	await runPublishSubscribeFlow(Ietf.ALPN.DRAFT_16);
 });
 
-// TODO: draft-17 uses uni streams for SETUP which creates a control stream
-// that the mock transport doesn't fully support yet (ReadableStream locking).
-// test("integration: ietf draft-17", async () => {
-// 	await runPublishSubscribeFlow(Ietf.ALPN.DRAFT_17);
-// });
+test("integration: ietf draft-17", async () => {
+	await runPublishSubscribeFlow(Ietf.ALPN.DRAFT_17);
+});
 
 test("integration: subscribe to non-existent broadcast", async () => {
 	const pair = createMockTransportPair("");

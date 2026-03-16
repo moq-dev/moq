@@ -4,6 +4,25 @@
  * Creates paired client/server transports connected via TransformStreams.
  */
 
+// High watermark to prevent writes from blocking on backpressure.
+// Real WebTransport has kernel buffers; we simulate this with a large queue.
+const WRITABLE_STRATEGY: QueuingStrategy<Uint8Array> = { highWaterMark: 256 };
+const READABLE_STRATEGY: QueuingStrategy<Uint8Array> = { highWaterMark: 256 };
+
+function newStream(): TransformStream<Uint8Array, Uint8Array> {
+	return new TransformStream(
+		{
+			// Copy each chunk to simulate real WebTransport's kernel-boundary copy.
+			// Without this, Writer's scratch buffer reuse corrupts queued data.
+			transform(chunk, controller) {
+				controller.enqueue(new Uint8Array(chunk));
+			},
+		},
+		WRITABLE_STRATEGY,
+		READABLE_STRATEGY,
+	);
+}
+
 class MockTransport implements WebTransport {
 	readonly protocol: string;
 	readonly ready: Promise<undefined>;
@@ -68,8 +87,8 @@ class MockTransport implements WebTransport {
 		if (!peer) throw new Error("no peer");
 
 		// Create two TransformStreams for the two directions
-		const c2s = new TransformStream<Uint8Array, Uint8Array>();
-		const s2c = new TransformStream<Uint8Array, Uint8Array>();
+		const c2s = newStream();
+		const s2c = newStream();
 
 		// Local side: writes to c2s, reads from s2c
 		const local = {
@@ -96,7 +115,7 @@ class MockTransport implements WebTransport {
 		const peer = this.#peer;
 		if (!peer) throw new Error("no peer");
 
-		const c2s = new TransformStream<Uint8Array, Uint8Array>();
+		const c2s = newStream();
 
 		try {
 			peer.#uniController.enqueue(c2s.readable);

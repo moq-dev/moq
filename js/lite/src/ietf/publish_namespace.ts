@@ -23,7 +23,7 @@ export class PublishNamespace {
 			await w.u62(0n); // required_request_id_delta: only 0 supported until stream-per-request
 		}
 		await Namespace.encode(w, this.trackNamespace);
-		await w.u53(0); // number of parameters
+		await new MessageParameters().encode(w, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {

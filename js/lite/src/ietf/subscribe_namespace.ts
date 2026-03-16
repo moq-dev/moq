@@ -37,7 +37,7 @@ export class SubscribeNamespace {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			await w.u53(this.subscribeOptions);
 		}
-		await w.u53(0); // no parameters
+		await new Parameters().encode(w, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
