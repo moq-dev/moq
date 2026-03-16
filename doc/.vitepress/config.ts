@@ -94,6 +94,7 @@ export default defineConfig({
 								{ text: "MoqTransport", link: "/concept/standard/moq-transport" },
 								{ text: "MSF", link: "/concept/standard/msf" },
 								{ text: "LOC", link: "/concept/standard/loc" },
+								{ text: "Interop", link: "/concept/standard/interop" },
 							],
 						},
 						{
