@@ -213,7 +213,7 @@ export class Connection implements Established {
 	 * Handles unidirectional streams for media delivery (groups).
 	 */
 	async #runUnis() {
-		const readers = new Readers(this.#quic);
+		const readers = new Readers(this.#quic, this.#session.version);
 
 		for (;;) {
 			const stream = await readers.next();

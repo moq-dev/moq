@@ -2,7 +2,7 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { Parameters } from "./parameters.ts";
+import { MessageParameters, Parameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // In draft-14, SUBSCRIBE_ANNOUNCES is renamed to SUBSCRIBE_NAMESPACE
@@ -37,7 +37,12 @@ export class SubscribeNamespace {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			await w.u53(this.subscribeOptions);
 		}
-		await new Parameters().encode(w, version);
+		// v14/v15 use SETUP-level Parameters (no count for d17); v16+ use MessageParameters (always has count).
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+			await new Parameters().encode(w, version);
+		} else {
+			await new MessageParameters().encode(w, version);
+		}
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -58,7 +63,12 @@ export class SubscribeNamespace {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			subscribeOptions = await r.u53();
 		}
-		await Parameters.decode(r, version);
+		// v14/v15 use SETUP-level Parameters; v16+ use MessageParameters (always has count).
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+			await Parameters.decode(r, version);
+		} else {
+			await MessageParameters.decode(r, version);
+		}
 
 		return new SubscribeNamespace({ namespace, requestId, subscribeOptions });
 	}

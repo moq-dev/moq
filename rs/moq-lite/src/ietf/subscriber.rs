@@ -78,15 +78,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let request_id = self.control.next_request_id().await?;
 
 		// Write SubscribeNamespace
+		let msg = ietf::SubscribeNamespace {
+			request_id,
+			namespace: prefix.clone(),
+			subscribe_options: 0x01, // NAMESPACE only
+		};
+
 		stream.writer.encode(&ietf::SubscribeNamespace::ID).await?;
-		stream
-			.writer
-			.encode(&ietf::SubscribeNamespace {
-				request_id,
-				namespace: prefix.clone(),
-				subscribe_options: 0x01, // NAMESPACE only
-			})
-			.await?;
+		stream.writer.encode(&msg).await?;
 
 		tracing::debug!(%prefix, "subscribe_namespace sent");
 
@@ -203,6 +202,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Err(err) => {
 				self.write_error(&mut stream, request_id, 400, &err.to_string()).await?;
+				stream.writer.finish()?;
+				stream.writer.closed().await?;
 				return Ok(());
 			}
 		}

@@ -201,7 +201,7 @@ export class Publisher {
 	 */
 	async #runGroup(requestId: bigint, group: Group) {
 		try {
-			const stream = await Writer.open(this.#quic);
+			const stream = await Writer.open(this.#quic, this.#session.version);
 
 			const header = new GroupMessage({
 				trackAlias: requestId,
