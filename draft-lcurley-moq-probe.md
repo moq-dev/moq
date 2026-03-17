@@ -24,8 +24,8 @@ informative:
 --- abstract
 
 This document defines a PROBE extension for MoQ Transport {{moqt}}.
-A subscriber opens a bidirectional PROBE stream to request that the publisher pad the connection up to a target.
-The publisher periodically responds with the measured bitrate and an elapsed timestamp, enabling the subscriber to estimate the available bandwidth.
+A subscriber opens a bidirectional PROBE stream to request that the publisher pad the connection up to a target bitrate.
+The publisher sends padding as defined in {{moqt}} Section 7.7 and periodically responds with the measured bitrate and an elapsed timestamp, enabling the subscriber to estimate the available bandwidth.
 
 --- middle
 
@@ -47,11 +47,10 @@ A viewer may get stuck at a low quality rendition indefinitely because the conge
 If the viewer does attempt to switch to a higher rendition without first probing, they risk buffering — either because the congestion window has not been warmed up to support the higher bitrate, or because the network genuinely cannot sustain it.
 Without probing, the subscriber cannot distinguish between these two cases.
 
-{{moqt}} Section 3.7.2 suggests subscribing to additional tracks at low priority to fill the congestion window during probing intervals.
+{{moqt}} Section 3.7.2 suggests subscribing to additional tracks at low priority or sending padding to fill the congestion window during probing intervals.
 However, this is difficult in practice because the subscriber does not know when probing is needed or by how much.
 The congestion window and bandwidth estimate are internal to the sender's congestion controller and are not exposed to the application, let alone the remote peer.
 The subscriber cannot distinguish between "the network has more capacity" and "the congestion controller is already fully utilizing the link".
-It also requires the publisher to have pre-encoded padding tracks and the subscriber to manage extra subscriptions.
 
 ## Hop-by-Hop
 MoQ is designed to work end-to-end via relays.
@@ -62,8 +61,8 @@ Using a wire-level extension ensures that PROBE measurements are scoped to a sin
 A relay terminates the PROBE stream and does not forward it upstream, avoiding incorrect measurements that reflect intermediate link capacity.
 
 ## This Extension
-This extension provides a simple mechanism for bandwidth estimation.
-The subscriber opens a PROBE stream and requests that the publisher pad the connection to a target.
+{{moqt}} defines padding streams and datagrams (Section 7.7) for probing, but does not define a signaling mechanism for a subscriber to request padding or for a publisher to report measurements.
+This extension fills that gap: the subscriber opens a PROBE stream to request that the publisher pad the connection to a target bitrate using {{moqt}} padding.
 The publisher responds with periodic measurements, allowing the subscriber to adjust its subscriptions accordingly.
 
 
@@ -74,7 +73,7 @@ Both endpoints indicate support by including the following Setup Option:
 
 ~~~
 PROBE Setup Option {
-  Option Key (vi64) = 0xPROBE_TODO
+  Option Key (vi64) = TBD1
   Option Value Length (vi64) = 0
 }
 ~~~
@@ -87,7 +86,7 @@ If a peer receives a PROBE stream without having negotiated the extension, it MU
 The PROBE extension uses a new bidirectional stream type.
 
 ~~~
-STREAM_TYPE = 0xPROBE_TODO
+STREAM_TYPE = TBD2
 ~~~
 
 The stream type is sent at the beginning of the stream, encoded as a variable-length integer, consistent with {{moqt}} stream type framing.
@@ -109,7 +108,7 @@ PROBE_REQUEST {
 
 **Target Bitrate**:
 The desired bitrate in kilobits per second.
-The publisher SHOULD pad the connection to attempt to reach this rate.
+The publisher SHOULD send padding as defined in {{moqt}} Section 7.7 to attempt to reach this rate.
 A value of 0 indicates no padding is needed; the publisher SHOULD only send media data but MUST continue sending PROBE_RESPONSE messages.
 This is useful for passively monitoring the current bitrate without actively probing for more bandwidth.
 Either endpoint MAY close or reset the stream to stop receiving updates entirely.
@@ -146,32 +145,7 @@ The interval is implementation-defined but a value between 100ms and 1000ms is R
 
 
 # Padding
-Padding is optional and depends on the capabilities of the QUIC implementation.
-A publisher that does not support padding MUST still send PROBE_RESPONSE messages based on the actual sending rate.
-
-## QUIC-Level Padding
-The preferred method is for the QUIC implementation to send PING+PADDING frames.
-PADDING frames alone MUST NOT be used, as they are not ack-eliciting and can cause starvation of the congestion controller.
-PING+PADDING is transparent to the application and does not consume application-level flow control.
-
-## Datagram Padding
-If the QUIC implementation does not expose a padding API, the publisher MAY send QUIC datagrams as a fallback.
-Datagrams are unreliable and do not consume stream-level flow control, making them suitable for padding.
-
-A PROBE datagram is identified by a well-known datagram type:
-
-~~~
-PROBE Datagram {
-  Datagram Type (vi64) = 0xPROBE_TODO
-  Padding (..)
-}
-~~~
-
-The contents of the Padding field are arbitrary and MUST be discarded by the receiver.
-The receiver MUST NOT interpret the contents as application data.
-
-## General Requirements
-Padding SHOULD be sent at the lowest priority to avoid interfering with media delivery.
+The publisher SHOULD send padding using the mechanisms defined in {{moqt}} Section 7.7 (padding streams and/or padding datagrams).
 
 The publisher MUST NOT exceed the target with padding alone.
 If media traffic already meets or exceeds the target, no additional padding is necessary.
@@ -201,7 +175,7 @@ This document registers the following entry in the "MoQ Setup Option Types" regi
 
 | Value | Name | Reference |
 |:------|:-----|:----------|
-| 0xPROBE_TODO | PROBE | This Document |
+| TBD1 | PROBE | This Document |
 
 ## MOQT Stream Type
 
@@ -209,15 +183,7 @@ This document registers the following entry in the "MoQ Stream Types" registry:
 
 | Value | Name | Reference |
 |:------|:-----|:----------|
-| 0xPROBE_TODO | PROBE | This Document |
-
-## MOQT Datagram Type
-
-This document registers the following entry in the "MoQ Datagram Types" registry:
-
-| Value | Name | Reference |
-|:------|:-----|:----------|
-| 0xPROBE_TODO | PROBE | This Document |
+| TBD2 | PROBE | This Document |
 
 
 --- back
