@@ -428,8 +428,7 @@ fix:
 	cargo sort --workspace > /dev/null
 
 	# Fix the Python issues.
-	if command -v ruff &> /dev/null; then ruff check --fix py/; fi
-	if command -v ruff &> /dev/null; then ruff format py/; fi
+	if command -v ruff &> /dev/null; then ruff check --fix py/ && ruff format py/; fi
 
 	if command -v tofu &> /dev/null; then (cd cdn && just fix); fi
 
