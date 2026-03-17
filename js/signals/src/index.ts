@@ -194,11 +194,8 @@ export class Effect {
 	#stack?: string;
 	#scheduled = false;
 
-	#stop!: () => void;
-	#stopped: Promise<void>;
-
-	#close!: () => void;
-	#closed: Promise<void>;
+	#stopped: PromiseWithResolvers<void>;
+	#closed: PromiseWithResolvers<void>;
 
 	#abort: AbortController = new AbortController();
 
@@ -215,13 +212,8 @@ export class Effect {
 			this.#stack = new Error().stack;
 		}
 
-		this.#stopped = new Promise((resolve) => {
-			this.#stop = resolve;
-		});
-
-		this.#closed = new Promise((resolve) => {
-			this.#close = resolve;
-		});
+		this.#stopped = Promise.withResolvers();
+		this.#closed = Promise.withResolvers();
 
 		if (fn) {
 			this.#schedule();
@@ -243,13 +235,11 @@ export class Effect {
 	async #run(): Promise<void> {
 		if (this.#dispose === undefined) return; // closed, no error because this is a microtask
 
-		this.#stop();
+		this.#stopped.resolve();
 		this.#abort.abort();
 		this.#abort = new AbortController();
 
-		this.#stopped = new Promise((resolve) => {
-			this.#stop = resolve;
-		});
+		this.#stopped = Promise.withResolvers();
 
 		// Unsubscribe from all signals.
 		for (const unwatch of this.#unwatch) unwatch();
@@ -588,8 +578,8 @@ export class Effect {
 			return;
 		}
 
-		this.#close();
-		this.#stop();
+		this.#closed.resolve();
+		this.#stopped.resolve();
 		this.#abort.abort();
 
 		for (const fn of this.#dispose) fn();
@@ -606,11 +596,11 @@ export class Effect {
 	}
 
 	get closed(): Promise<void> {
-		return this.#closed;
+		return this.#closed.promise;
 	}
 
 	get cancel(): Promise<void> {
-		return this.#stopped;
+		return this.#stopped.promise;
 	}
 
 	get abort(): AbortSignal {

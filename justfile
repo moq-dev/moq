@@ -328,6 +328,7 @@ check:
 		bun run --filter='*' --silent check > /dev/null
 	fi
 	bun biome check
+	echo "JS checks passed."
 
 	# Run the (slower) Rust checks.
 	cargo check --all-targets --quiet
@@ -397,6 +398,7 @@ fix:
 	# Fix the Javascript dependencies.
 	bun install --silent
 	bun biome check --write
+	echo "JS fixes applied."
 
 	# Fix the Rust issues.
 	cargo clippy --fix --allow-staged --allow-dirty --all-targets --quiet

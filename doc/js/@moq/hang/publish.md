@@ -36,78 +36,28 @@ The simplest way to publish:
 | `video` | boolean | false | Enable video |
 | `controls` | boolean | false | Show controls |
 
-### Events
-
-```typescript
-const publish = document.querySelector("moq-publish") as MoqPublish;
-
-publish.addEventListener("start", () => {
-    console.log("Publishing started");
-});
-
-publish.addEventListener("stop", () => {
-    console.log("Publishing stopped");
-});
-
-publish.addEventListener("error", (e) => {
-    console.error("Error:", e.detail);
-});
-```
-
 ## JavaScript API
 
-For more control:
+For more control, use `@moq/publish` directly:
 
 ```typescript
-import * as Hang from "@moq/hang";
+import * as Moq from "@moq/lite";
+import * as Publish from "@moq/publish";
 
-const connection = new Hang.Connection("https://relay.example.com/anon");
+const connection = await Moq.Connection.connect(
+    new URL("https://relay.example.com/anon")
+);
 
-const publish = new Hang.Publish.Broadcast(connection, {
+const publish = new Publish.Broadcast({
+    connection,
     enabled: true,
     name: "alice",
     video: {
         enabled: true,
         device: "camera",
-        bitrate: 2_500_000,
-        framerate: 30,
     },
     audio: {
         enabled: true,
-        bitrate: 128_000,
-    },
-});
-
-// Access the local preview
-publish.video.media.subscribe((stream) => {
-    if (stream) {
-        previewVideo.srcObject = stream;
-    }
-});
-```
-
-## Device Selection
-
-### Camera
-
-```typescript
-const publish = new Hang.Publish.Broadcast(connection, {
-    name: "stream",
-    video: {
-        enabled: true,
-        device: "camera",
-    },
-});
-```
-
-### Screen Share
-
-```typescript
-const publish = new Hang.Publish.Broadcast(connection, {
-    name: "stream",
-    video: {
-        enabled: true,
-        device: "screen",
     },
 });
 ```
@@ -122,74 +72,7 @@ publish.video.device.set("screen");
 publish.video.device.set("camera");
 ```
 
-### Specific Camera Selection
-
-```typescript
-// Get available devices
-const devices = await navigator.mediaDevices.enumerateDevices();
-const cameras = devices.filter(d => d.kind === "videoinput");
-
-// Select specific camera by deviceId
-publish.video.deviceId.set(cameras[1].deviceId);
-```
-
-## Quality Settings
-
-### Video Quality
-
-```typescript
-const publish = new Hang.Publish.Broadcast(connection, {
-    name: "stream",
-    video: {
-        enabled: true,
-        width: 1920,
-        height: 1080,
-        framerate: 30,
-        bitrate: 5_000_000,
-    },
-});
-
-// Change bitrate dynamically
-publish.video.bitrate.set(2_500_000);
-
-// Change framerate
-publish.video.framerate.set(15);
-```
-
-### Audio Quality
-
-```typescript
-const publish = new Hang.Publish.Broadcast(connection, {
-    name: "stream",
-    audio: {
-        enabled: true,
-        bitrate: 128_000,
-        sampleRate: 48000,
-        channels: 2,
-    },
-});
-```
-
-### Codec Selection
-
-```typescript
-const publish = new Hang.Publish.Broadcast(connection, {
-    name: "stream",
-    video: {
-        enabled: true,
-        codec: "avc1.640028", // H.264 High Profile
-        // codec: "hev1.1.6.L93.B0", // H.265
-        // codec: "vp09.00.10.08", // VP9
-        // codec: "av01.0.04M.08", // AV1
-    },
-    audio: {
-        enabled: true,
-        codec: "opus", // or "mp4a.40.2" for AAC
-    },
-});
-```
-
-## Enable/Disable Tracks
+### Enable/Disable Tracks
 
 ```typescript
 // Disable video (audio only)
@@ -200,89 +83,6 @@ publish.video.enabled.set(true);
 
 // Mute audio
 publish.audio.enabled.set(false);
-```
-
-## Publishing State
-
-```typescript
-// Check if publishing
-publish.enabled.subscribe((isEnabled) => {
-    console.log("Publishing:", isEnabled);
-});
-
-// Start publishing
-publish.enabled.set(true);
-
-// Stop publishing
-publish.enabled.set(false);
-```
-
-## Error Handling
-
-```typescript
-publish.error.subscribe((error) => {
-    if (error) {
-        console.error("Publish error:", error);
-
-        if (error.code === "PERMISSION_DENIED") {
-            showMessage("Camera/microphone access denied");
-        } else if (error.code === "NOT_SUPPORTED") {
-            showMessage("WebRTC not supported");
-        }
-    }
-});
-```
-
-## Permission Handling
-
-```typescript
-// Request permissions before publishing
-try {
-    await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    // Permissions granted, safe to publish
-    publish.enabled.set(true);
-} catch (error) {
-    if (error.name === "NotAllowedError") {
-        showMessage("Please allow camera and microphone access");
-    }
-}
-```
-
-## React Integration
-
-```tsx
-import { useEffect, useRef, useState } from "react";
-import "@moq/publish/element";
-import type MoqPublish from "@moq/publish/element";
-
-function Publisher({ url, name }) {
-    const publishRef = useRef<MoqPublish>(null);
-    const [isPublishing, setIsPublishing] = useState(false);
-
-    const togglePublish = () => {
-        const publish = publishRef.current;
-        if (publish) {
-            publish.enabled.set(!isPublishing);
-            setIsPublishing(!isPublishing);
-        }
-    };
-
-    return (
-        <div>
-            <moq-publish
-                ref={publishRef}
-                url={url}
-                name={name}
-                audio video>
-                <video muted autoplay style={{ width: "100%" }} />
-            </moq-publish>
-
-            <button onClick={togglePublish}>
-                {isPublishing ? "Stop" : "Start"} Publishing
-            </button>
-        </div>
-    );
-}
 ```
 
 ## SolidJS Integration

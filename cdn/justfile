@@ -15,11 +15,6 @@ pin:
 	just relay::pin
 	just pub::pin
 
-# Update all flake inputs to latest
-update:
-	just relay::update
-	just pub::update
-
 # Run health checks against all relay nodes
 health:
 	./health.sh

@@ -67,16 +67,12 @@ The `<moq-watch-ui>` element automatically discovers the nested `<moq-watch>` an
 ```typescript
 import * as Watch from "@moq/watch";
 
-const broadcast = new Watch.Broadcast(connection, {
+const broadcast = new Watch.Broadcast({
+    connection,
     enabled: true,
     name: "alice",
-    video: { enabled: true },
-    audio: { enabled: true },
+    reload: true,
 });
-
-// Reactive controls
-broadcast.volume.set(0.8);
-broadcast.paused.set(false);
 ```
 
 ## Related Packages

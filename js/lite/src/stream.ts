@@ -21,12 +21,15 @@ export class Stream {
 	constructor(props: {
 		writable: WritableStream<Uint8Array>;
 		readable: ReadableStream<Uint8Array>;
+		writer?: Writer;
+		reader?: Reader;
+		version?: IetfVersion;
 	}) {
-		this.writer = new Writer(props.writable);
-		this.reader = new Reader(props.readable);
+		this.writer = props.writer ?? new Writer(props.writable, props.version);
+		this.reader = props.reader ?? new Reader(props.readable, undefined, props.version);
 	}
 
-	static async accept(quic: WebTransport): Promise<Stream | undefined> {
+	static async accept(quic: WebTransport, version?: IetfVersion): Promise<Stream | undefined> {
 		for (;;) {
 			const reader =
 				quic.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
@@ -34,12 +37,14 @@ export class Stream {
 			reader.releaseLock();
 
 			if (next.done) return;
-			return new Stream(next.value);
+			const { readable, writable } = next.value;
+			return new Stream({ readable, writable, version });
 		}
 	}
 
-	static async open(quic: WebTransport, priority?: number): Promise<Stream> {
-		return new Stream(await quic.createBidirectionalStream({ sendOrder: priority }));
+	static async open(quic: WebTransport, version?: IetfVersion, priority?: number): Promise<Stream> {
+		const { readable, writable } = await quic.createBidirectionalStream({ sendOrder: priority });
+		return new Stream({ readable, writable, version });
 	}
 
 	close() {
@@ -333,9 +338,9 @@ export class Writer {
 		this.#writer.abort(reason).catch(() => void 0);
 	}
 
-	static async open(quic: WebTransport): Promise<Writer> {
+	static async open(quic: WebTransport, version?: IetfVersion): Promise<Writer> {
 		const writable = (await quic.createUnidirectionalStream()) as WritableStream<Uint8Array>;
-		return new Writer(writable);
+		return new Writer(writable, version);
 	}
 }
 
@@ -360,17 +365,19 @@ function setInt32(dst: ArrayBuffer, v: number): Uint8Array {
 // Returns the next stream from the connection
 export class Readers {
 	#reader: ReadableStreamDefaultReader<ReadableStream<Uint8Array>>;
+	#version?: IetfVersion;
 
-	constructor(quic: WebTransport) {
+	constructor(quic: WebTransport, version?: IetfVersion) {
 		this.#reader = quic.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 			ReadableStream<Uint8Array>
 		>;
+		this.#version = version;
 	}
 
 	async next(): Promise<Reader | undefined> {
 		const next = await this.#reader.read();
 		if (next.done) return;
-		return new Reader(next.value);
+		return new Reader(next.value, undefined, this.#version);
 	}
 
 	close() {

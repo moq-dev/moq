@@ -2,7 +2,7 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { Parameters } from "./parameters.ts";
+import { MessageParameters, Parameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // In draft-14, SUBSCRIBE_ANNOUNCES is renamed to SUBSCRIBE_NAMESPACE
@@ -37,7 +37,12 @@ export class SubscribeNamespace {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			await w.u53(this.subscribeOptions);
 		}
-		await w.u53(0); // no parameters
+		// v14/v15 use SETUP-style Parameters; v16+ use MessageParameters (delta-encoded keys).
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+			await new Parameters().encode(w, version);
+		} else {
+			await new MessageParameters().encode(w, version);
+		}
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -58,7 +63,12 @@ export class SubscribeNamespace {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			subscribeOptions = await r.u53();
 		}
-		await Parameters.decode(r, version);
+		// v14/v15 use SETUP-style Parameters; v16+ use MessageParameters (delta-encoded keys).
+		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+			await Parameters.decode(r, version);
+		} else {
+			await MessageParameters.decode(r, version);
+		}
 
 		return new SubscribeNamespace({ namespace, requestId, subscribeOptions });
 	}
@@ -211,6 +221,38 @@ export class SubscribeNamespaceEntryDone {
 	static async #decode(r: Reader): Promise<SubscribeNamespaceEntryDone> {
 		const suffix = await Namespace.decode(r);
 		return new SubscribeNamespaceEntryDone({ suffix });
+	}
+}
+
+/// PUBLISH_BLOCKED message (0x0F) — draft-17 only, sent on SUBSCRIBE_NAMESPACE bidi stream
+export class PublishBlocked {
+	static id = 0x0f;
+
+	suffix: Path.Valid;
+	trackName: string;
+
+	constructor({ suffix, trackName }: { suffix: Path.Valid; trackName: string }) {
+		this.suffix = suffix;
+		this.trackName = trackName;
+	}
+
+	async #encode(w: Writer): Promise<void> {
+		await Namespace.encode(w, this.suffix);
+		await w.string(this.trackName);
+	}
+
+	async encode(w: Writer, _version: IetfVersion): Promise<void> {
+		return Message.encode(w, this.#encode.bind(this));
+	}
+
+	static async decode(r: Reader, _version: IetfVersion): Promise<PublishBlocked> {
+		return Message.decode(r, PublishBlocked.#decode);
+	}
+
+	static async #decode(r: Reader): Promise<PublishBlocked> {
+		const suffix = await Namespace.decode(r);
+		const trackName = await r.string();
+		return new PublishBlocked({ suffix, trackName });
 	}
 }
 

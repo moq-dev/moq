@@ -12,7 +12,7 @@ import {
 } from "./publish_namespace.ts";
 import { MaxRequestId, RequestError, RequestOk, RequestsBlocked } from "./request.ts";
 import * as Setup from "./setup.ts";
-import { Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
+import { Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import {
 	SubscribeNamespace,
 	SubscribeNamespaceError,
@@ -26,6 +26,7 @@ import { type IetfVersion, Version } from "./version.ts";
 const MessagesV14 = {
 	[Setup.ClientSetup.id]: Setup.ClientSetup,
 	[Setup.ServerSetup.id]: Setup.ServerSetup,
+	[SubscribeUpdate.id]: SubscribeUpdate,
 	[Subscribe.id]: Subscribe,
 	[SubscribeOk.id]: SubscribeOk,
 	[SubscribeError.id]: SubscribeError,
@@ -59,6 +60,7 @@ const MessagesV14 = {
 const MessagesV15 = {
 	[Setup.ClientSetup.id]: Setup.ClientSetup,
 	[Setup.ServerSetup.id]: Setup.ServerSetup,
+	[SubscribeUpdate.id]: SubscribeUpdate,
 	[Subscribe.id]: Subscribe,
 	[SubscribeOk.id]: SubscribeOk,
 	[RequestError.id]: RequestError, // 0x05 → RequestError instead of SubscribeError
@@ -84,6 +86,7 @@ const MessagesV15 = {
 const MessagesV16 = {
 	[Setup.ClientSetup.id]: Setup.ClientSetup,
 	[Setup.ServerSetup.id]: Setup.ServerSetup,
+	[SubscribeUpdate.id]: SubscribeUpdate,
 	[Subscribe.id]: Subscribe,
 	[SubscribeOk.id]: SubscribeOk,
 	[RequestError.id]: RequestError, // 0x05 → RequestError
@@ -108,17 +111,20 @@ const MessagesV16 = {
 // v17 message map — uses unified Setup (0x2F00), removes several messages
 const MessagesV17 = {
 	[Setup.Setup.id]: Setup.Setup, // 0x2F00: unified SETUP
+	[SubscribeUpdate.id]: SubscribeUpdate, // 0x02: REQUEST_UPDATE
 	[Subscribe.id]: Subscribe,
 	[SubscribeOk.id]: SubscribeOk,
 	[RequestError.id]: RequestError, // 0x05
 	[PublishNamespace.id]: PublishNamespace,
 	[RequestOk.id]: RequestOk, // 0x07
-	// PublishNamespaceDone (0x09) removed in d17
-	// Unsubscribe (0x0a) removed in d17
+	// 0x08: NAMESPACE (bidi stream only)
+	// 0x09: removed in d17
+	// 0x0a: removed in d17
 	[PublishDone.id]: PublishDone,
-	// PublishNamespaceCancel (0x0c) removed in d17
+	// 0x0c: removed in d17
 	[TrackStatusRequest.id]: TrackStatusRequest,
-	[TrackStatus.id]: TrackStatus,
+	// 0x0e: NAMESPACE_DONE (bidi stream only), NOT TrackStatus
+	// 0x0f: PUBLISH_BLOCKED (bidi stream only)
 	[GoAway.id]: GoAway,
 	[Fetch.id]: Fetch,
 	// FetchCancel (0x17) removed in d17
@@ -147,8 +153,7 @@ export class Stream {
 
 	#maxRequestId: bigint;
 
-	#maxRequestIdPromise?: Promise<void>; // unblocks when there's a new max request id
-	#maxRequestIdResolve!: () => void; // resolves the max request id promise
+	#maxRequestIdUpdate?: PromiseWithResolvers<void>;
 
 	#writeLock = new Mutex();
 	#readLock = new Mutex();
@@ -168,9 +173,7 @@ export class Stream {
 		this.stream.reader.version = version;
 		this.stream.writer.version = version;
 		this.#maxRequestId = maxRequestId;
-		this.#maxRequestIdPromise = new Promise((resolve) => {
-			this.#maxRequestIdResolve = resolve;
-		});
+		this.#maxRequestIdUpdate = Promise.withResolvers();
 	}
 
 	/**
@@ -231,10 +234,8 @@ export class Stream {
 		}
 
 		this.#maxRequestId = max;
-		this.#maxRequestIdResolve();
-		this.#maxRequestIdPromise = new Promise((resolve) => {
-			this.#maxRequestIdResolve = resolve;
-		});
+		this.#maxRequestIdUpdate?.resolve();
+		this.#maxRequestIdUpdate = Promise.withResolvers();
 	}
 
 	async nextRequestId(): Promise<bigint | undefined> {
@@ -252,17 +253,17 @@ export class Stream {
 				return id;
 			}
 
-			if (!this.#maxRequestIdPromise) {
+			if (!this.#maxRequestIdUpdate) {
 				return undefined;
 			}
 
 			console.warn("blocked on max request id");
-			await this.#maxRequestIdPromise;
+			await this.#maxRequestIdUpdate.promise;
 		}
 	}
 
 	close(): void {
-		this.#maxRequestIdResolve();
-		this.#maxRequestIdPromise = undefined;
+		this.#maxRequestIdUpdate?.resolve();
+		this.#maxRequestIdUpdate = undefined;
 	}
 }
