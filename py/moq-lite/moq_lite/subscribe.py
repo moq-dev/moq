@@ -60,8 +60,4 @@ class BroadcastConsumer:
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""
         consumer = self.subscribe_catalog()
-        return await consumer.__anext__()
-
-    async def subscribe(self, name: str, max_latency_ms: int = 10_000) -> MediaConsumer:
-        """Convenience alias for subscribe_media."""
-        return self.subscribe_media(name, max_latency_ms)
+        return await anext(consumer)

@@ -66,7 +66,7 @@ origin = moq.OriginProducer()
 client = moq.Client(
     "https://relay.quic.video",
     publish=origin,
-    consume=origin,
+    subscribe=origin,
 )
 ```
 
@@ -74,7 +74,7 @@ client = moq.Client(
 
 ### Connection
 
-- **`Client(url, *, tls_verify=True, publish=None, consume=None)`** — async context manager for connecting to a relay
+- **`Client(url, *, tls_verify=True, publish=None, subscribe=None)`** — async context manager for connecting to a relay
 
 ### Publishing
 

@@ -325,7 +325,7 @@ check:
 	if tty -s; then
 		bun run --filter='*' --elide-lines=0 check
 	else
-		bun run --filter='*' --silent check > /dev/null
+		bun run --filter='*' check
 	fi
 	bun biome check
 	echo "JS checks passed."
@@ -343,6 +343,13 @@ check:
 
 	# requires: cargo install cargo-sort
 	cargo sort --workspace --check > /dev/null
+
+	# Run the Python checks.
+	if command -v ruff &> /dev/null; then
+		ruff check py/
+		ruff format --check py/
+		echo "Python checks passed."
+	fi
 
 	# Only run the tofu checks if tofu is installed.
 	if command -v tofu &> /dev/null; then (cd cdn && just check); fi
@@ -388,10 +395,19 @@ test *args:
 	if tty -s; then
 		bun run --filter='*' --elide-lines=0 test
 	else
-		bun run --filter='*' --silent test > /dev/null
+		bun run --filter='*' test
 	fi
 
 	cargo test --all-targets --quiet {{ args }}
+
+	# Run the Python tests.
+	if command -v maturin &> /dev/null; then
+		pushd py/moq-lite > /dev/null
+		maturin develop -m ../../rs/moq-ffi/Cargo.toml --uv
+		uv run pytest tests/
+		popd > /dev/null
+		echo "Python tests passed."
+	fi
 
 # Automatically fix some issues.
 fix:
@@ -409,6 +425,10 @@ fix:
 
 	# requires: cargo install cargo-sort
 	cargo sort --workspace > /dev/null
+
+	# Fix the Python issues.
+	if command -v ruff &> /dev/null; then ruff check --fix py/; fi
+	if command -v ruff &> /dev/null; then ruff format py/; fi
 
 	if command -v tofu &> /dev/null; then (cd cdn && just fix); fi
 
@@ -432,8 +452,16 @@ update:
 
 # Build the packages
 build:
+	#!/usr/bin/env bash
+	set -euo pipefail
+
 	bun run --filter='*' build
 	cargo build --quiet
+
+	# Build moq-ffi from source into py/moq-lite's venv.
+	if command -v maturin &> /dev/null; then
+		cd py/moq-lite && maturin develop -m ../../rs/moq-ffi/Cargo.toml --uv
+	fi
 
 # Generate and serve an HLS stream from a video for testing pub-hls
 serve-hls name port="8000":

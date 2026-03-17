@@ -29,6 +29,12 @@ class Announced:
     def __init__(self, inner: MoqAnnounced) -> None:
         self._inner = inner
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
     def __aiter__(self):
         return self
 
@@ -47,6 +53,12 @@ class AnnouncedBroadcast:
 
     def __init__(self, inner: MoqAnnouncedBroadcast) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     async def available(self) -> BroadcastConsumer:
         return BroadcastConsumer(await self._inner.available())

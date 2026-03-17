@@ -21,7 +21,7 @@ class Client:
     In advanced mode, provide your own origin for full control:
 
         origin = OriginProducer()
-        client = Client("https://relay.example.com", publish=origin, consume=origin)
+        client = Client("https://relay.example.com", publish=origin, subscribe=origin)
     """
 
     def __init__(
@@ -30,20 +30,20 @@ class Client:
         *,
         tls_verify: bool = True,
         publish: OriginProducer | None = None,
-        consume: OriginProducer | None = None,
+        subscribe: OriginProducer | None = None,
     ) -> None:
         self._url = url
         self._tls_verify = tls_verify
 
         # If neither origin is provided, create a shared internal one.
-        if publish is None and consume is None:
+        if publish is None and subscribe is None:
             self._origin = OriginProducer()
             self._publish_origin = self._origin
             self._consume_origin = self._origin
         else:
             self._origin = None
             self._publish_origin = publish
-            self._consume_origin = consume
+            self._consume_origin = subscribe
 
         self._consumer: OriginConsumer | None = None
         self._inner: MoqClient | None = None
@@ -70,6 +70,7 @@ class Client:
         return self
 
     async def __aexit__(self, *exc) -> None:
+        self._consumer = None
         if self._inner is not None:
             self._inner.cancel()
             self._inner = None

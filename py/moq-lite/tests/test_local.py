@@ -163,13 +163,13 @@ async def test_catalog_update_on_new_track():
         cat_consumer = announcement.broadcast.subscribe_catalog()
 
         # First catalog: 1 audio track.
-        catalog1 = await cat_consumer.__anext__()
+        catalog1 = await anext(cat_consumer)
         assert len(catalog1.audio) == 1
 
         # Add a second audio track — triggers catalog update.
         _media2 = broadcast.publish_media("opus", opus_head())
 
-        catalog2 = await cat_consumer.__anext__()
+        catalog2 = await anext(cat_consumer)
         assert len(catalog2.audio) == 2
 
         break
