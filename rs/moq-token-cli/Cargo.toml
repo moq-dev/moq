@@ -9,11 +9,6 @@ version = "0.5.14"
 edition = "2024"
 rust-version.workspace = true
 
-[[bin]]
-name = "moq-token"
-path = "src/bin.rs"
-doc = false
-
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

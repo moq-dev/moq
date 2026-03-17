@@ -40,6 +40,7 @@ in
     // {
       src = craneLib.cleanCargoSource ../.;
       cargoExtraArgs = "-p moq-token-cli";
+      meta.mainProgram = "moq-token-cli";
     }
   );
 }
