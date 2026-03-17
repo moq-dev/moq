@@ -1,6 +1,8 @@
+use anyhow::Context;
 use clap::ValueEnum;
 use hang::moq_lite;
 use tokio::io::AsyncWriteExt;
+use url::Url;
 
 #[derive(ValueEnum, Clone, Copy)]
 pub enum OutputFormat {
@@ -28,6 +30,90 @@ impl Subscribe {
 		Self { broadcast, args }
 	}
 
+	/// Wait for a named broadcast to be announced on the origin.
+	async fn wait_broadcast(
+		consumer: &mut moq_lite::OriginConsumer,
+		name: &str,
+	) -> anyhow::Result<moq_lite::BroadcastConsumer> {
+		loop {
+			let (path, announced) = consumer
+				.announced()
+				.await
+				.ok_or_else(|| anyhow::anyhow!("origin closed"))?;
+
+			if let Some(broadcast) = announced {
+				if path.as_ref() == name {
+					return Ok(broadcast);
+				}
+			}
+		}
+	}
+
+	pub async fn run_client(
+		client: moq_native::Client,
+		url: Url,
+		name: String,
+		args: SubscribeArgs,
+	) -> anyhow::Result<()> {
+		let origin = moq_lite::Origin::produce();
+		let mut consumer = origin.consume();
+
+		tracing::info!(%url, %name, "connecting to subscribe");
+
+		let mut session = client.with_consume(origin).connect(url).await?;
+
+		#[cfg(unix)]
+		let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+
+		let broadcast = Self::wait_broadcast(&mut consumer, &name).await?;
+		let subscribe = Self::new(broadcast, args);
+
+		tokio::select! {
+			res = subscribe.run() => res,
+			res = session.closed() => res.map_err(Into::into),
+			_ = tokio::signal::ctrl_c() => {
+				session.close(moq_lite::Error::Cancel);
+				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+				Ok(())
+			},
+		}
+	}
+
+	pub async fn run_server(server: moq_native::Server, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
+		let origin = moq_lite::Origin::produce();
+		let mut consumer = origin.consume();
+
+		let mut server = server.with_consume(origin);
+
+		#[cfg(unix)]
+		let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+
+		let mut conn_id: u64 = 0;
+
+		tracing::info!(addr = ?server.local_addr(), "listening for subscribe");
+
+		tokio::select! {
+			res = async {
+				while let Some(session) = server.accept().await {
+					let id = conn_id;
+					conn_id += 1;
+
+					tokio::spawn(async move {
+						if let Err(err) = consume_session(id, session).await {
+							tracing::warn!(%err, "failed to accept session");
+						}
+					});
+				}
+				Ok(())
+			} => res,
+			res = async {
+				let broadcast = Self::wait_broadcast(&mut consumer, &name).await?;
+				let subscribe = Self::new(broadcast, args);
+				subscribe.run().await
+			} => res,
+		}
+	}
+
 	pub async fn run(self) -> anyhow::Result<()> {
 		match self.args.output {
 			OutputFormat::Fmp4 => self.run_fmp4().await,
@@ -35,37 +121,21 @@ impl Subscribe {
 	}
 
 	async fn run_fmp4(self) -> anyhow::Result<()> {
-		use anyhow::Context;
-
 		let mut stdout = tokio::io::stdout();
 		let max_latency = std::time::Duration::from_millis(self.args.max_latency);
 
-		// Read catalog to discover format
-		let catalog_track = self.broadcast.subscribe_track(&hang::Catalog::default_track())?;
+		// Always convert to CMAF — this is a no-op for tracks already in CMAF.
+		let cmaf_output = moq_lite::Broadcast::new().produce();
+		let cmaf_consumer = cmaf_output.consume();
+		let converter = moq_mux::convert::Fmp4::new(self.broadcast, cmaf_output);
+
+		// The converter spawns tasks for each track and returns immediately.
+		converter.run().await?;
+
+		// Read the converted catalog.
+		let catalog_track = cmaf_consumer.subscribe_track(&hang::Catalog::default_track())?;
 		let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
 		let catalog = catalog_consumer.next().await?.context("empty catalog")?;
-
-		// Check if we need to convert to CMAF first
-		let needs_convert = catalog
-			.video
-			.renditions
-			.values()
-			.any(|c| matches!(c.container, hang::catalog::Container::Legacy))
-			|| catalog
-				.audio
-				.renditions
-				.values()
-				.any(|c| matches!(c.container, hang::catalog::Container::Legacy));
-
-		let (broadcast, catalog) = if needs_convert {
-			// Convert hang→CMAF
-			let converter = moq_mux::convert::Fmp4::new(self.broadcast);
-			let (broadcast, catalog_producer) = converter.run().await?;
-			let catalog = catalog_producer.snapshot();
-			(broadcast.consume(), catalog)
-		} else {
-			(self.broadcast, catalog)
-		};
 
 		// Build exporter from catalog (for init segment)
 		let exporter = moq_mux::consumer::Fmp4::new(&catalog)?;
@@ -79,7 +149,7 @@ impl Subscribe {
 		let mut muxer_tracks = Vec::new();
 
 		for (name, config) in &catalog.video.renditions {
-			let track = broadcast.subscribe_track(&moq_lite::Track {
+			let track = cmaf_consumer.subscribe_track(&moq_lite::Track {
 				name: name.clone(),
 				priority: 1,
 			})?;
@@ -97,7 +167,7 @@ impl Subscribe {
 		}
 
 		for (name, config) in &catalog.audio.renditions {
-			let track = broadcast.subscribe_track(&moq_lite::Track {
+			let track = cmaf_consumer.subscribe_track(&moq_lite::Track {
 				name: name.clone(),
 				priority: 2,
 			})?;
@@ -129,8 +199,16 @@ impl Subscribe {
 	}
 }
 
+#[tracing::instrument("session", skip_all, fields(id))]
+async fn consume_session(id: u64, session: moq_native::Request) -> anyhow::Result<()> {
+	let session = session.ok().await?;
+
+	tracing::info!(id, "accepted consume session");
+
+	session.closed().await.map_err(Into::into)
+}
+
 fn parse_timescale_from_init(init_data_b64: &str) -> anyhow::Result<u64> {
-	use anyhow::Context;
 	use base64::Engine;
 	use mp4_atom::DecodeMaybe;
 

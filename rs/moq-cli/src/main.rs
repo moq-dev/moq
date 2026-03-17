@@ -1,12 +1,8 @@
-mod client;
 mod publish;
-mod server;
 mod subscribe;
 mod web;
 
-use client::*;
 use publish::*;
-use server::*;
 use subscribe::*;
 use web::*;
 
@@ -122,39 +118,14 @@ async fn main() -> anyhow::Result<()> {
 					let publish = Publish::new(&args)?;
 
 					tokio::select! {
-						res = run_server(server, name, publish.consume()) => res,
+						res = publish.run_server(server, name) => res,
 						res = run_web(web_bind, web_tls, dir) => res,
-						res = publish.run() => res,
 					}
 				}
 				ServerAction::Subscribe { name, args } => {
-					let origin = hang::moq_lite::Origin::produce();
-					let mut consumer = origin.consume();
-
-					let session_server = server.with_consume(origin);
-
-					// Run the server in the background, waiting for a broadcast
 					tokio::select! {
-						res = run_server_consume(session_server, name.clone()) => res,
+						res = Subscribe::run_server(server, name, args) => res,
 						res = run_web(web_bind, web_tls, dir) => res,
-						res = async {
-							// Wait for the named broadcast to be announced
-							let broadcast = loop {
-								let (path, announced) = consumer
-									.announced()
-									.await
-									.ok_or_else(|| anyhow::anyhow!("origin closed"))?;
-
-								if let Some(broadcast) = announced {
-									if path.as_ref() == name {
-										break broadcast;
-									}
-								}
-							};
-
-							let subscribe = Subscribe::new(broadcast, args);
-							subscribe.run().await
-						} => res,
 					}
 				}
 			}
@@ -168,9 +139,9 @@ async fn main() -> anyhow::Result<()> {
 			match action {
 				ClientAction::Publish { name, args } => {
 					let publish = Publish::new(&args)?;
-					run_client(client, url, name, publish).await
+					publish.run_client(client, url, name).await
 				}
-				ClientAction::Subscribe { name, args } => run_client_subscribe(client, url, name, args).await,
+				ClientAction::Subscribe { name, args } => Subscribe::run_client(client, url, name, args).await,
 			}
 		}
 	}

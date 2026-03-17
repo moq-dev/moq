@@ -11,8 +11,9 @@
 //! - `hev1`: H.265 with inline SPS/PPS.
 //! - `hls`: HLS playlist.
 //!
-//! The [Decoder] module provides a generic interface for importing a stream of media.
-//! If you know the format in advance, use the specific decoder instead.
+//! The [Framed] and [Stream] types provide generic interfaces for importing media.
+//! [Framed] is for formats with known frame boundaries, [Stream] for unknown boundaries.
+//! If you know the format in advance, use the specific codec module instead.
 
 mod aac;
 #[cfg(any(feature = "h264", feature = "h265"))]

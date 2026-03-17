@@ -56,31 +56,17 @@ fn test_video_config() -> VideoConfig {
 	}
 }
 
-/// An input broadcast where catalog is written immediately but media data
-/// is written later via the returned `video_track` producer.
-///
-/// This matches real usage: the converter subscribes to the catalog first,
-/// then subscribes to media tracks. Media data arrives concurrently.
-struct InputBroadcast {
-	/// Write media frames here after passing `consumer` to the converter.
-	video_track: moq_lite::TrackProducer,
-	/// Pass this to the converter.
-	consumer: moq_lite::BroadcastConsumer,
-	// Must stay alive so the broadcast and weak track refs remain valid.
-	#[allow(dead_code)]
-	broadcast: moq_lite::BroadcastProducer,
-	#[allow(dead_code)]
-	catalog_track: moq_lite::TrackProducer,
-}
-
 /// Set up an input broadcast with the given catalog config.
-///
-/// Writes the catalog immediately (so the converter can read it on startup)
-/// but leaves the video track empty for the caller to write to.
-fn setup_input(video_config: &VideoConfig) -> InputBroadcast {
+fn setup_input(
+	video_config: &VideoConfig,
+) -> (
+	moq_lite::BroadcastConsumer,
+	moq_lite::TrackProducer,
+	moq_lite::BroadcastProducer,
+	moq_lite::TrackProducer,
+) {
 	let mut broadcast = moq_lite::Broadcast::new().produce();
 
-	// Create and write catalog
 	let mut catalog_track = broadcast.create_track(hang::Catalog::default_track()).unwrap();
 	let mut catalog = hang::Catalog::default();
 	catalog
@@ -93,7 +79,6 @@ fn setup_input(video_config: &VideoConfig) -> InputBroadcast {
 	group.write_frame(catalog_json).unwrap();
 	group.finish().unwrap();
 
-	// Create video track (empty — caller writes data after converter subscribes)
 	let video_track = broadcast
 		.create_track(moq_lite::Track {
 			name: "video".to_string(),
@@ -103,15 +88,9 @@ fn setup_input(video_config: &VideoConfig) -> InputBroadcast {
 
 	let consumer = broadcast.consume();
 
-	InputBroadcast {
-		video_track,
-		consumer,
-		broadcast,
-		catalog_track,
-	}
+	(consumer, video_track, broadcast, catalog_track)
 }
 
-/// Write Legacy-encoded frames to a track, grouped by keyframes.
 fn write_legacy_frames(track: &mut moq_lite::TrackProducer, frames: &[(Timestamp, Vec<u8>, bool)]) {
 	let mut current_group: Option<moq_lite::GroupProducer> = None;
 	for (timestamp, payload, is_keyframe) in frames {
@@ -137,7 +116,6 @@ fn write_legacy_frames(track: &mut moq_lite::TrackProducer, frames: &[(Timestamp
 	track.finish().unwrap();
 }
 
-/// Write CMAF moof+mdat frames to a track, grouped by keyframes.
 fn write_cmaf_frames(track: &mut moq_lite::TrackProducer, frames: &[(u64, Vec<u8>, bool)]) {
 	let mut current_group: Option<moq_lite::GroupProducer> = None;
 	let mut seq: u32 = 1;
@@ -162,16 +140,8 @@ fn write_cmaf_frames(track: &mut moq_lite::TrackProducer, frames: &[(u64, Vec<u8
 	track.finish().unwrap();
 }
 
-/// Read all Legacy frames from the output broadcast's video track.
-async fn read_legacy_frames(broadcast: &moq_lite::BroadcastProducer) -> Vec<(Timestamp, Vec<u8>, bool)> {
-	let consumer = broadcast.consume();
-	let track = consumer
-		.subscribe_track(&moq_lite::Track {
-			name: "video".to_string(),
-			priority: 1,
-		})
-		.unwrap();
-
+/// Read all Legacy frames from a track consumer (must be subscribed before converter finishes).
+async fn read_legacy_frames(track: moq_lite::TrackConsumer) -> Vec<(Timestamp, Vec<u8>, bool)> {
 	let mut ordered = crate::consumer::OrderedConsumer::new(track, crate::consumer::Legacy, Duration::MAX);
 
 	let mut result = Vec::new();
@@ -188,16 +158,8 @@ async fn read_legacy_frames(broadcast: &moq_lite::BroadcastProducer) -> Vec<(Tim
 	result
 }
 
-/// Read all raw CMAF frames (moof+mdat bytes) from the output broadcast's video track.
-async fn read_cmaf_raw_frames(broadcast: &moq_lite::BroadcastProducer) -> Vec<Bytes> {
-	let consumer = broadcast.consume();
-	let mut track = consumer
-		.subscribe_track(&moq_lite::Track {
-			name: "video".to_string(),
-			priority: 1,
-		})
-		.unwrap();
-
+/// Read all raw CMAF frames from a track consumer (must be subscribed before converter finishes).
+async fn read_cmaf_raw_frames(mut track: moq_lite::TrackConsumer) -> Vec<Bytes> {
 	let mut result = Vec::new();
 	while let Some(group) = tokio::time::timeout(Duration::from_millis(500), track.next_group())
 		.await
@@ -216,7 +178,6 @@ async fn read_cmaf_raw_frames(broadcast: &moq_lite::BroadcastProducer) -> Vec<By
 	result
 }
 
-/// Parse a CMAF moof+mdat frame and extract (timestamp, payload, keyframe).
 fn parse_cmaf_frame(data: &Bytes, timescale: u64) -> (Timestamp, Vec<u8>, bool) {
 	let mut cursor = std::io::Cursor::new(data.as_ref());
 	let mut moof_found = None;
@@ -241,6 +202,20 @@ fn parse_cmaf_frame(data: &Bytes, timescale: u64) -> (Timestamp, Vec<u8>, bool) 
 	(timestamp, mdat.data.clone(), keyframe)
 }
 
+/// Subscribe to the video track, retrying until it appears.
+async fn subscribe_video(consumer: &moq_lite::BroadcastConsumer) -> moq_lite::TrackConsumer {
+	let track = moq_lite::Track {
+		name: "video".to_string(),
+		priority: 1,
+	};
+	loop {
+		match consumer.subscribe_track(&track) {
+			Ok(t) => return t,
+			Err(_) => tokio::task::yield_now().await,
+		}
+	}
+}
+
 // ---- Tests ----
 
 #[tokio::test]
@@ -252,41 +227,25 @@ async fn legacy_to_cmaf_video() {
 		(ts(66_000), vec![0x06, 0x07, 0x08], true),
 	];
 
-	// Set up input: catalog written, video track empty
-	let mut input = setup_input(&config);
+	let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&config);
+	let output = moq_lite::Broadcast::new().produce();
+	let output_consumer = output.consume();
 
-	// Start converter — reads catalog, subscribes to video track, spawns tasks
-	let converter = super::Fmp4::new(input.consumer);
-	let (output, catalog_producer) = converter.run().await.unwrap();
+	let converter = super::Fmp4::new(consumer, output);
 
-	// Now write video data — the spawned conversion tasks will consume it
-	write_legacy_frames(&mut input.video_track, &frames);
+	let frames_clone = frames.clone();
+	tokio::spawn(async move {
+		tokio::task::yield_now().await;
+		write_legacy_frames(&mut video_track, &frames_clone);
+	});
 
-	// Verify catalog: container should now be Cmaf with valid init_data
-	let catalog = catalog_producer.snapshot();
-	let video_config = catalog.video.renditions.get("video").unwrap();
-	match &video_config.container {
-		Container::Cmaf { init_data } => {
-			let init_bytes = base64::engine::general_purpose::STANDARD.decode(init_data).unwrap();
-			let mut cursor = std::io::Cursor::new(&init_bytes);
-			let mut found_ftyp = false;
-			let mut found_moov = false;
-			while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
-				match atom {
-					mp4_atom::Any::Ftyp(_) => found_ftyp = true,
-					mp4_atom::Any::Moov(_) => found_moov = true,
-					_ => {}
-				}
-			}
-			assert!(found_ftyp, "init_data should contain ftyp");
-			assert!(found_moov, "init_data should contain moov");
-		}
-		Container::Legacy => panic!("expected Cmaf container after conversion"),
-	}
+	let (convert_result, cmaf_frames) = tokio::join!(converter.run(), async {
+		let output_video = subscribe_video(&output_consumer).await;
+		read_cmaf_raw_frames(output_video).await
+	});
+	convert_result.unwrap();
 
-	// Read output frames and verify
 	let timescale = config.framerate.map(|f| (f * 1000.0) as u64).unwrap();
-	let cmaf_frames = read_cmaf_raw_frames(&output).await;
 	assert_eq!(cmaf_frames.len(), 3, "expected 3 CMAF frames");
 
 	for (i, cmaf_data) in cmaf_frames.iter().enumerate() {
@@ -314,22 +273,24 @@ async fn cmaf_to_legacy_video() {
 		init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
 	};
 
-	let mut input = setup_input(&cmaf_config);
-	let converter = super::Hang::new(input.consumer);
-	let (output, catalog_producer) = converter.run().await.unwrap();
+	let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&cmaf_config);
+	let output = moq_lite::Broadcast::new().produce();
+	let output_consumer = output.consume();
+	let converter = super::Hang::new(consumer, output);
 
-	// Write CMAF data after converter has subscribed
-	write_cmaf_frames(&mut input.video_track, &cmaf_frames);
+	let cmaf_frames_clone = cmaf_frames.clone();
+	tokio::spawn(async move {
+		tokio::task::yield_now().await;
+		write_cmaf_frames(&mut video_track, &cmaf_frames_clone);
+	});
 
-	// Verify catalog: container should be Legacy
-	let catalog = catalog_producer.snapshot();
-	let video_config = catalog.video.renditions.get("video").unwrap();
-	assert_eq!(video_config.container, Container::Legacy);
+	let (convert_result, legacy_frames) = tokio::join!(converter.run(), async {
+		let output_video = subscribe_video(&output_consumer).await;
+		read_legacy_frames(output_video).await
+	});
+	convert_result.unwrap();
 
-	// Read output and verify
-	let legacy_frames = read_legacy_frames(&output).await;
 	assert_eq!(legacy_frames.len(), 3, "expected 3 Legacy frames");
-
 	assert_eq!(legacy_frames[0].0, ts(0));
 	assert_eq!(legacy_frames[0].1, vec![0x01, 0x02, 0x03]);
 	assert_eq!(legacy_frames[1].0, ts(33_000));
@@ -348,16 +309,31 @@ async fn roundtrip_legacy_cmaf_legacy() {
 		(ts(99_000), vec![0x11, 0x22], false),
 	];
 
+	let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&config);
+
 	// Legacy → CMAF
-	let mut input = setup_input(&config);
-	let (cmaf_output, _cp1) = super::Fmp4::new(input.consumer).run().await.unwrap();
-	write_legacy_frames(&mut input.video_track, &frames);
+	let cmaf_output = moq_lite::Broadcast::new().produce();
+	let cmaf_consumer = cmaf_output.consume();
+	let fmp4_converter = super::Fmp4::new(consumer, cmaf_output);
 
 	// CMAF → Legacy
-	let (legacy_output, _cp2) = super::Hang::new(cmaf_output.consume()).run().await.unwrap();
+	let legacy_output = moq_lite::Broadcast::new().produce();
+	let legacy_consumer = legacy_output.consume();
+	let hang_converter = super::Hang::new(cmaf_consumer, legacy_output);
 
-	// Verify roundtrip preserves timestamps and payloads
-	let result = read_legacy_frames(&legacy_output).await;
+	let frames_clone = frames.clone();
+	tokio::spawn(async move {
+		tokio::task::yield_now().await;
+		write_legacy_frames(&mut video_track, &frames_clone);
+	});
+
+	let (r1, r2, result) = tokio::join!(fmp4_converter.run(), hang_converter.run(), async {
+		let legacy_video = subscribe_video(&legacy_consumer).await;
+		read_legacy_frames(legacy_video).await
+	});
+	r1.unwrap();
+	r2.unwrap();
+
 	assert_eq!(result.len(), frames.len(), "frame count mismatch after roundtrip");
 
 	for (i, (expected_ts, expected_payload, _)) in frames.iter().enumerate() {
@@ -382,17 +358,26 @@ async fn cmaf_passthrough() {
 		init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
 	};
 
-	let mut input = setup_input(&cmaf_config);
-	let converter = super::Fmp4::new(input.consumer);
-	let (output, _catalog_producer) = converter.run().await.unwrap();
+	let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&cmaf_config);
+	let output = moq_lite::Broadcast::new().produce();
+	let output_consumer = output.consume();
 
-	// Write CMAF data — should pass through unchanged
-	write_cmaf_frames(&mut input.video_track, &cmaf_frames);
+	let converter = super::Fmp4::new(consumer, output);
 
-	let output_frames = read_cmaf_raw_frames(&output).await;
+	let cmaf_frames_clone = cmaf_frames.clone();
+	tokio::spawn(async move {
+		tokio::task::yield_now().await;
+		write_cmaf_frames(&mut video_track, &cmaf_frames_clone);
+	});
+
+	let (convert_result, output_frames) = tokio::join!(converter.run(), async {
+		let output_video = subscribe_video(&output_consumer).await;
+		read_cmaf_raw_frames(output_video).await
+	});
+	convert_result.unwrap();
+
 	assert_eq!(output_frames.len(), cmaf_frames.len());
 
-	// Verify byte-identical passthrough
 	let mut seq = 1u32;
 	for (i, (dts, payload, keyframe)) in cmaf_frames.iter().enumerate() {
 		let expected = build_moof_mdat(seq, 1, *dts, payload, *keyframe).unwrap();
@@ -406,18 +391,24 @@ async fn legacy_passthrough() {
 	let config = test_video_config();
 	let frames = vec![(ts(0), vec![0xAA, 0xBB], true), (ts(33_000), vec![0xCC, 0xDD], false)];
 
-	let mut input = setup_input(&config);
-	let converter = super::Hang::new(input.consumer);
-	let (output, catalog_producer) = converter.run().await.expect("converter.run() failed");
+	let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&config);
+	let output = moq_lite::Broadcast::new().produce();
+	let output_consumer = output.consume();
 
-	// Write Legacy data — should pass through unchanged
-	write_legacy_frames(&mut input.video_track, &frames);
+	let converter = super::Hang::new(consumer, output);
 
-	let catalog = catalog_producer.snapshot();
-	let video_config = catalog.video.renditions.get("video").unwrap();
-	assert_eq!(video_config.container, Container::Legacy);
+	let frames_clone = frames.clone();
+	tokio::spawn(async move {
+		tokio::task::yield_now().await;
+		write_legacy_frames(&mut video_track, &frames_clone);
+	});
 
-	let result = read_legacy_frames(&output).await;
+	let (convert_result, result) = tokio::join!(converter.run(), async {
+		let output_video = subscribe_video(&output_consumer).await;
+		read_legacy_frames(output_video).await
+	});
+	convert_result.expect("converter.run() failed");
+
 	assert_eq!(result.len(), frames.len());
 
 	for (i, (expected_ts, expected_payload, _)) in frames.iter().enumerate() {

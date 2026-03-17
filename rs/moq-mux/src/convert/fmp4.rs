@@ -10,11 +10,12 @@ use mp4_atom::{Atom, Encode};
 /// If tracks are hang/Legacy, each frame is individually wrapped in moof+mdat.
 pub struct Fmp4 {
 	input: moq_lite::BroadcastConsumer,
+	output: moq_lite::BroadcastProducer,
 }
 
 impl Fmp4 {
-	pub fn new(input: moq_lite::BroadcastConsumer) -> Self {
-		Self { input }
+	pub fn new(input: moq_lite::BroadcastConsumer, output: moq_lite::BroadcastProducer) -> Self {
+		Self { input, output }
 	}
 
 	/// Run the converter.
@@ -22,8 +23,8 @@ impl Fmp4 {
 	/// Reads the hang catalog from the input broadcast. If tracks are already CMAF,
 	/// passes them through unchanged (no-op). If tracks are hang/Legacy, converts
 	/// each frame to moof+mdat.
-	pub async fn run(self) -> anyhow::Result<(moq_lite::BroadcastProducer, crate::CatalogProducer)> {
-		let mut broadcast = moq_lite::Broadcast::new().produce();
+	pub async fn run(self) -> anyhow::Result<()> {
+		let mut broadcast = self.output;
 		let catalog_producer = crate::CatalogProducer::new(&mut broadcast)?;
 
 		let catalog_track = self.input.subscribe_track(&hang::Catalog::default_track())?;
@@ -32,6 +33,7 @@ impl Fmp4 {
 
 		let mut output_catalog = catalog_producer.clone();
 		let mut guard = output_catalog.lock();
+		let mut tasks = tokio::task::JoinSet::new();
 
 		for (name, config) in &catalog.video.renditions {
 			let input_track = self.input.subscribe_track(&moq_lite::Track {
@@ -47,7 +49,7 @@ impl Fmp4 {
 						priority: 1,
 					})?;
 					let track_name = name.clone();
-					tokio::spawn(async move {
+					tasks.spawn(async move {
 						if let Err(e) = passthrough_track(input_track, output_track).await {
 							tracing::error!(%e, track = %track_name, "passthrough_track failed");
 						}
@@ -69,7 +71,7 @@ impl Fmp4 {
 					})?;
 
 					let track_name = name.clone();
-					tokio::spawn(async move {
+					tasks.spawn(async move {
 						if let Err(e) = convert_legacy_to_cmaf(input_track, output_track, timescale, true).await {
 							tracing::error!(%e, track = %track_name, "convert_legacy_to_cmaf failed");
 						}
@@ -92,7 +94,7 @@ impl Fmp4 {
 						priority: 2,
 					})?;
 					let track_name = name.clone();
-					tokio::spawn(async move {
+					tasks.spawn(async move {
 						if let Err(e) = passthrough_track(input_track, output_track).await {
 							tracing::error!(%e, track = %track_name, "passthrough_track failed");
 						}
@@ -114,7 +116,7 @@ impl Fmp4 {
 
 					let timescale = config.sample_rate as u64;
 					let track_name = name.clone();
-					tokio::spawn(async move {
+					tasks.spawn(async move {
 						if let Err(e) = convert_legacy_to_cmaf(input_track, output_track, timescale, false).await {
 							tracing::error!(%e, track = %track_name, "convert_legacy_to_cmaf failed");
 						}
@@ -124,7 +126,11 @@ impl Fmp4 {
 		}
 
 		drop(guard);
-		Ok((broadcast, catalog_producer))
+
+		// Keep broadcast and catalog alive until all track tasks complete.
+		while tasks.join_next().await.is_some() {}
+
+		Ok(())
 	}
 }
 
