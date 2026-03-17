@@ -75,6 +75,7 @@
         # Python dependencies
         pyDeps = with pkgs; [
           ruff
+          pyright
           uv
           maturin
           python3

@@ -23,16 +23,48 @@ def h264_init() -> bytes:
     """H.264 Annex B init with SPS + PPS (1280x720, High profile)."""
     sps = bytes(
         [
-            0x00, 0x00, 0x00, 0x01,  # start code
-            0x67, 0x64, 0x00, 0x1F, 0xAC, 0x24, 0x84, 0x01,
-            0x40, 0x16, 0xEC, 0x04, 0x40, 0x00, 0x00, 0x03,
-            0x00, 0x40, 0x00, 0x00, 0x0C, 0x23, 0xC6, 0x0C, 0x92,
+            0x00,
+            0x00,
+            0x00,
+            0x01,  # start code
+            0x67,
+            0x64,
+            0x00,
+            0x1F,
+            0xAC,
+            0x24,
+            0x84,
+            0x01,
+            0x40,
+            0x16,
+            0xEC,
+            0x04,
+            0x40,
+            0x00,
+            0x00,
+            0x03,
+            0x00,
+            0x40,
+            0x00,
+            0x00,
+            0x0C,
+            0x23,
+            0xC6,
+            0x0C,
+            0x92,
         ]
     )
     pps = bytes(
         [
-            0x00, 0x00, 0x00, 0x01,  # start code
-            0x68, 0xEE, 0x32, 0xC8, 0xB0,
+            0x00,
+            0x00,
+            0x00,
+            0x01,  # start code
+            0x68,
+            0xEE,
+            0x32,
+            0xC8,
+            0xB0,
         ]
     )
     return sps + pps
@@ -109,6 +141,7 @@ async def test_video_publish_consume():
         track_name = list(catalog.video.keys())[0]
         video = catalog.video[track_name]
         assert video.codec.startswith("avc1.") or video.codec.startswith("avc3.")
+        assert video.coded is not None
         assert video.coded.width == 1280
         assert video.coded.height == 720
 

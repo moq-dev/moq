@@ -25,10 +25,13 @@ Homepage = "https://github.com/moq-dev/moq"
 Repository = "https://github.com/moq-dev/moq"
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio"]
+dev = ["pytest", "pytest-asyncio", "pyright"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.pyright]
+pythonVersion = "3.10"
 
 [tool.ruff]
 line-length = 120

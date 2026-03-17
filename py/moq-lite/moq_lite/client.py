@@ -6,7 +6,6 @@ from moq_ffi import MoqClient
 
 from .origin import Announced, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
-from .subscribe import BroadcastConsumer
 
 
 class Client:
