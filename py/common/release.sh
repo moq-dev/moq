@@ -40,14 +40,18 @@ print(data['project']['version'])
     echo "==> $name v$version"
 
     # Check if this version is already on PyPI
-    status_code=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/$name/$version/json")
+    status_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 --retry 3 --retry-connrefused "https://pypi.org/pypi/$name/$version/json")
 
     if [ "$status_code" = "200" ]; then
         echo "    Already published, skipping."
         continue
+    elif [ "$status_code" != "404" ]; then
+        echo "    ERROR: PyPI returned unexpected status $status_code" >&2
+        exit 1
     fi
 
     echo "    Building..."
+    rm -rf "$pkg_dir/dist"
     uv build "$pkg_dir" --out-dir "$pkg_dir/dist"
 
     echo "    Publishing..."

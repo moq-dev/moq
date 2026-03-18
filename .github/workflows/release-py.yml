@@ -9,6 +9,7 @@ on:
       - ".github/workflows/release-py.yml"
 
 permissions:
+  contents: read
   id-token: write
 
 concurrency:
