@@ -409,7 +409,7 @@ impl TrackConsumer {
 	/// Poll for the next group received over the network, without blocking.
 	///
 	/// Groups may arrive out of order or with gaps due to network conditions.
-	/// Use `OrderedConsumer` (in `moq-mux`) if you need groups in sequence order,
+	/// Use `OrderedConsumer` if you need groups in sequence order,
 	/// skipping those that arrive too late.
 	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
@@ -430,7 +430,7 @@ impl TrackConsumer {
 	/// Receive the next group available on this track.
 	///
 	/// Groups may arrive out of order or with gaps due to network conditions.
-	/// Use `OrderedConsumer` (in `moq-mux`) if you need groups in sequence order,
+	/// Use `OrderedConsumer` if you need groups in sequence order,
 	/// skipping those that arrive too late.
 	pub async fn recv_group(&mut self) -> Result<Option<GroupConsumer>> {
 		conducer::wait(|waiter| self.poll_recv_group(waiter)).await
