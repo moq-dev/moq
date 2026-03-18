@@ -38,3 +38,4 @@ pnpm-lock.yaml
 # Python
 __pycache__/
 *.pyc
+.venv/

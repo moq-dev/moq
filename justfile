@@ -345,10 +345,10 @@ check:
 	cargo sort --workspace --check > /dev/null
 
 	# Run the Python checks.
-	if command -v ruff &> /dev/null; then
-		ruff check py/
-		ruff format --check py/
-		(cd py/moq-lite && uv run pyright)
+	if command -v uv &> /dev/null; then
+		uv run ruff check py/
+		uv run ruff format --check py/
+		uv run --package moq-lite pyright
 		echo "Python checks passed."
 	fi
 
@@ -402,11 +402,9 @@ test *args:
 	cargo test --all-targets --quiet {{ args }}
 
 	# Run the Python tests.
-	if command -v maturin &> /dev/null; then
-		pushd py/moq-lite > /dev/null
-		maturin develop -m ../../rs/moq-ffi/Cargo.toml --uv
-		uv run pytest tests/
-		popd > /dev/null
+	if command -v uv &> /dev/null; then
+		uv run maturin develop -m rs/moq-ffi/Cargo.toml --uv
+		uv run --package moq-lite pytest py/moq-lite/tests/
 		echo "Python tests passed."
 	fi
 
@@ -428,7 +426,7 @@ fix:
 	cargo sort --workspace > /dev/null
 
 	# Fix the Python issues.
-	if command -v ruff &> /dev/null; then ruff check --fix py/ && ruff format py/; fi
+	if command -v uv &> /dev/null; then uv run ruff check --fix py/ && uv run ruff format py/; fi
 
 	if command -v tofu &> /dev/null; then (cd cdn && just fix); fi
 
@@ -459,8 +457,8 @@ build:
 	cargo build --quiet
 
 	# Build moq-ffi from source into py/moq-lite's venv.
-	if command -v maturin &> /dev/null; then
-		cd py/moq-lite && maturin develop -m ../../rs/moq-ffi/Cargo.toml --uv
+	if command -v uv &> /dev/null; then
+		(cd py/moq-lite && uv run maturin develop -m ../../rs/moq-ffi/Cargo.toml --uv)
 	fi
 
 # Generate and serve an HLS stream from a video for testing pub-hls

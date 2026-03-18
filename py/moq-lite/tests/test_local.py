@@ -2,9 +2,8 @@
 
 import struct
 
-import pytest
-
 import moq_lite as moq
+import pytest
 
 
 def opus_head() -> bytes:
