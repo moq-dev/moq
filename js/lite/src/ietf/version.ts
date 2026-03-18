@@ -52,3 +52,15 @@ export type IetfVersion =
 	| typeof Version.DRAFT_15
 	| typeof Version.DRAFT_16
 	| typeof Version.DRAFT_17;
+
+const VERSION_NAMES: Record<number, string> = {
+	[Version.DRAFT_07]: "moq-transport-07",
+	[Version.DRAFT_14]: "moq-transport-14",
+	[Version.DRAFT_15]: "moq-transport-15",
+	[Version.DRAFT_16]: "moq-transport-16",
+	[Version.DRAFT_17]: "moq-transport-17",
+};
+
+export function versionName(v: Version): string {
+	return VERSION_NAMES[v] ?? `unknown(0x${v.toString(16)})`;
+}

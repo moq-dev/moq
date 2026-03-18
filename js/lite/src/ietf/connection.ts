@@ -13,7 +13,7 @@ import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespace } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusRequest } from "./track.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import { type IetfVersion, Version, versionName } from "./version.ts";
 
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
@@ -23,6 +23,9 @@ import { type IetfVersion, Version } from "./version.ts";
 export class Connection implements Established {
 	// The URL of the connection.
 	readonly url: URL;
+
+	// The negotiated protocol version.
+	readonly version: string;
 
 	// The established WebTransport session.
 	#quic: WebTransport;
@@ -63,6 +66,7 @@ export class Connection implements Established {
 		version: IetfVersion;
 	}) {
 		this.url = url;
+		this.version = versionName(version);
 		this.#quic = quic;
 
 		// Two-path dispatch: v14-v16 uses adapter, v17 uses native bidi streams

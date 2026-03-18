@@ -10,7 +10,7 @@ import { SessionInfo } from "./session.ts";
 import { StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
-import type { Version } from "./version.ts";
+import { type Version, versionName } from "./version.ts";
 
 /**
  * Represents a connection to a MoQ server.
@@ -21,8 +21,11 @@ export class Connection implements Established {
 	// The URL of the connection.
 	readonly url: URL;
 
-	// The version of the connection.
-	readonly version: Version;
+	// The version of the connection as a human-readable string.
+	readonly version: string;
+
+	// The version used for encoding/decoding.
+	#version: Version;
 
 	// The established WebTransport session.
 	#quic: WebTransport;
@@ -51,10 +54,11 @@ export class Connection implements Established {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
-		this.version = version;
+		this.version = versionName(version);
+		this.#version = version;
 
-		this.#publisher = new Publisher(this.#quic, this.version);
-		this.#subscriber = new Subscriber(this.#quic, this.version);
+		this.#publisher = new Publisher(this.#quic, this.#version);
+		this.#subscriber = new Subscriber(this.#quic, this.#version);
 
 		this.#run();
 	}
@@ -131,7 +135,7 @@ export class Connection implements Established {
 		try {
 			// Receive messages until the connection is closed.
 			for (;;) {
-				const msg = await SessionInfo.decodeMaybe(this.#session.reader, this.version);
+				const msg = await SessionInfo.decodeMaybe(this.#session.reader, this.#version);
 				if (!msg) break;
 				// TODO use the session info
 			}
@@ -167,7 +171,7 @@ export class Connection implements Established {
 			await this.#publisher.runAnnounce(msg, stream);
 			return;
 		} else if (typ === StreamId.Subscribe) {
-			const msg = await Subscribe.decode(stream.reader, this.version);
+			const msg = await Subscribe.decode(stream.reader, this.#version);
 			await this.#publisher.runSubscribe(msg, stream);
 			return;
 		} else if (typ === StreamId.Probe) {
