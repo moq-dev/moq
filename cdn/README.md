@@ -22,7 +22,7 @@ However, we do use GCP for GeoDNS because most providers don't support it or too
    cargo run --bin moq-token-cli -- --key secrets/root.jwk sign --root "demo" --publish "" > secrets/demo-pub.jwt
 
    # to allow subscribing to `demo/` (used by health checks and the website)
-   cargo run --bin moq-token-cli -- --key secrets/root.jwk sign --root "demo" --get "" > secrets/demo-sub.jwt
+   cargo run --bin moq-token-cli -- --key secrets/root.jwk sign --root "demo" --subscribe "" > secrets/demo-sub.jwt
    ```
 3. Run `tofu init`.
 4. Run `tofu apply`.

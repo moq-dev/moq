@@ -1,5 +1,7 @@
 [Unit]
 Description=MoQ CDN monitor (memory + health checks)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple

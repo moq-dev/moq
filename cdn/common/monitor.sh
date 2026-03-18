@@ -35,7 +35,7 @@ send_webhook() {
 
 	local payload
 	payload=$(jq -n --arg content "$message" '{content: $content}')
-	curl -sf -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK" >/dev/null || echo "Warning: webhook failed" >&2
+	curl -sf --connect-timeout 5 --max-time 10 -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK" >/dev/null || echo "Warning: webhook failed" >&2
 }
 
 # ── Memory check ────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ check_memory() {
 
 	if (( available < MEMORY_THRESHOLD )); then
 		local top
-		top=$(ps aux --sort=-%mem | head -6)
+		top=$(ps -eo pid,user,%mem,rss,comm --sort=-%mem | head -6)
 
 		local msg="Memory alert on ${HOSTNAME}: ${available}% available (threshold: ${MEMORY_THRESHOLD}%)
 ${top}"
