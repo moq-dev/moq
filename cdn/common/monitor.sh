@@ -15,11 +15,12 @@ WEBHOOK="${MONITOR_WEBHOOK:-}"
 MEMORY_THRESHOLD="${MONITOR_MEMORY_THRESHOLD:-20}"
 HEALTH_DOMAIN="${MONITOR_HEALTH_DOMAIN:-cdn.moq.dev}"
 HEALTH_JWT_FILE="${MONITOR_HEALTH_JWT:-/var/lib/moq/demo-sub.jwt}"
-HEALTH_NODES=(${MONITOR_HEALTH_NODES:-usc euc sea})
+IFS=' ' read -r -a HEALTH_NODES <<< "${MONITOR_HEALTH_NODES:-usc euc sea}"
 HOSTNAME=$(hostname)
 
 MEMORY_STATE="ok"
 MEMORY_BACKOFF=60
+MAX_MEMORY_BACKOFF=600
 
 # Track per-node health state for transition alerts
 declare -A HEALTH_STATE
@@ -65,10 +66,14 @@ ${top}"
 			MEMORY_BACKOFF=60
 		else
 			MEMORY_BACKOFF=$(( MEMORY_BACKOFF * 2 ))
+			if (( MEMORY_BACKOFF > MAX_MEMORY_BACKOFF )); then
+				MEMORY_BACKOFF=$MAX_MEMORY_BACKOFF
+			fi
 		fi
 	else
 		if [[ "$MEMORY_STATE" == "alerting" ]]; then
 			MEMORY_STATE="ok"
+			MEMORY_BACKOFF=60
 			local msg="Memory recovered on ${HOSTNAME}: ${available}% available"
 			echo "$msg"
 			send_webhook "$msg"
