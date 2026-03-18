@@ -24,7 +24,7 @@ impl CatalogConsumer {
 	pub async fn next(&mut self) -> Result<Option<Catalog>> {
 		loop {
 			tokio::select! {
-				res = self.track.next_group() => {
+				res = self.track.recv_group() => {
 					match res? {
 						Some(group) => {
 							// Use the new group.
