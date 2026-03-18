@@ -111,12 +111,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			return Ok(());
 		};
 
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: msg.subscriber_priority,
-		};
+		let track = Track::new(msg.track_name.to_string());
 
-		let track = match broadcast.subscribe_track(&track) {
+		let track = match broadcast.subscribe_track(&track).await {
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())

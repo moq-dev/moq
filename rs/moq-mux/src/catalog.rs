@@ -32,6 +32,8 @@ impl CatalogProducer {
 		let msf_track = broadcast.create_track(moq_lite::Track {
 			name: moq_msf::DEFAULT_NAME.to_string(),
 			priority: 100,
+			ordered: false,
+			max_latency: std::time::Duration::ZERO,
 		})?;
 
 		Ok(Self {

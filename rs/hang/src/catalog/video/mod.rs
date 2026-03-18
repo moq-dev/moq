@@ -59,7 +59,12 @@ impl Video {
 			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
 				entry.insert(config.clone());
 				// TODO: Remove priority
-				return moq_lite::Track { name, priority: 1 };
+				return moq_lite::Track {
+					name,
+					priority: 1,
+					ordered: false,
+					max_latency: std::time::Duration::ZERO,
+				};
 			}
 		}
 

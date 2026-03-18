@@ -41,10 +41,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.
-	let mut track = broadcast.create_track(moq_lite::Track {
-		name: "chat".to_string(),
-		priority: 0,
-	})?;
+	let mut track = broadcast.create_track(moq_lite::Track::new("chat"))?;
 
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// If you put "alice" here, it would be published as "anon/chat-example/alice".

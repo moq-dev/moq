@@ -260,20 +260,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
-		let track = Track {
-			name: subscribe.track.to_string(),
-			priority: subscribe.priority,
-		};
+		let track = Track::new(subscribe.track.to_string());
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track)?;
-
-		// TODO wait until track.info() to get the *real* priority
+		let track = broadcast.subscribe_track(&track).await?;
 
 		let info = lite::SubscribeOk {
 			priority: track.info.priority,
-			ordered: false,
-			max_latency: std::time::Duration::ZERO,
+			ordered: track.info.ordered,
+			max_latency: track.info.max_latency,
 			start_group: None,
 			end_group: None,
 		};

@@ -280,11 +280,13 @@ async fn serve_fetch(
 	let track = moq_lite::Track {
 		name: track,
 		priority: 0,
+		ordered: false,
+		max_latency: std::time::Duration::ZERO,
 	};
 
 	// NOTE: The auth token is already scoped to the broadcast.
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
-	let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
+	let mut track = broadcast.subscribe_track(&track).await.map_err(|err| match err {
 		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
 	})?;

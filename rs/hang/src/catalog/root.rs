@@ -80,6 +80,8 @@ impl Catalog {
 		moq_lite::Track {
 			name: Catalog::DEFAULT_NAME.to_string(),
 			priority: 100,
+			ordered: false,
+			max_latency: std::time::Duration::ZERO,
 		}
 	}
 }

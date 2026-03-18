@@ -48,7 +48,6 @@ impl Consume {
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
-		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -58,8 +57,14 @@ impl Consume {
 		let id = self.catalog_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
+			let res = async {
+				let catalog = broadcast
+					.subscribe_track(&hang::catalog::Catalog::default_track())
+					.await?;
+				Self::run_catalog(id, broadcast, catalog.into()).await
+			};
 			let res = tokio::select! {
-				res = Self::run_catalog(id, broadcast, catalog.into()) => res,
+				res = res => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -217,11 +222,13 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 
-		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
+		let broadcast = consume.broadcast.clone();
+		let track_info = moq_lite::Track {
 			name: rendition.clone(),
 			priority: 1, // TODO: Remove priority
-		})?;
-		let track = hang::container::OrderedConsumer::new(track, latency);
+			ordered: false,
+			max_latency: std::time::Duration::ZERO,
+		};
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -231,8 +238,13 @@ impl Consume {
 		let id = self.track_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
+			let res = async {
+				let track = broadcast.subscribe_track(&track_info).await?;
+				let track = hang::container::OrderedConsumer::new(track, latency);
+				Self::run_track(id, track).await
+			};
 			let res = tokio::select! {
-				res = Self::run_track(id, track) => res,
+				res = res => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -261,11 +273,13 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 
-		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
+		let broadcast = consume.broadcast.clone();
+		let track_info = moq_lite::Track {
 			name: rendition.clone(),
 			priority: 2, // TODO: Remove priority
-		})?;
-		let track = hang::container::OrderedConsumer::new(track, latency);
+			ordered: false,
+			max_latency: std::time::Duration::ZERO,
+		};
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -275,8 +289,13 @@ impl Consume {
 		let id = self.track_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
+			let res = async {
+				let track = broadcast.subscribe_track(&track_info).await?;
+				let track = hang::container::OrderedConsumer::new(track, latency);
+				Self::run_track(id, track).await
+			};
 			let res = tokio::select! {
-				res = Self::run_track(id, track) => res,
+				res = res => res,
 				_ = channel.1 => Ok(()),
 			};
 

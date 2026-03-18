@@ -71,6 +71,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))
+		.await
 		.expect("subscribe_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
@@ -223,6 +224,7 @@ async fn iroh_connect() {
 
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))
+		.await
 		.expect("subscribe_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())

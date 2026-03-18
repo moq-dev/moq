@@ -463,11 +463,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: 0,
-		}
-		.produce();
+		let track = Track::new(msg.track_name.to_string()).produce();
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
@@ -500,9 +496,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
 		loop {
-			let track = tokio::select! {
-				producer = broadcast.requested_track() => match producer {
-					Ok(producer) => producer,
+			let request = tokio::select! {
+				request = broadcast.requested_track() => match request {
+					Ok(request) => request,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
 						break;
@@ -514,15 +510,29 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut this = self.clone();
 
 			let path = path.to_owned();
+			let broadcast = broadcast.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(path, track).await;
+				this.run_subscribe(path, request, broadcast).await;
 			});
 		}
 
 		Ok(())
 	}
 
-	async fn run_subscribe(&mut self, broadcast: Path<'_>, mut track: TrackProducer) {
+	async fn run_subscribe(
+		&mut self,
+		broadcast_path: Path<'_>,
+		request: crate::TrackRequest,
+		broadcast: BroadcastDynamic,
+	) {
+		// Create the TrackProducer and insert into the broadcast lookup.
+		let mut track = request.info.clone().produce();
+		if let Err(err) = broadcast.insert_track(&track) {
+			request.reject(err);
+			return;
+		}
+		request.respond(track.consume());
+		let broadcast = broadcast_path;
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,
 			Err(err) => {

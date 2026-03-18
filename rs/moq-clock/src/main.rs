@@ -56,6 +56,8 @@ async fn main() -> anyhow::Result<()> {
 	let track = Track {
 		name: config.track,
 		priority: 0,
+		ordered: false,
+		max_latency: std::time::Duration::ZERO,
 	};
 
 	let origin = moq_lite::Origin::produce();
@@ -97,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
 					Some(announce) = origin.announced() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(&track)?;
+							let track = broadcast.subscribe_track(&track).await?;
 							clock = Some(clock::Subscriber::new(track));
 						}
 						(path, None) => {

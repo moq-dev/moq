@@ -43,6 +43,8 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<m
 	let video_track = moq_lite::Track {
 		name: "video".to_string(),
 		priority: 1, // Video typically has lower priority than audio
+		ordered: false,
+		max_latency: std::time::Duration::ZERO,
 	};
 
 	// Example video configuration
