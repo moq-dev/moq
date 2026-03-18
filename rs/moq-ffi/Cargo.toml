@@ -13,7 +13,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [lib]
 name = "moq_ffi"
-crate-type = ["staticlib", "cdylib", "lib"]
+crate-type = ["staticlib", "cdylib"]
 
 [[bin]]
 name = "uniffi-bindgen"
