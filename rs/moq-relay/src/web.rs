@@ -277,12 +277,7 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let track = moq_lite::Track {
-		name: track,
-		priority: 0,
-		ordered: false,
-		max_latency: std::time::Duration::ZERO,
-	};
+	let track = moq_lite::Track::new(track);
 
 	// NOTE: The auth token is already scoped to the broadcast.
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;

@@ -237,8 +237,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				flags: Default::default(),
 			};
 
-			tasks
-				.push(Self::run_group(self.session.clone(), msg, track.info.priority, group, self.version).map(|_| ()));
+			tasks.push(Self::run_group(self.session.clone(), msg, 0, group, self.version).map(|_| ()));
 		}
 	}
 

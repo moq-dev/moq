@@ -1,6 +1,7 @@
 use std::{
 	collections::{HashMap, hash_map::Entry},
 	sync::{Arc, atomic},
+	time::Duration,
 };
 
 use crate::{
@@ -204,9 +205,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			id,
 			broadcast: broadcast_path.to_owned(),
 			track: (&track.info.name).into(),
-			priority: track.info.priority,
-			ordered: track.info.ordered,
-			max_latency: track.info.max_latency,
+			priority: 0,
+			ordered: false,
+			max_latency: Duration::ZERO,
 			start_group: None,
 			end_group: None,
 		};

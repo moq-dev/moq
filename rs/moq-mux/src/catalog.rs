@@ -29,12 +29,7 @@ impl CatalogProducer {
 		catalog: hang::Catalog,
 	) -> Result<Self, moq_lite::Error> {
 		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
-		let msf_track = broadcast.create_track(moq_lite::Track {
-			name: moq_msf::DEFAULT_NAME.to_string(),
-			priority: 100,
-			ordered: false,
-			max_latency: std::time::Duration::ZERO,
-		})?;
+		let msf_track = broadcast.create_track(moq_lite::Track::new(moq_msf::DEFAULT_NAME))?;
 
 		Ok(Self {
 			hang_track,

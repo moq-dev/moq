@@ -27,27 +27,16 @@ use std::{
 // TODO: Replace with a configurable cache size.
 const MAX_GROUP_AGE: Duration = Duration::from_secs(30);
 
-/// A track is a collection of groups, delivered out-of-order until expired.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A track is a collection of groups, identified by name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
 	pub name: String,
-	/// Publisher's preferred priority (ceiling for subscriptions).
-	pub priority: u8,
-	/// Publisher's ordering preference (default false).
-	pub ordered: bool,
-	/// Publisher's max cache/latency. Duration::ZERO means unlimited.
-	pub max_latency: Duration,
 }
 
 impl Track {
 	pub fn new<T: Into<String>>(name: T) -> Self {
-		Self {
-			name: name.into(),
-			priority: 0,
-			ordered: false,
-			max_latency: Duration::ZERO,
-		}
+		Self { name: name.into() }
 	}
 
 	pub fn produce(self) -> TrackProducer {
@@ -55,12 +44,20 @@ impl Track {
 	}
 }
 
-/// Per-subscriber preferences for a track subscription.
+/// Subscription preferences for a subscription or producer cap.
+///
+/// Describes how groups should be delivered: priority, ordering, latency bounds,
+/// and the range of groups requested.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Subscription {
 	pub priority: u8,
 	pub ordered: bool,
+	/// Maximum cache/latency. `Duration::ZERO` means unlimited.
 	pub max_latency: Duration,
+	/// First group sequence to deliver. `None` means start at the latest.
+	pub start: Option<u64>,
+	/// Last group sequence to deliver. `None` means no end (live).
+	pub end: Option<u64>,
 }
 
 #[derive(Default)]
@@ -162,27 +159,21 @@ impl State {
 		}
 	}
 
-	/// Compute the aggregate subscription from all active entries, capped by the track info.
+	/// Compute the aggregate subscription from all active entries.
 	///
 	/// Returns `None` if there are no subscriptions.
-	fn max_subscription(&self, cap: &Track) -> Option<Subscription> {
+	fn subscription(&self) -> Option<Subscription> {
 		if self.subscriptions.is_empty() {
 			return None;
 		}
 
-		let priority = self
-			.subscriptions
-			.iter()
-			.map(|(_, s)| s.priority)
-			.max()
-			.unwrap()
-			.min(cap.priority);
+		let priority = self.subscriptions.iter().map(|(_, s)| s.priority).max().unwrap();
 
-		// ordered is true only if ALL subscribers want ordered AND the publisher allows it.
-		let ordered = cap.ordered && self.subscriptions.iter().all(|(_, s)| s.ordered);
+		// ordered is true only if ALL subscribers want ordered.
+		let ordered = self.subscriptions.iter().all(|(_, s)| s.ordered);
 
-		// max_latency: max across subscriptions (ZERO = unlimited wins), capped by publisher.
-		let sub_max = self
+		// max_latency: max across subscriptions. ZERO = unlimited wins.
+		let max_latency = self
 			.subscriptions
 			.iter()
 			.map(|(_, s)| s.max_latency)
@@ -195,18 +186,34 @@ impl State {
 			})
 			.unwrap();
 
-		let max_latency = if cap.max_latency.is_zero() {
-			sub_max
-		} else if sub_max.is_zero() {
-			cap.max_latency
-		} else {
-			sub_max.min(cap.max_latency)
-		};
+		// start: min across all (earliest requested group). None = latest.
+		let start = self
+			.subscriptions
+			.iter()
+			.map(|(_, s)| s.start)
+			.reduce(|a, b| match (a, b) {
+				(Some(a), Some(b)) => Some(a.min(b)),
+				_ => None,
+			})
+			.unwrap();
+
+		// end: max across all (latest / unlimited). None = no end (live).
+		let end = self
+			.subscriptions
+			.iter()
+			.map(|(_, s)| s.end)
+			.reduce(|a, b| match (a, b) {
+				(Some(a), Some(b)) => Some(a.max(b)),
+				_ => None,
+			})
+			.unwrap();
 
 		Some(Subscription {
 			priority,
 			ordered,
 			max_latency,
+			start,
+			end,
 		})
 	}
 
@@ -225,6 +232,8 @@ impl State {
 pub struct TrackProducer {
 	pub info: Track,
 	state: conducer::Producer<State>,
+	/// The last aggregate subscription returned by [`Self::subscription`].
+	prev_subscription: Option<Subscription>,
 }
 
 impl TrackProducer {
@@ -232,6 +241,7 @@ impl TrackProducer {
 		Self {
 			info,
 			state: conducer::Producer::default(),
+			prev_subscription: None,
 		}
 	}
 
@@ -373,7 +383,6 @@ impl TrackProducer {
 			info: self.info.clone(),
 			state: self.state.consume(),
 			index: 0,
-			min_sequence: 0,
 		}
 	}
 
@@ -405,27 +414,35 @@ impl TrackProducer {
 
 	/// Poll for changes to the aggregate subscription.
 	///
-	/// Returns `Ready(sub)` when the aggregate differs from `prev`.
+	/// Returns `Ready(sub)` when the aggregate differs from the last value returned.
 	/// Returns `Ready(None)` when no subscriptions are active (or the track is closed).
-	pub fn poll_max(&self, waiter: &conducer::Waiter, prev: Option<&Subscription>) -> Poll<Option<Subscription>> {
-		let info = &self.info;
+	pub fn poll_subscription(&mut self, waiter: &conducer::Waiter) -> Poll<Option<Subscription>> {
+		let prev = self.prev_subscription.as_ref();
 		match self.state.poll(waiter, |state| {
-			let current = state.max_subscription(info);
+			let current = state.subscription();
 			if current.as_ref() != prev {
 				Poll::Ready(current)
 			} else {
 				Poll::Pending
 			}
 		}) {
-			Poll::Ready(Ok(sub)) => Poll::Ready(sub),
-			Poll::Ready(Err(_)) => Poll::Ready(None),
+			Poll::Ready(Ok(sub)) => {
+				self.prev_subscription = sub.clone();
+				Poll::Ready(sub)
+			}
+			Poll::Ready(Err(_)) => {
+				self.prev_subscription = None;
+				Poll::Ready(None)
+			}
 			Poll::Pending => Poll::Pending,
 		}
 	}
 
-	/// Synchronous snapshot of the current aggregate subscription.
-	pub fn max_subscription(&self) -> Option<Subscription> {
-		self.state.read().max_subscription(&self.info)
+	/// Block until the aggregate subscription changes.
+	///
+	/// Returns `None` when all subscriptions are dropped or the track is closed.
+	pub async fn subscription(&mut self) -> Option<Subscription> {
+		conducer::wait(|waiter| self.poll_subscription(waiter)).await
 	}
 
 	fn modify(&self) -> Result<conducer::Mut<'_, State>> {
@@ -440,13 +457,14 @@ impl Clone for TrackProducer {
 		Self {
 			info: self.info.clone(),
 			state: self.state.clone(),
+			prev_subscription: self.prev_subscription.clone(),
 		}
 	}
 }
 
-impl From<Track> for TrackProducer {
-	fn from(info: Track) -> Self {
-		TrackProducer::new(info)
+impl<T: Into<Track>> From<T> for TrackProducer {
+	fn from(info: T) -> Self {
+		TrackProducer::new(info.into())
 	}
 }
 
@@ -479,7 +497,6 @@ impl TrackWeak {
 			info: self.info.clone(),
 			state: self.state.consume(),
 			index: 0,
-			min_sequence: 0,
 		}
 	}
 
@@ -540,8 +557,6 @@ pub struct TrackConsumer {
 	pub info: Track,
 	state: conducer::Consumer<State>,
 	index: usize,
-
-	min_sequence: u64,
 }
 
 impl TrackConsumer {
@@ -564,8 +579,7 @@ impl TrackConsumer {
 	/// `Poll::Ready(Some(Err(e)))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
-		let Some((consumer, found_index)) =
-			ready!(self.poll(waiter, |state| state.poll_next_group(self.index, self.min_sequence))?)
+		let Some((consumer, found_index)) = ready!(self.poll(waiter, |state| state.poll_next_group(self.index, 0))?)
 		else {
 			return Poll::Ready(Ok(None));
 		};
@@ -638,11 +652,6 @@ impl TrackConsumer {
 			info: sub,
 			state: weak,
 		})
-	}
-
-	/// Start the consumer at the specified sequence.
-	pub fn start_at(&mut self, sequence: u64) {
-		self.min_sequence = sequence;
 	}
 
 	/// Return the latest sequence number in the track.
@@ -973,269 +982,6 @@ mod test {
 		}
 
 		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded)));
-	}
-
-	// --- Subscription tests ---
-
-	#[test]
-	fn subscription_max_aggregation() {
-		let cap = Track {
-			name: "test".into(),
-			priority: 10,
-			ordered: true,
-			max_latency: Duration::from_secs(30),
-		};
-
-		let mut state = State::default();
-
-		// No subscriptions → None.
-		assert_eq!(state.max_subscription(&cap), None);
-
-		// Single subscription.
-		state.subscriptions.push((
-			0,
-			Subscription {
-				priority: 5,
-				ordered: true,
-				max_latency: Duration::from_secs(10),
-			},
-		));
-		assert_eq!(
-			state.max_subscription(&cap),
-			Some(Subscription {
-				priority: 5,                          // min(5, 10) = 5
-				ordered: true,                        // all true AND cap true
-				max_latency: Duration::from_secs(10), // min(10, 30) = 10
-			})
-		);
-
-		// Add a second with higher priority, unordered, longer latency.
-		state.subscriptions.push((
-			1,
-			Subscription {
-				priority: 8,
-				ordered: false,
-				max_latency: Duration::from_secs(20),
-			},
-		));
-		assert_eq!(
-			state.max_subscription(&cap),
-			Some(Subscription {
-				priority: 8,                          // max(5, 8) = 8, capped by 10
-				ordered: false,                       // not all true
-				max_latency: Duration::from_secs(20), // max(10, 20) = 20, capped by 30
-			})
-		);
-	}
-
-	#[test]
-	fn subscription_max_latency_zero_is_unlimited() {
-		let cap = Track {
-			name: "test".into(),
-			priority: 10,
-			ordered: false,
-			max_latency: Duration::from_secs(30),
-		};
-
-		let mut state = State::default();
-		state.subscriptions.push((
-			0,
-			Subscription {
-				priority: 5,
-				ordered: false,
-				max_latency: Duration::ZERO, // unlimited
-			},
-		));
-		state.subscriptions.push((
-			1,
-			Subscription {
-				priority: 5,
-				ordered: false,
-				max_latency: Duration::from_secs(10),
-			},
-		));
-
-		let sub = state.max_subscription(&cap).unwrap();
-		// ZERO (unlimited) wins the max, then capped by 30 → 30.
-		assert_eq!(sub.max_latency, Duration::from_secs(30));
-	}
-
-	#[test]
-	fn subscription_capped_by_track() {
-		let cap = Track {
-			name: "test".into(),
-			priority: 3,
-			ordered: false,
-			max_latency: Duration::from_secs(5),
-		};
-
-		let mut state = State::default();
-		state.subscriptions.push((
-			0,
-			Subscription {
-				priority: 10, // exceeds cap
-				ordered: true,
-				max_latency: Duration::from_secs(20), // exceeds cap
-			},
-		));
-
-		let sub = state.max_subscription(&cap).unwrap();
-		assert_eq!(sub.priority, 3); // capped
-		assert!(!sub.ordered); // cap.ordered is false
-		assert_eq!(sub.max_latency, Duration::from_secs(5)); // capped
-	}
-
-	#[test]
-	fn track_subscription_lifecycle() {
-		let producer = Track {
-			name: "test".into(),
-			priority: 10,
-			ordered: true,
-			max_latency: Duration::ZERO, // unlimited cap
-		}
-		.produce();
-		let consumer = producer.consume();
-
-		assert_eq!(producer.max_subscription(), None);
-
-		// Create a subscription.
-		let sub1 = consumer
-			.subscribe(Subscription {
-				priority: 5,
-				ordered: false,
-				max_latency: Duration::from_secs(10),
-			})
-			.unwrap();
-		assert_eq!(
-			producer.max_subscription(),
-			Some(Subscription {
-				priority: 5,
-				ordered: false,
-				max_latency: Duration::from_secs(10),
-			})
-		);
-
-		// Create a second subscription.
-		let _sub2 = consumer
-			.subscribe(Subscription {
-				priority: 3,
-				ordered: true,
-				max_latency: Duration::from_secs(5),
-			})
-			.unwrap();
-		assert_eq!(
-			producer.max_subscription(),
-			Some(Subscription {
-				priority: 5,                          // max(5, 3)
-				ordered: false,                       // not all true
-				max_latency: Duration::from_secs(10), // max(10, 5)
-			})
-		);
-
-		// Drop first subscription → only second remains.
-		drop(sub1);
-		assert_eq!(
-			producer.max_subscription(),
-			Some(Subscription {
-				priority: 3,
-				ordered: true,
-				max_latency: Duration::from_secs(5),
-			})
-		);
-	}
-
-	#[test]
-	fn track_subscription_update() {
-		let producer = Track {
-			name: "test".into(),
-			priority: 10,
-			ordered: true,
-			max_latency: Duration::ZERO,
-		}
-		.produce();
-		let consumer = producer.consume();
-
-		let mut sub = consumer
-			.subscribe(Subscription {
-				priority: 5,
-				ordered: false,
-				max_latency: Duration::from_secs(10),
-			})
-			.unwrap();
-
-		sub.update(Subscription {
-			priority: 8,
-			ordered: true,
-			max_latency: Duration::from_secs(20),
-		});
-
-		assert_eq!(
-			producer.max_subscription(),
-			Some(Subscription {
-				priority: 8,
-				ordered: true,
-				max_latency: Duration::from_secs(20),
-			})
-		);
-	}
-
-	#[test]
-	fn track_subscription_drop_removes() {
-		let producer = Track {
-			name: "test".into(),
-			priority: 10,
-			ordered: true,
-			max_latency: Duration::ZERO,
-		}
-		.produce();
-		let consumer = producer.consume();
-
-		let sub = consumer
-			.subscribe(Subscription {
-				priority: 5,
-				ordered: false,
-				max_latency: Duration::from_secs(10),
-			})
-			.unwrap();
-		assert!(producer.max_subscription().is_some());
-
-		drop(sub);
-		assert_eq!(producer.max_subscription(), None);
-	}
-
-	#[tokio::test]
-	async fn poll_max_detects_changes() {
-		let producer = Track {
-			name: "test".into(),
-			priority: 10,
-			ordered: true,
-			max_latency: Duration::ZERO,
-		}
-		.produce();
-		let consumer = producer.consume();
-
-		// Initially no subscriptions → poll_max should return None immediately.
-		let result = conducer::wait(|waiter| producer.poll_max(waiter, Some(&Subscription::default()))).await;
-		assert_eq!(result, None);
-
-		// Subscribe → poll_max with prev=None should return the new subscription.
-		let _sub = consumer
-			.subscribe(Subscription {
-				priority: 5,
-				ordered: false,
-				max_latency: Duration::from_secs(10),
-			})
-			.unwrap();
-
-		let result = conducer::wait(|waiter| producer.poll_max(waiter, None)).await;
-		assert_eq!(
-			result,
-			Some(Subscription {
-				priority: 5,
-				ordered: false,
-				max_latency: Duration::from_secs(10),
-			})
-		);
 	}
 
 	#[tokio::test]

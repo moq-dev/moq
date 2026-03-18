@@ -53,12 +53,7 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(url = ?config.url, "connecting to server");
 
-	let track = Track {
-		name: config.track,
-		priority: 0,
-		ordered: false,
-		max_latency: std::time::Duration::ZERO,
-	};
+	let track = Track::new(config.track);
 
 	let origin = moq_lite::Origin::produce();
 

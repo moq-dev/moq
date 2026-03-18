@@ -223,12 +223,7 @@ impl Consume {
 			.ok_or(Error::NoIndex)?;
 
 		let broadcast = consume.broadcast.clone();
-		let track_info = moq_lite::Track {
-			name: rendition.clone(),
-			priority: 1, // TODO: Remove priority
-			ordered: false,
-			max_latency: std::time::Duration::ZERO,
-		};
+		let track_info = moq_lite::Track::new(rendition.clone());
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -274,12 +269,7 @@ impl Consume {
 			.ok_or(Error::NoIndex)?;
 
 		let broadcast = consume.broadcast.clone();
-		let track_info = moq_lite::Track {
-			name: rendition.clone(),
-			priority: 2, // TODO: Remove priority
-			ordered: false,
-			max_latency: std::time::Duration::ZERO,
-		};
+		let track_info = moq_lite::Track::new(rendition.clone());
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {

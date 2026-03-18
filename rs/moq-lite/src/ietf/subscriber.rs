@@ -637,7 +637,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				track_namespace: broadcast.to_owned(),
 				track_name: (&track.info.name).into(),
-				subscriber_priority: track.info.priority,
+				subscriber_priority: 0,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})

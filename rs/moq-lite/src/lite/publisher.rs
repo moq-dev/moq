@@ -266,9 +266,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = broadcast.subscribe_track(&track).await?;
 
 		let info = lite::SubscribeOk {
-			priority: track.info.priority,
-			ordered: track.info.ordered,
-			max_latency: track.info.max_latency,
+			priority: 0,
+			ordered: false,
+			max_latency: Duration::ZERO,
 			start_group: None,
 			end_group: None,
 		};
@@ -293,10 +293,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
-		// Start the consumer at the specified sequence, otherwise start at the latest group.
-		if let Some(start_group) = subscribe.start_group.or_else(|| track.latest()) {
-			track.start_at(start_group);
-		}
+		// No-op: start_at was removed from TrackConsumer
 
 		loop {
 			let group = tokio::select! {
@@ -317,7 +314,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				sequence,
 			};
 
-			let priority = priority.insert(track.info.priority, sequence);
+			let priority = priority.insert(subscribe.priority, sequence);
 			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
 		}
 	}

@@ -71,12 +71,7 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	);
 
 	// Subscribe to the video track.
-	let track = moq_lite::Track {
-		name: name.clone(),
-		priority: 1,
-		ordered: false,
-		max_latency: std::time::Duration::ZERO,
-	};
+	let track = moq_lite::Track::new(name.clone());
 
 	let track_consumer = broadcast.subscribe_track(&track).await?;
 	let mut ordered = hang::container::OrderedConsumer::new(track_consumer, Duration::from_millis(500));
