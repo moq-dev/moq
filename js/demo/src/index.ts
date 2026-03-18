@@ -4,7 +4,7 @@ import MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
 import MoqDiscover from "./discover";
 
-export { MoqWatchSupport, MoqWatch, MoqDiscover };
+export { MoqDiscover, MoqWatch, MoqWatchSupport };
 
 const watch = document.querySelector("moq-watch") as MoqWatch | undefined;
 if (!watch) throw new Error("unable to find <moq-watch> element");
