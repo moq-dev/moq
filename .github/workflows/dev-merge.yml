@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   merge:
@@ -20,9 +21,32 @@ jobs:
           ref: dev
           fetch-depth: 0
 
-      - name: Merge main into dev
+      - name: Create merge PR
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Merge main into a temporary branch
+          BRANCH="auto-merge/main-into-dev"
+          git checkout -b "$BRANCH"
           git merge origin/main --no-edit
-          git push origin dev
+
+          # Push the branch and create a PR
+          git push origin "$BRANCH" --force
+
+          # Create or update the PR
+          if gh pr list --head "$BRANCH" --base dev --json number --jq '.[0].number' | grep -q .; then
+            echo "PR already exists"
+          else
+            gh pr create \
+              --base dev \
+              --head "$BRANCH" \
+              --title "Merge main into dev" \
+              --body "Automated merge of main into dev." \
+              --label "automated"
+          fi
+
+          # Enable auto-merge so it merges once checks pass
+          gh pr merge "$BRANCH" --merge --auto
+        env:
+          GH_TOKEN: ${{ github.token }}
