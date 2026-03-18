@@ -412,9 +412,9 @@ impl TrackConsumer {
 	/// Use `OrderedConsumer` (in `moq-mux`) if you need groups in sequence order,
 	/// skipping those that arrive too late.
 	///
-	/// Returns `Poll::Ready(Some(Ok(group)))` when a group is available,
-	/// `Poll::Ready(None)` when the track is finished,
-	/// `Poll::Ready(Some(Err(e)))` when the track has been aborted, or
+	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
+	/// `Poll::Ready(Ok(None))` when the track is finished,
+	/// `Poll::Ready(Err(e))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
 	pub fn poll_recv_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
 		let Some((consumer, found_index)) =
