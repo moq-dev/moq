@@ -41,7 +41,7 @@ deploy:
 	echo "  Copying systemd units to /etc/systemd/system/..."
 	rsync -az demo-bbb-prepare.service root@$HOST:/etc/systemd/system/
 	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/
-	rsync -az ../common/vacuum.service ../common/vacuum.timer ../common/memory-alert.sh root@$HOST:/etc/systemd/system/
+	rsync -az ../common/vacuum.service ../common/vacuum.timer ../common/monitor.sh root@$HOST:/etc/systemd/system/
 	rsync -az --exclude='.gitignore' ../common/gen/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
@@ -53,10 +53,10 @@ deploy:
 		systemctl enable demo-bbb-prepare.service && \
 		systemctl enable demo-bbb.service && \
 		systemctl enable vacuum.timer && \
-		systemctl enable memory-alert.service && \
+		systemctl enable monitor.service && \
 		systemctl start demo-bbb-prepare.service && \
 		systemctl start vacuum.timer && \
-		systemctl restart memory-alert.service && \
+		systemctl restart monitor.service && \
 		systemctl restart demo-bbb.service"
 
 # Check status of publisher

@@ -1,11 +1,12 @@
 [Unit]
-Description=Alert when system memory is low
+Description=MoQ CDN monitor (memory + health checks)
 
 [Service]
 Type=simple
-Environment=MEMORY_ALERT_WEBHOOK=${webhook}
+Environment=MONITOR_WEBHOOK=${webhook}
+Environment=MONITOR_HEALTH_DOMAIN=${domain}
 Environment=PATH=/var/lib/moq/pkg/bin:/usr/bin:/bin
-ExecStart=/etc/systemd/system/memory-alert.sh
+ExecStart=/etc/systemd/system/monitor.sh
 Restart=on-failure
 RestartSec=10
 

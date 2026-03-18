@@ -54,8 +54,9 @@ echo "$msg"
 
 # Post to a webhook (Slack, Discord, etc.) if provided
 if [ -n "$WEBHOOK_URL" ]; then
+	payload=$(jq -n --arg content "$msg" '{content: $content}')
 	curl -sf -X POST -H "Content-Type: application/json" \
-		-d "{\"text\": \"$msg\"}" \
+		-d "$payload" \
 		"$WEBHOOK_URL" >/dev/null 2>&1 || echo "Warning: webhook post failed"
 fi
 
