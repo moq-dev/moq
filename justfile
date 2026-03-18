@@ -348,7 +348,7 @@ check:
 	if command -v ruff &> /dev/null; then
 		ruff check py/
 		ruff format --check py/
-		cd py/moq-lite && uv run pyright
+		(cd py/moq-lite && uv run pyright)
 		echo "Python checks passed."
 	fi
 
