@@ -50,3 +50,6 @@ url = { version = "2", features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 sd-notify = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
