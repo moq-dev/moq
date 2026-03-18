@@ -3284,7 +3284,6 @@ dependencies = [
  "moq-lite",
  "moq-mux",
  "moq-native",
- "pollster",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3369,10 +3368,8 @@ dependencies = [
  "serde_with",
  "time",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
- "tracing-test",
  "url",
  "web-transport-iroh",
  "web-transport-noq",
@@ -3400,7 +3397,6 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_with",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",
@@ -4311,12 +4307,6 @@ dependencies = [
  "serde",
  "time",
 ]
-
-[[package]]
-name = "pollster"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
 name = "polyval"
@@ -6482,27 +6472,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "tracing-test"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19a4c448db514d4f24c5ddb9f73f2ee71bfb24c526cf0c570ba142d1119e0051"
-dependencies = [
- "tracing-core",
- "tracing-subscriber",
- "tracing-test-macro",
-]
-
-[[package]]
-name = "tracing-test-macro"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad06847b7afb65c7866a36664b75c40b895e318cea4f71299f013fb22965329d"
-dependencies = [
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
