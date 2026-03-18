@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 
 [tool.uv.workspace]
 members = ["py/*"]
+exclude = ["py/common"]
 
 [dependency-groups]
 dev = ["ruff", "maturin", "pyright"]

@@ -106,7 +106,7 @@ wheels = [
 
 [[package]]
 name = "moq-lite"
-version = "0.1.2"
+version = "0.0.1"
 source = { editable = "py/moq-lite" }
 dependencies = [
     { name = "moq-ffi" },
