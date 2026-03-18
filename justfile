@@ -80,7 +80,7 @@ leaf1: auth-token
 auth-key:
 	@if [ ! -f "dev/root.jwk" ]; then \
 		rm -f dev/*.jwt; \
-		cargo run --bin moq-token -- --key "dev/root.jwk" generate; \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" generate; \
 	fi
 
 # Generate authentication tokens for local development
@@ -89,7 +89,7 @@ auth-key:
 # root.jwt - allows publishing and subscribing to all paths
 auth-token: auth-key
 	@if [ ! -f "dev/demo-web.jwt" ]; then \
-		cargo run --quiet --bin moq-token -- --key "dev/root.jwk" sign \
+		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "demo" \
 			--subscribe "" \
 			--publish "me" \
@@ -97,14 +97,14 @@ auth-token: auth-key
 	fi
 
 	@if [ ! -f "dev/demo-cli.jwt" ]; then \
-		cargo run --quiet --bin moq-token -- --key "dev/root.jwk" sign \
+		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "demo" \
 			--publish "" \
 			> dev/demo-cli.jwt ; \
 	fi
 
 	@if [ ! -f "dev/root.jwt" ]; then \
-		cargo run --quiet --bin moq-token -- --key "dev/root.jwk" sign \
+		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "" \
 			--subscribe "" \
 			--publish "" \
