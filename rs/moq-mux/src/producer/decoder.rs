@@ -27,7 +27,7 @@ pub enum FramedFormat {
 	Opus,
 }
 
-/// Backwards-compatible alias.
+#[deprecated(note = "use FramedFormat instead")]
 pub type DecoderFormat = FramedFormat;
 
 impl FromStr for FramedFormat {
@@ -189,7 +189,7 @@ pub struct Stream {
 	decoder: StreamKind,
 }
 
-/// Backwards-compatible alias.
+#[deprecated(note = "use Stream instead")]
 pub type StreamDecoder = Stream;
 
 impl Stream {
@@ -292,7 +292,7 @@ pub struct Framed {
 	decoder: FramedKind,
 }
 
-/// Backwards-compatible alias.
+#[deprecated(note = "use Framed instead")]
 pub type Decoder = Framed;
 
 impl Framed {

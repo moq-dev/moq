@@ -1,7 +1,6 @@
 use clap::ValueEnum;
 use hang::moq_lite;
 use moq_mux::producer;
-use url::Url;
 
 #[derive(ValueEnum, Clone, Copy)]
 pub enum InputFormat {
@@ -124,59 +123,6 @@ impl Publish {
 			}
 		}
 	}
-
-	pub async fn run_client(self, client: moq_native::Client, url: Url, name: String) -> anyhow::Result<()> {
-		let origin = moq_lite::Origin::produce();
-		origin.publish_broadcast(&name, self.consume());
-
-		tracing::info!(%url, %name, "connecting");
-
-		let mut session = client.with_publish(origin.consume()).connect(url).await?;
-
-		#[cfg(unix)]
-		let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
-
-		tokio::select! {
-			res = self.run() => res,
-			res = session.closed() => res.map_err(Into::into),
-			_ = tokio::signal::ctrl_c() => {
-				session.close(moq_lite::Error::Cancel);
-				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-				Ok(())
-			},
-		}
-	}
-
-	pub async fn run_server(self, mut server: moq_native::Server, name: String) -> anyhow::Result<()> {
-		let consumer = self.consume();
-
-		#[cfg(unix)]
-		let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
-
-		let mut conn_id: u64 = 0;
-
-		tracing::info!(addr = ?server.local_addr(), "listening");
-
-		tokio::select! {
-			res = async {
-				while let Some(session) = server.accept().await {
-					let id = conn_id;
-					conn_id += 1;
-
-					let name = name.clone();
-					let consumer = consumer.clone();
-
-					tokio::spawn(async move {
-						if let Err(err) = publish_session(id, session, name, consumer).await {
-							tracing::warn!(%err, "failed to accept session");
-						}
-					});
-				}
-				Ok(())
-			} => res,
-			res = self.run() => res,
-		}
-	}
 }
 
 async fn run_import(kind: &mut PublishKind) -> anyhow::Result<()> {
@@ -194,21 +140,4 @@ async fn run_import(kind: &mut PublishKind) -> anyhow::Result<()> {
 			hls.run().await
 		}
 	}
-}
-
-#[tracing::instrument("session", skip_all, fields(id))]
-async fn publish_session(
-	id: u64,
-	session: moq_native::Request,
-	name: String,
-	consumer: moq_lite::BroadcastConsumer,
-) -> anyhow::Result<()> {
-	let origin = moq_lite::Origin::produce();
-	origin.publish_broadcast(&name, consumer);
-
-	let session = session.with_publish(origin.consume()).ok().await?;
-
-	tracing::info!(id, "accepted session");
-
-	session.closed().await.map_err(Into::into)
 }

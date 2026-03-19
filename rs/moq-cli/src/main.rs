@@ -7,6 +7,7 @@ use subscribe::*;
 use web::*;
 
 use clap::{Parser, Subcommand};
+use hang::moq_lite;
 use std::path::PathBuf;
 use url::Url;
 
@@ -35,7 +36,7 @@ pub enum Command {
 		dir: Option<PathBuf>,
 
 		#[command(subcommand)]
-		action: ServerAction,
+		action: Action,
 	},
 	/// Run as a client (connect to a server)
 	Client {
@@ -47,13 +48,13 @@ pub enum Command {
 		url: Url,
 
 		#[command(subcommand)]
-		action: ClientAction,
+		action: Action,
 	},
 }
 
 #[derive(Subcommand, Clone)]
-pub enum ServerAction {
-	/// Publish media from stdin to connecting clients
+pub enum Action {
+	/// Publish media from stdin
 	Publish {
 		#[arg(long)]
 		name: String,
@@ -61,27 +62,7 @@ pub enum ServerAction {
 		#[command(flatten)]
 		args: PublishArgs,
 	},
-	/// Subscribe to media from a connecting client, write to stdout
-	Subscribe {
-		#[arg(long)]
-		name: String,
-
-		#[command(flatten)]
-		args: SubscribeArgs,
-	},
-}
-
-#[derive(Subcommand, Clone)]
-pub enum ClientAction {
-	/// Publish media from stdin to the server
-	Publish {
-		#[arg(long)]
-		name: String,
-
-		#[command(flatten)]
-		args: PublishArgs,
-	},
-	/// Subscribe to media from the server, write to stdout
+	/// Subscribe to media, write to stdout
 	Subscribe {
 		#[arg(long)]
 		name: String,
@@ -114,17 +95,27 @@ async fn main() -> anyhow::Result<()> {
 			let web_tls = server.tls_info();
 
 			match action {
-				ServerAction::Publish { name, args } => {
+				Action::Publish { name, args } => {
 					let publish = Publish::new(&args)?;
+					let broadcast = publish.consume();
 
 					tokio::select! {
-						res = publish.run_server(server, name) => res,
+						res = run_publish_server(server, name, broadcast) => res,
+						res = publish.run() => res,
 						res = run_web(web_bind, web_tls, dir) => res,
 					}
 				}
-				ServerAction::Subscribe { name, args } => {
+				Action::Subscribe { name, args } => {
+					let origin = moq_lite::Origin::produce();
+					let mut consumer = origin.consume();
+					let server = server.with_consume(origin);
+
 					tokio::select! {
-						res = Subscribe::run_server(server, name, args) => res,
+						res = run_accept(server) => res,
+						res = async {
+							let broadcast = wait_broadcast(&mut consumer, &name).await?;
+							Subscribe::new(broadcast, args).run().await
+						} => res,
 						res = run_web(web_bind, web_tls, dir) => res,
 					}
 				}
@@ -137,12 +128,135 @@ async fn main() -> anyhow::Result<()> {
 			let client = client.with_iroh(iroh);
 
 			match action {
-				ClientAction::Publish { name, args } => {
+				Action::Publish { name, args } => {
 					let publish = Publish::new(&args)?;
-					publish.run_client(client, url, name).await
+					let origin = moq_lite::Origin::produce();
+					origin.publish_broadcast(&name, publish.consume());
+
+					tracing::info!(%url, %name, "connecting");
+					let session = client.with_publish(origin.consume()).connect(url).await?;
+
+					run_client(session, publish.run()).await
 				}
-				ClientAction::Subscribe { name, args } => Subscribe::run_client(client, url, name, args).await,
+				Action::Subscribe { name, args } => {
+					let origin = moq_lite::Origin::produce();
+					let mut consumer = origin.consume();
+
+					tracing::info!(%url, %name, "connecting");
+					let session = client.with_consume(origin).connect(url).await?;
+
+					let broadcast = wait_broadcast(&mut consumer, &name).await?;
+					let subscribe = Subscribe::new(broadcast, args);
+
+					run_client(session, subscribe.run()).await
+				}
 			}
 		}
 	}
+}
+
+/// Run a client session, waiting for the action to complete, the session to close, or ctrl_c.
+async fn run_client(
+	mut session: moq_lite::Session,
+	action: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+	#[cfg(unix)]
+	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+
+	tokio::select! {
+		res = action => res,
+		res = session.closed() => res.map_err(Into::into),
+		_ = tokio::signal::ctrl_c() => {
+			session.close(moq_lite::Error::Cancel);
+			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+			Ok(())
+		},
+	}
+}
+
+/// Wait for a named broadcast to be announced on the origin.
+async fn wait_broadcast(
+	consumer: &mut moq_lite::OriginConsumer,
+	name: &str,
+) -> anyhow::Result<moq_lite::BroadcastConsumer> {
+	loop {
+		let (path, announced) = consumer
+			.announced()
+			.await
+			.ok_or_else(|| anyhow::anyhow!("origin closed"))?;
+
+		if let Some(broadcast) = announced {
+			if path.as_ref() == name {
+				return Ok(broadcast);
+			}
+		}
+	}
+}
+
+/// Accept connections in a loop, publishing the same broadcast to each.
+async fn run_publish_server(
+	mut server: moq_native::Server,
+	name: String,
+	broadcast: moq_lite::BroadcastConsumer,
+) -> anyhow::Result<()> {
+	#[cfg(unix)]
+	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+
+	let mut conn_id: u64 = 0;
+
+	tracing::info!(addr = ?server.local_addr(), "listening");
+
+	while let Some(request) = server.accept().await {
+		let id = conn_id;
+		conn_id += 1;
+
+		let name = name.clone();
+		let broadcast = broadcast.clone();
+
+		tokio::spawn(async move {
+			let origin = moq_lite::Origin::produce();
+			origin.publish_broadcast(&name, broadcast);
+
+			match request.with_publish(origin.consume()).ok().await {
+				Ok(session) => {
+					tracing::info!(id, "accepted session");
+					if let Err(err) = session.closed().await {
+						tracing::warn!(id, %err, "session error");
+					}
+				}
+				Err(err) => tracing::warn!(id, %err, "failed to accept session"),
+			}
+		});
+	}
+
+	Ok(())
+}
+
+/// Accept connections in a loop (origin already configured on the server).
+async fn run_accept(mut server: moq_native::Server) -> anyhow::Result<()> {
+	#[cfg(unix)]
+	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+
+	let mut conn_id: u64 = 0;
+
+	tracing::info!(addr = ?server.local_addr(), "listening");
+
+	while let Some(request) = server.accept().await {
+		let id = conn_id;
+		conn_id += 1;
+
+		tokio::spawn(async move {
+			match request.ok().await {
+				Ok(session) => {
+					tracing::info!(id, "accepted session");
+					if let Err(err) = session.closed().await {
+						tracing::warn!(id, %err, "session error");
+					}
+				}
+				Err(err) => tracing::warn!(id, %err, "failed to accept session"),
+			}
+		});
+	}
+
+	Ok(())
 }

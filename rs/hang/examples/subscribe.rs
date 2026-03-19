@@ -77,6 +77,8 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	};
 
 	let track_consumer = broadcast.subscribe_track(&track)?;
+
+	// Skip over groups where all frames are older than 500ms to maintain low latency.
 	let mut ordered =
 		moq_mux::consumer::OrderedConsumer::new(track_consumer, moq_mux::consumer::Legacy, Duration::from_millis(500));
 
