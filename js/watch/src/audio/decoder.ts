@@ -275,7 +275,7 @@ export class Decoder {
 			// Process data segments
 			// TODO: Use a consumer wrapper for CMAF to support latency control
 			for (;;) {
-				const group = await sub.recvGroup();
+				const group = await sub.nextGroup();
 				if (!group) break;
 
 				effect.spawn(async () => {

@@ -406,17 +406,13 @@ impl TrackConsumer {
 		})
 	}
 
-	/// Poll for the next group received over the network, without blocking.
+	/// Poll for the next group without blocking.
 	///
-	/// Groups may arrive out of order or with gaps due to network conditions.
-	/// Use `OrderedConsumer` if you need groups in sequence order,
-	/// skipping those that arrive too late.
-	///
-	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
-	/// `Poll::Ready(Ok(None))` when the track is finished,
-	/// `Poll::Ready(Err(e))` when the track has been aborted, or
+	/// Returns `Poll::Ready(Some(Ok(group)))` when a group is available,
+	/// `Poll::Ready(None)` when the track is finished,
+	/// `Poll::Ready(Some(Err(e)))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
-	pub fn poll_recv_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
 		let Some((consumer, found_index)) =
 			ready!(self.poll(waiter, |state| state.poll_next_group(self.index, self.min_sequence))?)
 		else {
@@ -427,25 +423,11 @@ impl TrackConsumer {
 		Poll::Ready(Ok(Some(consumer)))
 	}
 
-	/// Receive the next group available on this track.
+	/// Return the next group in order.
 	///
-	/// Groups may arrive out of order or with gaps due to network conditions.
-	/// Use `OrderedConsumer` if you need groups in sequence order,
-	/// skipping those that arrive too late.
-	pub async fn recv_group(&mut self) -> Result<Option<GroupConsumer>> {
-		conducer::wait(|waiter| self.poll_recv_group(waiter)).await
-	}
-
-	/// Deprecated: Use [`recv_group`](Self::recv_group) instead.
-	#[deprecated(note = "Use recv_group instead")]
+	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
-		self.recv_group().await
-	}
-
-	/// Deprecated: Use [`poll_recv_group`](Self::poll_recv_group) instead.
-	#[deprecated(note = "Use poll_recv_group instead")]
-	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
-		self.poll_recv_group(waiter)
+		conducer::wait(|waiter| self.poll_next_group(waiter)).await
 	}
 
 	/// Poll for the group with the given sequence, without blocking.
@@ -503,7 +485,7 @@ use futures::FutureExt;
 #[cfg(test)]
 impl TrackConsumer {
 	pub fn assert_group(&mut self) -> GroupConsumer {
-		self.recv_group()
+		self.next_group()
 			.now_or_never()
 			.expect("group would have blocked")
 			.expect("would have errored")
@@ -512,8 +494,8 @@ impl TrackConsumer {
 
 	pub fn assert_no_group(&mut self) {
 		assert!(
-			self.recv_group().now_or_never().is_none(),
-			"recv_group would not have blocked"
+			self.next_group().now_or_never().is_none(),
+			"next group would not have blocked"
 		);
 	}
 
@@ -771,7 +753,7 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn recv_group_finishes_without_waiting_for_gaps() {
+	async fn next_group_finishes_without_waiting_for_gaps() {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
@@ -780,7 +762,7 @@ mod test {
 		assert_eq!(consumer.assert_group().info.sequence, 1);
 
 		let done = consumer
-			.recv_group()
+			.next_group()
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored");

@@ -161,7 +161,7 @@ export class Publisher {
 			// Serve track groups, racing with stream close (= Unsubscribe)
 			const serving = (async () => {
 				for (;;) {
-					const group = await track.recvGroup();
+					const group = await track.nextGroup();
 					if (!group) return;
 					void this.#runGroup(msg.requestId, group);
 				}

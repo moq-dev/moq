@@ -201,7 +201,7 @@ export class Publisher {
 	async #runTrack(sub: bigint, broadcast: Path.Valid, track: Track, stream: Writer) {
 		try {
 			for (;;) {
-				const next = track.recvGroup();
+				const next = track.nextGroup();
 				const group = await Promise.race([next, stream.closed]);
 				if (!group) {
 					next.then((group) => group?.close()).catch(() => {});

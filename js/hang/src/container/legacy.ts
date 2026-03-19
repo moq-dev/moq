@@ -109,7 +109,7 @@ export class Consumer {
 	async #run() {
 		// Start fetching groups in the background
 		for (;;) {
-			const consumer = await this.#track.recvGroup();
+			const consumer = await this.#track.nextGroup();
 			if (!consumer) break;
 
 			// To improve TTV, we always start with the first group.

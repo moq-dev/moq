@@ -81,7 +81,7 @@ if (request) {
 
     // Read data as it arrives
     for (;;) {
-        const group = await track.recvGroup();
+        const group = await track.nextGroup();
         if (!group) break;
 
         for (;;) {
