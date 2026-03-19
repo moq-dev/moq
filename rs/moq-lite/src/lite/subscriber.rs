@@ -156,9 +156,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
-			let request = tokio::select! {
-				request = broadcast.requested_track() => match request {
-					Ok(request) => request,
+			let mut track = tokio::select! {
+				track = broadcast.requested_track() => match track {
+					Ok(track) => track,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
 						break;
@@ -171,33 +171,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut this = self.clone();
 
 			let path = path.clone();
-			let broadcast = broadcast.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(id, path, request, broadcast).await;
+				this.run_subscribe(id, path, &mut track).await;
 				this.subscribes.lock().remove(&id);
 			});
 		}
 	}
 
-	async fn run_subscribe(
-		&mut self,
-		id: u64,
-		broadcast_path: Path<'_>,
-		request: crate::TrackRequest,
-		broadcast: BroadcastDynamic,
-	) {
-		let track_name = request.info.name.clone();
-
-		// Create the TrackProducer and insert into the broadcast lookup.
-		let mut track = request.info.clone().produce();
-		if let Err(err) = broadcast.insert_track(&track) {
-			tracing::warn!(%err, track = %track_name, "failed to insert track");
-			request.reject(err);
-			return;
-		}
-
-		// Respond to the waiting subscribers with the consumer.
-		request.respond(track.consume());
+	async fn run_subscribe(&mut self, id: u64, broadcast_path: Path<'_>, track: &mut TrackProducer) {
+		let track_name = track.info.name.clone();
 
 		self.subscribes.lock().insert(id, track.clone());
 

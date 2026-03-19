@@ -113,7 +113,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let track = Track::new(msg.track_name.to_string());
 
-		let track = match broadcast.subscribe_track(&track).await {
+		let track = match broadcast.consume_track(&track) {
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())

@@ -72,9 +72,7 @@ impl Consume {
 	}
 
 	async fn run_catalog(task_id: Id, broadcast: moq_lite::BroadcastConsumer) -> Result<(), Error> {
-		let track = broadcast
-			.subscribe_track(&hang::catalog::Catalog::default_track())
-			.await?;
+		let track = broadcast.consume_track(&hang::catalog::Catalog::default_track())?;
 		let mut catalog = hang::CatalogConsumer::from(track);
 		while let Some(catalog) = catalog.next().await? {
 			// Unfortunately we need to store the codec information on the heap.
@@ -288,7 +286,7 @@ impl Consume {
 		track_info: &moq_lite::Track,
 		latency: std::time::Duration,
 	) -> Result<(), Error> {
-		let track = broadcast.subscribe_track(track_info).await?;
+		let track = broadcast.consume_track(track_info)?;
 		let mut track = hang::container::OrderedConsumer::new(track, latency);
 		while let Some(mut ordered) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.

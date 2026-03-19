@@ -281,7 +281,7 @@ async fn serve_fetch(
 
 	// NOTE: The auth token is already scoped to the broadcast.
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
-	let mut track = broadcast.subscribe_track(&track).await.map_err(|err| match err {
+	let mut track = broadcast.consume_track(&track).map_err(|err| match err {
 		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
 	})?;

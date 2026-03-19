@@ -69,10 +69,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.expect("expected announce, got unannounce");
 
-	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
-		.await
-		.expect("subscribe_track failed");
+	let mut track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
 		.await
@@ -222,10 +219,7 @@ async fn iroh_connect() {
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.expect("expected announce, got unannounce");
 
-	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
-		.await
-		.expect("subscribe_track failed");
+	let mut track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
 		.await

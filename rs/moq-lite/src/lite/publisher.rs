@@ -263,7 +263,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = Track::new(subscribe.track.to_string());
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track).await?;
+		let track = broadcast.consume_track(&track)?;
 
 		let info = lite::SubscribeOk {
 			priority: 0,
