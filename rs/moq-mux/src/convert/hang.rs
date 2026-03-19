@@ -161,7 +161,7 @@ async fn passthrough_track(
 	mut input: moq_lite::TrackConsumer,
 	mut output: moq_lite::TrackProducer,
 ) -> anyhow::Result<()> {
-	while let Some(group) = input.next_group().await? {
+	while let Some(group) = input.recv_group().await? {
 		let mut out_group = output.append_group()?;
 		let mut frame_reader = group;
 		while let Some(frame_data) = frame_reader.read_frame().await? {
@@ -186,7 +186,7 @@ async fn convert_cmaf_to_legacy(
 		ordered = ordered.with_max_group_duration(MAX_AUDIO_GROUP_DURATION);
 	}
 
-	while let Some(group) = input.next_group().await? {
+	while let Some(group) = input.recv_group().await? {
 		let mut frame_reader = group;
 		let mut is_first_in_group = true;
 

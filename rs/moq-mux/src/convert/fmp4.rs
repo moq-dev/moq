@@ -138,7 +138,7 @@ async fn passthrough_track(
 	mut input: moq_lite::TrackConsumer,
 	mut output: moq_lite::TrackProducer,
 ) -> anyhow::Result<()> {
-	while let Some(group) = input.next_group().await? {
+	while let Some(group) = input.recv_group().await? {
 		let mut out_group = output.append_group()?;
 		let mut reader = group;
 		while let Some(data) = reader.read_frame().await? {

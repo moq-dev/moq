@@ -161,7 +161,7 @@ async fn read_legacy_frames(track: moq_lite::TrackConsumer) -> Vec<(Timestamp, V
 /// Read all raw CMAF frames from a track consumer (must be subscribed before converter finishes).
 async fn read_cmaf_raw_frames(mut track: moq_lite::TrackConsumer) -> Vec<Bytes> {
 	let mut result = Vec::new();
-	while let Some(group) = tokio::time::timeout(Duration::from_millis(500), track.next_group())
+	while let Some(group) = tokio::time::timeout(Duration::from_millis(500), track.recv_group())
 		.await
 		.expect("read_cmaf_raw_frames timed out")
 		.expect("read_cmaf_raw_frames error")
