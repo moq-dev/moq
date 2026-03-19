@@ -45,12 +45,13 @@ resource "google_project_service" "all" {
   disable_on_destroy         = false
 }
 
-# Shared memory alert service (used by both relay and publisher)
-resource "local_file" "memory_alert_service" {
-  content = templatefile("${path.module}/common/memory-alert.service.tftpl", {
+# Shared monitor service (memory + health checks)
+resource "local_file" "monitor_service" {
+  content = templatefile("${path.module}/common/monitor.service.tftpl", {
     webhook = var.webhook
+    domain  = var.domain
   })
-  filename = "${path.module}/common/gen/memory-alert.service"
+  filename = "${path.module}/common/gen/monitor.service"
 }
 
 module "relay" {

@@ -13,3 +13,6 @@ pub mod producer;
 pub mod session;
 
 uniffi::setup_scaffolding!("moq");
+
+#[cfg(test)]
+mod test;

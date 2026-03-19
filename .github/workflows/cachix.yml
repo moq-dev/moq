@@ -37,7 +37,7 @@ jobs:
           nix build .#moq-cli --print-build-logs
           cachix push kixelated ./result
 
-      - name: Build and cache moq-token
+      - name: Build and cache moq-token-cli
         run: |
-          nix build .#moq-token --print-build-logs
+          nix build .#moq-token-cli --print-build-logs
           cachix push kixelated ./result

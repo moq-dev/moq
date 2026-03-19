@@ -4,6 +4,9 @@
 /// They appear after the message parameters as a sequence of Key-Value-Pairs
 /// (same delta-encoded format) until the end of the message.
 ///
+/// Unlike Message Parameters which have a count prefix, Track Properties
+/// have no count and are read until the end of the message payload.
+///
 /// For now we parse and validate the structure but discard the values.
 use bytes::Buf;
 
@@ -19,12 +22,14 @@ const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
 ///
 /// Track Properties use the same Key-Value-Pair encoding as parameters:
 /// delta-encoded types, even = varint value, odd = length-prefixed bytes.
+/// They have no count prefix — read until the buffer is empty.
 ///
 /// Only call this for draft-17+; older drafts don't have Track Properties.
-pub fn skip_properties<R: Buf>(r: &mut R, version: Version) -> Result<(), DecodeError> {
+pub fn skip<R: Buf>(r: &mut R, version: Version) -> Result<(), DecodeError> {
 	// Track Properties only exist in draft-17+
-	if version != Version::Draft17 {
-		return Ok(());
+	match version {
+		Version::Draft14 | Version::Draft15 | Version::Draft16 => return Ok(()),
+		_ => {}
 	}
 
 	let mut prev_type: u64 = 0;
@@ -72,7 +77,7 @@ mod tests {
 	#[test]
 	fn test_skip_empty_properties() {
 		let mut buf = bytes::Bytes::new();
-		skip_properties(&mut buf, Version::Draft17).unwrap();
+		skip(&mut buf, Version::Draft17).unwrap();
 	}
 
 	#[test]
@@ -82,7 +87,7 @@ mod tests {
 		0x02u64.encode(&mut buf, Version::Draft17).unwrap(); // delta type
 		5000u64.encode(&mut buf, Version::Draft17).unwrap(); // value
 		let mut bytes = buf.freeze();
-		skip_properties(&mut bytes, Version::Draft17).unwrap();
+		skip(&mut bytes, Version::Draft17).unwrap();
 		assert!(!bytes.has_remaining());
 	}
 
@@ -94,7 +99,7 @@ mod tests {
 		3u64.encode(&mut buf, Version::Draft17).unwrap(); // length
 		buf.extend_from_slice(&[0x01, 0x02, 0x03]); // value bytes
 		let mut bytes = buf.freeze();
-		skip_properties(&mut bytes, Version::Draft17).unwrap();
+		skip(&mut bytes, Version::Draft17).unwrap();
 		assert!(!bytes.has_remaining());
 	}
 
@@ -113,7 +118,7 @@ mod tests {
 		buf.extend_from_slice(&[0xAA, 0xBB]);
 
 		let mut bytes = buf.freeze();
-		skip_properties(&mut bytes, Version::Draft17).unwrap();
+		skip(&mut bytes, Version::Draft17).unwrap();
 		assert!(!bytes.has_remaining());
 	}
 }

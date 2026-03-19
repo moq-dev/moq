@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.2.12"
+version = "0.2.13"
 edition = "2024"
 rust-version.workspace = true
 
@@ -14,7 +14,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [lib]
 name = "moq"
-crate-type = ["staticlib", "lib"]
+crate-type = ["staticlib"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
@@ -30,8 +30,3 @@ url = "2"
 
 [build-dependencies]
 cbindgen = "0.29"
-
-[dev-dependencies]
-anyhow = "1"
-moq-native = { workspace = true, default-features = true }
-url = "2"

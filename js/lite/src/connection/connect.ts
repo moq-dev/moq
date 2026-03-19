@@ -74,8 +74,10 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 	if (session instanceof Session) {
-		console.warn(url.toString(), "using WebSocket fallback; the user experience may be degraded");
+		console.warn(url.toString(), "connected via WebSocket");
 		websocketWon.add(url.toString());
+	} else {
+		console.log(url.toString(), "connected via WebTransport");
 	}
 
 	// Get the negotiated protocol. qmux Session exposes it directly;
@@ -92,8 +94,8 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	if (protocol === Ietf.ALPN.DRAFT_17) {
 		// Draft-17: SETUP uses uni streams with 0x2F00 stream type
 		const encoder = new TextEncoder();
-		const params = new Ietf.Parameters();
-		params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+		const params = new Ietf.SetupOptions();
+		params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 
 		const setupMsg = new Ietf.Setup({ parameters: params });
 
@@ -138,7 +140,6 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 			reader: recvReader.reader,
 		});
 
-		console.debug(url.toString(), "moq-ietf draft-17 session established");
 		return new Ietf.Connection({
 			url,
 			quic: session as WebTransport,
@@ -153,7 +154,6 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		setupVersion = Ietf.Version.DRAFT_15;
 	} else if (protocol === Lite.ALPN_03) {
 		// moq-lite draft-03 doesn't use a session stream, so we return immediately.
-		console.debug(url.toString(), "moq-lite draft-03 session established");
 		return new Lite.Connection(url, session, Lite.Version.DRAFT_03, undefined);
 	} else if (protocol === Lite.ALPN || protocol === "" || protocol === undefined) {
 		// moq-lite ALPN (or no protocol) uses Draft14 encoding for SETUP,
@@ -169,9 +169,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	const encoder = new TextEncoder();
 
-	const params = new Ietf.Parameters();
-	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n); // Allow a ton of request IDs.
-	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js")); // Put the implementation name in the parameters.
+	const params = new Ietf.SetupOptions();
+	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n); // Allow a ton of request IDs.
+	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js")); // Put the implementation name in the parameters.
 
 	const client = new Ietf.ClientSetup({
 		// NOTE: draft 15 onwards does not use CLIENT_SETUP to negotiate the version.
@@ -198,11 +198,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	console.debug(url.toString(), "received server setup", server);
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
-		console.debug(url.toString(), "moq-lite session established");
 		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
-		const maxRequestId = server.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
-		console.debug(url.toString(), "moq-ietf session established, version:", server.version.toString(16));
+		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
 			url,
 			quic: session,
@@ -224,8 +222,8 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 	if (protocol === Ietf.ALPN.DRAFT_17) {
 		// Draft-17: SETUP uses uni streams with 0x2F00 stream type
 		const encoder = new TextEncoder();
-		const params = new Ietf.Parameters();
-		params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+		const params = new Ietf.SetupOptions();
+		params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 
 		const setupMsg = new Ietf.Setup({ parameters: params });
 
@@ -288,9 +286,9 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 
 	const encoder = new TextEncoder();
 
-	const params = new Ietf.Parameters();
-	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n);
-	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+	const params = new Ietf.SetupOptions();
+	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
+	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 
 	const client = new Ietf.ClientSetup({
 		versions:
@@ -313,7 +311,7 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
 		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
-		const maxRequestId = server.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
+		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
 			url,
 			quic: session,
@@ -387,10 +385,6 @@ async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>):
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
-
-	if (delay) {
-		console.debug(url.toString(), `no WebTransport after ${delay}ms, attempting WebSocket fallback`);
-	}
 
 	const quic = new Session(url);
 

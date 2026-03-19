@@ -2,7 +2,8 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { MessageParameters, Parameters } from "./parameters.ts";
+import { Parameters } from "./parameters.ts";
+import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // PUBLISH messages are new in draft-14
@@ -74,7 +75,7 @@ export class Publish {
 			if (this.contentExists !== !!this.largest) {
 				throw new Error("contentExists and largest must both be true or false");
 			}
-			const params = new MessageParameters();
+			const params = new Parameters();
 			params.groupOrder = this.groupOrder;
 			params.forward = this.forward;
 			if (this.largest) {
@@ -118,8 +119,9 @@ export class Publish {
 				forward,
 			});
 		}
-		// v15+
-		const params = await MessageParameters.decode(r, version);
+		// v15+: parameters followed by Track Properties (draft-17+)
+		const params = await Parameters.decode(r, version);
+		await Properties.skip(r, version);
 		const groupOrder = params.groupOrder ?? 0x02;
 		const forward = params.forward ?? true;
 		const largest = params.largest;

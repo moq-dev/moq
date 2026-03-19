@@ -2,7 +2,8 @@ import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-export const Parameter = {
+/// Setup Option key constants (separate namespace from Message Parameters).
+export const SetupOption = {
 	Path: 1n,
 	MaxRequestId: 2n,
 	AuthorizationToken: 3n,
@@ -11,7 +12,11 @@ export const Parameter = {
 	Implementation: 7n,
 } as const;
 
-export class Parameters {
+/// Setup Options — used in SETUP messages.
+///
+/// In d14-d16 these are count-prefixed ("Setup Parameters").
+/// In d17 these have no count prefix ("Setup Options") and read/write to end of message.
+export class SetupOptions {
 	vars: Map<bigint, bigint>;
 	bytes: Map<bigint, Uint8Array>;
 
@@ -112,8 +117,8 @@ export class Parameters {
 		}
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<Parameters> {
-		const params = new Parameters();
+	static async decode(r: Reader, version: IetfVersion): Promise<SetupOptions> {
+		const params = new SetupOptions();
 
 		if (version === Version.DRAFT_17) {
 			// d17: no count prefix, read until reader is done
@@ -176,7 +181,7 @@ export class Parameters {
 }
 
 // ---- Message Parameters (used in Subscribe, Publish, Fetch, etc.) ----
-// Uses raw bigint keys since parameter IDs have different meanings from setup parameters.
+// Count-prefixed KVPs with delta-encoded keys (d16+).
 
 // Varint parameter IDs (even)
 const MSG_PARAM_DELIVERY_TIMEOUT = 0x02n;
@@ -191,7 +196,8 @@ const MSG_PARAM_GROUP_ORDER = 0x22n;
 const MSG_PARAM_LARGEST_OBJECT = 0x09n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
 
-export class MessageParameters {
+/// Message Parameters — count-prefixed KVPs used in control messages.
+export class Parameters {
 	vars: Map<bigint, bigint>;
 	bytes: Map<bigint, Uint8Array>;
 
@@ -333,9 +339,9 @@ export class MessageParameters {
 		}
 	}
 
-	static async decode(r: Reader, version: IetfVersion): Promise<MessageParameters> {
+	static async decode(r: Reader, version: IetfVersion): Promise<Parameters> {
 		const count = await r.u53();
-		const params = new MessageParameters();
+		const params = new Parameters();
 
 		let prevType = 0n;
 

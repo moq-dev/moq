@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.10.9"
+version = "0.10.10"
 edition = "2024"
 rust-version.workspace = true
 
@@ -37,7 +37,7 @@ moq-native = { workspace = true, default-features = false, features = ["aws-lc-r
 moq-token = { workspace = true, features = ["jwks-loader"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
 rustls = { version = "0.23", features = [
-	"aws-lc-rs",
+    "aws-lc-rs",
 ], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_with = "3"

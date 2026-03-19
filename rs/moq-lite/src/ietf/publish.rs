@@ -251,7 +251,7 @@ impl Message for Publish<'_> {
 					0x10 => forward: Option<bool>,
 					0x22 => group_order: Option<GroupOrder>,
 				);
-				super::properties::skip_properties(r, version)?;
+				super::properties::skip(r, version)?;
 
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 				let forward = forward.unwrap_or(true);

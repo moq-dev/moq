@@ -1,15 +1,15 @@
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { Parameters } from "./parameters.ts";
+import { SetupOptions } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // Draft-17 unified SETUP message (0x2F00)
 export class Setup {
 	static id = 0x2f00;
 
-	parameters: Parameters;
+	parameters: SetupOptions;
 
-	constructor({ parameters = new Parameters() }: { parameters?: Parameters } = {}) {
+	constructor({ parameters = new SetupOptions() }: { parameters?: SetupOptions } = {}) {
 		this.parameters = parameters;
 	}
 
@@ -22,7 +22,7 @@ export class Setup {
 	}
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<Setup> {
-		const parameters = await Parameters.decode(r, version);
+		const parameters = await SetupOptions.decode(r, version);
 		return new Setup({ parameters });
 	}
 
@@ -37,9 +37,9 @@ export class ClientSetup {
 	static id = 0x20;
 
 	versions: number[];
-	parameters: Parameters;
+	parameters: SetupOptions;
 
-	constructor({ versions, parameters = new Parameters() }: { versions: number[]; parameters?: Parameters }) {
+	constructor({ versions, parameters = new SetupOptions() }: { versions: number[]; parameters?: SetupOptions }) {
 		this.versions = versions;
 		this.parameters = parameters;
 	}
@@ -67,7 +67,7 @@ export class ClientSetup {
 	static async #decode(r: Reader, version: IetfVersion): Promise<ClientSetup> {
 		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			// Draft15+: no versions list, just parameters
-			const parameters = await Parameters.decode(r, version);
+			const parameters = await SetupOptions.decode(r, version);
 			return new ClientSetup({ versions: [version], parameters });
 		} else if (version === Version.DRAFT_14) {
 			// Number of supported versions
@@ -83,7 +83,7 @@ export class ClientSetup {
 				supportedVersions.push(v);
 			}
 
-			const parameters = await Parameters.decode(r, version);
+			const parameters = await SetupOptions.decode(r, version);
 
 			return new ClientSetup({ versions: supportedVersions, parameters });
 		} else {
@@ -101,9 +101,9 @@ export class ServerSetup {
 	static id = 0x21;
 
 	version: number;
-	parameters: Parameters;
+	parameters: SetupOptions;
 
-	constructor({ version, parameters = new Parameters() }: { version: number; parameters?: Parameters }) {
+	constructor({ version, parameters = new SetupOptions() }: { version: number; parameters?: SetupOptions }) {
 		this.version = version;
 		this.parameters = parameters;
 	}
@@ -128,11 +128,11 @@ export class ServerSetup {
 	static async #decode(r: Reader, version: IetfVersion): Promise<ServerSetup> {
 		if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			// Draft15+: no version field, just parameters
-			const parameters = await Parameters.decode(r, version);
+			const parameters = await SetupOptions.decode(r, version);
 			return new ServerSetup({ version, parameters });
 		} else if (version === Version.DRAFT_14) {
 			const selectedVersion = await r.u53();
-			const parameters = await Parameters.decode(r, version);
+			const parameters = await SetupOptions.decode(r, version);
 			return new ServerSetup({ version: selectedVersion, parameters });
 		} else {
 			// d17 uses unified Setup, not ServerSetup

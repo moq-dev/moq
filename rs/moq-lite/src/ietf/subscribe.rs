@@ -223,7 +223,7 @@ impl Message for SubscribeOk {
 				decode_params!(r, version,
 					0x22 => _group_order: Option<GroupOrder>,
 				);
-				super::properties::skip_properties(r, version)?;
+				super::properties::skip(r, version)?;
 			}
 		}
 

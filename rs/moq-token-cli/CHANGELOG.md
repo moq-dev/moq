@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.15](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.14...moq-token-cli-v0.5.15) - 2026-03-18
+
+### Other
+
+- Fix Docker CI: align nix package names with crate names ([#1122](https://github.com/moq-dev/moq/pull/1122))
+
 ## [0.5.14](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.13...moq-token-cli-v0.5.14) - 2026-03-16
 
 ### Other

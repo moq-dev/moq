@@ -1,0 +1,33 @@
+name: Release Py
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "py/**"
+      - ".github/workflows/release-py.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-py
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release Py Packages
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'moq-dev'
+    environment:
+      name: pypi
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Release packages
+        run: nix develop --command ./py/common/release.sh

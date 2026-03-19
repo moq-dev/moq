@@ -15,7 +15,7 @@ JWT_FILE="${SCRIPT_DIR}/secrets/demo-sub.jwt"
 
 if [ ! -f "$JWT_FILE" ]; then
 	echo "Error: $JWT_FILE not found."
-	echo "Generate it with: cargo run --bin moq-token -- --key secrets/root.jwk sign --root \"demo\" --get \"\" > secrets/demo-sub.jwt"
+	echo "Generate it with: cargo run --bin moq-token-cli -- --key secrets/root.jwk sign --root \"demo\" --subscribe \"\" > secrets/demo-sub.jwt"
 	exit 1
 fi
 
@@ -54,8 +54,9 @@ echo "$msg"
 
 # Post to a webhook (Slack, Discord, etc.) if provided
 if [ -n "$WEBHOOK_URL" ]; then
+	payload=$(jq -n --arg content "$msg" '{content: $content}')
 	curl -sf -X POST -H "Content-Type: application/json" \
-		-d "{\"text\": \"$msg\"}" \
+		-d "$payload" \
 		"$WEBHOOK_URL" >/dev/null 2>&1 || echo "Warning: webhook post failed"
 fi
 

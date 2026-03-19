@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.13.5"
+version = "0.13.6"
 edition = "2024"
 rust-version.workspace = true
 
@@ -21,12 +21,7 @@ quinn = [
     "dep:reqwest",
     "dep:rustls-webpki",
 ]
-noq = [
-    "dep:web-transport-noq",
-    "dep:rcgen",
-    "dep:reqwest",
-    "dep:rustls-webpki",
-]
+noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
 aws-lc-rs = ["rustls/aws-lc-rs", "rcgen?/aws_lc_rs", "quinn?/rustls-aws-lc-rs"]
 iroh = ["dep:web-transport-iroh", "dep:web-transport-proto"]
@@ -47,9 +42,9 @@ moq-lite = { workspace = true, features = ["serde"] }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 qmux = { workspace = true, features = ["wss", "tls"], optional = true }
 quinn = { version = "0.11", default-features = false, features = [
-	"platform-verifier",
-	"runtime-tokio",
-	"bloom",
+    "platform-verifier",
+    "runtime-tokio",
+    "bloom",
 ], optional = true }
 rand = "0.9.2"
 rcgen = { version = "0.14", default-features = false, optional = true }
@@ -72,9 +67,6 @@ web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
 
 [dev-dependencies]
-anyhow = "1"
 bytes = "1"
-tokio = { workspace = true, features = ["rt-multi-thread"] }
 toml = "0.9"
 tracing-test = "0.2"
-url = "2"

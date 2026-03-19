@@ -90,10 +90,10 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	let mut track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
 
 	// Read one group.
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
-		.expect("next_group timed out")
-		.expect("next_group failed")
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
 	// Read one frame and verify the payload.
@@ -428,10 +428,10 @@ async fn broadcast_websocket() {
 	let mut track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
 
 	// Read one group.
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
-		.expect("next_group timed out")
-		.expect("next_group failed")
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
 	// Read one frame and verify the payload.
@@ -532,10 +532,10 @@ async fn broadcast_websocket_fallback() {
 	// Subscribe to the track.
 	let mut track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
-		.expect("next_group timed out")
-		.expect("next_group failed")
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
 	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())

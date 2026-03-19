@@ -5,7 +5,6 @@ on:
     tags:
       - 'moq-relay-v*'
       - 'moq-clock-v*'
-      # NOTE: The -cli is automatically removed
       - 'moq-cli-v*'
       - 'moq-token-cli-v*'
 
@@ -30,10 +29,8 @@ jobs:
         run: |
           ref=${GITHUB_REF#refs/tags/}
           if [[ "$ref" =~ ^([a-z-]+)-v([0-9.]+)$ ]]; then
-            full_target="${BASH_REMATCH[1]}"
+            target="${BASH_REMATCH[1]}"
             version="${BASH_REMATCH[2]}"
-            # Strip "-cli" suffix from target if present
-            target="${full_target%-cli}"
             echo "target=$target" >> $GITHUB_OUTPUT
             echo "version=$version" >> $GITHUB_OUTPUT
           else

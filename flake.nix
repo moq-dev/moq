@@ -72,6 +72,12 @@
           nodejs_24
         ];
 
+        # Python dependencies
+        pyDeps = with pkgs; [
+          uv
+          python3
+        ];
+
         # CDN/deployment dependencies
         cdnDeps = with pkgs; [
           opentofu
@@ -88,7 +94,7 @@
               moq-relay
               moq-clock
               moq-cli
-              moq-token
+              moq-token-cli
             ];
           };
 
@@ -97,12 +103,12 @@
             moq-relay
             moq-clock
             moq-cli
-            moq-token
+            moq-token-cli
             ;
         };
 
         devShells.default = pkgs.mkShell {
-          packages = rustDeps ++ jsDeps ++ cdnDeps;
+          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps;
 
           shellHook = ''
             export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"

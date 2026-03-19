@@ -124,7 +124,7 @@ ffmpeg -i input.mp4 -f mpegts - | moq-cli publish -
 
 ### moq-token-cli
 
-Command-line tool for JWT token management (binary name: `moq-token`).
+Command-line tool for JWT token management (binary name: `moq-token-cli`).
 
 **Installation:**
 ```bash
@@ -134,10 +134,10 @@ cargo install moq-token-cli
 **Usage:**
 ```bash
 # Generate a key
-moq-token --key root.jwk generate
+moq-token-cli --key root.jwk generate
 
 # Sign a token
-moq-token --key root.jwk sign \
+moq-token-cli --key root.jwk sign \
   --root "rooms/123" \
   --publish "alice" \
   --expires 1735689600
@@ -241,7 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut track = broadcast.subscribe("chat").await?;
 
     // Read groups and frames
-    while let Some(group) = track.next_group().await? {
+    while let Some(group) = track.recv_group().await? {
         while let Some(frame) = group.read().await? {
             println!("Received: {:?}", frame);
         }

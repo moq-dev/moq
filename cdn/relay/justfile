@@ -51,8 +51,8 @@ deploy node:
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
 	rsync -az certbot-renew.service certbot-renew.timer root@$HOST:/etc/systemd/system/
-	rsync -az gen/moq-cert.service gen/{{node}}/ root@$HOST:/etc/systemd/system/
-	rsync -az ../common/vacuum.service ../common/vacuum.timer ../common/memory-alert.sh root@$HOST:/etc/systemd/system/
+	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/
+	rsync -az ../common/vacuum.service ../common/vacuum.timer ../common/monitor.sh root@$HOST:/etc/systemd/system/
 	rsync -az --exclude='.gitignore' ../common/gen/ root@$HOST:/etc/systemd/system/
 
 	echo "  Building and caching packages..."
@@ -64,12 +64,12 @@ deploy node:
 		systemctl enable moq-cert.service && \
 		systemctl enable certbot-renew.timer && \
 		systemctl enable vacuum.timer && \
-		systemctl enable memory-alert.service && \
+		systemctl enable monitor.service && \
 		systemctl enable moq-relay.service && \
 		systemctl start certbot-renew.timer && \
 		systemctl start vacuum.timer && \
 		systemctl start moq-cert.service && \
-		systemctl restart memory-alert.service && \
+		systemctl restart monitor.service && \
 		systemctl restart moq-relay.service"
 
 # Check status of a node

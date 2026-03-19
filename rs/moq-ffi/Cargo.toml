@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>", "Brian Medley <bpm@bmedley.org>"
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
@@ -13,7 +13,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [lib]
 name = "moq_ffi"
-crate-type = ["staticlib", "cdylib", "lib"]
+crate-type = ["staticlib", "cdylib"]
 
 [[bin]]
 name = "uniffi-bindgen"
@@ -36,4 +36,3 @@ uniffi = { version = "0.31", features = ["build"] }
 
 [dev-dependencies]
 pollster = "0.4"
-tokio = { workspace = true, features = ["macros", "rt", "time"] }

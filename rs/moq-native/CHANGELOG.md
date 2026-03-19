@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.6](https://github.com/moq-dev/moq/compare/moq-native-v0.13.5...moq-native-v0.13.6) - 2026-03-18
+
+### Other
+
+- Improve the connect logging. ([#1131](https://github.com/moq-dev/moq/pull/1131))
+- Remove unused dev-dependencies and bump @moq/qmux ([#1126](https://github.com/moq-dev/moq/pull/1126))
+- Bump @moq/qmux to 0.0.4
+
 ## [0.13.5](https://github.com/moq-dev/moq/compare/moq-native-v0.13.4...moq-native-v0.13.5) - 2026-03-16
 
 ### Other

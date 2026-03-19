@@ -22,10 +22,10 @@ The authentication flow:
 Using the Rust CLI:
 ```bash
 # Symmetric key (simpler, key must stay secret)
-moq-token --key root.jwk generate
+moq-token-cli --key root.jwk generate
 
 # Asymmetric key (private signs, public verifies)
-moq-token --key private.jwk generate --algorithm RS256 --public public.jwk
+moq-token-cli --key private.jwk generate --algorithm RS256 --public public.jwk
 ```
 
 Using the JavaScript CLI:
@@ -50,7 +50,7 @@ public = "anon"
 
 ```bash
 # Allow publishing to demo/my-stream and subscribing to anything under demo/
-moq-token --key root.jwk sign --root demo --publish my-stream --subscribe ""
+moq-token-cli --key root.jwk sign --root demo --publish my-stream --subscribe ""
 ```
 
 The client connects with the token:
@@ -163,7 +163,7 @@ const token = await sign(key, claims)
 
 ### Rust
 ```bash
-moq-token --key root.jwk sign \
+moq-token-cli --key root.jwk sign \
   --root demo \
   --publish my-stream \
   --subscribe "" \
