@@ -2,7 +2,7 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { MessageParameters, Parameters } from "./parameters.ts";
+import { Parameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // we only support Group Order descending
@@ -41,7 +41,7 @@ export class TrackStatusRequest {
 			await w.u53(0); // no parameters
 		} else {
 			// v15+: just parameters
-			const params = new MessageParameters();
+			const params = new Parameters();
 			await params.encode(w, version);
 		}
 	}
@@ -70,7 +70,7 @@ export class TrackStatusRequest {
 			await Parameters.decode(r, version); // parameters
 		} else {
 			// v15+: just parameters
-			await MessageParameters.decode(r, version);
+			await Parameters.decode(r, version);
 		}
 
 		return new TrackStatusRequest({ requestId, trackNamespace, trackName });

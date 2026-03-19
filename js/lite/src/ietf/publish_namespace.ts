@@ -2,7 +2,7 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { MessageParameters } from "./parameters.ts";
+import { Parameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // In draft-14, ANNOUNCE is renamed to PUBLISH_NAMESPACE
@@ -23,7 +23,7 @@ export class PublishNamespace {
 			await w.u62(0n); // required_request_id_delta: only 0 supported until stream-per-request
 		}
 		await Namespace.encode(w, this.trackNamespace);
-		await new MessageParameters().encode(w, version);
+		await new Parameters().encode(w, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -40,7 +40,7 @@ export class PublishNamespace {
 			await r.u62(); // required_request_id_delta
 		}
 		const trackNamespace = await Namespace.decode(r);
-		await MessageParameters.decode(r, version); // ignore parameters
+		await Parameters.decode(r, version); // ignore parameters
 		return new PublishNamespace({ requestId, trackNamespace });
 	}
 }

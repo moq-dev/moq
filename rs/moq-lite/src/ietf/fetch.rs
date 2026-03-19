@@ -243,7 +243,7 @@ impl Message for FetchOk {
 				decode_params!(buf, version,
 					0x22 => group_order: Option<GroupOrder>,
 				);
-				super::properties::skip_properties(buf, version)?;
+				super::properties::skip(buf, version)?;
 
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 
