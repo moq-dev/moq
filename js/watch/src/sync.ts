@@ -1,10 +1,29 @@
 import { Time } from "@moq/lite";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
+
+export class SyncTrack {
+	#jitter = new Signal<Time.Milli | undefined>(undefined);
+	readonly jitter: Getter<Time.Milli | undefined> = this.#jitter;
+	#onClose: () => void;
+	#closed = false;
+
+	constructor(onClose: () => void) {
+		this.#onClose = onClose;
+	}
+
+	set(jitter: Time.Milli | undefined): void {
+		this.#jitter.set(jitter);
+	}
+
+	close(): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#onClose();
+	}
+}
 
 export interface SyncProps {
 	jitter?: Time.Milli | Signal<Time.Milli>;
-	audio?: Time.Milli | Signal<Time.Milli | undefined>;
-	video?: Time.Milli | Signal<Time.Milli | undefined>;
 }
 
 export class Sync {
@@ -17,9 +36,9 @@ export class Sync {
 	// The minimum buffer size, to account for network jitter.
 	jitter: Signal<Time.Milli>;
 
-	// Any additional delay required for audio or video.
-	audio: Signal<Time.Milli | undefined>;
-	video: Signal<Time.Milli | undefined>;
+	// Dynamic set of track consumers.
+	#tracks = new Set<SyncTrack>();
+	#tracksVersion = new Signal(0);
 
 	// The buffer required, based on both audio and video.
 	#latency = new Signal<Time.Milli>(Time.Milli.zero);
@@ -33,20 +52,33 @@ export class Sync {
 
 	constructor(props?: SyncProps) {
 		this.jitter = Signal.from(props?.jitter ?? (100 as Time.Milli));
-		this.audio = Signal.from(props?.audio);
-		this.video = Signal.from(props?.video);
 
 		this.#update = Promise.withResolvers();
 
 		this.signals.run(this.#runLatency.bind(this));
 	}
 
+	track(): SyncTrack {
+		const t = new SyncTrack(() => {
+			this.#tracks.delete(t);
+			this.#tracksVersion.update((v) => v + 1);
+		});
+		this.#tracks.add(t);
+		this.#tracksVersion.update((v) => v + 1);
+		return t;
+	}
+
 	#runLatency(effect: Effect): void {
 		const jitter = effect.get(this.jitter);
-		const video = effect.get(this.video) ?? Time.Milli.zero;
-		const audio = effect.get(this.audio) ?? Time.Milli.zero;
+		effect.get(this.#tracksVersion);
 
-		const latency = Time.Milli.add(Time.Milli.max(video, audio), jitter);
+		let max = Time.Milli.zero;
+		for (const t of this.#tracks) {
+			const v = effect.get(t.jitter) ?? Time.Milli.zero;
+			max = Time.Milli.max(max, v);
+		}
+
+		const latency = Time.Milli.add(max, jitter);
 		this.#latency.set(latency);
 
 		this.#update.resolve();

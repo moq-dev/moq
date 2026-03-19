@@ -2,7 +2,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import type { Sync } from "../sync";
+import { Sync, type SyncTrack } from "../sync";
 
 export type Target = {
 	// Optional manual override for the selected rendition name.
@@ -22,6 +22,8 @@ export type SourceProps = {
 
 	// A function that checks if an audio configuration is supported by the backend.
 	supported?: Supported;
+
+	sync?: Sync;
 };
 
 /**
@@ -48,11 +50,13 @@ export class Source {
 
 	// Used to target a latency and synchronize playback of video with audio.
 	sync: Sync;
+	#syncTrack: SyncTrack | undefined;
 
 	#signals = new Effect();
 
-	constructor(sync: Sync, props?: SourceProps) {
-		this.sync = sync;
+	constructor(props: SourceProps) {
+		this.sync = props.sync ?? new Sync();
+		this.#syncTrack = props.sync?.track();
 
 		this.broadcast = Signal.from(props?.broadcast);
 		this.target = Signal.from(props?.target);
@@ -113,7 +117,7 @@ export class Source {
 
 		effect.set(this.#track, selected.track);
 		effect.set(this.#config, selected.config);
-		effect.set(this.sync.audio, selected.config.jitter as Moq.Time.Milli | undefined);
+		this.#syncTrack?.set(selected.config.jitter as Moq.Time.Milli | undefined);
 	}
 
 	/**
@@ -141,6 +145,7 @@ export class Source {
 	}
 
 	close(): void {
+		this.#syncTrack?.close();
 		this.#signals.close();
 	}
 }
