@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
 	let client = config.client.init()?;
 
 	#[cfg(feature = "iroh")]
-	let (mut server, client) = {
+	let (server, client) = {
 		let iroh = config.iroh.bind().await?;
 		(server.with_iroh(iroh.clone()), client.with_iroh(iroh))
 	};
@@ -82,11 +82,7 @@ async fn main() -> anyhow::Result<()> {
 	}
 }
 
-async fn serve(
-	mut server: moq_native::Server,
-	cluster: Cluster,
-	auth: Auth,
-) -> anyhow::Result<()> {
+async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
 	let mut conn_id = 0;
 
 	while let Some(request) = server.accept().await {
