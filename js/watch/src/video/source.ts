@@ -160,7 +160,7 @@ export class Source {
 	readonly config: Getter<Catalog.VideoConfig | undefined> = this.#config;
 
 	sync: Sync;
-	#syncTrack: SyncTrack | undefined;
+	#syncTrack: SyncTrack;
 	supported: Signal<Supported | undefined>;
 
 	#signals = new Effect();
@@ -169,7 +169,7 @@ export class Source {
 		this.broadcast = Signal.from(props?.broadcast);
 		this.target = Signal.from(props?.target);
 		this.sync = props.sync ?? new Sync();
-		this.#syncTrack = props.sync?.track();
+		this.#syncTrack = this.sync.track();
 		this.supported = Signal.from(props?.supported);
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -224,7 +224,7 @@ export class Source {
 
 		effect.set(this.#track, selected);
 		effect.set(this.#config, config);
-		this.#syncTrack?.set(config.jitter as Moq.Time.Milli | undefined);
+		this.#syncTrack.set(config.jitter as Moq.Time.Milli | undefined);
 	}
 
 	/**
@@ -271,7 +271,7 @@ export class Source {
 	}
 
 	close(): void {
-		this.#syncTrack?.close();
+		this.#syncTrack.close();
 		this.#signals.close();
 	}
 }

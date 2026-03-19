@@ -50,13 +50,13 @@ export class Source {
 
 	// Used to target a latency and synchronize playback of video with audio.
 	sync: Sync;
-	#syncTrack: SyncTrack | undefined;
+	#syncTrack: SyncTrack;
 
 	#signals = new Effect();
 
 	constructor(props: SourceProps) {
 		this.sync = props.sync ?? new Sync();
-		this.#syncTrack = props.sync?.track();
+		this.#syncTrack = this.sync.track();
 
 		this.broadcast = Signal.from(props?.broadcast);
 		this.target = Signal.from(props?.target);
@@ -117,7 +117,7 @@ export class Source {
 
 		effect.set(this.#track, selected.track);
 		effect.set(this.#config, selected.config);
-		this.#syncTrack?.set(selected.config.jitter as Moq.Time.Milli | undefined);
+		this.#syncTrack.set(selected.config.jitter as Moq.Time.Milli | undefined);
 	}
 
 	/**
@@ -145,7 +145,7 @@ export class Source {
 	}
 
 	close(): void {
-		this.#syncTrack?.close();
+		this.#syncTrack.close();
 		this.#signals.close();
 	}
 }
