@@ -310,7 +310,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					while tasks.next().await.is_some() {}
 					false
 				} => unreachable!(),
-				Some(group) = track.next_group().transpose() => group,
+				Some(group) = track.recv_group().transpose() => group,
 				else => return Ok(()),
 			}?;
 

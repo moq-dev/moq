@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.13.5"
+version = "0.13.6"
 edition = "2024"
 rust-version.workspace = true
 
@@ -67,9 +67,6 @@ web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
 
 [dev-dependencies]
-anyhow = "1"
 bytes = "1"
-tokio = { workspace = true, features = ["rt-multi-thread"] }
 toml = "0.9"
 tracing-test = "0.2"
-url = "2"

@@ -1,13 +1,8 @@
-//! Integration tests for the libmoq C API.
-//!
-//! Tests the full publish/consume pipeline using the FFI functions,
-//! exercising local origin-based pub/sub without requiring a network connection.
+use super::*;
 
 use std::ffi::{c_char, c_void};
 use std::sync::mpsc;
 use std::time::Duration;
-
-use moq::*;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -77,29 +72,20 @@ fn opus_head() -> Vec<u8> {
 /// H.264 Annex B init with SPS + PPS extracted from Big Buck Bunny (1280x720, High profile, Level 3.1).
 fn h264_init() -> Vec<u8> {
 	let mut init = Vec::new();
-	// SPS NAL unit (from bbb.mp4 avcC)
-	init.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // start code
+	init.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
 	init.extend_from_slice(&[
 		0x67, 0x64, 0x00, 0x1f, 0xac, 0x24, 0x84, 0x01, 0x40, 0x16, 0xec, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40,
 		0x00, 0x00, 0x0c, 0x23, 0xc6, 0x0c, 0x92,
 	]);
-	// PPS NAL unit (from bbb.mp4 avcC)
-	init.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // start code
+	init.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
 	init.extend_from_slice(&[0x68, 0xee, 0x32, 0xc8, 0xb0]);
 	init
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[test]
 fn origin_lifecycle() {
 	let origin = id(moq_origin_create());
-
 	assert_eq!(moq_origin_close(origin), 0, "moq_origin_close should succeed");
-
-	// Closing again should fail.
 	assert!(moq_origin_close(origin) < 0, "double-close should fail");
 }
 
@@ -110,7 +96,6 @@ fn publish_media_lifecycle() {
 		moq_publish_close(broadcast);
 	}));
 
-	// Create an opus media track.
 	let init = opus_head();
 	let format = b"opus";
 	let media = id(unsafe {
@@ -123,26 +108,22 @@ fn publish_media_lifecycle() {
 		)
 	});
 
-	// Write a frame.
 	let payload = b"opus frame";
 	let ret = unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 1000) };
 	assert_eq!(ret, 0, "moq_publish_media_frame should succeed");
 
-	// Close media, then broadcast.
 	assert_eq!(moq_publish_media_close(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
 fn close_invalid_or_zero_ids() {
-	// Non-existent resources.
 	assert!(moq_origin_close(9999) < 0);
 	assert!(moq_session_close(9999) < 0);
 	assert!(moq_publish_close(9999) < 0);
 	assert!(moq_consume_close(9999) < 0);
 	assert!(moq_consume_frame_close(9999) < 0);
 
-	// ID zero is always invalid.
 	assert!(moq_origin_close(0) < 0);
 	assert!(moq_session_close(0) < 0);
 	assert!(moq_publish_close(0) < 0);
@@ -150,12 +131,10 @@ fn close_invalid_or_zero_ids() {
 
 #[test]
 fn double_close_all_resource_types() {
-	// Origin
 	let origin = id(moq_origin_create());
 	assert_eq!(moq_origin_close(origin), 0);
 	assert!(moq_origin_close(origin) < 0);
 
-	// Publish broadcast
 	let broadcast = id(moq_publish_create());
 	let init = opus_head();
 	let format = b"opus";
@@ -169,12 +148,10 @@ fn double_close_all_resource_types() {
 		)
 	});
 
-	// Media track double-close
 	assert_eq!(moq_publish_media_close(media), 0);
 	assert!(moq_publish_media_close(media) < 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 
-	// Set up a full pipeline to test consume resource double-close.
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());
 	let init = opus_head();
@@ -202,7 +179,6 @@ fn double_close_all_resource_types() {
 	let frame_cb = Callback::new();
 	let track = id(unsafe { moq_consume_audio_ordered(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
 
-	// Write a frame and consume it.
 	let payload = b"test";
 	assert_eq!(
 		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 1_000_000) },
@@ -210,23 +186,18 @@ fn double_close_all_resource_types() {
 	);
 	let frame_id = id(frame_cb.recv());
 
-	// Frame double-close
 	assert_eq!(moq_consume_frame_close(frame_id), 0);
 	assert!(moq_consume_frame_close(frame_id) < 0);
 
-	// Audio track double-close
 	assert_eq!(moq_consume_audio_close(track), 0);
 	assert!(moq_consume_audio_close(track) < 0);
 
-	// Catalog free double-close
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert!(moq_consume_catalog_free(catalog_id) < 0);
 
-	// Catalog task double-close
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
 	assert!(moq_consume_catalog_close(catalog_task) < 0);
 
-	// Cleanup
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -257,11 +228,9 @@ fn unknown_format() {
 fn local_announce() {
 	let origin = id(moq_origin_create());
 
-	// Listen for announcements.
 	let cb = Callback::new();
 	let announced_task = id(unsafe { moq_origin_announced(origin, Some(channel_callback), cb.ptr) });
 
-	// Create and publish a broadcast.
 	let broadcast = id(moq_publish_create());
 	let path = b"test/broadcast";
 	assert_eq!(
@@ -270,10 +239,8 @@ fn local_announce() {
 		"moq_origin_publish should succeed"
 	);
 
-	// Wait for the announcement callback.
 	let announced_id = id(cb.recv());
 
-	// Query announcement info.
 	let mut info = moq_announced {
 		path: std::ptr::null(),
 		path_len: 0,
@@ -286,7 +253,6 @@ fn local_announce() {
 		unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.path as *const u8, info.path_len)).unwrap() };
 	assert_eq!(announced_path, "test/broadcast");
 
-	// Cleanup.
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -305,7 +271,6 @@ fn announced_deactivation() {
 		0
 	);
 
-	// Wait for active announcement.
 	let announced_id = id(cb.recv());
 	let mut info = moq_announced {
 		path: std::ptr::null(),
@@ -315,10 +280,8 @@ fn announced_deactivation() {
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active);
 
-	// Close the publisher to trigger deactivation.
 	assert_eq!(moq_publish_close(broadcast), 0);
 
-	// Wait for the deactivation callback.
 	let deactivated_id = id(cb.recv());
 	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
 	assert!(!info.active, "broadcast should be inactive after publisher closes");
@@ -329,7 +292,6 @@ fn announced_deactivation() {
 
 #[test]
 fn local_publish_consume() {
-	// ── publisher ──────────────────────────────────────────────────
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());
 
@@ -351,14 +313,12 @@ fn local_publish_consume() {
 		0
 	);
 
-	// ── consumer ───────────────────────────────────────────────────
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 
 	let catalog_id = id(catalog_cb.recv());
 
-	// Query audio config.
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
 		name_len: 0,
@@ -382,7 +342,6 @@ fn local_publish_consume() {
 	.unwrap();
 	assert_eq!(codec, "opus");
 
-	// No video tracks in this broadcast.
 	let mut video_cfg = moq_video_config {
 		name: std::ptr::null(),
 		name_len: 0,
@@ -398,11 +357,9 @@ fn local_publish_consume() {
 		"video config should fail (no video tracks)"
 	);
 
-	// Subscribe to the audio track.
 	let frame_cb = Callback::new();
 	let track = id(unsafe { moq_consume_audio_ordered(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
 
-	// Write a frame after subscribing so the consumer definitely sees it.
 	let payload = b"opus audio payload data";
 	let timestamp_us: u64 = 1_000_000;
 	assert_eq!(
@@ -412,7 +369,6 @@ fn local_publish_consume() {
 
 	let frame_id = id(frame_cb.recv());
 
-	// Read frame chunk and verify payload.
 	let mut frame = moq_frame {
 		payload: std::ptr::null(),
 		payload_size: 0,
@@ -426,10 +382,8 @@ fn local_publish_consume() {
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload, "frame payload should match");
 
-	// Out-of-bounds chunk index should fail.
 	assert!(unsafe { moq_consume_frame_chunk(frame_id, 999, &mut frame) } < 0);
 
-	// ── cleanup ────────────────────────────────────────────────────
 	assert_eq!(moq_consume_frame_close(frame_id), 0);
 	assert_eq!(moq_consume_audio_close(track), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -445,7 +399,6 @@ fn video_publish_consume() {
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());
 
-	// Create an H.264 video track using avc3 format with real SPS/PPS.
 	let init = h264_init();
 	let format = b"avc3";
 	let media = id(unsafe {
@@ -470,7 +423,6 @@ fn video_publish_consume() {
 
 	let catalog_id = id(catalog_cb.recv());
 
-	// Query video config — should succeed for H.264 track.
 	let mut video_cfg = moq_video_config {
 		name: std::ptr::null(),
 		name_len: 0,
@@ -499,7 +451,6 @@ fn video_publish_consume() {
 		"codec should be avc1/avc3, got {codec}"
 	);
 
-	// Verify video dimensions are populated (1280x720 from bbb SPS).
 	assert!(!video_cfg.coded_width.is_null(), "coded_width should be set");
 	assert!(!video_cfg.coded_height.is_null(), "coded_height should be set");
 	let width = unsafe { *video_cfg.coded_width };
@@ -507,7 +458,6 @@ fn video_publish_consume() {
 	assert_eq!(width, 1280);
 	assert_eq!(height, 720);
 
-	// No audio tracks in this broadcast.
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
 		name_len: 0,
@@ -523,11 +473,9 @@ fn video_publish_consume() {
 		"audio config should fail (no audio tracks)"
 	);
 
-	// Subscribe to the video track and publish a frame.
 	let frame_cb = Callback::new();
 	let track = id(unsafe { moq_consume_video_ordered(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
 
-	// Write an IDR keyframe (Annex B with start code).
 	let keyframe = [0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC];
 	assert_eq!(
 		unsafe { moq_publish_media_frame(media, keyframe.as_ptr(), keyframe.len(), 0) },
@@ -545,7 +493,6 @@ fn video_publish_consume() {
 	assert_eq!(frame.timestamp_us, 0);
 	assert!(frame.payload_size > 0, "frame should have payload data");
 
-	// Cleanup
 	assert_eq!(moq_consume_frame_close(frame_id), 0);
 	assert_eq!(moq_consume_video_close(track), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -587,7 +534,6 @@ fn multiple_frames_ordering() {
 	let frame_cb = Callback::new();
 	let track = id(unsafe { moq_consume_audio_ordered(catalog_id, 0, 10_000, Some(channel_callback), frame_cb.ptr) });
 
-	// Publish multiple frames with increasing timestamps.
 	let timestamps: [u64; 5] = [0, 20_000, 40_000, 60_000, 80_000];
 	for (i, &ts) in timestamps.iter().enumerate() {
 		let payload = format!("frame-{i}");
@@ -597,7 +543,6 @@ fn multiple_frames_ordering() {
 		);
 	}
 
-	// Verify frames arrive in order with correct timestamps.
 	for (i, &expected_ts) in timestamps.iter().enumerate() {
 		let frame_id = id(frame_cb.recv());
 		let mut frame = moq_frame {
@@ -616,7 +561,6 @@ fn multiple_frames_ordering() {
 		assert_eq!(moq_consume_frame_close(frame_id), 0);
 	}
 
-	// Cleanup
 	assert_eq!(moq_consume_audio_close(track), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
@@ -631,7 +575,6 @@ fn catalog_update_on_new_track() {
 	let origin = id(moq_origin_create());
 	let broadcast = id(moq_publish_create());
 
-	// Create the first audio track.
 	let init = opus_head();
 	let format = b"opus";
 	let media1 = id(unsafe {
@@ -654,7 +597,6 @@ fn catalog_update_on_new_track() {
 	let catalog_cb = Callback::new();
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 
-	// First catalog: 1 audio track.
 	let catalog_id1 = id(catalog_cb.recv());
 	let mut audio_cfg = moq_audio_config {
 		name: std::ptr::null(),
@@ -667,10 +609,8 @@ fn catalog_update_on_new_track() {
 		channel_count: 0,
 	};
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id1, 0, &mut audio_cfg) }, 0);
-	// Second audio track shouldn't exist yet.
 	assert!(unsafe { moq_consume_audio_config(catalog_id1, 1, &mut audio_cfg) } < 0);
 
-	// Add a second audio track — should trigger a catalog update.
 	let media2 = id(unsafe {
 		moq_publish_media_ordered(
 			broadcast,
@@ -681,14 +621,11 @@ fn catalog_update_on_new_track() {
 		)
 	});
 
-	// Wait for the updated catalog.
 	let catalog_id2 = id(catalog_cb.recv());
 
-	// The updated catalog should have two audio tracks.
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 0, &mut audio_cfg) }, 0);
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 1, &mut audio_cfg) }, 0);
 
-	// Cleanup
 	assert_eq!(moq_consume_catalog_free(catalog_id1), 0);
 	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
 	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
@@ -701,28 +638,21 @@ fn catalog_update_on_new_track() {
 
 #[test]
 fn null_pointer_handling() {
-	// moq_consume_frame_chunk with null dst
 	assert_eq!(
 		unsafe { moq_consume_frame_chunk(9999, 0, std::ptr::null_mut()) },
 		-6,
 		"null dst should return InvalidPointer (-6)"
 	);
-
-	// moq_consume_video_config with null dst
 	assert_eq!(
 		unsafe { moq_consume_video_config(9999, 0, std::ptr::null_mut()) },
 		-6,
 		"null dst should return InvalidPointer (-6)"
 	);
-
-	// moq_consume_audio_config with null dst
 	assert_eq!(
 		unsafe { moq_consume_audio_config(9999, 0, std::ptr::null_mut()) },
 		-6,
 		"null dst should return InvalidPointer (-6)"
 	);
-
-	// moq_origin_announced_info with null dst
 	assert_eq!(
 		unsafe { moq_origin_announced_info(9999, std::ptr::null_mut()) },
 		-6,
@@ -761,7 +691,6 @@ fn session_connect_and_close() {
 		)
 	});
 
-	// Close the session immediately — the callback must NOT fire after close.
 	assert_eq!(moq_session_close(session), 0);
 
 	assert!(

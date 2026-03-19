@@ -35,7 +35,26 @@ moq-token = "0.1"
 cargo install moq-token-cli
 ```
 
-The binary is named `moq-token`.
+The binary is named `moq-token-cli`.
+
+#### Using Nix
+
+```bash
+# Run directly
+nix run github:moq-dev/moq#moq-token-cli
+
+# Or build and find the binary in ./result/bin/
+nix build github:moq-dev/moq#moq-token-cli
+```
+
+#### Using Docker
+
+```bash
+docker pull kixelated/moq-token-cli
+docker run -v "$(pwd):/app" -w /app kixelated/moq-token-cli --key root.jwk generate
+```
+
+Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/kixelated/moq-token-cli).
 
 ## CLI Usage
 
@@ -43,19 +62,19 @@ The binary is named `moq-token`.
 
 ```bash
 # Symmetric key (HMAC)
-moq-token --key root.jwk generate --algorithm HS256
+moq-token-cli --key root.jwk generate --algorithm HS256
 
 # Asymmetric key pair (RSA)
-moq-token --key private.jwk generate --public public.jwk --algorithm RS256
+moq-token-cli --key private.jwk generate --public public.jwk --algorithm RS256
 
 # Asymmetric key pair (EdDSA)
-moq-token --key private.jwk generate --public public.jwk --algorithm EdDSA
+moq-token-cli --key private.jwk generate --public public.jwk --algorithm EdDSA
 ```
 
 ### Sign a Token
 
 ```bash
-moq-token --key root.jwk sign \
+moq-token-cli --key root.jwk sign \
   --root "rooms/123" \
   --publish "alice" \
   --subscribe "" \
@@ -65,7 +84,7 @@ moq-token --key root.jwk sign \
 ### Verify a Token
 
 ```bash
-moq-token --key root.jwk verify < alice.jwt
+moq-token-cli --key root.jwk verify < alice.jwt
 ```
 
 ## Supported Algorithms

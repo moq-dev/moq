@@ -77,9 +77,9 @@
     },
     "js/lite": {
       "name": "@moq/lite",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "dependencies": {
-        "@moq/qmux": "^0.0.3",
+        "@moq/qmux": "^0.0.6",
         "@moq/signals": "workspace:*",
         "async-mutex": "^0.5.0",
       },
@@ -451,7 +451,7 @@
 
     "@moq/publish": ["@moq/publish@workspace:js/publish"],
 
-    "@moq/qmux": ["@moq/qmux@0.0.3", "", {}, "sha512-uxAZF3hEzfy5/n8XW8mZou2WswZhbmPN4zEGCPJY7NDD4FB15ogseoJZmWO+RMGqsw5+Bq+IG2EVJPojhUI8OQ=="],
+    "@moq/qmux": ["@moq/qmux@0.0.6", "", {}, "sha512-ISuGz05lUvf1hzHW3Aw3VnsGRJe1w9Qdog3LQ66KS+l+5mzQsPANvW8yOioEe1Z9dJO2G3sAHoGPnzwnsY9SIQ=="],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 

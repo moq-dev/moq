@@ -281,6 +281,13 @@ impl Client {
 
 	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh"))]
 	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
+		let session = self.connect_inner(url).await?;
+		tracing::info!(version = %session.version(), "connected");
+		Ok(session)
+	}
+
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh"))]
+	async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;

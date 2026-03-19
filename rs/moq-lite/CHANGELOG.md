@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.4](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.3...moq-lite-v0.15.4) - 2026-03-18
+
+### Other
+
+- Fix race where subscribe_track returns NotFound ([#1129](https://github.com/moq-dev/moq/pull/1129))
+
 ## [0.15.3](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.2...moq-lite-v0.15.3) - 2026-03-16
 
 ### Other

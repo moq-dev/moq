@@ -80,7 +80,7 @@ leaf1: auth-token
 auth-key:
 	@if [ ! -f "dev/root.jwk" ]; then \
 		rm -f dev/*.jwt; \
-		cargo run --bin moq-token -- --key "dev/root.jwk" generate; \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" generate; \
 	fi
 
 # Generate authentication tokens for local development
@@ -89,7 +89,7 @@ auth-key:
 # root.jwt - allows publishing and subscribing to all paths
 auth-token: auth-key
 	@if [ ! -f "dev/demo-web.jwt" ]; then \
-		cargo run --quiet --bin moq-token -- --key "dev/root.jwk" sign \
+		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "demo" \
 			--subscribe "" \
 			--publish "me" \
@@ -97,14 +97,14 @@ auth-token: auth-key
 	fi
 
 	@if [ ! -f "dev/demo-cli.jwt" ]; then \
-		cargo run --quiet --bin moq-token -- --key "dev/root.jwk" sign \
+		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "demo" \
 			--publish "" \
 			> dev/demo-cli.jwt ; \
 	fi
 
 	@if [ ! -f "dev/root.jwt" ]; then \
-		cargo run --quiet --bin moq-token -- --key "dev/root.jwk" sign \
+		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "" \
 			--subscribe "" \
 			--publish "" \
@@ -325,7 +325,7 @@ check:
 	if tty -s; then
 		bun run --filter='*' --elide-lines=0 check
 	else
-		bun run --filter='*' --silent check > /dev/null
+		bun run --filter='*' check
 	fi
 	bun biome check
 	echo "JS checks passed."
@@ -343,6 +343,14 @@ check:
 
 	# requires: cargo install cargo-sort
 	cargo sort --workspace --check > /dev/null
+
+	# Run the Python checks.
+	if command -v uv &> /dev/null; then
+		uv run ruff check py/
+		uv run ruff format --check py/
+		uv run --package moq-lite pyright
+		echo "Python checks passed."
+	fi
 
 	# Only run the tofu checks if tofu is installed.
 	if command -v tofu &> /dev/null; then (cd cdn && just check); fi
@@ -388,10 +396,17 @@ test *args:
 	if tty -s; then
 		bun run --filter='*' --elide-lines=0 test
 	else
-		bun run --filter='*' --silent test > /dev/null
+		bun run --filter='*' test
 	fi
 
 	cargo test --all-targets --quiet {{ args }}
+
+	# Run the Python tests.
+	if command -v uv &> /dev/null; then
+		uv run maturin develop -m rs/moq-ffi/Cargo.toml --uv
+		uv run --package moq-lite pytest py/moq-lite/tests/
+		echo "Python tests passed."
+	fi
 
 # Automatically fix some issues.
 fix:
@@ -409,6 +424,9 @@ fix:
 
 	# requires: cargo install cargo-sort
 	cargo sort --workspace > /dev/null
+
+	# Fix the Python issues.
+	if command -v uv &> /dev/null; then uv run ruff check --fix py/ && uv run ruff format py/; fi
 
 	if command -v tofu &> /dev/null; then (cd cdn && just fix); fi
 
@@ -432,8 +450,16 @@ update:
 
 # Build the packages
 build:
+	#!/usr/bin/env bash
+	set -euo pipefail
+
 	bun run --filter='*' build
 	cargo build --quiet
+
+	# Build moq-ffi from source into py/moq-lite's venv.
+	if command -v uv &> /dev/null; then
+		(cd py/moq-lite && uv run maturin develop -m ../../rs/moq-ffi/Cargo.toml --uv)
+	fi
 
 # Generate and serve an HLS stream from a video for testing pub-hls
 serve-hls name port="8000":

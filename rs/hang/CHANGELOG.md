@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3](https://github.com/moq-dev/moq/compare/hang-v0.15.2...hang-v0.15.3) - 2026-03-18
+
+### Other
+
+- Remove unused dev-dependencies and bump @moq/qmux ([#1126](https://github.com/moq-dev/moq/pull/1126))
+
 ## [0.15.2](https://github.com/moq-dev/moq/compare/hang-v0.15.1...hang-v0.15.2) - 2026-03-13
 
 ### Other

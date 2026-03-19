@@ -5,14 +5,9 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.5.14"
+version = "0.5.15"
 edition = "2024"
 rust-version.workspace = true
-
-[[bin]]
-name = "moq-token"
-path = "src/bin.rs"
-doc = false
 
 [dependencies]
 anyhow = "1"

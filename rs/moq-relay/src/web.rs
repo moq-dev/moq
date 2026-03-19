@@ -293,7 +293,10 @@ async fn serve_fetch(
 
 	let result = tokio::time::timeout_at(deadline, async {
 		let group = match params.group {
-			FetchGroup::Latest => track.next_group().await,
+			FetchGroup::Latest => match track.latest() {
+				Some(sequence) => track.get_group(sequence).await,
+				None => track.recv_group().await,
+			},
 			FetchGroup::Num(sequence) => track.get_group(sequence).await,
 		};
 

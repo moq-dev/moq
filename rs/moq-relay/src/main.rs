@@ -26,6 +26,8 @@ pub use config::*;
 pub use connection::*;
 pub use web::*;
 
+use anyhow::Context;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// TODO: It would be nice to remove this and rely on feature flags only.
@@ -46,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
 	let client = config.client.init()?;
 
 	#[cfg(feature = "iroh")]
-	let (mut server, client) = {
+	let (server, client) = {
 		let iroh = config.iroh.bind().await?;
 		(server.with_iroh(iroh.clone()), client.with_iroh(iroh))
 	};
@@ -54,12 +56,6 @@ async fn main() -> anyhow::Result<()> {
 	let auth = config.auth.init().await?;
 
 	let cluster = Cluster::new(config.cluster, client);
-	let cloned = cluster.clone();
-	tokio::spawn(async move {
-		if let Err(err) = cloned.run().await {
-			panic!("cluster failed: {err}");
-		}
-	});
 
 	// Create a web server too.
 	let web = Web::new(
@@ -72,16 +68,21 @@ async fn main() -> anyhow::Result<()> {
 		config.web,
 	);
 
-	tokio::spawn(async move {
-		web.run().await.expect("failed to run web server");
-	});
-
 	tracing::info!(%addr, "listening");
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready after all initialization is complete
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 
+	tokio::select! {
+		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
+		Err(err) = web.run() => return Err(err).context("web server failed"),
+		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
+		else => Ok(()),
+	}
+}
+
+async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
 	let mut conn_id = 0;
 
 	while let Some(request) = server.accept().await {
@@ -94,12 +95,11 @@ async fn main() -> anyhow::Result<()> {
 
 		conn_id += 1;
 		tokio::spawn(async move {
-			let err = conn.run().await;
-			if let Err(err) = err {
+			if let Err(err) = conn.run().await {
 				tracing::warn!(%err, "connection closed");
 			}
 		});
 	}
 
-	Ok(())
+	anyhow::bail!("stopped accepting connections")
 }

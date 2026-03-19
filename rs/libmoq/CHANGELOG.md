@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.13](https://github.com/moq-dev/moq/compare/libmoq-v0.2.12...libmoq-v0.2.13) - 2026-03-18
+
+### Other
+
+- Fix FFI test panic strategy mismatch ([#1128](https://github.com/moq-dev/moq/pull/1128))
+- Remove unused dev-dependencies and bump @moq/qmux ([#1126](https://github.com/moq-dev/moq/pull/1126))
+
 ## [0.2.12](https://github.com/moq-dev/moq/compare/libmoq-v0.2.11...libmoq-v0.2.12) - 2026-03-13
 
 ### Other

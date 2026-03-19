@@ -1,0 +1,19 @@
+[Unit]
+Description=MoQ CDN monitor (memory + health checks)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=MONITOR_WEBHOOK=${webhook}
+Environment=MONITOR_HEALTH_DOMAIN=${domain}
+Environment=PATH=/var/lib/moq/pkg/bin:/usr/bin:/bin
+ExecStart=/etc/systemd/system/monitor.sh
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

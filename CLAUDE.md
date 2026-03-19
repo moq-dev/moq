@@ -44,7 +44,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-native/        # QUIC/WebTransport connection helpers for native apps
   moq-relay/         # Clusterable relay server (binary: moq-relay)
   moq-token/         # JWT authentication library
-  moq-token-cli/     # JWT token CLI tool (binary: moq-token)
+  moq-token-cli/     # JWT token CLI tool (binary: moq-token-cli)
   moq-cli/           # CLI tool for media operations (binary: moq)
   moq-clock/         # Clock synchronization example (binary: moq-clock)
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)

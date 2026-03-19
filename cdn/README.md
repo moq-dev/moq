@@ -13,16 +13,16 @@ However, we do use GCP for GeoDNS because most providers don't support it or too
    mkdir -p secrets
 
    # generate the root key private key
-   cargo run --bin moq-token -- --key secrets/root.jwk generate > secrets/root.jwk
+   cargo run --bin moq-token-cli -- --key secrets/root.jwk generate > secrets/root.jwk
 
    # to allow relay servers to connect to each other
-   cargo run --bin moq-token -- --key secrets/root.jwk sign --publish "" --subscribe "" --cluster > secrets/cluster.jwt
+   cargo run --bin moq-token-cli -- --key secrets/root.jwk sign --publish "" --subscribe "" --cluster > secrets/cluster.jwt
 
    # to allow publishing to `demo/`
-   cargo run --bin moq-token -- --key secrets/root.jwk sign --root "demo" --publish "" > secrets/demo-pub.jwt
+   cargo run --bin moq-token-cli -- --key secrets/root.jwk sign --root "demo" --publish "" > secrets/demo-pub.jwt
 
    # to allow subscribing to `demo/` (used by health checks and the website)
-   cargo run --bin moq-token -- --key secrets/root.jwk sign --root "demo" --get "" > secrets/demo-sub.jwt
+   cargo run --bin moq-token-cli -- --key secrets/root.jwk sign --root "demo" --subscribe "" > secrets/demo-sub.jwt
    ```
 3. Run `tofu init`.
 4. Run `tofu apply`.

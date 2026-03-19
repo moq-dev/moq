@@ -379,7 +379,7 @@ class DecoderTrack {
 			// Process data segments
 			// TODO: Use a consumer wrapper for CMAF to support latency control
 			for (;;) {
-				const group = await Promise.race([sub.nextGroup(), effect.cancel]);
+				const group = await Promise.race([sub.recvGroup(), effect.cancel]);
 				if (!group) break;
 
 				effect.spawn(async () => {

@@ -35,3 +35,6 @@ pub(crate) use origin::*;
 pub(crate) use publish::*;
 pub(crate) use session::*;
 pub(crate) use state::*;
+
+#[cfg(test)]
+mod test;

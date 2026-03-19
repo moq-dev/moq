@@ -183,7 +183,7 @@ impl<F: ContainerFormat> OrderedConsumer<F> {
 	// Returns Pending until all groups have been consumed.
 	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), Error>> {
 		loop {
-			let Some(group) = ready!(self.track.poll_next_group(waiter)?) else {
+			let Some(group) = ready!(self.track.poll_recv_group(waiter)?) else {
 				// Track is finished.
 				return Poll::Ready(Ok(()));
 			};
@@ -821,6 +821,7 @@ mod tests {
 
 		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(20)).await;
+			// Write group 2: recv_group fires, drops current buffer_until for group 1
 			write_group(&mut track, 2, &[ts(200_000)]);
 			tokio::time::sleep(Duration::from_millis(20)).await;
 			group0.finish().unwrap();

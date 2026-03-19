@@ -1,0 +1,24 @@
+[project]
+name = "moq"
+version = "0.0.0"
+requires-python = ">=3.10"
+
+[tool.uv.workspace]
+members = ["py/*"]
+exclude = ["py/common"]
+
+[dependency-groups]
+dev = ["ruff", "maturin", "pyright"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.format]
+quote-style = "double"
