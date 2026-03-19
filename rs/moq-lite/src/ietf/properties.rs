@@ -27,8 +27,9 @@ const MAX_KVP_VALUE_LEN: usize = (1 << 16) - 1;
 /// Only call this for draft-17+; older drafts don't have Track Properties.
 pub fn skip<R: Buf>(r: &mut R, version: Version) -> Result<(), DecodeError> {
 	// Track Properties only exist in draft-17+
-	if version != Version::Draft17 {
-		return Ok(());
+	match version {
+		Version::Draft14 | Version::Draft15 | Version::Draft16 => return Ok(()),
+		_ => {}
 	}
 
 	let mut prev_type: u64 = 0;

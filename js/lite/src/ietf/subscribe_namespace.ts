@@ -37,12 +37,7 @@ export class SubscribeNamespace {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			await w.u53(this.subscribeOptions);
 		}
-		// v14/v15 use SETUP-style Parameters; v16+ use Parameters (delta-encoded keys).
-		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
-			await new Parameters().encode(w, version);
-		} else {
-			await new Parameters().encode(w, version);
-		}
+		await new Parameters().encode(w, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -63,12 +58,7 @@ export class SubscribeNamespace {
 		if (version === Version.DRAFT_16 || version === Version.DRAFT_17) {
 			subscribeOptions = await r.u53();
 		}
-		// v14/v15 use SETUP-style Parameters; v16+ use Parameters (delta-encoded keys).
-		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
-			await Parameters.decode(r, version);
-		} else {
-			await Parameters.decode(r, version);
-		}
+		await Parameters.decode(r, version);
 
 		return new SubscribeNamespace({ namespace, requestId, subscribeOptions });
 	}

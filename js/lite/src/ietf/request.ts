@@ -1,6 +1,7 @@
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { Parameters } from "./parameters.ts";
+import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 export class MaxRequestId {
@@ -83,6 +84,7 @@ export class RequestOk {
 	static async #decode(r: Reader, version: IetfVersion): Promise<RequestOk> {
 		const requestId = version === Version.DRAFT_17 ? undefined : await r.u62();
 		const parameters = await Parameters.decode(r, version);
+		await Properties.skip(r, version);
 		return new RequestOk({ requestId, parameters });
 	}
 

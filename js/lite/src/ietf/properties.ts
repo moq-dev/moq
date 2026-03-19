@@ -9,7 +9,8 @@ import { type IetfVersion, Version } from "./version.ts";
 ///
 /// Only present in draft-17+; older drafts don't have Track Properties.
 export async function skip(r: Reader, version: IetfVersion): Promise<void> {
-	if (version !== Version.DRAFT_17) {
+	// Track Properties only exist in draft-17+
+	if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 		return;
 	}
 
