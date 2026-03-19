@@ -13,6 +13,7 @@ export type SourceProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 	target?: Target | Signal<Target | undefined>;
 	supported?: Supported;
+	// Shared Sync instance for synchronizing playback across tracks. Defaults to a standalone Sync.
 	sync?: Sync;
 };
 

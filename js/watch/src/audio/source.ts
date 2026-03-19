@@ -23,6 +23,7 @@ export type SourceProps = {
 	// A function that checks if an audio configuration is supported by the backend.
 	supported?: Supported;
 
+	// Shared Sync instance for synchronizing playback across tracks. Defaults to a standalone Sync.
 	sync?: Sync;
 };
 

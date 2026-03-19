@@ -5,6 +5,7 @@ import { Sync } from "./sync";
 export type MuxerProps = {
 	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
 	paused?: boolean | Signal<boolean>;
+	// Shared Sync instance for synchronizing playback across tracks. Defaults to a standalone Sync.
 	sync?: Sync;
 };
 
