@@ -323,7 +323,8 @@ impl Client {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
-			let session = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
+			let alpns = self.versions.alpns();
+			let session = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied(), &alpns).await?;
 			let session = self.moq.connect(session).await?;
 			return Ok(session);
 		}

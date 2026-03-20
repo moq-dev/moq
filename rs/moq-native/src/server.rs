@@ -153,6 +153,16 @@ impl ServerConfig {
 		self.tls.generate.push(hostname.into());
 		self
 	}
+
+	pub fn with_quic_lb_id(mut self, id: ServerId) -> Self {
+		self.quic_lb_id = Some(id);
+		self
+	}
+
+	pub fn with_quic_lb_nonce(mut self, nonce: usize) -> Self {
+		self.quic_lb_nonce = Some(nonce);
+		self
+	}
 }
 
 /// Server for accepting MoQ connections over QUIC.
@@ -393,13 +403,16 @@ impl Server {
 				}
 				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
-					self.accept.push(async move {
-						let iroh = super::iroh::Request::accept(_conn).await?;
-						Ok(Request {
-							server,
-							kind: RequestKind::Iroh(iroh),
-						})
-					}.boxed());
+					{
+						let alpns = versions.alpns();
+						self.accept.push(async move {
+							let iroh = super::iroh::Request::accept(_conn, alpns).await?;
+							Ok(Request {
+								server,
+								kind: RequestKind::Iroh(iroh),
+							})
+						}.boxed());
+					}
 				}
 				Some(_res) = ws_accept => {
 					#[cfg(feature = "websocket")]
