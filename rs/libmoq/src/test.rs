@@ -225,6 +225,7 @@ fn unknown_format() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn local_announce() {
 	let origin = id(moq_origin_create());
 
@@ -259,6 +260,7 @@ fn local_announce() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn announced_deactivation() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
@@ -280,11 +282,15 @@ fn announced_deactivation() {
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active);
 
+	// Closing the broadcast no longer triggers an unannounce callback.
+	// C consumers should watch BroadcastConsumer::closed() to detect end of broadcast.
 	assert_eq!(moq_publish_close(broadcast), 0);
 
-	let deactivated_id = id(cb.recv());
-	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
-	assert!(!info.active, "broadcast should be inactive after publisher closes");
+	// No deactivation callback is expected.
+	assert!(
+		cb.try_recv(Duration::from_millis(100)).is_none(),
+		"should not receive deactivation callback"
+	);
 
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
 	assert_eq!(moq_origin_close(origin), 0);

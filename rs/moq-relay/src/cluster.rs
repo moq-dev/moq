@@ -89,7 +89,7 @@ impl Cluster {
 
 		// Scope the origin to our root.
 		let subscribe_origin = subscribe_origin.with_root(&token.root)?;
-		subscribe_origin.consume_only(&token.subscribe)
+		subscribe_origin.consume().with_filter(&token.subscribe)
 	}
 
 	// For a given auth token, return the origin that should be used for the session.
@@ -102,7 +102,7 @@ impl Cluster {
 		};
 
 		let publish_origin = publish_origin.with_root(&token.root)?;
-		publish_origin.publish_only(&token.publish)
+		publish_origin.with_filter(&token.publish)
 	}
 
 	// Register a cluster node's presence.
@@ -120,8 +120,9 @@ impl Cluster {
 
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
 		self.primary
-			.consume_broadcast(broadcast)
-			.or_else(|| self.secondary.consume_broadcast(broadcast))
+			.consume()
+			.try_consume_broadcast(broadcast)
+			.or_else(|| self.secondary.consume().try_consume_broadcast(broadcast))
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
@@ -185,56 +186,69 @@ impl Cluster {
 		loop {
 			let (name, broadcast) = tokio::select! {
 				biased;
-				Some(primary) = primary.announced() => primary,
-				Some(secondary) = secondary.announced() => secondary,
+				Ok(primary) = primary.announced() => primary,
+				Ok(secondary) = secondary.announced() => secondary,
 				else => return Ok(()),
 			};
 
-			if let Some(broadcast) = broadcast {
-				self.combined.publish_broadcast(&name, broadcast);
-			}
+			self.combined.publish_broadcast(&name, broadcast);
 		}
 	}
 
 	async fn run_remotes(self, mut origins: OriginConsumer, token: String) -> anyhow::Result<()> {
 		// Cancel tasks when the origin is closed.
+		let mut tasks: tokio::task::JoinSet<String> = tokio::task::JoinSet::new();
 		let mut active: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
 
 		// Discover other origins.
 		// NOTE: The root node will connect to all other nodes as a client, ignoring the existing (server) connection.
 		// This ensures that nodes are advertising a valid hostname before any tracks get announced.
-		while let Some((node, origin)) = origins.announced().await {
-			if self.config.node.as_deref() == Some(node.as_str()) {
-				// Skip ourselves.
-				continue;
-			}
-
-			let Some(origin) = origin else {
-				tracing::info!(%node, "origin cancelled");
-				active.remove(node.as_str()).unwrap().abort();
-				continue;
-			};
-
-			tracing::info!(%node, "discovered origin");
-
-			let this = self.clone();
-			let token = token.clone();
-			let node2 = node.clone();
-
-			let handle = tokio::spawn(
-				async move {
-					match this.run_remote(node2.as_str(), None, token, origin).await {
-						Ok(()) => tracing::info!(%node2, "origin closed"),
-						Err(err) => tracing::warn!(%err, %node2, "origin error"),
+		loop {
+			tokio::select! {
+				biased;
+				Some(result) = tasks.join_next() => {
+					if let Ok(node) = result {
+						active.remove(&node);
+						tracing::info!(%node, "origin task finished");
 					}
 				}
-				.in_current_span(),
-			);
+				res = origins.announced() => {
+					let Ok((node, origin)) = res else {
+						// Channel closed, shutdown gracefully.
+						return Ok(());
+					};
 
-			active.insert(node.to_string(), handle.abort_handle());
+					if self.config.node.as_deref() == Some(node.as_str()) {
+						// Skip ourselves.
+						continue;
+					}
+
+					tracing::info!(%node, "discovered origin");
+
+					// If there was a previous task for this node, abort it.
+					if let Some(handle) = active.remove(node.as_str()) {
+						handle.abort();
+					}
+
+					let this = self.clone();
+					let token = token.clone();
+					let node2 = node.clone();
+
+					let handle = tasks.spawn(
+						async move {
+							match this.run_remote(node2.as_str(), None, token, origin).await {
+								Ok(()) => tracing::info!(%node2, "origin closed"),
+								Err(err) => tracing::warn!(%err, %node2, "origin error"),
+							}
+							node2.to_string()
+						}
+						.in_current_span(),
+					);
+
+					active.insert(node.to_string(), handle);
+				}
+			}
 		}
-
-		Ok(())
 	}
 
 	#[tracing::instrument("remote", skip_all, err, fields(%remote))]

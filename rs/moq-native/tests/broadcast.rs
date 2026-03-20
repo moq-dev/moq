@@ -84,7 +84,6 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
 
 	// Subscribe to the track.
 	let mut track_sub = bc
@@ -424,7 +423,6 @@ async fn broadcast_websocket() {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
 
 	// Subscribe to the track.
 	let mut track_sub = bc
@@ -531,7 +529,6 @@ async fn broadcast_websocket_fallback() {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
 
 	// Subscribe to the track.
 	let mut track_sub = bc

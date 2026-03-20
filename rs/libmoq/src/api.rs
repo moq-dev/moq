@@ -76,8 +76,8 @@ pub struct moq_announced {
 	pub path: *const c_char,
 	pub path_len: usize,
 
-	/// Whether the broadcast is active or has ended
-	/// This MUST toggle between true and false over the lifetime of the broadcast
+	/// Whether the broadcast is active (always true; unannouncements are no longer sent).
+	#[deprecated(note = "always true — use BroadcastConsumer::closed() to detect end of broadcast")]
 	pub active: bool,
 }
 

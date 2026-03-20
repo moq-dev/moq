@@ -240,10 +240,8 @@ async fn serve_announced(
 
 	let mut broadcasts = Vec::new();
 
-	while let Some((suffix, active)) = origin.try_announced() {
-		if active.is_some() {
-			broadcasts.push(suffix);
-		}
+	while let Some((suffix, _broadcast)) = origin.try_announced() {
+		broadcasts.push(suffix);
 	}
 
 	Ok(broadcasts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("\n"))
@@ -284,7 +282,7 @@ async fn serve_fetch(
 	};
 
 	// NOTE: The auth token is already scoped to the broadcast.
-	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
+	let broadcast = origin.try_consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
 	let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
 		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
