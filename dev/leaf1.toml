@@ -16,35 +16,13 @@ tls.generate = ["localhost"]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
 listen = "[::]:4445"
 
-# This clustering scheme is very very simple for now.
-#
-# There is a root node that is used to connect leaf nodes together.
-# Announcements flow from leaf -> root -> leaf, but any subscriptions are leaf -> leaf.
-# The root node can serve (user) subscriptions too.
-#
-# The root node is either missing the "root" field below or it's identical to the "node" field.
-# This node acts a server only, accepting incoming connections from leaf nodes and users alike.
-#
-# There can be any number of leaf nodes.
-# These nodes will connect to the specified root address and announce themselves via MoQ as a "broadcast".
-# All nodes will discover these broadcasts and connect to other nodes.
-#
-# This forms an NxN mesh of nodes.
-# Broadcasts are announced between all nodes with no collision detection, so duplicates are possible.
-# Subscriptions will be relayed from leaf to leaf, so at most you can have:
-#  user -> leaf -> leaf -> user
+# Clustering: connect to the root node.
+# In this example, leaf nodes don't connect directly to each other; traffic gets proxied through the root.
+# `connect` can be an array to connect to multiple peers, creating a tiered CDN.
 [cluster]
-# Connect to this hostname in order to discover other nodes.
 connect = "localhost:4443"
-
-# Use the token in this file when connecting to other nodes.
-# `just auth-token` will populate this file.
 token = "dev/root.jwt"
 
-# My hostname, which must be accessible from other nodes.
-node = "localhost:4445"
-
-# Each leaf node will connect to the root node and other nodes, using this configuration.
 [client]
 # QUIC uses TLS to have the client verify the server's identity.
 # However if you're not worried about man-in-the-middle attacks, you can disable verification:

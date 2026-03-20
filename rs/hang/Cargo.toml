@@ -16,7 +16,6 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [dependencies]
 buf-list = "1"
 bytes = "1"
-conducer = { workspace = true }
 hex = "0.4"
 lazy_static = "1"
 moq-lite = { workspace = true, features = ["serde"] }
@@ -35,6 +34,8 @@ features = ["from", "display", "debug"]
 
 [dev-dependencies]
 anyhow = "1"
-moq-native = { path = "../moq-native" }
+moq-mux = { workspace = true }
+moq-native = { workspace = true, default-features = true }
+tokio = { workspace = true, features = ["test-util"] }
 tracing = "0.1"
 url = "2"

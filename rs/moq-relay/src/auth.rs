@@ -10,7 +10,6 @@ use std::time::Duration;
 pub struct AuthParams {
 	pub path: String,
 	pub jwt: Option<String>,
-	pub register: Option<String>,
 }
 
 impl AuthParams {
@@ -24,20 +23,17 @@ impl AuthParams {
 	pub fn from_url(url: &url::Url) -> Self {
 		let path = url.path().to_string();
 		let mut jwt = None;
-		let mut register = None;
 
 		for (k, v) in url.query_pairs() {
 			if v.is_empty() {
 				continue;
 			}
-			match k.as_ref() {
-				"jwt" => jwt = Some(v.into_owned()),
-				"register" => register = Some(v.into_owned()),
-				_ => {}
+			if k.as_ref() == "jwt" {
+				jwt = Some(v.into_owned())
 			}
 		}
 
-		Self { path, jwt, register }
+		Self { path, jwt }
 	}
 }
 
@@ -54,9 +50,6 @@ pub enum AuthError {
 
 	#[error("the path does not match the root")]
 	IncorrectRoot,
-
-	#[error("a cluster token was expected")]
-	ExpectedCluster,
 }
 
 impl From<AuthError> for http::StatusCode {
@@ -103,8 +96,6 @@ pub struct AuthToken {
 	pub root: PathOwned,
 	pub subscribe: Vec<PathOwned>,
 	pub publish: Vec<PathOwned>,
-	pub cluster: bool,
-	pub register: Option<String>,
 }
 
 const REFRESH_ERROR_INTERVAL: Duration = Duration::from_secs(300);
@@ -297,18 +288,10 @@ impl Auth {
 			})
 			.collect();
 
-		let register = match (params.register.as_deref(), claims.cluster) {
-			(Some(node), true) => Some(node.to_owned()),
-			(Some(_), false) => return Err(AuthError::ExpectedCluster),
-			_ => None,
-		};
-
 		Ok(AuthToken {
 			root: root.to_owned(),
 			subscribe,
 			publish,
-			cluster: claims.cluster,
-			register,
 		})
 	}
 }
@@ -412,7 +395,6 @@ mod tests {
 		let result = auth.verify(&AuthParams {
 			path: "/any/path".into(),
 			jwt: Some("fake-token".into()),
-			..Default::default()
 		});
 		assert!(result.is_err());
 
@@ -441,7 +423,6 @@ mod tests {
 		let token = auth.verify(&AuthParams {
 			path: "/room/123".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 		assert_eq!(token.root, "room/123".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
@@ -472,7 +453,6 @@ mod tests {
 		let result = auth.verify(&AuthParams {
 			path: "/secret".into(),
 			jwt: Some(token),
-			..Default::default()
 		});
 		assert!(result.is_err());
 
@@ -501,7 +481,6 @@ mod tests {
 		let token = auth.verify(&AuthParams {
 			path: "/room/123".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 		assert_eq!(token.root, "room/123".as_path());
 		assert_eq!(token.subscribe, vec!["bob".as_path()]);
@@ -531,7 +510,6 @@ mod tests {
 		let token = auth.verify(&AuthParams {
 			path: "/room/123".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec![]);
@@ -560,7 +538,6 @@ mod tests {
 		let token = auth.verify(&AuthParams {
 			path: "/room/123".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 		assert_eq!(token.subscribe, vec![]);
 		assert_eq!(token.publish, vec!["bob".as_path()]);
@@ -590,7 +567,6 @@ mod tests {
 		let token = auth.verify(&AuthParams {
 			path: "/room/123/alice".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 
 		// Root should be updated to the more specific path
@@ -624,7 +600,6 @@ mod tests {
 		let token = auth.verify(&AuthParams {
 			path: "/room/123/alice".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 
 		assert_eq!(token.root, "room/123/alice".as_path());
@@ -658,7 +633,6 @@ mod tests {
 		let token = auth.verify(&AuthParams {
 			path: "/room/123/bob".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 
 		assert_eq!(token.root, "room/123/bob".as_path());
@@ -691,7 +665,6 @@ mod tests {
 		let verified = auth.verify(&AuthParams {
 			path: "/room/123/alice".into(),
 			jwt: Some(token.clone()),
-			..Default::default()
 		})?;
 
 		assert_eq!(verified.root, "room/123/alice".as_path());
@@ -704,7 +677,6 @@ mod tests {
 		let verified = auth.verify(&AuthParams {
 			path: "/room/123/bob".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 
 		assert_eq!(verified.root, "room/123/bob".as_path());
@@ -738,7 +710,6 @@ mod tests {
 		let verified = auth.verify(&AuthParams {
 			path: "/room/123/users".into(),
 			jwt: Some(token.clone()),
-			..Default::default()
 		})?;
 
 		assert_eq!(verified.root, "room/123/users".as_path());
@@ -750,7 +721,6 @@ mod tests {
 		let verified = auth.verify(&AuthParams {
 			path: "/room/123/users/alice".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 
 		assert_eq!(verified.root, "room/123/users/alice".as_path());
@@ -784,7 +754,6 @@ mod tests {
 		let verified = auth.verify(&AuthParams {
 			path: "/room/123/alice".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 
 		// Should remain read-only
@@ -803,7 +772,6 @@ mod tests {
 		let verified = auth.verify(&AuthParams {
 			path: "/room/123/alice".into(),
 			jwt: Some(token),
-			..Default::default()
 		})?;
 
 		// Should remain write-only

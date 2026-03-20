@@ -1,9 +1,12 @@
-# Generate systemd service files from templates
+# Generate per-node systemd service files from templates
 resource "local_file" "moq_relay_service" {
+  for_each = var.relays
+
   content = templatefile("${path.module}/moq-relay.service.tftpl", {
-    domain = var.domain
+    domain  = var.domain
+    connect = each.value.connect
   })
-  filename = "${path.module}/gen/moq-relay.service"
+  filename = "${path.module}/gen/${each.key}/moq-relay.service"
 }
 
 resource "local_file" "moq_cert_service" {

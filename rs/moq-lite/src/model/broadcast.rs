@@ -3,6 +3,8 @@ use std::{
 	task::{Poll, ready},
 };
 
+use std::ops::Deref;
+
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
 use super::Track;
@@ -10,14 +12,25 @@ use super::Track;
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`Broadcast::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Broadcast {
-	// NOTE: Broadcasts have no names because they're often relative.
+	/// The number of hops from the origin.
+	pub hops: u64,
 }
 
 impl Broadcast {
-	pub fn produce() -> BroadcastProducer {
-		BroadcastProducer::new()
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	pub fn with_hops(mut self, hops: u64) -> Self {
+		self.hops = hops;
+		self
+	}
+
+	pub fn produce(self) -> BroadcastProducer {
+		BroadcastProducer::new(self)
 	}
 }
 
@@ -50,18 +63,20 @@ fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>,
 /// or handle on-demand requests via [Self::dynamic].
 #[derive(Clone)]
 pub struct BroadcastProducer {
+	pub info: Broadcast,
 	state: conducer::Producer<State>,
 }
 
 impl Default for BroadcastProducer {
 	fn default() -> Self {
-		Self::new()
+		Self::new(Broadcast::default())
 	}
 }
 
 impl BroadcastProducer {
-	pub fn new() -> Self {
+	pub fn new(info: Broadcast) -> Self {
 		Self {
+			info,
 			state: Default::default(),
 		}
 	}
@@ -97,12 +112,13 @@ impl BroadcastProducer {
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
 	pub fn dynamic(&self) -> BroadcastDynamic {
-		BroadcastDynamic::new(self.state.clone())
+		BroadcastDynamic::new(self.info.clone(), self.state.clone())
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
+			info: self.info.clone(),
 			state: self.state.consume(),
 		}
 	}
@@ -132,6 +148,14 @@ impl BroadcastProducer {
 	}
 }
 
+impl Deref for BroadcastProducer {
+	type Target = Broadcast;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 #[cfg(test)]
 impl BroadcastProducer {
 	pub fn assert_create_track(&mut self, track: &Track) -> TrackProducer {
@@ -150,17 +174,18 @@ impl BroadcastProducer {
 /// Dropped when no longer needed; pending requests are automatically aborted.
 #[derive(Clone)]
 pub struct BroadcastDynamic {
+	info: Broadcast,
 	state: conducer::Producer<State>,
 }
 
 impl BroadcastDynamic {
-	fn new(state: conducer::Producer<State>) -> Self {
+	fn new(info: Broadcast, state: conducer::Producer<State>) -> Self {
 		if let Ok(mut state) = state.write() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
 		}
 
-		Self { state }
+		Self { info, state }
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -189,6 +214,7 @@ impl BroadcastDynamic {
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
+			info: self.info.clone(),
 			state: self.state.consume(),
 		}
 	}
@@ -255,7 +281,16 @@ impl BroadcastDynamic {
 /// Subscribe to arbitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
+	pub info: Broadcast,
 	state: conducer::Consumer<State>,
+}
+
+impl Deref for BroadcastConsumer {
+	type Target = Broadcast;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
 }
 
 impl BroadcastConsumer {
@@ -343,7 +378,7 @@ mod test {
 
 	#[tokio::test]
 	async fn insert() {
-		let mut producer = BroadcastProducer::new();
+		let mut producer = Broadcast::new().produce();
 		let mut track1 = Track::new("track1").produce();
 
 		// Make sure we can insert before a consumer is created.
@@ -369,7 +404,7 @@ mod test {
 
 	#[tokio::test]
 	async fn closed() {
-		let mut producer = BroadcastProducer::new();
+		let mut producer = Broadcast::new().produce();
 		let _dynamic = producer.dynamic();
 
 		let consumer = producer.consume();
@@ -395,7 +430,7 @@ mod test {
 
 	#[tokio::test]
 	async fn requests() {
-		let mut producer = BroadcastProducer::new().dynamic();
+		let mut producer = Broadcast::new().produce().dynamic();
 
 		let consumer = producer.consume();
 		let consumer2 = consumer.clone();
@@ -433,7 +468,7 @@ mod test {
 
 	#[tokio::test]
 	async fn stale_producer() {
-		let mut broadcast = Broadcast::produce().dynamic();
+		let mut broadcast = Broadcast::new().produce().dynamic();
 		let consumer = broadcast.consume();
 
 		// Subscribe to a track, creating a request
@@ -463,7 +498,8 @@ mod test {
 
 	#[tokio::test]
 	async fn requested_unused() {
-		let mut broadcast = Broadcast::produce().dynamic();
+		tokio::time::pause();
+		let mut broadcast = Broadcast::new().produce().dynamic();
 
 		// Subscribe to a track that doesn't exist - this creates a request
 		let consumer1 = broadcast.consume().assert_subscribe_track(&Track::new("unknown_track"));
@@ -501,8 +537,8 @@ mod test {
 			"track producer should be unused after consumer is dropped"
 		);
 
-		// TODO Unfortunately, we need to sleep for a little bit to detect when unused.
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		// Advance paused time to let the async cleanup task run.
+		tokio::time::advance(std::time::Duration::from_millis(1)).await;
 
 		// Now the cleanup task should have run and we can subscribe again to the unknown track.
 		let consumer3 = broadcast.consume().subscribe_track(&Track::new("unknown_track"));

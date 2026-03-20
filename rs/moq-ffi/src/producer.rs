@@ -27,7 +27,7 @@ impl MoqBroadcastProducer {
 
 #[derive(uniffi::Object)]
 pub struct MoqMediaProducer {
-	inner: std::sync::Mutex<Option<moq_mux::import::Decoder>>,
+	inner: std::sync::Mutex<Option<moq_mux::producer::Framed>>,
 }
 
 #[uniffi::export]
@@ -38,7 +38,7 @@ impl MoqBroadcastProducer {
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let mut broadcast = moq_lite::BroadcastProducer::new();
+		let mut broadcast = moq_lite::Broadcast::new().produce();
 		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
@@ -52,11 +52,11 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		let format = moq_mux::import::DecoderFormat::from_str(&format)
+		let format = moq_mux::producer::FramedFormat::from_str(&format)
 			.map_err(|_| MoqError::Codec(format!("unknown format: {format}")))?;
 
 		let mut buf = init.as_slice();
-		let decoder = moq_mux::import::Decoder::new(state.broadcast.clone(), state.catalog.clone(), format, &mut buf)
+		let decoder = moq_mux::producer::Framed::new(state.broadcast.clone(), state.catalog.clone(), format, &mut buf)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		if buf.has_remaining() {

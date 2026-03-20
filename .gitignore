@@ -19,16 +19,6 @@ result
 node_modules
 /.direnv
 
-# Don't leak dev stuff
-*.mp4
-*.fmp4
-*.crt
-*.key
-*.hex
-*.jwk
-*.jwt
-*.m3u8
-*.m4s
 
 # We're using bun
 package-lock.json

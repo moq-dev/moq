@@ -97,7 +97,8 @@ pub unsafe extern "C" fn moq_log_level(level: *const c_char, level_len: usize) -
 			"" => moq_native::Log::default(),
 			level => moq_native::Log::new(Level::from_str(level)?),
 		}
-		.init();
+		.init()
+		.map_err(|_| crate::error::Error::LogInit)?;
 
 		Ok(())
 	})

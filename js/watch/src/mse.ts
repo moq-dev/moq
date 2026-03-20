@@ -1,10 +1,12 @@
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
-import type { Sync } from "./sync";
+import { Sync } from "./sync";
 
 export type MuxerProps = {
 	element?: HTMLMediaElement | Signal<HTMLMediaElement | undefined>;
 	paused?: boolean | Signal<boolean>;
+	// Shared Sync instance for synchronizing playback across tracks. Defaults to a standalone Sync.
+	sync?: Sync;
 };
 
 /**
@@ -23,10 +25,10 @@ export class Muxer {
 
 	#signals = new Effect();
 
-	constructor(sync: Sync, props?: MuxerProps) {
+	constructor(props: MuxerProps) {
 		this.element = Signal.from(props?.element);
 		this.paused = Signal.from(props?.paused ?? false);
-		this.#sync = sync;
+		this.#sync = props.sync ?? new Sync();
 
 		this.#signals.run(this.#runMediaSource.bind(this));
 		this.#signals.run(this.#runSkip.bind(this));

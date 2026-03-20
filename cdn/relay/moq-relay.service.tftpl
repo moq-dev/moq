@@ -20,7 +20,9 @@ ExecStart=/var/lib/moq/pkg/bin/moq-relay \
   --web-https-listen [::]:443 \
   --web-https-cert /etc/letsencrypt/live/${domain}/fullchain.pem \
   --web-https-key /etc/letsencrypt/live/${domain}/privkey.pem \
-  --cluster-root usc.${domain} \
+%{ for peer in connect ~}
+  --cluster-connect ${peer}.${domain} \
+%{ endfor ~}
   --cluster-node %H \
   --cluster-token /var/lib/moq/cluster.jwt
 

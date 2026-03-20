@@ -241,7 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut track = broadcast.subscribe("chat").await?;
 
     // Read groups and frames
-    while let Some(group) = track.next_group().await? {
+    while let Some(group) = track.recv_group().await? {
         while let Some(frame) = group.read().await? {
             println!("Received: {:?}", frame);
         }

@@ -91,7 +91,13 @@ export class Track {
 		group.close();
 	}
 
-	async nextGroup(): Promise<Group | undefined> {
+	/**
+	 * Receive the next group available on this track.
+	 *
+	 * Groups may arrive out of order or with gaps due to network conditions.
+	 * Use `OrderedConsumer` (in `@moq/hang`) if you need groups in sequence order.
+	 */
+	async recvGroup(): Promise<Group | undefined> {
 		for (;;) {
 			const groups = this.state.groups.peek();
 			if (groups.length > 0) {
@@ -104,6 +110,11 @@ export class Track {
 
 			await Signal.race(this.state.groups, this.state.closed);
 		}
+	}
+
+	/** @deprecated Use {@link recvGroup} instead. */
+	async nextGroup(): Promise<Group | undefined> {
+		return this.recvGroup();
 	}
 
 	async readFrame(): Promise<Uint8Array | undefined> {

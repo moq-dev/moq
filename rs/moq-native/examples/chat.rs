@@ -3,7 +3,7 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_native to configure a logger.
-	moq_native::Log::new(tracing::Level::DEBUG).init();
+	moq_native::Log::new(tracing::Level::DEBUG).init()?;
 
 	// Create an origin that we can publish to and the session can consume from.
 	let origin = moq_lite::Origin::produce();
@@ -37,7 +37,7 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin..
 	// A broadcast is a collection of tracks, but in this example we'll only create one.
-	let mut broadcast = moq_lite::Broadcast::produce();
+	let mut broadcast = moq_lite::Broadcast::new().produce();
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.

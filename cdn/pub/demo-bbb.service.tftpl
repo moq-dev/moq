@@ -23,7 +23,7 @@ ExecStart=/bin/bash -c '\
     -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
     - | \
   /var/lib/moq/pkg/bin/moq-cli publish \
-    --url "https://${domain}/demo?jwt=$(cat /var/lib/moq/demo-pub.jwt)" \
+    --url "https://${relay}/demo?jwt=$(cat /var/lib/moq/demo-pub.jwt)" \
     --name bbb \
     fmp4'
 

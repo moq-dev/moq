@@ -5,7 +5,7 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	// Optional: Use moq_native to configure a logger.
-	moq_native::Log::new(tracing::Level::DEBUG).init();
+	moq_native::Log::new(tracing::Level::DEBUG).init()?;
 
 	// Create an origin that the session can publish incoming broadcasts to.
 	let origin = moq_lite::Origin::produce();
@@ -77,7 +77,10 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	};
 
 	let track_consumer = broadcast.subscribe_track(&track)?;
-	let mut ordered = hang::container::OrderedConsumer::new(track_consumer, Duration::from_millis(500));
+
+	// Skip over groups where all frames are older than 500ms to maintain low latency.
+	let mut ordered =
+		moq_mux::consumer::OrderedConsumer::new(track_consumer, moq_mux::consumer::Legacy, Duration::from_millis(500));
 
 	// Read frames in presentation order.
 	while let Some(frame) = ordered.read().await? {
