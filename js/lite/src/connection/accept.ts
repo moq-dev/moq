@@ -37,8 +37,8 @@ export async function accept(transport: WebTransport, url: URL, props?: AcceptPr
 
 async function acceptDraft17(transport: WebTransport, url: URL): Promise<Established> {
 	const encoder = new TextEncoder();
-	const params = new Ietf.Parameters();
-	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+	const params = new Ietf.SetupOptions();
+	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
@@ -101,9 +101,9 @@ async function acceptAlpnVersion(transport: WebTransport, url: URL, version: Iet
 	await stream.writer.u53(Lite.StreamId.ServerCompat);
 
 	const encoder = new TextEncoder();
-	const params = new Ietf.Parameters();
-	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n);
-	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+	const params = new Ietf.SetupOptions();
+	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
+	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 
 	const server = new Ietf.ServerSetup({ version, parameters: params });
 	await server.encode(stream.writer, version);
@@ -150,9 +150,9 @@ async function acceptNegotiated(transport: WebTransport, url: URL, props?: Accep
 	await stream.writer.u53(Lite.StreamId.ServerCompat);
 
 	const encoder = new TextEncoder();
-	const params = new Ietf.Parameters();
-	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n);
-	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+	const params = new Ietf.SetupOptions();
+	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
+	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });
 	await server.encode(stream.writer, setupVersion);
@@ -160,7 +160,7 @@ async function acceptNegotiated(transport: WebTransport, url: URL, props?: Accep
 	if (Object.values(Lite.Version).includes(selectedVersion as Lite.Version)) {
 		return new Lite.Connection(url, transport, selectedVersion as Lite.Version, stream);
 	} else if (Object.values(Ietf.Version).includes(selectedVersion as Ietf.Version)) {
-		const maxRequestId = client.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
+		const maxRequestId = client.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
 			url,
 			quic: transport,

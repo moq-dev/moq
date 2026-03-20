@@ -47,7 +47,7 @@ pub enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	let config = Config::parse();
-	config.log.init();
+	config.log.init()?;
 
 	let client = config.client.init()?;
 
@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = moq_lite::Broadcast::produce();
+			let mut broadcast = moq_lite::Broadcast::new().produce();
 			let track = broadcast.create_track(track)?;
 			let clock = clock::Publisher::new(track);
 

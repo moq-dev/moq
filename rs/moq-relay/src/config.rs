@@ -58,7 +58,7 @@ impl Config {
 			config.update_from(std::env::args());
 		}
 
-		config.log.init();
+		config.log.init()?;
 		tracing::trace!(?config, "final config");
 
 		Ok(config)

@@ -244,7 +244,9 @@ export class Decoder {
 	#runCmafDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
-		const { timescale } = config.container;
+		// Decode the base64 init segment to extract timescale
+		const initBytes = Uint8Array.from(atob(config.container.initData), (c) => c.charCodeAt(0));
+		const { timescale } = Container.Cmaf.decodeInitSegment(initBytes);
 		const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 
 		// For CMAF, just use decode buffer (no network jitter buffer yet)

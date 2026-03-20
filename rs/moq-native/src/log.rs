@@ -34,7 +34,7 @@ impl Log {
 		LevelFilter::from_level(self.level)
 	}
 
-	pub fn init(&self) {
+	pub fn init(&self) -> anyhow::Result<()> {
 		let filter = EnvFilter::builder()
 			.with_default_directive(self.level().into()) // Default to our -q/-v args
 			.from_env_lossy() // Allow overriding with RUST_LOG
@@ -57,17 +57,19 @@ impl Log {
 			tracing_subscriber::registry()
 				.with(fmt_layer)
 				.with(console_layer)
-				.init();
+				.try_init()?;
 		}
 
 		#[cfg(not(feature = "tokio-console"))]
 		{
-			tracing_subscriber::registry().with(fmt_layer).init();
+			tracing_subscriber::registry().with(fmt_layer).try_init()?;
 		}
 
 		// Start deadlock detection thread (only in debug builds)
 		#[cfg(debug_assertions)]
 		std::thread::spawn(Self::deadlock_detector);
+
+		Ok(())
 	}
 
 	#[cfg(debug_assertions)]

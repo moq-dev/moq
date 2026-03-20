@@ -3,10 +3,10 @@ use std::{fmt, str::FromStr};
 use bytes::Buf;
 use hang::Error;
 
-/// The supported decoder formats.
+/// The supported framed formats (known frame boundaries).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum DecoderFormat {
+pub enum FramedFormat {
 	/// aka H264 with inline SPS/PPS
 	#[cfg(feature = "h264")]
 	Avc3,
@@ -27,48 +27,51 @@ pub enum DecoderFormat {
 	Opus,
 }
 
-impl FromStr for DecoderFormat {
+#[deprecated(note = "use FramedFormat instead")]
+pub type DecoderFormat = FramedFormat;
+
+impl FromStr for FramedFormat {
 	type Err = Error;
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
 			#[cfg(feature = "h264")]
-			"avc3" => Ok(DecoderFormat::Avc3),
+			"avc3" => Ok(FramedFormat::Avc3),
 			#[cfg(feature = "h264")]
 			"h264" | "annex-b" => {
 				tracing::warn!("format '{s}' is deprecated, use 'avc3' instead");
-				Ok(DecoderFormat::Avc3)
+				Ok(FramedFormat::Avc3)
 			}
 			#[cfg(feature = "h265")]
-			"hev1" => Ok(DecoderFormat::Hev1),
+			"hev1" => Ok(FramedFormat::Hev1),
 			#[cfg(feature = "mp4")]
-			"fmp4" | "cmaf" => Ok(DecoderFormat::Fmp4),
+			"fmp4" | "cmaf" => Ok(FramedFormat::Fmp4),
 			#[cfg(feature = "av1")]
-			"av01" | "av1" | "av1C" => Ok(DecoderFormat::Av01),
+			"av01" | "av1" | "av1C" => Ok(FramedFormat::Av01),
 			#[cfg(feature = "aac")]
-			"aac" => Ok(DecoderFormat::Aac),
+			"aac" => Ok(FramedFormat::Aac),
 			#[cfg(feature = "opus")]
-			"opus" => Ok(DecoderFormat::Opus),
+			"opus" => Ok(FramedFormat::Opus),
 			_ => Err(Error::UnknownFormat(s.to_string())),
 		}
 	}
 }
 
-impl fmt::Display for DecoderFormat {
+impl fmt::Display for FramedFormat {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match *self {
 			#[cfg(feature = "h264")]
-			DecoderFormat::Avc3 => write!(f, "avc3"),
+			FramedFormat::Avc3 => write!(f, "avc3"),
 			#[cfg(feature = "mp4")]
-			DecoderFormat::Fmp4 => write!(f, "fmp4"),
+			FramedFormat::Fmp4 => write!(f, "fmp4"),
 			#[cfg(feature = "h265")]
-			DecoderFormat::Hev1 => write!(f, "hev1"),
+			FramedFormat::Hev1 => write!(f, "hev1"),
 			#[cfg(feature = "av1")]
-			DecoderFormat::Av01 => write!(f, "av01"),
+			FramedFormat::Av01 => write!(f, "av01"),
 			#[cfg(feature = "aac")]
-			DecoderFormat::Aac => write!(f, "aac"),
+			FramedFormat::Aac => write!(f, "aac"),
 			#[cfg(feature = "opus")]
-			DecoderFormat::Opus => write!(f, "opus"),
+			FramedFormat::Opus => write!(f, "opus"),
 		}
 	}
 }
@@ -129,17 +132,17 @@ impl fmt::Display for StreamFormat {
 	}
 }
 
-impl From<StreamFormat> for DecoderFormat {
+impl From<StreamFormat> for FramedFormat {
 	fn from(format: StreamFormat) -> Self {
 		match format {
 			#[cfg(feature = "h264")]
-			StreamFormat::Avc3 => DecoderFormat::Avc3,
+			StreamFormat::Avc3 => FramedFormat::Avc3,
 			#[cfg(feature = "mp4")]
-			StreamFormat::Fmp4 => DecoderFormat::Fmp4,
+			StreamFormat::Fmp4 => FramedFormat::Fmp4,
 			#[cfg(feature = "h265")]
-			StreamFormat::Hev1 => DecoderFormat::Hev1,
+			StreamFormat::Hev1 => FramedFormat::Hev1,
 			#[cfg(feature = "av1")]
-			StreamFormat::Av01 => DecoderFormat::Av01,
+			StreamFormat::Av01 => FramedFormat::Av01,
 		}
 	}
 }
@@ -160,7 +163,7 @@ enum StreamKind {
 }
 
 #[derive(derive_more::From)]
-enum DecoderKind {
+enum FramedKind {
 	/// aka H264 with inline SPS/PPS
 	#[cfg(feature = "h264")]
 	Avc3(super::Avc3),
@@ -178,22 +181,25 @@ enum DecoderKind {
 	Opus(super::Opus),
 }
 
-/// A decoder for formats that support stream decoding (unknown frame boundaries).
+/// An importer for formats that support stream decoding (unknown frame boundaries).
 ///
 /// This includes formats like H.264 (AVC3), H.265 (HEV1), and fMP4/CMAF.
 /// Use this when the caller does not know the frame boundaries.
-pub struct StreamDecoder {
+pub struct Stream {
 	decoder: StreamKind,
 }
 
-impl StreamDecoder {
-	/// Create a new stream decoder with the given format.
+#[deprecated(note = "use Stream instead")]
+pub type StreamDecoder = Stream;
+
+impl Stream {
+	/// Create a new stream importer with the given format.
 	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer, format: StreamFormat) -> Self {
 		let decoder = match format {
 			#[cfg(feature = "h264")]
 			StreamFormat::Avc3 => super::Avc3::new(broadcast, catalog).into(),
 			#[cfg(feature = "mp4")]
-			StreamFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default())).into(),
+			StreamFormat::Fmp4 => Box::new(super::Fmp4::new(broadcast, catalog)).into(),
 			#[cfg(feature = "h265")]
 			StreamFormat::Hev1 => super::Hev1::new(broadcast, catalog).into(),
 			#[cfg(feature = "av1")]
@@ -279,55 +285,58 @@ impl StreamDecoder {
 	}
 }
 
-/// A decoder for formats with known frame boundaries.
+/// An importer for formats with known frame boundaries.
 ///
 /// This supports all formats and should be used when the caller knows the frame boundaries.
-pub struct Decoder {
-	decoder: DecoderKind,
+pub struct Framed {
+	decoder: FramedKind,
 }
 
-impl Decoder {
-	/// Create a new decoder with the given format and initialization data.
+#[deprecated(note = "use Framed instead")]
+pub type Decoder = Framed;
+
+impl Framed {
+	/// Create a new framed importer with the given format and initialization data.
 	///
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn new<T: Buf + AsRef<[u8]>>(
 		broadcast: moq_lite::BroadcastProducer,
 		catalog: crate::CatalogProducer,
-		format: DecoderFormat,
+		format: FramedFormat,
 		buf: &mut T,
 	) -> anyhow::Result<Self> {
 		let decoder = match format {
 			#[cfg(feature = "h264")]
-			DecoderFormat::Avc3 => {
+			FramedFormat::Avc3 => {
 				let mut decoder = super::Avc3::new(broadcast, catalog);
 				decoder.initialize(buf)?;
 				decoder.into()
 			}
 			#[cfg(feature = "mp4")]
-			DecoderFormat::Fmp4 => {
-				let mut decoder = Box::new(super::Fmp4::new(broadcast, catalog, super::Fmp4Config::default()));
+			FramedFormat::Fmp4 => {
+				let mut decoder = Box::new(super::Fmp4::new(broadcast, catalog));
 				decoder.decode(buf)?;
 				decoder.into()
 			}
 			#[cfg(feature = "h265")]
-			DecoderFormat::Hev1 => {
+			FramedFormat::Hev1 => {
 				let mut decoder = super::Hev1::new(broadcast, catalog);
 				decoder.initialize(buf)?;
 				decoder.into()
 			}
 			#[cfg(feature = "av1")]
-			DecoderFormat::Av01 => {
+			FramedFormat::Av01 => {
 				let mut decoder = super::Av01::new(broadcast, catalog);
 				decoder.initialize(buf)?;
 				decoder.into()
 			}
 			#[cfg(feature = "aac")]
-			DecoderFormat::Aac => {
+			FramedFormat::Aac => {
 				let config = super::AacConfig::parse(buf)?;
 				super::Aac::new(broadcast, catalog, config)?.into()
 			}
 			#[cfg(feature = "opus")]
-			DecoderFormat::Opus => {
+			FramedFormat::Opus => {
 				let config = super::OpusConfig::parse(buf)?;
 				super::Opus::new(broadcast, catalog, config)?.into()
 			}
@@ -345,17 +354,17 @@ impl Decoder {
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		match self.decoder {
 			#[cfg(feature = "h264")]
-			DecoderKind::Avc3(ref mut decoder) => decoder.finish(),
+			FramedKind::Avc3(ref mut decoder) => decoder.finish(),
 			#[cfg(feature = "mp4")]
-			DecoderKind::Fmp4(ref mut decoder) => decoder.finish(),
+			FramedKind::Fmp4(ref mut decoder) => decoder.finish(),
 			#[cfg(feature = "h265")]
-			DecoderKind::Hev1(ref mut decoder) => decoder.finish(),
+			FramedKind::Hev1(ref mut decoder) => decoder.finish(),
 			#[cfg(feature = "av1")]
-			DecoderKind::Av01(ref mut decoder) => decoder.finish(),
+			FramedKind::Av01(ref mut decoder) => decoder.finish(),
 			#[cfg(feature = "aac")]
-			DecoderKind::Aac(ref mut decoder) => decoder.finish(),
+			FramedKind::Aac(ref mut decoder) => decoder.finish(),
 			#[cfg(feature = "opus")]
-			DecoderKind::Opus(ref mut decoder) => decoder.finish(),
+			FramedKind::Opus(ref mut decoder) => decoder.finish(),
 		}
 	}
 
@@ -375,17 +384,17 @@ impl Decoder {
 	) -> anyhow::Result<()> {
 		match self.decoder {
 			#[cfg(feature = "h264")]
-			DecoderKind::Avc3(ref mut decoder) => decoder.decode_frame(buf, pts)?,
+			FramedKind::Avc3(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			#[cfg(feature = "mp4")]
-			DecoderKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
+			FramedKind::Fmp4(ref mut decoder) => decoder.decode(buf)?,
 			#[cfg(feature = "h265")]
-			DecoderKind::Hev1(ref mut decoder) => decoder.decode_frame(buf, pts)?,
+			FramedKind::Hev1(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			#[cfg(feature = "av1")]
-			DecoderKind::Av01(ref mut decoder) => decoder.decode_frame(buf, pts)?,
+			FramedKind::Av01(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			#[cfg(feature = "aac")]
-			DecoderKind::Aac(ref mut decoder) => decoder.decode(buf, pts)?,
+			FramedKind::Aac(ref mut decoder) => decoder.decode(buf, pts)?,
 			#[cfg(feature = "opus")]
-			DecoderKind::Opus(ref mut decoder) => decoder.decode(buf, pts)?,
+			FramedKind::Opus(ref mut decoder) => decoder.decode(buf, pts)?,
 		}
 
 		anyhow::ensure!(!buf.has_remaining(), "buffer was not fully consumed");
@@ -395,14 +404,14 @@ impl Decoder {
 }
 
 #[cfg(feature = "opus")]
-impl From<super::Opus> for Decoder {
+impl From<super::Opus> for Framed {
 	fn from(opus: super::Opus) -> Self {
 		Self { decoder: opus.into() }
 	}
 }
 
 #[cfg(feature = "aac")]
-impl From<super::Aac> for Decoder {
+impl From<super::Aac> for Framed {
 	fn from(aac: super::Aac) -> Self {
 		Self { decoder: aac.into() }
 	}

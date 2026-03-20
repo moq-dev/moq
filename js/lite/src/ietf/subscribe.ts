@@ -2,7 +2,8 @@ import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { MessageParameters, Parameters } from "./parameters.ts";
+import { Parameters } from "./parameters.ts";
+import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // we only support Group Order descending
@@ -49,7 +50,7 @@ export class Subscribe {
 			await w.u53(0); // no parameters
 		} else {
 			// v15+: fields moved into parameters
-			const params = new MessageParameters();
+			const params = new Parameters();
 			params.subscriberPriority = this.subscriberPriority;
 			params.groupOrder = GROUP_ORDER;
 			params.forward = true;
@@ -100,7 +101,7 @@ export class Subscribe {
 			return new Subscribe({ requestId, trackNamespace, trackName, subscriberPriority });
 		}
 		// v15+: fields are in parameters
-		const params = await MessageParameters.decode(r, version);
+		const params = await Parameters.decode(r, version);
 		const subscriberPriority = params.subscriberPriority ?? 128;
 		let groupOrder = params.groupOrder ?? GROUP_ORDER;
 		if (groupOrder > 2) {
@@ -149,7 +150,7 @@ export class SubscribeOk {
 			await w.u53(0); // no parameters
 		} else {
 			// v15+: just parameters after track_alias
-			const params = new MessageParameters();
+			const params = new Parameters();
 			params.groupOrder = GROUP_ORDER;
 			await params.encode(w, version);
 		}
@@ -184,8 +185,9 @@ export class SubscribeOk {
 
 			await Parameters.decode(r, version); // ignore parameters
 		} else {
-			// v15+: just parameters
-			await MessageParameters.decode(r, version);
+			// v15+: parameters followed by Track Properties (draft-17+)
+			await Parameters.decode(r, version);
+			await Properties.skip(r, version);
 		}
 
 		return new SubscribeOk({ requestId, trackAlias });
@@ -254,13 +256,13 @@ export class SubscribeUpdate {
 		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			await w.u62(this.requestId);
 			await w.u62(0n); // subscription_request_id
-			const params = new MessageParameters();
+			const params = new Parameters();
 			await params.encode(w, version);
 		} else {
 			// v17: request_id, required_request_id_delta, params
 			await w.u62(this.requestId);
 			await w.u62(0n); // required_request_id_delta
-			const params = new MessageParameters();
+			const params = new Parameters();
 			await params.encode(w, version);
 		}
 	}
@@ -287,13 +289,13 @@ export class SubscribeUpdate {
 		} else if (version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			const requestId = await r.u62();
 			await r.u62(); // subscription_request_id
-			await MessageParameters.decode(r, version);
+			await Parameters.decode(r, version);
 			return new SubscribeUpdate({ requestId });
 		} else {
 			// v17
 			const requestId = await r.u62();
 			await r.u62(); // required_request_id_delta
-			await MessageParameters.decode(r, version);
+			await Parameters.decode(r, version);
 			return new SubscribeUpdate({ requestId });
 		}
 	}

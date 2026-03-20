@@ -42,11 +42,9 @@ pub struct Claims {
 	)]
 	pub publish: Vec<String>,
 
-	/// If true, then this client is considered a cluster node.
-	/// Both the client and server will only announce broadcasts from non-cluster clients.
-	/// This avoids convoluted routing, as only the primary origin will announce.
-	//
-	// TODO This shouldn't be part of the token.
+	/// Deprecated: Previously used to mark cluster nodes.
+	/// Kept for backwards compatibility with existing tokens.
+	#[deprecated]
 	#[serde(default, rename = "cluster", skip_serializing_if = "is_false")]
 	pub cluster: bool,
 
@@ -83,6 +81,7 @@ impl Claims {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
 	use super::*;
 

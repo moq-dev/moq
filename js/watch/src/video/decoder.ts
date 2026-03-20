@@ -355,7 +355,9 @@ class DecoderTrack {
 	#runCmaf(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
 		if (this.config.container.kind !== "cmaf") return;
 
-		const { timescale } = this.config.container;
+		// Decode the base64 init segment to extract timescale
+		const initBytes = Uint8Array.from(atob(this.config.container.initData), (c) => c.charCodeAt(0));
+		const { timescale } = Container.Cmaf.decodeInitSegment(initBytes);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
 
 		// Configure decoder with description from catalog

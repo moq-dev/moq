@@ -1,0 +1,9 @@
+*.mp4
+*.fmp4
+*.crt
+*.key
+*.hex
+*.jwk
+*.jwt
+*.m3u8
+*.m4s

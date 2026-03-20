@@ -119,10 +119,12 @@ export class MultiBackend implements Backend {
 		this.jitter = Signal.from(props?.jitter ?? (100 as Moq.Time.Milli));
 		this.#sync = new Sync({ jitter: this.jitter });
 
-		this.#videoSource = new Video.Source(this.#sync, {
+		this.#videoSource = new Video.Source({
+			sync: this.#sync,
 			broadcast: this.broadcast,
 		});
-		this.#audioSource = new Audio.Source(this.#sync, {
+		this.#audioSource = new Audio.Source({
+			sync: this.#sync,
 			broadcast: this.broadcast,
 		});
 
@@ -175,7 +177,8 @@ export class MultiBackend implements Backend {
 	}
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
-		const mse = new Muxer(this.#sync, {
+		const mse = new Muxer({
+			sync: this.#sync,
 			paused: this.paused,
 			element,
 		});

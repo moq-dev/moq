@@ -102,6 +102,7 @@ match version {
 - Run `just fix` to automatically fix formating and easy things.
 - Rust tests are integrated within source files
 - Async tests that sleep should call `tokio::time::pause()` at the start to simulate time instantly
+- Use `tokio::time::sleep()` (not `advance()`) to move time forward in paused-time tests — `sleep` both advances the clock and yields to the runtime so spawned tasks can run
 
 ## Branching Strategy
 
@@ -109,6 +110,7 @@ match version {
 - **`dev`**: Development branch for breaking API changes. PRs with major API changes should target `dev`.
 - When ready for a new minor/major release, merge `dev` into `main`.
 - `cargo-semver-checks` enforces this on PRs to `main`.
+- When removing a public method on `dev`, mark it `#[deprecated]` first so downstream code gets warnings before the next breaking release.
 
 ## Workflow
 

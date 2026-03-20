@@ -123,17 +123,18 @@ See the full [subscribe.rs](https://github.com/moq-dev/moq/blob/main/rs/hang/exa
 
 ## Reading Frames
 
-Subscribe to a media track and read frames using [`OrderedConsumer`](https://docs.rs/hang/latest/hang/container/struct.OrderedConsumer.html):
+Subscribe to a media track and read frames using [`OrderedConsumer`](https://docs.rs/moq-mux/latest/moq_mux/consumer/struct.OrderedConsumer.html):
 
 ```rust
 let track_consumer = broadcast.subscribe_track(&track);
-let mut ordered = hang::container::OrderedConsumer::new(
+let mut ordered = moq_mux::consumer::OrderedConsumer::new(
     track_consumer,
+    moq_mux::consumer::Legacy,
     Duration::from_millis(500), // max latency before skipping groups
 );
 
 while let Some(frame) = ordered.read().await? {
-    // frame.timestamp, frame.keyframe, frame.payload
+    // frame.timestamp, frame.is_keyframe(), frame.payload
 }
 ```
 

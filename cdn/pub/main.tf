@@ -1,7 +1,7 @@
 # Generate systemd service files from templates
 resource "local_file" "demo_bbb_service" {
   content = templatefile("${path.module}/demo-bbb.service.tftpl", {
-    domain = var.domain
+    relay = var.relay
   })
   filename = "${path.module}/gen/demo-bbb.service"
 }
@@ -9,7 +9,7 @@ resource "local_file" "demo_bbb_service" {
 # Publisher instance
 resource "linode_instance" "publisher" {
   label  = "publisher-moq"
-  region = "us-central" # Dallas, TX
+  region = "us-east" # Newark, NJ (colocated with use relay)
   type   = "g6-nanode-1"
 
   # Use Debian 12 as base, will be converted to NixOS via bootstrap

@@ -215,8 +215,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						stream.writer.encode(&msg).await?;
 					}
 
-					tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-					let msg = lite::Announce::Active { suffix, hops: 0 };
+					tracing::debug!(broadcast = %origin.absolute(&path), hops = broadcast.info.hops, "announce");
+					let msg = lite::Announce::Active { suffix, hops: broadcast.info.hops };
 					stream.writer.encode(&msg).await?;
 
 					active.insert(path.clone(), broadcast.clone());

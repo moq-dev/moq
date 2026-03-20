@@ -1,6 +1,7 @@
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { MessageParameters } from "./parameters.ts";
+import { Parameters } from "./parameters.ts";
+import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 export class MaxRequestId {
@@ -61,12 +62,9 @@ export class RequestOk {
 	static id = 0x07;
 
 	requestId: bigint | undefined;
-	parameters: MessageParameters;
+	parameters: Parameters;
 
-	constructor({
-		requestId,
-		parameters = new MessageParameters(),
-	}: { requestId?: bigint; parameters?: MessageParameters }) {
+	constructor({ requestId, parameters = new Parameters() }: { requestId?: bigint; parameters?: Parameters }) {
 		this.requestId = requestId;
 		this.parameters = parameters;
 	}
@@ -85,7 +83,8 @@ export class RequestOk {
 
 	static async #decode(r: Reader, version: IetfVersion): Promise<RequestOk> {
 		const requestId = version === Version.DRAFT_17 ? undefined : await r.u62();
-		const parameters = await MessageParameters.decode(r, version);
+		const parameters = await Parameters.decode(r, version);
+		await Properties.skip(r, version);
 		return new RequestOk({ requestId, parameters });
 	}
 

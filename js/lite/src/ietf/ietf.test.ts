@@ -4,7 +4,7 @@ import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as GoAway from "./goaway.ts";
-import { Parameters } from "./parameters.ts";
+import { SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
@@ -605,7 +605,7 @@ test("GoAway v17: with timeout", async () => {
 });
 
 test("Setup v17: unified 0x2F00 round trip", async () => {
-	const params = new Parameters();
+	const params = new SetupOptions();
 	params.setBytes(7n, new TextEncoder().encode("test-impl"));
 	const msg = new Setup.Setup({ parameters: params });
 

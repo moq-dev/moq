@@ -94,8 +94,8 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	if (protocol === Ietf.ALPN.DRAFT_17) {
 		// Draft-17: SETUP uses uni streams with 0x2F00 stream type
 		const encoder = new TextEncoder();
-		const params = new Ietf.Parameters();
-		params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+		const params = new Ietf.SetupOptions();
+		params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 
 		const setupMsg = new Ietf.Setup({ parameters: params });
 
@@ -169,9 +169,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 
 	const encoder = new TextEncoder();
 
-	const params = new Ietf.Parameters();
-	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n); // Allow a ton of request IDs.
-	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js")); // Put the implementation name in the parameters.
+	const params = new Ietf.SetupOptions();
+	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n); // Allow a ton of request IDs.
+	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js")); // Put the implementation name in the parameters.
 
 	const client = new Ietf.ClientSetup({
 		// NOTE: draft 15 onwards does not use CLIENT_SETUP to negotiate the version.
@@ -200,7 +200,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
 		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
-		const maxRequestId = server.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
+		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
 			url,
 			quic: session,
@@ -222,8 +222,8 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 	if (protocol === Ietf.ALPN.DRAFT_17) {
 		// Draft-17: SETUP uses uni streams with 0x2F00 stream type
 		const encoder = new TextEncoder();
-		const params = new Ietf.Parameters();
-		params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+		const params = new Ietf.SetupOptions();
+		params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 
 		const setupMsg = new Ietf.Setup({ parameters: params });
 
@@ -286,9 +286,9 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 
 	const encoder = new TextEncoder();
 
-	const params = new Ietf.Parameters();
-	params.setVarint(Ietf.Parameter.MaxRequestId, 42069n);
-	params.setBytes(Ietf.Parameter.Implementation, encoder.encode("moq-lite-js"));
+	const params = new Ietf.SetupOptions();
+	params.setVarint(Ietf.SetupOption.MaxRequestId, 42069n);
+	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 
 	const client = new Ietf.ClientSetup({
 		versions:
@@ -311,7 +311,7 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
 		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
-		const maxRequestId = server.parameters.getVarint(Ietf.Parameter.MaxRequestId) ?? 0n;
+		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
 			url,
 			quic: session,
