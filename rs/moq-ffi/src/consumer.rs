@@ -6,6 +6,8 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::*;
 
+type LegacyConsumer = moq_mux::consumer::OrderedConsumer<moq_mux::consumer::Legacy>;
+
 #[derive(Clone, uniffi::Object)]
 pub struct MoqBroadcastConsumer {
 	inner: moq_lite::BroadcastConsumer,
@@ -42,12 +44,12 @@ pub struct MoqMediaConsumer {
 }
 
 struct Media {
-	inner: hang::container::OrderedSubscriber,
+	inner: LegacyConsumer,
 }
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqFrame>, MoqError> {
-		let Some(frame) = self.inner.read().await? else {
+		let Some(frame) = self.inner.read().await.map_err(|e| MoqError::Codec(e.to_string()))? else {
 			return Ok(None);
 		};
 
@@ -90,7 +92,7 @@ impl MoqBroadcastConsumer {
 		let track = self.inner.consume_track(&moq_lite::Track::new(name))?;
 		let subscriber = track.subscribe(moq_lite::Subscription::default()).await?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
-		let consumer = hang::container::OrderedSubscriber::new(subscriber, latency);
+		let consumer = LegacyConsumer::new(subscriber, moq_mux::consumer::Legacy, latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))

@@ -128,11 +128,6 @@ impl OrderedProducer {
 		self.track.finish()?;
 		Ok(())
 	}
-
-	/// Create a consumer for this track.
-	pub fn consume(&self) -> moq_lite::TrackConsumer {
-		self.track.consume()
-	}
 }
 
 impl From<moq_lite::TrackProducer> for OrderedProducer {

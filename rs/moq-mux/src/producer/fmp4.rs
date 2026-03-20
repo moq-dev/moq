@@ -7,19 +7,10 @@ use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-/// Configuration for the fMP4 importer.
-#[derive(Clone, Default)]
-pub struct Fmp4Config {
-	/// When true, transport fMP4 fragments directly (passthrough mode)
-	///
-	/// This requires a player that can decode the fragments directly.
-	pub passthrough: bool,
-}
-
-/// Converts fMP4/CMAF files into hang broadcast streams.
+/// Converts fMP4/CMAF files into MoQ broadcast streams using CMAF passthrough.
 ///
-/// This struct processes fragmented MP4 (fMP4) files and converts them into hang broadcasts.
-/// Not all MP4 features are supported.
+/// This struct processes fragmented MP4 (fMP4) files and transports complete
+/// moof+mdat fragments directly as MoQ frames, preserving the CMAF container format.
 ///
 /// ## Supported Codecs
 ///
@@ -50,10 +41,7 @@ pub struct Fmp4 {
 	moof: Option<Moof>,
 	moof_size: usize,
 
-	/// Configuration for the fMP4 importer.
-	config: Fmp4Config,
-
-	// -- PASSTHROUGH ONLY --
+	// The raw moof bytes for passthrough
 	moof_raw: Option<Bytes>,
 }
 
@@ -63,32 +51,11 @@ enum TrackKind {
 	Audio,
 }
 
-// Make a new audio group every 100ms.
-const MAX_AUDIO_GROUP_DURATION: Timestamp = Timestamp::from_millis_unchecked(100);
-
-enum Fmp4Producer {
-	/// Manual group management (video, passthrough audio).
-	Manual {
-		track: moq_lite::TrackProducer,
-		group: Option<moq_lite::GroupProducer>,
-	},
-	/// Automatic duration-based group management (non-passthrough audio).
-	Ordered(hang::container::OrderedProducer),
-}
-
-impl Fmp4Producer {
-	fn info(&self) -> &moq_lite::Track {
-		match self {
-			Self::Manual { track, .. } => &track.info,
-			Self::Ordered(ordered) => &ordered.track.info,
-		}
-	}
-}
-
 struct Fmp4Track {
 	kind: TrackKind,
 
-	producer: Fmp4Producer,
+	track: moq_lite::TrackProducer,
+	group: Option<moq_lite::GroupProducer>,
 
 	// The minimum buffer required for the track.
 	jitter: Option<Timestamp>,
@@ -104,7 +71,7 @@ impl Fmp4 {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer, config: Fmp4Config) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
 		Self {
 			catalog,
 			tracks: HashMap::default(),
@@ -112,7 +79,6 @@ impl Fmp4 {
 			moof: None,
 			moof_size: 0,
 			broadcast,
-			config,
 			moof_raw: None,
 		}
 	}
@@ -148,10 +114,7 @@ impl Fmp4 {
 					anyhow::ensure!(self.moof.is_none(), "duplicate moof box");
 					self.moof.replace(moof);
 					self.moof_size = size;
-
-					if self.config.passthrough {
-						self.moof_raw.replace(Bytes::copy_from_slice(raw));
-					}
+					self.moof_raw.replace(Bytes::copy_from_slice(raw));
 				}
 				Any::Mdat(mdat) => {
 					self.extract(mdat, raw)?;
@@ -183,7 +146,7 @@ impl Fmp4 {
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
 			let handler = &trak.mdia.hdlr.handler;
-			let ext = if self.config.passthrough { "m4s" } else { "hang" };
+			let ext = "m4s";
 
 			let (kind, track) = match handler.as_ref() {
 				b"vide" => {
@@ -202,19 +165,12 @@ impl Fmp4 {
 
 			let track = self.broadcast.create_track(track)?;
 
-			let producer = if kind == TrackKind::Audio && !self.config.passthrough {
-				Fmp4Producer::Ordered(
-					hang::container::OrderedProducer::new(track).with_max_group_duration(MAX_AUDIO_GROUP_DURATION),
-				)
-			} else {
-				Fmp4Producer::Manual { track, group: None }
-			};
-
 			self.tracks.insert(
 				track_id,
 				Fmp4Track {
 					kind,
-					producer,
+					track,
+					group: None,
 					jitter: None,
 					last_timestamp: None,
 					min_duration: None,
@@ -230,8 +186,8 @@ impl Fmp4 {
 	}
 
 	fn container(&self, trak: &Trak, moov: &Moov) -> anyhow::Result<Container> {
-		if self.config.passthrough {
-			// Build a single-track init segment (ftyp+moov) for this track.
+		// Build a single-track init segment (ftyp+moov) for this track.
+		{
 			let ftyp = mp4_atom::Ftyp {
 				major_brand: b"isom".into(),
 				minor_version: 0x200,
@@ -268,8 +224,6 @@ impl Fmp4 {
 
 			let init_data = base64::engine::general_purpose::STANDARD.encode(&buf);
 			Ok(Container::Cmaf { init_data })
-		} else {
-			Ok(Container::Legacy)
 		}
 	}
 
@@ -488,7 +442,7 @@ impl Fmp4 {
 		Ok(config)
 	}
 
-	// Extract all frames out of an mdat atom.
+	// Extract all frames out of an mdat atom using CMAF passthrough.
 	fn extract(&mut self, mdat: Mdat, mdat_raw: &[u8]) -> anyhow::Result<()> {
 		let moov = self.moov.as_ref().context("missing moov box")?;
 		let moof = self.moof.take().context("missing moof box")?;
@@ -521,13 +475,13 @@ impl Fmp4 {
 			let timescale = trak.mdia.mdhd.timescale as u64;
 
 			let mut offset = traf.tfhd.base_data_offset.unwrap_or_default() as usize;
+			let mut track_data_start: Option<usize> = None;
 
 			if traf.trun.is_empty() {
 				anyhow::bail!("missing trun box");
 			}
 
 			// Keep track of the minimum and maximum timestamp for this track to compute the jitter.
-			// Ideally these should both be the same value (a single frame lul).
 			let mut min_timestamp = None;
 			let mut max_timestamp = None;
 			let mut contains_keyframe = false;
@@ -537,24 +491,24 @@ impl Fmp4 {
 
 				if let Some(data_offset) = trun.data_offset {
 					let base_offset = tfhd.base_data_offset.unwrap_or_default() as usize;
-					// This is relative to the start of the MOOF, not the MDAT.
-					// Note: The trun data offset can be negative, but... that's not supported here.
 					let data_offset: usize = data_offset.try_into().context("invalid data offset")?;
 
-					// Use checked arithmetic to prevent underflow
 					let relative_offset = data_offset
 						.checked_sub(moof_size)
 						.and_then(|v| v.checked_sub(header_size))
 						.context("invalid data offset: underflow")?;
 
-					// Reset offset if the TRUN has a data offset
 					offset = base_offset
 						.checked_add(relative_offset)
 						.context("invalid data offset: overflow")?;
 				}
 
+				// Capture the actual start offset for this traf before consuming samples
+				if track_data_start.is_none() {
+					track_data_start = Some(offset);
+				}
+
 				for entry in &trun.entries {
-					// Use the moof defaults if the sample doesn't have its own values.
 					let flags = entry
 						.flags
 						.unwrap_or(tfhd.default_sample_flags.unwrap_or(default_sample_flags));
@@ -574,48 +528,14 @@ impl Fmp4 {
 
 					let keyframe = match track.kind {
 						TrackKind::Video => {
-							// https://chromium.googlesource.com/chromium/src/media/+/master/formats/mp4/track_run_iterator.cc#177
-							let keyframe = (flags >> 24) & 0x3 == 0x2; // kSampleDependsOnNoOther
-							let non_sync = (flags >> 16) & 0x1 == 0x1; // kSampleIsNonSyncSample
-
+							let keyframe = (flags >> 24) & 0x3 == 0x2;
+							let non_sync = (flags >> 16) & 0x1 == 0x1;
 							keyframe && !non_sync
 						}
-						TrackKind::Audio => {
-							// Audio frames are always keyframes.
-							// TODO: Optionally bundle audio frames into groups to
-							true
-						}
+						TrackKind::Audio => true,
 					};
 
 					contains_keyframe |= keyframe;
-
-					if !self.config.passthrough {
-						// TODO Avoid a copy if mp4-atom switches to using Bytes?
-						let payload = Bytes::copy_from_slice(&mdat.data[offset..(offset + size)]);
-
-						let frame = hang::container::Frame {
-							timestamp,
-							payload: payload.into(),
-						};
-
-						match &mut track.producer {
-							Fmp4Producer::Manual { track: raw, group } => {
-								let mut g = if keyframe {
-									if let Some(mut prev) = group.take() {
-										prev.finish()?;
-									}
-									raw.append_group()?
-								} else {
-									group.take().context("no keyframe at start")?
-								};
-								frame.encode(&mut g)?;
-								*group = Some(g);
-							}
-							Fmp4Producer::Ordered(ordered) => {
-								ordered.write(frame)?;
-							}
-						}
-					}
 
 					if timestamp >= max_timestamp.unwrap_or(Timestamp::ZERO) {
 						max_timestamp = Some(timestamp);
@@ -638,45 +558,86 @@ impl Fmp4 {
 				}
 			}
 
-			// If we're doing passthrough mode, then we write one giant fragment instead of individual frames.
-			if self.config.passthrough {
-				let Fmp4Producer::Manual { track: raw, group } = &mut track.producer else {
-					unreachable!("passthrough always uses Manual");
-				};
+			// Build a per-track moof containing only this traf, and a per-track mdat
+			// with only the samples belonging to this track.
+			let single_traf_moof = Moof {
+				mfhd: moof.mfhd.clone(),
+				traf: vec![traf.clone()],
+			};
 
-				let mut g = if contains_keyframe {
-					if let Some(mut prev) = group.take() {
-						prev.finish()?;
-					}
-					raw.append_group()?
-				} else {
-					group.take().context("no keyframe at start")?
-				};
+			// Compute the data range within the original mdat for this traf's samples.
+			let track_data_start = track_data_start.unwrap_or(0);
+			let track_data_end = offset; // offset was advanced past all samples above
 
-				let moof_raw = self.moof_raw.as_ref().context("missing moof box")?;
+			// Adjust the trun data_offset to point into the new per-track mdat.
+			let mut adjusted_moof = single_traf_moof;
+			let mut moof_buf = Vec::new();
+			adjusted_moof.encode(&mut moof_buf)?;
+			let new_moof_size = moof_buf.len();
 
-				// To avoid an extra allocation, we use the chunked API to write the moof and mdat atoms separately.
-				let mut frame = g.create_frame(moq_lite::Frame {
-					size: moof_raw.len() as u64 + mdat_raw.len() as u64,
-				})?;
+			// Slice out this track's data from the full mdat
+			let track_mdat_data = if track_data_start < mdat.data.len() && track_data_end <= mdat.data.len() {
+				&mdat.data[track_data_start..track_data_end]
+			} else {
+				// Fallback: use the full mdat data (single-track case)
+				&mdat.data[..]
+			};
 
-				frame.write(moof_raw.clone())?;
-				frame.write(Bytes::copy_from_slice(mdat_raw))?;
-				frame.finish()?;
+			// Re-encode moof with corrected per-trun data_offset for the per-track fragment.
+			// Each trun's data_offset points to the start of that run's data within the new mdat.
+			let mdat_header_size_new = 8u64; // 4 bytes size + 4 bytes 'mdat'
+			let mut cumulative_offset = 0u64;
+			for traf_mut in &mut adjusted_moof.traf {
+				// Clear base_data_offset since data_offset is now relative to moof start
+				traf_mut.tfhd.base_data_offset = None;
 
-				*group = Some(g);
+				for trun_mut in &mut traf_mut.trun {
+					trun_mut.data_offset =
+						Some((new_moof_size as u64 + mdat_header_size_new + cumulative_offset) as i32);
+
+					// Advance past this trun's sample data
+					let trun_data_size: u64 = trun_mut
+						.entries
+						.iter()
+						.map(|e| {
+							e.size
+								.unwrap_or(traf_mut.tfhd.default_sample_size.unwrap_or(default_sample_size)) as u64
+						})
+						.sum();
+					cumulative_offset += trun_data_size;
+				}
 			}
 
+			moof_buf.clear();
+			adjusted_moof.encode(&mut moof_buf)?;
+
+			let per_track_mdat = Mdat {
+				data: track_mdat_data.to_vec(),
+			};
+			per_track_mdat.encode(&mut moof_buf)?;
+
+			let fragment_bytes = Bytes::from(moof_buf);
+
+			// Write the per-track fragment as a single MoQ frame (passthrough).
+			let mut g = if contains_keyframe {
+				if let Some(mut prev) = track.group.take() {
+					prev.finish()?;
+				}
+				track.track.append_group()?
+			} else {
+				track.group.take().context("no keyframe at start")?
+			};
+
+			g.write_frame(fragment_bytes)?;
+
+			track.group = Some(g);
+
 			if let (Some(min), Some(max), Some(min_duration)) = (min_timestamp, max_timestamp, track.min_duration) {
-				// We report the minimum buffer required as the difference between the min and max frames.
-				// We also add the duration between frames to account for the frame rate.
-				// ex. for 2s fragments, this should be exactly 2s if we did everything correctly.
 				let jitter = max - min + min_duration;
 
 				if jitter < track.jitter.unwrap_or(Timestamp::MAX) {
 					track.jitter = Some(jitter);
 
-					// Update the catalog with the new jitter
 					let mut catalog = self.catalog.lock();
 
 					match track.kind {
@@ -684,7 +645,7 @@ impl Fmp4 {
 							let config = catalog
 								.video
 								.renditions
-								.get_mut(&track.producer.info().name)
+								.get_mut(&track.track.info.name)
 								.context("missing video config")?;
 							config.jitter = Some(jitter.convert()?);
 						}
@@ -692,7 +653,7 @@ impl Fmp4 {
 							let config = catalog
 								.audio
 								.renditions
-								.get_mut(&track.producer.info().name)
+								.get_mut(&track.track.info.name)
 								.context("missing audio config")?;
 							config.jitter = Some(jitter.convert()?);
 						}
@@ -709,17 +670,10 @@ impl Fmp4 {
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		for track in self.tracks.values_mut() {
-			match &mut track.producer {
-				Fmp4Producer::Manual { track: raw, group } => {
-					if let Some(mut g) = group.take() {
-						g.finish()?;
-					}
-					raw.finish()?;
-				}
-				Fmp4Producer::Ordered(ordered) => {
-					ordered.finish()?;
-				}
+			if let Some(mut g) = track.group.take() {
+				g.finish()?;
 			}
+			track.track.finish()?;
 		}
 		Ok(())
 	}
@@ -731,8 +685,8 @@ impl Drop for Fmp4 {
 
 		for track in self.tracks.values() {
 			match track.kind {
-				TrackKind::Video => catalog.video.remove_track(track.producer.info()).is_some(),
-				TrackKind::Audio => catalog.audio.remove_track(track.producer.info()).is_some(),
+				TrackKind::Video => catalog.video.remove_track(&track.track.info).is_some(),
+				TrackKind::Audio => catalog.audio.remove_track(&track.track.info).is_some(),
 			};
 		}
 	}

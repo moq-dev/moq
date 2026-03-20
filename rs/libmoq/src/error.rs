@@ -128,6 +128,15 @@ pub enum Error {
 	NulError(#[from] std::ffi::NulError),
 }
 
+impl From<moq_mux::consumer::Error> for Error {
+	fn from(err: moq_mux::consumer::Error) -> Self {
+		match err {
+			moq_mux::consumer::Error::Moq(e) => Error::Moq(e),
+			e => Error::DecodeFailed(Arc::new(e.into())),
+		}
+	}
+}
+
 impl From<tracing::metadata::ParseLevelError> for Error {
 	fn from(err: tracing::metadata::ParseLevelError) -> Self {
 		Error::Level(Arc::new(err))

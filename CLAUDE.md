@@ -110,6 +110,7 @@ match version {
 - **`dev`**: Development branch for breaking API changes. PRs with major API changes should target `dev`.
 - When ready for a new minor/major release, merge `dev` into `main`.
 - `cargo-semver-checks` enforces this on PRs to `main`.
+- When removing a public method on `dev`, mark it `#[deprecated]` first so downstream code gets warnings before the next breaking release.
 
 ## Workflow
 

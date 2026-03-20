@@ -76,7 +76,10 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 
 	let track_consumer = broadcast.consume_track(&track)?;
 	let track_sub = track_consumer.subscribe(moq_lite::Subscription::default()).await?;
-	let mut ordered = hang::container::OrderedSubscriber::new(track_sub, Duration::from_millis(500));
+
+	// Skip over groups where all frames are older than 500ms to maintain low latency.
+	let mut ordered =
+		moq_mux::consumer::OrderedConsumer::new(track_sub, moq_mux::consumer::Legacy, Duration::from_millis(500));
 
 	// Read frames in presentation order.
 	while let Some(frame) = ordered.read().await? {
