@@ -21,6 +21,7 @@ use futures::stream::StreamExt;
 /// Alternatively, you can generate a self-signed certificate given a list of hostnames.
 #[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+#[group(id = "server-tls")]
 #[non_exhaustive]
 pub struct ServerTlsConfig {
 	/// Load the given certificate from disk.
@@ -48,6 +49,7 @@ pub struct ServerTlsConfig {
 /// Configuration for the MoQ server.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[group(id = "server")]
 #[non_exhaustive]
 pub struct ServerConfig {
 	/// Listen for UDP packets on the given address.
@@ -116,6 +118,41 @@ impl ServerConfig {
 			moq_lite::Versions::from(self.version.clone())
 		}
 	}
+
+	pub fn with_bind(mut self, bind: net::SocketAddr) -> Self {
+		self.bind = Some(bind);
+		self
+	}
+
+	pub fn with_backend(mut self, backend: QuicBackend) -> Self {
+		self.backend = Some(backend);
+		self
+	}
+
+	pub fn with_max_streams(mut self, max_streams: u64) -> Self {
+		self.max_streams = Some(max_streams);
+		self
+	}
+
+	pub fn with_version(mut self, version: moq_lite::Version) -> Self {
+		self.version.push(version);
+		self
+	}
+
+	pub fn with_tls_cert(mut self, cert: PathBuf) -> Self {
+		self.tls.cert.push(cert);
+		self
+	}
+
+	pub fn with_tls_key(mut self, key: PathBuf) -> Self {
+		self.tls.key.push(key);
+		self
+	}
+
+	pub fn with_tls_generate(mut self, hostname: impl Into<String>) -> Self {
+		self.tls.generate.push(hostname.into());
+		self
+	}
 }
 
 /// Server for accepting MoQ connections over QUIC.
@@ -128,13 +165,13 @@ pub struct Server {
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
 	#[cfg(feature = "noq")]
-	noq: Option<crate::noq::NoqServer>,
+	noq: Option<crate::noq::Server>,
 	#[cfg(feature = "quinn")]
-	quinn: Option<crate::quinn::QuinnServer>,
+	quinn: Option<crate::quinn::Server>,
 	#[cfg(feature = "quiche")]
-	quiche: Option<crate::quiche::QuicheServer>,
+	quiche: Option<crate::quiche::Server>,
 	#[cfg(feature = "websocket")]
-	websocket: Option<crate::websocket::WebSocketListener>,
+	websocket: Option<crate::ws::Listener>,
 }
 
 impl Server {
@@ -161,20 +198,20 @@ impl Server {
 		#[cfg(feature = "noq")]
 		#[allow(unreachable_patterns)]
 		let noq = match backend {
-			QuicBackend::Noq => Some(crate::noq::NoqServer::new(config.clone())?),
+			QuicBackend::Noq => Some(crate::noq::Server::new(config.clone())?),
 			_ => None,
 		};
 
 		#[cfg(feature = "quinn")]
 		#[allow(unreachable_patterns)]
 		let quinn = match backend {
-			QuicBackend::Quinn => Some(crate::quinn::QuinnServer::new(config.clone())?),
+			QuicBackend::Quinn => Some(crate::quinn::Server::new(config.clone())?),
 			_ => None,
 		};
 
 		#[cfg(feature = "quiche")]
 		let quiche = match backend {
-			QuicBackend::Quiche => Some(crate::quiche::QuicheServer::new(config)?),
+			QuicBackend::Quiche => Some(crate::quiche::Server::new(config)?),
 			_ => None,
 		};
 
@@ -201,7 +238,7 @@ impl Server {
 	/// For applications that need WebSocket on the same HTTP port (e.g. moq-relay),
 	/// use `qmux::Session::accept()` with your own HTTP framework instead.
 	#[cfg(feature = "websocket")]
-	pub fn with_websocket(mut self, websocket: Option<crate::websocket::WebSocketListener>) -> Self {
+	pub fn with_websocket(mut self, websocket: Option<crate::ws::Listener>) -> Self {
 		self.websocket = websocket;
 		self
 	}
@@ -320,7 +357,7 @@ impl Server {
 					{
 						let alpns = versions.alpns();
 						self.accept.push(async move {
-							let noq = super::noq::NoqRequest::accept(_conn, alpns).await?;
+							let noq = super::noq::Request::accept(_conn, alpns).await?;
 							Ok(Request {
 								server,
 								kind: RequestKind::Noq(noq),
@@ -333,7 +370,7 @@ impl Server {
 					{
 						let alpns = versions.alpns();
 						self.accept.push(async move {
-							let quinn = super::quinn::QuinnRequest::accept(_conn, alpns).await?;
+							let quinn = super::quinn::Request::accept(_conn, alpns).await?;
 							Ok(Request {
 								server,
 								kind: RequestKind::Quinn(Box::new(quinn)),
@@ -346,7 +383,7 @@ impl Server {
 					{
 						let alpns = versions.alpns();
 						self.accept.push(async move {
-							let quiche = super::quiche::QuicheRequest::accept(_conn, alpns).await?;
+							let quiche = super::quiche::Request::accept(_conn, alpns).await?;
 							Ok(Request {
 								server,
 								kind: RequestKind::Quiche(quiche),
@@ -357,7 +394,7 @@ impl Server {
 				Some(_conn) = iroh_accept => {
 					#[cfg(feature = "iroh")]
 					self.accept.push(async move {
-						let iroh = super::iroh::IrohRequest::accept(_conn).await?;
+						let iroh = super::iroh::Request::accept(_conn).await?;
 						Ok(Request {
 							server,
 							kind: RequestKind::Iroh(iroh),
@@ -448,13 +485,13 @@ impl Server {
 /// An incoming connection that can be accepted or rejected.
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
-	Noq(crate::noq::NoqRequest),
+	Noq(crate::noq::Request),
 	#[cfg(feature = "quinn")]
-	Quinn(Box<crate::quinn::QuinnRequest>),
+	Quinn(Box<crate::quinn::Request>),
 	#[cfg(feature = "quiche")]
-	Quiche(crate::quiche::QuicheRequest),
+	Quiche(crate::quiche::Request),
 	#[cfg(feature = "iroh")]
-	Iroh(crate::iroh::IrohRequest),
+	Iroh(crate::iroh::Request),
 	#[cfg(feature = "websocket")]
 	WebSocket(qmux::Session),
 }

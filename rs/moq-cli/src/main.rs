@@ -18,7 +18,7 @@ pub struct Cli {
 
 	#[cfg(feature = "iroh")]
 	#[command(flatten)]
-	iroh: moq_native::IrohEndpointConfig,
+	iroh: moq_native::iroh::EndpointConfig,
 
 	#[command(subcommand)]
 	command: Command,

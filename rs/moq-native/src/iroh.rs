@@ -9,12 +9,13 @@ use web_transport_iroh::{
 // NOTE: web-transport-iroh should re-export proto like web-transport-quinn does.
 use web_transport_proto::{ConnectRequest, ConnectResponse};
 
-pub use iroh::Endpoint as IrohEndpoint;
+pub use iroh::Endpoint;
 
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[group(id = "iroh")]
 #[non_exhaustive]
-pub struct IrohEndpointConfig {
+pub struct EndpointConfig {
 	/// Whether to enable iroh support.
 	#[arg(
 		id = "iroh-enabled",
@@ -43,8 +44,8 @@ pub struct IrohEndpointConfig {
 	pub bind_v6: Option<net::SocketAddrV6>,
 }
 
-impl IrohEndpointConfig {
-	pub async fn bind(self) -> anyhow::Result<Option<IrohEndpoint>> {
+impl EndpointConfig {
+	pub async fn bind(self) -> anyhow::Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
 		}
@@ -73,7 +74,7 @@ impl IrohEndpointConfig {
 		let mut alpns: Vec<Vec<u8>> = moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 		alpns.push(web_transport_iroh::ALPN_H3.as_bytes().to_vec());
 
-		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(alpns);
+		let mut builder = Endpoint::builder().secret_key(secret_key).alpns(alpns);
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr(addr)?;
 		}
@@ -88,7 +89,7 @@ impl IrohEndpointConfig {
 	}
 }
 
-pub enum IrohRequest {
+pub enum Request {
 	Quic {
 		request: web_transport_iroh::QuicRequest,
 	},
@@ -97,7 +98,7 @@ pub enum IrohRequest {
 	},
 }
 
-impl IrohRequest {
+impl Request {
 	pub async fn accept(conn: iroh::endpoint::Incoming) -> anyhow::Result<Self> {
 		let conn = conn.accept()?.await?;
 		let alpn = String::from_utf8(conn.alpn().to_vec()).context("failed to decode ALPN")?;
@@ -122,8 +123,8 @@ impl IrohRequest {
 	/// Accept the session.
 	pub async fn ok(self) -> Result<web_transport_iroh::Session, web_transport_iroh::ServerError> {
 		match self {
-			IrohRequest::Quic { request } => Ok(request.ok()),
-			IrohRequest::WebTransport { request } => {
+			Request::Quic { request } => Ok(request.ok()),
+			Request::WebTransport { request } => {
 				let mut response = ConnectResponse::OK;
 				if let Some(protocol) = request.protocols.first() {
 					response = response.with_protocol(protocol);
@@ -136,24 +137,24 @@ impl IrohRequest {
 	/// Reject the session.
 	pub async fn close(self, status: http::StatusCode) -> Result<(), web_transport_iroh::ServerError> {
 		match self {
-			IrohRequest::Quic { request } => {
+			Request::Quic { request } => {
 				request.close(status);
 				Ok(())
 			}
-			IrohRequest::WebTransport { request, .. } => request.reject(status).await,
+			Request::WebTransport { request, .. } => request.reject(status).await,
 		}
 	}
 
 	pub fn url(&self) -> Option<&Url> {
 		match self {
-			IrohRequest::Quic { .. } => None,
-			IrohRequest::WebTransport { request } => Some(&request.url),
+			Request::Quic { .. } => None,
+			Request::WebTransport { request } => Some(&request.url),
 		}
 	}
 }
 
 pub(crate) async fn connect(
-	endpoint: &IrohEndpoint,
+	endpoint: &Endpoint,
 	url: Url,
 	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
 ) -> anyhow::Result<web_transport_iroh::Session> {
