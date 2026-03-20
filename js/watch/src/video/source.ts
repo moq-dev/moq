@@ -2,7 +2,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import type { Sync } from "../sync";
+import { Sync, type SyncTrack } from "../sync";
 
 /**
  * A function that checks if a video configuration is supported by the backend.
@@ -13,6 +13,8 @@ export type SourceProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 	target?: Target | Signal<Target | undefined>;
 	supported?: Supported;
+	// Shared Sync instance for synchronizing playback across tracks. Defaults to a standalone Sync.
+	sync?: Sync;
 };
 
 export type Target = {
@@ -159,14 +161,16 @@ export class Source {
 	readonly config: Getter<Catalog.VideoConfig | undefined> = this.#config;
 
 	sync: Sync;
+	#syncTrack: SyncTrack;
 	supported: Signal<Supported | undefined>;
 
 	#signals = new Effect();
 
-	constructor(sync: Sync, props?: SourceProps) {
+	constructor(props: SourceProps) {
 		this.broadcast = Signal.from(props?.broadcast);
 		this.target = Signal.from(props?.target);
-		this.sync = sync;
+		this.sync = props.sync ?? new Sync();
+		this.#syncTrack = this.sync.track();
 		this.supported = Signal.from(props?.supported);
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -221,7 +225,7 @@ export class Source {
 
 		effect.set(this.#track, selected);
 		effect.set(this.#config, config);
-		effect.set(this.sync.video, config.jitter as Moq.Time.Milli | undefined);
+		this.#syncTrack.set(config.jitter as Moq.Time.Milli | undefined);
 	}
 
 	/**
@@ -268,6 +272,7 @@ export class Source {
 	}
 
 	close(): void {
+		this.#syncTrack.close();
 		this.#signals.close();
 	}
 }
