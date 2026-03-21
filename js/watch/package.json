@@ -26,6 +26,7 @@
 	"dependencies": {
 		"@moq/hang": "workspace:^",
 		"@moq/lite": "workspace:^",
+		"@moq/msf": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"@moq/ui-core": "workspace:^"
 	},
