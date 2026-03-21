@@ -55,16 +55,21 @@ impl EndpointConfig {
 			secret
 		} else if let Some(path) = self.secret {
 			let path = PathBuf::from(path);
-			if !path.exists() {
-				// Generate a new random secret and write it to the file with restricted permissions.
-				let secret = SecretKey::generate(&mut rand::rng());
-				let data = hex::encode(secret.to_bytes());
-				write_secret_file(&path, data.as_bytes()).await?;
-				secret
-			} else {
-				// Otherwise, read the secret from a file.
-				let key_str = tokio::fs::read_to_string(&path).await?;
-				SecretKey::from_str(&key_str)?
+			// Generate a new random secret and attempt to write it atomically.
+			// If the file already exists (AlreadyExists), read the existing secret instead.
+			// This avoids a TOCTOU race between exists() and create_new().
+			let secret = SecretKey::generate(&mut rand::rng());
+			let data = hex::encode(secret.to_bytes());
+			match write_secret_file(&path, data.as_bytes()).await {
+				Ok(()) => secret,
+				Err(e)
+					if e.downcast_ref::<std::io::Error>()
+						.is_some_and(|io| io.kind() == std::io::ErrorKind::AlreadyExists) =>
+				{
+					let key_str = tokio::fs::read_to_string(&path).await?;
+					SecretKey::from_str(&key_str)?
+				}
+				Err(e) => return Err(e),
 			}
 		} else {
 			// Otherwise, generate a new random secret.
@@ -93,6 +98,7 @@ impl EndpointConfig {
 pub enum Request {
 	Quic {
 		request: web_transport_iroh::QuicRequest,
+		alpns: Vec<&'static str>,
 	},
 	WebTransport {
 		request: Box<web_transport_iroh::H3Request>,
@@ -116,8 +122,9 @@ impl Request {
 					alpns,
 				})
 			}
-			alpn if moq_lite::ALPNS.contains(&alpn) => Ok(Self::Quic {
+			alpn if alpns.contains(&alpn) => Ok(Self::Quic {
 				request: web_transport_iroh::QuicRequest::accept(conn),
+				alpns,
 			}),
 			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
 		}
@@ -126,7 +133,7 @@ impl Request {
 	/// Accept the session.
 	pub async fn ok(self) -> Result<web_transport_iroh::Session, web_transport_iroh::ServerError> {
 		match self {
-			Request::Quic { request } => Ok(request.ok()),
+			Request::Quic { request, .. } => Ok(request.ok()),
 			Request::WebTransport { request, alpns } => {
 				let mut response = ConnectResponse::OK;
 				if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
@@ -140,7 +147,7 @@ impl Request {
 	/// Reject the session.
 	pub async fn close(self, status: http::StatusCode) -> Result<(), web_transport_iroh::ServerError> {
 		match self {
-			Request::Quic { request } => {
+			Request::Quic { request, .. } => {
 				request.close(status);
 				Ok(())
 			}
@@ -222,6 +229,9 @@ fn url_set_scheme(url: Url, scheme: &str) -> anyhow::Result<Url> {
 }
 
 /// Write secret key data to a file with owner-only permissions (0o600 on Unix).
+///
+/// Uses `create_new(true)` so the call fails with `AlreadyExists` if the file
+/// already exists, which callers can use to handle races atomically.
 async fn write_secret_file(path: &std::path::Path, data: &[u8]) -> anyhow::Result<()> {
 	use tokio::io::AsyncWriteExt;
 
@@ -231,7 +241,7 @@ async fn write_secret_file(path: &std::path::Path, data: &[u8]) -> anyhow::Resul
 	#[cfg(unix)]
 	opts.mode(0o600);
 
-	let mut file = opts.open(path).await.context("failed to create secret key file")?;
+	let mut file = opts.open(path).await?;
 	file.write_all(data).await.context("failed to write secret key")?;
 	Ok(())
 }
