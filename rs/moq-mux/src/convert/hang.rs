@@ -263,7 +263,15 @@ fn extract_from_moof_mdat(
 				let duration = entry.duration.unwrap_or(traf.tfhd.default_sample_duration.unwrap_or(0));
 				let size = entry.size.unwrap_or(traf.tfhd.default_sample_size.unwrap_or(0)) as usize;
 
-				let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
+				let pts = (dts as i64)
+					.checked_add(entry.cts.unwrap_or_default() as i64)
+					.context("PTS overflow")?;
+				anyhow::ensure!(
+					pts >= 0,
+					"PTS is negative: dts={dts} cts={}",
+					entry.cts.unwrap_or_default()
+				);
+				let pts = pts as u64;
 				let timestamp = Timestamp::from_scale(pts, timescale)?;
 
 				let keyframe = {

@@ -538,9 +538,14 @@ impl OriginConsumer {
 		if let Some(bc) = self.try_consume_broadcast(&path) {
 			return Ok(bc);
 		}
-		let mut scoped = self.with_filter(&[path]).ok_or(Error::NotFound)?;
-		let (_, broadcast) = scoped.announced().await?;
-		Ok(broadcast)
+		let mut scoped = self.with_filter(std::slice::from_ref(&path)).ok_or(Error::NotFound)?;
+		loop {
+			let (announced_path, broadcast) = scoped.announced().await?;
+			if announced_path == path {
+				return Ok(broadcast);
+			}
+			// Skip descendant announcements that don't match the exact path.
+		}
 	}
 
 	/// Returns a new OriginConsumer that only consumes broadcasts matching one of the prefixes.
