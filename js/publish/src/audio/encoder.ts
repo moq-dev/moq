@@ -1,5 +1,5 @@
-import * as Catalog from "@moq/hang/catalog";
-import * as Container from "@moq/hang/container";
+import { type Audio, type AudioConfig, type Container, PRIORITY, u53 } from "@moq/hang/catalog";
+import * as ContainerMod from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
@@ -25,12 +25,12 @@ export type EncoderProps = {
 	// NOTE: Each frame is always flushed to the network immediately.
 	groupDuration?: Time.Milli;
 
-	container?: Catalog.Container;
+	container?: Container;
 };
 
 export class Encoder {
 	static readonly TRACK = "audio/data";
-	static readonly PRIORITY = Catalog.PRIORITY.audio;
+	static readonly PRIORITY = PRIORITY.audio;
 
 	enabled: Signal<boolean>;
 
@@ -40,11 +40,11 @@ export class Encoder {
 
 	source: Signal<Source | undefined>;
 
-	#catalog = new Signal<Catalog.Audio | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Audio | undefined> = this.#catalog;
+	#catalog = new Signal<Audio | undefined>(undefined);
+	readonly catalog: Getter<Audio | undefined> = this.#catalog;
 
-	#config = new Signal<Catalog.AudioConfig | undefined>(undefined);
-	readonly config: Getter<Catalog.AudioConfig | undefined> = this.#config;
+	#config = new Signal<AudioConfig | undefined>(undefined);
+	readonly config: Getter<AudioConfig | undefined> = this.#config;
 
 	#worklet = new Signal<AudioWorkletNode | undefined>(undefined);
 
@@ -120,9 +120,9 @@ export class Encoder {
 
 		const config = {
 			codec: "opus",
-			sampleRate: Catalog.u53(worklet.context.sampleRate),
-			numberOfChannels: Catalog.u53(worklet.channelCount),
-			bitrate: Catalog.u53(worklet.channelCount * 32_000),
+			sampleRate: u53(worklet.context.sampleRate),
+			numberOfChannels: u53(worklet.channelCount),
+			bitrate: u53(worklet.channelCount * 32_000),
 			container: { kind: "legacy" } as const,
 		};
 
@@ -151,7 +151,7 @@ export class Encoder {
 
 		effect.set(this.active, true, false);
 
-		const producer = new Container.Legacy.Producer(track);
+		const producer = new ContainerMod.Legacy.Producer(track);
 		effect.cleanup(() => producer.close());
 
 		let lastKeyframe: Time.Micro | undefined;
@@ -218,7 +218,7 @@ export class Encoder {
 		const config = effect.get(this.#config);
 		if (!config) return;
 
-		const catalog: Catalog.Audio = {
+		const catalog: Audio = {
 			renditions: { [Encoder.TRACK]: config },
 		};
 

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ContainerSchema } from "./container";
 import { u53Schema } from "./integers";
+import { Section } from "./section";
 
 // Backwards compatibility: old track schema
 const TrackSchema = z.object({
@@ -60,3 +61,6 @@ export const AudioSchema = z
 
 export type Audio = z.infer<typeof AudioSchema>;
 export type AudioConfig = z.infer<typeof AudioConfigSchema>;
+
+/// Predefined section for audio catalog data.
+export const AUDIO = new Section("audio", AudioSchema);

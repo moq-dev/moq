@@ -1,6 +1,7 @@
-import * as Catalog from "@moq/hang/catalog";
+import { PRIORITY, type Track } from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import type { Chat } from "../sections";
 
 export interface TypingProps {
 	// Whether to start downloading the chat.
@@ -13,24 +14,24 @@ export class Typing {
 	enabled: Signal<boolean>;
 	active: Signal<boolean | undefined>;
 
-	#catalog = new Signal<Catalog.Track | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Track | undefined> = this.#catalog;
+	#catalog = new Signal<Track | undefined>(undefined);
+	readonly catalog: Getter<Track | undefined> = this.#catalog;
 
 	#signals = new Effect();
 
 	constructor(
 		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
+		chatSection: Getter<Chat | undefined>,
 		props?: TypingProps,
 	) {
 		this.broadcast = broadcast;
 		this.active = new Signal<boolean | undefined>(undefined);
 		this.enabled = Signal.from(props?.enabled ?? false);
 
-		// Grab the chat section from the catalog (if it's changed).
+		// Grab the chat.typing track from the catalog section (if it's changed).
 		this.#signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
-			this.#catalog.set(effect.get(catalog)?.chat?.typing);
+			this.#catalog.set(effect.get(chatSection)?.typing);
 		});
 
 		this.#signals.run(this.#run.bind(this));
@@ -41,7 +42,7 @@ export class Typing {
 		if (!values) return;
 		const [_, catalog, broadcast] = values;
 
-		const track = broadcast.subscribe(catalog.name, Catalog.PRIORITY.typing);
+		const track = broadcast.subscribe(catalog.name, PRIORITY.typing);
 		effect.cleanup(() => track.close());
 
 		effect.spawn(async () => {

@@ -1,7 +1,7 @@
 use anyhow::Context;
 use base64::Engine;
 use bytes::Bytes;
-use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig};
+use hang::catalog::{AUDIO, Audio, AudioCodec, AudioConfig, Container, VIDEO, Video, VideoCodec, VideoConfig};
 use mp4_atom::{Atom, Encode};
 
 /// Converts a broadcast from any format to CMAF format.
@@ -24,114 +24,150 @@ impl Fmp4 {
 	/// passes them through unchanged (no-op). If tracks are hang/Legacy, converts
 	/// each frame to moof+mdat.
 	pub async fn run(self) -> anyhow::Result<()> {
+		let input = self.input;
 		let mut broadcast = self.output;
-		let catalog_producer = crate::CatalogProducer::new(&mut broadcast)?;
+		let mut catalog_producer = crate::CatalogProducer::new(&mut broadcast)?;
 
-		let catalog_track = self.input.subscribe_track(&hang::Catalog::default_track())?;
-		let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
-		let catalog = catalog_consumer.next().await?.context("empty catalog")?;
+		let mut catalog_track = input.subscribe_track(&hang::catalog::default_track())?;
 
-		let mut output_catalog = catalog_producer.clone();
-		let mut guard = output_catalog.lock();
-		let mut tasks = tokio::task::JoinSet::new();
+		// Read the first catalog group/frame directly
+		let mut group = catalog_track
+			.recv_group()
+			.await?
+			.context("catalog track closed before first group")?;
+		let frame = group
+			.read_frame()
+			.await?
+			.context("catalog group closed before first frame")?;
 
-		for (name, config) in &catalog.video.renditions {
-			let input_track = self.input.subscribe_track(&moq_lite::Track {
-				name: name.clone(),
-				priority: 1,
-			})?;
+		let json: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&frame)?;
 
-			match &config.container {
-				Container::Cmaf { .. } => {
-					guard.video.renditions.insert(name.clone(), config.clone());
-					let output_track = broadcast.create_track(moq_lite::Track {
-						name: name.clone(),
-						priority: 1,
-					})?;
-					let track_name = name.clone();
-					tasks.spawn(async move {
-						if let Err(e) = passthrough_track(input_track, output_track).await {
-							tracing::error!(%e, track = %track_name, "passthrough_track failed");
-						}
-					});
-				}
-				Container::Legacy => {
-					let init_data = build_video_init(config)?;
-					let timescale = guess_video_timescale(config);
+		let video: Video = json
+			.get("video")
+			.map(|v| serde_json::from_value(v.clone()))
+			.transpose()?
+			.unwrap_or_default();
 
-					let mut cmaf_config = config.clone();
-					cmaf_config.container = Container::Cmaf {
-						init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
-					};
-					guard.video.renditions.insert(name.clone(), cmaf_config);
+		let audio: Audio = json
+			.get("audio")
+			.map(|v| serde_json::from_value(v.clone()))
+			.transpose()?
+			.unwrap_or_default();
 
-					let output_track = broadcast.create_track(moq_lite::Track {
-						name: name.clone(),
-						priority: 1,
-					})?;
-
-					let track_name = name.clone();
-					tasks.spawn(async move {
-						if let Err(e) = convert_legacy_to_cmaf(input_track, output_track, timescale, true).await {
-							tracing::error!(%e, track = %track_name, "convert_legacy_to_cmaf failed");
-						}
-					});
-				}
-			}
-		}
-
-		for (name, config) in &catalog.audio.renditions {
-			let input_track = self.input.subscribe_track(&moq_lite::Track {
-				name: name.clone(),
-				priority: 2,
-			})?;
-
-			match &config.container {
-				Container::Cmaf { .. } => {
-					guard.audio.renditions.insert(name.clone(), config.clone());
-					let output_track = broadcast.create_track(moq_lite::Track {
-						name: name.clone(),
-						priority: 2,
-					})?;
-					let track_name = name.clone();
-					tasks.spawn(async move {
-						if let Err(e) = passthrough_track(input_track, output_track).await {
-							tracing::error!(%e, track = %track_name, "passthrough_track failed");
-						}
-					});
-				}
-				Container::Legacy => {
-					let init_data = build_audio_init(config)?;
-
-					let mut cmaf_config = config.clone();
-					cmaf_config.container = Container::Cmaf {
-						init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
-					};
-					guard.audio.renditions.insert(name.clone(), cmaf_config);
-
-					let output_track = broadcast.create_track(moq_lite::Track {
-						name: name.clone(),
-						priority: 2,
-					})?;
-
-					let timescale = config.sample_rate as u64;
-					let track_name = name.clone();
-					tasks.spawn(async move {
-						if let Err(e) = convert_legacy_to_cmaf(input_track, output_track, timescale, false).await {
-							tracing::error!(%e, track = %track_name, "convert_legacy_to_cmaf failed");
-						}
-					});
-				}
-			}
-		}
-
-		drop(guard);
-
-		// Keep broadcast and catalog alive until all track tasks complete.
-		while tasks.join_next().await.is_some() {}
-
-		Ok(())
+		run_with_catalog(&input, &mut broadcast, &mut catalog_producer, &video, &audio).await
 	}
+}
+
+async fn run_with_catalog(
+	input: &moq_lite::BroadcastConsumer,
+	broadcast: &mut moq_lite::BroadcastProducer,
+	catalog_producer: &mut crate::CatalogProducer,
+	video: &Video,
+	audio: &Audio,
+) -> anyhow::Result<()> {
+	let mut output_video = Video::default();
+	let mut output_audio = Audio::default();
+	let mut tasks = tokio::task::JoinSet::new();
+
+	for (name, config) in &video.renditions {
+		let input_track = input.subscribe_track(&moq_lite::Track {
+			name: name.clone(),
+			priority: 1,
+		})?;
+
+		match &config.container {
+			Container::Cmaf { .. } => {
+				output_video.renditions.insert(name.clone(), config.clone());
+				let output_track = broadcast.create_track(moq_lite::Track {
+					name: name.clone(),
+					priority: 1,
+				})?;
+				let track_name = name.clone();
+				tasks.spawn(async move {
+					if let Err(e) = passthrough_track(input_track, output_track).await {
+						tracing::error!(%e, track = %track_name, "passthrough_track failed");
+					}
+				});
+			}
+			Container::Legacy => {
+				let init_data = build_video_init(config)?;
+				let timescale = guess_video_timescale(config);
+
+				let mut cmaf_config = config.clone();
+				cmaf_config.container = Container::Cmaf {
+					init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
+				};
+				output_video.renditions.insert(name.clone(), cmaf_config);
+
+				let output_track = broadcast.create_track(moq_lite::Track {
+					name: name.clone(),
+					priority: 1,
+				})?;
+
+				let track_name = name.clone();
+				tasks.spawn(async move {
+					if let Err(e) = convert_legacy_to_cmaf(input_track, output_track, timescale, true).await {
+						tracing::error!(%e, track = %track_name, "convert_legacy_to_cmaf failed");
+					}
+				});
+			}
+		}
+	}
+
+	for (name, config) in &audio.renditions {
+		let input_track = input.subscribe_track(&moq_lite::Track {
+			name: name.clone(),
+			priority: 2,
+		})?;
+
+		match &config.container {
+			Container::Cmaf { .. } => {
+				output_audio.renditions.insert(name.clone(), config.clone());
+				let output_track = broadcast.create_track(moq_lite::Track {
+					name: name.clone(),
+					priority: 2,
+				})?;
+				let track_name = name.clone();
+				tasks.spawn(async move {
+					if let Err(e) = passthrough_track(input_track, output_track).await {
+						tracing::error!(%e, track = %track_name, "passthrough_track failed");
+					}
+				});
+			}
+			Container::Legacy => {
+				let init_data = build_audio_init(config)?;
+
+				let mut cmaf_config = config.clone();
+				cmaf_config.container = Container::Cmaf {
+					init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
+				};
+				output_audio.renditions.insert(name.clone(), cmaf_config);
+
+				let output_track = broadcast.create_track(moq_lite::Track {
+					name: name.clone(),
+					priority: 2,
+				})?;
+
+				let timescale = config.sample_rate as u64;
+				let track_name = name.clone();
+				tasks.spawn(async move {
+					if let Err(e) = convert_legacy_to_cmaf(input_track, output_track, timescale, false).await {
+						tracing::error!(%e, track = %track_name, "convert_legacy_to_cmaf failed");
+					}
+				});
+			}
+		}
+	}
+
+	// Publish the output catalog
+	catalog_producer.set(&VIDEO, &output_video)?;
+	catalog_producer.set(&AUDIO, &output_audio)?;
+	catalog_producer.flush();
+
+	// Keep broadcast and catalog alive until all track tasks complete.
+	while tasks.join_next().await.is_some() {}
+
+	Ok(())
 }
 
 async fn passthrough_track(

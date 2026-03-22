@@ -1,6 +1,6 @@
-import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
-import { Effect, type Signal } from "@moq/signals";
+import { Effect, type Getter, type Signal } from "@moq/signals";
+import type { Location as LocationSection } from "../sections";
 import { Peers, type PeersProps } from "./peers";
 import { Window, type WindowProps } from "./window";
 
@@ -17,11 +17,11 @@ export class Root {
 
 	constructor(
 		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
+		locationSection: Getter<LocationSection | undefined>,
 		props?: Props,
 	) {
-		this.window = new Window(broadcast, catalog, props?.window);
-		this.peers = new Peers(broadcast, catalog, props?.peers);
+		this.window = new Window(broadcast, locationSection, props?.window);
+		this.peers = new Peers(broadcast, locationSection, props?.peers);
 	}
 
 	close() {

@@ -1,9 +1,9 @@
-import type * as Catalog from "@moq/hang/catalog";
 import { Effect, Signal } from "@moq/signals";
 import { Peers, type PeersProps } from "./peers";
-import { Window, type WindowProps } from "./window";
+import { type LocationCatalog, Window, type WindowProps } from "./window";
 
 export * from "./peers";
+export type { Position } from "./types";
 export * from "./window";
 
 export type Props = {
@@ -15,7 +15,7 @@ export class Root {
 	window: Window;
 	peers: Peers;
 
-	catalog = new Signal<Catalog.Location | undefined>(undefined);
+	catalog = new Signal<LocationCatalog | undefined>(undefined);
 	signals = new Effect();
 
 	constructor(props?: Props) {

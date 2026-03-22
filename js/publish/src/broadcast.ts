@@ -1,4 +1,3 @@
-import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
@@ -116,23 +115,32 @@ export class Broadcast {
 
 	#serveCatalog(track: Moq.Track, effect: Effect): void {
 		if (!effect.get(this.enabled)) {
-			// Clear the catalog.
-			track.writeFrame(Catalog.encode({}));
+			// Write an empty catalog when disabled.
+			track.writeFrame(new TextEncoder().encode("{}"));
 			return;
 		}
 
-		// Create the new catalog.
-		const catalog: Catalog.Root = {
-			video: effect.get(this.video.catalog),
-			audio: effect.get(this.audio.catalog),
-			location: effect.get(this.location.catalog),
-			user: effect.get(this.user.catalog),
-			chat: effect.get(this.chat.catalog),
-			preview: effect.get(this.preview.catalog),
-		};
+		const obj: Record<string, unknown> = {};
 
-		const encoded = Catalog.encode(catalog);
-		track.writeFrame(encoded);
+		const video = effect.get(this.video.catalog);
+		if (video) obj.video = video;
+
+		const audio = effect.get(this.audio.catalog);
+		if (audio) obj.audio = audio;
+
+		const location = effect.get(this.location.catalog);
+		if (location) obj.location = location;
+
+		const user = effect.get(this.user.catalog);
+		if (user) obj.user = user;
+
+		const chat = effect.get(this.chat.catalog);
+		if (chat) obj.chat = chat;
+
+		const preview = effect.get(this.preview.catalog);
+		if (preview) obj.preview = preview;
+
+		track.writeFrame(new TextEncoder().encode(JSON.stringify(obj)));
 	}
 
 	close() {

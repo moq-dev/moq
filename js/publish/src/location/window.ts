@@ -1,28 +1,35 @@
-import * as Catalog from "@moq/hang/catalog";
+import { PRIORITY, type Track } from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
-import * as Zod from "@moq/lite/zod";
 import { Effect, Signal } from "@moq/signals";
+import type { Position } from "./types";
 
 export type WindowProps = {
 	// If true, then we'll publish our position to the broadcast.
 	enabled?: boolean | Signal<boolean>;
 
 	// Our current position.
-	position?: Catalog.Position | Signal<Catalog.Position | undefined>;
+	position?: Position | Signal<Position | undefined>;
 
 	// If set, then this broadcaster allows other peers to request position updates via this handle.
 	handle?: string | Signal<string | undefined>;
 };
 
+export type LocationCatalog = {
+	initial?: Position;
+	track?: Track;
+	handle?: string;
+	peers?: Track;
+};
+
 export class Window {
 	static readonly TRACK = "location/window.json";
-	static readonly PRIORITY = Catalog.PRIORITY.location;
+	static readonly PRIORITY = PRIORITY.location;
 
 	enabled: Signal<boolean>;
-	position: Signal<Catalog.Position | undefined>;
+	position: Signal<Position | undefined>;
 	handle: Signal<string | undefined>; // Allow other peers to request position updates via this handle.
 
-	catalog = new Signal<Catalog.Location | undefined>(undefined);
+	catalog = new Signal<LocationCatalog | undefined>(undefined);
 
 	signals = new Effect();
 
@@ -48,7 +55,7 @@ export class Window {
 		if (!values) return;
 		const [_, position] = values;
 
-		Zod.write(track, position, Catalog.PositionSchema);
+		track.writeJson(position);
 	}
 
 	close() {

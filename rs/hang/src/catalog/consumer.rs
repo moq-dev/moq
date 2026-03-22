@@ -1,43 +1,71 @@
-use crate::{Catalog, Result};
+use crate::Result;
 
-/// A catalog consumer, used to receive catalog updates and discover tracks.
-///
-/// This wraps a `moq_lite::TrackConsumer` and automatically deserializes JSON
-/// catalog data to discover available audio and video tracks in a broadcast.
-#[derive(Clone)]
+use super::CatalogReader;
+
+/// The default name for the catalog track.
+pub const DEFAULT_TRACK_NAME: &str = "catalog.json";
+
+/// The default priority for the catalog track.
+pub const DEFAULT_TRACK_PRIORITY: u8 = 100;
+
+/// Returns the default track descriptor for the catalog.
+pub fn default_track() -> moq_lite::Track {
+	moq_lite::Track {
+		name: DEFAULT_TRACK_NAME.to_string(),
+		priority: DEFAULT_TRACK_PRIORITY,
+	}
+}
+
+/// A catalog consumer that reads JSON frames from a MoQ track and
+/// feeds them into a `CatalogReader` for per-section change notification.
 pub struct CatalogConsumer {
 	/// Access to the underlying track consumer.
 	pub track: moq_lite::TrackConsumer,
+
+	/// The reader that distributes per-section updates.
+	reader: CatalogReader,
+
 	group: Option<moq_lite::GroupConsumer>,
 }
 
 impl CatalogConsumer {
 	/// Create a new catalog consumer from a MoQ track consumer.
 	pub fn new(track: moq_lite::TrackConsumer) -> Self {
-		Self { track, group: None }
+		Self {
+			track,
+			reader: CatalogReader::new(),
+			group: None,
+		}
 	}
 
-	/// Get the next catalog update.
+	/// Get a reference to the reader for registering section interest.
+	pub fn reader(&self) -> &CatalogReader {
+		&self.reader
+	}
+
+	/// Run the background loop that reads frames and dispatches to sections.
 	///
-	/// This method waits for the next catalog publication and returns the
-	/// catalog data. If there are no more updates, `None` is returned.
-	pub async fn next(&mut self) -> Result<Option<Catalog>> {
+	/// This method blocks until the track is closed.
+	pub async fn run(&mut self) -> Result<()> {
 		loop {
 			tokio::select! {
 				res = self.track.recv_group() => {
 					match res? {
 						Some(group) => {
-							// Use the new group.
 							self.group = Some(group);
 						}
-						// The track has ended, so we should return None.
-						None => return Ok(None),
+						None => {
+							self.reader.close();
+							return Ok(());
+						}
 					}
 				},
 				Some(frame) = async { self.group.as_mut()?.read_frame().await.transpose() } => {
 					self.group.take(); // We don't support deltas yet
-					let catalog = Catalog::from_slice(&frame?)?;
-					return Ok(Some(catalog));
+
+					let json: serde_json::Map<String, serde_json::Value> =
+						serde_json::from_slice(&frame?)?;
+					self.reader.update(json);
 				}
 			}
 		}

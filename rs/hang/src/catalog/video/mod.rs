@@ -16,7 +16,10 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, hex::Hex};
 
-use crate::catalog::Container;
+use crate::catalog::{Container, Section};
+
+/// Predefined section for video catalog data.
+pub const VIDEO: Section<Video> = Section::new("video");
 
 /// Information about a video track in the catalog.
 ///

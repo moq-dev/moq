@@ -42,7 +42,7 @@ impl Subscribe {
 		let converter = moq_mux::convert::Fmp4::new(self.broadcast, cmaf_output);
 
 		// Subscribe to the catalog before the converter starts, so we don't miss it.
-		let catalog_track = cmaf_consumer.subscribe_track(&hang::Catalog::default_track())?;
+		let catalog_track = cmaf_consumer.subscribe_track(&hang::catalog::default_track())?;
 
 		let max_latency = std::time::Duration::from_millis(self.args.max_latency);
 
@@ -65,20 +65,31 @@ async fn mux_fmp4(
 	let mut stdout = tokio::io::stdout();
 
 	let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
-	let catalog = catalog_consumer.next().await?.context("empty catalog")?;
+	let video_section = catalog_consumer.reader().section(&hang::catalog::VIDEO);
+	let audio_section = catalog_consumer.reader().section(&hang::catalog::AUDIO);
 
-	// Build exporter from catalog (for init segment)
-	let exporter = moq_mux::consumer::Fmp4::new(&catalog)?;
+	// Run until first catalog update
+	tokio::select! {
+		res = catalog_consumer.run() => { res?; anyhow::bail!("catalog closed before first update"); },
+		_ = video_section.changed() => {},
+		_ = audio_section.changed() => {},
+	}
+
+	let video = video_section.get()?.unwrap_or_default();
+	let audio = audio_section.get()?.unwrap_or_default();
+
+	// Build exporter from catalog sections (for init segment)
+	let exporter = moq_mux::consumer::Fmp4::new(&video, &audio)?;
 
 	// Write init segment (merged multi-track moov)
-	let init = exporter.init(&catalog)?;
+	let init = exporter.init(&video, &audio)?;
 	stdout.write_all(&init).await?;
 	stdout.flush().await?;
 
 	// Build OrderedMuxer from all track consumers (all CMAF after conversion)
 	let mut muxer_tracks = Vec::new();
 
-	for (name, config) in &catalog.video.renditions {
+	for (name, config) in &video.renditions {
 		let track = cmaf_consumer.subscribe_track(&moq_lite::Track {
 			name: name.clone(),
 			priority: 1,
@@ -96,7 +107,7 @@ async fn mux_fmp4(
 		muxer_tracks.push((name.clone(), consumer));
 	}
 
-	for (name, config) in &catalog.audio.renditions {
+	for (name, config) in &audio.renditions {
 		let track = cmaf_consumer.subscribe_track(&moq_lite::Track {
 			name: name.clone(),
 			priority: 2,

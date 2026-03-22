@@ -1,11 +1,10 @@
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, MutexGuard};
+use hang::catalog::{Audio, Section, Video};
+use serde::Serialize;
 
 /// Produces both a hang and MSF catalog track for a broadcast.
 ///
-/// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
-/// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
-/// Both the hang (`catalog.json`) and MSF (`catalog`) tracks are published on drop of the guard.
+/// Wraps a [`hang::CatalogWriter`] and publishes updates to both
+/// the hang (`catalog.json`) and MSF (`catalog`) tracks when [`flush`](Self::flush) is called.
 #[derive(Clone)]
 pub struct CatalogProducer {
 	/// Access to the underlying hang catalog track producer.
@@ -14,21 +13,13 @@ pub struct CatalogProducer {
 	/// Access to the underlying MSF catalog track producer.
 	pub msf_track: moq_lite::TrackProducer,
 
-	current: Arc<Mutex<hang::Catalog>>,
+	writer: hang::CatalogWriter,
 }
 
 impl CatalogProducer {
 	/// Create a new catalog producer, inserting both catalog tracks into the broadcast.
 	pub fn new(broadcast: &mut moq_lite::BroadcastProducer) -> Result<Self, moq_lite::Error> {
-		Self::with_catalog(broadcast, hang::Catalog::default())
-	}
-
-	/// Create a new catalog producer with the given initial catalog.
-	pub fn with_catalog(
-		broadcast: &mut moq_lite::BroadcastProducer,
-		catalog: hang::Catalog,
-	) -> Result<Self, moq_lite::Error> {
-		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
+		let hang_track = broadcast.create_track(hang::catalog::default_track())?;
 		let msf_track = broadcast.create_track(moq_lite::Track {
 			name: moq_msf::DEFAULT_NAME.to_string(),
 			priority: 100,
@@ -37,80 +28,67 @@ impl CatalogProducer {
 		Ok(Self {
 			hang_track,
 			msf_track,
-			current: Arc::new(Mutex::new(catalog)),
+			writer: hang::CatalogWriter::new(),
 		})
 	}
 
-	/// Get mutable access to the catalog, publishing it after any changes.
-	pub fn lock(&mut self) -> CatalogGuard<'_> {
-		CatalogGuard {
-			catalog: self.current.lock().unwrap(),
-			hang_track: &mut self.hang_track,
-			msf_track: &mut self.msf_track,
-			updated: false,
-		}
+	/// Set a typed section in the catalog.
+	///
+	/// This does NOT publish the update. Call [`flush`](Self::flush) to publish.
+	pub fn set<T: Serialize>(&self, section: &Section<T>, value: &T) -> Result<(), hang::Error> {
+		self.writer.set(section, value)
 	}
 
-	/// Get a snapshot of the current catalog.
-	pub fn snapshot(&self) -> hang::Catalog {
-		self.current.lock().unwrap().clone()
+	/// Remove a section from the catalog by name.
+	///
+	/// This does NOT publish the update. Call [`flush`](Self::flush) to publish.
+	pub fn remove(&self, name: &str) -> Result<(), hang::Error> {
+		self.writer.remove(name)
 	}
 
-	/// Create a consumer for this catalog, receiving updates as they're published.
+	/// Publish the current catalog state to both the hang and MSF tracks.
+	pub fn flush(&mut self) {
+		// Publish hang catalog
+		let Ok(encoded) = self.writer.encode() else {
+			return;
+		};
+		let Ok(mut group) = self.hang_track.append_group() else {
+			return;
+		};
+		let _ = group.write_frame(encoded);
+		let _ = group.finish();
+
+		// Publish MSF catalog
+		// Read video and audio sections from the writer state for MSF conversion.
+		let state = self.writer.read();
+		let video: Option<Video> = state
+			.sections
+			.get("video")
+			.and_then(|v| serde_json::from_value(v.clone()).ok());
+		let audio: Option<Audio> = state
+			.sections
+			.get("audio")
+			.and_then(|v| serde_json::from_value(v.clone()).ok());
+		drop(state);
+
+		crate::msf::publish(video.as_ref(), audio.as_ref(), &mut self.msf_track);
+	}
+
+	/// Get a reference to the underlying [`hang::CatalogWriter`].
+	pub fn writer(&self) -> &hang::CatalogWriter {
+		&self.writer
+	}
+
+	/// Create a consumer for the hang catalog track, receiving updates as they're published.
 	pub fn consume(&self) -> hang::CatalogConsumer {
 		hang::CatalogConsumer::new(self.hang_track.consume())
 	}
 
 	/// Finish publishing to this catalog.
 	pub fn finish(&mut self) -> Result<(), moq_lite::Error> {
+		self.writer.close();
 		self.hang_track.finish()?;
 		self.msf_track.finish()?;
 		Ok(())
-	}
-}
-
-/// RAII guard for modifying a catalog with automatic publishing on drop.
-///
-/// Obtained via [`CatalogProducer::lock`].
-///
-/// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
-pub struct CatalogGuard<'a> {
-	catalog: MutexGuard<'a, hang::Catalog>,
-	hang_track: &'a mut moq_lite::TrackProducer,
-	msf_track: &'a mut moq_lite::TrackProducer,
-	updated: bool,
-}
-
-impl<'a> Deref for CatalogGuard<'a> {
-	type Target = hang::Catalog;
-
-	fn deref(&self) -> &Self::Target {
-		&self.catalog
-	}
-}
-
-impl<'a> DerefMut for CatalogGuard<'a> {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		self.updated = true;
-		&mut self.catalog
-	}
-}
-
-impl Drop for CatalogGuard<'_> {
-	fn drop(&mut self) {
-		if !self.updated {
-			return;
-		}
-
-		// Publish hang catalog
-		let Ok(mut group) = self.hang_track.append_group() else {
-			return;
-		};
-		let frame = self.catalog.to_string().expect("invalid catalog");
-		let _ = group.write_frame(frame);
-		let _ = group.finish();
-
-		// Publish MSF catalog
-		crate::msf::publish(&self.catalog, self.msf_track);
 	}
 }

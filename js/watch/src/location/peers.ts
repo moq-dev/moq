@@ -1,7 +1,8 @@
-import * as Catalog from "@moq/hang/catalog";
+import { PRIORITY } from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import { type Location, PeersSchema, type Position } from "../sections";
 
 export interface PeersProps {
 	enabled?: boolean | Signal<boolean>;
@@ -11,32 +12,32 @@ export class Peers {
 	enabled: Signal<boolean>;
 	broadcast: Signal<Moq.Broadcast | undefined>;
 
-	#catalog = new Signal<Catalog.Track | undefined>(undefined);
-	#positions = new Signal<Record<string, Catalog.Position> | undefined>(undefined);
+	#peersTrack = new Signal<{ name: string } | undefined>(undefined);
+	#positions = new Signal<Record<string, Position> | undefined>(undefined);
 
 	signals = new Effect();
 
 	constructor(
 		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
+		locationSection: Getter<Location | undefined>,
 		props?: PeersProps,
 	) {
 		this.broadcast = broadcast;
 		this.enabled = Signal.from(props?.enabled ?? false);
 
 		this.signals.run((effect) => {
-			this.#catalog.set(effect.get(catalog)?.location?.peers);
+			this.#peersTrack.set(effect.get(locationSection)?.peers);
 		});
 
 		this.signals.run(this.#run.bind(this));
 	}
 
 	#run(effect: Effect) {
-		const values = effect.getAll([this.enabled, this.#catalog, this.broadcast]);
+		const values = effect.getAll([this.enabled, this.#peersTrack, this.broadcast]);
 		if (!values) return;
 		const [_, catalog, broadcast] = values;
 
-		const track = broadcast.subscribe(catalog.name, Catalog.PRIORITY.location);
+		const track = broadcast.subscribe(catalog.name, PRIORITY.location);
 		effect.cleanup(() => track.close());
 
 		effect.spawn(this.#runTrack.bind(this, track));
@@ -45,7 +46,7 @@ export class Peers {
 	async #runTrack(track: Moq.Track) {
 		try {
 			for (;;) {
-				const frame = await Zod.read(track, Catalog.PeersSchema);
+				const frame = await Zod.read(track, PeersSchema);
 				if (!frame) break;
 
 				this.#positions.set(frame);
@@ -56,7 +57,7 @@ export class Peers {
 		}
 	}
 
-	get positions(): Getter<Record<string, Catalog.Position> | undefined> {
+	get positions(): Getter<Record<string, Position> | undefined> {
 		return this.#positions;
 	}
 

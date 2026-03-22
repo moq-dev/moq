@@ -42,9 +42,8 @@ pub struct MoqFrame {
 	pub keyframe: bool,
 }
 
-pub fn convert_catalog(catalog: &hang::catalog::Catalog) -> MoqCatalog {
-	let video = catalog
-		.video
+pub fn convert_catalog(video: &hang::catalog::Video, audio: &hang::catalog::Audio) -> MoqCatalog {
+	let video_map = video
 		.renditions
 		.iter()
 		.map(|(name, config)| {
@@ -68,8 +67,7 @@ pub fn convert_catalog(catalog: &hang::catalog::Catalog) -> MoqCatalog {
 		})
 		.collect();
 
-	let audio = catalog
-		.audio
+	let audio_map = audio
 		.renditions
 		.iter()
 		.map(|(name, config)| {
@@ -86,16 +84,16 @@ pub fn convert_catalog(catalog: &hang::catalog::Catalog) -> MoqCatalog {
 		})
 		.collect();
 
-	let display = catalog.video.display.as_ref().map(|d| MoqDimensions {
+	let display = video.display.as_ref().map(|d| MoqDimensions {
 		width: d.width,
 		height: d.height,
 	});
 
 	MoqCatalog {
-		video,
-		audio,
+		video: video_map,
+		audio: audio_map,
 		display,
-		rotation: catalog.video.rotation,
-		flip: catalog.video.flip,
+		rotation: video.rotation,
+		flip: video.flip,
 	}
 }

@@ -1,7 +1,8 @@
-import * as Catalog from "@moq/hang/catalog";
+import { PRIORITY } from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
-import { Effect, Signal } from "@moq/signals";
+import { Effect, type Getter, Signal } from "@moq/signals";
+import { type Preview as PreviewInfo, PreviewSchema, type PreviewTrack } from "./sections";
 
 export interface PreviewProps {
 	enabled?: boolean | Signal<boolean>;
@@ -10,35 +11,33 @@ export interface PreviewProps {
 export class Preview {
 	broadcast: Signal<Moq.Broadcast | undefined>;
 	enabled: Signal<boolean>;
-	preview = new Signal<Catalog.Preview | undefined>(undefined);
-	#catalog = new Signal<Catalog.Track | undefined>(undefined);
+	preview = new Signal<PreviewInfo | undefined>(undefined);
 
 	#signals = new Effect();
 
 	constructor(
 		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
+		previewSection: Getter<PreviewTrack | undefined>,
 		props?: PreviewProps,
 	) {
 		this.broadcast = broadcast;
 		this.enabled = Signal.from(props?.enabled ?? false);
 
 		this.#signals.run((effect) => {
-			this.#catalog.set(effect.get(catalog)?.preview);
-		});
-
-		this.#signals.run((effect) => {
-			const values = effect.getAll([this.enabled, this.broadcast, this.#catalog]);
+			const values = effect.getAll([this.enabled, this.broadcast]);
 			if (!values) return;
-			const [_, broadcast, catalog] = values;
+			const [_, broadcast] = values;
+
+			const catalog = effect.get(previewSection);
+			if (!catalog) return;
 
 			// Subscribe to the preview.json track directly
-			const track = broadcast.subscribe(catalog.name, Catalog.PRIORITY.preview);
+			const track = broadcast.subscribe(catalog.name, PRIORITY.preview);
 			effect.cleanup(() => track.close());
 
 			effect.spawn(async () => {
 				try {
-					const info = await Zod.read(track, Catalog.PreviewSchema);
+					const info = await Zod.read(track, PreviewSchema);
 					if (!info) return;
 
 					this.preview.set(info);

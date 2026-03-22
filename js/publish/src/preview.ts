@@ -1,20 +1,30 @@
-import * as Catalog from "@moq/hang/catalog";
+import { PRIORITY, type Track } from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 
+export type PreviewInfo = {
+	name?: string;
+	avatar?: string;
+	audio?: boolean;
+	video?: boolean;
+	screen?: boolean;
+	typing?: boolean;
+	chat?: boolean;
+};
+
 export type PreviewProps = {
 	enabled?: boolean | Signal<boolean>;
-	info?: Catalog.Preview | Signal<Catalog.Preview | undefined>;
+	info?: PreviewInfo | Signal<PreviewInfo | undefined>;
 };
 
 export class Preview {
 	static readonly TRACK = "preview.json";
-	static readonly PRIORITY = Catalog.PRIORITY.preview;
+	static readonly PRIORITY = PRIORITY.preview;
 
 	enabled: Signal<boolean>;
-	info: Signal<Catalog.Preview | undefined>;
+	info: Signal<PreviewInfo | undefined>;
 
-	catalog = new Signal<Catalog.Track | undefined>(undefined);
+	catalog = new Signal<Track | undefined>(undefined);
 
 	signals = new Effect();
 

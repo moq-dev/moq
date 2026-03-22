@@ -1,6 +1,7 @@
-import * as Catalog from "@moq/hang/catalog";
+import { PRIORITY, type Track } from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import type { Chat } from "../sections";
 
 export interface MessageProps {
 	// Whether to start downloading the chat.
@@ -16,23 +17,23 @@ export class Message {
 	#latest = new Signal<string | undefined>(undefined);
 	readonly latest: Getter<string | undefined> = this.#latest;
 
-	#catalog = new Signal<Catalog.Track | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Track | undefined> = this.#catalog;
+	#catalog = new Signal<Track | undefined>(undefined);
+	readonly catalog: Getter<Track | undefined> = this.#catalog;
 
 	#signals = new Effect();
 
 	constructor(
 		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
+		chatSection: Getter<Chat | undefined>,
 		props?: MessageProps,
 	) {
 		this.broadcast = broadcast;
 		this.enabled = Signal.from(props?.enabled ?? false);
 
-		// Grab the chat section from the catalog (if it's changed).
+		// Grab the chat.message track from the catalog section (if it's changed).
 		this.#signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
-			this.#catalog.set(effect.get(catalog)?.chat?.message);
+			this.#catalog.set(effect.get(chatSection)?.message);
 		});
 
 		this.#signals.run(this.#run.bind(this));
@@ -43,7 +44,7 @@ export class Message {
 		if (!values) return;
 		const [_, catalog, broadcast] = values;
 
-		const track = broadcast.subscribe(catalog.name, Catalog.PRIORITY.chat);
+		const track = broadcast.subscribe(catalog.name, PRIORITY.chat);
 		effect.cleanup(() => track.close());
 
 		// Undefined is only when we're not subscribed to the track.

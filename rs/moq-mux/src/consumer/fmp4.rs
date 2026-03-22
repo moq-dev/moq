@@ -1,7 +1,7 @@
 use anyhow::Context;
 use base64::Engine;
 use bytes::Bytes;
-use hang::catalog::{Catalog, Container, VideoConfig};
+use hang::catalog::{Audio, Container, Video, VideoConfig};
 use mp4_atom::{DecodeMaybe, Encode};
 
 use super::OrderedFrame;
@@ -21,12 +21,12 @@ struct Fmp4ExportTrack {
 }
 
 impl Fmp4 {
-	/// Build from catalog configuration.
-	pub fn new(catalog: &Catalog) -> anyhow::Result<Self> {
+	/// Build from video and audio section configuration.
+	pub fn new(video: &Video, audio: &Audio) -> anyhow::Result<Self> {
 		let mut tracks = Vec::new();
 		let mut track_id = 1u32;
 
-		for (name, config) in &catalog.video.renditions {
+		for (name, config) in &video.renditions {
 			let timescale = match &config.container {
 				Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
 				Container::Legacy => guess_video_timescale(config),
@@ -41,7 +41,7 @@ impl Fmp4 {
 			track_id += 1;
 		}
 
-		for (name, config) in &catalog.audio.renditions {
+		for (name, config) in &audio.renditions {
 			let timescale = match &config.container {
 				Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
 				Container::Legacy => config.sample_rate as u64,
@@ -63,20 +63,20 @@ impl Fmp4 {
 	///
 	/// For multi-track output, decodes each track's init_data, extracts trak+trex,
 	/// and builds a merged ftyp+moov with renumbered track IDs.
-	pub fn init(&self, catalog: &Catalog) -> anyhow::Result<Bytes> {
+	pub fn init(&self, video: &Video, audio: &Audio) -> anyhow::Result<Bytes> {
 		let mut traks = Vec::new();
 		let mut trexs = Vec::new();
 		let mut ftyp_data = None;
 
 		// Collect all track init data
 		let mut track_inits: Vec<&str> = Vec::new();
-		for config in catalog.video.renditions.values() {
+		for config in video.renditions.values() {
 			match &config.container {
 				Container::Cmaf { init_data } => track_inits.push(init_data),
 				Container::Legacy => anyhow::bail!("track is not CMAF"),
 			}
 		}
-		for config in catalog.audio.renditions.values() {
+		for config in audio.renditions.values() {
 			match &config.container {
 				Container::Cmaf { init_data } => track_inits.push(init_data),
 				Container::Legacy => anyhow::bail!("track is not CMAF"),

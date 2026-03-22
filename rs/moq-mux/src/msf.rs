@@ -1,15 +1,17 @@
 //! MSF catalog conversion and helpers.
 //!
-//! Converts a [`hang::Catalog`] to an MSF [`moq_msf::Catalog`].
+//! Converts hang catalog sections to an MSF [`moq_msf::Catalog`].
 
 use base64::Engine;
+use hang::catalog::{Audio, Video};
 
-/// Convert a hang catalog to an MSF catalog.
-pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
+/// Convert hang video and audio sections to an MSF catalog.
+pub fn to_msf(video: Option<&Video>, audio: Option<&Audio>) -> moq_msf::Catalog {
 	let mut tracks = Vec::new();
 
-	let has_multiple_video = catalog.video.renditions.len() > 1;
-	for (name, config) in &catalog.video.renditions {
+	let video_renditions = video.map(|v| &v.renditions);
+	let has_multiple_video = video_renditions.is_some_and(|r| r.len() > 1);
+	for (name, config) in video_renditions.into_iter().flatten() {
 		let packaging = match &config.container {
 			hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
 			_ => moq_msf::Packaging::Legacy,
@@ -41,8 +43,9 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		});
 	}
 
-	let has_multiple_audio = catalog.audio.renditions.len() > 1;
-	for (name, config) in &catalog.audio.renditions {
+	let audio_renditions = audio.map(|a| &a.renditions);
+	let has_multiple_audio = audio_renditions.is_some_and(|r| r.len() > 1);
+	for (name, config) in audio_renditions.into_iter().flatten() {
 		let packaging = match &config.container {
 			hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
 			_ => moq_msf::Packaging::Legacy,
@@ -77,9 +80,9 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 	moq_msf::Catalog { version: 1, tracks }
 }
 
-/// Publish the MSF catalog derived from a hang catalog to the given track.
-pub fn publish(catalog: &hang::Catalog, track: &mut moq_lite::TrackProducer) {
-	let msf = to_msf(catalog);
+/// Publish the MSF catalog derived from hang video/audio sections to the given track.
+pub fn publish(video: Option<&Video>, audio: Option<&Audio>, track: &mut moq_lite::TrackProducer) {
+	let msf = to_msf(video, audio);
 	let Ok(mut group) = track.append_group() else {
 		return;
 	};
@@ -136,20 +139,17 @@ mod test {
 			},
 		);
 
-		let catalog = hang::Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			audio: Audio {
-				renditions: audio_renditions,
-			},
-			..Default::default()
+		let video = Video {
+			renditions: video_renditions,
+			display: None,
+			rotation: None,
+			flip: None,
+		};
+		let audio = Audio {
+			renditions: audio_renditions,
 		};
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf(Some(&video), Some(&audio));
 
 		assert_eq!(msf.version, 1);
 		assert_eq!(msf.tracks.len(), 2);
@@ -201,25 +201,21 @@ mod test {
 			},
 		);
 
-		let catalog = hang::Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			..Default::default()
+		let video = Video {
+			renditions: video_renditions,
+			display: None,
+			rotation: None,
+			flip: None,
 		};
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf(Some(&video), None);
 		let video = &msf.tracks[0];
 		assert_eq!(video.init_data, Some("AQID".to_string()));
 	}
 
 	#[test]
 	fn convert_empty() {
-		let catalog = hang::Catalog::default();
-		let msf = to_msf(&catalog);
+		let msf = to_msf(None, None);
 		assert_eq!(msf.version, 1);
 		assert!(msf.tracks.is_empty());
 	}
@@ -252,17 +248,14 @@ mod test {
 			},
 		);
 
-		let catalog = hang::Catalog {
-			video: Video {
-				renditions: video_renditions,
-				display: None,
-				rotation: None,
-				flip: None,
-			},
-			..Default::default()
+		let video = Video {
+			renditions: video_renditions,
+			display: None,
+			rotation: None,
+			flip: None,
 		};
 
-		let msf = to_msf(&catalog);
+		let msf = to_msf(Some(&video), None);
 		let video = &msf.tracks[0];
 		assert_eq!(video.packaging, moq_msf::Packaging::Cmaf);
 		assert_eq!(video.init_data, Some("AAAYZ2Z0eXA=".to_string()));

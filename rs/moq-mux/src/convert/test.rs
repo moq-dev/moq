@@ -67,14 +67,15 @@ fn setup_input(
 ) {
 	let mut broadcast = moq_lite::Broadcast::new().produce();
 
-	let mut catalog_track = broadcast.create_track(hang::Catalog::default_track()).unwrap();
-	let mut catalog = hang::Catalog::default();
-	catalog
-		.video
-		.renditions
-		.insert("video".to_string(), video_config.clone());
+	let mut catalog_track = broadcast.create_track(hang::catalog::default_track()).unwrap();
 
-	let catalog_json = catalog.to_string().unwrap();
+	let mut video = hang::catalog::Video::default();
+	video.renditions.insert("video".to_string(), video_config.clone());
+
+	let writer = hang::CatalogWriter::new();
+	writer.set(&hang::catalog::VIDEO, &video).unwrap();
+	let catalog_json = writer.encode().unwrap();
+
 	let mut group = catalog_track.append_group().unwrap();
 	group.write_frame(catalog_json).unwrap();
 	group.finish().unwrap();

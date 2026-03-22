@@ -1,4 +1,4 @@
-import * as Catalog from "@moq/hang/catalog";
+import { PRIORITY, type Track } from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 
@@ -8,14 +8,14 @@ export type MessageProps = {
 
 export class Message {
 	static readonly TRACK = "chat/message.txt";
-	static readonly PRIORITY = Catalog.PRIORITY.chat;
+	static readonly PRIORITY = PRIORITY.chat;
 
 	enabled: Signal<boolean>;
 
 	// The latest message to publish.
 	latest: Signal<string>;
 
-	catalog = new Signal<Catalog.Track | undefined>(undefined);
+	catalog = new Signal<Track | undefined>(undefined);
 
 	#signals = new Effect();
 

@@ -1,8 +1,13 @@
 use base64::Engine;
-use hang::catalog::Container;
+use hang::catalog::{Audio, Container, Video};
 use mp4_atom::{Decode, Encode};
 
-fn run_fmp4(data: &[u8]) -> hang::Catalog {
+struct CatalogSnapshot {
+	video: Video,
+	audio: Audio,
+}
+
+fn run_fmp4(data: &[u8]) -> CatalogSnapshot {
 	let mut broadcast = moq_lite::Broadcast::new().produce();
 	let catalog = crate::CatalogProducer::new(&mut broadcast).unwrap();
 
@@ -12,7 +17,20 @@ fn run_fmp4(data: &[u8]) -> hang::Catalog {
 	// Ignore errors from incomplete/malformed trailing fragments in test files.
 	let _ = fmp4.decode(&mut buf);
 
-	catalog.snapshot()
+	// Read video and audio sections from the catalog writer
+	let state = catalog.writer().read();
+	let video: Video = state
+		.sections
+		.get("video")
+		.and_then(|v| serde_json::from_value(v.clone()).ok())
+		.unwrap_or_default();
+	let audio: Audio = state
+		.sections
+		.get("audio")
+		.and_then(|v| serde_json::from_value(v.clone()).ok())
+		.unwrap_or_default();
+
+	CatalogSnapshot { video, audio }
 }
 
 fn decode_init_data(init_data: &str) -> (mp4_atom::Ftyp, mp4_atom::Moov) {

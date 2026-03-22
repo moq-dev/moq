@@ -27,7 +27,8 @@
 		"@moq/hang": "workspace:^",
 		"@moq/lite": "workspace:^",
 		"@moq/signals": "workspace:^",
-		"@moq/ui-core": "workspace:^"
+		"@moq/ui-core": "workspace:^",
+		"zod": "^4.1.5"
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.77",

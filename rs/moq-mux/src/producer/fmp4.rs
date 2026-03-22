@@ -1,7 +1,9 @@
 use anyhow::Context;
 use base64::Engine;
 use bytes::{Buf, Bytes, BytesMut};
-use hang::catalog::{AAC, AV1, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
+use hang::catalog::{
+	AAC, AUDIO, AV1, Audio, AudioCodec, AudioConfig, Container, H264, H265, VIDEO, VP9, Video, VideoCodec, VideoConfig,
+};
 use hang::container::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
@@ -30,6 +32,12 @@ pub struct Fmp4 {
 
 	/// The catalog being produced
 	catalog: crate::CatalogProducer,
+
+	/// Local video section state
+	video: Video,
+
+	/// Local audio section state
+	audio: Audio,
 
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track>,
@@ -74,6 +82,8 @@ impl Fmp4 {
 	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
 		Self {
 			catalog,
+			video: Video::default(),
+			audio: Audio::default(),
 			tracks: HashMap::default(),
 			moov: None,
 			moof: None,
@@ -139,10 +149,6 @@ impl Fmp4 {
 	}
 
 	fn init(&mut self, moov: Moov) -> anyhow::Result<()> {
-		// Clone the catalog to avoid the borrow checker.
-		let mut catalog = self.catalog.clone();
-		let mut catalog = catalog.lock();
-
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
 			let handler = &trak.mdia.hdlr.handler;
@@ -151,12 +157,12 @@ impl Fmp4 {
 			let (kind, track) = match handler.as_ref() {
 				b"vide" => {
 					let config = self.init_video(trak, &moov)?;
-					let track = catalog.video.create_track(ext, config.clone());
+					let track = self.video.create_track(ext, config.clone());
 					(TrackKind::Video, track)
 				}
 				b"soun" => {
 					let config = self.init_audio(trak, &moov)?;
-					let track = catalog.audio.create_track(ext, config.clone());
+					let track = self.audio.create_track(ext, config.clone());
 					(TrackKind::Audio, track)
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
@@ -178,7 +184,10 @@ impl Fmp4 {
 			);
 		}
 
-		drop(catalog);
+		// Publish the catalog with the new tracks
+		let _ = self.catalog.set(&VIDEO, &self.video);
+		let _ = self.catalog.set(&AUDIO, &self.audio);
+		self.catalog.flush();
 
 		self.moov = Some(moov);
 
@@ -638,26 +647,27 @@ impl Fmp4 {
 				if jitter < track.jitter.unwrap_or(Timestamp::MAX) {
 					track.jitter = Some(jitter);
 
-					let mut catalog = self.catalog.lock();
-
 					match track.kind {
 						TrackKind::Video => {
-							let config = catalog
+							let config = self
 								.video
 								.renditions
 								.get_mut(&track.track.info.name)
 								.context("missing video config")?;
 							config.jitter = Some(jitter.convert()?);
+							let _ = self.catalog.set(&VIDEO, &self.video);
 						}
 						TrackKind::Audio => {
-							let config = catalog
+							let config = self
 								.audio
 								.renditions
 								.get_mut(&track.track.info.name)
 								.context("missing audio config")?;
 							config.jitter = Some(jitter.convert()?);
+							let _ = self.catalog.set(&AUDIO, &self.audio);
 						}
 					}
+					self.catalog.flush();
 				}
 			}
 		}
@@ -681,14 +691,16 @@ impl Fmp4 {
 
 impl Drop for Fmp4 {
 	fn drop(&mut self) {
-		let mut catalog = self.catalog.lock();
-
 		for track in self.tracks.values() {
 			match track.kind {
-				TrackKind::Video => catalog.video.remove_track(&track.track.info).is_some(),
-				TrackKind::Audio => catalog.audio.remove_track(&track.track.info).is_some(),
+				TrackKind::Video => self.video.remove_track(&track.track.info).is_some(),
+				TrackKind::Audio => self.audio.remove_track(&track.track.info).is_some(),
 			};
 		}
+
+		let _ = self.catalog.set(&VIDEO, &self.video);
+		let _ = self.catalog.set(&AUDIO, &self.audio);
+		self.catalog.flush();
 	}
 }
 

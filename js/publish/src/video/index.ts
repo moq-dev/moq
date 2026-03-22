@@ -1,4 +1,4 @@
-import * as Catalog from "@moq/hang/catalog";
+import { PRIORITY, u53, type Video, type VideoConfig } from "@moq/hang/catalog";
 import { Effect, Signal } from "@moq/signals";
 import { Encoder, type EncoderProps } from "./encoder";
 import { TrackProcessor } from "./polyfill";
@@ -17,7 +17,7 @@ export type Props = {
 export class Root {
 	static readonly TRACK_HD = "video/hd";
 	static readonly TRACK_SD = "video/sd";
-	static readonly PRIORITY = Catalog.PRIORITY.video;
+	static readonly PRIORITY = PRIORITY.video;
 
 	source: Signal<Source | undefined>;
 	hd: Encoder;
@@ -25,7 +25,7 @@ export class Root {
 
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
-	catalog = new Signal<Catalog.Video | undefined>(undefined);
+	catalog = new Signal<Video | undefined>(undefined);
 	display = new Signal<{ width: number; height: number } | undefined>(undefined);
 	flip = new Signal<boolean>(false);
 
@@ -85,15 +85,15 @@ export class Root {
 		const hdConfig = effect.get(this.hd.catalog);
 		const sdConfig = effect.get(this.sd.catalog);
 
-		const renditions: Record<string, Catalog.VideoConfig> = {};
+		const renditions: Record<string, VideoConfig> = {};
 		if (hdConfig) renditions[Root.TRACK_HD] = hdConfig;
 		if (sdConfig) renditions[Root.TRACK_SD] = sdConfig;
 
-		const catalog: Catalog.Video = {
+		const catalog: Video = {
 			renditions,
 			display: {
-				width: Catalog.u53(display.width),
-				height: Catalog.u53(display.height),
+				width: u53(display.width),
+				height: u53(display.height),
 			},
 			flip: effect.get(this.flip) ?? undefined,
 		};
