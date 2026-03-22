@@ -6,6 +6,21 @@ pub struct MoqDimensions {
 	pub height: u32,
 }
 
+#[derive(uniffi::Enum)]
+pub enum Container {
+	Legacy,
+	Cmaf { timescale: u64, track_id: u32 },
+}
+
+impl From<hang::catalog::Container> for Container {
+	fn from(container: hang::catalog::Container) -> Self {
+		match container {
+			hang::catalog::Container::Legacy => Self::Legacy,
+			hang::catalog::Container::Cmaf { timescale, track_id } => Self::Cmaf { timescale, track_id },
+		}
+	}
+}
+
 #[derive(uniffi::Record)]
 pub struct MoqCatalog {
 	pub video: HashMap<String, MoqVideo>,
@@ -23,6 +38,7 @@ pub struct MoqVideo {
 	pub display_ratio: Option<MoqDimensions>,
 	pub bitrate: Option<u64>,
 	pub framerate: Option<f64>,
+	pub container: Container,
 }
 
 #[derive(uniffi::Record)]
@@ -32,6 +48,7 @@ pub struct MoqAudio {
 	pub sample_rate: u32,
 	pub channel_count: u32,
 	pub bitrate: Option<u64>,
+	pub container: Container,
 }
 
 /// A media frame.
@@ -63,6 +80,7 @@ pub fn convert_catalog(catalog: &hang::catalog::Catalog) -> MoqCatalog {
 					},
 					bitrate: config.bitrate,
 					framerate: config.framerate,
+					container: config.container.clone().into(),
 				},
 			)
 		})
@@ -81,6 +99,7 @@ pub fn convert_catalog(catalog: &hang::catalog::Catalog) -> MoqCatalog {
 					sample_rate: config.sample_rate,
 					channel_count: config.channel_count,
 					bitrate: config.bitrate,
+					container: config.container.clone().into(),
 				},
 			)
 		})
