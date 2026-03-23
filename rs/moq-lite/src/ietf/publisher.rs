@@ -122,7 +122,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		};
 
-		let subscriber = match track.subscribe(Subscription::default()).await {
+		let subscriber = match track.subscribe(Subscription::default()) {
 			Ok(sub) => sub,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
@@ -130,6 +130,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				return Ok(());
 			}
 		};
+
+		subscriber.ready().await?;
 
 		// Send SubscribeOk on the stream
 		stream.writer.encode(&ietf::SubscribeOk::ID).await?;

@@ -52,16 +52,16 @@ struct State {
 
 impl State {
 	/// Insert a track into the lookup, returning an error if a live track with the same name exists.
-	fn insert_track(&mut self, track: &TrackProducer) -> Result<(), Error> {
-		match self.tracks.entry(track.info.name.clone()) {
+	fn insert_track(&mut self, weak: TrackWeak) -> Result<(), Error> {
+		match self.tracks.entry(weak.info.name.clone()) {
 			hash_map::Entry::Occupied(mut entry) => {
 				if !entry.get().is_closed() {
 					return Err(Error::Duplicate);
 				}
-				entry.insert(track.weak());
+				entry.insert(weak);
 			}
 			hash_map::Entry::Vacant(entry) => {
-				entry.insert(track.weak());
+				entry.insert(weak);
 			}
 		}
 		Ok(())
@@ -99,11 +99,13 @@ impl BroadcastProducer {
 		}
 	}
 
-	/// Insert a track into the lookup, returning an error on duplicate.
+	/// Insert a track consumer into the lookup, returning an error on duplicate.
 	///
-	/// NOTE: You probably want to [TrackProducer::clone] first to keep publishing to the track.
-	pub fn insert_track(&mut self, track: &TrackProducer) -> Result<(), Error> {
-		insert_track_impl(&self.state, track)
+	/// This allows sharing a track from another broadcast without copying data.
+	pub fn insert_track(&mut self, track: TrackConsumer) -> Result<(), Error> {
+		let mut guard = modify(&self.state)?;
+		guard.insert_track(track.weak())?;
+		Ok(())
 	}
 
 	/// Remove a track from the lookup.
@@ -116,7 +118,9 @@ impl BroadcastProducer {
 	/// Produce a new track and insert it into the broadcast.
 	pub fn create_track(&mut self, track: Track) -> Result<TrackProducer, Error> {
 		let track = TrackProducer::new(track);
-		self.insert_track(&track)?;
+		let mut guard = modify(&self.state)?;
+		guard.insert_track(track.weak())?;
+		drop(guard);
 		Ok(track)
 	}
 
@@ -173,15 +177,8 @@ impl BroadcastProducer {
 	}
 
 	pub fn assert_insert_track(&mut self, track: &TrackProducer) {
-		self.insert_track(track).expect("should not have errored")
+		self.insert_track(track.consume()).expect("should not have errored")
 	}
-}
-
-/// Insert a track into the broadcast lookup.
-fn insert_track_impl(state: &conducer::Producer<State>, track: &TrackProducer) -> Result<(), Error> {
-	let mut guard = modify(state)?;
-	guard.insert_track(track)?;
-	Ok(())
 }
 
 /// Handles on-demand track creation for a broadcast.
@@ -231,8 +228,10 @@ impl BroadcastDynamic {
 	}
 
 	/// Insert a track into the broadcast lookup.
-	pub fn insert_track(&self, track: &TrackProducer) -> Result<(), Error> {
-		insert_track_impl(&self.state, track)
+	pub fn insert_track(&self, track: TrackConsumer) -> Result<(), Error> {
+		let mut guard = modify(&self.state)?;
+		guard.insert_track(track.weak())?;
+		Ok(())
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -340,19 +339,19 @@ impl BroadcastConsumer {
 
 		// Create a new TrackProducer, insert into lookup, and queue for dynamic handler.
 		let track_producer = TrackProducer::new(track.clone());
-		state.insert_track(&track_producer)?;
+		state.insert_track(track_producer.weak())?;
 		let consumer = track_producer.consume();
 		state.requested.push(track_producer);
 
 		Ok(consumer)
 	}
 
-	/// Subscribe to a track, blocking until the first group exists (or finish/abort).
+	/// Subscribe to a track.
 	///
 	/// Convenience: calls [`Self::consume_track`] then [`TrackConsumer::subscribe`].
-	pub async fn subscribe_track(&self, track: &Track, sub: Subscription) -> Result<TrackSubscriber, Error> {
+	pub fn subscribe_track(&self, track: &Track, sub: Subscription) -> Result<TrackSubscriber, Error> {
 		let consumer = self.consume_track(track)?;
-		consumer.subscribe(sub).await
+		consumer.subscribe(sub)
 	}
 
 	pub async fn closed(&self) -> Error {

@@ -79,7 +79,8 @@ impl Consume {
 		broadcast: moq_lite::BroadcastConsumer,
 		track: moq_lite::TrackConsumer,
 	) -> Result<(), Error> {
-		let subscriber = track.subscribe(moq_lite::Subscription::default()).await?;
+		let subscriber = track.subscribe(moq_lite::Subscription::default())?;
+		subscriber.ready().await?;
 		let mut catalog = hang::CatalogConsumer::new(subscriber);
 		while let Some(catalog) = catalog.next().await? {
 			// Unfortunately we need to store the codec information on the heap.
@@ -290,7 +291,8 @@ impl Consume {
 	}
 
 	async fn run_track(task_id: Id, track: moq_lite::TrackConsumer, latency: std::time::Duration) -> Result<(), Error> {
-		let subscriber = track.subscribe(moq_lite::Subscription::default()).await?;
+		let subscriber = track.subscribe(moq_lite::Subscription::default())?;
+		subscriber.ready().await?;
 		let mut track = LegacyConsumer::new(subscriber, moq_mux::consumer::Legacy, latency);
 		while let Some(mut ordered) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.

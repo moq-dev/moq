@@ -289,16 +289,17 @@ async fn serve_fetch(
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
 	let result = tokio::time::timeout_at(deadline, async {
-		let to_err = |_: moq_lite::Error| StatusCode::INTERNAL_SERVER_ERROR;
+		let to_err = |err: moq_lite::Error| match err {
+			moq_lite::Error::UnknownTrack | moq_lite::Error::UnknownBroadcast => StatusCode::NOT_FOUND,
+			_ => StatusCode::INTERNAL_SERVER_ERROR,
+		};
 
 		let group = match params.group {
 			FetchGroup::Latest => match track.latest() {
 				Some(sequence) => track.get_group(sequence).await.map_err(to_err)?,
 				None => {
-					let mut sub = track
-						.subscribe(moq_lite::Subscription::default())
-						.await
-						.map_err(to_err)?;
+					let mut sub = track.subscribe(moq_lite::Subscription::default()).map_err(to_err)?;
+					sub.ready().await.map_err(to_err)?;
 					sub.recv_group().await.map_err(to_err)?
 				}
 			},

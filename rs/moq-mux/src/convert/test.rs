@@ -201,12 +201,10 @@ fn parse_cmaf_frame(data: &Bytes, timescale: u64) -> (Timestamp, Vec<u8>, bool) 
 async fn subscribe_video(consumer: &moq_lite::BroadcastConsumer) -> moq_lite::TrackSubscriber {
 	let track = moq_lite::Track::new("video");
 	loop {
-		match consumer
-			.subscribe_track(&track, moq_lite::Subscription::default())
-			.await
-		{
+		match consumer.subscribe_track(&track, moq_lite::Subscription::default()) {
 			Ok(t) => return t,
-			Err(_) => tokio::task::yield_now().await,
+			Err(moq_lite::Error::UnknownTrack) => tokio::task::yield_now().await,
+			Err(e) => panic!("subscribe_video failed: {e}"),
 		}
 	}
 }
@@ -226,7 +224,7 @@ async fn legacy_to_cmaf_video() {
 	let output = moq_lite::Broadcast::new().produce();
 	let output_consumer = output.consume();
 
-	let converter = super::Fmp4::new(consumer, output);
+	let converter = super::Fmp4::new(consumer, output).unwrap();
 
 	let frames_clone = frames.clone();
 	tokio::spawn(async move {
@@ -271,7 +269,7 @@ async fn cmaf_to_legacy_video() {
 	let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&cmaf_config);
 	let output = moq_lite::Broadcast::new().produce();
 	let output_consumer = output.consume();
-	let converter = super::Hang::new(consumer, output);
+	let converter = super::Hang::new(consumer, output).unwrap();
 
 	let cmaf_frames_clone = cmaf_frames.clone();
 	tokio::spawn(async move {
@@ -309,12 +307,12 @@ async fn roundtrip_legacy_cmaf_legacy() {
 	// Legacy → CMAF
 	let cmaf_output = moq_lite::Broadcast::new().produce();
 	let cmaf_consumer = cmaf_output.consume();
-	let fmp4_converter = super::Fmp4::new(consumer, cmaf_output);
+	let fmp4_converter = super::Fmp4::new(consumer, cmaf_output).unwrap();
 
 	// CMAF → Legacy
 	let legacy_output = moq_lite::Broadcast::new().produce();
 	let legacy_consumer = legacy_output.consume();
-	let hang_converter = super::Hang::new(cmaf_consumer, legacy_output);
+	let hang_converter = super::Hang::new(cmaf_consumer, legacy_output).unwrap();
 
 	let frames_clone = frames.clone();
 	tokio::spawn(async move {
@@ -357,7 +355,7 @@ async fn cmaf_passthrough() {
 	let output = moq_lite::Broadcast::new().produce();
 	let output_consumer = output.consume();
 
-	let converter = super::Fmp4::new(consumer, output);
+	let converter = super::Fmp4::new(consumer, output).unwrap();
 
 	let cmaf_frames_clone = cmaf_frames.clone();
 	tokio::spawn(async move {
@@ -390,7 +388,7 @@ async fn legacy_passthrough() {
 	let output = moq_lite::Broadcast::new().produce();
 	let output_consumer = output.consume();
 
-	let converter = super::Hang::new(consumer, output);
+	let converter = super::Hang::new(consumer, output).unwrap();
 
 	let frames_clone = frames.clone();
 	tokio::spawn(async move {

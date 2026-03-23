@@ -88,10 +88,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// Subscribe to the track.
 	let track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
-	let mut subscriber = tokio::time::timeout(TIMEOUT, track_sub.subscribe(Default::default()))
-		.await
-		.expect("subscribe timed out")
-		.expect("subscribe failed");
+	let mut subscriber = track_sub.subscribe(Default::default()).expect("subscribe failed");
 
 	// Read one group.
 	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
@@ -430,10 +427,7 @@ async fn broadcast_websocket() {
 
 	// Subscribe to the track.
 	let track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
-	let mut subscriber = tokio::time::timeout(TIMEOUT, track_sub.subscribe(Default::default()))
-		.await
-		.expect("subscribe timed out")
-		.expect("subscribe failed");
+	let mut subscriber = track_sub.subscribe(Default::default()).expect("subscribe failed");
 
 	// Read one group.
 	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
@@ -539,10 +533,7 @@ async fn broadcast_websocket_fallback() {
 
 	// Subscribe to the track.
 	let track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
-	let mut subscriber = tokio::time::timeout(TIMEOUT, track_sub.subscribe(Default::default()))
-		.await
-		.expect("subscribe timed out")
-		.expect("subscribe failed");
+	let mut subscriber = track_sub.subscribe(Default::default()).expect("subscribe failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
 		.await

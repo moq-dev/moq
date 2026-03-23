@@ -78,7 +78,8 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to the catalog for this broadcast.
 	pub async fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let track = self.inner.consume_track(&hang::catalog::Catalog::default_track())?;
-		let subscriber = track.subscribe(moq_lite::Subscription::default()).await?;
+		let subscriber = track.subscribe(moq_lite::Subscription::default())?;
+		subscriber.ready().await?;
 		let consumer = hang::CatalogConsumer::new(subscriber);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
@@ -90,7 +91,8 @@ impl MoqBroadcastConsumer {
 	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
 	pub async fn subscribe_media(&self, name: String, max_latency_ms: u64) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		let track = self.inner.consume_track(&moq_lite::Track::new(name))?;
-		let subscriber = track.subscribe(moq_lite::Subscription::default()).await?;
+		let subscriber = track.subscribe(moq_lite::Subscription::default())?;
+		subscriber.ready().await?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = LegacyConsumer::new(subscriber, moq_mux::consumer::Legacy, latency);
 		Ok(Arc::new(MoqMediaConsumer {
