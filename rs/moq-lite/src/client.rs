@@ -121,12 +121,9 @@ impl Client {
 			parameters,
 		};
 
-		// TODO pretty print the parameters.
-		tracing::trace!(?client, "sending client setup");
 		stream.writer.encode(&client).await?;
 
 		let mut server: setup::Server = stream.reader.decode().await?;
-		tracing::trace!(?server, "received server setup");
 
 		let version = supported
 			.iter()

@@ -107,7 +107,6 @@ impl Server {
 		let mut stream = Stream::accept(&session, encoding).await?;
 
 		let mut client: setup::Client = stream.reader.decode().await?;
-		tracing::trace!(?client, "received client setup");
 
 		// Choose the version to use
 		let version = client
@@ -132,7 +131,6 @@ impl Server {
 			version: version.into(),
 			parameters,
 		};
-		tracing::trace!(?server, "sending server setup");
 		stream.writer.encode(&server).await?;
 
 		match version {

@@ -259,8 +259,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.encode(&msg).await?;
 
-		tracing::trace!(?msg, "sending group header");
-
 		loop {
 			let frame = tokio::select! {
 				biased;
