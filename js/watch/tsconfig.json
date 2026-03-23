@@ -6,7 +6,7 @@
 		"jsxImportSource": "solid-js",
 		"outDir": "dist",
 		"emitDeclarationOnly": true,
-		"types": ["audioworklet"]
+		"types": ["audioworklet", "bun"]
 	},
-	"include": ["src", "../common/worklet.d.ts", "../common/bun.d.ts"]
+	"include": ["src", "../common/worklet.d.ts"]
 }
