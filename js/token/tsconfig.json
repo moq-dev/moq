@@ -1,7 +1,10 @@
 {
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
-		"outDir": "dist"
+		"outDir": "dist",
+		"module": "nodenext",
+		"moduleResolution": "nodenext",
+		"types": ["node"]
 	},
 	"include": ["src"]
 }
