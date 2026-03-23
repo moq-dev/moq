@@ -120,9 +120,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let interest = stream.reader.decode::<lite::AnnouncePlease>().await?;
 		let prefix = interest.prefix.to_owned();
 
-		// For logging, show the full path that we're announcing.
-		tracing::trace!(root = %self.origin.absolute(&prefix), "announcing start");
-
 		let mut origin = self
 			.origin
 			.consume_only(&[prefix.as_path()])
@@ -144,8 +141,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				}
 
 				stream.writer.abort(&err);
-			} else {
-				tracing::trace!(prefix = %origin.absolute(prefix), "announcing complete");
 			}
 		});
 
@@ -359,8 +354,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 
-			tracing::trace!(size = %frame.info.size, "writing frame");
-
 			stream.encode(&frame.info.size).await?;
 
 			loop {
@@ -380,8 +373,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					None => break,
 				}
 			}
-
-			tracing::trace!(size = %frame.info.size, "wrote frame");
 		}
 
 		stream.finish()?;
