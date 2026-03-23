@@ -504,13 +504,13 @@ impl OriginConsumer {
 		}
 	}
 
-	/// Returns the next announced broadcast and the absolute path.
+	/// Returns the next announced broadcast and its path relative to this consumer's root.
 	///
 	/// If the same path is announced twice, the new broadcast replaces the old one.
 	/// The old broadcast's `closed()` future will resolve when it is no longer active.
 	/// Returns `Err(Error::Dropped)` if the consumer is closed.
 	///
-	/// Note: The returned path is absolute and will always match this consumer's prefix.
+	/// Note: The returned path has had this consumer's root prefix stripped.
 	pub async fn announced(&mut self) -> Result<OriginAnnounce, Error> {
 		self.updates.recv().await.ok_or(Error::Dropped)
 	}
