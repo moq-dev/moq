@@ -303,7 +303,7 @@ serve name *args:
 
 # Run the web server
 web url='http://localhost:4443/anon':
-	cd js/demo && VITE_RELAY_URL="{{url}}" bun run dev
+	cd demo/web && VITE_RELAY_URL="{{url}}" bun run dev
 
 # Publish the clock broadcast
 # `action` is either `publish` or `subscribe`
@@ -321,7 +321,7 @@ check:
 	set -euo pipefail
 
 	# Run the Javascript checks.
-	bun install --frozen-lockfile --silent
+	bun install --frozen-lockfile
 	if tty -s; then
 		bun run --filter='*' --elide-lines=0 check
 	else
@@ -392,7 +392,7 @@ test *args:
 	set -euo pipefail
 
 	# Run the Javascript tests.
-	bun install --frozen-lockfile --silent
+	bun install --frozen-lockfile
 	if tty -s; then
 		bun run --filter='*' --elide-lines=0 test
 	else
@@ -411,7 +411,7 @@ test *args:
 # Automatically fix some issues.
 fix:
 	# Fix the Javascript dependencies.
-	bun install --silent
+	bun install
 	bun biome check --write
 	echo "JS fixes applied."
 

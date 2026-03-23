@@ -60,13 +60,20 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   ui-core/           # Shared UI components (published as @moq/ui-core)
   watch/             # Watch/subscribe to streams + UI (published as @moq/watch)
   publish/           # Publish media to streams + UI (published as @moq/publish)
-  demo/              # Demo applications
+
+/demo/                # Demo applications
+  web/               # Web demo (watch/publish examples)
+  robot/             # Robotics demo (Rust publisher + TS viewer)
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
   spec/              # Raw IETF specification texts (drafts for moq-transport and moq-lite)
 /dev/                 # Development config and test media files
 /cdn/                 # CDN infrastructure (Terraform)
 ```
+
+## Dependencies
+
+- When adding new dependencies, always use the **newest stable version** available.
 
 ## Development Tips
 

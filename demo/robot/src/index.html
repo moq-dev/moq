@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>MoQ Robotics Demo</title>
+		<style>
+			* {
+				margin: 0;
+				padding: 0;
+				box-sizing: border-box;
+			}
+			body {
+				font-family: system-ui, -apple-system, sans-serif;
+				background: #0a0a0a;
+				color: #e0e0e0;
+				min-height: 100vh;
+			}
+			header {
+				background: #111;
+				border-bottom: 1px solid #333;
+				padding: 1rem 2rem;
+				display: flex;
+				align-items: center;
+				gap: 1rem;
+			}
+			header h1 {
+				font-size: 1.25rem;
+				font-weight: 600;
+				color: #4ade80;
+			}
+			header .status {
+				font-size: 0.8rem;
+				color: #888;
+				margin-left: auto;
+			}
+			#app {
+				padding: 2rem;
+			}
+		</style>
+	</head>
+	<body>
+		<header>
+			<h1>MoQ Robot Fleet</h1>
+			<span class="status" id="connection-status">Disconnected</span>
+		</header>
+		<div id="app"></div>
+		<script type="module" src="./index.ts"></script>
+	</body>
+</html>
