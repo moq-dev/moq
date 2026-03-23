@@ -20,13 +20,12 @@ declare module "node:assert" {
 		function notStrictEqual(actual: unknown, expected: unknown, message?: string | Error): void;
 		function notDeepStrictEqual(actual: unknown, expected: unknown, message?: string | Error): void;
 		function throws(block: () => unknown, message?: string | Error): void;
+		// biome-ignore lint/complexity/noBannedTypes: matches Node.js assert API signature
 		function throws(block: () => unknown, error: Function | RegExp | object, message?: string | Error): void;
+		function rejects(asyncFn: (() => Promise<unknown>) | Promise<unknown>, message?: string | Error): Promise<void>;
 		function rejects(
 			asyncFn: (() => Promise<unknown>) | Promise<unknown>,
-			message?: string | Error,
-		): Promise<void>;
-		function rejects(
-			asyncFn: (() => Promise<unknown>) | Promise<unknown>,
+			// biome-ignore lint/complexity/noBannedTypes: matches Node.js assert API signature
 			error: Function | RegExp | object,
 			message?: string | Error,
 		): Promise<void>;
