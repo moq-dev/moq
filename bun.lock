@@ -11,7 +11,7 @@
         "publint": "^0.3.17",
       },
     },
-    "demo/robot": {
+    "dev/robot": {
       "name": "@moq/robo-demo",
       "version": "0.1.0",
       "dependencies": {
@@ -29,7 +29,7 @@
         "vite-plugin-solid": "^2.11.10",
       },
     },
-    "demo/web": {
+    "dev/web": {
       "name": "@moq/demo",
       "version": "0.1.1",
       "dependencies": {
@@ -461,7 +461,7 @@
 
     "@moq/clock": ["@moq/clock@workspace:js/clock"],
 
-    "@moq/demo": ["@moq/demo@workspace:demo/web"],
+    "@moq/demo": ["@moq/demo@workspace:dev/web"],
 
     "@moq/hang": ["@moq/hang@workspace:js/hang"],
 
@@ -471,7 +471,7 @@
 
     "@moq/qmux": ["@moq/qmux@0.0.6", "", {}, "sha512-ISuGz05lUvf1hzHW3Aw3VnsGRJe1w9Qdog3LQ66KS+l+5mzQsPANvW8yOioEe1Z9dJO2G3sAHoGPnzwnsY9SIQ=="],
 
-    "@moq/robo-demo": ["@moq/robo-demo@workspace:demo/robot"],
+    "@moq/robo-demo": ["@moq/robo-demo@workspace:dev/robot"],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 

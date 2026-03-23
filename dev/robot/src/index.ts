@@ -4,7 +4,7 @@ import { RobotViewer } from "./viewer";
 
 // Parse URL params.
 const params = new URLSearchParams(window.location.search);
-const relayUrl = params.get("url") ?? "https://relay.quic.video/anon";
+const relayUrl = params.get("url") ?? import.meta.env.VITE_RELAY_URL ?? "https://cdn.moq.dev/anon";
 
 const statusEl = document.getElementById("connection-status")!;
 const appEl = document.getElementById("app")!;

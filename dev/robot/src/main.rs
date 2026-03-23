@@ -35,6 +35,11 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
     config.log.init();
 
+    // Validate angle files exist before connecting.
+    for path in &config.angles {
+        anyhow::ensure!(path.exists(), "angle file not found: {}", path.display());
+    }
+
     let client = config.client.clone().init()?;
     let robot = robot::Robot::new(&config);
 

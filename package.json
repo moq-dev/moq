@@ -15,9 +15,9 @@
 		"js/ui-core",
 		"js/watch",
 		"js/publish",
-		"demo/web",
+		"dev/web",
 		"js/signals",
-		"demo/robot"
+		"dev/robot"
 	],
 	"scripts": {
 		"check": "bun run --filter='*' check",

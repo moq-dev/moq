@@ -61,13 +61,15 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   watch/             # Watch/subscribe to streams + UI (published as @moq/watch)
   publish/           # Publish media to streams + UI (published as @moq/publish)
 
-/demo/                # Demo applications
+/dev/                 # Development config, demos, and test media
+  relay/             # Relay server configs (relay.toml, root.toml, leaf*.toml)
+  media/             # Test media files (gitignored)
   web/               # Web demo (watch/publish examples)
   robot/             # Robotics demo (Rust publisher + TS viewer)
+  throttle/          # Network throttle script for testing
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
   spec/              # Raw IETF specification texts (drafts for moq-transport and moq-lite)
-/dev/                 # Development config and test media files
 /cdn/                 # CDN infrastructure (Terraform)
 ```
 
