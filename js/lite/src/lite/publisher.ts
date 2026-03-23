@@ -84,7 +84,8 @@ export class Publisher {
 
 		switch (this.version) {
 			case Version.DRAFT_03:
-				// Draft03: send individual Announce messages for initial state.
+			case Version.DRAFT_04:
+				// Draft03+: send individual Announce messages for initial state.
 				for (const suffix of active) {
 					const wire = new Announce({ suffix, active: true });
 					await wire.encode(stream.writer, this.version);

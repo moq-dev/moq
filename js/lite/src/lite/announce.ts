@@ -7,12 +7,12 @@ import { Version } from "./version.ts";
 export class Announce {
 	suffix: Path.Valid;
 	active: boolean;
-	hops: number;
+	hops: bigint[];
 
-	constructor(props: { suffix: Path.Valid; active: boolean; hops?: number }) {
+	constructor(props: { suffix: Path.Valid; active: boolean; hops?: bigint[] }) {
 		this.suffix = props.suffix;
 		this.active = props.active;
-		this.hops = props.hops ?? 0;
+		this.hops = props.hops ?? [];
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -21,13 +21,18 @@ export class Announce {
 
 		switch (version) {
 			case Version.DRAFT_03:
-				await w.u53(this.hops);
+				await w.u53(this.hops.length);
 				break;
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 				break;
 			default:
-				unreachable(version);
+				// DRAFT_04+: encode array of OriginId
+				await w.u53(this.hops.length);
+				for (const hop of this.hops) {
+					await w.u53(Number(hop));
+				}
+				break;
 		}
 	}
 
@@ -35,16 +40,24 @@ export class Announce {
 		const active = await r.bool();
 		const suffix = Path.from(await r.string());
 
-		let hops = 0;
+		let hops: bigint[] = [];
 		switch (version) {
-			case Version.DRAFT_03:
-				hops = await r.u53();
+			case Version.DRAFT_03: {
+				// Read count but don't know actual IDs
+				await r.u53();
 				break;
+			}
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 				break;
-			default:
-				unreachable(version);
+			default: {
+				// DRAFT_04+: decode array of OriginId
+				const count = await r.u53();
+				for (let i = 0; i < count; i++) {
+					hops.push(BigInt(await r.u53()));
+				}
+				break;
+			}
 		}
 
 		return new Announce({ suffix, active, hops });
@@ -65,32 +78,60 @@ export class Announce {
 
 export class AnnounceInterest {
 	prefix: Path.Valid;
+	withoutOrigin?: bigint;
 
-	constructor(prefix: Path.Valid) {
+	constructor(prefix: Path.Valid, withoutOrigin?: bigint) {
 		this.prefix = prefix;
+		this.withoutOrigin = withoutOrigin;
 	}
 
-	async #encode(w: Writer) {
+	async #encode(w: Writer, version: Version) {
 		await w.string(this.prefix);
+
+		switch (version) {
+			case Version.DRAFT_01:
+			case Version.DRAFT_02:
+			case Version.DRAFT_03:
+				break;
+			default:
+				// DRAFT_04+: encode withoutOrigin as u53 (0 = no filter)
+				await w.u53(this.withoutOrigin !== undefined ? Number(this.withoutOrigin) : 0);
+				break;
+		}
 	}
 
-	static async #decode(r: Reader): Promise<AnnounceInterest> {
+	static async #decode(r: Reader, version: Version): Promise<AnnounceInterest> {
 		const prefix = Path.from(await r.string());
-		return new AnnounceInterest(prefix);
+
+		let withoutOrigin: bigint | undefined;
+		switch (version) {
+			case Version.DRAFT_01:
+			case Version.DRAFT_02:
+			case Version.DRAFT_03:
+				break;
+			default: {
+				// DRAFT_04+: decode withoutOrigin
+				const val = await r.u53();
+				withoutOrigin = val !== 0 ? BigInt(val) : undefined;
+				break;
+			}
+		}
+
+		return new AnnounceInterest(prefix, withoutOrigin);
 	}
 
-	async encode(w: Writer): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
+	async encode(w: Writer, version: Version): Promise<void> {
+		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
-	static async decode(r: Reader): Promise<AnnounceInterest> {
-		return Message.decode(r, AnnounceInterest.#decode);
+	static async decode(r: Reader, version: Version): Promise<AnnounceInterest> {
+		return Message.decode(r, (r) => AnnounceInterest.#decode(r, version));
 	}
 }
 
 /// Sent after setup to communicate the initially announced paths.
 ///
-/// Used by Draft01/Draft02 only. Draft03 uses individual Announce messages instead.
+/// Used by Draft01/Draft02 only. Draft03+ uses individual Announce messages instead.
 export class AnnounceInit {
 	suffixes: Path.Valid[];
 
@@ -104,7 +145,8 @@ export class AnnounceInit {
 			case Version.DRAFT_02:
 				break;
 			case Version.DRAFT_03:
-				throw new Error("announce init not supported for Draft03");
+			case Version.DRAFT_04:
+				throw new Error("announce init not supported for this version");
 			default:
 				unreachable(version);
 		}
