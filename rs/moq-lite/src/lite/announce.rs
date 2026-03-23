@@ -26,8 +26,8 @@ impl Message for Announce<'_> {
 		let status = AnnounceStatus::decode(r, version)?;
 		let suffix = Path::decode(r, version)?;
 		let hops = match version {
-			Version::Lite03 => u64::decode(r, version)?,
 			Version::Lite01 | Version::Lite02 => 0,
+			_ => u64::decode(r, version)?,
 		};
 
 		Ok(match status {
@@ -42,16 +42,16 @@ impl Message for Announce<'_> {
 				AnnounceStatus::Active.encode(w, version)?;
 				suffix.encode(w, version)?;
 				match version {
-					Version::Lite03 => hops.encode(w, version)?,
 					Version::Lite01 | Version::Lite02 => {}
+					_ => hops.encode(w, version)?,
 				}
 			}
 			Self::Ended { suffix, hops } => {
 				AnnounceStatus::Ended.encode(w, version)?;
 				suffix.encode(w, version)?;
 				match version {
-					Version::Lite03 => hops.encode(w, version)?,
 					Version::Lite01 | Version::Lite02 => {}
+					_ => hops.encode(w, version)?,
 				}
 			}
 		}
@@ -116,7 +116,7 @@ impl Message for AnnounceInit<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
-			Version::Lite03 => {
+			_ => {
 				return Err(DecodeError::Version);
 			}
 		}
@@ -136,7 +136,7 @@ impl Message for AnnounceInit<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
-			Version::Lite03 => {
+			_ => {
 				return Err(EncodeError::Version);
 			}
 		}

@@ -177,8 +177,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.encode(&announce_init).await?;
 			}
-			Version::Lite03 => {
-				// No more announce init in Lite03.
+			_ => {
+				// No more announce init starting with Lite03.
 			}
 		}
 

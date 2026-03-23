@@ -96,8 +96,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					self.start_announce(path, Broadcast::new().with_hops(1), &mut producers)?;
 				}
 			}
-			Version::Lite03 => {
-				// Lite03: no AnnounceInit, initial state comes via Announce messages.
+			_ => {
+				// Lite03+: no AnnounceInit, initial state comes via Announce messages.
 			}
 		}
 

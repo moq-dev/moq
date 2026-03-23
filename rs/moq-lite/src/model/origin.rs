@@ -1,3 +1,49 @@
+use std::fmt;
+
+use rand::Rng;
+
+use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+use crate::Version;
+
+/// A unique identifier for an origin, encoded as a varint on the wire.
+///
+/// Generated randomly as a non-zero 62-bit value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OriginId(u64);
+
+impl OriginId {
+	/// Generate a random non-zero 62-bit origin ID.
+	pub fn random() -> Self {
+		let mut rng = rand::rng();
+		let value = rng.random_range(1..(1u64 << 62));
+		Self(value)
+	}
+
+	/// Get the inner u64 value.
+	pub fn into_inner(self) -> u64 {
+		self.0
+	}
+}
+
+impl fmt::Display for OriginId {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		self.0.fmt(f)
+	}
+}
+
+impl Encode<Version> for OriginId {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.0.encode(w, version)
+	}
+}
+
+impl Decode<Version> for OriginId {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let value = u64::decode(r, version)?;
+		Ok(Self(value))
+	}
+}
+
 use std::{
 	collections::HashMap,
 	sync::atomic::{AtomicU64, Ordering},
