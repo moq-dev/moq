@@ -30,7 +30,7 @@ export class Announce {
 				// DRAFT_04+: encode array of OriginId
 				await w.u53(this.hops.length);
 				for (const hop of this.hops) {
-					await w.u53(Number(hop));
+					await w.u62(hop);
 				}
 				break;
 		}
@@ -40,7 +40,7 @@ export class Announce {
 		const active = await r.bool();
 		const suffix = Path.from(await r.string());
 
-		let hops: bigint[] = [];
+		const hops: bigint[] = [];
 		switch (version) {
 			case Version.DRAFT_03: {
 				// Read count but don't know actual IDs
@@ -54,7 +54,7 @@ export class Announce {
 				// DRAFT_04+: decode array of OriginId
 				const count = await r.u53();
 				for (let i = 0; i < count; i++) {
-					hops.push(BigInt(await r.u53()));
+					hops.push(await r.u62());
 				}
 				break;
 			}
@@ -94,8 +94,8 @@ export class AnnounceInterest {
 			case Version.DRAFT_03:
 				break;
 			default:
-				// DRAFT_04+: encode withoutOrigin as u53 (0 = no filter)
-				await w.u53(this.withoutOrigin !== undefined ? Number(this.withoutOrigin) : 0);
+				// DRAFT_04+: encode withoutOrigin as varint (0 = no filter)
+				await w.u62(this.withoutOrigin ?? 0n);
 				break;
 		}
 	}
@@ -111,8 +111,8 @@ export class AnnounceInterest {
 				break;
 			default: {
 				// DRAFT_04+: decode withoutOrigin
-				const val = await r.u53();
-				withoutOrigin = val !== 0 ? BigInt(val) : undefined;
+				const val = await r.u62();
+				withoutOrigin = val !== 0n ? val : undefined;
 				break;
 			}
 		}

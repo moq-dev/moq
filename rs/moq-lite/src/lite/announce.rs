@@ -118,7 +118,11 @@ impl Message for AnnouncePlease<'_> {
 			Version::Lite01 | Version::Lite02 | Version::Lite03 => None,
 			_ => {
 				let value = u64::decode(r, version)?;
-				if value == 0 { None } else { Some(OriginId::decode_raw(value)) }
+				if value == 0 {
+					None
+				} else {
+					Some(OriginId::decode_raw(value))
+				}
 			}
 		};
 		Ok(Self { prefix, without_origin })

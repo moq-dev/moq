@@ -2,8 +2,8 @@ use std::fmt;
 
 use rand::Rng;
 
-use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 use crate::Version;
+use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 /// A unique identifier for an origin, encoded as a varint on the wire.
 ///
@@ -214,9 +214,7 @@ impl OriginNode {
 
 			// Prefix check: if the existing broadcast's hops are a prefix of the new one,
 			// the new broadcast is routing through us (loop). Reject it.
-			if !existing.active.info.hops.is_empty()
-				&& broadcast.info.hops.starts_with(&existing.active.info.hops)
-			{
+			if !existing.active.info.hops.is_empty() && broadcast.info.hops.starts_with(&existing.active.info.hops) {
 				tracing::debug!(broadcast = %full, "rejecting broadcast: hops are prefix of existing");
 				return;
 			}
