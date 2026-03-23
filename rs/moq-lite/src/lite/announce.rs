@@ -1,8 +1,19 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Path, coding::*};
+use crate::{OriginId, Path, coding::*};
 
 use super::{Message, Version};
+
+// Helper: decode an OriginId from a varint (u64) using the lite Version.
+fn decode_origin_id<R: bytes::Buf>(r: &mut R, version: Version) -> Result<OriginId, DecodeError> {
+	let value = u64::decode(r, version)?;
+	Ok(OriginId::decode_raw(value))
+}
+
+// Helper: encode an OriginId as a varint (u64) using the lite Version.
+fn encode_origin_id<W: bytes::BufMut>(id: &OriginId, w: &mut W, version: Version) -> Result<(), EncodeError> {
+	id.into_inner().encode(w, version)
+}
 
 /// Sent by the publisher to announce the availability of a track.
 /// The payload contains the contents of the wildcard.
@@ -12,12 +23,12 @@ pub enum Announce<'a> {
 	Active {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: u64,
+		hops: Vec<OriginId>,
 	},
 	Ended {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: u64,
+		hops: Vec<OriginId>,
 	},
 }
 
@@ -26,8 +37,21 @@ impl Message for Announce<'_> {
 		let status = AnnounceStatus::decode(r, version)?;
 		let suffix = Path::decode(r, version)?;
 		let hops = match version {
-			Version::Lite01 | Version::Lite02 => 0,
-			_ => u64::decode(r, version)?,
+			Version::Lite01 | Version::Lite02 => Vec::new(),
+			Version::Lite03 => {
+				// Lite03 sends a single varint count; decode but we don't know the actual IDs.
+				let _count = u64::decode(r, version)?;
+				Vec::new()
+			}
+			_ => {
+				// Lite04+: count followed by that many OriginId varints.
+				let count = u64::decode(r, version)?;
+				let mut ids = Vec::with_capacity(count.min(32) as usize);
+				for _ in 0..count {
+					ids.push(decode_origin_id(r, version)?);
+				}
+				ids
+			}
 		};
 
 		Ok(match status {
@@ -43,7 +67,15 @@ impl Message for Announce<'_> {
 				suffix.encode(w, version)?;
 				match version {
 					Version::Lite01 | Version::Lite02 => {}
-					_ => hops.encode(w, version)?,
+					Version::Lite03 => {
+						(hops.len() as u64).encode(w, version)?;
+					}
+					_ => {
+						(hops.len() as u64).encode(w, version)?;
+						for id in hops {
+							encode_origin_id(id, w, version)?;
+						}
+					}
 				}
 			}
 			Self::Ended { suffix, hops } => {
@@ -51,7 +83,15 @@ impl Message for Announce<'_> {
 				suffix.encode(w, version)?;
 				match version {
 					Version::Lite01 | Version::Lite02 => {}
-					_ => hops.encode(w, version)?,
+					Version::Lite03 => {
+						(hops.len() as u64).encode(w, version)?;
+					}
+					_ => {
+						(hops.len() as u64).encode(w, version)?;
+						for id in hops {
+							encode_origin_id(id, w, version)?;
+						}
+					}
 				}
 			}
 		}
@@ -65,16 +105,34 @@ impl Message for Announce<'_> {
 pub struct AnnouncePlease<'a> {
 	// Request tracks with this prefix.
 	pub prefix: Path<'a>,
+
+	/// If set, skip announces whose hops list contains this origin ID.
+	/// Used to avoid loops in the relay cluster.
+	pub without_origin: Option<OriginId>,
 }
 
 impl Message for AnnouncePlease<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
-		Ok(Self { prefix })
+		let without_origin = match version {
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => None,
+			_ => {
+				let value = u64::decode(r, version)?;
+				if value == 0 { None } else { Some(OriginId::decode_raw(value)) }
+			}
+		};
+		Ok(Self { prefix, without_origin })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.prefix.encode(w, version)?;
+		match version {
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => {}
+			_ => {
+				let value = self.without_origin.map_or(0u64, |id| id.into_inner());
+				value.encode(w, version)?;
+			}
+		}
 
 		Ok(())
 	}

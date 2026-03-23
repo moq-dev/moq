@@ -119,6 +119,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	pub async fn recv_announce(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		let interest = stream.reader.decode::<lite::AnnouncePlease>().await?;
 		let prefix = interest.prefix.to_owned();
+		let without_origin = interest.without_origin;
 
 		let mut origin = self
 			.origin
@@ -127,7 +128,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let version = self.version;
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version).await {
+			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version, without_origin).await {
 				match &err {
 					Error::Cancel => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
@@ -152,6 +153,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
 		version: Version,
+		without_origin: Option<crate::OriginId>,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
 
@@ -164,7 +166,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				while let Some((path, active)) = origin.try_announced() {
 					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
 
-					if active.is_some() {
+					if let Some(broadcast) = &active {
+						// Skip if the broadcast's hops contain the without_origin ID.
+						if let Some(ref id) = without_origin {
+							if broadcast.info.hops.contains(id) {
+								continue;
+							}
+						}
 						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 						init.push(suffix.to_owned());
 					} else {
@@ -193,12 +201,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 
 							if let Some(broadcast) = active {
-								tracing::debug!(broadcast = %origin.absolute(&path), hops = broadcast.info.hops, "announce");
-								let msg = lite::Announce::Active { suffix, hops: broadcast.info.hops };
+								// Skip if the broadcast's hops contain the without_origin ID.
+								if let Some(ref id) = without_origin {
+									if broadcast.info.hops.contains(id) {
+										continue;
+									}
+								}
+								tracing::debug!(broadcast = %origin.absolute(&path), hops = broadcast.info.hops.len(), "announce");
+								let msg = lite::Announce::Active { suffix, hops: broadcast.info.hops.clone() };
 								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-								let msg = lite::Announce::Ended { suffix, hops: 0 };
+								let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
 								stream.writer.encode(&msg).await?;
 							}
 						},
