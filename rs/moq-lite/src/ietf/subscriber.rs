@@ -518,8 +518,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, mut track: TrackProducer) {
-		let broadcast = broadcast_path;
+	async fn run_subscribe(&mut self, broadcast: Path<'_>, mut track: TrackProducer) {
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,
 			Err(err) => {

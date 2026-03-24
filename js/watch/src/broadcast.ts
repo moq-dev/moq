@@ -8,6 +8,9 @@ import { toHang } from "./msf";
 
 export type CatalogFormat = "hang" | "msf";
 
+/** Delay (ms) before attempting MSF catalog fetch, giving hang format a headstart. */
+const HANG_HEADSTART_MS = 100;
+
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
 
@@ -108,21 +111,29 @@ export class Broadcast {
 
 		effect.spawn(async () => {
 			try {
-				// Race the first catalog fetch, giving hang a 100ms headstart
+				// Race the first catalog fetch, giving hang a headstart.
+				// Wrap each fetch so undefined results reject, ensuring only
+				// successful fetches compete (via Promise.any).
 				const hangFetch = hangTrack
-					? Catalog.fetch(hangTrack).then((r) => (r ? { kind: "hang" as const, root: r } : undefined))
+					? Catalog.fetch(hangTrack).then((r) => {
+							if (r) return { kind: "hang" as const, root: r };
+							throw new Error("hang catalog empty");
+						})
 					: undefined;
 
 				const msfFetch = msfTrack
-					? new Promise((r) => setTimeout(r, 100))
+					? new Promise((r) => setTimeout(r, HANG_HEADSTART_MS))
 							.then(() => Msf.fetch(msfTrack))
-							.then((c) => (c ? { kind: "msf" as const, root: toHang(c) } : undefined))
+							.then((c) => {
+								if (c) return { kind: "msf" as const, root: toHang(c) };
+								throw new Error("msf catalog empty");
+							})
 					: undefined;
 
-				const candidates = [effect.cancel, hangFetch, msfFetch].filter(
-					(c): c is NonNullable<typeof c> => c != null,
-				);
-				const first = await Promise.race(candidates);
+				const candidates = [hangFetch, msfFetch].filter((c): c is NonNullable<typeof c> => c != null);
+				if (candidates.length === 0) return;
+
+				const first = await Promise.race([effect.cancel.then(() => undefined), Promise.any(candidates)]);
 				if (!first) return;
 
 				// Close the loser
@@ -144,7 +155,7 @@ export class Broadcast {
 									effect.cancel,
 									Catalog.fetch(hangTrack as Moq.Track),
 								]);
-								return update ?? undefined;
+								return update;
 							}
 						: async () => {
 								const update = await Promise.race([effect.cancel, Msf.fetch(msfTrack as Moq.Track)]);

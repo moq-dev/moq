@@ -1,7 +1,6 @@
 use std::{
 	collections::{HashMap, hash_map::Entry},
 	sync::{Arc, atomic},
-	time::Duration,
 };
 
 use crate::{
@@ -187,15 +186,21 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		self.subscribes.lock().insert(id, track.clone());
 
+		// Read the initial subscription parameters from the consumer.
+		let sub = match track.subscription().await {
+			Some(sub) => sub,
+			None => return, // Consumer already dropped.
+		};
+
 		let msg = lite::Subscribe {
 			id,
 			broadcast: broadcast_path.to_owned(),
 			track: (&track.info.name).into(),
-			priority: 0,
-			ordered: false,
-			max_latency: Duration::ZERO,
-			start_group: None,
-			end_group: None,
+			priority: sub.priority,
+			ordered: sub.ordered,
+			max_latency: sub.max_latency,
+			start_group: sub.start,
+			end_group: sub.end,
 		};
 
 		tracing::info!(id, broadcast = %self.log_path(&broadcast_path), track = %track_name, "subscribe started");
