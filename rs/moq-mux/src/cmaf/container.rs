@@ -33,46 +33,15 @@ fn decode(data: Bytes, timescale: u64) -> Result<Frame, CmafError> {
 	Ok(Frame { timestamp, payload })
 }
 
-fn encode(
-	group: &mut moq_lite::GroupProducer,
-	frame: &Frame,
-	timescale: u64,
-	track_id: u32,
-	sequence_number: u32,
-) -> Result<(), CmafError> {
+fn encode(group: &mut moq_lite::GroupProducer, frame: &Frame, timescale: u64, track_id: u32) -> Result<(), CmafError> {
 	use mp4_atom::Encode;
 
 	let dts = frame.timestamp.as_micros() as u64 * timescale / 1_000_000;
+	let sequence_number = group.frame_count() as u32;
+	let keyframe = sequence_number == 0;
+	let flags = if keyframe { 0x0200_0000 } else { 0x0001_0000 };
 
-	let moof = mp4_atom::Moof {
-		mfhd: mp4_atom::Mfhd { sequence_number },
-		traf: vec![mp4_atom::Traf {
-			tfhd: mp4_atom::Tfhd {
-				track_id,
-				..Default::default()
-			},
-			tfdt: Some(mp4_atom::Tfdt {
-				base_media_decode_time: dts,
-			}),
-			trun: vec![mp4_atom::Trun {
-				data_offset: Some(0), // placeholder
-				entries: vec![mp4_atom::TrunEntry {
-					size: Some(frame.payload.len() as u32),
-					..Default::default()
-				}],
-			}],
-			..Default::default()
-		}],
-	};
-
-	// First pass: calculate moof size
-	let mut buf = Vec::new();
-	moof.encode(&mut buf)?;
-	let moof_size = buf.len();
-
-	// Second pass: set data_offset to point past moof + mdat header (8 bytes)
-	let data_offset = (moof_size + 8) as i32;
-	let moof = mp4_atom::Moof {
+	let build_moof = |data_offset| mp4_atom::Moof {
 		mfhd: mp4_atom::Mfhd { sequence_number },
 		traf: vec![mp4_atom::Traf {
 			tfhd: mp4_atom::Tfhd {
@@ -86,6 +55,7 @@ fn encode(
 				data_offset: Some(data_offset),
 				entries: vec![mp4_atom::TrunEntry {
 					size: Some(frame.payload.len() as u32),
+					flags: Some(flags),
 					..Default::default()
 				}],
 			}],
@@ -93,16 +63,21 @@ fn encode(
 		}],
 	};
 
+	// First pass: calculate moof size
+	let mut buf = Vec::new();
+	build_moof(0).encode(&mut buf)?;
+	let moof_size = buf.len();
+
+	// Second pass: set data_offset to point past moof + mdat header (8 bytes)
 	buf.clear();
-	moof.encode(&mut buf)?;
+	build_moof((moof_size + 8) as i32).encode(&mut buf)?;
 
 	let mdat = mp4_atom::Mdat {
 		data: frame.payload.to_vec(),
 	};
 	mdat.encode(&mut buf)?;
 
-	let total_size = buf.len();
-	let mut writer = group.create_frame(total_size.into())?;
+	let mut writer = group.create_frame(buf.len().into())?;
 	writer.write(Bytes::from(buf))?;
 	writer.finish()?;
 
@@ -115,7 +90,7 @@ impl Container for mp4_atom::Trak {
 	fn write(&self, group: &mut moq_lite::GroupProducer, frame: &Frame) -> Result<(), Self::Error> {
 		let timescale = self.mdia.mdhd.timescale as u64;
 		let track_id = self.tkhd.track_id;
-		encode(group, frame, timescale, track_id, 0)
+		encode(group, frame, timescale, track_id)
 	}
 
 	fn poll_read(
@@ -167,7 +142,7 @@ impl Container for hang::catalog::VideoConfig {
 		match &self.container {
 			hang::catalog::Container::Legacy => crate::hang::Legacy.write(group, frame).map_err(Into::into),
 			hang::catalog::Container::Cmaf { timescale, track_id } => {
-				encode(group, frame, *timescale, *track_id, 0).map_err(Into::into)
+				encode(group, frame, *timescale, *track_id).map_err(Into::into)
 			}
 		}
 	}
@@ -201,7 +176,7 @@ impl Container for hang::catalog::AudioConfig {
 		match &self.container {
 			hang::catalog::Container::Legacy => crate::hang::Legacy.write(group, frame).map_err(Into::into),
 			hang::catalog::Container::Cmaf { timescale, track_id } => {
-				encode(group, frame, *timescale, *track_id, 0).map_err(Into::into)
+				encode(group, frame, *timescale, *track_id).map_err(Into::into)
 			}
 		}
 	}

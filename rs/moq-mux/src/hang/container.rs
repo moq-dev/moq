@@ -1,7 +1,9 @@
 use std::task::Poll;
 
+use bytes::Buf;
+
 use crate::container::Container;
-use crate::frame::{Frame, Timestamp};
+use crate::frame::Frame;
 
 /// hang Legacy format: VarInt timestamp prefix + raw codec bitstream.
 pub struct Legacy;
@@ -28,10 +30,12 @@ impl Container for Legacy {
 			return Poll::Ready(Ok(None));
 		};
 
-		let mut buf = data.as_ref();
-		let timestamp = Timestamp::decode(&mut buf).map_err(hang::Error::from)?;
-		let payload = data.slice((data.len() - buf.len())..);
+		let mut hang_frame = hang::container::Frame::decode(data)?;
+		let payload = hang_frame.payload.copy_to_bytes(hang_frame.payload.remaining());
 
-		Poll::Ready(Ok(Some(Frame { timestamp, payload })))
+		Poll::Ready(Ok(Some(Frame {
+			timestamp: hang_frame.timestamp,
+			payload,
+		})))
 	}
 }

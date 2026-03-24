@@ -155,6 +155,11 @@ impl GroupProducer {
 		Ok(())
 	}
 
+	/// Return the number of frames written so far.
+	pub fn frame_count(&self) -> usize {
+		self.state.read().frames.len()
+	}
+
 	/// Mark the group as complete; no more frames will be written.
 	pub fn finish(&mut self) -> Result<()> {
 		let mut state = modify(&self.state)?;
