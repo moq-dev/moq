@@ -1,23 +1,22 @@
 use std::collections::VecDeque;
 use std::task::{Poll, ready};
 
-use buf_list::BufList;
+use crate::container::{self, Container, Timestamp};
 
-use super::container::Error;
-use super::{ContainerFormat, OrderedFrame, Timestamp};
+use super::OrderedFrame;
 
 /// A consumer for media tracks with timestamp reordering.
 ///
 /// This wraps a `moq_lite::TrackConsumer` and adds functionality
 /// like timestamp decoding, latency management, and frame buffering.
 ///
-/// Generic over `F: ContainerFormat` to support different container encodings.
+/// Generic over `F: Container` to support different container encodings.
 ///
 /// ## Latency Management
 ///
 /// The consumer can skip groups that are too far behind to maintain low latency.
 /// Configure the maximum acceptable delay through the consumer's latency settings.
-pub struct OrderedConsumer<F: ContainerFormat> {
+pub struct OrderedConsumer<F: Container> {
 	pub track: moq_lite::TrackConsumer,
 
 	format: F,
@@ -36,7 +35,7 @@ pub struct OrderedConsumer<F: ContainerFormat> {
 	max_latency: std::time::Duration,
 }
 
-impl<F: ContainerFormat> OrderedConsumer<F> {
+impl<F: Container> OrderedConsumer<F> {
 	/// Create a new OrderedConsumer wrapping the given moq-lite consumer.
 	pub fn new(track: moq_lite::TrackConsumer, format: F, max_latency: std::time::Duration) -> Self {
 		Self {
@@ -56,7 +55,7 @@ impl<F: ContainerFormat> OrderedConsumer<F> {
 	/// configured latency target.
 	///
 	/// Returns `None` when the track has ended.
-	pub async fn read(&mut self) -> Result<Option<OrderedFrame>, Error> {
+	pub async fn read(&mut self) -> Result<Option<OrderedFrame>, container::Error> {
 		conducer::wait(|waiter| self.poll_read(waiter)).await
 	}
 
@@ -64,7 +63,7 @@ impl<F: ContainerFormat> OrderedConsumer<F> {
 	///
 	/// Uses a single waiter that gets registered on all relevant conducer channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<OrderedFrame>, Error>> {
+	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<OrderedFrame>, container::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
@@ -181,7 +180,7 @@ impl<F: ContainerFormat> OrderedConsumer<F> {
 	// Reads any new groups from the track until we're completely finished.
 	//
 	// Returns Pending until all groups have been consumed.
-	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), Error>> {
+	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), container::Error>> {
 		loop {
 			let Some(group) = ready!(self.track.poll_next_group(waiter)?) else {
 				// Track is finished.
@@ -213,18 +212,18 @@ impl<F: ContainerFormat> OrderedConsumer<F> {
 	}
 
 	/// Wait until the track is closed.
-	pub async fn closed(&self) -> Result<(), Error> {
+	pub async fn closed(&self) -> Result<(), container::Error> {
 		Ok(self.track.closed().await?)
 	}
 }
 
-impl<F: ContainerFormat> From<OrderedConsumer<F>> for moq_lite::TrackConsumer {
+impl<F: Container> From<OrderedConsumer<F>> for moq_lite::TrackConsumer {
 	fn from(inner: OrderedConsumer<F>) -> Self {
 		inner.track
 	}
 }
 
-impl<F: ContainerFormat> std::ops::Deref for OrderedConsumer<F> {
+impl<F: Container> std::ops::Deref for OrderedConsumer<F> {
 	type Target = moq_lite::TrackConsumer;
 
 	fn deref(&self) -> &Self::Target {
@@ -264,11 +263,11 @@ impl GroupBuffer {
 	}
 
 	/// Poll for the next frame from this group.
-	fn poll_read<F: ContainerFormat>(
+	fn poll_read<F: Container>(
 		&mut self,
 		waiter: &conducer::Waiter,
 		format: &F,
-	) -> Poll<Result<Option<OrderedFrame>, Error>> {
+	) -> Poll<Result<Option<OrderedFrame>, container::Error>> {
 		if let Some(frame) = self.buffered.pop_front() {
 			return Poll::Ready(Ok(Some(frame)));
 		}
@@ -281,39 +280,43 @@ impl GroupBuffer {
 
 	// Add one more frame to the buffer if possible.
 	//
-	// Returns false if the track is finished.
-	fn buffer_once<F: ContainerFormat>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, Error>> {
-		let Some(chunks) = ready!(self.group.poll_read_frame_chunks(waiter)?) else {
+	// Returns false if the group is finished.
+	fn buffer_once<F: Container>(
+		&mut self,
+		waiter: &conducer::Waiter,
+		format: &F,
+	) -> Poll<Result<bool, container::Error>> {
+		let Some(frame) = ready!(format.poll_read(&mut self.group, waiter).map_err(Into::into)?) else {
 			return Poll::Ready(Ok(false));
 		};
 
-		let payload = BufList::from_iter(chunks);
-		let (timestamp, payload) = format.parse(payload).map_err(Into::into)?;
-
 		self.min_timestamp = Some(match self.min_timestamp {
-			Some(existing) => existing.min(timestamp),
-			None => timestamp,
+			Some(existing) => existing.min(frame.timestamp),
+			None => frame.timestamp,
 		});
 
 		self.max_timestamp = Some(match self.max_timestamp {
-			Some(existing) => existing.max(timestamp),
-			None => timestamp,
+			Some(existing) => existing.max(frame.timestamp),
+			None => frame.timestamp,
 		});
 
-		let index = self.index;
+		let keyframe = self.index == 0;
 		self.index += 1;
 
 		self.buffered.push_back(OrderedFrame {
-			timestamp,
-			payload,
-			group: self.group.info.sequence,
-			index,
+			timestamp: frame.timestamp,
+			payload: frame.payload,
+			keyframe,
 		});
 
 		Poll::Ready(Ok(true))
 	}
 
-	fn buffer_one<F: ContainerFormat>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, Error>> {
+	fn buffer_one<F: Container>(
+		&mut self,
+		waiter: &conducer::Waiter,
+		format: &F,
+	) -> Poll<Result<bool, container::Error>> {
 		if self.buffered.is_empty() {
 			self.buffer_once(waiter, format)
 		} else {
@@ -321,17 +324,21 @@ impl GroupBuffer {
 		}
 	}
 
-	fn buffer_all<F: ContainerFormat>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<(), Error>> {
+	fn buffer_all<F: Container>(
+		&mut self,
+		waiter: &conducer::Waiter,
+		format: &F,
+	) -> Poll<Result<(), container::Error>> {
 		while ready!(self.buffer_once(waiter, format)?) {}
 		Poll::Ready(Ok(()))
 	}
 
 	/// Poll for the maximum timestamp in this group.
-	fn poll_max_timestamp<F: ContainerFormat>(
+	fn poll_max_timestamp<F: Container>(
 		&mut self,
 		waiter: &conducer::Waiter,
 		format: &F,
-	) -> Poll<Result<Timestamp, Error>> {
+	) -> Poll<Result<Timestamp, container::Error>> {
 		// Keep reading more frames just to advance the max timestamp.
 		let _ = self.buffer_all(waiter, format)?;
 
@@ -340,17 +347,17 @@ impl GroupBuffer {
 		}
 
 		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			return Poll::Ready(Err(Error::Other("empty group".into())));
+			return Poll::Ready(Err(container::Error::Other("empty group".into())));
 		}
 
 		Poll::Pending
 	}
 
-	fn poll_min_timestamp<F: ContainerFormat>(
+	fn poll_min_timestamp<F: Container>(
 		&mut self,
 		waiter: &conducer::Waiter,
 		format: &F,
-	) -> Poll<Result<Timestamp, Error>> {
+	) -> Poll<Result<Timestamp, container::Error>> {
 		let _ = self.buffer_one(waiter, format)?;
 
 		if let Some(min) = self.min_timestamp {
@@ -358,7 +365,7 @@ impl GroupBuffer {
 		}
 
 		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			return Poll::Ready(Err(Error::Other("empty group".into())));
+			return Poll::Ready(Err(container::Error::Other("empty group".into())));
 		}
 
 		Poll::Pending
@@ -376,11 +383,10 @@ impl std::ops::Deref for GroupBuffer {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::consumer::Legacy;
+	use crate::container::Legacy;
 	use std::time::Duration;
 
 	use bytes::Bytes;
-	use hang::container::Frame;
 
 	fn ts(micros: u64) -> Timestamp {
 		Timestamp::from_micros(micros).unwrap()
@@ -390,17 +396,17 @@ mod tests {
 	fn write_group(track: &mut moq_lite::TrackProducer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_lite::Group { sequence }).unwrap();
 		for &timestamp in timestamps {
-			let frame = Frame {
+			let frame = container::Frame {
 				timestamp,
-				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
 			};
-			frame.encode(&mut group).unwrap();
+			Legacy.write(&mut group, &frame).unwrap();
 		}
 		group.finish().unwrap();
 	}
 
 	/// Drain all available frames with a per-read timeout.
-	async fn read_all(consumer: &mut OrderedConsumer<Legacy>) -> Result<Vec<OrderedFrame>, Error> {
+	async fn read_all(consumer: &mut OrderedConsumer<Legacy>) -> Result<Vec<OrderedFrame>, container::Error> {
 		let mut frames = Vec::new();
 		loop {
 			match tokio::time::timeout(Duration::from_millis(200), consumer.read()).await {
@@ -430,7 +436,7 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(0));
-		assert_eq!(frames[0].index, 0);
+		assert!(frames[0].keyframe);
 
 		// Next read returns None (track ended)
 		assert!(consumer.read().await.unwrap().is_none());
@@ -451,9 +457,7 @@ mod tests {
 		assert_eq!(frames[1].timestamp, ts(33_000));
 		assert_eq!(frames[2].timestamp, ts(66_000));
 
-		assert_eq!(frames[0].index, 0);
-		assert_eq!(frames[1].index, 1);
-		assert_eq!(frames[2].index, 2);
+		assert!(frames[0].keyframe);
 	}
 
 	#[tokio::test]
@@ -484,12 +488,15 @@ mod tests {
 		// Group 0: 5 frames, NOT finished (blocks consumer)
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for f in 0..5u64 {
-			Frame {
-				timestamp: ts(f * 2_000),
-				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-			}
-			.encode(&mut group0)
-			.unwrap();
+			Legacy
+				.write(
+					&mut group0,
+					&container::Frame {
+						timestamp: ts(f * 2_000),
+						payload: Bytes::from_static(&[0xDE, 0xAD]),
+					},
+				)
+				.unwrap();
 		}
 
 		// Groups 1-19: finished, 15ms spacing, 5 frames each
@@ -519,12 +526,15 @@ mod tests {
 		let mut consumer = OrderedConsumer::new(consumer_track, Legacy, Duration::ZERO);
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(400_000),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Legacy
+			.write(
+				&mut group0,
+				&container::Frame {
+					timestamp: ts(400_000),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+				},
+			)
+			.unwrap();
 
 		for g in 1..10u64 {
 			let timestamps: Vec<_> = (0..3).map(|f| ts(g * 50_000 + f * 5_000)).collect();
@@ -551,12 +561,15 @@ mod tests {
 		let mut consumer = OrderedConsumer::new(consumer_track, Legacy, Duration::from_millis(100));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Legacy
+			.write(
+				&mut group0,
+				&container::Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+				},
+			)
+			.unwrap();
 
 		for g in 1..10u64 {
 			write_group(&mut track, g, &[ts(g * 30_000)]);
@@ -589,12 +602,15 @@ mod tests {
 		let mut consumer = OrderedConsumer::new(consumer_track, Legacy, Duration::from_millis(500));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Legacy
+			.write(
+				&mut group0,
+				&container::Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+				},
+			)
+			.unwrap();
 
 		write_group(&mut track, 2, &[ts(60_000)]);
 		write_group(&mut track, 1, &[ts(30_000)]);
@@ -762,13 +778,11 @@ mod tests {
 		assert_eq!(frames.len(), 3);
 
 		assert_eq!(frames[0].timestamp, ts(0));
-		assert_eq!(frames[0].index, 0);
+		assert!(frames[0].keyframe);
 
 		assert_eq!(frames[1].timestamp, ts(33_333));
-		assert_eq!(frames[1].index, 1);
 
 		assert_eq!(frames[2].timestamp, ts(66_666));
-		assert_eq!(frames[2].index, 2);
 	}
 
 	#[tokio::test]
@@ -779,12 +793,15 @@ mod tests {
 
 		let payload_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05];
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from(payload_bytes.clone())]),
-		}
-		.encode(&mut group)
-		.unwrap();
+		Legacy
+			.write(
+				&mut group,
+				&container::Frame {
+					timestamp: ts(0),
+					payload: Bytes::from(payload_bytes.clone()),
+				},
+			)
+			.unwrap();
 		group.finish().unwrap();
 		track.finish().unwrap();
 
@@ -810,12 +827,15 @@ mod tests {
 		let mut consumer = OrderedConsumer::new(consumer_track, Legacy, Duration::from_secs(10));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Legacy
+			.write(
+				&mut group0,
+				&container::Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+				},
+			)
+			.unwrap();
 
 		write_group(&mut track, 1, &[ts(100_000)]);
 
@@ -888,12 +908,15 @@ mod tests {
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for &timestamp in &[ts(0), ts(66_000), ts(33_000)] {
-			Frame {
-				timestamp,
-				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-			}
-			.encode(&mut group0)
-			.unwrap();
+			Legacy
+				.write(
+					&mut group0,
+					&container::Frame {
+						timestamp,
+						payload: Bytes::from_static(&[0xDE, 0xAD]),
+					},
+				)
+				.unwrap();
 		}
 
 		write_group(&mut track, 1, &[ts(100_000)]);
@@ -935,26 +958,32 @@ mod tests {
 		write_group(&mut track, 5, &[ts(150_000)]);
 
 		let mut group7 = track.create_group(moq_lite::Group { sequence: 7 }).unwrap();
-		Frame {
-			timestamp: ts(300_000),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group7)
-		.unwrap();
+		Legacy
+			.write(
+				&mut group7,
+				&container::Frame {
+					timestamp: ts(300_000),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+				},
+			)
+			.unwrap();
 
 		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(50)).await;
-			Frame {
-				timestamp: ts(400_000),
-				payload: BufList::from_iter(vec![Bytes::from_static(&[0xBE, 0xEF])]),
-			}
-			.encode(&mut group7)
-			.unwrap();
+			Legacy
+				.write(
+					&mut group7,
+					&container::Frame {
+						timestamp: ts(400_000),
+						payload: Bytes::from_static(&[0xBE, 0xEF]),
+					},
+				)
+				.unwrap();
 			group7.finish().unwrap();
 			track.finish().unwrap();
 		});
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let _frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
 				frames.push(frame);
@@ -964,9 +993,6 @@ mod tests {
 		.await
 		.expect("should not hang");
 
-		assert_eq!(frames[0].group, 3);
-		assert_eq!(frames[1].group, 5);
-		assert!(frames.iter().skip(2).all(|f| f.group == 7));
 		finisher.await.unwrap();
 	}
 
@@ -992,7 +1018,6 @@ mod tests {
 		.expect("should not hang");
 
 		assert!(!frames.is_empty());
-		assert_eq!(frames[0].group, 7);
 	}
 
 	#[tokio::test]
@@ -1006,7 +1031,6 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
-		assert_eq!(frames[0].group, 100);
 	}
 
 	#[tokio::test]
@@ -1017,12 +1041,15 @@ mod tests {
 		let mut consumer = OrderedConsumer::new(consumer_track, Legacy, Duration::from_millis(50));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xAA])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Legacy
+			.write(
+				&mut group0,
+				&container::Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xAA]),
+				},
+			)
+			.unwrap();
 
 		write_group(&mut track, 1, &[ts(100_000)]);
 		write_group(&mut track, 2, &[ts(200_000)]);
@@ -1047,12 +1074,15 @@ mod tests {
 		let mut consumer = OrderedConsumer::new(consumer_track, Legacy, Duration::from_millis(100));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xAA])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Legacy
+			.write(
+				&mut group0,
+				&container::Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xAA]),
+				},
+			)
+			.unwrap();
 
 		write_group(&mut track, 1, &[ts(100_000)]);
 		track.finish().unwrap();
@@ -1080,12 +1110,15 @@ mod tests {
 
 		// Group 0: stalled at ts=0, NOT finished
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Legacy
+			.write(
+				&mut group0,
+				&container::Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+				},
+			)
+			.unwrap();
 
 		// Group 1: finished, 200ms ahead (well beyond 100ms max_latency)
 		write_group(&mut track, 1, &[ts(200_000)]);
@@ -1098,8 +1131,6 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 2, "Expected group 0 frame + group 1 frame");
-		assert_eq!(frames[0].group, 0);
-		assert_eq!(frames[1].group, 1);
 		finisher.await.unwrap();
 	}
 
@@ -1121,9 +1152,6 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 3, "Expected group 0 (2 frames) + group 2 (1 frame)");
-		assert_eq!(frames[0].group, 0);
-		assert_eq!(frames[1].group, 0);
-		assert_eq!(frames[2].group, 2);
 	}
 
 	#[tokio::test]
@@ -1140,7 +1168,6 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
-		assert_eq!(frames[0].group, 1);
 	}
 
 	#[tokio::test]
@@ -1187,6 +1214,5 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
-		assert_eq!(frames[0].group, 1);
 	}
 }
