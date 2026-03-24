@@ -1,6 +1,10 @@
-//! Media demuxers and (soon) muxers for MoQ.
+//! Media muxers and demuxers for MoQ.
 
 mod catalog;
+#[cfg(feature = "mp4")]
+pub mod cmaf;
+pub mod consumer;
+pub mod hang;
 pub mod import;
 pub mod msf;
 
