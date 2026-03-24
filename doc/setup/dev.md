@@ -18,7 +18,7 @@ It's *just* a fancier `Makefile` so you don't have to remember all the commands.
 just
 
 # Run the demo
-just dev
+just
 
 # This is equivalent to 3 terminal tabs:
 # just relay
@@ -78,14 +78,14 @@ You can set the logging level with the `RUST_LOG` environment variable.
 
 ```bash
 # Print the most verbose logs
-RUST_LOG=trace just dev
+RUST_LOG=trace just
 ```
 
 If you're getting a panic, use `RUST_BACKTRACE=1` to get a backtrace.
 
 ```bash
 # Print a backtrace on panic.
-RUST_BACKTRACE=1 just dev
+RUST_BACKTRACE=1 just
 ```
 
 
@@ -111,7 +111,7 @@ Please don't submit a vibe coded PR unless you understand it.
 
 
 ## Onwards
-`just dev` runs three processes that normally, should run on separate hosts.
+`just` runs three processes that normally, should run on separate hosts.
 Learn how to run them [in production](/setup/prod).
 
 Or take a detour and:

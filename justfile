@@ -6,22 +6,14 @@ set quiet
 
 mod dev
 
-# List all of the available commands.
+# Run the web demo by default.
 default:
-  just --list
+	just dev
 
 # Install any dependencies.
 install:
 	bun install
 	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-hack cargo-sweep cargo-semver-checks release-plz
-
-# Alias for the web demo.
-all: dev-web
-
-# Run the web demo: relay + bbb publisher + web viewer.
-[private]
-dev-web:
-	just dev::web
 
 # Run the CI checks
 check:

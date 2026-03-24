@@ -17,7 +17,7 @@
 		"js/publish",
 		"dev/web",
 		"js/signals",
-		"dev/robot"
+		"dev/robo"
 	],
 	"scripts": {
 		"check": "bun run --filter='*' check",

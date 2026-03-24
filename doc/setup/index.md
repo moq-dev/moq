@@ -29,13 +29,13 @@ Install the following:
 Then run the demo:
 ```bash
 # Runs the demo using pinned dependencies
-nix develop -c just dev
+nix develop -c just
 ```
 
 If you install `direnv`, then the Nix shell will be loaded whenever you `cd` into the repo:
 ```bash
 # Run the demo... in 9 keystrokes
-just dev
+just
 ```
 
 
@@ -55,13 +55,13 @@ Then run:
 just install
 
 # Run the demo
-just dev
+just
 ```
 
 When in doubt, check the [Nix Flake](https://github.com/moq-dev/moq/blob/main/flake.nix) for the full list of dependencies.
 
 ## What's Happening?
-The `just dev` command starts three components:
+The `just` command starts three components:
 
 - [moq-relay](/app/relay/): A server that routes live data between publishers and subscribers.
 - [moq-cli](/app/cli): A CLI that publishes video content piped from `ffmpeg`.

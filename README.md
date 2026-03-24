@@ -38,13 +38,13 @@ In production, you'll need a proper domain and a matching TLS certificate via [L
 
 ```sh
 # Runs a relay, demo media, and the web server
-nix develop -c just dev
+nix develop -c just
 ```
 
 Then visit [https://localhost:8080](https://localhost:8080) to see the demo.
 Note that this uses an insecure HTTP fetch for local development only; in production you'll need a proper domain + TLS certificate.
 
-*TIP:* If you've installed [nix-direnv](https://github.com/nix-community/nix-direnv), then only `just dev` is required.
+*TIP:* If you've installed [nix-direnv](https://github.com/nix-community/nix-direnv), then only `just` is required.
 
 
 ### Full Setup
@@ -63,7 +63,7 @@ If you don't like Nix, then you can install dependencies manually:
 just install
 
 # Runs a relay, demo media, and the web server
-just dev
+just
 ```
 
 Then visit [http://localhost:5173](http://localhost:5173) to see the demo.

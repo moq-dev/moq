@@ -18,6 +18,8 @@ websocket = ["moq-native/websocket"]
 anyhow = { version = "1", features = ["backtrace"] }
 clap = { version = "4", features = ["derive"] }
 ffmpeg-next = "8"
+hex = "0.4"
+rand = "0.9"
 hang = { workspace = true }
 moq-lite = { workspace = true }
 moq-mux = { workspace = true }

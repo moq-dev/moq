@@ -1,111 +1,31 @@
-set shell := ["bash", "-euo", "pipefail", "-c"]
+set fallback
 
-relay_url := 'http://localhost:4443/anon'
+mod robo
+mod web
+mod relay
 
-# Wait for the relay to be ready, then run a command.
-[private]
-wait *cmd:
-	#!/usr/bin/env bash
-	set -euo pipefail
-	for i in $(seq 1 30); do
-		curl -sf http://localhost:4443/certificate.sha256 > /dev/null 2>&1 && break
-		sleep 0.5
-	done
-	exec {{cmd}}
-
-# Run the web demo: relay + bbb publisher + web viewer.
-web:
+# Run the web demo (default).
+default:
 	bun install
-	cargo build
 	bun run concurrently --kill-others --names srv,bbb,web --prefix-colors auto \
 		"just relay" \
-		"just wait just pub bbb {{relay_url}}" \
-		"just wait env VITE_RELAY_URL={{relay_url}} bun run --filter @moq/demo dev"
+		"just wait && just pub bbb" \
+		"just wait && just web"
 
-# Run the robotics demo: relay + robot publisher + web viewer.
-robot *angles:
+# Wait for the localhost relay to be ready by repeatedly requesting the cert
+[private]
+wait url="http://localhost:4443/certificate.sha256":
 	#!/usr/bin/env bash
 	set -euo pipefail
+	for i in $(seq 1 60); do
+		curl -sf "{{url}}" > /dev/null 2>&1 && exit 0
+		sleep 1
+	done
+	exit 1
 
-	angles=({{angles}})
-	if [ ${#angles[@]} -eq 0 ]; then
-		echo "Usage: just dev::robot <angle1.mp4> [angle2.mp4] [angle3.mp4]"
-		echo "Provide at least one video file for the robot to stream."
-		exit 1
-	fi
-
-	cargo build --bin moq-relay --bin moq-robo
-	bun install
-
-	exec bun run concurrently --kill-others --names srv,robot,web --prefix-colors auto \
-		"just relay" \
-		"just wait cargo run --bin moq-robo -- --url {{relay_url}} --id abc123 --angles ${angles[*]}" \
-		"just wait env VITE_RELAY_URL={{relay_url}} bun run --filter @moq/robo-demo dev"
-
-# Run a localhost relay server without authentication.
-relay *args:
-	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- relay/localhost.toml {{args}}
-
-# Run a cluster of relay servers.
-cluster:
-	bun install
-	@just auth-token
-	cargo build --bin moq-relay
-
-	bun run concurrently --kill-others --names root,leaf0,leaf1,bbb,tos,web --prefix-colors auto \
-		"just root" \
-		"just wait just leaf0" \
-		"just wait just leaf1" \
-		"just wait just pub bbb http://localhost:4444/demo?jwt=$(cat relay/demo-cli.jwt)" \
-		"just wait just pub tos http://localhost:4443/demo?jwt=$(cat relay/demo-cli.jwt)" \
-		"just wait env VITE_RELAY_URL=http://localhost:4445/demo?jwt=$(cat relay/demo-web.jwt) bun run --filter @moq/demo dev"
-
-# Run a localhost root server, accepting connections from leaf nodes.
-root: auth-key
-	cargo run --bin moq-relay -- relay/root.toml
-
-# Run a localhost leaf, connecting to the root server.
-leaf0: auth-token
-	cargo run --bin moq-relay -- relay/leaf0.toml
-
-# Run a second localhost leaf, connecting to the root server.
-leaf1: auth-token
-	cargo run --bin moq-relay -- relay/leaf1.toml
-
-# Generate a random secret key for authentication.
-auth-key:
-	@if [ ! -f "relay/root.jwk" ]; then \
-		rm -f relay/*.jwt; \
-		cargo run --bin moq-token-cli -- --key "relay/root.jwk" generate; \
-	fi
-
-# Generate authentication tokens for local development.
-auth-token: auth-key
-	@if [ ! -f "relay/demo-web.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "relay/root.jwk" sign \
-			--root "demo" \
-			--subscribe "" \
-			--publish "me" \
-			> relay/demo-web.jwt ; \
-	fi
-
-	@if [ ! -f "relay/demo-cli.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "relay/root.jwk" sign \
-			--root "demo" \
-			--publish "" \
-			> relay/demo-cli.jwt ; \
-	fi
-
-	@if [ ! -f "relay/root.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "relay/root.jwk" sign \
-			--root "" \
-			--subscribe "" \
-			--publish "" \
-			--cluster \
-			> relay/root.jwt ; \
-	fi
 
 # Download a test video and convert it to fragmented MP4.
+[private]
 download name:
 	@if [ ! -f "media/{{name}}.mp4" ]; then \
 		curl -fsSL $(just download-url {{name}}) -o "media/{{name}}.mp4"; \
@@ -306,10 +226,6 @@ clock action url="http://localhost:4443/anon" *args:
 # Throttle UDP traffic for testing (macOS only, requires sudo).
 throttle:
 	throttle/enable
-
-# Connect tokio-console to the relay server (port 6680).
-relay-console:
-	tokio-console http://127.0.0.1:6680
 
 # Connect tokio-console to the publisher (port 6681).
 pub-console:

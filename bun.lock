@@ -11,8 +11,8 @@
         "publint": "^0.3.17",
       },
     },
-    "dev/robot": {
-      "name": "@moq/robo-demo",
+    "dev/robo": {
+      "name": "@moq/robo",
       "version": "0.1.0",
       "dependencies": {
         "@moq/hang": "workspace:^",
@@ -471,7 +471,7 @@
 
     "@moq/qmux": ["@moq/qmux@0.0.6", "", {}, "sha512-ISuGz05lUvf1hzHW3Aw3VnsGRJe1w9Qdog3LQ66KS+l+5mzQsPANvW8yOioEe1Z9dJO2G3sAHoGPnzwnsY9SIQ=="],
 
-    "@moq/robo-demo": ["@moq/robo-demo@workspace:dev/robot"],
+    "@moq/robo": ["@moq/robo@workspace:dev/robo"],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 

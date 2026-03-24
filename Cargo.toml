@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "dev/robot",
+    "dev/robo",
     "rs/conducer",
     "rs/hang",
     "rs/libmoq",
