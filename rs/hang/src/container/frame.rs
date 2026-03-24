@@ -48,10 +48,9 @@ impl Frame {
 	}
 
 	/// Decode a frame from raw bytes (VarInt timestamp prefix + payload).
-	pub fn decode(data: bytes::Bytes) -> Result<Self, Error> {
-		let mut buf = data.as_ref();
+	pub fn decode(mut buf: impl Buf) -> Result<Self, Error> {
 		let timestamp = Timestamp::decode(&mut buf)?;
-		let payload = data.slice((data.len() - buf.len())..);
+		let payload = buf.copy_to_bytes(buf.remaining());
 
 		Ok(Self {
 			timestamp,
