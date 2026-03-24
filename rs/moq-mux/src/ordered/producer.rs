@@ -43,7 +43,8 @@ impl<C: Container> Producer<C> {
 			}
 		};
 
-		self.container.write(group, &frame.into())
+		let container_frame: crate::container::Frame = frame.into();
+		self.container.write(group, &[container_frame])
 	}
 
 	/// Finish the track, closing any open group.

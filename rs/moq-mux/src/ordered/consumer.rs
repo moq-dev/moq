@@ -279,28 +279,30 @@ impl GroupBuffer {
 	//
 	// Returns false if the group is finished.
 	fn buffer_once<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
-		let Some(frame) = ready!(format.poll_read(&mut self.group, waiter)?) else {
+		let Some(frames) = ready!(format.poll_read(&mut self.group, waiter)?) else {
 			return Poll::Ready(Ok(false));
 		};
 
-		self.min_timestamp = Some(match self.min_timestamp {
-			Some(existing) => existing.min(frame.timestamp),
-			None => frame.timestamp,
-		});
+		for frame in frames {
+			self.min_timestamp = Some(match self.min_timestamp {
+				Some(existing) => existing.min(frame.timestamp),
+				None => frame.timestamp,
+			});
 
-		self.max_timestamp = Some(match self.max_timestamp {
-			Some(existing) => existing.max(frame.timestamp),
-			None => frame.timestamp,
-		});
+			self.max_timestamp = Some(match self.max_timestamp {
+				Some(existing) => existing.max(frame.timestamp),
+				None => frame.timestamp,
+			});
 
-		let keyframe = self.index == 0;
-		self.index += 1;
+			let keyframe = self.index == 0;
+			self.index += 1;
 
-		self.buffered.push_back(Frame {
-			timestamp: frame.timestamp,
-			payload: frame.payload,
-			keyframe,
-		});
+			self.buffered.push_back(Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+				keyframe,
+			});
+		}
 
 		Poll::Ready(Ok(true))
 	}
@@ -387,7 +389,7 @@ mod tests {
 				timestamp,
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 			};
-			Legacy.write(&mut group, &frame).unwrap();
+			Legacy.write(&mut group, &[frame]).unwrap();
 		}
 		group.finish().unwrap();
 	}
@@ -478,10 +480,10 @@ mod tests {
 			Legacy
 				.write(
 					&mut group0,
-					&ContainerFrame {
+					&[ContainerFrame {
 						timestamp: ts(f * 2_000),
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
-					},
+					}],
 				)
 				.unwrap();
 		}
@@ -516,10 +518,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&ContainerFrame {
+				&[ContainerFrame {
 					timestamp: ts(400_000),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
-				},
+				}],
 			)
 			.unwrap();
 
@@ -551,10 +553,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&ContainerFrame {
+				&[ContainerFrame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
-				},
+				}],
 			)
 			.unwrap();
 
@@ -592,10 +594,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&ContainerFrame {
+				&[ContainerFrame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
-				},
+				}],
 			)
 			.unwrap();
 
@@ -783,10 +785,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group,
-				&ContainerFrame {
+				&[ContainerFrame {
 					timestamp: ts(0),
 					payload: Bytes::from(payload_bytes.clone()),
-				},
+				}],
 			)
 			.unwrap();
 		group.finish().unwrap();
@@ -817,10 +819,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&ContainerFrame {
+				&[ContainerFrame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
-				},
+				}],
 			)
 			.unwrap();
 
@@ -898,10 +900,10 @@ mod tests {
 			Legacy
 				.write(
 					&mut group0,
-					&ContainerFrame {
+					&[ContainerFrame {
 						timestamp,
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
-					},
+					}],
 				)
 				.unwrap();
 		}
@@ -948,10 +950,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group7,
-				&ContainerFrame {
+				&[ContainerFrame {
 					timestamp: ts(300_000),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
-				},
+				}],
 			)
 			.unwrap();
 
@@ -960,10 +962,10 @@ mod tests {
 			Legacy
 				.write(
 					&mut group7,
-					&ContainerFrame {
+					&[ContainerFrame {
 						timestamp: ts(400_000),
 						payload: Bytes::from_static(&[0xBE, 0xEF]),
-					},
+					}],
 				)
 				.unwrap();
 			group7.finish().unwrap();
@@ -1031,10 +1033,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&ContainerFrame {
+				&[ContainerFrame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xAA]),
-				},
+				}],
 			)
 			.unwrap();
 
@@ -1064,10 +1066,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&ContainerFrame {
+				&[ContainerFrame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xAA]),
-				},
+				}],
 			)
 			.unwrap();
 
@@ -1100,10 +1102,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&ContainerFrame {
+				&[ContainerFrame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
-				},
+				}],
 			)
 			.unwrap();
 
@@ -1235,7 +1237,7 @@ mod tests {
 				timestamp: ts(i * 33_333),
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 			};
-			Legacy.write(&mut group, &frame).unwrap();
+			Legacy.write(&mut group, &[frame]).unwrap();
 		}
 		group.finish().unwrap();
 		track.finish().unwrap();

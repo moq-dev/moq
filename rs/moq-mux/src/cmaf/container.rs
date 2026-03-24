@@ -5,40 +5,80 @@ use bytes::Bytes;
 use crate::cmaf::CmafError;
 use crate::container::{Container, Frame, Timestamp};
 
-fn decode(data: Bytes, timescale: u64) -> Result<Frame, CmafError> {
+fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, CmafError> {
 	use mp4_atom::DecodeMaybe;
 
 	let mut cursor = std::io::Cursor::new(&data);
-	let mut timestamp = None;
-	let mut mdat_payload = None;
+	let mut moof = None;
+	let mut mdat_data = None;
 
 	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
 		match atom {
-			mp4_atom::Any::Moof(moof) => {
-				let traf = moof.traf.first().ok_or(CmafError::NoTraf)?;
-				let tfdt = traf.tfdt.as_ref().ok_or(CmafError::NoTfdt)?;
-				timestamp = Some(Timestamp::from_scale(tfdt.base_media_decode_time, timescale)?);
-			}
-			mp4_atom::Any::Mdat(mdat) => {
-				mdat_payload = Some(Bytes::from(mdat.data));
-			}
+			mp4_atom::Any::Moof(m) => moof = Some(m),
+			mp4_atom::Any::Mdat(m) => mdat_data = Some(m.data),
 			_ => {}
 		}
 	}
 
-	let timestamp = timestamp.ok_or(CmafError::NoMoof)?;
-	let payload = mdat_payload.ok_or(CmafError::NoMdat)?;
+	let moof = moof.ok_or(CmafError::NoMoof)?;
+	let mdat_data = mdat_data.ok_or(CmafError::NoMdat)?;
+	let traf = moof.traf.first().ok_or(CmafError::NoTraf)?;
+	let tfdt = traf.tfdt.as_ref().ok_or(CmafError::NoTfdt)?;
+	let base_dts = tfdt.base_media_decode_time;
 
-	Ok(Frame { timestamp, payload })
+	let mut frames = Vec::new();
+	let mut offset = 0usize;
+	let mut dts = base_dts;
+
+	for trun in &traf.trun {
+		for entry in &trun.entries {
+			let size = entry.size.unwrap_or(0) as usize;
+			let end = offset + size;
+
+			if end > mdat_data.len() {
+				break;
+			}
+
+			let timestamp = Timestamp::from_scale(dts, timescale)?;
+			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
+
+			frames.push(Frame { timestamp, payload });
+
+			offset = end;
+			dts += entry.duration.unwrap_or(0) as u64;
+		}
+	}
+
+	Ok(frames)
 }
 
-fn encode(group: &mut moq_lite::GroupProducer, frame: &Frame, timescale: u64, track_id: u32) -> Result<(), CmafError> {
+fn encode(
+	group: &mut moq_lite::GroupProducer,
+	frames: &[Frame],
+	timescale: u64,
+	track_id: u32,
+) -> Result<(), CmafError> {
 	use mp4_atom::Encode;
 
-	let dts = frame.timestamp.as_micros() as u64 * timescale / 1_000_000;
+	if frames.is_empty() {
+		return Ok(());
+	}
+
+	let dts = frames[0].timestamp.as_micros() as u64 * timescale / 1_000_000;
 	let sequence_number = group.frame_count() as u32;
 	let keyframe = sequence_number == 0;
-	let flags = if keyframe { 0x0200_0000 } else { 0x0001_0000 };
+	let keyframe_flags = if keyframe { 0x0200_0000 } else { 0x0001_0000 };
+
+	let entries: Vec<_> = frames
+		.iter()
+		.map(|f| mp4_atom::TrunEntry {
+			size: Some(f.payload.len() as u32),
+			flags: Some(keyframe_flags),
+			..Default::default()
+		})
+		.collect();
+
+	let mdat_data: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 
 	let build_moof = |data_offset| mp4_atom::Moof {
 		mfhd: mp4_atom::Mfhd { sequence_number },
@@ -52,11 +92,7 @@ fn encode(group: &mut moq_lite::GroupProducer, frame: &Frame, timescale: u64, tr
 			}),
 			trun: vec![mp4_atom::Trun {
 				data_offset: Some(data_offset),
-				entries: vec![mp4_atom::TrunEntry {
-					size: Some(frame.payload.len() as u32),
-					flags: Some(flags),
-					..Default::default()
-				}],
+				entries: entries.clone(),
 			}],
 			..Default::default()
 		}],
@@ -71,9 +107,7 @@ fn encode(group: &mut moq_lite::GroupProducer, frame: &Frame, timescale: u64, tr
 	buf.clear();
 	build_moof((moof_size + 8) as i32).encode(&mut buf)?;
 
-	let mdat = mp4_atom::Mdat {
-		data: frame.payload.to_vec(),
-	};
+	let mdat = mp4_atom::Mdat { data: mdat_data };
 	mdat.encode(&mut buf)?;
 
 	let mut writer = group.create_frame(buf.len().into())?;
@@ -86,17 +120,17 @@ fn encode(group: &mut moq_lite::GroupProducer, frame: &Frame, timescale: u64, tr
 impl Container for mp4_atom::Trak {
 	type Error = CmafError;
 
-	fn write(&self, group: &mut moq_lite::GroupProducer, frame: &Frame) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		let timescale = self.mdia.mdhd.timescale as u64;
 		let track_id = self.tkhd.track_id;
-		encode(group, frame, timescale, track_id)
+		encode(group, frames, timescale, track_id)
 	}
 
 	fn poll_read(
 		&self,
 		group: &mut moq_lite::GroupConsumer,
 		waiter: &conducer::Waiter,
-	) -> Poll<Result<Option<Frame>, Self::Error>> {
+	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		use std::task::ready;
 
 		let Some(data) = ready!(group.poll_read_frame(waiter).map_err(CmafError::from)?) else {
@@ -111,20 +145,20 @@ impl Container for mp4_atom::Trak {
 impl Container for mp4_atom::Moov {
 	type Error = CmafError;
 
-	fn write(&self, group: &mut moq_lite::GroupProducer, frame: &Frame) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		let trak = match self.trak.as_slice() {
 			[trak] => trak,
 			[] => return Err(CmafError::NoTracks),
 			_ => return Err(CmafError::MultipleTracks),
 		};
-		trak.write(group, frame)
+		trak.write(group, frames)
 	}
 
 	fn poll_read(
 		&self,
 		group: &mut moq_lite::GroupConsumer,
 		waiter: &conducer::Waiter,
-	) -> Poll<Result<Option<Frame>, Self::Error>> {
+	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		let trak = match self.trak.as_slice() {
 			[trak] => trak,
 			[] => return Poll::Ready(Err(CmafError::NoTracks)),
@@ -137,11 +171,11 @@ impl Container for mp4_atom::Moov {
 impl Container for hang::catalog::VideoConfig {
 	type Error = crate::Error;
 
-	fn write(&self, group: &mut moq_lite::GroupProducer, frame: &Frame) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match &self.container {
-			hang::catalog::Container::Legacy => crate::hang::Legacy.write(group, frame).map_err(Into::into),
+			hang::catalog::Container::Legacy => crate::hang::Legacy.write(group, frames).map_err(Into::into),
 			hang::catalog::Container::Cmaf { timescale, track_id } => {
-				encode(group, frame, *timescale, *track_id).map_err(Into::into)
+				encode(group, frames, *timescale, *track_id).map_err(Into::into)
 			}
 		}
 	}
@@ -150,7 +184,7 @@ impl Container for hang::catalog::VideoConfig {
 		&self,
 		group: &mut moq_lite::GroupConsumer,
 		waiter: &conducer::Waiter,
-	) -> Poll<Result<Option<Frame>, Self::Error>> {
+	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match &self.container {
 			hang::catalog::Container::Legacy => crate::hang::Legacy
 				.poll_read(group, waiter)
@@ -171,11 +205,11 @@ impl Container for hang::catalog::VideoConfig {
 impl Container for hang::catalog::AudioConfig {
 	type Error = crate::Error;
 
-	fn write(&self, group: &mut moq_lite::GroupProducer, frame: &Frame) -> Result<(), Self::Error> {
+	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match &self.container {
-			hang::catalog::Container::Legacy => crate::hang::Legacy.write(group, frame).map_err(Into::into),
+			hang::catalog::Container::Legacy => crate::hang::Legacy.write(group, frames).map_err(Into::into),
 			hang::catalog::Container::Cmaf { timescale, track_id } => {
-				encode(group, frame, *timescale, *track_id).map_err(Into::into)
+				encode(group, frames, *timescale, *track_id).map_err(Into::into)
 			}
 		}
 	}
@@ -184,7 +218,7 @@ impl Container for hang::catalog::AudioConfig {
 		&self,
 		group: &mut moq_lite::GroupConsumer,
 		waiter: &conducer::Waiter,
-	) -> Poll<Result<Option<Frame>, Self::Error>> {
+	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match &self.container {
 			hang::catalog::Container::Legacy => crate::hang::Legacy
 				.poll_read(group, waiter)
