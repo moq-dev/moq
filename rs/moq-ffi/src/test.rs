@@ -83,7 +83,7 @@ async fn local_publish_consume_audio() {
 	assert_eq!(announcement.path(), "live");
 
 	let broadcast_consumer = announcement.broadcast();
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -98,10 +98,7 @@ async fn local_publish_consume_audio() {
 	assert_eq!(audio.channel_count, 2);
 	assert!(catalog.video.is_empty());
 
-	let media_consumer = broadcast_consumer
-		.subscribe_media(track_name.clone(), 10_000)
-		.await
-		.unwrap();
+	let media_consumer = broadcast_consumer.subscribe_media(track_name.clone(), 10_000).unwrap();
 
 	let payload = b"opus audio payload data".to_vec();
 	media.write_frame(payload.clone(), 1_000_000).unwrap();
@@ -134,7 +131,7 @@ async fn video_publish_consume() {
 		.expect("expected announcement");
 
 	let broadcast_consumer = announcement.broadcast();
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -154,10 +151,7 @@ async fn video_publish_consume() {
 	assert_eq!(coded.height, 720);
 	assert!(catalog.audio.is_empty());
 
-	let media_consumer = broadcast_consumer
-		.subscribe_media(track_name.clone(), 10_000)
-		.await
-		.unwrap();
+	let media_consumer = broadcast_consumer.subscribe_media(track_name.clone(), 10_000).unwrap();
 
 	let keyframe = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC];
 	media.write_frame(keyframe, 0).unwrap();
@@ -189,7 +183,7 @@ async fn multiple_frames_ordering() {
 		.unwrap();
 
 	let broadcast_consumer = announcement.broadcast();
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.unwrap()
@@ -197,7 +191,7 @@ async fn multiple_frames_ordering() {
 		.unwrap();
 
 	let track_name = catalog.audio.keys().next().unwrap().clone();
-	let media_consumer = broadcast_consumer.subscribe_media(track_name, 10_000).await.unwrap();
+	let media_consumer = broadcast_consumer.subscribe_media(track_name, 10_000).unwrap();
 
 	let timestamps: [u64; 5] = [0, 20_000, 40_000, 60_000, 80_000];
 	for (i, &ts) in timestamps.iter().enumerate() {
@@ -235,7 +229,7 @@ async fn catalog_update_on_new_track() {
 		.unwrap();
 
 	let broadcast_consumer = announcement.broadcast();
-	let catalog_consumer = broadcast_consumer.subscribe_catalog().await.unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
 
 	let catalog1 = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -284,7 +278,7 @@ async fn announced_broadcast() {
 		.expect("expected announcement");
 
 	assert_eq!(announcement.path(), "test/broadcast");
-	let _catalog = announcement.broadcast().subscribe_catalog().await.unwrap();
+	let _catalog = announcement.broadcast().subscribe_catalog().unwrap();
 }
 
 #[test]

@@ -65,7 +65,6 @@ async fn mux_fmp4(
 	let mut stdout = tokio::io::stdout();
 
 	let catalog_sub = catalog_track.subscribe(moq_lite::Subscription::default())?;
-	catalog_sub.ready().await?;
 	let mut catalog_consumer = hang::CatalogConsumer::new(catalog_sub);
 	let catalog = catalog_consumer.next().await?.context("empty catalog")?;
 

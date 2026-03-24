@@ -15,7 +15,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -69,8 +69,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.expect("expected announce, got unannounce");
 
-	let track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
-	let mut subscriber = track_sub.subscribe(Default::default()).expect("subscribe failed");
+	let mut subscriber = bc.subscribe_track(&Track::new("video"), Default::default()).expect("subscribe_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
 		.await
@@ -136,7 +135,7 @@ async fn iroh_connect() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -220,8 +219,7 @@ async fn iroh_connect() {
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.expect("expected announce, got unannounce");
 
-	let track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
-	let mut subscriber = track_sub.subscribe(Default::default()).expect("subscribe failed");
+	let mut subscriber = bc.subscribe_track(&Track::new("video"), Default::default()).expect("subscribe_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
 		.await

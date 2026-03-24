@@ -19,13 +19,13 @@ pub struct CatalogProducer {
 
 impl CatalogProducer {
 	/// Create a new catalog producer, inserting both catalog tracks into the broadcast.
-	pub fn new(broadcast: &mut moq_lite::BroadcastProducer) -> Result<Self, moq_lite::Error> {
+	pub fn new(broadcast: &moq_lite::BroadcastProducer) -> Result<Self, moq_lite::Error> {
 		Self::with_catalog(broadcast, hang::Catalog::default())
 	}
 
 	/// Create a new catalog producer with the given initial catalog.
 	pub fn with_catalog(
-		broadcast: &mut moq_lite::BroadcastProducer,
+		broadcast: &moq_lite::BroadcastProducer,
 		catalog: hang::Catalog,
 	) -> Result<Self, moq_lite::Error> {
 		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
@@ -54,10 +54,9 @@ impl CatalogProducer {
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
-	pub async fn consume(&self) -> Result<hang::CatalogConsumer, moq_lite::Error> {
+	pub fn consume(&self) -> Result<hang::CatalogConsumer, moq_lite::Error> {
 		let track = self.hang_track.consume();
 		let subscriber = track.subscribe(moq_lite::Subscription::default())?;
-		subscriber.ready().await?;
 		Ok(hang::CatalogConsumer::new(subscriber))
 	}
 

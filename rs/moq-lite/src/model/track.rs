@@ -78,7 +78,7 @@ impl State {
 	/// Find the next non-tombstoned group at or after `index`.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
-	fn poll_next_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
+	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
 			if let Some((group, _)) = slot
@@ -552,6 +552,9 @@ pub struct TrackSubscriber {
 	state: conducer::Consumer<State>,
 	sub: conducer::Producer<Subscription>,
 	index: usize,
+
+	// The next largest sequence number that we want to return for next_group
+	next: u64,
 }
 
 impl TrackSubscriber {
@@ -565,7 +568,10 @@ impl TrackSubscriber {
 		conducer::wait(|waiter| self.poll_ready(waiter)).await
 	}
 
-	/// Receive the next group respecting the subscription start/end range.
+	/// A group respecting the subscription start/end range.
+	///
+	/// NOTE: This may not be sequential, as groups are delivered out of order.
+	/// Use [Self::next_group] to only receive newer groups.
 	pub async fn recv_group(&mut self) -> Result<Option<GroupConsumer>> {
 		conducer::wait(|waiter| self.poll_recv_group(waiter)).await
 	}
@@ -577,7 +583,7 @@ impl TrackSubscriber {
 		drop(sub);
 
 		let Some((consumer, found_index)) =
-			ready!(self.poll(waiter, |state| { state.poll_next_group(self.index, min_sequence) })?)
+			ready!(self.poll(waiter, |state| { state.poll_recv_group(self.index, min_sequence) })?)
 		else {
 			return Poll::Ready(Ok(None));
 		};
@@ -590,6 +596,37 @@ impl TrackSubscriber {
 		}
 
 		self.index = found_index + 1;
+		self.next = consumer.info.sequence + 1;
+
+		Poll::Ready(Ok(Some(consumer)))
+	}
+
+	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
+		conducer::wait(|waiter| self.poll_recv_group(waiter)).await
+	}
+
+	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+		let sub = self.sub.read();
+		let min_sequence = self.next.max(sub.start.unwrap_or(0));
+		let end = sub.end;
+		drop(sub);
+
+		let Some((consumer, found_index)) =
+			ready!(self.poll(waiter, |state| { state.poll_recv_group(self.index, min_sequence) })?)
+		else {
+			return Poll::Ready(Ok(None));
+		};
+
+		// Check end bound.
+		if let Some(end) = end {
+			if consumer.info.sequence > end {
+				return Poll::Ready(Ok(None));
+			}
+		}
+
+		self.index = found_index + 1;
+		self.next = consumer.info.sequence + 1;
+
 		Poll::Ready(Ok(Some(consumer)))
 	}
 
@@ -737,6 +774,7 @@ impl TrackConsumer {
 			state: self.state.clone(),
 			sub: sub_producer,
 			index: 0,
+			next: 0,
 		})
 	}
 

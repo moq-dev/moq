@@ -47,8 +47,8 @@ pub struct Publish {
 
 impl Publish {
 	pub fn new(args: &PublishArgs) -> anyhow::Result<Self> {
-		let mut import_broadcast = moq_lite::Broadcast::new().produce();
-		let catalog = moq_mux::CatalogProducer::new(&mut import_broadcast)?;
+		let import_broadcast = moq_lite::Broadcast::new().produce();
+		let catalog = moq_mux::CatalogProducer::new(&import_broadcast)?;
 
 		let kind = match args.input {
 			InputFormat::Avc3 => {

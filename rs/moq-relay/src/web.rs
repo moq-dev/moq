@@ -299,7 +299,6 @@ async fn serve_fetch(
 				Some(sequence) => track.get_group(sequence).await.map_err(to_err)?,
 				None => {
 					let mut sub = track.subscribe(moq_lite::Subscription::default()).map_err(to_err)?;
-					sub.ready().await.map_err(to_err)?;
 					sub.recv_group().await.map_err(to_err)?
 				}
 			},

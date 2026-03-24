@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::task::Poll;
 
 use anyhow::Context;
@@ -15,14 +16,19 @@ pub struct Fmp4 {
 	output: moq_lite::BroadcastProducer,
 	catalog_consumer: hang::CatalogConsumer,
 	catalog_producer: crate::CatalogProducer,
-	tracks: Vec<ConvertLegacyToCmaf>,
-	passthrough: Vec<moq_lite::TrackConsumer>,
-	initialized: bool,
+	tracks: HashMap<String, TrackState>,
+}
+
+enum TrackState {
+	/// CMAF track passed through without conversion (held to keep the track alive).
+	Passthrough(#[allow(dead_code)] moq_lite::TrackConsumer),
+	/// Legacy track being converted to CMAF.
+	Convert(Box<ConvertLegacyToCmaf>),
 }
 
 impl Fmp4 {
-	pub fn new(input: moq_lite::BroadcastConsumer, mut output: moq_lite::BroadcastProducer) -> anyhow::Result<Self> {
-		let catalog_producer = crate::CatalogProducer::new(&mut output)?;
+	pub fn new(input: moq_lite::BroadcastConsumer, output: moq_lite::BroadcastProducer) -> anyhow::Result<Self> {
+		let catalog_producer = crate::CatalogProducer::new(&output)?;
 
 		let catalog_track =
 			input.subscribe_track(&hang::Catalog::default_track(), moq_lite::Subscription::default())?;
@@ -33,29 +39,46 @@ impl Fmp4 {
 			output,
 			catalog_consumer,
 			catalog_producer,
-			tracks: Vec::new(),
-			passthrough: Vec::new(),
-			initialized: false,
+			tracks: HashMap::new(),
 		})
 	}
 
-	fn init(&mut self, waiter: &moq_lite::conducer::Waiter) -> Poll<anyhow::Result<()>> {
-		let catalog = match self.catalog_consumer.poll_next(waiter) {
-			Poll::Ready(Ok(Some(catalog))) => catalog,
-			Poll::Ready(Ok(None)) => return Poll::Ready(Err(anyhow::anyhow!("empty catalog"))),
-			Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
-			Poll::Pending => return Poll::Pending,
+	/// Poll all active track converters.
+	pub fn poll(&mut self, waiter: &moq_lite::conducer::Waiter) -> Poll<anyhow::Result<()>> {
+		if let Poll::Ready(catalog) = self.catalog_consumer.poll_next(waiter)? {
+			let Some(catalog) = catalog else {
+				return Poll::Ready(Ok(()));
+			};
+
+			self.update_catalog(&catalog)?;
 		};
 
-		let mut output_catalog = self.catalog_producer.clone();
-		let mut guard = output_catalog.lock();
+		self.tracks.retain(|_, t| match t {
+			TrackState::Passthrough(_) => true,
+			TrackState::Convert(c) => c.poll(waiter).is_pending(),
+		});
+
+		Poll::Pending
+	}
+
+	fn update_catalog(&mut self, catalog: &hang::Catalog) -> anyhow::Result<()> {
+		let mut guard = self.catalog_producer.lock();
+
+		// Collect all track names from the new catalog.
+		let mut active: HashMap<&str, ()> = HashMap::new();
 
 		for (name, config) in &catalog.video.renditions {
+			active.insert(name, ());
+
+			if self.tracks.contains_key(name) {
+				continue;
+			}
+
 			match &config.container {
 				Container::Cmaf { .. } => {
 					let consumer = self.input.consume_track(&moq_lite::Track::new(name.clone()))?;
 					self.output.insert_track(consumer.clone())?;
-					self.passthrough.push(consumer);
+					self.tracks.insert(name.clone(), TrackState::Passthrough(consumer));
 					guard.video.renditions.insert(name.clone(), config.clone());
 				}
 				Container::Legacy => {
@@ -73,18 +96,31 @@ impl Fmp4 {
 					guard.video.renditions.insert(name.clone(), cmaf_config);
 
 					let output_track = self.output.create_track(moq_lite::Track::new(name.clone()))?;
-					self.tracks
-						.push(ConvertLegacyToCmaf::new(input_track, output_track, timescale, true));
+					self.tracks.insert(
+						name.clone(),
+						TrackState::Convert(Box::new(ConvertLegacyToCmaf::new(
+							input_track,
+							output_track,
+							timescale,
+							true,
+						))),
+					);
 				}
 			}
 		}
 
 		for (name, config) in &catalog.audio.renditions {
+			active.insert(name, ());
+
+			if self.tracks.contains_key(name) {
+				continue;
+			}
+
 			match &config.container {
 				Container::Cmaf { .. } => {
 					let consumer = self.input.consume_track(&moq_lite::Track::new(name.clone()))?;
 					self.output.insert_track(consumer.clone())?;
-					self.passthrough.push(consumer);
+					self.tracks.insert(name.clone(), TrackState::Passthrough(consumer));
 					guard.audio.renditions.insert(name.clone(), config.clone());
 				}
 				Container::Legacy => {
@@ -103,32 +139,37 @@ impl Fmp4 {
 					let output_track = self.output.create_track(moq_lite::Track::new(name.clone()))?;
 
 					let timescale = config.sample_rate as u64;
-					self.tracks
-						.push(ConvertLegacyToCmaf::new(input_track, output_track, timescale, false));
+					self.tracks.insert(
+						name.clone(),
+						TrackState::Convert(Box::new(ConvertLegacyToCmaf::new(
+							input_track,
+							output_track,
+							timescale,
+							false,
+						))),
+					);
 				}
 			}
 		}
 
-		self.initialized = true;
-		Poll::Ready(Ok(()))
-	}
-
-	/// Poll all active track converters.
-	pub fn poll(&mut self, waiter: &moq_lite::conducer::Waiter) -> Poll<anyhow::Result<()>> {
-		if !self.initialized {
-			match self.init(waiter) {
-				Poll::Ready(Ok(())) => {}
-				other => return other,
+		// Remove tracks that are no longer in the catalog.
+		self.tracks.retain(|name, _| {
+			if active.contains_key(name.as_str()) {
+				return true;
 			}
-		}
+			let _ = self.output.remove_track(name);
+			false
+		});
+		guard
+			.video
+			.renditions
+			.retain(|name, _| active.contains_key(name.as_str()));
+		guard
+			.audio
+			.renditions
+			.retain(|name, _| active.contains_key(name.as_str()));
 
-		self.tracks.retain_mut(|t| t.poll_run(waiter).is_pending());
-		self.passthrough.retain(|t| t.poll_closed(waiter).is_pending());
-		if self.tracks.is_empty() && self.passthrough.is_empty() {
-			Poll::Ready(Ok(()))
-		} else {
-			Poll::Pending
-		}
+		Ok(())
 	}
 
 	/// Run the converter to completion.
@@ -160,41 +201,39 @@ impl ConvertLegacyToCmaf {
 		}
 	}
 
-	fn poll_run(&mut self, waiter: &moq_lite::conducer::Waiter) -> Poll<anyhow::Result<()>> {
-		loop {
-			match self.consumer.poll_read(waiter) {
-				Poll::Ready(Ok(Some(frame))) => {
-					let keyframe = frame.is_keyframe();
-
-					if self.is_video && keyframe {
-						if let Some(mut prev) = self.current_group.take() {
-							prev.finish()?;
-						}
-						self.current_group = Some(self.output.append_group()?);
-					} else if self.current_group.is_none() {
-						self.current_group = Some(self.output.append_group()?);
-					}
-
-					let group = self.current_group.as_mut().unwrap();
-
-					let payload: Vec<u8> = frame.payload.into_iter().flat_map(|chunk| chunk.into_iter()).collect();
-					let dts = frame.timestamp.as_micros() as u64 * self.timescale / 1_000_000;
-					let moof_mdat = build_moof_mdat(self.seq, 1, dts, &payload, keyframe)?;
-					self.seq += 1;
-
-					group.write_frame(moof_mdat)?;
+	fn poll(&mut self, waiter: &moq_lite::conducer::Waiter) -> Poll<anyhow::Result<()>> {
+		while let Poll::Ready(frame) = self.consumer.poll_read(waiter)? {
+			let Some(frame) = frame else {
+				if let Some(mut g) = self.current_group.take() {
+					g.finish()?;
 				}
-				Poll::Ready(Ok(None)) => {
-					if let Some(mut g) = self.current_group.take() {
-						g.finish()?;
-					}
-					self.output.finish()?;
-					return Poll::Ready(Ok(()));
+				self.output.finish()?;
+
+				return Poll::Ready(Ok(()));
+			};
+
+			let keyframe = frame.is_keyframe();
+
+			if self.is_video && keyframe {
+				if let Some(mut prev) = self.current_group.take() {
+					prev.finish()?;
 				}
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
-				Poll::Pending => return Poll::Pending,
+				self.current_group = Some(self.output.append_group()?);
+			} else if self.current_group.is_none() {
+				self.current_group = Some(self.output.append_group()?);
 			}
+
+			let group = self.current_group.as_mut().unwrap();
+
+			let payload: Vec<u8> = frame.payload.into_iter().flat_map(|chunk| chunk.into_iter()).collect();
+			let dts = frame.timestamp.as_micros() as u64 * self.timescale / 1_000_000;
+			let moof_mdat = build_moof_mdat(self.seq, 1, dts, &payload, keyframe)?;
+			self.seq += 1;
+
+			group.write_frame(moof_mdat)?;
 		}
+
+		Poll::Pending
 	}
 }
 

@@ -102,21 +102,21 @@ impl BroadcastProducer {
 	/// Insert a track consumer into the lookup, returning an error on duplicate.
 	///
 	/// This allows sharing a track from another broadcast without copying data.
-	pub fn insert_track(&mut self, track: TrackConsumer) -> Result<(), Error> {
+	pub fn insert_track(&self, track: TrackConsumer) -> Result<(), Error> {
 		let mut guard = modify(&self.state)?;
 		guard.insert_track(track.weak())?;
 		Ok(())
 	}
 
 	/// Remove a track from the lookup.
-	pub fn remove_track(&mut self, name: &str) -> Result<(), Error> {
+	pub fn remove_track(&self, name: &str) -> Result<(), Error> {
 		let mut state = modify(&self.state)?;
 		state.tracks.remove(name).ok_or(Error::UnknownTrack)?;
 		Ok(())
 	}
 
 	/// Produce a new track and insert it into the broadcast.
-	pub fn create_track(&mut self, track: Track) -> Result<TrackProducer, Error> {
+	pub fn create_track(&self, track: Track) -> Result<TrackProducer, Error> {
 		let track = TrackProducer::new(track);
 		let mut guard = modify(&self.state)?;
 		guard.insert_track(track.weak())?;
@@ -138,7 +138,7 @@ impl BroadcastProducer {
 	}
 
 	/// Abort the broadcast and all child tracks with the given error.
-	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
+	pub fn abort(&self, err: Error) -> Result<(), Error> {
 		let mut guard = modify(&self.state)?;
 
 		// Cascade abort to all child tracks.
@@ -172,11 +172,11 @@ impl Deref for BroadcastProducer {
 
 #[cfg(test)]
 impl BroadcastProducer {
-	pub fn assert_create_track(&mut self, track: &Track) -> TrackProducer {
+	pub fn assert_create_track(&self, track: &Track) -> TrackProducer {
 		self.create_track(track.clone()).expect("should not have errored")
 	}
 
-	pub fn assert_insert_track(&mut self, track: &TrackProducer) {
+	pub fn assert_insert_track(&self, track: &TrackProducer) {
 		self.insert_track(track.consume()).expect("should not have errored")
 	}
 }
@@ -243,7 +243,7 @@ impl BroadcastDynamic {
 	}
 
 	/// Abort the broadcast with the given error.
-	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
+	pub fn abort(&self, err: Error) -> Result<(), Error> {
 		let mut guard = modify(&self.state)?;
 
 		// Cascade abort to all child tracks.
@@ -386,7 +386,7 @@ mod test {
 
 	#[tokio::test]
 	async fn insert() {
-		let mut producer = Broadcast::new().produce();
+		let producer = Broadcast::new().produce();
 		let mut track1 = Track::new("track1").produce();
 
 		// Make sure we can insert before a consumer is created.
@@ -411,7 +411,7 @@ mod test {
 
 	#[tokio::test]
 	async fn closed() {
-		let mut producer = Broadcast::new().produce();
+		let producer = Broadcast::new().produce();
 		let dynamic = producer.dynamic();
 
 		let consumer = producer.consume();

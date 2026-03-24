@@ -65,7 +65,7 @@ fn setup_input(
 	moq_lite::BroadcastProducer,
 	moq_lite::TrackProducer,
 ) {
-	let mut broadcast = moq_lite::Broadcast::new().produce();
+	let broadcast = moq_lite::Broadcast::new().produce();
 
 	let mut catalog_track = broadcast.create_track(hang::Catalog::default_track()).unwrap();
 	let mut catalog = hang::Catalog::default();

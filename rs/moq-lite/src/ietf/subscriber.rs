@@ -488,7 +488,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		state.publishes.insert(request_id, msg.track_namespace.to_owned());
 		drop(state);
 
-		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
+		let broadcast = self.start_announce(msg.track_namespace.to_owned())?;
 		broadcast.insert_track(track.consume())?;
 
 		Ok(())

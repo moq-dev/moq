@@ -50,7 +50,7 @@ impl Consume {
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
-		let track = broadcast.consume_track(&hang::catalog::Catalog::default_track())?;
+		let track = broadcast.subscribe_track(&hang::catalog::Catalog::default_track(), Default::default())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -77,11 +77,9 @@ impl Consume {
 	async fn run_catalog(
 		task_id: Id,
 		broadcast: moq_lite::BroadcastConsumer,
-		track: moq_lite::TrackConsumer,
+		track: moq_lite::TrackSubscriber,
 	) -> Result<(), Error> {
-		let subscriber = track.subscribe(moq_lite::Subscription::default())?;
-		subscriber.ready().await?;
-		let mut catalog = hang::CatalogConsumer::new(subscriber);
+		let mut catalog = hang::CatalogConsumer::new(track);
 		while let Some(catalog) = catalog.next().await? {
 			// Unfortunately we need to store the codec information on the heap.
 			let audio_codec = catalog
@@ -224,7 +222,7 @@ impl Consume {
 
 		let track = consume
 			.broadcast
-			.consume_track(&moq_lite::Track::new(rendition.clone()))?;
+			.subscribe_track(&moq_lite::Track::new(rendition.clone()), Default::default())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -266,7 +264,7 @@ impl Consume {
 
 		let track = consume
 			.broadcast
-			.consume_track(&moq_lite::Track::new(rendition.clone()))?;
+			.subscribe_track(&moq_lite::Track::new(rendition.clone()), Default::default())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -290,10 +288,12 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_track(task_id: Id, track: moq_lite::TrackConsumer, latency: std::time::Duration) -> Result<(), Error> {
-		let subscriber = track.subscribe(moq_lite::Subscription::default())?;
-		subscriber.ready().await?;
-		let mut track = LegacyConsumer::new(subscriber, moq_mux::consumer::Legacy, latency);
+	async fn run_track(
+		task_id: Id,
+		track: moq_lite::TrackSubscriber,
+		latency: std::time::Duration,
+	) -> Result<(), Error> {
+		let mut track = LegacyConsumer::new(track, moq_mux::consumer::Legacy, latency);
 		while let Some(mut ordered) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::container::BufList::new();

@@ -113,7 +113,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let track = Track::new(msg.track_name.to_string());
 
-		let track = match broadcast.consume_track(&track) {
+		let track = match broadcast.subscribe_track(&track, Subscription::default()) {
 			Ok(track) => track,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
@@ -122,16 +122,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		};
 
-		let subscriber = match track.subscribe(Subscription::default()) {
-			Ok(sub) => sub,
-			Err(err) => {
-				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
-					.await?;
-				return Ok(());
-			}
-		};
-
-		subscriber.ready().await?;
+		// Wait until we have at least one group before sending OK
+		track.ready().await?;
 
 		// Send SubscribeOk on the stream
 		stream.writer.encode(&ietf::SubscribeOk::ID).await?;
@@ -148,7 +140,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
 		let res = tokio::select! {
-			res = self.run_track(subscriber, request_id) => res,
+			res = self.run_track(track, request_id) => res,
 			_ = stream.reader.closed() => Ok(()),
 			_ = self.session.closed() => Ok(()),
 		};

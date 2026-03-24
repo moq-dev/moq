@@ -258,8 +258,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let track = Track::new(subscribe.track.to_string());
 
 		let broadcast = consumer.ok_or(Error::UnknownBroadcast)?;
-		let track = broadcast.consume_track(&track)?;
-		let subscriber = track.subscribe(Subscription::default())?;
+		let subscriber = broadcast.subscribe_track(&track, Subscription::default())?;
+
+		// Wait for at least one group before sending SUBSCRIBE_OK
 		subscriber.ready().await?;
 
 		let info = lite::SubscribeOk {

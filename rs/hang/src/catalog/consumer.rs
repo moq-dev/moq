@@ -20,31 +20,27 @@ impl CatalogConsumer {
 
 	/// Poll for the next catalog update.
 	pub fn poll_next(&mut self, waiter: &moq_lite::conducer::Waiter) -> Poll<Result<Option<Catalog>>> {
-		// Poll for new group from track.
-		match self.track.poll_recv_group(waiter) {
-			Poll::Ready(Ok(Some(group))) => self.group = Some(group),
-			Poll::Ready(Ok(None)) => return Poll::Ready(Ok(None)),
-			Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
-			Poll::Pending => {}
-		}
-
-		// Poll for frame from current group.
-		if let Some(group) = &mut self.group {
-			match group.poll_read_frame(waiter) {
-				Poll::Ready(Ok(Some(frame))) => {
-					self.group.take(); // We don't support deltas yet
-					let catalog = Catalog::from_slice(&frame)?;
-					return Poll::Ready(Ok(Some(catalog)));
-				}
-				Poll::Ready(Ok(None)) => {
-					self.group = None;
-				}
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
-				Poll::Pending => {}
+		// Get the newest group from the track.
+		while let Poll::Ready(group) = self.track.poll_next_group(waiter)? {
+			self.group = group;
+			if self.group.is_none() {
+				return Poll::Ready(Ok(None));
 			}
 		}
 
-		Poll::Pending
+		let Some(group) = &mut self.group else {
+			return Poll::Pending;
+		};
+
+		// Poll for frame from current group.
+		match group.poll_read_frame(waiter)? {
+			Poll::Ready(Some(frame)) => {
+				self.group.take(); // We don't support deltas yet
+				let catalog = Catalog::from_slice(&frame)?;
+				Poll::Ready(Ok(Some(catalog)))
+			}
+			_ => Poll::Pending,
+		}
 	}
 
 	/// Get the next catalog update.
