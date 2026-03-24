@@ -12,6 +12,7 @@ dev = ["ruff", "maturin", "pyright"]
 
 [tool.pyright]
 pythonVersion = "3.10"
+include = ["py"]
 
 [tool.ruff]
 line-length = 120
