@@ -3,8 +3,7 @@ use std::task::Poll;
 use bytes::Bytes;
 
 use crate::cmaf::CmafError;
-use crate::container::Container;
-use crate::frame::{Frame, Timestamp};
+use crate::container::{Container, Frame, Timestamp};
 
 fn decode(data: Bytes, timescale: u64) -> Result<Frame, CmafError> {
 	use mp4_atom::DecodeMaybe;

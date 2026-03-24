@@ -2,6 +2,6 @@ mod container;
 
 pub use container::Legacy;
 
-pub type OrderedConsumer = crate::consumer::OrderedConsumer<Legacy>;
-pub type OrderedProducer = crate::producer::OrderedProducer<Legacy>;
-pub use crate::frame::{Frame, OrderedFrame};
+pub type Consumer = crate::ordered::Consumer<Legacy>;
+pub type Producer = crate::ordered::Producer<Legacy>;
+pub use crate::ordered::Frame;

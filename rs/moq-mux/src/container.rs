@@ -1,6 +1,18 @@
 use std::task::Poll;
 
-use crate::frame::Frame;
+use bytes::Bytes;
+
+pub type Timestamp = moq_lite::Timescale<1_000_000>;
+
+/// A media frame with a timestamp and codec-specific payload.
+#[derive(Clone, Debug)]
+pub struct Frame {
+	/// The presentation timestamp for this frame.
+	pub timestamp: Timestamp,
+
+	/// The encoded media data for this frame.
+	pub payload: Bytes,
+}
 
 /// Trait for reading/writing media frames from/to moq-lite groups.
 ///

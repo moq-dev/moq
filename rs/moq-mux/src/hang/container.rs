@@ -2,8 +2,7 @@ use std::task::Poll;
 
 use bytes::Buf;
 
-use crate::container::Container;
-use crate::frame::Frame;
+use crate::container::{Container, Frame};
 
 /// hang Legacy format: VarInt timestamp prefix + raw codec bitstream.
 pub struct Legacy;
