@@ -67,7 +67,7 @@ pub(crate) fn encode(
 		return Ok(());
 	}
 
-	let dts = frames[0].timestamp.as_micros() as u64 * timescale / 1_000_000;
+	let dts = (frames[0].timestamp.as_micros() * timescale as u128 / 1_000_000) as u64;
 	let sequence_number = group.frame_count() as u32;
 	let keyframe = sequence_number == 0;
 	let keyframe_flags = if keyframe { 0x0200_0000 } else { 0x0001_0000 };

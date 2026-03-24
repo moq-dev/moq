@@ -67,7 +67,7 @@ impl<C: Container> Producer<C> {
 		}
 
 		if self.group.is_none() {
-			return Err(moq_lite::Error::Decode.into());
+			return Err(moq_lite::Error::ProtocolViolation.into());
 		}
 
 		let container_frame = container::Frame {
