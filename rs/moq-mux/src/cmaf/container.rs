@@ -26,17 +26,20 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 	let tfdt = traf.tfdt.as_ref().ok_or(Error::NoTfdt)?;
 	let base_dts = tfdt.base_media_decode_time;
 
+	let default_size = traf.tfhd.default_sample_size;
+	let default_duration = traf.tfhd.default_sample_duration;
+
 	let mut frames = Vec::new();
 	let mut offset = 0usize;
 	let mut dts = base_dts;
 
 	for trun in &traf.trun {
 		for entry in &trun.entries {
-			let size = entry.size.unwrap_or(0) as usize;
+			let size = entry.size.or(default_size).unwrap_or(0) as usize;
 			let end = offset + size;
 
 			if end > mdat_data.len() {
-				break;
+				return Ok(frames);
 			}
 
 			let timestamp = Timestamp::from_scale(dts, timescale)?;
@@ -45,7 +48,7 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 			frames.push(Frame { timestamp, payload });
 
 			offset = end;
-			dts += entry.duration.unwrap_or(0) as u64;
+			dts += entry.duration.or(default_duration).unwrap_or(0) as u64;
 		}
 	}
 

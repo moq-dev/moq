@@ -50,7 +50,7 @@ impl<F: Container> Consumer<F> {
 	/// Set the maximum latency tolerance.
 	///
 	/// Groups with timestamps older than the newest timestamp minus this value will be skipped.
-	/// A value of zero (the default) means no skipping.
+	/// A value of zero (the default) skips aggressively — any group with a newer alternative is dropped.
 	pub fn with_latency(mut self, latency: std::time::Duration) -> Self {
 		self.latency = latency;
 		self
@@ -308,10 +308,14 @@ impl GroupBuffer {
 	}
 
 	fn buffer_one<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
-		if self.buffered.is_empty() {
-			self.buffer_once(waiter, format)
-		} else {
-			Poll::Ready(Ok(true))
+		loop {
+			if !self.buffered.is_empty() {
+				return Poll::Ready(Ok(true));
+			}
+			if !ready!(self.buffer_once(waiter, format)?) {
+				return Poll::Ready(Ok(false));
+			}
+			// poll_read returned Some(vec![]) — loop and try again
 		}
 	}
 
