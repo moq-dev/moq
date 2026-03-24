@@ -207,9 +207,7 @@ export default function BufferControl(props: BufferControlProps) {
 				</div>
 
 				{/* Help text - disappears after first interaction */}
-				{!hasInteracted() && (
-					<span class="watch-ui__buffer-help">click to change latency</span>
-				)}
+				{!hasInteracted() && <span class="watch-ui__buffer-help">click to change latency</span>}
 			</div>
 		</div>
 	);
