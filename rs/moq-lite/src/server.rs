@@ -28,6 +28,14 @@ impl Server {
 		self
 	}
 
+	/// Set both publish and consume from an `OriginProducer`.
+	///
+	/// This is equivalent to calling `with_publish(origin.consume())` and `with_consume(origin)`.
+	pub fn with_origin(self, origin: OriginProducer) -> Self {
+		let consumer = origin.consume();
+		self.with_publish(consumer).with_consume(origin)
+	}
+
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
 		self

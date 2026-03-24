@@ -52,7 +52,10 @@ pub fn start<S: web_transport_trait::Session>(
 							}
 							_ => Stream::open(&sub_ns_adapter, version).await?,
 						};
-						sub_ns.run_subscribe_namespace(stream).await
+						if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
+						tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+					}
+					Ok(())
 					} => Err(err),
 				}
 			}
@@ -83,7 +86,10 @@ pub fn start<S: web_transport_trait::Session>(
 							return Ok(());
 						}
 						let stream = Stream::open(&sub_ns_session, version).await?;
-						sub_ns.run_subscribe_namespace(stream).await
+						if let Err(err) = sub_ns.run_subscribe_namespace(stream).await {
+							tracing::warn!(%err, "subscribe_namespace failed, continuing without");
+						}
+						Ok(())
 					} => Err(err),
 				}
 			}
