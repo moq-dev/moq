@@ -6,7 +6,7 @@ use crate::cmaf::CmafError;
 use crate::container::Container;
 use crate::frame::{Frame, Timestamp};
 
-pub(crate) fn cmaf_decode(data: Bytes, timescale: u64) -> Result<Frame, CmafError> {
+fn decode(data: Bytes, timescale: u64) -> Result<Frame, CmafError> {
 	use mp4_atom::DecodeMaybe;
 
 	let mut cursor = std::io::Cursor::new(&data);
@@ -33,7 +33,7 @@ pub(crate) fn cmaf_decode(data: Bytes, timescale: u64) -> Result<Frame, CmafErro
 	Ok(Frame { timestamp, payload })
 }
 
-pub(crate) fn cmaf_encode(
+fn encode(
 	group: &mut moq_lite::GroupProducer,
 	frame: &Frame,
 	timescale: u64,
@@ -115,7 +115,7 @@ impl Container for mp4_atom::Trak {
 	fn write(&self, group: &mut moq_lite::GroupProducer, frame: &Frame) -> Result<(), Self::Error> {
 		let timescale = self.mdia.mdhd.timescale as u64;
 		let track_id = self.tkhd.track_id;
-		cmaf_encode(group, frame, timescale, track_id, 0)
+		encode(group, frame, timescale, track_id, 0)
 	}
 
 	fn poll_read(
@@ -130,7 +130,7 @@ impl Container for mp4_atom::Trak {
 		};
 
 		let timescale = self.mdia.mdhd.timescale as u64;
-		Poll::Ready(Ok(Some(cmaf_decode(data, timescale)?)))
+		Poll::Ready(Ok(Some(decode(data, timescale)?)))
 	}
 }
 
@@ -161,13 +161,13 @@ impl Container for mp4_atom::Moov {
 }
 
 impl Container for hang::catalog::VideoConfig {
-	type Error = CmafError;
+	type Error = crate::Error;
 
 	fn write(&self, group: &mut moq_lite::GroupProducer, frame: &Frame) -> Result<(), Self::Error> {
 		match &self.container {
-			hang::catalog::Container::Legacy => crate::hang::Legacy.write(group, frame).map_err(CmafError::from),
+			hang::catalog::Container::Legacy => crate::hang::Legacy.write(group, frame).map_err(Into::into),
 			hang::catalog::Container::Cmaf { timescale, track_id } => {
-				cmaf_encode(group, frame, *timescale, *track_id, 0)
+				encode(group, frame, *timescale, *track_id, 0).map_err(Into::into)
 			}
 		}
 	}
@@ -180,28 +180,28 @@ impl Container for hang::catalog::VideoConfig {
 		match &self.container {
 			hang::catalog::Container::Legacy => crate::hang::Legacy
 				.poll_read(group, waiter)
-				.map(|r| r.map_err(CmafError::from)),
+				.map(|r| r.map_err(Into::into)),
 			hang::catalog::Container::Cmaf { timescale, .. } => {
 				use std::task::ready;
 
-				let Some(data) = ready!(group.poll_read_frame(waiter).map_err(CmafError::from)?) else {
+				let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
 					return Poll::Ready(Ok(None));
 				};
 
-				Poll::Ready(cmaf_decode(data, *timescale).map(Some))
+				Poll::Ready(decode(data, *timescale).map(Some).map_err(Into::into))
 			}
 		}
 	}
 }
 
 impl Container for hang::catalog::AudioConfig {
-	type Error = CmafError;
+	type Error = crate::Error;
 
 	fn write(&self, group: &mut moq_lite::GroupProducer, frame: &Frame) -> Result<(), Self::Error> {
 		match &self.container {
-			hang::catalog::Container::Legacy => crate::hang::Legacy.write(group, frame).map_err(CmafError::from),
+			hang::catalog::Container::Legacy => crate::hang::Legacy.write(group, frame).map_err(Into::into),
 			hang::catalog::Container::Cmaf { timescale, track_id } => {
-				cmaf_encode(group, frame, *timescale, *track_id, 0)
+				encode(group, frame, *timescale, *track_id, 0).map_err(Into::into)
 			}
 		}
 	}
@@ -214,15 +214,15 @@ impl Container for hang::catalog::AudioConfig {
 		match &self.container {
 			hang::catalog::Container::Legacy => crate::hang::Legacy
 				.poll_read(group, waiter)
-				.map(|r| r.map_err(CmafError::from)),
+				.map(|r| r.map_err(Into::into)),
 			hang::catalog::Container::Cmaf { timescale, .. } => {
 				use std::task::ready;
 
-				let Some(data) = ready!(group.poll_read_frame(waiter).map_err(CmafError::from)?) else {
+				let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
 					return Poll::Ready(Ok(None));
 				};
 
-				Poll::Ready(cmaf_decode(data, *timescale).map(Some))
+				Poll::Ready(decode(data, *timescale).map(Some).map_err(Into::into))
 			}
 		}
 	}

@@ -25,7 +25,7 @@ impl<C: Container> OrderedProducer<C> {
 	///
 	/// If the frame is a keyframe, a new group is created automatically.
 	/// The first frame written must be a keyframe.
-	pub fn write(&mut self, frame: &OrderedFrame) -> Result<(), C::Error> {
+	pub fn write(&mut self, frame: OrderedFrame) -> Result<(), C::Error> {
 		if frame.keyframe {
 			if let Some(mut group) = self.group.take() {
 				group.finish()?;
@@ -35,17 +35,15 @@ impl<C: Container> OrderedProducer<C> {
 		let group = match &mut self.group {
 			Some(group) => group,
 			None => {
+				if !frame.keyframe {
+					return Err(moq_lite::Error::Decode.into());
+				}
 				let group = self.track.append_group()?;
 				self.group.insert(group)
 			}
 		};
 
-		let container_frame = crate::frame::Frame {
-			timestamp: frame.timestamp,
-			payload: frame.payload.clone(),
-		};
-
-		self.container.write(group, &container_frame)
+		self.container.write(group, &frame.into())
 	}
 
 	/// Finish the track, closing any open group.
