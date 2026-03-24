@@ -1201,4 +1201,56 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 	}
+
+	// ---- VideoConfig Container ----
+
+	#[cfg(feature = "mp4")]
+	#[tokio::test]
+	async fn video_config_legacy() {
+		tokio::time::pause();
+
+		let config = hang::catalog::VideoConfig {
+			codec: "avc1.64001f".parse().unwrap(),
+			container: hang::catalog::Container::Legacy,
+			description: None,
+			coded_width: None,
+			coded_height: None,
+			display_ratio_width: None,
+			display_ratio_height: None,
+			bitrate: None,
+			framerate: None,
+			optimize_for_latency: None,
+			jitter: None,
+		};
+
+		let mut track = moq_lite::Track::new("video").produce();
+		let consumer_track = track.consume();
+		let mut consumer =
+			OrderedConsumer::new(consumer_track, config).with_max_latency(Duration::from_millis(500));
+
+		// Write frames using Legacy encoding
+		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
+		for i in 0..3u64 {
+			let frame = Frame {
+				timestamp: ts(i * 33_333),
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+			};
+			Legacy.write(&mut group, &frame).unwrap();
+		}
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let mut frames = Vec::new();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			frames.push(frame);
+		}
+
+		assert_eq!(frames.len(), 3);
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert!(frames[0].keyframe);
+		assert_eq!(frames[1].timestamp, ts(33_333));
+		assert!(!frames[1].keyframe);
+		assert_eq!(frames[2].timestamp, ts(66_666));
+		assert!(!frames[2].keyframe);
+	}
 }
