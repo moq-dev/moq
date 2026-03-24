@@ -4,7 +4,7 @@ use bytes::Bytes;
 
 pub type Timestamp = moq_lite::Timescale<1_000_000>;
 
-/// A media frame with a timestamp and codec-specific payload.
+/// A media frame with a timestamp, payload, and keyframe flag.
 #[derive(Clone, Debug)]
 pub struct Frame {
 	/// The presentation timestamp for this frame.
@@ -12,6 +12,9 @@ pub struct Frame {
 
 	/// The encoded media data for this frame.
 	pub payload: Bytes,
+
+	/// Whether this frame is a keyframe.
+	pub keyframe: bool,
 }
 
 /// Trait for reading/writing media frames from/to moq-lite groups.

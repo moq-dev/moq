@@ -40,6 +40,7 @@ impl Container for Legacy {
 		Poll::Ready(Ok(Some(vec![Frame {
 			timestamp: hang_frame.timestamp,
 			payload,
+			keyframe: false, // Legacy can't determine from data; consumer infers from group position
 		}])))
 	}
 }

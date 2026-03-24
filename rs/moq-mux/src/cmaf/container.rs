@@ -44,8 +44,15 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 
 			let timestamp = Timestamp::from_scale(dts, timescale)?;
 			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
+			let flags = entry.flags.unwrap_or(0);
+			// depends_on_no_other (bits 24-25 == 0x2) means keyframe
+			let keyframe = (flags >> 24) & 0x3 == 0x2;
 
-			frames.push(Frame { timestamp, payload });
+			frames.push(Frame {
+				timestamp,
+				payload,
+				keyframe,
+			});
 
 			offset = end;
 			dts += entry.duration.or(default_duration).unwrap_or(0) as u64;
@@ -69,15 +76,16 @@ pub(crate) fn encode(
 
 	let dts = (frames[0].timestamp.as_micros() * timescale as u128 / 1_000_000) as u64;
 	let sequence_number = group.frame_count() as u32;
-	let keyframe = sequence_number == 0;
-	let keyframe_flags = if keyframe { 0x0200_0000 } else { 0x0001_0000 };
 
 	let entries: Vec<_> = frames
 		.iter()
-		.map(|f| mp4_atom::TrunEntry {
-			size: Some(f.payload.len() as u32),
-			flags: Some(keyframe_flags),
-			..Default::default()
+		.map(|f| {
+			let flags = if f.keyframe { 0x0200_0000 } else { 0x0001_0000 };
+			mp4_atom::TrunEntry {
+				size: Some(f.payload.len() as u32),
+				flags: Some(flags),
+				..Default::default()
+			}
 		})
 		.collect();
 

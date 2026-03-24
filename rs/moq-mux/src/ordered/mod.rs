@@ -1,7 +1,6 @@
 mod consumer;
-mod frame;
 mod producer;
 
+pub use crate::container::Frame;
 pub use consumer::*;
-pub use frame::*;
 pub use producer::*;

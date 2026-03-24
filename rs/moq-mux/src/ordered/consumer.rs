@@ -1,8 +1,7 @@
 use std::collections::VecDeque;
 use std::task::{Poll, ready};
 
-use super::Frame;
-use crate::container::{Container, Timestamp};
+use crate::container::{Container, Frame, Timestamp};
 
 /// A consumer for media tracks with timestamp reordering.
 ///
@@ -379,8 +378,6 @@ mod tests {
 
 	use bytes::Bytes;
 
-	type ContainerFrame = crate::container::Frame;
-
 	fn ts(micros: u64) -> Timestamp {
 		Timestamp::from_micros(micros).unwrap()
 	}
@@ -389,9 +386,10 @@ mod tests {
 	fn write_group(track: &mut moq_lite::TrackProducer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_lite::Group { sequence }).unwrap();
 		for &timestamp in timestamps {
-			let frame = ContainerFrame {
+			let frame = Frame {
 				timestamp,
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
 			};
 			Legacy.write(&mut group, &[frame]).unwrap();
 		}
@@ -484,9 +482,10 @@ mod tests {
 			Legacy
 				.write(
 					&mut group0,
-					&[ContainerFrame {
+					&[Frame {
 						timestamp: ts(f * 2_000),
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
+						keyframe: false,
 					}],
 				)
 				.unwrap();
@@ -522,9 +521,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&[ContainerFrame {
+				&[Frame {
 					timestamp: ts(400_000),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
 				}],
 			)
 			.unwrap();
@@ -557,9 +557,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&[ContainerFrame {
+				&[Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
 				}],
 			)
 			.unwrap();
@@ -598,9 +599,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&[ContainerFrame {
+				&[Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
 				}],
 			)
 			.unwrap();
@@ -789,9 +791,11 @@ mod tests {
 		Legacy
 			.write(
 				&mut group,
-				&[ContainerFrame {
+				&[Frame {
 					timestamp: ts(0),
 					payload: Bytes::from(payload_bytes.clone()),
+
+					keyframe: false,
 				}],
 			)
 			.unwrap();
@@ -823,9 +827,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&[ContainerFrame {
+				&[Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
 				}],
 			)
 			.unwrap();
@@ -904,9 +909,10 @@ mod tests {
 			Legacy
 				.write(
 					&mut group0,
-					&[ContainerFrame {
+					&[Frame {
 						timestamp,
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
+						keyframe: false,
 					}],
 				)
 				.unwrap();
@@ -954,9 +960,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group7,
-				&[ContainerFrame {
+				&[Frame {
 					timestamp: ts(300_000),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
 				}],
 			)
 			.unwrap();
@@ -966,9 +973,10 @@ mod tests {
 			Legacy
 				.write(
 					&mut group7,
-					&[ContainerFrame {
+					&[Frame {
 						timestamp: ts(400_000),
 						payload: Bytes::from_static(&[0xBE, 0xEF]),
+						keyframe: false,
 					}],
 				)
 				.unwrap();
@@ -1037,9 +1045,11 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&[ContainerFrame {
+				&[Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xAA]),
+
+					keyframe: false,
 				}],
 			)
 			.unwrap();
@@ -1070,9 +1080,11 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&[ContainerFrame {
+				&[Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xAA]),
+
+					keyframe: false,
 				}],
 			)
 			.unwrap();
@@ -1106,9 +1118,10 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&[ContainerFrame {
+				&[Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
 				}],
 			)
 			.unwrap();
@@ -1237,9 +1250,10 @@ mod tests {
 		// Write frames using Legacy encoding
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for i in 0..3u64 {
-			let frame = ContainerFrame {
+			let frame = Frame {
 				timestamp: ts(i * 33_333),
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
 			};
 			Legacy.write(&mut group, &[frame]).unwrap();
 		}

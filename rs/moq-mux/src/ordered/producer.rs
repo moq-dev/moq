@@ -1,5 +1,4 @@
-use super::Frame;
-use crate::container::{self, Container};
+use crate::container::{Container, Frame};
 
 /// A producer for media tracks that manages group boundaries based on keyframes.
 ///
@@ -19,7 +18,7 @@ pub struct Producer<C: Container> {
 	pub track: moq_lite::TrackProducer,
 	container: C,
 	group: Option<moq_lite::GroupProducer>,
-	buffer: Vec<container::Frame>,
+	buffer: Vec<Frame>,
 	latency: std::time::Duration,
 }
 
@@ -70,17 +69,12 @@ impl<C: Container> Producer<C> {
 			return Err(moq_lite::Error::ProtocolViolation.into());
 		}
 
-		let container_frame = container::Frame {
-			timestamp: frame.timestamp,
-			payload: frame.payload,
-		};
-
 		if self.latency.is_zero() {
 			// Flush immediately.
 			let group = self.group.as_mut().unwrap();
-			self.container.write(group, &[container_frame])?;
+			self.container.write(group, &[frame])?;
 		} else {
-			self.buffer.push(container_frame);
+			self.buffer.push(frame);
 
 			// Check if buffered duration exceeds latency.
 			if self.buffer.len() >= 2 {
