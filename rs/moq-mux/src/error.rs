@@ -9,5 +9,5 @@ pub enum Error {
 
 	#[cfg(feature = "mp4")]
 	#[error("cmaf: {0}")]
-	Cmaf(#[from] crate::cmaf::CmafError),
+	Cmaf(#[from] crate::cmaf::Error),
 }

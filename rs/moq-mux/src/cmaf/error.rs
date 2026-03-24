@@ -1,13 +1,10 @@
 #[derive(Debug, thiserror::Error)]
-pub enum CmafError {
+pub enum Error {
 	#[error("mp4: {0}")]
 	Mp4(#[from] mp4_atom::Error),
 
 	#[error("moq: {0}")]
 	Moq(#[from] moq_lite::Error),
-
-	#[error("hang: {0}")]
-	Hang(#[from] hang::Error),
 
 	#[error("timestamp overflow")]
 	TimestampOverflow(#[from] moq_lite::TimeOverflow),
