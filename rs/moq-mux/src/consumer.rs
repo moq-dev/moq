@@ -1,9 +1,8 @@
 use std::collections::VecDeque;
 use std::task::{Poll, ready};
 
-use crate::container::{self, Container, Timestamp};
-
-use super::OrderedFrame;
+use crate::container::Container;
+use crate::frame::{OrderedFrame, Timestamp};
 
 /// A consumer for media tracks with timestamp reordering.
 ///
@@ -55,7 +54,7 @@ impl<F: Container> OrderedConsumer<F> {
 	/// configured latency target.
 	///
 	/// Returns `None` when the track has ended.
-	pub async fn read(&mut self) -> Result<Option<OrderedFrame>, container::Error> {
+	pub async fn read(&mut self) -> Result<Option<OrderedFrame>, F::Error> {
 		conducer::wait(|waiter| self.poll_read(waiter)).await
 	}
 
@@ -63,7 +62,7 @@ impl<F: Container> OrderedConsumer<F> {
 	///
 	/// Uses a single waiter that gets registered on all relevant conducer channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<OrderedFrame>, container::Error>> {
+	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<OrderedFrame>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
@@ -180,7 +179,7 @@ impl<F: Container> OrderedConsumer<F> {
 	// Reads any new groups from the track until we're completely finished.
 	//
 	// Returns Pending until all groups have been consumed.
-	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), container::Error>> {
+	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), F::Error>> {
 		loop {
 			let Some(group) = ready!(self.track.poll_next_group(waiter)?) else {
 				// Track is finished.
@@ -212,7 +211,7 @@ impl<F: Container> OrderedConsumer<F> {
 	}
 
 	/// Wait until the track is closed.
-	pub async fn closed(&self) -> Result<(), container::Error> {
+	pub async fn closed(&self) -> Result<(), F::Error> {
 		Ok(self.track.closed().await?)
 	}
 }
@@ -267,7 +266,7 @@ impl GroupBuffer {
 		&mut self,
 		waiter: &conducer::Waiter,
 		format: &F,
-	) -> Poll<Result<Option<OrderedFrame>, container::Error>> {
+	) -> Poll<Result<Option<OrderedFrame>, F::Error>> {
 		if let Some(frame) = self.buffered.pop_front() {
 			return Poll::Ready(Ok(Some(frame)));
 		}
@@ -281,12 +280,8 @@ impl GroupBuffer {
 	// Add one more frame to the buffer if possible.
 	//
 	// Returns false if the group is finished.
-	fn buffer_once<F: Container>(
-		&mut self,
-		waiter: &conducer::Waiter,
-		format: &F,
-	) -> Poll<Result<bool, container::Error>> {
-		let Some(frame) = ready!(format.poll_read(&mut self.group, waiter).map_err(Into::into)?) else {
+	fn buffer_once<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+		let Some(frame) = ready!(format.poll_read(&mut self.group, waiter)?) else {
 			return Poll::Ready(Ok(false));
 		};
 
@@ -312,11 +307,7 @@ impl GroupBuffer {
 		Poll::Ready(Ok(true))
 	}
 
-	fn buffer_one<F: Container>(
-		&mut self,
-		waiter: &conducer::Waiter,
-		format: &F,
-	) -> Poll<Result<bool, container::Error>> {
+	fn buffer_one<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
 		if self.buffered.is_empty() {
 			self.buffer_once(waiter, format)
 		} else {
@@ -324,11 +315,7 @@ impl GroupBuffer {
 		}
 	}
 
-	fn buffer_all<F: Container>(
-		&mut self,
-		waiter: &conducer::Waiter,
-		format: &F,
-	) -> Poll<Result<(), container::Error>> {
+	fn buffer_all<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
 		while ready!(self.buffer_once(waiter, format)?) {}
 		Poll::Ready(Ok(()))
 	}
@@ -338,7 +325,7 @@ impl GroupBuffer {
 		&mut self,
 		waiter: &conducer::Waiter,
 		format: &F,
-	) -> Poll<Result<Timestamp, container::Error>> {
+	) -> Poll<Result<Timestamp, F::Error>> {
 		// Keep reading more frames just to advance the max timestamp.
 		let _ = self.buffer_all(waiter, format)?;
 
@@ -347,7 +334,7 @@ impl GroupBuffer {
 		}
 
 		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			return Poll::Ready(Err(container::Error::Other("empty group".into())));
+			return Poll::Ready(Err(moq_lite::Error::Decode.into()));
 		}
 
 		Poll::Pending
@@ -357,7 +344,7 @@ impl GroupBuffer {
 		&mut self,
 		waiter: &conducer::Waiter,
 		format: &F,
-	) -> Poll<Result<Timestamp, container::Error>> {
+	) -> Poll<Result<Timestamp, F::Error>> {
 		let _ = self.buffer_one(waiter, format)?;
 
 		if let Some(min) = self.min_timestamp {
@@ -365,7 +352,7 @@ impl GroupBuffer {
 		}
 
 		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			return Poll::Ready(Err(container::Error::Other("empty group".into())));
+			return Poll::Ready(Err(moq_lite::Error::Decode.into()));
 		}
 
 		Poll::Pending
@@ -383,7 +370,8 @@ impl std::ops::Deref for GroupBuffer {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::container::Legacy;
+	use crate::frame::Frame;
+	use crate::hang::Legacy;
 	use std::time::Duration;
 
 	use bytes::Bytes;
@@ -396,7 +384,7 @@ mod tests {
 	fn write_group(track: &mut moq_lite::TrackProducer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_lite::Group { sequence }).unwrap();
 		for &timestamp in timestamps {
-			let frame = container::Frame {
+			let frame = Frame {
 				timestamp,
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 			};
@@ -406,7 +394,7 @@ mod tests {
 	}
 
 	/// Drain all available frames with a per-read timeout.
-	async fn read_all(consumer: &mut OrderedConsumer<Legacy>) -> Result<Vec<OrderedFrame>, container::Error> {
+	async fn read_all(consumer: &mut OrderedConsumer<Legacy>) -> Result<Vec<OrderedFrame>, hang::Error> {
 		let mut frames = Vec::new();
 		loop {
 			match tokio::time::timeout(Duration::from_millis(200), consumer.read()).await {
@@ -491,7 +479,7 @@ mod tests {
 			Legacy
 				.write(
 					&mut group0,
-					&container::Frame {
+					&Frame {
 						timestamp: ts(f * 2_000),
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
 					},
@@ -529,7 +517,7 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&container::Frame {
+				&Frame {
 					timestamp: ts(400_000),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 				},
@@ -564,7 +552,7 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&container::Frame {
+				&Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 				},
@@ -605,7 +593,7 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&container::Frame {
+				&Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 				},
@@ -796,7 +784,7 @@ mod tests {
 		Legacy
 			.write(
 				&mut group,
-				&container::Frame {
+				&Frame {
 					timestamp: ts(0),
 					payload: Bytes::from(payload_bytes.clone()),
 				},
@@ -830,7 +818,7 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&container::Frame {
+				&Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 				},
@@ -911,7 +899,7 @@ mod tests {
 			Legacy
 				.write(
 					&mut group0,
-					&container::Frame {
+					&Frame {
 						timestamp,
 						payload: Bytes::from_static(&[0xDE, 0xAD]),
 					},
@@ -961,7 +949,7 @@ mod tests {
 		Legacy
 			.write(
 				&mut group7,
-				&container::Frame {
+				&Frame {
 					timestamp: ts(300_000),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 				},
@@ -973,7 +961,7 @@ mod tests {
 			Legacy
 				.write(
 					&mut group7,
-					&container::Frame {
+					&Frame {
 						timestamp: ts(400_000),
 						payload: Bytes::from_static(&[0xBE, 0xEF]),
 					},
@@ -1044,7 +1032,7 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&container::Frame {
+				&Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xAA]),
 				},
@@ -1077,7 +1065,7 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&container::Frame {
+				&Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xAA]),
 				},
@@ -1113,7 +1101,7 @@ mod tests {
 		Legacy
 			.write(
 				&mut group0,
-				&container::Frame {
+				&Frame {
 					timestamp: ts(0),
 					payload: Bytes::from_static(&[0xDE, 0xAD]),
 				},

@@ -5,8 +5,10 @@ mod catalog;
 pub mod cmaf;
 pub mod consumer;
 pub mod container;
+pub mod frame;
 pub mod hang;
 pub mod import;
 pub mod msf;
+pub mod producer;
 
 pub use catalog::*;
