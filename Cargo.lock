@@ -3439,6 +3439,7 @@ name = "moq-robo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "ffmpeg-next",
  "hang",
@@ -3446,6 +3447,7 @@ dependencies = [
  "moq-lite",
  "moq-mux",
  "moq-native",
+ "mp4-atom",
  "rand 0.9.2",
  "serde",
  "serde_json",

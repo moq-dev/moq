@@ -102,13 +102,13 @@ impl Robo {
         // Channel for the video pipeline to signal action completion.
         let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
 
-        // Start the video pipeline.
+        // Start the video pipeline (async, uses block_in_place for ffmpeg calls).
         let cmd_rx = self.inner.cmd_tx.subscribe();
-        let video_handle = tokio::task::spawn_blocking({
+        let video_handle = tokio::spawn({
             let media = self.media.clone();
             let broadcast = broadcast.clone();
             let catalog = catalog.clone();
-            move || video::run_pipeline(media, broadcast, catalog, cmd_rx, done_tx)
+            async move { video::run_pipeline(media, broadcast, catalog, cmd_rx, done_tx).await }
         });
 
         // Handle action completions (video finished playing an action file).

@@ -96,6 +96,10 @@ match version {
 }
 ```
 
+## Rust Conventions
+
+- Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
+
 ## Tooling
 
 - **TypeScript**: Always use `bun` for all package management and script execution (not npm, yarn, or pnpm)

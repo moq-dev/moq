@@ -1,33 +1,216 @@
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::Path;
 
 use anyhow::{Context, Result};
+use bytes::{Bytes, BytesMut};
+use mp4_atom::{Atom, DecodeMaybe};
 
 use crate::MediaFiles;
 use crate::robo::VideoCommand;
 
-/// Result of processing a single file.
+/// A single H.264 sample extracted from an fMP4 file.
+struct Sample {
+    /// Presentation timestamp in microseconds.
+    pts_micros: u64,
+    /// Raw AVCC-format H.264 data (length-prefixed NALUs).
+    data: Bytes,
+    /// Whether this sample is a keyframe (IDR).
+    #[allow(dead_code)]
+    keyframe: bool,
+}
+
+/// An fMP4 file preloaded into memory and parsed into samples.
+struct PreloadedFile {
+    /// AVCDecoderConfigurationRecord for initializing decoders.
+    avcc: Bytes,
+    /// All video samples in decode order.
+    samples: Vec<Sample>,
+    /// Source video dimensions.
+    width: u32,
+    height: u32,
+}
+
+impl PreloadedFile {
+    fn load(path: &Path) -> Result<Self> {
+        let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let mut cursor = std::io::Cursor::new(&data);
+
+        let mut moov = None;
+        // (moof, moof_encoded_size, mdat, mdat_header_size)
+        let mut fragments: Vec<(mp4_atom::Moof, usize, mp4_atom::Mdat, usize)> = Vec::new();
+        let mut pending_moof: Option<(mp4_atom::Moof, usize)> = None;
+
+        let mut position: usize = 0;
+        while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
+            let atom_end = cursor.position() as usize;
+            let atom_size = atom_end - position;
+
+            match atom {
+                mp4_atom::Any::Moov(m) => moov = Some(m),
+                mp4_atom::Any::Moof(m) => {
+                    anyhow::ensure!(pending_moof.is_none(), "consecutive moof without mdat");
+                    pending_moof = Some((m, atom_size));
+                }
+                mp4_atom::Any::Mdat(m) => {
+                    let (moof, moof_size) = pending_moof.take().context("mdat without moof")?;
+                    let mdat_header_size = atom_size - m.data.len();
+                    fragments.push((moof, moof_size, m, mdat_header_size));
+                }
+                _ => {} // skip ftyp, styp, sidx, etc.
+            }
+
+            position = atom_end;
+        }
+
+        let moov = moov.context("missing moov atom")?;
+
+        // Find the video track.
+        let trak = moov
+            .trak
+            .iter()
+            .find(|t| t.mdia.hdlr.handler.as_ref() == b"vide")
+            .context("no video track")?;
+
+        let track_id = trak.tkhd.track_id;
+        let timescale = trak.mdia.mdhd.timescale as u64;
+
+        // Extract AVCC and dimensions from the codec box.
+        let codec = trak
+            .mdia
+            .minf
+            .stbl
+            .stsd
+            .codecs
+            .first()
+            .context("missing codec")?;
+        let avc1 = match codec {
+            mp4_atom::Codec::Avc1(avc1) => avc1,
+            other => anyhow::bail!("expected avc1 codec, got: {:?}", other),
+        };
+
+        let mut avcc_buf = BytesMut::new();
+        avc1.avcc.encode_body(&mut avcc_buf)?;
+        let avcc = avcc_buf.freeze();
+        let width = avc1.visual.width as u32;
+        let height = avc1.visual.height as u32;
+
+        // Get defaults from moov.mvex.trex.
+        let trex = moov
+            .mvex
+            .as_ref()
+            .and_then(|mvex| mvex.trex.iter().find(|t| t.track_id == track_id));
+        let default_sample_duration = trex.map(|t| t.default_sample_duration).unwrap_or_default();
+        let default_sample_size = trex.map(|t| t.default_sample_size).unwrap_or_default();
+        let default_sample_flags = trex.map(|t| t.default_sample_flags).unwrap_or_default();
+
+        // Extract samples from all fragments.
+        let mut samples = Vec::new();
+
+        for (moof, moof_size, mdat, mdat_header_size) in &fragments {
+            for traf in &moof.traf {
+                if traf.tfhd.track_id != track_id {
+                    continue;
+                }
+
+                let tfdt = traf.tfdt.as_ref().context("missing tfdt")?;
+                let mut dts = tfdt.base_media_decode_time;
+
+                for trun in &traf.trun {
+                    let tfhd = &traf.tfhd;
+
+                    let mut offset = if let Some(data_offset) = trun.data_offset {
+                        let base = tfhd.base_data_offset.unwrap_or_default() as usize;
+                        let data_offset: usize =
+                            data_offset.try_into().context("invalid data offset")?;
+                        // data_offset is relative to start of moof.
+                        base + data_offset
+                            .checked_sub(*moof_size)
+                            .and_then(|v| v.checked_sub(*mdat_header_size))
+                            .context("invalid data offset: underflow")?
+                    } else {
+                        0
+                    };
+
+                    for entry in &trun.entries {
+                        let size = entry
+                            .size
+                            .unwrap_or(tfhd.default_sample_size.unwrap_or(default_sample_size))
+                            as usize;
+                        let flags = entry
+                            .flags
+                            .unwrap_or(tfhd.default_sample_flags.unwrap_or(default_sample_flags));
+                        let duration = entry.duration.unwrap_or(
+                            tfhd.default_sample_duration
+                                .unwrap_or(default_sample_duration),
+                        );
+
+                        let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
+                        let pts_micros = pts * 1_000_000 / timescale;
+
+                        anyhow::ensure!(
+                            offset + size <= mdat.data.len(),
+                            "sample extends beyond mdat"
+                        );
+                        let sample_data = Bytes::copy_from_slice(&mdat.data[offset..offset + size]);
+
+                        // Keyframe detection (same logic as fmp4.rs).
+                        let keyframe = {
+                            let kf = (flags >> 24) & 0x3 == 0x2;
+                            let non_sync = (flags >> 16) & 0x1 == 0x1;
+                            kf && !non_sync
+                        };
+
+                        samples.push(Sample {
+                            pts_micros,
+                            data: sample_data,
+                            keyframe,
+                        });
+
+                        dts += duration as u64;
+                        offset += size;
+                    }
+                }
+            }
+        }
+
+        anyhow::ensure!(
+            !samples.is_empty(),
+            "no video samples found in {}",
+            path.display()
+        );
+
+        tracing::info!(
+            path = %path.display(),
+            samples = samples.len(),
+            width,
+            height,
+            "preloaded file"
+        );
+
+        Ok(Self {
+            avcc,
+            samples,
+            width,
+            height,
+        })
+    }
+}
+
+/// Result of processing samples from a file.
 enum FileResult {
-    /// Reached end of file normally.
-    Eof,
-    /// Interrupted by a command.
-    Interrupted(VideoCommand),
+    Eof { last_pts: i64 },
+    Interrupted { cmd: VideoCommand, last_pts: i64 },
 }
 
 /// What the pipeline is currently playing.
 enum PlayState {
-    /// Looping idle.fmp4.
     Idle,
-    /// Looping dead.fmp4.
     Dead,
-    /// Playing an action file once.
     Action(String),
 }
 
-/// State-machine-driven video pipeline.
-///
-/// Plays idle (loop) by default. Commands from the watch channel switch between
-/// idle, dead (loop), and action files (play once, then signal completion).
-pub fn run_pipeline(
+/// Preload all media files into RAM, then run the async playback loop.
+pub async fn run_pipeline(
     media: MediaFiles,
     broadcast: moq_lite::BroadcastProducer,
     catalog: moq_mux::CatalogProducer,
@@ -36,253 +219,407 @@ pub fn run_pipeline(
 ) -> Result<()> {
     ffmpeg_next::init().context("failed to init ffmpeg")?;
 
+    // Preload all files into RAM (blocking, once at startup).
+    let files: BTreeMap<String, PreloadedFile> = tokio::task::block_in_place(|| {
+        let mut files = BTreeMap::new();
+        files.insert("idle".into(), PreloadedFile::load(&media.idle)?);
+        files.insert("dead".into(), PreloadedFile::load(&media.dead)?);
+        for (name, path) in &media.actions {
+            files.insert(name.clone(), PreloadedFile::load(path)?);
+        }
+        Ok::<_, anyhow::Error>(files)
+    })?;
+
     let mut hd = moq_mux::import::Avc1::new(broadcast.clone(), catalog.clone());
-    let mut preview = moq_mux::import::Avc3::new(broadcast, catalog);
+
+    // Spawn the 240p transcoder on a dedicated thread.
+    let preview = moq_mux::import::Avc3::new(broadcast, catalog);
+    let mut transcoder = TranscoderHandle::spawn(preview);
 
     let mut pts_offset: i64 = 0;
     let mut state = PlayState::Idle;
 
     loop {
-        let (path, looping) = match &state {
-            PlayState::Idle => (&media.idle, true),
-            PlayState::Dead => (&media.dead, true),
-            PlayState::Action(name) => {
-                let path = media
-                    .actions
-                    .get(name)
-                    .with_context(|| format!("unknown action: {name}"))?;
-                (path, false)
-            }
+        let (file_key, looping) = match &state {
+            PlayState::Idle => ("idle", true),
+            PlayState::Dead => ("dead", true),
+            PlayState::Action(name) => (name.as_str(), false),
         };
 
-        tracing::info!(?path, ?state, looping, "playing file");
+        let file = files
+            .get(file_key)
+            .with_context(|| format!("unknown file: {file_key}"))?;
 
-        match process_file(
-            path,
+        tracing::info!(?state, looping, samples = file.samples.len(), "playing");
+
+        match process_samples(
+            file,
             &mut hd,
-            &mut preview,
+            &mut transcoder,
             &mut cmd_rx,
             looping,
             pts_offset,
-        )? {
-            (FileResult::Eof, last_pts) => {
-                pts_offset = last_pts + 33_333; // ~one frame at 30fps
+        )
+        .await?
+        {
+            FileResult::Eof { last_pts } => {
+                pts_offset = last_pts + 33_333;
 
                 if looping {
-                    // Restart the same file.
+                    tokio::task::yield_now().await;
                     continue;
                 }
 
-                // Action finished — notify robo to transition state.
-                let _ = done_tx.blocking_send(());
-                // Wait for robo to decide next state and send a new value via cmd_tx.
-                let handle = tokio::runtime::Handle::current();
-                handle
-                    .block_on(cmd_rx.changed())
-                    .map_err(|_| anyhow::anyhow!("command channel closed"))?;
+                // Action finished — notify robo.
+                done_tx.send(()).await.context("done channel closed")?;
+                cmd_rx.changed().await.context("command channel closed")?;
 
                 match cmd_rx.borrow_and_update().as_ref() {
-                    Some(VideoCommand::Action(name)) => {
-                        state = PlayState::Action(name.clone());
-                    }
-                    Some(VideoCommand::Kill) => {
-                        state = PlayState::Dead;
-                    }
-                    None => {
-                        state = PlayState::Idle;
-                    }
+                    Some(VideoCommand::Action(name)) => state = PlayState::Action(name.clone()),
+                    Some(VideoCommand::Kill) => state = PlayState::Dead,
+                    None => state = PlayState::Idle,
                 }
             }
-            (FileResult::Interrupted(cmd), last_pts) => {
+            FileResult::Interrupted { cmd, last_pts } => {
                 pts_offset = last_pts + 33_333;
                 match cmd {
-                    VideoCommand::Action(name) => {
-                        state = PlayState::Action(name);
-                    }
-                    VideoCommand::Kill => {
-                        state = PlayState::Dead;
-                    }
+                    VideoCommand::Action(name) => state = PlayState::Action(name),
+                    VideoCommand::Kill => state = PlayState::Dead,
                 }
             }
         }
     }
 }
 
-fn process_file(
-    path: &PathBuf,
+async fn process_samples(
+    file: &PreloadedFile,
     hd: &mut moq_mux::import::Avc1,
-    preview: &mut moq_mux::import::Avc3,
+    transcoder: &mut TranscoderHandle,
     cmd_rx: &mut tokio::sync::watch::Receiver<Option<VideoCommand>>,
     looping: bool,
     pts_offset: i64,
-) -> Result<(FileResult, i64)> {
-    let mut input = ffmpeg_next::format::input(path).context("failed to open input file")?;
+) -> Result<FileResult> {
+    // Initialize HD track from AVCC.
+    hd.initialize(&mut file.avcc.as_ref())?;
 
-    let video_stream = input
-        .streams()
-        .best(ffmpeg_next::media::Type::Video)
-        .context("no video stream found")?;
+    // Initialize the 240p transcoder for this file.
+    transcoder
+        .init(file.avcc.clone(), file.width, file.height)
+        .await?;
 
-    let stream_index = video_stream.index();
-    let time_base = video_stream.time_base();
-    let params = video_stream.parameters();
-
-    // Initialize the HD (Avc1) track from the container's extradata.
-    let extradata = unsafe { (*params.as_ptr()).extradata };
-    let extradata_size = unsafe { (*params.as_ptr()).extradata_size } as usize;
-    anyhow::ensure!(
-        !extradata.is_null() && extradata_size > 0,
-        "missing H.264 extradata"
-    );
-    let avcc = unsafe { std::slice::from_raw_parts(extradata, extradata_size) };
-    hd.initialize(&mut &*avcc)?;
-
-    // Set up decoder for the 240p transcode path.
-    let dec_ctx = ffmpeg_next::codec::Context::from_parameters(params)?;
-    let mut decoder = dec_ctx.decoder().video()?;
-
-    // 240p encoder — match source aspect ratio.
-    let sd_height: u32 = 240;
-    let sd_width: u32 = (sd_height as u64 * decoder.width() as u64 / decoder.height() as u64) as u32;
-    // Round down to even (required for YUV420P).
-    let sd_width = sd_width & !1;
-
-    let enc_codec = ffmpeg_next::encoder::find(ffmpeg_next::codec::Id::H264)
-        .context("H.264 encoder not found")?;
-    let enc_ctx = ffmpeg_next::codec::Context::new_with_codec(enc_codec);
-    let mut enc = enc_ctx.encoder().video()?;
-    enc.set_width(sd_width);
-    enc.set_height(sd_height);
-    enc.set_format(ffmpeg_next::format::Pixel::YUV420P);
-    enc.set_time_base(ffmpeg_next::Rational::new(1, 30));
-    enc.set_frame_rate(Some(ffmpeg_next::Rational::new(30, 1)));
-    enc.set_bit_rate(300_000);
-    enc.set_gop(60);
-
-    let mut opts = ffmpeg_next::Dictionary::new();
-    opts.set("preset", "ultrafast");
-    opts.set("tune", "zerolatency");
-    let mut encoder = enc.open_with(opts)?;
-
-    let mut scaler = ffmpeg_next::software::scaling::Context::get(
-        decoder.format(),
-        decoder.width(),
-        decoder.height(),
-        ffmpeg_next::format::Pixel::YUV420P,
-        sd_width,
-        sd_height,
-        ffmpeg_next::software::scaling::Flags::BILINEAR,
-    )?;
-
-    let mut frame_count: u64 = 0;
-    let mut last_pts: i64 = pts_offset;
-    let wall_start = std::time::Instant::now();
+    let wall_start = tokio::time::Instant::now();
     let pts_start = pts_offset;
+    let mut last_pts = pts_offset;
 
-    for (stream, packet) in input.packets() {
-        if stream.index() != stream_index {
-            continue;
-        }
-
-        // Check for commands.
+    for sample in &file.samples {
+        // Check for commands (non-blocking).
         if cmd_rx.has_changed().unwrap_or(false) {
             let cmd = cmd_rx.borrow_and_update().clone();
             if let Some(cmd) = cmd {
                 match &cmd {
                     VideoCommand::Kill => {
-                        // Kill always interrupts immediately.
-                        return Ok((FileResult::Interrupted(cmd), last_pts));
+                        return Ok(FileResult::Interrupted { cmd, last_pts });
                     }
                     VideoCommand::Action(_) if looping => {
-                        // Action command while looping (idle/dead) — interrupt to play it.
-                        return Ok((FileResult::Interrupted(cmd), last_pts));
+                        return Ok(FileResult::Interrupted { cmd, last_pts });
                     }
-                    VideoCommand::Action(_) => {
-                        // Action command while playing an action — robo handles queueing.
-                        // We ignore it here and let the file play to completion.
-                    }
+                    VideoCommand::Action(_) => {} // robo handles queueing
                 }
             }
         }
 
-        let input_pts = packet.pts().unwrap_or(frame_count as i64);
-        let pts_micros = rescale_to_micros(input_pts, time_base);
-        let adjusted_pts = pts_micros + pts_offset;
+        let adjusted_pts = sample.pts_micros as i64 + pts_offset;
 
-        // Pace to real-time.
+        // Pace to real-time (async — yields to runtime, ctrl+c works).
         let target = std::time::Duration::from_micros((adjusted_pts - pts_start).max(0) as u64);
-        let elapsed = wall_start.elapsed();
-        if target > elapsed {
-            std::thread::sleep(target - elapsed);
-        }
+        tokio::time::sleep_until(wall_start + target).await;
 
         let ts = hang::container::Timestamp::from_micros(adjusted_pts.max(0) as u64)
             .context("timestamp overflow")?;
 
-        // HD: pass AVCC packet directly to Avc1.
-        if let Some(data) = packet.data() {
-            hd.decode(&mut &*data, Some(ts))?;
-        }
+        // HD: feed AVCC packet to Avc1 (sync, non-blocking memory write).
+        hd.decode(&mut sample.data.as_ref(), Some(ts))?;
 
-        // 240p: decode → scale → burn label → encode → feed to Avc3.
-        decoder.send_packet(&packet)?;
-        let mut decoded = ffmpeg_next::frame::Video::empty();
-        while decoder.receive_frame(&mut decoded).is_ok() {
-            let mut yuv = ffmpeg_next::frame::Video::empty();
-            scaler.run(&decoded, &mut yuv)?;
-            burn_label(&mut yuv);
-            yuv.set_pts(Some(frame_count as i64));
-
-            if frame_count == 0 {
-                yuv.set_kind(ffmpeg_next::picture::Type::I);
-            }
-
-            encoder.send_frame(&yuv)?;
-            drain_to_avc3(&mut encoder, preview, ts)?;
-            frame_count += 1;
-        }
+        // 240p: send to transcoder thread (non-blocking, bounded channel provides backpressure).
+        transcoder.frame(sample.data.clone(), ts).await?;
 
         last_pts = adjusted_pts;
     }
 
-    // Flush decoder + encoder for preview.
-    decoder.send_eof()?;
-    let mut decoded = ffmpeg_next::frame::Video::empty();
-    while decoder.receive_frame(&mut decoded).is_ok() {
-        let mut yuv = ffmpeg_next::frame::Video::empty();
-        scaler.run(&decoded, &mut yuv)?;
-        yuv.set_pts(Some(frame_count as i64));
-        encoder.send_frame(&yuv)?;
+    // Wait for the transcoder to flush.
+    transcoder.flush(last_pts).await?;
+
+    Ok(FileResult::Eof { last_pts })
+}
+
+// --- Transcoder thread ---
+
+/// Message sent to the transcoder thread.
+enum TranscoderMsg {
+    /// (Re)initialize the decoder/encoder for a new file.
+    Init {
+        avcc: Bytes,
+        width: u32,
+        height: u32,
+        reply: tokio::sync::oneshot::Sender<Result<()>>,
+    },
+    /// Transcode a single frame.
+    Frame {
+        data: Bytes,
+        ts: hang::container::Timestamp,
+    },
+    /// Flush the decoder/encoder at end of file.
+    Flush {
+        last_pts: i64,
+        reply: tokio::sync::oneshot::Sender<Result<()>>,
+    },
+}
+
+/// Async handle to the transcoder thread.
+struct TranscoderHandle {
+    tx: tokio::sync::mpsc::Sender<TranscoderMsg>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TranscoderHandle {
+    /// Spawn the transcoder on a dedicated thread.
+    fn spawn(preview: moq_mux::import::Avc3) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+
+        let thread = std::thread::Builder::new()
+            .name("transcoder".into())
+            .spawn(move || transcoder_thread(rx, preview))
+            .expect("failed to spawn transcoder thread");
+
+        Self {
+            tx,
+            thread: Some(thread),
+        }
+    }
+
+    async fn init(&self, avcc: Bytes, width: u32, height: u32) -> Result<()> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(TranscoderMsg::Init {
+                avcc,
+                width,
+                height,
+                reply: reply_tx,
+            })
+            .await
+            .context("transcoder thread dead")?;
+        reply_rx.await.context("transcoder thread dead")?
+    }
+
+    async fn frame(&self, data: Bytes, ts: hang::container::Timestamp) -> Result<()> {
+        self.tx
+            .send(TranscoderMsg::Frame { data, ts })
+            .await
+            .context("transcoder thread dead")
+    }
+
+    async fn flush(&self, last_pts: i64) -> Result<()> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(TranscoderMsg::Flush {
+                last_pts,
+                reply: reply_tx,
+            })
+            .await
+            .context("transcoder thread dead")?;
+        reply_rx.await.context("transcoder thread dead")?
+    }
+}
+
+impl Drop for TranscoderHandle {
+    fn drop(&mut self) {
+        // Drop the sender to signal the thread to exit.
+        // (tx is dropped automatically, thread sees channel closed)
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Runs on a dedicated thread. Owns the ffmpeg decoder/encoder/scaler (non-Send types)
+/// and the Avc3 preview track.
+fn transcoder_thread(
+    mut rx: tokio::sync::mpsc::Receiver<TranscoderMsg>,
+    mut preview: moq_mux::import::Avc3,
+) {
+    let mut state: Option<Transcoder> = None;
+
+    while let Some(msg) = rx.blocking_recv() {
+        match msg {
+            TranscoderMsg::Init {
+                avcc,
+                width,
+                height,
+                reply,
+            } => {
+                let result = Transcoder::new(&avcc, width, height);
+                match result {
+                    Ok(t) => {
+                        state = Some(t);
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+            TranscoderMsg::Frame { data, ts } => {
+                if let Some(t) = state.as_mut() {
+                    if let Err(e) = t.transcode_frame(&data, ts, &mut preview) {
+                        tracing::error!(error = %e, "transcode error");
+                    }
+                }
+            }
+            TranscoderMsg::Flush { last_pts, reply } => {
+                let result = if let Some(t) = state.as_mut() {
+                    t.flush(&mut preview, last_pts)
+                } else {
+                    Ok(())
+                };
+                state = None; // Drop the transcoder after flush.
+                let _ = reply.send(result);
+            }
+        }
+    }
+}
+
+/// Encapsulates ffmpeg decode → scale → encode for the 240p preview.
+/// Lives on the dedicated transcoder thread (never crosses thread boundaries).
+struct Transcoder {
+    decoder: ffmpeg_next::decoder::Video,
+    encoder: ffmpeg_next::encoder::video::Encoder,
+    scaler: ffmpeg_next::software::scaling::Context,
+    frame_count: u64,
+}
+
+impl Transcoder {
+    fn new(avcc: &[u8], src_width: u32, src_height: u32) -> Result<Self> {
+        // Create decoder with H.264 codec and AVCC extradata.
+        let codec = ffmpeg_next::decoder::find(ffmpeg_next::codec::Id::H264)
+            .context("H.264 decoder not found")?;
+        let mut ctx = ffmpeg_next::codec::Context::new_with_codec(codec);
+
+        // Set extradata (AVCC) via raw FFI.
+        unsafe {
+            let ptr = ctx.as_mut_ptr();
+            let extradata = ffmpeg_next::ffi::av_malloc(avcc.len()) as *mut u8;
+            anyhow::ensure!(!extradata.is_null(), "av_malloc failed");
+            std::ptr::copy_nonoverlapping(avcc.as_ptr(), extradata, avcc.len());
+            (*ptr).extradata = extradata;
+            (*ptr).extradata_size = avcc.len() as i32;
+            (*ptr).width = src_width as i32;
+            (*ptr).height = src_height as i32;
+        }
+
+        let decoder = ctx.decoder().video()?;
+
+        // 240p encoder — match source aspect ratio.
+        let sd_height: u32 = 240;
+        let sd_width = (sd_height as u64 * src_width as u64 / src_height as u64) as u32 & !1;
+
+        let enc_codec = ffmpeg_next::encoder::find(ffmpeg_next::codec::Id::H264)
+            .context("H.264 encoder not found")?;
+        let enc_ctx = ffmpeg_next::codec::Context::new_with_codec(enc_codec);
+        let mut enc = enc_ctx.encoder().video()?;
+        enc.set_width(sd_width);
+        enc.set_height(sd_height);
+        enc.set_format(ffmpeg_next::format::Pixel::YUV420P);
+        enc.set_time_base(ffmpeg_next::Rational::new(1, 30));
+        enc.set_frame_rate(Some(ffmpeg_next::Rational::new(30, 1)));
+        enc.set_bit_rate(300_000);
+        enc.set_gop(60);
+
+        let mut opts = ffmpeg_next::Dictionary::new();
+        opts.set("preset", "ultrafast");
+        opts.set("tune", "zerolatency");
+        let encoder = enc.open_with(opts)?;
+
+        let scaler = ffmpeg_next::software::scaling::Context::get(
+            ffmpeg_next::format::Pixel::YUV420P,
+            src_width,
+            src_height,
+            ffmpeg_next::format::Pixel::YUV420P,
+            sd_width,
+            sd_height,
+            ffmpeg_next::software::scaling::Flags::BILINEAR,
+        )?;
+
+        Ok(Self {
+            decoder,
+            encoder,
+            scaler,
+            frame_count: 0,
+        })
+    }
+
+    fn transcode_frame(
+        &mut self,
+        data: &Bytes,
+        ts: hang::container::Timestamp,
+        preview: &mut moq_mux::import::Avc3,
+    ) -> Result<()> {
+        let mut packet = ffmpeg_next::Packet::copy(data);
+        packet.set_pts(Some(self.frame_count as i64));
+        packet.set_dts(Some(self.frame_count as i64));
+
+        self.decoder.send_packet(&packet)?;
+
+        let mut decoded = ffmpeg_next::frame::Video::empty();
+        while self.decoder.receive_frame(&mut decoded).is_ok() {
+            let mut yuv = ffmpeg_next::frame::Video::empty();
+            self.scaler.run(&decoded, &mut yuv)?;
+            burn_label(&mut yuv);
+            yuv.set_pts(Some(self.frame_count as i64));
+
+            if self.frame_count == 0 {
+                yuv.set_kind(ffmpeg_next::picture::Type::I);
+            }
+
+            self.encoder.send_frame(&yuv)?;
+            self.drain_encoder(preview, ts)?;
+            self.frame_count += 1;
+        }
+
+        Ok(())
+    }
+
+    fn flush(&mut self, preview: &mut moq_mux::import::Avc3, last_pts: i64) -> Result<()> {
         let ts =
             hang::container::Timestamp::from_micros(last_pts.max(0) as u64).context("timestamp")?;
-        drain_to_avc3(&mut encoder, preview, ts)?;
-        frame_count += 1;
+
+        self.decoder.send_eof()?;
+        let mut decoded = ffmpeg_next::frame::Video::empty();
+        while self.decoder.receive_frame(&mut decoded).is_ok() {
+            let mut yuv = ffmpeg_next::frame::Video::empty();
+            self.scaler.run(&decoded, &mut yuv)?;
+            yuv.set_pts(Some(self.frame_count as i64));
+            self.encoder.send_frame(&yuv)?;
+            self.drain_encoder(preview, ts)?;
+            self.frame_count += 1;
+        }
+
+        self.encoder.send_eof()?;
+        self.drain_encoder(preview, ts)?;
+        Ok(())
     }
 
-    encoder.send_eof()?;
-    let ts =
-        hang::container::Timestamp::from_micros(last_pts.max(0) as u64).context("timestamp")?;
-    drain_to_avc3(&mut encoder, preview, ts)?;
-
-    Ok((FileResult::Eof, last_pts))
-}
-
-/// Drain encoded packets from the encoder and feed them to Avc3 as Annex B frames.
-fn drain_to_avc3(
-    encoder: &mut ffmpeg_next::encoder::video::Video,
-    avc3: &mut moq_mux::import::Avc3,
-    pts: hang::container::Timestamp,
-) -> Result<()> {
-    let mut pkt = ffmpeg_next::Packet::empty();
-    while encoder.receive_packet(&mut pkt).is_ok() {
-        let data = pkt.data().context("empty encoded packet")?;
-        avc3.decode_frame(&mut &*data, Some(pts))?;
+    fn drain_encoder(
+        &mut self,
+        preview: &mut moq_mux::import::Avc3,
+        ts: hang::container::Timestamp,
+    ) -> Result<()> {
+        let mut pkt = ffmpeg_next::Packet::empty();
+        while self.encoder.receive_packet(&mut pkt).is_ok() {
+            let data = pkt.data().context("empty encoded packet")?;
+            preview.decode_frame(&mut &*data, Some(ts))?;
+        }
+        Ok(())
     }
-    Ok(())
-}
-
-fn rescale_to_micros(pts: i64, time_base: ffmpeg_next::Rational) -> i64 {
-    pts * time_base.numerator() as i64 * 1_000_000 / time_base.denominator() as i64
 }
 
 /// Burn a "240p" label in the bottom-right corner of a YUV420P frame.
@@ -291,7 +628,6 @@ fn burn_label(frame: &mut ffmpeg_next::frame::Video) {
     let h = frame.height() as usize;
     let scale = 2usize;
 
-    // 5-wide glyphs, 7 rows each.
     #[rustfmt::skip]
     let glyphs: &[&[u8; 7]] = &[
         &[0b01110, 0b10001, 0b00001, 0b00110, 0b01000, 0b10000, 0b11111], // 2
@@ -316,7 +652,6 @@ fn burn_label(frame: &mut ffmpeg_next::frame::Video) {
     let y_stride = frame.stride(0);
     let y_data = frame.data_mut(0);
 
-    // Dark background box.
     for y in y0..y0 + box_h {
         for x in x0..x0 + box_w {
             if x < w && y < h {
@@ -325,7 +660,6 @@ fn burn_label(frame: &mut ffmpeg_next::frame::Video) {
         }
     }
 
-    // Draw glyphs at 2x scale.
     let text_x = x0 + padding;
     let text_y = y0 + padding;
 
