@@ -1,5 +1,4 @@
-import assert from "node:assert";
-import test from "node:test";
+import { expect, test } from "bun:test";
 import { Group, Time, Track, Varint } from "@moq/lite";
 import { Consumer, Producer } from "./legacy.ts";
 
@@ -71,8 +70,8 @@ test("consumer reads frames from a single group", async () => {
 	producer.close();
 
 	const frames = await consumeFrames(consumer, 200);
-	assert.strictEqual(frames.length, 1);
-	assert.strictEqual(frames[0].timestamp, 0);
+	expect(frames.length).toBe(1);
+	expect(frames[0].timestamp).toBe(0 as Time.Micro);
 
 	consumer.close();
 });
@@ -89,7 +88,7 @@ test("consumer reads frames from multiple groups within latency", async () => {
 	producer.close();
 
 	const frames = await consumeFrames(consumer, 200);
-	assert.strictEqual(frames.length, 5, `Expected 5 frames, got ${frames.length}`);
+	expect(frames.length).toBe(5);
 
 	consumer.close();
 });
@@ -131,7 +130,7 @@ test("active index advances correctly after latency skip", async () => {
 	//
 	// Bug: #active gets stuck at group 13 (whose #runGroup already completed),
 	// so the consumer only gets 5 frames from group 13, then deadlocks.
-	assert.ok(frames.length >= 30, `Expected >= 30 frames (groups 13-19), got ${frames.length}`);
+	expect(frames.length >= 30).toBeTruthy();
 
 	consumer.close();
 });
@@ -156,7 +155,7 @@ test("consumer.close() stops consumption", async () => {
 
 	// next() should return undefined after close
 	const result = await consumer.next();
-	assert.strictEqual(result, undefined);
+	expect(result).toBe(undefined);
 
 	producer.close();
 });
@@ -174,7 +173,7 @@ test("consumer.close() before any reads", async () => {
 	consumer.close();
 
 	const result = await consumer.next();
-	assert.strictEqual(result, undefined);
+	expect(result).toBe(undefined);
 
 	producer.close();
 });
@@ -206,10 +205,7 @@ test("latency 0 delivers only the latest groups", async () => {
 
 	// With latency 0, early groups should be aggressively skipped.
 	// Total frames without skipping = 30. We expect significantly fewer.
-	assert.ok(
-		frames.length < groupCount * framesPerGroup,
-		`Expected skipping with latency 0, got all ${frames.length} frames`,
-	);
+	expect(frames.length < groupCount * framesPerGroup).toBeTruthy();
 
 	consumer.close();
 });
@@ -239,11 +235,11 @@ test("latency skip delivers correct groups", async () => {
 	// Total span: group 9 starts at 270ms, last frame at 278ms.
 	// For 100ms latency, we want groups where span from group start to max < 100ms.
 	// All delivered frames should have timestamps within ~100ms of the latest.
-	assert.ok(frames.length > 0, "Expected at least some frames");
+	expect(frames.length > 0).toBeTruthy();
 
 	const maxTimestamp = Math.max(...frames.map((f) => f.timestamp));
 	const minTimestamp = Math.min(...frames.map((f) => f.timestamp));
-	assert.ok(maxTimestamp - minTimestamp <= 110_000, `Span ${maxTimestamp - minTimestamp}us should be <= 110ms`);
+	expect(maxTimestamp - minTimestamp <= 110_000).toBeTruthy();
 
 	consumer.close();
 });
@@ -283,12 +279,12 @@ test("next() returns undefined for group boundaries", async () => {
 	const groupDoneMarkers = allResults.filter((r) => !r.frame);
 	const frameResults = allResults.filter((r) => r.frame);
 
-	assert.strictEqual(frameResults.length, 6, `Expected 6 frames, got ${frameResults.length}`);
-	assert.strictEqual(groupDoneMarkers.length, 3, `Expected 3 group-done markers, got ${groupDoneMarkers.length}`);
+	expect(frameResults.length).toBe(6);
+	expect(groupDoneMarkers.length).toBe(3);
 
 	// Group-done markers should have ascending group numbers
 	for (let i = 1; i < groupDoneMarkers.length; i++) {
-		assert.ok(groupDoneMarkers[i].group > groupDoneMarkers[i - 1].group);
+		expect(groupDoneMarkers[i].group > groupDoneMarkers[i - 1].group).toBeTruthy();
 	}
 
 	consumer.close();
@@ -303,9 +299,7 @@ test("concurrent next() calls throw", async () => {
 	const first = consumer.next();
 
 	// Second concurrent call should throw
-	await assert.rejects(() => consumer.next(), {
-		message: "multiple calls to decode not supported",
-	});
+	await expect((() => consumer.next())()).rejects.toThrow("multiple calls to decode not supported");
 
 	// Clean up: close everything so the first promise resolves
 	consumer.close();
@@ -342,13 +336,13 @@ test("frames are decoded with correct timestamps and keyframe flags", async () =
 		}
 	}
 
-	assert.strictEqual(decoded.length, 3);
-	assert.strictEqual(decoded[0].timestamp, 0);
-	assert.strictEqual(decoded[0].keyframe, true);
-	assert.strictEqual(decoded[1].timestamp, 33_333);
-	assert.strictEqual(decoded[1].keyframe, false);
-	assert.strictEqual(decoded[2].timestamp, 66_666);
-	assert.strictEqual(decoded[2].keyframe, false);
+	expect(decoded.length).toBe(3);
+	expect(decoded[0].timestamp).toBe(0 as Time.Micro);
+	expect(decoded[0].keyframe).toBe(true);
+	expect(decoded[1].timestamp).toBe(33_333 as Time.Micro);
+	expect(decoded[1].keyframe).toBe(false);
+	expect(decoded[2].timestamp).toBe(66_666 as Time.Micro);
+	expect(decoded[2].keyframe).toBe(false);
 
 	consumer.close();
 });
@@ -369,7 +363,7 @@ test("empty track returns undefined", async () => {
 	]);
 
 	// Should return undefined (track closed) or timeout (null)
-	assert.ok(result === undefined || result === null, "Expected undefined or timeout for empty track");
+	expect(result === undefined || result === null).toBeTruthy();
 
 	consumer.close();
 });
@@ -401,10 +395,7 @@ test("track closed with error propagates gracefully", async () => {
 			consumer.next(),
 			new Promise<null>((resolve) => setTimeout(() => resolve(null), 300)),
 		]);
-		assert.ok(
-			result2 === undefined || result2 === null || result2.frame === undefined,
-			"Expected consumer to stop after track error",
-		);
+		expect(result2 === undefined || result2 === null || result2.frame === undefined).toBeTruthy();
 	}
 
 	consumer.close();
@@ -439,7 +430,7 @@ test("consumer recovers from gap in group sequence numbers", async () => {
 	// All groups arrive at once, so the full span (0-260ms) exceeds the 100ms target.
 	// #checkLatency skips old groups (including past the gap) until within budget.
 	// The important thing: the consumer does NOT deadlock on the missing group 2.
-	assert.ok(frames.length >= 4, `Expected >= 4 frames, got ${frames.length}`);
+	expect(frames.length >= 4).toBeTruthy();
 
 	consumer.close();
 });
@@ -464,7 +455,7 @@ test("consumer recovers from gap at the start of sequence numbers", async () => 
 
 	// Group 5 is consumed normally (2 frames). Then #active = 6 (missing).
 	// Groups 7-9 accumulate, span = 100ms > 80ms, so latency skip fires.
-	assert.ok(frames.length >= 4, `Expected >= 4 frames, got ${frames.length}`);
+	expect(frames.length >= 4).toBeTruthy();
 
 	consumer.close();
 });
@@ -475,7 +466,7 @@ test("buffered signal updates as frames arrive and are consumed", async () => {
 	const consumer = new Consumer(track, { latency: 500 as Time.Milli });
 
 	// Initially no buffered ranges
-	assert.deepStrictEqual(consumer.buffered.peek(), []);
+	expect(consumer.buffered.peek()).toEqual([]);
 
 	// Write 3 groups with 2 frames each, well-spaced timestamps
 	for (let g = 0; g < 3; g++) {
@@ -490,20 +481,20 @@ test("buffered signal updates as frames arrive and are consumed", async () => {
 
 	// Should have buffered ranges
 	const rangesBefore = consumer.buffered.peek();
-	assert.ok(rangesBefore.length > 0, "Expected buffered ranges after writing frames");
+	expect(rangesBefore.length > 0).toBeTruthy();
 	const totalBefore = rangesBefore.reduce((sum, r) => sum + (r.end as number) - (r.start as number), 0);
-	assert.ok(totalBefore > 0, "Expected non-zero buffered duration");
+	expect(totalBefore > 0).toBeTruthy();
 
 	producer.close();
 
 	// Consume all frames in one go
 	const frames = await consumeFrames(consumer, 500);
-	assert.ok(frames.length > 0, "Expected to consume some frames");
+	expect(frames.length > 0).toBeTruthy();
 
 	// After consuming all frames, buffered should be empty or smaller
 	const rangesAfter = consumer.buffered.peek();
 	const totalAfter = rangesAfter.reduce((sum, r) => sum + (r.end as number) - (r.start as number), 0);
-	assert.ok(totalAfter <= totalBefore, "Buffered ranges should shrink after consumption");
+	expect(totalAfter <= totalBefore).toBeTruthy();
 
 	consumer.close();
 });
@@ -523,9 +514,9 @@ test("buffered merges consecutive done groups into one range", async () => {
 	// All groups are done (fully received). Since they have consecutive sequence
 	// numbers, they should merge into a single contiguous range.
 	const ranges = consumer.buffered.peek();
-	assert.strictEqual(ranges.length, 1, `Expected 1 merged range, got ${ranges.length}: ${JSON.stringify(ranges)}`);
-	assert.strictEqual(ranges[0].start, 0);
-	assert.strictEqual(ranges[0].end, 46);
+	expect(ranges.length).toBe(1);
+	expect(ranges[0].start).toBe(0 as Time.Milli);
+	expect(ranges[0].end).toBe(46 as Time.Milli);
 
 	consumer.close();
 	track.close();
@@ -546,19 +537,15 @@ test("buffered shows gap when group sequence numbers are missing", async () => {
 	// Groups 0 and 1 should merge (consecutive, done).
 	// Group 3 should be a separate range (gap at group 2).
 	const ranges = consumer.buffered.peek();
-	assert.strictEqual(
-		ranges.length,
-		2,
-		`Expected 2 ranges (gap at group 2), got ${ranges.length}: ${JSON.stringify(ranges)}`,
-	);
+	expect(ranges.length).toBe(2);
 
 	// First range: groups 0-1
-	assert.strictEqual(ranges[0].start, 0);
-	assert.strictEqual(ranges[0].end, 23);
+	expect(ranges[0].start).toBe(0 as Time.Milli);
+	expect(ranges[0].end).toBe(23 as Time.Milli);
 
 	// Second range: group 3
-	assert.strictEqual(ranges[1].start, 69);
-	assert.strictEqual(ranges[1].end, 69);
+	expect(ranges[1].start).toBe(69 as Time.Milli);
+	expect(ranges[1].end).toBe(69 as Time.Milli);
 
 	consumer.close();
 	track.close();
@@ -575,14 +562,14 @@ test("buffered does not merge non-consecutive groups across a gap", async () => 
 	await new Promise((resolve) => setTimeout(resolve, 100));
 
 	const ranges = consumer.buffered.peek();
-	assert.strictEqual(ranges.length, 2, `Expected 2 ranges (gap at group 1), got ${ranges.length}`);
+	expect(ranges.length).toBe(2);
 
 	// Group 0 range: [0, 0]. No extension because group 1 (N+1) is missing.
 	// N+2 (group 2) exists but is not enough — extension requires exactly N+1.
-	assert.strictEqual(ranges[0].start, 0);
-	assert.strictEqual(ranges[0].end, 0);
-	assert.strictEqual(ranges[1].start, 46);
-	assert.strictEqual(ranges[1].end, 46);
+	expect(ranges[0].start).toBe(0 as Time.Milli);
+	expect(ranges[0].end).toBe(0 as Time.Milli);
+	expect(ranges[1].start).toBe(46 as Time.Milli);
+	expect(ranges[1].end).toBe(46 as Time.Milli);
 
 	consumer.close();
 	track.close();
@@ -606,9 +593,9 @@ test("buffered range for in-progress group uses last frame as end", async () => 
 	// Group is in-progress, so the last frame has duration 0.
 	// Range should be [0ms, 33ms].
 	const ranges = consumer.buffered.peek();
-	assert.strictEqual(ranges.length, 1, `Expected 1 range, got ${ranges.length}`);
-	assert.strictEqual(ranges[0].start, 0);
-	assert.strictEqual(ranges[0].end, 33);
+	expect(ranges.length).toBe(1);
+	expect(ranges[0].start).toBe(0 as Time.Milli);
+	expect(ranges[0].end).toBe(33 as Time.Milli);
 
 	group.close();
 	consumer.close();
@@ -634,9 +621,9 @@ test("buffered extension applies when N is done and N+1 has first frame but is n
 	// frame timestamp (50ms). Group 0 range: [0, 50]. Group 1 range: [50, 50].
 	// Merged: [0, 50].
 	const ranges = consumer.buffered.peek();
-	assert.strictEqual(ranges.length, 1, `Expected 1 range, got ${ranges.length}`);
-	assert.strictEqual(ranges[0].start, 0);
-	assert.strictEqual(ranges[0].end, 50);
+	expect(ranges.length).toBe(1);
+	expect(ranges[0].start).toBe(0 as Time.Milli);
+	expect(ranges[0].end).toBe(50 as Time.Milli);
 
 	group1.close();
 	consumer.close();
@@ -660,9 +647,9 @@ test("no buffered extension when N+1 exists but has no frames", async () => {
 	// Without a first frame timestamp, we can't compute the extension.
 	// Group 0 range: [0, 0] (no extension).
 	const ranges = consumer.buffered.peek();
-	assert.strictEqual(ranges.length, 1, `Expected 1 range, got ${ranges.length}`);
-	assert.strictEqual(ranges[0].start, 0);
-	assert.strictEqual(ranges[0].end, 0);
+	expect(ranges.length).toBe(1);
+	expect(ranges[0].start).toBe(0 as Time.Milli);
+	expect(ranges[0].end).toBe(0 as Time.Milli);
 
 	group1.close();
 	consumer.close();
@@ -683,7 +670,7 @@ test("late group arrival fills gap in buffered ranges", async () => {
 
 	// Should have 2 ranges (gap at group 1).
 	const rangesBefore = consumer.buffered.peek();
-	assert.strictEqual(rangesBefore.length, 2, `Expected 2 ranges before gap fill, got ${rangesBefore.length}`);
+	expect(rangesBefore.length).toBe(2);
 
 	// Now fill the gap with group 1.
 	writeGroupWithSequence(track, 1, [23_000 as Time.Micro]);
@@ -694,9 +681,9 @@ test("late group arrival fills gap in buffered ranges", async () => {
 	// Group 0 extends to group 1 start (23ms), group 1 extends to group 2 start (46ms).
 	// Merged: [0, 46].
 	const rangesAfter = consumer.buffered.peek();
-	assert.strictEqual(rangesAfter.length, 1, `Expected 1 range after gap fill, got ${rangesAfter.length}`);
-	assert.strictEqual(rangesAfter[0].start, 0);
-	assert.strictEqual(rangesAfter[0].end, 46);
+	expect(rangesAfter.length).toBe(1);
+	expect(rangesAfter[0].start).toBe(0 as Time.Milli);
+	expect(rangesAfter[0].end).toBe(46 as Time.Milli);
 
 	consumer.close();
 	track.close();
@@ -716,9 +703,9 @@ test("buffered range handles B-frames (out-of-order timestamps within group)", a
 	await new Promise((resolve) => setTimeout(resolve, 100));
 
 	const ranges = consumer.buffered.peek();
-	assert.strictEqual(ranges.length, 1);
-	assert.strictEqual(ranges[0].start, 0);
-	assert.strictEqual(ranges[0].end, 33);
+	expect(ranges.length).toBe(1);
+	expect(ranges[0].start).toBe(0 as Time.Milli);
+	expect(ranges[0].end).toBe(33 as Time.Milli);
 
 	consumer.close();
 	track.close();
@@ -740,12 +727,12 @@ test("consumer delivers groups in sequence order regardless of write order", asy
 	await new Promise((resolve) => setTimeout(resolve, 100));
 
 	const frames = await consumeFrames(consumer, 500);
-	assert.strictEqual(frames.length, 3, `Expected 3 frames, got ${frames.length}`);
+	expect(frames.length).toBe(3);
 
 	// Should be delivered in group sequence order, not write order.
-	assert.strictEqual(frames[0].group, 0);
-	assert.strictEqual(frames[1].group, 1);
-	assert.strictEqual(frames[2].group, 2);
+	expect(frames[0].group).toBe(0);
+	expect(frames[1].group).toBe(1);
+	expect(frames[2].group).toBe(2);
 
 	consumer.close();
 });

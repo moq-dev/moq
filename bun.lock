@@ -58,7 +58,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.8.8",

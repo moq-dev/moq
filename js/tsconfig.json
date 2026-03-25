@@ -2,8 +2,6 @@
 	"compilerOptions": {
 		"lib": ["esnext", "dom", "dom.iterable"],
 		"target": "esnext",
-		"module": "esnext",
-		"moduleResolution": "bundler",
 		"rewriteRelativeImportExtensions": true,
 
 		"declaration": true,
@@ -37,7 +35,8 @@
 		// Disable enums and weird Typescript features.
 		"erasableSyntaxOnly": true,
 
-		"skipLibCheck": true
+		"skipLibCheck": true,
+		"types": ["bun-types"]
 	},
 	// Include something just so TS doesn't complain about not matching files
 	"include": ["common"],

@@ -4,7 +4,7 @@
 		"outDir": "dist",
 		"module": "nodenext",
 		"moduleResolution": "nodenext",
-		"types": ["node"]
+		"types": ["node", "bun-types"]
 	},
 	"include": ["src"]
 }
