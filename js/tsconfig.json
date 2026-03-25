@@ -35,8 +35,7 @@
 		// Disable enums and weird Typescript features.
 		"erasableSyntaxOnly": true,
 
-		"skipLibCheck": true,
-		"types": ["bun-types"]
+		"skipLibCheck": true
 	},
 	// Include something just so TS doesn't complain about not matching files
 	"include": ["common"],
