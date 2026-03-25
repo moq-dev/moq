@@ -18,12 +18,12 @@ websocket = ["moq-native/websocket"]
 anyhow = { version = "1", features = ["backtrace"] }
 clap = { version = "4", features = ["derive"] }
 ffmpeg-next = "8"
-hex = "0.4"
-rand = "0.9"
 hang = { workspace = true }
+hex = "0.4"
 moq-lite = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+rand = "0.9"
 serde = { workspace = true }
 serde_json = "1"
 tokio = { workspace = true, features = ["full"] }

@@ -61,6 +61,20 @@
 				background: #4a1a1a; color: #f87171; border-color: #f87171; font-weight: 700;
 			}
 			.card .controls button.kill:hover { background: #6a2a2a; }
+			.card .controls button.kill.active {
+				background: #7a1a1a; color: #fecaca; border-color: #f87171;
+			}
+			.card .controls button.active {
+				background: #1a4a1a; color: #4ade80; border-color: #4ade80; font-weight: 700;
+			}
+			.card .controls button.queued {
+				background: #3a2a0a; color: #facc15; border-color: #facc15;
+				animation: pulse 1.5s ease-in-out infinite;
+			}
+			@keyframes pulse {
+				0%, 100% { opacity: 1; }
+				50% { opacity: 0.6; }
+			}
 
 			.card .alert {
 				position: absolute; top: 0.5rem; left: 0.5rem;

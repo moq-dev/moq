@@ -60,6 +60,13 @@ root.run((effect) => {
 	});
 });
 
+interface RoboStatus {
+	actions: string[];
+	current: string;
+	queued: string | null;
+	controllers: string[];
+}
+
 // A robo card: live video + sensor HUD, expandable to fullscreen with controls.
 class RoboCard {
 	el: HTMLDivElement;
@@ -96,27 +103,6 @@ class RoboCard {
 		controls.className = "controls";
 		this.el.appendChild(controls);
 
-		// Angle buttons.
-		for (let i = 1; i <= 3; i++) {
-			const btn = document.createElement("button");
-			btn.textContent = `Angle ${i}`;
-			btn.addEventListener("click", (e) => {
-				e.stopPropagation();
-				sendCommand({ type: "angle", value: i });
-			});
-			controls.appendChild(btn);
-		}
-
-		// Kill button.
-		const killBtn = document.createElement("button");
-		killBtn.textContent = "KILL";
-		killBtn.className = "kill";
-		killBtn.addEventListener("click", (e) => {
-			e.stopPropagation();
-			sendCommand({ type: "kill" });
-		});
-		controls.appendChild(killBtn);
-
 		// Click to toggle expand.
 		this.el.addEventListener("click", () => {
 			expanded.set(expanded.peek() === roboId ? undefined : roboId);
@@ -148,15 +134,7 @@ class RoboCard {
 		this.#signals.run((effect) => {
 			const exp = effect.get(expanded);
 			const pixels = exp === roboId ? 1920 * 1080 : 426 * 240;
-			console.log(`[${roboId}] pixel budget: ${pixels}, expanded: ${exp === roboId}`);
 			videoSource.target.set({ pixels });
-		});
-
-		// Log rendition selection changes.
-		this.#signals.run((effect) => {
-			const track = effect.get(videoSource.track);
-			const config = effect.get(videoSource.config);
-			console.log(`[${roboId}] selected rendition: ${track}`, config);
 		});
 
 		const videoDecoder = new Watch.Video.Decoder(videoSource);
@@ -191,8 +169,8 @@ class RoboCard {
 			});
 		});
 
-		// Track controllers from status track.
-		const controllers = new Moq.Signals.Signal<string[]>([]);
+		// Track status from status track.
+		const status = new Moq.Signals.Signal<RoboStatus | undefined>(undefined);
 
 		this.#signals.run((effect) => {
 			const active = effect.get(broadcast.active);
@@ -204,20 +182,61 @@ class RoboCard {
 			effect.spawn(async () => {
 				for (;;) {
 					const json = (await Promise.race([effect.cancel, statusTrack.readJson()])) as
-						| { controllers: string[] }
+						| RoboStatus
 						| undefined;
 					if (!json) break;
-					controllers.set(json.controllers);
+					status.set(json);
 				}
 			});
 		});
 
-		// Command publishing.
-		let commandTrack: Moq.Track | undefined;
-
-		// Reactive alert: yellow for 1 controller, red for 2+.
+		// Dynamic action buttons + kill button based on status.
 		this.#signals.run((effect) => {
-			const ctrls = effect.get(controllers);
+			const st = effect.get(status);
+			if (!st) return;
+
+			// Clear existing buttons.
+			while (controls.firstChild) {
+				controls.removeChild(controls.firstChild);
+			}
+
+			// Create action buttons.
+			for (const action of st.actions) {
+				const btn = document.createElement("button");
+				btn.textContent = capitalize(action);
+				btn.className = "action-btn";
+
+				if (st.current === action) {
+					btn.classList.add("active");
+				} else if (st.queued === action) {
+					btn.classList.add("queued");
+				}
+
+				btn.addEventListener("click", (e) => {
+					e.stopPropagation();
+					sendCommand({ type: "action", name: action });
+				});
+				controls.appendChild(btn);
+			}
+
+			// Kill button.
+			const killBtn = document.createElement("button");
+			killBtn.textContent = "KILL";
+			killBtn.className = "kill";
+			if (st.current === "dead") {
+				killBtn.classList.add("active");
+			}
+			killBtn.addEventListener("click", (e) => {
+				e.stopPropagation();
+				sendCommand({ type: "kill" });
+			});
+			controls.appendChild(killBtn);
+		});
+
+		// Controller alert: yellow for 1, red for 2+.
+		this.#signals.run((effect) => {
+			const st = effect.get(status);
+			const ctrls = st?.controllers ?? [];
 
 			if (ctrls.length === 0) {
 				alert.style.display = "none";
@@ -231,6 +250,9 @@ class RoboCard {
 				alert.textContent = `${ctrls.length} CONTROLLERS: ${ctrls.join(", ")}`;
 			}
 		});
+
+		// Command publishing.
+		let commandTrack: Moq.Track | undefined;
 
 		this.#signals.run((effect) => {
 			const conn = effect.get(connection.established);
@@ -265,6 +287,10 @@ class RoboCard {
 	close() {
 		this.#signals.close();
 	}
+}
+
+function capitalize(s: string): string {
+	return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function formatTime(s: number): string {

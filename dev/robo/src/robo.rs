@@ -2,64 +2,76 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 
-use crate::Config;
 use crate::sensor;
 use crate::video;
+use crate::{Config, MediaFiles};
 
-/// Shared robo state, updated by commands and read by the status publisher.
+/// Published on the status track as JSON.
 #[derive(Clone, serde::Serialize)]
 pub struct State {
-    pub angle: usize,
+    /// Available action names (sorted).
+    pub actions: Vec<String>,
+    /// Current state: "idle", "dead", or an action name.
+    pub current: String,
+    /// Queued action (replaces previous queue). None means return to idle after current action.
+    pub queued: Option<String>,
+    /// Connected viewer IDs.
     pub controllers: Vec<String>,
-    pub killed: bool,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            angle: 1,
-            controllers: Vec::new(),
-            killed: false,
-        }
-    }
 }
 
 /// A command sent by a viewer.
 #[derive(serde::Deserialize, Debug)]
 #[serde(tag = "type")]
 enum Command {
-    #[serde(rename = "angle")]
-    Angle { value: usize },
+    #[serde(rename = "action")]
+    Action { name: String },
     #[serde(rename = "kill")]
+    Kill,
+}
+
+/// Commands sent to the video pipeline.
+#[derive(Clone, Debug)]
+pub enum VideoCommand {
+    /// Switch to an action file (plays once).
+    Action(String),
+    /// Kill switch — switch to dead loop immediately.
     Kill,
 }
 
 struct Inner {
     state: Mutex<State>,
-    angle_switch: tokio::sync::watch::Sender<usize>,
-    angles_len: usize,
+    /// Sends commands to the video pipeline.
+    cmd_tx: tokio::sync::watch::Sender<Option<VideoCommand>>,
+    action_names: Vec<String>,
 }
 
 #[derive(Clone)]
 pub struct Robo {
     broadcast: moq_lite::BroadcastProducer,
     inner: Arc<Inner>,
-    config: Config,
+    media: MediaFiles,
 }
 
 impl Robo {
-    pub fn new(config: &Config) -> Self {
+    pub fn new(_config: &Config, media: &MediaFiles) -> Self {
         let broadcast = moq_lite::BroadcastProducer::default();
-        let (angle_tx, _) = tokio::sync::watch::channel(1usize);
+        let (cmd_tx, _) = tokio::sync::watch::channel(None);
+
+        let action_names: Vec<String> = media.actions.keys().cloned().collect();
 
         Self {
             broadcast,
             inner: Arc::new(Inner {
-                state: Mutex::new(State::default()),
-                angle_switch: angle_tx,
-                angles_len: config.angles.len(),
+                state: Mutex::new(State {
+                    actions: action_names.clone(),
+                    current: "idle".to_string(),
+                    queued: None,
+                    controllers: Vec::new(),
+                }),
+                cmd_tx,
+                action_names,
             }),
-            config: config.clone(),
+            media: media.clone(),
         }
     }
 
@@ -87,13 +99,34 @@ impl Robo {
         };
         let status_producer = broadcast.create_track(status_track)?;
 
-        // Start the video pipeline (Avc1 for HD transmux, Avc3 for 240p transcode).
-        let angle_rx = self.inner.angle_switch.subscribe();
+        // Channel for the video pipeline to signal action completion.
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+        // Start the video pipeline.
+        let cmd_rx = self.inner.cmd_tx.subscribe();
         let video_handle = tokio::task::spawn_blocking({
-            let angles = self.config.angles.clone();
+            let media = self.media.clone();
             let broadcast = broadcast.clone();
             let catalog = catalog.clone();
-            move || video::run_pipeline(angles, broadcast, catalog, angle_rx)
+            move || video::run_pipeline(media, broadcast, catalog, cmd_rx, done_tx)
+        });
+
+        // Handle action completions (video finished playing an action file).
+        let inner = self.inner.clone();
+        let done_handle = tokio::spawn(async move {
+            while done_rx.recv().await.is_some() {
+                let mut state = inner.state.lock().unwrap();
+                if let Some(queued) = state.queued.take() {
+                    // Play the queued action next.
+                    state.current = queued.clone();
+                    let _ = inner.cmd_tx.send(Some(VideoCommand::Action(queued)));
+                } else {
+                    // Return to idle.
+                    state.current = "idle".to_string();
+                    let _ = inner.cmd_tx.send(None);
+                }
+            }
+            Ok::<_, anyhow::Error>(())
         });
 
         let sensor_handle = tokio::spawn(sensor::run_sensor(sensor_producer));
@@ -102,6 +135,7 @@ impl Robo {
 
         tokio::select! {
             res = video_handle => res?.context("video pipeline error"),
+            res = done_handle => res?.context("done handler error"),
             res = sensor_handle => res?.context("sensor error"),
             res = status_handle => res?.context("status error"),
         }
@@ -195,16 +229,33 @@ async fn handle_viewer_commands(
         while let Some(frame) = group.read_frame().await? {
             let text = std::str::from_utf8(&frame)?;
             match serde_json::from_str::<Command>(text) {
-                Ok(Command::Angle { value }) => {
-                    if value >= 1 && value <= inner.angles_len {
-                        inner.state.lock().unwrap().angle = value;
-                        let _ = inner.angle_switch.send(value);
-                        tracing::info!(%viewer_id, angle = value, "switched angle");
+                Ok(Command::Action { name }) => {
+                    if !inner.action_names.contains(&name) {
+                        tracing::warn!(%viewer_id, %name, "unknown action");
+                        continue;
+                    }
+
+                    let mut state = inner.state.lock().unwrap();
+                    if state.current == "idle" || state.current == "dead" {
+                        // Currently looping — interrupt immediately.
+                        state.current = name.clone();
+                        state.queued = None;
+                        let _ = inner.cmd_tx.send(Some(VideoCommand::Action(name)));
+                        tracing::info!(%viewer_id, current = %state.current, "action started");
+                    } else {
+                        // Currently playing an action — queue this one.
+                        state.queued = Some(name.clone());
+                        tracing::info!(%viewer_id, queued = %name, "action queued");
                     }
                 }
                 Ok(Command::Kill) => {
-                    inner.state.lock().unwrap().killed = true;
-                    tracing::warn!(%viewer_id, "kill switch activated");
+                    let mut state = inner.state.lock().unwrap();
+                    if state.current != "dead" {
+                        state.current = "dead".to_string();
+                        state.queued = None;
+                        let _ = inner.cmd_tx.send(Some(VideoCommand::Kill));
+                        tracing::warn!(%viewer_id, "kill switch activated");
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(%viewer_id, error = %e, "invalid command");
