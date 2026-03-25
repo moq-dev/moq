@@ -98,7 +98,7 @@ async fn local_publish_consume_audio() {
 	assert_eq!(audio.channel_count, 2);
 	assert!(catalog.video.is_empty());
 
-	let media_consumer = broadcast_consumer.subscribe_media(track_name.clone(), 10_000).unwrap();
+	let media_consumer = broadcast_consumer.subscribe_audio(track_name.clone(), audio.clone(), 10_000).unwrap();
 
 	let payload = b"opus audio payload data".to_vec();
 	media.write_frame(payload.clone(), 1_000_000).unwrap();
@@ -151,7 +151,7 @@ async fn video_publish_consume() {
 	assert_eq!(coded.height, 720);
 	assert!(catalog.audio.is_empty());
 
-	let media_consumer = broadcast_consumer.subscribe_media(track_name.clone(), 10_000).unwrap();
+	let media_consumer = broadcast_consumer.subscribe_video(track_name.clone(), video.clone(), 10_000).unwrap();
 
 	let keyframe = vec![0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC];
 	media.write_frame(keyframe, 0).unwrap();
@@ -190,8 +190,8 @@ async fn multiple_frames_ordering() {
 		.unwrap()
 		.unwrap();
 
-	let track_name = catalog.audio.keys().next().unwrap().clone();
-	let media_consumer = broadcast_consumer.subscribe_media(track_name, 10_000).unwrap();
+	let (track_name, audio) = catalog.audio.iter().next().unwrap();
+	let media_consumer = broadcast_consumer.subscribe_audio(track_name.clone(), audio.clone(), 10_000).unwrap();
 
 	let timestamps: [u64; 5] = [0, 20_000, 40_000, 60_000, 80_000];
 	for (i, &ts) in timestamps.iter().enumerate() {

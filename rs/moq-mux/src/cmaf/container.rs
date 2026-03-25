@@ -42,7 +42,8 @@ pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 				return Ok(frames);
 			}
 
-			let timestamp = Timestamp::from_scale(dts, timescale)?;
+			let pts = dts as i64 + entry.cts.unwrap_or(0) as i64;
+			let timestamp = Timestamp::from_scale(pts.max(0) as u64, timescale)?;
 			let payload = Bytes::copy_from_slice(&mdat_data[offset..end]);
 			let flags = entry.flags.unwrap_or(0);
 			// depends_on_no_other (bits 24-25 == 0x2) means keyframe
