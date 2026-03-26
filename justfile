@@ -11,7 +11,7 @@ default:
 # Install any dependencies.
 install:
 	bun install
-	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-hack cargo-sweep cargo-semver-checks release-plz
+	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-sweep cargo-semver-checks release-plz
 
 # Alias for dev.
 all: dev
