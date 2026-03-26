@@ -1,5 +1,4 @@
-import assert from "node:assert";
-import test from "node:test";
+import { expect, test } from "bun:test";
 import * as Varint from "./varint.ts";
 
 test("Varint encode/decode roundtrip - 1 byte values (0-63)", () => {
@@ -7,11 +6,11 @@ test("Varint encode/decode roundtrip - 1 byte values (0-63)", () => {
 
 	for (const value of testValues) {
 		const encoded = Varint.encode(value);
-		assert.strictEqual(encoded.byteLength, 1, `${value} should encode to 1 byte`);
+		expect(encoded.byteLength).toBe(1);
 
 		const [decoded, remaining] = Varint.decode(encoded);
-		assert.strictEqual(decoded, value, `${value} should decode correctly`);
-		assert.strictEqual(remaining.byteLength, 0, "remaining should be empty");
+		expect(decoded).toBe(value);
+		expect(remaining.byteLength).toBe(0);
 	}
 });
 
@@ -20,11 +19,11 @@ test("Varint encode/decode roundtrip - 2 byte values (64-16383)", () => {
 
 	for (const value of testValues) {
 		const encoded = Varint.encode(value);
-		assert.strictEqual(encoded.byteLength, 2, `${value} should encode to 2 bytes`);
+		expect(encoded.byteLength).toBe(2);
 
 		const [decoded, remaining] = Varint.decode(encoded);
-		assert.strictEqual(decoded, value, `${value} should decode correctly`);
-		assert.strictEqual(remaining.byteLength, 0, "remaining should be empty");
+		expect(decoded).toBe(value);
+		expect(remaining.byteLength).toBe(0);
 	}
 });
 
@@ -33,11 +32,11 @@ test("Varint encode/decode roundtrip - 4 byte values (16384-1073741823)", () => 
 
 	for (const value of testValues) {
 		const encoded = Varint.encode(value);
-		assert.strictEqual(encoded.byteLength, 4, `${value} should encode to 4 bytes`);
+		expect(encoded.byteLength).toBe(4);
 
 		const [decoded, remaining] = Varint.decode(encoded);
-		assert.strictEqual(decoded, value, `${value} should decode correctly`);
-		assert.strictEqual(remaining.byteLength, 0, "remaining should be empty");
+		expect(decoded).toBe(value);
+		expect(remaining.byteLength).toBe(0);
 	}
 });
 
@@ -46,23 +45,23 @@ test("Varint encode/decode roundtrip - 8 byte values (1073741824+)", () => {
 
 	for (const value of testValues) {
 		const encoded = Varint.encode(value);
-		assert.strictEqual(encoded.byteLength, 8, `${value} should encode to 8 bytes`);
+		expect(encoded.byteLength).toBe(8);
 
 		const [decoded, remaining] = Varint.decode(encoded);
-		assert.strictEqual(decoded, value, `${value} should decode correctly`);
-		assert.strictEqual(remaining.byteLength, 0, "remaining should be empty");
+		expect(decoded).toBe(value);
+		expect(remaining.byteLength).toBe(0);
 	}
 });
 
 test("Varint size calculation", () => {
-	assert.strictEqual(Varint.size(0), 1);
-	assert.strictEqual(Varint.size(63), 1);
-	assert.strictEqual(Varint.size(64), 2);
-	assert.strictEqual(Varint.size(16383), 2);
-	assert.strictEqual(Varint.size(16384), 4);
-	assert.strictEqual(Varint.size(1073741823), 4);
-	assert.strictEqual(Varint.size(1073741824), 8);
-	assert.strictEqual(Varint.size(Number.MAX_SAFE_INTEGER), 8);
+	expect(Varint.size(0)).toBe(1);
+	expect(Varint.size(63)).toBe(1);
+	expect(Varint.size(64)).toBe(2);
+	expect(Varint.size(16383)).toBe(2);
+	expect(Varint.size(16384)).toBe(4);
+	expect(Varint.size(1073741823)).toBe(4);
+	expect(Varint.size(1073741824)).toBe(8);
+	expect(Varint.size(Number.MAX_SAFE_INTEGER)).toBe(8);
 });
 
 test("Varint decode returns remaining buffer", () => {
@@ -74,8 +73,8 @@ test("Varint decode returns remaining buffer", () => {
 	combined.set(extra, encoded.byteLength);
 
 	const [decoded, remaining] = Varint.decode(combined);
-	assert.strictEqual(decoded, 42);
-	assert.deepEqual(remaining, extra);
+	expect(decoded).toBe(42);
+	expect(remaining).toEqual(extra);
 });
 
 test("Varint decode handles buffer at non-zero offset", () => {
@@ -90,22 +89,22 @@ test("Varint decode handles buffer at non-zero offset", () => {
 	const subarray = combined.subarray(padding.byteLength);
 
 	const [decoded, remaining] = Varint.decode(subarray);
-	assert.strictEqual(decoded, 1000);
-	assert.strictEqual(remaining.byteLength, 0);
+	expect(decoded).toBe(1000);
+	expect(remaining.byteLength).toBe(0);
 });
 
 test("Varint encode rejects negative values", () => {
-	assert.throws(() => Varint.encode(-1), /underflow/);
+	expect(() => Varint.encode(-1)).toThrow(/underflow/);
 });
 
 test("Varint decode throws on empty buffer", () => {
-	assert.throws(() => Varint.decode(new Uint8Array(0)), /buffer is empty/);
+	expect(() => Varint.decode(new Uint8Array(0))).toThrow(/buffer is empty/);
 });
 
 test("Varint decode throws on truncated buffer", () => {
 	// Create a 2-byte varint header but only provide 1 byte
 	const truncated = new Uint8Array([0x40]); // 0x40 = 2-byte marker with value 0
-	assert.throws(() => Varint.decode(truncated), /buffer too short/);
+	expect(() => Varint.decode(truncated)).toThrow(/buffer too short/);
 });
 
 test("Varint boundary values", () => {
@@ -121,9 +120,9 @@ test("Varint boundary values", () => {
 
 	for (const { value, expectedSize } of boundaries) {
 		const encoded = Varint.encode(value);
-		assert.strictEqual(encoded.byteLength, expectedSize, `${value} should encode to ${expectedSize} bytes`);
+		expect(encoded.byteLength).toBe(expectedSize);
 
 		const [decoded] = Varint.decode(encoded);
-		assert.strictEqual(decoded, value, `${value} should roundtrip correctly`);
+		expect(decoded).toBe(value);
 	}
 });

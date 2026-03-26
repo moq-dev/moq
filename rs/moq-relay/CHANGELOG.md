@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.12](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.11...moq-relay-v0.10.12) - 2026-03-26
+
+### Added
+
+- expose moq-relay as library ([#1121](https://github.com/moq-dev/moq/pull/1121))
+
 ## [0.10.11](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.10...moq-relay-v0.10.11) - 2026-03-25
 
 ### Other

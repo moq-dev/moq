@@ -1,5 +1,4 @@
-import assert from "node:assert";
-import test from "node:test";
+import { expect, test } from "bun:test";
 import * as base64 from "@hexagon/base64";
 import { exportJWK, generateKeyPair } from "jose";
 import type { Algorithm } from "./algorithm.ts";
@@ -59,19 +58,19 @@ test("load - valid JWK", () => {
 	const jwk = encodeJwk(testKey);
 	const key = load(jwk);
 
-	assert.strictEqual(key.alg, "HS256");
-	assert.deepEqual(key.key_ops, ["sign", "verify"]);
-	assert.strictEqual(key.kty, "oct");
-	assert.strictEqual(key.k, testKey.k);
-	assert.strictEqual(key.kid, "test-key-1");
+	expect(key.alg).toBe("HS256");
+	expect(key.key_ops).toEqual(["sign", "verify"]);
+	expect(key.kty).toBe("oct");
+	expect((key as { k?: string }).k).toBe(testKey.k);
+	expect(key.kid).toBe("test-key-1");
 });
 
 test("load - invalid base64url", () => {
 	const invalidJwk = "invalid-base64url!@#$%";
 
-	assert.throws(() => {
+	expect(() => {
 		load(invalidJwk);
-	});
+	}).toThrow();
 });
 
 test("load - invalid JSON after base64url decode", () => {
@@ -79,9 +78,9 @@ test("load - invalid JSON after base64url decode", () => {
 	const data = new TextEncoder().encode("invalid json");
 	const invalidJwk = base64.fromArrayBuffer(data.buffer as ArrayBuffer, true); // true for urlSafe
 
-	assert.throws(() => {
+	expect(() => {
 		load(invalidJwk);
-	});
+	}).toThrow();
 });
 
 test("load - invalid secret format", () => {
@@ -91,9 +90,9 @@ test("load - invalid secret format", () => {
 	};
 	const jwk = encodeJwk(invalidKey);
 
-	assert.throws(() => {
+	expect(() => {
 		load(jwk);
-	});
+	}).toThrow();
 });
 
 test("load - secret too short", () => {
@@ -103,9 +102,9 @@ test("load - secret too short", () => {
 	};
 	const jwk = encodeJwk(invalidKey);
 
-	assert.throws(() => {
+	expect(() => {
 		load(jwk);
-	});
+	}).toThrow();
 });
 
 test("load - missing required fields", () => {
@@ -116,9 +115,9 @@ test("load - missing required fields", () => {
 	};
 	const jwk = encodeJwk(invalidKey);
 
-	assert.throws(() => {
+	expect(() => {
 		load(jwk);
-	});
+	}).toThrow();
 });
 
 test("load - legacy oct key without kty", () => {
@@ -126,18 +125,18 @@ test("load - legacy oct key without kty", () => {
 	const jwk = encodeJwk(legacyKey);
 	const key = load(jwk);
 
-	assert.strictEqual(key.kty, "oct");
-	assert.strictEqual(key.alg, testKey.alg);
-	assert.deepEqual(key.key_ops, testKey.key_ops);
+	expect(key.kty).toBe("oct");
+	expect(key.alg).toBe(testKey.alg);
+	expect(key.key_ops).toEqual(testKey.key_ops as unknown as typeof key.key_ops);
 });
 
 test("sign - successful signing", async () => {
 	const key = load(encodeJwk(testKey));
 	const token = await sign(key, testClaims);
 
-	assert.ok(typeof token === "string");
-	assert.ok(token.length > 0);
-	assert.ok(token.split(".").length === 3); // JWT format: header.payload.signature
+	expect(typeof token === "string").toBeTruthy();
+	expect(token.length > 0).toBeTruthy();
+	expect(token.split(".").length === 3).toBeTruthy(); // JWT format: header.payload.signature
 });
 
 test("sign - key doesn't support signing", async () => {
@@ -147,9 +146,11 @@ test("sign - key doesn't support signing", async () => {
 	};
 	const key = load(encodeJwk(verifyOnlyKey));
 
-	await assert.rejects(async () => {
-		await sign(key, testClaims);
-	});
+	await expect(
+		(async () => {
+			await sign(key, testClaims);
+		})(),
+	).rejects.toThrow();
 });
 
 test("verify - successful verification", async () => {
@@ -157,10 +158,10 @@ test("verify - successful verification", async () => {
 	const token = await sign(key, testClaims);
 	const claims = await verify(key, token, testClaims.root);
 
-	assert.strictEqual(claims.root, testClaims.root);
-	assert.strictEqual(claims.put, testClaims.put);
-	assert.strictEqual(claims.get, testClaims.get);
-	assert.strictEqual(claims.cluster, testClaims.cluster);
+	expect(claims.root).toBe(testClaims.root);
+	expect(claims.put).toBe(testClaims.put);
+	expect(claims.get).toBe(testClaims.get);
+	expect(claims.cluster).toBe(testClaims.cluster);
 });
 
 test("verify - key doesn't support verification", async () => {
@@ -170,17 +171,21 @@ test("verify - key doesn't support verification", async () => {
 	};
 	const key = load(encodeJwk(signOnlyKey));
 
-	await assert.rejects(async () => {
-		await verify(key, "some.jwt.token", "test-path");
-	});
+	await expect(
+		(async () => {
+			await verify(key, "some.jwt.token", "test-path");
+		})(),
+	).rejects.toThrow();
 });
 
 test("verify - invalid token format", async () => {
 	const key = load(encodeJwk(testKey));
 
-	await assert.rejects(async () => {
-		await verify(key, "invalid-token", "test-path");
-	});
+	await expect(
+		(async () => {
+			await verify(key, "invalid-token", "test-path");
+		})(),
+	).rejects.toThrow();
 });
 
 test("verify - expired token", async () => {
@@ -192,9 +197,11 @@ test("verify - expired token", async () => {
 	const key = load(encodeJwk(testKey));
 	const token = await sign(key, expiredClaims);
 
-	await assert.rejects(async () => {
-		await verify(key, token, expiredClaims.root);
-	});
+	await expect(
+		(async () => {
+			await verify(key, token, expiredClaims.root);
+		})(),
+	).rejects.toThrow();
 });
 
 test("verify - token without exp field", async () => {
@@ -207,9 +214,9 @@ test("verify - token without exp field", async () => {
 	const token = await sign(key, claimsWithoutExp);
 	const claims = await verify(key, token, claimsWithoutExp.root);
 
-	assert.strictEqual(claims.root, "test-path");
-	assert.strictEqual(claims.put, "test-pub");
-	assert.strictEqual(claims.exp, undefined);
+	expect(claims.root).toBe("test-path");
+	expect(claims.put).toBe("test-pub");
+	expect(claims.exp).toBe(undefined);
 });
 
 test("claims validation - must have pub or sub", async () => {
@@ -221,9 +228,11 @@ test("claims validation - must have pub or sub", async () => {
 
 	const key = load(encodeJwk(testKey));
 
-	await assert.rejects(async () => {
-		await sign(key, invalidClaims as Claims);
-	});
+	await expect(
+		(async () => {
+			await sign(key, invalidClaims as Claims);
+		})(),
+	).rejects.toThrow();
 });
 
 test("round-trip - sign and verify", async () => {
@@ -240,21 +249,23 @@ test("round-trip - sign and verify", async () => {
 	const token = await sign(key, originalClaims);
 	const verifiedClaims = await verify(key, token, originalClaims.root);
 
-	assert.strictEqual(verifiedClaims.root, originalClaims.root);
-	assert.strictEqual(verifiedClaims.put, originalClaims.put);
-	assert.strictEqual(verifiedClaims.get, originalClaims.get);
-	assert.strictEqual(verifiedClaims.cluster, originalClaims.cluster);
-	assert.strictEqual(verifiedClaims.exp, originalClaims.exp);
-	assert.strictEqual(verifiedClaims.iat, originalClaims.iat);
+	expect(verifiedClaims.root).toBe(originalClaims.root);
+	expect(verifiedClaims.put).toBe(originalClaims.put);
+	expect(verifiedClaims.get).toBe(originalClaims.get);
+	expect(verifiedClaims.cluster).toBe(originalClaims.cluster);
+	expect(verifiedClaims.exp).toBe(originalClaims.exp);
+	expect(verifiedClaims.iat).toBe(originalClaims.iat);
 });
 
 test("verify - path mismatch", async () => {
 	const key = load(encodeJwk(testKey));
 	const token = await sign(key, testClaims);
 
-	await assert.rejects(async () => {
-		await verify(key, token, "different-path");
-	});
+	await expect(
+		(async () => {
+			await verify(key, token, "different-path");
+		})(),
+	).rejects.toThrow();
 });
 
 test("sign - invalid claims without pub or sub", async () => {
@@ -264,9 +275,11 @@ test("sign - invalid claims without pub or sub", async () => {
 		cluster: false,
 	};
 
-	await assert.rejects(async () => {
-		await sign(key, invalidClaims as Claims);
-	});
+	await expect(
+		(async () => {
+			await sign(key, invalidClaims as Claims);
+		})(),
+	).rejects.toThrow();
 });
 
 test("sign - claims validation path not prefix absolute sub", async () => {
@@ -277,8 +290,8 @@ test("sign - claims validation path not prefix absolute sub", async () => {
 	};
 
 	const token = await sign(key, validClaims);
-	assert.ok(typeof token === "string");
-	assert.ok(token.length > 0);
+	expect(typeof token === "string").toBeTruthy();
+	expect(token.length > 0).toBeTruthy();
 });
 
 test("sign - claims validation path is prefix with relative paths", async () => {
@@ -290,8 +303,8 @@ test("sign - claims validation path is prefix with relative paths", async () => 
 	};
 
 	const token = await sign(key, validClaims);
-	assert.ok(typeof token === "string");
-	assert.ok(token.length > 0);
+	expect(typeof token === "string").toBeTruthy();
+	expect(token.length > 0).toBeTruthy();
 });
 
 test("sign - claims validation empty root", async () => {
@@ -302,8 +315,8 @@ test("sign - claims validation empty root", async () => {
 	};
 
 	const token = await sign(key, validClaims);
-	assert.ok(typeof token === "string");
-	assert.ok(token.length > 0);
+	expect(typeof token === "string").toBeTruthy();
+	expect(token.length > 0).toBeTruthy();
 });
 
 test("different algorithms - HS384", async () => {
@@ -319,8 +332,8 @@ test("different algorithms - HS384", async () => {
 	const token = await sign(key, testClaims);
 	const verifiedClaims = await verify(key, token, testClaims.root);
 
-	assert.strictEqual(verifiedClaims.root, testClaims.root);
-	assert.strictEqual(verifiedClaims.put, testClaims.put);
+	expect(verifiedClaims.root).toBe(testClaims.root);
+	expect(verifiedClaims.put).toBe(testClaims.put);
 });
 
 test("different algorithms - HS512", async () => {
@@ -336,8 +349,8 @@ test("different algorithms - HS512", async () => {
 	const token = await sign(key, testClaims);
 	const verifiedClaims = await verify(key, token, testClaims.root);
 
-	assert.strictEqual(verifiedClaims.root, testClaims.root);
-	assert.strictEqual(verifiedClaims.put, testClaims.put);
+	expect(verifiedClaims.root).toBe(testClaims.root);
+	expect(verifiedClaims.put).toBe(testClaims.put);
 });
 
 test("verify - private to public key", async () => {
@@ -345,12 +358,12 @@ test("verify - private to public key", async () => {
 	const key = load(privateEncoded);
 	const publicKey = toPublicKey(key);
 
-	assert.equal(publicKey.alg, key.alg);
+	expect(publicKey.alg).toBe(key.alg);
 
-	assert.ok(key.key_ops.indexOf("sign") >= 0);
-	assert.ok(key.key_ops.indexOf("verify") >= 0);
-	assert.ok(publicKey.key_ops.indexOf("sign") === -1);
-	assert.ok(publicKey.key_ops.indexOf("verify") >= 0);
+	expect(key.key_ops.indexOf("sign") >= 0).toBeTruthy();
+	expect(key.key_ops.indexOf("verify") >= 0).toBeTruthy();
+	expect(publicKey.key_ops.indexOf("sign") === -1).toBeTruthy();
+	expect(publicKey.key_ops.indexOf("verify") >= 0).toBeTruthy();
 });
 
 test("RS256 algorithm - static sign and verify", async () => {
@@ -360,7 +373,7 @@ test("RS256 algorithm - static sign and verify", async () => {
 	const key = load(privateKey);
 	const token = await sign(key, testClaims);
 	const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
-	assert.strictEqual(verifiedClaims.root, testClaims.root);
+	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
 test("RSA algorithms - sign and verify", async () => {
@@ -369,7 +382,7 @@ test("RSA algorithms - sign and verify", async () => {
 		const key = load(privateEncoded);
 		const token = await sign(key, testClaims);
 		const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
-		assert.strictEqual(verifiedClaims.root, testClaims.root);
+		expect(verifiedClaims.root).toBe(testClaims.root);
 	}
 });
 
@@ -380,11 +393,13 @@ test("RSA public keys verify but cannot sign", async () => {
 
 	const token = await sign(privateKey, testClaims);
 	const claims = await verify(publicKey, token, testClaims.root);
-	assert.strictEqual(claims.root, testClaims.root);
+	expect(claims.root).toBe(testClaims.root);
 
-	await assert.rejects(async () => {
-		await sign(publicKey as Key, testClaims);
-	});
+	await expect(
+		(async () => {
+			await sign(publicKey as Key, testClaims);
+		})(),
+	).rejects.toThrow();
 });
 
 test("PS256 algorithm - static sign and verify", async () => {
@@ -394,7 +409,7 @@ test("PS256 algorithm - static sign and verify", async () => {
 	const key = load(privateKey);
 	const token = await sign(key, testClaims);
 	const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
-	assert.strictEqual(verifiedClaims.root, testClaims.root);
+	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
 test("RSA-PSS algorithms - sign and verify", async () => {
@@ -403,7 +418,7 @@ test("RSA-PSS algorithms - sign and verify", async () => {
 		const key = load(privateEncoded);
 		const token = await sign(key, testClaims);
 		const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
-		assert.strictEqual(verifiedClaims.root, testClaims.root);
+		expect(verifiedClaims.root).toBe(testClaims.root);
 	}
 });
 
@@ -413,7 +428,7 @@ test("EC algorithms - sign and verify", async () => {
 		const key = load(privateEncoded);
 		const token = await sign(key, testClaims);
 		const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
-		assert.strictEqual(verifiedClaims.root, testClaims.root);
+		expect(verifiedClaims.root).toBe(testClaims.root);
 	}
 });
 
@@ -423,7 +438,7 @@ test("EdDSA algorithm - sign and verify", async () => {
 	const publicKey = loadPublic(publicEncoded);
 	const token = await sign(privateKey, testClaims);
 	const verifiedClaims = await verify(publicKey, token, testClaims.root);
-	assert.strictEqual(verifiedClaims.root, testClaims.root);
+	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
 test("EdDSA algorithm - static sign and verify", async () => {
@@ -433,7 +448,7 @@ test("EdDSA algorithm - static sign and verify", async () => {
 	const key = load(privateKey);
 	const token = await sign(key, testClaims);
 	const verifiedClaims = await verify(toPublicKey(key), token, testClaims.root);
-	assert.strictEqual(verifiedClaims.root, testClaims.root);
+	expect(verifiedClaims.root).toBe(testClaims.root);
 });
 
 test("EdDSA algorithm - verify with private key fails", async () => {
@@ -442,9 +457,11 @@ test("EdDSA algorithm - verify with private key fails", async () => {
 		"eyJhbGciOiJFZERTQSIsImtleV9vcHMiOlsidmVyaWZ5Iiwic2lnbiJdLCJrdHkiOiJPS1AiLCJjcnYiOiJFZDI1NTE5IiwieCI6Imd4cXVxMDlJUE4xVHl1TG1nTnNqZmo2NWtoa05OWndKVmp1MEEtUmQ0dkEiLCJkIjoiU1NFSHBIeTFUNHJaemhua3dpVVFlUGV1TUh2MWpLUGlxRzRsbFhyQV91cyJ9";
 	const key = load(privateKey);
 	const token = await sign(key, testClaims);
-	await assert.rejects(async () => {
-		await verify(key, token, testClaims.root);
-	});
+	await expect(
+		(async () => {
+			await verify(key, token, testClaims.root);
+		})(),
+	).rejects.toThrow();
 });
 
 test("asymmetric cross-algorithm verification fails", async () => {
@@ -456,11 +473,13 @@ test("asymmetric cross-algorithm verification fails", async () => {
 	const token = await sign(rsKey, testClaims);
 
 	const verifiedClaims = await verify(rsPublicKey, token, testClaims.root);
-	assert.strictEqual(verifiedClaims.root, testClaims.root);
+	expect(verifiedClaims.root).toBe(testClaims.root);
 
-	await assert.rejects(async () => {
-		await verify(psPublicKey, token, testClaims.root);
-	});
+	await expect(
+		(async () => {
+			await verify(psPublicKey, token, testClaims.root);
+		})(),
+	).rejects.toThrow();
 });
 
 test("cross-algorithm verification fails", async () => {
@@ -477,9 +496,11 @@ test("cross-algorithm verification fails", async () => {
 
 	const token = await sign(hs256Key, testClaims);
 
-	await assert.rejects(async () => {
-		await verify(hs384Key, token, testClaims.root);
-	});
+	await expect(
+		(async () => {
+			await verify(hs384Key, token, testClaims.root);
+		})(),
+	).rejects.toThrow();
 });
 
 test("load - invalid algorithm", () => {
@@ -489,9 +510,9 @@ test("load - invalid algorithm", () => {
 	};
 	const jwk = encodeJwk(invalidKey);
 
-	assert.throws(() => {
+	expect(() => {
 		load(jwk);
-	});
+	}).toThrow();
 });
 
 test("load - mismatched algorithm", () => {
@@ -501,9 +522,9 @@ test("load - mismatched algorithm", () => {
 	};
 	const jwk = encodeJwk(invalidKey);
 
-	assert.throws(() => {
+	expect(() => {
 		load(jwk);
-	});
+	}).toThrow();
 });
 
 test("load - invalid key_ops", () => {
@@ -513,9 +534,9 @@ test("load - invalid key_ops", () => {
 	};
 	const jwk = encodeJwk(invalidKey);
 
-	assert.throws(() => {
+	expect(() => {
 		load(jwk);
-	});
+	}).toThrow();
 });
 
 test("load - missing alg field", () => {
@@ -526,9 +547,9 @@ test("load - missing alg field", () => {
 	};
 	const jwk = encodeJwk(invalidKey);
 
-	assert.throws(() => {
+	expect(() => {
 		load(jwk);
-	});
+	}).toThrow();
 });
 
 test("sign - includes kid in header when present", async () => {
@@ -540,9 +561,9 @@ test("sign - includes kid in header when present", async () => {
 	const headerBuffer = base64.toArrayBuffer(headerB64, true); // true for urlSafe
 	const header = JSON.parse(new TextDecoder().decode(headerBuffer));
 
-	assert.strictEqual(header.kid, "test-key-1");
-	assert.strictEqual(header.alg, "HS256");
-	assert.strictEqual(header.typ, "JWT");
+	expect(header.kid).toBe("test-key-1");
+	expect(header.alg).toBe("HS256");
+	expect(header.typ).toBe("JWT");
 });
 
 test("sign - no kid in header when not present", async () => {
@@ -560,9 +581,9 @@ test("sign - no kid in header when not present", async () => {
 	const headerBuffer = base64.toArrayBuffer(headerB64, true); // true for urlSafe
 	const header = JSON.parse(new TextDecoder().decode(headerBuffer));
 
-	assert.strictEqual(header.kid, undefined);
-	assert.strictEqual(header.alg, "HS256");
-	assert.strictEqual(header.typ, "JWT");
+	expect(header.kid).toBe(undefined);
+	expect(header.alg).toBe("HS256");
+	expect(header.typ).toBe("JWT");
 });
 
 test("sign - sets issued at timestamp", async () => {
@@ -581,24 +602,30 @@ test("sign - sets issued at timestamp", async () => {
 	const payloadBuffer = base64.toArrayBuffer(payloadB64, true); // true for urlSafe
 	const payload = JSON.parse(new TextDecoder().decode(payloadBuffer));
 
-	assert.ok(payload.iat >= beforeSign);
-	assert.ok(payload.iat <= afterSign);
+	expect(payload.iat >= beforeSign).toBeTruthy();
+	expect(payload.iat <= afterSign).toBeTruthy();
 });
 
 test("verify - malformed token parts", async () => {
 	const key = load(encodeJwk(testKey));
 
-	await assert.rejects(async () => {
-		await verify(key, "invalid", "test-path");
-	});
+	await expect(
+		(async () => {
+			await verify(key, "invalid", "test-path");
+		})(),
+	).rejects.toThrow();
 
-	await assert.rejects(async () => {
-		await verify(key, "invalid.token", "test-path");
-	});
+	await expect(
+		(async () => {
+			await verify(key, "invalid.token", "test-path");
+		})(),
+	).rejects.toThrow();
 
-	await assert.rejects(async () => {
-		await verify(key, "invalid.token.signature.extra", "test-path");
-	});
+	await expect(
+		(async () => {
+			await verify(key, "invalid.token.signature.extra", "test-path");
+		})(),
+	).rejects.toThrow();
 });
 
 test("verify - invalid payload structure", async () => {
@@ -613,9 +640,11 @@ test("verify - invalid payload structure", async () => {
 	const signature = "invalid";
 	const invalidToken = `${header}.${payload}.${signature}`;
 
-	await assert.rejects(async () => {
-		await verify(key, invalidToken, "test-path");
-	});
+	await expect(
+		(async () => {
+			await verify(key, invalidToken, "test-path");
+		})(),
+	).rejects.toThrow();
 });
 
 test("verify - claims validation during verification", async () => {
@@ -626,5 +655,5 @@ test("verify - claims validation during verification", async () => {
 
 	// Test that valid tokens pass verification
 	const verifiedClaims = await verify(key, token, "test-path");
-	assert.strictEqual(verifiedClaims.root, "test-path");
+	expect(verifiedClaims.root).toBe("test-path");
 });
