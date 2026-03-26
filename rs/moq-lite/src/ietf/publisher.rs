@@ -138,9 +138,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			})
 			.await?;
 
+		let priority = msg.subscriber_priority;
+
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
 		let res = tokio::select! {
-			res = self.run_track(track, request_id) => res,
+			res = self.run_track(track, request_id, priority) => res,
 			_ = stream.reader.closed() => Ok(()),
 			_ = self.session.closed() => Ok(()),
 		};
@@ -215,7 +217,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
-	async fn run_track(&self, mut track: TrackSubscriber, request_id: RequestId) -> Result<(), Error> {
+	async fn run_track(&self, mut track: TrackSubscriber, request_id: RequestId, priority: u8) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
 		loop {
@@ -236,11 +238,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				track_alias: request_id.0,
 				group_id: sequence,
 				sub_group_id: 0,
-				publisher_priority: 0,
+				publisher_priority: priority,
 				flags: Default::default(),
 			};
 
-			tasks.push(Self::run_group(self.session.clone(), msg, 0, group, self.version).map(|_| ()));
+			tasks.push(Self::run_group(self.session.clone(), msg, priority, group, self.version).map(|_| ()));
 		}
 	}
 

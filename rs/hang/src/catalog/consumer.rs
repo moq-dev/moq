@@ -23,23 +23,27 @@ impl CatalogConsumer {
 		// Get the newest group from the track.
 		while let Poll::Ready(group) = self.track.poll_next_group(waiter)? {
 			self.group = group;
+
+			// We got a None, meaning the track is done.
 			if self.group.is_none() {
 				return Poll::Ready(Ok(None));
 			}
 		}
 
+		// If there's no current group, return pending.
 		let Some(group) = &mut self.group else {
 			return Poll::Pending;
 		};
 
 		// Poll for frame from current group.
-		match group.poll_read_frame(waiter)? {
-			Poll::Ready(Some(frame)) => {
-				self.group.take(); // We don't support deltas yet
-				let catalog = Catalog::from_slice(&frame)?;
-				Poll::Ready(Ok(Some(catalog)))
-			}
-			_ => Poll::Pending,
+		if let Poll::Ready(Some(frame)) = group.poll_read_frame(waiter)? {
+			self.group.take(); // We don't support deltas yet
+
+			let catalog = Catalog::from_slice(&frame)?;
+			Poll::Ready(Ok(Some(catalog)))
+		} else {
+			self.group.take();
+			Poll::Pending
 		}
 	}
 
