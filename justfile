@@ -373,8 +373,8 @@ ci:
 	just build
 
 	# Check feature edge cases for all crates
-	cargo check --workspace --no-default-features --quiet --exclude moq-ffi
-	cargo check --workspace --all-features --quiet --exclude moq-ffi
+	cargo check --workspace --no-default-features --exclude moq-ffi
+	cargo check --workspace --all-features --exclude moq-ffi
 
 # Check semver compatibility against crates.io
 # requires: cargo install cargo-semver-checks
