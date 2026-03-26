@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.3...moq-mux-v0.3.4) - 2026-03-26
+
+### Other
+
+- Use typed ordered::Consumer for video/audio in moq-ffi ([#1163](https://github.com/moq-dev/moq/pull/1163))
+
 ## [0.3.3](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.2...moq-mux-v0.3.3) - 2026-03-25
 
 ### Other
