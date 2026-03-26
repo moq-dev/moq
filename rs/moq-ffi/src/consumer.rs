@@ -47,7 +47,7 @@ struct Media {
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqFrame>, MoqError> {
-		let frame = self.inner.read().await.map_err(|e| MoqError::Codec(e.to_string()))?;
+		let frame = self.inner.read().await?;
 
 		let Some(frame) = frame else {
 			return Ok(None);
