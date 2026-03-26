@@ -327,7 +327,6 @@ check:
 		bun run --filter='*' check
 	fi
 	bun biome check
-	echo "JS checks passed."
 
 	# Run the (slower) Rust checks.
 	cargo check --all-targets
@@ -341,14 +340,13 @@ check:
 	cargo shear
 
 	# requires: cargo install cargo-sort
-	cargo sort --workspace --check > /dev/null
+	cargo sort --workspace --check
 
 	# Run the Python checks.
 	if command -v uv &> /dev/null; then
 		uv run ruff check py/
 		uv run ruff format --check py/
 		uv run --package moq-lite pyright
-		echo "Python checks passed."
 	fi
 
 	# Only run the tofu checks if tofu is installed.
@@ -404,7 +402,6 @@ test *args:
 	if command -v uv &> /dev/null; then
 		uv run maturin develop -m rs/moq-ffi/Cargo.toml --uv
 		uv run --package moq-lite pytest py/moq-lite/tests/
-		echo "Python tests passed."
 	fi
 
 # Automatically fix some issues.
@@ -412,7 +409,6 @@ fix:
 	# Fix the Javascript dependencies.
 	bun install --silent
 	bun biome check --write
-	echo "JS fixes applied."
 
 	# Fix the Rust issues.
 	cargo clippy --fix --allow-staged --allow-dirty --all-targets
@@ -422,7 +418,7 @@ fix:
 	cargo shear --fix
 
 	# requires: cargo install cargo-sort
-	cargo sort --workspace > /dev/null
+	cargo sort --workspace
 
 	# Fix the Python issues.
 	if command -v uv &> /dev/null; then uv run ruff check --fix py/ && uv run ruff format py/; fi
