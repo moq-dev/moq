@@ -2,7 +2,6 @@
 
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
 
-set quiet
 
 # List all of the available commands.
 default:
@@ -89,7 +88,7 @@ auth-key:
 # root.jwt - allows publishing and subscribing to all paths
 auth-token: auth-key
 	@if [ ! -f "dev/demo-web.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "demo" \
 			--subscribe "" \
 			--publish "me" \
@@ -97,14 +96,14 @@ auth-token: auth-key
 	fi
 
 	@if [ ! -f "dev/demo-cli.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "demo" \
 			--publish "" \
 			> dev/demo-cli.jwt ; \
 	fi
 
 	@if [ ! -f "dev/root.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "" \
 			--subscribe "" \
 			--publish "" \
@@ -331,12 +330,12 @@ check:
 	echo "JS checks passed."
 
 	# Run the (slower) Rust checks.
-	cargo check --all-targets --quiet
-	cargo clippy --all-targets --quiet -- -D warnings
+	cargo check --all-targets
+	cargo clippy --all-targets -- -D warnings
 	cargo fmt --all --check
 
 	# Check documentation warnings (only workspace crates, not dependencies)
-	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 
 	# requires: cargo install cargo-shear
 	cargo shear
@@ -356,7 +355,7 @@ check:
 	if command -v tofu &> /dev/null; then (cd cdn && just check); fi
 
 	# Only run the nix checks if nix is installed.
-	if command -v nix &> /dev/null; then nix flake check --quiet; fi
+	if command -v nix &> /dev/null; then nix flake check; fi
 
 # Run comprehensive CI checks including all feature combinations (requires cargo-hack)
 ci:
@@ -374,7 +373,7 @@ ci:
 
 	# Check all feature combinations for all crates
 	# requires: cargo install cargo-hack
-	cargo hack check --workspace --each-feature --no-dev-deps --quiet --exclude moq-ffi
+	cargo hack check --workspace --each-feature --no-dev-deps --exclude moq-ffi
 
 # Check semver compatibility against crates.io
 # requires: cargo install cargo-semver-checks
@@ -399,7 +398,7 @@ test *args:
 		bun run --filter='*' test
 	fi
 
-	cargo test --all-targets --quiet {{ args }}
+	cargo test --all-targets {{ args }}
 
 	# Run the Python tests.
 	if command -v uv &> /dev/null; then
@@ -416,7 +415,7 @@ fix:
 	echo "JS fixes applied."
 
 	# Fix the Rust issues.
-	cargo clippy --fix --allow-staged --allow-dirty --all-targets --quiet
+	cargo clippy --fix --allow-staged --allow-dirty --all-targets
 	cargo fmt --all
 
 	# requires: cargo install cargo-shear
@@ -454,7 +453,7 @@ build:
 	set -euo pipefail
 
 	bun run --filter='*' build
-	cargo build --quiet
+	cargo build
 
 	# Build moq-ffi from source into py/moq-lite's venv.
 	if command -v uv &> /dev/null; then
