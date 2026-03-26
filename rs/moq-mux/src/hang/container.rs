@@ -51,7 +51,7 @@ impl Container for Legacy {
 pub enum Media {
 	Legacy,
 	#[cfg(feature = "mp4")]
-	Cmaf(mp4_atom::Moov),
+	Cmaf(Box<mp4_atom::Moov>),
 }
 
 #[cfg(feature = "mp4")]
@@ -72,7 +72,7 @@ impl TryFrom<&hang::catalog::Container> for Media {
 				let mut cursor = std::io::Cursor::new(&init_bytes);
 				while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).map_err(crate::cmaf::Error::from)? {
 					if let mp4_atom::Any::Moov(moov) = atom {
-						return Ok(Self::Cmaf(moov));
+						return Ok(Self::Cmaf(Box::new(moov)));
 					}
 				}
 

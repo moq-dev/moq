@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
 		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
 		Err(err) = web.run() => return Err(err).context("web server failed"),
 		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
-		_ = tokio::signal::ctrl_c() => Ok(()),
+		else => Ok(()),
 	}
 }
 
