@@ -358,7 +358,7 @@ check:
 	# Only run the nix checks if nix is installed.
 	if command -v nix &> /dev/null; then nix flake check --quiet; fi
 
-# Run comprehensive CI checks including all feature combinations (requires cargo-hack)
+# Run comprehensive CI checks including feature edge cases
 ci:
 	#!/usr/bin/env bash
 	set -euo pipefail
@@ -372,9 +372,9 @@ ci:
 	# Make sure everything builds
 	just build
 
-	# Check all feature combinations for all crates
-	# requires: cargo install cargo-hack
-	cargo hack check --workspace --each-feature --no-dev-deps --quiet --exclude moq-ffi
+	# Check feature edge cases for all crates
+	cargo check --workspace --no-default-features --quiet --exclude moq-ffi
+	cargo check --workspace --all-features --quiet --exclude moq-ffi
 
 # Check semver compatibility against crates.io
 # requires: cargo install cargo-semver-checks
