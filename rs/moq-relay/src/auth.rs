@@ -6,14 +6,19 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Parameters extracted from an incoming connection URL for authentication.
 #[derive(Default, Debug)]
 pub struct AuthParams {
+	/// The URL path identifying the broadcast root.
 	pub path: String,
+	/// A JWT token, if provided via the `jwt` query parameter.
 	pub jwt: Option<String>,
+	/// A cluster registration identifier, if provided via the `register` query parameter.
 	pub register: Option<String>,
 }
 
 impl AuthParams {
+	/// Creates params with just a path and no token or registration.
 	pub fn new(path: impl Into<String>) -> Self {
 		Self {
 			path: path.into(),
@@ -21,6 +26,7 @@ impl AuthParams {
 		}
 	}
 
+	/// Extracts authentication parameters from a URL's path and query string.
 	pub fn from_url(url: &url::Url) -> Self {
 		let path = url.path().to_string();
 		let mut jwt = None;
@@ -41,6 +47,7 @@ impl AuthParams {
 	}
 }
 
+/// Errors returned when authentication or authorization fails.
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum AuthError {
 	#[error("authentication is disabled")]
@@ -71,8 +78,14 @@ impl axum::response::IntoResponse for AuthError {
 	}
 }
 
+/// Configuration for JWT-based authentication.
+///
+/// Supports both local key files and remote JWK set URIs with optional
+/// periodic refresh. When no key is configured, a public prefix can
+/// still grant unauthenticated access to a subset of paths.
 #[derive(clap::Args, Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct AuthConfig {
 	/// Either the root authentication key or a URI to a JWK set.
 	/// If present, all paths will require a token unless they are in the public list.
@@ -93,22 +106,33 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
+	/// Initializes an [`Auth`] instance from this configuration.
 	pub async fn init(self) -> anyhow::Result<Auth> {
 		Auth::new(self).await
 	}
 }
 
+/// The result of a successful authentication, containing the resolved
+/// permissions for a connection.
 #[derive(Debug)]
 pub struct AuthToken {
+	/// The root path this token is scoped to.
 	pub root: PathOwned,
+	/// Paths the holder is allowed to subscribe to, relative to `root`.
 	pub subscribe: Vec<PathOwned>,
+	/// Paths the holder is allowed to publish to, relative to `root`.
 	pub publish: Vec<PathOwned>,
+	/// Whether this token grants cluster-level privileges.
 	pub cluster: bool,
+	/// The cluster node name to register, if this is a cluster connection.
 	pub register: Option<String>,
 }
 
 const REFRESH_ERROR_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Verifies JWT tokens and resolves connection permissions.
+///
+/// Clone this freely — the underlying key material is shared via [`Arc`].
 #[derive(Clone)]
 pub struct Auth {
 	key: Option<Arc<Mutex<KeySet>>>,
@@ -176,6 +200,10 @@ impl Auth {
 		}
 	}
 
+	/// Creates a new authenticator from the given configuration.
+	///
+	/// If the key is a URL, the JWK set is fetched immediately and an
+	/// optional background task is spawned to refresh it periodically.
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
 		let public = config.public.map(|p| p.as_path().to_owned());
 
@@ -236,8 +264,8 @@ impl Auth {
 		})
 	}
 
-	// Parse the token from the user provided URL, returning the claims if successful.
-	// If no token is provided, then the claims will use the public path if it is set.
+	/// Parse the token from the user provided URL, returning the claims if successful.
+	/// If no token is provided, then the claims will use the public path if it is set.
 	pub fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
 		// Find the token in the query parameters.
 		// ?jwt=...

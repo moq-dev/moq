@@ -7,10 +7,15 @@ use url::Url;
 
 use crate::AuthToken;
 
+/// Configuration for relay clustering.
+///
+/// When a root URL and node name are both set, the relay joins a
+/// cluster by connecting to the root and advertising its own hostname.
 #[serde_with::serde_as]
 #[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ClusterConfig {
 	/// Connect to this hostname in order to discover other nodes.
 	#[serde(alias = "connect")]
@@ -51,22 +56,29 @@ pub struct ClusterConfig {
 	pub prefix: String,
 }
 
+/// Manages broadcast origins across local and remote relay nodes.
+///
+/// Broadcasts are split into three tiers: [`primary`](Self::primary)
+/// holds locally announced broadcasts, [`secondary`](Self::secondary)
+/// holds those learned from other cluster nodes, and
+/// [`combined`](Self::combined) merges both for serving to end users.
 #[derive(Clone)]
 pub struct Cluster {
 	config: ClusterConfig,
 	client: moq_native::Client,
 
-	// Broadcasts announced by local clients (users).
+	/// Broadcasts announced by local clients (users).
 	pub primary: OriginProducer,
 
-	// Broadcasts announced by remote servers (cluster).
+	/// Broadcasts announced by remote servers (cluster).
 	pub secondary: OriginProducer,
 
-	// Broadcasts announced by local clients and remote servers.
+	/// Broadcasts announced by local clients and remote servers.
 	pub combined: OriginProducer,
 }
 
 impl Cluster {
+	/// Creates a new cluster with the given configuration and QUIC client.
 	pub fn new(config: ClusterConfig, client: moq_native::Client) -> Self {
 		Cluster {
 			config,
@@ -77,7 +89,7 @@ impl Cluster {
 		}
 	}
 
-	// For a given auth token, return the origin that should be used for the session.
+	/// For a given auth token, return the origin that should be used for the session.
 	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginConsumer> {
 		// These broadcasts will be served to the session (when it subscribes).
 		// If this is a cluster node, then only publish our primary broadcasts.
@@ -92,7 +104,7 @@ impl Cluster {
 		subscribe_origin.consume_only(&token.subscribe)
 	}
 
-	// For a given auth token, return the origin that should be used for the session.
+	/// For a given auth token, return the origin that should be used for the session.
 	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
 		// If this is a cluster node, then add its broadcasts to the secondary origin.
 		// That way we won't publish them to other cluster nodes.
@@ -105,9 +117,9 @@ impl Cluster {
 		publish_origin.publish_only(&token.publish)
 	}
 
-	// Register a cluster node's presence.
-	//
-	// Returns a [ClusterRegistration] that should be kept alive for the duration of the session.
+	/// Register a cluster node's presence.
+	///
+	/// Returns a [`ClusterRegistration`] that should be kept alive for the duration of the session.
 	pub fn register(&self, token: &AuthToken) -> Option<ClusterRegistration> {
 		let node = token.register.clone()?;
 		let broadcast = Broadcast::produce();
@@ -118,12 +130,18 @@ impl Cluster {
 		Some(ClusterRegistration::new(node, broadcast))
 	}
 
+	/// Looks up a broadcast by name across primary and secondary origins.
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
 		self.primary
 			.consume_broadcast(broadcast)
 			.or_else(|| self.secondary.consume_broadcast(broadcast))
 	}
 
+	/// Runs the cluster event loop, connecting to remote nodes and
+	/// merging their broadcasts into the combined origin.
+	///
+	/// This future runs until the cluster is shut down or a fatal error
+	/// occurs.
 	pub async fn run(self) -> anyhow::Result<()> {
 		// If we're using a root node, then we have to connect to it.
 		// Otherwise, we're the root node so we wait for other nodes to connect to us.
@@ -302,6 +320,8 @@ impl Cluster {
 	}
 }
 
+/// A handle that keeps a cluster node registered. Dropping it
+/// unregisters the node and aborts its broadcast.
 pub struct ClusterRegistration {
 	// The name of the node.
 	node: String,
@@ -311,6 +331,7 @@ pub struct ClusterRegistration {
 }
 
 impl ClusterRegistration {
+	/// Creates a new registration for the given node.
 	pub fn new(node: String, broadcast: BroadcastProducer) -> Self {
 		tracing::info!(%node, "registered cluster client");
 		ClusterRegistration { node, broadcast }
