@@ -30,42 +30,6 @@ impl From<Container> for hang::catalog::Container {
 	}
 }
 
-impl TryFrom<MoqVideo> for hang::catalog::VideoConfig {
-	type Error = crate::error::MoqError;
-
-	fn try_from(v: MoqVideo) -> Result<Self, Self::Error> {
-		Ok(Self {
-			codec: v.codec.parse().map_err(|e: hang::Error| crate::error::MoqError::Codec(e.to_string()))?,
-			description: v.description.map(bytes::Bytes::from),
-			coded_width: v.coded.as_ref().map(|d| d.width),
-			coded_height: v.coded.as_ref().map(|d| d.height),
-			display_ratio_width: v.display_ratio.as_ref().map(|d| d.width),
-			display_ratio_height: v.display_ratio.as_ref().map(|d| d.height),
-			bitrate: v.bitrate,
-			framerate: v.framerate,
-			optimize_for_latency: None,
-			container: v.container.into(),
-			jitter: None,
-		})
-	}
-}
-
-impl TryFrom<MoqAudio> for hang::catalog::AudioConfig {
-	type Error = crate::error::MoqError;
-
-	fn try_from(a: MoqAudio) -> Result<Self, Self::Error> {
-		Ok(Self {
-			codec: a.codec.parse().map_err(|e: hang::Error| crate::error::MoqError::Codec(e.to_string()))?,
-			description: a.description.map(bytes::Bytes::from),
-			sample_rate: a.sample_rate,
-			channel_count: a.channel_count,
-			bitrate: a.bitrate,
-			container: a.container.into(),
-			jitter: None,
-		})
-	}
-}
-
 #[derive(uniffi::Record)]
 pub struct MoqCatalog {
 	pub video: HashMap<String, MoqVideo>,

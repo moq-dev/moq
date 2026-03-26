@@ -41,21 +41,13 @@ pub struct MoqMediaConsumer {
 	task: Task<Media>,
 }
 
-enum MediaInner {
-	Video(moq_mux::ordered::Consumer<hang::catalog::VideoConfig>),
-	Audio(moq_mux::ordered::Consumer<hang::catalog::AudioConfig>),
-}
-
 struct Media {
-	inner: MediaInner,
+	inner: moq_mux::ordered::Consumer<hang::catalog::Container>,
 }
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqFrame>, MoqError> {
-		let frame = match &mut self.inner {
-			MediaInner::Video(c) => c.read().await.map_err(|e| MoqError::Codec(e.to_string()))?,
-			MediaInner::Audio(c) => c.read().await.map_err(|e| MoqError::Codec(e.to_string()))?,
-		};
+		let frame = self.inner.read().await.map_err(|e| MoqError::Codec(e.to_string()))?;
 
 		let Some(frame) = frame else {
 			return Ok(None);
@@ -92,47 +84,23 @@ impl MoqBroadcastConsumer {
 		}))
 	}
 
-	/// Subscribe to a video track by name, delivering frames in decode order.
+	/// Subscribe to a track by name, delivering frames in decode order.
 	///
-	/// `config` is the video track configuration from the catalog.
+	/// `container` is the track container from the catalog.
 	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
-	pub fn subscribe_video(
+	pub fn subscribe_media(
 		&self,
 		name: String,
-		config: MoqVideo,
+		container: Container,
 		max_latency_ms: u64,
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
-		let video_config = hang::catalog::VideoConfig::try_from(config)?;
+		let container: hang::catalog::Container = container.into();
 		let latency = std::time::Duration::from_millis(max_latency_ms);
-		let consumer = moq_mux::ordered::Consumer::new(track, video_config).with_latency(latency);
+		let consumer = moq_mux::ordered::Consumer::new(track, container).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {
-			task: Task::new(Media {
-				inner: MediaInner::Video(consumer),
-			}),
-		}))
-	}
-
-	/// Subscribe to an audio track by name, delivering frames in decode order.
-	///
-	/// `config` is the audio track configuration from the catalog.
-	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
-	pub fn subscribe_audio(
-		&self,
-		name: String,
-		config: MoqAudio,
-		max_latency_ms: u64,
-	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
-		let audio_config = hang::catalog::AudioConfig::try_from(config)?;
-		let latency = std::time::Duration::from_millis(max_latency_ms);
-		let consumer = moq_mux::ordered::Consumer::new(track, audio_config).with_latency(latency);
-		Ok(Arc::new(MoqMediaConsumer {
-			task: Task::new(Media {
-				inner: MediaInner::Audio(consumer),
-			}),
+			task: Task::new(Media { inner: consumer }),
 		}))
 	}
 }

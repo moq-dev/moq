@@ -46,11 +46,11 @@ impl Container for Legacy {
 }
 
 #[cfg(feature = "mp4")]
-impl Container for hang::catalog::VideoConfig {
+impl Container for hang::catalog::Container {
 	type Error = crate::Error;
 
 	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
-		match &self.container {
+		match self {
 			hang::catalog::Container::Legacy => Legacy.write(group, frames).map_err(Into::into),
 			hang::catalog::Container::Cmaf { timescale, track_id } => {
 				crate::cmaf::encode(group, frames, *timescale, *track_id).map_err(Into::into)
@@ -63,40 +63,7 @@ impl Container for hang::catalog::VideoConfig {
 		group: &mut moq_lite::GroupConsumer,
 		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
-		match &self.container {
-			hang::catalog::Container::Legacy => Legacy.poll_read(group, waiter).map(|r| r.map_err(Into::into)),
-			hang::catalog::Container::Cmaf { timescale, .. } => {
-				use std::task::ready;
-
-				let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
-					return Poll::Ready(Ok(None));
-				};
-
-				Poll::Ready(crate::cmaf::decode(data, *timescale).map(Some).map_err(Into::into))
-			}
-		}
-	}
-}
-
-#[cfg(feature = "mp4")]
-impl Container for hang::catalog::AudioConfig {
-	type Error = crate::Error;
-
-	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
-		match &self.container {
-			hang::catalog::Container::Legacy => Legacy.write(group, frames).map_err(Into::into),
-			hang::catalog::Container::Cmaf { timescale, track_id } => {
-				crate::cmaf::encode(group, frames, *timescale, *track_id).map_err(Into::into)
-			}
-		}
-	}
-
-	fn poll_read(
-		&self,
-		group: &mut moq_lite::GroupConsumer,
-		waiter: &conducer::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
-		match &self.container {
+		match self {
 			hang::catalog::Container::Legacy => Legacy.poll_read(group, waiter).map(|r| r.map_err(Into::into)),
 			hang::catalog::Container::Cmaf { timescale, .. } => {
 				use std::task::ready;
