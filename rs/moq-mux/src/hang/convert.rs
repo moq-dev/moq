@@ -85,6 +85,8 @@ impl Convert {
 						}
 					});
 				}
+				#[cfg(not(feature = "mp4"))]
+				_ => anyhow::bail!("CMAF container requires the 'mp4' feature"),
 			}
 		}
 
@@ -133,6 +135,8 @@ impl Convert {
 						}
 					});
 				}
+				#[cfg(not(feature = "mp4"))]
+				_ => anyhow::bail!("CMAF container requires the 'mp4' feature"),
 			}
 		}
 
