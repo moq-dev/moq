@@ -1,5 +1,4 @@
-import assert from "node:assert";
-import test from "node:test";
+import { expect, test } from "bun:test";
 import { Broadcast } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -24,9 +23,9 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 	// Client discovers announced broadcast
 	const announced = client.announced();
 	const entry = await announced.next();
-	assert.ok(entry);
-	assert.strictEqual(entry.path, "test");
-	assert.strictEqual(entry.active, true);
+	if (!entry) throw new Error("expected entry");
+	expect(entry.path).toBe("test" as Path.Valid);
+	expect(entry.active).toBe(true);
 
 	// Client consumes the broadcast and subscribes to a track
 	const remote = client.consume(Path.from("test"));
@@ -34,15 +33,15 @@ async function runPublishSubscribeFlow(protocol: string, version?: number) {
 
 	// Server handles the subscription request
 	const req = await broadcast.requested();
-	assert.ok(req);
-	assert.strictEqual(req.track.name, "video");
+	if (!req) throw new Error("expected req");
+	expect(req.track.name).toBe("video");
 
 	// Server writes data
 	req.track.writeString("hello");
 
 	// Client reads data
 	const data = await track.readString();
-	assert.strictEqual(data, "hello");
+	expect(data).toBe("hello");
 
 	// Cleanup
 	req.track.close();
@@ -94,9 +93,11 @@ test("integration: subscribe to non-existent broadcast", async () => {
 	const track = remote.subscribe("video", 0);
 
 	// Reading should eventually error since the broadcast doesn't exist
-	await assert.rejects(async () => {
-		await track.readString();
-	});
+	await expect(
+		(async () => {
+			await track.readString();
+		})(),
+	).rejects.toThrow();
 
 	client.close();
 	server.close();
