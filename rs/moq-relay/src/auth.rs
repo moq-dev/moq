@@ -85,6 +85,7 @@ impl axum::response::IntoResponse for AuthError {
 /// still grant unauthenticated access to a subset of paths.
 #[derive(clap::Args, Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct AuthConfig {
 	/// Either the root authentication key or a URI to a JWK set.
 	/// If present, all paths will require a token unless they are in the public list.

@@ -15,6 +15,7 @@ use crate::AuthToken;
 #[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ClusterConfig {
 	/// Connect to this hostname in order to discover other nodes.
 	#[serde(alias = "connect")]

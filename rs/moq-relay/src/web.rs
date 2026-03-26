@@ -23,6 +23,7 @@ use crate::{Auth, AuthParams, Cluster};
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct WebConfig {
 	/// Plain HTTP listener settings.
 	#[command(flatten)]
@@ -43,6 +44,7 @@ pub struct WebConfig {
 /// Plain HTTP listener configuration.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct HttpConfig {
 	/// Socket address to bind the HTTP listener to.
 	#[arg(long = "web-http-listen", id = "http-listen", env = "MOQ_WEB_HTTP_LISTEN")]
@@ -52,6 +54,7 @@ pub struct HttpConfig {
 /// HTTPS listener configuration with TLS certificate and key.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct HttpsConfig {
 	/// Socket address to bind the HTTPS listener to.
 	#[arg(long = "web-https-listen", id = "web-https-listen", env = "MOQ_WEB_HTTPS_LISTEN", requires_all = ["web-https-cert", "web-https-key"])]
