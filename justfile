@@ -154,7 +154,7 @@ pub name url="http://localhost:4443/anon" *args:
 	# Publish the media with the moq cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
 	cargo run --bin moq-cli -- \
-		{{args}} publish --url "{{url}}" --name "{{name}}" fmp4
+		{{args}} client --url "{{url}}" publish --name "{{name}}" --input fmp4
 
 pub-iroh name url prefix="":
 	# Download the sample media.
@@ -164,7 +164,7 @@ pub-iroh name url prefix="":
 	# Publish the media with the moq cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
 	cargo run --bin moq-cli -- \
-		--iroh-enabled publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4
+		--iroh-enabled client --url "{{url}}" publish --name "{{prefix}}{{name}}" --input fmp4
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
@@ -250,7 +250,7 @@ pub-hls name relay="http://localhost:4443/anon":
 
 	# Run moq to ingest from local files
 	echo ">>> Running with --passthrough flag"
-	cargo run --bin moq-cli -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
+	echo "$OUT_DIR/master.m3u8" | cargo run --bin moq-cli -- client --url "{{relay}}" publish --name "{{name}}" --input hls
 	EXIT_CODE=$?
 
 	# Cleanup after cargo run completes (success or failure)
@@ -274,7 +274,7 @@ pub-h264 name url="http://localhost:4443/anon" *args:
 		-c:v copy -an \
 		-bsf:v h264_mp4toannexb \
 		-f h264 \
-		- | cargo run --bin moq-cli -- publish --url "{{url}}" --name "{{name}}" --format annex-b {{args}}
+		- | cargo run --bin moq-cli -- {{args}} client --url "{{url}}" publish --name "{{name}}" --input avc3
 
 # Publish/subscribe using gstreamer - see https://github.com/moq-dev/gstreamer
 pub-gst name url='http://localhost:4443/anon':

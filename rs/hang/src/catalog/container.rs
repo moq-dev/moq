@@ -20,6 +20,7 @@ pub enum Container {
 	Legacy,
 	Cmaf {
 		/// Base64-encoded init segment (ftyp+moov)
+		#[serde(rename = "initData")]
 		init_data: String,
 	},
 }
