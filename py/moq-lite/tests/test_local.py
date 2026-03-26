@@ -110,7 +110,7 @@ async def test_local_publish_consume_audio():
         assert audio.sample_rate == 48000
         assert audio.channel_count == 2
 
-        media_consumer = announcement.broadcast.subscribe_media(track_name)
+        media_consumer = announcement.broadcast.subscribe_media(track_name, audio.container, 10_000)
 
         payload = b"opus audio payload data"
         media.write_frame(payload, 1_000_000)
@@ -144,7 +144,7 @@ async def test_video_publish_consume():
         assert video.coded.width == 1280
         assert video.coded.height == 720
 
-        media_consumer = announcement.broadcast.subscribe_media(track_name)
+        media_consumer = announcement.broadcast.subscribe_media(track_name, video.container, 10_000)
 
         keyframe = bytes([0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC])
         media.write_frame(keyframe, 0)
@@ -168,7 +168,8 @@ async def test_multiple_frames_ordering():
     async for announcement in consumer.announced():
         catalog = await announcement.broadcast.catalog()
         track_name = list(catalog.audio.keys())[0]
-        media_consumer = announcement.broadcast.subscribe_media(track_name)
+        audio = catalog.audio[track_name]
+        media_consumer = announcement.broadcast.subscribe_media(track_name, audio.container, 10_000)
 
         timestamps = [0, 20_000, 40_000, 60_000, 80_000]
         for i, ts in enumerate(timestamps):
