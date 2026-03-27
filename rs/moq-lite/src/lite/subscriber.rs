@@ -81,8 +81,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
-		tracing::trace!(root = %self.log_path(""), "announced start");
-
 		// Ask for everything.
 		// TODO This should actually ask for each root.
 		let msg = lite::AnnouncePlease { prefix: "".into() };
@@ -270,7 +268,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) => {
-				tracing::trace!(group = %group.info.sequence, "group cancelled");
 				let _ = group.abort(Error::Cancel);
 			}
 			Err(err) => {
@@ -278,7 +275,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let _ = group.abort(err);
 			}
 			_ => {
-				tracing::trace!(group = %group.info.sequence, "group complete");
 				let _ = group.finish();
 			}
 		}
@@ -312,8 +308,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		let mut remain = frame.info.size;
 
-		tracing::trace!(size = %frame.info.size, "reading frame");
-
 		const MAX_CHUNK: usize = 1024 * 1024; // 1 MiB
 		while remain > 0 {
 			let chunk = stream
@@ -323,8 +317,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
 			frame.write(chunk)?;
 		}
-
-		tracing::trace!(size = %frame.info.size, "read frame");
 
 		Ok(())
 	}

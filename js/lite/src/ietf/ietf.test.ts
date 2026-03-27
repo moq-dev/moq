@@ -1,5 +1,4 @@
-import assert from "node:assert";
-import test from "node:test";
+import { expect, test } from "bun:test";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
@@ -72,10 +71,10 @@ test("Subscribe v14: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 1n);
-	assert.strictEqual(decoded.trackNamespace, "test");
-	assert.strictEqual(decoded.trackName, "video");
-	assert.strictEqual(decoded.subscriberPriority, 128);
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+	expect(decoded.subscriberPriority).toBe(128);
 });
 
 test("Subscribe v14: nested namespace", async () => {
@@ -89,7 +88,7 @@ test("Subscribe v14: nested namespace", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.trackNamespace, "conference/room123");
+	expect(decoded.trackNamespace).toBe("conference/room123" as Path.Valid);
 });
 
 test("SubscribeOk v14: without largest", async () => {
@@ -98,8 +97,8 @@ test("SubscribeOk v14: without largest", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 42n);
-	assert.strictEqual(decoded.trackAlias, 43n);
+	expect(decoded.requestId).toBe(42n);
+	expect(decoded.trackAlias).toBe(43n);
 });
 
 // Subscribe tests (v15)
@@ -114,10 +113,10 @@ test("Subscribe v15: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
 	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, Version.DRAFT_15);
 
-	assert.strictEqual(decoded.requestId, 1n);
-	assert.strictEqual(decoded.trackNamespace, "test");
-	assert.strictEqual(decoded.trackName, "video");
-	assert.strictEqual(decoded.subscriberPriority, 128);
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+	expect(decoded.subscriberPriority).toBe(128);
 });
 
 test("SubscribeOk v15: round trip", async () => {
@@ -126,8 +125,8 @@ test("SubscribeOk v15: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, Version.DRAFT_15);
 
-	assert.strictEqual(decoded.requestId, 42n);
-	assert.strictEqual(decoded.trackAlias, 43n);
+	expect(decoded.requestId).toBe(42n);
+	expect(decoded.trackAlias).toBe(43n);
 });
 
 test("SubscribeError: round trip", async () => {
@@ -136,9 +135,9 @@ test("SubscribeError: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeError.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 123n);
-	assert.strictEqual(decoded.errorCode, 500);
-	assert.strictEqual(decoded.reasonPhrase, "Not found");
+	expect(decoded.requestId).toBe(123n);
+	expect(decoded.errorCode).toBe(500);
+	expect(decoded.reasonPhrase).toBe("Not found");
 });
 
 test("Unsubscribe: round trip", async () => {
@@ -147,7 +146,7 @@ test("Unsubscribe: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Subscribe.Unsubscribe.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 999n);
+	expect(decoded.requestId).toBe(999n);
 });
 
 test("PublishDone: basic test", async () => {
@@ -156,9 +155,9 @@ test("PublishDone: basic test", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, PublishDone.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 10n);
-	assert.strictEqual(decoded.statusCode, 0);
-	assert.strictEqual(decoded.reasonPhrase, "complete");
+	expect(decoded.requestId).toBe(10n);
+	expect(decoded.statusCode).toBe(0);
+	expect(decoded.reasonPhrase).toBe("complete");
 });
 
 test("PublishDone: with error", async () => {
@@ -167,9 +166,9 @@ test("PublishDone: with error", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, PublishDone.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 10n);
-	assert.strictEqual(decoded.statusCode, 1);
-	assert.strictEqual(decoded.reasonPhrase, "error");
+	expect(decoded.requestId).toBe(10n);
+	expect(decoded.statusCode).toBe(1);
+	expect(decoded.reasonPhrase).toBe("error");
 });
 
 // Announce/PublishNamespace tests
@@ -179,8 +178,8 @@ test("PublishNamespace: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 1n);
-	assert.strictEqual(decoded.trackNamespace, "test/broadcast");
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("test/broadcast" as Path.Valid);
 });
 
 test("PublishNamespaceOk: round trip", async () => {
@@ -189,7 +188,7 @@ test("PublishNamespaceOk: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Announce.PublishNamespaceOk.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 2n);
+	expect(decoded.requestId).toBe(2n);
 });
 
 test("PublishNamespaceError: round trip", async () => {
@@ -198,9 +197,9 @@ test("PublishNamespaceError: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Announce.PublishNamespaceError.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 3n);
-	assert.strictEqual(decoded.errorCode, 404);
-	assert.strictEqual(decoded.reasonPhrase, "Unauthorized");
+	expect(decoded.requestId).toBe(3n);
+	expect(decoded.errorCode).toBe(404);
+	expect(decoded.reasonPhrase).toBe("Unauthorized");
 });
 
 test("PublishNamespaceDone: round trip", async () => {
@@ -209,7 +208,7 @@ test("PublishNamespaceDone: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Announce.PublishNamespaceDone.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.trackNamespace, "old/stream");
+	expect(decoded.trackNamespace).toBe("old/stream" as Path.Valid);
 });
 
 test("PublishNamespaceCancel: round trip", async () => {
@@ -222,9 +221,9 @@ test("PublishNamespaceCancel: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Announce.PublishNamespaceCancel.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.trackNamespace, "canceled");
-	assert.strictEqual(decoded.errorCode, 1);
-	assert.strictEqual(decoded.reasonPhrase, "Shutdown");
+	expect(decoded.trackNamespace).toBe("canceled" as Path.Valid);
+	expect(decoded.errorCode).toBe(1);
+	expect(decoded.reasonPhrase).toBe("Shutdown");
 });
 
 // GoAway tests
@@ -234,7 +233,7 @@ test("GoAway: with URL", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, GoAway.GoAway.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.newSessionUri, "https://example.com/new");
+	expect(decoded.newSessionUri).toBe("https://example.com/new");
 });
 
 test("GoAway: empty", async () => {
@@ -243,7 +242,7 @@ test("GoAway: empty", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, GoAway.GoAway.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.newSessionUri, "");
+	expect(decoded.newSessionUri).toBe("");
 });
 
 // Track tests
@@ -257,9 +256,9 @@ test("TrackStatusRequest: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Track.TrackStatusRequest.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 0n);
-	assert.strictEqual(decoded.trackNamespace, "video/stream");
-	assert.strictEqual(decoded.trackName, "main");
+	expect(decoded.requestId).toBe(0n);
+	expect(decoded.trackNamespace).toBe("video/stream" as Path.Valid);
+	expect(decoded.trackName).toBe("main");
 });
 
 test("TrackStatus v14: round trip", async () => {
@@ -274,11 +273,11 @@ test("TrackStatus v14: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Track.TrackStatus.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.trackNamespace, "test");
-	assert.strictEqual(decoded.trackName, "status");
-	assert.strictEqual(decoded.statusCode, 200);
-	assert.strictEqual(decoded.lastGroupId, 42n);
-	assert.strictEqual(decoded.lastObjectId, 100n);
+	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
+	expect(decoded.trackName).toBe("status");
+	expect(decoded.statusCode).toBe(200);
+	expect(decoded.lastGroupId).toBe(42n);
+	expect(decoded.lastObjectId).toBe(100n);
 });
 
 // Validation tests
@@ -304,9 +303,11 @@ test("Subscribe v14: rejects invalid filter type", async () => {
 		0x00, // num_params
 	]);
 
-	await assert.rejects(async () => {
-		await decodeVersioned(invalidBytes, Subscribe.Subscribe.decode, Version.DRAFT_14);
-	});
+	await expect(
+		(async () => {
+			await decodeVersioned(invalidBytes, Subscribe.Subscribe.decode, Version.DRAFT_14);
+		})(),
+	).rejects.toThrow();
 });
 
 test("SubscribeOk v14: rejects non-zero expires", async () => {
@@ -318,9 +319,11 @@ test("SubscribeOk v14: rejects non-zero expires", async () => {
 		0x00, // num_params
 	]);
 
-	await assert.rejects(async () => {
-		await decodeVersioned(invalidBytes, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
-	});
+	await expect(
+		(async () => {
+			await decodeVersioned(invalidBytes, Subscribe.SubscribeOk.decode, Version.DRAFT_14);
+		})(),
+	).rejects.toThrow();
 });
 
 // Unicode tests
@@ -330,9 +333,9 @@ test("SubscribeError: unicode strings", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeError.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 1n);
-	assert.strictEqual(decoded.errorCode, 400);
-	assert.strictEqual(decoded.reasonPhrase, "Error: 错误 🚫");
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.errorCode).toBe(400);
+	expect(decoded.reasonPhrase).toBe("Error: 错误 🚫");
 });
 
 test("PublishNamespace: unicode namespace", async () => {
@@ -341,8 +344,8 @@ test("PublishNamespace: unicode namespace", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 1n);
-	assert.strictEqual(decoded.trackNamespace, "会议/房间");
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("会议/房间" as Path.Valid);
 });
 
 // Publish v15 tests
@@ -361,11 +364,11 @@ test("Publish v15: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
 	const decoded = await decodeVersioned(encoded, Publish.decode, Version.DRAFT_15);
 
-	assert.strictEqual(decoded.requestId, 1n);
-	assert.strictEqual(decoded.trackNamespace, "test/ns");
-	assert.strictEqual(decoded.trackName, "video");
-	assert.strictEqual(decoded.trackAlias, 42n);
-	assert.strictEqual(decoded.forward, true);
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("test/ns" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+	expect(decoded.trackAlias).toBe(42n);
+	expect(decoded.forward).toBe(true);
 });
 
 test("Publish v14: round trip", async () => {
@@ -383,14 +386,14 @@ test("Publish v14: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Publish.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 1n);
-	assert.strictEqual(decoded.trackNamespace, "test/ns");
-	assert.strictEqual(decoded.trackName, "video");
-	assert.strictEqual(decoded.trackAlias, 42n);
-	assert.strictEqual(decoded.forward, true);
-	assert.strictEqual(decoded.contentExists, true);
-	assert.strictEqual(decoded.largest?.groupId, 10n);
-	assert.strictEqual(decoded.largest?.objectId, 5n);
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("test/ns" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+	expect(decoded.trackAlias).toBe(42n);
+	expect(decoded.forward).toBe(true);
+	expect(decoded.contentExists).toBe(true);
+	expect(decoded.largest?.groupId).toBe(10n);
+	expect(decoded.largest?.objectId).toBe(5n);
 });
 
 // ClientSetup v15 tests
@@ -400,8 +403,8 @@ test("ClientSetup v15: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
 	const decoded = await decodeVersioned(encoded, Setup.ClientSetup.decode, Version.DRAFT_15);
 
-	assert.strictEqual(decoded.versions.length, 1);
-	assert.strictEqual(decoded.versions[0], Version.DRAFT_15);
+	expect(decoded.versions.length).toBe(1);
+	expect(decoded.versions[0]).toBe(Version.DRAFT_15);
 });
 
 test("ClientSetup v14: round trip", async () => {
@@ -410,8 +413,8 @@ test("ClientSetup v14: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Setup.ClientSetup.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.versions.length, 1);
-	assert.strictEqual(decoded.versions[0], Version.DRAFT_14);
+	expect(decoded.versions.length).toBe(1);
+	expect(decoded.versions[0]).toBe(Version.DRAFT_14);
 });
 
 // ServerSetup v15 tests
@@ -421,7 +424,7 @@ test("ServerSetup v15: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
 	const decoded = await decodeVersioned(encoded, Setup.ServerSetup.decode, Version.DRAFT_15);
 
-	assert.strictEqual(decoded.version, Version.DRAFT_15);
+	expect(decoded.version).toBe(Version.DRAFT_15);
 });
 
 test("ServerSetup v14: round trip", async () => {
@@ -430,7 +433,7 @@ test("ServerSetup v14: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Setup.ServerSetup.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.version, Version.DRAFT_14);
+	expect(decoded.version).toBe(Version.DRAFT_14);
 });
 
 // RequestOk / RequestError v15 tests
@@ -440,7 +443,7 @@ test("RequestOk: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
 	const decoded = await decodeVersioned(encoded, RequestOk.decode, Version.DRAFT_15);
 
-	assert.strictEqual(decoded.requestId, 42n);
+	expect(decoded.requestId).toBe(42n);
 });
 
 test("RequestError v15: round trip", async () => {
@@ -449,10 +452,10 @@ test("RequestError v15: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
 	const decoded = await decodeVersioned(encoded, RequestError.decode, Version.DRAFT_15);
 
-	assert.strictEqual(decoded.requestId, 99n);
-	assert.strictEqual(decoded.errorCode, 500);
-	assert.strictEqual(decoded.reasonPhrase, "Internal error");
-	assert.strictEqual(decoded.retryInterval, 0n);
+	expect(decoded.requestId).toBe(99n);
+	expect(decoded.errorCode).toBe(500);
+	expect(decoded.reasonPhrase).toBe("Internal error");
+	expect(decoded.retryInterval).toBe(0n);
 });
 
 test("RequestError v16: round trip with retryInterval", async () => {
@@ -466,10 +469,10 @@ test("RequestError v16: round trip with retryInterval", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_16);
 	const decoded = await decodeVersioned(encoded, RequestError.decode, Version.DRAFT_16);
 
-	assert.strictEqual(decoded.requestId, 99n);
-	assert.strictEqual(decoded.errorCode, 500);
-	assert.strictEqual(decoded.reasonPhrase, "Internal error");
-	assert.strictEqual(decoded.retryInterval, 5000n);
+	expect(decoded.requestId).toBe(99n);
+	expect(decoded.errorCode).toBe(500);
+	expect(decoded.reasonPhrase).toBe("Internal error");
+	expect(decoded.retryInterval).toBe(5000n);
 });
 
 // --- Leading-ones varint tests ---
@@ -490,14 +493,8 @@ test("Leading-ones varint: spec test vectors", () => {
 
 	for (const [bytes, expected] of cases) {
 		const [decoded, remain] = Varint.decodeLeadingOnes(bytes);
-		assert.strictEqual(
-			decoded,
-			expected,
-			`decode mismatch for bytes [${Array.from(bytes)
-				.map((b) => b.toString(16))
-				.join(",")}]`,
-		);
-		assert.strictEqual(remain.length, 0, "all bytes should be consumed");
+		expect(decoded).toBe(expected);
+		expect(remain.length).toBe(0);
 	}
 
 	// Test minimal round-trip (skip non-minimal 0x8025 for 37, and u64::MAX which exceeds safe range)
@@ -510,7 +507,7 @@ test("Leading-ones varint: spec test vectors", () => {
 
 	for (const [expectedBytes, value] of roundTripCases) {
 		const encoded = Varint.encodeLeadingOnes(value);
-		assert.deepStrictEqual(encoded, expectedBytes, `encode mismatch for value ${value}`);
+		expect(encoded).toEqual(expectedBytes);
 	}
 });
 
@@ -526,18 +523,18 @@ test("Leading-ones varint: boundary round-trips", () => {
 
 	for (const [value, expectedLen] of cases) {
 		const encoded = Varint.encodeLeadingOnes(value);
-		assert.strictEqual(encoded.length, expectedLen, `unexpected length for value ${value}`);
+		expect(encoded.length).toBe(expectedLen);
 
 		const [decoded, remain] = Varint.decodeLeadingOnes(encoded);
-		assert.strictEqual(decoded, value, `round-trip mismatch for value ${value}`);
-		assert.strictEqual(remain.length, 0);
+		expect(decoded).toBe(value);
+		expect(remain.length).toBe(0);
 	}
 });
 
 test("Leading-ones varint: invalid 0xFC prefix rejected", () => {
-	assert.throws(() => {
+	expect(() => {
 		Varint.decodeLeadingOnes(new Uint8Array([0xfc]));
-	}, /reserved/);
+	}).toThrow(/reserved/);
 });
 
 // --- Draft-17 message tests ---
@@ -553,10 +550,10 @@ test("Subscribe v17: round trip with requiredRequestIdDelta", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.requestId, 1n);
-	assert.strictEqual(decoded.trackNamespace, "test");
-	assert.strictEqual(decoded.trackName, "video");
-	assert.strictEqual(decoded.subscriberPriority, 128);
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+	expect(decoded.subscriberPriority).toBe(128);
 });
 
 test("SubscribeOk v17: no requestId", async () => {
@@ -565,8 +562,8 @@ test("SubscribeOk v17: no requestId", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeOk.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.requestId, undefined);
-	assert.strictEqual(decoded.trackAlias, 42n);
+	expect(decoded.requestId).toBe(undefined);
+	expect(decoded.trackAlias).toBe(42n);
 });
 
 test("RequestOk v17: no requestId", async () => {
@@ -575,7 +572,7 @@ test("RequestOk v17: no requestId", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, RequestOk.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.requestId, undefined);
+	expect(decoded.requestId).toBe(undefined);
 });
 
 test("RequestError v17: no requestId, has retryInterval", async () => {
@@ -588,10 +585,10 @@ test("RequestError v17: no requestId, has retryInterval", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, RequestError.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.requestId, undefined);
-	assert.strictEqual(decoded.errorCode, 500);
-	assert.strictEqual(decoded.reasonPhrase, "Internal error");
-	assert.strictEqual(decoded.retryInterval, 3000n);
+	expect(decoded.requestId).toBe(undefined);
+	expect(decoded.errorCode).toBe(500);
+	expect(decoded.reasonPhrase).toBe("Internal error");
+	expect(decoded.retryInterval).toBe(3000n);
 });
 
 test("GoAway v17: with timeout", async () => {
@@ -600,8 +597,8 @@ test("GoAway v17: with timeout", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, GoAway.GoAway.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.newSessionUri, "https://example.com/new");
-	assert.strictEqual(decoded.timeout, 5000n);
+	expect(decoded.newSessionUri).toBe("https://example.com/new");
+	expect(decoded.timeout).toBe(5000n);
 });
 
 test("Setup v17: unified 0x2F00 round trip", async () => {
@@ -612,7 +609,7 @@ test("Setup v17: unified 0x2F00 round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, Setup.Setup.decode, Version.DRAFT_17);
 
-	assert.deepStrictEqual(decoded.parameters.getBytes(7n), new TextEncoder().encode("test-impl"));
+	expect(decoded.parameters.getBytes(7n)).toEqual(new TextEncoder().encode("test-impl"));
 });
 
 test("Publish v17: round trip with requiredRequestIdDelta", async () => {
@@ -630,11 +627,11 @@ test("Publish v17: round trip with requiredRequestIdDelta", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, Publish.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.requestId, 1n);
-	assert.strictEqual(decoded.trackNamespace, "test/ns");
-	assert.strictEqual(decoded.trackName, "video");
-	assert.strictEqual(decoded.trackAlias, 42n);
-	assert.strictEqual(decoded.forward, true);
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("test/ns" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+	expect(decoded.trackAlias).toBe(42n);
+	expect(decoded.forward).toBe(true);
 });
 
 test("PublishNamespace v17: round trip", async () => {
@@ -643,20 +640,20 @@ test("PublishNamespace v17: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.requestId, 5n);
-	assert.strictEqual(decoded.trackNamespace, "live/stream");
+	expect(decoded.requestId).toBe(5n);
+	expect(decoded.trackNamespace).toBe("live/stream" as Path.Valid);
 });
 
 test("PublishNamespaceDone v17: encode rejects", async () => {
 	const msg = new Announce.PublishNamespaceDone({ trackNamespace: Path.from("old/stream") });
 
-	await assert.rejects(() => encodeVersioned(msg, Version.DRAFT_17), /removed in draft-17/);
+	await expect((() => encodeVersioned(msg, Version.DRAFT_17))()).rejects.toThrow(/removed in draft-17/);
 });
 
 test("PublishNamespaceCancel v17: encode rejects", async () => {
 	const msg = new Announce.PublishNamespaceCancel({ trackNamespace: Path.from("canceled") });
 
-	await assert.rejects(() => encodeVersioned(msg, Version.DRAFT_17), /removed in draft-17/);
+	await expect((() => encodeVersioned(msg, Version.DRAFT_17))()).rejects.toThrow(/removed in draft-17/);
 });
 
 test("PublishDone v17: no requestId", async () => {
@@ -665,9 +662,9 @@ test("PublishDone v17: no requestId", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, PublishDone.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.requestId, undefined);
-	assert.strictEqual(decoded.statusCode, 0);
-	assert.strictEqual(decoded.reasonPhrase, "done");
+	expect(decoded.requestId).toBe(undefined);
+	expect(decoded.statusCode).toBe(0);
+	expect(decoded.reasonPhrase).toBe("done");
 });
 
 // --- SubscribeUpdate tests ---
@@ -678,7 +675,7 @@ test("SubscribeUpdate v14: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 5n);
+	expect(decoded.requestId).toBe(5n);
 });
 
 test("SubscribeUpdate v15: round trip", async () => {
@@ -687,7 +684,7 @@ test("SubscribeUpdate v15: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_15);
 
-	assert.strictEqual(decoded.requestId, 10n);
+	expect(decoded.requestId).toBe(10n);
 });
 
 test("SubscribeUpdate v17: round trip with requiredRequestIdDelta", async () => {
@@ -696,7 +693,7 @@ test("SubscribeUpdate v17: round trip with requiredRequestIdDelta", async () => 
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.requestId, 42n);
+	expect(decoded.requestId).toBe(42n);
 });
 
 // --- PublishBlocked tests ---
@@ -710,8 +707,8 @@ test("PublishBlocked v17: round trip", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, SubscribeNamespace.PublishBlocked.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.suffix, "stream1");
-	assert.strictEqual(decoded.trackName, "video");
+	expect(decoded.suffix).toBe("stream1" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
 });
 
 // --- TrackStatusRequest version-aware tests ---
@@ -726,9 +723,9 @@ test("TrackStatusRequest v14: round trip with subscribe fields", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
 	const decoded = await decodeVersioned(encoded, Track.TrackStatusRequest.decode, Version.DRAFT_14);
 
-	assert.strictEqual(decoded.requestId, 1n);
-	assert.strictEqual(decoded.trackNamespace, "video/stream");
-	assert.strictEqual(decoded.trackName, "main");
+	expect(decoded.requestId).toBe(1n);
+	expect(decoded.trackNamespace).toBe("video/stream" as Path.Valid);
+	expect(decoded.trackName).toBe("main");
 });
 
 test("TrackStatusRequest v15: round trip with params", async () => {
@@ -737,9 +734,9 @@ test("TrackStatusRequest v15: round trip with params", async () => {
 	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
 	const decoded = await decodeVersioned(encoded, Track.TrackStatusRequest.decode, Version.DRAFT_15);
 
-	assert.strictEqual(decoded.requestId, 2n);
-	assert.strictEqual(decoded.trackNamespace, "test");
-	assert.strictEqual(decoded.trackName, "audio");
+	expect(decoded.requestId).toBe(2n);
+	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
+	expect(decoded.trackName).toBe("audio");
 });
 
 test("TrackStatusRequest v17: round trip with requiredRequestIdDelta", async () => {
@@ -748,7 +745,7 @@ test("TrackStatusRequest v17: round trip with requiredRequestIdDelta", async () 
 	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
 	const decoded = await decodeVersioned(encoded, Track.TrackStatusRequest.decode, Version.DRAFT_17);
 
-	assert.strictEqual(decoded.requestId, 3n);
-	assert.strictEqual(decoded.trackNamespace, "live");
-	assert.strictEqual(decoded.trackName, "data");
+	expect(decoded.requestId).toBe(3n);
+	expect(decoded.trackNamespace).toBe("live" as Path.Valid);
+	expect(decoded.trackName).toBe("data");
 });

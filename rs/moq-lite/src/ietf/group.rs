@@ -156,6 +156,7 @@ pub struct GroupHeader {
 
 impl Encode<Version> for GroupHeader {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		tracing::trace!(?self, "encoding group header");
 		self.flags.encode()?.encode(w, version)?;
 		self.track_alias.encode(w, version)?;
 		self.group_id.encode(w, version)?;
@@ -194,13 +195,15 @@ impl Decode<Version> for GroupHeader {
 			128 // Default priority when absent
 		};
 
-		Ok(Self {
+		let result = Self {
 			track_alias,
 			group_id,
 			sub_group_id,
 			publisher_priority,
 			flags,
-		})
+		};
+		tracing::trace!(?result, "decoded group header");
+		Ok(result)
 	}
 }
 

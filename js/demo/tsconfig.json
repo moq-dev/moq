@@ -1,7 +1,9 @@
 {
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
-		"outDir": "dist"
+		"outDir": "dist",
+		"jsx": "preserve",
+		"jsxImportSource": "solid-js"
 	},
 	"include": ["src", "../common/worklet.d.ts"]
 }

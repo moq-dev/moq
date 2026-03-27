@@ -7,7 +7,10 @@ use hang::Error;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum FramedFormat {
-	/// aka H264 with inline SPS/PPS
+	/// H264 with AVCC framing (length-prefixed NALUs, out-of-band SPS/PPS).
+	#[cfg(feature = "h264")]
+	Avc1,
+	/// H264 with Annex B framing (start code prefixed, inline SPS/PPS).
 	#[cfg(feature = "h264")]
 	Avc3,
 	/// fMP4/CMAF container.
@@ -36,6 +39,8 @@ impl FromStr for FramedFormat {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
 			#[cfg(feature = "h264")]
+			"avc1" | "avcc" => Ok(FramedFormat::Avc1),
+			#[cfg(feature = "h264")]
 			"avc3" => Ok(FramedFormat::Avc3),
 			#[cfg(feature = "h264")]
 			"h264" | "annex-b" => {
@@ -60,6 +65,8 @@ impl FromStr for FramedFormat {
 impl fmt::Display for FramedFormat {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match *self {
+			#[cfg(feature = "h264")]
+			FramedFormat::Avc1 => write!(f, "avc1"),
 			#[cfg(feature = "h264")]
 			FramedFormat::Avc3 => write!(f, "avc3"),
 			#[cfg(feature = "mp4")]
@@ -164,7 +171,10 @@ enum StreamKind {
 
 #[derive(derive_more::From)]
 enum FramedKind {
-	/// aka H264 with inline SPS/PPS
+	/// H264 with AVCC framing
+	#[cfg(feature = "h264")]
+	Avc1(super::Avc1),
+	/// H264 with Annex B framing
 	#[cfg(feature = "h264")]
 	Avc3(super::Avc3),
 	// Boxed because it's a large struct and clippy complains about the size.
@@ -307,6 +317,12 @@ impl Framed {
 	) -> anyhow::Result<Self> {
 		let decoder = match format {
 			#[cfg(feature = "h264")]
+			FramedFormat::Avc1 => {
+				let mut decoder = super::Avc1::new(broadcast, catalog);
+				decoder.initialize(buf)?;
+				decoder.into()
+			}
+			#[cfg(feature = "h264")]
 			FramedFormat::Avc3 => {
 				let mut decoder = super::Avc3::new(broadcast, catalog);
 				decoder.initialize(buf)?;
@@ -354,6 +370,8 @@ impl Framed {
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		match self.decoder {
 			#[cfg(feature = "h264")]
+			FramedKind::Avc1(ref mut decoder) => decoder.finish(),
+			#[cfg(feature = "h264")]
 			FramedKind::Avc3(ref mut decoder) => decoder.finish(),
 			#[cfg(feature = "mp4")]
 			FramedKind::Fmp4(ref mut decoder) => decoder.finish(),
@@ -383,6 +401,8 @@ impl Framed {
 		pts: Option<hang::container::Timestamp>,
 	) -> anyhow::Result<()> {
 		match self.decoder {
+			#[cfg(feature = "h264")]
+			FramedKind::Avc1(ref mut decoder) => decoder.decode(buf, pts)?,
 			#[cfg(feature = "h264")]
 			FramedKind::Avc3(ref mut decoder) => decoder.decode_frame(buf, pts)?,
 			#[cfg(feature = "mp4")]
