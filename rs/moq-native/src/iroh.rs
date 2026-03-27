@@ -202,7 +202,7 @@ pub(crate) async fn connect(
 
 			web_transport_iroh::Session::connect_h3(conn, request).await?
 		}
-		alpn if moq_lite::ALPNS.contains(&alpn) => {
+		alpn if alpns.contains(&alpn) => {
 			let conn = connecting.await?;
 			web_transport_iroh::Session::raw(conn)
 		}
