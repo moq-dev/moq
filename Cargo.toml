@@ -4,6 +4,7 @@ members = [
     "rs/hang",
     "rs/libmoq",
     "rs/moq-cli",
+    "rs/moq-codec",
     "rs/moq-clock",
     "rs/moq-ffi",
     "rs/moq-lite",

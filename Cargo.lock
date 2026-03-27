@@ -3299,6 +3299,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-codec"
+version = "0.0.1"
+
+[[package]]
 name = "moq-ffi"
 version = "0.2.0"
 dependencies = [
