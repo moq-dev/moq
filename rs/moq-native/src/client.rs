@@ -8,6 +8,7 @@ use url::Url;
 /// TLS configuration for the client.
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[group(id = "client-tls")]
 #[non_exhaustive]
 pub struct ClientTls {
 	/// Use the TLS root at this path, encoded as PEM.
@@ -37,6 +38,7 @@ pub struct ClientTls {
 /// Configuration for the MoQ client.
 #[derive(Clone, Debug, clap::Parser, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[group(id = "client")]
 #[non_exhaustive]
 pub struct ClientConfig {
 	/// Listen for UDP packets on the given address.
@@ -80,7 +82,7 @@ pub struct ClientConfig {
 	#[cfg(feature = "websocket")]
 	#[command(flatten)]
 	#[serde(default)]
-	pub websocket: super::ClientWebSocket,
+	pub websocket: super::ws::ClientConfig,
 }
 
 impl ClientConfig {
@@ -96,6 +98,36 @@ impl ClientConfig {
 			moq_lite::Versions::from(self.version.clone())
 		}
 	}
+
+	pub fn with_bind(mut self, bind: net::SocketAddr) -> Self {
+		self.bind = bind;
+		self
+	}
+
+	pub fn with_backend(mut self, backend: QuicBackend) -> Self {
+		self.backend = Some(backend);
+		self
+	}
+
+	pub fn with_max_streams(mut self, max_streams: u64) -> Self {
+		self.max_streams = Some(max_streams);
+		self
+	}
+
+	pub fn with_version(mut self, version: moq_lite::Version) -> Self {
+		self.version.push(version);
+		self
+	}
+
+	pub fn with_tls_disable_verify(mut self, disable: bool) -> Self {
+		self.tls.disable_verify = Some(disable);
+		self
+	}
+
+	pub fn with_tls_root(mut self, root: PathBuf) -> Self {
+		self.tls.root.push(root);
+		self
+	}
 }
 
 impl Default for ClientConfig {
@@ -107,7 +139,7 @@ impl Default for ClientConfig {
 			version: Vec::new(),
 			tls: ClientTls::default(),
 			#[cfg(feature = "websocket")]
-			websocket: super::ClientWebSocket::default(),
+			websocket: super::ws::ClientConfig::default(),
 		}
 	}
 }
@@ -120,14 +152,14 @@ pub struct Client {
 	moq: moq_lite::Client,
 	versions: moq_lite::Versions,
 	#[cfg(feature = "websocket")]
-	websocket: super::ClientWebSocket,
+	websocket: super::ws::ClientConfig,
 	tls: rustls::ClientConfig,
 	#[cfg(feature = "noq")]
-	noq: Option<crate::noq::NoqClient>,
+	noq: Option<crate::noq::Client>,
 	#[cfg(feature = "quinn")]
-	quinn: Option<crate::quinn::QuinnClient>,
+	quinn: Option<crate::quinn::Client>,
 	#[cfg(feature = "quiche")]
-	quiche: Option<crate::quiche::QuicheClient>,
+	quiche: Option<crate::quiche::Client>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<web_transport_iroh::iroh::Endpoint>,
 	#[cfg(feature = "iroh")]
@@ -211,20 +243,20 @@ impl Client {
 		#[cfg(feature = "noq")]
 		#[allow(unreachable_patterns)]
 		let noq = match backend {
-			QuicBackend::Noq => Some(crate::noq::NoqClient::new(&config)?),
+			QuicBackend::Noq => Some(crate::noq::Client::new(&config)?),
 			_ => None,
 		};
 
 		#[cfg(feature = "quinn")]
 		#[allow(unreachable_patterns)]
 		let quinn = match backend {
-			QuicBackend::Quinn => Some(crate::quinn::QuinnClient::new(&config)?),
+			QuicBackend::Quinn => Some(crate::quinn::Client::new(&config)?),
 			_ => None,
 		};
 
 		#[cfg(feature = "quiche")]
 		let quiche = match backend {
-			QuicBackend::Quiche => Some(crate::quiche::QuicheClient::new(&config)?),
+			QuicBackend::Quiche => Some(crate::quiche::Client::new(&config)?),
 			_ => None,
 		};
 
@@ -291,7 +323,8 @@ impl Client {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().context("Iroh support is not enabled")?;
-			let session = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied()).await?;
+			let alpns = self.versions.alpns();
+			let session = crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied(), &alpns).await?;
 			let session = self.moq.connect(session).await?;
 			return Ok(session);
 		}
@@ -311,7 +344,7 @@ impl Client {
 			#[cfg(feature = "websocket")]
 			{
 				let alpns = self.versions.alpns();
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
+				let ws_handle = crate::ws::race_handle(&self.websocket, &self.tls, url, &alpns);
 
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
@@ -342,7 +375,7 @@ impl Client {
 			#[cfg(feature = "websocket")]
 			{
 				let alpns = self.versions.alpns();
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
+				let ws_handle = crate::ws::race_handle(&self.websocket, &self.tls, url, &alpns);
 
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,
@@ -372,7 +405,7 @@ impl Client {
 			#[cfg(feature = "websocket")]
 			{
 				let alpns = self.versions.alpns();
-				let ws_handle = crate::websocket::race_handle(&self.websocket, &self.tls, url, &alpns);
+				let ws_handle = crate::ws::race_handle(&self.websocket, &self.tls, url, &alpns);
 
 				return Ok(tokio::select! {
 					Ok(quic) = quic_handle => self.moq.connect(quic).await?,

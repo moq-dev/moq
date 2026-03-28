@@ -10,13 +10,13 @@ use url::Url;
 // ── Client ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub(crate) struct QuinnClient {
+pub(crate) struct Client {
 	pub quic: quinn::Endpoint,
 	pub transport: Arc<quinn::TransportConfig>,
 	pub versions: moq_lite::Versions,
 }
 
-impl QuinnClient {
+impl Client {
 	pub fn new(config: &ClientConfig) -> anyhow::Result<Self> {
 		let socket = std::net::UdpSocket::bind(config.bind).context("failed to bind UDP socket")?;
 
@@ -139,12 +139,12 @@ impl QuinnClient {
 
 // ── Server ──────────────────────────────────────────────────────────
 
-pub(crate) struct QuinnServer {
+pub(crate) struct Server {
 	pub quic: quinn::Endpoint,
 	pub certs: Arc<ServeCerts>,
 }
 
-impl QuinnServer {
+impl Server {
 	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
 		// Enable BBR congestion control
 		// TODO Validate the BBR implementation before enabling it
@@ -239,10 +239,10 @@ impl QuinnServer {
 	}
 }
 
-// ── QuinnRequest ────────────────────────────────────────────────────
+// ── Request ────────────────────────────────────────────────────
 
 /// A raw QUIC connection request without WebTransport framing (quinn backend).
-pub(crate) enum QuinnRequest {
+pub(crate) enum Request {
 	Raw {
 		request: web_transport_quinn::proto::ConnectRequest,
 		response: web_transport_quinn::proto::ConnectResponse,
@@ -254,7 +254,7 @@ pub(crate) enum QuinnRequest {
 	},
 }
 
-impl QuinnRequest {
+impl Request {
 	pub async fn accept(conn: quinn::Incoming, alpns: Vec<&'static str>) -> anyhow::Result<Self> {
 		let mut conn = conn.accept()?;
 
@@ -310,12 +310,12 @@ impl QuinnRequest {
 	/// Accept the session, returning a 200 OK if using WebTransport.
 	pub async fn ok(self) -> Result<web_transport_quinn::Session, web_transport_quinn::ServerError> {
 		match self {
-			QuinnRequest::Raw {
+			Request::Raw {
 				connection,
 				request,
 				response,
 			} => Ok(web_transport_quinn::Session::raw(connection, request, response)),
-			QuinnRequest::WebTransport { request, alpns } => {
+			Request::WebTransport { request, alpns } => {
 				let mut response = web_transport_quinn::proto::ConnectResponse::OK;
 				// Pick the first sub-protocol that we actually support.
 				// This is the WebTransport equivalent of ALPN negotiation.
@@ -333,8 +333,8 @@ impl QuinnRequest {
 	/// Returns the URL provided by the client.
 	pub fn url(&self) -> Option<&Url> {
 		match self {
-			QuinnRequest::Raw { .. } => None,
-			QuinnRequest::WebTransport { request, .. } => Some(&request.url),
+			Request::Raw { .. } => None,
+			Request::WebTransport { request, .. } => Some(&request.url),
 		}
 	}
 
@@ -344,11 +344,11 @@ impl QuinnRequest {
 		status: web_transport_quinn::http::StatusCode,
 	) -> Result<(), web_transport_quinn::ServerError> {
 		match self {
-			QuinnRequest::Raw { connection, .. } => {
+			Request::Raw { connection, .. } => {
 				connection.close(status.as_u16().into(), status.as_str().as_bytes());
 				Ok(())
 			}
-			QuinnRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
+			Request::WebTransport { request, alpns: _, .. } => request.reject(status).await,
 		}
 	}
 }
