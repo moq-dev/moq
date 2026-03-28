@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-#[derive(uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct MoqDimensions {
 	pub width: u32,
 	pub height: u32,
 }
 
-#[derive(uniffi::Enum)]
+#[derive(Clone, uniffi::Enum)]
 pub enum Container {
 	Legacy,
 	Cmaf { init_data: String },
@@ -21,6 +21,15 @@ impl From<hang::catalog::Container> for Container {
 	}
 }
 
+impl From<Container> for hang::catalog::Container {
+	fn from(container: Container) -> Self {
+		match container {
+			Container::Legacy => Self::Legacy,
+			Container::Cmaf { init_data } => Self::Cmaf { init_data },
+		}
+	}
+}
+
 #[derive(uniffi::Record)]
 pub struct MoqCatalog {
 	pub video: HashMap<String, MoqVideo>,
@@ -30,7 +39,7 @@ pub struct MoqCatalog {
 	pub flip: Option<bool>,
 }
 
-#[derive(uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct MoqVideo {
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
@@ -41,7 +50,7 @@ pub struct MoqVideo {
 	pub container: Container,
 }
 
-#[derive(uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct MoqAudio {
 	pub codec: String,
 	pub description: Option<Vec<u8>>,

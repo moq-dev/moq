@@ -20,7 +20,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: kixelated
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}

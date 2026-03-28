@@ -24,10 +24,11 @@
 		"zod": "^4.1.0"
 	},
 	"devDependencies": {
-		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
+		"@types/bun": "^1.3.11",
 		"@types/node": "^24.3.1",
-		"vite-plugin-html": "^3.2.2",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
 		"rimraf": "^6.0.1",
-		"typescript": "^5.9.2"
+		"typescript": "^6.0.0",
+		"vite-plugin-html": "^3.2.2"
 	}
 }

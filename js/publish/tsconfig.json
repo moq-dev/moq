@@ -5,7 +5,8 @@
 		"jsx": "preserve",
 		"jsxImportSource": "solid-js",
 		"outDir": "dist",
-		"emitDeclarationOnly": true
+		"emitDeclarationOnly": true,
+		"types": ["audioworklet"]
 	},
 	"include": ["src", "../common/worklet.d.ts"]
 }
