@@ -408,7 +408,6 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 			};
 
 			let size: u16 = reader.decode::<u16>().await?;
-			tracing::trace!(type_id, size, "adapter: reading control message");
 
 			let body = reader.read_exact(size as usize).await?;
 
@@ -417,7 +416,6 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 
 			// Classify and route
 			let route = self.classify(type_id, &body)?;
-			tracing::trace!(?route, "adapter: classified message");
 
 			match route {
 				Route::NewRequest(request_id) => {

@@ -360,7 +360,7 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 	})
 }
 
-/// Create a catalog consumer for a broadcast.
+/// Subscribe to catalog updates for a broadcast.
 ///
 /// The callback is called with a catalog ID when a new catalog is available.
 /// The catalog ID can be used to query video/audio track information.
@@ -368,9 +368,9 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that `on_catalog` is valid until [moq_consume_catalog_close] is called.
+/// - The caller must ensure that `on_catalog` is valid until [moq_consume_catalog_unsubscribe] is called.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_catalog(
+pub unsafe extern "C" fn moq_consume_catalog_subscribe(
 	broadcast: u32,
 	on_catalog: Option<extern "C" fn(user_data: *mut c_void, catalog: i32)>,
 	user_data: *mut c_void,
@@ -378,15 +378,29 @@ pub unsafe extern "C" fn moq_consume_catalog(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let on_catalog = unsafe { ffi::OnStatus::new(user_data, on_catalog) };
-		State::lock().consume.catalog(broadcast, on_catalog)
+		State::lock().consume.catalog_subscribe(broadcast, on_catalog)
 	})
 }
 
-/// Close a catalog consumer and cancel its background task.
+/// Unsubscribe from catalog updates and cancel the background task.
 ///
 /// This only stops the background subscription; catalog snapshots previously
-/// delivered via the [moq_consume_catalog] callback remain valid until freed
-/// with [moq_consume_catalog_free].
+/// delivered via the [moq_consume_catalog_subscribe] callback remain valid until closed
+/// with [moq_consume_catalog_close].
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_catalog_unsubscribe(catalog: u32) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		State::lock().consume.catalog_unsubscribe(catalog)
+	})
+}
+
+/// Close a catalog snapshot received via the [moq_consume_catalog_subscribe] callback.
+///
+/// This releases the snapshot and invalidates any borrowed references (e.g. pointers
+/// returned by [moq_consume_video_config] or [moq_consume_audio_config]).
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -394,20 +408,6 @@ pub extern "C" fn moq_consume_catalog_close(catalog: u32) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		State::lock().consume.catalog_close(catalog)
-	})
-}
-
-/// Free a catalog snapshot received via the [moq_consume_catalog] callback.
-///
-/// This releases the snapshot and invalidates any borrowed references (e.g. pointers
-/// returned by [moq_consume_video_config] or [moq_consume_audio_config]).
-///
-/// Returns a zero on success, or a negative code on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_catalog_free(catalog: u32) -> i32 {
-	ffi::enter(move || {
-		let catalog = ffi::parse_id(catalog)?;
-		State::lock().consume.catalog_free(catalog)
 	})
 }
 
@@ -419,7 +419,7 @@ pub extern "C" fn moq_consume_catalog_free(catalog: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_video_config] struct.
-/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst: *mut moq_video_config) -> i32 {
 	ffi::enter(move || {
@@ -438,7 +438,7 @@ pub unsafe extern "C" fn moq_consume_video_config(catalog: u32, index: u32, dst:
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_audio_config] struct.
-/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_free] is called.
+/// - The caller must ensure that `dst` is not used after [moq_consume_catalog_close] is called.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst: *mut moq_audio_config) -> i32 {
 	ffi::enter(move || {

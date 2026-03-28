@@ -2,8 +2,6 @@
 	"compilerOptions": {
 		"lib": ["esnext", "dom", "dom.iterable"],
 		"target": "esnext",
-		"module": "esnext",
-		"moduleResolution": "bundler",
 		"rewriteRelativeImportExtensions": true,
 
 		"declaration": true,

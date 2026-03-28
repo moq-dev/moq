@@ -48,9 +48,9 @@ int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_
 int32_t moq_consume_close(uint32_t consume);
 
 // Consuming: Catalog
-int32_t moq_consume_catalog(uint32_t broadcast, void (*on_catalog)(void *user_data, int32_t catalog), void *user_data);
+int32_t moq_consume_catalog_subscribe(uint32_t broadcast, void (*on_catalog)(void *user_data, int32_t catalog), void *user_data);
+int32_t moq_consume_catalog_unsubscribe(uint32_t catalog);
 int32_t moq_consume_catalog_close(uint32_t catalog);
-int32_t moq_consume_catalog_free(uint32_t catalog);
 int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_config *dst);
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
 

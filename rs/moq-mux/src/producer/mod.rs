@@ -21,6 +21,8 @@ mod annexb;
 #[cfg(feature = "av1")]
 mod av01;
 #[cfg(feature = "h264")]
+mod avc1;
+#[cfg(feature = "h264")]
 mod avc3;
 mod decoder;
 #[cfg(feature = "mp4")]
@@ -34,6 +36,8 @@ mod opus;
 pub use aac::*;
 #[cfg(feature = "av1")]
 pub use av01::*;
+#[cfg(feature = "h264")]
+pub use avc1::*;
 #[cfg(feature = "h264")]
 pub use avc3::*;
 pub use decoder::*;

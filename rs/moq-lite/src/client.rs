@@ -28,6 +28,14 @@ impl Client {
 		self
 	}
 
+	/// Set both publish and consume from an `OriginProducer`.
+	///
+	/// This is equivalent to calling `with_publish(origin.consume())` and `with_consume(origin)`.
+	pub fn with_origin(self, origin: OriginProducer) -> Self {
+		let consumer = origin.consume();
+		self.with_publish(consumer).with_consume(origin)
+	}
+
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
 		self
@@ -121,12 +129,9 @@ impl Client {
 			parameters,
 		};
 
-		// TODO pretty print the parameters.
-		tracing::trace!(?client, "sending client setup");
 		stream.writer.encode(&client).await?;
 
 		let mut server: setup::Server = stream.reader.decode().await?;
-		tracing::trace!(?server, "received server setup");
 
 		let version = supported
 			.iter()

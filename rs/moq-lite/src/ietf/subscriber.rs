@@ -663,7 +663,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let group: ietf::GroupHeader = stream.decode().await?;
-		tracing::trace!(?group, "received group header");
 
 		if group.sub_group_id != 0 {
 			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");
@@ -694,7 +693,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) => {
-				tracing::trace!(group = %producer.info.sequence, "group cancelled");
 				let _ = producer.abort(Error::Cancel);
 			}
 			Err(err) => {
@@ -702,7 +700,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let _ = producer.abort(err);
 			}
 			_ => {
-				tracing::trace!(group = %producer.info.sequence, "group complete");
 				let _ = producer.finish();
 			}
 		}
@@ -760,15 +757,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	) -> Result<(), Error> {
 		let mut remain = frame.info.size;
 
-		tracing::trace!(size = %frame.info.size, "reading frame");
-
 		while remain > 0 {
 			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;
 			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
 			frame.write(chunk)?;
 		}
-
-		tracing::trace!(size = %frame.info.size, "read frame");
 
 		Ok(())
 	}
