@@ -2,19 +2,16 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 
+use crate::Config;
+use crate::game;
 use crate::sensor;
 use crate::video;
-use crate::{Config, MediaFiles};
 
 /// Published on the status track as JSON.
 #[derive(Clone, serde::Serialize)]
 pub struct State {
-    /// Available action names (sorted).
+    /// Available action names.
     pub actions: Vec<String>,
-    /// Current state: "idle", "dead", or an action name.
-    pub current: String,
-    /// Queued action (replaces previous queue). None means return to idle after current action.
-    pub queued: Option<String>,
     /// Connected viewer IDs.
     pub controllers: Vec<String>,
 }
@@ -29,49 +26,34 @@ enum Command {
     Kill,
 }
 
-/// Commands sent to the video pipeline.
-#[derive(Clone, Debug)]
-pub enum VideoCommand {
-    /// Switch to an action file (plays once).
-    Action(String),
-    /// Kill switch — switch to dead loop immediately.
-    Kill,
-}
-
 struct Inner {
     state: Mutex<State>,
-    /// Sends commands to the video pipeline.
-    cmd_tx: tokio::sync::watch::Sender<Option<VideoCommand>>,
+    /// Sends commands directly to the game loop.
+    cmd_tx: tokio::sync::mpsc::Sender<String>,
     action_names: Vec<String>,
 }
 
 #[derive(Clone)]
-pub struct Robo {
+pub struct Drone {
     broadcast: moq_lite::BroadcastProducer,
     inner: Arc<Inner>,
-    media: MediaFiles,
 }
 
-impl Robo {
-    pub fn new(_config: &Config, media: &MediaFiles) -> Self {
+impl Drone {
+    pub fn new(_config: &Config, cmd_tx: tokio::sync::mpsc::Sender<String>) -> Self {
         let broadcast = moq_lite::BroadcastProducer::default();
-        let (cmd_tx, _) = tokio::sync::watch::channel(None);
-
-        let action_names: Vec<String> = media.actions.keys().cloned().collect();
+        let action_names = game::action_names();
 
         Self {
             broadcast,
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
                     actions: action_names.clone(),
-                    current: "idle".to_string(),
-                    queued: None,
                     controllers: Vec::new(),
                 }),
                 cmd_tx,
                 action_names,
             }),
-            media: media.clone(),
         }
     }
 
@@ -79,10 +61,10 @@ impl Robo {
         self.broadcast.consume()
     }
 
-    pub async fn run(&self) -> anyhow::Result<()> {
+    pub async fn run(&self, cmd_rx: tokio::sync::mpsc::Receiver<String>) -> anyhow::Result<()> {
         let mut broadcast = self.broadcast.clone();
 
-        // Catalog and video tracks are managed by the Avc1/Avc3 importers.
+        // Catalog and video tracks are managed by the Avc3 importer.
         let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 
         // Create sensor track (raw JSON, not via catalog).
@@ -99,43 +81,23 @@ impl Robo {
         };
         let status_producer = broadcast.create_track(status_track)?;
 
-        // Channel for the video pipeline to signal action completion.
-        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
+        // Shared battery level between game and sensor.
+        let battery = sensor::new_battery();
 
-        // Start the video pipeline (async, uses block_in_place for ffmpeg calls).
-        let cmd_rx = self.inner.cmd_tx.subscribe();
+        // Start the video/game pipeline.
         let video_handle = tokio::spawn({
-            let media = self.media.clone();
             let broadcast = broadcast.clone();
             let catalog = catalog.clone();
-            async move { video::run_pipeline(media, broadcast, catalog, cmd_rx, done_tx).await }
+            let battery = battery.clone();
+            async move { video::run_pipeline(broadcast, catalog, cmd_rx, battery).await }
         });
 
-        // Handle action completions (video finished playing an action file).
-        let inner = self.inner.clone();
-        let done_handle = tokio::spawn(async move {
-            while done_rx.recv().await.is_some() {
-                let mut state = inner.state.lock().unwrap();
-                if let Some(queued) = state.queued.take() {
-                    // Play the queued action next.
-                    state.current = queued.clone();
-                    let _ = inner.cmd_tx.send(Some(VideoCommand::Action(queued)));
-                } else {
-                    // Return to idle.
-                    state.current = "idle".to_string();
-                    let _ = inner.cmd_tx.send(None);
-                }
-            }
-            Ok::<_, anyhow::Error>(())
-        });
-
-        let sensor_handle = tokio::spawn(sensor::run_sensor(sensor_producer));
+        let sensor_handle = tokio::spawn(sensor::run_sensor(sensor_producer, battery));
         let state = self.inner.clone();
         let status_handle = tokio::spawn(run_status(status_producer, state));
 
         tokio::select! {
             res = video_handle => res?.context("video pipeline error"),
-            res = done_handle => res?.context("done handler error"),
             res = sensor_handle => res?.context("sensor error"),
             res = status_handle => res?.context("status error"),
         }
@@ -169,7 +131,7 @@ async fn run_status(
 /// Handles discovered viewers: subscribes to their command tracks.
 pub async fn handle_viewers(
     viewer_origin: &mut moq_lite::OriginConsumer,
-    robo: &Robo,
+    drone: &Drone,
 ) -> anyhow::Result<()> {
     loop {
         let Some((path, broadcast)) = viewer_origin.announced().await else {
@@ -180,14 +142,15 @@ pub async fn handle_viewers(
 
         if let Some(broadcast) = broadcast {
             tracing::info!(%viewer_id, "viewer connected");
-            robo.inner
+            drone
+                .inner
                 .state
                 .lock()
                 .unwrap()
                 .controllers
                 .push(viewer_id.clone());
 
-            let inner = robo.inner.clone();
+            let inner = drone.inner.clone();
             tokio::spawn(async move {
                 if let Err(e) = handle_viewer_commands(&viewer_id, broadcast, &inner).await {
                     tracing::warn!(%viewer_id, error = %e, "viewer command error");
@@ -202,7 +165,8 @@ pub async fn handle_viewers(
             });
         } else {
             tracing::info!(%viewer_id, "viewer went offline");
-            robo.inner
+            drone
+                .inner
                 .state
                 .lock()
                 .unwrap()
@@ -234,28 +198,12 @@ async fn handle_viewer_commands(
                         tracing::warn!(%viewer_id, %name, "unknown action");
                         continue;
                     }
-
-                    let mut state = inner.state.lock().unwrap();
-                    if state.current == "idle" || state.current == "dead" {
-                        // Currently looping — interrupt immediately.
-                        state.current = name.clone();
-                        state.queued = None;
-                        let _ = inner.cmd_tx.send(Some(VideoCommand::Action(name)));
-                        tracing::info!(%viewer_id, current = %state.current, "action started");
-                    } else {
-                        // Currently playing an action — queue this one.
-                        state.queued = Some(name.clone());
-                        tracing::info!(%viewer_id, queued = %name, "action queued");
-                    }
+                    let _ = inner.cmd_tx.send(name.clone()).await;
+                    tracing::info!(%viewer_id, %name, "action");
                 }
                 Ok(Command::Kill) => {
-                    let mut state = inner.state.lock().unwrap();
-                    if state.current != "dead" {
-                        state.current = "dead".to_string();
-                        state.queued = None;
-                        let _ = inner.cmd_tx.send(Some(VideoCommand::Kill));
-                        tracing::warn!(%viewer_id, "kill switch activated");
-                    }
+                    let _ = inner.cmd_tx.send("dock".to_string()).await;
+                    tracing::info!(%viewer_id, "kill → dock");
                 }
                 Err(e) => {
                     tracing::warn!(%viewer_id, error = %e, "invalid command");

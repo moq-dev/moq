@@ -69,6 +69,13 @@ export default defineConfig({
 						{ text: "Production", link: "/setup/prod" },
 					],
 				},
+				{
+					text: "Demos",
+					items: [
+						{ text: "Web", link: "/setup/demo/web" },
+						{ text: "Drone", link: "/setup/demo/drone" },
+					],
+				},
 			],
 
 			"/concept/": [

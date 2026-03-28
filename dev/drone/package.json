@@ -1,9 +1,9 @@
 {
-	"name": "@moq/robo",
+	"name": "@moq/drone",
 	"private": true,
 	"type": "module",
 	"version": "0.1.0",
-	"description": "MoQ Robotics Demo - Web Viewer",
+	"description": "MoQ Drone Demo - Web Viewer",
 	"license": "(MIT OR Apache-2.0)",
 	"scripts": {
 		"dev": "vite --open",

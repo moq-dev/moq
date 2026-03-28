@@ -6,6 +6,12 @@ set quiet
 
 mod dev
 
+# Shortcuts to avoid `dev::` prefix.
+mod drone 'dev/drone'
+mod pub 'dev/pub'
+mod relay 'dev/relay'
+mod web 'dev/web'
+
 # Run the web demo by default.
 default:
 	just dev

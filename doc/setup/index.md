@@ -74,8 +74,10 @@ The demo uses an insecure HTTP fetch for local development only. In production, 
 :::
 
 ### More Demos
-Check out the full [development guide](/setup/dev) for more demos and commands.
 
-We have separate repos for the more difficult plugins to compile:
+- [Web Demo](/setup/demo/web) — watch and publish live streams from a browser
+- [Drone Demo](/setup/demo/drone) — simulated drone fleet with live video, sensor HUD, and remote control
+
+Check out the full [development guide](/setup/dev) for more commands, or try publishing to the public relay:
 - [OBS](/app/obs)
 - [Gstreamer](/app/gstreamer)

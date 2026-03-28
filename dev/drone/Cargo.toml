@@ -1,6 +1,6 @@
 [package]
-name = "moq-robo"
-description = "Media over QUIC - Robotics Demo"
+name = "moq-drone"
+description = "Media over QUIC - Drone Demo"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -24,10 +24,11 @@ hex = "0.4"
 moq-lite = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
-mp4-atom = { version = "0.10.0", features = ["bytes"] }
 rand = "0.9"
+rapier2d = "0.32"
 serde = { workspace = true }
 serde_json = "1"
+tiny-skia = "0.12"
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
 url = "2"

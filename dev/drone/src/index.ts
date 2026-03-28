@@ -5,8 +5,13 @@ import * as Watch from "@moq/watch";
 const params = new URLSearchParams(window.location.search);
 const url = new URL(params.get("url") ?? import.meta.env.VITE_RELAY_URL ?? "https://cdn.moq.dev/anon");
 
-const statusEl = document.getElementById("connection-status")!;
-const gridEl = document.getElementById("grid")!;
+const statusEl = document.getElementById("connection-status") as HTMLElement;
+const gridEl = document.getElementById("grid") as HTMLElement;
+const emptyState = document.getElementById("empty-state") as HTMLElement;
+
+function updateEmptyState() {
+	emptyState.style.display = drones.size === 0 ? "block" : "none";
+}
 
 // Single shared connection for everything.
 const connection = new Moq.Connection.Reload({ url, enabled: true });
@@ -19,18 +24,19 @@ root.run((e) => {
 	statusEl.style.color = status === "connected" ? "#4ade80" : status === "connecting" ? "#facc15" : "#888";
 });
 
-// Track which robo is expanded (fullscreen).
+// Track which drone is expanded (fullscreen).
 const expanded = new Moq.Signals.Signal<string | undefined>(undefined);
 
-// Active robo cards.
-const robos = new Map<string, RoboCard>();
+// Active drone cards.
+const drones = new Map<string, DroneCard>();
+updateEmptyState();
 
-// Discover robos via announcements.
+// Discover drones via announcements.
 root.run((effect) => {
 	const conn = effect.get(connection.established);
 	if (!conn) return;
 
-	const announced = conn.announced(Moq.Path.from("robo"));
+	const announced = conn.announced(Moq.Path.from("drone"));
 	effect.cleanup(() => announced.close());
 
 	effect.spawn(async () => {
@@ -38,41 +44,42 @@ root.run((effect) => {
 			const entry = await Promise.race([effect.cancel, announced.next()]);
 			if (!entry) break;
 
-			// Strip the "robo/" prefix to get the robo ID.
-			// Skip nested paths like "robo/abc123/viewer/..."
-			const suffix = Moq.Path.stripPrefix(Moq.Path.from("robo"), entry.path);
+			// Strip the "drone/" prefix to get the drone ID.
+			// Skip nested paths like "drone/abc123/viewer/..."
+			const suffix = Moq.Path.stripPrefix(Moq.Path.from("drone"), entry.path);
 			if (!suffix || suffix.includes("/")) continue;
 
 			const id = suffix;
-			if (entry.active && !robos.has(id)) {
-				const card = new RoboCard(id);
-				robos.set(id, card);
+			if (entry.active && !drones.has(id)) {
+				const card = new DroneCard(id);
+				drones.set(id, card);
 				gridEl.appendChild(card.el);
+				updateEmptyState();
 			} else if (!entry.active) {
-				const card = robos.get(id);
+				const card = drones.get(id);
 				if (card) {
 					card.close();
 					card.el.remove();
-					robos.delete(id);
+					drones.delete(id);
+					updateEmptyState();
 				}
 			}
 		}
 	});
 });
 
-interface RoboStatus {
+interface DroneStatus {
 	actions: string[];
-	current: string;
-	queued: string | null;
 	controllers: string[];
 }
 
-// A robo card: live video + sensor HUD, expandable to fullscreen with controls.
-class RoboCard {
+// A drone card: live video + sensor HUD, expandable to fullscreen with controls.
+class DroneCard {
 	el: HTMLDivElement;
 	#signals = new Moq.Signals.Effect();
+	#sendCommand: (cmd: unknown) => void = () => {};
 
-	constructor(roboId: string) {
+	constructor(droneId: string) {
 		this.el = document.createElement("div");
 		this.el.className = "card";
 
@@ -84,7 +91,7 @@ class RoboCard {
 		// Label overlay.
 		const label = document.createElement("div");
 		label.className = "label";
-		label.textContent = roboId;
+		label.textContent = droneId;
 		this.el.appendChild(label);
 
 		// Sensor HUD overlay.
@@ -98,28 +105,66 @@ class RoboCard {
 		alert.className = "alert";
 		this.el.appendChild(alert);
 
-		// Controls (visible when expanded).
+		// Controls container (visible when expanded).
 		const controls = document.createElement("div");
 		controls.className = "controls";
 		this.el.appendChild(controls);
 
-		// Click to toggle expand.
-		this.el.addEventListener("click", () => {
-			expanded.set(expanded.peek() === roboId ? undefined : roboId);
+		// Build the control layout.
+		const controlsInner = this.buildControls();
+		controls.appendChild(controlsInner);
+
+		// Click to toggle expand (but not on controls).
+		canvas.addEventListener("click", () => {
+			expanded.set(expanded.peek() === droneId ? undefined : droneId);
 		});
 
 		// React to expand state for styling.
 		this.#signals.run((effect) => {
 			const exp = effect.get(expanded);
-			const isExpanded = exp === roboId;
+			const isExpanded = exp === droneId;
 			this.el.classList.toggle("expanded", isExpanded);
 			controls.style.display = isExpanded ? "flex" : "none";
 		});
 
+		// Keyboard input when expanded.
+		const keyHandler = (e: KeyboardEvent) => {
+			if (expanded.peek() !== droneId) return;
+
+			switch (e.key) {
+				case "ArrowLeft":
+					this.#sendCommand({ type: "action", name: "left" });
+					e.preventDefault();
+					break;
+				case "ArrowRight":
+					this.#sendCommand({ type: "action", name: "right" });
+					e.preventDefault();
+					break;
+				case "ArrowUp":
+					this.#sendCommand({ type: "action", name: "up" });
+					e.preventDefault();
+					break;
+				case "ArrowDown":
+					this.#sendCommand({ type: "action", name: "down" });
+					e.preventDefault();
+					break;
+				case " ":
+					this.#sendCommand({ type: "action", name: "grab" });
+					e.preventDefault();
+					break;
+				case "Escape":
+					expanded.set(undefined);
+					e.preventDefault();
+					break;
+			}
+		};
+		document.addEventListener("keydown", keyHandler);
+		this.#signals.cleanup(() => document.removeEventListener("keydown", keyHandler));
+
 		// Set up video via Watch API, sharing the connection.
 		const broadcast = new Watch.Broadcast({
 			connection: connection.established,
-			name: Moq.Path.from(`robo/${roboId}`),
+			name: Moq.Path.from(`drone/${droneId}`),
 			enabled: true,
 		});
 		this.#signals.cleanup(() => broadcast.close());
@@ -133,7 +178,7 @@ class RoboCard {
 		// Set pixel budget based on expanded state.
 		this.#signals.run((effect) => {
 			const exp = effect.get(expanded);
-			const pixels = exp === roboId ? 1920 * 1080 : 426 * 240;
+			const pixels = exp === droneId ? 1920 * 1080 : 478 * 360;
 			videoSource.target.set({ pixels });
 		});
 
@@ -143,7 +188,7 @@ class RoboCard {
 		// Disable non-expanded cards when one is expanded to save bandwidth.
 		this.#signals.run((effect) => {
 			const exp = effect.get(expanded);
-			const active = exp === undefined || exp === roboId;
+			const active = exp === undefined || exp === droneId;
 			videoDecoder.enabled.set(active);
 		});
 
@@ -170,7 +215,7 @@ class RoboCard {
 		});
 
 		// Track status from status track.
-		const status = new Moq.Signals.Signal<RoboStatus | undefined>(undefined);
+		const status = new Moq.Signals.Signal<DroneStatus | undefined>(undefined);
 
 		this.#signals.run((effect) => {
 			const active = effect.get(broadcast.active);
@@ -182,7 +227,7 @@ class RoboCard {
 			effect.spawn(async () => {
 				for (;;) {
 					const json = (await Promise.race([effect.cancel, statusTrack.readJson()])) as
-						| RoboStatus
+						| DroneStatus
 						| undefined;
 					if (!json) break;
 					status.set(json);
@@ -190,47 +235,16 @@ class RoboCard {
 			});
 		});
 
-		// Dynamic action buttons + kill button based on status.
+		// Update controller count from status.
 		this.#signals.run((effect) => {
 			const st = effect.get(status);
 			if (!st) return;
 
-			// Clear existing buttons.
-			while (controls.firstChild) {
-				controls.removeChild(controls.firstChild);
+			const statusText = controls.querySelector(".status-text") as HTMLElement | null;
+			if (statusText) {
+				const n = st.controllers.length;
+				statusText.textContent = n === 0 ? "No controllers" : `${n} controller${n > 1 ? "s" : ""}`;
 			}
-
-			// Create action buttons.
-			for (const action of st.actions) {
-				const btn = document.createElement("button");
-				btn.textContent = capitalize(action);
-				btn.className = "action-btn";
-
-				if (st.current === action) {
-					btn.classList.add("active");
-				} else if (st.queued === action) {
-					btn.classList.add("queued");
-				}
-
-				btn.addEventListener("click", (e) => {
-					e.stopPropagation();
-					sendCommand({ type: "action", name: action });
-				});
-				controls.appendChild(btn);
-			}
-
-			// Kill button.
-			const killBtn = document.createElement("button");
-			killBtn.textContent = "KILL";
-			killBtn.className = "kill";
-			if (st.current === "dead") {
-				killBtn.classList.add("active");
-			}
-			killBtn.addEventListener("click", (e) => {
-				e.stopPropagation();
-				sendCommand({ type: "kill" });
-			});
-			controls.appendChild(killBtn);
 		});
 
 		// Controller alert: yellow for 1, red for 2+.
@@ -259,11 +273,11 @@ class RoboCard {
 			if (!conn) return;
 
 			const exp = effect.get(expanded);
-			if (exp !== roboId) return;
+			if (exp !== droneId) return;
 
 			const viewerId = `v${Math.random().toString(36).slice(2, 8)}`;
 			const viewerBroadcast = new Moq.Broadcast();
-			conn.publish(Moq.Path.from(`robo/${roboId}/viewer/${viewerId}`), viewerBroadcast);
+			conn.publish(Moq.Path.from(`drone/${droneId}/viewer/${viewerId}`), viewerBroadcast);
 			effect.cleanup(() => {
 				viewerBroadcast.close();
 				commandTrack = undefined;
@@ -278,19 +292,68 @@ class RoboCard {
 			});
 		});
 
-		function sendCommand(cmd: unknown) {
+		this.#sendCommand = (cmd: unknown) => {
 			if (!commandTrack) return;
 			commandTrack.writeJson(cmd);
-		}
+		};
+	}
+
+	buildControls(): HTMLElement {
+		const wrapper = document.createElement("div");
+		wrapper.className = "controls-inner";
+
+		// D-pad layout.
+		const dpad = document.createElement("div");
+		dpad.className = "dpad";
+
+		const makeBtn = (action: string, label: string, className?: string) => {
+			const btn = document.createElement("button");
+			btn.textContent = label;
+			btn.dataset.action = action;
+			if (className) btn.className = className;
+			btn.addEventListener("click", (e) => {
+				e.stopPropagation();
+				this.#sendCommand({ type: "action", name: action });
+			});
+			return btn;
+		};
+
+		// Arrow buttons in a 3x3 grid.
+		const upBtn = makeBtn("up", "▲", "dpad-btn dpad-up");
+		const leftBtn = makeBtn("left", "◄", "dpad-btn dpad-left");
+		const rightBtn = makeBtn("right", "►", "dpad-btn dpad-right");
+		const downBtn = makeBtn("down", "▼", "dpad-btn dpad-down");
+
+		dpad.appendChild(upBtn);
+		dpad.appendChild(leftBtn);
+		dpad.appendChild(rightBtn);
+		dpad.appendChild(downBtn);
+
+		// Action buttons column.
+		const actions = document.createElement("div");
+		actions.className = "action-column";
+
+		const grabBtn = makeBtn("grab", "GRAB [Space]", "action-main");
+		const dockBtn = makeBtn("dock", "DOCK", "action-dock");
+
+		actions.appendChild(grabBtn);
+		actions.appendChild(dockBtn);
+
+		// Status text.
+		const statusText = document.createElement("div");
+		statusText.className = "status-text";
+		statusText.textContent = "Idle";
+		actions.appendChild(statusText);
+
+		wrapper.appendChild(dpad);
+		wrapper.appendChild(actions);
+
+		return wrapper;
 	}
 
 	close() {
 		this.#signals.close();
 	}
-}
-
-function capitalize(s: string): string {
-	return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function formatTime(s: number): string {

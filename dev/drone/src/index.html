@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>MoQ Drone Fleet</title>
+		<style>
+			* { margin: 0; padding: 0; box-sizing: border-box; }
+			body { font-family: system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
+
+			header {
+				background: #111; border-bottom: 1px solid #333;
+				padding: 0.75rem 1.5rem; display: flex; align-items: center; gap: 1rem;
+			}
+			header h1 { font-size: 1.1rem; font-weight: 600; color: #4ade80; }
+			header .info {
+				font-size: 0.7rem; color: #888; line-height: 1.4;
+				margin-left: auto; text-align: right; max-width: 360px;
+			}
+			header .info span { color: #aaa; }
+			header .status { font-size: 0.75rem; margin-left: 1rem; }
+
+			#grid {
+				display: flex; flex-wrap: wrap; gap: 1rem; padding: 1rem;
+			}
+
+			#empty-state {
+				display: none; padding: 4rem 2rem; text-align: center; width: 100%;
+			}
+			#empty-state .icon { font-size: 3rem; margin-bottom: 1rem; opacity: 0.3; }
+			#empty-state .msg { font-size: 1rem; color: #666; }
+			#empty-state .hint { font-size: 0.75rem; color: #444; margin-top: 0.5rem; }
+
+			.card {
+				position: relative; background: #111; border: 1px solid #333; border-radius: 8px;
+				overflow: hidden; cursor: pointer; transition: all 0.3s ease;
+				width: 320px; aspect-ratio: 1;
+			}
+			.card:hover { border-color: #4ade80; }
+			.card.expanded {
+				position: fixed; inset: 0; z-index: 100; width: 100%; height: 100%;
+				border-radius: 0; border: none; aspect-ratio: auto;
+				display: flex; flex-direction: row;
+			}
+
+			.card .video {
+				width: 100%; height: 100%; object-fit: contain; background: #000; display: block;
+			}
+			.card.expanded .video {
+				flex: 1; min-width: 0;
+			}
+
+			.card .label {
+				position: absolute; top: 0.5rem; right: 0.5rem;
+				background: rgba(0,0,0,0.7); color: #4ade80; padding: 0.2rem 0.5rem;
+				border-radius: 4px; font-family: monospace; font-size: 0.7rem;
+			}
+
+			.card .hud {
+				position: absolute; top: 0.5rem; left: 0.5rem;
+				background: rgba(0,0,0,0.7); color: #4ade80; padding: 0.2rem 0.5rem;
+				border-radius: 4px; font-family: monospace; font-size: 0.65rem;
+				pointer-events: none;
+			}
+
+			/* Controls panel — side panel when expanded */
+			.card .controls {
+				display: none;
+			}
+			.card.expanded .controls {
+				display: flex; flex-direction: column; align-items: center; justify-content: center;
+				width: 220px; background: #111; border-left: 1px solid #333;
+				padding: 1rem; gap: 1.5rem; flex-shrink: 0;
+			}
+
+			.controls-inner {
+				display: flex; flex-direction: column; align-items: center; gap: 1.5rem;
+			}
+
+			/* D-pad: 3x3 CSS grid */
+			.dpad {
+				display: grid;
+				grid-template-columns: 56px 56px 56px;
+				grid-template-rows: 56px 56px 56px;
+				gap: 4px;
+			}
+			.dpad-btn {
+				background: #222; color: #e0e0e0; border: 1px solid #555;
+				border-radius: 6px; cursor: pointer; font-size: 1.2rem;
+				display: flex; align-items: center; justify-content: center;
+				transition: all 0.15s;
+			}
+			.dpad-btn:hover { background: #333; border-color: #4ade80; }
+			.dpad-btn:active { background: #444; transform: scale(0.95); }
+			.dpad-up { grid-column: 2; grid-row: 1; }
+			.dpad-left { grid-column: 1; grid-row: 2; }
+			.dpad-right { grid-column: 3; grid-row: 2; }
+			.dpad-down { grid-column: 2; grid-row: 3; }
+
+			/* Action buttons */
+			.action-column {
+				display: flex; flex-direction: column; gap: 0.5rem; width: 100%;
+			}
+			.action-main {
+				background: #1a2a4a; color: #60a5fa; border: 1px solid #3b82f6;
+				padding: 0.6rem; border-radius: 6px; cursor: pointer;
+				font-size: 0.85rem; font-weight: 600; width: 100%;
+				transition: all 0.15s;
+			}
+			.action-main:hover { background: #2a3a5a; }
+			.action-main:active { transform: scale(0.97); }
+
+			.action-dock {
+				background: #1a3a1a; color: #4ade80; border: 1px solid #22c55e;
+				padding: 0.5rem; border-radius: 6px; cursor: pointer;
+				font-size: 0.8rem; font-weight: 600; width: 100%;
+				transition: all 0.15s;
+			}
+			.action-dock:hover { background: #2a4a2a; }
+			.action-dock:active { transform: scale(0.97); }
+
+			/* Active/queued states for all buttons */
+			.dpad-btn.active, .action-main.active, .action-dock.active {
+				background: #1a4a1a; color: #4ade80; border-color: #4ade80; font-weight: 700;
+			}
+			.dpad-btn.queued, .action-main.queued, .action-dock.queued {
+				background: #3a2a0a; color: #facc15; border-color: #facc15;
+				animation: pulse 1.5s ease-in-out infinite;
+			}
+			@keyframes pulse {
+				0%, 100% { opacity: 1; }
+				50% { opacity: 0.6; }
+			}
+
+			/* Status text */
+			.status-text {
+				font-family: monospace; font-size: 0.7rem; color: #888;
+				text-align: center; margin-top: 0.5rem;
+			}
+
+			.card .alert {
+				position: absolute; bottom: 0.5rem; left: 0.5rem;
+				padding: 0.2rem 0.6rem; border-radius: 4px;
+				font-family: monospace; font-size: 0.65rem; font-weight: 700;
+				border: 1px solid; pointer-events: none; display: none;
+			}
+			.card .alert.yellow {
+				background: rgba(161, 98, 7, 0.85); border-color: #facc15; color: #fef9c3;
+			}
+			.card .alert.red {
+				background: rgba(220, 38, 38, 0.85); border-color: #f87171; color: #fecaca;
+			}
+		</style>
+	</head>
+	<body>
+		<header>
+			<h1>MoQ Drone Fleet</h1>
+			<div class="info">
+				<span>Click a drone to control it.</span> Arrow keys to move, spacebar to grab/drop.
+				Battery drains while flying — dock to recharge.
+				<br><em style="color:#555">Game is vibe-coded; don't take it seriously.</em>
+			</div>
+			<span class="status" id="connection-status">Disconnected</span>
+		</header>
+		<div id="grid">
+			<div id="empty-state">
+				<div class="icon">&#x1F6F8;</div>
+				<div class="msg">No drones online</div>
+				<div class="hint">Waiting for publishers to connect...</div>
+			</div>
+		</div>
+		<footer style="position:fixed;bottom:0;left:0;right:0;padding:0.4rem 1rem;background:#111;border-top:1px solid #222;font-family:monospace;font-size:0.65rem;color:#555;text-align:center;">
+			Run <code style="color:#888">just dev::drone::start <em>N</em></code> to add more drones
+		</footer>
+		<script type="module" src="./index.ts"></script>
+	</body>
+</html>

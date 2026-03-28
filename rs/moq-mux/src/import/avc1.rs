@@ -186,7 +186,9 @@ impl Avc1 {
 		}
 
 		let zero = self.zero.get_or_insert_with(tokio::time::Instant::now);
-		Ok(hang::container::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
+		Ok(hang::container::Timestamp::from_micros(
+			zero.elapsed().as_micros() as u64
+		)?)
 	}
 }
 

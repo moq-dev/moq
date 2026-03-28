@@ -65,7 +65,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   relay/             # Relay server configs (relay.toml, root.toml, leaf*.toml)
   media/             # Test media files (gitignored)
   web/               # Web demo (watch/publish examples)
-  robo/              # Robotics demo (Rust publisher + TS viewer)
+  drone/             # Drone demo (Rust publisher + TS viewer)
   throttle/          # Network throttle script for testing
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
