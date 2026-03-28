@@ -65,8 +65,8 @@ impl Consume {
 				_ = channel.1 => Ok(()),
 			};
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().consume.catalog_task.remove(id).flatten() {
+			let entry = State::lock().consume.catalog_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -237,8 +237,8 @@ impl Consume {
 				_ = channel.1 => Ok(()),
 			};
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().consume.track_task.remove(id).flatten() {
+			let entry = State::lock().consume.track_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -279,8 +279,8 @@ impl Consume {
 				_ = channel.1 => Ok(()),
 			};
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().consume.track_task.remove(id).flatten() {
+			let entry = State::lock().consume.track_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});

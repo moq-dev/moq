@@ -53,10 +53,22 @@ impl Convert {
 			self.update_catalog(&catalog)?;
 		};
 
+		let mut error = None;
 		self.tracks.retain(|_, t| match t {
 			TrackState::Passthrough(_) => true,
-			TrackState::Convert(c) => c.poll(waiter).is_pending(),
+			TrackState::Convert(c) => match c.poll(waiter) {
+				Poll::Pending => true,
+				Poll::Ready(Ok(())) => false,
+				Poll::Ready(Err(e)) => {
+					error.get_or_insert(e);
+					false
+				}
+			},
 		});
+
+		if let Some(e) = error {
+			return Poll::Ready(Err(e));
+		}
 
 		Poll::Pending
 	}
@@ -176,8 +188,8 @@ struct ConvertTrack {
 	output: moq_lite::TrackProducer,
 	timescale: u64,
 	seq: u32,
-	/// Active input groups being read, each with its corresponding output group.
-	groups: Vec<(moq_lite::GroupConsumer, moq_lite::GroupProducer)>,
+	/// Active input groups being read, each with its corresponding output group and first-frame flag.
+	groups: Vec<(moq_lite::GroupConsumer, moq_lite::GroupProducer, bool)>,
 	finished: bool,
 }
 
@@ -199,7 +211,7 @@ impl ConvertTrack {
 			match self.input.poll_recv_group(waiter) {
 				Poll::Ready(Ok(Some(group))) => {
 					let out_group = self.output.append_group()?;
-					self.groups.push((group, out_group));
+					self.groups.push((group, out_group, true));
 				}
 				Poll::Ready(Ok(None)) => self.finished = true,
 				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
@@ -211,7 +223,7 @@ impl ConvertTrack {
 		let timescale = self.timescale;
 		let seq = &mut self.seq;
 
-		self.groups.retain_mut(|(reader, writer)| {
+		self.groups.retain_mut(|(reader, writer, is_first_frame)| {
 			loop {
 				match reader.poll_read_frame(waiter) {
 					Poll::Ready(Ok(Some(data))) => {
@@ -226,8 +238,9 @@ impl ConvertTrack {
 
 						let payload: Vec<u8> = frame.payload.into_iter().flat_map(|c| c.into_iter()).collect();
 						let dts = frame.timestamp.as_micros() as u64 * timescale / 1_000_000;
-						// Legacy frames don't carry keyframe info; use false as default
-						let moof_mdat = match build_moof_mdat(*seq, 1, dts, &payload, false) {
+						// The first frame of each Legacy group is a keyframe.
+						let keyframe = std::mem::replace(is_first_frame, false);
+						let moof_mdat = match build_moof_mdat(*seq, 1, dts, &payload, keyframe) {
 							Ok(m) => m,
 							Err(e) => {
 								tracing::error!(%e, "build_moof_mdat failed");

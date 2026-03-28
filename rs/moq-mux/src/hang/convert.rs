@@ -53,10 +53,22 @@ impl Convert {
 			self.update_catalog(&catalog)?;
 		};
 
+		let mut error = None;
 		self.tracks.retain(|_, t| match t {
 			TrackState::Passthrough(_) => true,
-			TrackState::Convert(c) => c.poll(waiter).is_pending(),
+			TrackState::Convert(c) => match c.poll(waiter) {
+				Poll::Pending => true,
+				Poll::Ready(Ok(())) => false,
+				Poll::Ready(Err(e)) => {
+					error.get_or_insert(e);
+					false
+				}
+			},
 		});
+
+		if let Some(e) = error {
+			return Poll::Ready(Err(e));
+		}
 
 		Poll::Pending
 	}
