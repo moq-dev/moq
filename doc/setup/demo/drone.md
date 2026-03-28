@@ -48,7 +48,7 @@ The drone has a battery that drains while flying and recharges on the dock. At 1
 
 ### Broadcast Hierarchy
 
-```
+```text
 drone/
   {id}/                           ← drone broadcast
     catalog.json                  ← video renditions (managed by moq-mux)

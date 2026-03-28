@@ -10,7 +10,7 @@ A browser-based demo for watching and publishing live streams via MoQ. Uses the 
 ## Running
 
 ```bash
-just dev::web
+just web
 ```
 
 This starts three components in parallel:

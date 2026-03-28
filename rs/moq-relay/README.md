@@ -52,6 +52,6 @@ Key features:
 Quick example configuration in your `.toml` file:
 ```toml
 [auth]
-key = "dev/relay/root.jwk"    # JWT signing key
+key = "dev/relay/root.jwk"    # JWT signing key (relative to working directory)
 public = "anon"         # Allow anonymous access to /anon prefix
 ```

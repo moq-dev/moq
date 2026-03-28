@@ -289,9 +289,11 @@ impl GameState {
             self.dock_path.push((cx, cy));
         }
 
-        // Start first waypoint.
+        // Start first waypoint, or target dock center directly if already on the dock tile.
         if let Some(&first) = self.dock_path.first() {
             self.target = Some(first);
+        } else {
+            self.target = Some((self.dock.0, self.dock.1));
         }
     }
 
@@ -419,9 +421,10 @@ impl GameState {
         self.docking = false;
         self.dock_path.clear();
 
-        if self.carrying {
+        if self.carrying || self.grabbing {
             self.do_drop();
         }
+        self.dropping = false;
 
         if let Some(drone) = self.bodies.get_mut(self.drone_handle) {
             drone.set_translation(Vec2::new(self.dock.0, self.dock.1), true);

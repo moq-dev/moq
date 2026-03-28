@@ -310,6 +310,7 @@ class DroneCard {
 			const btn = document.createElement("button");
 			btn.textContent = label;
 			btn.dataset.action = action;
+			btn.setAttribute("aria-label", action.charAt(0).toUpperCase() + action.slice(1));
 			if (className) btn.className = className;
 			btn.addEventListener("click", (e) => {
 				e.stopPropagation();

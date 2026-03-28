@@ -103,7 +103,7 @@ h264 name url="http://localhost:4443/anon" *args:
 		-c:v copy -an \
 		-bsf:v h264_mp4toannexb \
 		-f h264 \
-		- | cargo run --bin moq-cli -- publish --url "{{url}}" --name "{{name}}" --format annex-b {{args}}
+		- | cargo run --bin moq-cli -- publish --url "{{url}}" --name "{{name}}" avc3 {{args}}
 
 # Publish a video using ffmpeg directly from moq to the localhost.
 serve name *args:

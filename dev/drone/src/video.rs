@@ -119,22 +119,48 @@ fn encoder_thread(
         let EncoderMsg::Frame { rgba, ts } = msg;
 
         // Lazy-init.
-        let hd_encoder = lazy_init(&mut hd_enc, || Encoder::new(WIDTH, HEIGHT, 500_000), "HD encoder");
-        let sd_encoder = lazy_init(&mut sd_enc, || Encoder::new(SD_WIDTH, SD_HEIGHT, 200_000), "SD encoder");
-        let color_scaler = lazy_init(&mut rgba_scaler, || {
-            ffmpeg_next::software::scaling::Context::get(
-                ffmpeg_next::format::Pixel::RGBA, WIDTH, HEIGHT,
-                ffmpeg_next::format::Pixel::YUV420P, WIDTH, HEIGHT,
-                ffmpeg_next::software::scaling::Flags::BILINEAR,
-            ).map_err(Into::into)
-        }, "RGBA scaler");
-        let downscaler = lazy_init(&mut sd_scaler, || {
-            ffmpeg_next::software::scaling::Context::get(
-                ffmpeg_next::format::Pixel::YUV420P, WIDTH, HEIGHT,
-                ffmpeg_next::format::Pixel::YUV420P, SD_WIDTH, SD_HEIGHT,
-                ffmpeg_next::software::scaling::Flags::BILINEAR,
-            ).map_err(Into::into)
-        }, "SD scaler");
+        let hd_encoder = lazy_init(
+            &mut hd_enc,
+            || Encoder::new(WIDTH, HEIGHT, 500_000),
+            "HD encoder",
+        );
+        let sd_encoder = lazy_init(
+            &mut sd_enc,
+            || Encoder::new(SD_WIDTH, SD_HEIGHT, 200_000),
+            "SD encoder",
+        );
+        let color_scaler = lazy_init(
+            &mut rgba_scaler,
+            || {
+                ffmpeg_next::software::scaling::Context::get(
+                    ffmpeg_next::format::Pixel::RGBA,
+                    WIDTH,
+                    HEIGHT,
+                    ffmpeg_next::format::Pixel::YUV420P,
+                    WIDTH,
+                    HEIGHT,
+                    ffmpeg_next::software::scaling::Flags::BILINEAR,
+                )
+                .map_err(Into::into)
+            },
+            "RGBA scaler",
+        );
+        let downscaler = lazy_init(
+            &mut sd_scaler,
+            || {
+                ffmpeg_next::software::scaling::Context::get(
+                    ffmpeg_next::format::Pixel::YUV420P,
+                    WIDTH,
+                    HEIGHT,
+                    ffmpeg_next::format::Pixel::YUV420P,
+                    SD_WIDTH,
+                    SD_HEIGHT,
+                    ffmpeg_next::software::scaling::Flags::BILINEAR,
+                )
+                .map_err(Into::into)
+            },
+            "SD scaler",
+        );
 
         let (Some(hd_encoder), Some(sd_encoder), Some(color_scaler), Some(downscaler)) =
             (hd_encoder, sd_encoder, color_scaler, downscaler)

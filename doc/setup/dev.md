@@ -14,11 +14,11 @@ It's *just* a fancier `Makefile` so you don't have to remember all the commands.
 
 ### Common Commands
 ```bash
-# List all available commands
+# Run the demo (default)
 just
 
-# Run the demo
-just
+# List all available commands
+just --list
 
 # This is equivalent to 3 terminal tabs:
 # just relay
