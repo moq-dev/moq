@@ -50,11 +50,7 @@ impl Cluster {
 			Origin::produce()
 		};
 
-		Cluster {
-			config,
-			client,
-			origin,
-		}
+		Cluster { config, client, origin }
 	}
 
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
