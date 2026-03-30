@@ -6,8 +6,6 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::media::*;
 
-type LegacyConsumer = moq_mux::consumer::OrderedConsumer<moq_mux::consumer::Legacy>;
-
 #[derive(Clone, uniffi::Object)]
 pub struct MoqBroadcastConsumer {
 	inner: moq_lite::BroadcastConsumer,
@@ -44,16 +42,15 @@ pub struct MoqMediaConsumer {
 }
 
 struct Media {
-	inner: LegacyConsumer,
+	inner: moq_mux::ordered::Consumer<moq_mux::hang::Media>,
 }
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqFrame>, MoqError> {
-		let Some(frame) = self.inner.read().await.map_err(|e| MoqError::Codec(e.to_string()))? else {
+		let Some(frame) = self.inner.read().await? else {
 			return Ok(None);
 		};
 
-		let keyframe = frame.is_keyframe();
 		let timestamp_us: u64 = frame
 			.timestamp
 			.as_micros()
@@ -66,7 +63,7 @@ impl Media {
 		Ok(Some(MoqFrame {
 			payload,
 			timestamp_us,
-			keyframe,
+			keyframe: frame.keyframe,
 		}))
 	}
 }
@@ -85,14 +82,22 @@ impl MoqBroadcastConsumer {
 		}))
 	}
 
-	/// Subscribe to a media track by name, delivering frames in decode order.
+	/// Subscribe to a track by name, delivering frames in decode order.
 	///
+	/// `container` is the track container from the catalog.
 	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
-	pub fn subscribe_media(&self, name: String, max_latency_ms: u64) -> Result<Arc<MoqMediaConsumer>, MoqError> {
+	pub fn subscribe_media(
+		&self,
+		name: String,
+		container: Container,
+		max_latency_ms: u64,
+	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
+		let container: hang::catalog::Container = container.into();
 		let latency = std::time::Duration::from_millis(max_latency_ms);
-		let consumer = LegacyConsumer::new(track, moq_mux::consumer::Legacy, latency);
+		let media = moq_mux::hang::Media::try_from(&container)?;
+		let consumer = moq_mux::ordered::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))

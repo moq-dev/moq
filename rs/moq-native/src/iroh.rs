@@ -9,12 +9,13 @@ use web_transport_iroh::{
 // NOTE: web-transport-iroh should re-export proto like web-transport-quinn does.
 use web_transport_proto::{ConnectRequest, ConnectResponse};
 
-pub use iroh::Endpoint as IrohEndpoint;
+pub use iroh::Endpoint;
 
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[group(id = "iroh")]
 #[non_exhaustive]
-pub struct IrohEndpointConfig {
+pub struct EndpointConfig {
 	/// Whether to enable iroh support.
 	#[arg(
 		id = "iroh-enabled",
@@ -43,8 +44,8 @@ pub struct IrohEndpointConfig {
 	pub bind_v6: Option<net::SocketAddrV6>,
 }
 
-impl IrohEndpointConfig {
-	pub async fn bind(self) -> anyhow::Result<Option<IrohEndpoint>> {
+impl EndpointConfig {
+	pub async fn bind(self) -> anyhow::Result<Option<Endpoint>> {
 		if !self.enabled.unwrap_or(false) {
 			return Ok(None);
 		}
@@ -54,15 +55,21 @@ impl IrohEndpointConfig {
 			secret
 		} else if let Some(path) = self.secret {
 			let path = PathBuf::from(path);
-			if !path.exists() {
-				// Generate a new random secret and write it to the file.
-				let secret = SecretKey::generate(&mut rand::rng());
-				tokio::fs::write(path, hex::encode(secret.to_bytes())).await?;
-				secret
-			} else {
-				// Otherwise, read the secret from a file.
-				let key_str = tokio::fs::read_to_string(&path).await?;
-				SecretKey::from_str(&key_str)?
+			// Generate a new random secret and attempt to write it atomically.
+			// If the file already exists (AlreadyExists), read the existing secret instead.
+			// This avoids a TOCTOU race between exists() and create_new().
+			let secret = SecretKey::generate(&mut rand::rng());
+			let data = hex::encode(secret.to_bytes());
+			match write_secret_file(&path, data.as_bytes()).await {
+				Ok(()) => secret,
+				Err(e)
+					if e.downcast_ref::<std::io::Error>()
+						.is_some_and(|io| io.kind() == std::io::ErrorKind::AlreadyExists) =>
+				{
+					let key_str = tokio::fs::read_to_string(&path).await?;
+					SecretKey::from_str(&key_str)?
+				}
+				Err(e) => return Err(e),
 			}
 		} else {
 			// Otherwise, generate a new random secret.
@@ -73,7 +80,7 @@ impl IrohEndpointConfig {
 		let mut alpns: Vec<Vec<u8>> = moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 		alpns.push(web_transport_iroh::ALPN_H3.as_bytes().to_vec());
 
-		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(alpns);
+		let mut builder = Endpoint::builder().secret_key(secret_key).alpns(alpns);
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr(addr)?;
 		}
@@ -88,17 +95,19 @@ impl IrohEndpointConfig {
 	}
 }
 
-pub enum IrohRequest {
+pub enum Request {
 	Quic {
 		request: web_transport_iroh::QuicRequest,
+		alpns: Vec<&'static str>,
 	},
 	WebTransport {
 		request: Box<web_transport_iroh::H3Request>,
+		alpns: Vec<&'static str>,
 	},
 }
 
-impl IrohRequest {
-	pub async fn accept(conn: iroh::endpoint::Incoming) -> anyhow::Result<Self> {
+impl Request {
+	pub async fn accept(conn: iroh::endpoint::Incoming, alpns: Vec<&'static str>) -> anyhow::Result<Self> {
 		let conn = conn.accept()?.await?;
 		let alpn = String::from_utf8(conn.alpn().to_vec()).context("failed to decode ALPN")?;
 		tracing::Span::current().record("id", conn.stable_id());
@@ -110,10 +119,12 @@ impl IrohRequest {
 					.context("failed to receive WebTransport request")?;
 				Ok(Self::WebTransport {
 					request: Box::new(request),
+					alpns,
 				})
 			}
-			alpn if moq_lite::ALPNS.contains(&alpn) => Ok(Self::Quic {
+			alpn if alpns.contains(&alpn) => Ok(Self::Quic {
 				request: web_transport_iroh::QuicRequest::accept(conn),
+				alpns,
 			}),
 			_ => Err(anyhow::anyhow!("unsupported ALPN: {alpn}")),
 		}
@@ -122,10 +133,10 @@ impl IrohRequest {
 	/// Accept the session.
 	pub async fn ok(self) -> Result<web_transport_iroh::Session, web_transport_iroh::ServerError> {
 		match self {
-			IrohRequest::Quic { request } => Ok(request.ok()),
-			IrohRequest::WebTransport { request } => {
+			Request::Quic { request, .. } => Ok(request.ok()),
+			Request::WebTransport { request, alpns } => {
 				let mut response = ConnectResponse::OK;
-				if let Some(protocol) = request.protocols.first() {
+				if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 					response = response.with_protocol(protocol);
 				}
 				request.respond(response).await
@@ -136,26 +147,27 @@ impl IrohRequest {
 	/// Reject the session.
 	pub async fn close(self, status: http::StatusCode) -> Result<(), web_transport_iroh::ServerError> {
 		match self {
-			IrohRequest::Quic { request } => {
+			Request::Quic { request, .. } => {
 				request.close(status);
 				Ok(())
 			}
-			IrohRequest::WebTransport { request, .. } => request.reject(status).await,
+			Request::WebTransport { request, .. } => request.reject(status).await,
 		}
 	}
 
 	pub fn url(&self) -> Option<&Url> {
 		match self {
-			IrohRequest::Quic { .. } => None,
-			IrohRequest::WebTransport { request } => Some(&request.url),
+			Request::Quic { .. } => None,
+			Request::WebTransport { request, .. } => Some(&request.url),
 		}
 	}
 }
 
 pub(crate) async fn connect(
-	endpoint: &IrohEndpoint,
+	endpoint: &Endpoint,
 	url: Url,
 	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
+	alpns: &[&str],
 ) -> anyhow::Result<web_transport_iroh::Session> {
 	let host = url.host().context("Invalid URL: missing host")?.to_string();
 	let endpoint_id: iroh::EndpointId = host.parse().context("Invalid URL: host is not an iroh endpoint id")?;
@@ -168,11 +180,9 @@ pub(crate) async fn connect(
 
 	// We need to use this API to provide multiple ALPNs.
 	// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
-	let alpn = moq_lite::ALPNS[0].as_bytes();
-	let mut additional: Vec<Vec<u8>> = moq_lite::ALPNS[1..]
-		.iter()
-		.map(|alpn| alpn.as_bytes().to_vec())
-		.collect();
+	anyhow::ensure!(!alpns.is_empty(), "no ALPNs configured");
+	let alpn = alpns[0].as_bytes();
+	let mut additional: Vec<Vec<u8>> = alpns[1..].iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 	additional.push(b"h3".to_vec());
 	let opts = iroh::endpoint::ConnectOptions::new().with_additional_alpns(additional);
 
@@ -186,13 +196,13 @@ pub(crate) async fn connect(
 			let url = url_set_scheme(url, "https")?;
 
 			let mut request = ConnectRequest::new(url);
-			for alpn in moq_lite::ALPNS {
+			for alpn in alpns {
 				request = request.with_protocol(alpn.to_string());
 			}
 
 			web_transport_iroh::Session::connect_h3(conn, request).await?
 		}
-		alpn if moq_lite::ALPNS.contains(&alpn) => {
+		alpn if alpns.contains(&alpn) => {
 			let conn = connecting.await?;
 			web_transport_iroh::Session::raw(conn)
 		}
@@ -216,4 +226,22 @@ fn url_set_scheme(url: Url, scheme: &str) -> anyhow::Result<Url> {
 	)
 	.parse()?;
 	Ok(url)
+}
+
+/// Write secret key data to a file with owner-only permissions (0o600 on Unix).
+///
+/// Uses `create_new(true)` so the call fails with `AlreadyExists` if the file
+/// already exists, which callers can use to handle races atomically.
+async fn write_secret_file(path: &std::path::Path, data: &[u8]) -> anyhow::Result<()> {
+	use tokio::io::AsyncWriteExt;
+
+	let mut opts = tokio::fs::OpenOptions::new();
+	opts.write(true).create_new(true);
+
+	#[cfg(unix)]
+	opts.mode(0o600);
+
+	let mut file = opts.open(path).await?;
+	file.write_all(data).await.context("failed to write secret key")?;
+	Ok(())
 }

@@ -39,7 +39,7 @@ impl Subscribe {
 		// Always convert to CMAF — this is a no-op for tracks already in CMAF.
 		let cmaf_output = moq_lite::Broadcast::new().produce();
 		let cmaf_consumer = cmaf_output.consume();
-		let converter = moq_mux::convert::Fmp4::new(self.broadcast, cmaf_output);
+		let converter = moq_mux::cmaf::Convert::new(self.broadcast, cmaf_output);
 
 		// Subscribe to the catalog before the converter starts, so we don't miss it.
 		let catalog_track = cmaf_consumer.subscribe_track(&hang::Catalog::default_track())?;

@@ -9,6 +9,7 @@ use url::Url;
 #[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ClusterConfig {
 	/// Connect to these hostnames to form the cluster.
 	#[arg(
@@ -29,6 +30,7 @@ pub struct ClusterConfig {
 	pub origin_id: Option<u64>,
 }
 
+/// Manages broadcast origins across local and remote relay nodes.
 #[derive(Clone)]
 pub struct Cluster {
 	config: ClusterConfig,
@@ -40,6 +42,7 @@ pub struct Cluster {
 }
 
 impl Cluster {
+	/// Creates a new cluster with the given configuration and QUIC client.
 	pub fn new(config: ClusterConfig, client: moq_native::Client) -> Self {
 		let origin = if let Some(id) = config.origin_id {
 			Origin::produce().with_id(OriginId::try_new(id).expect("invalid origin ID: must be 1 <= value < 2^62"))
@@ -58,6 +61,11 @@ impl Cluster {
 		self.origin.consume_broadcast(broadcast)
 	}
 
+	/// Runs the cluster event loop, connecting to remote nodes and
+	/// merging their broadcasts into the combined origin.
+	///
+	/// This future runs until the cluster is shut down or a fatal error
+	/// occurs.
 	pub async fn run(self) -> anyhow::Result<()> {
 		if self.config.connect.is_empty() {
 			return Ok(());

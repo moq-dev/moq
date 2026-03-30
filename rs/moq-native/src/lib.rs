@@ -14,40 +14,39 @@ pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 mod client;
 mod crypto;
 mod log;
-#[cfg(feature = "noq")]
-mod noq;
-#[cfg(feature = "quinn")]
-mod quinn;
 mod server;
+
 #[cfg(any(feature = "noq", feature = "quinn"))]
 mod tls;
-#[cfg(feature = "websocket")]
-mod websocket;
 
-pub use client::*;
-pub use log::*;
-pub use server::*;
-#[cfg(feature = "websocket")]
-pub use websocket::*;
+#[cfg(feature = "noq")]
+mod noq;
+#[cfg(feature = "quiche")]
+mod quiche;
+#[cfg(feature = "quinn")]
+mod quinn;
 
-// Re-export these crates.
+#[cfg(feature = "websocket")]
+pub mod ws;
+
+#[cfg(feature = "iroh")]
+pub mod iroh;
+
+// Re-export core types at root
+pub use client::{Client, ClientConfig, ClientTls};
+pub use log::Log;
+pub use server::{Request, Server, ServerConfig, ServerId, ServerTlsConfig, ServerTlsInfo};
+
+// Re-export dependency crates
 pub use moq_lite;
 pub use rustls;
 
 #[cfg(feature = "noq")]
 pub use web_transport_noq;
-#[cfg(feature = "quinn")]
-pub use web_transport_quinn;
-
-#[cfg(feature = "quiche")]
-mod quiche;
 #[cfg(feature = "quiche")]
 pub use web_transport_quiche;
-
-#[cfg(feature = "iroh")]
-mod iroh;
-#[cfg(feature = "iroh")]
-pub use iroh::*;
+#[cfg(feature = "quinn")]
+pub use web_transport_quinn;
 
 /// The QUIC backend to use for connections.
 #[derive(Clone, Debug, clap::ValueEnum, serde::Serialize, serde::Deserialize)]

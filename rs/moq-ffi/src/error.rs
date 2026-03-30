@@ -9,6 +9,9 @@ pub enum MoqError {
 	Media(#[from] hang::Error),
 
 	#[error(transparent)]
+	Mux(#[from] moq_mux::Error),
+
+	#[error(transparent)]
 	Url(#[from] url::ParseError),
 
 	#[error(transparent)]

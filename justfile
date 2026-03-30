@@ -2,7 +2,6 @@
 
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
 
-set quiet
 
 # List all of the available commands.
 default:
@@ -89,7 +88,7 @@ auth-key:
 # root.jwt - allows publishing and subscribing to all paths
 auth-token: auth-key
 	@if [ ! -f "dev/demo-web.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "demo" \
 			--subscribe "" \
 			--publish "me" \
@@ -97,14 +96,14 @@ auth-token: auth-key
 	fi
 
 	@if [ ! -f "dev/demo-cli.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "demo" \
 			--publish "" \
 			> dev/demo-cli.jwt ; \
 	fi
 
 	@if [ ! -f "dev/root.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "" \
 			--subscribe "" \
 			--publish "" \
@@ -154,7 +153,7 @@ pub name url="http://localhost:4443/anon" *args:
 	# Publish the media with the moq cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
 	cargo run --bin moq-cli -- \
-		{{args}} publish --url "{{url}}" --name "{{name}}" fmp4
+		{{args}} client --url "{{url}}" publish --name "{{name}}" --input fmp4
 
 pub-iroh name url prefix="":
 	# Download the sample media.
@@ -164,7 +163,7 @@ pub-iroh name url prefix="":
 	# Publish the media with the moq cli.
 	just ffmpeg-cmaf "dev/{{name}}.fmp4" |\
 	cargo run --bin moq-cli -- \
-		--iroh-enabled publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4
+		--iroh-enabled client --url "{{url}}" publish --name "{{prefix}}{{name}}" --input fmp4
 
 # Generate and ingest an HLS stream from a video file.
 pub-hls name relay="http://localhost:4443/anon":
@@ -250,7 +249,7 @@ pub-hls name relay="http://localhost:4443/anon":
 
 	# Run moq to ingest from local files
 	echo ">>> Running with --passthrough flag"
-	cargo run --bin moq-cli -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
+	echo "$OUT_DIR/master.m3u8" | cargo run --bin moq-cli -- client --url "{{relay}}" publish --name "{{name}}" --input hls
 	EXIT_CODE=$?
 
 	# Cleanup after cargo run completes (success or failure)
@@ -274,7 +273,7 @@ pub-h264 name url="http://localhost:4443/anon" *args:
 		-c:v copy -an \
 		-bsf:v h264_mp4toannexb \
 		-f h264 \
-		- | cargo run --bin moq-cli -- publish --url "{{url}}" --name "{{name}}" --format annex-b {{args}}
+		- | cargo run --bin moq-cli -- {{args}} client --url "{{url}}" publish --name "{{name}}" --input avc3
 
 # Publish/subscribe using gstreamer - see https://github.com/moq-dev/gstreamer
 pub-gst name url='http://localhost:4443/anon':
@@ -328,35 +327,33 @@ check:
 		bun run --filter='*' check
 	fi
 	bun biome check
-	echo "JS checks passed."
 
 	# Run the (slower) Rust checks.
-	cargo check --all-targets --quiet
-	cargo clippy --all-targets --quiet -- -D warnings
+	cargo check --all-targets
+	cargo clippy --all-targets -- -D warnings
 	cargo fmt --all --check
 
 	# Check documentation warnings (only workspace crates, not dependencies)
-	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 
 	# requires: cargo install cargo-shear
 	cargo shear
 
 	# requires: cargo install cargo-sort
-	cargo sort --workspace --check > /dev/null
+	cargo sort --workspace --check
 
 	# Run the Python checks.
 	if command -v uv &> /dev/null; then
 		uv run ruff check py/
 		uv run ruff format --check py/
 		uv run --package moq-lite pyright
-		echo "Python checks passed."
 	fi
 
 	# Only run the tofu checks if tofu is installed.
 	if command -v tofu &> /dev/null; then (cd cdn && just check); fi
 
 	# Only run the nix checks if nix is installed.
-	if command -v nix &> /dev/null; then nix flake check --quiet; fi
+	if command -v nix &> /dev/null; then nix flake check; fi
 
 # Run comprehensive CI checks including all feature combinations (requires cargo-hack)
 ci:
@@ -374,7 +371,7 @@ ci:
 
 	# Check all feature combinations for all crates
 	# requires: cargo install cargo-hack
-	cargo hack check --workspace --each-feature --no-dev-deps --quiet --exclude moq-ffi
+	cargo hack check --workspace --each-feature --no-dev-deps --exclude moq-ffi
 
 # Check semver compatibility against crates.io
 # requires: cargo install cargo-semver-checks
@@ -399,13 +396,12 @@ test *args:
 		bun run --filter='*' test
 	fi
 
-	cargo test --all-targets --quiet {{ args }}
+	cargo test --all-targets {{ args }}
 
 	# Run the Python tests.
 	if command -v uv &> /dev/null; then
 		uv run maturin develop -m rs/moq-ffi/Cargo.toml --uv
 		uv run --package moq-lite pytest py/moq-lite/tests/
-		echo "Python tests passed."
 	fi
 
 # Automatically fix some issues.
@@ -413,17 +409,16 @@ fix:
 	# Fix the Javascript dependencies.
 	bun install --silent
 	bun biome check --write
-	echo "JS fixes applied."
 
 	# Fix the Rust issues.
-	cargo clippy --fix --allow-staged --allow-dirty --all-targets --quiet
+	cargo clippy --fix --allow-staged --allow-dirty --all-targets
 	cargo fmt --all
 
 	# requires: cargo install cargo-shear
 	cargo shear --fix
 
 	# requires: cargo install cargo-sort
-	cargo sort --workspace > /dev/null
+	cargo sort --workspace
 
 	# Fix the Python issues.
 	if command -v uv &> /dev/null; then uv run ruff check --fix py/ && uv run ruff format py/; fi
@@ -454,7 +449,7 @@ build:
 	set -euo pipefail
 
 	bun run --filter='*' build
-	cargo build --quiet
+	cargo build
 
 	# Build moq-ffi from source into py/moq-lite's venv.
 	if command -v uv &> /dev/null; then

@@ -1,5 +1,4 @@
-import assert from "node:assert";
-import test from "node:test";
+import { expect, test } from "bun:test";
 import { Reader, Writer } from "./stream.ts";
 
 // Helper to create a writable stream that captures written data
@@ -35,9 +34,9 @@ test("Writer u8", async () => {
 	writer.close();
 	await writer.closed;
 
-	assert.strictEqual(written.length, 2);
-	assert.deepEqual(written[0], new Uint8Array([42]));
-	assert.deepEqual(written[1], new Uint8Array([255]));
+	expect(written.length).toBe(2);
+	expect(written[0]).toEqual(new Uint8Array([42]));
+	expect(written[1]).toEqual(new Uint8Array([255]));
 });
 
 test("Writer i32", async () => {
@@ -52,13 +51,13 @@ test("Writer i32", async () => {
 	await writer.closed;
 
 	const result = concatChunks(written);
-	assert.strictEqual(result.byteLength, 12); // 3 * 4 bytes
+	expect(result.byteLength).toBe(12); // 3 * 4 bytes
 
 	// Read back the values
 	const view = new DataView(result.buffer, result.byteOffset, result.byteLength);
-	assert.strictEqual(view.getInt32(0), 0);
-	assert.strictEqual(view.getInt32(4), -1);
-	assert.strictEqual(view.getInt32(8), 1000);
+	expect(view.getInt32(0)).toBe(0);
+	expect(view.getInt32(4)).toBe(-1);
+	expect(view.getInt32(8)).toBe(1000);
 });
 
 test("Writer u53", async () => {
@@ -75,11 +74,11 @@ test("Writer u53", async () => {
 	await writer.closed;
 
 	// Verify the varint encoding sizes
-	assert.strictEqual(written[0].byteLength, 1); // 0 fits in 1 byte
-	assert.strictEqual(written[1].byteLength, 1); // 63 fits in 1 byte
-	assert.strictEqual(written[2].byteLength, 2); // 64 needs 2 bytes
-	assert.strictEqual(written[3].byteLength, 2); // 16383 fits in 2 bytes
-	assert.strictEqual(written[4].byteLength, 4); // 16384 needs 4 bytes
+	expect(written[0].byteLength).toBe(1); // 0 fits in 1 byte
+	expect(written[1].byteLength).toBe(1); // 63 fits in 1 byte
+	expect(written[2].byteLength).toBe(2); // 64 needs 2 bytes
+	expect(written[3].byteLength).toBe(2); // 16383 fits in 2 bytes
+	expect(written[4].byteLength).toBe(4); // 16384 needs 4 bytes
 });
 
 test("Writer string", async () => {
@@ -100,20 +99,20 @@ test("Writer string", async () => {
 	const str1 = await reader.string();
 	const str2 = await reader.string();
 
-	assert.strictEqual(str1, "hello");
-	assert.strictEqual(str2, "🎉");
+	expect(str1).toBe("hello");
+	expect(str2).toBe("🎉");
 });
 
 test("Reader u8", async () => {
 	const data = new Uint8Array([42, 255, 0, 128]);
 	const reader = new Reader(undefined, data);
 
-	assert.strictEqual(await reader.u8(), 42);
-	assert.strictEqual(await reader.u8(), 255);
-	assert.strictEqual(await reader.u8(), 0);
-	assert.strictEqual(await reader.u8(), 128);
+	expect(await reader.u8()).toBe(42);
+	expect(await reader.u8()).toBe(255);
+	expect(await reader.u8()).toBe(0);
+	expect(await reader.u8()).toBe(128);
 
-	assert.strictEqual(await reader.done(), true);
+	expect(await reader.done()).toBe(true);
 });
 
 test("Reader read with exact sizes", async () => {
@@ -121,15 +120,15 @@ test("Reader read with exact sizes", async () => {
 	const reader = new Reader(undefined, data);
 
 	const chunk1 = await reader.read(3);
-	assert.deepEqual(chunk1, new Uint8Array([1, 2, 3]));
+	expect(chunk1).toEqual(new Uint8Array([1, 2, 3]));
 
 	const chunk2 = await reader.read(2);
-	assert.deepEqual(chunk2, new Uint8Array([4, 5]));
+	expect(chunk2).toEqual(new Uint8Array([4, 5]));
 
 	const chunk3 = await reader.read(3);
-	assert.deepEqual(chunk3, new Uint8Array([6, 7, 8]));
+	expect(chunk3).toEqual(new Uint8Array([6, 7, 8]));
 
-	assert.strictEqual(await reader.done(), true);
+	expect(await reader.done()).toBe(true);
 });
 
 test("Reader read with zero size", async () => {
@@ -137,11 +136,11 @@ test("Reader read with zero size", async () => {
 	const reader = new Reader(undefined, data);
 
 	const chunk = await reader.read(0);
-	assert.deepEqual(chunk, new Uint8Array([]));
+	expect(chunk).toEqual(new Uint8Array([]));
 
 	// Original data should still be available
 	const remaining = await reader.read(3);
-	assert.deepEqual(remaining, new Uint8Array([1, 2, 3]));
+	expect(remaining).toEqual(new Uint8Array([1, 2, 3]));
 });
 
 test("Reader readAll", async () => {
@@ -153,9 +152,9 @@ test("Reader readAll", async () => {
 
 	// readAll should get the remaining data
 	const remaining = await reader.readAll();
-	assert.deepEqual(remaining, new Uint8Array([3, 4, 5]));
+	expect(remaining).toEqual(new Uint8Array([3, 4, 5]));
 
-	assert.strictEqual(await reader.done(), true);
+	expect(await reader.done()).toBe(true);
 });
 
 test("Reader u53 varint decoding", async () => {
@@ -177,10 +176,10 @@ test("Reader u53 varint decoding", async () => {
 
 	for (const expectedValue of testValues) {
 		const actualValue = await reader.u53();
-		assert.strictEqual(actualValue, expectedValue, `Failed for value ${expectedValue}`);
+		expect(actualValue).toBe(expectedValue);
 	}
 
-	assert.strictEqual(await reader.done(), true);
+	expect(await reader.done()).toBe(true);
 });
 
 test("Reader u62 varint decoding", async () => {
@@ -201,10 +200,10 @@ test("Reader u62 varint decoding", async () => {
 
 	for (const expectedValue of testValues) {
 		const actualValue = await reader.u62();
-		assert.strictEqual(actualValue, expectedValue, `Failed for value ${expectedValue}`);
+		expect(actualValue).toBe(expectedValue);
 	}
 
-	assert.strictEqual(await reader.done(), true);
+	expect(await reader.done()).toBe(true);
 });
 
 test("Reader string decoding", async () => {
@@ -225,10 +224,10 @@ test("Reader string decoding", async () => {
 
 	for (const expectedString of testStrings) {
 		const actualString = await reader.string();
-		assert.strictEqual(actualString, expectedString, `Failed for string "${expectedString}"`);
+		expect(actualString).toBe(expectedString);
 	}
 
-	assert.strictEqual(await reader.done(), true);
+	expect(await reader.done()).toBe(true);
 });
 
 test("Reader from stream", async () => {
@@ -247,7 +246,7 @@ test("Reader from stream", async () => {
 
 	// Read all data
 	const result = await reader.readAll();
-	assert.deepEqual(result, new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9]));
+	expect(result).toEqual(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9]));
 });
 
 test("Reader stream with partial reads", async () => {
@@ -266,13 +265,13 @@ test("Reader stream with partial reads", async () => {
 
 	// Read specific amounts that cross chunk boundaries
 	const first = await reader.read(3); // Should span first two chunks
-	assert.deepEqual(first, new Uint8Array([1, 2, 3]));
+	expect(first).toEqual(new Uint8Array([1, 2, 3]));
 
 	const second = await reader.read(2);
-	assert.deepEqual(second, new Uint8Array([4, 5]));
+	expect(second).toEqual(new Uint8Array([4, 5]));
 
 	const third = await reader.read(1);
-	assert.deepEqual(third, new Uint8Array([6]));
+	expect(third).toEqual(new Uint8Array([6]));
 
-	assert.strictEqual(await reader.done(), true);
+	expect(await reader.done()).toBe(true);
 });

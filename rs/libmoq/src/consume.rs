@@ -48,7 +48,7 @@ impl Consume {
 		self.broadcast.insert(broadcast)
 	}
 
-	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
+	pub fn catalog_subscribe(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
 		let catalog = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 
@@ -188,7 +188,7 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {
+	pub fn catalog_unsubscribe(&mut self, catalog: Id) -> Result<(), Error> {
 		// Take the entire entry: drops the sender (signals shutdown) and revokes the callback.
 		self.catalog_task
 			.get_mut(catalog)
@@ -198,7 +198,7 @@ impl Consume {
 		Ok(())
 	}
 
-	pub fn catalog_free(&mut self, catalog: Id) -> Result<(), Error> {
+	pub fn catalog_close(&mut self, catalog: Id) -> Result<(), Error> {
 		self.catalog.remove(catalog).ok_or(Error::CatalogNotFound)?;
 		Ok(())
 	}
