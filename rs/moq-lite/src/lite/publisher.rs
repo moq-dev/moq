@@ -1,11 +1,11 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, PathOwned, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -157,6 +157,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
 
+		// Track which suffixes we've actually sent as Active, so we don't send
+		// Ended for suffixes that were filtered out by without_origin.
+		let mut sent_suffixes: HashSet<PathOwned> = HashSet::new();
+
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				let mut init = Vec::new();
@@ -174,10 +178,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							}
 						}
 						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-						init.push(suffix.to_owned());
+						let owned = suffix.to_owned();
+						sent_suffixes.insert(owned.clone());
+						init.push(owned);
 					} else {
 						// A potential race.
 						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+						let owned = suffix.to_owned();
+						sent_suffixes.remove(&owned);
 						init.retain(|path| path != &suffix);
 					}
 				}
@@ -208,9 +216,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									}
 								}
 								tracing::debug!(broadcast = %origin.absolute(&path), hops = broadcast.info.hops.len(), "announce");
+								sent_suffixes.insert(suffix.clone());
 								let msg = lite::Announce::Active { suffix, hops: broadcast.info.hops.clone() };
 								stream.writer.encode(&msg).await?;
-							} else {
+							} else if sent_suffixes.remove(&suffix) {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
 								let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
 								stream.writer.encode(&msg).await?;

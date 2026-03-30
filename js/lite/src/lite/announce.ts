@@ -7,6 +7,8 @@ import { Version } from "./version.ts";
 export class Announce {
 	suffix: Path.Valid;
 	active: boolean;
+
+	/// Ordered origin path for Draft04+. Empty when decoding Draft03 (which only carries a count).
 	hops: bigint[];
 
 	constructor(props: { suffix: Path.Valid; active: boolean; hops?: bigint[] }) {
@@ -21,6 +23,9 @@ export class Announce {
 
 		switch (version) {
 			case Version.DRAFT_03:
+				if (this.hops.length > 32) {
+					throw new Error(`hop count ${this.hops.length} exceeds maximum of 32`);
+				}
 				await w.u53(this.hops.length);
 				break;
 			case Version.DRAFT_01:
@@ -28,6 +33,14 @@ export class Announce {
 				break;
 			default:
 				// DRAFT_04+: encode array of OriginId
+				if (this.hops.length > 32) {
+					throw new Error(`hop count ${this.hops.length} exceeds maximum of 32`);
+				}
+				for (const hop of this.hops) {
+					if (hop === 0n) {
+						throw new Error("OriginId must be non-zero");
+					}
+				}
 				await w.u53(this.hops.length);
 				for (const hop of this.hops) {
 					await w.u62(hop);
@@ -44,7 +57,10 @@ export class Announce {
 		switch (version) {
 			case Version.DRAFT_03: {
 				// Read count but don't know actual IDs
-				await r.u53();
+				const count = await r.u53();
+				if (count > 32) {
+					throw new Error(`hop count ${count} exceeds maximum of 32`);
+				}
 				break;
 			}
 			case Version.DRAFT_01:
@@ -53,8 +69,15 @@ export class Announce {
 			default: {
 				// DRAFT_04+: decode array of OriginId
 				const count = await r.u53();
+				if (count > 32) {
+					throw new Error(`hop count ${count} exceeds maximum of 32`);
+				}
 				for (let i = 0; i < count; i++) {
-					hops.push(await r.u62());
+					const hop = await r.u62();
+					if (hop === 0n) {
+						throw new Error("OriginId must be non-zero");
+					}
+					hops.push(hop);
 				}
 				break;
 			}
@@ -78,6 +101,8 @@ export class Announce {
 
 export class AnnounceInterest {
 	prefix: Path.Valid;
+
+	/// Draft04+ only: filter out announces whose hops contain this origin ID. Uses 0n on the wire for "unset".
 	withoutOrigin?: bigint;
 
 	constructor(prefix: Path.Valid, withoutOrigin?: bigint) {

@@ -7,7 +7,7 @@ use super::{Message, Version};
 // Helper: decode an OriginId from a varint (u64) using the lite Version.
 fn decode_origin_id<R: bytes::Buf>(r: &mut R, version: Version) -> Result<OriginId, DecodeError> {
 	let value = u64::decode(r, version)?;
-	Ok(OriginId::decode_raw(value))
+	OriginId::try_new(value).map_err(|_| DecodeError::InvalidValue)
 }
 
 // Helper: encode an OriginId as a varint (u64) using the lite Version.
@@ -39,9 +39,9 @@ impl Message for Announce<'_> {
 		let hops = match version {
 			Version::Lite01 | Version::Lite02 => Vec::new(),
 			Version::Lite03 => {
-				// Lite03 sends a single varint count; decode but we don't know the actual IDs.
-				let _count = u64::decode(r, version)?;
-				Vec::new()
+				// Lite03 sends a single varint count; we don't know the actual IDs.
+				let count = u64::decode(r, version)?;
+				vec![OriginId::UNKNOWN; count.min(32) as usize]
 			}
 			_ => {
 				// Lite04+: count followed by that many OriginId varints.
@@ -121,7 +121,7 @@ impl Message for AnnouncePlease<'_> {
 				if value == 0 {
 					None
 				} else {
-					Some(OriginId::decode_raw(value))
+					Some(OriginId::try_new(value).map_err(|_| DecodeError::InvalidValue)?)
 				}
 			}
 		};

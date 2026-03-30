@@ -7,15 +7,25 @@ use crate::coding::{Decode, DecodeError, Encode, EncodeError};
 
 /// A unique identifier for an origin, encoded as a varint on the wire.
 ///
-/// Generated randomly as a non-zero 62-bit value.
+/// Must be a non-zero 62-bit value (1 <= value < 2^62).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct OriginId(u64);
 
+/// The maximum valid OriginId value (2^62 - 1).
+const ORIGIN_ID_MAX: u64 = (1u64 << 62) - 1;
+
 impl OriginId {
-	/// Create an OriginId from a raw u64 value.
-	pub fn new(value: u64) -> Self {
-		Self(value)
+	/// A placeholder value used when the actual OriginId is unknown (e.g., Lite03 hop placeholders).
+	pub const UNKNOWN: Self = Self(ORIGIN_ID_MAX);
+
+	/// Create an OriginId from a u64 value.
+	/// Returns an error if the value is zero or >= 2^62.
+	pub fn try_new(value: u64) -> Result<Self, InvalidOriginId> {
+		if value == 0 || value > ORIGIN_ID_MAX {
+			return Err(InvalidOriginId(value));
+		}
+		Ok(Self(value))
 	}
 
 	/// Generate a random non-zero 62-bit origin ID.
@@ -29,12 +39,19 @@ impl OriginId {
 	pub fn into_inner(self) -> u64 {
 		self.0
 	}
+}
 
-	/// Construct from a raw u64 value (used when decoding from wire).
-	pub fn decode_raw(value: u64) -> Self {
-		Self(value)
+/// Error returned when constructing an OriginId with an invalid value.
+#[derive(Debug, Clone)]
+pub struct InvalidOriginId(pub u64);
+
+impl fmt::Display for InvalidOriginId {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "invalid OriginId: {} (must be 1 <= value < 2^62)", self.0)
 	}
 }
+
+impl std::error::Error for InvalidOriginId {}
 
 impl fmt::Display for OriginId {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -51,7 +68,18 @@ impl Encode<Version> for OriginId {
 impl Decode<Version> for OriginId {
 	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let value = u64::decode(r, version)?;
-		Ok(Self(value))
+		Self::try_new(value).map_err(|_| DecodeError::InvalidValue)
+	}
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for OriginId {
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		D: serde::Deserializer<'de>,
+	{
+		let value = u64::deserialize(deserializer)?;
+		Self::try_new(value).map_err(serde::de::Error::custom)
 	}
 }
 
@@ -212,9 +240,13 @@ impl OriginNode {
 		} else if let Some(existing) = &mut self.broadcast {
 			// This node is a leaf with an existing broadcast.
 
-			// Prefix check: if the existing broadcast's hops are a prefix of the new one,
+			// Prefix check: if the existing broadcast's hops are a strict prefix of the new one,
 			// the new broadcast is routing through us (loop). Reject it.
-			if !existing.active.info.hops.is_empty() && broadcast.info.hops.starts_with(&existing.active.info.hops) {
+			// Identical hop lists are not treated as loops (could be a re-announcement).
+			if !existing.active.info.hops.is_empty()
+				&& broadcast.info.hops.len() > existing.active.info.hops.len()
+				&& broadcast.info.hops.starts_with(&existing.active.info.hops)
+			{
 				tracing::debug!(broadcast = %full, "rejecting broadcast: hops are prefix of existing");
 				return;
 			}
