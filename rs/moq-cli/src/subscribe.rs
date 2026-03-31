@@ -48,10 +48,7 @@ impl Subscribe {
 
 		// Run the converter concurrently — it blocks until all tracks finish,
 		// so we must read from the output broadcast in parallel.
-		tokio::select! {
-			res = converter.run() => res?,
-			res = mux_fmp4(catalog_track, cmaf_consumer, max_latency) => res?,
-		}
+		tokio::try_join!(converter.run(), mux_fmp4(catalog_track, cmaf_consumer, max_latency))?;
 
 		Ok(())
 	}
