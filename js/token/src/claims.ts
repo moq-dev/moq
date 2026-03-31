@@ -9,7 +9,7 @@ export const ClaimsSchema = z
 		exp: z.number().optional(),
 		iat: z.number().optional(),
 	})
-	.refine((data) => data.put || data.get, {
+	.refine((data) => data.put !== undefined || data.get !== undefined, {
 		message: "Either put or get must be specified",
 	});
 
@@ -22,7 +22,7 @@ export type Claims = z.infer<typeof ClaimsSchema>;
  * Validate claims structure and business rules
  */
 export function validateClaims(claims: Claims): void {
-	if (!claims.put && !claims.get) {
+	if (claims.put === undefined && claims.get === undefined) {
 		throw new Error("no put or get paths specified; token is useless");
 	}
 }
