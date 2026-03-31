@@ -1,11 +1,11 @@
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, PathOwned, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -123,7 +123,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let mut origin = self
 			.origin
-			.consume_only(&[prefix.as_path()])
+			.with_filter(&[prefix.as_path()])
 			.ok_or(Error::Unauthorized)?;
 
 		let version = self.version;
@@ -157,35 +157,30 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
 
-		// Track which suffixes we've actually sent as Active, so we don't send
-		// Ended for suffixes that were filtered out by exclude_hop filter.
-		let mut sent_suffixes: HashSet<PathOwned> = HashSet::new();
+		let mut active: HashMap<crate::PathOwned, BroadcastConsumer> = HashMap::new();
+		let mut closures: FuturesUnordered<crate::OriginClosureFuture> = FuturesUnordered::new();
 
 		match version {
 			Version::Lite01 | Version::Lite02 => {
 				let mut init = Vec::new();
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths
-				// We use `try_next()` to synchronously get the initial updates.
-				while let Some((path, active)) = origin.try_announced() {
+				while let Some((path, broadcast)) = origin.try_announced() {
 					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
+					tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+					init.push(suffix.to_owned());
 
-					if let Some(broadcast) = &active {
-						// Skip if the broadcast's hops contain the excluded hop ID.
-						if exclude_hop != crate::OriginId::UNKNOWN && broadcast.info.hops.contains(&exclude_hop) {
-							continue;
-						}
-						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-						let owned = suffix.to_owned();
-						sent_suffixes.insert(owned.clone());
-						init.push(owned);
-					} else {
-						// A potential race.
-						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-						let owned = suffix.to_owned();
-						sent_suffixes.remove(&owned);
-						init.retain(|path| path != &suffix);
+					// Skip if the broadcast's hops contain the excluded hop ID.
+					if exclude_hop != crate::OriginId::UNKNOWN && broadcast.info.hops.contains(&exclude_hop) {
+						continue;
 					}
+
+					active.insert(path.clone(), broadcast.clone());
+					let bc = broadcast.clone();
+					closures.push(Box::pin(async move {
+						bc.closed().await;
+						(path, broadcast)
+					}));
 				}
 
 				let announce_init = lite::AnnounceInit { suffixes: init };
@@ -201,37 +196,48 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			tokio::select! {
 				biased;
 				res = stream.reader.closed() => return res,
-				announced = origin.announced() => {
-					match announced {
-						Some((path, active)) => {
-							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
-
-							if let Some(broadcast) = active {
-								// Skip if the broadcast's hops contain the excluded hop ID.
-								if exclude_hop != crate::OriginId::UNKNOWN
-									&& broadcast.info.hops.contains(&exclude_hop) {
-										if sent_suffixes.remove(&suffix) {
-											tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-											let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
-											stream.writer.encode(&msg).await?;
-										}
-										continue;
-									}
-								tracing::debug!(broadcast = %origin.absolute(&path), hops = broadcast.info.hops.len(), "announce");
-								sent_suffixes.insert(suffix.clone());
-								let msg = lite::Announce::Active { suffix, hops: broadcast.info.hops.clone() };
-								stream.writer.encode(&msg).await?;
-							} else if sent_suffixes.remove(&suffix) {
-								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-								let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
-								stream.writer.encode(&msg).await?;
-							}
-						},
-						None => {
-							stream.writer.finish()?;
-							return stream.writer.closed().await;
-						}
+				Some((path, broadcast)) = closures.next() => {
+					// Only send Ended if this broadcast is still the active one (not replaced)
+					if active.get(&path).is_some_and(|b| b.is_clone(&broadcast)) {
+						active.remove(&path);
+						let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
+						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+						let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
+						stream.writer.encode(&msg).await?;
 					}
+				}
+				res = origin.announced() => {
+					let (path, broadcast) = res?;
+					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
+
+					// Skip if the broadcast's hops contain the excluded hop ID.
+					if exclude_hop != crate::OriginId::UNKNOWN && broadcast.info.hops.contains(&exclude_hop) {
+						// If we previously announced this path, send Ended
+						if active.remove(&path).is_some() {
+							tracing::debug!(broadcast = %origin.absolute(&path), "unannounce (excluded hop)");
+							let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
+							stream.writer.encode(&msg).await?;
+						}
+						continue;
+					}
+
+					// If same path already active, send Ended then Active (reannounce)
+					if active.contains_key(&path) {
+						tracing::debug!(broadcast = %origin.absolute(&path), "reannounce (ended)");
+						let msg = lite::Announce::Ended { suffix: suffix.clone(), hops: Vec::new() };
+						stream.writer.encode(&msg).await?;
+					}
+
+					tracing::debug!(broadcast = %origin.absolute(&path), hops = broadcast.info.hops.len(), "announce");
+					let msg = lite::Announce::Active { suffix, hops: broadcast.info.hops.clone() };
+					stream.writer.encode(&msg).await?;
+
+					active.insert(path.clone(), broadcast.clone());
+					let bc = broadcast.clone();
+					closures.push(Box::pin(async move {
+						bc.closed().await;
+						(path, broadcast)
+					}));
 				}
 			}
 		}
@@ -246,7 +252,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::info!(%id, broadcast = %absolute, %track, "subscribed started");
 
-		let broadcast = self.origin.consume_broadcast(&subscribe.broadcast);
+		let broadcast = self.origin.try_consume_broadcast(&subscribe.broadcast);
 		let priority = self.priority.clone();
 		let version = self.version;
 

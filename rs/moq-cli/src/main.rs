@@ -180,15 +180,13 @@ async fn wait_broadcast(
 	name: &str,
 ) -> anyhow::Result<moq_lite::BroadcastConsumer> {
 	loop {
-		let (path, announced) = consumer
+		let (path, broadcast) = consumer
 			.announced()
 			.await
-			.ok_or_else(|| anyhow::anyhow!("origin closed"))?;
+			.map_err(|_| anyhow::anyhow!("origin closed"))?;
 
-		if let Some(broadcast) = announced {
-			if path.as_ref() == name {
-				return Ok(broadcast);
-			}
+		if path.as_ref() == name {
+			return Ok(broadcast);
 		}
 	}
 }

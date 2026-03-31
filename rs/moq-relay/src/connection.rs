@@ -38,8 +38,8 @@ impl Connection {
 		};
 
 		let origin = self.cluster.origin.with_root(&token.root);
-		let publish = origin.as_ref().and_then(|o| o.publish_only(&token.publish));
-		let subscribe = origin.as_ref().and_then(|o| o.consume_only(&token.subscribe));
+		let publish = origin.as_ref().and_then(|o| o.with_filter(&token.publish));
+		let subscribe = origin.as_ref().and_then(|o| o.consume().with_filter(&token.subscribe));
 		let transport = self.request.transport();
 
 		match (&publish, &subscribe) {

@@ -15,6 +15,9 @@ pub enum Error {
 	#[error("no tfdt in traf")]
 	NoTfdt,
 
+	#[error("PTS overflow")]
+	PtsOverflow,
+
 	#[error("no moof found in CMAF frame data")]
 	NoMoof,
 

@@ -65,7 +65,7 @@ impl Origin {
 	}
 
 	async fn run_announced(task_id: Id, mut consumer: moq_lite::OriginConsumer) -> Result<(), Error> {
-		while let Some((path, broadcast)) = consumer.announced().await {
+		while let Ok((path, _broadcast)) = consumer.announced().await {
 			let mut state = State::lock();
 
 			// Stop if the callback was revoked by close.
@@ -74,7 +74,7 @@ impl Origin {
 			};
 			let callback = entry.callback;
 
-			let announced_id = state.origin.announced.insert((path.to_string(), broadcast.is_some()))?;
+			let announced_id = state.origin.announced.insert((path.to_string(), true))?;
 			drop(state);
 
 			// The lock is dropped before the callback is invoked.
@@ -84,6 +84,7 @@ impl Origin {
 		Ok(())
 	}
 
+	#[allow(deprecated)]
 	pub fn announced_info(&self, announced: Id, dst: &mut moq_announced) -> Result<(), Error> {
 		let announced = self.announced.get(announced).ok_or(Error::AnnouncementNotFound)?;
 		*dst = moq_announced {
@@ -106,7 +107,10 @@ impl Origin {
 
 	pub fn consume<P: moq_lite::AsPath>(&mut self, origin: Id, path: P) -> Result<moq_lite::BroadcastConsumer, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		origin.consume().consume_broadcast(path).ok_or(Error::BroadcastNotFound)
+		origin
+			.consume()
+			.try_consume_broadcast(path)
+			.ok_or(Error::BroadcastNotFound)
 	}
 
 	pub fn publish<P: moq_lite::AsPath>(

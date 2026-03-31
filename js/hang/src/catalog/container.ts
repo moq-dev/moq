@@ -16,7 +16,7 @@ export const ContainerSchema = z
 		z.object({
 			kind: z.literal("cmaf"),
 			// Base64-encoded init segment (ftyp+moov)
-			initData: z.string().base64(),
+			initData: z.base64(),
 		}),
 	])
 	.default({ kind: "legacy" });

@@ -78,15 +78,15 @@ async fn main() -> anyhow::Result<()> {
 		Command::Subscribe => {
 			let session = client.with_consume(origin.clone()).connect(config.url).await?;
 
-			// NOTE: We could just call `session.consume_broadcast(&config.broadcast)` instead,
-			// However that won't work with IETF MoQ and the current OriginConsumer API the moment.
-			// So instead we do the cooler thing and loop while the broadcast is announced.
+			// We use announced() to watch for the broadcast to come online/reconnect,
+			// rather than a one-shot consume_broadcast() call.
 
 			tracing::info!(broadcast = %config.broadcast, "waiting for broadcast to be online");
 
 			let path: moq_lite::Path<'_> = config.broadcast.into();
 			let mut origin = origin
-				.consume_only(&[path])
+				.consume()
+				.with_filter(&[path])
 				.context("not allowed to consume broadcast")?;
 
 			// The current subscriber if any, dropped after each announce.
@@ -94,15 +94,11 @@ async fn main() -> anyhow::Result<()> {
 
 			loop {
 				tokio::select! {
-					Some(announce) = origin.announced() => match announce {
-						(path, Some(broadcast)) => {
-							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(&track)?;
-							clock = Some(clock::Subscriber::new(track));
-						}
-						(path, None) => {
-							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
-						}
+					res = origin.announced() => {
+						let (path, broadcast) = res.context("origin closed")?;
+						tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
+						let subscribed_track = broadcast.subscribe_track(&track)?;
+						clock = Some(clock::Subscriber::new(subscribed_track));
 					},
 					res = session.closed() => return res.context("session closed"),
 					// NOTE: This drops clock when a new announce arrives, canceling it.

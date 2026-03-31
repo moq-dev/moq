@@ -54,7 +54,7 @@ impl Cluster {
 	}
 
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
-		self.origin.consume_broadcast(broadcast)
+		self.origin.consume().try_consume_broadcast(broadcast)
 	}
 
 	/// Runs the cluster event loop, connecting to remote nodes and
