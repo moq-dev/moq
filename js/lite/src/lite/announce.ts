@@ -9,7 +9,7 @@ export class Announce {
 	suffix: Path.Valid;
 	active: boolean;
 
-	/// Ordered origin path for Draft04+. Empty when decoding Draft03 (which only carries a count).
+	/// Ordered origin path. Draft03 populates with 0n (UNKNOWN) entries; Draft04+ uses real IDs.
 	hops: bigint[];
 
 	constructor(props: { suffix: Path.Valid; active: boolean; hops?: bigint[] }) {
@@ -32,15 +32,11 @@ export class Announce {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 				break;
+			// biome-ignore lint/complexity/noUselessSwitchCase: explicit for documentation
+			case Version.DRAFT_04:
 			default:
-				// DRAFT_04+: encode array of OriginId
 				if (this.hops.length > MAX_HOPS) {
 					throw new Error(`hop count ${this.hops.length} exceeds maximum of ${MAX_HOPS}`);
-				}
-				for (const hop of this.hops) {
-					if (hop === 0n) {
-						throw new Error("OriginId must be non-zero");
-					}
 				}
 				await w.u53(this.hops.length);
 				for (const hop of this.hops) {
@@ -70,18 +66,15 @@ export class Announce {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 				break;
+			// biome-ignore lint/complexity/noUselessSwitchCase: explicit for documentation
+			case Version.DRAFT_04:
 			default: {
-				// DRAFT_04+: decode array of OriginId
 				const count = await r.u53();
 				if (count > MAX_HOPS) {
 					throw new Error(`hop count ${count} exceeds maximum of ${MAX_HOPS}`);
 				}
 				for (let i = 0; i < count; i++) {
-					const hop = await r.u62();
-					if (hop === 0n) {
-						throw new Error("OriginId must be non-zero");
-					}
-					hops.push(hop);
+					hops.push(await r.u62());
 				}
 				break;
 			}
@@ -122,6 +115,8 @@ export class AnnounceInterest {
 			case Version.DRAFT_02:
 			case Version.DRAFT_03:
 				break;
+			// biome-ignore lint/complexity/noUselessSwitchCase: explicit for documentation
+			case Version.DRAFT_04:
 			default:
 				await w.u62(this.excludeHop);
 				break;
@@ -137,6 +132,8 @@ export class AnnounceInterest {
 			case Version.DRAFT_02:
 			case Version.DRAFT_03:
 				break;
+			// biome-ignore lint/complexity/noUselessSwitchCase: explicit for documentation
+			case Version.DRAFT_04:
 			default:
 				excludeHop = await r.u62();
 				break;
