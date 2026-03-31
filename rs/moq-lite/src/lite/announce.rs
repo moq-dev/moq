@@ -106,16 +106,16 @@ pub struct AnnouncePlease<'a> {
 	// Request tracks with this prefix.
 	pub prefix: Path<'a>,
 
-	/// Skip announces whose hops list contains this origin ID.
+	/// Skip announces whose hops list contains this hop ID.
 	/// Used to avoid loops in the relay cluster.
 	/// Defaults to 0 (unknown), which means no filtering.
-	pub without_origin: OriginId,
+	pub exclude_hop: OriginId,
 }
 
 impl Message for AnnouncePlease<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
-		let without_origin = match version {
+		let exclude_hop = match version {
 			Version::Lite01 | Version::Lite02 | Version::Lite03 => OriginId::UNKNOWN,
 			_ => {
 				let value = u64::decode(r, version)?;
@@ -126,7 +126,7 @@ impl Message for AnnouncePlease<'_> {
 				}
 			}
 		};
-		Ok(Self { prefix, without_origin })
+		Ok(Self { prefix, exclude_hop })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
@@ -134,7 +134,7 @@ impl Message for AnnouncePlease<'_> {
 		match version {
 			Version::Lite01 | Version::Lite02 | Version::Lite03 => {}
 			_ => {
-				self.without_origin.into_inner().encode(w, version)?;
+				self.exclude_hop.into_inner().encode(w, version)?;
 			}
 		}
 

@@ -106,12 +106,12 @@ export class Announce {
 export class AnnounceInterest {
 	prefix: Path.Valid;
 
-	/// Filter out announces whose hops contain this origin ID. 0n means no filtering.
-	withoutOrigin: bigint;
+	/// Filter out announces whose hops contain this hop ID. 0n means no filtering.
+	excludeHop: bigint;
 
-	constructor(props: { prefix: Path.Valid; withoutOrigin?: bigint }) {
+	constructor(props: { prefix: Path.Valid; excludeHop?: bigint }) {
 		this.prefix = props.prefix;
-		this.withoutOrigin = props.withoutOrigin ?? 0n;
+		this.excludeHop = props.excludeHop ?? 0n;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -123,7 +123,7 @@ export class AnnounceInterest {
 			case Version.DRAFT_03:
 				break;
 			default:
-				await w.u62(this.withoutOrigin);
+				await w.u62(this.excludeHop);
 				break;
 		}
 	}
@@ -131,18 +131,18 @@ export class AnnounceInterest {
 	static async #decode(r: Reader, version: Version): Promise<AnnounceInterest> {
 		const prefix = Path.from(await r.string());
 
-		let withoutOrigin = 0n;
+		let excludeHop = 0n;
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 			case Version.DRAFT_03:
 				break;
 			default:
-				withoutOrigin = await r.u62();
+				excludeHop = await r.u62();
 				break;
 		}
 
-		return new AnnounceInterest({ prefix, withoutOrigin });
+		return new AnnounceInterest({ prefix, excludeHop });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

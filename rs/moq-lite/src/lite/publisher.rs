@@ -119,7 +119,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	pub async fn recv_announce(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		let interest = stream.reader.decode::<lite::AnnouncePlease>().await?;
 		let prefix = interest.prefix.to_owned();
-		let without_origin = interest.without_origin;
+		let exclude_hop = interest.exclude_hop;
 
 		let mut origin = self
 			.origin
@@ -128,7 +128,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let version = self.version;
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version, without_origin).await {
+			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version, exclude_hop).await {
 				match &err {
 					Error::Cancel => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
@@ -153,12 +153,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
 		version: Version,
-		without_origin: crate::OriginId,
+		exclude_hop: crate::OriginId,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
 
 		// Track which suffixes we've actually sent as Active, so we don't send
-		// Ended for suffixes that were filtered out by without_origin.
+		// Ended for suffixes that were filtered out by exclude_hop filter.
 		let mut sent_suffixes: HashSet<PathOwned> = HashSet::new();
 
 		match version {
@@ -171,8 +171,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
 
 					if let Some(broadcast) = &active {
-						// Skip if the broadcast's hops contain the without_origin ID.
-						if without_origin != crate::OriginId::UNKNOWN && broadcast.info.hops.contains(&without_origin) {
+						// Skip if the broadcast's hops contain the excluded hop ID.
+						if exclude_hop != crate::OriginId::UNKNOWN && broadcast.info.hops.contains(&exclude_hop) {
 							continue;
 						}
 						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
@@ -207,9 +207,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 
 							if let Some(broadcast) = active {
-								// Skip if the broadcast's hops contain the without_origin ID.
-								if without_origin != crate::OriginId::UNKNOWN
-									&& broadcast.info.hops.contains(&without_origin) {
+								// Skip if the broadcast's hops contain the excluded hop ID.
+								if exclude_hop != crate::OriginId::UNKNOWN
+									&& broadcast.info.hops.contains(&exclude_hop) {
 										if sent_suffixes.remove(&suffix) {
 											tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
 											let msg = lite::Announce::Ended { suffix, hops: Vec::new() };

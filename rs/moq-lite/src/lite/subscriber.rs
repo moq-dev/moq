@@ -91,7 +91,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// TODO This should actually ask for each root.
 		let msg = lite::AnnouncePlease {
 			prefix: "".into(),
-			without_origin: self.origin_id,
+			exclude_hop: self.origin_id,
 		};
 		stream.writer.encode(&msg).await?;
 

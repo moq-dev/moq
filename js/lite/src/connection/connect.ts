@@ -339,7 +339,7 @@ async function connectWebTransport(
 	const finalOptions: WebTransportOptions = {
 		allowPooling: false,
 		congestionControl: "low-latency",
-		protocols: [Lite.ALPN_04, Lite.ALPN_03, Lite.ALPN, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
+		protocols: [Lite.ALPN_03, Lite.ALPN, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
 		...options,
 	};
 
