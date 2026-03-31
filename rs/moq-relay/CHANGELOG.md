@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.13](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.12...moq-relay-v0.10.13) - 2026-03-31
+
+### Other
+
+- Drone demo: real-time 2D game with physics ([#1171](https://github.com/moq-dev/moq/pull/1171))
+
 ## [0.10.12](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.11...moq-relay-v0.10.12) - 2026-03-26
 
 ### Added
