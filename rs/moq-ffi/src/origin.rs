@@ -26,32 +26,18 @@ struct Announced {
 
 impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
-		loop {
-			match self.inner.announced().await {
-				Some((path, Some(broadcast))) => {
-					return Ok(Some(Arc::new(MoqAnnouncement {
-						path: path.to_string(),
-						broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
-					})));
-				}
-				// TODO moq-lite will change to not emit None (unannounce) events here.
-				Some((_path, None)) => continue,
-				None => return Ok(None),
-			}
+		match self.inner.announced().await {
+			Ok((path, broadcast)) => Ok(Some(Arc::new(MoqAnnouncement {
+				path: path.to_string(),
+				broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
+			}))),
+			Err(_) => Ok(None),
 		}
 	}
 
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		loop {
-			match self.inner.announced().await {
-				Some((_path, Some(broadcast))) => {
-					return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)));
-				}
-				// TODO moq-lite will change to not emit None (unannounce) events here.
-				Some((_path, None)) => continue,
-				None => return Err(MoqError::Closed),
-			}
-		}
+		let (_path, broadcast) = self.inner.announced().await.map_err(|_| MoqError::Closed)?;
+		Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)))
 	}
 }
 
