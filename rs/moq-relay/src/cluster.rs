@@ -45,7 +45,7 @@ impl Cluster {
 	/// Creates a new cluster with the given configuration and QUIC client.
 	pub fn new(config: ClusterConfig, client: moq_native::Client) -> Self {
 		let origin = if let Some(id) = config.origin_id {
-			Origin::produce().with_id(OriginId::try_new(id).expect("invalid origin ID: must be 1 <= value < 2^62"))
+			Origin::produce().with_id(OriginId::try_from(id).expect("invalid origin ID: must be 1 <= value < 2^62"))
 		} else {
 			Origin::produce()
 		};

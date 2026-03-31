@@ -4,15 +4,17 @@ use crate::{OriginId, Path, coding::*};
 
 use super::{Message, Version};
 
-// Helper: decode an OriginId from a varint (u64) using the lite Version.
-fn decode_origin_id<R: bytes::Buf>(r: &mut R, version: Version) -> Result<OriginId, DecodeError> {
-	let value = u64::decode(r, version)?;
-	OriginId::try_new(value).map_err(|_| DecodeError::InvalidValue)
+impl Decode<Version> for OriginId {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let value = u64::decode(r, version)?;
+		Self::try_from(value).map_err(|_| DecodeError::InvalidValue)
+	}
 }
 
-// Helper: encode an OriginId as a varint (u64) using the lite Version.
-fn encode_origin_id<W: bytes::BufMut>(id: &OriginId, w: &mut W, version: Version) -> Result<(), EncodeError> {
-	id.into_inner().encode(w, version)
+impl Encode<Version> for OriginId {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.into_inner().encode(w, version)
+	}
 }
 
 /// Sent by the publisher to announce the availability of a track.
@@ -40,15 +42,21 @@ impl Message for Announce<'_> {
 			Version::Lite01 | Version::Lite02 => Vec::new(),
 			Version::Lite03 => {
 				// Lite03 sends a single varint count; we don't know the actual IDs.
-				let count = u64::decode(r, version)?;
-				vec![OriginId::UNKNOWN; count.min(32) as usize]
+				let count = u64::decode(r, version)? as usize;
+				if count > 32 {
+					return Err(DecodeError::InvalidValue);
+				}
+				vec![OriginId::UNKNOWN; count]
 			}
 			_ => {
 				// Lite04+: count followed by that many OriginId varints.
-				let count = u64::decode(r, version)?;
-				let mut ids = Vec::with_capacity(count.min(32) as usize);
+				let count = u64::decode(r, version)? as usize;
+				if count > 32 {
+					return Err(DecodeError::InvalidValue);
+				}
+				let mut ids = Vec::with_capacity(count);
 				for _ in 0..count {
-					ids.push(decode_origin_id(r, version)?);
+					ids.push(OriginId::decode(r, version)?);
 				}
 				ids
 			}
@@ -61,37 +69,29 @@ impl Message for Announce<'_> {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		match self {
-			Self::Active { suffix, hops } => {
-				AnnounceStatus::Active.encode(w, version)?;
-				suffix.encode(w, version)?;
-				match version {
-					Version::Lite01 | Version::Lite02 => {}
-					Version::Lite03 => {
-						(hops.len() as u64).encode(w, version)?;
-					}
-					_ => {
-						(hops.len() as u64).encode(w, version)?;
-						for id in hops {
-							encode_origin_id(id, w, version)?;
-						}
-					}
+		let (status, suffix, hops) = match self {
+			Self::Active { suffix, hops } => (AnnounceStatus::Active, suffix, hops),
+			Self::Ended { suffix, hops } => (AnnounceStatus::Ended, suffix, hops),
+		};
+
+		status.encode(w, version)?;
+		suffix.encode(w, version)?;
+
+		match version {
+			Version::Lite01 | Version::Lite02 => {}
+			Version::Lite03 => {
+				if hops.len() > 32 {
+					return Err(EncodeError::TooMany);
 				}
+				(hops.len() as u64).encode(w, version)?;
 			}
-			Self::Ended { suffix, hops } => {
-				AnnounceStatus::Ended.encode(w, version)?;
-				suffix.encode(w, version)?;
-				match version {
-					Version::Lite01 | Version::Lite02 => {}
-					Version::Lite03 => {
-						(hops.len() as u64).encode(w, version)?;
-					}
-					_ => {
-						(hops.len() as u64).encode(w, version)?;
-						for id in hops {
-							encode_origin_id(id, w, version)?;
-						}
-					}
+			_ => {
+				if hops.len() > 32 {
+					return Err(EncodeError::TooMany);
+				}
+				(hops.len() as u64).encode(w, version)?;
+				for id in hops {
+					id.encode(w, version)?;
 				}
 			}
 		}
@@ -106,22 +106,23 @@ pub struct AnnouncePlease<'a> {
 	// Request tracks with this prefix.
 	pub prefix: Path<'a>,
 
-	/// If set, skip announces whose hops list contains this origin ID.
+	/// Skip announces whose hops list contains this origin ID.
 	/// Used to avoid loops in the relay cluster.
-	pub without_origin: Option<OriginId>,
+	/// Defaults to 0 (unknown), which means no filtering.
+	pub without_origin: OriginId,
 }
 
 impl Message for AnnouncePlease<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
 		let without_origin = match version {
-			Version::Lite01 | Version::Lite02 | Version::Lite03 => None,
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => OriginId::UNKNOWN,
 			_ => {
 				let value = u64::decode(r, version)?;
 				if value == 0 {
-					None
+					OriginId::UNKNOWN
 				} else {
-					Some(OriginId::try_new(value).map_err(|_| DecodeError::InvalidValue)?)
+					OriginId::try_from(value).map_err(|_| DecodeError::InvalidValue)?
 				}
 			}
 		};
@@ -133,8 +134,7 @@ impl Message for AnnouncePlease<'_> {
 		match version {
 			Version::Lite01 | Version::Lite02 | Version::Lite03 => {}
 			_ => {
-				let value = self.without_origin.map_or(0u64, |id| id.into_inner());
-				value.encode(w, version)?;
+				self.without_origin.into_inner().encode(w, version)?;
 			}
 		}
 

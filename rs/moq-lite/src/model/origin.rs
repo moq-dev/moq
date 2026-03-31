@@ -17,16 +17,7 @@ const ORIGIN_ID_MAX: u64 = (1u64 << 62) - 1;
 
 impl OriginId {
 	/// A placeholder value used when the actual OriginId is unknown (e.g., Lite03 hop placeholders).
-	pub const UNKNOWN: Self = Self(ORIGIN_ID_MAX);
-
-	/// Create an OriginId from a u64 value.
-	/// Returns an error if the value is zero or >= 2^62.
-	pub fn try_new(value: u64) -> Result<Self, InvalidOriginId> {
-		if value == 0 || value > ORIGIN_ID_MAX {
-			return Err(InvalidOriginId(value));
-		}
-		Ok(Self(value))
-	}
+	pub const UNKNOWN: Self = Self(0);
 
 	/// Generate a random non-zero 62-bit origin ID.
 	pub fn random() -> Self {
@@ -38,6 +29,17 @@ impl OriginId {
 	/// Get the inner u64 value.
 	pub fn into_inner(self) -> u64 {
 		self.0
+	}
+}
+
+impl TryFrom<u64> for OriginId {
+	type Error = InvalidOriginId;
+
+	fn try_from(value: u64) -> Result<Self, Self::Error> {
+		if value == 0 || value > ORIGIN_ID_MAX {
+			return Err(InvalidOriginId(value));
+		}
+		Ok(Self(value))
 	}
 }
 
@@ -68,7 +70,7 @@ impl Encode<Version> for OriginId {
 impl Decode<Version> for OriginId {
 	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let value = u64::decode(r, version)?;
-		Self::try_new(value).map_err(|_| DecodeError::InvalidValue)
+		Self::try_from(value).map_err(|_| DecodeError::InvalidValue)
 	}
 }
 
@@ -79,7 +81,7 @@ impl<'de> serde::Deserialize<'de> for OriginId {
 		D: serde::Deserializer<'de>,
 	{
 		let value = u64::deserialize(deserializer)?;
-		Self::try_new(value).map_err(serde::de::Error::custom)
+		Self::try_from(value).map_err(serde::de::Error::custom)
 	}
 }
 
@@ -234,9 +236,6 @@ impl OriginNode {
 		if let Some((dir, relative)) = rest.next_part() {
 			// Not using entry to avoid allocating a string most of the time.
 			self.entry(dir).lock().publish(&full, broadcast, &relative);
-		} else if broadcast.info.hops.len() > 32 {
-			// Cap max hops at 32 to prevent abuse.
-			tracing::debug!(broadcast = %full, hops = broadcast.info.hops.len(), "rejecting broadcast: too many hops");
 		} else if let Some(existing) = &mut self.broadcast {
 			// This node is a leaf with an existing broadcast.
 
@@ -553,6 +552,10 @@ impl OriginProducer {
 	/// Returns false if the broadcast is not allowed to be published.
 	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
 		let path = path.as_path();
+
+		if broadcast.info.hops.len() > 32 {
+			return false;
+		}
 
 		let (root, rest) = match self.nodes.get(&path) {
 			Some(root) => root,

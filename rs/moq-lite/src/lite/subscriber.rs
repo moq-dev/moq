@@ -20,7 +20,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: Option<OriginProducer>,
-	origin_id: Option<OriginId>,
+	origin_id: OriginId,
 	subscribes: Lock<HashMap<u64, TrackProducer>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
@@ -28,7 +28,10 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn new(session: S, origin: Option<OriginProducer>, version: Version) -> Self {
-		let origin_id = origin.as_ref().map(|o| o.id());
+		let origin_id = match &origin {
+			Some(o) => o.id(),
+			None => OriginId::UNKNOWN,
+		};
 		Self {
 			session,
 			origin,
@@ -98,11 +101,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			Version::Lite01 | Version::Lite02 => {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
 				for path in msg.suffixes {
-					// Lite01/02 don't have hops on the wire; use a single-element vec with our ID if available.
-					let hops = match self.origin_id {
-						Some(id) => vec![id],
-						None => Vec::new(),
-					};
+					// Lite01/02 don't have hops on the wire; use unknown since the actual origin is not known.
+					let hops = vec![OriginId::UNKNOWN];
 					self.start_announce(path, Broadcast::new().with_hops(hops), &mut producers)?;
 				}
 			}
@@ -115,8 +115,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			match announce {
 				lite::Announce::Active { suffix: path, hops } => {
 					let mut new_hops = hops;
-					if let Some(id) = self.origin_id {
-						new_hops.push(id);
+					if self.origin_id != OriginId::UNKNOWN {
+						new_hops.push(self.origin_id);
 					}
 					self.start_announce(path, Broadcast::new().with_hops(new_hops), &mut producers)?;
 				}

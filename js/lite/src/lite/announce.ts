@@ -1,8 +1,9 @@
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
+
+const MAX_HOPS = 32;
 
 export class Announce {
 	suffix: Path.Valid;
@@ -23,8 +24,8 @@ export class Announce {
 
 		switch (version) {
 			case Version.DRAFT_03:
-				if (this.hops.length > 32) {
-					throw new Error(`hop count ${this.hops.length} exceeds maximum of 32`);
+				if (this.hops.length > MAX_HOPS) {
+					throw new Error(`hop count ${this.hops.length} exceeds maximum of ${MAX_HOPS}`);
 				}
 				await w.u53(this.hops.length);
 				break;
@@ -33,8 +34,8 @@ export class Announce {
 				break;
 			default:
 				// DRAFT_04+: encode array of OriginId
-				if (this.hops.length > 32) {
-					throw new Error(`hop count ${this.hops.length} exceeds maximum of 32`);
+				if (this.hops.length > MAX_HOPS) {
+					throw new Error(`hop count ${this.hops.length} exceeds maximum of ${MAX_HOPS}`);
 				}
 				for (const hop of this.hops) {
 					if (hop === 0n) {
@@ -56,10 +57,13 @@ export class Announce {
 		const hops: bigint[] = [];
 		switch (version) {
 			case Version.DRAFT_03: {
-				// Read count but don't know actual IDs
+				// Read count but don't know actual IDs; use 0 as unknown placeholder.
 				const count = await r.u53();
-				if (count > 32) {
-					throw new Error(`hop count ${count} exceeds maximum of 32`);
+				if (count > MAX_HOPS) {
+					throw new Error(`hop count ${count} exceeds maximum of ${MAX_HOPS}`);
+				}
+				for (let i = 0; i < count; i++) {
+					hops.push(0n);
 				}
 				break;
 			}
@@ -69,8 +73,8 @@ export class Announce {
 			default: {
 				// DRAFT_04+: decode array of OriginId
 				const count = await r.u53();
-				if (count > 32) {
-					throw new Error(`hop count ${count} exceeds maximum of 32`);
+				if (count > MAX_HOPS) {
+					throw new Error(`hop count ${count} exceeds maximum of ${MAX_HOPS}`);
 				}
 				for (let i = 0; i < count; i++) {
 					const hop = await r.u62();
@@ -102,12 +106,12 @@ export class Announce {
 export class AnnounceInterest {
 	prefix: Path.Valid;
 
-	/// Draft04+ only: filter out announces whose hops contain this origin ID. Uses 0n on the wire for "unset".
-	withoutOrigin?: bigint;
+	/// Filter out announces whose hops contain this origin ID. 0n means no filtering.
+	withoutOrigin: bigint;
 
-	constructor(prefix: Path.Valid, withoutOrigin?: bigint) {
-		this.prefix = prefix;
-		this.withoutOrigin = withoutOrigin;
+	constructor(props: { prefix: Path.Valid; withoutOrigin?: bigint }) {
+		this.prefix = props.prefix;
+		this.withoutOrigin = props.withoutOrigin ?? 0n;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -119,8 +123,7 @@ export class AnnounceInterest {
 			case Version.DRAFT_03:
 				break;
 			default:
-				// DRAFT_04+: encode withoutOrigin as varint (0 = no filter)
-				await w.u62(this.withoutOrigin ?? 0n);
+				await w.u62(this.withoutOrigin);
 				break;
 		}
 	}
@@ -128,21 +131,18 @@ export class AnnounceInterest {
 	static async #decode(r: Reader, version: Version): Promise<AnnounceInterest> {
 		const prefix = Path.from(await r.string());
 
-		let withoutOrigin: bigint | undefined;
+		let withoutOrigin = 0n;
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 			case Version.DRAFT_03:
 				break;
-			default: {
-				// DRAFT_04+: decode withoutOrigin
-				const val = await r.u62();
-				withoutOrigin = val !== 0n ? val : undefined;
+			default:
+				withoutOrigin = await r.u62();
 				break;
-			}
 		}
 
-		return new AnnounceInterest(prefix, withoutOrigin);
+		return new AnnounceInterest({ prefix, withoutOrigin });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -169,11 +169,8 @@ export class AnnounceInit {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 				break;
-			case Version.DRAFT_03:
-			case Version.DRAFT_04:
-				throw new Error("announce init not supported for this version");
 			default:
-				unreachable(version);
+				throw new Error("announce init not supported for this version");
 		}
 	}
 

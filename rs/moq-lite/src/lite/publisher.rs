@@ -153,7 +153,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
 		version: Version,
-		without_origin: Option<crate::OriginId>,
+		without_origin: crate::OriginId,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
 
@@ -172,10 +172,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					if let Some(broadcast) = &active {
 						// Skip if the broadcast's hops contain the without_origin ID.
-						if let Some(ref id) = without_origin {
-							if broadcast.info.hops.contains(id) {
-								continue;
-							}
+						if without_origin != crate::OriginId::UNKNOWN && broadcast.info.hops.contains(&without_origin) {
+							continue;
 						}
 						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 						let owned = suffix.to_owned();
@@ -210,11 +208,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 							if let Some(broadcast) = active {
 								// Skip if the broadcast's hops contain the without_origin ID.
-								if let Some(ref id) = without_origin {
-									if broadcast.info.hops.contains(id) {
+								if without_origin != crate::OriginId::UNKNOWN
+									&& broadcast.info.hops.contains(&without_origin) {
+										if sent_suffixes.remove(&suffix) {
+											tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+											let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
+											stream.writer.encode(&msg).await?;
+										}
 										continue;
 									}
-								}
 								tracing::debug!(broadcast = %origin.absolute(&path), hops = broadcast.info.hops.len(), "announce");
 								sent_suffixes.insert(suffix.clone());
 								let msg = lite::Announce::Active { suffix, hops: broadcast.info.hops.clone() };

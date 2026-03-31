@@ -413,8 +413,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Ok(entry.get().producer.clone());
 			}
 			Entry::Vacant(entry) => {
-				// IETF protocol doesn't have hops; use a single-element vec (remote source).
-				let broadcast = Broadcast::new().with_hops(vec![OriginId::random()]).produce();
+				// IETF protocol doesn't have hops; use a single unknown hop (remote source).
+				let broadcast = Broadcast::new().with_hops(vec![OriginId::UNKNOWN]).produce();
 				origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
