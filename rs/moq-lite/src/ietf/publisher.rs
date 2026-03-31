@@ -452,7 +452,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					})
 					.await;
 			}
-			Version::Draft17 => {}
+			_ => {}
 		}
 		stream.writer.finish().ok();
 	}
