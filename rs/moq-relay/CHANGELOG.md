@@ -64,6 +64,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.12](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.11...moq-relay-v0.10.12) - 2026-03-26
+
+### Added
+
+- expose moq-relay as library ([#1121](https://github.com/moq-dev/moq/pull/1121))
+
+## [0.10.11](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.10...moq-relay-v0.10.11) - 2026-03-25
+
+### Other
+
+- Revert next_group to recv_group rename ([#1137](https://github.com/moq-dev/moq/pull/1137))
+- Fix non-US relay cluster connectivity and improve monitoring ([#1130](https://github.com/moq-dev/moq/pull/1130))
+- Rename next_group to recv_group for clarity ([#1135](https://github.com/moq-dev/moq/pull/1135))
+
 ## [0.10.10](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.9...moq-relay-v0.10.10) - 2026-03-18
 
 ### Other

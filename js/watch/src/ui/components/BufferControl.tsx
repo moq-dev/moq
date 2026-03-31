@@ -83,6 +83,7 @@ export default function BufferControl(props: BufferControlProps) {
 	const context = useWatchUIContext();
 	const maxRange = (): Moq.Time.Milli => props.max ?? (5000 as Moq.Time.Milli);
 	const [isDragging, setIsDragging] = createSignal(false);
+	const [hasInteracted, setHasInteracted] = createSignal(false);
 
 	const bufferTargetPct = createMemo(() => (context.jitter() / maxRange()) * 100);
 
@@ -106,6 +107,7 @@ export default function BufferControl(props: BufferControlProps) {
 
 	const onMouseDown = (e: MouseEvent) => {
 		setIsDragging(true);
+		setHasInteracted(true);
 		updateBufferFromMouseX(e.clientX);
 		document.addEventListener("mousemove", onMouseMove);
 		document.addEventListener("mouseup", onMouseUp);
@@ -133,6 +135,7 @@ export default function BufferControl(props: BufferControlProps) {
 			return;
 		}
 		e.preventDefault();
+		setHasInteracted(true);
 		const value = Math.max(MIN_RANGE, Math.min(maxRange(), context.jitter() + delta)) as Moq.Time.Milli;
 		context.setJitter(value);
 	};
@@ -202,6 +205,9 @@ export default function BufferControl(props: BufferControlProps) {
 						<span class="watch-ui__buffer-target-label">{`${Math.round(context.jitter())}ms`}</span>
 					</div>
 				</div>
+
+				{/* Help text - disappears after first interaction */}
+				{!hasInteracted() && <span class="watch-ui__buffer-help">click to change latency</span>}
 			</div>
 		</div>
 	);

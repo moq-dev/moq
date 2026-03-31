@@ -6,7 +6,6 @@
       "name": "moq",
       "devDependencies": {
         "@biomejs/biome": "^2.4.3",
-        "@types/bun": "^1.3.9",
         "concurrently": "^9.2.1",
         "publint": "^0.3.17",
       },
@@ -45,7 +44,7 @@
         "solid-element": "^1.9.1",
         "solid-js": "^1.9.10",
         "tailwindcss": "^4.1.13",
-        "typescript": "^5.9.2",
+        "typescript": "^6.0.0",
         "vite": "^7.3.1",
         "vite-plugin-solid": "^2.11.10",
       },
@@ -71,12 +70,12 @@
       },
       "devDependencies": {
         "@types/node": "^24.3.1",
-        "typescript": "^5.9.2",
+        "typescript": "^6.0.0",
       },
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.8.8",
@@ -87,10 +86,11 @@
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.77",
+        "@types/bun": "^1.3.11",
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
         "fast-glob": "^3.3.3",
         "rimraf": "^6.0.1",
-        "typescript": "^5.9.2",
+        "typescript": "^6.0.0",
       },
     },
     "js/lite": {
@@ -102,10 +102,11 @@
         "async-mutex": "^0.5.0",
       },
       "devDependencies": {
+        "@types/bun": "^1.3.11",
         "@types/node": "^24.3.1",
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
         "rimraf": "^6.0.1",
-        "typescript": "^5.9.2",
+        "typescript": "^6.0.0",
         "vite-plugin-html": "^3.2.2",
       },
       "peerDependencies": {
@@ -128,7 +129,7 @@
         "rimraf": "^6.0.1",
         "solid-element": "^1.9.1",
         "solid-js": "^1.9.10",
-        "typescript": "^5.9.2",
+        "typescript": "^6.0.0",
         "vite": "^7.3.1",
         "vite-plugin-solid": "^2.11.10",
       },
@@ -140,7 +141,7 @@
         "@types/react": "^19.1.8",
         "rimraf": "^6.0.1",
         "solid-js": "^1.9.7",
-        "typescript": "^5.9.2",
+        "typescript": "^6.0.0",
       },
       "peerDependencies": {
         "@types/react": "^19.1.8",
@@ -165,9 +166,10 @@
         "zod": "^4.1.5",
       },
       "devDependencies": {
+        "@types/bun": "^1.3.11",
         "@types/node": "^24.3.1",
         "rimraf": "^6.0.1",
-        "typescript": "^5.9.2",
+        "typescript": "^6.0.0",
       },
     },
     "js/ui-core": {
@@ -177,7 +179,7 @@
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
         "rimraf": "^6.0.1",
         "solid-js": "^1.9.10",
-        "typescript": "^5.9.2",
+        "typescript": "^6.0.0",
         "vite": "^7.3.1",
         "vite-plugin-solid": "^2.11.10",
       },
@@ -196,12 +198,13 @@
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.77",
+        "@types/bun": "^1.3.11",
         "@typescript/lib-dom": "npm:@types/web@^0.0.241",
         "esbuild": "^0.27.0",
         "rimraf": "^6.0.1",
         "solid-element": "^1.9.1",
         "solid-js": "^1.9.10",
-        "typescript": "^5.9.2",
+        "typescript": "^6.0.0",
         "vite": "^7.3.1",
         "vite-plugin-solid": "^2.11.10",
       },
@@ -613,7 +616,7 @@
 
     "@types/babel__traverse": ["@types/babel__traverse@7.28.0", "", { "dependencies": { "@babel/types": "^7.28.2" } }, "sha512-8PvcXf70gTDZBgt9ptxJ8elBeBjcLOAcOtoO/mPJjtji1+CdGbHgm77om1GrsPxsiE+uXIpNSK64UYaIwQXd4Q=="],
 
-    "@types/bun": ["@types/bun@1.3.9", "", { "dependencies": { "bun-types": "1.3.9" } }, "sha512-KQ571yULOdWJiMH+RIWIOZ7B2RXQGpL1YQrBtLIV3FqDcCu6FsbFUBwhdKUlCKUpS3PJDsHlJ1QKlpxoVR+xtw=="],
+    "@types/bun": ["@types/bun@1.3.11", "", { "dependencies": { "bun-types": "1.3.11" } }, "sha512-5vPne5QvtpjGpsGYXiFyycfpDF2ECyPcTSsFBMa0fraoxiQyMJ3SmuQIGhzPg2WJuWxVBoxWJ2kClYTcw/4fAg=="],
 
     "@types/debug": ["@types/debug@4.1.12", "", { "dependencies": { "@types/ms": "*" } }, "sha512-vIChWdVG3LG1SMxEvI/AK+FWJthlrqlTu7fbrlywTkkaONwk/UAGaULXRlf8vkzFBLVm0zkMdCquhL5aOjhXPQ=="],
 
@@ -721,7 +724,7 @@
 
     "buffer-from": ["buffer-from@1.1.2", "", {}, "sha512-E+XQCRwSbaaiChtv6k6Dwgc+bx+Bs6vuKJHHl5kox/BaKbhiXzqQOwK4cO22yElGp2OCmjwVhT3HmxgyPGnJfQ=="],
 
-    "bun-types": ["bun-types@1.3.9", "", { "dependencies": { "@types/node": "*" } }, "sha512-+UBWWOakIP4Tswh0Bt0QD0alpTY8cb5hvgiYeWCMet9YukHbzuruIEeXC2D7nMJPB12kbh8C7XJykSexEqGKJg=="],
+    "bun-types": ["bun-types@1.3.11", "", { "dependencies": { "@types/node": "*" } }, "sha512-1KGPpoxQWl9f6wcZh57LvrPIInQMn2TQ7jsgxqpRzg+l0QPOFvJVH7HmvHo/AiPgwXy+/Thf6Ov3EdVn1vOabg=="],
 
     "camel-case": ["camel-case@4.1.2", "", { "dependencies": { "pascal-case": "^3.1.2", "tslib": "^2.0.3" } }, "sha512-gxGWBrTT1JuMx6R+o5PTXMmUnhnVzLQ9SNutD4YqKtI6ap897t3tKECYla6gCWEkplXnlNybEkZg9GEGxKFCgw=="],
 
@@ -1155,7 +1158,7 @@
 
     "tunnel-agent": ["tunnel-agent@0.6.0", "", { "dependencies": { "safe-buffer": "^5.0.1" } }, "sha512-McnNiV1l8RYeY8tBgEpuodCC1mLUdbSN+CYBL7kJsJNInOP8UjDDEwdk6Mw60vdLLrr5NHKZhMAOSrR2NZuQ+w=="],
 
-    "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+    "typescript": ["typescript@6.0.2", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-bGdAIrZ0wiGDo5l8c++HWtbaNCWTS4UTv7RaTH/ThVIgjkveJt83m74bBHMJkuCbslY8ixgLBVZJIOiQlQTjfQ=="],
 
     "undici": ["undici@7.18.2", "", {}, "sha512-y+8YjDFzWdQlSE9N5nzKMT3g4a5UBX1HKowfdXh0uvAnTaqqwqB92Jt4UXBAeKekDs5IaDKyJFR4X1gYVCgXcw=="],
 
@@ -1230,6 +1233,8 @@
     "@babel/helper-compilation-targets/semver": ["semver@6.3.1", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
 
     "@cspotcode/source-map-support/@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.9", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.0.3", "@jridgewell/sourcemap-codec": "^1.4.10" } }, "sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ=="],
+
+    "@moq/drone/typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
     "@poppinss/dumper/supports-color": ["supports-color@10.2.2", "", {}, "sha512-SS+jx45GF1QjgEXQx4NJZV9ImqmO2NPz5FNsIHrsDjh2YsHnawpan7SNQ1o8NuhrbHZy9AZhIoCUiCeaW/C80g=="],
 

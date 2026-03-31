@@ -146,10 +146,7 @@ impl Avc1 {
 			let nal_len = match self.length_size {
 				1 => data[offset] as usize,
 				2 => u16::from_be_bytes([data[offset], data[offset + 1]]) as usize,
-				3 => {
-					let b = [data[offset], data[offset + 1], data[offset + 2]];
-					((b[0] as usize) << 16) | ((b[1] as usize) << 8) | (b[2] as usize)
-				}
+				3 => u32::from_be_bytes([0, data[offset], data[offset + 1], data[offset + 2]]) as usize,
 				4 => u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]) as usize,
 				_ => return false,
 			};

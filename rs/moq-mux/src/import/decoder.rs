@@ -7,9 +7,6 @@ use hang::Error;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum DecoderFormat {
-	/// H264 with AVCC framing (length-prefixed NALUs, out-of-band SPS/PPS).
-	#[cfg(feature = "h264")]
-	Avc1,
 	/// H264 with Annex B framing (start code prefixed, inline SPS/PPS).
 	#[cfg(feature = "h264")]
 	Avc3,
@@ -28,6 +25,9 @@ pub enum DecoderFormat {
 	/// Raw Opus frames (not Ogg).
 	#[cfg(feature = "opus")]
 	Opus,
+	/// H264 with AVCC framing (length-prefixed NALUs, out-of-band SPS/PPS).
+	#[cfg(feature = "h264")]
+	Avc1,
 }
 
 impl FromStr for DecoderFormat {
