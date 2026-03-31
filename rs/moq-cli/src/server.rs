@@ -7,7 +7,7 @@ pub async fn run_server(
 ) -> anyhow::Result<()> {
 	#[cfg(unix)]
 	// Notify systemd that we're ready.
-	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 	let mut conn_id = 0;
 

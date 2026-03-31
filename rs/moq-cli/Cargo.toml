@@ -34,4 +34,4 @@ tracing = "0.1"
 url = "2"
 
 [target.'cfg(unix)'.dependencies]
-sd-notify = "0.4"
+sd-notify = "0.5"

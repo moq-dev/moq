@@ -50,7 +50,7 @@ tracing = "0.1"
 url = { version = "2", features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
-sd-notify = "0.4"
+sd-notify = "0.5"
 
 [dev-dependencies]
 tempfile = "3"

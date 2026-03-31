@@ -41,6 +41,18 @@ pub struct IrohEndpointConfig {
 	/// Defaults to `[::]:0` if not provided.
 	#[arg(id = "iroh-bind-v6", long = "iroh-bind-v6", env = "MOQ_IROH_BIND_V6")]
 	pub bind_v6: Option<net::SocketAddrV6>,
+
+	/// Disable the iroh relay, using only direct P2P connections.
+	#[arg(
+		id = "iroh-disable-relay",
+		long = "iroh-disable-relay",
+		env = "MOQ_IROH_DISABLE_RELAY",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	pub disable_relay: Option<bool>,
 }
 
 impl IrohEndpointConfig {
@@ -73,7 +85,13 @@ impl IrohEndpointConfig {
 		let mut alpns: Vec<Vec<u8>> = moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 		alpns.push(web_transport_iroh::ALPN_H3.as_bytes().to_vec());
 
-		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(alpns);
+		let mut builder = if self.disable_relay.unwrap_or(false) {
+			IrohEndpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+		} else {
+			IrohEndpoint::builder(iroh::endpoint::presets::N0)
+		}
+		.secret_key(secret_key)
+		.alpns(alpns);
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr(addr)?;
 		}

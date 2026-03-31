@@ -69,7 +69,7 @@ struct StepOutcome {
 	/// Number of media segments written during this step.
 	pub wrote_segments: usize,
 	/// Target segment duration (in seconds) from the playlist, if known.
-	pub target_duration: Option<f32>,
+	pub target_duration: Option<u64>,
 }
 
 /// HLS ingest that pulls an HLS media playlist and feeds the bytes into the fMP4 ingest.
@@ -260,9 +260,9 @@ impl Hls {
 	}
 
 	/// Compute the delay before the next ingest step should run.
-	fn refresh_delay(&self, target_duration: Option<f32>, wrote_segments: usize) -> Duration {
+	fn refresh_delay(&self, target_duration: Option<u64>, wrote_segments: usize) -> Duration {
 		let base = target_duration
-			.map(|dur| Duration::from_secs_f32(dur.max(0.5)))
+			.map(|dur| Duration::from_secs(dur.max(1)))
 			.unwrap_or_else(|| Duration::from_millis(500));
 		if wrote_segments == 0 {
 			return base / 2;
