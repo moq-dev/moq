@@ -65,7 +65,8 @@ async function generateRsaKey(alg: Algorithm, name: "RSASSA-PKCS1-v1_5" | "RSA-P
 		["sign", "verify"],
 	);
 
-	const jwk = (await crypto.subtle.exportKey("jwk", keyPair.privateKey)) as {
+	const privateKey = "privateKey" in keyPair ? keyPair.privateKey : keyPair;
+	const jwk = (await crypto.subtle.exportKey("jwk", privateKey)) as {
 		kty: "RSA";
 		n: string;
 		e: string;
@@ -106,7 +107,8 @@ async function generateEcKey(alg: "ES256" | "ES384", namedCurve: "P-256" | "P-38
 		["sign", "verify"],
 	);
 
-	const jwk = (await crypto.subtle.exportKey("jwk", keyPair.privateKey)) as {
+	const privateKey = "privateKey" in keyPair ? keyPair.privateKey : keyPair;
+	const jwk = (await crypto.subtle.exportKey("jwk", privateKey)) as {
 		kty: "EC";
 		crv: "P-256" | "P-384";
 		x: string;
@@ -138,7 +140,8 @@ async function generateEdDsaKey(alg: "EdDSA", kid?: string): Promise<Key> {
 		["sign", "verify"],
 	);
 
-	const jwk = (await crypto.subtle.exportKey("jwk", keyPair.privateKey)) as {
+	const privateKey = "privateKey" in keyPair ? keyPair.privateKey : keyPair;
+	const jwk = (await crypto.subtle.exportKey("jwk", privateKey)) as {
 		kty: "OKP";
 		crv: "Ed25519";
 		x: string;

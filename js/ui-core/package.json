@@ -23,6 +23,7 @@
 		"@moq/signals": "workspace:^0.1.0"
 	},
 	"devDependencies": {
+		"@biomejs/biome": "^2.4.3",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
 		"rimraf": "^6.0.1",
 		"solid-js": "^1.9.10",

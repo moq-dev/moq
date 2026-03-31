@@ -24,7 +24,8 @@
 		"js/ui-core",
 		"js/watch",
 		"js/publish",
-		"js/demo",
-		"js/signals"
+		"js/signals",
+		"dev/web",
+		"dev/drone"
 	]
 }

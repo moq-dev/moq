@@ -1,0 +1,10 @@
+{
+	"extends": "../../js/tsconfig.json",
+	"compilerOptions": {
+		"module": "esnext",
+		"moduleResolution": "bundler",
+		"types": ["bun"],
+		"outDir": "dist"
+	},
+	"include": ["src", "../../js/common/worklet.d.ts"]
+}

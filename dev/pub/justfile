@@ -1,0 +1,206 @@
+set fallback
+
+# Publish a video using ffmpeg to a relay server.
+default name='bbb' url='http://localhost:4443/anon' *args:
+	just download "{{name}}"
+	cargo build --bin moq-cli
+	just ffmpeg-cmaf "media/{{name}}.fmp4" |\
+	cargo run --bin moq-cli -- \
+		{{args}} publish --url "{{url}}" --name "{{name}}" fmp4
+
+# Publish a video via iroh.
+iroh name url prefix="":
+	just download "{{name}}"
+	cargo build --bin moq-cli
+	just ffmpeg-cmaf "media/{{name}}.fmp4" |\
+	cargo run --bin moq-cli -- \
+		--iroh-enabled publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4
+
+# Generate and ingest an HLS stream from a video file.
+hls name relay="http://localhost:4443/anon":
+	#!/usr/bin/env bash
+	set -euo pipefail
+
+	just download "{{name}}"
+
+	INPUT="media/{{name}}.mp4"
+	OUT_DIR="media/{{name}}"
+
+	rm -rf "$OUT_DIR"
+	mkdir -p "$OUT_DIR"
+
+	echo ">>> Generating HLS stream to disk (1280x720 + 256x144)..."
+
+	ffmpeg -hide_banner -loglevel warning -re -stream_loop -1 -i "$INPUT" \
+		-filter_complex "\
+		[0:v]split=2[v0][v1]; \
+		[v0]scale=-2:720[v720]; \
+		[v1]scale=-2:144[v144]" \
+		-map "[v720]" -map "[v144]" -map 0:a:0 \
+		-r 25 -preset veryfast -g 50 -keyint_min 50 -sc_threshold 0 \
+		-c:v:0 libx264 -profile:v:0 high -level:v:0 4.1 -pix_fmt:v:0 yuv420p -tag:v:0 avc1 \
+		-b:v:0 4M -maxrate:v:0 4.4M -bufsize:v:0 8M \
+		-c:v:1 libx264 -profile:v:1 high -level:v:1 4.1 -pix_fmt:v:1 yuv420p -tag:v:1 avc1 \
+		-b:v:1 300k -maxrate:v:1 330k -bufsize:v:1 600k \
+		-c:a aac -b:a 128k \
+		-f hls -hls_time 2 -hls_list_size 6 \
+		-hls_flags independent_segments+delete_segments \
+		-hls_segment_type fmp4 \
+		-master_pl_name master.m3u8 \
+		-var_stream_map "v:0,agroup:audio,name:720 v:1,agroup:audio,name:144 a:0,agroup:audio,name:audio" \
+		-hls_segment_filename "$OUT_DIR/v%v/segment_%09d.m4s" \
+		"$OUT_DIR/v%v/stream.m3u8" &
+
+	FFMPEG_PID=$!
+
+	echo ">>> Waiting for HLS playlist generation..."
+	for i in {1..30}; do
+		if [ -f "$OUT_DIR/master.m3u8" ]; then break; fi
+		sleep 0.5
+	done
+
+	if [ ! -f "$OUT_DIR/master.m3u8" ]; then
+		kill $FFMPEG_PID 2>/dev/null || true
+		echo "Error: master.m3u8 not generated in time"
+		exit 1
+	fi
+
+	echo ">>> Waiting for variant playlists..."
+	sleep 2
+	for i in {1..20}; do
+		if [ -f "$OUT_DIR/v0/stream.m3u8" ] || [ -f "$OUT_DIR/v720/stream.m3u8" ] || [ -f "$OUT_DIR/v144/stream.m3u8" ] || [ -f "$OUT_DIR/vaudio/stream.m3u8" ]; then
+			break
+		fi
+		sleep 0.5
+	done
+
+	CLEANUP_CALLED=false
+	cleanup() {
+		if [ "$CLEANUP_CALLED" = "true" ]; then return; fi
+		CLEANUP_CALLED=true
+		echo "Shutting down..."
+		kill $FFMPEG_PID 2>/dev/null || true
+		sleep 0.5
+		kill -9 $FFMPEG_PID 2>/dev/null || true
+	}
+	trap cleanup SIGINT SIGTERM EXIT
+
+	echo ">>> Running with --passthrough flag"
+	cargo run --bin moq-cli -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
+	EXIT_CODE=$?
+
+	cleanup
+	exit $EXIT_CODE
+
+# Publish a video using H.264 Annex B format.
+h264 name url="http://localhost:4443/anon" *args:
+	just download "{{name}}"
+	cargo build --bin moq-cli
+
+	ffmpeg -hide_banner -v quiet \
+		-stream_loop -1 -re \
+		-i "media/{{name}}.fmp4" \
+		-c:v copy -an \
+		-bsf:v h264_mp4toannexb \
+		-f h264 \
+		- | cargo run --bin moq-cli -- publish --url "{{url}}" --name "{{name}}" avc3 {{args}}
+
+# Publish a video using ffmpeg directly from moq to the localhost.
+serve name *args:
+	just download "{{name}}"
+	cargo build --bin moq-cli
+	just ffmpeg-cmaf "media/{{name}}.fmp4" |\
+	cargo run --bin moq-cli -- \
+		{{args}} serve --listen "[::]:4443" --tls-generate "localhost" \
+		--name "{{name}}" fmp4
+
+# Generate and serve an HLS stream from a video for testing.
+serve-hls name port="8000":
+	#!/usr/bin/env bash
+	set -euo pipefail
+
+	just download "{{name}}"
+
+	INPUT="media/{{name}}.mp4"
+	OUT_DIR="media/{{name}}"
+
+	rm -rf "$OUT_DIR"
+	mkdir -p "$OUT_DIR"
+
+	echo ">>> Starting HLS stream generation..."
+	echo ">>> Master playlist: http://localhost:{{port}}/master.m3u8"
+
+	cleanup() {
+		echo "Shutting down..."
+		kill $(jobs -p) 2>/dev/null || true
+		exit 0
+	}
+	trap cleanup SIGINT SIGTERM
+
+	ffmpeg -loglevel warning -re -stream_loop -1 -i "$INPUT" \
+		-map 0:v:0 -map 0:v:0 -map 0:a:0 \
+		-r 25 -preset veryfast -g 50 -keyint_min 50 -sc_threshold 0 \
+		-c:v:0 libx264 -profile:v:0 high -level:v:0 4.1 -pix_fmt:v:0 yuv420p -tag:v:0 avc1 -bsf:v:0 dump_extra -b:v:0 4M -vf:0 "scale=1920:-2" \
+		-c:v:1 libx264 -profile:v:1 high -level:v:1 4.1 -pix_fmt:v:1 yuv420p -tag:v:1 avc1 -bsf:v:1 dump_extra -b:v:1 300k -vf:1 "scale=256:-2" \
+		-c:a aac -b:a 128k \
+		-f hls \
+		-hls_time 2 -hls_list_size 12 \
+		-hls_flags independent_segments+delete_segments \
+		-hls_segment_type fmp4 \
+		-master_pl_name master.m3u8 \
+		-var_stream_map "v:0,agroup:audio v:1,agroup:audio a:0,agroup:audio" \
+		-hls_segment_filename "$OUT_DIR/v%v/segment_%09d.m4s" \
+		"$OUT_DIR/v%v/stream.m3u8" &
+
+	sleep 2
+	echo ">>> HTTP server: http://localhost:{{port}}/"
+	cd "$OUT_DIR" && python3 -m http.server {{port}}
+
+# Publish the clock broadcast.
+clock action url="http://localhost:4443/anon" *args:
+	@if [ "{{action}}" != "publish" ] && [ "{{action}}" != "subscribe" ]; then \
+		echo "Error: action must be 'publish' or 'subscribe', got '{{action}}'" >&2; \
+		exit 1; \
+	fi
+
+	cargo run --bin moq-clock -- --url "{{url}}" --broadcast "clock" {{args}} {{action}}
+
+# Connect tokio-console to the publisher (port 6681).
+console:
+	tokio-console http://127.0.0.1:6681
+
+# --- Private helpers ---
+
+# Download a test video and convert it to fragmented MP4.
+[private]
+download name:
+	@if [ ! -f "media/{{name}}.mp4" ]; then \
+		curl -fsSL $(just download-url {{name}}) -o "media/{{name}}.mp4"; \
+	fi
+
+	@if [ ! -f "media/{{name}}.fmp4" ]; then \
+		ffmpeg -loglevel error -i "media/{{name}}.mp4" \
+			-c:v copy \
+			-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
+			"media/{{name}}.fmp4"; \
+	fi
+
+# Returns the URL for a test video.
+[private]
+download-url name:
+	@case {{name}} in \
+		bbb) echo "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" ;; \
+		tos) echo "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4" ;; \
+		av1) echo "http://download.opencontent.netflix.com.s3.amazonaws.com/AV1/Sparks/Sparks-5994fps-AV1-10bit-1920x1080-2194kbps.mp4" ;; \
+		hevc) echo "https://test-videos.co.uk/vids/jellyfish/mp4/h265/1080/Jellyfish_1080_10s_30MB.mp4" ;; \
+		*) echo "unknown" && exit 1 ;; \
+	esac
+
+# Convert an h264 input file to CMAF (fmp4) format to stdout.
+[private]
+ffmpeg-cmaf input output='-' *args:
+	ffmpeg -hide_banner -v quiet \
+		-stream_loop -1 -re \
+		-i "{{input}}" \
+		-c copy \
+		-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame {{args}} {{output}}

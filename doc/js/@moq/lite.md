@@ -223,7 +223,7 @@ Firefox and Safari support is experimental or planned.
 
 For more examples, see:
 - [TypeScript examples](https://github.com/moq-dev/moq/tree/main/js)
-- [demo](https://github.com/moq-dev/moq/tree/main/js/demo)
+- [demo](https://github.com/moq-dev/moq/tree/main/dev/web)
 
 ## Protocol Specification
 

@@ -4,7 +4,7 @@
 It's designed to be run in a datacenter, relaying media across multiple hops to deduplicate and improve QoS.
 
 The only argument is the path to a TOML configuration file.
-See [relay.toml](../dev/relay.toml) for an example configuration.
+See [localhost.toml](../../dev/relay/localhost.toml) for an example configuration.
 
 ## HTTP
 Primarily for debugging, you can also connect to the relay via HTTP.
@@ -52,6 +52,6 @@ Key features:
 Quick example configuration in your `.toml` file:
 ```toml
 [auth]
-key = "dev/root.jwk"    # JWT signing key
+key = "dev/relay/root.jwk"    # JWT signing key (relative to working directory)
 public = "anon"         # Allow anonymous access to /anon prefix
 ```

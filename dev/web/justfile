@@ -1,0 +1,5 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+# Run the web server targeting the specified relay
+default url='http://localhost:4443/anon':
+	VITE_RELAY_URL="{{url}}" bun run --filter @moq/demo dev

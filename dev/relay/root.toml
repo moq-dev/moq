@@ -28,7 +28,7 @@ listen = "[::]:4443"
 [auth]
 # `just auth-key` will generate a root key.
 # If you want to disable authentication, don't specify a key.
-key = "dev/root.jwk"
+key = "root.jwk"
 
 # Allow anonymous publishing and subscribing for anon/**
 public = "anon"

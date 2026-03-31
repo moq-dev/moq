@@ -9,7 +9,7 @@ The web demo application showcases MoQ's browser capabilities, allowing you to p
 
 ## Overview
 
-Located at `js/demo/`, the web demo provides:
+Located at `dev/web/`, the web demo provides:
 
 - **Publishing** — Capture camera, microphone, or screen and publish via MoQ
 - **Watching** — Subscribe to and render live broadcasts with low latency
@@ -18,7 +18,7 @@ Located at `js/demo/`, the web demo provides:
 ## Running Locally
 
 ```bash
-cd js/demo
+cd dev/web
 bun install
 bun run dev
 ```

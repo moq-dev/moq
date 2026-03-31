@@ -33,7 +33,7 @@ just web https://<your relay>
 > **Note:** WebTransport automatically prepends the URL path (e.g., `/anon`) to broadcast names. Raw QUIC and iroh have no HTTP layer, so you must manually include that prefix in the broadcast name (e.g., publish as `/anon/bbb`).
 
 The publisher sends a `PUBLISH_NAMESPACE` and the subscriber **requires** a `SUBSCRIBE_NAMESPACE`.
-If you haven't implemented the latter yet, remove `reload` in `js/demo/src/index.html`.
+If you haven't implemented the latter yet, remove `reload` in `dev/web/src/index.html`.
 
 **Feeling spicy?**
 You can use [gstreamer](/app/gstreamer) or [obs](/app/obs) too, both support publishing and subscribing.

@@ -10,6 +10,46 @@
         "publint": "latest",
       },
     },
+    "dev/drone": {
+      "name": "@moq/drone",
+      "version": "0.1.0",
+      "dependencies": {
+        "@moq/hang": "workspace:^",
+        "@moq/lite": "workspace:^",
+        "@moq/signals": "workspace:^",
+        "@moq/watch": "workspace:^",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.11",
+        "esbuild": "^0.27.0",
+        "solid-element": "^1.9.1",
+        "solid-js": "^1.9.10",
+        "typescript": "^6.0.0",
+        "vite": "^7.3.1",
+        "vite-plugin-solid": "^2.11.10",
+      },
+    },
+    "dev/web": {
+      "name": "@moq/demo",
+      "version": "0.1.1",
+      "dependencies": {
+        "@moq/hang": "workspace:^",
+        "@moq/publish": "workspace:^",
+        "@moq/watch": "workspace:^",
+      },
+      "devDependencies": {
+        "@tailwindcss/typography": "^0.5.16",
+        "@tailwindcss/vite": "^4.1.13",
+        "esbuild": "^0.27.0",
+        "highlight.js": "^11.11.1",
+        "solid-element": "^1.9.1",
+        "solid-js": "^1.9.10",
+        "tailwindcss": "^4.1.13",
+        "typescript": "^6.0.0",
+        "vite": "^7.3.1",
+        "vite-plugin-solid": "^2.11.10",
+      },
+    },
     "doc": {
       "name": "moq-doc",
       "version": "0.1.0",
@@ -32,27 +72,6 @@
       "devDependencies": {
         "@types/node": "^24.3.1",
         "typescript": "^6.0.0",
-      },
-    },
-    "js/demo": {
-      "name": "@moq/demo",
-      "version": "0.1.1",
-      "dependencies": {
-        "@moq/hang": "workspace:^",
-        "@moq/publish": "workspace:^",
-        "@moq/watch": "workspace:^",
-      },
-      "devDependencies": {
-        "@tailwindcss/typography": "^0.5.16",
-        "@tailwindcss/vite": "^4.1.13",
-        "esbuild": "^0.27.0",
-        "highlight.js": "^11.11.1",
-        "solid-element": "^1.9.1",
-        "solid-js": "^1.9.10",
-        "tailwindcss": "^4.1.13",
-        "typescript": "^6.0.0",
-        "vite": "^7.3.1",
-        "vite-plugin-solid": "^2.11.10",
       },
     },
     "js/hang": {
@@ -446,7 +465,9 @@
 
     "@moq/clock": ["@moq/clock@workspace:js/clock"],
 
-    "@moq/demo": ["@moq/demo@workspace:js/demo"],
+    "@moq/demo": ["@moq/demo@workspace:dev/web"],
+
+    "@moq/drone": ["@moq/drone@workspace:dev/drone"],
 
     "@moq/hang": ["@moq/hang@workspace:js/hang"],
 

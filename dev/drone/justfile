@@ -1,0 +1,18 @@
+set fallback
+
+# Run the drone demo: relay + drone publisher(s) + web viewer.
+default count='1':
+	bun install
+
+	bun run concurrently --kill-others --prefix-colors auto \
+		"just relay" \
+		"sleep 1 && just wait && just start {{count}}" \
+		"sleep 2 && just wait && just web"
+
+# Add drone publisher(s) to an already-running relay.
+start count='1' url='http://localhost:4443/anon':
+	cargo run --bin moq-drone -- --url {{url}} --count {{count}}
+
+# Host the web server
+web url='http://localhost:4443/anon':
+	VITE_RELAY_URL="{{url}}" bun run --filter @moq/drone dev --open

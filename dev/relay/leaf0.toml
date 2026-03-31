@@ -39,7 +39,7 @@ connect = "localhost:4443"
 
 # Use the token in this file when connecting to other nodes.
 # `just auth-token` will populate this file.
-token = "dev/root.jwt"
+token = "root.jwt"
 
 # My hostname, which must be accessible from other nodes.
 node = "localhost:4444"
@@ -63,7 +63,7 @@ tls.disable_verify = true
 
 [auth]
 # `just auth-key` will populate this file.
-key = "dev/root.jwk"
+key = "root.jwk"
 
 # Allow anonymous publishing and subscribing for this prefix.
 public = "anon"

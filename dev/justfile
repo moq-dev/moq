@@ -1,0 +1,29 @@
+set fallback
+
+mod drone
+mod pub
+mod relay
+mod web
+
+# Run the web demo (default).
+default:
+	bun install
+	bun run concurrently --kill-others --names srv,bbb,web --prefix-colors auto \
+		"just relay" \
+		"just wait && just pub bbb" \
+		"just wait && just web"
+
+# Wait for the localhost relay to be ready by repeatedly requesting the cert
+[private]
+wait url="http://localhost:4443/certificate.sha256":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	for i in $(seq 1 60); do
+		curl -sf "{{url}}" > /dev/null 2>&1 && exit 0
+		sleep 1
+	done
+	exit 1
+
+# Throttle UDP traffic for testing (macOS only, requires sudo).
+throttle:
+	throttle/enable

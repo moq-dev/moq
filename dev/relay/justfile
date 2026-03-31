@@ -1,0 +1,67 @@
+set fallback
+
+# Run a localhost relay server without authentication.
+default:
+	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- localhost.toml
+
+# Run a cluster of relay servers.
+cluster:
+	bun install
+	@just auth-token
+
+	bun run concurrently --kill-others --names root,leaf0,leaf1,bbb,tos,web --prefix-colors auto \
+		"just root" \
+		"just wait && just leaf0" \
+		"just wait && just leaf1" \
+		"just wait && just pub bbb http://localhost:4444/demo?jwt=$(cat demo-cli.jwt)" \
+		"just wait && just pub tos http://localhost:4443/demo?jwt=$(cat demo-cli.jwt)" \
+		"just wait && env VITE_RELAY_URL=http://localhost:4445/demo?jwt=$(cat demo-web.jwt) bun run --filter @moq/demo dev"
+
+# Run a localhost root server, accepting connections from leaf nodes.
+root: auth-key
+	cargo run --bin moq-relay -- root.toml
+
+# Run a localhost leaf, connecting to the root server.
+leaf0: auth-token
+	cargo run --bin moq-relay -- leaf0.toml
+
+# Run a second localhost leaf, connecting to the root server.
+leaf1: auth-token
+	cargo run --bin moq-relay -- leaf1.toml
+
+# Generate a random secret key for authentication.
+auth-key:
+	@if [ ! -f "root.jwk" ]; then \
+		rm -f *.jwt; \
+		cargo run --bin moq-token-cli -- --key "root.jwk" generate; \
+	fi
+
+# Generate authentication tokens for local development.
+auth-token: auth-key
+	@if [ ! -f "demo-web.jwt" ]; then \
+		cargo run --quiet --bin moq-token-cli -- --key "root.jwk" sign \
+			--root "demo" \
+			--subscribe "" \
+			--publish "me" \
+			> demo-web.jwt ; \
+	fi
+
+	@if [ ! -f "demo-cli.jwt" ]; then \
+		cargo run --quiet --bin moq-token-cli -- --key "root.jwk" sign \
+			--root "demo" \
+			--publish "" \
+			> demo-cli.jwt ; \
+	fi
+
+	@if [ ! -f "root.jwt" ]; then \
+		cargo run --quiet --bin moq-token-cli -- --key "root.jwk" sign \
+			--root "" \
+			--subscribe "" \
+			--publish "" \
+			--cluster \
+			> root.jwt ; \
+	fi
+
+# Connect tokio-console to the relay server (port 6680).
+console:
+	tokio-console http://127.0.0.1:6680
