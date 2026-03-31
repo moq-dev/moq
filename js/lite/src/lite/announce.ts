@@ -32,8 +32,6 @@ export class Announce {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 				break;
-			// biome-ignore lint/complexity/noUselessSwitchCase: explicit for documentation
-			case Version.DRAFT_04:
 			default:
 				if (this.hops.length > MAX_HOPS) {
 					throw new Error(`hop count ${this.hops.length} exceeds maximum of ${MAX_HOPS}`);
@@ -66,8 +64,6 @@ export class Announce {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 				break;
-			// biome-ignore lint/complexity/noUselessSwitchCase: explicit for documentation
-			case Version.DRAFT_04:
 			default: {
 				const count = await r.u53();
 				if (count > MAX_HOPS) {
@@ -115,8 +111,6 @@ export class AnnounceInterest {
 			case Version.DRAFT_02:
 			case Version.DRAFT_03:
 				break;
-			// biome-ignore lint/complexity/noUselessSwitchCase: explicit for documentation
-			case Version.DRAFT_04:
 			default:
 				await w.u62(this.excludeHop);
 				break;
@@ -132,8 +126,6 @@ export class AnnounceInterest {
 			case Version.DRAFT_02:
 			case Version.DRAFT_03:
 				break;
-			// biome-ignore lint/complexity/noUselessSwitchCase: explicit for documentation
-			case Version.DRAFT_04:
 			default:
 				excludeHop = await r.u62();
 				break;
