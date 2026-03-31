@@ -14,7 +14,7 @@ use hang::container::Frame;
 pub struct Convert {
 	input: moq_lite::BroadcastConsumer,
 	output: moq_lite::BroadcastProducer,
-	catalog_consumer: hang::CatalogConsumer,
+	catalog_consumer: Option<hang::CatalogConsumer>,
 	catalog_producer: crate::CatalogProducer,
 	tracks: HashMap<String, TrackState>,
 }
@@ -37,7 +37,7 @@ impl Convert {
 		Ok(Self {
 			input,
 			output,
-			catalog_consumer,
+			catalog_consumer: Some(catalog_consumer),
 			catalog_producer,
 			tracks: HashMap::new(),
 		})
@@ -45,13 +45,14 @@ impl Convert {
 
 	/// Poll the converter forward.
 	pub fn poll(&mut self, waiter: &moq_lite::conducer::Waiter) -> Poll<anyhow::Result<()>> {
-		if let Poll::Ready(catalog) = self.catalog_consumer.poll_next(waiter)? {
-			let Some(catalog) = catalog else {
-				return Poll::Ready(Ok(()));
-			};
-
-			self.update_catalog(&catalog)?;
-		};
+		if let Some(consumer) = &mut self.catalog_consumer {
+			if let Poll::Ready(catalog) = consumer.poll_next(waiter)? {
+				match catalog {
+					Some(catalog) => self.update_catalog(&catalog)?,
+					None => self.catalog_consumer = None,
+				}
+			}
+		}
 
 		let mut error = None;
 		self.tracks.retain(|_, t| match t {
@@ -68,6 +69,11 @@ impl Convert {
 
 		if let Some(e) = error {
 			return Poll::Ready(Err(e));
+		}
+
+		if self.catalog_consumer.is_none() && !self.tracks.values().any(|t| matches!(t, TrackState::Convert(_))) {
+			let _ = self.catalog_producer.finish();
+			return Poll::Ready(Ok(()));
 		}
 
 		Poll::Pending
@@ -282,6 +288,7 @@ mod test {
 	#[cfg(feature = "mp4")]
 	#[tokio::test]
 	async fn cmaf_to_legacy_video() {
+		tokio::time::pause();
 		use base64::Engine;
 		use hang::catalog::Container;
 
@@ -300,7 +307,7 @@ mod test {
 			init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
 		};
 
-		let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&cmaf_config);
+		let (consumer, mut video_track, _broadcast, mut catalog_track) = setup_input(&cmaf_config);
 		let output = moq_lite::Broadcast::new().produce();
 		let output_consumer = output.consume();
 		let converter = super::Convert::new(consumer, output).unwrap();
@@ -309,6 +316,7 @@ mod test {
 		tokio::spawn(async move {
 			tokio::task::yield_now().await;
 			write_cmaf_frames(&mut video_track, &cmaf_frames_clone);
+			catalog_track.finish().unwrap();
 		});
 
 		let (convert_result, legacy_frames) = tokio::join!(converter.run(), async {
@@ -328,10 +336,11 @@ mod test {
 
 	#[tokio::test]
 	async fn legacy_passthrough() {
+		tokio::time::pause();
 		let config = test_video_config();
 		let frames = vec![(ts(0), vec![0xAA, 0xBB], true), (ts(33_000), vec![0xCC, 0xDD], false)];
 
-		let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&config);
+		let (consumer, mut video_track, _broadcast, mut catalog_track) = setup_input(&config);
 		let output = moq_lite::Broadcast::new().produce();
 		let output_consumer = output.consume();
 
@@ -341,6 +350,7 @@ mod test {
 		tokio::spawn(async move {
 			tokio::task::yield_now().await;
 			write_legacy_frames(&mut video_track, &frames_clone);
+			catalog_track.finish().unwrap();
 		});
 
 		let (convert_result, result) = tokio::join!(converter.run(), async {
