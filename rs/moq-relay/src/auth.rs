@@ -230,10 +230,10 @@ impl Auth {
 		let guest_pub = Self::dedup_paths(guest_pub);
 
 		if guest_sub.len() > 1 {
-			tracing::warn!("keys have different guest_sub paths: {:?}; allowing all", guest_sub);
+			tracing::debug!("keys have multiple guest_sub paths: {:?}", guest_sub);
 		}
 		if guest_pub.len() > 1 {
-			tracing::warn!("keys have different guest_pub paths: {:?}; allowing all", guest_pub);
+			tracing::debug!("keys have multiple guest_pub paths: {:?}", guest_pub);
 		}
 
 		(guest_sub, guest_pub)
@@ -378,26 +378,40 @@ impl Auth {
 		};
 
 		// If a more specific path is provided, reduce the permissions.
-		let subscribe = claims
+		let subscribe: Vec<PathOwned> = claims
 			.subscribe
 			.into_iter()
 			.filter_map(|p| {
 				let p = Path::new(&p);
 				if !p.is_empty() {
-					p.strip_prefix(&suffix).map(|p| p.to_owned())
+					if let Some(remaining) = p.strip_prefix(&suffix) {
+						Some(remaining.to_owned())
+					} else if suffix.has_prefix(&p) {
+						// Connection is under the allowed prefix — grant full access
+						Some(Path::new("").to_owned())
+					} else {
+						None
+					}
 				} else {
 					Some(p.to_owned())
 				}
 			})
 			.collect();
 
-		let publish = claims
+		let publish: Vec<PathOwned> = claims
 			.publish
 			.into_iter()
 			.filter_map(|p| {
 				let p = Path::new(&p);
 				if !p.is_empty() {
-					p.strip_prefix(&suffix).map(|p| p.to_owned())
+					if let Some(remaining) = p.strip_prefix(&suffix) {
+						Some(remaining.to_owned())
+					} else if suffix.has_prefix(&p) {
+						// Connection is under the allowed prefix — grant full access
+						Some(Path::new("").to_owned())
+					} else {
+						None
+					}
 				} else {
 					Some(p.to_owned())
 				}
@@ -409,6 +423,11 @@ impl Auth {
 			(Some(_), false) => return Err(AuthError::ExpectedCluster),
 			_ => None,
 		};
+
+		// Reject connections that end up with no permissions after reduction
+		if subscribe.is_empty() && publish.is_empty() && !claims.cluster {
+			return Err(AuthError::IncorrectRoot);
+		}
 
 		Ok(AuthToken {
 			root: root.to_owned(),
@@ -949,6 +968,16 @@ mod tests {
 		assert_eq!(token.root, "demo".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec![]);
+
+		// Anonymous access to /demo/room/123 — still allowed (subpath of guest prefix)
+		let token = auth.verify(&AuthParams::new("/demo/room/123"))?;
+		assert_eq!(token.root, Path::new("demo/room/123").to_owned());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec![]);
+
+		// Anonymous access to /other — should fail (not under guest prefix)
+		let result = auth.verify(&AuthParams::new("/other"));
+		assert!(result.is_err());
 
 		Ok(())
 	}
