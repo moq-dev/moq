@@ -137,10 +137,6 @@ const REFRESH_ERROR_INTERVAL: Duration = Duration::from_secs(300);
 pub struct Auth {
 	key: Option<Arc<Mutex<KeySet>>>,
 	public: Option<PathOwned>,
-	/// Aggregated public subscribe path from loaded keys.
-	public_sub: Option<String>,
-	/// Aggregated public publish path from loaded keys.
-	public_pub: Option<String>,
 	refresh_task: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
 
@@ -211,30 +207,30 @@ impl Auth {
 	/// Pick the most permissive public paths from a set of keys.
 	/// Shorter prefixes are more permissive (e.g. "" beats "demo").
 	fn aggregate_public_paths(key_set: &KeySet) -> (Option<String>, Option<String>) {
-		let mut public_sub: Option<String> = None;
-		let mut public_pub: Option<String> = None;
+		let mut anon_sub: Option<String> = None;
+		let mut anon_pub: Option<String> = None;
 
 		for key in &key_set.keys {
-			if let Some(ref sub) = key.public_sub {
-				public_sub = Some(match public_sub {
+			if let Some(ref sub) = key.anon_sub {
+				anon_sub = Some(match anon_sub {
 					Some(existing) if existing.len() <= sub.len() => existing,
 					_ => sub.clone(),
 				});
 			}
-			if let Some(ref pub_) = key.public_pub {
-				public_pub = Some(match public_pub {
+			if let Some(ref pub_) = key.anon_pub {
+				anon_pub = Some(match anon_pub {
 					Some(existing) if existing.len() <= pub_.len() => existing,
 					_ => pub_.clone(),
 				});
 			}
 		}
 
-		(public_sub, public_pub)
+		(anon_sub, anon_pub)
 	}
 
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
 		let public = config.public.as_ref().map(|p| {
-			tracing::warn!("--auth-public is deprecated; use public_sub/public_pub fields in the JWK instead");
+			tracing::warn!("--auth-public is deprecated; set anon_sub/anon_pub fields on the JWK instead");
 			p.as_path().to_owned()
 		});
 
@@ -248,8 +244,6 @@ impl Auth {
 			Ok(Self {
 				key: None,
 				public,
-				public_sub: None,
-				public_pub: None,
 				refresh_task: None,
 			})
 		} else {
@@ -264,11 +258,6 @@ impl Auth {
 		tracing::info!(%uri, "loading JWK set");
 
 		Self::refresh_key_set(&uri, key_set.as_ref()).await?;
-
-		let (public_sub, public_pub) = {
-			let ks = key_set.lock().expect("keyset mutex poisoned");
-			Self::aggregate_public_paths(&ks)
-		};
 
 		let refresh_task = if let Some(refresh_interval_secs) = refresh_interval {
 			anyhow::ensure!(refresh_interval_secs >= 30, "refresh_interval cannot be less than 30");
@@ -285,25 +274,19 @@ impl Auth {
 		Ok(Self {
 			key: Some(key_set),
 			public,
-			public_sub,
-			public_pub,
 			refresh_task,
 		})
 	}
 
 	fn new_local(key: String, public: Option<PathOwned>) -> anyhow::Result<Self> {
 		let key = moq_token::Key::from_file(&key).context("cannot load key")?;
-		let key_set = KeySet {
+		let key_set = Arc::new(Mutex::new(KeySet {
 			keys: vec![Arc::new(key)],
-		};
-		let (public_sub, public_pub) = Self::aggregate_public_paths(&key_set);
-		let key_set = Arc::new(Mutex::new(key_set));
+		}));
 
 		Ok(Self {
 			key: Some(key_set),
 			public,
-			public_sub,
-			public_pub,
 			refresh_task: None,
 		})
 	}
@@ -322,15 +305,31 @@ impl Auth {
 				.map_err(|_| AuthError::DecodeFailed)?
 		} else if params.jwt.is_some() {
 			return Err(AuthError::UnexpectedToken);
-		} else if self.public_sub.is_some() || self.public_pub.is_some() {
-			// Use key-based public access permissions
-			let subscribe = self.public_sub.iter().cloned().collect();
-			let publish = self.public_pub.iter().cloned().collect();
-			moq_token::Claims {
-				root: "".to_string(),
-				subscribe,
-				publish,
-				..Default::default()
+		} else if let Some(key) = self.key.as_deref() {
+			// Compute public access permissions on-demand from the current keyset
+			let ks = key.lock().expect("key mutex poisoned");
+			let (anon_sub, anon_pub) = Self::aggregate_public_paths(&ks);
+			drop(ks);
+
+			if anon_sub.is_some() || anon_pub.is_some() {
+				let subscribe = anon_sub.into_iter().collect();
+				let publish = anon_pub.into_iter().collect();
+				moq_token::Claims {
+					root: "".to_string(),
+					subscribe,
+					publish,
+					..Default::default()
+				}
+			} else if let Some(public) = &self.public {
+				// Deprecated: fall back to --auth-public
+				moq_token::Claims {
+					root: public.to_string(),
+					subscribe: vec!["".to_string()],
+					publish: vec!["".to_string()],
+					..Default::default()
+				}
+			} else {
+				return Err(AuthError::ExpectedToken);
 			}
 		} else if let Some(public) = &self.public {
 			// Deprecated: fall back to --auth-public
@@ -410,13 +409,13 @@ mod tests {
 	}
 
 	fn create_test_key_with_public(
-		public_sub: Option<&str>,
-		public_pub: Option<&str>,
+		anon_sub: Option<&str>,
+		anon_pub: Option<&str>,
 	) -> anyhow::Result<(NamedTempFile, Key)> {
 		let key_file = NamedTempFile::new()?;
 		let mut key = Key::generate(Algorithm::HS256, None)?;
-		key.public_sub = public_sub.map(|s| s.to_string());
-		key.public_pub = public_pub.map(|s| s.to_string());
+		key.anon_sub = anon_sub.map(|s| s.to_string());
+		key.anon_pub = anon_pub.map(|s| s.to_string());
 		key.to_file(key_file.path())?;
 		Ok((key_file, key))
 	}
@@ -909,7 +908,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_key_public_sub_allows_anonymous_subscribe() -> anyhow::Result<()> {
+	async fn test_key_anon_sub_allows_anonymous_subscribe() -> anyhow::Result<()> {
 		let (key_file, _) = create_test_key_with_public(Some("demo"), None)?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
@@ -933,7 +932,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_key_public_pub_allows_anonymous_publish() -> anyhow::Result<()> {
+	async fn test_key_anon_pub_allows_anonymous_publish() -> anyhow::Result<()> {
 		let (key_file, _) = create_test_key_with_public(None, Some("demo"))?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),

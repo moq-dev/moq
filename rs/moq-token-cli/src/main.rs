@@ -107,8 +107,8 @@ fn main() -> anyhow::Result<()> {
 		} => {
 			let mut key = moq_token::Key::generate(algorithm, id)?;
 
-			key.public_sub = public_subscribe.or_else(|| public.clone());
-			key.public_pub = public_publish.or(public);
+			key.anon_sub = public_subscribe.or_else(|| public.clone());
+			key.anon_pub = public_publish.or(public);
 
 			if let Some(public_key) = public_key {
 				key.to_public()?.to_file(public_key)?;

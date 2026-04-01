@@ -29,8 +29,8 @@ const BaseKeySchema = z.object({
 	alg: AlgorithmSchema,
 	key_ops: z.array(OperationSchema).nonempty(),
 	kid: z.string().optional(),
-	public_sub: z.string().optional(),
-	public_pub: z.string().optional(),
+	anon_sub: z.string().optional(),
+	anon_pub: z.string().optional(),
 });
 
 const OctKeySchema = BaseKeySchema.extend({

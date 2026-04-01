@@ -2,7 +2,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import * as base64 from "@hexagon/base64";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import type { Algorithm } from "./algorithm.ts";
 import type { Claims } from "./claims.ts";
 import { generate } from "./generate.ts";
@@ -20,22 +20,21 @@ program
 	.option("--algorithm <algorithm>", "Algorithm to use", "HS256")
 	.option("--id <id>", "Optional key ID, useful for rotating keys")
 	.option("--public-key <path>", "Optional path to save the public key (for asymmetric algorithms)")
-	.option("--public-subscribe <path>", "Path prefix for unauthenticated subscribe access")
-	.option("--public-publish <path>", "Path prefix for unauthenticated publish access")
+	.addOption(
+		new Option("--public-subscribe <path>", "Path prefix for unauthenticated subscribe access").conflicts("public"),
+	)
+	.addOption(
+		new Option("--public-publish <path>", "Path prefix for unauthenticated publish access").conflicts("public"),
+	)
 	.option("--public <path>", "Path prefix for both unauthenticated subscribe and publish access")
 	.action(async (options) => {
 		try {
-			if (options.public && (options.publicSubscribe || options.publicPublish)) {
-				console.error("Error: --public cannot be used with --public-subscribe or --public-publish");
-				process.exit(1);
-			}
-
 			const algorithm = options.algorithm as Algorithm;
-			const public_sub = options.publicSubscribe ?? options.public;
-			const public_pub = options.publicPublish ?? options.public;
+			const anon_sub = options.publicSubscribe ?? options.public;
+			const anon_pub = options.publicPublish ?? options.public;
 			const key = await generate(algorithm, options.id, {
-				...(public_sub !== undefined && { public_sub }),
-				...(public_pub !== undefined && { public_pub }),
+				...(anon_sub !== undefined && { anon_sub }),
+				...(anon_pub !== undefined && { anon_pub }),
 			});
 
 			// Save the private key
