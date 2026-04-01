@@ -15,7 +15,7 @@ pub async fn run_client(client: moq_native::Client, url: Url, name: String, publ
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready.
-	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 	tokio::select! {
 		res = publish.run() => res,

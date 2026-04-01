@@ -34,9 +34,9 @@ qmux = { version = "0.0.5", default-features = false }
 serde = { version = "1", features = ["derive"] }
 tokio = "1.48"
 web-async = { version = "0.1.3", features = ["tracing"] }
-web-transport-iroh = "0.2"
+web-transport-iroh = "0.3"
 web-transport-noq = "0.0.3"
-web-transport-proto = "0.5"
+web-transport-proto = "0.6"
 web-transport-quiche = "0.2"
 web-transport-quinn = "0.11"
 web-transport-trait = "0.3.4"

@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready after all initialization is complete
-	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 	tokio::select! {
 		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),

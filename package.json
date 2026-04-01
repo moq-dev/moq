@@ -2,9 +2,9 @@
 	"name": "moq",
 	"version": "0.0.0",
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.3",
+		"@biomejs/biome": "^2.4.10",
 		"concurrently": "^9.2.1",
-		"publint": "^0.3.17"
+		"publint": "^0.3.18"
 	},
 	"private": true,
 	"scripts": {
