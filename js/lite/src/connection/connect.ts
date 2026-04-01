@@ -367,6 +367,9 @@ async function connectWebTransport(
 
 	const quic = new WebTransport(finalUrl, finalOptions);
 
+	// Both .ready and .closed reject on failure; catch .closed to avoid an unhandled rejection.
+	quic.closed.catch(() => {});
+
 	// Wait for the WebTransport to connect, or for the cancel promise to resolve.
 	// Close the connection if we lost the race.
 	const loaded = await Promise.race([quic.ready.then(() => true), cancel]);

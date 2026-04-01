@@ -1,10 +1,49 @@
 set fallback
 
+# --- R2 bucket management (vid.moq.dev) ---
+
+# Initialize the bucket (this is mine; make your own)
+init:
+	bun init
+	bun wrangler r2 bucket create video-moq-dev
+
+# Deploy the worker
+deploy:
+	bun init
+	bun wrangler deploy
+
+# Upload a single file to R2.
+# NOTE: Videos should be fragmented to minimize latency when streaming.
+# Use ffmpeg to fragment before uploading:
+#	 ffmpeg -i input.mp4 -c copy -f mp4 \
+#		 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
+#		 output.mp4
+upload file:
+	bun init
+	bun wrangler r2 object put "video-moq-dev/{{file}}" --file "media/{{file}}" --remote
+
+# Sync all files in a local directory to R2
+sync dir="media":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	for file in "{{dir}}"/*; do
+		key=$(basename "$file")
+		echo "Uploading $key..."
+		bun wrangler r2 object put "video-moq-dev/$key" --file "$file" --remote
+	done
+
+# List files in the bucket
+list:
+	bun init
+	bun wrangler r2 object list "video-moq-dev"
+
+# --- Publishing ---
+
 # Publish a video using ffmpeg to a relay server.
 default name='bbb' url='http://localhost:4443/anon' *args:
 	just download "{{name}}"
 	cargo build --bin moq-cli
-	just ffmpeg-cmaf "media/{{name}}.fmp4" |\
+	just ffmpeg-cmaf "media/{{name}}.mp4" |\
 	cargo run --bin moq-cli -- \
 		{{args}} publish --url "{{url}}" --name "{{name}}" fmp4
 
@@ -12,7 +51,7 @@ default name='bbb' url='http://localhost:4443/anon' *args:
 iroh name url prefix="":
 	just download "{{name}}"
 	cargo build --bin moq-cli
-	just ffmpeg-cmaf "media/{{name}}.fmp4" |\
+	just ffmpeg-cmaf "media/{{name}}.mp4" |\
 	cargo run --bin moq-cli -- \
 		--iroh-enabled publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4
 
@@ -99,7 +138,7 @@ h264 name url="http://localhost:4443/anon" *args:
 
 	ffmpeg -hide_banner -v quiet \
 		-stream_loop -1 -re \
-		-i "media/{{name}}.fmp4" \
+		-i "media/{{name}}.mp4" \
 		-c:v copy -an \
 		-bsf:v h264_mp4toannexb \
 		-f h264 \
@@ -109,7 +148,7 @@ h264 name url="http://localhost:4443/anon" *args:
 serve name *args:
 	just download "{{name}}"
 	cargo build --bin moq-cli
-	just ffmpeg-cmaf "media/{{name}}.fmp4" |\
+	just ffmpeg-cmaf "media/{{name}}.mp4" |\
 	cargo run --bin moq-cli -- \
 		{{args}} serve --listen "[::]:4443" --tls-generate "localhost" \
 		--name "{{name}}" fmp4
@@ -171,30 +210,12 @@ console:
 
 # --- Private helpers ---
 
-# Download a test video and convert it to fragmented MP4.
+# Download a test video (already fragmented on vid.moq.dev).
 [private]
 download name:
 	@if [ ! -f "media/{{name}}.mp4" ]; then \
-		curl -fsSL $(just download-url {{name}}) -o "media/{{name}}.mp4"; \
+		curl -fsSL "https://vid.moq.dev/{{name}}.mp4" -o "media/{{name}}.mp4"; \
 	fi
-
-	@if [ ! -f "media/{{name}}.fmp4" ]; then \
-		ffmpeg -loglevel error -i "media/{{name}}.mp4" \
-			-c:v copy \
-			-f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
-			"media/{{name}}.fmp4"; \
-	fi
-
-# Returns the URL for a test video.
-[private]
-download-url name:
-	@case {{name}} in \
-		bbb) echo "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4" ;; \
-		tos) echo "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4" ;; \
-		av1) echo "http://download.opencontent.netflix.com.s3.amazonaws.com/AV1/Sparks/Sparks-5994fps-AV1-10bit-1920x1080-2194kbps.mp4" ;; \
-		hevc) echo "https://test-videos.co.uk/vids/jellyfish/mp4/h265/1080/Jellyfish_1080_10s_30MB.mp4" ;; \
-		*) echo "unknown" && exit 1 ;; \
-	esac
 
 # Convert an h264 input file to CMAF (fmp4) format to stdout.
 [private]
