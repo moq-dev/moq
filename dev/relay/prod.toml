@@ -27,7 +27,7 @@ key = "key.pem"
 
 # See docs/auth.md for more information.
 [auth]
-# Path to the authentication key file:
-# - For asymmetric keys (RS256, ES256, etc.): use the public key (e.g., "public.jwk")
-# - For symmetric keys (HS256, HS384, HS512): use the shared secret key (e.g., "secret.jwk")
-key = "public.jwk"
+# Directory or URL containing JWK files named by key ID.
+# - File path: reads {path}/{kid}.jwk from disk (e.g., "keys/")
+# - URL: fetches {url}/{kid}.jwk with HTTP caching (e.g., "https://api.moq.dev/keys")
+keys = "keys"

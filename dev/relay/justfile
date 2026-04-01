@@ -31,15 +31,16 @@ leaf1: auth-token
 
 # Generate a random secret key for authentication.
 auth-key:
-	@if [ ! -f "root.jwk" ]; then \
+	@mkdir -p keys
+	@if [ ! -f "keys/dev.jwk" ]; then \
 		rm -f *.jwt; \
-		cargo run --bin moq-token-cli -- --key "root.jwk" generate; \
+		cargo run --bin moq-token-cli -- --key "keys/dev.jwk" generate --id dev; \
 	fi
 
 # Generate authentication tokens for local development.
 auth-token: auth-key
 	@if [ ! -f "demo-web.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "root.jwk" sign \
+		cargo run --quiet --bin moq-token-cli -- --key "keys/dev.jwk" sign \
 			--root "demo" \
 			--subscribe "" \
 			--publish "me" \
@@ -47,14 +48,14 @@ auth-token: auth-key
 	fi
 
 	@if [ ! -f "demo-cli.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "root.jwk" sign \
+		cargo run --quiet --bin moq-token-cli -- --key "keys/dev.jwk" sign \
 			--root "demo" \
 			--publish "" \
 			> demo-cli.jwt ; \
 	fi
 
 	@if [ ! -f "root.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "root.jwk" sign \
+		cargo run --quiet --bin moq-token-cli -- --key "keys/dev.jwk" sign \
 			--root "" \
 			--subscribe "" \
 			--publish "" \

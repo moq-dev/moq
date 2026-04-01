@@ -250,7 +250,7 @@ async fn serve_announced(
 		jwt: query.jwt,
 		register: query.register,
 	};
-	let token = state.auth.verify(&params)?;
+	let token = state.auth.verify(&params).await?;
 	let Some(mut origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
@@ -287,7 +287,7 @@ async fn serve_fetch(
 		jwt: params.auth.jwt,
 		register: params.auth.register,
 	};
-	let token = state.auth.verify(&auth)?;
+	let token = state.auth.verify(&auth).await?;
 
 	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());

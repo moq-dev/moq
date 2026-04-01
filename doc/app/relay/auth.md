@@ -10,10 +10,13 @@ moq-relay uses JWT (JSON Web Tokens) for authentication and authorization. Token
 ## Overview
 
 The authentication flow:
-1. Generate a signing key (shared secret or public/private keypair)
-2. Configure the relay with the verification key
-3. Issue tokens to clients with their allowed paths
-4. Clients connect with `?jwt=<token>` query parameter
+1. Generate a signing key with a key ID (`kid`)
+2. Store the key file as `{kid}.jwk` in a directory or serve it via HTTP
+3. Configure the relay with the key directory or URL
+4. Issue tokens to clients with their allowed paths
+5. Clients connect with `?jwt=<token>` query parameter
+
+The relay resolves keys on demand by extracting the `kid` from the JWT header and fetching the corresponding key.
 
 ## Quick Start
 
@@ -22,41 +25,64 @@ The authentication flow:
 Using the Rust CLI:
 ```bash
 # Symmetric key (simpler, key must stay secret)
-moq-token-cli --key root.jwk generate
+moq-token-cli --key keys/my-key.jwk generate --id my-key
 
 # Asymmetric key (private signs, public verifies)
-moq-token-cli --key private.jwk generate --algorithm RS256 --public public.jwk
+moq-token-cli --key private.jwk generate --id my-key --algorithm ES256 --public keys/my-key.jwk
 ```
 
-Using the JavaScript CLI:
-```bash
-bunx @moq/token generate --key root.jwk
-```
+The `--id` flag sets the key ID (`kid`), which is used to look up the key later. The key file should be named `{kid}.jwk`.
 
 ### Configure the Relay
 
 ```toml
 [auth]
-# Path to the verification key
-# - Symmetric: the shared secret (e.g., "root.jwk")
-# - Asymmetric: the public key (e.g., "public.jwk")
-key = "root.jwk"
+# Directory containing JWK files named by key ID
+keys = "keys"
 
 # Optional: allow anonymous access to a path prefix
 public = "anon"
+```
+
+Or with a remote key server:
+```toml
+[auth]
+# Base URL for key lookup — fetches {url}/{kid}.jwk
+keys = "https://api.example.com/keys"
 ```
 
 ### Issue a Token
 
 ```bash
 # Allow publishing to demo/my-stream and subscribing to anything under demo/
-moq-token-cli --key root.jwk sign --root demo --publish my-stream --subscribe ""
+moq-token-cli --key keys/my-key.jwk sign --root demo --publish my-stream --subscribe ""
 ```
 
 The client connects with the token:
 ```text
 https://relay.example.com/demo/my-stream?jwt=eyJhbGciOiJIUzI1NiIs...
 ```
+
+## Key Resolution
+
+When a client connects with a JWT, the relay:
+1. Decodes the JWT header to extract the `kid` (key ID)
+2. Looks up the key from the configured source
+3. Verifies the JWT signature with the resolved key
+4. Checks the token's `root` claim matches the connection path
+
+### File Mode
+
+With `keys = "/path/to/keys"`, the relay reads `/path/to/keys/{kid}.jwk` from disk on each request.
+
+### URL Mode
+
+With `keys = "https://api.example.com/keys"`, the relay fetches `https://api.example.com/keys/{kid}.jwk` with HTTP caching:
+
+- Respects `Cache-Control: max-age` and `stale-while-revalidate` headers
+- Uses `ETag` / `If-None-Match` for efficient revalidation
+- Fresh keys are served from memory without network requests
+- Stale keys within the revalidation window are returned immediately while revalidating in the background
 
 ## Token Claims
 
@@ -112,7 +138,7 @@ The `public` setting allows unauthenticated access to a path prefix:
 
 ```toml
 [auth]
-key = "root.jwk"
+keys = "keys"
 public = "anon"  # Anyone can publish/subscribe to anon/*
 ```
 
@@ -129,16 +155,22 @@ public = ""
 ### Public viewing, authenticated publishing
 ```toml
 [auth]
-key = "root.jwk"
+keys = "keys"
 public = "streams"  # Anyone can subscribe to streams/*
 # Publishing requires a token
 ```
 
-### Fully authenticated
+### Fully authenticated (local keys)
 ```toml
 [auth]
-key = "public.jwk"  # Asymmetric, public key only
+keys = "keys"
 # Everything requires a token
+```
+
+### Fully authenticated (remote key server)
+```toml
+[auth]
+keys = "https://api.example.com/keys"
 ```
 
 ## Library Usage
@@ -163,7 +195,7 @@ const token = await sign(key, claims)
 
 ### Rust
 ```bash
-moq-token-cli --key root.jwk sign \
+moq-token-cli --key keys/my-key.jwk sign \
   --root demo \
   --publish my-stream \
   --subscribe "" \

@@ -26,9 +26,9 @@ listen = "[::]:4443"
 # Authentication is rather crude because it's GOOD ENOUGH for now.
 # see docs/auth.md for more information.
 [auth]
-# `just auth-key` will generate a root key.
-# If you want to disable authentication, don't specify a key.
-key = "root.jwk"
+# `just auth-key` will generate a key directory with JWK files named by key ID.
+# If you want to disable authentication, don't specify keys.
+keys = "keys"
 
 # Allow anonymous publishing and subscribing for anon/**
 public = "anon"

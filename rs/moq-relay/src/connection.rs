@@ -28,7 +28,7 @@ impl Connection {
 		};
 
 		// Verify the URL before accepting the connection.
-		let token = match self.auth.verify(&params) {
+		let token = match self.auth.verify(&params).await {
 			Ok(token) => token,
 			Err(err) => {
 				let status: http::StatusCode = err.clone().into();

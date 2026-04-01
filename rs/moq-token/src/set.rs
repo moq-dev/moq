@@ -3,7 +3,6 @@ use anyhow::Context;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// JWK Set to spec <https://datatracker.ietf.org/doc/html/rfc7517#section-5>
 #[derive(Default, Clone)]
