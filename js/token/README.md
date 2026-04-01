@@ -10,7 +10,6 @@ For general installation as a library
 npm add @moq/token
 ```
 
-
 #### CLI
 
 To use as a CLI (with node installed)
@@ -18,7 +17,9 @@ To use as a CLI (with node installed)
 ```bash
 npm install -g @moq/token
 ```
+
 And then run
+
 ```bash
 moq-token generate ...
 ```
@@ -29,10 +30,10 @@ You can also just directly use it via bun as:
 bunx @moq/token generate ...
 ```
 
-
 ## Usage
 
 #### Generation
+
 You would first generate a token as so:
 
 ```typescript
@@ -42,12 +43,14 @@ const key = await generate('HS256');
 ```
 
 or as a CLI
+
 ```bash
 # generate secret key
 moq-token generate --key key.jwk
 ```
 
 The default is HS256, you can choose other algorithms with `--algorithm`:
+
 ```bash
 moq-token generate --key key.jwk --algorithm ES256
 ```
@@ -113,6 +116,7 @@ See **[examples/sign-and-verify.ts](./examples/sign-and-verify.ts)** for a compl
 ### Algorithm
 
 Supported algorithms:
+
 - `HS256` - HMAC with SHA-256
 - `HS384` - HMAC with SHA-384
 - `HS512` - HMAC with SHA-512

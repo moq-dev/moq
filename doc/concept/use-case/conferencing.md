@@ -4,9 +4,11 @@ description: How MoQ compares to conferencing protocols
 ---
 
 # MoQ vs WebRTC
+
 This page compares MoQ with **WebRTC**, the dominant protocol for conferencing.
 
 ## Requirements
+
 Boring stuff first.
 Conferencing protocols need to:
 
@@ -16,11 +18,13 @@ Conferencing protocols need to:
 - Support a wide range of networks
 
 Some optional features:
+
 - Support browsers (aka WebRTC)
 - End-to-end encryption.
 - Peer-to-peer connections.
 
 ## Existing Protocols
+
 - **WebRTC** ([Web Real-Time Communication](https://en.wikipedia.org/wiki/WebRTC)) - The dominant protocol for conferencing.
 - **RTP** ([Real-Time Transport Protocol](https://en.wikipedia.org/wiki/Real-time_Transport_Protocol)) - The core protocol within WebRTC.
 

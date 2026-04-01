@@ -8,6 +8,7 @@ description: Simulated drone fleet with live video and remote control via MoQ.
 A simulated drone fleet where each drone renders a 2D game scene with physics, publishes live video and sensor telemetry, while web viewers can discover drones, watch their feeds, and send control commands.
 
 This demo showcases MoQ's key differentiators:
+
 - **Prefix-based discovery** — drones are discovered automatically via announcement prefixes
 - **Bidirectional metadata** — sensor telemetry and control commands flow alongside video
 - **Low-latency video** — H.264 video with simulcast (720p + 360p)
@@ -20,6 +21,7 @@ just dev::drone
 ```
 
 This starts three components in parallel:
+
 1. **Relay** — a localhost MoQ relay server
 2. **Drone publisher** — a Rust binary that renders a 2D physics game, encodes video, and publishes sensor data
 3. **Web viewer** — a Vite dev server with a browser UI
@@ -37,6 +39,7 @@ Spawns 3 drone instances, each with a unique ID. They appear in the grid automat
 ## Controls
 
 Click a drone card to expand it, then:
+
 - **Arrow keys** — move the drone on the 5x5 grid
 - **Spacebar** — grab/drop a ball
 - **Dock button** — auto-navigate to the docking station

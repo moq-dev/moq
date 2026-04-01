@@ -4,6 +4,7 @@ description: A low-overhead container format for MoQ.
 ---
 
 # LOC - Low Overhead Container
+
 We originally wanted to use [CMAF](/concept/standard/msf) but there's a lot of overhead.
 Like 100 bytes per frame sort of overhead (`moof` + `mdat`), the type of overhead that kills audio-only streams.
 

@@ -7,17 +7,19 @@ The only argument is the path to a TOML configuration file.
 See [localhost.toml](../../dev/relay/localhost.toml) for an example configuration.
 
 ## HTTP
+
 Primarily for debugging, you can also connect to the relay via HTTP.
 
--  `GET /certificate.sha256`: Returns the fingerprint of the TLS certificate.
--  `GET /announced/*prefix`: Returns all of the announced tracks with the given (optional) prefix.
--  `GET /fetch/*path`: Returns the latest group of the given track.
+- `GET /certificate.sha256`: Returns the fingerprint of the TLS certificate.
+- `GET /announced/*prefix`: Returns all of the announced tracks with the given (optional) prefix.
+- `GET /fetch/*path`: Returns the latest group of the given track.
 
 The HTTP server listens on the same bind address, but TCP instead of UDP.
 The default is `http://localhost:4443`.
 HTTPS is currently not supported.
 
 ## Clustering
+
 In order to scale MoQ, you will eventually need to run multiple moq-relay instances potentially in different regions.
 This is called *clustering*, where the goal is that a user connects to the closest relay and they magically form a mesh behind the scenes.
 
@@ -32,8 +34,8 @@ They can then advertise their internal ip/hostname to other instances when publi
 
 Cluster arguments:
 
--   `--cluster-root <HOST>`: The hostname/ip of the root node. If missing, this node is a root.
--   `--cluster-node <HOST>`: The hostname/ip of this instance. There needs to be a corresponding valid TLS certificate, potentially self-signed. If missing, published broadcasts will only be available on this specific relay.
+- `--cluster-root <HOST>`: The hostname/ip of the root node. If missing, this node is a root.
+- `--cluster-node <HOST>`: The hostname/ip of this instance. There needs to be a corresponding valid TLS certificate, potentially self-signed. If missing, published broadcasts will only be available on this specific relay.
 
 ## Authentication
 
@@ -43,6 +45,7 @@ For detailed authentication setup, including token generation and configuration 
 **[Authentication Documentation](../../docs/auth.md)**
 
 Key features:
+
 - JWT tokens passed via query parameters (`?jwt=<token>`)
 - Path-based authorization with `root`, `pub`, and `sub` claims
 - Anonymous access support for public content
@@ -50,6 +53,7 @@ Key features:
 - Asymmetric key cryptography (RSASSA-PKCS1-SHA256/384/512, RSASSA-PSS-SHA256/384/512, ECDSA-SHA256/384, EdDSA)
 
 Quick example configuration in your `.toml` file:
+
 ```toml
 [auth]
 key = "dev/relay/root.jwk"    # JWT signing key (relative to working directory)

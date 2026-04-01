@@ -23,7 +23,7 @@ bun install
 bun run dev
 ```
 
-Then open [http://localhost:5173](http://localhost:5173) in a browser with WebTransport support (Chrome 97+, Edge 97+).
+Then open <http://localhost:5173> in a browser with WebTransport support (Chrome 97+, Edge 97+).
 
 ## Related
 

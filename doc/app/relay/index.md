@@ -4,6 +4,7 @@ description: A server that connects MoQ publishers and subscribers.
 ---
 
 # moq-relay
+
 A server that routes broadcasts between publishers and subscribers, performing caching, deduplication, and fan-out.
 
 ## Overview
@@ -11,6 +12,7 @@ A server that routes broadcasts between publishers and subscribers, performing c
 `moq-relay` is designed to run in datacenters, relaying media across multiple hops to improve quality of service and enable massive scale.
 
 **Features:**
+
 - Fan-out to multiple subscribers
 - Caching and deduplication
 - Cross-region clustering
@@ -127,6 +129,7 @@ RUST_LOG=moq_relay=trace moq-relay relay.toml
 Metrics (Prometheus format) are planned but not yet implemented.
 
 Current visibility:
+
 - Check logs for connection count
 - Use [HTTP endpoints](/app/relay/http) for track inspection
 - Monitor system resources (CPU, memory, bandwidth)
@@ -166,6 +169,7 @@ lsof -i :4443
 ### Certificate Errors
 
 Ensure:
+
 - Certificate is valid and not expired
 - Certificate matches domain name
 - Private key has correct permissions
@@ -174,6 +178,7 @@ Ensure:
 ### Connection Timeouts
 
 Check:
+
 - UDP port is open in firewall
 - Cloud provider allows UDP traffic
 - TLS certificate is valid

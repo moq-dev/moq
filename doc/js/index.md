@@ -16,6 +16,7 @@ The TypeScript implementation brings MoQ to web browsers using modern APIs like 
 Core pub/sub transport protocol for browsers. Implements the [moq-lite specification](/spec/draft-lcurley-moq-lite).
 
 **Features:**
+
 - WebTransport-based QUIC
 - Broadcasts, tracks, groups, frames
 - Browser and server-side support (with polyfill)
@@ -29,6 +30,7 @@ Core pub/sub transport protocol for browsers. Implements the [moq-lite specifica
 High-level media library with Web Components for streaming audio and video.
 
 **Features:**
+
 - Web Components (easiest integration)
 - JavaScript API for advanced use
 - WebCodecs-based encoding/decoding
@@ -162,11 +164,13 @@ Requires modern browser features:
 - **WebAudio** - For audio playback
 
 **Supported browsers:**
+
 - Chrome 97+
 - Edge 97+
 - Brave (recent versions)
 
 **Experimental support:**
+
 - Firefox (behind flag)
 - Safari (future support planned)
 
