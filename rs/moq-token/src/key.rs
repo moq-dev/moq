@@ -8,23 +8,7 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header};
 use rsa::BigUint;
 use rsa::pkcs1::EncodeRsaPrivateKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-	D: Deserializer<'de>,
-{
-	#[derive(Deserialize)]
-	#[serde(untagged)]
-	enum StringOrVec {
-		String(String),
-		Vec(Vec<String>),
-	}
-
-	match StringOrVec::deserialize(deserializer)? {
-		StringOrVec::String(s) => Ok(vec![s]),
-		StringOrVec::Vec(v) => Ok(v),
-	}
-}
+use serde_with::{OneOrMany, formats::PreferMany, serde_as};
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
 
@@ -158,6 +142,7 @@ pub struct RsaAdditionalPrime {
 
 /// JWK, almost to spec (<https://datatracker.ietf.org/doc/html/rfc7517>) but not quite the same
 /// because it's annoying to implement.
+#[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]
 pub struct Key {
@@ -179,15 +164,18 @@ pub struct Key {
 
 	/// Path prefixes for both unauthenticated subscribe and publish access.
 	/// Shorthand for setting both `guest_sub` and `guest_pub`.
-	#[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "string_or_vec")]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
 	pub guest: Vec<String>,
 
 	/// Path prefixes for unauthenticated subscribe access. `""` means everything.
-	#[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "string_or_vec")]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
 	pub guest_sub: Vec<String>,
 
 	/// Path prefixes for unauthenticated publish access. `""` means everything.
-	#[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "string_or_vec")]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
 	pub guest_pub: Vec<String>,
 
 	// Cached for performance reasons, unfortunately.
