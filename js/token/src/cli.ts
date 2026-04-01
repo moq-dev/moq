@@ -19,22 +19,22 @@ program
 	.requiredOption("--key <path>", "Path to save the key")
 	.option("--algorithm <algorithm>", "Algorithm to use", "HS256")
 	.option("--id <id>", "Optional key ID, useful for rotating keys")
-	.option("--public-key <path>", "Optional path to save the public key (for asymmetric algorithms)")
+	.option("--public <path>", "Optional path to save the public key (for asymmetric algorithms)")
 	.addOption(
-		new Option("--public-subscribe <path>", "Path prefix for unauthenticated subscribe access").conflicts("public"),
+		new Option("--guest-subscribe <path>", "Path prefix for unauthenticated subscribe access").conflicts("guest"),
 	)
 	.addOption(
-		new Option("--public-publish <path>", "Path prefix for unauthenticated publish access").conflicts("public"),
+		new Option("--guest-publish <path>", "Path prefix for unauthenticated publish access").conflicts("guest"),
 	)
-	.option("--public <path>", "Path prefix for both unauthenticated subscribe and publish access")
+	.option("--guest <path>", "Path prefix for both unauthenticated subscribe and publish access")
 	.action(async (options) => {
 		try {
 			const algorithm = options.algorithm as Algorithm;
-			const anon_sub = options.publicSubscribe ?? options.public;
-			const anon_pub = options.publicPublish ?? options.public;
+			const guest_sub = options.guestSubscribe ?? options.guest;
+			const guest_pub = options.guestPublish ?? options.guest;
 			const key = await generate(algorithm, options.id, {
-				...(anon_sub !== undefined && { anon_sub }),
-				...(anon_pub !== undefined && { anon_pub }),
+				...(guest_sub !== undefined && { guest_sub }),
+				...(guest_pub !== undefined && { guest_pub }),
 			});
 
 			// Save the private key
@@ -45,13 +45,13 @@ program
 			console.log(`Generated ${algorithm} key: ${options.key}`);
 
 			// Save public key if requested and key is asymmetric
-			if (options.publicKey && key.kty !== "oct") {
+			if (options.public && key.kty !== "oct") {
 				const publicKey = toPublicKey(key);
 				const publicKeyJson = JSON.stringify(publicKey, null, 2);
 				const publicKeyEncoded = base64.fromArrayBuffer(new TextEncoder().encode(publicKeyJson).buffer, true);
-				writeFileSync(options.publicKey, publicKeyEncoded, "utf-8");
-				console.log(`Generated public key: ${options.publicKey}`);
-			} else if (options.publicKey && key.kty === "oct") {
+				writeFileSync(options.public, publicKeyEncoded, "utf-8");
+				console.log(`Generated public key: ${options.public}`);
+			} else if (options.public && key.kty === "oct") {
 				console.error("Warning: Cannot save public key for symmetric (oct) algorithm");
 			}
 		} catch (error) {

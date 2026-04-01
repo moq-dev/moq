@@ -162,11 +162,11 @@ pub struct Key {
 
 	/// Path prefix for unauthenticated subscribe access. `""` means everything, `None` means no anonymous access.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub anon_sub: Option<String>,
+	pub guest_sub: Option<String>,
 
 	/// Path prefix for unauthenticated publish access. `""` means everything, `None` means no anonymous access.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub anon_pub: Option<String>,
+	pub guest_pub: Option<String>,
 
 	// Cached for performance reasons, unfortunately.
 	#[serde(skip)]
@@ -277,8 +277,8 @@ impl Key {
 				operations: [KeyOperation::Verify].into(),
 				key,
 				kid: self.kid.clone(),
-				anon_sub: self.anon_sub.clone(),
-				anon_pub: self.anon_pub.clone(),
+				guest_sub: self.guest_sub.clone(),
+				guest_pub: self.guest_pub.clone(),
 				decode: Default::default(),
 				encode: Default::default(),
 			}),
@@ -534,8 +534,8 @@ mod tests {
 				secret: b"test-secret-that-is-long-enough-for-hmac-sha256".to_vec(),
 			},
 			kid: Some("test-key-1".to_string()),
-			anon_sub: None,
-			anon_pub: None,
+			guest_sub: None,
+			guest_pub: None,
 			decode: Default::default(),
 			encode: Default::default(),
 		}
@@ -1201,12 +1201,12 @@ mod tests {
 
 				match public_key.key {
 					KeyType::RSA {
-						public: ref anon_public,
+						public: ref guest_public,
 						private: ref public_private,
 					} => {
 						assert!(public_private.is_none());
-						assert_eq!(public.n, anon_public.n);
-						assert_eq!(public.e, anon_public.e);
+						assert_eq!(public.n, guest_public.n);
+						assert_eq!(public.e, guest_public.e);
 					}
 					_ => panic!("Expected public key to be an RSA key"),
 				}
@@ -1239,12 +1239,12 @@ mod tests {
 
 				match public_key.key {
 					KeyType::RSA {
-						public: ref anon_public,
+						public: ref guest_public,
 						private: ref public_private,
 					} => {
 						assert!(public_private.is_none());
-						assert_eq!(public.n, anon_public.n);
-						assert_eq!(public.e, anon_public.e);
+						assert_eq!(public.n, guest_public.n);
+						assert_eq!(public.e, guest_public.e);
 					}
 					_ => panic!("Expected public key to be an RSA key"),
 				}

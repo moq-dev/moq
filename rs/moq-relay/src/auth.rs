@@ -207,30 +207,30 @@ impl Auth {
 	/// Pick the most permissive public paths from a set of keys.
 	/// Shorter prefixes are more permissive (e.g. "" beats "demo").
 	fn aggregate_public_paths(key_set: &KeySet) -> (Option<String>, Option<String>) {
-		let mut anon_sub: Option<String> = None;
-		let mut anon_pub: Option<String> = None;
+		let mut guest_sub: Option<String> = None;
+		let mut guest_pub: Option<String> = None;
 
 		for key in &key_set.keys {
-			if let Some(ref sub) = key.anon_sub {
-				anon_sub = Some(match anon_sub {
+			if let Some(ref sub) = key.guest_sub {
+				guest_sub = Some(match guest_sub {
 					Some(existing) if existing.len() <= sub.len() => existing,
 					_ => sub.clone(),
 				});
 			}
-			if let Some(ref pub_) = key.anon_pub {
-				anon_pub = Some(match anon_pub {
+			if let Some(ref pub_) = key.guest_pub {
+				guest_pub = Some(match guest_pub {
 					Some(existing) if existing.len() <= pub_.len() => existing,
 					_ => pub_.clone(),
 				});
 			}
 		}
 
-		(anon_sub, anon_pub)
+		(guest_sub, guest_pub)
 	}
 
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
 		let public = config.public.as_ref().map(|p| {
-			tracing::warn!("--auth-public is deprecated; set anon_sub/anon_pub fields on the JWK instead");
+			tracing::warn!("--auth-public is deprecated; set guest_sub/guest_pub fields on the JWK instead");
 			p.as_path().to_owned()
 		});
 
@@ -308,12 +308,12 @@ impl Auth {
 		} else if let Some(key) = self.key.as_deref() {
 			// Compute public access permissions on-demand from the current keyset
 			let ks = key.lock().expect("key mutex poisoned");
-			let (anon_sub, anon_pub) = Self::aggregate_public_paths(&ks);
+			let (guest_sub, guest_pub) = Self::aggregate_public_paths(&ks);
 			drop(ks);
 
-			if anon_sub.is_some() || anon_pub.is_some() {
-				let subscribe = anon_sub.into_iter().collect();
-				let publish = anon_pub.into_iter().collect();
+			if guest_sub.is_some() || guest_pub.is_some() {
+				let subscribe = guest_sub.into_iter().collect();
+				let publish = guest_pub.into_iter().collect();
 				moq_token::Claims {
 					root: "".to_string(),
 					subscribe,
@@ -409,13 +409,13 @@ mod tests {
 	}
 
 	fn create_test_key_with_public(
-		anon_sub: Option<&str>,
-		anon_pub: Option<&str>,
+		guest_sub: Option<&str>,
+		guest_pub: Option<&str>,
 	) -> anyhow::Result<(NamedTempFile, Key)> {
 		let key_file = NamedTempFile::new()?;
 		let mut key = Key::generate(Algorithm::HS256, None)?;
-		key.anon_sub = anon_sub.map(|s| s.to_string());
-		key.anon_pub = anon_pub.map(|s| s.to_string());
+		key.guest_sub = guest_sub.map(|s| s.to_string());
+		key.guest_pub = guest_pub.map(|s| s.to_string());
 		key.to_file(key_file.path())?;
 		Ok((key_file, key))
 	}
@@ -908,7 +908,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_key_anon_sub_allows_anonymous_subscribe() -> anyhow::Result<()> {
+	async fn test_key_guest_sub_allows_anonymous_subscribe() -> anyhow::Result<()> {
 		let (key_file, _) = create_test_key_with_public(Some("demo"), None)?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
@@ -932,7 +932,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_key_anon_pub_allows_anonymous_publish() -> anyhow::Result<()> {
+	async fn test_key_guest_pub_allows_anonymous_publish() -> anyhow::Result<()> {
 		let (key_file, _) = create_test_key_with_public(None, Some("demo"))?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
