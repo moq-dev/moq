@@ -8,7 +8,7 @@ import type { Key } from "./key.ts";
 export async function generate(
 	algorithm: Algorithm,
 	kid?: string,
-	options?: { guest_sub?: string; guest_pub?: string },
+	options?: { guest?: string[]; guest_sub?: string[]; guest_pub?: string[] },
 ): Promise<Key> {
 	switch (algorithm) {
 		case "HS256":
@@ -43,7 +43,7 @@ async function generateHmacKey(
 	alg: Algorithm,
 	byteLength: number,
 	kid?: string,
-	options?: { guest_sub?: string; guest_pub?: string },
+	options?: { guest?: string[]; guest_sub?: string[]; guest_pub?: string[] },
 ): Promise<Key> {
 	const bytes = new Uint8Array(byteLength);
 	crypto.getRandomValues(bytes);
@@ -56,8 +56,9 @@ async function generateHmacKey(
 		k,
 		key_ops: ["sign", "verify"],
 		...(kid && { kid }),
-		...(options?.guest_sub !== undefined && { guest_sub: options.guest_sub }),
-		...(options?.guest_pub !== undefined && { guest_pub: options.guest_pub }),
+		guest: options?.guest ?? [],
+		guest_sub: options?.guest_sub ?? [],
+		guest_pub: options?.guest_pub ?? [],
 	};
 }
 
@@ -68,7 +69,7 @@ async function generateRsaKey(
 	alg: Algorithm,
 	name: "RSASSA-PKCS1-v1_5" | "RSA-PSS",
 	kid?: string,
-	options?: { guest_sub?: string; guest_pub?: string },
+	options?: { guest?: string[]; guest_sub?: string[]; guest_pub?: string[] },
 ): Promise<Key> {
 	const keyPair = await crypto.subtle.generateKey(
 		{
@@ -107,8 +108,9 @@ async function generateRsaKey(
 		qi: jwk.qi,
 		key_ops: ["sign", "verify"],
 		...(kid && { kid }),
-		...(options?.guest_sub !== undefined && { guest_sub: options.guest_sub }),
-		...(options?.guest_pub !== undefined && { guest_pub: options.guest_pub }),
+		guest: options?.guest ?? [],
+		guest_sub: options?.guest_sub ?? [],
+		guest_pub: options?.guest_pub ?? [],
 	};
 }
 
@@ -119,7 +121,7 @@ async function generateEcKey(
 	alg: "ES256" | "ES384",
 	namedCurve: "P-256" | "P-384",
 	kid?: string,
-	options?: { guest_sub?: string; guest_pub?: string },
+	options?: { guest?: string[]; guest_sub?: string[]; guest_pub?: string[] },
 ): Promise<Key> {
 	const keyPair = await crypto.subtle.generateKey(
 		{
@@ -148,8 +150,9 @@ async function generateEcKey(
 		d: jwk.d,
 		key_ops: ["sign", "verify"],
 		...(kid && { kid }),
-		...(options?.guest_sub !== undefined && { guest_sub: options.guest_sub }),
-		...(options?.guest_pub !== undefined && { guest_pub: options.guest_pub }),
+		guest: options?.guest ?? [],
+		guest_sub: options?.guest_sub ?? [],
+		guest_pub: options?.guest_pub ?? [],
 	};
 }
 
@@ -159,7 +162,7 @@ async function generateEcKey(
 async function generateEdDsaKey(
 	alg: "EdDSA",
 	kid?: string,
-	options?: { guest_sub?: string; guest_pub?: string },
+	options?: { guest?: string[]; guest_sub?: string[]; guest_pub?: string[] },
 ): Promise<Key> {
 	const keyPair = await crypto.subtle.generateKey(
 		{
@@ -185,8 +188,9 @@ async function generateEdDsaKey(
 		d: jwk.d,
 		key_ops: ["sign", "verify"],
 		...(kid && { kid }),
-		...(options?.guest_sub !== undefined && { guest_sub: options.guest_sub }),
-		...(options?.guest_pub !== undefined && { guest_pub: options.guest_pub }),
+		guest: options?.guest ?? [],
+		guest_sub: options?.guest_sub ?? [],
+		guest_pub: options?.guest_pub ?? [],
 	};
 }
 

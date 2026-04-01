@@ -8,6 +8,23 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header};
 use rsa::BigUint;
 use rsa::pkcs1::EncodeRsaPrivateKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+	D: Deserializer<'de>,
+{
+	#[derive(Deserialize)]
+	#[serde(untagged)]
+	enum StringOrVec {
+		String(String),
+		Vec(Vec<String>),
+	}
+
+	match StringOrVec::deserialize(deserializer)? {
+		StringOrVec::String(s) => Ok(vec![s]),
+		StringOrVec::Vec(v) => Ok(v),
+	}
+}
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
 
@@ -160,13 +177,18 @@ pub struct Key {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub kid: Option<String>,
 
-	/// Path prefix for unauthenticated subscribe access. `""` means everything, `None` means no anonymous access.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub guest_sub: Option<String>,
+	/// Path prefixes for both unauthenticated subscribe and publish access.
+	/// Shorthand for setting both `guest_sub` and `guest_pub`.
+	#[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "string_or_vec")]
+	pub guest: Vec<String>,
 
-	/// Path prefix for unauthenticated publish access. `""` means everything, `None` means no anonymous access.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub guest_pub: Option<String>,
+	/// Path prefixes for unauthenticated subscribe access. `""` means everything.
+	#[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "string_or_vec")]
+	pub guest_sub: Vec<String>,
+
+	/// Path prefixes for unauthenticated publish access. `""` means everything.
+	#[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "string_or_vec")]
+	pub guest_pub: Vec<String>,
 
 	// Cached for performance reasons, unfortunately.
 	#[serde(skip)]
@@ -277,6 +299,7 @@ impl Key {
 				operations: [KeyOperation::Verify].into(),
 				key,
 				kid: self.kid.clone(),
+				guest: self.guest.clone(),
 				guest_sub: self.guest_sub.clone(),
 				guest_pub: self.guest_pub.clone(),
 				decode: Default::default(),
@@ -534,8 +557,9 @@ mod tests {
 				secret: b"test-secret-that-is-long-enough-for-hmac-sha256".to_vec(),
 			},
 			kid: Some("test-key-1".to_string()),
-			guest_sub: None,
-			guest_pub: None,
+			guest: vec![],
+			guest_sub: vec![],
+			guest_pub: vec![],
 			decode: Default::default(),
 			encode: Default::default(),
 		}

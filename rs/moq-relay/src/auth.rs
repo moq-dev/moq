@@ -204,33 +204,66 @@ impl Auth {
 	///
 	/// If the key is a URL, the JWK set is fetched immediately and an
 	/// optional background task is spawned to refresh it periodically.
-	/// Pick the most permissive public paths from a set of keys.
-	/// Shorter prefixes are more permissive (e.g. "" beats "demo").
-	fn aggregate_public_paths(key_set: &KeySet) -> (Option<String>, Option<String>) {
-		let mut guest_sub: Option<String> = None;
-		let mut guest_pub: Option<String> = None;
+	/// Collect guest access paths from all keys, removing duplicates and subsets.
+	/// For example, keys with paths ["foo", "foo/bar", "baz"] yields ["foo", "baz"]
+	/// since "foo/bar" is a subset of "foo".
+	fn aggregate_public_paths(key_set: &KeySet, public: Option<&PathOwned>) -> (Vec<PathOwned>, Vec<PathOwned>) {
+		let mut guest_sub: Vec<PathOwned> = Vec::new();
+		let mut guest_pub: Vec<PathOwned> = Vec::new();
+
+		// Backwards compatibility: --auth-public sets both guest_sub and guest_pub
+		if let Some(public) = public {
+			guest_sub.push(public.to_owned());
+			guest_pub.push(public.to_owned());
+		}
 
 		for key in &key_set.keys {
-			if let Some(ref sub) = key.guest_sub {
-				guest_sub = Some(match guest_sub {
-					Some(existing) if existing.len() <= sub.len() => existing,
-					_ => sub.clone(),
-				});
+			for sub in key.guest_sub.iter().chain(key.guest.iter()) {
+				guest_sub.push(Path::new(sub).to_owned());
 			}
-			if let Some(ref pub_) = key.guest_pub {
-				guest_pub = Some(match guest_pub {
-					Some(existing) if existing.len() <= pub_.len() => existing,
-					_ => pub_.clone(),
-				});
+			for pub_ in key.guest_pub.iter().chain(key.guest.iter()) {
+				guest_pub.push(Path::new(pub_).to_owned());
 			}
+		}
+
+		let guest_sub = Self::dedup_paths(guest_sub);
+		let guest_pub = Self::dedup_paths(guest_pub);
+
+		if guest_sub.len() > 1 {
+			tracing::warn!("keys have different guest_sub paths: {:?}; allowing all", guest_sub);
+		}
+		if guest_pub.len() > 1 {
+			tracing::warn!("keys have different guest_pub paths: {:?}; allowing all", guest_pub);
 		}
 
 		(guest_sub, guest_pub)
 	}
 
+	/// Remove duplicate and subset paths, keeping only the shortest prefixes.
+	fn dedup_paths(mut paths: Vec<PathOwned>) -> Vec<PathOwned> {
+		if paths.len() <= 1 {
+			return paths;
+		}
+
+		// Sort by length so shorter (more permissive) prefixes come first
+		paths.sort_by_key(|p| p.len());
+		paths.dedup();
+
+		let mut result: Vec<PathOwned> = Vec::new();
+		'outer: for path in paths {
+			for existing in &result {
+				if path.has_prefix(existing) {
+					continue 'outer;
+				}
+			}
+			result.push(path);
+		}
+		result
+	}
+
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
 		let public = config.public.as_ref().map(|p| {
-			tracing::warn!("--auth-public is deprecated; set guest_sub/guest_pub fields on the JWK instead");
+			tracing::warn!("--auth-public is deprecated; use --guest when generating an auth key instead");
 			p.as_path().to_owned()
 		});
 
@@ -308,31 +341,23 @@ impl Auth {
 		} else if let Some(key) = self.key.as_deref() {
 			// Compute public access permissions on-demand from the current keyset
 			let ks = key.lock().expect("key mutex poisoned");
-			let (guest_sub, guest_pub) = Self::aggregate_public_paths(&ks);
+			let (guest_sub, guest_pub) = Self::aggregate_public_paths(&ks, self.public.as_ref());
 			drop(ks);
 
-			if guest_sub.is_some() || guest_pub.is_some() {
-				let subscribe = guest_sub.into_iter().collect();
-				let publish = guest_pub.into_iter().collect();
+			if !guest_sub.is_empty() || !guest_pub.is_empty() {
+				let subscribe = guest_sub.into_iter().map(|p| p.to_string()).collect();
+				let publish = guest_pub.into_iter().map(|p| p.to_string()).collect();
 				moq_token::Claims {
 					root: "".to_string(),
 					subscribe,
 					publish,
 					..Default::default()
 				}
-			} else if let Some(public) = &self.public {
-				// Deprecated: fall back to --auth-public
-				moq_token::Claims {
-					root: public.to_string(),
-					subscribe: vec!["".to_string()],
-					publish: vec!["".to_string()],
-					..Default::default()
-				}
 			} else {
 				return Err(AuthError::ExpectedToken);
 			}
 		} else if let Some(public) = &self.public {
-			// Deprecated: fall back to --auth-public
+			// Deprecated: --auth-public without a key
 			moq_token::Claims {
 				root: public.to_string(),
 				subscribe: vec!["".to_string()],
@@ -408,14 +433,11 @@ mod tests {
 		Ok((key_file, key))
 	}
 
-	fn create_test_key_with_public(
-		guest_sub: Option<&str>,
-		guest_pub: Option<&str>,
-	) -> anyhow::Result<(NamedTempFile, Key)> {
+	fn create_test_key_with_public(guest_sub: &[&str], guest_pub: &[&str]) -> anyhow::Result<(NamedTempFile, Key)> {
 		let key_file = NamedTempFile::new()?;
 		let mut key = Key::generate(Algorithm::HS256, None)?;
-		key.guest_sub = guest_sub.map(|s| s.to_string());
-		key.guest_pub = guest_pub.map(|s| s.to_string());
+		key.guest_sub = guest_sub.iter().map(|s| s.to_string()).collect();
+		key.guest_pub = guest_pub.iter().map(|s| s.to_string()).collect();
 		key.to_file(key_file.path())?;
 		Ok((key_file, key))
 	}
@@ -909,7 +931,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_key_guest_sub_allows_anonymous_subscribe() -> anyhow::Result<()> {
-		let (key_file, _) = create_test_key_with_public(Some("demo"), None)?;
+		let (key_file, _) = create_test_key_with_public(&["demo"], &[])?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			..Default::default()
@@ -933,7 +955,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_key_guest_pub_allows_anonymous_publish() -> anyhow::Result<()> {
-		let (key_file, _) = create_test_key_with_public(None, Some("demo"))?;
+		let (key_file, _) = create_test_key_with_public(&[], &["demo"])?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			..Default::default()
@@ -950,7 +972,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_key_public_both() -> anyhow::Result<()> {
-		let (key_file, _) = create_test_key_with_public(Some("demo"), Some("demo"))?;
+		let (key_file, _) = create_test_key_with_public(&["demo"], &["demo"])?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			..Default::default()
@@ -971,7 +993,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_key_public_empty_string_allows_everything() -> anyhow::Result<()> {
-		let (key_file, _) = create_test_key_with_public(Some(""), Some(""))?;
+		let (key_file, _) = create_test_key_with_public(&[""], &[""])?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			..Default::default()
@@ -988,7 +1010,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_key_public_jwt_still_works() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key_with_public(Some("demo"), None)?;
+		let (key_file, key) = create_test_key_with_public(&["demo"], &[])?;
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
 			..Default::default()

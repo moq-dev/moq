@@ -63,7 +63,7 @@ tls.disable_verify = true
 
 [auth]
 # `just auth-key` will populate this file.
-key = "root.jwk"
+key = "dev.jwk"
 
 # Allow anonymous publishing and subscribing for this prefix.
 public = "anon"

@@ -34,22 +34,23 @@ enum Commands {
 		#[arg(long)]
 		public: Option<PathBuf>,
 
-		/// Path prefix for unauthenticated subscribe access.
+		/// Path prefixes for unauthenticated subscribe access.
 		/// Use "" to allow subscribing to everything without a token.
-		/// Conflicts with --guest.
-		#[arg(long = "guest-subscribe", conflicts_with = "guest")]
-		guest_subscribe: Option<String>,
+		/// Can be specified multiple times.
+		#[arg(long = "guest-subscribe")]
+		guest_subscribe: Vec<String>,
 
-		/// Path prefix for unauthenticated publish access.
+		/// Path prefixes for unauthenticated publish access.
 		/// Use "" to allow publishing to everything without a token.
-		/// Conflicts with --guest.
-		#[arg(long = "guest-publish", conflicts_with = "guest")]
-		guest_publish: Option<String>,
+		/// Can be specified multiple times.
+		#[arg(long = "guest-publish")]
+		guest_publish: Vec<String>,
 
-		/// Path prefix for both unauthenticated subscribe and publish access.
+		/// Path prefixes for both unauthenticated subscribe and publish access.
 		/// Shorthand for `--guest-subscribe` and `--guest-publish` with the same path.
+		/// Can be specified multiple times.
 		#[arg(long)]
-		guest: Option<String>,
+		guest: Vec<String>,
 	},
 
 	/// Sign a token to stdout, reading the key from stdin.
@@ -107,8 +108,9 @@ fn main() -> anyhow::Result<()> {
 		} => {
 			let mut key = moq_token::Key::generate(algorithm, id)?;
 
-			key.guest_sub = guest_subscribe.or_else(|| guest.clone());
-			key.guest_pub = guest_publish.or(guest);
+			key.guest = guest;
+			key.guest_sub = guest_subscribe;
+			key.guest_pub = guest_publish;
 
 			if let Some(public) = public {
 				key.to_public()?.to_file(public)?;

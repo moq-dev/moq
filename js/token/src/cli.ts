@@ -2,7 +2,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import * as base64 from "@hexagon/base64";
-import { Command, Option } from "commander";
+import { Command } from "commander";
 import type { Algorithm } from "./algorithm.ts";
 import type { Claims } from "./claims.ts";
 import { generate } from "./generate.ts";
@@ -20,21 +20,16 @@ program
 	.option("--algorithm <algorithm>", "Algorithm to use", "HS256")
 	.option("--id <id>", "Optional key ID, useful for rotating keys")
 	.option("--public <path>", "Optional path to save the public key (for asymmetric algorithms)")
-	.addOption(
-		new Option("--guest-subscribe <path>", "Path prefix for unauthenticated subscribe access").conflicts("guest"),
-	)
-	.addOption(
-		new Option("--guest-publish <path>", "Path prefix for unauthenticated publish access").conflicts("guest"),
-	)
-	.option("--guest <path>", "Path prefix for both unauthenticated subscribe and publish access")
+	.option("--guest-subscribe <path...>", "Path prefixes for unauthenticated subscribe access")
+	.option("--guest-publish <path...>", "Path prefixes for unauthenticated publish access")
+	.option("--guest <path...>", "Path prefixes for both unauthenticated subscribe and publish access")
 	.action(async (options) => {
 		try {
 			const algorithm = options.algorithm as Algorithm;
-			const guest_sub = options.guestSubscribe ?? options.guest;
-			const guest_pub = options.guestPublish ?? options.guest;
 			const key = await generate(algorithm, options.id, {
-				...(guest_sub !== undefined && { guest_sub }),
-				...(guest_pub !== undefined && { guest_pub }),
+				...(options.guest?.length && { guest: options.guest }),
+				...(options.guestSubscribe?.length && { guest_sub: options.guestSubscribe }),
+				...(options.guestPublish?.length && { guest_pub: options.guestPublish }),
 			});
 
 			// Save the private key
