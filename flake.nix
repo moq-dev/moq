@@ -102,16 +102,13 @@
             ];
           };
 
-          # Inherit packages from the overlay (build from source)
+          # Inherit packages from the overlay
           inherit (overlayPkgs)
             moq-relay
             moq-clock
             moq-cli
             moq-token-cli
             ;
-
-          # Pre-built binary from GitHub Releases (updated by CI)
-          moq-relay-bin = pkgs.callPackage ./nix/moq-relay-bin.nix { };
         };
 
         devShells.default = pkgs.mkShell {
