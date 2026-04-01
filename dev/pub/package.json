@@ -5,6 +5,7 @@
 		"deploy": "wrangler deploy"
 	},
 	"devDependencies": {
+		"@cloudflare/workers-types": "^4",
 		"wrangler": "^4"
 	}
 }

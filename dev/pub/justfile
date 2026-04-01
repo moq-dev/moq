@@ -4,12 +4,12 @@ set fallback
 
 # Initialize the bucket (this is mine; make your own)
 init:
-	bun init
+	bun install
 	bun wrangler r2 bucket create video-moq-dev
 
 # Deploy the worker
 deploy:
-	bun init
+	bun install
 	bun wrangler deploy
 
 # Upload a single file to R2.
@@ -19,7 +19,7 @@ deploy:
 #		 -movflags cmaf+separate_moof+delay_moov+skip_trailer+frag_every_frame \
 #		 output.mp4
 upload file:
-	bun init
+	bun install
 	bun wrangler r2 object put "video-moq-dev/{{file}}" --file "media/{{file}}" --remote
 
 # Sync all files in a local directory to R2
@@ -34,7 +34,7 @@ sync dir="media":
 
 # List files in the bucket
 list:
-	bun init
+	bun install
 	bun wrangler r2 object list "video-moq-dev"
 
 # --- Publishing ---

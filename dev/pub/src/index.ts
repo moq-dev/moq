@@ -28,15 +28,20 @@ export default {
 			return new Response("Not Found", { status: 404 });
 		}
 
-		const ext = key.substring(key.lastIndexOf("."));
+		const dotIdx = key.lastIndexOf(".");
+		const ext = dotIdx >= 0 ? key.substring(dotIdx).toLowerCase() : "";
 		const contentType = CONTENT_TYPES[ext] ?? "application/octet-stream";
 
-		return new Response(object.body, {
-			headers: {
-				"Content-Type": contentType,
-				"Cache-Control": "public, max-age=2592000",
-				"Content-Length": object.size.toString(),
-			},
-		});
+		const headers = {
+			"Content-Type": contentType,
+			"Cache-Control": "public, max-age=2592000",
+			"Content-Length": object.size.toString(),
+		};
+
+		if (request.method === "HEAD") {
+			return new Response(null, { headers });
+		}
+
+		return new Response(object.body, { headers });
 	},
 };
