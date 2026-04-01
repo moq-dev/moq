@@ -11,3 +11,7 @@ rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
+
+[lib]
+test = false
+doctest = false

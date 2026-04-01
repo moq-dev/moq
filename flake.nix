@@ -1,6 +1,12 @@
 {
   description = "MoQ - Media over QUIC";
 
+  # For pre-built binaries (faster builds), add our Cachix cache to your Nix config:
+  #   extra-substituters = https://kixelated.cachix.org
+  #   extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+  #
+  # Or run: cachix use kixelated
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
