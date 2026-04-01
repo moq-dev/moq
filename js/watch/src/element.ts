@@ -2,10 +2,17 @@ import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
-import { Broadcast } from "./broadcast";
+import { Broadcast, type CatalogAttr, type CatalogFormat, catalogAttrSchema } from "./broadcast";
 import { Sync } from "./sync";
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "jitter"] as const;
+function parseCatalogAttr(value: string | null): CatalogFormat[] {
+	const parsed = catalogAttrSchema.safeParse(value);
+	if (!parsed.success) return ["hang"];
+	if (parsed.data === "auto") return ["hang", "msf"];
+	return [parsed.data];
+}
+
+const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "jitter", "catalog"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -152,6 +159,8 @@ export default class MoqWatch extends HTMLElement {
 			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "jitter") {
 			this.backend.jitter.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
+		} else if (name === "catalog") {
+			this.broadcast.catalogFormats.set(parseCatalogAttr(newValue));
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -212,6 +221,18 @@ export default class MoqWatch extends HTMLElement {
 
 	set jitter(value: number) {
 		this.backend.jitter.set(value as Time.Milli);
+	}
+
+	get catalog(): CatalogFormat[] {
+		return this.broadcast.catalogFormats.peek();
+	}
+
+	set catalog(value: CatalogAttr | CatalogFormat[]) {
+		if (typeof value === "string") {
+			this.broadcast.catalogFormats.set(parseCatalogAttr(value));
+		} else {
+			this.broadcast.catalogFormats.set(value);
+		}
 	}
 }
 

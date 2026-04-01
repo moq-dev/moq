@@ -259,7 +259,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let broadcast = consumer.ok_or(Error::UnknownBroadcast)?;
 		let track = broadcast.consume_track(&track)?;
-		let subscriber = track.subscribe(Subscription::default()).await?;
+		let subscriber = track
+			.subscribe(Subscription {
+				start: subscribe.start_group,
+				end: subscribe.end_group,
+				..Default::default()
+			})
+			.await?;
 
 		let info = lite::SubscribeOk {
 			priority: 0,

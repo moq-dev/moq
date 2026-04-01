@@ -49,7 +49,11 @@ function toAudioConfig(track: Msf.Track): Catalog.AudioConfig | undefined {
 		description: track.packaging !== "cmaf" && track.initData ? base64ToHex(track.initData) : undefined,
 		sampleRate: u53(track.samplerate ?? DEFAULT_SAMPLE_RATE),
 		numberOfChannels: u53(
-			track.channelConfig ? Number.parseInt(track.channelConfig, 10) : DEFAULT_NUMBER_OF_CHANNELS,
+			(() => {
+				if (!track.channelConfig) return DEFAULT_NUMBER_OF_CHANNELS;
+				const parsed = Number.parseInt(track.channelConfig, 10);
+				return Number.isFinite(parsed) ? parsed : DEFAULT_NUMBER_OF_CHANNELS;
+			})(),
 		),
 		bitrate: track.bitrate != null ? u53(track.bitrate) : undefined,
 	};
