@@ -16,7 +16,7 @@ This demo showcases MoQ's key differentiators:
 ## Running
 
 ```bash
-just dev::drone
+just dev drone
 ```
 
 This starts three components in parallel:
@@ -29,7 +29,7 @@ Once running, open the browser to see the drone grid.
 ### Multiple Drones
 
 ```bash
-just dev::drone 3
+just dev drone 3
 ```
 
 Spawns 3 drone instances, each with a unique ID. They appear in the grid automatically via MoQ's announcement system.

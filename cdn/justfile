@@ -7,13 +7,13 @@ default:
 
 deploy:
 	tofu apply
-	just relay::deploy-all
-	just pub::deploy
+	just relay deploy-all
+	just pub deploy
 
 # Pin relay and pub to their latest release tags
 pin:
-	just relay::pin
-	just pub::pin
+	just relay pin
+	just pub pin
 
 # Run health checks against all relay nodes
 health:
