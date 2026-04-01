@@ -1,6 +1,11 @@
 {
   description = "MoQ - Media over QUIC";
 
+  nixConfig = {
+    extra-substituters = [ "https://kixelated.cachix.org" ];
+    extra-trusted-public-keys = [ "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
@@ -97,13 +102,16 @@
             ];
           };
 
-          # Inherit packages from the overlay
+          # Inherit packages from the overlay (build from source)
           inherit (overlayPkgs)
             moq-relay
             moq-clock
             moq-cli
             moq-token-cli
             ;
+
+          # Pre-built binary from GitHub Releases (updated by CI)
+          moq-relay-bin = pkgs.callPackage ./nix/moq-relay-bin.nix { };
         };
 
         devShells.default = pkgs.mkShell {

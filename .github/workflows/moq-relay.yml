@@ -19,12 +19,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            nix-system: x86_64-linux
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+            nix-system: aarch64-linux
           - target: x86_64-apple-darwin
             os: macos-15-intel
+            nix-system: x86_64-darwin
           - target: aarch64-apple-darwin
             os: macos-latest
+            nix-system: aarch64-darwin
 
     steps:
       - uses: actions/checkout@v6
@@ -72,11 +76,42 @@ jobs:
           mkdir -p dist
           cp "target/${target}/release/moq-relay" "dist/${name}"
 
+      - name: Compute SRI hash
+        id: hash
+        shell: bash
+        run: |
+          file=$(ls dist/*)
+          sha256=$(sha256sum "$file" | awk '{print $1}')
+          sri="sha256-$(echo -n "$sha256" | xxd -r -p | base64 -w0)"
+          echo "sri=$sri" >> $GITHUB_OUTPUT
+          echo "Hash for ${{ matrix.nix-system }}: $sri"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: moq-relay-${{ matrix.target }}
           path: dist/*
+
+      - name: Upload hash
+        uses: actions/upload-artifact@v7
+        with:
+          name: hash-${{ matrix.nix-system }}
+          path: |
+            # Write hash to a file for the release job to pick up
+            echo "${{ steps.hash.outputs.sri }}" > /dev/null
+
+      # Store hash in a file artifact
+      - name: Save hash file
+        shell: bash
+        run: |
+          mkdir -p hashes
+          echo -n "${{ steps.hash.outputs.sri }}" > "hashes/${{ matrix.nix-system }}"
+
+      - name: Upload hash artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: hash-${{ matrix.nix-system }}
+          path: hashes/*
 
   release:
     name: Release
@@ -107,9 +142,10 @@ jobs:
           echo "tag=${prev_tag}" >> $GITHUB_OUTPUT
           echo "Previous tag: ${prev_tag:-none}"
 
-      - name: Download artifacts
+      - name: Download binary artifacts
         uses: actions/download-artifact@v8
         with:
+          pattern: moq-relay-*
           path: artifacts
           merge-multiple: true
 
@@ -130,3 +166,64 @@ jobs:
               --generate-notes \
               artifacts/*
           fi
+
+  update-hashes:
+    name: Update Nix hashes
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Parse version
+        id: parse
+        run: |
+          ref=${GITHUB_REF#refs/tags/}
+          if [[ "$ref" =~ ^moq-relay-v([0-9.]+)$ ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+          else
+            echo "Tag format not recognized: $ref" >&2
+            exit 1
+          fi
+
+      - name: Download hash artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: hash-*
+          path: hashes
+          merge-multiple: true
+
+      - name: Generate hashes.json
+        run: |
+          version="${{ steps.parse.outputs.version }}"
+
+          # Read each platform hash
+          x86_64_linux=$(cat hashes/x86_64-linux)
+          aarch64_linux=$(cat hashes/aarch64-linux)
+          x86_64_darwin=$(cat hashes/x86_64-darwin)
+          aarch64_darwin=$(cat hashes/aarch64-darwin)
+
+          # Write hashes.json
+          cat > nix/hashes.json << EOF
+          {
+            "moq-relay": {
+              "version": "${version}",
+              "hashes": {
+                "x86_64-linux": "${x86_64_linux}",
+                "aarch64-linux": "${aarch64_linux}",
+                "x86_64-darwin": "${x86_64_darwin}",
+                "aarch64-darwin": "${aarch64_darwin}"
+              }
+            }
+          }
+          EOF
+
+      - name: Commit and push hashes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add nix/hashes.json
+          git commit -m "nix: update moq-relay binary hashes for v${{ steps.parse.outputs.version }}"
+          git push origin main
