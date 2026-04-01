@@ -19,11 +19,24 @@ program
 	.requiredOption("--key <path>", "Path to save the key")
 	.option("--algorithm <algorithm>", "Algorithm to use", "HS256")
 	.option("--id <id>", "Optional key ID, useful for rotating keys")
-	.option("--public <path>", "Optional path to save the public key (for asymmetric algorithms)")
+	.option("--public-key <path>", "Optional path to save the public key (for asymmetric algorithms)")
+	.option("--public-subscribe <path>", "Path prefix for unauthenticated subscribe access")
+	.option("--public-publish <path>", "Path prefix for unauthenticated publish access")
+	.option("--public <path>", "Path prefix for both unauthenticated subscribe and publish access")
 	.action(async (options) => {
 		try {
+			if (options.public && (options.publicSubscribe || options.publicPublish)) {
+				console.error("Error: --public cannot be used with --public-subscribe or --public-publish");
+				process.exit(1);
+			}
+
 			const algorithm = options.algorithm as Algorithm;
-			const key = await generate(algorithm, options.id);
+			const public_sub = options.publicSubscribe ?? options.public;
+			const public_pub = options.publicPublish ?? options.public;
+			const key = await generate(algorithm, options.id, {
+				...(public_sub !== undefined && { public_sub }),
+				...(public_pub !== undefined && { public_pub }),
+			});
 
 			// Save the private key
 			const keyJson = JSON.stringify(key, null, 2);
@@ -33,13 +46,13 @@ program
 			console.log(`Generated ${algorithm} key: ${options.key}`);
 
 			// Save public key if requested and key is asymmetric
-			if (options.public && key.kty !== "oct") {
+			if (options.publicKey && key.kty !== "oct") {
 				const publicKey = toPublicKey(key);
 				const publicKeyJson = JSON.stringify(publicKey, null, 2);
 				const publicKeyEncoded = base64.fromArrayBuffer(new TextEncoder().encode(publicKeyJson).buffer, true);
-				writeFileSync(options.public, publicKeyEncoded, "utf-8");
-				console.log(`Generated public key: ${options.public}`);
-			} else if (options.public && key.kty === "oct") {
+				writeFileSync(options.publicKey, publicKeyEncoded, "utf-8");
+				console.log(`Generated public key: ${options.publicKey}`);
+			} else if (options.publicKey && key.kty === "oct") {
 				console.error("Warning: Cannot save public key for symmetric (oct) algorithm");
 			}
 		} catch (error) {

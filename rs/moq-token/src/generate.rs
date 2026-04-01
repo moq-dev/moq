@@ -26,6 +26,8 @@ pub fn generate(algorithm: Algorithm, id: Option<String>) -> anyhow::Result<Key>
 		operations: [KeyOperation::Sign, KeyOperation::Verify].into(),
 		algorithm,
 		key: key?,
+		public_sub: None,
+		public_pub: None,
 		decode: Default::default(),
 		encode: Default::default(),
 	})

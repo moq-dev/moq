@@ -160,6 +160,14 @@ pub struct Key {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub kid: Option<String>,
 
+	/// Path prefix for unauthenticated subscribe access. `""` means everything, `None` means no anonymous access.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub public_sub: Option<String>,
+
+	/// Path prefix for unauthenticated publish access. `""` means everything, `None` means no anonymous access.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub public_pub: Option<String>,
+
 	// Cached for performance reasons, unfortunately.
 	#[serde(skip)]
 	pub(crate) decode: OnceLock<DecodingKey>,
@@ -269,6 +277,8 @@ impl Key {
 				operations: [KeyOperation::Verify].into(),
 				key,
 				kid: self.kid.clone(),
+				public_sub: self.public_sub.clone(),
+				public_pub: self.public_pub.clone(),
 				decode: Default::default(),
 				encode: Default::default(),
 			}),
@@ -524,6 +534,8 @@ mod tests {
 				secret: b"test-secret-that-is-long-enough-for-hmac-sha256".to_vec(),
 			},
 			kid: Some("test-key-1".to_string()),
+			public_sub: None,
+			public_pub: None,
 			decode: Default::default(),
 			encode: Default::default(),
 		}

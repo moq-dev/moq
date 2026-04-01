@@ -137,6 +137,10 @@ const REFRESH_ERROR_INTERVAL: Duration = Duration::from_secs(300);
 pub struct Auth {
 	key: Option<Arc<Mutex<KeySet>>>,
 	public: Option<PathOwned>,
+	/// Aggregated public subscribe path from loaded keys.
+	public_sub: Option<String>,
+	/// Aggregated public publish path from loaded keys.
+	public_pub: Option<String>,
 	refresh_task: Option<Arc<tokio::task::JoinHandle<()>>>,
 }
 
@@ -204,8 +208,35 @@ impl Auth {
 	///
 	/// If the key is a URL, the JWK set is fetched immediately and an
 	/// optional background task is spawned to refresh it periodically.
+	/// Pick the most permissive public paths from a set of keys.
+	/// Shorter prefixes are more permissive (e.g. "" beats "demo").
+	fn aggregate_public_paths(key_set: &KeySet) -> (Option<String>, Option<String>) {
+		let mut public_sub: Option<String> = None;
+		let mut public_pub: Option<String> = None;
+
+		for key in &key_set.keys {
+			if let Some(ref sub) = key.public_sub {
+				public_sub = Some(match public_sub {
+					Some(existing) if existing.len() <= sub.len() => existing,
+					_ => sub.clone(),
+				});
+			}
+			if let Some(ref pub_) = key.public_pub {
+				public_pub = Some(match public_pub {
+					Some(existing) if existing.len() <= pub_.len() => existing,
+					_ => pub_.clone(),
+				});
+			}
+		}
+
+		(public_sub, public_pub)
+	}
+
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
-		let public = config.public.map(|p| p.as_path().to_owned());
+		let public = config.public.as_ref().map(|p| {
+			tracing::warn!("--auth-public is deprecated; use public_sub/public_pub fields in the JWK instead");
+			p.as_path().to_owned()
+		});
 
 		if let Some(key) = config.key {
 			if key.starts_with("http://") || key.starts_with("https://") {
@@ -217,6 +248,8 @@ impl Auth {
 			Ok(Self {
 				key: None,
 				public,
+				public_sub: None,
+				public_pub: None,
 				refresh_task: None,
 			})
 		} else {
@@ -231,6 +264,11 @@ impl Auth {
 		tracing::info!(%uri, "loading JWK set");
 
 		Self::refresh_key_set(&uri, key_set.as_ref()).await?;
+
+		let (public_sub, public_pub) = {
+			let ks = key_set.lock().expect("keyset mutex poisoned");
+			Self::aggregate_public_paths(&ks)
+		};
 
 		let refresh_task = if let Some(refresh_interval_secs) = refresh_interval {
 			anyhow::ensure!(refresh_interval_secs >= 30, "refresh_interval cannot be less than 30");
@@ -247,19 +285,25 @@ impl Auth {
 		Ok(Self {
 			key: Some(key_set),
 			public,
+			public_sub,
+			public_pub,
 			refresh_task,
 		})
 	}
 
 	fn new_local(key: String, public: Option<PathOwned>) -> anyhow::Result<Self> {
 		let key = moq_token::Key::from_file(&key).context("cannot load key")?;
-		let key_set = Arc::new(Mutex::new(KeySet {
+		let key_set = KeySet {
 			keys: vec![Arc::new(key)],
-		}));
+		};
+		let (public_sub, public_pub) = Self::aggregate_public_paths(&key_set);
+		let key_set = Arc::new(Mutex::new(key_set));
 
 		Ok(Self {
 			key: Some(key_set),
 			public,
+			public_sub,
+			public_pub,
 			refresh_task: None,
 		})
 	}
@@ -278,7 +322,18 @@ impl Auth {
 				.map_err(|_| AuthError::DecodeFailed)?
 		} else if params.jwt.is_some() {
 			return Err(AuthError::UnexpectedToken);
+		} else if self.public_sub.is_some() || self.public_pub.is_some() {
+			// Use key-based public access permissions
+			let subscribe = self.public_sub.iter().cloned().collect();
+			let publish = self.public_pub.iter().cloned().collect();
+			moq_token::Claims {
+				root: "".to_string(),
+				subscribe,
+				publish,
+				..Default::default()
+			}
 		} else if let Some(public) = &self.public {
+			// Deprecated: fall back to --auth-public
 			moq_token::Claims {
 				root: public.to_string(),
 				subscribe: vec!["".to_string()],
@@ -350,6 +405,18 @@ mod tests {
 	fn create_test_key() -> anyhow::Result<(NamedTempFile, Key)> {
 		let key_file = NamedTempFile::new()?;
 		let key = Key::generate(Algorithm::HS256, None)?;
+		key.to_file(key_file.path())?;
+		Ok((key_file, key))
+	}
+
+	fn create_test_key_with_public(
+		public_sub: Option<&str>,
+		public_pub: Option<&str>,
+	) -> anyhow::Result<(NamedTempFile, Key)> {
+		let key_file = NamedTempFile::new()?;
+		let mut key = Key::generate(Algorithm::HS256, None)?;
+		key.public_sub = public_sub.map(|s| s.to_string());
+		key.public_pub = public_pub.map(|s| s.to_string());
 		key.to_file(key_file.path())?;
 		Ok((key_file, key))
 	}
@@ -837,6 +904,131 @@ mod tests {
 		// Should remain write-only
 		assert_eq!(verified.subscribe, vec![]);
 		assert_eq!(verified.publish, vec!["".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_sub_allows_anonymous_subscribe() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(Some("demo"), None)?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Anonymous access to / — can subscribe under demo/
+		let token = auth.verify(&AuthParams::new("/"))?;
+		assert_eq!(token.root, "".as_path());
+		assert_eq!(token.subscribe, vec!["demo".as_path()]);
+		assert_eq!(token.publish, vec![]);
+
+		// Anonymous access to /demo — subscribe reduces to ""
+		let token = auth.verify(&AuthParams::new("/demo"))?;
+		assert_eq!(token.root, "demo".as_path());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec![]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_pub_allows_anonymous_publish() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(None, Some("demo"))?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Anonymous access to / — can publish under demo/
+		let token = auth.verify(&AuthParams::new("/"))?;
+		assert_eq!(token.subscribe, vec![]);
+		assert_eq!(token.publish, vec!["demo".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_both() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(Some("demo"), Some("demo"))?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		let token = auth.verify(&AuthParams::new("/"))?;
+		assert_eq!(token.subscribe, vec!["demo".as_path()]);
+		assert_eq!(token.publish, vec!["demo".as_path()]);
+
+		// Connecting to /demo reduces both to ""
+		let token = auth.verify(&AuthParams::new("/demo"))?;
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_empty_string_allows_everything() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(Some(""), Some(""))?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Anonymous access to any path gets full pub/sub
+		let token = auth.verify(&AuthParams::new("/anything/here"))?;
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_jwt_still_works() -> anyhow::Result<()> {
+		let (key_file, key) = create_test_key_with_public(Some("demo"), None)?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// JWT tokens should still work normally, ignoring key public fields
+		let claims = moq_token::Claims {
+			root: "secret".to_string(),
+			subscribe: vec!["".to_string()],
+			publish: vec!["alice".into()],
+			..Default::default()
+		};
+		let jwt = key.encode(&claims)?;
+
+		let token = auth.verify(&AuthParams {
+			path: "/secret".into(),
+			jwt: Some(jwt),
+			..Default::default()
+		})?;
+		assert_eq!(token.root, "secret".as_path());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["alice".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_no_public_fields_requires_token() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key()?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// No public fields and no JWT → should fail
+		let result = auth.verify(&AuthParams::new("/demo"));
+		assert!(result.is_err());
 
 		Ok(())
 	}

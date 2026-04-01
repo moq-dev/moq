@@ -31,8 +31,25 @@ enum Commands {
 		id: Option<String>,
 
 		/// Optional path to save the public key (for asymmetric algorithms).
+		#[arg(long = "public-key")]
+		public_key: Option<PathBuf>,
+
+		/// Path prefix for unauthenticated subscribe access.
+		/// Use "" to allow subscribing to everything without a token.
+		/// Conflicts with --public.
+		#[arg(long = "public-subscribe", conflicts_with = "public")]
+		public_subscribe: Option<String>,
+
+		/// Path prefix for unauthenticated publish access.
+		/// Use "" to allow publishing to everything without a token.
+		/// Conflicts with --public.
+		#[arg(long = "public-publish", conflicts_with = "public")]
+		public_publish: Option<String>,
+
+		/// Path prefix for both unauthenticated subscribe and publish access.
+		/// Shorthand for `--public-subscribe` and `--public-publish` with the same path.
 		#[arg(long)]
-		public: Option<PathBuf>,
+		public: Option<String>,
 	},
 
 	/// Sign a token to stdout, reading the key from stdin.
@@ -80,11 +97,21 @@ fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 
 	match cli.command {
-		Commands::Generate { algorithm, id, public } => {
-			let key = moq_token::Key::generate(algorithm, id)?;
+		Commands::Generate {
+			algorithm,
+			id,
+			public_key,
+			public_subscribe,
+			public_publish,
+			public,
+		} => {
+			let mut key = moq_token::Key::generate(algorithm, id)?;
 
-			if let Some(public) = public {
-				key.to_public()?.to_file(public)?;
+			key.public_sub = public_subscribe.or_else(|| public.clone());
+			key.public_pub = public_publish.or(public);
+
+			if let Some(public_key) = public_key {
+				key.to_public()?.to_file(public_key)?;
 			}
 
 			key.to_file(&cli.key)?;
