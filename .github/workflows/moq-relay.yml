@@ -1,0 +1,138 @@
+name: moq-relay
+
+on:
+  push:
+    tags:
+      - "moq-relay-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Parse version
+        id: parse
+        shell: bash
+        run: |
+          ref=${GITHUB_REF#refs/tags/}
+          if [[ "$ref" =~ ^moq-relay-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+          else
+            echo "Tag format not recognized: $ref" >&2
+            exit 1
+          fi
+
+      - name: Build
+        shell: bash
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p moq-relay \
+            --config "target.aarch64-unknown-linux-gnu.linker='aarch64-linux-gnu-gcc'"
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${{ steps.parse.outputs.version }}"
+          target="${{ matrix.target }}"
+          name="moq-relay-v${version}-${target}"
+
+          mkdir -p dist
+          cp "target/${target}/release/moq-relay" "dist/${name}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: moq-relay-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Parse version
+        id: parse
+        run: |
+          ref=${GITHUB_REF#refs/tags/}
+          if [[ "$ref" =~ ^moq-relay-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
+          else
+            echo "Tag format not recognized: $ref" >&2
+            exit 1
+          fi
+
+      - name: Find previous tag
+        id: prev_tag
+        run: |
+          current_tag="moq-relay-v${{ steps.parse.outputs.version }}"
+          prev_tag=$(git tag --list 'moq-relay-v*' --sort=v:refname | awk -v cur="$current_tag" '$0 == cur { print prev; found=1; exit } { prev=$0 } END { if (!found) print "" }')
+          echo "tag=${prev_tag}" >> $GITHUB_OUTPUT
+          echo "Previous tag: ${prev_tag:-none}"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          title="moq-relay v${{ steps.parse.outputs.version }}"
+          prev_tag="${{ steps.prev_tag.outputs.tag }}"
+
+          if gh release view "$tag" > /dev/null 2>&1; then
+            # Release exists — update assets and metadata
+            gh release upload "$tag" artifacts/* --clobber
+            if [ -n "$prev_tag" ]; then
+              gh release edit "$tag" --title "$title" --notes-start-tag "$prev_tag"
+            else
+              gh release edit "$tag" --title "$title"
+            fi
+          else
+            # Create new release
+            if [ -n "$prev_tag" ]; then
+              gh release create "$tag" \
+                --title "$title" \
+                --generate-notes \
+                --notes-start-tag "$prev_tag" \
+                artifacts/*
+            else
+              gh release create "$tag" \
+                --title "$title" \
+                --generate-notes \
+                artifacts/*
+            fi
+          fi
