@@ -10,7 +10,7 @@ WorkingDirectory=/var/lib/moq
 
 ExecStart=/bin/bash -c '\
   # Download the video \
-  /var/lib/moq/pkg/bin/wget -nv http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4 -O /var/lib/moq/tmp.mp4 && \
+  /var/lib/moq/pkg/bin/wget -nv https://vid.moq.dev/bbb.mp4 -O /var/lib/moq/tmp.mp4 && \
   # Fragment the video using ffmpeg from flake \
   /var/lib/moq/pkg/bin/ffmpeg \
     -y -loglevel error -i /var/lib/moq/tmp.mp4 \

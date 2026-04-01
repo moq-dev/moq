@@ -1,0 +1,31 @@
+{
+	// Cloudflare Wrangler configuration for the video hosting Worker
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "video-moq-dev",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-07-09",
+	"account_id": "dd618f5dbd5da77b8296f1613c301f5c",
+	"workers_dev": false,
+	"route": {
+		"pattern": "vid.moq.dev",
+		"custom_domain": true
+	},
+	// R2 bucket bindings
+	"r2_buckets": [
+		{
+			"binding": "VIDEO",
+			"bucket_name": "video-moq-dev"
+		},
+		{
+			"bucket_name": "video-moq-dev",
+			"binding": "video_moq_dev",
+			"remote": true
+		}
+	],
+	// Observability
+	"observability": {
+		"logs": {
+			"enabled": true
+		}
+	}
+}

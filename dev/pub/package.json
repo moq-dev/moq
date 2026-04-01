@@ -1,0 +1,10 @@
+{
+	"name": "video-moq-dev",
+	"private": true,
+	"scripts": {
+		"deploy": "wrangler deploy"
+	},
+	"devDependencies": {
+		"wrangler": "^4"
+	}
+}
