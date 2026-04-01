@@ -377,7 +377,7 @@ This is a more efficient use of bandwidth than ABR, but it requires more complex
 
 ## Conferences
 
-Some applications involve multiple producers, such as a conference calls or a live events.
+Some applications involve multiple producers, such as a conference call or a live event.
 Even though these are separate broadcasts from potentially separate origins, moq-lite can still serve them over the same session.
 
 ### Discovery

@@ -97,7 +97,7 @@ Unfortunately, fMP4 is not quite designed for real-time streaming and incurs eit
 
 - Minimal latency: 1-frame fragments introduce ~100 bytes of overhead per frame.
 - Minimal size (HLS): GoP sized fragments introduce a GoP's worth of latency.
-- Mixed latency/size (LL-HLS): 500ms sized fragments introduce a 500ms latency, with some additional overhead.
+- Mixed latency/size (LL-HLS): 500ms-sized fragments introduce a 500ms latency, with some additional overhead.
 
 ## `description`
 
