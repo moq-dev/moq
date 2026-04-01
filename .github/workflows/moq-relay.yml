@@ -6,7 +6,7 @@ on:
       - "moq-relay-v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -39,7 +39,7 @@ jobs:
         shell: bash
         run: |
           ref=${GITHUB_REF#refs/tags/}
-          if [[ "$ref" =~ ^moq-relay-v([0-9.]+)$ ]]; then
+          if [[ "$ref" =~ ^moq-relay-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
             echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
           else
             echo "Tag format not recognized: $ref" >&2
@@ -72,6 +72,8 @@ jobs:
     name: Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v6
@@ -82,7 +84,7 @@ jobs:
         id: parse
         run: |
           ref=${GITHUB_REF#refs/tags/}
-          if [[ "$ref" =~ ^moq-relay-v([0-9.]+)$ ]]; then
+          if [[ "$ref" =~ ^moq-relay-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
             echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
           else
             echo "Tag format not recognized: $ref" >&2
@@ -93,7 +95,7 @@ jobs:
         id: prev_tag
         run: |
           current_tag="moq-relay-v${{ steps.parse.outputs.version }}"
-          prev_tag=$(git tag --list 'moq-relay-v*' --sort=-v:refname | grep -v "^${current_tag}$" | head -n1)
+          prev_tag=$(git tag --list 'moq-relay-v*' --sort=v:refname | awk -v cur="$current_tag" '$0 == cur { print prev; found=1; exit } { prev=$0 } END { if (!found) print "" }')
           echo "tag=${prev_tag}" >> $GITHUB_OUTPUT
           echo "Previous tag: ${prev_tag:-none}"
 
@@ -103,20 +105,34 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create release
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          tag="${{ github.ref_name }}"
+          title="moq-relay v${{ steps.parse.outputs.version }}"
           prev_tag="${{ steps.prev_tag.outputs.tag }}"
-          if [ -n "$prev_tag" ]; then
-            gh release create "${{ github.ref_name }}" \
-              --title "moq-relay v${{ steps.parse.outputs.version }}" \
-              --generate-notes \
-              --notes-start-tag "$prev_tag" \
-              artifacts/*
+
+          if gh release view "$tag" > /dev/null 2>&1; then
+            # Release exists — update assets and metadata
+            gh release upload "$tag" artifacts/* --clobber
+            if [ -n "$prev_tag" ]; then
+              gh release edit "$tag" --title "$title" --notes-start-tag "$prev_tag"
+            else
+              gh release edit "$tag" --title "$title"
+            fi
           else
-            gh release create "${{ github.ref_name }}" \
-              --title "moq-relay v${{ steps.parse.outputs.version }}" \
-              --generate-notes \
-              artifacts/*
+            # Create new release
+            if [ -n "$prev_tag" ]; then
+              gh release create "$tag" \
+                --title "$title" \
+                --generate-notes \
+                --notes-start-tag "$prev_tag" \
+                artifacts/*
+            else
+              gh release create "$tag" \
+                --title "$title" \
+                --generate-notes \
+                artifacts/*
+            fi
           fi
