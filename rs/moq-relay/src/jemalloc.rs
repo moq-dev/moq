@@ -11,7 +11,10 @@ pub async fn run() -> anyhow::Result<()> {
 		Ok(true) => tracing::info!("jemalloc heap profiling is active"),
 		Ok(false) => {
 			tracing::info!("jemalloc profiling compiled in; activating");
-			unsafe { raw::write(prof_active, true) }.ok();
+			if let Err(err) = unsafe { raw::write(prof_active, true) } {
+				tracing::warn!(%err, "failed to activate jemalloc profiling");
+				return;
+			}
 		}
 		Err(err) => {
 			tracing::warn!(%err, "jemalloc profiling not available — set MALLOC_CONF=prof:true to enable");
