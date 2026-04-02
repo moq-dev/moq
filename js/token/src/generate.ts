@@ -17,29 +17,33 @@ function randomKid(): KeyId {
  * Generate a new key for the given algorithm.
  * A random key ID is assigned if none is provided.
  */
-export async function generate(algorithm: Algorithm, kid?: string): Promise<Key> {
+export async function generate(
+	algorithm: Algorithm,
+	kid?: string,
+	options?: { guest?: string[]; guest_sub?: string[]; guest_pub?: string[] },
+): Promise<Key> {
 	const validKid: KeyId = kid?.trim() ? KeyIdSchema.parse(kid.trim()) : randomKid();
 	switch (algorithm) {
 		case "HS256":
-			return generateHmacKey(algorithm, 32, validKid);
+			return generateHmacKey(algorithm, 32, validKid, options);
 		case "HS384":
-			return generateHmacKey(algorithm, 48, validKid);
+			return generateHmacKey(algorithm, 48, validKid, options);
 		case "HS512":
-			return generateHmacKey(algorithm, 64, validKid);
+			return generateHmacKey(algorithm, 64, validKid, options);
 		case "RS256":
 		case "RS384":
 		case "RS512":
-			return generateRsaKey(algorithm, "RSASSA-PKCS1-v1_5", validKid);
+			return generateRsaKey(algorithm, "RSASSA-PKCS1-v1_5", validKid, options);
 		case "PS256":
 		case "PS384":
 		case "PS512":
-			return generateRsaKey(algorithm, "RSA-PSS", validKid);
+			return generateRsaKey(algorithm, "RSA-PSS", validKid, options);
 		case "ES256":
-			return generateEcKey(algorithm, "P-256", validKid);
+			return generateEcKey(algorithm, "P-256", validKid, options);
 		case "ES384":
-			return generateEcKey(algorithm, "P-384", validKid);
+			return generateEcKey(algorithm, "P-384", validKid, options);
 		case "EdDSA":
-			return generateEdDsaKey(algorithm, validKid);
+			return generateEdDsaKey(algorithm, validKid, options);
 		default:
 			throw new Error(`Unsupported algorithm: ${algorithm}`);
 	}
@@ -48,7 +52,12 @@ export async function generate(algorithm: Algorithm, kid?: string): Promise<Key>
 /**
  * Generate an HMAC symmetric key
  */
-async function generateHmacKey(alg: Algorithm, byteLength: number, kid: KeyId): Promise<Key> {
+async function generateHmacKey(
+	alg: Algorithm,
+	byteLength: number,
+	kid: KeyId,
+	options?: { guest?: string[]; guest_sub?: string[]; guest_pub?: string[] },
+): Promise<Key> {
 	const bytes = new Uint8Array(byteLength);
 	crypto.getRandomValues(bytes);
 
@@ -60,13 +69,21 @@ async function generateHmacKey(alg: Algorithm, byteLength: number, kid: KeyId): 
 		k,
 		kid,
 		key_ops: ["sign", "verify"],
+		guest: options?.guest ?? [],
+		guest_sub: options?.guest_sub ?? [],
+		guest_pub: options?.guest_pub ?? [],
 	};
 }
 
 /**
  * Generate an RSA asymmetric key pair
  */
-async function generateRsaKey(alg: Algorithm, name: "RSASSA-PKCS1-v1_5" | "RSA-PSS", kid: KeyId): Promise<Key> {
+async function generateRsaKey(
+	alg: Algorithm,
+	name: "RSASSA-PKCS1-v1_5" | "RSA-PSS",
+	kid: KeyId,
+	options?: { guest?: string[]; guest_sub?: string[]; guest_pub?: string[] },
+): Promise<Key> {
 	const keyPair = await crypto.subtle.generateKey(
 		{
 			name,
@@ -104,13 +121,21 @@ async function generateRsaKey(alg: Algorithm, name: "RSASSA-PKCS1-v1_5" | "RSA-P
 		qi: jwk.qi,
 		kid,
 		key_ops: ["sign", "verify"],
+		guest: options?.guest ?? [],
+		guest_sub: options?.guest_sub ?? [],
+		guest_pub: options?.guest_pub ?? [],
 	};
 }
 
 /**
  * Generate an elliptic curve asymmetric key pair
  */
-async function generateEcKey(alg: "ES256" | "ES384", namedCurve: "P-256" | "P-384", kid: KeyId): Promise<Key> {
+async function generateEcKey(
+	alg: "ES256" | "ES384",
+	namedCurve: "P-256" | "P-384",
+	kid: KeyId,
+	options?: { guest?: string[]; guest_sub?: string[]; guest_pub?: string[] },
+): Promise<Key> {
 	const keyPair = await crypto.subtle.generateKey(
 		{
 			name: "ECDSA",
@@ -138,13 +163,20 @@ async function generateEcKey(alg: "ES256" | "ES384", namedCurve: "P-256" | "P-38
 		d: jwk.d,
 		kid,
 		key_ops: ["sign", "verify"],
+		guest: options?.guest ?? [],
+		guest_sub: options?.guest_sub ?? [],
+		guest_pub: options?.guest_pub ?? [],
 	};
 }
 
 /**
  * Generate an EdDSA key pair using Ed25519
  */
-async function generateEdDsaKey(alg: "EdDSA", kid: KeyId): Promise<Key> {
+async function generateEdDsaKey(
+	alg: "EdDSA",
+	kid: KeyId,
+	options?: { guest?: string[]; guest_sub?: string[]; guest_pub?: string[] },
+): Promise<Key> {
 	const keyPair = await crypto.subtle.generateKey(
 		{
 			name: "Ed25519",
@@ -169,6 +201,9 @@ async function generateEdDsaKey(alg: "EdDSA", kid: KeyId): Promise<Key> {
 		d: jwk.d,
 		kid,
 		key_ops: ["sign", "verify"],
+		guest: options?.guest ?? [],
+		guest_sub: options?.guest_sub ?? [],
+		guest_pub: options?.guest_pub ?? [],
 	};
 }
 

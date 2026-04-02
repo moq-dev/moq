@@ -12,9 +12,11 @@ moq-relay uses JWT (JSON Web Tokens) for authentication and authorization. Token
 There are two authentication modes:
 
 ### Single Key (`--auth-key`)
+
 A single JWK file used to verify all tokens. No `kid` header is required in JWTs. Good for development and simple deployments.
 
 ### Key Directory (`--auth-key-dir`)
+
 For production use with key rotation. Keys are resolved on demand by extracting the `kid` from the JWT header and fetching the corresponding key file.
 
 1. Generate signing keys (a random key ID is assigned automatically)
@@ -28,6 +30,7 @@ For production use with key rotation. Keys are resolved on demand by extracting 
 ### Generate a Key
 
 Using the Rust CLI:
+
 ```bash
 # Symmetric key (simpler, key must stay secret)
 moq-token-cli generate --out my-key.jwk
@@ -47,12 +50,14 @@ A random key ID is generated if `--id` is not specified.
 ### Configure the Relay
 
 Single key (simplest):
+
 ```toml
 [auth]
 key = "my-key.jwk"
 ```
 
 Key directory (for key rotation):
+
 ```toml
 [auth]
 # Point to the public keys directory (from --public-dir).
@@ -61,6 +66,7 @@ key_dir = "/etc/moq/keys/"
 ```
 
 Remote key server:
+
 ```toml
 [auth]
 key_dir = "https://api.example.com/keys"
@@ -74,6 +80,7 @@ moq-token-cli sign --key my-key.jwk --root demo --publish my-stream --subscribe 
 ```
 
 The client connects with the token:
+
 ```text
 https://relay.example.com/demo/my-stream?jwt=eyJhbGciOiJIUzI1NiIs...
 ```
@@ -89,6 +96,7 @@ The relay uses the specified key file to verify all incoming JWTs. No `kid` head
 Key files are stored as JSON by default. Legacy base64url-encoded files are also supported for backwards compatibility. Use `--base64` when generating keys if you prefer the base64url format.
 
 When a client connects with a JWT, the relay:
+
 1. Decodes the JWT header to extract the `kid` (key ID)
 2. Looks up the key from the configured source: `{dir}/{kid}.jwk` or `{url}/{kid}.jwk`
 3. Verifies the JWT signature with the resolved key
@@ -130,6 +138,7 @@ An empty suffix (`""`) allows access to anything under the root.
 ## Supported Algorithms
 
 ### Symmetric (HMAC)
+
 The same key signs and verifies. Simpler setup, but the key must be kept secret everywhere it's used.
 
 - `HS256` - HMAC with SHA-256 (default)
@@ -137,6 +146,7 @@ The same key signs and verifies. Simpler setup, but the key must be kept secret 
 - `HS512` - HMAC with SHA-512
 
 ### Asymmetric (RSA/ECDSA)
+
 Private key signs, public key verifies. The relay only needs the public key, so compromise of the relay doesn't leak signing capability.
 
 - `RS256`, `RS384`, `RS512` - RSA PKCS#1 v1.5
@@ -159,12 +169,14 @@ Set `public = ""` to make everything public (development only).
 ## Example Configurations
 
 ### Development (no auth)
+
 ```toml
 [auth]
 public = ""
 ```
 
 ### Development (single key)
+
 ```toml
 [auth]
 key = "dev.jwk"
@@ -172,12 +184,14 @@ public = "anon"
 ```
 
 ### Production (local keys with rotation)
+
 ```toml
 [auth]
 key_dir = "/etc/moq/keys/"
 ```
 
 ### Production (remote key server)
+
 ```toml
 [auth]
 key_dir = "https://api.example.com/keys"
@@ -186,6 +200,7 @@ key_dir = "https://api.example.com/keys"
 ## Library Usage
 
 ### TypeScript
+
 ```typescript
 import { generate, load, sign, type Claims } from "@moq/token"
 
@@ -204,6 +219,7 @@ const token = await sign(key, claims)
 ```
 
 ### Rust
+
 ```bash
 moq-token-cli sign --key my-key.jwk \
   --root demo \

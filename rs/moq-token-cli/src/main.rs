@@ -46,6 +46,18 @@ enum Commands {
 		/// Output as base64url instead of JSON.
 		#[arg(long)]
 		base64: bool,
+
+		/// Path prefixes for unauthenticated subscribe access.
+		#[arg(long = "guest-subscribe")]
+		guest_subscribe: Vec<String>,
+
+		/// Path prefixes for unauthenticated publish access.
+		#[arg(long = "guest-publish")]
+		guest_publish: Vec<String>,
+
+		/// Path prefixes for both unauthenticated subscribe and publish access.
+		#[arg(long)]
+		guest: Vec<String>,
 	},
 
 	/// Sign a token, writing it to stdout.
@@ -107,13 +119,20 @@ fn main() -> anyhow::Result<()> {
 			public,
 			public_dir,
 			base64,
+			guest_subscribe,
+			guest_publish,
+			guest,
 		} => {
 			let id = match id {
 				Some(id) => moq_token::KeyId::decode(&id)?,
 				None => moq_token::KeyId::random(),
 			};
 
-			let key = moq_token::Key::generate(algorithm, Some(id.clone()))?;
+			let mut key = moq_token::Key::generate(algorithm, Some(id.clone()))?;
+
+			key.guest = guest;
+			key.guest_sub = guest_subscribe;
+			key.guest_pub = guest_publish;
 
 			if let Some(dir) = public_dir {
 				let path = dir.join(format!("{id}.jwk"));

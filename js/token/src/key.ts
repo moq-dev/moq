@@ -33,10 +33,15 @@ const Base64FieldSchema = z
 		message: "Field must be valid base64url data",
 	});
 
+const StringOrArray = z.union([z.string().transform((s) => [s]), z.array(z.string())]).default([]);
+
 const BaseKeySchema = z.object({
 	alg: AlgorithmSchema,
 	key_ops: z.array(OperationSchema).nonempty(),
 	kid: KeyIdSchema.optional(),
+	guest: StringOrArray,
+	guest_sub: StringOrArray,
+	guest_pub: StringOrArray,
 });
 
 const OctKeySchema = BaseKeySchema.extend({
