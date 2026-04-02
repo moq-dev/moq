@@ -1,8 +1,21 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Path, coding::*};
+use crate::{OriginId, Path, coding::*};
 
 use super::{Message, Version};
+
+impl Decode<Version> for OriginId {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let value = u64::decode(r, version)?;
+		Self::try_from(value).map_err(|_| DecodeError::InvalidValue)
+	}
+}
+
+impl Encode<Version> for OriginId {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.into_inner().encode(w, version)
+	}
+}
 
 /// Sent by the publisher to announce the availability of a track.
 /// The payload contains the contents of the wildcard.
@@ -12,12 +25,12 @@ pub enum Announce<'a> {
 	Active {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: u64,
+		hops: Vec<OriginId>,
 	},
 	Ended {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: u64,
+		hops: Vec<OriginId>,
 	},
 }
 
@@ -26,8 +39,27 @@ impl Message for Announce<'_> {
 		let status = AnnounceStatus::decode(r, version)?;
 		let suffix = Path::decode(r, version)?;
 		let hops = match version {
-			Version::Lite03 => u64::decode(r, version)?,
-			Version::Lite01 | Version::Lite02 => 0,
+			Version::Lite01 | Version::Lite02 => Vec::new(),
+			Version::Lite03 => {
+				// Lite03 sends a single varint count; we don't know the actual IDs.
+				let count = u64::decode(r, version)? as usize;
+				if count > 32 {
+					return Err(DecodeError::InvalidValue);
+				}
+				vec![OriginId::UNKNOWN; count]
+			}
+			_ => {
+				// Lite04+: count followed by that many OriginId varints.
+				let count = u64::decode(r, version)? as usize;
+				if count > 32 {
+					return Err(DecodeError::InvalidValue);
+				}
+				let mut ids = Vec::with_capacity(count);
+				for _ in 0..count {
+					ids.push(OriginId::decode(r, version)?);
+				}
+				ids
+			}
 		};
 
 		Ok(match status {
@@ -37,21 +69,29 @@ impl Message for Announce<'_> {
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
-		match self {
-			Self::Active { suffix, hops } => {
-				AnnounceStatus::Active.encode(w, version)?;
-				suffix.encode(w, version)?;
-				match version {
-					Version::Lite03 => hops.encode(w, version)?,
-					Version::Lite01 | Version::Lite02 => {}
+		let (status, suffix, hops) = match self {
+			Self::Active { suffix, hops } => (AnnounceStatus::Active, suffix, hops),
+			Self::Ended { suffix, hops } => (AnnounceStatus::Ended, suffix, hops),
+		};
+
+		status.encode(w, version)?;
+		suffix.encode(w, version)?;
+
+		match version {
+			Version::Lite01 | Version::Lite02 => {}
+			Version::Lite03 => {
+				if hops.len() > 32 {
+					return Err(EncodeError::TooMany);
 				}
+				(hops.len() as u64).encode(w, version)?;
 			}
-			Self::Ended { suffix, hops } => {
-				AnnounceStatus::Ended.encode(w, version)?;
-				suffix.encode(w, version)?;
-				match version {
-					Version::Lite03 => hops.encode(w, version)?,
-					Version::Lite01 | Version::Lite02 => {}
+			_ => {
+				if hops.len() > 32 {
+					return Err(EncodeError::TooMany);
+				}
+				(hops.len() as u64).encode(w, version)?;
+				for id in hops {
+					id.encode(w, version)?;
 				}
 			}
 		}
@@ -65,16 +105,38 @@ impl Message for Announce<'_> {
 pub struct AnnouncePlease<'a> {
 	// Request tracks with this prefix.
 	pub prefix: Path<'a>,
+
+	/// Skip announces whose hops list contains this hop ID.
+	/// Used to avoid loops in the relay cluster.
+	/// Defaults to 0 (unknown), which means no filtering.
+	pub exclude_hop: OriginId,
 }
 
 impl Message for AnnouncePlease<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
-		Ok(Self { prefix })
+		let exclude_hop = match version {
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => OriginId::UNKNOWN,
+			_ => {
+				let value = u64::decode(r, version)?;
+				if value == 0 {
+					OriginId::UNKNOWN
+				} else {
+					OriginId::try_from(value).map_err(|_| DecodeError::InvalidValue)?
+				}
+			}
+		};
+		Ok(Self { prefix, exclude_hop })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.prefix.encode(w, version)?;
+		match version {
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => {}
+			_ => {
+				self.exclude_hop.into_inner().encode(w, version)?;
+			}
+		}
 
 		Ok(())
 	}
@@ -116,7 +178,7 @@ impl Message for AnnounceInit<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
-			Version::Lite03 => {
+			_ => {
 				return Err(DecodeError::Version);
 			}
 		}
@@ -136,7 +198,7 @@ impl Message for AnnounceInit<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
-			Version::Lite03 => {
+			_ => {
 				return Err(EncodeError::Version);
 			}
 		}

@@ -1,8 +1,8 @@
 use std::collections::{HashMap, hash_map::Entry};
 
 use crate::{
-	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
-	Track, TrackProducer,
+	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginId, OriginProducer, Path,
+	PathOwned, Track, TrackProducer,
 	coding::{Reader, Stream},
 	ietf::{self, Control, FilterType, GroupOrder, RequestId},
 	model::BroadcastProducer,
@@ -413,8 +413,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Ok(entry.get().producer.clone());
 			}
 			Entry::Vacant(entry) => {
-				// IETF protocol doesn't have hops; use 1 (remote source).
-				let broadcast = Broadcast::new().with_hops(1).produce();
+				// IETF protocol doesn't have hops; use a single unknown hop (remote source).
+				let broadcast = Broadcast::new().with_hops(vec![OriginId::UNKNOWN]).produce();
 				origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),

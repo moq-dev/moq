@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use moq_lite::{BroadcastConsumer, Origin, OriginProducer};
+use moq_lite::{BroadcastConsumer, Origin, OriginId, OriginProducer};
 use tracing::Instrument;
 use url::Url;
 
@@ -24,6 +24,10 @@ pub struct ClusterConfig {
 	/// Use the token in this file when connecting to other nodes.
 	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
 	pub token: Option<PathBuf>,
+
+	/// Optional explicit origin ID for this node. If not set, a random one is generated.
+	#[arg(long = "cluster-origin-id", env = "MOQ_CLUSTER_ORIGIN_ID")]
+	pub origin_id: Option<u64>,
 }
 
 /// Manages broadcast origins across local and remote relay nodes.
@@ -40,11 +44,13 @@ pub struct Cluster {
 impl Cluster {
 	/// Creates a new cluster with the given configuration and QUIC client.
 	pub fn new(config: ClusterConfig, client: moq_native::Client) -> Self {
-		Cluster {
-			config,
-			client,
-			origin: Origin::produce(),
-		}
+		let origin = if let Some(id) = config.origin_id {
+			Origin::produce().with_id(OriginId::try_from(id).expect("invalid origin ID: must be 1 <= value < 2^62"))
+		} else {
+			Origin::produce()
+		};
+
+		Cluster { config, client, origin }
 	}
 
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {

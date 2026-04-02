@@ -119,6 +119,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	pub async fn recv_announce(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		let interest = stream.reader.decode::<lite::AnnouncePlease>().await?;
 		let prefix = interest.prefix.to_owned();
+		let exclude_hop = interest.exclude_hop;
 
 		let mut origin = self
 			.origin
@@ -127,7 +128,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let version = self.version;
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version).await {
+			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version, exclude_hop).await {
 				match &err {
 					Error::Cancel => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
@@ -152,6 +153,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
 		version: Version,
+		exclude_hop: crate::OriginId,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
 
@@ -168,6 +170,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 					init.push(suffix.to_owned());
 
+					// Skip if the broadcast's hops contain the excluded hop ID.
+					if exclude_hop != crate::OriginId::UNKNOWN && broadcast.info.hops.contains(&exclude_hop) {
+						continue;
+					}
+
 					active.insert(path.clone(), broadcast.clone());
 					let bc = broadcast.clone();
 					closures.push(Box::pin(async move {
@@ -179,8 +186,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.encode(&announce_init).await?;
 			}
-			Version::Lite03 => {
-				// No more announce init in Lite03.
+			_ => {
+				// No more announce init starting with Lite03.
 			}
 		}
 
@@ -195,7 +202,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						active.remove(&path);
 						let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-						let msg = lite::Announce::Ended { suffix, hops: 0 };
+						let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
 						stream.writer.encode(&msg).await?;
 					}
 				}
@@ -203,15 +210,26 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					let (path, broadcast) = res?;
 					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 
+					// Skip if the broadcast's hops contain the excluded hop ID.
+					if exclude_hop != crate::OriginId::UNKNOWN && broadcast.info.hops.contains(&exclude_hop) {
+						// If we previously announced this path, send Ended
+						if active.remove(&path).is_some() {
+							tracing::debug!(broadcast = %origin.absolute(&path), "unannounce (excluded hop)");
+							let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
+							stream.writer.encode(&msg).await?;
+						}
+						continue;
+					}
+
 					// If same path already active, send Ended then Active (reannounce)
 					if active.contains_key(&path) {
 						tracing::debug!(broadcast = %origin.absolute(&path), "reannounce (ended)");
-						let msg = lite::Announce::Ended { suffix: suffix.clone(), hops: 0 };
+						let msg = lite::Announce::Ended { suffix: suffix.clone(), hops: Vec::new() };
 						stream.writer.encode(&msg).await?;
 					}
 
-					tracing::debug!(broadcast = %origin.absolute(&path), hops = broadcast.info.hops, "announce");
-					let msg = lite::Announce::Active { suffix, hops: broadcast.info.hops };
+					tracing::debug!(broadcast = %origin.absolute(&path), hops = broadcast.info.hops.len(), "announce");
+					let msg = lite::Announce::Active { suffix, hops: broadcast.info.hops.clone() };
 					stream.writer.encode(&msg).await?;
 
 					active.insert(path.clone(), broadcast.clone());

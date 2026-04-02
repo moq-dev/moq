@@ -167,7 +167,7 @@ export class Connection implements Established {
 		if (typ === StreamId.Session) {
 			throw new Error("duplicate session stream");
 		} else if (typ === StreamId.Announce) {
-			const msg = await AnnounceInterest.decode(stream.reader);
+			const msg = await AnnounceInterest.decode(stream.reader, this.#version);
 			await this.#publisher.runAnnounce(msg, stream);
 			return;
 		} else if (typ === StreamId.Subscribe) {

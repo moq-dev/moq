@@ -1,3 +1,90 @@
+use std::fmt;
+
+use rand::Rng;
+
+use crate::Version;
+use crate::coding::{Decode, DecodeError, Encode, EncodeError};
+
+/// A unique identifier for an origin, encoded as a varint on the wire.
+///
+/// Must be a non-zero 62-bit value (1 <= value < 2^62).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct OriginId(u64);
+
+/// The maximum valid OriginId value (2^62 - 1).
+const ORIGIN_ID_MAX: u64 = (1u64 << 62) - 1;
+
+impl OriginId {
+	/// A placeholder value used when the actual OriginId is unknown (e.g., Lite03 hop placeholders).
+	pub const UNKNOWN: Self = Self(0);
+
+	/// Generate a random non-zero 62-bit origin ID.
+	pub fn random() -> Self {
+		let mut rng = rand::rng();
+		let value = rng.random_range(1..(1u64 << 62));
+		Self(value)
+	}
+
+	/// Get the inner u64 value.
+	pub fn into_inner(self) -> u64 {
+		self.0
+	}
+}
+
+impl TryFrom<u64> for OriginId {
+	type Error = InvalidOriginId;
+
+	fn try_from(value: u64) -> Result<Self, Self::Error> {
+		if value == 0 || value > ORIGIN_ID_MAX {
+			return Err(InvalidOriginId(value));
+		}
+		Ok(Self(value))
+	}
+}
+
+/// Error returned when constructing an OriginId with an invalid value.
+#[derive(Debug, Clone)]
+pub struct InvalidOriginId(pub u64);
+
+impl fmt::Display for InvalidOriginId {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "invalid OriginId: {} (must be 1 <= value < 2^62)", self.0)
+	}
+}
+
+impl std::error::Error for InvalidOriginId {}
+
+impl fmt::Display for OriginId {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		self.0.fmt(f)
+	}
+}
+
+impl Encode<Version> for OriginId {
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		self.0.encode(w, version)
+	}
+}
+
+impl Decode<Version> for OriginId {
+	fn decode<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
+		let value = u64::decode(r, version)?;
+		Self::try_from(value).map_err(|_| DecodeError::InvalidValue)
+	}
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for OriginId {
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		D: serde::Deserializer<'de>,
+	{
+		let value = u64::deserialize(deserializer)?;
+		Self::try_from(value).map_err(serde::de::Error::custom)
+	}
+}
+
 use std::{
 	collections::HashMap,
 	sync::atomic::{AtomicU64, Ordering},
@@ -120,7 +207,19 @@ impl OriginNode {
 			self.entry(dir).lock().publish(&full, broadcast, &relative);
 		} else if let Some(existing) = &mut self.broadcast {
 			// This node is a leaf with an existing broadcast.
-			if broadcast.info.hops < existing.active.info.hops {
+
+			// Prefix check: if the existing broadcast's hops are a strict prefix of the new one,
+			// the new broadcast is routing through us (loop). Reject it.
+			// Identical hop lists are not treated as loops (could be a re-announcement).
+			if !existing.active.info.hops.is_empty()
+				&& broadcast.info.hops.len() > existing.active.info.hops.len()
+				&& broadcast.info.hops.starts_with(&existing.active.info.hops)
+			{
+				tracing::debug!(broadcast = %full, "rejecting broadcast: hops are prefix of existing");
+				return;
+			}
+
+			if broadcast.info.hops.len() < existing.active.info.hops.len() {
 				// New broadcast has fewer hops, so it becomes active.
 				let old = existing.active.clone();
 				existing.active = broadcast.clone();
@@ -225,7 +324,7 @@ impl OriginNode {
 				.iter()
 				.enumerate()
 				.rev()
-				.min_by_key(|(_, b)| b.info.hops)
+				.min_by_key(|(_, b)| b.info.hops.len())
 				.map(|(i, _)| i)
 				.unwrap();
 			let active = entry.backup.swap_remove(best);
@@ -367,8 +466,11 @@ impl Origin {
 }
 
 /// Announces broadcasts to consumers over the network.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct OriginProducer {
+	/// A unique identifier for this origin.
+	id: OriginId,
+
 	// The roots of the tree that we are allowed to publish.
 	// A path of "" means we can publish anything.
 	nodes: OriginNodes,
@@ -377,9 +479,30 @@ pub struct OriginProducer {
 	root: PathOwned,
 }
 
+impl Default for OriginProducer {
+	fn default() -> Self {
+		Self {
+			id: OriginId::random(),
+			nodes: OriginNodes::default(),
+			root: PathOwned::default(),
+		}
+	}
+}
+
 impl OriginProducer {
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Set the origin ID.
+	pub fn with_id(mut self, id: OriginId) -> Self {
+		self.id = id;
+		self
+	}
+
+	/// Get the origin ID.
+	pub fn id(&self) -> OriginId {
+		self.id
 	}
 
 	/// Create and publish a new broadcast, returning the producer.
@@ -401,6 +524,10 @@ impl OriginProducer {
 	/// Returns false if the broadcast is not allowed to be published.
 	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
 		let path = path.as_path();
+
+		if broadcast.info.hops.len() > 32 {
+			return false;
+		}
 
 		let (root, rest) = match self.nodes.get(&path) {
 			Some(root) => root,
@@ -433,6 +560,7 @@ impl OriginProducer {
 	/// Returns None if there are no legal prefixes.
 	pub fn with_filter(&self, prefixes: &[Path]) -> Option<OriginProducer> {
 		Some(OriginProducer {
+			id: self.id,
 			nodes: self.nodes.select(prefixes)?,
 			root: self.root.clone(),
 		})
@@ -450,6 +578,7 @@ impl OriginProducer {
 		let prefix = prefix.as_path();
 
 		Some(Self {
+			id: self.id,
 			root: self.root.join(&prefix).to_owned(),
 			nodes: self.nodes.root(&prefix)?,
 		})
@@ -777,6 +906,12 @@ mod tests {
 		assert!(origin.consume().try_consume_broadcast("test").is_none());
 	}
 
+	/// Create a hops vector with `n` random OriginIds for testing.
+	/// Each call returns a completely independent set of IDs.
+	fn test_hops(n: usize) -> Vec<OriginId> {
+		(0..n).map(|_| OriginId::random()).collect()
+	}
+
 	#[tokio::test]
 	async fn test_hops_ordering() {
 		tokio::time::pause();
@@ -784,7 +919,7 @@ mod tests {
 		let origin = Origin::produce();
 
 		// Publish a broadcast with 3 hops.
-		let far = Broadcast::new().with_hops(3).produce();
+		let far = Broadcast::new().with_hops(test_hops(3)).produce();
 		let far_consumer = far.consume();
 
 		let mut consumer = origin.consume();
@@ -794,7 +929,7 @@ mod tests {
 		consumer.assert_next_wait();
 
 		// Now publish a closer broadcast (1 hop). It should replace the active and reannounce immediately.
-		let close = Broadcast::new().with_hops(1).produce();
+		let close = Broadcast::new().with_hops(test_hops(1)).produce();
 		let close_consumer = close.consume();
 
 		origin.publish_broadcast("test", close_consumer.clone());
@@ -802,7 +937,7 @@ mod tests {
 		consumer.assert_next_wait();
 
 		// Publish a broadcast with more hops (5). Should go to backup silently.
-		let farther = Broadcast::new().with_hops(5).produce();
+		let farther = Broadcast::new().with_hops(test_hops(5)).produce();
 		let farther_consumer = farther.consume();
 
 		origin.publish_broadcast("test", farther_consumer.clone());
@@ -835,7 +970,7 @@ mod tests {
 	async fn test_hops_same_no_reannounce() {
 		let origin = Origin::produce();
 
-		let b1 = Broadcast::new().with_hops(2).produce();
+		let b1 = Broadcast::new().with_hops(test_hops(2)).produce();
 		let b1c = b1.consume();
 
 		let mut consumer = origin.consume();
@@ -844,7 +979,7 @@ mod tests {
 		consumer.assert_next("test", &b1c);
 
 		// Publish another broadcast with same hops. Should go to backup, no reannounce.
-		let b2 = Broadcast::new().with_hops(2).produce();
+		let b2 = Broadcast::new().with_hops(test_hops(2)).produce();
 		let _b2c = b2.consume();
 
 		origin.publish_broadcast("test", _b2c.clone());
@@ -859,9 +994,9 @@ mod tests {
 
 		let origin = Origin::produce();
 
-		let b1 = Broadcast::new().with_hops(1).produce();
+		let b1 = Broadcast::new().with_hops(test_hops(1)).produce();
 		let b1c = b1.consume();
-		let b2 = Broadcast::new().with_hops(3).produce();
+		let b2 = Broadcast::new().with_hops(test_hops(3)).produce();
 		let b2c = b2.consume();
 
 		let mut consumer = origin.consume();
@@ -877,7 +1012,7 @@ mod tests {
 		consumer.assert_next_wait(); // No reannounce yet.
 
 		// During hold-down, a better broadcast arrives (0 hops).
-		let b3 = Broadcast::new().with_hops(0).produce();
+		let b3 = Broadcast::new().with_hops(test_hops(0)).produce();
 		let b3c = b3.consume();
 		origin.publish_broadcast("test", b3c.clone());
 
@@ -936,11 +1071,11 @@ mod tests {
 
 		let origin = Origin::produce();
 
-		let b1 = Broadcast::new().with_hops(1).produce();
+		let b1 = Broadcast::new().with_hops(test_hops(1)).produce();
 		let b1c = b1.consume();
-		let b2 = Broadcast::new().with_hops(2).produce();
+		let b2 = Broadcast::new().with_hops(test_hops(2)).produce();
 		let b2c = b2.consume();
-		let b3 = Broadcast::new().with_hops(3).produce();
+		let b3 = Broadcast::new().with_hops(test_hops(3)).produce();
 		let b3c = b3.consume();
 
 		let mut consumer = origin.consume();

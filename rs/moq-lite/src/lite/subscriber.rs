@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::{
-	AsPath, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path,
-	PathOwned, TrackProducer,
+	AsPath, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginId, OriginProducer,
+	Path, PathOwned, TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -21,6 +21,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: Option<OriginProducer>,
+	origin_id: OriginId,
 	subscribes: Lock<HashMap<u64, TrackProducer>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
@@ -28,9 +29,14 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub fn new(session: S, origin: Option<OriginProducer>, version: Version) -> Self {
+		let origin_id = match &origin {
+			Some(o) => o.id(),
+			None => OriginId::UNKNOWN,
+		};
 		Self {
 			session,
 			origin,
+			origin_id,
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version,
@@ -84,7 +90,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Ask for everything.
 		// TODO This should actually ask for each root.
-		let msg = lite::AnnouncePlease { prefix: "".into() };
+		let msg = lite::AnnouncePlease {
+			prefix: "".into(),
+			exclude_hop: self.origin_id,
+		};
 		stream.writer.encode(&msg).await?;
 
 		let mut producers = HashMap::new();
@@ -93,19 +102,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			Version::Lite01 | Version::Lite02 => {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
 				for path in msg.suffixes {
-					// Lite01/02 don't have hops on the wire; use 1 (remote source, unknown distance).
-					self.start_announce(path, Broadcast::new().with_hops(1), &mut producers)?;
+					// Lite01/02 don't have hops on the wire; use unknown since the actual origin is not known.
+					let hops = vec![OriginId::UNKNOWN];
+					self.start_announce(path, Broadcast::new().with_hops(hops), &mut producers)?;
 				}
 			}
-			Version::Lite03 => {
-				// Lite03: no AnnounceInit, initial state comes via Announce messages.
+			_ => {
+				// Lite03+: no AnnounceInit, initial state comes via Announce messages.
 			}
 		}
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {
 				lite::Announce::Active { suffix: path, hops } => {
-					self.start_announce(path, Broadcast::new().with_hops(hops + 1), &mut producers)?;
+					let mut new_hops = hops;
+					if self.origin_id != OriginId::UNKNOWN {
+						new_hops.push(self.origin_id);
+					}
+					self.start_announce(path, Broadcast::new().with_hops(new_hops), &mut producers)?;
 				}
 				lite::Announce::Ended { suffix: path, .. } => {
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
@@ -128,7 +142,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		info: Broadcast,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<(), Error> {
-		tracing::debug!(broadcast = %self.log_path(&path), hops = info.hops, "announce");
+		tracing::debug!(broadcast = %self.log_path(&path), hops = info.hops.len(), "announce");
 
 		let broadcast = info.produce();
 
