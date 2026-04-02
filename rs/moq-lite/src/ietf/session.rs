@@ -167,21 +167,28 @@ async fn run_unis<S: web_transport_trait::Session>(
 		let kind: u64 = reader.decode_peek().await?;
 
 		// v17: SETUP arrives on a uni stream, then becomes the GOAWAY channel.
+		// We accept it in the background without blocking, since there are no
+		// extensions that require waiting on the SETUP before proceeding.
 		if kind == setup::SETUP_V17 && version == Version::Draft17 {
-			if client {
-				let _server: setup::Server = reader.decode().await?;
-			} else {
-				let _client: setup::Client = reader.decode().await?;
-			}
-
-			// Monitor for GOAWAY in the background while we continue accepting unis.
 			web_async::spawn(async move {
+				// Decode and discard the SETUP message.
+				let res = if client {
+					reader.decode::<setup::Server>().await.map(|_| ())
+				} else {
+					reader.decode::<setup::Client>().await.map(|_| ())
+				};
+
+				if let Err(err) = res {
+					tracing::warn!(%err, "setup decode error");
+					return;
+				}
+
+				// Monitor for GOAWAY after setup completes.
 				if let Err(err) = run_goaway(reader.with_version(version)).await {
 					tracing::warn!(%err, "goaway error");
 				}
 			});
 
-			// Continue the loop to accept group data streams.
 			continue;
 		}
 
