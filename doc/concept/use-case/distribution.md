@@ -4,9 +4,11 @@ description: How MoQ compares to distribution protocols like HLS/DASH
 ---
 
 # MoQ vs HLS/DASH
+
 This page compares MoQ with traditional **distribution protocols** like HLS and DASH.
 
 ## Requirements
+
 Okay the boring stuff first.
 Distribution protocols need to:
 
@@ -17,10 +19,12 @@ Distribution protocols need to:
 - Support multiple renditions (ABR)
 
 Some optional features:
+
 - Support VOD and DVR
 - Support DRM 🤮
 
 ## Existing Protocols
+
 - **HLS** ([HTTP Live Streaming](https://en.wikipedia.org/wiki/HTTP_Live_Streaming)) - Apple's protocol. Used to be required for iOS, now mainly for Airplay.
 - **DASH** ([Dynamic Adaptive Streaming over HTTP](https://en.wikipedia.org/wiki/Dynamic_Adaptive_Streaming_over_HTTP)) - An MPEG standard that copies Apple but does it "better".
 - **LL-HLS** ([Low-Latency HLS](https://en.wikipedia.org/wiki/HTTP_Live_Streaming#Low_Latency_HLS)) - A variant of HLS for lower latency.
@@ -31,6 +35,7 @@ A "state-less" protocol like HTTP is perfect for distribution because it can be 
 We're mostly going to be discussing HLS/DASH in the rest of this document.
 
 Notable mentions:
+
 - **Sye** ([Sye](https://www.aboutamazon.eu/news/job-creation-and-investment/how-homegrown-swedish-streaming-technology-went-worldwide-with-amazon-and-prime-video)) - Prime Video's protocol they force (with money) every CDN to support.
 - **RTMP** ([Real-Time Messaging Protocol](https://en.wikipedia.org/wiki/Real-Time_Messaging_Protocol)) - The classic Flash-era protocol before we switching to HTTP.
 - **WebRTC** ([Web Real-Time Communication](https://en.wikipedia.org/wiki/WebRTC)) - Can be used for distribution, but it's not designed for it.
@@ -39,10 +44,12 @@ RTMP and WebRTC can technically offer a better user experience with lower latenc
 A specialized RTMP/WebRTC CDN does not have the same level of optimization as a general-purpose HTTP CDN.
 
 ## Latency
+
 Fun fact, I (`kixelated`) created MoQ because we hit the latency limits of HLS.
 We were already using a `LHLS` variant for streaming frame-by-frame well before LL-HLS was a thing.
 
 ### The Problem
+
 HLS/DASH are known for their high latency.
 Even LL-HLS and LL-DASH can only achieve the ~2s-3s latency range on a good network.
 
@@ -64,6 +71,7 @@ It also doesn't help that segments are not streamed, which means a 2s segment si
 LL-HLS and LL-DASH address this by using smaller segments (~500ms), but still suffer from the same queuing problem.
 
 ### A Solution
+
 MoQ solves this by using QUIC to stream segments in parallel.
 And of course, segments are streamed instead of sitting on disk to further reduce latency.
 
@@ -82,6 +90,7 @@ But note that audio is higher priority than video too.
 There will be some desync during congestion events, but a continuous stream of audio helps smooth out the user experience.
 
 ### Dynamic Experience
+
 While MoQ unlocks this new user experience, it won't always be desirable.
 A user might *want* to buffer so they don't miss any content.
 
@@ -94,6 +103,7 @@ It doesn't matter how big the viewer's buffer is if WebRTC decides to drop after
 MoQ gives you the ability to distribution to a diverse set of viewers with different latency requirements.
 
 ### HTTP/3
+
 One thing I want to mention is that MoQ does not use HTTP.
 Ouch, I just said that HTTP was crucial for HLS/DASH.
 
@@ -102,6 +112,7 @@ When you make a HTTP request, it could be using HTTP/1, HTTP/2, or HTTP/3.
 Most of the time this doesn't matter, but it can put us in a bad situation unless we explicitly require a specific version.
 
 For example, [prioritizing a HTTP request](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Priority):
+
 - HTTP/1: Does nothing. TCP connections fight for bandwidth instead.
 - HTTP/2: Prioritizes the new request, but data might still be stuck in the TCP queue.
 - HTTP/3: Prioritizes the new request.
@@ -118,6 +129,7 @@ But then when doing [contribution](/concept/use-case/contribution), the client/s
 Rather than fight HTTP semantics, we're using a proper bidirectional protocol like QUIC/WebTransport instead.
 
 ### Why it doesn't Matter
+
 Remember that economies of scale are gud.
 We can still get the benefits of HTTP without using HTTP.
 
@@ -130,6 +142,7 @@ It's an ambitious attempt to surplant HTTP for live content, not just media cont
 More use-cases means more emdna which means more customers which means more investment which means you get the idea.
 
 ### Device Support
+
 The biggest uphill battle for MoQ is device support.
 
 HTTP has powered the internet for decades and it's not going anywhere anytime soon.

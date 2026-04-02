@@ -17,6 +17,7 @@ The Rust implementation provides the reference implementation of the MoQ protoco
 The core pub/sub transport protocol implementing the [moq-lite specification](/spec/draft-lcurley-moq-lite).
 
 **Features:**
+
 - Broadcasts, tracks, groups, and frames
 - Built-in concurrency and deduplication
 - QUIC stream management
@@ -32,6 +33,7 @@ The core pub/sub transport protocol implementing the [moq-lite specification](/s
 Media-specific encoding/streaming library built on top of `moq-lite`.
 
 **Features:**
+
 - Catalog for track discovery
 - Container format (timestamp + codec bitstream)
 - Support for H.264/265, VP8/9, AV1, AAC, Opus
@@ -46,6 +48,7 @@ Media-specific encoding/streaming library built on top of `moq-lite`.
 Media muxers and demuxers for importing existing formats into MoQ.
 
 **Features:**
+
 - fMP4/CMAF import
 - HLS playlist import
 - H.264/H.265 Annex B parsing
@@ -63,6 +66,7 @@ Media muxers and demuxers for importing existing formats into MoQ.
 JWT authentication library and CLI tool for generating tokens.
 
 **Features:**
+
 - HMAC and RSA/ECDSA signing
 - Path-based authorization
 - Token generation and verification
@@ -77,6 +81,7 @@ JWT authentication library and CLI tool for generating tokens.
 QUIC and WebTransport implementation for Rust.
 
 **Features:**
+
 - Quinn-based QUIC
 - WebTransport protocol support
 - TLS certificate management
@@ -91,6 +96,7 @@ QUIC and WebTransport implementation for Rust.
 Opinionated helpers to configure a Quinn QUIC endpoint.
 
 **Features:**
+
 - TLS certificate management
 - QUIC transport configuration
 - Connection setup helpers
@@ -102,16 +108,19 @@ Opinionated helpers to configure a Quinn QUIC endpoint.
 Command-line tool for media operations (binary name: `moq-cli`).
 
 **Features:**
+
 - Publish video from files or FFmpeg
 - Test and development
 - Media server deployments
 
 **Installation:**
+
 ```bash
 cargo install moq-cli
 ```
 
 **Usage:**
+
 ```bash
 # Publish a video file
 moq-cli publish video.mp4
@@ -127,11 +136,13 @@ ffmpeg -i input.mp4 -f mpegts - | moq-cli publish -
 Command-line tool for JWT token management (binary name: `moq-token-cli`).
 
 **Installation:**
+
 ```bash
 cargo install moq-token-cli
 ```
 
 **Usage:**
+
 ```bash
 # Generate a key
 moq-token-cli --key root.jwk generate
@@ -158,6 +169,7 @@ Timing and clock utilities for synchronization.
 C bindings for `moq-lite` via FFI.
 
 **Use cases:**
+
 - Integrate with C/C++ applications
 - Bindings for other languages
 - Legacy system integration

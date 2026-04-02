@@ -4,12 +4,14 @@ description: Welcome to the future, old man.
 ---
 
 # AI
+
 Hopefully you had this square on your buzzword bingo card.
 
 WebRTC is a great protocol for conferencing, but it's not designed for AI.
 But I haven't personally worked in this space either so take my suggestions with a grain of salt.
 
 ## Latency
+
 Inference is still quite slow and expensive, even for the big players.
 If you're going to spend >300ms and literal dollars on expensive inference, you want at least *some* reliability guarantees.
 
@@ -23,12 +25,14 @@ The viewer (and thus your application) controls how long it's willing to wait fo
 The latency budget of the network protocol can match the latency budget of the application.
 
 ## On-Demand
+
 MoQ is pull-based, so nothing is transmitted over the network until there's at least one subscriber.
 You can further extend this by not generating/encoding content either.
 
 Both of these were mentioned briefly on the [contribution](/concept/use-case/contribution) page if you want to read more.
 
 ### Inference
+
 If you want to save compute resources, you can defer inference until it's actually needed.
 
 For example, let's say you're publishing a `captions` track populated by Whisper or something.
@@ -36,6 +40,7 @@ If nobody has enabled captions, then nobody will subscribe to the `captions` tra
 You can stop generating the track (or use a smaller model) until it's actually requested.
 
 ### Simulcast
+
 If you want to save bandwidth, you can publish media in a format expected by the AI model.
 
 For example, let's say you're doing object detection on a bunch of security cameras.
@@ -44,9 +49,11 @@ But if a human (those still exist) wants to audit the full video, you can separa
 Since this is on-demand, you will only encode/transmit the 1080p video when it's actually needed.
 
 ## Browser Control
+
 One of the perks of using WebSockets/MoQ instead of WebRTC is that you get full control over the media pipeline.
 
 [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API) is used to encode/decode media within the browser.
+
 - For video, you use [VideoFrame](https://developer.mozilla.org/en-US/docs/Web/API/VideoFrame) which directly maps to a texture on the GPU. You can use WebGPU to perform inference, encoding, rendering, etc without ever touching the CPU.
 - For audio, you get [AudioData](https://developer.mozilla.org/en-US/docs/Web/API/AudioData) which is (usually) just a float32 array. You control exactly how these are processed, captured, emitted, etc.
 
@@ -57,6 +64,7 @@ And note that all of this is possible with WebRTC and [insertable streams](https
 However, you're really not gaining much by using WebRTC only for networking... just use MoQ instead.
 
 ## Non-Media
+
 MoQ is not just for media.
 
 Send your prompts over the same WebTransport connection as the media.
@@ -64,6 +72,7 @@ Or send non-media stuff like vertex data for 3D models, separate from the textur
 It's a versatile protocol with a wide range of use-cases.
 
 ## Simplicity
+
 You're working with AI, so you're probably building something new.
 
 If you don't want to deal with SDP, or connections that take 10 RTTs, or unsupported media encodings, or STUN/TURN servers, then give MoQ a try.

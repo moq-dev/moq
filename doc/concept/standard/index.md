@@ -4,6 +4,7 @@ description: IETF drafts and protocol specifications
 ---
 
 # Standards
+
 MoQ is a big tent, full of many different opinions and ideas.
 I consider any media protocol that uses QUIC to be part of MoQ, even if it's part of a standards body or organization.
 
@@ -11,6 +12,7 @@ Additionally, MoQ is experimental and not yet battle-tested, so expect all of th
 If you're interested in participating, join any of these communities and get involved.
 
 ## IETF MoQ Working Group
+
 The IETF MoQ Working Group is the official standardization body for MoQ.
 The group is primarily focusing on the [MoqTransport](/concept/standard/moq-transport) specification, but there's a number of other drafts too.
 
@@ -23,6 +25,7 @@ Once you get more involved, jump into the excessive number of [GitHub issues](ht
 - [GitHub](https://github.com/moq-wg/moq-transport)
 
 ## moq.dev
+
 [moq.dev](https://moq.dev) is an open-source implementation of MoQ primarily focused on production usage.
 
 The goal is to support compatibility with the IETF drafts, but not a full implementation.

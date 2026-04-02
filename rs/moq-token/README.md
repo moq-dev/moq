@@ -6,6 +6,7 @@ For comprehensive documentation including token structure, authorization rules, 
 **[Authentication Documentation](../../doc/concept/authentication.md)**
 
 ## Quick Usage (symmetric keys)
+
 ```bash
 # generate secret key
 moq-token-cli --key key.jwk generate
@@ -16,6 +17,7 @@ moq-token-cli --key key.jwk verify < token.jwt
 ```
 
 ## Quick Usage (asymmetric keys)
+
 ```bash
 # generate private and public keys
 moq-token-cli --key private.jwk generate --algorithm RS256 --public public.jwk

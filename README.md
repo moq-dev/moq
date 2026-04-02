@@ -14,7 +14,8 @@ Built using modern web technologies, MoQ delivers WebRTC-like latency without th
 The core networking is delegated to a QUIC library but the rest is in application-space, giving you full control over your media pipeline.
 
 **Key Features:**
-- 🚀 **Real-time latency** using QUIC for priotization and partial reliability.
+
+- 🚀 **Real-time latency** using QUIC for prioritization and partial reliability.
 - 📈 **Massive scale** designed for fan-out and supports cross-region clustering.
 - 🌐 **Modern Web** using [WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API), [WebCodecs](https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API), and [WebAudio](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API).
 - 🎯 **Multi-language** with both Rust (native) and TypeScript (web) libraries.
@@ -22,17 +23,18 @@ The core networking is delegated to a QUIC library but the rest is in applicatio
 
 > **Note:** This project implements [moq-lite](https://doc.moq.dev/concept/layer/moq-lite), a forwards-compatible subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite works with any moq-transport CDN (ex. [Cloudflare](https://doc.moq.dev/blog/first-cdn)). The focus is narrower, prioritizing simplicity and deployability.
 
-
 ## Demo
+
 This repository is split into multiple binaries and libraries across different languages.
 It can get overwhelming, so there's an included [demo](dev/web) with some examples.
 
 **Note:** this demo uses an insecure HTTP fetch intended for *local development only*.
 In production, you'll need a proper domain and a matching TLS certificate via [LetsEncrypt](https://letsencrypt.org/docs/) or similar.
 
-
 ### Quick Setup
+
 **Requirements:**
+
 - [Nix](https://nixos.org/download.html)
 - [Nix Flakes enabled](https://nixos.wiki/wiki/Flakes)
 
@@ -41,16 +43,17 @@ In production, you'll need a proper domain and a matching TLS certificate via [L
 nix develop -c just
 ```
 
-Then visit [https://localhost:8080](https://localhost:8080) to see the demo.
+Then visit <https://localhost:8080> to see the demo.
 Note that this uses an insecure HTTP fetch for local development only; in production you'll need a proper domain + TLS certificate.
 
 *TIP:* If you've installed [nix-direnv](https://github.com/nix-community/nix-direnv), then only `just` is required.
 
-
 ### Full Setup
+
 If you don't like Nix, then you can install dependencies manually:
 
 **Requirements:**
+
 - [Just](https://github.com/casey/just)
 - [Rust](https://www.rust-lang.org/tools/install)
 - [Bun](https://bun.sh/)
@@ -58,6 +61,7 @@ If you don't like Nix, then you can install dependencies manually:
 - ...probably some other stuff
 
 **Run it:**
+
 ```sh
 # Install some more dependencies
 just install
@@ -66,8 +70,7 @@ just install
 just
 ```
 
-Then visit [http://localhost:5173](http://localhost:5173) to see the demo.
-
+Then visit <http://localhost:5173> to see the demo.
 
 ## Architecture
 
@@ -86,7 +89,6 @@ If you want to do something more custom, then you can always extend it or replac
 
 Think of `hang` as like HLS/DASH, while `moq-lite` is like HTTP.
 
-
 ```
 ┌─────────────────┐
 │   Application   │   🏢 Your business logic
@@ -103,11 +105,12 @@ Think of `hang` as like HLS/DASH, while `moq-lite` is like HTTP.
 └─────────────────┘
 ```
 
-
 ## Libraries
+
 This repository provides both [Rust](/rs) and [TypeScript](/js) libraries with similar APIs but language-specific optimizations.
 
 ### Rust
+
 | Crate                       | Description                                                                                                                           | Docs                                                                           |
 |-----------------------------|---------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
 | [moq-lite](rs/moq-lite)          | The core pub/sub transport protocol. Has built-in concurrency and deduplication.                                                      | [![docs.rs](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite)     |
@@ -119,7 +122,6 @@ This repository provides both [Rust](/rs) and [TypeScript](/js) libraries with s
 | [moq-cli](rs/moq-cli)       | A CLI for publishing media to MoQ relays.                                                                                             |                                                                                |
 | [moq-mux](rs/moq-mux)       | Media muxers and demuxers (fMP4/CMAF, HLS) for importing content into MoQ broadcasts.                                                 | [![docs.rs](https://docs.rs/moq-mux/badge.svg)](https://docs.rs/moq-mux)       |
 | [hang-gst](https://github.com/moq-dev/gstreamer) | A GStreamer plugin for publishing or consuming hang broadcasts. A separate repo to avoid requiring gstreamer as a build dependency.            |                                                                                |
-
 
 ### TypeScript
 
@@ -133,20 +135,22 @@ This repository provides both [Rust](/rs) and [TypeScript](/js) libraries with s
 | **[@moq/publish](js/publish)**     | Publish media to MoQ broadcasts (Web Component + JS API).                                                               | [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish) |
 | **[@moq/ui-core](js/ui-core)**     | Shared UI components (Button, Icon, Stats, CSS theme) used by `@moq/watch/ui` and `@moq/publish/ui`.                    | [![npm](https://img.shields.io/npm/v/@moq/ui-core)](https://www.npmjs.com/package/@moq/ui-core) |
 
-
 ## Documentation
+
 Additional documentation and implementation details:
 
 - **[Authentication](doc/concept/authentication.md)** - JWT tokens, authorization, and security
 
-
 ## Protocol
+
 Read the specifications:
+
 - [moq-lite](https://moq-dev.github.io/drafts/draft-lcurley-moq-lite.html)
 - [hang](https://moq-dev.github.io/drafts/draft-lcurley-moq-hang.html)
 - [use-cases](https://moq-dev.github.io/drafts/draft-lcurley-moq-use-cases.html)
 
 ## Development
+
 ```sh
 # See all available commands
 just
@@ -174,10 +178,10 @@ The `moq-native` and `moq-relay` crates optionally support connecting via [iroh]
 
 When the iroh feature is enabled, you can connect to iroh endpoints with these URLs:
 
-* `iroh://<ENDPOINT_ID>`: Connect via moq-lite over raw QUIC.
-* `moql+iroh://<ENDPOINT_ID>`: Connect via moq-lite over raw QUIC (same as above)
-* `moqt+iroh://<ENDPOINT_ID>`: Connect via IETF MoQ over raw QUIC
-* `h3+iroh://<ENDPOINT_ID>/optional/path?with=query`: Connect via WebTransport over HTTP/3.
+- `iroh://<ENDPOINT_ID>`: Connect via moq-lite over raw QUIC.
+- `moql+iroh://<ENDPOINT_ID>`: Connect via moq-lite over raw QUIC (same as above)
+- `moqt+iroh://<ENDPOINT_ID>`: Connect via IETF MoQ over raw QUIC
+- `h3+iroh://<ENDPOINT_ID>/optional/path?with=query`: Connect via WebTransport over HTTP/3.
 
 `ENDPOINT_ID` must be the hex-encoded iroh endpoint id. It is currently not possible to set direct addresses or iroh relay URLs. The iroh integration in moq-native uses iroh's default discovery mechanisms to discover other endpoints by their endpoint id.
 
@@ -211,5 +215,6 @@ Then open [localhost:5173](http://localhost:5173) and watch BBB, pushed from ter
 ## License
 
 Licensed under either:
--   Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
--   MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or https://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or https://opensource.org/licenses/MIT)

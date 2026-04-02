@@ -10,7 +10,6 @@
 A TypeScript [Media over QUIC](https://moq.dev/) (MoQ) client for both browsers and server JS/TS environments.
 The `@moq/lite` client specifically implements the networking layer called [moq-lite](https://doc.moq.dev/concept/layer/moq-lite), handling real-time data delivery to/from moq relays.
 
-
 Check out [hang](../hang) for a higher-level media library that uses this package.
 
 > **Note:** moq-lite is a subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite is forwards compatible with moq-transport, so it works with any moq-transport CDN (ex. [Cloudflare](https://doc.moq.dev/blog/first-cdn)). See the [compatibility docs](https://doc.moq.dev/concept/layer/moq-lite#compatibility) for details.
@@ -45,15 +44,15 @@ You can optionally enable `WebTransport` and full HTTP3/Quic on server environme
 npm install @fails-components/webtransport
 npm install @fails-components/webtransport-transport-http3-quiche
 ```
+
 Which you would load as follows
+
 ```javascript
 import { WebTransport, quicheLoaded } from '@fails-components/webtransport';
 global.WebTransport = WebTransport;
 import * as Moq from '@moq/lite'
 await quicheLoaded; //This is a promise, connect after it resolves
 ```
-
-
 
 ## Examples
 
@@ -62,10 +61,10 @@ await quicheLoaded; //This is a promise, connect after it resolves
 - **[Subscribing](examples/subscribe.ts)** - Subscribe to and receive broadcast data
 - **[Discovery](examples/discovery.ts)** - Discover broadcasts announced by the server
 - **[Server side usage](https://github.com/sb2702/webcodecs-examples/tree/main/src/moq-server)** - Publish from browser to a server
+
 ## License
 
 Licensed under either:
 
--   Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
--   MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)

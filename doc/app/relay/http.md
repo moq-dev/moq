@@ -31,7 +31,7 @@ It's recommended to only use HTTPS in production.
 
 ## Notable Endpoints
 
-### GET /announced/*prefix
+### GET /announced/\*prefix
 
 Lists all announced broadcasts matching the given prefix.
 
@@ -46,7 +46,7 @@ curl http://localhost:4443/announced/demo
 curl http://localhost:4443/announced/demo/my-stream
 ```
 
-### GET /fetch/*path
+### GET /fetch/\*path
 
 Fetches a specific group from a track, by default the latest group.
 Useful for quick debugging without setting up a full subscriber, or for fetching old content.
@@ -76,7 +76,6 @@ This is only useful for local development with self-signed certificates.
 curl http://localhost:4443/certificate.sha256
 # f4:a3:b2:... (hex-encoded fingerprint)
 ```
-
 
 ## See Also
 

@@ -4,6 +4,7 @@ description: The layer that makes MoQ browser compatible
 ---
 
 # WebTransport
+
 [RFC9000](https://datatracker.ietf.org/doc/html/rfc9000) introduced QUIC and [RFC9114](https://datatracker.ietf.org/doc/html/rfc9114) introduced HTTP/3.
 
 However, HTTP/3 is not the only way to use QUIC in a browser.
@@ -16,6 +17,7 @@ It exposes more-or-less the same API as QUIC so it works great for MoQ.
 - [Browser Specification](https://www.w3.org/TR/webtransport/)
 
 ## Handshake
+
 WebTransport actually uses HTTP/3 under the hood.
 A `CONNECT` request is sent by the client to the server, indicating it wants to establish a WebTransport session.
 There's also an optional `protocol` header similar to ALPN and WebSocket's subprotocol.
@@ -25,6 +27,7 @@ HTTP/3 requests and other WebTransport sessions fight for resources, requiring e
 Both sides negotiate the maximum number of WebTransport sessions that can be established on the same QUIC connection; my recommendation is to set it to 1.
 
 ## API
+
 There are some subtle differences between the WebTransport API and the QUIC API.
 Most of the time, you can assume they are the same, but there are some differences:
 
@@ -36,6 +39,7 @@ Shameless plug: use my [web-transport](/rs/crate/web-transport) libraries for Ru
 It implements most of the Quinn API so you can support both QUIC and WebTransport with minimal changes.
 
 ## Why Not HTTP/3?
+
 MoQ could use HTTP/3 directly instead of WebTransport, but HTTP semantics make it awkward:
 
 - **With WebTransport**: both sides can create streams whenever and immediately write new frames.
@@ -45,5 +49,6 @@ MoQ could use HTTP/3 directly instead of WebTransport, but HTTP semantics make i
 This is useful for backwards compatibility with HLS, but the long-term goal is to make publishing and subscribing symmetrical via WebTransport.
 
 ## Native Clients
+
 Native MoQ clients can skip WebTransport entirely and use QUIC directly via an ALPN.
 This avoids the HTTP/3 handshake overhead and the quirks of sharing a connection.

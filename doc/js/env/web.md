@@ -21,6 +21,7 @@ description: Web Components API reference
 Publish camera/microphone or screen as a MoQ broadcast.
 
 **Attributes:**
+
 - `url` (required) - Relay server URL
 - `name` (required) - Broadcast name
 - `device` - "camera" or "screen" (default: "camera")
@@ -50,6 +51,7 @@ Publish camera/microphone or screen as a MoQ broadcast.
 Subscribe to and render a MoQ broadcast.
 
 **Attributes:**
+
 - `url` (required) - Relay server URL
 - `name` (required) - Broadcast name
 - `controls` - Show playback controls (boolean)
@@ -79,6 +81,7 @@ Subscribe to and render a MoQ broadcast.
 Display browser support information for watching streams.
 
 **Attributes:**
+
 - `show` - "always", "warning", "error", or "never" (default: "warning")
 - `details` - show detailed codec information
 
@@ -98,6 +101,7 @@ Display browser support information for watching streams.
 Display browser support information for publishing streams.
 
 **Attributes:**
+
 - `show` - "always", "warning", "error", or "never" (default: "warning")
 - `details` - show detailed codec information
 
@@ -294,11 +298,13 @@ Requires modern browser features:
 - **WebAudio** - For audio playback
 
 **Supported browsers:**
+
 - Chrome 97+
 - Edge 97+
 - Brave (recent versions)
 
 **Experimental support:**
+
 - Firefox (behind flag)
 - Safari (future support planned)
 

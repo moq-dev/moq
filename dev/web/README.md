@@ -11,6 +11,7 @@ See [moq.dev](https://moq.dev) for more information.
 The principles are the same but the implementation is exponentially simpler given a narrower focus (and no politics).
 
 # Usage
+
 These are demos, duh.
 We're using Vite but other bundlers should work too.
 
@@ -18,5 +19,5 @@ We're using Vite but other bundlers should work too.
 
 Licensed under either:
 
--   Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
--   MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0, ([LICENSE-APACHE](../../LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](../../LICENSE-MIT) or http://opensource.org/licenses/MIT)
