@@ -12,14 +12,25 @@ const SERVER_SETUP: u8 = 0x21;
 /// Draft-17 unified SETUP message type (varint 0x2F00)
 pub(crate) const SETUP_V17: u64 = 0x2F00;
 
-/// Draft-17 unified SETUP message — same encoding for both client and server.
+/// Draft-17+ unified SETUP message — same encoding for both client and server.
 #[derive(Debug, Clone)]
 pub struct Setup {
 	pub parameters: Bytes,
 }
 
+impl Setup {
+	fn check_version(v: Version) {
+		match v {
+			Version::Ietf(ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16)
+			| Version::Lite(_) => unreachable!("Setup is draft-17+ only"),
+			_ => {}
+		}
+	}
+}
+
 impl Encode<Version> for Setup {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, v: Version) -> Result<(), EncodeError> {
+		Self::check_version(v);
 		SETUP_V17.encode(w, v)?;
 		u16::try_from(self.parameters.len())
 			.map_err(|_| EncodeError::TooLarge)?
@@ -34,6 +45,7 @@ impl Encode<Version> for Setup {
 
 impl Decode<Version> for Setup {
 	fn decode<R: bytes::Buf>(r: &mut R, v: Version) -> Result<Self, DecodeError> {
+		Self::check_version(v);
 		let kind = u64::decode(r, v)?;
 		if kind != SETUP_V17 {
 			return Err(DecodeError::InvalidValue);
