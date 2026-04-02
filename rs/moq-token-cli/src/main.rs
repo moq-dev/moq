@@ -7,6 +7,10 @@ use std::{io, path::PathBuf};
 #[command(name = "moq-token")]
 #[command(about = "Generate, sign, and verify tokens for moq-relay", long_about = None)]
 struct Cli {
+	/// Deprecated: use --key on the subcommand or --out on generate instead.
+	#[arg(long, global = true, hide = true)]
+	key: Option<PathBuf>,
+
 	/// The command to execute.
 	#[command(subcommand)]
 	command: Commands,
@@ -43,7 +47,7 @@ enum Commands {
 	Sign {
 		/// Path to the signing key file.
 		#[arg(long)]
-		key: PathBuf,
+		key: Option<PathBuf>,
 
 		/// The root path for the token.
 		#[arg(long, default_value = "")]
@@ -74,12 +78,16 @@ enum Commands {
 	Verify {
 		/// Path to the key file.
 		#[arg(long)]
-		key: PathBuf,
+		key: Option<PathBuf>,
 	},
 }
 
 fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
+
+	if cli.key.is_some() {
+		eprintln!("warning: --key before the subcommand is deprecated; use --key on sign/verify or --out on generate");
+	}
 
 	match cli.command {
 		Commands::Generate {
@@ -103,7 +111,7 @@ fn main() -> anyhow::Result<()> {
 			if let Some(dir) = out_dir {
 				let path = dir.join(format!("{id}.jwk"));
 				key.to_file(&path)?;
-			} else if let Some(path) = out {
+			} else if let Some(path) = out.or(cli.key) {
 				key.to_file(&path)?;
 			} else {
 				let json = key.to_str()?;
@@ -120,7 +128,8 @@ fn main() -> anyhow::Result<()> {
 			expires,
 			issued,
 		} => {
-			let key = moq_token::Key::from_file(key)?;
+			let key_path = key.or(cli.key).context("--key is required for sign")?;
+			let key = moq_token::Key::from_file(key_path)?;
 
 			let payload = moq_token::Claims {
 				root,
@@ -136,7 +145,8 @@ fn main() -> anyhow::Result<()> {
 		}
 
 		Commands::Verify { key } => {
-			let key = moq_token::Key::from_file(key)?;
+			let key_path = key.or(cli.key).context("--key is required for verify")?;
+			let key = moq_token::Key::from_file(key_path)?;
 			let token = io::read_to_string(io::stdin())?.trim().to_string();
 			let payload = key.decode(&token)?;
 
