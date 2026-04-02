@@ -1,9 +1,10 @@
 use tikv_jemalloc_ctl::raw;
 
-/// Activate jemalloc heap profiling and spawn a SIGUSR1 signal handler to dump profiles.
+/// Activate jemalloc heap profiling and listen for SIGUSR1 to dump profiles.
 ///
-/// Send `kill -USR1 <pid>` to write a heap profile to `/tmp/moq-relay.heap.<seq>`.
-pub fn init() {
+/// The dump path is controlled by `MALLOC_CONF=prof_prefix:<path>`.
+/// Returns `pending` if profiling is not available (i.e. MALLOC_CONF=prof:true was not set).
+pub async fn run() -> anyhow::Result<()> {
 	let prof_active = b"prof.active\0";
 
 	match unsafe { raw::read::<bool>(prof_active) } {
@@ -14,28 +15,18 @@ pub fn init() {
 		}
 		Err(err) => {
 			tracing::warn!(%err, "jemalloc profiling not available — set MALLOC_CONF=prof:true to enable");
-			return;
+			return std::future::pending().await;
 		}
 	}
 
-	tokio::spawn(async {
-		if let Err(err) = signal_handler().await {
-			tracing::error!(%err, "jemalloc signal handler failed");
-		}
-	});
-}
-
-async fn signal_handler() -> anyhow::Result<()> {
 	let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())?;
-	let mut seq = 0u64;
 
 	loop {
 		sig.recv().await;
-		let path = format!("/tmp/moq-relay.heap.{seq}\0");
-		seq += 1;
 
-		match unsafe { raw::write(b"prof.dump\0", path.as_ptr()) } {
-			Ok(()) => tracing::info!(path = &path[..path.len() - 1], "heap profile dumped"),
+		// Empty path tells jemalloc to use prof_prefix from MALLOC_CONF.
+		match unsafe { raw::write(b"prof.dump\0", b"\0" as *const u8) } {
+			Ok(()) => tracing::info!("heap profile dumped"),
 			Err(err) => tracing::error!(%err, "failed to dump heap profile"),
 		}
 	}

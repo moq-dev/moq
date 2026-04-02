@@ -12,7 +12,7 @@ mod cluster;
 mod config;
 mod connection;
 #[cfg(feature = "jemalloc")]
-pub mod jemalloc_prof;
+pub mod jemalloc;
 mod web;
 #[cfg(feature = "websocket")]
 mod websocket;
