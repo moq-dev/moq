@@ -20,24 +20,26 @@ program
 	.option("--algorithm <algorithm>", "Algorithm to use", "HS256")
 	.option("--id <id>", "Key ID (randomly generated if not provided)")
 	.option("--public <path>", "Path to save the public key (for asymmetric algorithms)")
+	.option("--base64", "Output as base64url instead of JSON", false)
 	.action(async (options) => {
 		try {
 			const algorithm = options.algorithm as Algorithm;
 			const key = await generate(algorithm, options.id);
 
-			// Save the private key
-			const keyJson = JSON.stringify(key, null, 2);
-			const keyEncoded = base64.fromArrayBuffer(new TextEncoder().encode(keyJson).buffer, true);
-			writeFileSync(options.key, keyEncoded, "utf-8");
+			const encodeKey = (k: object): string => {
+				const json = JSON.stringify(k, null, 2);
+				if (options.base64) {
+					return base64.fromArrayBuffer(new TextEncoder().encode(json).buffer, true);
+				}
+				return json;
+			};
 
+			writeFileSync(options.key, encodeKey(key), "utf-8");
 			console.log(`Generated ${algorithm} key: ${options.key}`);
 
-			// Save public key if requested and key is asymmetric
 			if (options.public && key.kty !== "oct") {
 				const publicKey = toPublicKey(key);
-				const publicKeyJson = JSON.stringify(publicKey, null, 2);
-				const publicKeyEncoded = base64.fromArrayBuffer(new TextEncoder().encode(publicKeyJson).buffer, true);
-				writeFileSync(options.public, publicKeyEncoded, "utf-8");
+				writeFileSync(options.public, encodeKey(publicKey), "utf-8");
 				console.log(`Generated public key: ${options.public}`);
 			} else if (options.public && key.kty === "oct") {
 				console.error("Warning: Cannot save public key for symmetric (oct) algorithm");

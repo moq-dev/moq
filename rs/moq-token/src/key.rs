@@ -213,32 +213,45 @@ impl Key {
 		Ok(serde_json::from_str(s)?)
 	}
 
+	/// Load a key from a file, auto-detecting JSON or base64url encoding.
 	pub fn from_file<P: AsRef<StdPath>>(path: P) -> anyhow::Result<Self> {
 		let contents = std::fs::read_to_string(&path)?;
-		Self::from_base64url(&contents)
+		Self::from_encoded(&contents)
 	}
 
 	/// Async version of [`from_file`](Self::from_file), using `tokio::fs`.
 	#[cfg(feature = "tokio")]
 	pub async fn from_file_async<P: AsRef<StdPath>>(path: P) -> anyhow::Result<Self> {
 		let contents = tokio::fs::read_to_string(path).await?;
-		Self::from_base64url(&contents)
+		Self::from_encoded(&contents)
 	}
 
-	fn from_base64url(contents: &str) -> anyhow::Result<Self> {
-		let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(contents.trim())?;
-		let json = String::from_utf8(decoded)?;
-		Ok(serde_json::from_str(&json)?)
+	/// Parse a key from a string, auto-detecting JSON or base64url encoding.
+	fn from_encoded(contents: &str) -> anyhow::Result<Self> {
+		let contents = contents.trim();
+		if contents.starts_with('{') {
+			Ok(serde_json::from_str(contents)?)
+		} else {
+			let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(contents)?;
+			let json = String::from_utf8(decoded)?;
+			Ok(serde_json::from_str(&json)?)
+		}
 	}
 
 	pub fn to_str(&self) -> anyhow::Result<String> {
 		Ok(serde_json::to_string(self)?)
 	}
 
+	/// Write the key to a file as JSON.
 	pub fn to_file<P: AsRef<StdPath>>(&self, path: P) -> anyhow::Result<()> {
-		// Serialize to JSON first
+		let json = serde_json::to_string_pretty(self)?;
+		std::fs::write(path, json)?;
+		Ok(())
+	}
+
+	/// Write the key to a file as base64url-encoded JSON.
+	pub fn to_file_base64url<P: AsRef<StdPath>>(&self, path: P) -> anyhow::Result<()> {
 		let json = serde_json::to_string(self)?;
-		// Then encode as base64url
 		let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
 		std::fs::write(path, encoded)?;
 		Ok(())

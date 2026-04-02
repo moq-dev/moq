@@ -146,17 +146,28 @@ export function loadPublic(jwk: string): PublicKey {
 }
 
 function loadKey(jwk: string): Key | PublicKey {
-	const decoded = decodeBase64Flexible(jwk.trim());
-	if (!decoded) {
-		throw new Error("Failed to decode JWK: invalid base64url encoding");
-	}
+	const trimmed = jwk.trim();
 
 	let data: unknown;
-	try {
-		const jsonString = new TextDecoder().decode(decoded);
-		data = JSON.parse(jsonString);
-	} catch {
-		throw new Error("Failed to parse JWK: invalid JSON format");
+	if (trimmed.startsWith("{")) {
+		// Plain JSON
+		try {
+			data = JSON.parse(trimmed);
+		} catch {
+			throw new Error("Failed to parse JWK: invalid JSON format");
+		}
+	} else {
+		// Base64url encoded JSON
+		const decoded = decodeBase64Flexible(trimmed);
+		if (!decoded) {
+			throw new Error("Failed to decode JWK: invalid base64url encoding");
+		}
+		try {
+			const jsonString = new TextDecoder().decode(decoded);
+			data = JSON.parse(jsonString);
+		} catch {
+			throw new Error("Failed to parse JWK: invalid JSON format after base64url decode");
+		}
 	}
 
 	const key = parseKeyWithLegacyFallback(data);

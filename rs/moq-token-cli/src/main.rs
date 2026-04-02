@@ -17,6 +17,7 @@ enum Commands {
 	/// Generate a new signing key.
 	///
 	/// A random key ID is assigned unless --id is specified.
+	/// Output is JSON by default; use --base64 for base64url encoding.
 	Generate {
 		/// The algorithm to use.
 		#[arg(long, default_value = "HS256")]
@@ -41,6 +42,10 @@ enum Commands {
 		/// Write the public key to a directory as {kid}.jwk (asymmetric algorithms only).
 		#[arg(long, conflicts_with = "public")]
 		public_dir: Option<PathBuf>,
+
+		/// Output as base64url instead of JSON.
+		#[arg(long)]
+		base64: bool,
 	},
 
 	/// Sign a token, writing it to stdout.
@@ -82,6 +87,14 @@ enum Commands {
 	},
 }
 
+fn write_key(key: &moq_token::Key, path: &std::path::Path, base64: bool) -> anyhow::Result<()> {
+	if base64 {
+		key.to_file_base64url(path)
+	} else {
+		key.to_file(path)
+	}
+}
+
 fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 
@@ -93,6 +106,7 @@ fn main() -> anyhow::Result<()> {
 			out_dir,
 			public,
 			public_dir,
+			base64,
 		} => {
 			let id = match id {
 				Some(id) => moq_token::KeyId::decode(&id)?,
@@ -103,16 +117,16 @@ fn main() -> anyhow::Result<()> {
 
 			if let Some(dir) = public_dir {
 				let path = dir.join(format!("{id}.jwk"));
-				key.to_public()?.to_file(path)?;
+				write_key(&key.to_public()?, &path, base64)?;
 			} else if let Some(path) = public {
-				key.to_public()?.to_file(path)?;
+				write_key(&key.to_public()?, &path, base64)?;
 			}
 
 			if let Some(dir) = out_dir {
 				let path = dir.join(format!("{id}.jwk"));
-				key.to_file(&path)?;
+				write_key(&key, &path, base64)?;
 			} else if let Some(path) = out {
-				key.to_file(&path)?;
+				write_key(&key, &path, base64)?;
 			} else {
 				let json = key.to_str()?;
 				println!("{json}");

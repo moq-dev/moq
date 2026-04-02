@@ -86,7 +86,7 @@ The relay uses the specified key file to verify all incoming JWTs. No `kid` head
 
 ### Key Directory Mode (`--auth-key-dir`)
 
-Key files on disk are base64url-encoded JWK (matching the `moq-token-cli generate` output format). URL endpoints serve JWK as plain JSON with `Content-Type: application/json`.
+Key files are stored as JSON by default. Legacy base64url-encoded files are also supported for backwards compatibility. Use `--base64` when generating keys if you prefer the base64url format.
 
 When a client connects with a JWT, the relay:
 1. Decodes the JWT header to extract the `kid` (key ID)

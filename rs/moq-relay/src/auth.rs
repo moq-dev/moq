@@ -201,8 +201,8 @@ impl KeyResolver {
 			AuthError::KeyNotFound
 		})?;
 
-		let key: Key = serde_json::from_str(&body).map_err(|e| {
-			tracing::warn!(%url, %e, "failed to parse key JSON");
+		let key = Key::from_str(&body).map_err(|e| {
+			tracing::warn!(%url, %e, "failed to parse key");
 			AuthError::DecodeFailed
 		})?;
 
