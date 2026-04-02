@@ -163,16 +163,19 @@ curl http://relay.example.com:4443/announced/
 ## Common Issues
 
 ### "Connection refused"
+
 - Ensure the relay is running
 - Check firewall allows UDP traffic
 - Verify the URL is correct
 
 ### "Invalid certificate"
+
 - The relay needs a valid TLS certificate
 - For development, use the fingerprint method
 - See [TLS Setup](/app/relay/#tls-setup)
 
 ### "Permission denied"
+
 - Check your JWT token is valid
 - Verify the token allows publishing to that path
 - See [Authentication](/app/relay/auth)

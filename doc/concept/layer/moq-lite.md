@@ -4,6 +4,7 @@ description: A simple, forwards-compatible subset of MoQ Transport. Avoids some 
 ---
 
 # moq-lite
+
 This website uses [moq-lite](/concept/layer/moq-lite), a subset of the IETF [moq-transport](/concept/standard/moq-transport) draft.
 moq-lite is forwards compatible with moq-transport so it works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn)).
 The principles behind MoQ are fantastic, but standards are **SLOW** and involve too much arguing.
@@ -14,6 +15,7 @@ See the [specification](/spec/draft-lcurley-moq-lite) for low-level details.
 ## API
 
 ### Terminology
+
 - **Session** - A bidirectional connection between a client and a server.
 - **Origin** - A collection of **broadcasts**, used to scope what is available to a session.
 - **Broadcast** - A named and discoverable collection of **tracks** from a single publisher.
@@ -28,8 +30,8 @@ THE BIKE SHED MUST BE PAINTED RED.
 - `Broadcast` -> `Namespace`
 - `Frame` -> `Object`
 
-
 ### Session Establishment
+
 When a client connects to a server, it sends a list of supported ALPNs.
 The server selects the first supported one to negotiate the protocol/version.
 
@@ -37,6 +39,7 @@ If `h3` is negotiated, then we do *another* ALPN negotiation as part of the WebT
 It's gross but required for web browsers, so we suck it up.
 
 Here's a list of currently supported ALPNs:
+
 - `moql`: moq-lite, the version is negotiated via `SETUP`.
 - `moq-lite-03`: moq-lite draft 3
 - `moq-00`: moq-transport draft 14, the version is negotiated via `SETUP`.
@@ -51,6 +54,7 @@ Once the QUIC or WebTransport connection is established, there is a minimal MoQ 
 The `SETUP` message is primarily used to negotiate extensions, then you're off to the races!
 
 ### Announcements
+
 `moq-lite` optionally supports live discovery of broadcasts.
 
 Depending on the language, there's an `announced(prefix: Path)` method on the session.
@@ -61,6 +65,7 @@ It's also useful for individual broadcasts as you can get notifications it comes
 The [moq-relay clustering](/app/relay/cluster) feature actually uses this to discover other nodes in the cluster AND what broadcasts are available on each node.
 
 ### Subscriptions
+
 All data transfers are initiated by subscriptions.
 
 The subscriber needs to send a `SUBSCRIBE` message indicating the **broadcast** and **track** they want (both strings).
@@ -81,6 +86,7 @@ You can and should take advantage of this, for example using delta encoding.
 If frames within a group are actually independent, you should probably split them into individual groups!
 
 ### Congestion
+
 If it's not obvious by now, a lot of MoQ's behavior is designed to be robust to congestion.
 
 When congestion occurs, something **MUST** get dropped.
@@ -88,6 +94,7 @@ MoQ puts each subscriber (viewer) in control, allowing them to choose how much l
 This is how the same protocol can deliver the same content anywhere between 100ms of latency to 30s of latency.
 
 Each Subscription consists of a few properties:
+
 - **Track Priority**: A value between 0 and 255. Tracks with higher priority will be delivered first.
 - **Group Order**: The order in which groups are delivered. Defaults to descending; higher IDs are delivered first.
 - **Group Timeout**: The maximum duration to keep old groups in cache/transit. Defaults to 30 seconds.
@@ -103,6 +110,7 @@ For example, consider a conference room with Alice and Bob:
 | `bob/video` | 40 | descending | 2s |
 
 When combined with a local jitter buffer, this should result in different user experiences based on the network conditions:
+
 - **No Congestion**: Every frame is delivered immediately.
 - **Minor Congestion**: Bob's video might skip a few frames at the tail of each group.
 - **Moderate Congestion**: Bob and Alice's video will skip the tail of each group, but audio will still be delivered.
@@ -112,6 +120,7 @@ There's no optimal solution for this, but we think these subscription properties
 They're simple to implement and easy enough to understand.
 
 ## Compatibility
+
 `moq-lite` is forward compatible with `moq-transport`.
 That means for every moq-lite API, there's a corresponding moq-transport API.
 
@@ -133,7 +142,6 @@ But if a publisher needs a feature, then the subscriber needs it too, so you can
 | moq-lite      | moq-transport | ✅        |                                                                      |
 | moq-transport | moq-lite      | ⚠️        | No moq-transport-only features.                                      |
 | moq-transport | moq-transport | ⚠️        | Depends on the implementations.                                      |
-
 
 ### Major Differences
 

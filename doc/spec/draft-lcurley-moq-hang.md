@@ -8,9 +8,9 @@ Hang is a real-time conferencing protocol built on top of moq-lite.
 A room consists of multiple participants who publish media tracks.
 All updates are live, such as a change in participants or media tracks.
 
-
 # Terminology
-Hang is built on top of moq-lite [moql] and uses much of the same terminology.
+
+Hang is built on top of moq-lite \[moql] and uses much of the same terminology.
 A quick recap:
 
 - **Broadcast**: A collection of Tracks from a single publisher.
@@ -25,8 +25,8 @@ Hang introduces additional terminology:
 - **Catalog**: A JSON document that describes each available media track, supporting live updates.
 - **Container**: A tiny header in front of each media payload containing the timestamp.
 
-
 # Discovery
+
 The first requirement for a real-time conferencing application is to discover other participants in the same room.
 Hang does this using moq-lite's ANNOUNCE capabilities.
 
@@ -41,7 +41,7 @@ For example:
 /room456/zoe.hang
 ```
 
-A participant issues an ANNOUNCE_PLEASE message to discover any other participants in the same room.
+A participant issues an ANNOUNCE\_PLEASE message to discover any other participants in the same room.
 The server (relay) will then respond with an ANNOUNCE message for any matching broadcasts, including their own.
 
 For example:
@@ -60,6 +60,7 @@ ANNOUNCE suffix=alice.hang active=false
 ```
 
 # Catalog
+
 The catalog describes the available media tracks for a single participant.
 It's a JSON document that extends the W3C WebCodecs specification.
 
@@ -72,6 +73,7 @@ Each group contains a single frame with UTF-8 JSON.
 A publisher MUST NOT write multiple frames to a group until a future specification includes a delta-encoding mechanism (via JSON Patch most likely).
 
 ## Root
+
 The root of the catalog is a JSON document with the following schema:
 
 ```text
@@ -91,8 +93,8 @@ This way catalog updates are rare and a client MAY choose to not subscribe.
 This specification currently only defines audio and video tracks.
 
 ## Video
-A video track contains the necessary information to decode a video stream.
 
+A video track contains the necessary information to decode a video stream.
 
 ```text
 type VideoSchema = {
@@ -141,8 +143,8 @@ For example:
 }
 ```
 
-
 ## Audio
+
 An audio track contains the necessary information to decode an audio stream.
 
 ```text
@@ -179,6 +181,7 @@ For example:
 ```
 
 # Container
+
 Audio and video tracks use a lightweight container to encapsulate the media payload.
 
 Each moq-lite group MUST start with a keyframe.
@@ -190,12 +193,10 @@ The remainder of the payload is codec specific; see the WebCodecs specification 
 
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
 
-
 # Security Considerations
-TODO Security
 
+TODO Security
 
 # IANA Considerations
 
 This document has no IANA actions.
-

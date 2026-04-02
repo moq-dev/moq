@@ -4,7 +4,16 @@
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.10",
 		"concurrently": "^9.2.1",
-		"publint": "^0.3.18"
+		"publint": "^0.3.18",
+		"remark-cli": "^12.0.1",
+		"remark-frontmatter": "^5.0.0",
+		"remark-lint-list-item-indent": "^4.0.1",
+		"remark-lint-maximum-line-length": "^4.1.1",
+		"remark-lint-no-duplicate-headings": "^4.0.1",
+		"remark-lint-no-undefined-references": "^5.0.2",
+		"remark-preset-lint-consistent": "^6.0.1",
+		"remark-preset-lint-recommended": "^7.0.1",
+		"remark-stringify": "^11.0.0"
 	},
 	"private": true,
 	"scripts": {

@@ -166,10 +166,12 @@ Use a ring buffer between the decoder and audio output to absorb network jitter.
 Both `VideoConfig` and `AudioConfig` have a `description` field that provides out-of-band codec initialization data. If present, it contains codec-specific configuration as a hex-encoded byte string.
 
 **Video examples:**
+
 - **H.264** — SPS/PPS in AVCC format. NAL units in the payload are length-prefixed.
 - **H.265** — VPS/SPS/PPS in HVCC format.
 
 **Audio examples:**
+
 - **AAC** — `AudioSpecificConfig` bytes.
 - **Opus** — Typically `None`; configuration is in-band.
 

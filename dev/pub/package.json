@@ -1,0 +1,11 @@
+{
+	"name": "video-moq-dev",
+	"private": true,
+	"scripts": {
+		"deploy": "wrangler deploy"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^4",
+		"wrangler": "^4"
+	}
+}

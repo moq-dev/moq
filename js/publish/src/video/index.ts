@@ -55,7 +55,7 @@ export class Root {
 		effect.spawn(async () => {
 			for (;;) {
 				const next = await Promise.race([reader.read(), effect.cancel]);
-				if (!next || !next.value) break;
+				if (!next?.value) break;
 
 				this.frame.update((prev) => {
 					prev?.close();

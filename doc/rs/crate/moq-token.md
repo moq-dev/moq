@@ -90,15 +90,18 @@ moq-token-cli --key root.jwk verify < alice.jwt
 ## Supported Algorithms
 
 **Symmetric (HMAC):**
+
 - HS256
 - HS384
 - HS512
 
 **Asymmetric (RSA):**
+
 - RS256, RS384, RS512
 - PS256, PS384, PS512
 
 **Asymmetric (Elliptic Curve):**
+
 - EC256, EC384
 - EdDSA
 

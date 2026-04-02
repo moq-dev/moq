@@ -14,6 +14,7 @@ just web
 ```
 
 This starts three components in parallel:
+
 1. **Relay** — a localhost MoQ relay server
 2. **Publisher** — `moq-cli` publishing Big Buck Bunny via ffmpeg
 3. **Web server** — a Vite dev server with the demo UI

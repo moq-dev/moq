@@ -10,6 +10,7 @@ moq-relay uses JWT (JSON Web Tokens) for authentication and authorization. Token
 ## Overview
 
 The authentication flow:
+
 1. Generate a signing key (shared secret or public/private keypair)
 2. Configure the relay with the verification key
 3. Issue tokens to clients with their allowed paths
@@ -20,6 +21,7 @@ The authentication flow:
 ### Generate a Key
 
 Using the Rust CLI:
+
 ```bash
 # Symmetric key (simpler, key must stay secret)
 moq-token-cli --key root.jwk generate
@@ -29,6 +31,7 @@ moq-token-cli --key private.jwk generate --algorithm RS256 --public public.jwk
 ```
 
 Using the JavaScript CLI:
+
 ```bash
 bunx @moq/token generate --key root.jwk
 ```
@@ -54,6 +57,7 @@ moq-token-cli --key root.jwk sign --root demo --publish my-stream --subscribe ""
 ```
 
 The client connects with the token:
+
 ```text
 https://relay.example.com/demo/my-stream?jwt=eyJhbGciOiJIUzI1NiIs...
 ```
@@ -92,6 +96,7 @@ An empty suffix (`""`) allows access to anything under the root.
 ## Supported Algorithms
 
 ### Symmetric (HMAC)
+
 The same key signs and verifies. Simpler setup, but the key must be kept secret everywhere it's used.
 
 - `HS256` - HMAC with SHA-256 (default)
@@ -99,6 +104,7 @@ The same key signs and verifies. Simpler setup, but the key must be kept secret 
 - `HS512` - HMAC with SHA-512
 
 ### Asymmetric (RSA/ECDSA)
+
 Private key signs, public key verifies. The relay only needs the public key, so compromise of the relay doesn't leak signing capability.
 
 - `RS256`, `RS384`, `RS512` - RSA PKCS#1 v1.5
@@ -121,12 +127,14 @@ Set `public = ""` to make everything public (development only).
 ## Example Configurations
 
 ### Development (no auth)
+
 ```toml
 [auth]
 public = ""
 ```
 
 ### Public viewing, authenticated publishing
+
 ```toml
 [auth]
 key = "root.jwk"
@@ -135,6 +143,7 @@ public = "streams"  # Anyone can subscribe to streams/*
 ```
 
 ### Fully authenticated
+
 ```toml
 [auth]
 key = "public.jwk"  # Asymmetric, public key only
@@ -144,6 +153,7 @@ key = "public.jwk"  # Asymmetric, public key only
 ## Library Usage
 
 ### TypeScript
+
 ```typescript
 import { generate, load, sign, type Claims } from "@moq/token"
 
@@ -162,6 +172,7 @@ const token = await sign(key, claims)
 ```
 
 ### Rust
+
 ```bash
 moq-token-cli --key root.jwk sign \
   --root demo \

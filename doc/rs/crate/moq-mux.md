@@ -91,10 +91,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Supported Codecs
 
 **Video:**
+
 - H.264 (AVC) - requires `h264` feature
 - H.265 (HEVC) - requires `h265` feature
 
 **Audio:**
+
 - AAC
 - Opus
 

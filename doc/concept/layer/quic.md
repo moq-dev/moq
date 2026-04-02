@@ -11,6 +11,7 @@ QUIC is why MoQ exists.
 It's the protocol that finally grants us the web support needed for real-time streaming.
 
 ## History
+
 To explain the purpose of QUIC, it's helpful to understand the history of HTTP.
 Let's take a quick trip through history:
 
@@ -22,6 +23,7 @@ RTMP and HLS suffer from this same head-of-line blocking problem.
 Old audio/video frames end up blocking new frames from being delivered, driving up latency during congestion.
 
 ## Why Not Raw UDP?
+
 "Just use UDP" has been the rallying cry of real-time media for decades.
 That's exactly the route that protocols like WebRTC and SRT have taken, but they incur a high complexity cost.
 Every implementation needs custom encryption, congestion control, flow control, retransmissions, prioritization, NAT traversal, browser support, and more.
@@ -33,13 +35,16 @@ The point of MoQ is to avoid reinventing the wheel and focus on **media** instea
 QUIC is a fantastic protocol with wide support and the features we need.
 
 ## Features
+
 Speaking of features, here's a QUICk summary of the features MoQ relies on.
 
 ### Streams
+
 After establishing a QUIC connection, both sides can create streams.
 This is can be done instantly (without overhead) provided the configurable limit has not been reached.
 
 There's two flavors of streams:
+
 - **Bidirectional**: A stream that can be read from and written to.
 - **Unidirectional**: A stream that can only be written to.
 
@@ -60,6 +65,7 @@ But Group A won't block Group B, nor will Track A block Track B.
 This can make sense for real-time audio when retransmissions are not needed.
 
 ### Reliability
+
 QUIC provides three flavors of reliability:
 
 - **Full Reliability**: A QUIC stream will be retransmitted until every byte arrives. Perfect for mandatory data like the catalog.
@@ -70,10 +76,12 @@ MoQ primarily uses partial reliability, reseting streams once the content is no 
 However, in order to support multiple different latency targets, we prefer to prioritize streams instead of resetting them.
 
 ### Prioritization
+
 The QUIC library is responsible for constructing and sending each UDP packet.
 This means a QUIC library can prioritize streams by deciding which packet to send next.
 
 This is useful in order to:
+
 - Prioritize audio over video
 - Prioritize recent frames over old frames
 
@@ -82,6 +90,7 @@ When the network is congested, old groups get starved while new groups get throu
 We'll eventually reset old groups once a maximum latency is reached, but it's better to prioritize than to reset.
 
 ### Connection Migration
+
 Something we get for free is connection migration.
 QUIC connections can survive IP address changes, such as switching from WiFi to cellular.
 
@@ -89,6 +98,7 @@ This is because QUIC uses connection IDs rather than the traditional `IP:port` t
 It's also the basis for some pretty neat [load balancing](https://datatracker.ietf.org/doc/html/draft-ietf-quic-load-balancers) techniques.
 
 ## Browser Support
+
 QUIC is available in browsers via [WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API):
 
 - **Chrome/Edge** - Supported since 2021 (97)
@@ -100,6 +110,7 @@ That means MacOS 26.4 and iOS 26.4 is the minimum version for Safari support.
 We have an (automatic) WebSocket fallback in the meantime.
 
 ## Security
+
 TLS 1.3 is required for QUIC.
 
 This can be annoying for local development and private networks.

@@ -4,15 +4,18 @@ description: Set up the rest of the stuff.
 ---
 
 # Development
+
 Still here? You must be a Big Buck Bunny fan.
 
 This guide covers the rest of the stuff you can run locally.
 
 ## Just
+
 We use [Just](https://github.com/casey/just) to run helper commands.
 It's *just* a fancier `Makefile` so you don't have to remember all the commands.
 
 ### Common Commands
+
 ```bash
 # Run the demo (default)
 just
@@ -41,6 +44,7 @@ just pub-hls tos
 Want more? See the [justfile](https://github.com/moq-dev/moq/blob/main/justfile) for all commands.
 
 ### The Internet
+
 Most of the commands default to `http://localhost:4443/anon`.
 That's pretty lame.
 
@@ -74,6 +78,7 @@ just pub av1 https://cdn.moq.dev/?jwt=not_a_real_token_ask_for_one
 ## Debugging
 
 ### Rust
+
 You can set the logging level with the `RUST_LOG` environment variable.
 
 ```bash
@@ -88,7 +93,6 @@ If you're getting a panic, use `RUST_BACKTRACE=1` to get a backtrace.
 RUST_BACKTRACE=1 just
 ```
 
-
 ## IDE Setup
 
 I use [Cursor](https://www.cursor.com/), but anything works.
@@ -100,7 +104,6 @@ Recommended extensions:
 - [EditorConfig](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig)
 - [direnv](https://marketplace.visualstudio.com/items?itemName=mkhl.direnv)
 
-
 ## Contributing
 
 Run `just fix` before pushing your changes, otherwise CI will yell at you.
@@ -109,12 +112,13 @@ It runs `just check` so that's the easiest way to debug any issues.
 Please don't submit a vibe coded PR unless you understand it.
 `You're absolutely right!` is not always good enough.
 
-
 ## Onwards
+
 `just` runs three processes that normally, should run on separate hosts.
 Learn how to run them [in production](/setup/prod).
 
 Or take a detour and:
+
 - Brush up on the [concepts](/concept/).
 - Discover the other [apps](/app/).
 - `use` the [Rust crates](/rs/).

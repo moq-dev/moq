@@ -82,6 +82,7 @@ The idea is to [build first, argue later](/concept/standard/).
 See the [concepts](/concept/) page for a breakdown of the layering, rationale, and comparison to other protocols.
 
 ## Setup
+
 Get up and running in seconds with [Nix](https://nixos.org/download.html) ([+Flakes](https://nixos.wiki/wiki/Flakes)), or be lame and [install stuff manually](/setup/):
 
 ```bash
@@ -95,9 +96,11 @@ If everything works, a browser window will pop up demoing how to both publish an
 - Skip ahead to the [production guide](/setup/prod) to see what it takes to deploy this bad boy.
 
 ## Applications
+
 There are a bunch of MoQ binaries and plugins.
 
 Some highlights:
+
 - [moq-relay](/app/relay/) - A server connecting publishers to subscribers, able to form a [self-hosted CDN cluster](/app/relay/cluster).
 - [moq-cli](/app/cli) - A CLI that can import and publish MoQ broadcasts from a variety of formats (fMP4, HLS, etc), including via ffmpeg.
 - [obs](/app/obs) - An OBS plugin, able to publish a MoQ broadcast and/or use MoQ broadcasts as sources.
@@ -106,9 +109,11 @@ Some highlights:
 - [...and more](/app/)
 
 ## Rust Crates 🦀
+
 Integrate MoQ into your application without fear. Focused on [native](/rs/env/native) but has token [WASM](/rs/env/wasm) support.
 
 Some highlights:
+
 - [moq-lite](/rs/crate/moq-lite) - Performs the core asynchronous networking, caching, and fanout.
 - [moq-mux](/rs/crate/moq-mux) - Media muxers/demuxers for fMP4, CMAF, and HLS import.
 - [libmoq](/rs/crate/libmoq) - C bindings for the above, no finagling Rust into your build system.
@@ -116,10 +121,12 @@ Some highlights:
 - [...and more](/rs/)
 
 ## TypeScript Packages
+
 Run MoQ in a [web browser](/js/env/web) utilizing the latest Web tech.
 Or run on [native](/js/env/native) with polyfills via Node/Bun/Deno.
 
 Some highlights:
+
 - [@moq/lite](/js/@moq/lite) - Performs the core asynchronous networking.
 - [@moq/hang](/js/@moq/hang/) - Performs any media stuff: capture, encode, transmux, decode, render.
 - [@moq/watch](/js/@moq/watch) - Subscribe to and render MoQ broadcasts.

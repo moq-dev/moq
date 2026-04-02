@@ -26,7 +26,7 @@ key = "key.pem"
 
 ## Full Reference
 
-### [log]
+### \[log]
 
 Logging configuration.
 
@@ -37,7 +37,7 @@ Logging configuration.
 level = "info"
 ```
 
-### [server]
+### \[server]
 
 QUIC/WebTransport server settings.
 
@@ -47,7 +47,7 @@ QUIC/WebTransport server settings.
 listen = "0.0.0.0:4443"
 ```
 
-### [server.tls]
+### \[server.tls]
 
 TLS configuration for the QUIC endpoint.
 
@@ -63,7 +63,7 @@ generate = ["localhost", "127.0.0.1"]
 
 For production, use certificates from Let's Encrypt or another CA.
 
-### [web.http]
+### \[web.http]
 
 HTTP server for debugging endpoints.
 
@@ -76,7 +76,7 @@ listen = "0.0.0.0:4443"
 
 See [HTTP Endpoints](/app/relay/http) for available endpoints.
 
-### [web.https]
+### \[web.https]
 
 HTTPS/WSS server for TCP fallback.
 
@@ -90,7 +90,7 @@ cert = "cert.pem"
 key = "key.pem"
 ```
 
-### [auth]
+### \[auth]
 
 Authentication configuration.
 
@@ -108,7 +108,7 @@ public = "anon"
 
 See [Authentication](/app/relay/auth) for details on token generation.
 
-### [cluster]
+### \[cluster]
 
 Clustering configuration for multi-relay deployments.
 
@@ -127,7 +127,7 @@ node = "leaf1.relay.example.com:4443"
 
 See [Clustering](/app/relay/cluster) for deployment patterns.
 
-### [client]
+### \[client]
 
 Client settings used when connecting to other relays (clustering).
 
@@ -140,7 +140,7 @@ tls.disable_verify = true
 # tls.root = ["/path/to/root.pem"]
 ```
 
-### [iroh]
+### \[iroh]
 
 Experimental P2P support via iroh.
 

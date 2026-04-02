@@ -6,7 +6,7 @@ on:
       - "moq-ffi-v*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: moq-ffi-release
@@ -20,17 +20,11 @@ jobs:
       version: ${{ steps.parse.outputs.version }}
 
     steps:
+      - uses: actions/checkout@v6
+
       - name: Parse version from tag
         id: parse
-        shell: bash
-        run: |
-          ref=${GITHUB_REF#refs/tags/}
-          if [[ "$ref" =~ ^moq-ffi-v([0-9.]+)$ ]]; then
-            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-          else
-            echo "Tag format not recognized: $ref" >&2
-            exit 1
-          fi
+        run: .github/scripts/release.sh parse-version moq-ffi
 
   build:
     name: Build (${{ matrix.target }})
@@ -198,6 +192,8 @@ jobs:
     name: Release
     needs: [parse-version, build, bindings, python]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v6
@@ -206,12 +202,7 @@ jobs:
 
       - name: Find previous tag
         id: prev_tag
-        shell: bash
-        run: |
-          current_tag="moq-ffi-v${{ needs.parse-version.outputs.version }}"
-          prev_tag=$(git tag --list 'moq-ffi-v*' --sort=-v:refname | grep -v "^${current_tag}$" | head -n1 || true)
-          echo "tag=${prev_tag}" >> "$GITHUB_OUTPUT"
-          echo "Previous tag: ${prev_tag:-none}"
+        run: .github/scripts/release.sh prev-tag moq-ffi
 
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -219,26 +210,13 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create release
-        shell: bash
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
-          REF_NAME: ${{ github.ref_name }}
-          VERSION: ${{ needs.parse-version.outputs.version }}
-          PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: |
-          if [ -n "$PREV_TAG" ]; then
-            gh release create "$REF_NAME" \
-              --title "moq-ffi v${VERSION}" \
-              --generate-notes \
-              --notes-start-tag "$PREV_TAG" \
-              artifacts/*
-          else
-            gh release create "$REF_NAME" \
-              --title "moq-ffi v${VERSION}" \
-              --generate-notes \
-              artifacts/*
-          fi
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TITLE: "moq-ffi v${{ needs.parse-version.outputs.version }}"
+          RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: .github/scripts/release.sh create artifacts
 
   publish-python:
     name: Publish to PyPI

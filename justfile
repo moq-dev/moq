@@ -34,6 +34,9 @@ check:
 	fi
 	bun biome check
 
+	# Run the Markdown checks.
+	bun remark . --quiet --frail
+
 	# Run the (slower) Rust checks.
 	cargo check --all-targets
 	cargo clippy --all-targets -- -D warnings
@@ -115,6 +118,9 @@ fix:
 	# Fix the Javascript dependencies.
 	bun install
 	bun biome check --write
+
+	# Fix the Markdown issues.
+	bun remark . --quiet --output
 
 	# Fix the Rust issues.
 	cargo clippy --fix --allow-staged --allow-dirty --all-targets
