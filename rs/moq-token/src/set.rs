@@ -1,8 +1,10 @@
+use crate::error::KeyError;
 use crate::{Claims, Key, KeyOperation};
-use anyhow::Context;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::Path;
 use std::sync::Arc;
+
+#[cfg(feature = "jwks-loader")]
 use std::time::Duration;
 
 /// JWK Set to spec <https://datatracker.ietf.org/doc/html/rfc7517#section-5>
@@ -46,36 +48,31 @@ impl<'de> Deserialize<'de> for KeySet {
 
 impl KeySet {
 	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> anyhow::Result<Self> {
+	pub fn from_str(s: &str) -> crate::Result<Self> {
 		Ok(serde_json::from_str(s)?)
 	}
 
-	pub fn from_file<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+	pub fn from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
 		let json = std::fs::read_to_string(&path)?;
 		Ok(serde_json::from_str(&json)?)
 	}
 
-	pub fn to_str(&self) -> anyhow::Result<String> {
+	pub fn to_str(&self) -> crate::Result<String> {
 		Ok(serde_json::to_string(&self)?)
 	}
 
-	pub fn to_file<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
+	pub fn to_file<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
 		let json = serde_json::to_string(&self)?;
 		std::fs::write(path, json)?;
 		Ok(())
 	}
 
-	pub fn to_public_set(&self) -> anyhow::Result<KeySet> {
+	pub fn to_public_set(&self) -> crate::Result<KeySet> {
 		Ok(KeySet {
 			keys: self
 				.keys
 				.iter()
-				.map(|key| {
-					key.as_ref()
-						.to_public()
-						.map(Arc::new)
-						.map_err(|e| anyhow::anyhow!("failed to get public key from jwks: {:?}", e))
-				})
+				.map(|key| key.as_ref().to_public().map(Arc::new))
 				.collect::<Result<Vec<Arc<Key>>, _>>()?,
 		})
 	}
@@ -88,26 +85,26 @@ impl KeySet {
 		self.keys.iter().find(|key| key.operations.contains(operation)).cloned()
 	}
 
-	pub fn encode(&self, payload: &Claims) -> anyhow::Result<String> {
+	pub fn encode(&self, payload: &Claims) -> crate::Result<String> {
 		let key = self
 			.find_supported_key(&KeyOperation::Sign)
-			.context("cannot find signing key")?;
+			.ok_or(KeyError::NoSigningKey)?;
 		key.encode(payload)
 	}
 
-	pub fn decode(&self, token: &str) -> anyhow::Result<Claims> {
-		let header = jsonwebtoken::decode_header(token).context("failed to decode JWT header")?;
+	pub fn decode(&self, token: &str) -> crate::Result<Claims> {
+		let header = jsonwebtoken::decode_header(token)?;
 
 		let key = match header.kid {
 			Some(kid) => self
 				.find_key(kid.as_str())
-				.ok_or_else(|| anyhow::anyhow!("cannot find key with kid {kid}")),
+				.ok_or_else(|| crate::Error::from(KeyError::KeyNotFound(kid))),
 			None => {
 				// If we only have one key we can use it without a kid
 				if self.keys.len() == 1 {
 					Ok(self.keys[0].clone())
 				} else {
-					anyhow::bail!("missing kid in JWT header")
+					Err(KeyError::MissingKid.into())
 				}
 			}
 		}?;
@@ -117,25 +114,12 @@ impl KeySet {
 }
 
 #[cfg(feature = "jwks-loader")]
-pub async fn load_keys(jwks_uri: &str) -> anyhow::Result<KeySet> {
-	let client = reqwest::Client::builder()
-		.timeout(Duration::from_secs(10))
-		.build()
-		.context("failed to build reqwest client")?;
+pub async fn load_keys(jwks_uri: &str) -> crate::Result<KeySet> {
+	let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
 
-	let jwks_json = client
-		.get(jwks_uri)
-		.send()
-		.await
-		.with_context(|| format!("failed to GET JWKS from {}", jwks_uri))?
-		.error_for_status()
-		.with_context(|| format!("JWKS endpoint returned error: {}", jwks_uri))?
-		.text()
-		.await
-		.context("failed to read JWKS response body")?;
+	let jwks_json = client.get(jwks_uri).send().await?.error_for_status()?.text().await?;
 
-	// Parse the JWKS into a KeySet
-	KeySet::from_str(&jwks_json).context("Failed to parse JWKS into KeySet")
+	KeySet::from_str(&jwks_json)
 }
 
 #[cfg(test)]

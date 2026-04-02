@@ -1,5 +1,5 @@
+use crate::error::KeyError;
 use crate::{Algorithm, EllipticCurve, Key, KeyOperation, KeyType, RsaPublicKey};
-use anyhow::Context;
 use aws_lc_rs::encoding::AsBigEndian;
 use aws_lc_rs::signature::KeyPair;
 use elliptic_curve::generic_array::typenum::Unsigned;
@@ -9,7 +9,7 @@ use elliptic_curve::{Curve, CurveArithmetic, SecretKey};
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 
 /// Generate a key pair for the given algorithm, returning the private and public keys.
-pub fn generate(algorithm: Algorithm, id: Option<String>) -> anyhow::Result<Key> {
+pub fn generate(algorithm: Algorithm, id: Option<String>) -> crate::Result<Key> {
 	let key = match algorithm {
 		Algorithm::HS256 => generate_hmac_key::<32>(),
 		Algorithm::HS384 => generate_hmac_key::<48>(),
@@ -34,7 +34,7 @@ pub fn generate(algorithm: Algorithm, id: Option<String>) -> anyhow::Result<Key>
 	})
 }
 
-fn generate_hmac_key<const SIZE: usize>() -> anyhow::Result<KeyType> {
+fn generate_hmac_key<const SIZE: usize>() -> crate::Result<KeyType> {
 	let mut key = [0u8; SIZE];
 	aws_lc_rs::rand::fill(&mut key)?;
 	Ok(KeyType::OCT { secret: key.to_vec() })
@@ -66,31 +66,29 @@ impl rsa::rand_core::RngCore for AwsRng {
 
 impl rsa::rand_core::CryptoRng for AwsRng {}
 
-fn generate_rsa_key(size: usize) -> anyhow::Result<KeyType> {
+fn generate_rsa_key(size: usize) -> crate::Result<KeyType> {
 	let mut rng = AwsRng;
-	let key = rsa::RsaPrivateKey::new(&mut rng, size);
+	let mut key = rsa::RsaPrivateKey::new(&mut rng, size)?;
+	key.precompute()?;
 
-	match key {
-		Ok(key) => Ok(KeyType::RSA {
-			public: RsaPublicKey {
-				e: key.e().to_bytes_be(),
-				n: key.n().to_bytes_be(),
-			},
-			private: Some(crate::RsaPrivateKey {
-				d: key.d().to_bytes_be(),
-				p: key.primes()[0].to_bytes_be(),
-				q: key.primes()[1].to_bytes_be(),
-				dp: key.dp().expect("no dp specified in key").to_bytes_be(),
-				dq: key.dq().expect("no dq specified in key").to_bytes_be(),
-				qi: key.qinv().expect("no qinv specified in key").to_bytes_be().1,
-				oth: None, // TODO https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2.7
-			}),
+	Ok(KeyType::RSA {
+		public: RsaPublicKey {
+			e: key.e().to_bytes_be(),
+			n: key.n().to_bytes_be(),
+		},
+		private: Some(crate::RsaPrivateKey {
+			d: key.d().to_bytes_be(),
+			p: key.primes()[0].to_bytes_be(),
+			q: key.primes()[1].to_bytes_be(),
+			dp: key.dp().ok_or(KeyError::MissingPrivateKey)?.to_bytes_be(),
+			dq: key.dq().ok_or(KeyError::MissingPrivateKey)?.to_bytes_be(),
+			qi: key.qinv().ok_or(KeyError::MissingPrivateKey)?.to_bytes_be().1,
+			oth: None, // TODO https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2.7
 		}),
-		Err(err) => Err(anyhow::anyhow!("Failed to generate RSA key: {}", err)),
-	}
+	})
 }
 
-fn generate_ec_key<C>(curve: EllipticCurve) -> anyhow::Result<KeyType>
+fn generate_ec_key<C>(curve: EllipticCurve) -> crate::Result<KeyType>
 where
 	C: Curve + CurveArithmetic + PointCompression,
 	C::AffinePoint: ToEncodedPoint<C> + FromEncodedPoint<C>,
@@ -107,8 +105,8 @@ where
 
 	let point = secret.public_key().to_encoded_point(false);
 
-	let x = point.x().context("Missing x() point in EC key")?.to_vec();
-	let y = point.y().context("Missing y() point in EC key")?.to_vec();
+	let x = point.x().ok_or(KeyError::MissingEcX)?.to_vec();
+	let y = point.y().ok_or(KeyError::MissingEcY)?.to_vec();
 	let d = secret.to_bytes().to_vec();
 
 	Ok(KeyType::EC {
@@ -119,7 +117,7 @@ where
 	})
 }
 
-fn generate_ed25519_key() -> anyhow::Result<KeyType> {
+fn generate_ed25519_key() -> crate::Result<KeyType> {
 	let key_pair = aws_lc_rs::signature::Ed25519KeyPair::generate()?;
 
 	let public_key = key_pair.public_key().as_ref().to_vec();

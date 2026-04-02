@@ -1,6 +1,6 @@
+use crate::error::KeyError;
 use crate::generate::generate;
 use crate::{Algorithm, Claims};
-use anyhow::{Context, bail};
 use base64::Engine;
 use elliptic_curve::SecretKey;
 use elliptic_curve::pkcs8::EncodePrivateKey;
@@ -227,11 +227,11 @@ impl fmt::Debug for Key {
 
 impl Key {
 	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> anyhow::Result<Self> {
+	pub fn from_str(s: &str) -> crate::Result<Self> {
 		Ok(serde_json::from_str(s)?)
 	}
 
-	pub fn from_file<P: AsRef<StdPath>>(path: P) -> anyhow::Result<Self> {
+	pub fn from_file<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
 		let contents = std::fs::read_to_string(&path)?;
 		// It's base64url encoded
 		let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(contents.trim())?;
@@ -239,11 +239,11 @@ impl Key {
 		Ok(serde_json::from_str(&json)?)
 	}
 
-	pub fn to_str(&self) -> anyhow::Result<String> {
+	pub fn to_str(&self) -> crate::Result<String> {
 		Ok(serde_json::to_string(self)?)
 	}
 
-	pub fn to_file<P: AsRef<StdPath>>(&self, path: P) -> anyhow::Result<()> {
+	pub fn to_file<P: AsRef<StdPath>>(&self, path: P) -> crate::Result<()> {
 		// Serialize to JSON first
 		let json = serde_json::to_string(self)?;
 		// Then encode as base64url
@@ -252,52 +252,49 @@ impl Key {
 		Ok(())
 	}
 
-	pub fn to_public(&self) -> anyhow::Result<Self> {
+	pub fn to_public(&self) -> crate::Result<Self> {
 		if !self.operations.contains(&KeyOperation::Verify) {
-			return Err(anyhow::anyhow!("This key doesn't support the Verify operation"));
+			return Err(KeyError::VerifyUnsupported.into());
 		}
 
 		let key = match self.key {
-			KeyType::RSA { ref public, .. } => Ok(KeyType::RSA {
+			KeyType::RSA { ref public, .. } => KeyType::RSA {
 				public: public.clone(),
 				private: None,
-			}),
+			},
 			KeyType::EC {
 				ref x,
 				ref y,
 				ref curve,
 				..
-			} => Ok(KeyType::EC {
+			} => KeyType::EC {
 				x: x.clone(),
 				y: y.clone(),
 				curve: curve.clone(),
 				d: None,
-			}),
-			KeyType::OCT { .. } => Err(anyhow::anyhow!("OCT key cannot be converted to public key")),
-			KeyType::OKP { ref x, ref curve, .. } => Ok(KeyType::OKP {
+			},
+			KeyType::OCT { .. } => return Err(KeyError::NoPublicKey.into()),
+			KeyType::OKP { ref x, ref curve, .. } => KeyType::OKP {
 				x: x.clone(),
 				curve: curve.clone(),
 				d: None,
-			}),
+			},
 		};
 
-		match key {
-			Ok(key) => Ok(Self {
-				algorithm: self.algorithm,
-				operations: [KeyOperation::Verify].into(),
-				key,
-				kid: self.kid.clone(),
-				guest: self.guest.clone(),
-				guest_sub: self.guest_sub.clone(),
-				guest_pub: self.guest_pub.clone(),
-				decode: Default::default(),
-				encode: Default::default(),
-			}),
-			Err(err) => Err(anyhow::anyhow!("Failed to convert key: {}", err)),
-		}
+		Ok(Self {
+			algorithm: self.algorithm,
+			operations: [KeyOperation::Verify].into(),
+			key,
+			kid: self.kid.clone(),
+			guest: self.guest.clone(),
+			guest_sub: self.guest_sub.clone(),
+			guest_pub: self.guest_pub.clone(),
+			decode: Default::default(),
+			encode: Default::default(),
+		})
 	}
 
-	fn to_decoding_key(&self) -> anyhow::Result<&DecodingKey> {
+	fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
 		if let Some(key) = self.decode.get() {
 			return Ok(key);
 		}
@@ -305,7 +302,7 @@ impl Key {
 		let decoding_key = match self.key {
 			KeyType::OCT { ref secret } => match self.algorithm {
 				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => DecodingKey::from_secret(secret),
-				_ => bail!("Invalid algorithm for key type OCT"),
+				_ => return Err(KeyError::InvalidAlgorithm.into()),
 			},
 			KeyType::EC {
 				ref curve,
@@ -315,10 +312,10 @@ impl Key {
 			} => match curve {
 				EllipticCurve::P256 => {
 					if self.algorithm != Algorithm::ES256 {
-						bail!("Invalid algorithm for P-256 curve");
+						return Err(KeyError::InvalidAlgorithmForCurve("P-256").into());
 					}
 					if x.len() != 32 || y.len() != 32 {
-						bail!("Invalid coordinate length for P-256");
+						return Err(KeyError::InvalidCoordinateLength("P-256").into());
 					}
 
 					DecodingKey::from_ec_components(
@@ -328,10 +325,10 @@ impl Key {
 				}
 				EllipticCurve::P384 => {
 					if self.algorithm != Algorithm::ES384 {
-						bail!("Invalid algorithm for P-384 curve");
+						return Err(KeyError::InvalidAlgorithmForCurve("P-384").into());
 					}
 					if x.len() != 48 || y.len() != 48 {
-						bail!("Invalid coordinate length for P-384");
+						return Err(KeyError::InvalidCoordinateLength("P-384").into());
 					}
 
 					DecodingKey::from_ec_components(
@@ -339,19 +336,19 @@ impl Key {
 						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(y).as_ref(),
 					)?
 				}
-				_ => bail!("Invalid curve for EC key"),
+				_ => return Err(KeyError::InvalidCurve("EC").into()),
 			},
 			KeyType::OKP { ref curve, ref x, .. } => match curve {
 				EllipticCurve::Ed25519 => {
 					if self.algorithm != Algorithm::EdDSA {
-						bail!("Invalid algorithm for Ed25519 curve");
+						return Err(KeyError::InvalidAlgorithmForCurve("Ed25519").into());
 					}
 
 					DecodingKey::from_ed_components(
 						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
 					)?
 				}
-				_ => bail!("Invalid curve for OKP key"),
+				_ => return Err(KeyError::InvalidCurve("OKP").into()),
 			},
 			KeyType::RSA { ref public, .. } => {
 				DecodingKey::from_rsa_raw_components(public.n.as_ref(), public.e.as_ref())
@@ -361,7 +358,7 @@ impl Key {
 		Ok(self.decode.get_or_init(|| decoding_key))
 	}
 
-	fn to_encoding_key(&self) -> anyhow::Result<&EncodingKey> {
+	fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
 		if let Some(key) = self.encode.get() {
 			return Ok(key);
 		}
@@ -369,10 +366,10 @@ impl Key {
 		let encoding_key = match self.key {
 			KeyType::OCT { ref secret } => match self.algorithm {
 				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => EncodingKey::from_secret(secret),
-				_ => bail!("Invalid algorithm for key type OCT"),
+				_ => return Err(KeyError::InvalidAlgorithm.into()),
 			},
 			KeyType::EC { ref curve, ref d, .. } => {
-				let d = d.as_ref().context("Missing private key")?;
+				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
 
 				match curve {
 					EllipticCurve::P256 => {
@@ -385,7 +382,7 @@ impl Key {
 						let doc = secret_key.to_pkcs8_der()?;
 						EncodingKey::from_ec_der(doc.as_bytes())
 					}
-					_ => bail!("Invalid curve for EC key"),
+					_ => return Err(KeyError::InvalidCurve("EC").into()),
 				}
 			}
 			KeyType::OKP {
@@ -393,14 +390,14 @@ impl Key {
 				ref d,
 				ref x,
 			} => {
-				let d = d.as_ref().context("Missing private key")?;
+				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
 
 				let key_pair =
 					aws_lc_rs::signature::Ed25519KeyPair::from_seed_and_public_key(d.as_slice(), x.as_slice())?;
 
 				match curve {
 					EllipticCurve::Ed25519 => EncodingKey::from_ed_der(key_pair.to_pkcs8()?.as_ref()),
-					_ => bail!("Invalid curve for OKP key"),
+					_ => return Err(KeyError::InvalidCurve("OKP").into()),
 				}
 			}
 			KeyType::RSA {
@@ -409,7 +406,7 @@ impl Key {
 			} => {
 				let n = BigUint::from_bytes_be(&public.n);
 				let e = BigUint::from_bytes_be(&public.e);
-				let private = private.as_ref().context("Missing private key")?;
+				let private = private.as_ref().ok_or(KeyError::MissingPrivateKey)?;
 				let d = BigUint::from_bytes_be(&private.d);
 				let p = BigUint::from_bytes_be(&private.p);
 				let q = BigUint::from_bytes_be(&private.q);
@@ -424,57 +421,47 @@ impl Key {
 		Ok(self.encode.get_or_init(|| encoding_key))
 	}
 
-	pub fn decode(&self, token: &str) -> anyhow::Result<Claims> {
+	pub fn decode(&self, token: &str) -> crate::Result<Claims> {
 		if !self.operations.contains(&KeyOperation::Verify) {
-			bail!("key does not support verification");
+			return Err(KeyError::VerifyUnsupported.into());
 		}
 
-		let decode: anyhow::Result<&DecodingKey> = self.to_decoding_key();
+		let decode = self.to_decoding_key()?;
 
-		match decode {
-			Ok(decode) => {
-				let mut validation = jsonwebtoken::Validation::new(self.algorithm.into());
-				validation.required_spec_claims = Default::default(); // Don't require exp, but still validate it if present
-				validation.validate_exp = false; // We validate exp ourselves to handle null values
+		let mut validation = jsonwebtoken::Validation::new(self.algorithm.into());
+		validation.required_spec_claims = Default::default(); // Don't require exp, but still validate it if present
+		validation.validate_exp = false; // We validate exp ourselves to handle null values
 
-				let token = jsonwebtoken::decode::<Claims>(token, decode, &validation)?;
+		let token = jsonwebtoken::decode::<Claims>(token, decode, &validation)?;
 
-				if let Some(exp) = token.claims.expires
-					&& exp < std::time::SystemTime::now()
-				{
-					anyhow::bail!("token has expired");
-				}
-
-				token.claims.validate()?;
-
-				Ok(token.claims)
-			}
-			Err(e) => Err(anyhow::anyhow!("Failed to decode key: {}", e)),
+		if let Some(exp) = token.claims.expires
+			&& exp < std::time::SystemTime::now()
+		{
+			return Err(crate::Error::TokenExpired);
 		}
+
+		token.claims.validate()?;
+
+		Ok(token.claims)
 	}
 
-	pub fn encode(&self, payload: &Claims) -> anyhow::Result<String> {
+	pub fn encode(&self, payload: &Claims) -> crate::Result<String> {
 		if !self.operations.contains(&KeyOperation::Sign) {
-			bail!("key does not support signing");
+			return Err(KeyError::SignUnsupported.into());
 		}
 
 		payload.validate()?;
 
-		let encode: anyhow::Result<&EncodingKey> = self.to_encoding_key();
+		let encode = self.to_encoding_key()?;
 
-		match encode {
-			Ok(encode) => {
-				let mut header = Header::new(self.algorithm.into());
-				header.kid = self.kid.clone();
-				let token = jsonwebtoken::encode(&header, &payload, encode)?;
-				Ok(token)
-			}
-			Err(e) => Err(anyhow::anyhow!("Failed to encode key: {}", e)),
-		}
+		let mut header = Header::new(self.algorithm.into());
+		header.kid = self.kid.clone();
+		let token = jsonwebtoken::encode(&header, &payload, encode)?;
+		Ok(token)
 	}
 
 	/// Generate a key pair for the given algorithm, returning the private and public keys.
-	pub fn generate(algorithm: Algorithm, id: Option<String>) -> anyhow::Result<Self> {
+	pub fn generate(algorithm: Algorithm, id: Option<String>) -> crate::Result<Self> {
 		generate(algorithm, id)
 	}
 }
@@ -1134,7 +1121,7 @@ mod tests {
 		test_asymmetric_key(key_eddsa);
 	}
 
-	fn test_asymmetric_key(key: anyhow::Result<Key>) {
+	fn test_asymmetric_key(key: crate::Result<Key>) {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 

@@ -120,7 +120,7 @@
         "vite-plugin-html": "^3.2.2",
       },
       "peerDependencies": {
-        "zod": "^4.1.0",
+        "zod": "^4.0.0",
       },
     },
     "js/publish": {
