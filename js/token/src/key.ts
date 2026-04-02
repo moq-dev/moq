@@ -25,7 +25,16 @@ const Base64FieldSchema = z.string().check(
 	}),
 );
 
-const StringOrArray = z.union([z.string().transform((s) => [s]), z.array(z.string())]).default([]);
+const StringOrArray = z._default(
+	z.union([
+		z.pipe(
+			z.string(),
+			z.transform((s) => [s]),
+		),
+		z.array(z.string()),
+	]),
+	[],
+);
 
 const BaseKeySchema = z.object({
 	alg: AlgorithmSchema,
