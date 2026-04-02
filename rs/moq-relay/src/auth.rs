@@ -1,7 +1,9 @@
 use anyhow::Context;
 use axum::http;
+use http_cache_reqwest::{Cache, CacheMode, HttpCache, HttpCacheOptions, MokaManager};
 use moq_lite::{AsPath, Path, PathOwned};
 use moq_token::{Key, KeyId};
+use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -137,9 +139,15 @@ enum KeySource {
 	/// A directory of key files, resolved by kid as `{dir}/{kid}.jwk`.
 	Dir(PathBuf),
 	/// A single key URL. No kid required.
-	Url { url: url::Url, client: reqwest::Client },
+	Url {
+		url: url::Url,
+		client: ClientWithMiddleware,
+	},
 	/// A base URL for kid-based key lookup, fetching `{base}/{kid}.jwk`.
-	UrlDir { base: url::Url, client: reqwest::Client },
+	UrlDir {
+		base: url::Url,
+		client: ClientWithMiddleware,
+	},
 }
 
 struct KeyResolver {
@@ -174,7 +182,7 @@ impl KeyResolver {
 		}
 	}
 
-	async fn fetch_key(client: &reqwest::Client, url: url::Url) -> Result<Arc<Key>, AuthError> {
+	async fn fetch_key(client: &ClientWithMiddleware, url: url::Url) -> Result<Arc<Key>, AuthError> {
 		let response = client.get(url.clone()).send().await.map_err(|e| {
 			tracing::warn!(%url, %e, "failed to fetch key");
 			AuthError::KeyNotFound
@@ -208,11 +216,19 @@ pub struct Auth {
 	public: Option<PathOwned>,
 }
 
-fn build_http_client() -> anyhow::Result<reqwest::Client> {
-	reqwest::Client::builder()
+fn build_http_client() -> anyhow::Result<ClientWithMiddleware> {
+	let client = reqwest::Client::builder()
 		.timeout(std::time::Duration::from_secs(10))
 		.build()
-		.context("failed to build HTTP client")
+		.context("failed to build HTTP client")?;
+
+	Ok(reqwest_middleware::ClientBuilder::new(client)
+		.with(Cache(HttpCache {
+			mode: CacheMode::Default,
+			manager: MokaManager::default(),
+			options: HttpCacheOptions::default(),
+		}))
+		.build())
 }
 
 fn parse_url(s: &str) -> Option<url::Url> {
