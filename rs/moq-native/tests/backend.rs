@@ -67,7 +67,6 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))
@@ -133,7 +132,7 @@ async fn quiche_webtransport() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn iroh_connect() {
-	use moq_native::IrohEndpointConfig;
+	use moq_native::iroh::EndpointConfig;
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
@@ -147,7 +146,7 @@ async fn iroh_connect() {
 	group.finish().expect("failed to finish group");
 
 	// Create server iroh endpoint
-	let mut server_iroh_config = IrohEndpointConfig::default();
+	let mut server_iroh_config = EndpointConfig::default();
 	server_iroh_config.enabled = Some(true);
 	let server_endpoint = server_iroh_config
 		.bind()
@@ -176,7 +175,7 @@ async fn iroh_connect() {
 	let mut announcements = sub_origin.consume();
 
 	// Create client iroh endpoint
-	let mut client_iroh_config = IrohEndpointConfig::default();
+	let mut client_iroh_config = EndpointConfig::default();
 	client_iroh_config.enabled = Some(true);
 	let client_endpoint = client_iroh_config
 		.bind()
@@ -219,7 +218,6 @@ async fn iroh_connect() {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))

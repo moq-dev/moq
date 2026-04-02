@@ -7,7 +7,7 @@ use std::ops::Deref;
 
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
-use super::Track;
+use super::{OriginId, Track};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -15,8 +15,8 @@ use super::Track;
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Broadcast {
-	/// The number of hops from the origin.
-	pub hops: u64,
+	/// The list of origin IDs representing the path from the origin.
+	pub hops: Vec<OriginId>,
 }
 
 impl Broadcast {
@@ -24,7 +24,7 @@ impl Broadcast {
 		Self::default()
 	}
 
-	pub fn with_hops(mut self, hops: u64) -> Self {
+	pub fn with_hops(mut self, hops: Vec<OriginId>) -> Self {
 		self.hops = hops;
 		self
 	}

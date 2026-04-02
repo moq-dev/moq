@@ -1,5 +1,4 @@
-import assert from "node:assert";
-import test from "node:test";
+import { expect, test } from "bun:test";
 import { AlgorithmSchema } from "./algorithm.ts";
 
 test("algorithm schema - valid algorithms", () => {
@@ -19,33 +18,33 @@ test("algorithm schema - valid algorithms", () => {
 	] as const;
 
 	for (const alg of validAlgorithms) {
-		assert.strictEqual(AlgorithmSchema.parse(alg), alg);
+		expect(AlgorithmSchema.parse(alg)).toBe(alg);
 	}
 });
 
 test("algorithm schema - invalid algorithms", () => {
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse("HS128");
-	}, /Invalid option/);
+	}).toThrow(/Invalid option/);
 
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse("ES512");
-	}, /Invalid option/);
+	}).toThrow(/Invalid option/);
 
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse("invalid");
-	}, /Invalid option/);
+	}).toThrow(/Invalid option/);
 
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse("");
-	}, /Invalid option/);
+	}).toThrow(/Invalid option/);
 });
 
 test("algorithm schema - type safety", () => {
 	// Test that TypeScript types are working correctly
 	const validAlgorithm = AlgorithmSchema.parse("HS256");
-	assert.ok(typeof validAlgorithm === "string");
-	assert.ok(
+	expect(typeof validAlgorithm === "string").toBeTruthy();
+	expect(
 		[
 			"HS256",
 			"HS384",
@@ -60,37 +59,37 @@ test("algorithm schema - type safety", () => {
 			"PS512",
 			"EdDSA",
 		].includes(validAlgorithm),
-	);
+	).toBeTruthy();
 });
 
 test("algorithm schema - case sensitivity", () => {
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse("hs256");
-	}, /Invalid option/);
+	}).toThrow(/Invalid option/);
 
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse("Hs256");
-	}, /Invalid option/);
+	}).toThrow(/Invalid option/);
 
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse("HS256 ");
-	}, /Invalid option/);
+	}).toThrow(/Invalid option/);
 });
 
 test("algorithm schema - non-string inputs", () => {
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse(256);
-	}, /Expected string|Invalid option/);
+	}).toThrow(/Expected string|Invalid option/);
 
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse(null);
-	}, /Expected string|Invalid option/);
+	}).toThrow(/Expected string|Invalid option/);
 
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse(undefined);
-	}, /Expected string|Invalid option/);
+	}).toThrow(/Expected string|Invalid option/);
 
-	assert.throws(() => {
+	expect(() => {
 		AlgorithmSchema.parse({});
-	}, /Expected string|Invalid option/);
+	}).toThrow(/Expected string|Invalid option/);
 });

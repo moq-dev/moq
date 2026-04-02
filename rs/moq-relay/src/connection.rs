@@ -3,14 +3,23 @@ use crate::{Auth, AuthParams, Cluster};
 use axum::http;
 use moq_native::Request;
 
+/// An incoming connection that has not yet been authenticated.
+///
+/// Call [`run`](Self::run) to authenticate the request, wire up
+/// publish/subscribe origins, and serve the session until it closes.
 pub struct Connection {
+	/// A numeric identifier for logging.
 	pub id: u64,
+	/// The raw QUIC/WebTransport request to accept or reject.
 	pub request: Request,
+	/// The cluster state used to resolve origins.
 	pub cluster: Cluster,
+	/// The authenticator used to verify credentials.
 	pub auth: Auth,
 }
 
 impl Connection {
+	/// Authenticates and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
 		let params = match self.request.url() {
@@ -29,8 +38,8 @@ impl Connection {
 		};
 
 		let origin = self.cluster.origin.with_root(&token.root);
-		let publish = origin.as_ref().and_then(|o| o.publish_only(&token.publish));
-		let subscribe = origin.as_ref().and_then(|o| o.consume_only(&token.subscribe));
+		let publish = origin.as_ref().and_then(|o| o.with_filter(&token.publish));
+		let subscribe = origin.as_ref().and_then(|o| o.consume().with_filter(&token.subscribe));
 		let transport = self.request.transport();
 
 		match (&publish, &subscribe) {

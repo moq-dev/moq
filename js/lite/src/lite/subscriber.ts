@@ -47,13 +47,13 @@ export class Subscriber {
 
 	async #runAnnounced(announced: Announced, prefix: Path.Valid): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
-		const msg = new AnnounceInterest(prefix);
+		const msg = new AnnounceInterest({ prefix });
 
 		try {
 			// Open a stream and send the announce interest.
 			const stream = await Stream.open(this.#quic);
 			await stream.writer.u53(StreamId.Announce);
-			await msg.encode(stream.writer);
+			await msg.encode(stream.writer, this.version);
 
 			switch (this.version) {
 				case Version.DRAFT_01:
@@ -70,7 +70,8 @@ export class Subscriber {
 					break;
 				}
 				case Version.DRAFT_03:
-					// Draft03: no AnnounceInit, initial state comes via Announce messages.
+				case Version.DRAFT_04:
+					// Draft03+: no AnnounceInit, initial state comes via Announce messages.
 					break;
 			}
 

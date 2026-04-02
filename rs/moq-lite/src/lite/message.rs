@@ -17,6 +17,7 @@ pub trait Message: Sized + std::fmt::Debug {
 
 impl<T: Message> Encode<Version> for T {
 	fn encode<W: BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
+		tracing::trace!(?self, "encoding");
 		let mut sizer = Sizer::default();
 		self.encode_msg(&mut sizer, version)?;
 		sizer.size.encode(w, version)?;
@@ -27,11 +28,40 @@ impl<T: Message> Encode<Version> for T {
 impl<T: Message> Decode<Version> for T {
 	fn decode<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		let size = usize::decode(buf, version)?;
-		let mut limited = buf.take(size);
-		let result = Self::decode_msg(&mut limited, version)?;
-		if limited.remaining() > 0 {
-			return Err(DecodeError::Long);
+
+		if tracing::enabled!(tracing::Level::TRACE) {
+			if buf.remaining() < size {
+				return Err(DecodeError::Short);
+			}
+			let raw = buf.copy_to_bytes(size);
+			let mut slice = &raw[..];
+			match Self::decode_msg(&mut slice, version) {
+				Ok(result) => {
+					if slice.remaining() > 0 {
+						return Err(DecodeError::Long);
+					}
+					tracing::trace!(?result, "decoded");
+					Ok(result)
+				}
+				Err(e) => {
+					tracing::warn!(%e, ?raw, "decode failed");
+					Err(e)
+				}
+			}
+		} else {
+			let mut limited = buf.take(size);
+			match Self::decode_msg(&mut limited, version) {
+				Ok(result) => {
+					if limited.remaining() > 0 {
+						return Err(DecodeError::Long);
+					}
+					Ok(result)
+				}
+				Err(e) => {
+					tracing::warn!(%e, "decode failed");
+					Err(e)
+				}
+			}
 		}
-		Ok(result)
 	}
 }

@@ -172,7 +172,7 @@ fn double_close_all_resource_types() {
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog_subscribe(consume, Some(channel_callback), catalog_cb.ptr) });
 
 	let catalog_id = id(catalog_cb.recv());
 
@@ -192,11 +192,11 @@ fn double_close_all_resource_types() {
 	assert_eq!(moq_consume_audio_close(track), 0);
 	assert!(moq_consume_audio_close(track) < 0);
 
-	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert!(moq_consume_catalog_free(catalog_id) < 0);
+	assert_eq!(moq_consume_catalog_close(catalog_id), 0);
+	assert!(moq_consume_catalog_close(catalog_id) < 0);
 
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
-	assert!(moq_consume_catalog_close(catalog_task) < 0);
+	assert_eq!(moq_consume_catalog_unsubscribe(catalog_task), 0);
+	assert!(moq_consume_catalog_unsubscribe(catalog_task) < 0);
 
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media), 0);
@@ -225,6 +225,7 @@ fn unknown_format() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn local_announce() {
 	let origin = id(moq_origin_create());
 
@@ -259,6 +260,7 @@ fn local_announce() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn announced_deactivation() {
 	let origin = id(moq_origin_create());
 	let cb = Callback::new();
@@ -280,11 +282,15 @@ fn announced_deactivation() {
 	assert_eq!(unsafe { moq_origin_announced_info(announced_id, &mut info) }, 0);
 	assert!(info.active);
 
+	// Closing the broadcast no longer triggers an unannounce callback.
+	// C consumers should watch BroadcastConsumer::closed() to detect end of broadcast.
 	assert_eq!(moq_publish_close(broadcast), 0);
 
-	let deactivated_id = id(cb.recv());
-	assert_eq!(unsafe { moq_origin_announced_info(deactivated_id, &mut info) }, 0);
-	assert!(!info.active, "broadcast should be inactive after publisher closes");
+	// No deactivation callback is expected.
+	assert!(
+		cb.try_recv(Duration::from_millis(100)).is_none(),
+		"should not receive deactivation callback"
+	);
 
 	assert_eq!(moq_origin_announced_close(announced_task), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -315,7 +321,7 @@ fn local_publish_consume() {
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog_subscribe(consume, Some(channel_callback), catalog_cb.ptr) });
 
 	let catalog_id = id(catalog_cb.recv());
 
@@ -386,8 +392,8 @@ fn local_publish_consume() {
 
 	assert_eq!(moq_consume_frame_close(frame_id), 0);
 	assert_eq!(moq_consume_audio_close(track), 0);
-	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_unsubscribe(catalog_task), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -419,7 +425,7 @@ fn video_publish_consume() {
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog_subscribe(consume, Some(channel_callback), catalog_cb.ptr) });
 
 	let catalog_id = id(catalog_cb.recv());
 
@@ -495,8 +501,8 @@ fn video_publish_consume() {
 
 	assert_eq!(moq_consume_frame_close(frame_id), 0);
 	assert_eq!(moq_consume_video_close(track), 0);
-	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_unsubscribe(catalog_task), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -528,7 +534,7 @@ fn multiple_frames_ordering() {
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog_subscribe(consume, Some(channel_callback), catalog_cb.ptr) });
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
@@ -562,8 +568,8 @@ fn multiple_frames_ordering() {
 	}
 
 	assert_eq!(moq_consume_audio_close(track), 0);
-	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_unsubscribe(catalog_task), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -595,7 +601,7 @@ fn catalog_update_on_new_track() {
 
 	let consume = id(unsafe { moq_origin_consume(origin, path.as_ptr() as *const c_char, path.len()) });
 	let catalog_cb = Callback::new();
-	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_task = id(unsafe { moq_consume_catalog_subscribe(consume, Some(channel_callback), catalog_cb.ptr) });
 
 	let catalog_id1 = id(catalog_cb.recv());
 	let mut audio_cfg = moq_audio_config {
@@ -626,9 +632,9 @@ fn catalog_update_on_new_track() {
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 0, &mut audio_cfg) }, 0);
 	assert_eq!(unsafe { moq_consume_audio_config(catalog_id2, 1, &mut audio_cfg) }, 0);
 
-	assert_eq!(moq_consume_catalog_free(catalog_id1), 0);
-	assert_eq!(moq_consume_catalog_free(catalog_id2), 0);
-	assert_eq!(moq_consume_catalog_close(catalog_task), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_id1), 0);
+	assert_eq!(moq_consume_catalog_close(catalog_id2), 0);
+	assert_eq!(moq_consume_catalog_unsubscribe(catalog_task), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_media_close(media1), 0);
 	assert_eq!(moq_publish_media_close(media2), 0);

@@ -20,33 +20,43 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::{Auth, AuthParams, Cluster};
 
+/// Configuration for the HTTP/HTTPS web server.
 #[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct WebConfig {
+	/// Plain HTTP listener settings.
 	#[command(flatten)]
 	#[serde(default)]
 	pub http: HttpConfig,
 
+	/// HTTPS listener settings with TLS.
 	#[command(flatten)]
 	#[serde(default)]
 	pub https: HttpsConfig,
 
-	// If true (default), expose a WebTransport compatible WebSocket polyfill.
+	/// If true (default), expose a WebTransport compatible WebSocket polyfill.
 	#[arg(long = "web-ws", env = "MOQ_WEB_WS", default_value = "true")]
 	#[serde(default = "default_true")]
 	pub ws: bool,
 }
 
+/// Plain HTTP listener configuration.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct HttpConfig {
+	/// Socket address to bind the HTTP listener to.
 	#[arg(long = "web-http-listen", id = "http-listen", env = "MOQ_WEB_HTTP_LISTEN")]
 	pub listen: Option<net::SocketAddr>,
 }
 
+/// HTTPS listener configuration with TLS certificate and key.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
+#[non_exhaustive]
 pub struct HttpsConfig {
+	/// Socket address to bind the HTTPS listener to.
 	#[arg(long = "web-https-listen", id = "web-https-listen", env = "MOQ_WEB_HTTPS_LISTEN", requires_all = ["web-https-cert", "web-https-key"])]
 	pub listen: Option<net::SocketAddr>,
 
@@ -59,24 +69,31 @@ pub struct HttpsConfig {
 	pub key: Option<PathBuf>,
 }
 
+/// Shared state passed to all web handler routes.
 pub struct WebState {
+	/// The authenticator for verifying incoming requests.
 	pub auth: Auth,
+	/// The cluster state for resolving origins.
 	pub cluster: Cluster,
+	/// TLS certificate information served at `/certificate.sha256`.
 	pub tls_info: Arc<std::sync::RwLock<moq_native::ServerTlsInfo>>,
+	/// Monotonically increasing connection counter for WebSocket sessions.
 	pub conn_id: AtomicU64,
 }
 
-// Run a HTTP server using Axum
+/// Run a HTTP server using Axum
 pub struct Web {
 	state: WebState,
 	config: WebConfig,
 }
 
 impl Web {
+	/// Creates a new web server with the given state and configuration.
 	pub fn new(state: WebState, config: WebConfig) -> Self {
 		Self { state, config }
 	}
 
+	/// Runs the HTTP and/or HTTPS listeners until they shut down.
 	pub async fn run(self) -> anyhow::Result<()> {
 		let app = Router::new()
 			.route("/certificate.sha256", get(serve_fingerprint))
@@ -233,16 +250,14 @@ async fn serve_announced(
 	};
 	let token = state.auth.verify(&params)?;
 	let scoped = state.cluster.origin.with_root(&token.root);
-	let Some(mut origin) = scoped.and_then(|o| o.consume_only(&token.subscribe)) else {
+	let Some(mut origin) = scoped.and_then(|o| o.consume().with_filter(&token.subscribe)) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
 	let mut broadcasts = Vec::new();
 
-	while let Some((suffix, active)) = origin.try_announced() {
-		if active.is_some() {
-			broadcasts.push(suffix);
-		}
+	while let Some((suffix, _broadcast)) = origin.try_announced() {
+		broadcasts.push(suffix);
 	}
 
 	Ok(broadcasts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("\n"))
@@ -271,7 +286,7 @@ async fn serve_fetch(
 	let token = state.auth.verify(&auth)?;
 
 	let scoped = state.cluster.origin.with_root(&token.root);
-	let Some(origin) = scoped.and_then(|o| o.consume_only(&token.subscribe)) else {
+	let Some(origin) = scoped.and_then(|o| o.consume().with_filter(&token.subscribe)) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
 
@@ -283,7 +298,7 @@ async fn serve_fetch(
 	};
 
 	// NOTE: The auth token is already scoped to the broadcast.
-	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
+	let broadcast = origin.try_consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
 	let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
 		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,

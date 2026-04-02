@@ -26,7 +26,7 @@
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
 		"rimraf": "^6.0.1",
 		"solid-js": "^1.9.10",
-		"typescript": "^5.9.2",
+		"typescript": "^6.0.0",
 		"vite": "^7.3.1",
 		"vite-plugin-solid": "^2.11.10"
 	}

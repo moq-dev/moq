@@ -84,7 +84,6 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
 
 	// Subscribe to the track.
 	let mut track_sub = bc
@@ -376,7 +375,7 @@ async fn broadcast_websocket() {
 	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::ws::Listener::bind("[::]:0".parse().unwrap())
 		.await
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
@@ -424,7 +423,6 @@ async fn broadcast_websocket() {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
 
 	// Subscribe to the track.
 	let mut track_sub = bc
@@ -480,7 +478,7 @@ async fn broadcast_websocket_fallback() {
 	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
 
-	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
+	let ws_listener = moq_native::ws::Listener::bind("[::]:0".parse().unwrap())
 		.await
 		.expect("failed to bind WebSocket listener");
 	let ws_addr = ws_listener.local_addr().expect("failed to get ws addr");
@@ -531,7 +529,6 @@ async fn broadcast_websocket_fallback() {
 		.expect("origin closed");
 
 	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
 
 	// Subscribe to the track.
 	let mut track_sub = bc

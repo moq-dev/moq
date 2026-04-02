@@ -1,18 +1,16 @@
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
 
 function guardDraft03(version: Version) {
 	switch (version) {
-		case Version.DRAFT_03:
-			break;
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
 			throw new Error("fetch not supported for this version");
 		default:
-			unreachable(version);
+			// DRAFT_03+
+			break;
 	}
 }
 

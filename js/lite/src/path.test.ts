@@ -1,104 +1,103 @@
-import assert from "node:assert";
-import test from "node:test";
+import { expect, test } from "bun:test";
 import * as Path from "./path.ts";
 
 test("Path constructor trims leading and trailing slashes", () => {
-	assert.strictEqual(Path.from("/foo/bar/"), "foo/bar");
-	assert.strictEqual(Path.from("///foo/bar///"), "foo/bar");
-	assert.strictEqual(Path.from("foo/bar"), "foo/bar");
+	expect(Path.from("/foo/bar/")).toBe("foo/bar" as Path.Valid);
+	expect(Path.from("///foo/bar///")).toBe("foo/bar" as Path.Valid);
+	expect(Path.from("foo/bar")).toBe("foo/bar" as Path.Valid);
 });
 
 test("Path constructor handles empty paths", () => {
-	assert.strictEqual(Path.from(""), "");
-	assert.strictEqual(Path.from("/"), "");
-	assert.strictEqual(Path.from("///"), "");
+	expect(Path.from("")).toBe("" as Path.Valid);
+	expect(Path.from("/")).toBe("" as Path.Valid);
+	expect(Path.from("///")).toBe("" as Path.Valid);
 });
 
 test("hasPrefix matches exact paths", () => {
 	const path = Path.from("foo/bar");
-	assert.strictEqual(Path.hasPrefix(Path.from("foo/bar"), path), true);
+	expect(Path.hasPrefix(Path.from("foo/bar"), path)).toBe(true);
 });
 
 test("hasPrefix matches proper prefixes", () => {
 	const path = Path.from("foo/bar/baz");
-	assert.strictEqual(Path.hasPrefix(Path.from("foo"), path), true);
-	assert.strictEqual(Path.hasPrefix(Path.from("foo/bar"), path), true);
+	expect(Path.hasPrefix(Path.from("foo"), path)).toBe(true);
+	expect(Path.hasPrefix(Path.from("foo/bar"), path)).toBe(true);
 });
 
 test("hasPrefix does not match partial segment prefixes", () => {
 	const path = Path.from("foobar");
-	assert.strictEqual(Path.hasPrefix(Path.from("foo"), path), false);
+	expect(Path.hasPrefix(Path.from("foo"), path)).toBe(false);
 
 	const path2 = Path.from("foo/bar");
-	assert.strictEqual(Path.hasPrefix(Path.from("fo"), path2), false);
+	expect(Path.hasPrefix(Path.from("fo"), path2)).toBe(false);
 });
 
 test("hasPrefix handles empty prefix", () => {
 	const path = Path.from("foo/bar");
-	assert.strictEqual(Path.hasPrefix(Path.empty(), path), true);
+	expect(Path.hasPrefix(Path.empty(), path)).toBe(true);
 });
 
 test("hasPrefix ignores trailing slashes in prefix", () => {
 	const path = Path.from("foo/bar");
-	assert.strictEqual(Path.hasPrefix(Path.from("foo/"), path), true);
-	assert.strictEqual(Path.hasPrefix(Path.from("foo/bar/"), path), true);
+	expect(Path.hasPrefix(Path.from("foo/"), path)).toBe(true);
+	expect(Path.hasPrefix(Path.from("foo/bar/"), path)).toBe(true);
 });
 
 test("stripPrefix strips valid prefixes", () => {
 	const path = Path.from("foo/bar/baz");
 
 	const suffix1 = Path.stripPrefix(Path.from("foo"), path);
-	assert.strictEqual(suffix1, "bar/baz");
+	expect(suffix1).toBe("bar/baz" as Path.Valid);
 
 	const suffix2 = Path.stripPrefix(Path.from("foo/bar"), path);
-	assert.strictEqual(suffix2, "baz");
+	expect(suffix2).toBe("baz" as Path.Valid);
 
 	const suffix3 = Path.stripPrefix(Path.from("foo/bar/baz"), path);
-	assert.strictEqual(suffix3, "");
+	expect(suffix3).toBe("" as Path.Valid);
 });
 
 test("stripPrefix returns null for invalid prefixes", () => {
 	const path = Path.from("foo/bar");
-	assert.strictEqual(Path.stripPrefix(Path.from("notfound"), path), null);
-	assert.strictEqual(Path.stripPrefix(Path.from("fo"), path), null);
+	expect(Path.stripPrefix(Path.from("notfound"), path)).toBe(null);
+	expect(Path.stripPrefix(Path.from("fo"), path)).toBe(null);
 });
 
 test("stripPrefix handles empty prefix", () => {
 	const path = Path.from("foo/bar");
 	const result = Path.stripPrefix(Path.empty(), path);
-	assert.strictEqual(result, "foo/bar");
+	expect(result).toBe("foo/bar" as Path.Valid);
 });
 
 test("stripPrefix accepts Path instances", () => {
 	const path = Path.from("foo/bar/baz");
 	const prefix = Path.from("foo/bar");
 	const result = Path.stripPrefix(prefix, path);
-	assert.strictEqual(result, "baz");
+	expect(result).toBe("baz" as Path.Valid);
 });
 
 test("join paths with slashes", () => {
 	const base = Path.from("foo");
 	const joined = Path.join(base, Path.from("bar"));
-	assert.strictEqual(joined, "foo/bar");
+	expect(joined).toBe("foo/bar" as Path.Valid);
 });
 
 test("join handles empty base", () => {
 	const base = Path.empty();
 	const joined = Path.join(base, Path.from("bar"));
-	assert.strictEqual(joined, "bar");
+	expect(joined).toBe("bar" as Path.Valid);
 });
 
 test("join handles empty suffix", () => {
 	const base = Path.from("foo");
 	const joined = Path.join(base, Path.empty());
-	assert.strictEqual(joined, "foo");
+	expect(joined).toBe("foo" as Path.Valid);
 });
 
 test("join accepts Path instances", () => {
 	const base = Path.from("foo");
 	const suffix = Path.from("bar");
 	const joined = Path.join(base, suffix);
-	assert.strictEqual(joined, "foo/bar");
+	expect(joined).toBe("foo/bar" as Path.Valid);
 });
 
 test("join handles multiple joins", () => {
@@ -106,19 +105,19 @@ test("join handles multiple joins", () => {
 		Path.join(Path.join(Path.from("api"), Path.from("v1")), Path.from("users")),
 		Path.from("123"),
 	);
-	assert.strictEqual(path, "api/v1/users/123");
+	expect(path).toBe("api/v1/users/123" as Path.Valid);
 });
 
 test("isEmpty checks correctly", () => {
-	assert.strictEqual(Path.from("") === "", true);
-	assert.strictEqual(Path.from("foo") === "", false);
-	assert.strictEqual(Path.empty() === "", true);
+	expect(Path.from("") === "").toBe(true);
+	expect(Path.from("foo") === "").toBe(false);
+	expect(Path.empty() === "").toBe(true);
 });
 
 test("length property works correctly", () => {
-	assert.strictEqual(Path.from("foo").length, 3);
-	assert.strictEqual(Path.from("foo/bar").length, 7);
-	assert.strictEqual(Path.empty().length, 0);
+	expect(Path.from("foo").length).toBe(3);
+	expect(Path.from("foo/bar").length).toBe(7);
+	expect(Path.empty().length).toBe(0);
 });
 
 test("equals checks correctly", () => {
@@ -126,67 +125,67 @@ test("equals checks correctly", () => {
 	const path2 = Path.from("/foo/bar/");
 	const path3 = Path.from("foo/baz");
 
-	assert.strictEqual(path1 === path2, true);
-	assert.strictEqual(path1 === path3, false);
+	expect(path1 === path2).toBe(true);
+	expect(path1 === path3).toBe(false);
 });
 
 test("JSON serialization works", () => {
 	const path = Path.from("foo/bar");
-	assert.strictEqual(JSON.stringify(path), '"foo/bar"');
+	expect(JSON.stringify(path)).toBe('"foo/bar"');
 });
 
 test("handles paths with multiple consecutive slashes", () => {
 	const path = Path.from("foo//bar///baz");
 	// Multiple consecutive slashes are collapsed to single slashes
-	assert.strictEqual(path, "foo/bar/baz");
+	expect(path).toBe("foo/bar/baz" as Path.Valid);
 });
 
 test("removes multiple slashes comprehensively", () => {
 	// Test various multiple slash scenarios
-	assert.strictEqual(Path.from("foo//bar"), "foo/bar");
-	assert.strictEqual(Path.from("foo///bar"), "foo/bar");
-	assert.strictEqual(Path.from("foo////bar"), "foo/bar");
+	expect(Path.from("foo//bar")).toBe("foo/bar" as Path.Valid);
+	expect(Path.from("foo///bar")).toBe("foo/bar" as Path.Valid);
+	expect(Path.from("foo////bar")).toBe("foo/bar" as Path.Valid);
 
 	// Multiple occurrences of double slashes
-	assert.strictEqual(Path.from("foo//bar//baz"), "foo/bar/baz");
-	assert.strictEqual(Path.from("a//b//c//d"), "a/b/c/d");
+	expect(Path.from("foo//bar//baz")).toBe("foo/bar/baz" as Path.Valid);
+	expect(Path.from("a//b//c//d")).toBe("a/b/c/d" as Path.Valid);
 
 	// Mixed slash counts
-	assert.strictEqual(Path.from("foo//bar///baz////qux"), "foo/bar/baz/qux");
+	expect(Path.from("foo//bar///baz////qux")).toBe("foo/bar/baz/qux" as Path.Valid);
 
 	// With leading and trailing slashes
-	assert.strictEqual(Path.from("//foo//bar//"), "foo/bar");
-	assert.strictEqual(Path.from("///foo///bar///"), "foo/bar");
+	expect(Path.from("//foo//bar//")).toBe("foo/bar" as Path.Valid);
+	expect(Path.from("///foo///bar///")).toBe("foo/bar" as Path.Valid);
 
 	// Edge case: only slashes
-	assert.strictEqual(Path.from("//"), "");
-	assert.strictEqual(Path.from("////"), "");
+	expect(Path.from("//")).toBe("" as Path.Valid);
+	expect(Path.from("////")).toBe("" as Path.Valid);
 
 	// Test that operations work correctly with normalized paths
 	const pathWithSlashes = Path.from("foo//bar///baz");
-	assert.strictEqual(Path.hasPrefix(Path.from("foo/bar"), pathWithSlashes), true);
-	assert.strictEqual(Path.stripPrefix(Path.from("foo"), pathWithSlashes), "bar/baz");
-	assert.strictEqual(Path.join(pathWithSlashes, Path.from("qux")), "foo/bar/baz/qux");
+	expect(Path.hasPrefix(Path.from("foo/bar"), pathWithSlashes)).toBe(true);
+	expect(Path.stripPrefix(Path.from("foo"), pathWithSlashes)).toBe("bar/baz" as Path.Valid);
+	expect(Path.join(pathWithSlashes, Path.from("qux"))).toBe("foo/bar/baz/qux" as Path.Valid);
 });
 
 test("handles special characters", () => {
 	const path = Path.from("foo-bar_baz.txt");
-	assert.strictEqual(path, "foo-bar_baz.txt");
-	assert.strictEqual(Path.hasPrefix(Path.from("foo-bar"), path), false);
-	assert.strictEqual(Path.hasPrefix(Path.from("foo-bar_baz.txt"), path), true);
+	expect(path).toBe("foo-bar_baz.txt" as Path.Valid);
+	expect(Path.hasPrefix(Path.from("foo-bar"), path)).toBe(false);
+	expect(Path.hasPrefix(Path.from("foo-bar_baz.txt"), path)).toBe(true);
 });
 
 test("from accepts multiple arguments", () => {
-	assert.strictEqual(Path.from("foo", "bar", "baz"), "foo/bar/baz");
-	assert.strictEqual(Path.from("api", "v1", "users"), "api/v1/users");
+	expect(Path.from("foo", "bar", "baz")).toBe("foo/bar/baz" as Path.Valid);
+	expect(Path.from("api", "v1", "users")).toBe("api/v1/users" as Path.Valid);
 });
 
 test("from handles empty strings in arguments", () => {
-	assert.strictEqual(Path.from("foo", "", "bar"), "foo/bar");
-	assert.strictEqual(Path.from("", "foo", "bar", ""), "foo/bar");
+	expect(Path.from("foo", "", "bar")).toBe("foo/bar" as Path.Valid);
+	expect(Path.from("", "foo", "bar", "")).toBe("foo/bar" as Path.Valid);
 });
 
 test("from sanitizes multiple arguments with slashes", () => {
-	assert.strictEqual(Path.from("/foo/", "/bar/", "/baz/"), "foo/bar/baz");
-	assert.strictEqual(Path.from("foo//", "//bar", "baz"), "foo/bar/baz");
+	expect(Path.from("/foo/", "/bar/", "/baz/")).toBe("foo/bar/baz" as Path.Valid);
+	expect(Path.from("foo//", "//bar", "baz")).toBe("foo/bar/baz" as Path.Valid);
 });

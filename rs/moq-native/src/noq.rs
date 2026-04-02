@@ -12,13 +12,13 @@ use web_transport_noq::noq;
 // ── Client ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub(crate) struct NoqClient {
+pub(crate) struct Client {
 	pub quic: noq::Endpoint,
 	pub transport: Arc<noq::TransportConfig>,
 	pub versions: moq_lite::Versions,
 }
 
-impl NoqClient {
+impl Client {
 	pub fn new(config: &ClientConfig) -> anyhow::Result<Self> {
 		let socket = std::net::UdpSocket::bind(config.bind).context("failed to bind UDP socket")?;
 
@@ -140,12 +140,12 @@ impl NoqClient {
 
 // ── Server ──────────────────────────────────────────────────────────
 
-pub(crate) struct NoqServer {
+pub(crate) struct Server {
 	pub quic: noq::Endpoint,
 	pub certs: Arc<ServeCerts>,
 }
 
-impl NoqServer {
+impl Server {
 	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
 		let mut transport = noq::TransportConfig::default();
 		transport.max_idle_timeout(Some(Duration::from_secs(10).try_into().unwrap()));
@@ -238,10 +238,10 @@ impl NoqServer {
 	}
 }
 
-// ── NoqRequest ──────────────────────────────────────────────────────
+// ── Request ──────────────────────────────────────────────────────
 
 /// A raw QUIC connection request without WebTransport framing (noq backend).
-pub(crate) enum NoqRequest {
+pub(crate) enum Request {
 	Raw {
 		request: web_transport_noq::proto::ConnectRequest,
 		response: web_transport_noq::proto::ConnectResponse,
@@ -253,7 +253,7 @@ pub(crate) enum NoqRequest {
 	},
 }
 
-impl NoqRequest {
+impl Request {
 	pub async fn accept(conn: noq::Incoming, alpns: Vec<&'static str>) -> anyhow::Result<Self> {
 		let mut conn = conn.accept()?;
 
@@ -309,12 +309,12 @@ impl NoqRequest {
 	/// Accept the session, returning a 200 OK if using WebTransport.
 	pub async fn ok(self) -> Result<web_transport_noq::Session, web_transport_noq::ServerError> {
 		match self {
-			NoqRequest::Raw {
+			Request::Raw {
 				connection,
 				request,
 				response,
 			} => Ok(web_transport_noq::Session::raw(connection, request, response)),
-			NoqRequest::WebTransport { request, alpns } => {
+			Request::WebTransport { request, alpns } => {
 				let mut response = web_transport_noq::proto::ConnectResponse::OK;
 				if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 					response = response.with_protocol(protocol);
@@ -327,8 +327,8 @@ impl NoqRequest {
 	/// Returns the URL provided by the client.
 	pub fn url(&self) -> Option<&Url> {
 		match self {
-			NoqRequest::Raw { .. } => None,
-			NoqRequest::WebTransport { request, .. } => Some(&request.url),
+			Request::Raw { .. } => None,
+			Request::WebTransport { request, .. } => Some(&request.url),
 		}
 	}
 
@@ -338,11 +338,11 @@ impl NoqRequest {
 		status: web_transport_noq::http::StatusCode,
 	) -> Result<(), web_transport_noq::ServerError> {
 		match self {
-			NoqRequest::Raw { connection, .. } => {
+			Request::Raw { connection, .. } => {
 				connection.close(status.as_u16().into(), status.as_str().as_bytes());
 				Ok(())
 			}
-			NoqRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
+			Request::WebTransport { request, alpns: _, .. } => request.reject(status).await,
 		}
 	}
 }

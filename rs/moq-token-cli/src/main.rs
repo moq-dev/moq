@@ -99,7 +99,6 @@ fn main() -> anyhow::Result<()> {
 		} => {
 			let key = moq_token::Key::from_file(cli.key)?;
 
-			#[allow(deprecated)]
 			let payload = moq_token::Claims {
 				root,
 				publish,

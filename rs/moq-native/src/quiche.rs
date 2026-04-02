@@ -14,14 +14,14 @@ use web_transport_quiche::proto::ConnectRequest;
 // ── Client ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub(crate) struct QuicheClient {
+pub(crate) struct Client {
 	pub bind: net::SocketAddr,
 	pub disable_verify: bool,
 	pub max_streams: u64,
 	pub versions: moq_lite::Versions,
 }
 
-impl QuicheClient {
+impl Client {
 	pub fn new(config: &ClientConfig) -> anyhow::Result<Self> {
 		if !config.tls.root.is_empty() {
 			tracing::warn!("--tls-root is not supported with the quiche backend; system roots will be used");
@@ -103,12 +103,12 @@ impl QuicheClient {
 
 // ── Server ──────────────────────────────────────────────────────────
 
-pub(crate) struct QuicheServer {
+pub(crate) struct Server {
 	pub server: web_transport_quiche::ez::Server,
 	pub fingerprints: Arc<RwLock<ServerTlsInfo>>,
 }
 
-impl QuicheServer {
+impl Server {
 	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
 		if config.quic_lb_id.is_some() {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
@@ -247,7 +247,7 @@ fn generate_quiche_cert(
 // ── QuicheQuicRequest ───────────────────────────────────────────────
 
 /// A raw QUIC connection request via the quiche backend (not using HTTP/3).
-pub(crate) enum QuicheRequest {
+pub(crate) enum Request {
 	Raw {
 		connection: web_transport_quiche::ez::Connection,
 		request: web_transport_quiche::proto::ConnectRequest,
@@ -259,7 +259,7 @@ pub(crate) enum QuicheRequest {
 	},
 }
 
-impl QuicheRequest {
+impl Request {
 	pub async fn accept(
 		incoming: web_transport_quiche::ez::Incoming,
 		alpns: Vec<&'static str>,
@@ -295,12 +295,12 @@ impl QuicheRequest {
 	/// Accept the session, wrapping as a raw WebTransport-compatible connection.
 	pub async fn ok(self) -> Result<web_transport_quiche::Connection, web_transport_quiche::ServerError> {
 		match self {
-			QuicheRequest::Raw {
+			Request::Raw {
 				connection,
 				request,
 				response,
 			} => Ok(web_transport_quiche::Connection::raw(connection, request, response)),
-			QuicheRequest::WebTransport { request, alpns } => {
+			Request::WebTransport { request, alpns } => {
 				let mut response = web_transport_quiche::proto::ConnectResponse::OK;
 				// Pick the first sub-protocol that we actually support.
 				// This is the WebTransport equivalent of ALPN negotiation.
@@ -315,8 +315,8 @@ impl QuicheRequest {
 	/// Returns the URL for this connection.
 	pub fn url(&self) -> Option<&Url> {
 		match self {
-			QuicheRequest::Raw { .. } => None,
-			QuicheRequest::WebTransport { request, .. } => Some(&request.url),
+			Request::Raw { .. } => None,
+			Request::WebTransport { request, .. } => Some(&request.url),
 		}
 	}
 
@@ -326,11 +326,11 @@ impl QuicheRequest {
 		status: web_transport_quiche::http::StatusCode,
 	) -> Result<(), web_transport_quiche::ServerError> {
 		match self {
-			QuicheRequest::Raw { connection, .. } => {
+			Request::Raw { connection, .. } => {
 				let _: () = connection.close(status.as_u16().into(), status.as_str());
 				Ok(())
 			}
-			QuicheRequest::WebTransport { request, alpns: _, .. } => request.reject(status).await,
+			Request::WebTransport { request, alpns: _, .. } => request.reject(status).await,
 		}
 	}
 }

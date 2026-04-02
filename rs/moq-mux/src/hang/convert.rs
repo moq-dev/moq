@@ -1,15 +1,14 @@
 use anyhow::Context;
+#[cfg(feature = "mp4")]
 use base64::Engine;
-use bytes::Bytes;
 use hang::catalog::{AUDIO, Audio, Container, VIDEO, Video};
 use hang::container::{Frame, OrderedProducer, Timestamp};
-use mp4_atom::DecodeMaybe;
 
 /// Converts a broadcast from any format to hang/Legacy format.
 ///
 /// If tracks are already Legacy, they are passed through unchanged.
 /// If tracks are CMAF, parses moof+mdat and converts to hang frames.
-pub struct Hang {
+pub struct Convert {
 	input: moq_lite::BroadcastConsumer,
 	output: moq_lite::BroadcastProducer,
 }
@@ -17,7 +16,7 @@ pub struct Hang {
 // Make a new audio group every 100ms.
 const MAX_AUDIO_GROUP_DURATION: Timestamp = Timestamp::from_millis_unchecked(100);
 
-impl Hang {
+impl Convert {
 	pub fn new(input: moq_lite::BroadcastConsumer, output: moq_lite::BroadcastProducer) -> Self {
 		Self { input, output }
 	}
@@ -96,12 +95,13 @@ async fn run_with_catalog(
 					}
 				});
 			}
+			#[cfg(feature = "mp4")]
 			Container::Cmaf { init_data } => {
 				let init_bytes = base64::engine::general_purpose::STANDARD
 					.decode(init_data)
 					.context("invalid base64 init_data")?;
 
-				let timescale = parse_timescale(&init_bytes)?;
+				let timescale = crate::cmaf::parse_timescale(&init_bytes)?;
 
 				let mut legacy_config = config.clone();
 				legacy_config.container = Container::Legacy;
@@ -119,6 +119,8 @@ async fn run_with_catalog(
 					}
 				});
 			}
+			#[cfg(not(feature = "mp4"))]
+			_ => anyhow::bail!("CMAF container requires the 'mp4' feature"),
 		}
 	}
 
@@ -143,12 +145,13 @@ async fn run_with_catalog(
 					}
 				});
 			}
+			#[cfg(feature = "mp4")]
 			Container::Cmaf { init_data } => {
 				let init_bytes = base64::engine::general_purpose::STANDARD
 					.decode(init_data)
 					.context("invalid base64 init_data")?;
 
-				let timescale = parse_timescale(&init_bytes)?;
+				let timescale = crate::cmaf::parse_timescale(&init_bytes)?;
 
 				let mut legacy_config = config.clone();
 				legacy_config.container = Container::Legacy;
@@ -166,6 +169,8 @@ async fn run_with_catalog(
 					}
 				});
 			}
+			#[cfg(not(feature = "mp4"))]
+			_ => anyhow::bail!("CMAF container requires the 'mp4' feature"),
 		}
 	}
 
@@ -178,18 +183,6 @@ async fn run_with_catalog(
 	while tasks.join_next().await.is_some() {}
 
 	Ok(())
-}
-
-/// Parse the timescale from an init segment (ftyp+moov).
-fn parse_timescale(init_data: &[u8]) -> anyhow::Result<u64> {
-	let mut cursor = std::io::Cursor::new(init_data);
-	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
-		if let mp4_atom::Any::Moov(moov) = atom {
-			let trak = moov.trak.first().context("no tracks in moov")?;
-			return Ok(trak.mdia.mdhd.timescale as u64);
-		}
-	}
-	anyhow::bail!("no moov found in init data")
 }
 
 /// Pass a track through unchanged.
@@ -210,6 +203,7 @@ async fn passthrough_track(
 }
 
 /// Convert CMAF moof+mdat frames to hang Legacy frames.
+#[cfg(feature = "mp4")]
 async fn convert_cmaf_to_legacy(
 	mut input: moq_lite::TrackConsumer,
 	output: moq_lite::TrackProducer,
@@ -227,19 +221,17 @@ async fn convert_cmaf_to_legacy(
 		let mut is_first_in_group = true;
 
 		while let Some(frame_data) = frame_reader.read_frame().await? {
-			// Parse the moof+mdat fragment
-			let samples = extract_samples(&frame_data, timescale)?;
+			let frames = crate::cmaf::decode(frame_data, timescale)?;
 
-			for (i, (timestamp, payload, keyframe)) in samples.into_iter().enumerate() {
-				if is_video && is_first_in_group && i == 0 && keyframe {
+			for (i, frame) in frames.into_iter().enumerate() {
+				if is_video && is_first_in_group && i == 0 && frame.keyframe {
 					ordered.keyframe()?;
 				}
 
-				let frame = Frame {
-					timestamp,
-					payload: payload.into(),
-				};
-				ordered.write(frame)?;
+				ordered.write(Frame {
+					timestamp: frame.timestamp,
+					payload: frame.payload.into(),
+				})?;
 			}
 
 			is_first_in_group = false;
@@ -250,78 +242,91 @@ async fn convert_cmaf_to_legacy(
 	Ok(())
 }
 
-/// Extract individual samples from a moof+mdat fragment.
-fn extract_samples(data: &Bytes, timescale: u64) -> anyhow::Result<Vec<(Timestamp, Bytes, bool)>> {
-	let mut cursor = std::io::Cursor::new(data.as_ref());
-	let mut moof: Option<mp4_atom::Moof> = None;
+#[cfg(test)]
+mod test {
+	use hang::container::Timestamp;
 
-	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
-		match atom {
-			mp4_atom::Any::Moof(m) => {
-				moof = Some(m);
-			}
-			mp4_atom::Any::Mdat(mdat) => {
-				let moof = moof.take().context("mdat without moof")?;
-				return extract_from_moof_mdat(&moof, &mdat, timescale);
-			}
-			_ => {}
-		}
+	use crate::cmaf::test::*;
+
+	fn ts(micros: u64) -> Timestamp {
+		Timestamp::from_micros(micros).unwrap()
 	}
 
-	anyhow::bail!("no mdat found in fragment")
-}
+	#[cfg(feature = "mp4")]
+	#[tokio::test]
+	async fn cmaf_to_legacy_video() {
+		use base64::Engine;
+		use hang::catalog::Container;
 
-fn extract_from_moof_mdat(
-	moof: &mp4_atom::Moof,
-	mdat: &mp4_atom::Mdat,
-	timescale: u64,
-) -> anyhow::Result<Vec<(Timestamp, Bytes, bool)>> {
-	let mut samples = Vec::new();
+		let config = test_video_config();
+		let init_data = crate::cmaf::build_video_init(&config).unwrap();
+		let timescale = config.framerate.map(|f| (f * 1000.0) as u64).unwrap();
 
-	for traf in &moof.traf {
-		let tfdt = traf.tfdt.as_ref().context("missing tfdt")?;
-		let mut dts = tfdt.base_media_decode_time;
-		let mut offset = 0usize;
+		let cmaf_frames: Vec<(u64, Vec<u8>, bool)> = vec![
+			(0, vec![0x01, 0x02, 0x03], true),
+			(33_000u64 * timescale / 1_000_000, vec![0x04, 0x05], false),
+			(66_000u64 * timescale / 1_000_000, vec![0x06, 0x07, 0x08], true),
+		];
 
-		for trun in &traf.trun {
-			if trun.data_offset.is_some() {
-				// data_offset is relative to start of moof. Since we converted the
-				// fragment ourselves (build_moof_mdat sets data_offset = moof_size + 8),
-				// we subtract those to get an offset into mdat.data.
-				// For fragments we produce, data_offset points past the mdat header,
-				// so the offset into mdat.data is 0 for the first sample.
-				// For external fragments we don't have moof_size, so we reset to 0.
-				offset = 0;
-			}
+		let mut cmaf_config = config.clone();
+		cmaf_config.container = Container::Cmaf {
+			init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
+		};
 
-			for entry in &trun.entries {
-				let flags = entry.flags.unwrap_or(traf.tfhd.default_sample_flags.unwrap_or(0));
-				let duration = entry.duration.unwrap_or(traf.tfhd.default_sample_duration.unwrap_or(0));
-				let size = entry.size.unwrap_or(traf.tfhd.default_sample_size.unwrap_or(0)) as usize;
+		let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&cmaf_config);
+		let output = moq_lite::Broadcast::new().produce();
+		let output_consumer = output.consume();
+		let converter = super::Convert::new(consumer, output);
 
-				let pts = (dts as i64 + entry.cts.unwrap_or_default() as i64) as u64;
-				let timestamp = Timestamp::from_scale(pts, timescale)?;
+		let cmaf_frames_clone = cmaf_frames.clone();
+		tokio::spawn(async move {
+			tokio::task::yield_now().await;
+			write_cmaf_frames(&mut video_track, &cmaf_frames_clone);
+		});
 
-				let keyframe = {
-					let depends_on_no_other = (flags >> 24) & 0x3 == 0x2;
-					let non_sync = (flags >> 16) & 0x1 == 0x1;
-					depends_on_no_other && !non_sync
-				};
+		let (convert_result, legacy_frames) = tokio::join!(converter.run(), async {
+			let output_video = subscribe_video(&output_consumer).await;
+			read_legacy_frames(output_video).await
+		});
+		convert_result.unwrap();
 
-				anyhow::ensure!(
-					offset + size <= mdat.data.len(),
-					"sample extends past mdat: offset={offset} size={size} mdat_len={}",
-					mdat.data.len()
-				);
-
-				let payload = Bytes::copy_from_slice(&mdat.data[offset..offset + size]);
-				samples.push((timestamp, payload, keyframe));
-
-				dts += duration as u64;
-				offset += size;
-			}
-		}
+		assert_eq!(legacy_frames.len(), 3, "expected 3 Legacy frames");
+		assert_eq!(legacy_frames[0].0, ts(0));
+		assert_eq!(legacy_frames[0].1, vec![0x01, 0x02, 0x03]);
+		assert_eq!(legacy_frames[1].0, ts(33_000));
+		assert_eq!(legacy_frames[1].1, vec![0x04, 0x05]);
+		assert_eq!(legacy_frames[2].0, ts(66_000));
+		assert_eq!(legacy_frames[2].1, vec![0x06, 0x07, 0x08]);
 	}
 
-	Ok(samples)
+	#[tokio::test]
+	async fn legacy_passthrough() {
+		let config = test_video_config();
+		let frames = vec![(ts(0), vec![0xAA, 0xBB], true), (ts(33_000), vec![0xCC, 0xDD], false)];
+
+		let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&config);
+		let output = moq_lite::Broadcast::new().produce();
+		let output_consumer = output.consume();
+
+		let converter = super::Convert::new(consumer, output);
+
+		let frames_clone = frames.clone();
+		tokio::spawn(async move {
+			tokio::task::yield_now().await;
+			write_legacy_frames(&mut video_track, &frames_clone);
+		});
+
+		let (convert_result, result) = tokio::join!(converter.run(), async {
+			let output_video = subscribe_video(&output_consumer).await;
+			read_legacy_frames(output_video).await
+		});
+		convert_result.expect("converter.run() failed");
+
+		assert_eq!(result.len(), frames.len());
+
+		for (i, (expected_ts, expected_payload, _)) in frames.iter().enumerate() {
+			assert_eq!(result[i].0, *expected_ts, "timestamp mismatch at frame {i}");
+			assert_eq!(result[i].1, *expected_payload, "payload mismatch at frame {i}");
+		}
+	}
 }

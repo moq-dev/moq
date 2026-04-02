@@ -108,14 +108,14 @@ impl Publish {
 
 		match export {
 			ExportFormat::Fmp4 => {
-				let converter = moq_mux::convert::Fmp4::new(import_consumer, output_broadcast);
+				let converter = moq_mux::cmaf::Convert::new(import_consumer, output_broadcast);
 				tokio::select! {
 					res = run_import(&mut kind) => res,
 					res = converter.run() => res,
 				}
 			}
 			ExportFormat::Hang => {
-				let converter = moq_mux::convert::Hang::new(import_consumer, output_broadcast);
+				let converter = moq_mux::hang::Convert::new(import_consumer, output_broadcast);
 				tokio::select! {
 					res = run_import(&mut kind) => res,
 					res = converter.run() => res,

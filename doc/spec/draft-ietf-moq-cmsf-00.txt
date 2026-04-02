@@ -259,10 +259,10 @@ Internet-Draft  CMSF- a CMAF compliant implementation of   December 2025
    CMSF defines a special instance of an Event Timeline track, termed
    the SAP Type timeline track.  Its purpose is to convey information
    about the distribution of Stream Access Point types and their
-   associated Earlist Presentation Times.
+   associated Earliest Presentation Times.
 
    In the catalog, the SAP-type timeline track MUST include a
-   'packaging' value of 'eventtimeline" and MUST include an 'eventType'
+   'packaging' value of 'eventtimeline' and MUST include an 'eventType'
    value of 'org.ietf.moq.cmsf.sap'.
 
    In the SAP Type timeline JSON payload:
@@ -291,7 +291,7 @@ Internet-Draft  CMSF- a CMAF compliant implementation of   December 2025
 3.6.2.  SAP-type timeline track example
 
    This shows an example of 30-fps HEVC-encoded content, in which each
-   4s Group beings with SAP-type 2 (i.e., the first picture in the Group
+   4s Group begins with SAP-type 2 (i.e., the first picture in the Group
    is an IDR picture, while there may be one or more pictures in the
    Group following the IDR picture in decoding order but preceding it in
    output order).  After 2 seconds in each Group, there is a SAP-type 3,
@@ -424,7 +424,57 @@ Internet-Draft  CMSF- a CMAF compliant implementation of   December 2025
 
 6.  Security Considerations
 
-   TODO Security
+   CMSF inherits the security properties of the underlying MoQ
+   Transport protocol [MoQTransport] and the WebTransport or QUIC
+   session over which it operates.  Implementations MUST ensure that
+   the transport layer provides confidentiality, integrity, and
+   authentication (e.g., via TLS 1.3).
+
+   Threat Model:  An attacker may be on-path or off-path and may
+      attempt to eavesdrop, inject, modify, or replay CMSF messages.
+      Attackers may also attempt to disrupt availability through
+      resource exhaustion.
+
+   Confidentiality:  Media content carried within CMSF Groups and
+      Objects is visible to relays and any entity with access to the
+      QUIC session keys.  Applications requiring end-to-end media
+      confidentiality SHOULD encrypt media payloads above the
+      transport layer (e.g., using Secure Frame [SFrame]).
+
+   Integrity:  CMSF metadata (SAP types, event timelines, timing
+      information) MUST be integrity-protected by the underlying
+      transport.  Receivers SHOULD validate that CMSF metadata is
+      consistent with the media content (e.g., declared SAP types
+      match actual Stream Access Points).
+
+   Authentication and Authorization:  Publishers and subscribers
+      SHOULD be authenticated before being allowed to announce or
+      consume CMSF content.  Authorization policies SHOULD restrict
+      which paths a client may publish to or subscribe from.
+      Credentials SHOULD have bounded lifetimes, and implementations
+      SHOULD support revocation mechanisms.
+
+   Replay and Impersonation:  Implementations MUST rely on the
+      transport's replay protection (e.g., QUIC's nonce-based
+      encryption).  CMSF itself does not introduce additional replay
+      vectors beyond those of the underlying MoQ Transport.
+
+   Availability:  Receivers MUST impose limits on the rate and size
+      of CMSF Objects and Groups to mitigate resource exhaustion
+      attacks.  Relays SHOULD apply backpressure or rate limiting
+      to protect downstream consumers.
+
+   Privacy:  CMSF track names and catalog metadata may reveal
+      information about the media content or its structure.
+      Implementations SHOULD consider the privacy implications of
+      exposing track names, codec parameters, and timing metadata
+      to untrusted intermediaries.
+
+   Operational Guidance:  Implementations SHOULD log security-
+      relevant events (authentication failures, authorization
+      denials, malformed messages) for monitoring and incident
+      response.  Error messages SHOULD NOT leak internal state or
+      configuration details to unauthenticated clients.
 
 7.  IANA Considerations
 

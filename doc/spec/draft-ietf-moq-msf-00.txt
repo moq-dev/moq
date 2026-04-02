@@ -1598,10 +1598,10 @@ Internet-Draft            MOQT Streaming Format             January 2026
 
 7.2.  Media Timeline Catalog requirements
 
-   A media timeline track MUST carry a 'type' identifier in the Catalog
-   with a value of "mediatimeline".  A media timeline track MUST carry a
-   'depends' attribute which contains an array of all track names to
-   which the media timeline track applies.  The mime-type of a media
+   A media timeline track MUST carry a 'packaging' identifier in the
+   Catalog with a value of "mediatimeline".  A media timeline track MUST
+   carry a 'depends' attribute which contains an array of all track
+   names to which the media timeline track applies.  The mime-type of a media
    timeline track MUST be specified as "application/json".
 
 7.3.  Media Timeline track updating
@@ -1778,7 +1778,67 @@ Internet-Draft            MOQT Streaming Format             January 2026
 
 10.  Security Considerations
 
-   ToDo
+   MSF inherits the security properties of the underlying MoQ
+   Transport protocol [MoQTransport] and its associated transport
+   security mechanisms (TLS 1.3 over QUIC or WebTransport).
+
+   Threat Model:  Attackers may be on-path (e.g., compromised relays)
+      or off-path.  They may attempt to eavesdrop on media content,
+      inject or modify track data, replay previously captured Groups
+      or Objects, or disrupt service availability through resource
+      exhaustion or malformed messages.
+
+   Confidentiality and Integrity:  Media content and catalog metadata
+      are protected in transit by the underlying QUIC transport
+      encryption.  However, relay nodes can observe and modify
+      content.  Applications requiring end-to-end confidentiality
+      SHOULD apply payload-level encryption (e.g., Secure Frame
+      [SFrame]) above the MSF layer.
+
+   Authentication and Authorization:  Implementations MUST
+      authenticate publishers and subscribers before allowing them
+      to announce or consume MSF tracks.  Authorization SHOULD be
+      enforced per-track or per-broadcast path.  Credentials MUST
+      have bounded lifetimes and implementations SHOULD support
+      revocation.
+
+   Replay and Denial of Service:  The underlying QUIC transport
+      provides replay protection through its nonce-based encryption.
+      Implementations MUST impose limits on catalog size, track
+      count, Group rate, and Object sizes to prevent resource
+      exhaustion.  Relays SHOULD apply rate limiting and
+      backpressure to protect downstream consumers from floods of
+      data or announcements.
+
+   Catalog Integrity:  The MSF catalog (Section 5) describes the
+      structure of a broadcast and is critical to correct operation.
+      A malicious or compromised publisher could advertise misleading
+      codec parameters, invalid track dependencies, or excessive
+      track counts.  Receivers MUST validate catalog contents and
+      SHOULD reject catalogs that exceed implementation-defined
+      complexity limits.
+
+   Privacy and Metadata:  MSF track names, catalog fields (codec,
+      bitrate, resolution, temporal properties), and media timeline
+      metadata may reveal information about content and users.
+      Implementations SHOULD minimize metadata exposure to untrusted
+      intermediaries.  The 'renderGroup' and temporal ordering
+      metadata in particular may allow traffic analysis of media
+      structure even when payloads are encrypted.
+
+   Interoperability:  Implementations that do not fully validate
+      MSF catalog fields or track packaging types may be vulnerable
+      to unexpected behavior when interoperating with other
+      implementations.  Receivers MUST gracefully handle unknown
+      catalog fields and SHOULD ignore unrecognized packaging types
+      rather than crashing.
+
+   Operational Guidance:  Deployments SHOULD log authentication
+      failures, authorization denials, and malformed catalog or
+      track data for monitoring.  Error responses MUST NOT leak
+      internal state or configuration to unauthenticated peers.
+      Implementations SHOULD follow the guidance in [RFC3552] for
+      security considerations in protocol design.
 
 11.  IANA Considerations
 
