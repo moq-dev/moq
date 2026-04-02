@@ -204,8 +204,68 @@ impl Auth {
 	///
 	/// If the key is a URL, the JWK set is fetched immediately and an
 	/// optional background task is spawned to refresh it periodically.
+	/// Collect guest access paths from all keys, removing duplicates and subsets.
+	/// For example, keys with paths ["foo", "foo/bar", "baz"] yields ["foo", "baz"]
+	/// since "foo/bar" is a subset of "foo".
+	fn aggregate_public_paths(key_set: &KeySet, public: Option<&PathOwned>) -> (Vec<PathOwned>, Vec<PathOwned>) {
+		let mut guest_sub: Vec<PathOwned> = Vec::new();
+		let mut guest_pub: Vec<PathOwned> = Vec::new();
+
+		// Backwards compatibility: --auth-public sets both guest_sub and guest_pub
+		if let Some(public) = public {
+			guest_sub.push(public.to_owned());
+			guest_pub.push(public.to_owned());
+		}
+
+		for key in &key_set.keys {
+			for sub in key.guest_sub.iter().chain(key.guest.iter()) {
+				guest_sub.push(Path::new(sub).to_owned());
+			}
+			for pub_ in key.guest_pub.iter().chain(key.guest.iter()) {
+				guest_pub.push(Path::new(pub_).to_owned());
+			}
+		}
+
+		let guest_sub = Self::dedup_paths(guest_sub);
+		let guest_pub = Self::dedup_paths(guest_pub);
+
+		if guest_sub.len() > 1 {
+			tracing::debug!("keys have multiple guest_sub paths: {:?}", guest_sub);
+		}
+		if guest_pub.len() > 1 {
+			tracing::debug!("keys have multiple guest_pub paths: {:?}", guest_pub);
+		}
+
+		(guest_sub, guest_pub)
+	}
+
+	/// Remove duplicate and subset paths, keeping only the shortest prefixes.
+	fn dedup_paths(mut paths: Vec<PathOwned>) -> Vec<PathOwned> {
+		if paths.len() <= 1 {
+			return paths;
+		}
+
+		// Sort by length so shorter (more permissive) prefixes come first
+		paths.sort_by_key(|p| p.len());
+		paths.dedup();
+
+		let mut result: Vec<PathOwned> = Vec::new();
+		'outer: for path in paths {
+			for existing in &result {
+				if path.has_prefix(existing) {
+					continue 'outer;
+				}
+			}
+			result.push(path);
+		}
+		result
+	}
+
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
-		let public = config.public.map(|p| p.as_path().to_owned());
+		let public = config.public.as_ref().map(|p| {
+			tracing::warn!("--auth-public is deprecated; use --guest when generating an auth key instead");
+			p.as_path().to_owned()
+		});
 
 		if let Some(key) = config.key {
 			if key.starts_with("http://") || key.starts_with("https://") {
@@ -278,7 +338,26 @@ impl Auth {
 				.map_err(|_| AuthError::DecodeFailed)?
 		} else if params.jwt.is_some() {
 			return Err(AuthError::UnexpectedToken);
+		} else if let Some(key) = self.key.as_deref() {
+			// Compute public access permissions on-demand from the current keyset
+			let ks = key.lock().expect("key mutex poisoned");
+			let (guest_sub, guest_pub) = Self::aggregate_public_paths(&ks, self.public.as_ref());
+			drop(ks);
+
+			if !guest_sub.is_empty() || !guest_pub.is_empty() {
+				let subscribe = guest_sub.into_iter().map(|p| p.to_string()).collect();
+				let publish = guest_pub.into_iter().map(|p| p.to_string()).collect();
+				moq_token::Claims {
+					root: "".to_string(),
+					subscribe,
+					publish,
+					..Default::default()
+				}
+			} else {
+				return Err(AuthError::ExpectedToken);
+			}
 		} else if let Some(public) = &self.public {
+			// Deprecated: --auth-public without a key
 			moq_token::Claims {
 				root: public.to_string(),
 				subscribe: vec!["".to_string()],
@@ -299,26 +378,40 @@ impl Auth {
 		};
 
 		// If a more specific path is provided, reduce the permissions.
-		let subscribe = claims
+		let subscribe: Vec<PathOwned> = claims
 			.subscribe
 			.into_iter()
 			.filter_map(|p| {
 				let p = Path::new(&p);
 				if !p.is_empty() {
-					p.strip_prefix(&suffix).map(|p| p.to_owned())
+					if let Some(remaining) = p.strip_prefix(&suffix) {
+						Some(remaining.to_owned())
+					} else if suffix.has_prefix(&p) {
+						// Connection is under the allowed prefix — grant full access
+						Some(Path::new("").to_owned())
+					} else {
+						None
+					}
 				} else {
 					Some(p.to_owned())
 				}
 			})
 			.collect();
 
-		let publish = claims
+		let publish: Vec<PathOwned> = claims
 			.publish
 			.into_iter()
 			.filter_map(|p| {
 				let p = Path::new(&p);
 				if !p.is_empty() {
-					p.strip_prefix(&suffix).map(|p| p.to_owned())
+					if let Some(remaining) = p.strip_prefix(&suffix) {
+						Some(remaining.to_owned())
+					} else if suffix.has_prefix(&p) {
+						// Connection is under the allowed prefix — grant full access
+						Some(Path::new("").to_owned())
+					} else {
+						None
+					}
 				} else {
 					Some(p.to_owned())
 				}
@@ -330,6 +423,11 @@ impl Auth {
 			(Some(_), false) => return Err(AuthError::ExpectedCluster),
 			_ => None,
 		};
+
+		// Reject connections that end up with no permissions after reduction
+		if subscribe.is_empty() && publish.is_empty() && !claims.cluster {
+			return Err(AuthError::IncorrectRoot);
+		}
 
 		Ok(AuthToken {
 			root: root.to_owned(),
@@ -350,6 +448,15 @@ mod tests {
 	fn create_test_key() -> anyhow::Result<(NamedTempFile, Key)> {
 		let key_file = NamedTempFile::new()?;
 		let key = Key::generate(Algorithm::HS256, None)?;
+		key.to_file(key_file.path())?;
+		Ok((key_file, key))
+	}
+
+	fn create_test_key_with_public(guest_sub: &[&str], guest_pub: &[&str]) -> anyhow::Result<(NamedTempFile, Key)> {
+		let key_file = NamedTempFile::new()?;
+		let mut key = Key::generate(Algorithm::HS256, None)?;
+		key.guest_sub = guest_sub.iter().map(|s| s.to_string()).collect();
+		key.guest_pub = guest_pub.iter().map(|s| s.to_string()).collect();
 		key.to_file(key_file.path())?;
 		Ok((key_file, key))
 	}
@@ -837,6 +944,141 @@ mod tests {
 		// Should remain write-only
 		assert_eq!(verified.subscribe, vec![]);
 		assert_eq!(verified.publish, vec!["".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_guest_sub_allows_anonymous_subscribe() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(&["demo"], &[])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Anonymous access to / — can subscribe under demo/
+		let token = auth.verify(&AuthParams::new("/"))?;
+		assert_eq!(token.root, "".as_path());
+		assert_eq!(token.subscribe, vec!["demo".as_path()]);
+		assert_eq!(token.publish, vec![]);
+
+		// Anonymous access to /demo — subscribe reduces to ""
+		let token = auth.verify(&AuthParams::new("/demo"))?;
+		assert_eq!(token.root, "demo".as_path());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec![]);
+
+		// Anonymous access to /demo/room/123 — still allowed (subpath of guest prefix)
+		let token = auth.verify(&AuthParams::new("/demo/room/123"))?;
+		assert_eq!(token.root, Path::new("demo/room/123").to_owned());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec![]);
+
+		// Anonymous access to /other — should fail (not under guest prefix)
+		let result = auth.verify(&AuthParams::new("/other"));
+		assert!(result.is_err());
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_guest_pub_allows_anonymous_publish() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(&[], &["demo"])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Anonymous access to / — can publish under demo/
+		let token = auth.verify(&AuthParams::new("/"))?;
+		assert_eq!(token.subscribe, vec![]);
+		assert_eq!(token.publish, vec!["demo".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_both() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(&["demo"], &["demo"])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		let token = auth.verify(&AuthParams::new("/"))?;
+		assert_eq!(token.subscribe, vec!["demo".as_path()]);
+		assert_eq!(token.publish, vec!["demo".as_path()]);
+
+		// Connecting to /demo reduces both to ""
+		let token = auth.verify(&AuthParams::new("/demo"))?;
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_empty_string_allows_everything() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(&[""], &[""])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Anonymous access to any path gets full pub/sub
+		let token = auth.verify(&AuthParams::new("/anything/here"))?;
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_jwt_still_works() -> anyhow::Result<()> {
+		let (key_file, key) = create_test_key_with_public(&["demo"], &[])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// JWT tokens should still work normally, ignoring key public fields
+		let claims = moq_token::Claims {
+			root: "secret".to_string(),
+			subscribe: vec!["".to_string()],
+			publish: vec!["alice".into()],
+			..Default::default()
+		};
+		let jwt = key.encode(&claims)?;
+
+		let token = auth.verify(&AuthParams {
+			path: "/secret".into(),
+			jwt: Some(jwt),
+			..Default::default()
+		})?;
+		assert_eq!(token.root, "secret".as_path());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["alice".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_no_public_fields_requires_token() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key()?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// No public fields and no JWT → should fail
+		let result = auth.verify(&AuthParams::new("/demo"));
+		assert!(result.is_err());
 
 		Ok(())
 	}

@@ -26,6 +26,9 @@ pub fn generate(algorithm: Algorithm, id: Option<String>) -> crate::Result<Key> 
 		operations: [KeyOperation::Sign, KeyOperation::Verify].into(),
 		algorithm,
 		key: key?,
+		guest: vec![],
+		guest_sub: vec![],
+		guest_pub: vec![],
 		decode: Default::default(),
 		encode: Default::default(),
 	})
@@ -65,7 +68,8 @@ impl rsa::rand_core::CryptoRng for AwsRng {}
 
 fn generate_rsa_key(size: usize) -> crate::Result<KeyType> {
 	let mut rng = AwsRng;
-	let key = rsa::RsaPrivateKey::new(&mut rng, size)?;
+	let mut key = rsa::RsaPrivateKey::new(&mut rng, size)?;
+	key.precompute()?;
 
 	Ok(KeyType::RSA {
 		public: RsaPublicKey {
@@ -76,9 +80,9 @@ fn generate_rsa_key(size: usize) -> crate::Result<KeyType> {
 			d: key.d().to_bytes_be(),
 			p: key.primes()[0].to_bytes_be(),
 			q: key.primes()[1].to_bytes_be(),
-			dp: key.dp().expect("no dp specified in key").to_bytes_be(),
-			dq: key.dq().expect("no dq specified in key").to_bytes_be(),
-			qi: key.qinv().expect("no qinv specified in key").to_bytes_be().1,
+			dp: key.dp().ok_or(KeyError::MissingPrivateKey)?.to_bytes_be(),
+			dq: key.dq().ok_or(KeyError::MissingPrivateKey)?.to_bytes_be(),
+			qi: key.qinv().ok_or(KeyError::MissingPrivateKey)?.to_bytes_be().1,
 			oth: None, // TODO https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2.7
 		}),
 	})

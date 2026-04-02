@@ -39,9 +39,18 @@ list:
 
 # --- Publishing ---
 
+# Publish Big Buck Bunny to a relay server.
+bbb url='http://localhost:4443/anon' *args:
+	just download bbb
+	just cmaf bbb "{{url}}" {{args}}
+
+# Publish Tears of Steel to a relay server.
+tos url='http://localhost:4443/anon' *args:
+	just download tos
+	just cmaf tos "{{url}}" {{args}}
+
 # Publish a video using ffmpeg to a relay server.
-default name='bbb' url='http://localhost:4443/anon' *args:
-	just download "{{name}}"
+cmaf name url='http://localhost:4443/anon' *args:
 	cargo build --bin moq-cli
 	just ffmpeg-cmaf "media/{{name}}.mp4" |\
 	cargo run --bin moq-cli -- \
