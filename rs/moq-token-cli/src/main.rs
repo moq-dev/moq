@@ -33,6 +33,24 @@ enum Commands {
 		/// Optional path to save the public key (for asymmetric algorithms).
 		#[arg(long)]
 		public: Option<PathBuf>,
+
+		/// Path prefixes for unauthenticated subscribe access.
+		/// Use "" to allow subscribing to everything without a token.
+		/// Can be specified multiple times.
+		#[arg(long = "guest-subscribe")]
+		guest_subscribe: Vec<String>,
+
+		/// Path prefixes for unauthenticated publish access.
+		/// Use "" to allow publishing to everything without a token.
+		/// Can be specified multiple times.
+		#[arg(long = "guest-publish")]
+		guest_publish: Vec<String>,
+
+		/// Path prefixes for both unauthenticated subscribe and publish access.
+		/// Shorthand for `--guest-subscribe` and `--guest-publish` with the same path.
+		/// Can be specified multiple times.
+		#[arg(long)]
+		guest: Vec<String>,
 	},
 
 	/// Sign a token to stdout, reading the key from stdin.
@@ -80,8 +98,19 @@ fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 
 	match cli.command {
-		Commands::Generate { algorithm, id, public } => {
-			let key = moq_token::Key::generate(algorithm, id)?;
+		Commands::Generate {
+			algorithm,
+			id,
+			public,
+			guest_subscribe,
+			guest_publish,
+			guest,
+		} => {
+			let mut key = moq_token::Key::generate(algorithm, id)?;
+
+			key.guest = guest;
+			key.guest_sub = guest_subscribe;
+			key.guest_pub = guest_publish;
 
 			if let Some(public) = public {
 				key.to_public()?.to_file(public)?;
