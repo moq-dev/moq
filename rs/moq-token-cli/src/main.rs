@@ -7,10 +7,6 @@ use std::{io, path::PathBuf};
 #[command(name = "moq-token")]
 #[command(about = "Generate, sign, and verify tokens for moq-relay", long_about = None)]
 struct Cli {
-	/// Deprecated: use --key on the subcommand or --out on generate instead.
-	#[arg(long, global = true, hide = true)]
-	key: Option<PathBuf>,
-
 	/// The command to execute.
 	#[command(subcommand)]
 	command: Commands,
@@ -38,16 +34,20 @@ enum Commands {
 		#[arg(long, conflicts_with = "out")]
 		out_dir: Option<PathBuf>,
 
-		/// Optional path to save the public key (for asymmetric algorithms).
+		/// Write the public key to a file path (asymmetric algorithms only).
 		#[arg(long)]
 		public: Option<PathBuf>,
+
+		/// Write the public key to a directory as {kid}.jwk (asymmetric algorithms only).
+		#[arg(long, conflicts_with = "public")]
+		public_dir: Option<PathBuf>,
 	},
 
 	/// Sign a token, writing it to stdout.
 	Sign {
 		/// Path to the signing key file.
 		#[arg(long)]
-		key: Option<PathBuf>,
+		key: PathBuf,
 
 		/// The root path for the token.
 		#[arg(long, default_value = "")]
@@ -78,16 +78,12 @@ enum Commands {
 	Verify {
 		/// Path to the key file.
 		#[arg(long)]
-		key: Option<PathBuf>,
+		key: PathBuf,
 	},
 }
 
 fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
-
-	if cli.key.is_some() {
-		eprintln!("warning: --key before the subcommand is deprecated; use --key on sign/verify or --out on generate");
-	}
 
 	match cli.command {
 		Commands::Generate {
@@ -96,6 +92,7 @@ fn main() -> anyhow::Result<()> {
 			out,
 			out_dir,
 			public,
+			public_dir,
 		} => {
 			let id = match id {
 				Some(id) => moq_token::KeyId::decode(&id)?,
@@ -104,14 +101,17 @@ fn main() -> anyhow::Result<()> {
 
 			let key = moq_token::Key::generate(algorithm, Some(id.clone()))?;
 
-			if let Some(public) = public {
-				key.to_public()?.to_file(public)?;
+			if let Some(dir) = public_dir {
+				let path = dir.join(format!("{id}.jwk"));
+				key.to_public()?.to_file(path)?;
+			} else if let Some(path) = public {
+				key.to_public()?.to_file(path)?;
 			}
 
 			if let Some(dir) = out_dir {
 				let path = dir.join(format!("{id}.jwk"));
 				key.to_file(&path)?;
-			} else if let Some(path) = out.or(cli.key) {
+			} else if let Some(path) = out {
 				key.to_file(&path)?;
 			} else {
 				let json = key.to_str()?;
@@ -128,8 +128,7 @@ fn main() -> anyhow::Result<()> {
 			expires,
 			issued,
 		} => {
-			let key_path = key.or(cli.key).context("--key is required for sign")?;
-			let key = moq_token::Key::from_file(key_path)?;
+			let key = moq_token::Key::from_file(key)?;
 
 			let payload = moq_token::Claims {
 				root,
@@ -145,8 +144,7 @@ fn main() -> anyhow::Result<()> {
 		}
 
 		Commands::Verify { key } => {
-			let key_path = key.or(cli.key).context("--key is required for verify")?;
-			let key = moq_token::Key::from_file(key_path)?;
+			let key = moq_token::Key::from_file(key)?;
 			let token = io::read_to_string(io::stdin())?.trim().to_string();
 			let payload = key.decode(&token)?;
 

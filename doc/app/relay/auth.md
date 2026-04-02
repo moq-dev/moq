@@ -32,14 +32,14 @@ Using the Rust CLI:
 # Symmetric key (simpler, key must stay secret)
 moq-token-cli generate --out my-key.jwk
 
-# With a specific key ID
-moq-token-cli generate --id my-key --out my-key.jwk
-
 # Save to a directory as {kid}.jwk
 moq-token-cli generate --out-dir ./keys/
 
 # Asymmetric key (private signs, public verifies)
-moq-token-cli generate --algorithm ES256 --out private.jwk --public ./keys/my-key.jwk
+moq-token-cli generate --algorithm ES256 --out private.jwk --public public.jwk
+
+# Asymmetric key, both saved to directories as {kid}.jwk
+moq-token-cli generate --algorithm ES256 --out-dir ./private/ --public-dir ./keys/
 ```
 
 A random key ID is generated if `--id` is not specified.
@@ -55,6 +55,8 @@ key = "my-key.jwk"
 Key directory (for key rotation):
 ```toml
 [auth]
+# Point to the public keys directory (from --public-dir).
+# For asymmetric algorithms, the relay only needs public keys to verify tokens.
 key_dir = "/etc/moq/keys/"
 ```
 
