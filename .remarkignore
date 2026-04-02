@@ -1,2 +1,8 @@
 node_modules/
+.direnv/
+target/
+dist/
+out/
+pkg/
+result/
 **/CHANGELOG.md
