@@ -91,7 +91,7 @@ export const VideoSchema = z.union([
 			return {
 				renditions: Object.fromEntries(arr.map((item) => [item.track.name, item.config])),
 				display:
-					config?.displayAspectWidth && config?.displayAspectHeight
+					config?.displayAspectWidth !== undefined && config?.displayAspectHeight !== undefined
 						? { width: config.displayAspectWidth, height: config.displayAspectHeight }
 						: undefined,
 				rotation: undefined,
