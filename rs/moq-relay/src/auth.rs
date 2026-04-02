@@ -92,6 +92,13 @@ impl axum::response::IntoResponse for AuthError {
 #[serde(default)]
 #[non_exhaustive]
 pub struct AuthConfig {
+	/// A single JWK key file for authentication.
+	///
+	/// The key is read from disk on each request. No `kid` header is required in JWTs.
+	/// Useful for local development with a single key.
+	#[arg(long = "auth-key", env = "MOQ_AUTH_KEY")]
+	pub key: Option<String>,
+
 	/// A directory path or base URL for on-demand key resolution by key ID.
 	///
 	/// If a file path: reads `{path}/{kid}.jwk` from disk.
@@ -130,8 +137,14 @@ pub struct AuthToken {
 }
 
 enum KeySource {
+	/// A single key file, read from disk on each request. No kid required.
 	File(PathBuf),
-	Url { base: String, client: reqwest::Client },
+	/// A directory of key files, resolved by kid as `{dir}/{kid}.jwk`.
+	Dir(PathBuf),
+	/// A single key URL, fetched with HTTP caching. No kid required.
+	Url { url: String, client: reqwest::Client },
+	/// A base URL for kid-based key lookup, fetching `{base}/{kid}.jwk`.
+	UrlDir { base: String, client: reqwest::Client },
 }
 
 struct CachedKey {
@@ -203,31 +216,39 @@ impl KeyResolver {
 		}
 	}
 
-	async fn resolve(self: &Arc<Self>, kid: &str) -> Result<Arc<Key>, AuthError> {
-		validate_kid(kid)?;
-
+	async fn resolve(self: &Arc<Self>, kid: Option<&str>) -> Result<Arc<Key>, AuthError> {
 		match &self.source {
-			KeySource::File(dir) => Self::resolve_file(dir, kid),
-			KeySource::Url { base, client } => self.resolve_url(base, client, kid).await,
+			KeySource::File(path) => {
+				let key = Key::from_file(path).map_err(|_| AuthError::KeyNotFound)?;
+				Ok(Arc::new(key))
+			}
+			KeySource::Dir(dir) => {
+				let kid = kid.ok_or(AuthError::MissingKeyId)?;
+				validate_kid(kid)?;
+				let path = dir.join(format!("{kid}.jwk"));
+				let key = Key::from_file(&path).map_err(|_| AuthError::KeyNotFound)?;
+				Ok(Arc::new(key))
+			}
+			KeySource::Url { url, client } => self.resolve_cached_url(url, client, "single").await,
+			KeySource::UrlDir { base, client } => {
+				let kid = kid.ok_or(AuthError::MissingKeyId)?;
+				validate_kid(kid)?;
+				let url = format!("{base}/{kid}.jwk");
+				self.resolve_cached_url(&url, client, kid).await
+			}
 		}
 	}
 
-	fn resolve_file(dir: &std::path::Path, kid: &str) -> Result<Arc<Key>, AuthError> {
-		let path = dir.join(format!("{kid}.jwk"));
-		let key = Key::from_file(&path).map_err(|_| AuthError::KeyNotFound)?;
-		Ok(Arc::new(key))
-	}
-
-	async fn resolve_url(
+	async fn resolve_cached_url(
 		self: &Arc<Self>,
-		base: &str,
+		url: &str,
 		client: &reqwest::Client,
-		kid: &str,
+		cache_key: &str,
 	) -> Result<Arc<Key>, AuthError> {
 		// Check cache first (read lock)
 		{
 			let cache = self.cache.read().await;
-			if let Some(cached) = cache.get(kid) {
+			if let Some(cached) = cache.get(cache_key) {
 				if cached.is_fresh() {
 					return Ok(cached.key.clone());
 				}
@@ -236,13 +257,13 @@ impl KeyResolver {
 					let etag = cached.etag.clone();
 					// Spawn background revalidation
 					let resolver = Arc::clone(self);
-					let base = base.to_owned();
+					let url = url.to_owned();
 					let client = client.clone();
-					let kid = kid.to_owned();
+					let cache_key = cache_key.to_owned();
 					drop(cache);
 					tokio::spawn(async move {
-						if let Err(e) = resolver.fetch_and_cache(&base, &client, &kid, etag).await {
-							tracing::debug!(%kid, %e, "background key revalidation failed");
+						if let Err(e) = resolver.fetch_and_cache(&url, &client, &cache_key, etag).await {
+							tracing::debug!(%cache_key, %e, "background key revalidation failed");
 						}
 					});
 					return Ok(key);
@@ -251,19 +272,17 @@ impl KeyResolver {
 		}
 
 		// Cache miss or expired beyond SWR — fetch synchronously
-		self.fetch_and_cache(base, client, kid, None).await
+		self.fetch_and_cache(url, client, cache_key, None).await
 	}
 
 	async fn fetch_and_cache(
 		&self,
-		base: &str,
+		url: &str,
 		client: &reqwest::Client,
-		kid: &str,
+		cache_key: &str,
 		etag: Option<String>,
 	) -> Result<Arc<Key>, AuthError> {
-		let url = format!("{base}/{kid}.jwk");
-
-		let mut request = client.get(&url);
+		let mut request = client.get(url);
 		if let Some(etag) = &etag {
 			request = request.header(reqwest::header::IF_NONE_MATCH, etag.as_str());
 		}
@@ -284,7 +303,7 @@ impl KeyResolver {
 				.or(etag);
 
 			let mut cache = self.cache.write().await;
-			if let Some(cached) = cache.get_mut(kid) {
+			if let Some(cached) = cache.get_mut(cache_key) {
 				cached.fetched = Instant::now();
 				cached.max_age = max_age;
 				cached.stale_while_revalidate = swr;
@@ -324,7 +343,7 @@ impl KeyResolver {
 
 		let mut cache = self.cache.write().await;
 		cache.insert(
-			kid.to_owned(),
+			cache_key.to_owned(),
 			CachedKey {
 				key: key.clone(),
 				etag: resp_etag,
@@ -347,30 +366,59 @@ pub struct Auth {
 	public: Option<PathOwned>,
 }
 
+fn is_url(s: &str) -> bool {
+	s.starts_with("http://") || s.starts_with("https://")
+}
+
+fn build_http_client() -> anyhow::Result<reqwest::Client> {
+	reqwest::Client::builder()
+		.timeout(Duration::from_secs(10))
+		.build()
+		.context("failed to build HTTP client")
+}
+
 impl Auth {
 	/// Creates a new authenticator from the given configuration.
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
 		let public = config.public.map(|p| p.as_path().to_owned());
 
-		let resolver = if let Some(keys) = config.keys {
-			let source = if keys.starts_with("http://") || keys.starts_with("https://") {
-				let client = reqwest::Client::builder()
-					.timeout(Duration::from_secs(10))
-					.build()
-					.context("failed to build HTTP client")?;
-				KeySource::Url { base: keys, client }
+		anyhow::ensure!(
+			config.key.is_none() || config.keys.is_none(),
+			"cannot specify both --auth-key and --auth-keys"
+		);
+
+		let source = if let Some(key) = config.key {
+			let source = if is_url(&key) {
+				KeySource::Url {
+					url: key,
+					client: build_http_client()?,
+				}
+			} else {
+				let path = PathBuf::from(&key);
+				anyhow::ensure!(path.is_file(), "auth-key path is not a file: {key}");
+				KeySource::File(path)
+			};
+			Some(source)
+		} else if let Some(keys) = config.keys {
+			let source = if is_url(&keys) {
+				KeySource::UrlDir {
+					base: keys,
+					client: build_http_client()?,
+				}
 			} else {
 				let path = PathBuf::from(&keys);
 				anyhow::ensure!(path.is_dir(), "auth-keys path is not a directory: {keys}");
-				KeySource::File(path)
+				KeySource::Dir(path)
 			};
-			Some(Arc::new(KeyResolver::new(source)))
+			Some(source)
 		} else {
 			None
 		};
 
+		let resolver = source.map(|s| Arc::new(KeyResolver::new(s)));
+
 		if resolver.is_none() && public.is_none() {
-			anyhow::bail!("no auth-keys or public path configured");
+			anyhow::bail!("no auth-key, auth-keys, or public path configured");
 		}
 
 		Ok(Self { resolver, public })
@@ -384,12 +432,11 @@ impl Auth {
 				return Err(AuthError::UnexpectedToken);
 			};
 
-			// Extract kid from JWT header without verifying
+			// Extract kid from JWT header (may be None for single-key modes)
 			let header = jsonwebtoken::decode_header(token).map_err(|_| AuthError::DecodeFailed)?;
-			let kid = header.kid.ok_or(AuthError::MissingKeyId)?;
 
-			// Resolve the key by kid
-			let key = resolver.resolve(&kid).await?;
+			// Resolve the key (kid requirement depends on the source type)
+			let key = resolver.resolve(header.kid.as_deref()).await?;
 
 			// Verify the token with the resolved key
 			key.decode(token).map_err(|_| AuthError::DecodeFailed)?

@@ -1,4 +1,3 @@
 *.jwk
 *.jwt
-keys/
 iroh-secret.key

@@ -1,6 +1,7 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use moq_token::Algorithm;
+use rand::Rng;
 use std::{io, path::PathBuf};
 
 #[derive(Debug, Parser)]
@@ -81,7 +82,11 @@ fn main() -> anyhow::Result<()> {
 
 	match cli.command {
 		Commands::Generate { algorithm, id, public } => {
-			let key = moq_token::Key::generate(algorithm, id)?;
+			let id = id.unwrap_or_else(|| {
+				let random: u64 = rand::rng().random();
+				format!("{random:016x}")
+			});
+			let key = moq_token::Key::generate(algorithm, Some(id))?;
 
 			if let Some(public) = public {
 				key.to_public()?.to_file(public)?;

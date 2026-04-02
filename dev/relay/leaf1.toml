@@ -62,8 +62,8 @@ tls.disable_verify = true
 # ex. You could host the root at a private `.internal` domain and generate a matching certificate.
 
 [auth]
-# `just auth-key` will populate this key directory.
-keys = "keys"
+# `just auth-key` will populate this file.
+key = "dev.jwk"
 
 # Allow anonymous publishing and subscribing for this prefix.
 public = "anon"

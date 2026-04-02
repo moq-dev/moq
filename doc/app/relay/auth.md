@@ -9,14 +9,19 @@ moq-relay uses JWT (JSON Web Tokens) for authentication and authorization. Token
 
 ## Overview
 
-The authentication flow:
-1. Generate a signing key with a key ID (`kid`)
-2. Store the key file as `{kid}.jwk` in a directory or serve it via HTTP
+There are two authentication modes:
+
+### Single Key (`--auth-key`)
+The simplest setup — a single JWK file used to verify all tokens. No `kid` header is required in JWTs. The key is read from disk on each request.
+
+### Key Directory (`--auth-keys`)
+For production use with key rotation. Keys are resolved on demand by extracting the `kid` from the JWT header and fetching the corresponding key file.
+
+1. Generate signing keys with key IDs (`kid`)
+2. Store each key as `{kid}.jwk` in a directory or serve via HTTP
 3. Configure the relay with the key directory or URL
 4. Issue tokens to clients with their allowed paths
 5. Clients connect with `?jwt=<token>` query parameter
-
-The relay resolves keys on demand by extracting the `kid` from the JWT header and fetching the corresponding key.
 
 ## Quick Start
 
@@ -35,12 +40,21 @@ The `--id` flag sets the key ID (`kid`), which is used to look up the key later.
 
 ### Configure the Relay
 
+Single key (simplest, good for development):
+```toml
+[auth]
+# A single JWK file — no kid lookup required
+key = "dev.jwk"
+
+# Optional: allow anonymous access to a path prefix
+public = "anon"
+```
+
+Key directory (recommended for production):
 ```toml
 [auth]
 # Directory containing JWK files named by key ID
 keys = "keys"
-
-# Optional: allow anonymous access to a path prefix
 public = "anon"
 ```
 
@@ -150,6 +164,13 @@ Set `public = ""` to make everything public (development only).
 ```toml
 [auth]
 public = ""
+```
+
+### Development (single key)
+```toml
+[auth]
+key = "dev.jwk"
+public = "anon"
 ```
 
 ### Public viewing, authenticated publishing
