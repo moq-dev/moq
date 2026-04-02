@@ -48,9 +48,9 @@ pub struct Claims {
 }
 
 impl Claims {
-	pub fn validate(&self) -> anyhow::Result<()> {
+	pub fn validate(&self) -> crate::Result<()> {
 		if self.publish.is_empty() && self.subscribe.is_empty() {
-			anyhow::bail!("no publish or subscribe allowed; token is useless");
+			return Err(crate::Error::UselessToken);
 		}
 
 		Ok(())

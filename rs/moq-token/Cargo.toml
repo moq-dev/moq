@@ -17,7 +17,6 @@ jwks-loader = ["reqwest"]
 tokio = ["dep:tokio"]
 
 [dependencies]
-anyhow = "1"
 aws-lc-rs = "1"
 base64 = "0.22"
 elliptic-curve = "0.13.8"
