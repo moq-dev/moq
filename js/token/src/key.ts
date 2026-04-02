@@ -1,6 +1,6 @@
 import * as base64 from "@hexagon/base64";
 import * as jose from "jose";
-import { z } from "zod";
+import * as z from "zod/mini";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsSchema, validateClaims } from "./claims.ts";
 
@@ -18,82 +18,97 @@ const EC_ALGORITHM_TO_CURVE: Record<"ES256" | "ES384", "P-256" | "P-384"> = {
 	ES384: "P-384",
 };
 
-const Base64FieldSchema = z
-	.string()
-	.min(1)
-	.refine((value) => decodeBase64Flexible(value) !== null, {
+const Base64FieldSchema = z.string().check(
+	z.minLength(1),
+	z.refine((value) => decodeBase64Flexible(value) !== null, {
 		message: "Field must be valid base64url data",
-	});
+	}),
+);
 
-const StringOrArray = z.union([z.string().transform((s) => [s]), z.array(z.string())]).default([]);
+const StringOrArray = z._default(
+	z.union([
+		z.pipe(
+			z.string(),
+			z.transform((s) => [s]),
+		),
+		z.array(z.string()),
+	]),
+	[],
+);
 
 const BaseKeySchema = z.object({
 	alg: AlgorithmSchema,
-	key_ops: z.array(OperationSchema).nonempty(),
-	kid: z.string().optional(),
+	key_ops: z.array(OperationSchema).check(z.minLength(1)),
+	kid: z.optional(z.string()),
 	guest: StringOrArray,
 	guest_sub: StringOrArray,
 	guest_pub: StringOrArray,
 });
 
-const OctKeySchema = BaseKeySchema.extend({
+const OctKeySchema = z.extend(BaseKeySchema, {
 	kty: z.literal("oct"),
-	k: Base64FieldSchema.refine(
-		(secret) => {
-			// Validate minimum length (at least 32 bytes when decoded)
-			const decoded = decodeBase64Flexible(secret);
-			return decoded && decoded.byteLength >= MIN_HMAC_SECRET_BYTES;
-		},
-		{
-			message: `Secret must be at least ${MIN_HMAC_SECRET_BYTES} bytes when decoded`,
-		},
+	k: Base64FieldSchema.check(
+		z.refine(
+			(secret) => {
+				// Validate minimum length (at least 32 bytes when decoded)
+				const decoded = decodeBase64Flexible(secret);
+				return decoded && decoded.byteLength >= MIN_HMAC_SECRET_BYTES;
+			},
+			{
+				message: `Secret must be at least ${MIN_HMAC_SECRET_BYTES} bytes when decoded`,
+			},
+		),
 	),
 });
 
-const LegacyOctKeySchema = BaseKeySchema.extend({
+const LegacyOctKeySchema = z.extend(BaseKeySchema, {
 	k: Base64FieldSchema,
-	kty: z.undefined().optional(),
+	kty: z.optional(z.undefined()),
 });
 
-const RsaKeySchema = BaseKeySchema.extend({
-	kty: z.literal("RSA"),
-	n: Base64FieldSchema,
-	e: Base64FieldSchema,
-	d: Base64FieldSchema.optional(),
-	p: Base64FieldSchema.optional(),
-	q: Base64FieldSchema.optional(),
-	dp: Base64FieldSchema.optional(),
-	dq: Base64FieldSchema.optional(),
-	qi: Base64FieldSchema.optional(),
-}).superRefine((data, ctx) => {
-	// The RFC requires only d, the others are only required as soon as one is present
-	// https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2
-	// But WebCrypto requires all parameters to be present for private keys
-	const privFields = ["d", "p", "q", "dp", "dq", "qi"] as const;
+const RsaKeySchema = z
+	.extend(BaseKeySchema, {
+		kty: z.literal("RSA"),
+		n: Base64FieldSchema,
+		e: Base64FieldSchema,
+		d: z.optional(Base64FieldSchema),
+		p: z.optional(Base64FieldSchema),
+		q: z.optional(Base64FieldSchema),
+		dp: z.optional(Base64FieldSchema),
+		dq: z.optional(Base64FieldSchema),
+		qi: z.optional(Base64FieldSchema),
+	})
+	.check(
+		z.superRefine((data, ctx) => {
+			// The RFC requires only d, the others are only required as soon as one is present
+			// https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2
+			// But WebCrypto requires all parameters to be present for private keys
+			const privFields = ["d", "p", "q", "dp", "dq", "qi"] as const;
 
-	const present = privFields.filter((f) => data[f] !== undefined);
+			const present = privFields.filter((f) => data[f] !== undefined);
 
-	if (present.length > 0 && present.length < privFields.length) {
-		ctx.addIssue({
-			code: "custom",
-			message: "If any private RSA fields are present, all private RSA fields must be present.",
-		});
-	}
-});
+			if (present.length > 0 && present.length < privFields.length) {
+				ctx.addIssue({
+					code: "custom",
+					message: "If any private RSA fields are present, all private RSA fields must be present.",
+				});
+			}
+		}),
+	);
 
-const EcKeySchema = BaseKeySchema.extend({
+const EcKeySchema = z.extend(BaseKeySchema, {
 	kty: z.literal("EC"),
 	crv: z.enum(["P-256", "P-384"]),
 	x: Base64FieldSchema,
 	y: Base64FieldSchema,
-	d: Base64FieldSchema.optional(),
+	d: z.optional(Base64FieldSchema),
 });
 
-const OkpKeySchema = BaseKeySchema.extend({
+const OkpKeySchema = z.extend(BaseKeySchema, {
 	kty: z.literal("OKP"),
 	crv: z.literal("Ed25519"),
 	x: Base64FieldSchema,
-	d: Base64FieldSchema.optional(),
+	d: z.optional(Base64FieldSchema),
 });
 
 const CanonicalKeySchema = z.discriminatedUnion("kty", [OctKeySchema, RsaKeySchema, EcKeySchema, OkpKeySchema]);

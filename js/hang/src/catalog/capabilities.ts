@@ -1,20 +1,20 @@
-import { z } from "zod";
+import * as z from "zod/mini";
 
 export const VideoCapabilitiesSchema = z.object({
-	hardware: z.array(z.string()).optional(),
-	software: z.array(z.string()).optional(),
-	unsupported: z.array(z.string()).optional(),
+	hardware: z.optional(z.array(z.string())),
+	software: z.optional(z.array(z.string())),
+	unsupported: z.optional(z.array(z.string())),
 });
 
 export const AudioCapabilitiesSchema = z.object({
-	hardware: z.array(z.string()).optional(),
-	software: z.array(z.string()).optional(),
-	unsupported: z.array(z.string()).optional(),
+	hardware: z.optional(z.array(z.string())),
+	software: z.optional(z.array(z.string())),
+	unsupported: z.optional(z.array(z.string())),
 });
 
 export const CapabilitiesSchema = z.object({
-	video: VideoCapabilitiesSchema.optional(),
-	audio: AudioCapabilitiesSchema.optional(),
+	video: z.optional(VideoCapabilitiesSchema),
+	audio: z.optional(AudioCapabilitiesSchema),
 });
 
 export type Capabilities = z.infer<typeof CapabilitiesSchema>;

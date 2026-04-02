@@ -1,15 +1,15 @@
-import { z } from "zod";
+import * as z from "zod/mini";
 
 export const PreviewSchema = z.object({
-	name: z.string().optional(), // name
-	avatar: z.string().optional(), // avatar
+	name: z.optional(z.string()), // name
+	avatar: z.optional(z.string()), // avatar
 
-	audio: z.boolean().optional(), // audio enabled
-	video: z.boolean().optional(), // video enabled
+	audio: z.optional(z.boolean()), // audio enabled
+	video: z.optional(z.boolean()), // video enabled
 
-	typing: z.boolean().optional(), // actively typing
-	chat: z.boolean().optional(), // chatted recently
-	screen: z.boolean().optional(), // screen sharing
+	typing: z.optional(z.boolean()), // actively typing
+	chat: z.optional(z.boolean()), // chatted recently
+	screen: z.optional(z.boolean()), // screen sharing
 });
 
 export type Preview = z.infer<typeof PreviewSchema>;
