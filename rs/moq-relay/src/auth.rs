@@ -265,7 +265,11 @@ impl Auth {
 			};
 			Some(source)
 		} else if let Some(key_dir) = config.key_dir {
-			let source = if let Some(url) = parse_url(&key_dir) {
+			let source = if let Some(mut url) = parse_url(&key_dir) {
+				// Ensure trailing slash so Url::join appends rather than replaces the last segment
+				if !url.path().ends_with('/') {
+					url.set_path(&format!("{}/", url.path()));
+				}
 				KeySource::UrlDir {
 					base: url,
 					client: build_http_client()?,

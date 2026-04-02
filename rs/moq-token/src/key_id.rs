@@ -11,10 +11,15 @@ use serde::{Deserialize, Serialize};
 pub struct KeyId(String);
 
 impl KeyId {
+	const MAX_LENGTH: usize = 128;
+
 	/// Validate and create a KeyId from a string.
 	pub fn decode(s: &str) -> Result<Self, KeyIdError> {
 		if s.is_empty() {
 			return Err(KeyIdError::Empty);
+		}
+		if s.len() > Self::MAX_LENGTH {
+			return Err(KeyIdError::TooLong);
 		}
 		if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
 			return Err(KeyIdError::Invalid);
@@ -74,6 +79,9 @@ impl TryFrom<String> for KeyId {
 pub enum KeyIdError {
 	#[error("key ID must not be empty")]
 	Empty,
+
+	#[error("key ID exceeds maximum length of 128 characters")]
+	TooLong,
 
 	#[error("key ID contains invalid characters (only alphanumeric, hyphens, underscores allowed)")]
 	Invalid,

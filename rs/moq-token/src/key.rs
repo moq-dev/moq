@@ -985,7 +985,7 @@ mod tests {
 
 		assert!(debug_str.contains("algorithm: HS256"));
 		assert!(debug_str.contains("operations"));
-		assert!(debug_str.contains("kid: Some(\"test-key-1\")"));
+		assert!(debug_str.contains("kid: Some(KeyId(\"test-key-1\"))"));
 		assert!(!debug_str.contains("secret")); // Should not contain secret
 	}
 
