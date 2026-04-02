@@ -16,7 +16,7 @@ doctest = false
 jwks-loader = ["reqwest"]
 
 [dependencies]
-anyhow = "1"
+thiserror = "2"
 aws-lc-rs = "1"
 base64 = "0.22"
 elliptic-curve = "0.13.8"

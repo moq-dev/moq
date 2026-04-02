@@ -1,3 +1,4 @@
+use crate::Error;
 use std::{fmt, str::FromStr};
 
 /// A subset of jsonwebtoken algorithms.
@@ -41,7 +42,7 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
 }
 
 impl FromStr for Algorithm {
-	type Err = anyhow::Error;
+	type Err = Error;
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
@@ -57,7 +58,7 @@ impl FromStr for Algorithm {
 			"PS384" => Ok(Algorithm::PS384),
 			"PS512" => Ok(Algorithm::PS512),
 			"EdDSA" => Ok(Algorithm::EdDSA),
-			_ => anyhow::bail!("invalid algorithm: {s}"),
+			_ => Err(Error::InvalidAlgorithm(s.to_string())),
 		}
 	}
 }
