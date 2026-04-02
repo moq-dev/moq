@@ -101,9 +101,9 @@ enum Commands {
 
 fn write_key(key: &moq_token::Key, path: &std::path::Path, base64: bool) -> anyhow::Result<()> {
 	if base64 {
-		key.to_file_base64url(path)
+		Ok(key.to_file_base64url(path)?)
 	} else {
-		key.to_file(path)
+		Ok(key.to_file(path)?)
 	}
 }
 
