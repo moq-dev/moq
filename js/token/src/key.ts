@@ -5,6 +5,14 @@ import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsSchema, validateClaims } from "./claims.ts";
 
 /**
+ * A validated key identifier (kid). Only alphanumeric, hyphens, and underscores.
+ */
+export const KeyIdSchema = z
+	.string()
+	.regex(/^[A-Za-z0-9_-]+$/, "Key ID must contain only alphanumeric characters, hyphens, and underscores");
+export type KeyId = z.infer<typeof KeyIdSchema>;
+
+/**
  * Key operations that can be performed
  */
 export const OperationSchema = z.enum(["sign", "verify", "decrypt", "encrypt"]);
@@ -28,7 +36,7 @@ const Base64FieldSchema = z
 const BaseKeySchema = z.object({
 	alg: AlgorithmSchema,
 	key_ops: z.array(OperationSchema).nonempty(),
-	kid: z.string().optional(),
+	kid: KeyIdSchema.optional(),
 });
 
 const OctKeySchema = BaseKeySchema.extend({

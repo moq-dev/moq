@@ -70,8 +70,11 @@ pub enum AuthError {
 	#[error("key not found")]
 	KeyNotFound,
 
-	#[error("missing or invalid key ID in token")]
+	#[error("missing key ID in token")]
 	MissingKeyId,
+
+	#[error(transparent)]
+	InvalidKeyId(#[from] moq_token::KeyIdError),
 }
 
 impl From<AuthError> for http::StatusCode {
@@ -162,20 +165,20 @@ impl KeyResolver {
 	async fn resolve(&self, kid: Option<&str>) -> Result<Arc<Key>, AuthError> {
 		match &self.source {
 			KeySource::File(path) => {
-				let key = Key::from_file(path).map_err(|_| AuthError::KeyNotFound)?;
+				let key = Key::from_file_async(path).await.map_err(|_| AuthError::KeyNotFound)?;
 				Ok(Arc::new(key))
 			}
 			KeySource::Dir(dir) => {
 				let kid = kid.ok_or(AuthError::MissingKeyId)?;
-				let kid = KeyId::decode(kid).map_err(|_| AuthError::MissingKeyId)?;
+				let kid = KeyId::decode(kid)?;
 				let path = dir.join(format!("{kid}.jwk"));
-				let key = Key::from_file(&path).map_err(|_| AuthError::KeyNotFound)?;
+				let key = Key::from_file_async(&path).await.map_err(|_| AuthError::KeyNotFound)?;
 				Ok(Arc::new(key))
 			}
 			KeySource::Url { url, client } => Self::fetch_key(client, url.clone()).await,
 			KeySource::UrlDir { base, client } => {
 				let kid = kid.ok_or(AuthError::MissingKeyId)?;
-				let kid = KeyId::decode(kid).map_err(|_| AuthError::MissingKeyId)?;
+				let kid = KeyId::decode(kid)?;
 				let url = base.join(&format!("{kid}.jwk")).map_err(|_| AuthError::KeyNotFound)?;
 				Self::fetch_key(client, url).await
 			}

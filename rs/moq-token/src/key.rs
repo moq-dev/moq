@@ -215,7 +215,17 @@ impl Key {
 
 	pub fn from_file<P: AsRef<StdPath>>(path: P) -> anyhow::Result<Self> {
 		let contents = std::fs::read_to_string(&path)?;
-		// It's base64url encoded
+		Self::from_base64url(&contents)
+	}
+
+	/// Async version of [`from_file`](Self::from_file), using `tokio::fs`.
+	#[cfg(feature = "tokio")]
+	pub async fn from_file_async<P: AsRef<StdPath>>(path: P) -> anyhow::Result<Self> {
+		let contents = tokio::fs::read_to_string(path).await?;
+		Self::from_base64url(&contents)
+	}
+
+	fn from_base64url(contents: &str) -> anyhow::Result<Self> {
 		let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(contents.trim())?;
 		let json = String::from_utf8(decoded)?;
 		Ok(serde_json::from_str(&json)?)

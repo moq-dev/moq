@@ -14,6 +14,7 @@ doctest = false
 
 [features]
 jwks-loader = ["reqwest"]
+tokio = ["dep:tokio"]
 
 [dependencies]
 anyhow = "1"
@@ -29,3 +30,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_with = { version = "3", features = ["base64"] }
 thiserror = "2"
+tokio = { version = "1", features = ["fs"], optional = true }

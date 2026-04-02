@@ -3755,6 +3755,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
