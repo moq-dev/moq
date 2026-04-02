@@ -1,5 +1,5 @@
 import type * as Moq from "@moq/lite";
-import { z } from "zod";
+import * as z from "zod/mini";
 
 import { AudioSchema } from "./audio";
 import { CapabilitiesSchema } from "./capabilities";
@@ -10,13 +10,13 @@ import { UserSchema } from "./user";
 import { VideoSchema } from "./video";
 
 export const RootSchema = z.object({
-	video: VideoSchema.optional(),
-	audio: AudioSchema.optional(),
-	location: LocationSchema.optional(),
-	user: UserSchema.optional(),
-	chat: ChatSchema.optional(),
-	capabilities: CapabilitiesSchema.optional(),
-	preview: TrackSchema.optional(),
+	video: z.optional(VideoSchema),
+	audio: z.optional(AudioSchema),
+	location: z.optional(LocationSchema),
+	user: z.optional(UserSchema),
+	chat: z.optional(ChatSchema),
+	capabilities: z.optional(CapabilitiesSchema),
+	preview: z.optional(TrackSchema),
 });
 
 export type Root = z.infer<typeof RootSchema>;

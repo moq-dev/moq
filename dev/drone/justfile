@@ -1,12 +1,12 @@
 set fallback
 
 # Run the drone demo: relay + drone publisher(s) + web viewer.
-default count='1':
+default:
 	bun install
 
 	bun run concurrently --kill-others --prefix-colors auto \
 		"just relay" \
-		"sleep 1 && just wait && just start {{count}}" \
+		"sleep 1 && just wait && just start" \
 		"sleep 2 && just wait && just web"
 
 # Add drone publisher(s) to an already-running relay.
