@@ -51,6 +51,7 @@ impl AuthParams {
 
 /// Errors returned when authentication or authorization fails.
 #[derive(thiserror::Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum AuthError {
 	#[error("authentication is disabled")]
 	UnexpectedToken,

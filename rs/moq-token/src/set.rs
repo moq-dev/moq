@@ -118,7 +118,7 @@ impl KeySet {
 #[cfg(feature = "jwks-loader")]
 pub async fn load_keys(jwks_uri: &str) -> anyhow::Result<KeySet> {
 	let client = reqwest::Client::builder()
-		.timeout(Duration::from_secs(10))
+		.timeout(std::time::Duration::from_secs(10))
 		.build()
 		.context("failed to build reqwest client")?;
 

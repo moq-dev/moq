@@ -76,6 +76,7 @@ impl TryFrom<String> for KeyId {
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
 pub enum KeyIdError {
 	#[error("key ID must not be empty")]
 	Empty,

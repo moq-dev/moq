@@ -1,4 +1,5 @@
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
 	#[error("mp4: {0}")]
 	Mp4(#[from] mp4_atom::Error),
