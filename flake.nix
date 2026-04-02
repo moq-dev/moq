@@ -115,6 +115,10 @@
         devShells.default = pkgs.mkShell {
           packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps;
 
+          # jemalloc's configure uses -O0 test builds, which conflict with
+          # Nix's _FORTIFY_SOURCE hardening (requires -O).
+          hardeningDisable = [ "fortify" ];
+
           shellHook = ''
             export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
           '';
