@@ -1,9 +1,10 @@
+use anyhow::Context;
 use tikv_jemalloc_ctl::raw;
 
 /// Activate jemalloc heap profiling and listen for SIGUSR1 to dump profiles.
 ///
 /// The dump path is controlled by `MALLOC_CONF=prof_prefix:<path>`.
-/// Returns `pending` if profiling is not available (i.e. MALLOC_CONF=prof:true was not set).
+/// Returns `Ok(())` if profiling is not available (i.e. MALLOC_CONF=prof:true was not set).
 pub async fn run() -> anyhow::Result<()> {
 	let prof_active = b"prof.active\0";
 
@@ -11,14 +12,11 @@ pub async fn run() -> anyhow::Result<()> {
 		Ok(true) => tracing::info!("jemalloc heap profiling is active"),
 		Ok(false) => {
 			tracing::info!("jemalloc profiling compiled in; activating");
-			if let Err(err) = unsafe { raw::write(prof_active, true) } {
-				tracing::warn!(%err, "failed to activate jemalloc profiling");
-				return;
-			}
+			unsafe { raw::write(prof_active, true) }.context("failed to activate jemalloc profiling")?;
 		}
 		Err(err) => {
-			tracing::warn!(%err, "jemalloc profiling not available — set MALLOC_CONF=prof:true to enable");
-			return std::future::pending().await;
+			tracing::debug!(%err, "jemalloc profiling not available — set MALLOC_CONF=prof:true to enable");
+			return Ok(());
 		}
 	}
 

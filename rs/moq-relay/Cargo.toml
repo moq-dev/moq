@@ -47,11 +47,11 @@ rustls = { version = "0.23", features = [
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["json", "base64"] }
 thiserror = "2"
+tikv-jemalloc-ctl = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 tokio = { workspace = true, features = ["full"] }
 toml = "0.9"
 tower-http = { version = "0.6", features = ["cors"] }
-tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
-tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tracing = "0.1"
 url = { version = "2", features = ["serde"] }
 
