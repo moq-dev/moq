@@ -1358,8 +1358,8 @@ mod tests {
 		let temp_dir = std::env::temp_dir();
 		let temp_path = temp_dir.join("test_jwk.key");
 
-		// Write key to file
-		key.to_file(&temp_path).unwrap();
+		// Write key to file as base64url
+		key.to_file_base64url(&temp_path).unwrap();
 
 		// Read file contents
 		let contents = std::fs::read_to_string(&temp_path).unwrap();
