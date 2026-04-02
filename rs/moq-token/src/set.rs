@@ -115,17 +115,9 @@ impl KeySet {
 
 #[cfg(feature = "jwks-loader")]
 pub async fn load_keys(jwks_uri: &str) -> crate::Result<KeySet> {
-	let client = reqwest::Client::builder()
-		.timeout(Duration::from_secs(10))
-		.build()?;
+	let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
 
-	let jwks_json = client
-		.get(jwks_uri)
-		.send()
-		.await?
-		.error_for_status()?
-		.text()
-		.await?;
+	let jwks_json = client.get(jwks_uri).send().await?.error_for_status()?.text().await?;
 
 	KeySet::from_str(&jwks_json)
 }
