@@ -207,6 +207,9 @@ in
       };
 
       environment = {
+        # Enable jemalloc heap profiling; dump with `kill -USR1 <pid>`
+        MALLOC_CONF = "prof:true,prof_active:true,prof_prefix:/tmp/moq-relay.heap";
+
         MOQ_LOG_LEVEL = lib.mkDefault cfg.logLevel;
 
         # Server configuration

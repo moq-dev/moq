@@ -2,8 +2,15 @@ use moq_relay::*;
 
 use anyhow::Context;
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+	#[cfg(feature = "jemalloc")]
+	jemalloc_prof::init();
+
 	// TODO: It would be nice to remove this and rely on feature flags only.
 	// However, some dependency is pulling in `ring` and I don't know why, so meh for now.
 	rustls::crypto::aws_lc_rs::default_provider()
