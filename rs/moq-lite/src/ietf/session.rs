@@ -35,7 +35,7 @@ pub fn start<S: web_transport_trait::Session>(
 
 				tokio::select! {
 					Err(err) = adapter.run(setup.reader, setup.writer, rx) => Err::<(), Error>(err),
-					Err(err) = run_unis(adapter.clone(), subscriber.clone(), version, client) => Err(err),
+					Err(err) = run_unis(adapter.clone(), subscriber.clone(), version) => Err(err),
 					Err(err) = run_dispatch(dispatch_session, publisher.clone(), subscriber.clone(), version) => Err(err),
 					Err(err) = publisher.run() => Err(err),
 					Err(err) = async {
@@ -64,7 +64,7 @@ pub fn start<S: web_transport_trait::Session>(
 				web_async::spawn({
 					let session = session.clone();
 					async move {
-						if let Err(err) = run_setup(session, client).await {
+						if let Err(err) = run_setup(session).await {
 							tracing::warn!(%err, "setup send error");
 						}
 					}
@@ -78,7 +78,7 @@ pub fn start<S: web_transport_trait::Session>(
 				let mut sub_ns = subscriber.clone();
 
 				tokio::select! {
-					Err(err) = run_unis(session.clone(), subscriber.clone(), version, client) => Err(err),
+					Err(err) = run_unis(session.clone(), subscriber.clone(), version) => Err(err),
 					Err(err) = run_dispatch(session.clone(), publisher.clone(), subscriber.clone(), version) => Err(err),
 					Err(err) = publisher.run() => Err(err),
 					Err(err) = async {
@@ -115,7 +115,7 @@ pub fn start<S: web_transport_trait::Session>(
 }
 
 /// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.
-async fn run_setup<S: web_transport_trait::Session>(session: S, client: bool) -> Result<(), Error> {
+async fn run_setup<S: web_transport_trait::Session>(session: S) -> Result<(), Error> {
 	let version = Version::Draft17;
 	let outer_version = crate::Version::Ietf(version);
 
@@ -126,21 +126,7 @@ async fn run_setup<S: web_transport_trait::Session>(session: S, client: bool) ->
 	parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
 	let parameters = parameters.encode_bytes(version)?;
 
-	if client {
-		writer
-			.encode(&setup::Client {
-				versions: crate::coding::Versions::from([outer_version.into()]),
-				parameters,
-			})
-			.await?;
-	} else {
-		writer
-			.encode(&setup::Server {
-				version: outer_version.into(),
-				parameters,
-			})
-			.await?;
-	}
+	writer.encode(&setup::Setup { parameters }).await?;
 
 	// Hold the writer alive until the session closes.
 	session.closed().await;
@@ -157,7 +143,6 @@ async fn run_unis<S: web_transport_trait::Session>(
 	session: S,
 	subscriber: Subscriber<S>,
 	version: Version,
-	client: bool,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
@@ -166,19 +151,13 @@ async fn run_unis<S: web_transport_trait::Session>(
 		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
 		let kind: u64 = reader.decode_peek().await?;
 
-		// v17: SETUP arrives on a uni stream, then becomes the GOAWAY channel.
+		// v17+: SETUP arrives on a uni stream, then becomes the GOAWAY channel.
 		// We accept it in the background without blocking, since there are no
 		// extensions that require waiting on the SETUP before proceeding.
-		if kind == setup::SETUP_V17 && version == Version::Draft17 {
+		if kind == setup::SETUP_V17 {
 			web_async::spawn(async move {
-				// Decode and discard the SETUP message.
-				let res = if client {
-					reader.decode::<setup::Server>().await.map(|_| ())
-				} else {
-					reader.decode::<setup::Client>().await.map(|_| ())
-				};
-
-				if let Err(err) = res {
+				// Decode and discard the unified SETUP message.
+				if let Err(err) = reader.decode::<setup::Setup>().await {
 					tracing::warn!(%err, "setup decode error");
 					return;
 				}
