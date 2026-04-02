@@ -42,7 +42,7 @@ moq-lite = { workspace = true, features = ["serde"] }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
 moq-token = { workspace = true, features = ["tokio"] }
 qmux = { workspace = true, features = ["ws"], optional = true }
-reqwest = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 reqwest-middleware = "0.4"
 rustls = { version = "0.23", features = [
     "aws-lc-rs",

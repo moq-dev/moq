@@ -7,9 +7,11 @@ import { type Claims, ClaimsSchema, validateClaims } from "./claims.ts";
 /**
  * A validated key identifier (kid). Only alphanumeric, hyphens, and underscores.
  */
-export const KeyIdSchema = z
-	.string()
-	.regex(/^[A-Za-z0-9_-]+$/, "Key ID must contain only alphanumeric characters, hyphens, and underscores");
+export const KeyIdSchema = z.string().check(
+	z.refine((value) => /^[A-Za-z0-9_-]+$/.test(value), {
+		message: "Key ID must contain only alphanumeric characters, hyphens, and underscores",
+	}),
+);
 export type KeyId = z.infer<typeof KeyIdSchema>;
 
 /**
