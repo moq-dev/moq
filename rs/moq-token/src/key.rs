@@ -158,7 +158,7 @@ pub struct Key {
 
 	/// The key ID, useful for rotating keys.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub kid: Option<String>,
+	pub kid: Option<crate::KeyId>,
 
 	// Cached for performance reasons, unfortunately.
 	#[serde(skip)]
@@ -444,7 +444,7 @@ impl Key {
 		match encode {
 			Ok(encode) => {
 				let mut header = Header::new(self.algorithm.into());
-				header.kid = self.kid.clone();
+				header.kid = self.kid.as_ref().map(|k| k.to_string());
 				let token = jsonwebtoken::encode(&header, &payload, encode)?;
 				Ok(token)
 			}
@@ -453,7 +453,7 @@ impl Key {
 	}
 
 	/// Generate a key pair for the given algorithm, returning the private and public keys.
-	pub fn generate(algorithm: Algorithm, id: Option<String>) -> anyhow::Result<Self> {
+	pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> anyhow::Result<Self> {
 		generate(algorithm, id)
 	}
 }
@@ -523,7 +523,7 @@ mod tests {
 			key: KeyType::OCT {
 				secret: b"test-secret-that-is-long-enough-for-hmac-sha256".to_vec(),
 			},
-			kid: Some("test-key-1".to_string()),
+			kid: Some(crate::KeyId::decode("test-key-1").unwrap()),
 			decode: Default::default(),
 			encode: Default::default(),
 		}
@@ -746,12 +746,12 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_hs256() {
-		let key = Key::generate(Algorithm::HS256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
 		assert_eq!(key.algorithm, Algorithm::HS256);
-		assert_eq!(key.kid, Some("test-id".to_string()));
+		assert_eq!(key.kid, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert_eq!(key.operations, [KeyOperation::Sign, KeyOperation::Verify].into());
 
 		match key.key {
@@ -762,7 +762,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_hs384() {
-		let key = Key::generate(Algorithm::HS384, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::HS384, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -776,7 +776,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_hs512() {
-		let key = Key::generate(Algorithm::HS512, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::HS512, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -790,7 +790,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_rs512() {
-		let key = Key::generate(Algorithm::RS512, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::RS512, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -811,7 +811,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_es256() {
-		let key = Key::generate(Algorithm::ES256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::ES256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -821,7 +821,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_ps512() {
-		let key = Key::generate(Algorithm::PS512, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::PS512, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -831,7 +831,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_eddsa() {
-		let key = Key::generate(Algorithm::EdDSA, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::EdDSA, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -852,14 +852,15 @@ mod tests {
 
 	#[test]
 	fn test_public_key_conversion_hmac() {
-		let key = Key::generate(Algorithm::HS256, Some("test-id".to_string())).expect("HMAC key generation failed");
+		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()))
+			.expect("HMAC key generation failed");
 
 		assert!(key.to_public().is_err());
 	}
 
 	#[test]
 	fn test_public_key_conversion_rsa() {
-		let key = Key::generate(Algorithm::RS256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::RS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -886,7 +887,7 @@ mod tests {
 
 	#[test]
 	fn test_public_key_conversion_es() {
-		let key = Key::generate(Algorithm::ES256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::ES256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -920,7 +921,7 @@ mod tests {
 
 	#[test]
 	fn test_public_key_conversion_ed() {
-		let key = Key::generate(Algorithm::EdDSA, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::EdDSA, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -952,7 +953,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_sign_verify_cycle() {
-		let key = Key::generate(Algorithm::HS256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -1054,9 +1055,9 @@ mod tests {
 
 	#[test]
 	fn test_hmac_algorithms() {
-		let key_256 = Key::generate(Algorithm::HS256, Some("test-id".to_string()));
-		let key_384 = Key::generate(Algorithm::HS384, Some("test-id".to_string()));
-		let key_512 = Key::generate(Algorithm::HS512, Some("test-id".to_string()));
+		let key_256 = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_384 = Key::generate(Algorithm::HS384, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_512 = Key::generate(Algorithm::HS512, Some(crate::KeyId::decode("test-id").unwrap()));
 
 		let claims = create_test_claims();
 
@@ -1073,9 +1074,9 @@ mod tests {
 
 	#[test]
 	fn test_rsa_pkcs1_asymmetric_algorithms() {
-		let key_rs256 = Key::generate(Algorithm::RS256, Some("test-id".to_string()));
-		let key_rs384 = Key::generate(Algorithm::RS384, Some("test-id".to_string()));
-		let key_rs512 = Key::generate(Algorithm::RS512, Some("test-id".to_string()));
+		let key_rs256 = Key::generate(Algorithm::RS256, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_rs384 = Key::generate(Algorithm::RS384, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_rs512 = Key::generate(Algorithm::RS512, Some(crate::KeyId::decode("test-id").unwrap()));
 
 		for key in [key_rs256, key_rs384, key_rs512] {
 			test_asymmetric_key(key);
@@ -1084,9 +1085,9 @@ mod tests {
 
 	#[test]
 	fn test_rsa_pss_asymmetric_algorithms() {
-		let key_ps256 = Key::generate(Algorithm::PS256, Some("test-id".to_string()));
-		let key_ps384 = Key::generate(Algorithm::PS384, Some("test-id".to_string()));
-		let key_ps512 = Key::generate(Algorithm::PS512, Some("test-id".to_string()));
+		let key_ps256 = Key::generate(Algorithm::PS256, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_ps384 = Key::generate(Algorithm::PS384, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_ps512 = Key::generate(Algorithm::PS512, Some(crate::KeyId::decode("test-id").unwrap()));
 
 		for key in [key_ps256, key_ps384, key_ps512] {
 			test_asymmetric_key(key);
@@ -1095,8 +1096,8 @@ mod tests {
 
 	#[test]
 	fn test_ec_asymmetric_algorithms() {
-		let key_es256 = Key::generate(Algorithm::ES256, Some("test-id".to_string()));
-		let key_es384 = Key::generate(Algorithm::ES384, Some("test-id".to_string()));
+		let key_es256 = Key::generate(Algorithm::ES256, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_es384 = Key::generate(Algorithm::ES384, Some(crate::KeyId::decode("test-id").unwrap()));
 
 		for key in [key_es256, key_es384] {
 			test_asymmetric_key(key);
@@ -1105,7 +1106,7 @@ mod tests {
 
 	#[test]
 	fn test_ed_asymmetric_algorithms() {
-		let key_eddsa = Key::generate(Algorithm::EdDSA, Some("test-id".to_string()));
+		let key_eddsa = Key::generate(Algorithm::EdDSA, Some(crate::KeyId::decode("test-id").unwrap()));
 
 		test_asymmetric_key(key_eddsa);
 	}
@@ -1129,11 +1130,11 @@ mod tests {
 
 	#[test]
 	fn test_cross_algorithm_verification_fails() {
-		let key_256 = Key::generate(Algorithm::HS256, Some("test-id".to_string()));
+		let key_256 = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key_256.is_ok());
 		let key_256 = key_256.unwrap();
 
-		let key_384 = Key::generate(Algorithm::HS384, Some("test-id".to_string()));
+		let key_384 = Key::generate(Algorithm::HS384, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key_384.is_ok());
 		let key_384 = key_384.unwrap();
 
@@ -1147,11 +1148,11 @@ mod tests {
 
 	#[test]
 	fn test_asymmetric_cross_algorithm_verification_fails() {
-		let key_rs256 = Key::generate(Algorithm::RS256, Some("test-id".to_string()));
+		let key_rs256 = Key::generate(Algorithm::RS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key_rs256.is_ok());
 		let key_rs256 = key_rs256.unwrap();
 
-		let key_ps256 = Key::generate(Algorithm::PS256, Some("test-id".to_string()));
+		let key_ps256 = Key::generate(Algorithm::PS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key_ps256.is_ok());
 		let key_ps256 = key_ps256.unwrap();
 
@@ -1167,7 +1168,7 @@ mod tests {
 
 	#[test]
 	fn test_rsa_pkcs1_public_key_conversion() {
-		let key = Key::generate(Algorithm::RS256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::RS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -1205,7 +1206,7 @@ mod tests {
 
 	#[test]
 	fn test_rsa_pss_public_key_conversion() {
-		let key = Key::generate(Algorithm::PS384, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::PS384, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -1278,7 +1279,7 @@ mod tests {
 		// Should be able to deserialize new format
 		let key: Key = serde_json::from_str(unpadded_json).unwrap();
 		assert_eq!(key.algorithm, Algorithm::HS256);
-		assert_eq!(key.kid, Some("test-key-1".to_string()));
+		assert_eq!(key.kid, Some(crate::KeyId::decode("test-key-1").unwrap()));
 
 		if let KeyType::OCT { secret } = &key.key {
 			assert_eq!(secret, b"test-secret-that-is-long-enough-for-hmac-sha256");
@@ -1295,7 +1296,7 @@ mod tests {
 		// Should be able to deserialize old format for backwards compatibility
 		let key: Key = serde_json::from_str(padded_json).unwrap();
 		assert_eq!(key.algorithm, Algorithm::HS256);
-		assert_eq!(key.kid, Some("test-key-1".to_string()));
+		assert_eq!(key.kid, Some(crate::KeyId::decode("test-key-1").unwrap()));
 
 		if let KeyType::OCT { secret } = &key.key {
 			assert_eq!(secret, b"test-secret-that-is-long-enough-for-hmac-sha256");

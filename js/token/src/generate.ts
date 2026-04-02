@@ -3,9 +3,23 @@ import type { Algorithm } from "./algorithm.ts";
 import type { Key } from "./key.ts";
 
 /**
- * Generate a new key for the given algorithm
+ * Generate a random key ID (16 hex characters).
+ * Only allows alphanumeric characters, hyphens, and underscores.
+ */
+function randomKid(): string {
+	const bytes = new Uint8Array(8);
+	crypto.getRandomValues(bytes);
+	return Array.from(bytes)
+		.map((b) => b.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+/**
+ * Generate a new key for the given algorithm.
+ * A random key ID is assigned if none is provided.
  */
 export async function generate(algorithm: Algorithm, kid?: string): Promise<Key> {
+	kid = kid ?? randomKid();
 	switch (algorithm) {
 		case "HS256":
 			return generateHmacKey(algorithm, 32, kid);

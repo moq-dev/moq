@@ -1,13 +1,10 @@
 use anyhow::Context;
 use axum::http;
 use moq_lite::{AsPath, Path, PathOwned};
-use moq_token::Key;
+use moq_token::{Key, KeyId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
 /// Parameters extracted from an incoming connection URL for authentication.
 #[derive(Default, Debug)]
@@ -71,7 +68,7 @@ pub enum AuthError {
 	#[error("key not found")]
 	KeyNotFound,
 
-	#[error("missing key ID in token")]
+	#[error("missing or invalid key ID in token")]
 	MissingKeyId,
 }
 
@@ -93,18 +90,16 @@ impl axum::response::IntoResponse for AuthError {
 #[non_exhaustive]
 pub struct AuthConfig {
 	/// A single JWK key file for authentication.
-	///
-	/// The key is read from disk on each request. No `kid` header is required in JWTs.
-	/// Useful for local development with a single key.
+	/// No `kid` header is required in JWTs.
 	#[arg(long = "auth-key", env = "MOQ_AUTH_KEY")]
 	pub key: Option<String>,
 
-	/// A directory path or base URL for on-demand key resolution by key ID.
+	/// A directory path or base URL containing JWK files named by key ID.
 	///
-	/// If a file path: reads `{path}/{kid}.jwk` from disk.
-	/// If a URL: fetches `{url}/{kid}.jwk` with HTTP caching.
-	#[arg(long = "auth-keys", env = "MOQ_AUTH_KEYS")]
-	pub keys: Option<String>,
+	/// File path: reads `{dir}/{kid}.jwk` from disk.
+	/// URL: fetches `{url}/{kid}.jwk` with HTTP caching.
+	#[arg(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR")]
+	pub key_dir: Option<String>,
 
 	/// The prefix that will be public for reading and writing.
 	/// If present, unauthorized users will be able to read and write to this prefix ONLY.
@@ -137,86 +132,26 @@ pub struct AuthToken {
 }
 
 enum KeySource {
-	/// A single key file, read from disk on each request. No kid required.
+	/// A single key file. No kid required.
 	File(PathBuf),
 	/// A directory of key files, resolved by kid as `{dir}/{kid}.jwk`.
 	Dir(PathBuf),
-	/// A single key URL, fetched with HTTP caching. No kid required.
-	Url { url: String, client: reqwest::Client },
+	/// A single key URL. No kid required.
+	Url { url: url::Url, client: reqwest::Client },
 	/// A base URL for kid-based key lookup, fetching `{base}/{kid}.jwk`.
-	UrlDir { base: String, client: reqwest::Client },
-}
-
-struct CachedKey {
-	key: Arc<Key>,
-	etag: Option<String>,
-	fetched: Instant,
-	max_age: Duration,
-	stale_while_revalidate: Duration,
-}
-
-impl CachedKey {
-	fn is_fresh(&self) -> bool {
-		self.fetched.elapsed() < self.max_age
-	}
-
-	fn is_stale_usable(&self) -> bool {
-		self.fetched.elapsed() < self.max_age + self.stale_while_revalidate
-	}
+	UrlDir { base: url::Url, client: reqwest::Client },
 }
 
 struct KeyResolver {
 	source: KeySource,
-	cache: RwLock<HashMap<String, CachedKey>>,
-}
-
-/// Validate that a kid is safe for use in file paths and URLs.
-/// Only allows alphanumeric characters, hyphens, and underscores.
-fn validate_kid(kid: &str) -> Result<(), AuthError> {
-	if kid.is_empty() {
-		return Err(AuthError::MissingKeyId);
-	}
-	if kid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-		Ok(())
-	} else {
-		Err(AuthError::MissingKeyId)
-	}
-}
-
-/// Parse Cache-Control header for max-age and stale-while-revalidate directives.
-fn parse_cache_control(headers: &reqwest::header::HeaderMap) -> (Duration, Duration) {
-	let mut max_age = Duration::from_secs(300); // default 5 minutes
-	let mut swr = Duration::from_secs(0);
-
-	if let Some(cc) = headers
-		.get(reqwest::header::CACHE_CONTROL)
-		.and_then(|v| v.to_str().ok())
-	{
-		for directive in cc.split(',').map(|s| s.trim()) {
-			if let Some(val) = directive.strip_prefix("max-age=") {
-				if let Ok(secs) = val.trim().parse::<u64>() {
-					max_age = Duration::from_secs(secs);
-				}
-			} else if let Some(val) = directive.strip_prefix("stale-while-revalidate=") {
-				if let Ok(secs) = val.trim().parse::<u64>() {
-					swr = Duration::from_secs(secs);
-				}
-			}
-		}
-	}
-
-	(max_age, swr)
 }
 
 impl KeyResolver {
 	fn new(source: KeySource) -> Self {
-		Self {
-			source,
-			cache: RwLock::new(HashMap::new()),
-		}
+		Self { source }
 	}
 
-	async fn resolve(self: &Arc<Self>, kid: Option<&str>) -> Result<Arc<Key>, AuthError> {
+	async fn resolve(&self, kid: Option<&str>) -> Result<Arc<Key>, AuthError> {
 		match &self.source {
 			KeySource::File(path) => {
 				let key = Key::from_file(path).map_err(|_| AuthError::KeyNotFound)?;
@@ -224,111 +159,31 @@ impl KeyResolver {
 			}
 			KeySource::Dir(dir) => {
 				let kid = kid.ok_or(AuthError::MissingKeyId)?;
-				validate_kid(kid)?;
+				let kid = KeyId::decode(kid).map_err(|_| AuthError::MissingKeyId)?;
 				let path = dir.join(format!("{kid}.jwk"));
 				let key = Key::from_file(&path).map_err(|_| AuthError::KeyNotFound)?;
 				Ok(Arc::new(key))
 			}
-			KeySource::Url { url, client } => self.resolve_cached_url(url, client, "single").await,
+			KeySource::Url { url, client } => Self::fetch_key(client, url.clone()).await,
 			KeySource::UrlDir { base, client } => {
 				let kid = kid.ok_or(AuthError::MissingKeyId)?;
-				validate_kid(kid)?;
-				let url = format!("{base}/{kid}.jwk");
-				self.resolve_cached_url(&url, client, kid).await
+				let kid = KeyId::decode(kid).map_err(|_| AuthError::MissingKeyId)?;
+				let url = base.join(&format!("{kid}.jwk")).map_err(|_| AuthError::KeyNotFound)?;
+				Self::fetch_key(client, url).await
 			}
 		}
 	}
 
-	async fn resolve_cached_url(
-		self: &Arc<Self>,
-		url: &str,
-		client: &reqwest::Client,
-		cache_key: &str,
-	) -> Result<Arc<Key>, AuthError> {
-		// Check cache first (read lock)
-		{
-			let cache = self.cache.read().await;
-			if let Some(cached) = cache.get(cache_key) {
-				if cached.is_fresh() {
-					return Ok(cached.key.clone());
-				}
-				if cached.is_stale_usable() {
-					let key = cached.key.clone();
-					let etag = cached.etag.clone();
-					// Spawn background revalidation
-					let resolver = Arc::clone(self);
-					let url = url.to_owned();
-					let client = client.clone();
-					let cache_key = cache_key.to_owned();
-					drop(cache);
-					tokio::spawn(async move {
-						if let Err(e) = resolver.fetch_and_cache(&url, &client, &cache_key, etag).await {
-							tracing::debug!(%cache_key, %e, "background key revalidation failed");
-						}
-					});
-					return Ok(key);
-				}
-			}
-		}
-
-		// Cache miss or expired beyond SWR — fetch synchronously
-		self.fetch_and_cache(url, client, cache_key, None).await
-	}
-
-	async fn fetch_and_cache(
-		&self,
-		url: &str,
-		client: &reqwest::Client,
-		cache_key: &str,
-		etag: Option<String>,
-	) -> Result<Arc<Key>, AuthError> {
-		let mut request = client.get(url);
-		if let Some(etag) = &etag {
-			request = request.header(reqwest::header::IF_NONE_MATCH, etag.as_str());
-		}
-
-		let response = request.send().await.map_err(|e| {
+	async fn fetch_key(client: &reqwest::Client, url: url::Url) -> Result<Arc<Key>, AuthError> {
+		let response = client.get(url.clone()).send().await.map_err(|e| {
 			tracing::warn!(%url, %e, "failed to fetch key");
 			AuthError::KeyNotFound
 		})?;
-
-		// Handle 304 Not Modified — refresh the cache timestamps
-		if response.status() == reqwest::StatusCode::NOT_MODIFIED {
-			let (max_age, swr) = parse_cache_control(response.headers());
-			let new_etag = response
-				.headers()
-				.get(reqwest::header::ETAG)
-				.and_then(|v| v.to_str().ok())
-				.map(|s| s.to_owned())
-				.or(etag);
-
-			let mut cache = self.cache.write().await;
-			if let Some(cached) = cache.get_mut(cache_key) {
-				cached.fetched = Instant::now();
-				cached.max_age = max_age;
-				cached.stale_while_revalidate = swr;
-				cached.etag = new_etag;
-				return Ok(cached.key.clone());
-			}
-			// Entry was evicted between read and write, treat as miss
-			return Err(AuthError::KeyNotFound);
-		}
-
-		if response.status() == reqwest::StatusCode::NOT_FOUND {
-			return Err(AuthError::KeyNotFound);
-		}
 
 		let response = response.error_for_status().map_err(|e| {
 			tracing::warn!(%url, %e, "key endpoint returned error");
 			AuthError::KeyNotFound
 		})?;
-
-		let (max_age, swr) = parse_cache_control(response.headers());
-		let resp_etag = response
-			.headers()
-			.get(reqwest::header::ETAG)
-			.and_then(|v| v.to_str().ok())
-			.map(|s| s.to_owned());
 
 		let body = response.text().await.map_err(|e| {
 			tracing::warn!(%url, %e, "failed to read key response body");
@@ -339,21 +194,8 @@ impl KeyResolver {
 			tracing::warn!(%url, %e, "failed to parse key JSON");
 			AuthError::DecodeFailed
 		})?;
-		let key = Arc::new(key);
 
-		let mut cache = self.cache.write().await;
-		cache.insert(
-			cache_key.to_owned(),
-			CachedKey {
-				key: key.clone(),
-				etag: resp_etag,
-				fetched: Instant::now(),
-				max_age,
-				stale_while_revalidate: swr,
-			},
-		);
-
-		Ok(key)
+		Ok(Arc::new(key))
 	}
 }
 
@@ -366,15 +208,19 @@ pub struct Auth {
 	public: Option<PathOwned>,
 }
 
-fn is_url(s: &str) -> bool {
-	s.starts_with("http://") || s.starts_with("https://")
-}
-
 fn build_http_client() -> anyhow::Result<reqwest::Client> {
 	reqwest::Client::builder()
-		.timeout(Duration::from_secs(10))
+		.timeout(std::time::Duration::from_secs(10))
 		.build()
 		.context("failed to build HTTP client")
+}
+
+fn parse_url(s: &str) -> Option<url::Url> {
+	let url = url::Url::parse(s).ok()?;
+	match url.scheme() {
+		"http" | "https" => Some(url),
+		_ => None,
+	}
 }
 
 impl Auth {
@@ -383,14 +229,14 @@ impl Auth {
 		let public = config.public.map(|p| p.as_path().to_owned());
 
 		anyhow::ensure!(
-			config.key.is_none() || config.keys.is_none(),
-			"cannot specify both --auth-key and --auth-keys"
+			config.key.is_none() || config.key_dir.is_none(),
+			"cannot specify both --auth-key and --auth-key-dir"
 		);
 
 		let source = if let Some(key) = config.key {
-			let source = if is_url(&key) {
+			let source = if let Some(url) = parse_url(&key) {
 				KeySource::Url {
-					url: key,
+					url,
 					client: build_http_client()?,
 				}
 			} else {
@@ -399,15 +245,15 @@ impl Auth {
 				KeySource::File(path)
 			};
 			Some(source)
-		} else if let Some(keys) = config.keys {
-			let source = if is_url(&keys) {
+		} else if let Some(key_dir) = config.key_dir {
+			let source = if let Some(url) = parse_url(&key_dir) {
 				KeySource::UrlDir {
-					base: keys,
+					base: url,
 					client: build_http_client()?,
 				}
 			} else {
-				let path = PathBuf::from(&keys);
-				anyhow::ensure!(path.is_dir(), "auth-keys path is not a directory: {keys}");
+				let path = PathBuf::from(&key_dir);
+				anyhow::ensure!(path.is_dir(), "auth-key-dir path is not a directory: {key_dir}");
 				KeySource::Dir(path)
 			};
 			Some(source)
@@ -418,7 +264,7 @@ impl Auth {
 		let resolver = source.map(|s| Arc::new(KeyResolver::new(s)));
 
 		if resolver.is_none() && public.is_none() {
-			anyhow::bail!("no auth-key, auth-keys, or public path configured");
+			anyhow::bail!("no auth-key, auth-key-dir, or public path configured");
 		}
 
 		Ok(Self { resolver, public })
@@ -509,7 +355,7 @@ mod tests {
 	use tempfile::TempDir;
 
 	fn create_test_key_with_kid(kid: &str) -> Key {
-		Key::generate(Algorithm::HS256, Some(kid.to_string())).unwrap()
+		Key::generate(Algorithm::HS256, Some(moq_token::KeyId::decode(kid).unwrap())).unwrap()
 	}
 
 	fn setup_key_dir(keys: &[(&str, &Key)]) -> TempDir {
@@ -578,7 +424,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -615,7 +461,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -648,7 +494,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -679,7 +525,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -712,7 +558,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -744,7 +590,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -776,7 +622,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -810,7 +656,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -844,7 +690,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -878,7 +724,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -924,7 +770,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -970,7 +816,7 @@ mod tests {
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -1020,7 +866,7 @@ mod tests {
 	async fn test_key_resolver_file_missing_key() -> anyhow::Result<()> {
 		let dir = TempDir::new()?;
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -1052,7 +898,7 @@ mod tests {
 		let dir = setup_key_dir(&[("key-1", &key1), ("key-2", &key2)]);
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
@@ -1096,11 +942,11 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_kid_validation() {
-		assert!(validate_kid("abc-123_DEF").is_ok());
-		assert!(validate_kid("").is_err());
-		assert!(validate_kid("../etc/passwd").is_err());
-		assert!(validate_kid("key with spaces").is_err());
-		assert!(validate_kid("key/slash").is_err());
+		assert!(KeyId::decode("abc-123_DEF").is_ok());
+		assert!(KeyId::decode("").is_err());
+		assert!(KeyId::decode("../etc/passwd").is_err());
+		assert!(KeyId::decode("key with spaces").is_err());
+		assert!(KeyId::decode("key/slash").is_err());
 	}
 
 	#[tokio::test]
@@ -1110,7 +956,7 @@ mod tests {
 		let dir = TempDir::new()?;
 
 		let auth = Auth::new(AuthConfig {
-			keys: Some(dir.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;

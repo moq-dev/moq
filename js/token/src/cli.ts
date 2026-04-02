@@ -15,11 +15,11 @@ program.name("moq-token").description("Generate, sign, and verify tokens for moq
 
 program
 	.command("generate")
-	.description("Generate a key (pair) for the given algorithm")
+	.description("Generate a new signing key")
 	.requiredOption("--key <path>", "Path to save the key")
 	.option("--algorithm <algorithm>", "Algorithm to use", "HS256")
-	.option("--id <id>", "Optional key ID, useful for rotating keys")
-	.option("--public <path>", "Optional path to save the public key (for asymmetric algorithms)")
+	.option("--id <id>", "Key ID (randomly generated if not provided)")
+	.option("--public <path>", "Path to save the public key (for asymmetric algorithms)")
 	.action(async (options) => {
 		try {
 			const algorithm = options.algorithm as Algorithm;

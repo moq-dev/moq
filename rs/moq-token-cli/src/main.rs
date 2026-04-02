@@ -1,17 +1,12 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use moq_token::Algorithm;
-use rand::Rng;
 use std::{io, path::PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "moq-token")]
 #[command(about = "Generate, sign, and verify tokens for moq-relay", long_about = None)]
 struct Cli {
-	/// The path for the key.
-	#[arg(long)]
-	key: PathBuf,
-
 	/// The command to execute.
 	#[command(subcommand)]
 	command: Commands,
@@ -19,83 +14,105 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-	/// Generate a key (pair) for the given algorithm.
+	/// Generate a new signing key.
 	///
-	/// The key is output to the provided -key path.
+	/// A random key ID is assigned unless --id is specified.
 	Generate {
 		/// The algorithm to use.
 		#[arg(long, default_value = "HS256")]
 		algorithm: Algorithm,
 
-		/// An optional key ID, useful for rotating keys.
+		/// The key ID. Randomly generated if not provided.
 		#[arg(long)]
 		id: Option<String>,
+
+		/// Write the key to a file path.
+		#[arg(long)]
+		out: Option<PathBuf>,
+
+		/// Write the key to a directory as {kid}.jwk.
+		#[arg(long, conflicts_with = "out")]
+		out_dir: Option<PathBuf>,
 
 		/// Optional path to save the public key (for asymmetric algorithms).
 		#[arg(long)]
 		public: Option<PathBuf>,
 	},
 
-	/// Sign a token to stdout, reading the key from stdin.
+	/// Sign a token, writing it to stdout.
 	Sign {
+		/// Path to the signing key file.
+		#[arg(long)]
+		key: PathBuf,
+
 		/// The root path for the token.
-		/// The user MUST connect to this WebTransport path and any broadcasts are relative to it.
-		/// Any trailing/leading slashes are ignored.
 		#[arg(long, default_value = "")]
 		root: String,
 
-		/// If specified, the user can publish any matching path prefixes.
-		/// If not specified, the user will not publish any broadcasts.
-		/// This can be specified multiple times to publish multiple paths.
+		/// Paths the user can publish to (repeatable).
 		#[arg(long)]
 		publish: Vec<String>,
 
-		/// If true, then this client is considered a cluster node.
-		/// Both the client and server will only announce broadcasts from non-cluster clients.
-		/// This avoids convoluted routing, as only the primary origin will announce.
+		/// Mark this token as a cluster node.
 		#[arg(long)]
 		cluster: bool,
 
-		/// If specified, the user can subscribe to any matching path prefixes.
-		/// If not specified, the user will not receive announcements and cannot subscribe to any broadcasts.
-		/// This can be specified multiple times to subscribe to multiple paths.
+		/// Paths the user can subscribe to (repeatable).
 		#[arg(long)]
 		subscribe: Vec<String>,
 
-		/// The expiration time of the token as a unix timestamp.
+		/// Expiration time as a unix timestamp.
 		#[arg(long, value_parser = parse_unix_timestamp)]
 		expires: Option<std::time::SystemTime>,
 
-		/// The issued time of the token as a unix timestamp.
+		/// Issued-at time as a unix timestamp.
 		#[arg(long, value_parser = parse_unix_timestamp)]
 		issued: Option<std::time::SystemTime>,
 	},
 
 	/// Verify a token from stdin, writing the payload to stdout.
-	/// NOTE: You still need to verify that the path is valid for the token.
-	/// This just verifies the signature.
-	Verify,
+	Verify {
+		/// Path to the key file.
+		#[arg(long)]
+		key: PathBuf,
+	},
 }
 
 fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 
 	match cli.command {
-		Commands::Generate { algorithm, id, public } => {
-			let id = id.unwrap_or_else(|| {
-				let random: u64 = rand::rng().random();
-				format!("{random:016x}")
-			});
-			let key = moq_token::Key::generate(algorithm, Some(id))?;
+		Commands::Generate {
+			algorithm,
+			id,
+			out,
+			out_dir,
+			public,
+		} => {
+			let id = match id {
+				Some(id) => moq_token::KeyId::decode(&id)?,
+				None => moq_token::KeyId::random(),
+			};
+
+			let key = moq_token::Key::generate(algorithm, Some(id.clone()))?;
 
 			if let Some(public) = public {
 				key.to_public()?.to_file(public)?;
 			}
 
-			key.to_file(&cli.key)?;
+			if let Some(dir) = out_dir {
+				let path = dir.join(format!("{id}.jwk"));
+				key.to_file(&path)?;
+			} else if let Some(path) = out {
+				key.to_file(&path)?;
+			} else {
+				let json = key.to_str()?;
+				println!("{json}");
+			}
 		}
 
 		Commands::Sign {
+			key,
 			root,
 			publish,
 			cluster,
@@ -103,7 +120,7 @@ fn main() -> anyhow::Result<()> {
 			expires,
 			issued,
 		} => {
-			let key = moq_token::Key::from_file(cli.key)?;
+			let key = moq_token::Key::from_file(key)?;
 
 			let payload = moq_token::Claims {
 				root,
@@ -118,8 +135,8 @@ fn main() -> anyhow::Result<()> {
 			println!("{token}");
 		}
 
-		Commands::Verify => {
-			let key = moq_token::Key::from_file(cli.key)?;
+		Commands::Verify { key } => {
+			let key = moq_token::Key::from_file(key)?;
 			let token = io::read_to_string(io::stdin())?.trim().to_string();
 			let payload = key.decode(&token)?;
 
@@ -130,7 +147,6 @@ fn main() -> anyhow::Result<()> {
 	Ok(())
 }
 
-// A simpler parser for clap
 fn parse_unix_timestamp(s: &str) -> anyhow::Result<std::time::SystemTime> {
 	let timestamp = s.parse::<i64>().context("expected unix timestamp")?;
 	let timestamp = timestamp.try_into().context("timestamp out of range")?;

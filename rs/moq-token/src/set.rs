@@ -154,7 +154,8 @@ mod tests {
 		}
 	}
 
-	fn create_test_key(kid: Option<String>) -> Key {
+	fn create_test_key(kid: Option<&str>) -> Key {
+		let kid = kid.map(|s| crate::KeyId::decode(s).unwrap());
 		Key::generate(Algorithm::ES256, kid).expect("failed to generate key")
 	}
 
@@ -184,7 +185,7 @@ mod tests {
 
 	#[test]
 	fn test_keyset_to_str() {
-		let key = create_test_key(Some("1".to_string()));
+		let key = create_test_key(Some("1"));
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
 		};
@@ -196,8 +197,8 @@ mod tests {
 
 	#[test]
 	fn test_keyset_serde_round_trip() {
-		let key1 = create_test_key(Some("1".to_string()));
-		let key2 = create_test_key(Some("2".to_string()));
+		let key1 = create_test_key(Some("1"));
+		let key2 = create_test_key(Some("2"));
 		let set = KeySet {
 			keys: vec![Arc::new(key1), Arc::new(key2)],
 		};
@@ -212,7 +213,7 @@ mod tests {
 
 	#[test]
 	fn test_find_key_success() {
-		let key = create_test_key(Some("my-key".to_string()));
+		let key = create_test_key(Some("my-key"));
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
 		};
@@ -224,7 +225,7 @@ mod tests {
 
 	#[test]
 	fn test_find_key_missing() {
-		let key = create_test_key(Some("my-key".to_string()));
+		let key = create_test_key(Some("my-key"));
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
 		};
@@ -246,10 +247,10 @@ mod tests {
 
 	#[test]
 	fn test_find_supported_key() {
-		let mut sign_key = create_test_key(Some("sign".to_string()));
+		let mut sign_key = create_test_key(Some("sign"));
 		sign_key.operations = [KeyOperation::Sign].into();
 
-		let mut verify_key = create_test_key(Some("verify".to_string()));
+		let mut verify_key = create_test_key(Some("verify"));
 		verify_key.operations = [KeyOperation::Verify].into();
 
 		let set = KeySet {
@@ -268,7 +269,7 @@ mod tests {
 	#[test]
 	fn test_to_public_set() {
 		// Use asymmetric key (ES256) so we can separate public/private
-		let key = create_test_key(Some("1".to_string()));
+		let key = create_test_key(Some("1"));
 
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
@@ -285,7 +286,7 @@ mod tests {
 
 	#[test]
 	fn test_to_public_set_fails_for_symmetric() {
-		let key = Key::generate(Algorithm::HS256, Some("sym".to_string())).unwrap();
+		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("sym").unwrap())).unwrap();
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
 		};
@@ -296,7 +297,7 @@ mod tests {
 
 	#[test]
 	fn test_encode_success() {
-		let key = create_test_key(Some("1".to_string()));
+		let key = create_test_key(Some("1"));
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
 		};
@@ -308,7 +309,7 @@ mod tests {
 
 	#[test]
 	fn test_encode_no_signing_key() {
-		let mut key = create_test_key(Some("1".to_string()));
+		let mut key = create_test_key(Some("1"));
 		key.operations = [KeyOperation::Verify].into();
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
@@ -322,7 +323,7 @@ mod tests {
 
 	#[test]
 	fn test_decode_success_with_kid() {
-		let key = create_test_key(Some("1".to_string()));
+		let key = create_test_key(Some("1"));
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
 		};
@@ -372,8 +373,8 @@ mod tests {
 
 	#[test]
 	fn test_decode_fail_unknown_kid() {
-		let key1 = create_test_key(Some("1".to_string()));
-		let key2 = create_test_key(Some("2".to_string()));
+		let key1 = create_test_key(Some("1"));
+		let key2 = create_test_key(Some("2"));
 
 		let set1 = KeySet {
 			keys: vec![Arc::new(key1)],
@@ -392,7 +393,7 @@ mod tests {
 
 	#[test]
 	fn test_file_io() {
-		let key = create_test_key(Some("1".to_string()));
+		let key = create_test_key(Some("1"));
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
 		};

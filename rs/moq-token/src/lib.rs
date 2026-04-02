@@ -9,9 +9,11 @@ mod algorithm;
 mod claims;
 mod generate;
 mod key;
+mod key_id;
 mod set;
 
 pub use algorithm::*;
 pub use claims::*;
 pub use key::*;
+pub use key_id::*;
 pub use set::*;

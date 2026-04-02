@@ -45,10 +45,8 @@ deploy node:
 	rsync -az flake.nix flake.lock root@$HOST:/var/lib/moq/
 
 	echo "  Copying secrets to /var/lib/moq"
-	ssh root@$HOST "install -d -m 755 /var/lib/moq/keys"
-	rsync -az ../secrets/keys/ root@$HOST:/var/lib/moq/keys/
-	rsync -az ../secrets/*.jwt root@$HOST:/var/lib/moq/
-	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/keys/*.jwk /var/lib/moq/*.jwt"
+	rsync -az ../secrets/ root@$HOST:/var/lib/moq/
+	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwk /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
 	rsync -az certbot-renew.service certbot-renew.timer root@$HOST:/etc/systemd/system/

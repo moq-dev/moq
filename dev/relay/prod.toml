@@ -27,7 +27,12 @@ key = "key.pem"
 
 # See docs/auth.md for more information.
 [auth]
-# Directory or URL containing JWK files named by key ID.
-# - File path: reads {path}/{kid}.jwk from disk (e.g., "keys/")
-# - URL: fetches {url}/{kid}.jwk with HTTP caching (e.g., "https://api.moq.dev/keys")
-keys = "keys"
+# A single JWK key file for authentication. No kid required in JWTs.
+key = "root.jwk"
+
+# For multiple keys with rotation, use a directory instead:
+# key_dir = "/path/to/keys/"
+# Keys are named {kid}.jwk and resolved by the kid in the JWT header.
+
+# Or use a URL for remote key management:
+# key_dir = "https://api.example.com/keys"
