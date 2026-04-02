@@ -667,7 +667,9 @@ impl OriginConsumer {
 		if let Some(bc) = self.try_consume_broadcast(&path) {
 			return Ok(bc);
 		}
-		let mut scoped = self.with_filter(std::slice::from_ref(&path)).ok_or(Error::NotFound)?;
+		let mut scoped = self
+			.with_filter(std::slice::from_ref(&path))
+			.ok_or(Error::UnknownBroadcast)?;
 		loop {
 			let (announced_path, broadcast) = scoped.announced().await?;
 			if announced_path == path {
