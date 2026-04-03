@@ -1,4 +1,3 @@
-use anyhow::Context;
 use tikv_jemalloc_ctl::raw;
 
 /// Activate jemalloc heap profiling and listen for SIGUSR1 to dump profiles.
@@ -12,7 +11,8 @@ pub async fn run() -> anyhow::Result<()> {
 		Ok(true) => tracing::info!("jemalloc heap profiling is active"),
 		Ok(false) => {
 			tracing::info!("jemalloc profiling compiled in; activating");
-			unsafe { raw::write(prof_active, true) }.context("failed to activate jemalloc profiling")?;
+			unsafe { raw::write(prof_active, true) }
+				.map_err(|err| anyhow::anyhow!("failed to activate jemalloc profiling: {err}"))?;
 		}
 		Err(err) => {
 			tracing::debug!(%err, "jemalloc profiling not available — set MALLOC_CONF=prof:true to enable");
