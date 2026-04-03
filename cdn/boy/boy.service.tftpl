@@ -1,0 +1,26 @@
+[Unit]
+Description=MoQ Boy - ${name}
+After=network-online.target boy-${name}-prepare.service
+Wants=network-online.target
+Requires=boy-${name}-prepare.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/lib/moq
+Environment="RUST_LOG=info"
+
+ExecStart=/var/lib/moq/pkg/bin/moq-boy \
+  --url "https://${domain}/anon" \
+  --rom "/var/lib/moq/${rom}" \
+  --name "${name}"
+
+# Restart with exponential backoff
+Restart=always
+RestartSec=10s
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

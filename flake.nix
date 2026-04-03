@@ -109,6 +109,7 @@
             moq-clock
             moq-cli
             moq-token-cli
+            moq-boy
             ;
         };
 

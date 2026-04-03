@@ -46,4 +46,15 @@ in
       meta.mainProgram = "moq-token-cli";
     }
   );
+
+  moq-boy = craneLib.buildPackage (
+    crateInfo ../rs/moq-boy/Cargo.toml
+    // {
+      src = craneLib.cleanCargoSource ../.;
+      cargoExtraArgs = "-p moq-boy";
+      nativeBuildInputs = with final; [ pkg-config clang ];
+      buildInputs = with final; [ ffmpeg ];
+      LIBCLANG_PATH = "${final.libclang.lib}/lib";
+    }
+  );
 }

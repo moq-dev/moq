@@ -1,0 +1,14 @@
+[Unit]
+Description=Download ROM for boy-${name}
+Before=boy-${name}.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+WorkingDirectory=/var/lib/moq
+
+ExecStart=/var/lib/moq/pkg/bin/wget -nv https://rom.moq.dev/${rom} -O /var/lib/moq/${rom}
+
+[Install]
+WantedBy=multi-user.target
