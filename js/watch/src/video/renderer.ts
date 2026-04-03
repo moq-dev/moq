@@ -76,8 +76,7 @@ export class Renderer {
 			{ threshold: 0.01 },
 		);
 
-		document.addEventListener("visibilitychange", update);
-		effect.cleanup(() => document.removeEventListener("visibilitychange", update));
+		effect.event(document, "visibilitychange", update);
 
 		observer.observe(canvas);
 		effect.cleanup(() => observer.disconnect());
