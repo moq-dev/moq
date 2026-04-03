@@ -107,13 +107,9 @@ export class Renderer {
 		let frame: VideoFrame | undefined;
 
 		const paused = effect.get(this.paused);
-		if (!paused) {
+		if (!paused || !this.#lastFrame) {
 			frame = effect.get(this.decoder.frame);
 			this.#lastFrame?.close();
-			this.#lastFrame = frame?.clone();
-		} else if (!this.#lastFrame) {
-			// Waiting for a preview frame from the decoder.
-			frame = effect.get(this.decoder.frame);
 			this.#lastFrame = frame?.clone();
 		} else {
 			frame = this.#lastFrame?.clone();
