@@ -1,6 +1,5 @@
-import { GameCard } from "@moq/boy";
+import { GameCard, Moq } from "@moq/boy";
 import { gridStyles } from "@moq/boy/styles";
-import * as Moq from "@moq/lite";
 
 // Inject styles into the document.
 const style = document.createElement("style");

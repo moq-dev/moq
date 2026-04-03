@@ -9,6 +9,7 @@ export default defineConfig({
 			entry: {
 				index: resolve(__dirname, "src/index.ts"),
 				element: resolve(__dirname, "src/element.ts"),
+				styles: resolve(__dirname, "src/styles.ts"),
 			},
 			formats: ["es"],
 		},
