@@ -7,14 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.2](https://github.com/moq-dev/moq/compare/moq-msf-v0.1.1...moq-msf-v0.1.2) - 2026-04-03
+## [0.0.2](https://github.com/moq-dev/moq/compare/moq-codec-v0.0.1...moq-codec-v0.0.2) - 2026-04-03
 
 ### Other
 
 - Add moq-relay release workflow and Nix cache configuration ([#1178](https://github.com/moq-dev/moq/pull/1178))
-
-## [0.1.1](https://github.com/moq-dev/moq/compare/moq-msf-v0.1.0...moq-msf-v0.1.1) - 2026-03-13
-
-### Other
-
-- Set MSRV to 1.85 (edition 2024) ([#1083](https://github.com/moq-dev/moq/pull/1083))

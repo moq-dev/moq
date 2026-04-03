@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/moq-dev/moq/compare/conducer-v0.3.1...conducer-v0.3.2) - 2026-04-03
+
+### Other
+
+- Add moq-relay release workflow and Nix cache configuration ([#1178](https://github.com/moq-dev/moq/pull/1178))
+
 ## [0.3.1](https://github.com/moq-dev/moq/compare/conducer-v0.3.0...conducer-v0.3.1) - 2026-03-13
 
 ### Other

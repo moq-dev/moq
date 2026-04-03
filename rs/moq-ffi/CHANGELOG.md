@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.0...moq-ffi-v0.2.1) - 2026-04-03
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.2.0](https://github.com/moq-dev/moq/compare/moq-ffi-v0.1.6...moq-ffi-v0.2.0) - 2026-03-26
 
 ### Other

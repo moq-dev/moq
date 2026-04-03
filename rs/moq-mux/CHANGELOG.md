@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.4...moq-mux-v0.3.5) - 2026-04-03
+
+### Added
+
+- *(moq-relay)* on-demand key resolution via --auth-keys ([#1188](https://github.com/moq-dev/moq/pull/1188))
+
+### Other
+
+- Bump moq-mux version from 0.3.4 to 0.3.5 ([#1198](https://github.com/moq-dev/moq/pull/1198))
+- Add moq-relay release workflow and Nix cache configuration ([#1178](https://github.com/moq-dev/moq/pull/1178))
+- Update dependencies including breaking changes ([#1175](https://github.com/moq-dev/moq/pull/1175))
+
 ## [0.3.4](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.3...moq-mux-v0.3.4) - 2026-03-26
 
 ### Other

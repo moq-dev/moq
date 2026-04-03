@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.17](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.16...moq-token-cli-v0.5.17) - 2026-04-03
+
+### Added
+
+- *(moq-relay)* on-demand key resolution via --auth-keys ([#1188](https://github.com/moq-dev/moq/pull/1188))
+- key-based public access for anonymous subscribe/publish ([#1180](https://github.com/moq-dev/moq/pull/1180))
+
+### Other
+
+- Remove redundant validateClaims from @moq/token ([#1196](https://github.com/moq-dev/moq/pull/1196))
+- Add Markdown linting with remark configuration ([#1183](https://github.com/moq-dev/moq/pull/1183))
+
 ## [0.5.16](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.15...moq-token-cli-v0.5.16) - 2026-03-26
 
 ### Other
