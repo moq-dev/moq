@@ -23,6 +23,7 @@ doc = false
 [features]
 default = ["iroh", "quinn", "websocket"]
 iroh = ["moq-native/iroh"]
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 noq = ["moq-native/noq"]
 quinn = ["moq-native/quinn"]
 quiche = ["moq-native/quiche"]
@@ -50,6 +51,8 @@ rustls = { version = "0.23", features = [
 serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["json", "base64"] }
 thiserror = "2"
+tikv-jemalloc-ctl = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 tokio = { workspace = true, features = ["full"] }
 toml = "0.9"
 tower-http = { version = "0.6", features = ["cors"] }
