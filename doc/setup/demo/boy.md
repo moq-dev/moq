@@ -17,7 +17,7 @@ This demo showcases MoQ's key differentiators:
 ## Running
 
 ```bash
-just dev boy
+just demo boy
 ```
 
 This starts three components in parallel:
@@ -31,7 +31,7 @@ The default ROM ([Big2Small](https://github.com/mdsteele/big2small), a GPLv3 puz
 ### Custom ROM
 
 ```bash
-just dev boy start rom=path/to/game.gb
+just demo boy start path/to/game.gb
 ```
 
 ### Multiple Sessions
@@ -39,7 +39,7 @@ just dev boy start rom=path/to/game.gb
 Run additional instances in separate terminals with different ROMs:
 
 ```bash
-just dev boy start rom=path/to/other.gb
+just demo boy start path/to/other.gb
 ```
 
 Each session appears in the grid automatically via MoQ's announcement system.
@@ -112,6 +112,6 @@ These tracks bypass the hang container format — they're raw UTF-8 JSON bytes w
 
 ## Source Code
 
-- **Rust publisher**: [`dev/boy/src/`](https://github.com/moq-dev/moq/tree/main/dev/boy/src/) — `main.rs`, `emulator.rs`, `video.rs`, `audio.rs`, `input.rs`
-- **Web viewer**: [`dev/boy/src/index.ts`](https://github.com/moq-dev/moq/tree/main/dev/boy/src/index.ts)
-- **Justfile**: [`dev/boy/justfile`](https://github.com/moq-dev/moq/tree/main/dev/boy/justfile)
+- **Rust publisher**: [`rs/moq-boy/src/`](https://github.com/moq-dev/moq/tree/main/rs/moq-boy/src/) — `main.rs`, `emulator.rs`, `video.rs`, `audio.rs`, `input.rs`
+- **Web viewer**: [`js/moq-boy/src/index.ts`](https://github.com/moq-dev/moq/tree/main/js/moq-boy/src/index.ts)
+- **Justfile**: [`demo/boy/justfile`](https://github.com/moq-dev/moq/tree/main/demo/boy/justfile)

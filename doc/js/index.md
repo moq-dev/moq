@@ -208,7 +208,7 @@ Use `@moq/watch/ui` and `@moq/publish/ui` for ready-made SolidJS UI overlays.
 
 ## Demo Application
 
-Check out the [demo](https://github.com/moq-dev/moq/tree/main/dev/web) for complete examples:
+Check out the [demo](https://github.com/moq-dev/moq/tree/main/demo/web) for complete examples:
 
 - Video conferencing
 - Screen sharing

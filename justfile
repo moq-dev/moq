@@ -3,18 +3,22 @@
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
 
 
-mod dev
+mod demo
 mod cdn
 
-# Shortcuts to avoid `dev::` prefix.
-mod boy 'dev/boy'
-mod pub 'dev/pub'
-mod relay 'dev/relay'
-mod web 'dev/web'
+# Shortcuts to avoid `demo::` prefix.
+mod boy 'demo/boy'
+mod pub 'demo/pub'
+mod relay 'demo/relay'
+mod web 'demo/web'
 
-# Run the web demo by default.
+# Run the demo by default.
 default:
-	just dev
+	just demo
+
+# Alias for `just demo web`.
+dev:
+	just demo web
 
 # Install any dependencies.
 install:

@@ -30,8 +30,8 @@ Once running, open the browser to watch the stream, publish from your camera, or
 
 ## Source Code
 
-- **Web app**: [`dev/web/src/`](https://github.com/moq-dev/moq/tree/main/dev/web/src/)
-- **Justfile**: [`dev/web/justfile`](https://github.com/moq-dev/moq/tree/main/dev/web/justfile)
+- **Web app**: [`demo/web/src/`](https://github.com/moq-dev/moq/tree/main/demo/web/src/)
+- **Justfile**: [`demo/web/justfile`](https://github.com/moq-dev/moq/tree/main/demo/web/justfile)
 
 ## Related
 

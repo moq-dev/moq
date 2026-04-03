@@ -1,11 +1,11 @@
 {
-	"extends": "../../js/tsconfig.json",
+	"extends": "../tsconfig.json",
 	"compilerOptions": {
 		"module": "esnext",
 		"moduleResolution": "bundler",
 		"types": ["bun"],
 		"outDir": "dist"
 	},
-	"include": ["src", "../../js/common/worklet.d.ts"],
-	"exclude": ["src/worker.ts"]
+	"include": ["src", "../common/worklet.d.ts"],
+	"exclude": []
 }
