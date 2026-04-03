@@ -158,8 +158,8 @@ println!("Subscribe: {:?}", claims.subscribe);
 | Claim | Type | Description |
 |-------|------|-------------|
 | `root` | string | Root path for all operations |
-| `put` | string | string\[]? | Publishing permission paths |
-| `get` | string | string\[]? | Subscription permission paths |
+| `put` | `string \| string[]?` | Publishing permission paths |
+| `get` | `string \| string[]?` | Subscription permission paths |
 | `cluster` | bool? | Cluster node flag |
 | `exp` | number? | Expiration (Unix timestamp) |
 | `iat` | number? | Issued at (Unix timestamp) |

@@ -95,8 +95,8 @@ try {
 | Claim | Type | Description |
 |-------|------|-------------|
 | `root` | string | Root path for operations |
-| `put` | string | string\[]? | Publishing permission paths |
-| `get` | string | string\[]? | Subscription permission paths |
+| `put` | `string \| string[]?` | Publishing permission paths |
+| `get` | `string \| string[]?` | Subscription permission paths |
 | `cluster` | boolean? | Cluster node flag |
 | `exp` | number? | Expiration timestamp |
 | `iat` | number? | Issued at timestamp |
