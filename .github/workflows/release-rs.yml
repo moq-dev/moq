@@ -41,9 +41,6 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
-      - name: Install release-plz
-        run: nix develop --command cargo binstall --no-confirm release-plz
-
       - name: Release
         run: nix develop --command just release
         env:
