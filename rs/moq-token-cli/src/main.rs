@@ -6,6 +6,7 @@ use std::{io, path::PathBuf};
 #[derive(Debug, Parser)]
 #[command(name = "moq-token")]
 #[command(about = "Generate, sign, and verify tokens for moq-relay", long_about = None)]
+#[command(version = env!("VERSION"))]
 struct Cli {
 	/// The command to execute.
 	#[command(subcommand)]

@@ -7,6 +7,7 @@ use crate::{AuthConfig, ClusterConfig, WebConfig};
 /// variables, or a TOML file.
 #[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
+#[command(version = env!("VERSION"))]
 #[non_exhaustive]
 pub struct Config {
 	/// The QUIC/TLS configuration for the server.

@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use url::Url;
 
 #[derive(Parser, Clone)]
+#[command(version = env!("VERSION"))]
 pub struct Cli {
 	#[command(flatten)]
 	log: moq_native::Log,
