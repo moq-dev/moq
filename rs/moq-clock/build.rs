@@ -2,6 +2,9 @@ use std::process::Command;
 
 fn main() {
 	println!("cargo:rerun-if-changed=../../.git/HEAD");
+	println!("cargo:rerun-if-changed=../../.git/refs/heads");
+	println!("cargo:rerun-if-changed=../../.git/refs/tags");
+	println!("cargo:rerun-if-changed=../../.git/packed-refs");
 
 	let prefix = "moq-clock-v";
 	let version = git_version(prefix).unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
