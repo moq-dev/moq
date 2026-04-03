@@ -1,5 +1,4 @@
 use anyhow::Context;
-#[cfg(feature = "mp4")]
 use base64::Engine;
 use hang::catalog::{AUDIO, Audio, Container, VIDEO, Video};
 use hang::container::{Frame, OrderedProducer, Timestamp};
@@ -83,7 +82,6 @@ async fn run_with_catalog(
 					}
 				});
 			}
-			#[cfg(feature = "mp4")]
 			Container::Cmaf { init_data } => {
 				let init_bytes = base64::engine::general_purpose::STANDARD
 					.decode(init_data)
@@ -104,8 +102,6 @@ async fn run_with_catalog(
 					}
 				});
 			}
-			#[cfg(not(feature = "mp4"))]
-			_ => anyhow::bail!("CMAF container requires the 'mp4' feature"),
 		}
 	}
 
@@ -127,7 +123,6 @@ async fn run_with_catalog(
 					}
 				});
 			}
-			#[cfg(feature = "mp4")]
 			Container::Cmaf { init_data } => {
 				let init_bytes = base64::engine::general_purpose::STANDARD
 					.decode(init_data)
@@ -148,8 +143,6 @@ async fn run_with_catalog(
 					}
 				});
 			}
-			#[cfg(not(feature = "mp4"))]
-			_ => anyhow::bail!("CMAF container requires the 'mp4' feature"),
 		}
 	}
 
@@ -182,7 +175,6 @@ async fn passthrough_track(
 }
 
 /// Convert CMAF moof+mdat frames to hang Legacy frames.
-#[cfg(feature = "mp4")]
 async fn convert_cmaf_to_legacy(
 	mut input: moq_lite::TrackSubscriber,
 	output: moq_lite::TrackProducer,
@@ -231,7 +223,6 @@ mod test {
 		Timestamp::from_micros(micros).unwrap()
 	}
 
-	#[cfg(feature = "mp4")]
 	#[tokio::test]
 	async fn cmaf_to_legacy_video() {
 		use base64::Engine;
