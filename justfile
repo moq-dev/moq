@@ -102,8 +102,8 @@ bump:
 
 # Create release PRs and publish crates
 release:
-	release-plz release-pr
-	release-plz release
+	release-plz release-pr --git-token "$GITHUB_TOKEN"
+	release-plz release --git-token "$GITHUB_TOKEN"
 
 # Run the unit tests
 test *args:
