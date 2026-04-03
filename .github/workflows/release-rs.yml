@@ -44,14 +44,8 @@ jobs:
       - name: Install release-plz
         run: nix develop --command cargo binstall --no-confirm release-plz
 
-      - name: Release PR
-        run: nix develop --command release-plz release-pr
-        env:
-          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
       - name: Release
-        run: nix develop --command release-plz release
+        run: nix develop --command just release
         env:
           GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

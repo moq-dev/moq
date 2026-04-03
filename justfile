@@ -87,6 +87,9 @@ ci:
 	cargo check --workspace --no-default-features --exclude moq-ffi
 	cargo check --workspace --all-features --exclude moq-ffi
 
+	# Dry-run release to verify packaging
+	if command -v release-plz &> /dev/null; then release-plz release --dry-run; fi
+
 # Check semver compatibility against crates.io
 # requires: cargo install cargo-semver-checks
 # libmoq is an internal C-ABI crate and is intentionally excluded from published-crate semver checks.
@@ -96,6 +99,11 @@ semver:
 # Update versions and changelogs via release-plz
 bump:
 	release-plz update
+
+# Create release PRs and publish crates
+release:
+	release-plz release-pr
+	release-plz release
 
 # Run the unit tests
 test *args:
