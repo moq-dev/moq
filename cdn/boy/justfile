@@ -35,7 +35,7 @@ deploy:
 
 	echo "  Copying secrets to /var/lib/moq"
 	rsync -az ../secrets/ root@$HOST:/var/lib/moq/
-	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwt"
+	ssh root@$HOST "find /var/lib/moq -type d -exec chmod 755 {} + && find /var/lib/moq -type f -exec chmod 644 {} + && chmod 600 /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
 	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/

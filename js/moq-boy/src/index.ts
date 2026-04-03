@@ -38,7 +38,7 @@ export class GameCard {
 	#heldButtons = new Set<string>();
 
 	constructor(config: GameCardConfig) {
-		const { sessionId, connection, expanded, root } = config;
+		const { sessionId, connection, expanded } = config;
 
 		this.el = document.createElement("div");
 		this.el.className = "card";
@@ -65,7 +65,7 @@ export class GameCard {
 		this.el.appendChild(controls);
 
 		// Build controls.
-		const { wrapper: controlsInner, latencyList } = this.#buildControls();
+		const { wrapper: controlsInner, latencyList, muteBtn } = this.#buildControls();
 		controls.appendChild(controlsInner);
 
 		// Click to toggle expand via Fullscreen API.
@@ -324,20 +324,17 @@ export class GameCard {
 		};
 
 		// Wire up mute toggle button.
-		const muteBtn = root.querySelector(".mute-btn") as HTMLButtonElement | null;
-		if (muteBtn) {
-			muteBtn.textContent = "Mute";
-			muteBtn.addEventListener("click", (e) => {
-				e.stopPropagation();
-				const muted = !userMuted.peek();
-				userMuted.set(muted);
-				muteBtn.textContent = muted ? "Unmute" : "Mute";
-				muteBtn.classList.toggle("unmuted", !muted);
-			});
-		}
+		muteBtn.textContent = "Mute";
+		muteBtn.addEventListener("click", (e) => {
+			e.stopPropagation();
+			const muted = !userMuted.peek();
+			userMuted.set(muted);
+			muteBtn.textContent = muted ? "Unmute" : "Mute";
+			muteBtn.classList.toggle("unmuted", !muted);
+		});
 	}
 
-	#buildControls(): { wrapper: HTMLElement; latencyList: HTMLElement } {
+	#buildControls(): { wrapper: HTMLElement; latencyList: HTMLElement; muteBtn: HTMLButtonElement } {
 		const wrapper = document.createElement("div");
 		wrapper.className = "controls-inner";
 
@@ -441,7 +438,7 @@ export class GameCard {
 		wrapper.appendChild(latencyList);
 		wrapper.appendChild(latencyNote);
 
-		return { wrapper, latencyList };
+		return { wrapper, latencyList, muteBtn };
 	}
 
 	#sendButtons() {
