@@ -12,6 +12,7 @@ mod clock;
 use moq_lite::*;
 
 #[derive(Parser, Clone)]
+#[command(version = env!("VERSION"))]
 pub struct Config {
 	/// Connect to the given URL starting with https://
 	#[arg(long)]
