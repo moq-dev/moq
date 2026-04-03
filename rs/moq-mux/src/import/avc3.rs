@@ -260,6 +260,11 @@ impl Avc3 {
 			return Ok(());
 		}
 
+		// Don't emit frames before the codec config is known (no catalog entry yet).
+		if self.config.is_none() {
+			return Ok(());
+		}
+
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);

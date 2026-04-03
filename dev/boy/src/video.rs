@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use bytes::Bytes;
 
@@ -9,15 +12,13 @@ pub struct VideoEncoder {
     tx: tokio::sync::mpsc::Sender<EncoderMsg>,
     /// Clone of the video track producer, for monitoring used/unused.
     pub track: moq_lite::TrackProducer,
+    force_keyframe: Arc<AtomicBool>,
     _thread: std::thread::JoinHandle<()>,
 }
 
-enum EncoderMsg {
-    Frame {
-        rgba: Bytes,
-        ts: hang::container::Timestamp,
-    },
-    ForceKeyframe,
+struct EncoderMsg {
+    rgba: Bytes,
+    ts: hang::container::Timestamp,
 }
 
 impl VideoEncoder {
@@ -27,91 +28,84 @@ impl VideoEncoder {
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let avc3 = moq_mux::import::Avc3::new(broadcast, catalog);
+        let force_keyframe = Arc::new(AtomicBool::new(false));
 
-        // Clone the track producer before moving avc3 into the thread.
         let track = avc3.track().clone();
 
+        let fk = force_keyframe.clone();
         let thread = std::thread::Builder::new()
             .name("video-encoder".into())
-            .spawn(move || encoder_thread(rx, avc3))
+            .spawn(move || encoder_thread(rx, avc3, fk))
             .expect("failed to spawn video encoder thread");
 
         Self {
             tx,
             track,
+            force_keyframe,
             _thread: thread,
         }
     }
 
     /// Send a frame to the encoder. Non-blocking: drops the frame if the channel is full.
     pub fn try_frame(&self, rgba: Bytes, ts: hang::container::Timestamp) {
-        let _ = self.tx.try_send(EncoderMsg::Frame { rgba, ts });
+        let _ = self.tx.try_send(EncoderMsg { rgba, ts });
     }
 
-    /// Force the next encoded frame to be a keyframe.
+    /// Force the next encoded frame to be a keyframe. Cannot be lost.
     pub fn force_keyframe(&self) {
-        let _ = self.tx.try_send(EncoderMsg::ForceKeyframe);
+        self.force_keyframe.store(true, Ordering::Release);
     }
 }
 
 fn encoder_thread(
     mut rx: tokio::sync::mpsc::Receiver<EncoderMsg>,
     mut avc3: moq_mux::import::Avc3,
+    force_keyframe: Arc<AtomicBool>,
 ) {
     let mut encoder: Option<Encoder> = None;
     let mut scaler: Option<ffmpeg_next::software::scaling::Context> = None;
-    let mut force_keyframe = false;
 
     while let Some(msg) = rx.blocking_recv() {
-        match msg {
-            EncoderMsg::ForceKeyframe => {
-                force_keyframe = true;
+        let enc = lazy_init(
+            &mut encoder,
+            || Encoder::new(WIDTH, HEIGHT),
+            "H.264 encoder",
+        );
+        let color_scaler = lazy_init(
+            &mut scaler,
+            || {
+                ffmpeg_next::software::scaling::Context::get(
+                    ffmpeg_next::format::Pixel::RGBA,
+                    WIDTH,
+                    HEIGHT,
+                    ffmpeg_next::format::Pixel::YUV420P,
+                    WIDTH,
+                    HEIGHT,
+                    ffmpeg_next::software::scaling::Flags::POINT,
+                )
+                .map_err(Into::into)
+            },
+            "RGBA scaler",
+        );
+
+        let (Some(enc), Some(color_scaler)) = (enc, color_scaler) else {
+            return;
+        };
+
+        let mut yuv = match rgba_to_yuv(&msg.rgba, color_scaler, enc.frame_count) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!(error = %e, "RGBA->YUV failed");
                 continue;
             }
-            EncoderMsg::Frame { rgba, ts } => {
-                let enc = lazy_init(
-                    &mut encoder,
-                    || Encoder::new(WIDTH, HEIGHT),
-                    "H.264 encoder",
-                );
-                let color_scaler = lazy_init(
-                    &mut scaler,
-                    || {
-                        ffmpeg_next::software::scaling::Context::get(
-                            ffmpeg_next::format::Pixel::RGBA,
-                            WIDTH,
-                            HEIGHT,
-                            ffmpeg_next::format::Pixel::YUV420P,
-                            WIDTH,
-                            HEIGHT,
-                            ffmpeg_next::software::scaling::Flags::POINT,
-                        )
-                        .map_err(Into::into)
-                    },
-                    "RGBA scaler",
-                );
+        };
 
-                let (Some(enc), Some(color_scaler)) = (enc, color_scaler) else {
-                    return;
-                };
+        if force_keyframe.swap(false, Ordering::AcqRel) {
+            yuv.set_kind(ffmpeg_next::picture::Type::I);
+        }
 
-                let mut yuv = match rgba_to_yuv(&rgba, color_scaler, enc.frame_count) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::error!(error = %e, "RGBA->YUV failed");
-                        continue;
-                    }
-                };
-
-                if force_keyframe {
-                    yuv.set_kind(ffmpeg_next::picture::Type::I);
-                    force_keyframe = false;
-                }
-
-                if let Err(e) = enc.encode_yuv(&yuv, ts, &mut avc3) {
-                    tracing::error!(error = %e, "H.264 encode error");
-                }
-            }
+        if let Err(e) = enc.encode_yuv(&yuv, msg.ts, &mut avc3) {
+            tracing::error!(error = %e, "H.264 encode error");
         }
     }
 }

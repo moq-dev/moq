@@ -277,6 +277,11 @@ impl Hev1 {
 			return Ok(());
 		}
 
+		// Don't emit frames before the codec config is known (no catalog entry yet).
+		if self.config.is_none() {
+			return Ok(());
+		}
+
 		let track = &mut self.track;
 		let pts = pts.context("missing timestamp")?;
 

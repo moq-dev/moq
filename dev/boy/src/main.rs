@@ -112,13 +112,17 @@ async fn run(config: &Config) -> Result<()> {
     let vt = video_track.clone();
     tokio::spawn(async move {
         loop {
-            let _ = vt.used().await;
+            if vt.used().await.is_err() {
+                break;
+            }
             tracing::info!("resuming video: viewer subscribed");
             flag.store(true, Ordering::Release);
             all_paused.store(false, Ordering::Release);
             resume.1.notify_all();
 
-            let _ = vt.unused().await;
+            if vt.unused().await.is_err() {
+                break;
+            }
             tracing::info!("pausing video: no viewers");
             flag.store(false, Ordering::Release);
         }
@@ -131,13 +135,17 @@ async fn run(config: &Config) -> Result<()> {
     let at = audio_track.clone();
     tokio::spawn(async move {
         loop {
-            let _ = at.used().await;
+            if at.used().await.is_err() {
+                break;
+            }
             tracing::info!("resuming audio: viewer subscribed");
             flag.store(true, Ordering::Release);
             all_paused.store(false, Ordering::Release);
             resume.1.notify_all();
 
-            let _ = at.unused().await;
+            if at.unused().await.is_err() {
+                break;
+            }
             tracing::info!("pausing audio: no viewers");
             flag.store(false, Ordering::Release);
         }
@@ -150,19 +158,26 @@ async fn run(config: &Config) -> Result<()> {
         tokio::spawn(async move {
             loop {
                 // Wait for BOTH tracks to become unused.
-                let _ = tokio::join!(video_track.unused(), audio_track.unused());
+                let (v, a) = tokio::join!(video_track.unused(), audio_track.unused());
+                if v.is_err() || a.is_err() {
+                    break;
+                }
                 tracing::info!("pausing emulation: no viewers");
                 paused.store(true, Ordering::Release);
 
                 // Wait for EITHER track to become used.
                 tokio::select! {
-                    _ = video_track.used() => {},
-                    _ = audio_track.used() => {},
+                    Err(_) = video_track.used() => break,
+                    Err(_) = audio_track.used() => break,
+                    else => {},
                 }
                 tracing::info!("resuming emulation: viewer connected");
                 paused.store(false, Ordering::Release);
                 resume.1.notify_all();
             }
+            // Ensure emulator thread isn't stuck waiting on resume.
+            paused.store(false, Ordering::Release);
+            resume.1.notify_all();
         });
     }
 
