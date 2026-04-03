@@ -1,7 +1,8 @@
-import * as Catalog from "@moq/hang/catalog";
+import { PRIORITY } from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import * as Zod from "@moq/lite/zod";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import { type Location, type Position, PositionSchema } from "../sections";
 
 export interface WindowProps {
 	enabled?: boolean | Signal<boolean>;
@@ -15,42 +16,42 @@ export class Window {
 	#handle = new Signal<string | undefined>(undefined);
 	readonly handle: Getter<string | undefined> = this.#handle;
 
-	#catalog = new Signal<Catalog.Location | undefined>(undefined);
+	#location = new Signal<Location | undefined>(undefined);
 
-	#position = new Signal<Catalog.Position | undefined>(undefined);
-	readonly position: Getter<Catalog.Position | undefined> = this.#position;
+	#position = new Signal<Position | undefined>(undefined);
+	readonly position: Getter<Position | undefined> = this.#position;
 
 	signals = new Effect();
 
 	constructor(
 		broadcast: Signal<Moq.Broadcast | undefined>,
-		catalog: Signal<Catalog.Root | undefined>,
+		locationSection: Getter<Location | undefined>,
 		props?: WindowProps,
 	) {
 		this.broadcast = broadcast;
 		this.enabled = Signal.from(props?.enabled ?? false);
 
 		this.signals.run((effect) => {
-			this.#catalog.set(effect.get(catalog)?.location);
+			this.#location.set(effect.get(locationSection));
 		});
 
 		this.signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
-			this.#position.set(effect.get(this.#catalog)?.initial);
+			this.#position.set(effect.get(this.#location)?.initial);
 		});
 
 		this.signals.run((effect) => {
-			this.#handle.set(effect.get(this.#catalog)?.handle);
+			this.#handle.set(effect.get(this.#location)?.handle);
 		});
 
 		this.signals.run((effect) => {
 			const broadcast = effect.get(this.broadcast);
 			if (!broadcast) return;
 
-			const updates = effect.get(this.#catalog)?.track;
+			const updates = effect.get(this.#location)?.track;
 			if (!updates) return;
 
-			const track = broadcast.subscribe(updates.name, Catalog.PRIORITY.location);
+			const track = broadcast.subscribe(updates.name, PRIORITY.location);
 			effect.cleanup(() => track.close());
 
 			effect.spawn(this.#runTrack.bind(this, track));
@@ -60,7 +61,7 @@ export class Window {
 	async #runTrack(track: Moq.Track) {
 		try {
 			for (;;) {
-				const position = await Zod.read(track, Catalog.PositionSchema);
+				const position = await Zod.read(track, PositionSchema);
 				if (!position) break;
 
 				this.#position.set(position);

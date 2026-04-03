@@ -39,10 +39,11 @@ impl Subscribe {
 		// Always convert to CMAF — this is a no-op for tracks already in CMAF.
 		let cmaf_output = moq_lite::Broadcast::new().produce();
 		let cmaf_consumer = cmaf_output.consume();
-		let converter = moq_mux::cmaf::Convert::new(self.broadcast, cmaf_output)?;
+		let converter = moq_mux::cmaf::Convert::new(self.broadcast, cmaf_output);
 
-		// Consume the catalog track before the converter starts, so we don't miss it.
-		let catalog_track = cmaf_consumer.consume_track(&hang::Catalog::default_track())?;
+		// Subscribe to the catalog before the converter starts, so we don't miss it.
+		let catalog_track =
+			cmaf_consumer.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
 
 		let max_latency = std::time::Duration::from_millis(self.args.max_latency);
 
@@ -55,30 +56,42 @@ impl Subscribe {
 }
 
 async fn mux_fmp4(
-	catalog_track: moq_lite::TrackConsumer,
+	catalog_track: moq_lite::TrackSubscriber,
 	cmaf_consumer: moq_lite::BroadcastConsumer,
 	max_latency: std::time::Duration,
 ) -> anyhow::Result<()> {
 	let mut stdout = tokio::io::stdout();
 
-	let catalog_sub = catalog_track.subscribe(moq_lite::Subscription::default())?;
-	let mut catalog_consumer = hang::CatalogConsumer::new(catalog_sub);
-	let catalog = catalog_consumer.next().await?.context("empty catalog")?;
+	let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
+	let video_section = catalog_consumer.reader().section(&hang::catalog::VIDEO);
+	let audio_section = catalog_consumer.reader().section(&hang::catalog::AUDIO);
 
-	// Build exporter from catalog (for init segment)
-	let exporter = moq_mux::consumer::Fmp4::new(&catalog)?;
+	// Run until first catalog update
+	tokio::select! {
+		res = catalog_consumer.run() => { res?; anyhow::bail!("catalog closed before first update"); },
+		_ = video_section.changed() => {},
+		_ = audio_section.changed() => {},
+	}
+
+	let video = video_section.get()?.unwrap_or_default();
+	let audio = audio_section.get()?.unwrap_or_default();
+
+	// Build exporter from catalog sections (for init segment)
+	let exporter = moq_mux::consumer::Fmp4::new(&video, &audio)?;
 
 	// Write init segment (merged multi-track moov)
-	let init = exporter.init(&catalog)?;
+	let init = exporter.init(&video, &audio)?;
 	stdout.write_all(&init).await?;
 	stdout.flush().await?;
 
 	// Build OrderedMuxer from all track consumers (all CMAF after conversion)
 	let mut muxer_tracks = Vec::new();
 
-	for (name, config) in &catalog.video.renditions {
-		let track =
-			cmaf_consumer.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
+	for (name, config) in &video.renditions {
+		let track = cmaf_consumer.subscribe_track(
+			&moq_lite::Track { name: name.clone() },
+			moq_lite::Subscription::default(),
+		)?;
 
 		let timescale = match &config.container {
 			hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
@@ -92,9 +105,11 @@ async fn mux_fmp4(
 		muxer_tracks.push((name.clone(), consumer));
 	}
 
-	for (name, config) in &catalog.audio.renditions {
-		let track =
-			cmaf_consumer.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
+	for (name, config) in &audio.renditions {
+		let track = cmaf_consumer.subscribe_track(
+			&moq_lite::Track { name: name.clone() },
+			moq_lite::Subscription::default(),
+		)?;
 
 		let timescale = match &config.container {
 			hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,

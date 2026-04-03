@@ -102,6 +102,7 @@ impl AacConfig {
 /// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
 pub struct Aac {
 	catalog: crate::CatalogProducer,
+	audio: hang::catalog::Audio,
 	track: hang::container::OrderedProducer,
 	zero: Option<tokio::time::Instant>,
 }
@@ -112,29 +113,39 @@ impl Aac {
 		mut catalog: crate::CatalogProducer,
 		config: AacConfig,
 	) -> anyhow::Result<Self> {
-		let track = {
-			let mut cat = catalog.lock();
-
-			let audio_config = hang::catalog::AudioConfig {
-				codec: hang::catalog::AAC {
-					profile: config.profile,
-				}
-				.into(),
-				sample_rate: config.sample_rate,
-				channel_count: config.channel_count,
-				bitrate: None,
-				description: None,
-				container: hang::catalog::Container::Legacy,
-				jitter: None,
-			};
-			let track = cat.audio.create_track("aac", audio_config.clone());
-			tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
-
-			broadcast.create_track(track)?
+		// Read the current audio section from the catalog, if any
+		let mut audio: hang::catalog::Audio = {
+			let state = catalog.writer().read();
+			state
+				.sections
+				.get("audio")
+				.and_then(|v| serde_json::from_value(v.clone()).ok())
+				.unwrap_or_default()
 		};
+
+		let audio_config = hang::catalog::AudioConfig {
+			codec: hang::catalog::AAC {
+				profile: config.profile,
+			}
+			.into(),
+			sample_rate: config.sample_rate,
+			channel_count: config.channel_count,
+			bitrate: None,
+			description: None,
+			container: hang::catalog::Container::Legacy,
+			jitter: None,
+		};
+		let track_info = audio.create_track("aac", audio_config.clone());
+		tracing::debug!(name = ?track_info.name, config = ?audio_config, "starting track");
+
+		let _ = catalog.set(&hang::catalog::AUDIO, &audio);
+		catalog.flush();
+
+		let track = broadcast.create_track(track_info)?;
 
 		Ok(Self {
 			catalog,
+			audio,
 			track: hang::container::OrderedProducer::new(track).with_max_group_duration(MAX_GROUP_DURATION),
 			zero: None,
 		})
@@ -180,7 +191,9 @@ impl Aac {
 impl Drop for Aac {
 	fn drop(&mut self) {
 		tracing::debug!(name = ?self.track.info.name, "ending track");
-		self.catalog.lock().audio.remove_track(&self.track.info);
+		self.audio.remove_track(&self.track.info);
+		let _ = self.catalog.set(&hang::catalog::AUDIO, &self.audio);
+		self.catalog.flush();
 	}
 }
 

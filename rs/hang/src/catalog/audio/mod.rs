@@ -11,7 +11,10 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, hex::Hex};
 
-use crate::catalog::Container;
+use crate::catalog::{Container, Section};
+
+/// Predefined section for audio catalog data.
+pub const AUDIO: Section<Audio> = Section::new("audio");
 
 /// Information about an audio track in the catalog.
 ///

@@ -23,15 +23,47 @@ pub struct MoqCatalogConsumer {
 }
 
 struct Catalog {
-	inner: hang::CatalogConsumer,
+	track: moq_lite::TrackSubscriber,
+	group: Option<moq_lite::GroupConsumer>,
 }
 
 impl Catalog {
 	async fn next(&mut self) -> Result<Option<MoqCatalog>, MoqError> {
-		match self.inner.next().await {
-			Ok(Some(catalog)) => Ok(Some(convert_catalog(&catalog))),
-			Ok(None) => Ok(None),
-			Err(e) => Err(e.into()),
+		loop {
+			tokio::select! {
+				res = self.track.recv_group() => {
+					match res? {
+						Some(group) => {
+							self.group = Some(group);
+						}
+						None => return Ok(None),
+					}
+				},
+				Some(frame) = async { self.group.as_mut()?.read_frame().await.transpose() } => {
+					self.group.take(); // We don't support deltas yet
+
+					let frame_data = frame?;
+					let json: serde_json::Map<String, serde_json::Value> =
+						serde_json::from_slice(&frame_data)
+							.map_err(|e| MoqError::Codec(e.to_string()))?;
+
+					let video: hang::catalog::Video = json
+						.get("video")
+						.map(|v| serde_json::from_value(v.clone()))
+						.transpose()
+						.map_err(|e| MoqError::Codec(e.to_string()))?
+						.unwrap_or_default();
+
+					let audio: hang::catalog::Audio = json
+						.get("audio")
+						.map(|v| serde_json::from_value(v.clone()))
+						.transpose()
+						.map_err(|e| MoqError::Codec(e.to_string()))?
+						.unwrap_or_default();
+
+					return Ok(Some(convert_catalog(&video, &audio)));
+				}
+			}
 		}
 	}
 }
@@ -76,13 +108,12 @@ impl Media {
 impl MoqBroadcastConsumer {
 	/// Subscribe to the catalog for this broadcast.
 	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
-		let subscriber = self.inner.subscribe_track(
-			&hang::catalog::Catalog::default_track(),
-			moq_lite::Subscription::default(),
-		)?;
-		let consumer = hang::CatalogConsumer::new(subscriber);
+		let _guard = crate::ffi::RUNTIME.enter();
+		let track = self
+			.inner
+			.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
 		Ok(Arc::new(MoqCatalogConsumer {
-			task: Task::new(Catalog { inner: consumer }),
+			task: Task::new(Catalog { track, group: None }),
 		}))
 	}
 

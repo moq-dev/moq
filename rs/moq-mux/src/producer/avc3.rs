@@ -13,6 +13,9 @@ pub struct Avc3 {
 	// The catalog being produced.
 	catalog: crate::CatalogProducer,
 
+	// Local video section state.
+	video: hang::catalog::Video,
+
 	// The track being produced.
 	track: Option<hang::container::OrderedProducer>,
 
@@ -33,9 +36,20 @@ pub struct Avc3 {
 
 impl Avc3 {
 	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
+		// Read the current video section from the catalog, if any
+		let video: hang::catalog::Video = {
+			let state = catalog.writer().read();
+			state
+				.sections
+				.get("video")
+				.and_then(|v| serde_json::from_value(v.clone()).ok())
+				.unwrap_or_default()
+		};
+
 		Self {
 			broadcast,
 			catalog,
+			video,
 			track: None,
 			config: None,
 			current: Default::default(),
@@ -80,15 +94,16 @@ impl Avc3 {
 			return Ok(());
 		}
 
-		let mut catalog = self.catalog.lock();
-
 		if let Some(track) = &self.track.take() {
 			tracing::debug!(name = ?track.info.name, "reinitializing track");
-			catalog.video.remove_track(&track.info);
+			self.video.remove_track(&track.info);
 		}
 
-		let track = catalog.video.create_track("avc3", config.clone());
+		let track = self.video.create_track("avc3", config.clone());
 		tracing::debug!(name = ?track.name, ?config, "starting track");
+
+		let _ = self.catalog.set(&hang::catalog::VIDEO, &self.video);
+		self.catalog.flush();
 
 		let track = self.broadcast.create_track(track)?;
 
@@ -315,7 +330,9 @@ impl Drop for Avc3 {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.info.name, "ending track");
-			self.catalog.lock().video.remove_track(&track.info);
+			self.video.remove_track(&track.info);
+			let _ = self.catalog.set(&hang::catalog::VIDEO, &self.video);
+			self.catalog.flush();
 		}
 	}
 }

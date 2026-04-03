@@ -43,6 +43,10 @@ pub enum Error {
 	#[error("url parse error: {0}")]
 	Url(#[from] url::ParseError),
 
+	/// The catalog or section channel has been closed.
+	#[error("closed")]
+	Closed,
+
 	/// A group contained zero frames.
 	#[error("empty group")]
 	EmptyGroup,

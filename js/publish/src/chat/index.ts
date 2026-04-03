@@ -1,4 +1,4 @@
-import type * as Catalog from "@moq/hang/catalog";
+import type { Track } from "@moq/hang/catalog";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { Message, type MessageProps } from "./message";
 import { Typing, type TypingProps } from "./typing";
@@ -11,12 +11,17 @@ export type Props = {
 	typing?: TypingProps;
 };
 
+export type ChatCatalog = {
+	message?: Track;
+	typing?: Track;
+};
+
 export class Root {
 	message: Message;
 	typing: Typing;
 
-	#catalog = new Signal<Catalog.Chat | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Chat | undefined> = this.#catalog;
+	#catalog = new Signal<ChatCatalog | undefined>(undefined);
+	readonly catalog: Getter<ChatCatalog | undefined> = this.#catalog;
 
 	#signals = new Effect();
 

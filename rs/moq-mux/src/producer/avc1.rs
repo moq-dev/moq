@@ -90,15 +90,20 @@ impl Avc1 {
 			return Ok(());
 		}
 
-		let mut catalog = self.catalog.lock();
+		let mut video = self.current_video();
 
 		if let Some(track) = &self.track.take() {
 			tracing::debug!(name = ?track.info.name, "reinitializing avc1 track");
-			catalog.video.remove_track(&track.info);
+			video.remove_track(&track.info);
 		}
 
-		let track = catalog.video.create_track("avc1", config.clone());
+		let track = video.create_track("avc1", config.clone());
 		tracing::debug!(name = ?track.name, ?config, "starting avc1 track");
+
+		self.catalog
+			.set(&hang::catalog::VIDEO, &video)
+			.map_err(|e| anyhow::anyhow!(e))?;
+		self.catalog.flush();
 
 		let track = self.broadcast.create_track(track)?;
 
@@ -191,13 +196,26 @@ impl Avc1 {
 			zero.elapsed().as_micros() as u64
 		)?)
 	}
+
+	/// Read the current video section from the catalog writer, or return a default.
+	fn current_video(&self) -> hang::catalog::Video {
+		let state = self.catalog.writer().read();
+		state
+			.sections
+			.get("video")
+			.and_then(|v| serde_json::from_value(v.clone()).ok())
+			.unwrap_or_default()
+	}
 }
 
 impl Drop for Avc1 {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.info.name, "ending avc1 track");
-			self.catalog.lock().video.remove_track(&track.info);
+			let mut video = self.current_video();
+			video.remove_track(&track.info);
+			let _ = self.catalog.set(&hang::catalog::VIDEO, &video);
+			self.catalog.flush();
 		}
 	}
 }

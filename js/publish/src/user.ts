@@ -1,4 +1,3 @@
-import type * as Catalog from "@moq/hang/catalog";
 import { Effect, Signal } from "@moq/signals";
 
 export type Props = {
@@ -9,6 +8,13 @@ export type Props = {
 	color?: string | Signal<string | undefined>;
 };
 
+export type UserCatalog = {
+	id?: string;
+	name?: string;
+	avatar?: string;
+	color?: string;
+};
+
 export class Info {
 	enabled: Signal<boolean>;
 
@@ -17,7 +23,7 @@ export class Info {
 	avatar: Signal<string | undefined>;
 	color: Signal<string | undefined>;
 
-	catalog = new Signal<Catalog.User | undefined>(undefined);
+	catalog = new Signal<UserCatalog | undefined>(undefined);
 
 	signals = new Effect();
 

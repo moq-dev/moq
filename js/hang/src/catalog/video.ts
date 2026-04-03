@@ -1,6 +1,7 @@
 import * as z from "zod/mini";
 import { ContainerSchema } from "./container";
 import { u53Schema } from "./integers";
+import { Section } from "./section";
 
 // Backwards compatibility: old track schema
 const TrackSchema = z.object({
@@ -103,3 +104,6 @@ export const VideoSchema = z.union([
 
 export type Video = z.infer<typeof VideoSchema>;
 export type VideoConfig = z.infer<typeof VideoConfigSchema>;
+
+/// Predefined section for video catalog data.
+export const VIDEO = new Section("video", VideoSchema);

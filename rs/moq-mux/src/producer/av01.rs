@@ -11,6 +11,9 @@ pub struct Av01 {
 	// The catalog being produced.
 	catalog: crate::CatalogProducer,
 
+	// Local video section state.
+	video: hang::catalog::Video,
+
 	// The track being produced.
 	track: Option<hang::container::OrderedProducer>,
 
@@ -33,9 +36,20 @@ struct Frame {
 
 impl Av01 {
 	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
+		// Read the current video section from the catalog, if any
+		let video: hang::catalog::Video = {
+			let state = catalog.writer().read();
+			state
+				.sections
+				.get("video")
+				.and_then(|v| serde_json::from_value(v.clone()).ok())
+				.unwrap_or_default()
+		};
+
 		Self {
 			broadcast,
 			catalog,
+			video,
 			track: None,
 			config: None,
 			current: Default::default(),
@@ -93,13 +107,14 @@ impl Av01 {
 
 		if let Some(track) = &self.track.take() {
 			tracing::debug!(name = ?track.info.name, "reinitializing track");
-			self.catalog.lock().video.remove_track(&track.info);
+			self.video.remove_track(&track.info);
 		}
 
-		let mut catalog = self.catalog.lock();
-		let track = catalog.video.create_track("av01", config.clone());
+		let track = self.video.create_track("av01", config.clone());
 		tracing::debug!(name = ?track.name, ?config, "starting track");
-		drop(catalog);
+
+		let _ = self.catalog.set(&hang::catalog::VIDEO, &self.video);
+		self.catalog.flush();
 
 		let track = self.broadcast.create_track(track)?;
 
@@ -139,10 +154,11 @@ impl Av01 {
 			jitter: None,
 		};
 
-		let mut catalog = self.catalog.lock();
-		let track = catalog.video.create_track("av01", config.clone());
+		let track = self.video.create_track("av01", config.clone());
 		tracing::debug!(name = ?track.name, "starting track with minimal config");
-		drop(catalog);
+
+		let _ = self.catalog.set(&hang::catalog::VIDEO, &self.video);
+		self.catalog.flush();
 
 		let track = self.broadcast.create_track(track)?;
 
@@ -225,12 +241,13 @@ impl Av01 {
 		}
 
 		if let Some(track) = &self.track.take() {
-			self.catalog.lock().video.remove_track(&track.info);
+			self.video.remove_track(&track.info);
 		}
 
-		let mut catalog = self.catalog.lock();
-		let track = catalog.video.create_track("av01", config.clone());
-		drop(catalog);
+		let track = self.video.create_track("av01", config.clone());
+
+		let _ = self.catalog.set(&hang::catalog::VIDEO, &self.video);
+		self.catalog.flush();
 
 		let track = self.broadcast.create_track(track)?;
 		self.config = Some(config);
@@ -418,7 +435,9 @@ impl Drop for Av01 {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.info.name, "ending track");
-			self.catalog.lock().video.remove_track(&track.info);
+			self.video.remove_track(&track.info);
+			let _ = self.catalog.set(&hang::catalog::VIDEO, &self.video);
+			self.catalog.flush();
 		}
 	}
 }

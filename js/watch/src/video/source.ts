@@ -182,7 +182,7 @@ export class Source {
 		const broadcast = effect.get(this.broadcast);
 		if (!broadcast) return;
 
-		const catalog = effect.get(broadcast.catalog)?.video;
+		const catalog = effect.get(broadcast.video);
 		if (!catalog) return;
 
 		effect.set(this.#catalog, catalog);

@@ -1,5 +1,5 @@
-import type * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import type { User } from "./sections";
 
 export interface Props {
 	enabled?: boolean | Signal<boolean>;
@@ -15,16 +15,17 @@ export class Info {
 
 	signals = new Effect();
 
-	constructor(catalog: Signal<Catalog.Root | undefined>, props?: Props) {
+	constructor(user: Getter<User | undefined>, props?: Props) {
 		this.enabled = Signal.from(props?.enabled ?? false);
 
 		this.signals.run((effect) => {
 			if (!effect.get(this.enabled)) return;
 
-			this.#id.set(effect.get(catalog)?.user?.id);
-			this.#name.set(effect.get(catalog)?.user?.name);
-			this.#avatar.set(effect.get(catalog)?.user?.avatar);
-			this.#color.set(effect.get(catalog)?.user?.color);
+			const u = effect.get(user);
+			this.#id.set(u?.id);
+			this.#name.set(u?.name);
+			this.#avatar.set(u?.avatar);
+			this.#color.set(u?.color);
 		});
 	}
 

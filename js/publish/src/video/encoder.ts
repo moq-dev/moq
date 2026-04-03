@@ -1,5 +1,5 @@
-import * as Catalog from "@moq/hang/catalog";
-import * as Container from "@moq/hang/container";
+import { type Container, u53, type VideoConfig } from "@moq/hang/catalog";
+import * as ContainerMod from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
@@ -9,7 +9,7 @@ import type { Source } from "./types";
 export interface EncoderProps {
 	enabled?: boolean | Signal<boolean>;
 	config?: EncoderConfig | Signal<EncoderConfig | undefined>;
-	container?: Catalog.Container;
+	container?: Container;
 }
 
 // TODO support signals?
@@ -40,8 +40,8 @@ export class Encoder {
 	source: Signal<Source | undefined>;
 	frame: Getter<VideoFrame | undefined>;
 
-	#catalog = new Signal<Catalog.VideoConfig | undefined>(undefined);
-	readonly catalog: Getter<Catalog.VideoConfig | undefined> = this.#catalog;
+	#catalog = new Signal<VideoConfig | undefined>(undefined);
+	readonly catalog: Getter<VideoConfig | undefined> = this.#catalog;
 
 	#signals = new Effect();
 
@@ -71,7 +71,7 @@ export class Encoder {
 	serve(track: Moq.Track, effect: Effect): void {
 		if (!effect.get(this.enabled)) return;
 
-		const producer = new Container.Legacy.Producer(track);
+		const producer = new ContainerMod.Legacy.Producer(track);
 		effect.cleanup(() => producer.close());
 
 		let lastKeyframe: Time.Micro | undefined;
@@ -127,12 +127,12 @@ export class Encoder {
 		if (!values) return;
 		const [_, config] = values;
 
-		const catalog: Catalog.VideoConfig = {
+		const catalog: VideoConfig = {
 			codec: config.codec,
-			bitrate: config.bitrate ? Catalog.u53(config.bitrate) : undefined,
+			bitrate: config.bitrate ? u53(config.bitrate) : undefined,
 			framerate: config.framerate,
-			codedWidth: Catalog.u53(config.width),
-			codedHeight: Catalog.u53(config.height),
+			codedWidth: u53(config.width),
+			codedHeight: u53(config.height),
 			optimizeForLatency: true,
 			container: { kind: "legacy" } as const,
 		};

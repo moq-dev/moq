@@ -44,14 +44,25 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	tracing::info!(%path, "broadcast announced");
 
 	// Read the catalog to discover available tracks.
-	let catalog_sub = broadcast.subscribe_track(&hang::Catalog::default_track(), moq_lite::Subscription::default())?;
-	let mut catalog = hang::CatalogConsumer::new(catalog_sub);
+	let catalog_track =
+		broadcast.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
+	let mut catalog = hang::CatalogConsumer::new(catalog_track);
 
-	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
+	// Register interest in the video section
+	let video_section = catalog.reader().section(&hang::catalog::VIDEO);
+
+	// Run until we get the first video section update
+	tokio::select! {
+		res = catalog.run() => { res?; anyhow::bail!("catalog closed before first update"); },
+		_ = video_section.changed() => {},
+	}
+
+	let video = video_section
+		.get()?
+		.ok_or_else(|| anyhow::anyhow!("no video section"))?;
 
 	// Find the first video track.
-	let (name, config) = info
-		.video
+	let (name, config) = video
 		.renditions
 		.iter()
 		.next()

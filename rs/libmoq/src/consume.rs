@@ -10,7 +10,8 @@ type LegacyConsumer = moq_mux::consumer::OrderedConsumer<moq_mux::consumer::Lega
 struct ConsumeCatalog {
 	broadcast: moq_lite::BroadcastConsumer,
 
-	catalog: hang::catalog::Catalog,
+	video: hang::catalog::Video,
+	audio: hang::catalog::Audio,
 
 	/// We need to store the codec information on the heap unfortunately.
 	audio_codec: Vec<String>,
@@ -50,7 +51,7 @@ impl Consume {
 
 	pub fn catalog_subscribe(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
-		let track = broadcast.subscribe_track(&hang::catalog::Catalog::default_track(), Default::default())?;
+		let catalog = broadcast.subscribe_track(&hang::catalog::default_track(), Default::default())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -61,7 +62,7 @@ impl Consume {
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_catalog(id, broadcast, track) => res,
+				res = Self::run_catalog(id, broadcast, catalog) => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -77,45 +78,63 @@ impl Consume {
 	async fn run_catalog(
 		task_id: Id,
 		broadcast: moq_lite::BroadcastConsumer,
-		track: moq_lite::TrackSubscriber,
+		mut track: moq_lite::TrackSubscriber,
 	) -> Result<(), Error> {
-		let mut catalog = hang::CatalogConsumer::new(track);
-		while let Some(catalog) = catalog.next().await? {
-			// Unfortunately we need to store the codec information on the heap.
-			let audio_codec = catalog
-				.audio
-				.renditions
-				.values()
-				.map(|config| config.codec.to_string())
-				.collect();
+		while let Some(mut group) = track.recv_group().await? {
+			// Read only the first frame per group (catalog doesn't support deltas yet)
+			if let Some(frame) = group.read_frame().await? {
+				let json: serde_json::Map<String, serde_json::Value> =
+					serde_json::from_slice(&frame).map_err(hang::Error::from)?;
 
-			let video_codec = catalog
-				.video
-				.renditions
-				.values()
-				.map(|config| config.codec.to_string())
-				.collect();
+				let video: hang::catalog::Video = json
+					.get("video")
+					.map(|v| serde_json::from_value(v.clone()))
+					.transpose()
+					.map_err(hang::Error::from)?
+					.unwrap_or_default();
 
-			let catalog = ConsumeCatalog {
-				broadcast: broadcast.clone(),
-				catalog,
-				audio_codec,
-				video_codec,
-			};
+				let audio: hang::catalog::Audio = json
+					.get("audio")
+					.map(|v| serde_json::from_value(v.clone()))
+					.transpose()
+					.map_err(hang::Error::from)?
+					.unwrap_or_default();
 
-			let mut state = State::lock();
+				// Unfortunately we need to store the codec information on the heap.
+				let audio_codec = audio
+					.renditions
+					.values()
+					.map(|config| config.codec.to_string())
+					.collect();
 
-			// Stop if the callback was revoked by close.
-			let Some(Some(entry)) = state.consume.catalog_task.get(task_id) else {
-				return Ok(());
-			};
-			let callback = entry.callback;
+				let video_codec = video
+					.renditions
+					.values()
+					.map(|config| config.codec.to_string())
+					.collect();
 
-			let snapshot_id = state.consume.catalog.insert(catalog)?;
-			drop(state);
+				let catalog = ConsumeCatalog {
+					broadcast: broadcast.clone(),
+					video,
+					audio,
+					audio_codec,
+					video_codec,
+				};
 
-			// The lock is dropped before the callback is invoked.
-			callback.call(Ok(snapshot_id));
+				let mut state = State::lock();
+
+				// Stop if the callback was revoked by close.
+				let Some(Some(entry)) = state.consume.catalog_task.get(task_id) else {
+					return Ok(());
+				};
+				let callback = entry.callback;
+
+				let snapshot_id = state.consume.catalog.insert(catalog)?;
+				drop(state);
+
+				// The lock is dropped before the callback is invoked.
+				callback.call(Ok(snapshot_id));
+			}
 		}
 
 		Ok(())
@@ -124,13 +143,7 @@ impl Consume {
 	pub fn video_config(&mut self, catalog: Id, index: usize, dst: &mut moq_video_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 
-		let (rendition, config) = consume
-			.catalog
-			.video
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
+		let (rendition, config) = consume.video.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
 		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
 
 		*dst = moq_video_config {
@@ -162,13 +175,7 @@ impl Consume {
 	pub fn audio_config(&mut self, catalog: Id, index: usize, dst: &mut moq_audio_config) -> Result<(), Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 
-		let (rendition, config) = consume
-			.catalog
-			.audio
-			.renditions
-			.iter()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
+		let (rendition, config) = consume.audio.renditions.iter().nth(index).ok_or(Error::NoIndex)?;
 		let codec = consume.audio_codec.get(index).ok_or(Error::NoIndex)?;
 
 		*dst = moq_audio_config {
@@ -212,13 +219,7 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let rendition = consume
-			.catalog
-			.video
-			.renditions
-			.keys()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
+		let rendition = consume.video.renditions.keys().nth(index).ok_or(Error::NoIndex)?;
 
 		let track = consume
 			.broadcast
@@ -254,13 +255,7 @@ impl Consume {
 		on_frame: OnStatus,
 	) -> Result<Id, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
-		let rendition = consume
-			.catalog
-			.audio
-			.renditions
-			.keys()
-			.nth(index)
-			.ok_or(Error::NoIndex)?;
+		let rendition = consume.audio.renditions.keys().nth(index).ok_or(Error::NoIndex)?;
 
 		let track = consume
 			.broadcast

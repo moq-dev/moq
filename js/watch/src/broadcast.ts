@@ -1,7 +1,8 @@
-import * as Catalog from "@moq/hang/catalog";
+import { AUDIO, type Audio, CatalogReader, PRIORITY, VIDEO, type Video } from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import { Path } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import { CHAT, type Chat, LOCATION, type Location, PREVIEW, type PreviewTrack, USER, type User } from "./sections";
 
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
@@ -33,8 +34,15 @@ export class Broadcast {
 	#active = new Signal<Moq.Broadcast | undefined>(undefined);
 	readonly active: Getter<Moq.Broadcast | undefined> = this.#active;
 
-	#catalog = new Signal<Catalog.Root | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Root | undefined> = this.#catalog;
+	// Per-section catalog getters
+	#catalogReader = new CatalogReader();
+
+	readonly video: Getter<Video | undefined>;
+	readonly audio: Getter<Audio | undefined>;
+	readonly chat: Getter<Chat | undefined>;
+	readonly user: Getter<User | undefined>;
+	readonly preview: Getter<PreviewTrack | undefined>;
+	readonly location: Getter<Location | undefined>;
 
 	// All actively announced broadcast paths from the connection.
 	#announced: Getter<Set<Moq.Path.Valid>>;
@@ -48,6 +56,14 @@ export class Broadcast {
 		this.reload = Signal.from(props?.reload ?? false);
 
 		this.#announced = props?.announced ?? new Signal(new Set());
+
+		// Register all known sections
+		this.video = this.#catalogReader.section(VIDEO);
+		this.audio = this.#catalogReader.section(AUDIO);
+		this.chat = this.#catalogReader.section(CHAT);
+		this.user = this.#catalogReader.section(USER);
+		this.preview = this.#catalogReader.section(PREVIEW);
+		this.location = this.#catalogReader.section(LOCATION);
 
 		this.signals.run(this.#runBroadcast.bind(this));
 		this.signals.run(this.#runCatalog.bind(this));
@@ -86,26 +102,28 @@ export class Broadcast {
 
 		this.status.set("loading");
 
-		const catalog = broadcast.subscribe("catalog.json", Catalog.PRIORITY.catalog);
+		const catalog = broadcast.subscribe("catalog.json", PRIORITY.catalog);
 		effect.cleanup(() => catalog.close());
 
-		effect.spawn(async () => {
-			try {
-				for (;;) {
-					const update = await Promise.race([effect.cancel, Catalog.fetch(catalog)]);
-					if (!update) break;
+		// Use CatalogReader to consume the catalog track and update per-section signals.
+		this.#catalogReader.consume(catalog, effect);
 
-					console.debug("received catalog", this.name.peek(), update);
+		// Track status based on whether any section has a value.
+		effect.run((inner) => {
+			const video = inner.get(this.video);
+			const audio = inner.get(this.audio);
+			const chat = inner.get(this.chat);
+			const user = inner.get(this.user);
+			const preview = inner.get(this.preview);
+			const location = inner.get(this.location);
 
-					this.#catalog.set(update);
-					this.status.set("live");
-				}
-			} catch (err) {
-				console.warn("error fetching catalog", this.name.peek(), err);
-			} finally {
-				this.#catalog.set(undefined);
-				this.status.set("offline");
+			if (video || audio || chat || user || preview || location) {
+				this.status.set("live");
 			}
+		});
+
+		effect.cleanup(() => {
+			this.status.set("offline");
 		});
 	}
 

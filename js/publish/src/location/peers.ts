@@ -1,21 +1,21 @@
-import * as Catalog from "@moq/hang/catalog";
+import { PRIORITY, type Track } from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
-import * as Zod from "@moq/lite/zod";
 import { Effect, Signal } from "@moq/signals";
+import type { Position } from "./types";
 
 export interface PeersProps {
 	enabled?: boolean | Signal<boolean>;
-	positions?: Record<string, Catalog.Position> | Signal<Record<string, Catalog.Position>>;
+	positions?: Record<string, Position> | Signal<Record<string, Position>>;
 }
 
 export class Peers {
 	static readonly TRACK = "location/peers.json";
-	static readonly PRIORITY = Catalog.PRIORITY.location;
+	static readonly PRIORITY = PRIORITY.location;
 
 	enabled: Signal<boolean>;
-	positions = new Signal<Record<string, Catalog.Position>>({});
+	positions = new Signal<Record<string, Position>>({});
 
-	catalog = new Signal<Catalog.Track | undefined>(undefined);
+	catalog = new Signal<Track | undefined>(undefined);
 	signals = new Effect();
 
 	constructor(props?: PeersProps) {
@@ -35,7 +35,7 @@ export class Peers {
 		if (!values) return;
 		const [_, positions] = values;
 
-		Zod.write(track, positions, Catalog.PeersSchema);
+		track.writeJson(positions);
 	}
 
 	close() {
