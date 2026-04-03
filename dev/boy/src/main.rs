@@ -15,9 +15,9 @@ pub struct Config {
     #[arg(long)]
     pub url: Url,
 
-    /// Path to the Game Boy ROM file. Defaults to the bundled Big2Small.
+    /// Path to the Game Boy ROM file.
     #[arg(long)]
-    pub rom: Option<PathBuf>,
+    pub rom: PathBuf,
 
     /// Session name (used in broadcast path: boy/{name}). Defaults to ROM filename.
     #[arg(long)]
@@ -37,12 +37,7 @@ pub struct Config {
 }
 
 async fn run(config: &Config) -> Result<()> {
-    let rom_path = config.rom.clone().unwrap_or_else(|| {
-        // Default to bundled ROM next to the binary or in the project dir.
-        let mut path = std::env::current_dir().unwrap_or_default();
-        path.push("roms/big2small.gb");
-        path
-    });
+    let rom_path = config.rom.clone();
 
     // Default name to ROM filename without extension.
     let name = config.name.clone().unwrap_or_else(|| {
