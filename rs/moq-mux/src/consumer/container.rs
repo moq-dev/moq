@@ -23,7 +23,6 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(#[from] moq_lite::Error),
 
-	#[cfg(feature = "mp4")]
 	#[error("mp4: {0}")]
 	Mp4(#[from] mp4_atom::Error),
 
@@ -44,12 +43,10 @@ impl ContainerFormat for Legacy {
 }
 
 /// CMAF format: parse moof tfdt for timestamp, return full moof+mdat unchanged.
-#[cfg(feature = "mp4")]
 pub struct Cmaf {
 	pub timescale: u64,
 }
 
-#[cfg(feature = "mp4")]
 #[derive(Debug, thiserror::Error)]
 pub enum CmafError {
 	#[error("mp4: {0}")]
@@ -68,7 +65,6 @@ pub enum CmafError {
 	NoMoof,
 }
 
-#[cfg(feature = "mp4")]
 impl From<CmafError> for Error {
 	fn from(e: CmafError) -> Self {
 		match e {
@@ -78,7 +74,6 @@ impl From<CmafError> for Error {
 	}
 }
 
-#[cfg(feature = "mp4")]
 impl ContainerFormat for Cmaf {
 	type Error = CmafError;
 

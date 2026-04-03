@@ -14,13 +14,16 @@ A media library built on top of `moq-lite` for streaming audio and video.
 - **Frame**: A timestamp and a codec payload pair.
 
 ## Supported Codecs
+
 We most of the implement the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#video-decoder-config).
 
 - **Video:** H.264, H.265, VP8, VP9, AV1
 - **Audio:** AAC, Opus
 
 ## CMAF Import
+
 For importing fMP4/CMAF/HLS files, see the `moq-mux` crate.
 
 ## Examples
+
 - [Publishing a video track](examples/video.rs)

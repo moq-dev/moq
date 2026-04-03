@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqBroadcastConsumer, MoqCatalogConsumer, MoqMediaConsumer
+from moq_ffi import Container, MoqBroadcastConsumer, MoqCatalogConsumer, MoqMediaConsumer
 
 from .types import Catalog, Frame
 
@@ -54,8 +54,8 @@ class BroadcastConsumer:
     def subscribe_catalog(self) -> CatalogConsumer:
         return CatalogConsumer(self._inner.subscribe_catalog())
 
-    def subscribe_media(self, name: str, max_latency_ms: int = 10_000) -> MediaConsumer:
-        return MediaConsumer(self._inner.subscribe_media(name, max_latency_ms))
+    def subscribe_media(self, name: str, container: Container, max_latency_ms: int) -> MediaConsumer:
+        return MediaConsumer(self._inner.subscribe_media(name, container, max_latency_ms))
 
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""

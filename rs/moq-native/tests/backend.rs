@@ -15,7 +15,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -68,11 +68,11 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 
 	assert_eq!(path.as_str(), "test");
 
-	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+	let mut subscriber = bc
+		.subscribe_track(&Track::new("video"), Default::default())
 		.expect("subscribe_track failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
@@ -136,7 +136,7 @@ async fn iroh_connect() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -219,11 +219,11 @@ async fn iroh_connect() {
 
 	assert_eq!(path.as_str(), "test");
 
-	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+	let mut subscriber = bc
+		.subscribe_track(&Track::new("video"), Default::default())
 		.expect("subscribe_track failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")

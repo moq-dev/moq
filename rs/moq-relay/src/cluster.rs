@@ -5,6 +5,10 @@ use moq_lite::{BroadcastConsumer, Origin, OriginId, OriginProducer};
 use tracing::Instrument;
 use url::Url;
 
+/// Configuration for relay clustering.
+///
+/// When a root URL and node name are both set, the relay joins a
+/// cluster by connecting to the root and advertising its own hostname.
 #[serde_with::serde_as]
 #[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[serde_with::skip_serializing_none]
@@ -53,6 +57,7 @@ impl Cluster {
 		Cluster { config, client, origin }
 	}
 
+	/// Looks up a broadcast by name across primary and secondary origins.
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
 		self.origin.consume().try_consume_broadcast(broadcast)
 	}

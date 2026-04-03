@@ -19,6 +19,7 @@ use super::Version;
 /// v14: own format (TrackStatusRequest-like with subscribe fields)
 /// v15: same wire format as SUBSCRIBE. Response is REQUEST_OK.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct TrackStatus<'a> {
 	pub request_id: RequestId,
 	pub track_namespace: Path<'a>,

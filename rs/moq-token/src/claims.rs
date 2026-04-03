@@ -1,25 +1,8 @@
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_with::{TimestampSeconds, serde_as};
+use serde::{Deserialize, Serialize};
+use serde_with::{OneOrMany, TimestampSeconds, formats::PreferMany, serde_as};
 
 fn is_false(value: &bool) -> bool {
 	!value
-}
-
-fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-	D: Deserializer<'de>,
-{
-	#[derive(Deserialize)]
-	#[serde(untagged)]
-	enum StringOrVec {
-		String(String),
-		Vec(Vec<String>),
-	}
-
-	match StringOrVec::deserialize(deserializer)? {
-		StringOrVec::String(s) => Ok(vec![s]),
-		StringOrVec::Vec(v) => Ok(v),
-	}
 }
 
 #[serde_with::skip_serializing_none]
@@ -34,12 +17,8 @@ pub struct Claims {
 
 	/// If specified, the user can publish any matching broadcasts.
 	/// If not specified, the user will not publish any broadcasts.
-	#[serde(
-		default,
-		rename = "put",
-		skip_serializing_if = "Vec::is_empty",
-		deserialize_with = "string_or_vec"
-	)]
+	#[serde(default, rename = "put", skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
 	pub publish: Vec<String>,
 
 	/// Deprecated: Previously used to mark cluster nodes.
@@ -51,12 +30,8 @@ pub struct Claims {
 	/// If specified, the user can subscribe to any matching broadcasts.
 	/// If not specified, the user will not receive announcements and cannot subscribe to any broadcasts.
 	// NOTE: This can't be renamed to "sub" because that's a reserved JWT field.
-	#[serde(
-		default,
-		rename = "get",
-		skip_serializing_if = "Vec::is_empty",
-		deserialize_with = "string_or_vec"
-	)]
+	#[serde(default, rename = "get", skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
 	pub subscribe: Vec<String>,
 
 	/// The expiration time of the token as a unix timestamp.
@@ -71,9 +46,9 @@ pub struct Claims {
 }
 
 impl Claims {
-	pub fn validate(&self) -> anyhow::Result<()> {
+	pub fn validate(&self) -> crate::Result<()> {
 		if self.publish.is_empty() && self.subscribe.is_empty() {
-			anyhow::bail!("no publish or subscribe allowed; token is useless");
+			return Err(crate::Error::UselessToken);
 		}
 
 		Ok(())

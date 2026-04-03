@@ -42,7 +42,7 @@ impl Subscribe {
 		let converter = moq_mux::cmaf::Convert::new(self.broadcast, cmaf_output);
 
 		// Subscribe to the catalog before the converter starts, so we don't miss it.
-		let catalog_track = cmaf_consumer.subscribe_track(&hang::catalog::default_track())?;
+		let catalog_track = cmaf_consumer.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
 
 		let max_latency = std::time::Duration::from_millis(self.args.max_latency);
 
@@ -55,7 +55,7 @@ impl Subscribe {
 }
 
 async fn mux_fmp4(
-	catalog_track: moq_lite::TrackConsumer,
+	catalog_track: moq_lite::TrackSubscriber,
 	cmaf_consumer: moq_lite::BroadcastConsumer,
 	max_latency: std::time::Duration,
 ) -> anyhow::Result<()> {
@@ -90,7 +90,7 @@ async fn mux_fmp4(
 		let track = cmaf_consumer.subscribe_track(&moq_lite::Track {
 			name: name.clone(),
 			priority: 1,
-		})?;
+		}, moq_lite::Subscription::default())?;
 
 		let timescale = match &config.container {
 			hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
@@ -108,7 +108,7 @@ async fn mux_fmp4(
 		let track = cmaf_consumer.subscribe_track(&moq_lite::Track {
 			name: name.clone(),
 			priority: 2,
-		})?;
+		}, moq_lite::Subscription::default())?;
 
 		let timescale = match &config.container {
 			hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,

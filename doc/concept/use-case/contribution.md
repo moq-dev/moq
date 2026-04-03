@@ -4,6 +4,7 @@ description: How MoQ compares to contribution protocols like RTMP and SRT
 ---
 
 # MoQ vs RTMP/SRT
+
 This page compares MoQ with traditional **contribution protocols** like RTMP and SRT.
 
 **WARNING**: I have the least experience with contribution protocols.
@@ -11,13 +12,16 @@ I did read the SRT specification once and it made me very sad.
 Take everything with a grain of salt.
 
 ## Requirements
+
 Okay the boring stuff first.
 Contribution protocols need to:
+
 - Publish from a client to a server
 - Integrate with encoders and other media sources (ex. OBS)
 - Support a wide range of devices
 
 Some optional features:
+
 - Support browsers
 - Support modern codecs (looking at you, RTMP)
 - Support ad signaling 🤮
@@ -27,8 +31,10 @@ Some optional features:
 - Support simulcast (multiple renditions)
 
 ## Use-Cases
+
 There's a lot of optional features for contribution protocols.
 I would generalize this into two camps:
+
 1. User generated content (ex. YouTube/Twitch/Facebook)
 2. Studio generated content (ex. SportsBall)
 
@@ -44,6 +50,7 @@ This is an over-generalization of course.
 HUMOR ME.
 
 ## Existing Protocols
+
 - **RTMP** ([Real-Time Messaging Protocol](https://en.wikipedia.org/wiki/Real-Time_Messaging_Protocol)) - The classic Flash-era protocol
 - **SRT** ([Secure Reliable Transport](https://en.wikipedia.org/wiki/Secure_Reliable_Transport)) - Modern "low-latency" alternative
 - **E-RTMP** ([Enhanced RTMP](https://en.wikipedia.org/wiki/Real-Time_Messaging_Protocol#Enhanced_RTMP)) - Modernized version of RTMP
@@ -54,6 +61,7 @@ User-generated content (YouTube/Twitch/Facebook) primarily uses RTMP.
 Studio-generated content primarily uses SRT.
 
 ## Pull vs Push
+
 Existing contribution protocols are push-based.
 Even Youtube's weird HLS ingest thing operates via POST requests.
 
@@ -61,6 +69,7 @@ However, MoQ is fundamentally a pull-based protocol.
 Technically, MoqTransport supports push too (via PUBLISH), but hear me out for a second.
 
 ### The Push Problem
+
 I would say there is one major problem with push: **Nothing is optional.**
 
 When a publisher creates multiple tracks, like 360p and 1080p, it needs to simultaneously encode and transmit both tracks.
@@ -75,6 +84,7 @@ We might be able to afford uploading 360p for every camera (recording to disk), 
 Ideally, we could only stream 1080p from individual cameras when a human wants a closer look...
 
 ### The Pull Solution
+
 The first thing a MoQ viewer does is subscribe to the `catalog.json` track for a broadcast.
 This lists all of the available tracks and their properties.
 
@@ -91,6 +101,7 @@ If nobody currently wants the 1080p track, then don't transcode it.
 The "publisher" in this case is any entity that understands the media format on top of MoQ.
 
 ## Multiple Connections
+
 Another issue with push-based protocols is that each connection is expensive.
 If every connection needs its own copy of the content, we quickly run out of bandwidth.
 Redundant ingest is mostly limited to large events that have bandwidth to spare (active-active).
@@ -114,6 +125,7 @@ This works because the client discovers all available broadcasts available on a 
 If two connections can serve the same content, the subscription goes to the "best" connection (ie. P2P > CDN).
 
 ## Economies of Scale
+
 A subtle problem with contribution protocols is that they're not used for distribution.
 
 This might be silly: "of course distribution and contribution are different!"

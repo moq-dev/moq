@@ -21,7 +21,10 @@ listen = "[::]:4445"
 # `connect` can be an array to connect to multiple peers, creating a tiered CDN.
 [cluster]
 connect = "localhost:4443"
-token = "dev/root.jwt"
+
+# Use the token in this file when connecting to other nodes.
+# `just auth-token` will populate this file.
+token = "root.jwt"
 
 [client]
 # QUIC uses TLS to have the client verify the server's identity.
@@ -41,7 +44,7 @@ tls.disable_verify = true
 
 [auth]
 # `just auth-key` will populate this file.
-key = "dev/root.jwk"
+key = "dev.jwk"
 
 # Allow anonymous publishing and subscribing for this prefix.
 public = "anon"

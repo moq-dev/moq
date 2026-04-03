@@ -3,6 +3,7 @@ import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as GoAway from "./goaway.ts";
+import * as Namespace from "./namespace.ts";
 import { SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
@@ -748,4 +749,88 @@ test("TrackStatusRequest v17: round trip with requiredRequestIdDelta", async () 
 	expect(decoded.requestId).toBe(3n);
 	expect(decoded.trackNamespace).toBe("live" as Path.Valid);
 	expect(decoded.trackName).toBe("data");
+});
+
+// --- Namespace encoding tests ---
+
+// Helper to encode a namespace to raw bytes
+async function encodeNamespace(namespace: Path.Valid): Promise<Uint8Array> {
+	const { stream, written } = createTestWritableStream();
+	const writer = new Writer(stream);
+	await Namespace.encode(writer, namespace);
+	writer.close();
+	await writer.closed;
+	return concatChunks(written);
+}
+
+// Helper to decode a namespace from raw bytes
+async function decodeNamespace(bytes: Uint8Array): Promise<Path.Valid> {
+	const reader = new Reader(undefined, bytes);
+	return await Namespace.decode(reader);
+}
+
+test("Namespace: empty encodes as zero-length tuple", async () => {
+	const bytes = await encodeNamespace(Path.empty());
+
+	// Should be a single byte: varint 0 (zero parts)
+	expect(bytes).toEqual(new Uint8Array([0x00]));
+});
+
+test("Namespace: empty round trip", async () => {
+	const encoded = await encodeNamespace(Path.empty());
+	const decoded = await decodeNamespace(encoded);
+
+	expect(decoded).toBe("" as Path.Valid);
+});
+
+test("Namespace: single part round trip", async () => {
+	const encoded = await encodeNamespace(Path.from("test"));
+	const decoded = await decodeNamespace(encoded);
+
+	expect(decoded).toBe("test" as Path.Valid);
+});
+
+test("Namespace: single part encodes as one-length tuple", async () => {
+	const bytes = await encodeNamespace(Path.from("test"));
+
+	// varint 1 (one part), then length-prefixed "test"
+	expect(bytes[0]).toBe(0x01);
+});
+
+test("Namespace: multi-part round trip", async () => {
+	const encoded = await encodeNamespace(Path.from("conference/room/123"));
+	const decoded = await decodeNamespace(encoded);
+
+	expect(decoded).toBe("conference/room/123" as Path.Valid);
+});
+
+test("Namespace: multi-part encodes correct count", async () => {
+	const bytes = await encodeNamespace(Path.from("a/b/c"));
+
+	// First byte should be varint 3 (three parts)
+	expect(bytes[0]).toBe(0x03);
+});
+
+test("Namespace: Subscribe with empty namespace round trip", async () => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.empty(),
+		trackName: "video",
+		subscriberPriority: 128,
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, Version.DRAFT_17);
+
+	expect(decoded.trackNamespace).toBe("" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+});
+
+test("Namespace: PublishNamespace with empty namespace round trip", async () => {
+	const msg = new Announce.PublishNamespace({ requestId: 1n, trackNamespace: Path.empty() });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_17);
+	const decoded = await decodeVersioned(encoded, Announce.PublishNamespace.decode, Version.DRAFT_17);
+
+	expect(decoded.trackNamespace).toBe("" as Path.Valid);
 });

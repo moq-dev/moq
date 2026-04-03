@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.7](https://github.com/moq-dev/moq/compare/moq-native-v0.13.6...moq-native-v0.13.7) - 2026-04-03
+
+### Other
+
+- Add moq-relay release workflow and Nix cache configuration ([#1178](https://github.com/moq-dev/moq/pull/1178))
+- Update dependencies including breaking changes ([#1175](https://github.com/moq-dev/moq/pull/1175))
+
 ## [0.13.6](https://github.com/moq-dev/moq/compare/moq-native-v0.13.5...moq-native-v0.13.6) - 2026-03-18
 
 ### Other

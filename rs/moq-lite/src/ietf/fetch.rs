@@ -288,6 +288,7 @@ impl Message for FetchError<'_> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct FetchCancel {
 	pub request_id: RequestId,
 }

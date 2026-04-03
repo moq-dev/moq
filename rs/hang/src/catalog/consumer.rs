@@ -19,8 +19,8 @@ pub fn default_track() -> moq_lite::Track {
 /// A catalog consumer that reads JSON frames from a MoQ track and
 /// feeds them into a `CatalogReader` for per-section change notification.
 pub struct CatalogConsumer {
-	/// Access to the underlying track consumer.
-	pub track: moq_lite::TrackConsumer,
+	/// Access to the underlying track subscriber.
+	pub track: moq_lite::TrackSubscriber,
 
 	/// The reader that distributes per-section updates.
 	reader: CatalogReader,
@@ -29,8 +29,8 @@ pub struct CatalogConsumer {
 }
 
 impl CatalogConsumer {
-	/// Create a new catalog consumer from a MoQ track consumer.
-	pub fn new(track: moq_lite::TrackConsumer) -> Self {
+	/// Create a new catalog consumer from a MoQ track subscriber.
+	pub fn new(track: moq_lite::TrackSubscriber) -> Self {
 		Self {
 			track,
 			reader: CatalogReader::new(),
@@ -80,8 +80,8 @@ impl CatalogConsumer {
 	}
 }
 
-impl From<moq_lite::TrackConsumer> for CatalogConsumer {
-	fn from(inner: moq_lite::TrackConsumer) -> Self {
+impl From<moq_lite::TrackSubscriber> for CatalogConsumer {
+	fn from(inner: moq_lite::TrackSubscriber) -> Self {
 		Self::new(inner)
 	}
 }

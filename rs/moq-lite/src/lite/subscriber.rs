@@ -1,6 +1,7 @@
 use std::{
 	collections::{HashMap, hash_map::Entry},
 	sync::{Arc, atomic},
+	time::Duration,
 };
 
 use crate::{
@@ -124,7 +125,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 
 					// Abort the producer.
-					let mut producer = producers.remove(&path.into_owned()).ok_or(Error::NotFound)?;
+					let producer = producers.remove(&path.into_owned()).ok_or(Error::UnknownBroadcast)?;
 					producer.abort(Error::Cancel).ok();
 				}
 			}
@@ -174,8 +175,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
 			let track = tokio::select! {
-				producer = broadcast.requested_track() => match producer {
-					Ok(producer) => producer,
+				track = broadcast.requested_track() => match track {
+					Ok(track) => track,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
 						break;
@@ -195,21 +196,23 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer) {
+	async fn run_subscribe(&mut self, id: u64, broadcast_path: Path<'_>, mut track: TrackProducer) {
+		let track_name = track.info.name.clone();
+
 		self.subscribes.lock().insert(id, track.clone());
 
 		let msg = lite::Subscribe {
 			id,
-			broadcast: broadcast.to_owned(),
+			broadcast: broadcast_path.to_owned(),
 			track: (&track.info.name).into(),
-			priority: track.info.priority,
-			ordered: true,
-			max_latency: std::time::Duration::ZERO,
+			priority: 0,
+			ordered: false,
+			max_latency: Duration::ZERO,
 			start_group: None,
 			end_group: None,
 		};
 
-		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe started");
+		tracing::info!(id, broadcast = %self.log_path(&broadcast_path), track = %track_name, "subscribe started");
 
 		let res = tokio::select! {
 			_ = track.unused() => Err(Error::Cancel),
@@ -218,15 +221,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe cancelled");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast_path), track = %track_name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
 			Err(err) => {
-				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, %err, "subscribe error");
+				tracing::warn!(id, broadcast = %self.log_path(&broadcast_path), track = %track_name, %err, "subscribe error");
 				let _ = track.abort(err);
 			}
 			_ => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe complete");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast_path), track = %track_name, "subscribe complete");
 				let _ = track.finish();
 			}
 		}

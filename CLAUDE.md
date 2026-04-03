@@ -7,6 +7,7 @@ This file provides guidance for AI coding agents when working with code in this 
 MoQ (Media over QUIC) is a next-generation live media delivery protocol providing real-time latency at massive scale. It's a polyglot monorepo with Rust (server/native) and TypeScript/JavaScript (browser) implementations.
 
 ## Common Development Commands
+
 ```bash
 # Code quality and testing
 just check        # Run all tests and linting
@@ -23,18 +24,17 @@ The project contains multiple layers of protocols:
 1. **quic** - Does all the networking.
 2. **web-transport** - A small layer on top of QUIC/HTTP3 for browser support. Provided by the browser or the `web-transport` crates.
 3. **moq-lite** - A generic pub/sub protocol on top of `web-transport` implemented by CDNs, splitting content into:
-    - broadcast: a collection of tracks produced by a publisher
-    - track: a live stream of groups within a broadcast.
-    - group: a live stream of frames within a track, each delivered independently over a QUIC stream.
-    - frame: a sized payload of bytes.
+   - broadcast: a collection of tracks produced by a publisher
+   - track: a live stream of groups within a broadcast.
+   - group: a live stream of frames within a track, each delivered independently over a QUIC stream.
+   - frame: a sized payload of bytes.
 4. **hang** - Media-specific encoding/decoding on top of `moq-lite`. Contains:
-    - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
-    - container: each frame consists of a timestamp and codec bitstream
-    - watch/publish: dedicated packages for subscribing/publishing with optional SolidJS UI overlays
+   - catalog: a JSON track containing a description of other tracks and their properties (for WebCodecs).
+   - container: each frame consists of a timestamp and codec bitstream
+   - watch/publish: dedicated packages for subscribing/publishing with optional SolidJS UI overlays
 5. **application** - Users building on top of `moq-lite` or `hang`
 
 Key architectural rule: The CDN/relay does not know anything about media. Anything in the `moq` layer should be generic, using rules on the wire on how to deliver content.
-
 
 ## Project Structure
 
@@ -60,13 +60,22 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   ui-core/           # Shared UI components (published as @moq/ui-core)
   watch/             # Watch/subscribe to streams + UI (published as @moq/watch)
   publish/           # Publish media to streams + UI (published as @moq/publish)
-  demo/              # Demo applications
+
+/dev/                 # Development config, demos, and test media
+  relay/             # Relay server configs (relay.toml, root.toml, leaf*.toml)
+  media/             # Test media files (gitignored)
+  web/               # Web demo (watch/publish examples)
+  drone/             # Drone demo (Rust publisher + TS viewer)
+  throttle/          # Network throttle script for testing
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
   spec/              # Raw IETF specification texts (drafts for moq-transport and moq-lite)
-/dev/                 # Development config and test media files
 /cdn/                 # CDN infrastructure (Terraform)
 ```
+
+## Dependencies
+
+- When adding new dependencies, always use the **newest stable version** available.
 
 ## Development Tips
 
@@ -86,6 +95,11 @@ match version {
     _ => { /* newest/draft-17 behavior */ }
 }
 ```
+
+## Rust Conventions
+
+- **Error handling**: Use `thiserror` with `#[from]` for library crates, `anyhow` for binaries. Always add `#[non_exhaustive]` to public `thiserror` enums.
+- Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
 
 ## Tooling
 
@@ -115,6 +129,7 @@ match version {
 ## Workflow
 
 When making changes to the codebase:
+
 1. Make your code changes
 2. Run `just fix` to auto-format and fix linting issues
 3. Run `just check` to verify everything passes

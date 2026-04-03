@@ -1,8 +1,18 @@
 import * as base64 from "@hexagon/base64";
 import * as jose from "jose";
-import { z } from "zod";
+import * as z from "zod/mini";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
-import { type Claims, ClaimsSchema, validateClaims } from "./claims.ts";
+import { type Claims, ClaimsSchema } from "./claims.ts";
+
+/**
+ * A validated key identifier (kid). Only alphanumeric, hyphens, and underscores.
+ */
+export const KeyIdSchema = z.string().check(
+	z.refine((value) => /^[A-Za-z0-9_-]+$/.test(value), {
+		message: "Key ID must contain only alphanumeric characters, hyphens, and underscores",
+	}),
+);
+export type KeyId = z.infer<typeof KeyIdSchema>;
 
 /**
  * Key operations that can be performed
@@ -18,77 +28,97 @@ const EC_ALGORITHM_TO_CURVE: Record<"ES256" | "ES384", "P-256" | "P-384"> = {
 	ES384: "P-384",
 };
 
-const Base64FieldSchema = z
-	.string()
-	.min(1)
-	.refine((value) => decodeBase64Flexible(value) !== null, {
+const Base64FieldSchema = z.string().check(
+	z.minLength(1),
+	z.refine((value) => decodeBase64Flexible(value) !== null, {
 		message: "Field must be valid base64url data",
-	});
+	}),
+);
+
+const StringOrArray = z._default(
+	z.union([
+		z.pipe(
+			z.string(),
+			z.transform((s) => [s]),
+		),
+		z.array(z.string()),
+	]),
+	[],
+);
 
 const BaseKeySchema = z.object({
 	alg: AlgorithmSchema,
-	key_ops: z.array(OperationSchema).nonempty(),
-	kid: z.string().optional(),
+	key_ops: z.array(OperationSchema).check(z.minLength(1)),
+	kid: z.optional(KeyIdSchema),
+	guest: StringOrArray,
+	guest_sub: StringOrArray,
+	guest_pub: StringOrArray,
 });
 
-const OctKeySchema = BaseKeySchema.extend({
+const OctKeySchema = z.extend(BaseKeySchema, {
 	kty: z.literal("oct"),
-	k: Base64FieldSchema.refine(
-		(secret) => {
-			// Validate minimum length (at least 32 bytes when decoded)
-			const decoded = decodeBase64Flexible(secret);
-			return decoded && decoded.byteLength >= MIN_HMAC_SECRET_BYTES;
-		},
-		{
-			message: `Secret must be at least ${MIN_HMAC_SECRET_BYTES} bytes when decoded`,
-		},
+	k: Base64FieldSchema.check(
+		z.refine(
+			(secret) => {
+				// Validate minimum length (at least 32 bytes when decoded)
+				const decoded = decodeBase64Flexible(secret);
+				return decoded && decoded.byteLength >= MIN_HMAC_SECRET_BYTES;
+			},
+			{
+				message: `Secret must be at least ${MIN_HMAC_SECRET_BYTES} bytes when decoded`,
+			},
+		),
 	),
 });
 
-const LegacyOctKeySchema = BaseKeySchema.extend({
+const LegacyOctKeySchema = z.extend(BaseKeySchema, {
 	k: Base64FieldSchema,
-	kty: z.undefined().optional(),
+	kty: z.optional(z.undefined()),
 });
 
-const RsaKeySchema = BaseKeySchema.extend({
-	kty: z.literal("RSA"),
-	n: Base64FieldSchema,
-	e: Base64FieldSchema,
-	d: Base64FieldSchema.optional(),
-	p: Base64FieldSchema.optional(),
-	q: Base64FieldSchema.optional(),
-	dp: Base64FieldSchema.optional(),
-	dq: Base64FieldSchema.optional(),
-	qi: Base64FieldSchema.optional(),
-}).superRefine((data, ctx) => {
-	// The RFC requires only d, the others are only required as soon as one is present
-	// https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2
-	// But WebCrypto requires all parameters to be present for private keys
-	const privFields = ["d", "p", "q", "dp", "dq", "qi"] as const;
+const RsaKeySchema = z
+	.extend(BaseKeySchema, {
+		kty: z.literal("RSA"),
+		n: Base64FieldSchema,
+		e: Base64FieldSchema,
+		d: z.optional(Base64FieldSchema),
+		p: z.optional(Base64FieldSchema),
+		q: z.optional(Base64FieldSchema),
+		dp: z.optional(Base64FieldSchema),
+		dq: z.optional(Base64FieldSchema),
+		qi: z.optional(Base64FieldSchema),
+	})
+	.check(
+		z.superRefine((data, ctx) => {
+			// The RFC requires only d, the others are only required as soon as one is present
+			// https://datatracker.ietf.org/doc/html/rfc7518#section-6.3.2
+			// But WebCrypto requires all parameters to be present for private keys
+			const privFields = ["d", "p", "q", "dp", "dq", "qi"] as const;
 
-	const present = privFields.filter((f) => data[f] !== undefined);
+			const present = privFields.filter((f) => data[f] !== undefined);
 
-	if (present.length > 0 && present.length < privFields.length) {
-		ctx.addIssue({
-			code: "custom",
-			message: "If any private RSA fields are present, all private RSA fields must be present.",
-		});
-	}
-});
+			if (present.length > 0 && present.length < privFields.length) {
+				ctx.addIssue({
+					code: "custom",
+					message: "If any private RSA fields are present, all private RSA fields must be present.",
+				});
+			}
+		}),
+	);
 
-const EcKeySchema = BaseKeySchema.extend({
+const EcKeySchema = z.extend(BaseKeySchema, {
 	kty: z.literal("EC"),
 	crv: z.enum(["P-256", "P-384"]),
 	x: Base64FieldSchema,
 	y: Base64FieldSchema,
-	d: Base64FieldSchema.optional(),
+	d: z.optional(Base64FieldSchema),
 });
 
-const OkpKeySchema = BaseKeySchema.extend({
+const OkpKeySchema = z.extend(BaseKeySchema, {
 	kty: z.literal("OKP"),
 	crv: z.literal("Ed25519"),
 	x: Base64FieldSchema,
-	d: Base64FieldSchema.optional(),
+	d: z.optional(Base64FieldSchema),
 });
 
 const CanonicalKeySchema = z.discriminatedUnion("kty", [OctKeySchema, RsaKeySchema, EcKeySchema, OkpKeySchema]);
@@ -138,17 +168,28 @@ export function loadPublic(jwk: string): PublicKey {
 }
 
 function loadKey(jwk: string): Key | PublicKey {
-	const decoded = decodeBase64Flexible(jwk.trim());
-	if (!decoded) {
-		throw new Error("Failed to decode JWK: invalid base64url encoding");
-	}
+	const trimmed = jwk.trim();
 
 	let data: unknown;
-	try {
-		const jsonString = new TextDecoder().decode(decoded);
-		data = JSON.parse(jsonString);
-	} catch {
-		throw new Error("Failed to parse JWK: invalid JSON format");
+	if (trimmed.startsWith("{")) {
+		// Plain JSON
+		try {
+			data = JSON.parse(trimmed);
+		} catch {
+			throw new Error("Failed to parse JWK: invalid JSON format");
+		}
+	} else {
+		// Base64url encoded JSON
+		const decoded = decodeBase64Flexible(trimmed);
+		if (!decoded) {
+			throw new Error("Failed to decode JWK: invalid base64url encoding");
+		}
+		try {
+			const jsonString = new TextDecoder().decode(decoded);
+			data = JSON.parse(jsonString);
+		} catch {
+			throw new Error("Failed to parse JWK: invalid JSON format after base64url decode");
+		}
 	}
 
 	const key = parseKeyWithLegacyFallback(data);
@@ -168,7 +209,6 @@ export async function sign(key: Key, claims: Claims): Promise<string> {
 	// Validate claims before signing
 	try {
 		ClaimsSchema.parse(claims);
-		validateClaims(claims);
 	} catch (error) {
 		throw new Error(`Invalid claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
@@ -204,9 +244,6 @@ export async function verify(key: PublicKey | SymmetricKey, token: string, path:
 	if (claims.root !== path) {
 		throw new Error("Token path does not match provided path");
 	}
-
-	// Validate claims structure and business rules
-	validateClaims(claims);
 
 	return claims;
 }

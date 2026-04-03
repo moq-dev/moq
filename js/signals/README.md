@@ -4,11 +4,13 @@ Reactive signals with explicit tracking.
 No magic or footguns.
 
 ## Usage
+
 ```sh
 bun add @moq/signals
 ```
 
 ### Signal
+
 A `Signal` holds a reactive value.
 
 ```ts
@@ -28,6 +30,7 @@ The old and new values are then compared with deep equality ([dequal](https://gi
 It's possible to skip this check, but please benchmark it first...
 
 ### Effect
+
 An `Effect` is a reactive scope.
 It re-runs whenever a tracked signal changes.
 
@@ -50,6 +53,7 @@ The key difference from other libraries: **`effect.get(signal)` is what subscrib
 If you just want to read without tracking, use `signal.peek()` directly.
 
 ### effect.cleanup
+
 Run a cleanup function when the effect reruns or closes.
 
 ```ts
@@ -64,6 +68,7 @@ const effect = new Effect((effect) => {
 ```
 
 ### effect.run
+
 Create a nested effect that can be rerun independently.
 It will be closed when the parent effect reruns or closes.
 
@@ -86,6 +91,7 @@ age.set(21); // only the nested effect reruns: "You are 21 years old!"
 ```
 
 ### effect.abort
+
 An `AbortSignal` that is aborted when the effect reruns or closes.
 Pass it to any API that accepts an `AbortSignal` — `fetch`, `addEventListener`, streams, etc.
 

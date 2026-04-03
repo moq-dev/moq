@@ -1,31 +1,21 @@
-import { z } from "zod";
+import * as z from "zod/mini";
 
 export const ClaimsSchema = z
 	.object({
 		root: z.string(),
-		put: z.union([z.string(), z.array(z.string())]).optional(),
-		cluster: z.boolean().optional(),
-		get: z.union([z.string(), z.array(z.string())]).optional(),
-		exp: z.number().optional(),
-		iat: z.number().optional(),
+		put: z.optional(z.union([z.string(), z.array(z.string())])),
+		cluster: z.optional(z.boolean()),
+		get: z.optional(z.union([z.string(), z.array(z.string())])),
+		exp: z.optional(z.number()),
+		iat: z.optional(z.number()),
 	})
-	.refine((data) => data.put || data.get, {
-		message: "Either put or get must be specified",
-	});
+	.check(
+		z.refine((data) => data.put !== undefined || data.get !== undefined, {
+			message: "Either put or get must be specified",
+		}),
+	);
 
 /**
  * JWT claims structure for moq-token
  */
 export type Claims = z.infer<typeof ClaimsSchema>;
-
-/**
- * Validate claims structure and business rules
- */
-export function validateClaims(claims: Claims): void {
-	if (!claims.put && !claims.get) {
-		throw new Error("no put or get paths specified; token is useless");
-	}
-}
-
-// Export with lowercase for backward compatibility
-export const claimsSchema = ClaimsSchema;

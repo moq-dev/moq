@@ -13,12 +13,15 @@ Shared UI components for [Media over QUIC](https://moq.dev/) (MoQ) packages.
 ## Components
 
 ### Button
+
 A styled, accessible button component with hover/active states and disabled support.
 
 ### Icon
+
 SVG icon library including media controls (play, pause, volume, fullscreen, etc.), device indicators (camera, microphone, screen), and stats icons (network, video, audio, buffer).
 
 ### Stats
+
 Real-time statistics panel for monitoring media streaming performance. Displays network, video, audio, and buffer metrics via a provider pattern.
 
 ## CSS
@@ -34,5 +37,5 @@ Shared stylesheets are available as CSS imports:
 
 Licensed under either:
 
--   Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
--   MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)

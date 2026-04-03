@@ -25,42 +25,32 @@ impl Convert {
 	/// each frame to moof+mdat.
 	pub async fn run(self) -> anyhow::Result<()> {
 		let input = self.input;
-		let mut broadcast = self.output;
-		let mut catalog_producer = crate::CatalogProducer::new(&mut broadcast)?;
+		let broadcast = self.output;
+		let mut catalog_producer = crate::CatalogProducer::new(&broadcast)?;
 
-		let mut catalog_track = input.subscribe_track(&hang::catalog::default_track())?;
+		let catalog_track = input.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
 
-		// Read the first catalog group/frame directly
-		let mut group = catalog_track
-			.recv_group()
-			.await?
-			.context("catalog track closed before first group")?;
-		let frame = group
-			.read_frame()
-			.await?
-			.context("catalog group closed before first frame")?;
+		let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
+		let video_section = catalog_consumer.reader().section(&VIDEO);
+		let audio_section = catalog_consumer.reader().section(&AUDIO);
 
-		let json: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&frame)?;
+		// Run until first catalog update
+		tokio::select! {
+			res = catalog_consumer.run() => { res?; anyhow::bail!("catalog closed before first update"); },
+			_ = video_section.changed() => {},
+			_ = audio_section.changed() => {},
+		}
 
-		let video: Video = json
-			.get("video")
-			.map(|v| serde_json::from_value(v.clone()))
-			.transpose()?
-			.unwrap_or_default();
+		let video = video_section.get()?.unwrap_or_default();
+		let audio = audio_section.get()?.unwrap_or_default();
 
-		let audio: Audio = json
-			.get("audio")
-			.map(|v| serde_json::from_value(v.clone()))
-			.transpose()?
-			.unwrap_or_default();
-
-		run_with_catalog(&input, &mut broadcast, &mut catalog_producer, &video, &audio).await
+		run_with_catalog(&input, &broadcast, &mut catalog_producer, &video, &audio).await
 	}
 }
 
 async fn run_with_catalog(
 	input: &moq_lite::BroadcastConsumer,
-	broadcast: &mut moq_lite::BroadcastProducer,
+	broadcast: &moq_lite::BroadcastProducer,
 	catalog_producer: &mut crate::CatalogProducer,
 	video: &Video,
 	audio: &Audio,
@@ -73,7 +63,7 @@ async fn run_with_catalog(
 		let input_track = input.subscribe_track(&moq_lite::Track {
 			name: name.clone(),
 			priority: 1,
-		})?;
+		}, moq_lite::Subscription::default())?;
 
 		match &config.container {
 			Container::Cmaf { .. } => {
@@ -118,7 +108,7 @@ async fn run_with_catalog(
 		let input_track = input.subscribe_track(&moq_lite::Track {
 			name: name.clone(),
 			priority: 2,
-		})?;
+		}, moq_lite::Subscription::default())?;
 
 		match &config.container {
 			Container::Cmaf { .. } => {
@@ -171,7 +161,7 @@ async fn run_with_catalog(
 }
 
 async fn passthrough_track(
-	mut input: moq_lite::TrackConsumer,
+	mut input: moq_lite::TrackSubscriber,
 	mut output: moq_lite::TrackProducer,
 ) -> anyhow::Result<()> {
 	while let Some(group) = input.recv_group().await? {
@@ -187,7 +177,7 @@ async fn passthrough_track(
 }
 
 async fn convert_legacy_to_cmaf(
-	input: moq_lite::TrackConsumer,
+	input: moq_lite::TrackSubscriber,
 	mut output: moq_lite::TrackProducer,
 	timescale: u64,
 	is_video: bool,
@@ -611,7 +601,7 @@ pub(crate) mod test {
 		moq_lite::BroadcastProducer,
 		moq_lite::TrackProducer,
 	) {
-		let mut broadcast = moq_lite::Broadcast::new().produce();
+		let broadcast = moq_lite::Broadcast::new().produce();
 
 		let mut catalog_track = broadcast.create_track(hang::catalog::default_track()).unwrap();
 		let mut video = hang::catalog::Video::default();
@@ -685,7 +675,7 @@ pub(crate) mod test {
 		track.finish().unwrap();
 	}
 
-	pub(crate) async fn read_legacy_frames(track: moq_lite::TrackConsumer) -> Vec<(Timestamp, Vec<u8>, bool)> {
+	pub(crate) async fn read_legacy_frames(track: moq_lite::TrackSubscriber) -> Vec<(Timestamp, Vec<u8>, bool)> {
 		let mut ordered = crate::consumer::OrderedConsumer::new(track, crate::consumer::Legacy, Duration::MAX);
 
 		let mut result = Vec::new();
@@ -702,7 +692,7 @@ pub(crate) mod test {
 		result
 	}
 
-	pub(crate) async fn read_cmaf_raw_frames(mut track: moq_lite::TrackConsumer) -> Vec<Bytes> {
+	pub(crate) async fn read_cmaf_raw_frames(mut track: moq_lite::TrackSubscriber) -> Vec<Bytes> {
 		let mut result = Vec::new();
 		while let Some(group) = tokio::time::timeout(Duration::from_millis(500), track.recv_group())
 			.await
@@ -745,13 +735,13 @@ pub(crate) mod test {
 		(timestamp, mdat.data.clone(), keyframe)
 	}
 
-	pub(crate) async fn subscribe_video(consumer: &moq_lite::BroadcastConsumer) -> moq_lite::TrackConsumer {
+	pub(crate) async fn subscribe_video(consumer: &moq_lite::BroadcastConsumer) -> moq_lite::TrackSubscriber {
 		let track = moq_lite::Track {
 			name: "video".to_string(),
 			priority: 1,
 		};
 		loop {
-			match consumer.subscribe_track(&track) {
+			match consumer.subscribe_track(&track, moq_lite::Subscription::default()) {
 				Ok(t) => return t,
 				Err(_) => tokio::task::yield_now().await,
 			}
@@ -852,12 +842,12 @@ pub(crate) mod test {
 
 		let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&config);
 
-		// Legacy → CMAF
+		// Legacy -> CMAF
 		let cmaf_output = moq_lite::Broadcast::new().produce();
 		let cmaf_consumer = cmaf_output.consume();
 		let fmp4_converter = super::Convert::new(consumer, cmaf_output);
 
-		// CMAF → Legacy
+		// CMAF -> Legacy
 		let legacy_output = moq_lite::Broadcast::new().produce();
 		let legacy_consumer = legacy_output.consume();
 		let hang_converter = crate::hang::Convert::new(cmaf_consumer, legacy_output);

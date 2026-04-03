@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.5](https://github.com/moq-dev/moq/compare/hang-v0.15.4...hang-v0.15.5) - 2026-04-03
+
+### Other
+
+- Add Markdown linting with remark configuration ([#1183](https://github.com/moq-dev/moq/pull/1183))
+- Add moq-relay release workflow and Nix cache configuration ([#1178](https://github.com/moq-dev/moq/pull/1178))
+
 ## [0.15.4](https://github.com/moq-dev/moq/compare/hang-v0.15.3...hang-v0.15.4) - 2026-03-25
 
 ### Other

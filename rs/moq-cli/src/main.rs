@@ -161,7 +161,7 @@ async fn run_client(
 	action: impl std::future::Future<Output = anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
 	#[cfg(unix)]
-	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 	tokio::select! {
 		res = action => res,
@@ -198,7 +198,7 @@ async fn run_publish_server(
 	broadcast: moq_lite::BroadcastConsumer,
 ) -> anyhow::Result<()> {
 	#[cfg(unix)]
-	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 	let mut conn_id: u64 = 0;
 
@@ -233,7 +233,7 @@ async fn run_publish_server(
 /// Accept connections in a loop (origin already configured on the server).
 async fn run_accept(mut server: moq_native::Server) -> anyhow::Result<()> {
 	#[cfg(unix)]
-	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 	let mut conn_id: u64 = 0;
 

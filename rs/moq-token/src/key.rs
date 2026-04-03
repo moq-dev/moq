@@ -1,6 +1,6 @@
+use crate::error::KeyError;
 use crate::generate::generate;
 use crate::{Algorithm, Claims};
-use anyhow::{Context, bail};
 use base64::Engine;
 use elliptic_curve::SecretKey;
 use elliptic_curve::pkcs8::EncodePrivateKey;
@@ -8,6 +8,7 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header};
 use rsa::BigUint;
 use rsa::pkcs1::EncodeRsaPrivateKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_with::{OneOrMany, formats::PreferMany, serde_as};
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
 
@@ -141,6 +142,7 @@ pub struct RsaAdditionalPrime {
 
 /// JWK, almost to spec (<https://datatracker.ietf.org/doc/html/rfc7517>) but not quite the same
 /// because it's annoying to implement.
+#[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]
 pub struct Key {
@@ -158,7 +160,23 @@ pub struct Key {
 
 	/// The key ID, useful for rotating keys.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub kid: Option<String>,
+	pub kid: Option<crate::KeyId>,
+
+	/// Path prefixes for both unauthenticated subscribe and publish access.
+	/// Shorthand for setting both `guest_sub` and `guest_pub`.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
+	pub guest: Vec<String>,
+
+	/// Path prefixes for unauthenticated subscribe access. `""` means everything.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
+	pub guest_sub: Vec<String>,
+
+	/// Path prefixes for unauthenticated publish access. `""` means everything.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
+	pub guest_pub: Vec<String>,
 
 	// Cached for performance reasons, unfortunately.
 	#[serde(skip)]
@@ -209,74 +227,97 @@ impl fmt::Debug for Key {
 
 impl Key {
 	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> anyhow::Result<Self> {
+	pub fn from_str(s: &str) -> crate::Result<Self> {
 		Ok(serde_json::from_str(s)?)
 	}
 
-	pub fn from_file<P: AsRef<StdPath>>(path: P) -> anyhow::Result<Self> {
+	/// Load a key from a file, auto-detecting JSON or base64url encoding.
+	pub fn from_file<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
 		let contents = std::fs::read_to_string(&path)?;
-		// It's base64url encoded
-		let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(contents.trim())?;
-		let json = String::from_utf8(decoded)?;
-		Ok(serde_json::from_str(&json)?)
+		Self::from_encoded(&contents)
 	}
 
-	pub fn to_str(&self) -> anyhow::Result<String> {
+	/// Async version of [`from_file`](Self::from_file), using `tokio::fs`.
+	#[cfg(feature = "tokio")]
+	pub async fn from_file_async<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
+		let contents = tokio::fs::read_to_string(path).await?;
+		Self::from_encoded(&contents)
+	}
+
+	/// Parse a key from a string, auto-detecting JSON or base64url encoding.
+	fn from_encoded(contents: &str) -> crate::Result<Self> {
+		let contents = contents.trim();
+		if contents.starts_with('{') {
+			Ok(serde_json::from_str(contents)?)
+		} else {
+			let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(contents)?;
+			let json = String::from_utf8(decoded)?;
+			Ok(serde_json::from_str(&json)?)
+		}
+	}
+
+	pub fn to_str(&self) -> crate::Result<String> {
 		Ok(serde_json::to_string(self)?)
 	}
 
-	pub fn to_file<P: AsRef<StdPath>>(&self, path: P) -> anyhow::Result<()> {
-		// Serialize to JSON first
+	/// Write the key to a file as JSON.
+	pub fn to_file<P: AsRef<StdPath>>(&self, path: P) -> crate::Result<()> {
+		let json = serde_json::to_string_pretty(self)?;
+		std::fs::write(path, json)?;
+		Ok(())
+	}
+
+	/// Write the key to a file as base64url-encoded JSON.
+	pub fn to_file_base64url<P: AsRef<StdPath>>(&self, path: P) -> crate::Result<()> {
 		let json = serde_json::to_string(self)?;
-		// Then encode as base64url
 		let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
 		std::fs::write(path, encoded)?;
 		Ok(())
 	}
 
-	pub fn to_public(&self) -> anyhow::Result<Self> {
+	pub fn to_public(&self) -> crate::Result<Self> {
 		if !self.operations.contains(&KeyOperation::Verify) {
-			return Err(anyhow::anyhow!("This key doesn't support the Verify operation"));
+			return Err(KeyError::VerifyUnsupported.into());
 		}
 
 		let key = match self.key {
-			KeyType::RSA { ref public, .. } => Ok(KeyType::RSA {
+			KeyType::RSA { ref public, .. } => KeyType::RSA {
 				public: public.clone(),
 				private: None,
-			}),
+			},
 			KeyType::EC {
 				ref x,
 				ref y,
 				ref curve,
 				..
-			} => Ok(KeyType::EC {
+			} => KeyType::EC {
 				x: x.clone(),
 				y: y.clone(),
 				curve: curve.clone(),
 				d: None,
-			}),
-			KeyType::OCT { .. } => Err(anyhow::anyhow!("OCT key cannot be converted to public key")),
-			KeyType::OKP { ref x, ref curve, .. } => Ok(KeyType::OKP {
+			},
+			KeyType::OCT { .. } => return Err(KeyError::NoPublicKey.into()),
+			KeyType::OKP { ref x, ref curve, .. } => KeyType::OKP {
 				x: x.clone(),
 				curve: curve.clone(),
 				d: None,
-			}),
+			},
 		};
 
-		match key {
-			Ok(key) => Ok(Self {
-				algorithm: self.algorithm,
-				operations: [KeyOperation::Verify].into(),
-				key,
-				kid: self.kid.clone(),
-				decode: Default::default(),
-				encode: Default::default(),
-			}),
-			Err(err) => Err(anyhow::anyhow!("Failed to convert key: {}", err)),
-		}
+		Ok(Self {
+			algorithm: self.algorithm,
+			operations: [KeyOperation::Verify].into(),
+			key,
+			kid: self.kid.clone(),
+			guest: self.guest.clone(),
+			guest_sub: self.guest_sub.clone(),
+			guest_pub: self.guest_pub.clone(),
+			decode: Default::default(),
+			encode: Default::default(),
+		})
 	}
 
-	fn to_decoding_key(&self) -> anyhow::Result<&DecodingKey> {
+	fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
 		if let Some(key) = self.decode.get() {
 			return Ok(key);
 		}
@@ -284,7 +325,7 @@ impl Key {
 		let decoding_key = match self.key {
 			KeyType::OCT { ref secret } => match self.algorithm {
 				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => DecodingKey::from_secret(secret),
-				_ => bail!("Invalid algorithm for key type OCT"),
+				_ => return Err(KeyError::InvalidAlgorithm.into()),
 			},
 			KeyType::EC {
 				ref curve,
@@ -294,10 +335,10 @@ impl Key {
 			} => match curve {
 				EllipticCurve::P256 => {
 					if self.algorithm != Algorithm::ES256 {
-						bail!("Invalid algorithm for P-256 curve");
+						return Err(KeyError::InvalidAlgorithmForCurve("P-256").into());
 					}
 					if x.len() != 32 || y.len() != 32 {
-						bail!("Invalid coordinate length for P-256");
+						return Err(KeyError::InvalidCoordinateLength("P-256").into());
 					}
 
 					DecodingKey::from_ec_components(
@@ -307,10 +348,10 @@ impl Key {
 				}
 				EllipticCurve::P384 => {
 					if self.algorithm != Algorithm::ES384 {
-						bail!("Invalid algorithm for P-384 curve");
+						return Err(KeyError::InvalidAlgorithmForCurve("P-384").into());
 					}
 					if x.len() != 48 || y.len() != 48 {
-						bail!("Invalid coordinate length for P-384");
+						return Err(KeyError::InvalidCoordinateLength("P-384").into());
 					}
 
 					DecodingKey::from_ec_components(
@@ -318,19 +359,19 @@ impl Key {
 						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(y).as_ref(),
 					)?
 				}
-				_ => bail!("Invalid curve for EC key"),
+				_ => return Err(KeyError::InvalidCurve("EC").into()),
 			},
 			KeyType::OKP { ref curve, ref x, .. } => match curve {
 				EllipticCurve::Ed25519 => {
 					if self.algorithm != Algorithm::EdDSA {
-						bail!("Invalid algorithm for Ed25519 curve");
+						return Err(KeyError::InvalidAlgorithmForCurve("Ed25519").into());
 					}
 
 					DecodingKey::from_ed_components(
 						base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x).as_ref(),
 					)?
 				}
-				_ => bail!("Invalid curve for OKP key"),
+				_ => return Err(KeyError::InvalidCurve("OKP").into()),
 			},
 			KeyType::RSA { ref public, .. } => {
 				DecodingKey::from_rsa_raw_components(public.n.as_ref(), public.e.as_ref())
@@ -340,7 +381,7 @@ impl Key {
 		Ok(self.decode.get_or_init(|| decoding_key))
 	}
 
-	fn to_encoding_key(&self) -> anyhow::Result<&EncodingKey> {
+	fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
 		if let Some(key) = self.encode.get() {
 			return Ok(key);
 		}
@@ -348,10 +389,10 @@ impl Key {
 		let encoding_key = match self.key {
 			KeyType::OCT { ref secret } => match self.algorithm {
 				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => EncodingKey::from_secret(secret),
-				_ => bail!("Invalid algorithm for key type OCT"),
+				_ => return Err(KeyError::InvalidAlgorithm.into()),
 			},
 			KeyType::EC { ref curve, ref d, .. } => {
-				let d = d.as_ref().context("Missing private key")?;
+				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
 
 				match curve {
 					EllipticCurve::P256 => {
@@ -364,7 +405,7 @@ impl Key {
 						let doc = secret_key.to_pkcs8_der()?;
 						EncodingKey::from_ec_der(doc.as_bytes())
 					}
-					_ => bail!("Invalid curve for EC key"),
+					_ => return Err(KeyError::InvalidCurve("EC").into()),
 				}
 			}
 			KeyType::OKP {
@@ -372,14 +413,14 @@ impl Key {
 				ref d,
 				ref x,
 			} => {
-				let d = d.as_ref().context("Missing private key")?;
+				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
 
 				let key_pair =
 					aws_lc_rs::signature::Ed25519KeyPair::from_seed_and_public_key(d.as_slice(), x.as_slice())?;
 
 				match curve {
 					EllipticCurve::Ed25519 => EncodingKey::from_ed_der(key_pair.to_pkcs8()?.as_ref()),
-					_ => bail!("Invalid curve for OKP key"),
+					_ => return Err(KeyError::InvalidCurve("OKP").into()),
 				}
 			}
 			KeyType::RSA {
@@ -388,7 +429,7 @@ impl Key {
 			} => {
 				let n = BigUint::from_bytes_be(&public.n);
 				let e = BigUint::from_bytes_be(&public.e);
-				let private = private.as_ref().context("Missing private key")?;
+				let private = private.as_ref().ok_or(KeyError::MissingPrivateKey)?;
 				let d = BigUint::from_bytes_be(&private.d);
 				let p = BigUint::from_bytes_be(&private.p);
 				let q = BigUint::from_bytes_be(&private.q);
@@ -403,57 +444,47 @@ impl Key {
 		Ok(self.encode.get_or_init(|| encoding_key))
 	}
 
-	pub fn decode(&self, token: &str) -> anyhow::Result<Claims> {
+	pub fn decode(&self, token: &str) -> crate::Result<Claims> {
 		if !self.operations.contains(&KeyOperation::Verify) {
-			bail!("key does not support verification");
+			return Err(KeyError::VerifyUnsupported.into());
 		}
 
-		let decode: anyhow::Result<&DecodingKey> = self.to_decoding_key();
+		let decode = self.to_decoding_key()?;
 
-		match decode {
-			Ok(decode) => {
-				let mut validation = jsonwebtoken::Validation::new(self.algorithm.into());
-				validation.required_spec_claims = Default::default(); // Don't require exp, but still validate it if present
-				validation.validate_exp = false; // We validate exp ourselves to handle null values
+		let mut validation = jsonwebtoken::Validation::new(self.algorithm.into());
+		validation.required_spec_claims = Default::default(); // Don't require exp, but still validate it if present
+		validation.validate_exp = false; // We validate exp ourselves to handle null values
 
-				let token = jsonwebtoken::decode::<Claims>(token, decode, &validation)?;
+		let token = jsonwebtoken::decode::<Claims>(token, decode, &validation)?;
 
-				if let Some(exp) = token.claims.expires
-					&& exp < std::time::SystemTime::now()
-				{
-					anyhow::bail!("token has expired");
-				}
-
-				token.claims.validate()?;
-
-				Ok(token.claims)
-			}
-			Err(e) => Err(anyhow::anyhow!("Failed to decode key: {}", e)),
+		if let Some(exp) = token.claims.expires
+			&& exp < std::time::SystemTime::now()
+		{
+			return Err(crate::Error::TokenExpired);
 		}
+
+		token.claims.validate()?;
+
+		Ok(token.claims)
 	}
 
-	pub fn encode(&self, payload: &Claims) -> anyhow::Result<String> {
+	pub fn encode(&self, payload: &Claims) -> crate::Result<String> {
 		if !self.operations.contains(&KeyOperation::Sign) {
-			bail!("key does not support signing");
+			return Err(KeyError::SignUnsupported.into());
 		}
 
 		payload.validate()?;
 
-		let encode: anyhow::Result<&EncodingKey> = self.to_encoding_key();
+		let encode = self.to_encoding_key()?;
 
-		match encode {
-			Ok(encode) => {
-				let mut header = Header::new(self.algorithm.into());
-				header.kid = self.kid.clone();
-				let token = jsonwebtoken::encode(&header, &payload, encode)?;
-				Ok(token)
-			}
-			Err(e) => Err(anyhow::anyhow!("Failed to encode key: {}", e)),
-		}
+		let mut header = Header::new(self.algorithm.into());
+		header.kid = self.kid.as_ref().map(|k| k.to_string());
+		let token = jsonwebtoken::encode(&header, &payload, encode)?;
+		Ok(token)
 	}
 
 	/// Generate a key pair for the given algorithm, returning the private and public keys.
-	pub fn generate(algorithm: Algorithm, id: Option<String>) -> anyhow::Result<Self> {
+	pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result<Self> {
 		generate(algorithm, id)
 	}
 }
@@ -524,7 +555,10 @@ mod tests {
 			key: KeyType::OCT {
 				secret: b"test-secret-that-is-long-enough-for-hmac-sha256".to_vec(),
 			},
-			kid: Some("test-key-1".to_string()),
+			kid: Some(crate::KeyId::decode("test-key-1").unwrap()),
+			guest: vec![],
+			guest_sub: vec![],
+			guest_pub: vec![],
 			decode: Default::default(),
 			encode: Default::default(),
 		}
@@ -747,12 +781,12 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_hs256() {
-		let key = Key::generate(Algorithm::HS256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
 		assert_eq!(key.algorithm, Algorithm::HS256);
-		assert_eq!(key.kid, Some("test-id".to_string()));
+		assert_eq!(key.kid, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert_eq!(key.operations, [KeyOperation::Sign, KeyOperation::Verify].into());
 
 		match key.key {
@@ -763,7 +797,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_hs384() {
-		let key = Key::generate(Algorithm::HS384, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::HS384, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -777,7 +811,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_hs512() {
-		let key = Key::generate(Algorithm::HS512, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::HS512, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -791,7 +825,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_rs512() {
-		let key = Key::generate(Algorithm::RS512, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::RS512, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -812,7 +846,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_es256() {
-		let key = Key::generate(Algorithm::ES256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::ES256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -822,7 +856,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_ps512() {
-		let key = Key::generate(Algorithm::PS512, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::PS512, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -832,7 +866,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_eddsa() {
-		let key = Key::generate(Algorithm::EdDSA, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::EdDSA, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -853,14 +887,15 @@ mod tests {
 
 	#[test]
 	fn test_public_key_conversion_hmac() {
-		let key = Key::generate(Algorithm::HS256, Some("test-id".to_string())).expect("HMAC key generation failed");
+		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()))
+			.expect("HMAC key generation failed");
 
 		assert!(key.to_public().is_err());
 	}
 
 	#[test]
 	fn test_public_key_conversion_rsa() {
-		let key = Key::generate(Algorithm::RS256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::RS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -887,7 +922,7 @@ mod tests {
 
 	#[test]
 	fn test_public_key_conversion_es() {
-		let key = Key::generate(Algorithm::ES256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::ES256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -921,7 +956,7 @@ mod tests {
 
 	#[test]
 	fn test_public_key_conversion_ed() {
-		let key = Key::generate(Algorithm::EdDSA, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::EdDSA, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -953,7 +988,7 @@ mod tests {
 
 	#[test]
 	fn test_key_generate_sign_verify_cycle() {
-		let key = Key::generate(Algorithm::HS256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -975,7 +1010,7 @@ mod tests {
 
 		assert!(debug_str.contains("algorithm: HS256"));
 		assert!(debug_str.contains("operations"));
-		assert!(debug_str.contains("kid: Some(\"test-key-1\")"));
+		assert!(debug_str.contains("kid: Some(KeyId(\"test-key-1\"))"));
 		assert!(!debug_str.contains("secret")); // Should not contain secret
 	}
 
@@ -1055,9 +1090,9 @@ mod tests {
 
 	#[test]
 	fn test_hmac_algorithms() {
-		let key_256 = Key::generate(Algorithm::HS256, Some("test-id".to_string()));
-		let key_384 = Key::generate(Algorithm::HS384, Some("test-id".to_string()));
-		let key_512 = Key::generate(Algorithm::HS512, Some("test-id".to_string()));
+		let key_256 = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_384 = Key::generate(Algorithm::HS384, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_512 = Key::generate(Algorithm::HS512, Some(crate::KeyId::decode("test-id").unwrap()));
 
 		let claims = create_test_claims();
 
@@ -1074,9 +1109,9 @@ mod tests {
 
 	#[test]
 	fn test_rsa_pkcs1_asymmetric_algorithms() {
-		let key_rs256 = Key::generate(Algorithm::RS256, Some("test-id".to_string()));
-		let key_rs384 = Key::generate(Algorithm::RS384, Some("test-id".to_string()));
-		let key_rs512 = Key::generate(Algorithm::RS512, Some("test-id".to_string()));
+		let key_rs256 = Key::generate(Algorithm::RS256, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_rs384 = Key::generate(Algorithm::RS384, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_rs512 = Key::generate(Algorithm::RS512, Some(crate::KeyId::decode("test-id").unwrap()));
 
 		for key in [key_rs256, key_rs384, key_rs512] {
 			test_asymmetric_key(key);
@@ -1085,9 +1120,9 @@ mod tests {
 
 	#[test]
 	fn test_rsa_pss_asymmetric_algorithms() {
-		let key_ps256 = Key::generate(Algorithm::PS256, Some("test-id".to_string()));
-		let key_ps384 = Key::generate(Algorithm::PS384, Some("test-id".to_string()));
-		let key_ps512 = Key::generate(Algorithm::PS512, Some("test-id".to_string()));
+		let key_ps256 = Key::generate(Algorithm::PS256, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_ps384 = Key::generate(Algorithm::PS384, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_ps512 = Key::generate(Algorithm::PS512, Some(crate::KeyId::decode("test-id").unwrap()));
 
 		for key in [key_ps256, key_ps384, key_ps512] {
 			test_asymmetric_key(key);
@@ -1096,8 +1131,8 @@ mod tests {
 
 	#[test]
 	fn test_ec_asymmetric_algorithms() {
-		let key_es256 = Key::generate(Algorithm::ES256, Some("test-id".to_string()));
-		let key_es384 = Key::generate(Algorithm::ES384, Some("test-id".to_string()));
+		let key_es256 = Key::generate(Algorithm::ES256, Some(crate::KeyId::decode("test-id").unwrap()));
+		let key_es384 = Key::generate(Algorithm::ES384, Some(crate::KeyId::decode("test-id").unwrap()));
 
 		for key in [key_es256, key_es384] {
 			test_asymmetric_key(key);
@@ -1106,12 +1141,12 @@ mod tests {
 
 	#[test]
 	fn test_ed_asymmetric_algorithms() {
-		let key_eddsa = Key::generate(Algorithm::EdDSA, Some("test-id".to_string()));
+		let key_eddsa = Key::generate(Algorithm::EdDSA, Some(crate::KeyId::decode("test-id").unwrap()));
 
 		test_asymmetric_key(key_eddsa);
 	}
 
-	fn test_asymmetric_key(key: anyhow::Result<Key>) {
+	fn test_asymmetric_key(key: crate::Result<Key>) {
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -1130,11 +1165,11 @@ mod tests {
 
 	#[test]
 	fn test_cross_algorithm_verification_fails() {
-		let key_256 = Key::generate(Algorithm::HS256, Some("test-id".to_string()));
+		let key_256 = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key_256.is_ok());
 		let key_256 = key_256.unwrap();
 
-		let key_384 = Key::generate(Algorithm::HS384, Some("test-id".to_string()));
+		let key_384 = Key::generate(Algorithm::HS384, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key_384.is_ok());
 		let key_384 = key_384.unwrap();
 
@@ -1148,11 +1183,11 @@ mod tests {
 
 	#[test]
 	fn test_asymmetric_cross_algorithm_verification_fails() {
-		let key_rs256 = Key::generate(Algorithm::RS256, Some("test-id".to_string()));
+		let key_rs256 = Key::generate(Algorithm::RS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key_rs256.is_ok());
 		let key_rs256 = key_rs256.unwrap();
 
-		let key_ps256 = Key::generate(Algorithm::PS256, Some("test-id".to_string()));
+		let key_ps256 = Key::generate(Algorithm::PS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key_ps256.is_ok());
 		let key_ps256 = key_ps256.unwrap();
 
@@ -1168,7 +1203,7 @@ mod tests {
 
 	#[test]
 	fn test_rsa_pkcs1_public_key_conversion() {
-		let key = Key::generate(Algorithm::RS256, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::RS256, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -1190,12 +1225,12 @@ mod tests {
 
 				match public_key.key {
 					KeyType::RSA {
-						public: ref public_public,
+						public: ref guest_public,
 						private: ref public_private,
 					} => {
 						assert!(public_private.is_none());
-						assert_eq!(public.n, public_public.n);
-						assert_eq!(public.e, public_public.e);
+						assert_eq!(public.n, guest_public.n);
+						assert_eq!(public.e, guest_public.e);
 					}
 					_ => panic!("Expected public key to be an RSA key"),
 				}
@@ -1206,7 +1241,7 @@ mod tests {
 
 	#[test]
 	fn test_rsa_pss_public_key_conversion() {
-		let key = Key::generate(Algorithm::PS384, Some("test-id".to_string()));
+		let key = Key::generate(Algorithm::PS384, Some(crate::KeyId::decode("test-id").unwrap()));
 		assert!(key.is_ok());
 		let key = key.unwrap();
 
@@ -1228,12 +1263,12 @@ mod tests {
 
 				match public_key.key {
 					KeyType::RSA {
-						public: ref public_public,
+						public: ref guest_public,
 						private: ref public_private,
 					} => {
 						assert!(public_private.is_none());
-						assert_eq!(public.n, public_public.n);
-						assert_eq!(public.e, public_public.e);
+						assert_eq!(public.n, guest_public.n);
+						assert_eq!(public.e, guest_public.e);
 					}
 					_ => panic!("Expected public key to be an RSA key"),
 				}
@@ -1279,7 +1314,7 @@ mod tests {
 		// Should be able to deserialize new format
 		let key: Key = serde_json::from_str(unpadded_json).unwrap();
 		assert_eq!(key.algorithm, Algorithm::HS256);
-		assert_eq!(key.kid, Some("test-key-1".to_string()));
+		assert_eq!(key.kid, Some(crate::KeyId::decode("test-key-1").unwrap()));
 
 		if let KeyType::OCT { secret } = &key.key {
 			assert_eq!(secret, b"test-secret-that-is-long-enough-for-hmac-sha256");
@@ -1296,7 +1331,7 @@ mod tests {
 		// Should be able to deserialize old format for backwards compatibility
 		let key: Key = serde_json::from_str(padded_json).unwrap();
 		assert_eq!(key.algorithm, Algorithm::HS256);
-		assert_eq!(key.kid, Some("test-key-1".to_string()));
+		assert_eq!(key.kid, Some(crate::KeyId::decode("test-key-1").unwrap()));
 
 		if let KeyType::OCT { secret } = &key.key {
 			assert_eq!(secret, b"test-secret-that-is-long-enough-for-hmac-sha256");
@@ -1305,14 +1340,108 @@ mod tests {
 		}
 	}
 
+	// Tests that Rust can load keys generated by the JS @moq/token package
+	// and verify tokens signed by JS.
+	//
+	// Generated with: bun -e 'import { generate } from "./js/token/src/generate.ts"; ...'
+	// See js/token/src/interop.test.ts for the JS-side counterpart.
+
+	/// JS-generated HS256 key (from @moq/token generate("HS256", "js-test-key"))
+	const JS_HS256_KEY: &str = r#"{"kty":"oct","alg":"HS256","k":"xm6xsSkfFqzPU3KfcbAcF2_h0OkStxQ_nNqVPYl0ync","kid":"js-test-key","key_ops":["sign","verify"],"guest":[],"guest_sub":[],"guest_pub":[]}"#;
+
+	/// JS-generated HS256 token (from @moq/token sign(key, {root:"live", put:["camera1"], get:["camera1","camera2"]}))
+	const JS_HS256_TOKEN: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImpzLXRlc3Qta2V5In0.eyJyb290IjoibGl2ZSIsInB1dCI6WyJjYW1lcmExIl0sImdldCI6WyJjYW1lcmExIiwiY2FtZXJhMiJdLCJpYXQiOjE3NzUxNzY3NTR9.tHNQtHh_HCIKxXOexDCM7AkjqWzbULLZzjEckfOGRfY";
+
+	/// JS-generated EdDSA private key (from @moq/token generate("EdDSA", "js-eddsa-key"))
+	const JS_EDDSA_PRIVATE_KEY: &str = r#"{"kty":"OKP","alg":"EdDSA","crv":"Ed25519","x":"UiU9fT_SdBBpkFtJPRCY0gX1jK_Dr9syYLFuEz4QUM4","d":"lm-L_PV3ksuQ-KrFBgFMDJqAZC3_Z6Z5UC4ZQY5OoDQ","kid":"js-eddsa-key","key_ops":["sign","verify"],"guest":[],"guest_sub":[],"guest_pub":[]}"#;
+
+	/// JS-generated EdDSA public key (from @moq/token toPublicKey(key))
+	const JS_EDDSA_PUBLIC_KEY: &str = r#"{"kty":"OKP","alg":"EdDSA","crv":"Ed25519","x":"UiU9fT_SdBBpkFtJPRCY0gX1jK_Dr9syYLFuEz4QUM4","kid":"js-eddsa-key","guest":[],"guest_sub":[],"guest_pub":[],"key_ops":["verify"]}"#;
+
+	/// JS-generated EdDSA token (from @moq/token sign(key, {root:"stream", put:["video"]}))
+	const JS_EDDSA_TOKEN: &str = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCIsImtpZCI6ImpzLWVkZHNhLWtleSJ9.eyJyb290Ijoic3RyZWFtIiwicHV0IjpbInZpZGVvIl0sImlhdCI6MTc3NTE3Njc1Nn0.l9rUMHjPSXWKSXRP3mmeMgTAywtqpdqQehhViWaPrKxax1Y2D9KRIYTixYz-b6PI-AoHQYusHWeeLu_HRw2cAg";
+
+	#[test]
+	fn test_js_hs256_key_load() {
+		let key = Key::from_str(JS_HS256_KEY).unwrap();
+		assert_eq!(key.algorithm, Algorithm::HS256);
+		assert_eq!(key.kid, Some(crate::KeyId::decode("js-test-key").unwrap()));
+	}
+
+	#[test]
+	fn test_js_hs256_token_verify() {
+		let key = Key::from_str(JS_HS256_KEY).unwrap();
+		let claims = key.decode(JS_HS256_TOKEN).unwrap();
+		assert_eq!(claims.root, "live");
+		assert_eq!(claims.publish, vec!["camera1"]);
+		assert_eq!(claims.subscribe, vec!["camera1", "camera2"]);
+	}
+
+	#[test]
+	fn test_js_hs256_sign_and_roundtrip() {
+		let key = Key::from_str(JS_HS256_KEY).unwrap();
+		let claims = Claims {
+			root: "rust-test".to_string(),
+			publish: vec!["pub1".into()],
+			subscribe: vec!["sub1".into()],
+			..Default::default()
+		};
+		let token = key.encode(&claims).unwrap();
+		let verified = key.decode(&token).unwrap();
+		assert_eq!(verified.root, "rust-test");
+		assert_eq!(verified.publish, vec!["pub1"]);
+	}
+
+	#[test]
+	fn test_js_eddsa_key_load() {
+		let private_key = Key::from_str(JS_EDDSA_PRIVATE_KEY).unwrap();
+		assert_eq!(private_key.algorithm, Algorithm::EdDSA);
+		assert!(matches!(private_key.key, KeyType::OKP { .. }));
+
+		let public_key = Key::from_str(JS_EDDSA_PUBLIC_KEY).unwrap();
+		assert_eq!(public_key.algorithm, Algorithm::EdDSA);
+	}
+
+	#[test]
+	fn test_js_eddsa_token_verify_with_private_key() {
+		let key = Key::from_str(JS_EDDSA_PRIVATE_KEY).unwrap();
+		let claims = key.decode(JS_EDDSA_TOKEN).unwrap();
+		assert_eq!(claims.root, "stream");
+		assert_eq!(claims.publish, vec!["video"]);
+	}
+
+	#[test]
+	fn test_js_eddsa_token_verify_with_public_key() {
+		let key = Key::from_str(JS_EDDSA_PUBLIC_KEY).unwrap();
+		let claims = key.decode(JS_EDDSA_TOKEN).unwrap();
+		assert_eq!(claims.root, "stream");
+		assert_eq!(claims.publish, vec!["video"]);
+	}
+
+	#[test]
+	fn test_js_token_wrong_key_fails() {
+		// Generate a different HS256 key
+		let wrong_key = Key::generate(Algorithm::HS256, None).unwrap();
+		let result = wrong_key.decode(JS_HS256_TOKEN);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_js_eddsa_token_wrong_key_fails() {
+		// Try verifying EdDSA token with the HS256 key
+		let wrong_key = Key::from_str(JS_HS256_KEY).unwrap();
+		let result = wrong_key.decode(JS_EDDSA_TOKEN);
+		assert!(result.is_err());
+	}
+
 	#[test]
 	fn test_file_io_base64url() {
 		let key = create_test_key();
 		let temp_dir = std::env::temp_dir();
 		let temp_path = temp_dir.join("test_jwk.key");
 
-		// Write key to file
-		key.to_file(&temp_path).unwrap();
+		// Write key to file as base64url
+		key.to_file_base64url(&temp_path).unwrap();
 
 		// Read file contents
 		let contents = std::fs::read_to_string(&temp_path).unwrap();

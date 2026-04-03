@@ -454,7 +454,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					entry.remove();
 				}
 			}
-			Entry::Vacant(_) => return Err(Error::NotFound),
+			Entry::Vacant(_) => return Err(Error::UnknownBroadcast),
 		};
 
 		Ok(())
@@ -463,11 +463,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: 0,
-		}
-		.produce();
+		let track = Track::new(msg.track_name.to_string()).produce();
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
@@ -492,8 +488,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		state.publishes.insert(request_id, msg.track_namespace.to_owned());
 		drop(state);
 
-		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-		broadcast.insert_track(&track)?;
+		let broadcast = self.start_announce(msg.track_namespace.to_owned())?;
+		broadcast.insert_track(track.consume())?;
 
 		Ok(())
 	}
@@ -501,8 +497,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
 		loop {
 			let track = tokio::select! {
-				producer = broadcast.requested_track() => match producer {
-					Ok(producer) => producer,
+				track = broadcast.requested_track() => match track {
+					Ok(track) => track,
 					Err(err) => {
 						tracing::debug!(%err, "broadcast closed");
 						break;
@@ -522,7 +518,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_subscribe(&mut self, broadcast: Path<'_>, mut track: TrackProducer) {
+	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, mut track: TrackProducer) {
+		let broadcast = broadcast_path;
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,
 			Err(err) => {
@@ -627,7 +624,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				track_namespace: broadcast.to_owned(),
 				track_name: (&track.info.name).into(),
-				subscriber_priority: track.info.priority,
+				subscriber_priority: 0,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})
@@ -678,7 +675,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					RequestId(group.track_alias)
 				}
 			};
-			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
+			let track = state.subscribes.get_mut(&request_id).ok_or(Error::UnknownTrack)?;
 
 			let group = Group {
 				sequence: group.group_id,

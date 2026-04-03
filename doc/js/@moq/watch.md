@@ -34,6 +34,7 @@ npm add @moq/watch
 ```
 
 **Attributes:**
+
 - `url` (required) — Relay server URL
 - `name` (required) — Broadcast name
 - `controls` — Show playback controls (boolean)

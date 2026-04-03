@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Subscription, Track, TrackSubscriber,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -286,20 +286,18 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
-		let track = Track {
-			name: subscribe.track.to_string(),
-			priority: subscribe.priority,
-		};
+		let track = Track::new(subscribe.track.to_string());
 
-		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let track = broadcast.subscribe_track(&track)?;
+		let broadcast = consumer.ok_or(Error::UnknownBroadcast)?;
+		let subscriber = broadcast.subscribe_track(&track, Subscription::default())?;
 
-		// TODO wait until track.info() to get the *real* priority
+		// Wait for at least one group before sending SUBSCRIBE_OK
+		subscriber.ready().await?;
 
 		let info = lite::SubscribeOk {
-			priority: track.info.priority,
+			priority: 0,
 			ordered: false,
-			max_latency: std::time::Duration::ZERO,
+			max_latency: Duration::ZERO,
 			start_group: None,
 			end_group: None,
 		};
@@ -307,7 +305,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
 		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, version) => res?,
+			res = Self::run_track(session, subscriber, subscribe, priority, version) => res?,
 			res = stream.reader.closed() => res?,
 		}
 
@@ -317,17 +315,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	async fn run_track(
 		session: S,
-		mut track: TrackConsumer,
+		mut track: TrackSubscriber,
 		subscribe: &lite::Subscribe<'_>,
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
-
-		// Start the consumer at the specified sequence, otherwise start at the latest group.
-		if let Some(start_group) = subscribe.start_group.or_else(|| track.latest()) {
-			track.start_at(start_group);
-		}
 
 		loop {
 			let group = tokio::select! {
@@ -348,7 +341,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				sequence,
 			};
 
-			let priority = priority.insert(track.info.priority, sequence);
+			let priority = priority.insert(subscribe.priority, sequence);
 			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
 		}
 	}

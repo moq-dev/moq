@@ -148,6 +148,7 @@ impl Message for PublishNamespaceDone<'_> {
 /// PublishNamespaceCancel message (0x0c)
 /// v14/v15: uses track_namespace. v16: uses request_id.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct PublishNamespaceCancel<'a> {
 	/// v14/v15: the namespace being cancelled
 	pub track_namespace: Path<'a>,

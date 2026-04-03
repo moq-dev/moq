@@ -24,7 +24,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -86,12 +86,12 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	assert_eq!(path.as_str(), "test");
 
 	// Subscribe to the track.
-	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+	let mut subscriber = bc
+		.subscribe_track(&Track::new("video"), Default::default())
 		.expect("subscribe_track failed");
 
 	// Read one group.
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
@@ -361,7 +361,7 @@ async fn broadcast_websocket() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -425,12 +425,12 @@ async fn broadcast_websocket() {
 	assert_eq!(path.as_str(), "test");
 
 	// Subscribe to the track.
-	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+	let mut subscriber = bc
+		.subscribe_track(&Track::new("video"), Default::default())
 		.expect("subscribe_track failed");
 
 	// Read one group.
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
@@ -464,7 +464,7 @@ async fn broadcast_websocket_fallback() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -531,11 +531,11 @@ async fn broadcast_websocket_fallback() {
 	assert_eq!(path.as_str(), "test");
 
 	// Subscribe to the track.
-	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+	let mut subscriber = bc
+		.subscribe_track(&Track::new("video"), Default::default())
 		.expect("subscribe_track failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")

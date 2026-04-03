@@ -51,7 +51,7 @@ impl Consume {
 
 	pub fn catalog_subscribe(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
-		let catalog = broadcast.subscribe_track(&hang::catalog::default_track())?;
+		let catalog = broadcast.subscribe_track(&hang::catalog::default_track(), Default::default())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -66,8 +66,8 @@ impl Consume {
 				_ = channel.1 => Ok(()),
 			};
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().consume.catalog_task.remove(id).flatten() {
+			let entry = State::lock().consume.catalog_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -78,7 +78,7 @@ impl Consume {
 	async fn run_catalog(
 		task_id: Id,
 		broadcast: moq_lite::BroadcastConsumer,
-		mut track: moq_lite::TrackConsumer,
+		mut track: moq_lite::TrackSubscriber,
 	) -> Result<(), Error> {
 		while let Some(mut group) = track.recv_group().await? {
 			// Read only the first frame per group (catalog doesn't support deltas yet)
@@ -221,11 +221,9 @@ impl Consume {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let rendition = consume.video.renditions.keys().nth(index).ok_or(Error::NoIndex)?;
 
-		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
-			name: rendition.clone(),
-			priority: 1, // TODO: Remove priority
-		})?;
-		let track = LegacyConsumer::new(track, moq_mux::consumer::Legacy, latency);
+		let track = consume
+			.broadcast
+			.subscribe_track(&moq_lite::Track::new(rendition.clone()), Default::default())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -236,12 +234,12 @@ impl Consume {
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(id, track) => res,
+				res = Self::run_track(id, track, latency) => res,
 				_ = channel.1 => Ok(()),
 			};
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().consume.track_task.remove(id).flatten() {
+			let entry = State::lock().consume.track_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -259,11 +257,9 @@ impl Consume {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let rendition = consume.audio.renditions.keys().nth(index).ok_or(Error::NoIndex)?;
 
-		let track = consume.broadcast.subscribe_track(&moq_lite::Track {
-			name: rendition.clone(),
-			priority: 2, // TODO: Remove priority
-		})?;
-		let track = LegacyConsumer::new(track, moq_mux::consumer::Legacy, latency);
+		let track = consume
+			.broadcast
+			.subscribe_track(&moq_lite::Track::new(rendition.clone()), Default::default())?;
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -274,12 +270,12 @@ impl Consume {
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(id, track) => res,
+				res = Self::run_track(id, track, latency) => res,
 				_ = channel.1 => Ok(()),
 			};
 
-			// The lock is dropped before the callback is invoked.
-			if let Some(entry) = State::lock().consume.track_task.remove(id).flatten() {
+			let entry = State::lock().consume.track_task.remove(id).flatten();
+			if let Some(entry) = entry {
 				entry.callback.call(res);
 			}
 		});
@@ -287,7 +283,12 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_track(task_id: Id, mut track: LegacyConsumer) -> Result<(), Error> {
+	async fn run_track(
+		task_id: Id,
+		track: moq_lite::TrackSubscriber,
+		latency: std::time::Duration,
+	) -> Result<(), Error> {
+		let mut track = LegacyConsumer::new(track, moq_mux::consumer::Legacy, latency);
 		while let Some(mut ordered) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::container::BufList::new();

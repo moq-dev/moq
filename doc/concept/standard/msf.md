@@ -4,6 +4,7 @@ description: A catalog format for MoQ.
 ---
 
 # MSF - MoQ Streaming Format
+
 HLS/DASH playlists suck.
 WebRTC SDP is even worse.
 MSF is a replacement for both, utilizing MoQ live streams.

@@ -61,8 +61,7 @@ impl Video {
 			};
 			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
 				entry.insert(config.clone());
-				// TODO: Remove priority
-				return moq_lite::Track { name, priority: 1 };
+				return moq_lite::Track::new(name);
 			}
 		}
 
@@ -88,7 +87,7 @@ pub struct Display {
 /// This struct contains all the information needed to initialize a video decoder,
 /// including codec-specific parameters, resolution, and optional metadata.
 ///
-/// Reference: <https://w3c.github.io/webcodecs/#video-decoder-config>
+/// Reference: <https://www.w3.org/TR/webcodecs/#video-decoder-config>
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

@@ -1,51 +1,30 @@
 //! Media demuxers for MoQ.
 //!
 //! This crate provides modules for converting existing media formats into MoQ broadcasts.
-//! It supports various container and codec formats, optionally enabled via feature flags.
-//!
-//! **Feature flags:**
-//! - `aac`: Raw AAC frames (not ADTS).
-//! - `opus`: Raw Opus frames (not Ogg).
-//! - `avc3`: H.264 with inline SPS/PPS.
-//! - `fmp4`: fMP4/CMAF container.
-//! - `hev1`: H.265 with inline SPS/PPS.
-//! - `hls`: HLS playlist.
+//! It supports various container and codec formats.
 //!
 //! The [Framed] and [Stream] types provide generic interfaces for importing media.
 //! [Framed] is for formats with known frame boundaries, [Stream] for unknown boundaries.
 //! If you know the format in advance, use the specific codec module instead.
 
 mod aac;
-#[cfg(any(feature = "h264", feature = "h265"))]
 mod annexb;
-#[cfg(feature = "av1")]
 mod av01;
-#[cfg(feature = "h264")]
 mod avc1;
-#[cfg(feature = "h264")]
 mod avc3;
 mod decoder;
-#[cfg(feature = "mp4")]
 mod fmp4;
-#[cfg(feature = "h265")]
 mod hev1;
-#[cfg(feature = "hls")]
 mod hls;
 mod opus;
 
 pub use aac::*;
-#[cfg(feature = "av1")]
 pub use av01::*;
-#[cfg(feature = "h264")]
 pub use avc1::*;
-#[cfg(feature = "h264")]
 pub use avc3::*;
 pub use decoder::*;
-#[cfg(feature = "mp4")]
 pub use fmp4::*;
-#[cfg(feature = "h265")]
 pub use hev1::*;
-#[cfg(feature = "hls")]
 pub use hls::*;
 pub use opus::*;
 

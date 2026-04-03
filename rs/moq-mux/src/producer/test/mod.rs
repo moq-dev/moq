@@ -8,8 +8,8 @@ struct CatalogSnapshot {
 }
 
 fn run_fmp4(data: &[u8]) -> CatalogSnapshot {
-	let mut broadcast = moq_lite::Broadcast::new().produce();
-	let catalog = crate::CatalogProducer::new(&mut broadcast).unwrap();
+	let broadcast = moq_lite::Broadcast::new().produce();
+	let catalog = crate::CatalogProducer::new(&broadcast).unwrap();
 
 	let mut fmp4 = super::Fmp4::new(broadcast, catalog.clone());
 
