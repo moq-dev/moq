@@ -8,14 +8,11 @@ use scuffle_h265::{NALUnitType, SpsNALUnit};
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
 pub struct Hev1 {
-	// The broadcast being produced.
-	broadcast: moq_lite::BroadcastProducer,
-
 	// The catalog being produced.
 	catalog: crate::CatalogProducer,
 
 	// The track being produced.
-	track: Option<hang::container::OrderedProducer>,
+	track: hang::container::OrderedProducer,
 
 	// Whether the track has been initialized.
 	// If it changes, then we'll reinitialize with a new track.
@@ -34,11 +31,18 @@ pub struct Hev1 {
 }
 
 impl Hev1 {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
+	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
+		// Create the track eagerly so callers can monitor used/unused before any frames arrive.
+		let track_info = moq_lite::Track {
+			name: "video0.hev1".to_string(),
+			priority: 1,
+		};
+		// unwrap: broadcast was just created and isn't closed.
+		let track = broadcast.create_track(track_info).unwrap();
+
 		Self {
-			broadcast,
 			catalog,
-			track: None,
+			track: track.into(),
 			config: None,
 			current: Default::default(),
 			zero: None,
@@ -81,20 +85,16 @@ impl Hev1 {
 			return Ok(());
 		}
 
+		// Update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
+		catalog
+			.video
+			.renditions
+			.insert(self.track.info.name.clone(), config.clone());
 
-		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.info.name, "reinitializing track");
-			catalog.video.remove_track(&track.info);
-		}
-
-		let track = catalog.video.create_track("hev1", config.clone());
-		tracing::debug!(name = ?track.name, ?config, "starting track");
-
-		let track = self.broadcast.create_track(track)?;
+		tracing::debug!(name = ?self.track.info.name, ?config, "updated catalog");
 
 		self.config = Some(config);
-		self.track = Some(track.into());
 
 		Ok(())
 	}
@@ -283,7 +283,7 @@ impl Hev1 {
 			return Ok(());
 		}
 
-		let track = self.track.as_mut().context("expected SPS before any frames")?;
+		let track = &mut self.track;
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
@@ -310,13 +310,13 @@ impl Hev1 {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
-		track.finish()?;
+		self.track.finish()?;
 		Ok(())
 	}
 
-	pub fn is_initialized(&self) -> bool {
-		self.track.is_some()
+	/// Returns a reference to the underlying track producer.
+	pub fn track(&self) -> &moq_lite::TrackProducer {
+		&self.track
 	}
 
 	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
@@ -333,10 +333,8 @@ impl Hev1 {
 
 impl Drop for Hev1 {
 	fn drop(&mut self) {
-		if let Some(track) = &self.track {
-			tracing::debug!(name = ?track.info.name, "ending track");
-			self.catalog.lock().video.remove_track(&track.info);
-		}
+		tracing::debug!(name = ?self.track.info.name, "ending track");
+		self.catalog.lock().video.remove_track(&self.track.info);
 	}
 }
 

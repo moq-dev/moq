@@ -38,7 +38,13 @@ impl<T> Producer<T> {
 
 	/// Create a new [`Consumer`] that shares this producer's state.
 	pub fn consume(&self) -> Consumer<T> {
-		self.counts.consumers.fetch_add(1, Ordering::Relaxed);
+		let prev = self.counts.consumers.fetch_add(1, Ordering::AcqRel);
+
+		// Wake waiters (e.g. `used()`) when the first consumer appears.
+		if prev == 0 {
+			let waiters = self.state.lock().waiters.take();
+			waiters.wake();
+		}
 
 		Consumer {
 			state: self.state.clone(),
@@ -157,6 +163,37 @@ impl<T> Producer<T> {
 		// Re-check after registration to avoid TOCTOU race where the last
 		// consumer drops between the initial check and waiter registration.
 		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
+			return Poll::Ready(Some(()));
+		}
+
+		Poll::Pending
+	}
+
+	/// Wait until at least one consumer exists.
+	///
+	/// Returns `Ok(())` when a consumer is created, or `Err(Ref)` if the channel closes first.
+	pub async fn used(&self) -> Result<(), Ref<'_, T>> {
+		match crate::wait(move |waiter| self.poll_used(waiter)).await {
+			Some(()) => Ok(()),
+			None => Err(self.read()),
+		}
+	}
+
+	fn poll_used(&self, waiter: &Waiter) -> Poll<Option<()>> {
+		let mut state = self.state.lock();
+		if state.closed {
+			return Poll::Ready(None);
+		}
+
+		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
+			return Poll::Ready(Some(()));
+		}
+
+		waiter.register(&mut state.waiters);
+
+		// Re-check after registration to avoid TOCTOU race where a consumer
+		// is created between the initial check and waiter registration.
+		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
 			return Poll::Ready(Some(()));
 		}
 

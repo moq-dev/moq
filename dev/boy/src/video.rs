@@ -7,6 +7,8 @@ use crate::emulator::{HEIGHT, WIDTH};
 /// Receives RGBA frames, encodes to H.264, publishes via MoQ.
 pub struct VideoEncoder {
     tx: tokio::sync::mpsc::Sender<EncoderMsg>,
+    /// Clone of the video track producer, for monitoring used/unused.
+    pub track: moq_lite::TrackProducer,
     _thread: std::thread::JoinHandle<()>,
 }
 
@@ -15,6 +17,7 @@ enum EncoderMsg {
         rgba: Bytes,
         ts: hang::container::Timestamp,
     },
+    ForceKeyframe,
 }
 
 impl VideoEncoder {
@@ -25,6 +28,9 @@ impl VideoEncoder {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
         let avc3 = moq_mux::import::Avc3::new(broadcast, catalog);
 
+        // Clone the track producer before moving avc3 into the thread.
+        let track = avc3.track().clone();
+
         let thread = std::thread::Builder::new()
             .name("video-encoder".into())
             .spawn(move || encoder_thread(rx, avc3))
@@ -32,6 +38,7 @@ impl VideoEncoder {
 
         Self {
             tx,
+            track,
             _thread: thread,
         }
     }
@@ -39,6 +46,11 @@ impl VideoEncoder {
     /// Send a frame to the encoder. Non-blocking: drops the frame if the channel is full.
     pub fn try_frame(&self, rgba: Bytes, ts: hang::container::Timestamp) {
         let _ = self.tx.try_send(EncoderMsg::Frame { rgba, ts });
+    }
+
+    /// Force the next encoded frame to be a keyframe.
+    pub fn force_keyframe(&self) {
+        let _ = self.tx.try_send(EncoderMsg::ForceKeyframe);
     }
 }
 
@@ -48,46 +60,58 @@ fn encoder_thread(
 ) {
     let mut encoder: Option<Encoder> = None;
     let mut scaler: Option<ffmpeg_next::software::scaling::Context> = None;
+    let mut force_keyframe = false;
 
     while let Some(msg) = rx.blocking_recv() {
-        let EncoderMsg::Frame { rgba, ts } = msg;
-
-        let enc = lazy_init(
-            &mut encoder,
-            || Encoder::new(WIDTH, HEIGHT),
-            "H.264 encoder",
-        );
-        let color_scaler = lazy_init(
-            &mut scaler,
-            || {
-                ffmpeg_next::software::scaling::Context::get(
-                    ffmpeg_next::format::Pixel::RGBA,
-                    WIDTH,
-                    HEIGHT,
-                    ffmpeg_next::format::Pixel::YUV420P,
-                    WIDTH,
-                    HEIGHT,
-                    ffmpeg_next::software::scaling::Flags::POINT, // Nearest-neighbor for pixel art
-                )
-                .map_err(Into::into)
-            },
-            "RGBA scaler",
-        );
-
-        let (Some(enc), Some(color_scaler)) = (enc, color_scaler) else {
-            return;
-        };
-
-        let yuv = match rgba_to_yuv(&rgba, color_scaler, enc.frame_count) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::error!(error = %e, "RGBA->YUV failed");
+        match msg {
+            EncoderMsg::ForceKeyframe => {
+                force_keyframe = true;
                 continue;
             }
-        };
+            EncoderMsg::Frame { rgba, ts } => {
+                let enc = lazy_init(
+                    &mut encoder,
+                    || Encoder::new(WIDTH, HEIGHT),
+                    "H.264 encoder",
+                );
+                let color_scaler = lazy_init(
+                    &mut scaler,
+                    || {
+                        ffmpeg_next::software::scaling::Context::get(
+                            ffmpeg_next::format::Pixel::RGBA,
+                            WIDTH,
+                            HEIGHT,
+                            ffmpeg_next::format::Pixel::YUV420P,
+                            WIDTH,
+                            HEIGHT,
+                            ffmpeg_next::software::scaling::Flags::POINT,
+                        )
+                        .map_err(Into::into)
+                    },
+                    "RGBA scaler",
+                );
 
-        if let Err(e) = enc.encode_yuv(&yuv, ts, &mut avc3) {
-            tracing::error!(error = %e, "H.264 encode error");
+                let (Some(enc), Some(color_scaler)) = (enc, color_scaler) else {
+                    return;
+                };
+
+                let mut yuv = match rgba_to_yuv(&rgba, color_scaler, enc.frame_count) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::error!(error = %e, "RGBA->YUV failed");
+                        continue;
+                    }
+                };
+
+                if force_keyframe {
+                    yuv.set_kind(ffmpeg_next::picture::Type::I);
+                    force_keyframe = false;
+                }
+
+                if let Err(e) = enc.encode_yuv(&yuv, ts, &mut avc3) {
+                    tracing::error!(error = %e, "H.264 encode error");
+                }
+            }
         }
     }
 }
@@ -158,8 +182,6 @@ impl Encoder {
         let mut opts = ffmpeg_next::Dictionary::new();
         opts.set("preset", "ultrafast");
         opts.set("tune", "zerolatency");
-        // Use CRF for quality-based encoding instead of fixed bitrate.
-        // CRF 18 is visually lossless for pixel art at this tiny resolution.
         opts.set("crf", "18");
         let encoder = enc.open_with(opts)?;
 

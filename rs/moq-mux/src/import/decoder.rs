@@ -278,13 +278,13 @@ impl StreamDecoder {
 	pub fn is_initialized(&self) -> bool {
 		match self.decoder {
 			#[cfg(feature = "h264")]
-			StreamKind::Avc3(ref decoder) => decoder.is_initialized(),
+			StreamKind::Avc3(_) => true,
 			#[cfg(feature = "mp4")]
 			StreamKind::Fmp4(ref decoder) => decoder.is_initialized(),
 			#[cfg(feature = "h265")]
-			StreamKind::Hev1(ref decoder) => decoder.is_initialized(),
+			StreamKind::Hev1(_) => true,
 			#[cfg(feature = "av1")]
-			StreamKind::Av01(ref decoder) => decoder.is_initialized(),
+			StreamKind::Av01(_) => true,
 		}
 	}
 }

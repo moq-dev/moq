@@ -13,12 +13,24 @@
 				padding: 0.75rem 1.5rem; display: flex; align-items: center; gap: 1rem;
 			}
 			header h1 { font-size: 1.1rem; font-weight: 600; color: #8bac0f; }
-			header .info {
-				font-size: 0.7rem; color: #888; line-height: 1.4;
-				margin-left: auto; text-align: right; max-width: 400px;
+			header .status { font-size: 0.75rem; margin-left: auto; }
+
+			.about {
+				max-width: 500px; margin: 1.5rem auto; padding: 0 1.5rem;
+				font-size: 0.75rem; color: #555; line-height: 1.7;
 			}
-			header .info span { color: #aaa; }
-			header .status { font-size: 0.75rem; margin-left: 1rem; }
+			.about p { margin-bottom: 0.5rem; }
+			.about a { color: #8bac0f; text-decoration: none; }
+			.about a:hover { text-decoration: underline; }
+			.about ul {
+				list-style: none; padding: 0; margin: 0;
+			}
+			.about li {
+				padding-left: 1rem; position: relative;
+			}
+			.about li::before {
+				content: "\2022"; color: #8bac0f; position: absolute; left: 0;
+			}
 
 			#grid {
 				display: flex; flex-wrap: wrap; gap: 1rem; padding: 1rem;
@@ -172,10 +184,6 @@
 	<body>
 		<header>
 			<h1>MoQ Boy</h1>
-			<div class="info">
-				<span>Click a session to play.</span> Arrows to move, Z=B, X=A, Enter=Start, Shift=Select.
-				Everyone controls the same game (anarchy mode).
-			</div>
 			<span class="status" id="connection-status">Disconnected</span>
 		</header>
 		<div id="grid">
@@ -185,10 +193,17 @@
 				<div class="hint">Waiting for Game Boy sessions to connect...</div>
 			</div>
 		</div>
-		<div style="max-width:600px;margin:2rem auto;padding:1rem 1.5rem;font-size:0.75rem;color:#555;text-align:center;line-height:1.6;">
-			All games are streamed from a remote server via <a href="https://moq.dev" style="color:#8bac0f;text-decoration:none;">MoQ</a>.
-			Yes, your toaster is powerful enough to run Game Boy games.
-			But it's a good demo of how you can use MoQ for interactive experiences.
+		<div class="about">
+			<p>Click a game to play. Everyone controls the same game (anarchy mode).</p>
+			<p>
+				A generic <a href="https://moq.dev">MoQ</a> relay is used for everything:
+			</p>
+			<ul>
+				<li>Discovering online games and players.</li>
+				<li>Transmitting audio/video tracks, metadata, and (multiple) player controls.</li>
+				<li>Subscribing to audio/video on-demand.</li>
+				<li>Pausing emulation/encoding when there are no subscribers.</li>
+			</ul>
 		</div>
 		<footer style="position:fixed;bottom:0;left:0;right:0;padding:0.4rem 1rem;background:#111;border-top:1px solid #222;font-family:monospace;font-size:0.65rem;color:#555;text-align:center;">
 			Hint: Run <code style="color:#888">just boy opossum</code> to start a new game

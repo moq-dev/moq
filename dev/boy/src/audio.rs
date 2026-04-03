@@ -80,6 +80,11 @@ impl AudioEncoder {
         })
     }
 
+    /// Returns a reference to the underlying track producer.
+    pub fn track(&self) -> &moq_lite::TrackProducer {
+        self.opus.track()
+    }
+
     /// Feed interleaved stereo u8 samples from the emulator.
     /// Boytacean outputs unsigned 8-bit PCM (0-255, center at 128).
     pub fn push_samples(&mut self, samples: &[u8]) -> Result<()> {

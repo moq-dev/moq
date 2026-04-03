@@ -81,6 +81,11 @@ impl Opus {
 		})
 	}
 
+	/// Returns a reference to the underlying track producer.
+	pub fn track(&self) -> &moq_lite::TrackProducer {
+		&self.track
+	}
+
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		self.track.finish()?;

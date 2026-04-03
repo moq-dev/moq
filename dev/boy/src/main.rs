@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use url::Url;
 
 mod audio;
@@ -77,9 +79,18 @@ async fn run(config: &Config) -> Result<()> {
         .connect(config.url.clone())
         .await?;
 
-    // Set up catalog and video encoder.
+    // Set up catalog and encoders.
     let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
     let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone());
+
+    // Init ffmpeg and create audio encoder before the blocking thread
+    // so we can clone its track producer for monitoring.
+    ffmpeg_next::init().context("failed to init ffmpeg")?;
+    let mut audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
+
+    // Clone track producers for the monitoring task.
+    let video_track = video_encoder.track.clone();
+    let audio_track = audio_encoder.track().clone();
 
     // Create status track.
     let status_track = moq_lite::Track {
@@ -88,17 +99,77 @@ async fn run(config: &Config) -> Result<()> {
     };
     let mut status_producer = broadcast.create_track(status_track)?;
 
+    // Per-track and overall pause signaling.
+    let video_active = Arc::new(AtomicBool::new(false));
+    let audio_active = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(true)); // Start paused until first viewer.
+    let resume_notify = Arc::new((Mutex::new(()), Condvar::new()));
+
+    // Monitor video track.
+    let flag = video_active.clone();
+    let all_paused = paused.clone();
+    let resume = resume_notify.clone();
+    let vt = video_track.clone();
+    tokio::spawn(async move {
+        loop {
+            let _ = vt.used().await;
+            tracing::info!("resuming video: viewer subscribed");
+            flag.store(true, Ordering::Release);
+            all_paused.store(false, Ordering::Release);
+            resume.1.notify_all();
+
+            let _ = vt.unused().await;
+            tracing::info!("pausing video: no viewers");
+            flag.store(false, Ordering::Release);
+        }
+    });
+
+    // Monitor audio track.
+    let flag = audio_active.clone();
+    let all_paused = paused.clone();
+    let resume = resume_notify.clone();
+    let at = audio_track.clone();
+    tokio::spawn(async move {
+        loop {
+            let _ = at.used().await;
+            tracing::info!("resuming audio: viewer subscribed");
+            flag.store(true, Ordering::Release);
+            all_paused.store(false, Ordering::Release);
+            resume.1.notify_all();
+
+            let _ = at.unused().await;
+            tracing::info!("pausing audio: no viewers");
+            flag.store(false, Ordering::Release);
+        }
+    });
+
+    // Monitor overall pause state (both unused = pause emulation).
+    {
+        let paused = paused.clone();
+        let resume = resume_notify.clone();
+        tokio::spawn(async move {
+            loop {
+                // Wait for BOTH tracks to become unused.
+                let _ = tokio::join!(video_track.unused(), audio_track.unused());
+                tracing::info!("pausing emulation: no viewers");
+                paused.store(true, Ordering::Release);
+
+                // Wait for EITHER track to become used.
+                tokio::select! {
+                    _ = video_track.used() => {},
+                    _ = audio_track.used() => {},
+                }
+                tracing::info!("resuming emulation: viewer connected");
+                paused.store(false, Ordering::Release);
+                resume.1.notify_all();
+            }
+        });
+    }
+
     // Run the emulator on a blocking thread.
     let timeout_secs = config.timeout;
     let emulator_handle = tokio::task::spawn_blocking(move || -> Result<()> {
-        ffmpeg_next::init().context("failed to init ffmpeg")?;
-
         let mut emu = emulator::Emulator::new(&rom_path)?;
-
-        // Set up audio encoder (runs on this thread since Opus encoding is fast).
-        // GB APU typically outputs at ~44100Hz but we'll check.
-        let mut audio_encoder =
-            audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
 
         let frame_duration = std::time::Duration::from_micros(16_742); // ~59.73fps
         let mut next_frame = std::time::Instant::now();
@@ -106,11 +177,25 @@ async fn run(config: &Config) -> Result<()> {
         let mut last_input = std::time::Instant::now();
         let mut last_status = String::new();
         let timeout = std::time::Duration::from_secs(timeout_secs);
-        // Per-viewer latency: viewer_id -> (latency_ms, last_seen).
         let mut viewer_latency: std::collections::HashMap<String, (f64, std::time::Instant)> =
             std::collections::HashMap::new();
 
         loop {
+            // Pause emulation when no viewers are watching.
+            if paused.load(Ordering::Acquire) {
+                tracing::info!("pausing encoding");
+                let (lock, cvar) = &*resume_notify;
+                let mut guard = lock.lock().unwrap();
+                while paused.load(Ordering::Acquire) {
+                    guard = cvar.wait(guard).unwrap();
+                }
+                tracing::info!("resuming encoding");
+                // Don't try to catch up after a pause.
+                next_frame = std::time::Instant::now();
+                // Force a keyframe so new viewers can start decoding.
+                video_encoder.force_keyframe();
+            }
+
             // Wait for next frame.
             let now = std::time::Instant::now();
             if now < next_frame {
@@ -132,7 +217,6 @@ async fn run(config: &Config) -> Result<()> {
                         emu.set_buttons(&viewer_id, buttons.into_iter().collect());
                         last_input = std::time::Instant::now();
 
-                        // Calculate end-to-end latency: current time - viewer's displayed time.
                         let latency = current_ts_ms - ts_ms;
                         if latency >= 0.0 {
                             viewer_latency.insert(viewer_id, (latency, std::time::Instant::now()));
@@ -165,7 +249,7 @@ async fn run(config: &Config) -> Result<()> {
             let stale = std::time::Duration::from_secs(30);
             viewer_latency.retain(|_, (_, last_seen)| last_seen.elapsed() < stale);
 
-            // Publish status with held buttons, idle countdown, and per-viewer latency.
+            // Publish status.
             let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
             let idle_secs = idle_time.as_secs();
             let remaining = timeout_secs.saturating_sub(idle_secs);
@@ -190,21 +274,26 @@ async fn run(config: &Config) -> Result<()> {
                 }
             }
 
-            // Grab and publish video frame.
-            let rgba = Bytes::from(emu.framebuffer());
-            let pts_micros = start.elapsed().as_micros() as u64;
-            let ts = hang::container::Timestamp::from_micros(pts_micros)
-                .context("timestamp overflow")?;
+            // Grab and publish video frame (skip if no video viewers).
+            if video_active.load(Ordering::Relaxed) {
+                let rgba = Bytes::from(emu.framebuffer());
+                let pts_micros = start.elapsed().as_micros() as u64;
+                let ts = hang::container::Timestamp::from_micros(pts_micros)
+                    .context("timestamp overflow")?;
+                video_encoder.try_frame(rgba, ts);
+            }
 
-            // Send to video encoder thread (non-blocking, drop frame if behind).
-            video_encoder.try_frame(rgba, ts);
-
-            // Grab and encode audio.
-            let samples = emu.audio_samples();
-            if !samples.is_empty() {
-                if let Err(e) = audio_encoder.push_samples(&samples) {
-                    tracing::warn!(error = %e, "audio encode error");
+            // Grab and encode audio (skip if no audio viewers).
+            if audio_active.load(Ordering::Relaxed) {
+                let samples = emu.audio_samples();
+                if !samples.is_empty() {
+                    if let Err(e) = audio_encoder.push_samples(&samples) {
+                        tracing::warn!(error = %e, "audio encode error");
+                    }
                 }
+            } else {
+                // Drain audio buffer even when not encoding to prevent buildup.
+                emu.audio_samples();
             }
         }
     });

@@ -83,6 +83,10 @@ boy/
 - **Viewers discover sessions** — subscribe to announcements with prefix `boy/`, filter to single-component suffixes
 - **Emulator discovers viewers** — subscribes to `boy/{name}/viewer/` prefix using `OriginProducer::with_root()`
 
+### Auto-Pause
+
+Emulation and encoding are automatically paused when no viewers are watching. When a viewer connects, emulation resumes immediately with a fresh keyframe.
+
 ### Video Pipeline
 
 The Rust publisher runs a Game Boy Color emulator (boytacean), grabs the framebuffer each frame, and encodes a single rendition:
