@@ -15,11 +15,12 @@ program.name("moq-token").description("Generate, sign, and verify tokens for moq
 
 program
 	.command("generate")
-	.description("Generate a key (pair) for the given algorithm")
+	.description("Generate a new signing key")
 	.requiredOption("--key <path>", "Path to save the key")
 	.option("--algorithm <algorithm>", "Algorithm to use", "HS256")
-	.option("--id <id>", "Optional key ID, useful for rotating keys")
-	.option("--public <path>", "Optional path to save the public key (for asymmetric algorithms)")
+	.option("--id <id>", "Key ID (randomly generated if not provided)")
+	.option("--public <path>", "Path to save the public key (for asymmetric algorithms)")
+	.option("--base64", "Output as base64url instead of JSON", false)
 	.option("--guest-subscribe <path...>", "Path prefixes for unauthenticated subscribe access")
 	.option("--guest-publish <path...>", "Path prefixes for unauthenticated publish access")
 	.option("--guest <path...>", "Path prefixes for both unauthenticated subscribe and publish access")
@@ -32,19 +33,20 @@ program
 				...(options.guestPublish?.length && { guest_pub: options.guestPublish }),
 			});
 
-			// Save the private key
-			const keyJson = JSON.stringify(key, null, 2);
-			const keyEncoded = base64.fromArrayBuffer(new TextEncoder().encode(keyJson).buffer, true);
-			writeFileSync(options.key, keyEncoded, "utf-8");
+			const encodeKey = (k: object): string => {
+				const json = JSON.stringify(k, null, 2);
+				if (options.base64) {
+					return base64.fromArrayBuffer(new TextEncoder().encode(json).buffer, true);
+				}
+				return json;
+			};
 
+			writeFileSync(options.key, encodeKey(key), "utf-8");
 			console.log(`Generated ${algorithm} key: ${options.key}`);
 
-			// Save public key if requested and key is asymmetric
 			if (options.public && key.kty !== "oct") {
 				const publicKey = toPublicKey(key);
-				const publicKeyJson = JSON.stringify(publicKey, null, 2);
-				const publicKeyEncoded = base64.fromArrayBuffer(new TextEncoder().encode(publicKeyJson).buffer, true);
-				writeFileSync(options.public, publicKeyEncoded, "utf-8");
+				writeFileSync(options.public, encodeKey(publicKey), "utf-8");
 				console.log(`Generated public key: ${options.public}`);
 			} else if (options.public && key.kty === "oct") {
 				console.error("Warning: Cannot save public key for symmetric (oct) algorithm");

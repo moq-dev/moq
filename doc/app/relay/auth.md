@@ -9,12 +9,21 @@ moq-relay uses JWT (JSON Web Tokens) for authentication and authorization. Token
 
 ## Overview
 
-The authentication flow:
+There are two authentication modes:
 
-1. Generate a signing key (shared secret or public/private keypair)
-2. Configure the relay with the verification key
-3. Issue tokens to clients with their allowed paths
-4. Clients connect with `?jwt=<token>` query parameter
+### Single Key (`--auth-key`)
+
+A single JWK file used to verify all tokens. No `kid` header is required in JWTs. Good for development and simple deployments.
+
+### Key Directory (`--auth-key-dir`)
+
+For production use with key rotation. Keys are resolved on demand by extracting the `kid` from the JWT header and fetching the corresponding key file.
+
+1. Generate signing keys (a random key ID is assigned automatically)
+2. Store each key as `{kid}.jwk` in a directory or serve via HTTP
+3. Configure the relay with the key directory or URL
+4. Issue tokens to clients with their allowed paths
+5. Clients connect with `?jwt=<token>` query parameter
 
 ## Quick Start
 
@@ -24,36 +33,50 @@ Using the Rust CLI:
 
 ```bash
 # Symmetric key (simpler, key must stay secret)
-moq-token-cli --key root.jwk generate
+moq-token-cli generate --out my-key.jwk
+
+# Save to a directory as {kid}.jwk
+moq-token-cli generate --out-dir ./keys/
 
 # Asymmetric key (private signs, public verifies)
-moq-token-cli --key private.jwk generate --algorithm RS256 --public public.jwk
+moq-token-cli generate --algorithm ES256 --out private.jwk --public public.jwk
+
+# Asymmetric key, both saved to directories as {kid}.jwk
+moq-token-cli generate --algorithm ES256 --out-dir ./private/ --public-dir ./keys/
 ```
 
-Using the JavaScript CLI:
-
-```bash
-bunx @moq/token generate --key root.jwk
-```
+A random key ID is generated if `--id` is not specified.
 
 ### Configure the Relay
 
+Single key (simplest):
+
 ```toml
 [auth]
-# Path to the verification key
-# - Symmetric: the shared secret (e.g., "root.jwk")
-# - Asymmetric: the public key (e.g., "public.jwk")
-key = "root.jwk"
+key = "my-key.jwk"
+```
 
-# Optional: allow anonymous access to a path prefix
-public = "anon"
+Key directory (for key rotation):
+
+```toml
+[auth]
+# Point to the public keys directory (from --public-dir).
+# For asymmetric algorithms, the relay only needs public keys to verify tokens.
+key_dir = "/etc/moq/keys/"
+```
+
+Remote key server:
+
+```toml
+[auth]
+key_dir = "https://api.example.com/keys"
 ```
 
 ### Issue a Token
 
 ```bash
 # Allow publishing to demo/my-stream and subscribing to anything under demo/
-moq-token-cli --key root.jwk sign --root demo --publish my-stream --subscribe ""
+moq-token-cli sign --key my-key.jwk --root demo --publish my-stream --subscribe ""
 ```
 
 The client connects with the token:
@@ -61,6 +84,25 @@ The client connects with the token:
 ```text
 https://relay.example.com/demo/my-stream?jwt=eyJhbGciOiJIUzI1NiIs...
 ```
+
+## Key Resolution
+
+### Single Key Mode (`--auth-key`)
+
+The relay uses the specified key file to verify all incoming JWTs. No `kid` header is required in the token.
+
+### Key Directory Mode (`--auth-key-dir`)
+
+Key files are stored as JSON by default. Legacy base64url-encoded files are also supported for backwards compatibility. Use `--base64` when generating keys if you prefer the base64url format.
+
+When a client connects with a JWT, the relay:
+
+1. Decodes the JWT header to extract the `kid` (key ID)
+2. Looks up the key from the configured source: `{dir}/{kid}.jwk` or `{url}/{kid}.jwk`
+3. Verifies the JWT signature with the resolved key
+4. Checks the token's `root` claim matches the connection path
+
+Key IDs must contain only alphanumeric characters, hyphens, and underscores.
 
 ## Token Claims
 
@@ -118,7 +160,7 @@ The `public` setting allows unauthenticated access to a path prefix:
 
 ```toml
 [auth]
-key = "root.jwk"
+key = "my-key.jwk"
 public = "anon"  # Anyone can publish/subscribe to anon/*
 ```
 
@@ -133,21 +175,26 @@ Set `public = ""` to make everything public (development only).
 public = ""
 ```
 
-### Public viewing, authenticated publishing
+### Development (single key)
 
 ```toml
 [auth]
-key = "root.jwk"
-public = "streams"  # Anyone can subscribe to streams/*
-# Publishing requires a token
+key = "dev.jwk"
+public = "anon"
 ```
 
-### Fully authenticated
+### Production (local keys with rotation)
 
 ```toml
 [auth]
-key = "public.jwk"  # Asymmetric, public key only
-# Everything requires a token
+key_dir = "/etc/moq/keys/"
+```
+
+### Production (remote key server)
+
+```toml
+[auth]
+key_dir = "https://api.example.com/keys"
 ```
 
 ## Library Usage
@@ -157,7 +204,7 @@ key = "public.jwk"  # Asymmetric, public key only
 ```typescript
 import { generate, load, sign, type Claims } from "@moq/token"
 
-// Generate a key
+// Generate a key (random kid assigned automatically)
 const keyString = await generate('HS256')
 
 // Load and sign
@@ -174,7 +221,7 @@ const token = await sign(key, claims)
 ### Rust
 
 ```bash
-moq-token-cli --key root.jwk sign \
+moq-token-cli sign --key my-key.jwk \
   --root demo \
   --publish my-stream \
   --subscribe "" \

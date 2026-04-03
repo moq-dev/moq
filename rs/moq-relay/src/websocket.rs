@@ -28,7 +28,7 @@ pub(crate) async fn serve_ws(
 		jwt: query.jwt,
 		register: query.register,
 	};
-	let token = state.auth.verify(&params)?;
+	let token = state.auth.verify(&params).await?;
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
 	let registration = state.cluster.register(&token);

@@ -9,7 +9,7 @@ use elliptic_curve::{Curve, CurveArithmetic, SecretKey};
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 
 /// Generate a key pair for the given algorithm, returning the private and public keys.
-pub fn generate(algorithm: Algorithm, id: Option<String>) -> crate::Result<Key> {
+pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result<Key> {
 	let key = match algorithm {
 		Algorithm::HS256 => generate_hmac_key::<32>(),
 		Algorithm::HS384 => generate_hmac_key::<48>(),

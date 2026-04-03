@@ -5,6 +5,16 @@ import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsSchema, validateClaims } from "./claims.ts";
 
 /**
+ * A validated key identifier (kid). Only alphanumeric, hyphens, and underscores.
+ */
+export const KeyIdSchema = z.string().check(
+	z.refine((value) => /^[A-Za-z0-9_-]+$/.test(value), {
+		message: "Key ID must contain only alphanumeric characters, hyphens, and underscores",
+	}),
+);
+export type KeyId = z.infer<typeof KeyIdSchema>;
+
+/**
  * Key operations that can be performed
  */
 export const OperationSchema = z.enum(["sign", "verify", "decrypt", "encrypt"]);
@@ -39,7 +49,7 @@ const StringOrArray = z._default(
 const BaseKeySchema = z.object({
 	alg: AlgorithmSchema,
 	key_ops: z.array(OperationSchema).check(z.minLength(1)),
-	kid: z.optional(z.string()),
+	kid: z.optional(KeyIdSchema),
 	guest: StringOrArray,
 	guest_sub: StringOrArray,
 	guest_pub: StringOrArray,
@@ -158,17 +168,28 @@ export function loadPublic(jwk: string): PublicKey {
 }
 
 function loadKey(jwk: string): Key | PublicKey {
-	const decoded = decodeBase64Flexible(jwk.trim());
-	if (!decoded) {
-		throw new Error("Failed to decode JWK: invalid base64url encoding");
-	}
+	const trimmed = jwk.trim();
 
 	let data: unknown;
-	try {
-		const jsonString = new TextDecoder().decode(decoded);
-		data = JSON.parse(jsonString);
-	} catch {
-		throw new Error("Failed to parse JWK: invalid JSON format");
+	if (trimmed.startsWith("{")) {
+		// Plain JSON
+		try {
+			data = JSON.parse(trimmed);
+		} catch {
+			throw new Error("Failed to parse JWK: invalid JSON format");
+		}
+	} else {
+		// Base64url encoded JSON
+		const decoded = decodeBase64Flexible(trimmed);
+		if (!decoded) {
+			throw new Error("Failed to decode JWK: invalid base64url encoding");
+		}
+		try {
+			const jsonString = new TextDecoder().decode(decoded);
+			data = JSON.parse(jsonString);
+		} catch {
+			throw new Error("Failed to parse JWK: invalid JSON format after base64url decode");
+		}
 	}
 
 	const key = parseKeyWithLegacyFallback(data);
