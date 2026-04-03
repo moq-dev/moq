@@ -298,6 +298,14 @@ impl TrackProducer {
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
+	/// Block until there is at least one active consumer.
+	pub async fn used(&self) -> Result<()> {
+		self.state
+			.used()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
 	/// Return true if the track has been closed.
 	pub fn is_closed(&self) -> bool {
 		self.state.read().is_closed()

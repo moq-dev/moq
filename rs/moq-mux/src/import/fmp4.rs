@@ -184,22 +184,22 @@ impl Fmp4 {
 			let handler = &trak.mdia.hdlr.handler;
 			let ext = if self.config.passthrough { "m4s" } else { "hang" };
 
-			let (kind, track) = match handler.as_ref() {
+			let track = self.broadcast.unique_track(&format!(".{ext}"))?;
+
+			let kind = match handler.as_ref() {
 				b"vide" => {
 					let config = self.init_video(trak)?;
-					let track = catalog.video.create_track(ext, config.clone());
-					(TrackKind::Video, track)
+					catalog.video.insert(&track.info.name, config)?;
+					TrackKind::Video
 				}
 				b"soun" => {
 					let config = self.init_audio(trak)?;
-					let track = catalog.audio.create_track(ext, config.clone());
-					(TrackKind::Audio, track)
+					catalog.audio.insert(&track.info.name, config)?;
+					TrackKind::Audio
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
-
-			let track = self.broadcast.create_track(track)?;
 
 			let producer = if kind == TrackKind::Audio && !self.config.passthrough {
 				Fmp4Producer::Ordered(
@@ -698,8 +698,8 @@ impl Drop for Fmp4 {
 
 		for track in self.tracks.values() {
 			match track.kind {
-				TrackKind::Video => catalog.video.remove_track(track.producer.info()).is_some(),
-				TrackKind::Audio => catalog.audio.remove_track(track.producer.info()).is_some(),
+				TrackKind::Video => catalog.video.remove(&track.producer.info().name).is_some(),
+				TrackKind::Audio => catalog.audio.remove(&track.producer.info().name).is_some(),
 			};
 		}
 	}

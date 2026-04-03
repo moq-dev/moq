@@ -112,32 +112,34 @@ impl Aac {
 		mut catalog: crate::CatalogProducer,
 		config: AacConfig,
 	) -> anyhow::Result<Self> {
-		let track = {
-			let mut cat = catalog.lock();
+		let track = broadcast.unique_track(".aac")?;
 
-			let audio_config = hang::catalog::AudioConfig {
-				codec: hang::catalog::AAC {
-					profile: config.profile,
-				}
-				.into(),
-				sample_rate: config.sample_rate,
-				channel_count: config.channel_count,
-				bitrate: None,
-				description: None,
-				container: hang::catalog::Container::Legacy,
-				jitter: None,
-			};
-			let track = cat.audio.create_track("aac", audio_config.clone());
-			tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
-
-			broadcast.create_track(track)?
+		let audio_config = hang::catalog::AudioConfig {
+			codec: hang::catalog::AAC {
+				profile: config.profile,
+			}
+			.into(),
+			sample_rate: config.sample_rate,
+			channel_count: config.channel_count,
+			bitrate: None,
+			description: None,
+			container: hang::catalog::Container::Legacy,
+			jitter: None,
 		};
+
+		catalog.lock().audio.insert(&track.info.name, audio_config.clone())?;
+		tracing::debug!(name = ?track.info.name, config = ?audio_config, "starting track");
 
 		Ok(Self {
 			catalog,
 			track: hang::container::OrderedProducer::new(track).with_max_group_duration(MAX_GROUP_DURATION),
 			zero: None,
 		})
+	}
+
+	/// Returns a reference to the underlying track producer.
+	pub fn track(&self) -> &moq_lite::TrackProducer {
+		&self.track
 	}
 
 	/// Finish the track, flushing the current group.
@@ -180,7 +182,7 @@ impl Aac {
 impl Drop for Aac {
 	fn drop(&mut self) {
 		tracing::debug!(name = ?self.track.info.name, "ending track");
-		self.catalog.lock().audio.remove_track(&self.track.info);
+		self.catalog.lock().audio.remove(&self.track.info.name);
 	}
 }
 

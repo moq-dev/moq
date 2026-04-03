@@ -50,6 +50,10 @@ pub enum Error {
 	/// The format is not recognized.
 	#[error("unknown format: {0}")]
 	UnknownFormat(String),
+
+	/// A track with this name already exists.
+	#[error("duplicate track: {0}")]
+	Duplicate(String),
 }
 
 /// A Result type alias for hang operations.

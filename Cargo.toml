@@ -1,9 +1,9 @@
 [workspace]
 members = [
-    "dev/boy",
     "rs/conducer",
     "rs/hang",
     "rs/libmoq",
+    "rs/moq-boy",
     "rs/moq-cli",
     "rs/moq-clock",
     "rs/moq-codec",

@@ -50,6 +50,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   moq-mux/           # Media muxers/demuxers (fMP4, CMAF, HLS)
   hang/              # Media encoding/streaming (catalog/container format)
   libmoq/            # C bindings (staticlib)
+  moq-boy/           # MoQ Boy emulator publisher (binary: moq-boy)
 
 /js/                  # TypeScript/JavaScript packages
   lite/              # Core protocol for browsers (published as @moq/lite)
@@ -60,12 +61,13 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   ui-core/           # Shared UI components (published as @moq/ui-core)
   watch/             # Watch/subscribe to streams + UI (published as @moq/watch)
   publish/           # Publish media to streams + UI (published as @moq/publish)
+  moq-boy/           # MoQ Boy web viewer (published as @moq/boy)
 
-/dev/                 # Development config, demos, and test media
+/demo/                # Demos and test media
+  boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
   relay/             # Relay server configs (relay.toml, root.toml, leaf*.toml)
-  media/             # Test media files (gitignored)
+  pub/               # Media hosting (vid.moq.dev)
   web/               # Web demo (watch/publish examples)
-  drone/             # Drone demo (Rust publisher + TS viewer)
   throttle/          # Network throttle script for testing
 
 /doc/                 # Documentation site (VitePress, deployed via Cloudflare)
