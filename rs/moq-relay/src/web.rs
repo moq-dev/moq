@@ -292,34 +292,34 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let track = moq_lite::Track {
-		name: track,
-		priority: 0,
-	};
+	let track = moq_lite::Track::new(track);
 
 	// NOTE: The auth token is already scoped to the broadcast.
 	let broadcast = origin.try_consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
-	let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
-		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
+	let track = broadcast.consume_track(&track).map_err(|err| match err {
+		moq_lite::Error::UnknownTrack | moq_lite::Error::UnknownBroadcast => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
 	})?;
 
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
 	let result = tokio::time::timeout_at(deadline, async {
-		let group = match params.group {
-			FetchGroup::Latest => match track.latest() {
-				Some(sequence) => track.get_group(sequence).await,
-				None => track.recv_group().await,
-			},
-			FetchGroup::Num(sequence) => track.get_group(sequence).await,
+		let to_err = |err: moq_lite::Error| match err {
+			moq_lite::Error::UnknownTrack | moq_lite::Error::UnknownBroadcast => StatusCode::NOT_FOUND,
+			_ => StatusCode::INTERNAL_SERVER_ERROR,
 		};
 
-		let group = match group {
-			Ok(Some(group)) => group,
-			Ok(None) => return Err(StatusCode::NOT_FOUND),
-			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-		};
+		let group = match params.group {
+			FetchGroup::Latest => match track.latest() {
+				Some(sequence) => track.get_group(sequence).await.map_err(to_err)?,
+				None => {
+					let mut sub = track.subscribe(moq_lite::Subscription::default()).map_err(to_err)?;
+					sub.recv_group().await.map_err(to_err)?
+				}
+			},
+			FetchGroup::Num(sequence) => track.get_group(sequence).await.map_err(to_err)?,
+		}
+		.ok_or(StatusCode::NOT_FOUND)?;
 
 		tracing::info!(track = %track.info.name, group = %group.info.sequence, "serving group");
 

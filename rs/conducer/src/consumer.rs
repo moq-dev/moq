@@ -8,6 +8,7 @@ use crate::{
 	lock::*,
 	producer::{Producer, Ref},
 	waiter::*,
+	weak::Weak,
 };
 
 /// The consuming side of a shared state channel.
@@ -103,6 +104,14 @@ impl<T> Consumer<T> {
 	pub fn read(&self) -> Ref<'_, T> {
 		Ref {
 			state: self.state.lock(),
+		}
+	}
+
+	/// Create a [`Weak`] reference that doesn't affect the producer/consumer ref counts.
+	pub fn weak(&self) -> Weak<T> {
+		Weak {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
 		}
 	}
 

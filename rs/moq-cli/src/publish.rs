@@ -47,8 +47,8 @@ pub struct Publish {
 
 impl Publish {
 	pub fn new(args: &PublishArgs) -> anyhow::Result<Self> {
-		let mut import_broadcast = moq_lite::Broadcast::new().produce();
-		let catalog = moq_mux::CatalogProducer::new(&mut import_broadcast)?;
+		let import_broadcast = moq_lite::Broadcast::new().produce();
+		let catalog = moq_mux::CatalogProducer::new(&import_broadcast)?;
 
 		let kind = match args.input {
 			InputFormat::Avc3 => {
@@ -108,14 +108,14 @@ impl Publish {
 
 		match export {
 			ExportFormat::Fmp4 => {
-				let converter = moq_mux::cmaf::Convert::new(import_consumer, output_broadcast);
+				let converter = moq_mux::cmaf::Convert::new(import_consumer, output_broadcast)?;
 				tokio::select! {
 					res = run_import(&mut kind) => res,
 					res = converter.run() => res,
 				}
 			}
 			ExportFormat::Hang => {
-				let converter = moq_mux::hang::Convert::new(import_consumer, output_broadcast);
+				let converter = moq_mux::hang::Convert::new(import_consumer, output_broadcast)?;
 				tokio::select! {
 					res = run_import(&mut kind) => res,
 					res = converter.run() => res,

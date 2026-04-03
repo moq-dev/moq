@@ -108,7 +108,7 @@ pub struct Aac {
 
 impl Aac {
 	pub fn new(
-		mut broadcast: moq_lite::BroadcastProducer,
+		broadcast: moq_lite::BroadcastProducer,
 		mut catalog: crate::CatalogProducer,
 		config: AacConfig,
 	) -> anyhow::Result<Self> {

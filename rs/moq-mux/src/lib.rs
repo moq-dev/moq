@@ -1,9 +1,7 @@
 //! Media muxers and demuxers for MoQ.
 
 mod catalog;
-#[cfg(feature = "mp4")]
 pub mod cmaf;
-#[cfg(feature = "mp4")]
 pub mod consumer;
 pub mod container;
 mod error;

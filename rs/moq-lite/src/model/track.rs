@@ -26,25 +26,38 @@ use std::{
 // TODO: Replace with a configurable cache size.
 const MAX_GROUP_AGE: Duration = Duration::from_secs(30);
 
-/// A track is a collection of groups, delivered out-of-order until expired.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A track is a collection of groups, identified by name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
 	pub name: String,
-	pub priority: u8,
 }
 
 impl Track {
 	pub fn new<T: Into<String>>(name: T) -> Self {
-		Self {
-			name: name.into(),
-			priority: 0,
-		}
+		Self { name: name.into() }
 	}
 
 	pub fn produce(self) -> TrackProducer {
 		TrackProducer::new(self)
 	}
+}
+
+/// Subscription preferences for a subscription or producer cap.
+///
+/// Describes how groups should be delivered: priority, ordering, latency bounds,
+/// and the range of groups requested.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Subscription {
+	pub priority: u8,
+	pub ordered: bool,
+	/// Maximum cache/latency. `Duration::ZERO` means unlimited.
+	pub max_latency: Duration,
+	/// First group sequence to deliver. `None` means no preference.
+	/// Use [`TrackSubscriber::update`] to set a concrete value once `latest()` is known.
+	pub start: Option<u64>,
+	/// Last group sequence to deliver. `None` means no preference (live).
+	pub end: Option<u64>,
 }
 
 #[derive(Default)]
@@ -56,13 +69,16 @@ struct State {
 	max_sequence: Option<u64>,
 	final_sequence: Option<u64>,
 	abort: Option<Error>,
+
+	/// Per-subscriber subscription values, read by the producer for aggregation.
+	subscriptions: Vec<conducer::Consumer<Subscription>>,
 }
 
 impl State {
 	/// Find the next non-tombstoned group at or after `index`.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
-	fn poll_next_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
+	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
 			if let Some((group, _)) = slot
@@ -143,9 +159,98 @@ impl State {
 		}
 	}
 
+	/// Compute the aggregate subscription from all active (non-closed) subscribers.
+	///
+	/// Aggregation rules:
+	/// - `priority`: max across all subscribers (highest-priority wins).
+	/// - `ordered`: AND of all subscribers (true only if every subscriber requests ordered).
+	/// - `max_latency`: max across subscribers, with `Duration::ZERO` meaning unlimited (ZERO wins).
+	/// - `start`/`end`: min/max of concrete values; `None` means no preference (deferred to others).
+	///
+	/// Returns `None` if there are no active subscriptions.
+	fn subscription(&self) -> Option<Subscription> {
+		if self.subscriptions.is_empty() {
+			return None;
+		}
+
+		// Read each subscriber's current subscription value into owned copies.
+		let subs: Vec<Subscription> = self
+			.subscriptions
+			.iter()
+			.filter_map(|c| {
+				let r = c.read();
+				if r.is_closed() { None } else { Some(r.clone()) }
+			})
+			.collect();
+
+		if subs.is_empty() {
+			return None;
+		}
+
+		let priority = subs.iter().map(|s| s.priority).max().unwrap();
+
+		// ordered is true only if ALL subscribers want ordered.
+		let ordered = subs.iter().all(|s| s.ordered);
+
+		// max_latency: max across subscriptions. ZERO = unlimited wins.
+		let max_latency = subs
+			.iter()
+			.map(|s| s.max_latency)
+			.reduce(|a, b| {
+				if a.is_zero() || b.is_zero() {
+					Duration::ZERO
+				} else {
+					a.max(b)
+				}
+			})
+			.unwrap();
+
+		// start: min across all concrete values. None = no preference (defer to others).
+		let start = subs
+			.iter()
+			.map(|s| s.start)
+			.reduce(|a, b| match (a, b) {
+				(Some(a), Some(b)) => Some(a.min(b)),
+				(Some(a), None) | (None, Some(a)) => Some(a),
+				(None, None) => None,
+			})
+			.unwrap();
+
+		// end: max across all concrete values. None = no end (defer to others).
+		let end = subs
+			.iter()
+			.map(|s| s.end)
+			.reduce(|a, b| match (a, b) {
+				(Some(a), Some(b)) => Some(a.max(b)),
+				(Some(a), None) | (None, Some(a)) => Some(a),
+				(None, None) => None,
+			})
+			.unwrap();
+
+		Some(Subscription {
+			priority,
+			ordered,
+			max_latency,
+			start,
+			end,
+		})
+	}
+
 	fn poll_finished(&self) -> Poll<Result<u64>> {
 		if let Some(fin) = self.final_sequence {
 			Poll::Ready(Ok(fin))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
+
+	/// Check if the track is "ready" for a subscriber: has at least one group,
+	/// is finished (with 0+ groups), or is aborted.
+	fn poll_ready(&self) -> Poll<Result<()>> {
+		if self.max_sequence.is_some() || self.final_sequence.is_some() {
+			Poll::Ready(Ok(()))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
 		} else {
@@ -158,6 +263,8 @@ impl State {
 pub struct TrackProducer {
 	pub info: Track,
 	state: conducer::Producer<State>,
+	/// The last aggregate subscription returned by [`Self::subscription`].
+	prev_subscription: Option<Subscription>,
 }
 
 impl TrackProducer {
@@ -165,10 +272,15 @@ impl TrackProducer {
 		Self {
 			info,
 			state: conducer::Producer::default(),
+			prev_subscription: None,
 		}
 	}
 
 	/// Create a new group with the given sequence number.
+	///
+	/// If a group with the same sequence already exists but was aborted (e.g. due to a
+	/// cancelled subscription), it will be replaced with a tombstone and the new group
+	/// pushed to the end. Successfully completed groups return `Err(Error::Duplicate)`.
 	pub fn create_group(&mut self, info: Group) -> Result<GroupProducer> {
 		let group = info.produce();
 
@@ -180,7 +292,25 @@ impl TrackProducer {
 		}
 
 		if !state.duplicates.insert(group.info.sequence) {
-			return Err(Error::Duplicate);
+			// Sequence exists -- check if the existing group was aborted.
+			for slot in state.groups.iter_mut() {
+				if let Some((existing, _)) = slot {
+					if existing.info.sequence == group.info.sequence {
+						if !existing.is_aborted() {
+							return Err(Error::Duplicate);
+						}
+						// Tombstone the old entry and push the new group at the end.
+						*slot = None;
+						break;
+					}
+				}
+			}
+
+			let now = tokio::time::Instant::now();
+			state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.info.sequence));
+			state.groups.push_back(Some((group.clone(), now)));
+			state.evict_expired(now);
+			return Ok(group);
 		}
 
 		let now = tokio::time::Instant::now();
@@ -285,8 +415,6 @@ impl TrackProducer {
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			index: 0,
-			min_sequence: 0,
 		}
 	}
 
@@ -316,6 +444,49 @@ impl TrackProducer {
 		}
 	}
 
+	/// Poll for changes to the aggregate subscription.
+	///
+	/// Returns `Ready(sub)` when the aggregate differs from the last value returned.
+	/// Returns `Ready(None)` when no subscriptions are active (or the track is closed).
+	pub fn poll_subscription(&mut self, waiter: &conducer::Waiter) -> Poll<Option<Subscription>> {
+		let prev = self.prev_subscription.as_ref();
+		match self.state.poll(waiter, |state| {
+			// Remove closed subscription consumers.
+			state.subscriptions.retain(|c| !c.read().is_closed());
+
+			// Also poll each subscription consumer so the waiter is registered
+			// on inner changes too.
+			for sub in &state.subscriptions {
+				// Register the waiter on each subscription's conducer channel.
+				let _ = sub.poll(waiter, |_| Poll::<()>::Pending);
+			}
+
+			let current = state.subscription();
+			if current.as_ref() != prev {
+				Poll::Ready(current)
+			} else {
+				Poll::Pending
+			}
+		}) {
+			Poll::Ready(Ok(sub)) => {
+				self.prev_subscription = sub.clone();
+				Poll::Ready(sub)
+			}
+			Poll::Ready(Err(_)) => {
+				self.prev_subscription = None;
+				Poll::Ready(None)
+			}
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Block until the aggregate subscription changes.
+	///
+	/// Returns `None` when all subscriptions are dropped or the track is closed.
+	pub async fn subscription(&mut self) -> Option<Subscription> {
+		conducer::wait(|waiter| self.poll_subscription(waiter)).await
+	}
+
 	fn modify(&self) -> Result<conducer::Mut<'_, State>> {
 		self.state
 			.write()
@@ -328,13 +499,14 @@ impl Clone for TrackProducer {
 		Self {
 			info: self.info.clone(),
 			state: self.state.clone(),
+			prev_subscription: self.prev_subscription.clone(),
 		}
 	}
 }
 
-impl From<Track> for TrackProducer {
-	fn from(info: Track) -> Self {
-		TrackProducer::new(info)
+impl<T: Into<Track>> From<T> for TrackProducer {
+	fn from(info: T) -> Self {
+		TrackProducer::new(info.into())
 	}
 }
 
@@ -366,20 +538,142 @@ impl TrackWeak {
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
-			index: 0,
-			min_sequence: 0,
+		}
+	}
+}
+
+/// Iterates groups from a track while managing this subscriber's subscription lifecycle.
+///
+/// Created via [`TrackConsumer::subscribe`]. Registers a subscription in the
+/// shared state on creation; automatically removes it on drop.
+/// Blocks in `subscribe()` until the first group exists (or finish/abort).
+pub struct TrackSubscriber {
+	pub info: Track,
+	state: conducer::Consumer<State>,
+	sub: conducer::Producer<Subscription>,
+	index: usize,
+
+	// The next largest sequence number that we want to return for next_group
+	next: u64,
+}
+
+impl TrackSubscriber {
+	/// Poll whether the track is "ready": has at least one group, is finished, or aborted.
+	pub fn poll_ready(&self, waiter: &conducer::Waiter) -> Poll<Result<()>> {
+		self.poll(waiter, |state| state.poll_ready())
+	}
+
+	/// Wait until the track is ready (has at least one group, is finished, or aborted).
+	pub async fn ready(&self) -> Result<()> {
+		conducer::wait(|waiter| self.poll_ready(waiter)).await
+	}
+
+	/// A group respecting the subscription start/end range.
+	///
+	/// NOTE: This may not be sequential, as groups are delivered out of order.
+	/// Use [Self::next_group] to only receive newer groups.
+	pub async fn recv_group(&mut self) -> Result<Option<GroupConsumer>> {
+		conducer::wait(|waiter| self.poll_recv_group(waiter)).await
+	}
+
+	pub fn poll_recv_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+		let sub = self.sub.read();
+		let min_sequence = sub.start.unwrap_or(0);
+		let end = sub.end;
+		drop(sub);
+
+		let Some((consumer, found_index)) =
+			ready!(self.poll(waiter, |state| { state.poll_recv_group(self.index, min_sequence) })?)
+		else {
+			return Poll::Ready(Ok(None));
+		};
+
+		// Check end bound.
+		if let Some(end) = end {
+			if consumer.info.sequence > end {
+				return Poll::Ready(Ok(None));
+			}
+		}
+
+		self.index = found_index + 1;
+		self.next = consumer.info.sequence + 1;
+
+		Poll::Ready(Ok(Some(consumer)))
+	}
+
+	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
+		conducer::wait(|waiter| self.poll_recv_group(waiter)).await
+	}
+
+	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+		let sub = self.sub.read();
+		let min_sequence = self.next.max(sub.start.unwrap_or(0));
+		let end = sub.end;
+		drop(sub);
+
+		let Some((consumer, found_index)) =
+			ready!(self.poll(waiter, |state| { state.poll_recv_group(self.index, min_sequence) })?)
+		else {
+			return Poll::Ready(Ok(None));
+		};
+
+		// Check end bound.
+		if let Some(end) = end {
+			if consumer.info.sequence > end {
+				return Poll::Ready(Ok(None));
+			}
+		}
+
+		self.index = found_index + 1;
+		self.next = consumer.info.sequence + 1;
+
+		Poll::Ready(Ok(Some(consumer)))
+	}
+
+	/// Update this subscription's preferences.
+	pub fn update(&mut self, sub: Subscription) {
+		if let Ok(mut guard) = self.sub.write() {
+			*guard = sub;
 		}
 	}
 
-	pub async fn unused(&self) -> crate::Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	/// Return the latest sequence number in the track.
+	pub fn latest(&self) -> Option<u64> {
+		self.state.read().max_sequence
 	}
 
-	pub fn is_clone(&self, other: &Self) -> bool {
-		self.state.same_channel(&other.state)
+	/// The current subscription preferences.
+	pub fn subscription(&self) -> Subscription {
+		self.sub.read().clone()
+	}
+
+	/// Poll for track closure, without blocking.
+	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<Result<()>> {
+		self.poll(waiter, |state| state.poll_closed())
+	}
+
+	/// Block until the track is closed.
+	pub async fn closed(&self) -> Result<()> {
+		conducer::wait(|waiter| self.poll_closed(waiter)).await
+	}
+
+	// A helper to automatically apply Dropped if the state is closed without an error.
+	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R>>
+	where
+		F: Fn(&conducer::Ref<'_, State>) -> Poll<Result<R>>,
+	{
+		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
+			Ok(res) => res,
+			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		})
+	}
+}
+
+impl Drop for TrackSubscriber {
+	fn drop(&mut self) {
+		// Close the subscription producer so the TrackProducer knows to remove it.
+		// The producer's poll_subscription will clean up closed consumers.
+		let _ = self.sub.close();
 	}
 }
 
@@ -388,9 +682,6 @@ impl TrackWeak {
 pub struct TrackConsumer {
 	pub info: Track,
 	state: conducer::Consumer<State>,
-	index: usize,
-
-	min_sequence: u64,
 }
 
 impl TrackConsumer {
@@ -406,46 +697,16 @@ impl TrackConsumer {
 		})
 	}
 
-	/// Poll for the next group received over the network, without blocking.
-	///
-	/// Groups may arrive out of order or with gaps due to network conditions.
-	/// Use `OrderedConsumer` if you need groups in sequence order,
-	/// skipping those that arrive too late.
-	///
-	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
-	/// `Poll::Ready(Ok(None))` when the track is finished,
-	/// `Poll::Ready(Err(e))` when the track has been aborted, or
-	/// `Poll::Pending` when no group is available yet.
-	pub fn poll_recv_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
-		let Some((consumer, found_index)) =
-			ready!(self.poll(waiter, |state| state.poll_next_group(self.index, self.min_sequence))?)
-		else {
-			return Poll::Ready(Ok(None));
-		};
-
-		self.index = found_index + 1;
-		Poll::Ready(Ok(Some(consumer)))
-	}
-
-	/// Receive the next group available on this track.
-	///
-	/// Groups may arrive out of order or with gaps due to network conditions.
-	/// Use `OrderedConsumer` if you need groups in sequence order,
-	/// skipping those that arrive too late.
-	pub async fn recv_group(&mut self) -> Result<Option<GroupConsumer>> {
-		conducer::wait(|waiter| self.poll_recv_group(waiter)).await
-	}
-
-	/// Deprecated: Use [`recv_group`](Self::recv_group) instead.
-	#[deprecated(note = "Use recv_group instead")]
+	/// Removed: Use [`TrackSubscriber::recv_group`] instead.
+	#[deprecated(note = "Use TrackSubscriber::recv_group instead")]
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
-		self.recv_group().await
+		unimplemented!("Use TrackSubscriber::recv_group instead")
 	}
 
-	/// Deprecated: Use [`poll_recv_group`](Self::poll_recv_group) instead.
-	#[deprecated(note = "Use poll_recv_group instead")]
-	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
-		self.poll_recv_group(waiter)
+	/// Removed: Use [`TrackSubscriber::poll_recv_group`] instead.
+	#[deprecated(note = "Use TrackSubscriber::poll_recv_group instead")]
+	pub fn poll_next_group(&mut self, _waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+		unimplemented!("Use TrackSubscriber::poll_recv_group instead")
 	}
 
 	/// Poll for the group with the given sequence, without blocking.
@@ -486,9 +747,43 @@ impl TrackConsumer {
 		conducer::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
-	/// Start the consumer at the specified sequence.
-	pub fn start_at(&mut self, sequence: u64) {
-		self.min_sequence = sequence;
+	/// Register a subscription and return a [`TrackSubscriber`] immediately.
+	///
+	/// The subscriber can be used right away, but callers may want to call
+	/// [`TrackSubscriber::ready`] or poll [`TrackSubscriber::poll_ready`] to
+	/// wait until the first group exists (or finish/abort).
+	///
+	/// Dropping the subscriber removes the subscription from the aggregate.
+	pub fn subscribe(&self, sub: Subscription) -> Result<TrackSubscriber> {
+		// Create a conducer channel for this subscription's preferences.
+		let sub_producer = conducer::Producer::new(sub);
+		let sub_consumer = sub_producer.consume();
+
+		{
+			// Use weak write access to insert the subscription consumer.
+			// If the channel is closed (track finished/dropped), skip — the subscriber
+			// can still read existing groups without an active subscription.
+			let weak = self.state.weak();
+			if let Ok(mut state) = weak.write() {
+				state.subscriptions.push(sub_consumer);
+			}
+		}
+
+		Ok(TrackSubscriber {
+			info: self.info.clone(),
+			state: self.state.clone(),
+			sub: sub_producer,
+			index: 0,
+			next: 0,
+		})
+	}
+
+	/// Create a weak reference that doesn't prevent auto-close.
+	pub(crate) fn weak(&self) -> TrackWeak {
+		TrackWeak {
+			info: self.info.clone(),
+			state: self.state.weak(),
+		}
 	}
 
 	/// Return the latest sequence number in the track.
@@ -501,9 +796,10 @@ impl TrackConsumer {
 use futures::FutureExt;
 
 #[cfg(test)]
+#[allow(deprecated)]
 impl TrackConsumer {
 	pub fn assert_group(&mut self) -> GroupConsumer {
-		self.recv_group()
+		self.next_group()
 			.now_or_never()
 			.expect("group would have blocked")
 			.expect("would have errored")
@@ -512,8 +808,8 @@ impl TrackConsumer {
 
 	pub fn assert_no_group(&mut self) {
 		assert!(
-			self.recv_group().now_or_never().is_none(),
-			"recv_group would not have blocked"
+			self.next_group().now_or_never().is_none(),
+			"next_group would not have blocked"
 		);
 	}
 
@@ -539,6 +835,11 @@ impl TrackConsumer {
 
 	pub fn assert_not_clone(&self, other: &Self) {
 		assert!(!self.is_clone(other), "should not be clone");
+	}
+
+	pub fn assert_subscribe(&self) -> TrackSubscriber {
+		self.subscribe(Subscription::default())
+			.expect("subscribe should not have errored")
 	}
 }
 
@@ -631,19 +932,20 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn consumer_skips_evicted_groups() {
+	async fn subscriber_skips_evicted_groups() {
 		tokio::time::pause();
 
 		let mut producer = Track::new("test").produce();
 		producer.append_group().unwrap(); // seq 0
 
-		let mut consumer = producer.consume();
+		let consumer = producer.consume();
+		let mut subscriber = consumer.subscribe(Subscription::default()).unwrap();
 
 		tokio::time::advance(MAX_GROUP_AGE + Duration::from_secs(1)).await;
 		producer.append_group().unwrap(); // seq 1
 
-		// Group 0 was evicted. Consumer should get group 1.
-		let group = consumer.assert_group();
+		// Group 0 was evicted. Subscriber should get group 1.
+		let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(group.info.sequence, 1);
 	}
 
@@ -724,10 +1026,11 @@ mod test {
 			assert!(state.duplicates.contains(&2));
 		}
 
-		// Consumer should still be able to read through the hole.
-		let mut consumer = producer.consume();
-		let group = consumer.assert_group();
-		// consume() starts at index 0, first non-tombstoned group is seq 5.
+		// Subscriber should still be able to read through the hole.
+		let consumer = producer.consume();
+		let mut subscriber = consumer.subscribe(Subscription::default()).unwrap();
+		let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		// subscribe() starts at index 0, first non-tombstoned group is seq 5.
 		assert_eq!(group.info.sequence, 5);
 	}
 
@@ -776,10 +1079,21 @@ mod test {
 		producer.create_group(Group { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
 
-		let mut consumer = producer.consume();
-		assert_eq!(consumer.assert_group().info.sequence, 1);
+		let consumer = producer.consume();
+		let mut subscriber = consumer.subscribe(Subscription::default()).unwrap();
+		assert_eq!(
+			subscriber
+				.recv_group()
+				.now_or_never()
+				.expect("should not block")
+				.expect("would have errored")
+				.expect("track was closed")
+				.info
+				.sequence,
+			1
+		);
 
-		let done = consumer
+		let done = subscriber
 			.recv_group()
 			.now_or_never()
 			.expect("should not block")
@@ -819,5 +1133,135 @@ mod test {
 		}
 
 		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded)));
+	}
+
+	#[tokio::test]
+	async fn create_group_replaces_aborted() {
+		let mut producer = Track::new("test").produce();
+
+		// Create and abort a group.
+		let mut group = producer.create_group(Group { sequence: 5 }).unwrap();
+		group.abort(Error::Cancel).unwrap();
+
+		// Creating the same group again should succeed (replaces aborted).
+		let group2 = producer.create_group(Group { sequence: 5 });
+		assert!(group2.is_ok(), "should replace aborted group");
+
+		// Creating again on a non-aborted group should fail.
+		let group3 = producer.create_group(Group { sequence: 5 });
+		assert!(
+			matches!(group3, Err(Error::Duplicate)),
+			"should not replace active group"
+		);
+	}
+
+	#[tokio::test]
+	async fn create_group_does_not_replace_finished() {
+		let mut producer = Track::new("test").produce();
+
+		// Create and finish a group.
+		let mut group = producer.create_group(Group { sequence: 5 }).unwrap();
+		group.finish().unwrap();
+
+		// Should fail because the group finished successfully.
+		let result = producer.create_group(Group { sequence: 5 });
+		assert!(matches!(result, Err(Error::Duplicate)));
+	}
+
+	#[tokio::test]
+	async fn subscribe_unblocks_on_first_group() {
+		let mut producer = Track::new("test").produce();
+		let consumer = producer.consume();
+
+		// ready() blocks until a group exists.
+		let handle = tokio::spawn(async move {
+			let sub = consumer.subscribe(Subscription::default()).unwrap();
+			sub.ready().await?;
+			Ok::<_, Error>(sub)
+		});
+
+		// Yield to let ready() start waiting.
+		tokio::task::yield_now().await;
+
+		// Write a group to unblock ready().
+		producer.append_group().unwrap();
+
+		let subscriber = handle.await.unwrap().unwrap();
+		assert_eq!(subscriber.latest(), Some(0));
+	}
+
+	#[tokio::test]
+	async fn subscribe_unblocks_on_finish() {
+		let mut producer = Track::new("test").produce();
+		let consumer = producer.consume();
+
+		let handle = tokio::spawn(async move {
+			let sub = consumer.subscribe(Subscription::default()).unwrap();
+			sub.ready().await?;
+			Ok::<_, Error>(sub)
+		});
+
+		tokio::task::yield_now().await;
+
+		// Finishing without any groups should also unblock ready().
+		producer.finish().unwrap();
+
+		let subscriber = handle.await.unwrap().unwrap();
+		assert!(subscriber.latest().is_none());
+	}
+
+	#[tokio::test]
+	async fn subscribe_unblocks_on_abort() {
+		let mut producer = Track::new("test").produce();
+		let consumer = producer.consume();
+
+		let handle = tokio::spawn(async move {
+			let sub = consumer.subscribe(Subscription::default()).unwrap();
+			sub.ready().await
+		});
+
+		tokio::task::yield_now().await;
+
+		// Aborting should unblock ready() with an error.
+		producer.abort(Error::Cancel).unwrap();
+
+		let result = handle.await.unwrap();
+		assert!(result.is_err(), "ready() should return error on abort");
+	}
+
+	#[tokio::test]
+	async fn subscribe_returns_immediately_if_group_exists() {
+		let mut producer = Track::new("test").produce();
+		producer.append_group().unwrap();
+
+		let consumer = producer.consume();
+
+		// subscribe is sync now; ready() should not block since a group already exists.
+		let subscriber = consumer.subscribe(Subscription::default()).expect("should not error");
+		subscriber
+			.ready()
+			.now_or_never()
+			.expect("should not block")
+			.expect("should not error");
+
+		assert_eq!(subscriber.latest(), Some(0));
+	}
+
+	#[tokio::test]
+	async fn subscribe_returns_immediately_if_finished() {
+		let mut producer = Track::new("test").produce();
+		producer.finish().unwrap();
+
+		let consumer = producer.consume();
+
+		// subscribe is sync now; ready() should not block since the track is finished.
+		let subscriber = consumer.subscribe(Subscription::default()).expect("should not error");
+		subscriber
+			.ready()
+			.now_or_never()
+			.expect("should not block")
+			.expect("should not error");
+
+		assert!(subscriber.latest().is_none());
 	}
 }

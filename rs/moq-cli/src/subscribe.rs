@@ -39,10 +39,10 @@ impl Subscribe {
 		// Always convert to CMAF — this is a no-op for tracks already in CMAF.
 		let cmaf_output = moq_lite::Broadcast::new().produce();
 		let cmaf_consumer = cmaf_output.consume();
-		let converter = moq_mux::cmaf::Convert::new(self.broadcast, cmaf_output);
+		let converter = moq_mux::cmaf::Convert::new(self.broadcast, cmaf_output)?;
 
-		// Subscribe to the catalog before the converter starts, so we don't miss it.
-		let catalog_track = cmaf_consumer.subscribe_track(&hang::Catalog::default_track())?;
+		// Consume the catalog track before the converter starts, so we don't miss it.
+		let catalog_track = cmaf_consumer.consume_track(&hang::Catalog::default_track())?;
 
 		let max_latency = std::time::Duration::from_millis(self.args.max_latency);
 
@@ -61,7 +61,8 @@ async fn mux_fmp4(
 ) -> anyhow::Result<()> {
 	let mut stdout = tokio::io::stdout();
 
-	let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
+	let catalog_sub = catalog_track.subscribe(moq_lite::Subscription::default())?;
+	let mut catalog_consumer = hang::CatalogConsumer::new(catalog_sub);
 	let catalog = catalog_consumer.next().await?.context("empty catalog")?;
 
 	// Build exporter from catalog (for init segment)
@@ -76,10 +77,8 @@ async fn mux_fmp4(
 	let mut muxer_tracks = Vec::new();
 
 	for (name, config) in &catalog.video.renditions {
-		let track = cmaf_consumer.subscribe_track(&moq_lite::Track {
-			name: name.clone(),
-			priority: 1,
-		})?;
+		let track =
+			cmaf_consumer.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
 
 		let timescale = match &config.container {
 			hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
@@ -94,10 +93,8 @@ async fn mux_fmp4(
 	}
 
 	for (name, config) in &catalog.audio.renditions {
-		let track = cmaf_consumer.subscribe_track(&moq_lite::Track {
-			name: name.clone(),
-			priority: 2,
-		})?;
+		let track =
+			cmaf_consumer.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
 
 		let timescale = match &config.container {
 			hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,

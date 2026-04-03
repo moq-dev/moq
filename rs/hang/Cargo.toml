@@ -11,6 +11,9 @@ rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
+
+[lib]
+doctest = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -24,7 +27,6 @@ serde = { workspace = true }
 serde_json = "1"
 serde_with = { version = "3", features = ["hex"] }
 thiserror = "2"
-tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = "0.1"
 url = "2"
 
@@ -36,6 +38,6 @@ features = ["from", "display", "debug"]
 anyhow = "1"
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = true }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = "0.1"
 url = "2"

@@ -7,7 +7,6 @@ pub enum Error {
 	#[error("hang: {0}")]
 	Hang(#[from] hang::Error),
 
-	#[cfg(feature = "mp4")]
 	#[error("cmaf: {0}")]
 	Cmaf(#[from] crate::cmaf::Error),
 }

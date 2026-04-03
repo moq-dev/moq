@@ -1,209 +1,271 @@
+use std::collections::HashMap;
+use std::task::Poll;
+
 use anyhow::Context;
-#[cfg(feature = "mp4")]
 use base64::Engine;
 use hang::catalog::Container;
-use hang::container::{Frame, OrderedProducer, Timestamp};
+use hang::container::Frame;
 
 /// Converts a broadcast from any format to hang/Legacy format.
 ///
-/// If tracks are already Legacy, they are passed through unchanged.
+/// If tracks are already Legacy, they are inserted directly (no copy).
 /// If tracks are CMAF, parses moof+mdat and converts to hang frames.
 pub struct Convert {
 	input: moq_lite::BroadcastConsumer,
 	output: moq_lite::BroadcastProducer,
+	catalog_consumer: Option<hang::CatalogConsumer>,
+	catalog_producer: crate::CatalogProducer,
+	tracks: HashMap<String, TrackState>,
 }
 
-// Make a new audio group every 100ms.
-const MAX_AUDIO_GROUP_DURATION: Timestamp = Timestamp::from_millis_unchecked(100);
+enum TrackState {
+	/// Legacy track passed through without conversion (held to keep the track alive).
+	Passthrough(#[allow(dead_code)] moq_lite::TrackConsumer),
+	/// CMAF track being converted to Legacy.
+	Convert(Box<ConvertTrack>),
+}
 
 impl Convert {
-	pub fn new(input: moq_lite::BroadcastConsumer, output: moq_lite::BroadcastProducer) -> Self {
-		Self { input, output }
+	pub fn new(input: moq_lite::BroadcastConsumer, output: moq_lite::BroadcastProducer) -> anyhow::Result<Self> {
+		let catalog_producer = crate::CatalogProducer::new(&output)?;
+
+		let catalog_track =
+			input.subscribe_track(&hang::Catalog::default_track(), moq_lite::Subscription::default())?;
+		let catalog_consumer = hang::CatalogConsumer::new(catalog_track);
+
+		Ok(Self {
+			input,
+			output,
+			catalog_consumer: Some(catalog_consumer),
+			catalog_producer,
+			tracks: HashMap::new(),
+		})
 	}
 
-	/// Run the converter.
-	///
-	/// Reads the hang catalog from the input broadcast. If tracks are already Legacy,
-	/// passes them through unchanged (no-op). If tracks are CMAF, parses moof+mdat
-	/// and converts to hang frames.
-	pub async fn run(self) -> anyhow::Result<()> {
-		let mut broadcast = self.output;
-		let catalog_producer = crate::CatalogProducer::new(&mut broadcast)?;
+	/// Poll the converter forward.
+	pub fn poll(&mut self, waiter: &moq_lite::conducer::Waiter) -> Poll<anyhow::Result<()>> {
+		if let Some(consumer) = &mut self.catalog_consumer {
+			if let Poll::Ready(catalog) = consumer.poll_next(waiter)? {
+				match catalog {
+					Some(catalog) => self.update_catalog(&catalog)?,
+					None => self.catalog_consumer = None,
+				}
+			}
+		}
 
-		// Subscribe to the input catalog
-		let catalog_track = self.input.subscribe_track(&hang::Catalog::default_track())?;
-		let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
-		let catalog = catalog_consumer.next().await?.context("empty catalog")?;
+		let mut error = None;
+		self.tracks.retain(|_, t| match t {
+			TrackState::Passthrough(_) => true,
+			TrackState::Convert(c) => match c.poll(waiter) {
+				Poll::Pending => true,
+				Poll::Ready(Ok(())) => false,
+				Poll::Ready(Err(e)) => {
+					error.get_or_insert(e);
+					false
+				}
+			},
+		});
 
-		let mut output_catalog = catalog_producer.clone();
-		let mut guard = output_catalog.lock();
-		let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+		if let Some(e) = error {
+			return Poll::Ready(Err(e));
+		}
 
-		// Convert video tracks
+		if self.catalog_consumer.is_none() && !self.tracks.values().any(|t| matches!(t, TrackState::Convert(_))) {
+			let _ = self.catalog_producer.finish();
+			return Poll::Ready(Ok(()));
+		}
+
+		Poll::Pending
+	}
+
+	fn update_catalog(&mut self, catalog: &hang::Catalog) -> anyhow::Result<()> {
+		let mut guard = self.catalog_producer.lock();
+
+		let mut active: HashMap<&str, ()> = HashMap::new();
+
 		for (name, config) in &catalog.video.renditions {
-			let input_track = self.input.subscribe_track(&moq_lite::Track {
-				name: name.clone(),
-				priority: 1,
-			})?;
+			active.insert(name, ());
+
+			if self.tracks.contains_key(name) {
+				continue;
+			}
 
 			match &config.container {
 				Container::Legacy => {
-					// Already Legacy — pass through
+					let consumer = self.input.consume_track(&moq_lite::Track::new(name.clone()))?;
+					self.output.insert_track(consumer.clone())?;
+					self.tracks.insert(name.clone(), TrackState::Passthrough(consumer));
 					guard.video.renditions.insert(name.clone(), config.clone());
-					let output_track = broadcast.create_track(moq_lite::Track {
-						name: name.clone(),
-						priority: 1,
-					})?;
-					let track_name = name.clone();
-					tasks.spawn(async move {
-						if let Err(e) = passthrough_track(input_track, output_track).await {
-							tracing::error!(%e, track = %track_name, "passthrough_track failed");
-						}
-					});
 				}
-				#[cfg(feature = "mp4")]
 				Container::Cmaf { init_data } => {
 					let init_bytes = base64::engine::general_purpose::STANDARD
 						.decode(init_data)
 						.context("invalid base64 init_data")?;
-
 					let timescale = crate::cmaf::parse_timescale(&init_bytes)?;
+
+					let input_track = self
+						.input
+						.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
 
 					let mut legacy_config = config.clone();
 					legacy_config.container = Container::Legacy;
 					guard.video.renditions.insert(name.clone(), legacy_config);
 
-					let output_track = broadcast.create_track(moq_lite::Track {
-						name: name.clone(),
-						priority: 1,
-					})?;
-
-					let track_name = name.clone();
-					tasks.spawn(async move {
-						if let Err(e) = convert_cmaf_to_legacy(input_track, output_track, timescale, true).await {
-							tracing::error!(%e, track = %track_name, "convert_cmaf_to_legacy failed");
-						}
-					});
+					let output_track = self.output.create_track(moq_lite::Track::new(name.clone()))?;
+					self.tracks.insert(
+						name.clone(),
+						TrackState::Convert(Box::new(ConvertTrack::new(input_track, output_track, timescale))),
+					);
 				}
-				#[cfg(not(feature = "mp4"))]
-				_ => anyhow::bail!("CMAF container requires the 'mp4' feature"),
 			}
 		}
 
-		// Convert audio tracks
 		for (name, config) in &catalog.audio.renditions {
-			let input_track = self.input.subscribe_track(&moq_lite::Track {
-				name: name.clone(),
-				priority: 2,
-			})?;
+			active.insert(name, ());
+
+			if self.tracks.contains_key(name) {
+				continue;
+			}
 
 			match &config.container {
 				Container::Legacy => {
+					let consumer = self.input.consume_track(&moq_lite::Track::new(name.clone()))?;
+					self.output.insert_track(consumer.clone())?;
+					self.tracks.insert(name.clone(), TrackState::Passthrough(consumer));
 					guard.audio.renditions.insert(name.clone(), config.clone());
-					let output_track = broadcast.create_track(moq_lite::Track {
-						name: name.clone(),
-						priority: 2,
-					})?;
-					let track_name = name.clone();
-					tasks.spawn(async move {
-						if let Err(e) = passthrough_track(input_track, output_track).await {
-							tracing::error!(%e, track = %track_name, "passthrough_track failed");
-						}
-					});
 				}
-				#[cfg(feature = "mp4")]
 				Container::Cmaf { init_data } => {
 					let init_bytes = base64::engine::general_purpose::STANDARD
 						.decode(init_data)
 						.context("invalid base64 init_data")?;
-
 					let timescale = crate::cmaf::parse_timescale(&init_bytes)?;
+
+					let input_track = self
+						.input
+						.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
 
 					let mut legacy_config = config.clone();
 					legacy_config.container = Container::Legacy;
 					guard.audio.renditions.insert(name.clone(), legacy_config);
 
-					let output_track = broadcast.create_track(moq_lite::Track {
-						name: name.clone(),
-						priority: 2,
-					})?;
-
-					let track_name = name.clone();
-					tasks.spawn(async move {
-						if let Err(e) = convert_cmaf_to_legacy(input_track, output_track, timescale, false).await {
-							tracing::error!(%e, track = %track_name, "convert_cmaf_to_legacy failed");
-						}
-					});
+					let output_track = self.output.create_track(moq_lite::Track::new(name.clone()))?;
+					self.tracks.insert(
+						name.clone(),
+						TrackState::Convert(Box::new(ConvertTrack::new(input_track, output_track, timescale))),
+					);
 				}
-				#[cfg(not(feature = "mp4"))]
-				_ => anyhow::bail!("CMAF container requires the 'mp4' feature"),
 			}
 		}
 
-		drop(guard);
-
-		// Keep broadcast and catalog alive until all track tasks complete.
-		while tasks.join_next().await.is_some() {}
+		// Remove tracks that are no longer in the catalog.
+		self.tracks.retain(|name, _| {
+			if active.contains_key(name.as_str()) {
+				return true;
+			}
+			let _ = self.output.remove_track(name);
+			false
+		});
+		guard
+			.video
+			.renditions
+			.retain(|name, _| active.contains_key(name.as_str()));
+		guard
+			.audio
+			.renditions
+			.retain(|name, _| active.contains_key(name.as_str()));
 
 		Ok(())
 	}
-}
 
-/// Pass a track through unchanged.
-async fn passthrough_track(
-	mut input: moq_lite::TrackConsumer,
-	mut output: moq_lite::TrackProducer,
-) -> anyhow::Result<()> {
-	while let Some(group) = input.recv_group().await? {
-		let mut out_group = output.append_group()?;
-		let mut frame_reader = group;
-		while let Some(frame_data) = frame_reader.read_frame().await? {
-			out_group.write_frame(frame_data)?;
-		}
-		out_group.finish()?;
+	/// Run the converter to completion.
+	pub async fn run(mut self) -> anyhow::Result<()> {
+		moq_lite::conducer::wait(|w| self.poll(w)).await
 	}
-	output.finish()?;
-	Ok(())
 }
 
-/// Convert CMAF moof+mdat frames to hang Legacy frames.
-#[cfg(feature = "mp4")]
-async fn convert_cmaf_to_legacy(
-	mut input: moq_lite::TrackConsumer,
+/// Poll-based CMAF-to-Legacy converter for a single track.
+///
+/// Receives groups independently and converts each one without ordering across groups.
+struct ConvertTrack {
+	input: moq_lite::TrackSubscriber,
 	output: moq_lite::TrackProducer,
 	timescale: u64,
-	is_video: bool,
-) -> anyhow::Result<()> {
-	let mut ordered = OrderedProducer::new(output);
+	/// Active input groups being read, each with its corresponding output group.
+	groups: Vec<(moq_lite::GroupConsumer, moq_lite::GroupProducer)>,
+	finished: bool,
+}
 
-	if !is_video {
-		ordered = ordered.with_max_group_duration(MAX_AUDIO_GROUP_DURATION);
-	}
-
-	while let Some(group) = input.recv_group().await? {
-		let mut frame_reader = group;
-		let mut is_first_in_group = true;
-
-		while let Some(frame_data) = frame_reader.read_frame().await? {
-			let frames = crate::cmaf::decode(frame_data, timescale)?;
-
-			for (i, frame) in frames.into_iter().enumerate() {
-				if is_video && is_first_in_group && i == 0 && frame.keyframe {
-					ordered.keyframe()?;
-				}
-
-				ordered.write(Frame {
-					timestamp: frame.timestamp,
-					payload: frame.payload.into(),
-				})?;
-			}
-
-			is_first_in_group = false;
+impl ConvertTrack {
+	fn new(input: moq_lite::TrackSubscriber, output: moq_lite::TrackProducer, timescale: u64) -> Self {
+		Self {
+			input,
+			output,
+			timescale,
+			groups: Vec::new(),
+			finished: false,
 		}
 	}
 
-	ordered.finish()?;
-	Ok(())
+	fn poll(&mut self, waiter: &moq_lite::conducer::Waiter) -> Poll<anyhow::Result<()>> {
+		// 1. Poll for new input groups
+		while !self.finished {
+			match self.input.poll_recv_group(waiter) {
+				Poll::Ready(Ok(Some(group))) => {
+					let out_group = self.output.append_group()?;
+					self.groups.push((group, out_group));
+				}
+				Poll::Ready(Ok(None)) => self.finished = true,
+				Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+				Poll::Pending => break,
+			}
+		}
+
+		// 2. Poll all active groups for frames, converting each independently
+		let timescale = self.timescale;
+
+		self.groups.retain_mut(|(reader, writer)| {
+			loop {
+				match reader.poll_read_frame(waiter) {
+					Poll::Ready(Ok(Some(data))) => {
+						// Decode CMAF moof+mdat into media frames
+						let frames = match crate::cmaf::decode(data, timescale) {
+							Ok(f) => f,
+							Err(e) => {
+								tracing::error!(%e, "cmaf decode failed");
+								return false;
+							}
+						};
+
+						// Encode each as hang Legacy frame
+						for decoded in frames {
+							let frame = Frame {
+								timestamp: decoded.timestamp,
+								payload: decoded.payload.into(),
+							};
+							if let Err(e) = frame.encode(writer) {
+								tracing::error!(%e, "legacy encode failed");
+								return false;
+							}
+						}
+					}
+					Poll::Ready(Ok(None)) => {
+						let _ = writer.finish();
+						return false;
+					}
+					Poll::Ready(Err(_)) => return false,
+					Poll::Pending => return true,
+				}
+			}
+		});
+
+		// 3. Done when input finished and all groups drained
+		if self.finished && self.groups.is_empty() {
+			self.output.finish()?;
+			Poll::Ready(Ok(()))
+		} else {
+			Poll::Pending
+		}
+	}
 }
 
 #[cfg(test)]
@@ -216,9 +278,9 @@ mod test {
 		Timestamp::from_micros(micros).unwrap()
 	}
 
-	#[cfg(feature = "mp4")]
 	#[tokio::test]
 	async fn cmaf_to_legacy_video() {
+		tokio::time::pause();
 		use base64::Engine;
 		use hang::catalog::Container;
 
@@ -237,15 +299,16 @@ mod test {
 			init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
 		};
 
-		let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&cmaf_config);
+		let (consumer, mut video_track, _broadcast, mut catalog_track) = setup_input(&cmaf_config);
 		let output = moq_lite::Broadcast::new().produce();
 		let output_consumer = output.consume();
-		let converter = super::Convert::new(consumer, output);
+		let converter = super::Convert::new(consumer, output).unwrap();
 
 		let cmaf_frames_clone = cmaf_frames.clone();
 		tokio::spawn(async move {
 			tokio::task::yield_now().await;
 			write_cmaf_frames(&mut video_track, &cmaf_frames_clone);
+			catalog_track.finish().unwrap();
 		});
 
 		let (convert_result, legacy_frames) = tokio::join!(converter.run(), async {
@@ -265,19 +328,21 @@ mod test {
 
 	#[tokio::test]
 	async fn legacy_passthrough() {
+		tokio::time::pause();
 		let config = test_video_config();
 		let frames = vec![(ts(0), vec![0xAA, 0xBB], true), (ts(33_000), vec![0xCC, 0xDD], false)];
 
-		let (consumer, mut video_track, _broadcast, _catalog_track) = setup_input(&config);
+		let (consumer, mut video_track, _broadcast, mut catalog_track) = setup_input(&config);
 		let output = moq_lite::Broadcast::new().produce();
 		let output_consumer = output.consume();
 
-		let converter = super::Convert::new(consumer, output);
+		let converter = super::Convert::new(consumer, output).unwrap();
 
 		let frames_clone = frames.clone();
 		tokio::spawn(async move {
 			tokio::task::yield_now().await;
 			write_legacy_frames(&mut video_track, &frames_clone);
+			catalog_track.finish().unwrap();
 		});
 
 		let (convert_result, result) = tokio::join!(converter.run(), async {

@@ -35,5 +35,6 @@ pub use server::*;
 pub use session::*;
 pub use version::*;
 
-// Re-export the bytes crate
+// Re-export crates that are part of the public API
 pub use bytes;
+pub use conducer;

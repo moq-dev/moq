@@ -74,9 +74,11 @@ impl Media {
 impl MoqBroadcastConsumer {
 	/// Subscribe to the catalog for this broadcast.
 	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
-		let consumer = hang::CatalogConsumer::from(track);
+		let subscriber = self.inner.subscribe_track(
+			&hang::catalog::Catalog::default_track(),
+			moq_lite::Subscription::default(),
+		)?;
+		let consumer = hang::CatalogConsumer::new(subscriber);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
 		}))
@@ -92,8 +94,9 @@ impl MoqBroadcastConsumer {
 		container: Container,
 		max_latency_ms: u64,
 	) -> Result<Arc<MoqMediaConsumer>, MoqError> {
-		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
+		let track = self
+			.inner
+			.subscribe_track(&moq_lite::Track::new(name), moq_lite::Subscription::default())?;
 		let container: hang::catalog::Container = container.into();
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let media = moq_mux::hang::Media::try_from(&container)?;

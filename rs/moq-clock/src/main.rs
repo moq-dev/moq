@@ -53,16 +53,13 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(url = ?config.url, "connecting to server");
 
-	let track = Track {
-		name: config.track,
-		priority: 0,
-	};
+	let track = Track::new(config.track);
 
 	let origin = moq_lite::Origin::produce();
 
 	match config.role {
 		Command::Publish => {
-			let mut broadcast = moq_lite::Broadcast::new().produce();
+			let broadcast = moq_lite::Broadcast::new().produce();
 			let track = broadcast.create_track(track)?;
 			let clock = clock::Publisher::new(track);
 
@@ -97,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
 					res = origin.announced() => {
 						let (path, broadcast) = res.context("origin closed")?;
 						tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-						let subscribed_track = broadcast.subscribe_track(&track)?;
+						let subscribed_track = broadcast.subscribe_track(&track, Subscription::default())?;
 						clock = Some(clock::Subscriber::new(subscribed_track));
 					},
 					res = session.closed() => return res.context("session closed"),

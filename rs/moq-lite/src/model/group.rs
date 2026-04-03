@@ -206,6 +206,11 @@ impl GroupProducer {
 			.await
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
+
+	/// Returns true if this group was aborted (closed with an error).
+	pub fn is_aborted(&self) -> bool {
+		self.state.read().abort.is_some()
+	}
 }
 
 impl Clone for GroupProducer {

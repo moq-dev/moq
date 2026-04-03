@@ -47,8 +47,15 @@ pub enum Error {
 	#[error("app code={0}")]
 	App(u16),
 
+	#[deprecated(note = "Use UnknownBroadcast or UnknownTrack instead")]
 	#[error("not found")]
 	NotFound,
+
+	#[error("unknown broadcast")]
+	UnknownBroadcast,
+
+	#[error("unknown track")]
+	UnknownTrack,
 
 	#[error("wrong frame size")]
 	WrongSize,
@@ -84,6 +91,7 @@ pub enum Error {
 	Closed,
 }
 
+#[allow(deprecated)]
 impl Error {
 	/// An integer code that is sent over the wire.
 	pub fn to_code(&self) -> u32 {
@@ -100,6 +108,8 @@ impl Error {
 			Self::BoundsExceeded => 11,
 			Self::Duplicate => 12,
 			Self::NotFound => 13,
+			Self::UnknownBroadcast => 26,
+			Self::UnknownTrack => 27,
 			Self::WrongSize => 14,
 			Self::ProtocolViolation => 15,
 			Self::UnexpectedMessage => 16,
@@ -138,6 +148,8 @@ impl Error {
 			20 => Self::InvalidRole,
 			24 => Self::Dropped,
 			25 => Self::Closed,
+			26 => Self::UnknownBroadcast,
+			27 => Self::UnknownTrack,
 			code if code >= 64 => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
 				Err(_) => Self::ProtocolViolation,

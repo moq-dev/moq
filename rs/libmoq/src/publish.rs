@@ -16,8 +16,8 @@ pub struct Publish {
 
 impl Publish {
 	pub fn create(&mut self) -> Result<Id, Error> {
-		let mut broadcast = moq_lite::Broadcast::new().produce();
-		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
+		let broadcast = moq_lite::Broadcast::new().produce();
+		let catalog = moq_mux::CatalogProducer::new(&broadcast)?;
 
 		let id = self.broadcasts.insert((broadcast, catalog))?;
 		Ok(id)

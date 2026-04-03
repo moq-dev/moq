@@ -50,11 +50,9 @@ impl Container for Legacy {
 /// Constructed from a `VideoConfig` or `AudioConfig`, parsing init_data once upfront.
 pub enum Media {
 	Legacy,
-	#[cfg(feature = "mp4")]
 	Cmaf(Box<mp4_atom::Moov>),
 }
 
-#[cfg(feature = "mp4")]
 impl TryFrom<&hang::catalog::Container> for Media {
 	type Error = crate::Error;
 
@@ -88,7 +86,6 @@ impl Container for Media {
 	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
 			Self::Legacy => Legacy.write(group, frames).map_err(Into::into),
-			#[cfg(feature = "mp4")]
 			Self::Cmaf(moov) => moov.write(group, frames).map_err(Into::into),
 		}
 	}
@@ -100,7 +97,6 @@ impl Container for Media {
 	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
 		match self {
 			Self::Legacy => Legacy.poll_read(group, waiter).map(|r| r.map_err(Into::into)),
-			#[cfg(feature = "mp4")]
 			Self::Cmaf(moov) => moov.poll_read(group, waiter).map(|r| r.map_err(Into::into)),
 		}
 	}
