@@ -88,7 +88,7 @@ ci:
 	cargo check --workspace --all-features --exclude moq-ffi
 
 	# Dry-run publish to verify packaging
-	cargo publish --workspace --dry-run
+	cargo publish --workspace --dry-run --exclude libmoq --exclude moq-ffi
 
 # Check semver compatibility against crates.io
 # requires: cargo install cargo-semver-checks
