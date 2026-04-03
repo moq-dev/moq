@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::task::Poll;
 
 use anyhow::Context;
-#[cfg(feature = "mp4")]
 use base64::Engine;
 use hang::catalog::Container;
 use hang::container::Frame;
@@ -98,7 +97,6 @@ impl Convert {
 					self.tracks.insert(name.clone(), TrackState::Passthrough(consumer));
 					guard.video.renditions.insert(name.clone(), config.clone());
 				}
-				#[cfg(feature = "mp4")]
 				Container::Cmaf { init_data } => {
 					let init_bytes = base64::engine::general_purpose::STANDARD
 						.decode(init_data)
@@ -119,8 +117,6 @@ impl Convert {
 						TrackState::Convert(Box::new(ConvertTrack::new(input_track, output_track, timescale))),
 					);
 				}
-				#[cfg(not(feature = "mp4"))]
-				_ => anyhow::bail!("CMAF container requires the 'mp4' feature"),
 			}
 		}
 
@@ -138,7 +134,6 @@ impl Convert {
 					self.tracks.insert(name.clone(), TrackState::Passthrough(consumer));
 					guard.audio.renditions.insert(name.clone(), config.clone());
 				}
-				#[cfg(feature = "mp4")]
 				Container::Cmaf { init_data } => {
 					let init_bytes = base64::engine::general_purpose::STANDARD
 						.decode(init_data)
@@ -159,8 +154,6 @@ impl Convert {
 						TrackState::Convert(Box::new(ConvertTrack::new(input_track, output_track, timescale))),
 					);
 				}
-				#[cfg(not(feature = "mp4"))]
-				_ => anyhow::bail!("CMAF container requires the 'mp4' feature"),
 			}
 		}
 
@@ -285,7 +278,6 @@ mod test {
 		Timestamp::from_micros(micros).unwrap()
 	}
 
-	#[cfg(feature = "mp4")]
 	#[tokio::test]
 	async fn cmaf_to_legacy_video() {
 		tokio::time::pause();

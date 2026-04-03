@@ -1224,7 +1224,6 @@ mod tests {
 
 	// ---- Media Container ----
 
-	#[cfg(feature = "mp4")]
 	#[tokio::test]
 	async fn media_container_legacy() {
 		tokio::time::pause();
