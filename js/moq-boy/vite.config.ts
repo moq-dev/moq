@@ -9,7 +9,6 @@ export default defineConfig({
 			entry: {
 				index: resolve(__dirname, "src/index.ts"),
 				element: resolve(__dirname, "src/element.ts"),
-				preview: resolve(__dirname, "src/preview.ts"),
 			},
 			formats: ["es"],
 		},

@@ -12,14 +12,12 @@
 	"exports": {
 		".": "./src/index.ts",
 		"./element": "./src/element.ts",
-		"./preview": "./src/preview.ts"
+		"./styles": "./src/styles.ts"
 	},
 	"sideEffects": [
-		"./src/element.ts",
-		"./src/preview.ts"
+		"./src/element.ts"
 	],
 	"scripts": {
-		"dev": "vite src --open",
 		"build": "rimraf dist && vite build && tsc && bun ../common/package.ts",
 		"check": "tsc --noEmit",
 		"release": "bun ../common/release.ts"

@@ -159,7 +159,7 @@ export const gridStyles = `
 	}
 
 	.empty-state {
-		display: none; padding: 4rem 2rem; text-align: center; width: 100%;
+		padding: 4rem 2rem; text-align: center; width: 100%;
 	}
 	.empty-state .icon { font-size: 3rem; margin-bottom: 1rem; opacity: 0.3; }
 	.empty-state .msg { font-size: 1rem; color: #666; }
