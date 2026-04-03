@@ -110,6 +110,7 @@ impl Message for SubscribeNamespaceError<'_> {
 
 /// UnsubscribeNamespace message (0x14) — v14/v15 only (v16 uses stream close)
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct UnsubscribeNamespace {
 	pub request_id: RequestId,
 }

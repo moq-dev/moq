@@ -2,6 +2,11 @@ import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 
 export async function encode(w: Writer, namespace: Path.Valid): Promise<void> {
+	if (namespace === "") {
+		await w.u53(0);
+		return;
+	}
+
 	const parts = namespace.split("/");
 	await w.u53(parts.length);
 	for (const part of parts) {

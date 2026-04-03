@@ -36,11 +36,13 @@ Check out the [cdn](https://github.com/moq-dev/moq/tree/main/cdn) directory for 
 It consists of a relay server in the US, Europe, and Asia.
 Clients use [GeoDNS](https://en.wikipedia.org/wiki/GeoDNS) to connect to the nearest relay, and relays connect to each other to form a global mesh.
 You can also connect to individual nodes directly:
+
 - `https://usc.cdn.moq.dev`
 - `https://euc.cdn.moq.dev`
 - `https://sea.cdn.moq.dev`
 
 Here's a quick tl;dr of the setup:
+
 - [Linode](https://linode.com/) is the VM provider.
 - [GCP](https://cloud.google.com/) is the DNS provider.
 - [OpenTofu](https://opentofu.org/) (aka Terraform) sets up the infrastructure.
@@ -74,7 +76,6 @@ TLS is where most people get stuck.
 
 And of course, make sure UDP is allowed on your firewall.
 The default WebTransport port is UDP/443 but anything will work if you put it in the URL.
-
 
 ## Next Steps
 

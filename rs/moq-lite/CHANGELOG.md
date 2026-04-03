@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.6](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.5...moq-lite-v0.15.6) - 2026-04-03
+
+### Fixed
+
+- *(@moq/lite)* encode empty namespace as [] not [""] ([#1179](https://github.com/moq-dev/moq/pull/1179))
+
+### Other
+
+- Improve SETUP message handling and error reporting in session ([#1189](https://github.com/moq-dev/moq/pull/1189))
+- Add Markdown linting with remark configuration ([#1183](https://github.com/moq-dev/moq/pull/1183))
+
 ## [0.15.5](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.4...moq-lite-v0.15.5) - 2026-03-25
 
 ### Other

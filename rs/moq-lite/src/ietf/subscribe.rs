@@ -267,6 +267,7 @@ impl Message for SubscribeError<'_> {
 
 /// Unsubscribe message (0x0a)
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Unsubscribe {
 	pub request_id: RequestId,
 }
@@ -287,6 +288,7 @@ impl Message for Unsubscribe {
 
 /// SubscribeUpdate message (0x02)
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SubscribeUpdate {
 	pub request_id: RequestId,
 	pub subscription_request_id: Option<RequestId>,

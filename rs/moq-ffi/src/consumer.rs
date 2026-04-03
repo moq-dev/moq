@@ -47,7 +47,9 @@ struct Media {
 
 impl Media {
 	async fn next(&mut self) -> Result<Option<MoqFrame>, MoqError> {
-		let Some(frame) = self.inner.read().await? else {
+		let frame = self.inner.read().await?;
+
+		let Some(frame) = frame else {
 			return Ok(None);
 		};
 

@@ -34,6 +34,7 @@ npm add @moq/publish
 ```
 
 **Attributes:**
+
 - `url` (required) — Relay server URL
 - `name` (required) — Broadcast name
 - `device` — "camera" or "screen" (default: "camera")

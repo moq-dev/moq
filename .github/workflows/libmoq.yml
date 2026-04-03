@@ -6,7 +6,7 @@ on:
       - "libmoq-v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -47,14 +47,7 @@ jobs:
       - name: Parse version
         id: parse
         shell: bash
-        run: |
-          ref=${GITHUB_REF#refs/tags/}
-          if [[ "$ref" =~ ^libmoq-v([0-9.]+)$ ]]; then
-            echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
-          else
-            echo "Tag format not recognized: $ref" >&2
-            exit 1
-          fi
+        run: .github/scripts/release.sh parse-version libmoq
 
       - name: Build and package
         shell: bash
@@ -74,6 +67,8 @@ jobs:
     name: Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v6
@@ -82,23 +77,11 @@ jobs:
 
       - name: Parse version
         id: parse
-        run: |
-          ref=${GITHUB_REF#refs/tags/}
-          if [[ "$ref" =~ ^libmoq-v([0-9.]+)$ ]]; then
-            echo "version=${BASH_REMATCH[1]}" >> $GITHUB_OUTPUT
-          else
-            echo "Tag format not recognized: $ref" >&2
-            exit 1
-          fi
+        run: .github/scripts/release.sh parse-version libmoq
 
-      - name: Find previous libmoq tag
+      - name: Find previous tag
         id: prev_tag
-        run: |
-          # Get all libmoq tags sorted by version, excluding the current tag
-          current_tag="libmoq-v${{ steps.parse.outputs.version }}"
-          prev_tag=$(git tag --list 'libmoq-v*' --sort=-v:refname | grep -v "^${current_tag}$" | head -n1)
-          echo "tag=${prev_tag}" >> $GITHUB_OUTPUT
-          echo "Previous tag: ${prev_tag:-none}"
+        run: .github/scripts/release.sh prev-tag libmoq
 
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -106,20 +89,10 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create release
+      - name: Create or update release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          prev_tag="${{ steps.prev_tag.outputs.tag }}"
-          if [ -n "$prev_tag" ]; then
-            gh release create "${{ github.ref_name }}" \
-              --title "libmoq v${{ steps.parse.outputs.version }}" \
-              --generate-notes \
-              --notes-start-tag "$prev_tag" \
-              artifacts/*
-          else
-            gh release create "${{ github.ref_name }}" \
-              --title "libmoq v${{ steps.parse.outputs.version }}" \
-              --generate-notes \
-              artifacts/*
-          fi
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TITLE: "libmoq v${{ steps.parse.outputs.version }}"
+          RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: .github/scripts/release.sh create artifacts

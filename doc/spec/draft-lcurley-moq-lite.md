@@ -8,9 +8,9 @@ moq-lite is designed to fanout live content 1->N across the internet.
 It leverages QUIC to prioritize important content, avoiding head-of-line blocking while respecting encoding dependencies.
 While primarily designed for media, the transport is payload agnostic and can be proxied by relays/CDNs without knowledge of codecs, containers, or encryption keys.
 
-
 # Rationale
-This draft is based on MoqTransport [moqt].
+
+This draft is based on MoqTransport \[moqt].
 The concepts, motivations, and terminology are very similar and when in doubt, refer to existing MoqTransport literature.
 A few things have been renamed (ex. object -> frame) to better align with media terminology.
 
@@ -34,8 +34,8 @@ Every feature from MoqTransport that is not necessary (or has not been implement
 This includes many great ideas (ex. group order) that may be added as they are needed.
 This draft is the current state, not the end state.
 
-
 # Concepts
+
 moq-lite consists of:
 
 - **Session**: An established QUIC connection between a client and server.
@@ -48,6 +48,7 @@ The application determines how to split data into broadcast, tracks, groups, and
 The moq-lite layer provides fanout, prioritization, and caching even for latency sensitive applications.
 
 ## Session
+
 A Session consists of a connection between a client and a server.
 There is currently no P2P support within QUIC so it's out of scope for moq-lite.
 
@@ -63,17 +64,19 @@ Each client establishes a session with a CDN edge server, ideally the closest on
 Any broadcasts and subscriptions are transparently proxied by the CDN behind the scenes.
 
 ## Broadcast
+
 A Broadcast is a collection of Tracks from a single publisher.
 This corresponds to a MoqTransport's "track namespace".
 
 A publisher may produce multiple broadcasts, each of which is advertised via an ANNOUNCE message.
-The subscriber uses the ANNOUNCE_PLEASE message to discover available broadcasts.
+The subscriber uses the ANNOUNCE\_PLEASE message to discover available broadcasts.
 These announcements are live and can change over time, allowing for dynamic origin discovery.
 
 A broadcast consists of any number of Tracks.
 The contents, relationships, and encoding of tracks are determined by the application.
 
 ## Track
+
 A Track is a series of Groups identified by a unique name within a Broadcast.
 
 A track consists of a single active Group at any moment, called the "latest group".
@@ -84,6 +87,7 @@ Every subscription is scoped to a single Track.
 A subscription starts at a configurable Group (defaulting to the latest) and continues until a configurable end Group or until either the publisher or subscriber cancels the subscription.
 
 The subscriber and publisher both indicate their delivery preference:
+
 - `Priority` indicates if Track A should be transmitted instead of Track B.
 - `Ordered` indicates if the Groups within a Track should be transmitted in order.
 - `Max Latency` indicates the maximum duration before a Group is abandoned.
@@ -91,6 +95,7 @@ The subscriber and publisher both indicate their delivery preference:
 The combination of these preferences enables the most important content to arrive during network degradation while still respecting encoding dependencies.
 
 ## Group
+
 A Group is an ordered stream of Frames within a Track.
 
 Each group consists of an append-only list of Frames.
@@ -101,16 +106,19 @@ In contrast, Groups may arrive out of order due to network congestion and priori
 The application SHOULD process or buffer groups out of order to avoid blocking on flow control.
 
 ## Frame
+
 A Frame is a payload of bytes within a Group.
 
 A frame is used to represent a chunk of data with an upfront size.
 The contents are opaque to the moq-lite layer.
 
 # Flow
+
 This section outlines the flow of messages within a moq-lite session.
 See the Messages section for the specific encoding.
 
 ## Connection
+
 moq-lite runs on top of WebTransport.
 WebTransport is a layer on top of QUIC and HTTP/3, required for web support.
 The API is nearly identical to QUIC with the exception of stream IDs.
@@ -118,6 +126,7 @@ The API is nearly identical to QUIC with the exception of stream IDs.
 How the WebTransport connection is authenticated is out-of-scope for this draft.
 
 ## Termination
+
 QUIC bidirectional streams have an independent send and receive direction.
 Rather than deal with half-open states, moq-lite combines both sides.
 If an endpoint closes the send direction of a stream, the peer MUST also close their send direction.
@@ -126,22 +135,26 @@ moq-lite contains many long-lived transactions, such as subscriptions and announ
 These are terminated when the underlying QUIC stream is terminated.
 
 To terminate a stream, an endpoint may:
-- close the send direction (STREAM with FIN) to gracefully terminate (all messages are flushed).
-- reset the send direction (RESET_STREAM) to immediately terminate.
 
-After resetting the send direction, an endpoint MAY close the recv direction (STOP_SENDING).
+- close the send direction (STREAM with FIN) to gracefully terminate (all messages are flushed).
+- reset the send direction (RESET\_STREAM) to immediately terminate.
+
+After resetting the send direction, an endpoint MAY close the recv direction (STOP\_SENDING).
 However, it is ultimately the other peer's responsibility to close their send direction.
 
 ## Handshake
+
 See the [Session](#session) section for ALPN negotiation and session activation details.
 
 # Streams
+
 moq-lite uses a bidirectional stream for each transaction.
 If the stream is closed, potentially with an error, the transaction is terminated.
 
 ## Bidirectional Streams
+
 Bidirectional streams are used for control streams.
-There's a 1-byte STREAM_TYPE at the beginning of each stream.
+There's a 1-byte STREAM\_TYPE at the beginning of each stream.
 
 | ID | Stream | Creator |
 |---:|:-------|:--------|
@@ -151,9 +164,10 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 | 0x4 | Probe | Subscriber |
 
 ### Announce
+
 A subscriber can open a Announce Stream to discover broadcasts matching a prefix.
 
-The subscriber creates the stream with a ANNOUNCE_PLEASE message.
+The subscriber creates the stream with a ANNOUNCE\_PLEASE message.
 The publisher replies with ANNOUNCE messages for any matching broadcasts and any future changes.
 Each ANNOUNCE message contains one of the following statuses:
 
@@ -168,17 +182,19 @@ Path prefix matching and equality is done on a byte-by-byte basis.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE messages.
 
 ### Subscribe
+
 A subscriber opens Subscribe Streams to request a Track.
 
-The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
-The publisher replies with a SUBSCRIBE_OK message followed by any number of SUBSCRIBE_DROP and additional SUBSCRIBE_OK messages.
-The first message on the response stream MUST be a SUBSCRIBE_OK; it is not valid to send a SUBSCRIBE_DROP before SUBSCRIBE_OK.
+The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE\_UPDATE messages.
+The publisher replies with a SUBSCRIBE\_OK message followed by any number of SUBSCRIBE\_DROP and additional SUBSCRIBE\_OK messages.
+The first message on the response stream MUST be a SUBSCRIBE\_OK; it is not valid to send a SUBSCRIBE\_DROP before SUBSCRIBE\_OK.
 
-The publisher closes the stream (FIN) when every group from start to end has been accounted for, either via a GROUP stream (completed or reset) or a SUBSCRIBE_DROP message.
+The publisher closes the stream (FIN) when every group from start to end has been accounted for, either via a GROUP stream (completed or reset) or a SUBSCRIBE\_DROP message.
 Unbounded subscriptions (no end group) stay open until the publisher closes the stream to indicate the track has ended, or either endpoint resets.
 Either endpoint MAY reset/cancel the stream at any time.
 
 ### Fetch
+
 A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
 
 The subscriber sends a FETCH message containing the broadcast path, track name, priority, and group sequence.
@@ -189,6 +205,7 @@ The publisher FINs the stream after the last frame, or resets the stream on erro
 Fetch behaves like HTTP: a single request/response per stream.
 
 ### Probe
+
 A subscriber opens a Probe Stream (0x4) to measure the available bitrate of the connection.
 
 The subscriber sends a PROBE message with a target bitrate on the bidirectional stream.
@@ -199,6 +216,7 @@ The publisher periodically replies with PROBE messages on the same bidirectional
 If the publisher does not support PROBE (e.g., congestion controller is not exposed), it MUST reset the stream.
 
 # Delivery
+
 The most important concept in moq-lite is how to deliver a subscription.
 QUIC can only improve the user experience if data is delivered out-of-order during congestion.
 This is the sole reason why data is divided into Broadcasts, Tracks, Groups, and Frames.
@@ -207,7 +225,9 @@ moq-lite consists of multiple groups being transmitted in parallel across separa
 How these streams get transmitted over the network is very important, and yet has been distilled down into a few simple properties:
 
 ## Prioritization
+
 The Publisher and Subscriber both exchange `Priority` and `Ordered` values:
+
 - `Priority` determines which Track should be transmitted next.
 - `Ordered` determines which Group within the Track should be transmitted next.
 
@@ -215,6 +235,7 @@ A publisher SHOULD attempt to transmit streams based on these fields.
 This depends on the QUIC implementation and it may not be possible to get fine-grained control.
 
 ### Priority
+
 The `Subscriber Priority` is scoped to the connection.
 The `Publisher Priority` SHOULD be used to resolve conflicts or ties.
 
@@ -228,13 +249,15 @@ There are two people in a conference call, Ali and Bob.
 
 We subscribe to both of their audio tracks with priority 2 and video tracks with priority 1.
 This will cause equal priority for `Ali` and `Bob` while prioritizing audio.
+
 ```
 ali/audio + bob/audio: subscriber_priority=2 publisher_priority=2
 ali/video + bob/video: subscriber_priority=1 publisher_priority=1
 ```
 
-If Bob starts actively speaking, they can bump their publisher priority via a SUBSCRIBE_OK message.
+If Bob starts actively speaking, they can bump their publisher priority via a SUBSCRIBE\_OK message.
 This would cause tracks be delivered in this order:
+
 ```
 bob/audio: subscriber_priority=2 publisher_priority=3
 ali/audio: subscriber_priority=2 publisher_priority=2
@@ -243,6 +266,7 @@ ali/video: subscriber_priority=1 publisher_priority=1
 ```
 
 The subscriber priority takes precedence, so we could override it if we decided to full-screen Ali's window:
+
 ```
 ali/audio subscriber_priority=4 publisher_priority=2
 ali/video subscriber_priority=3 publisher_priority=1
@@ -251,6 +275,7 @@ bob/video subscriber_priority=1 publisher_priority=2
 ```
 
 ### Ordered
+
 The `Subscriber Ordered` field signals if older (0x1) or newer (0x0) groups should be transmitted first within a Track.
 The `Publisher Ordered` field MAY likewise be used to resolve conflicts.
 
@@ -261,16 +286,16 @@ Note that [expiration](#expiration) is not affected by `ordered`.
 An old group may still be cancelled/skipped if it exceeds `max_latency` set by either peer.
 An application MUST support gaps and out-of-order delivery even when `ordered` is true.
 
-
 ## Expiration
+
 The Publisher and Subscriber both transmit a `Max Latency` value, indicating the maximum duration before a group is expired.
 
 It is not crucial to aggressively expire groups thanks to [prioritization](#prioritization).
 However, a lower priority group will still consume RAM, bandwidth, and potentially flow control.
 It is RECOMMENDED that an application set conservative limits and only resort to expiration when data is absolutely no longer needed.
 
-A subscriber SHOULD expire groups based on the `Subscriber Max Latency` in SUBSCRIBE/SUBSCRIBE_UPDATE.
-A publisher SHOULD expire groups based on the `Publisher Max Latency` in SUBSCRIBE_OK.
+A subscriber SHOULD expire groups based on the `Subscriber Max Latency` in SUBSCRIBE/SUBSCRIBE\_UPDATE.
+A publisher SHOULD expire groups based on the `Publisher Max Latency` in SUBSCRIBE\_OK.
 An implementation MAY use the minimum of both when determining when to expire a group.
 
 Group age is computed relative to the latest group by sequence number.
@@ -280,6 +305,7 @@ The arrival time is when the first byte of a group is received (subscriber) or q
 An expired group SHOULD BE reset at the QUIC level to avoid consuming flow control.
 
 ## Unidirectional Streams
+
 Unidirectional streams are used for data transmission.
 
 | ID | Stream | Creator |
@@ -287,6 +313,7 @@ Unidirectional streams are used for data transmission.
 | 0x0 | Group | Publisher |
 
 ### Group
+
 A publisher creates Group Streams in response to a Subscribe Stream.
 
 A Group Stream MUST start with a GROUP message and MAY be followed by any number of FRAME messages.
@@ -297,19 +324,20 @@ Both the publisher and subscriber MAY reset the stream at any time.
 This is not a fatal error and the session remains active.
 The subscriber MAY cache the error and potentially retry later.
 
-
-
 # Encoding
+
 This section covers the encoding of each message.
 
 ## Message Length
+
 Most messages are prefixed with a variable-length integer indicating the number of bytes in the message payload that follows.
 This length field does not include the length of the varint length itself.
 
-An implementation SHOULD close the connection with a PROTOCOL_VIOLATION if it receives a message with an unexpected length.
+An implementation SHOULD close the connection with a PROTOCOL\_VIOLATION if it receives a message with an unexpected length.
 The version and extensions should be used to support new fields, not the message length.
 
-## STREAM_TYPE
+## STREAM\_TYPE
+
 All streams start with a short header indicating the stream type.
 
 ```text
@@ -322,9 +350,9 @@ The stream ID depends on if it's a bidirectional or unidirectional stream, as in
 A receiver MUST reset the stream if it receives an unknown stream type.
 Unknown stream types MUST NOT be treated as fatal; this enables extension negotiation via stream probing.
 
+## ANNOUNCE\_PLEASE
 
-## ANNOUNCE_PLEASE
-A subscriber sends an ANNOUNCE_PLEASE message to indicate it wants to receive an ANNOUNCE message for any broadcasts with a path that starts with the requested prefix.
+A subscriber sends an ANNOUNCE\_PLEASE message to indicate it wants to receive an ANNOUNCE message for any broadcasts with a path that starts with the requested prefix.
 
 ```text
 ANNOUNCE_PLEASE Message {
@@ -339,9 +367,8 @@ Indicate interest for any broadcasts with a path that starts with this prefix.
 The publisher MUST respond with ANNOUNCE messages for any matching and active broadcasts, followed by ANNOUNCE messages for any future updates.
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
 
-
-
 ## ANNOUNCE
+
 A publisher sends an ANNOUNCE message to advertise a change in broadcast availability.
 Only the suffix is encoded on the wire, as the full path can be constructed by prepending the requested prefix.
 
@@ -371,8 +398,8 @@ The number of hops from the origin publisher.
 This is used as a tiebreaker when there are multiple paths to the same broadcast.
 A relay SHOULD increment this value when forwarding an announcement.
 
-
 ## SUBSCRIBE
+
 SUBSCRIBE is sent by a subscriber to start a subscription.
 
 ```text
@@ -418,10 +445,10 @@ The last group to deliver (inclusive).
 A value of 0 means unbounded (default).
 A non-zero value is the absolute group sequence + 1.
 
+## SUBSCRIBE\_UPDATE
 
-## SUBSCRIBE_UPDATE
-A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
-A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscription.
+A subscriber can modify a subscription with a SUBSCRIBE\_UPDATE message.
+A subscriber MAY send multiple SUBSCRIBE\_UPDATE messages to update the subscription.
 The start and end group can be changed in either direction (growing or shrinking).
 
 ```text
@@ -437,11 +464,11 @@ SUBSCRIBE_UPDATE Message {
 
 See [SUBSCRIBE](#subscribe) for information about each field.
 
+## SUBSCRIBE\_OK
 
-## SUBSCRIBE_OK
-A SUBSCRIBE_OK message is sent in response to a SUBSCRIBE.
-The publisher MAY send multiple SUBSCRIBE_OK messages to update the subscription.
-The first message on the response stream MUST be a SUBSCRIBE_OK; a SUBSCRIBE_DROP MUST NOT precede it.
+A SUBSCRIBE\_OK message is sent in response to a SUBSCRIBE.
+The publisher MAY send multiple SUBSCRIBE\_OK messages to update the subscription.
+The first message on the response stream MUST be a SUBSCRIBE\_OK; a SUBSCRIBE\_DROP MUST NOT precede it.
 
 ```text
 SUBSCRIBE_OK Message {
@@ -456,11 +483,11 @@ SUBSCRIBE_OK Message {
 ```
 
 **Type**:
-Set to 0x0 to indicate a SUBSCRIBE_OK message.
+Set to 0x0 to indicate a SUBSCRIBE\_OK message.
 
 **Start Group**:
 The resolved absolute start group sequence.
-A value of 0 means the start group is not yet known; the publisher MUST send a subsequent SUBSCRIBE_OK with a resolved value.
+A value of 0 means the start group is not yet known; the publisher MUST send a subsequent SUBSCRIBE\_OK with a resolved value.
 A non-zero value is the absolute group sequence + 1.
 
 **End Group**:
@@ -470,8 +497,9 @@ A non-zero value is the absolute group sequence + 1.
 
 See [SUBSCRIBE](#subscribe) for information about the other fields.
 
-## SUBSCRIBE_DROP
-A SUBSCRIBE_DROP message is sent by the publisher on the Subscribe Stream when groups cannot be served.
+## SUBSCRIBE\_DROP
+
+A SUBSCRIBE\_DROP message is sent by the publisher on the Subscribe Stream when groups cannot be served.
 
 ```text
 SUBSCRIBE_DROP Message {
@@ -484,7 +512,7 @@ SUBSCRIBE_DROP Message {
 ```
 
 **Type**:
-Set to 0x1 to indicate a SUBSCRIBE_DROP message.
+Set to 0x1 to indicate a SUBSCRIBE\_DROP message.
 
 **Start Group**:
 The first absolute group sequence in the dropped range.
@@ -497,6 +525,7 @@ An application-specific error code.
 A value of 0 indicates no error; the groups are simply unavailable.
 
 ## FETCH
+
 FETCH is sent by a subscriber to request a single group from a track.
 
 ```text
@@ -526,6 +555,7 @@ The publisher responds with FRAME messages on the same stream.
 The publisher FINs the stream after the last frame, or resets on error.
 
 ## PROBE
+
 PROBE is used to measure the available bitrate of the connection.
 
 ```text
@@ -540,6 +570,7 @@ When sent by the subscriber (stream opener): the target bitrate in bits per seco
 When sent by the publisher (responder): the current measured bitrate in bits per second.
 
 ## GROUP
+
 The GROUP message contains information about a Group, as well as a reference to the subscription being served.
 
 ```text
@@ -559,8 +590,8 @@ The sequence number of the group.
 This SHOULD increase by 1 for each new group.
 A subscriber MUST handle gaps, potentially caused by congestion.
 
-
 ## FRAME
+
 The FRAME message is a payload within a group.
 
 ```text
@@ -574,32 +605,35 @@ FRAME Message {
 An application specific payload.
 A generic library or relay MUST NOT inspect or modify the contents unless otherwise negotiated.
 
-
 # Appendix A: Changelog
 
 ## moq-lite-03
+
 - Version negotiated via ALPN (`moq-lite-xx`) instead of SETUP messages.
-- Removed Session, SessionCompat streams and SESSION_CLIENT/SESSION_SERVER/SESSION_UPDATE messages.
+- Removed Session, SessionCompat streams and SESSION\_CLIENT/SESSION\_SERVER/SESSION\_UPDATE messages.
 - Unknown stream types reset instead of fatal; enables extension negotiation via stream probing.
 - Added FETCH stream for single group download.
-- Added Start Group and End Group to SUBSCRIBE, SUBSCRIBE_UPDATE, and SUBSCRIBE_OK.
-- Added SUBSCRIBE_DROP on Subscribe stream.
+- Added Start Group and End Group to SUBSCRIBE, SUBSCRIBE\_UPDATE, and SUBSCRIBE\_OK.
+- Added SUBSCRIBE\_DROP on Subscribe stream.
 - Subscribe stream closed (FIN) when all groups accounted for.
-- Added PROBE stream replacing SESSION_UPDATE bitrate.
-- Removed ANNOUNCE_INIT message.
+- Added PROBE stream replacing SESSION\_UPDATE bitrate.
+- Removed ANNOUNCE\_INIT message.
 - Added `Hops` to ANNOUNCE.
-- Added `Subscriber Max Latency` and `Subscriber Ordered` to SUBSCRIBE and SUBSCRIBE_UPDATE.
-- Added `Publisher Priority`, `Publisher Max Latency`, and `Publisher Ordered` to SUBSCRIBE_OK.
-- SUBSCRIBE_OK may be sent multiple times.
+- Added `Subscriber Max Latency` and `Subscriber Ordered` to SUBSCRIBE and SUBSCRIBE\_UPDATE.
+- Added `Publisher Priority`, `Publisher Max Latency`, and `Publisher Ordered` to SUBSCRIBE\_OK.
+- SUBSCRIBE\_OK may be sent multiple times.
 
 ## moq-lite-02
+
 - Added SessionCompat stream.
 - Editorial stuff.
 
 ## moq-lite-01
+
 - Added Message Length (i) to all messages.
 
 # Appendix B: Upstream Differences
+
 A quick comparison of moq-lite and moq-transport-14:
 
 - Streams instead of request IDs.
@@ -617,36 +651,39 @@ A quick comparison of moq-lite and moq-transport-14:
 - No paused subscriptions (forward=0)
 
 ## Deleted Messages
+
 - GOAWAY
-- MAX_SUBSCRIBE_ID
-- REQUESTS_BLOCKED
-- SUBSCRIBE_ERROR
+- MAX\_SUBSCRIBE\_ID
+- REQUESTS\_BLOCKED
+- SUBSCRIBE\_ERROR
 - UNSUBSCRIBE
-- PUBLISH_DONE
+- PUBLISH\_DONE
 - PUBLISH
-- PUBLISH_OK
-- PUBLISH_ERROR
-- FETCH_OK
-- FETCH_ERROR
-- FETCH_CANCEL
-- FETCH_HEADER
-- TRACK_STATUS
-- TRACK_STATUS_OK
-- TRACK_STATUS_ERROR
-- PUBLISH_NAMESPACE
-- PUBLISH_NAMESPACE_OK
-- PUBLISH_NAMESPACE_ERROR
-- PUBLISH_NAMESPACE_CANCEL
-- SUBSCRIBE_NAMESPACE_OK
-- SUBSCRIBE_NAMESPACE_ERROR
-- UNSUBSCRIBE_NAMESPACE
-- OBJECT_DATAGRAM
+- PUBLISH\_OK
+- PUBLISH\_ERROR
+- FETCH\_OK
+- FETCH\_ERROR
+- FETCH\_CANCEL
+- FETCH\_HEADER
+- TRACK\_STATUS
+- TRACK\_STATUS\_OK
+- TRACK\_STATUS\_ERROR
+- PUBLISH\_NAMESPACE
+- PUBLISH\_NAMESPACE\_OK
+- PUBLISH\_NAMESPACE\_ERROR
+- PUBLISH\_NAMESPACE\_CANCEL
+- SUBSCRIBE\_NAMESPACE\_OK
+- SUBSCRIBE\_NAMESPACE\_ERROR
+- UNSUBSCRIBE\_NAMESPACE
+- OBJECT\_DATAGRAM
 
 ## Renamed Messages
-- SUBSCRIBE_NAMESPACE -> ANNOUNCE_PLEASE
-- SUBGROUP_HEADER -> GROUP
+
+- SUBSCRIBE\_NAMESPACE -> ANNOUNCE\_PLEASE
+- SUBGROUP\_HEADER -> GROUP
 
 ## Deleted Fields
+
 Some of these fields occur in multiple messages.
 
 - Request ID
@@ -664,12 +701,10 @@ Some of these fields occur in multiple messages.
 - Object Status
 - Extension Headers
 
-
 # Security Considerations
-TODO Security
 
+TODO Security
 
 # IANA Considerations
 
 This document has no IANA actions.
-

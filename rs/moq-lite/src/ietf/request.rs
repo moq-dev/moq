@@ -42,6 +42,7 @@ impl Decode<Version> for RequestId {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct MaxRequestId {
 	pub request_id: RequestId,
 }
@@ -61,6 +62,7 @@ impl Message for MaxRequestId {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct RequestsBlocked {
 	pub request_id: RequestId,
 }

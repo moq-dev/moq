@@ -1,0 +1,85 @@
+set fallback
+
+# Run the GB demo: relay + emulator publisher + web viewer.
+default:
+	bun install
+
+	bun run concurrently --kill-others --prefix-colors auto \
+		"just relay" \
+		"just wait && just b2s" \
+		"just wait && just dangan" \
+		"just wait && just web"
+
+# Download the given ROM from our R2 bucket.
+download rom:
+	#!/usr/bin/env bash
+	if [ ! -f "rom/{{rom}}" ]; then
+		mkdir -p rom
+		curl -fSL -o "rom/{{rom}}.tmp" "https://rom.moq.dev/{{rom}}"
+		mv "rom/{{rom}}.tmp" "rom/{{rom}}"
+	fi
+
+# Big2Small (puzzle): https://mdsteele.itch.io/big2small
+b2s:
+	just download big2small.gb
+	just start rom/big2small.gb
+
+# Dangan GB2 (bullet hell): https://snorpung.itch.io/dangan-gb2
+dangan:
+	just download DanganGB2.gbc
+	just start rom/DanganGB2.gbc
+
+# Opossum Country (horror): https://benjelter.itch.io/opossum-country
+opossum:
+	just download OpossumCountry.gbc
+	just start rom/OpossumCountry.gbc
+
+# Capybara (cozy): https://playinstinct.itch.io/capybara-village
+capybara:
+	just download Capybara-Village.gb
+	just start rom/Capybara-Village.gb
+
+# Forest of Fallen Knights (adventure): https://felrasyr.itch.io/forest-of-fallen-knights
+fofk:
+	just download FoFK.gb
+	just start rom/FoFK.gb
+
+# GB Run (racing): https://biscuitlocker.itch.io/gb-run
+gb-run:
+	just download gb-run.gbc
+	just start rom/gb-run.gbc
+
+# Start a Game Boy emulator publisher.
+start rom url='http://localhost:4443/anon':
+	cargo run --bin moq-boy -- --url "{{url}}" --rom "{{rom}}"
+
+# Host the web server
+web url='http://localhost:4443/anon':
+	VITE_RELAY_URL="{{url}}" bun run --filter @moq/boy dev --open
+
+# --- rom.moq.dev (R2 hosting) ---
+
+# Deploy the rom.moq.dev worker
+deploy:
+	bun install
+	bun wrangler deploy
+
+# Upload a single ROM to R2
+upload file:
+	bun install
+	bun wrangler r2 object put "rom-moq-dev/{{file}}" --file "rom/{{file}}" --remote
+
+# Sync all ROMs to R2
+sync dir="rom":
+	#!/usr/bin/env bash
+	set -euo pipefail
+	for file in "{{dir}}"/*; do
+		key=$(basename "$file")
+		echo "Uploading $key..."
+		bun wrangler r2 object put "rom-moq-dev/$key" --file "$file" --remote
+	done
+
+# List files in the R2 bucket
+list:
+	bun install
+	bun wrangler r2 object list "rom-moq-dev"

@@ -29,4 +29,3 @@ The wire format is identical to the Rust `moq-clock` crate:
 3. **Second Frames**: Subsequent frames contain individual seconds (e.g., "00", "01", "02", ...)
 
 It's a crude format, but it shows how delta encoding can work.
-

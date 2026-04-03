@@ -7,10 +7,6 @@ use std::{io, path::PathBuf};
 #[command(name = "moq-token")]
 #[command(about = "Generate, sign, and verify tokens for moq-relay", long_about = None)]
 struct Cli {
-	/// The path for the key.
-	#[arg(long)]
-	key: PathBuf,
-
 	/// The command to execute.
 	#[command(subcommand)]
 	command: Commands,
@@ -18,34 +14,63 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-	/// Generate a key (pair) for the given algorithm.
+	/// Generate a new signing key.
 	///
-	/// The key is output to the provided -key path.
+	/// A random key ID is assigned unless --id is specified.
+	/// Output is JSON by default; use --base64 for base64url encoding.
 	Generate {
 		/// The algorithm to use.
 		#[arg(long, default_value = "HS256")]
 		algorithm: Algorithm,
 
-		/// An optional key ID, useful for rotating keys.
+		/// The key ID. Randomly generated if not provided.
 		#[arg(long)]
 		id: Option<String>,
 
-		/// Optional path to save the public key (for asymmetric algorithms).
+		/// Write the key to a file path.
+		#[arg(long)]
+		out: Option<PathBuf>,
+
+		/// Write the key to a directory as {kid}.jwk.
+		#[arg(long, conflicts_with = "out")]
+		out_dir: Option<PathBuf>,
+
+		/// Write the public key to a file path (asymmetric algorithms only).
 		#[arg(long)]
 		public: Option<PathBuf>,
+
+		/// Write the public key to a directory as {kid}.jwk (asymmetric algorithms only).
+		#[arg(long, conflicts_with = "public")]
+		public_dir: Option<PathBuf>,
+
+		/// Output as base64url instead of JSON.
+		#[arg(long)]
+		base64: bool,
+
+		/// Path prefixes for unauthenticated subscribe access.
+		#[arg(long = "guest-subscribe")]
+		guest_subscribe: Vec<String>,
+
+		/// Path prefixes for unauthenticated publish access.
+		#[arg(long = "guest-publish")]
+		guest_publish: Vec<String>,
+
+		/// Path prefixes for both unauthenticated subscribe and publish access.
+		#[arg(long)]
+		guest: Vec<String>,
 	},
 
-	/// Sign a token to stdout, reading the key from stdin.
+	/// Sign a token, writing it to stdout.
 	Sign {
+		/// Path to the signing key file.
+		#[arg(long)]
+		key: PathBuf,
+
 		/// The root path for the token.
-		/// The user MUST connect to this WebTransport path and any broadcasts are relative to it.
-		/// Any trailing/leading slashes are ignored.
 		#[arg(long, default_value = "")]
 		root: String,
 
-		/// If specified, the user can publish any matching path prefixes.
-		/// If not specified, the user will not publish any broadcasts.
-		/// This can be specified multiple times to publish multiple paths.
+		/// Paths the user can publish to (repeatable).
 		#[arg(long)]
 		publish: Vec<String>,
 
@@ -53,43 +78,83 @@ enum Commands {
 		#[arg(long, hide = true)]
 		cluster: bool,
 
-		/// If specified, the user can subscribe to any matching path prefixes.
-		/// If not specified, the user will not receive announcements and cannot subscribe to any broadcasts.
-		/// This can be specified multiple times to subscribe to multiple paths.
+		/// Paths the user can subscribe to (repeatable).
 		#[arg(long)]
 		subscribe: Vec<String>,
 
-		/// The expiration time of the token as a unix timestamp.
+		/// Expiration time as a unix timestamp.
 		#[arg(long, value_parser = parse_unix_timestamp)]
 		expires: Option<std::time::SystemTime>,
 
-		/// The issued time of the token as a unix timestamp.
+		/// Issued-at time as a unix timestamp.
 		#[arg(long, value_parser = parse_unix_timestamp)]
 		issued: Option<std::time::SystemTime>,
 	},
 
 	/// Verify a token from stdin, writing the payload to stdout.
-	/// NOTE: You still need to verify that the path is valid for the token.
-	/// This just verifies the signature.
-	Verify,
+	Verify {
+		/// Path to the key file.
+		#[arg(long)]
+		key: PathBuf,
+	},
+}
+
+fn write_key(key: &moq_token::Key, path: &std::path::Path, base64: bool) -> anyhow::Result<()> {
+	if base64 {
+		Ok(key.to_file_base64url(path)?)
+	} else {
+		Ok(key.to_file(path)?)
+	}
 }
 
 fn main() -> anyhow::Result<()> {
 	let cli = Cli::parse();
 
 	match cli.command {
-		Commands::Generate { algorithm, id, public } => {
-			let key = moq_token::Key::generate(algorithm, id)?;
+		Commands::Generate {
+			algorithm,
+			id,
+			out,
+			out_dir,
+			public,
+			public_dir,
+			base64,
+			guest_subscribe,
+			guest_publish,
+			guest,
+		} => {
+			let id = match id {
+				Some(id) => moq_token::KeyId::decode(&id)?,
+				None => moq_token::KeyId::random(),
+			};
 
-			if let Some(public) = public {
-				key.to_public()?.to_file(public)?;
+			let mut key = moq_token::Key::generate(algorithm, Some(id.clone()))?;
+
+			key.guest = guest;
+			key.guest_sub = guest_subscribe;
+			key.guest_pub = guest_publish;
+
+			if let Some(dir) = public_dir {
+				let path = dir.join(format!("{id}.jwk"));
+				write_key(&key.to_public()?, &path, base64)?;
+			} else if let Some(path) = public {
+				write_key(&key.to_public()?, &path, base64)?;
 			}
 
-			key.to_file(&cli.key)?;
+			if let Some(dir) = out_dir {
+				let path = dir.join(format!("{id}.jwk"));
+				write_key(&key, &path, base64)?;
+			} else if let Some(path) = out {
+				write_key(&key, &path, base64)?;
+			} else {
+				let json = key.to_str()?;
+				println!("{json}");
+			}
 		}
 
 		#[allow(deprecated)]
 		Commands::Sign {
+			key,
 			root,
 			publish,
 			cluster,
@@ -97,7 +162,7 @@ fn main() -> anyhow::Result<()> {
 			expires,
 			issued,
 		} => {
-			let key = moq_token::Key::from_file(cli.key)?;
+			let key = moq_token::Key::from_file(key)?;
 
 			let payload = moq_token::Claims {
 				root,
@@ -112,8 +177,8 @@ fn main() -> anyhow::Result<()> {
 			println!("{token}");
 		}
 
-		Commands::Verify => {
-			let key = moq_token::Key::from_file(cli.key)?;
+		Commands::Verify { key } => {
+			let key = moq_token::Key::from_file(key)?;
 			let token = io::read_to_string(io::stdin())?.trim().to_string();
 			let payload = key.decode(&token)?;
 
@@ -124,7 +189,6 @@ fn main() -> anyhow::Result<()> {
 	Ok(())
 }
 
-// A simpler parser for clap
 fn parse_unix_timestamp(s: &str) -> anyhow::Result<std::time::SystemTime> {
 	let timestamp = s.parse::<i64>().context("expected unix timestamp")?;
 	let timestamp = timestamp.try_into().context("timestamp out of range")?;

@@ -1,5 +1,6 @@
 /// Errors from moq-mux operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
 	#[error("moq: {0}")]
 	Moq(#[from] moq_lite::Error),

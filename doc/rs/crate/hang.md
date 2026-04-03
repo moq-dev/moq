@@ -35,6 +35,7 @@ hang = "0.1"
 `hang` implements most of the [WebCodecs specification](https://www.w3.org/TR/webcodecs/).
 
 **Video:**
+
 - H.264 (AVC)
 - H.265 (HEVC)
 - VP8
@@ -42,6 +43,7 @@ hang = "0.1"
 - AV1
 
 **Audio:**
+
 - AAC
 - Opus
 
@@ -181,6 +183,7 @@ pub struct Frame {
 ```
 
 This simple container:
+
 - Works with WebCodecs
 - Minimal overhead
 - Codec-agnostic
@@ -203,6 +206,7 @@ hls.run().await?;
 ```
 
 This is useful for:
+
 - Ingesting existing content
 - Converting VOD to live
 - Testing with sample files
@@ -212,11 +216,13 @@ This is useful for:
 Groups are aligned with natural boundaries:
 
 **Video:**
+
 - Start with keyframe (I-frame)
 - Include dependent frames (P/B-frames)
 - Enable joining at group boundaries
 
 **Audio:**
+
 - Collection of audio packets
 - Usually 1 second of audio
 - Independent decoding

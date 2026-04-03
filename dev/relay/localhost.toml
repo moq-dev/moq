@@ -35,4 +35,4 @@ enabled = false
 # If the file does not exist, a random key will be generated and written to the path.
 # This gives the relay a persistent iroh endpoint id. The secret key can alternatively be set
 # via MOQ_IROH_SECRET environment variable.
-secret = "./dev/relay-iroh-secret.key"
+secret = "./iroh-secret.key"

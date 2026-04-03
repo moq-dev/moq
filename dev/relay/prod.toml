@@ -27,7 +27,12 @@ key = "key.pem"
 
 # See docs/auth.md for more information.
 [auth]
-# Path to the authentication key file:
-# - For asymmetric keys (RS256, ES256, etc.): use the public key (e.g., "public.jwk")
-# - For symmetric keys (HS256, HS384, HS512): use the shared secret key (e.g., "secret.jwk")
-key = "public.jwk"
+# A single JWK key file for authentication. No kid required in JWTs.
+key = "root.jwk"
+
+# For multiple keys with rotation, use a directory instead:
+# key_dir = "/path/to/keys/"
+# Keys are named {kid}.jwk and resolved by the kid in the JWT header.
+
+# Or use a URL for remote key management:
+# key_dir = "https://api.example.com/keys"

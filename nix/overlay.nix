@@ -12,10 +12,13 @@ in
     crateInfo ../rs/moq-relay/Cargo.toml
     // {
       src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p moq-relay";
+      cargoExtraArgs = "-p moq-relay --features jemalloc";
       # Enable frame pointers for profiling support (negligible overhead on x86_64).
       # This also ensures the CDN build matches what Cachix caches.
       RUSTFLAGS = "-C force-frame-pointers=yes";
+      # jemalloc's configure uses -O0 test builds, which conflict with
+      # Nix's _FORTIFY_SOURCE hardening (requires -O).
+      hardeningDisable = [ "fortify" ];
     }
   );
 

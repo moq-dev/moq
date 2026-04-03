@@ -62,19 +62,19 @@ Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub
 
 ```bash
 # Symmetric key (HMAC)
-moq-token-cli --key root.jwk generate --algorithm HS256
+moq-token-cli generate --out root.jwk --algorithm HS256
 
 # Asymmetric key pair (RSA)
-moq-token-cli --key private.jwk generate --public public.jwk --algorithm RS256
+moq-token-cli generate --algorithm RS256 --out private.jwk --public public.jwk
 
 # Asymmetric key pair (EdDSA)
-moq-token-cli --key private.jwk generate --public public.jwk --algorithm EdDSA
+moq-token-cli generate --algorithm EdDSA --out private.jwk --public public.jwk
 ```
 
 ### Sign a Token
 
 ```bash
-moq-token-cli --key root.jwk sign \
+moq-token-cli sign --key root.jwk \
   --root "rooms/123" \
   --publish "alice" \
   --subscribe "" \
@@ -84,21 +84,24 @@ moq-token-cli --key root.jwk sign \
 ### Verify a Token
 
 ```bash
-moq-token-cli --key root.jwk verify < alice.jwt
+moq-token-cli verify --key root.jwk < alice.jwt
 ```
 
 ## Supported Algorithms
 
 **Symmetric (HMAC):**
+
 - HS256
 - HS384
 - HS512
 
 **Asymmetric (RSA):**
+
 - RS256, RS384, RS512
 - PS256, PS384, PS512
 
 **Asymmetric (Elliptic Curve):**
+
 - EC256, EC384
 - EdDSA
 
@@ -110,13 +113,13 @@ moq-token-cli --key root.jwk verify < alice.jwt
 use moq_token::*;
 
 // Generate HMAC key
-let key = Key::generate(Algorithm::HS256)?;
-key.save("root.jwk")?;
+let key = Key::generate(Algorithm::HS256, None)?;
+key.to_file("root.jwk")?;
 
 // Generate RSA key pair
-let (private_key, public_key) = Key::generate_pair(Algorithm::RS256)?;
-private_key.save("private.jwk")?;
-public_key.save("public.jwk")?;
+let key = Key::generate(Algorithm::RS256, None)?;
+key.to_public()?.to_file("public.jwk")?;
+key.to_file("private.jwk")?;
 ```
 
 ### Sign a Token
@@ -124,17 +127,16 @@ public_key.save("public.jwk")?;
 ```rust
 use moq_token::*;
 
-let key = Key::load("root.jwk")?;
+let key = Key::from_file("root.jwk")?;
 
 let claims = Claims {
     root: "rooms/123".to_string(),
-    publish: Some("alice".to_string()),
-    subscribe: Some("".to_string()),
-    cluster: false,
-    expires: 1735689600,
+    publish: vec!["alice".to_string()],
+    subscribe: vec!["".to_string()],
+    ..Default::default()
 };
 
-let token = key.sign(&claims)?;
+let token = key.encode(&claims)?;
 println!("Token: {}", token);
 ```
 
@@ -143,8 +145,8 @@ println!("Token: {}", token);
 ```rust
 use moq_token::*;
 
-let key = Key::load("root.jwk")?;
-let claims = key.verify(&token)?;
+let key = Key::from_file("root.jwk")?;
+let claims = key.decode(&token)?;
 
 println!("Root: {}", claims.root);
 println!("Publish: {:?}", claims.publish);
@@ -156,11 +158,11 @@ println!("Subscribe: {:?}", claims.subscribe);
 | Claim | Type | Description |
 |-------|------|-------------|
 | `root` | string | Root path for all operations |
-| `pub` | string? | Publishing permission (path suffix) |
-| `sub` | string? | Subscription permission (path suffix) |
-| `cluster` | bool | Cluster node flag |
-| `exp` | number | Expiration (Unix timestamp) |
-| `iat` | number | Issued at (Unix timestamp) |
+| `put` | `string \| string[]?` | Publishing permission paths |
+| `get` | `string \| string[]?` | Subscription permission paths |
+| `cluster` | bool? | Cluster node flag |
+| `exp` | number? | Expiration (Unix timestamp) |
+| `iat` | number? | Issued at (Unix timestamp) |
 
 ## Integration with moq-relay
 

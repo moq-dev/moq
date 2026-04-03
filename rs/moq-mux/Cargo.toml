@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.3.3"
+version = "0.3.5"
 edition = "2024"
 rust-version.workspace = true
 
@@ -24,7 +24,7 @@ bytes = "1"
 conducer = { workspace = true }
 h264-parser = { version = "0.4.0" }
 hang = { workspace = true }
-m3u8-rs = { version = "5" }
+m3u8-rs = { version = "6" }
 moq-lite = { workspace = true, features = ["serde"] }
 moq-msf = { workspace = true }
 mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"] }

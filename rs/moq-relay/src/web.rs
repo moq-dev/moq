@@ -248,7 +248,7 @@ async fn serve_announced(
 		path: prefix,
 		jwt: query.jwt,
 	};
-	let token = state.auth.verify(&params)?;
+	let token = state.auth.verify(&params).await?;
 	let scoped = state.cluster.origin.with_root(&token.root);
 	let Some(mut origin) = scoped.and_then(|o| o.consume().with_filter(&token.subscribe)) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
@@ -283,7 +283,7 @@ async fn serve_fetch(
 		path: broadcast.clone(),
 		jwt: params.auth.jwt,
 	};
-	let token = state.auth.verify(&auth)?;
+	let token = state.auth.verify(&auth).await?;
 
 	let scoped = state.cluster.origin.with_root(&token.root);
 	let Some(origin) = scoped.and_then(|o| o.consume().with_filter(&token.subscribe)) else {

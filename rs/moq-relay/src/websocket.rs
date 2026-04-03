@@ -24,7 +24,7 @@ pub(crate) async fn serve_ws(
 	let ws = ws.protocols(["webtransport"]);
 
 	let params = AuthParams { path, jwt: query.jwt };
-	let token = state.auth.verify(&params)?;
+	let token = state.auth.verify(&params).await?;
 	let origin = state.cluster.origin.with_root(&token.root);
 	let publish = origin.as_ref().and_then(|o| o.with_filter(&token.publish));
 	let subscribe = origin.as_ref().and_then(|o| o.consume().with_filter(&token.subscribe));

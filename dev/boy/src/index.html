@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>MoQ Boy</title>
+		<style>
+			* { margin: 0; padding: 0; box-sizing: border-box; }
+			body { font-family: system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
+
+			header {
+				background: #111; border-bottom: 1px solid #333;
+				padding: 0.75rem 1.5rem; display: flex; align-items: center; gap: 1rem;
+			}
+			header h1 { font-size: 1.1rem; font-weight: 600; color: #8bac0f; }
+			header .info {
+				font-size: 0.7rem; color: #888; line-height: 1.4;
+				margin-left: auto; text-align: right; max-width: 400px;
+			}
+			header .info span { color: #aaa; }
+			header .status { font-size: 0.75rem; margin-left: 1rem; }
+
+			#grid {
+				display: flex; flex-wrap: wrap; gap: 1rem; padding: 1rem;
+			}
+
+			#empty-state {
+				display: none; padding: 4rem 2rem; text-align: center; width: 100%;
+			}
+			#empty-state .icon { font-size: 3rem; margin-bottom: 1rem; opacity: 0.3; }
+			#empty-state .msg { font-size: 1rem; color: #666; }
+			#empty-state .hint { font-size: 0.75rem; color: #444; margin-top: 0.5rem; }
+
+			.card {
+				position: relative; background: #111; border: 1px solid #333; border-radius: 8px;
+				overflow: hidden; cursor: pointer; transition: all 0.3s ease;
+				width: 320px; aspect-ratio: 10/9;
+			}
+			.card:hover { border-color: #8bac0f; }
+			.card.expanded {
+				position: fixed; inset: 0; z-index: 100; width: 100%; height: 100%;
+				border-radius: 0; border: none; aspect-ratio: auto;
+				display: flex; flex-direction: row;
+			}
+
+			.card .video {
+				width: 100%; height: 100%; object-fit: contain; background: #000; display: block;
+				image-rendering: pixelated;
+			}
+			.card.expanded .video {
+				flex: 1; min-width: 0;
+			}
+
+			.card .label {
+				position: absolute; top: 0.5rem; right: 0.5rem;
+				background: rgba(0,0,0,0.7); color: #8bac0f; padding: 0.2rem 0.5rem;
+				border-radius: 4px; font-family: monospace; font-size: 0.7rem;
+			}
+
+			.card .countdown {
+				position: absolute; top: 0.5rem; left: 0.5rem;
+				background: rgba(0,0,0,0.7); color: #facc15; padding: 0.2rem 0.5rem;
+				border-radius: 4px; font-family: monospace; font-size: 0.65rem;
+				pointer-events: none; display: none;
+			}
+
+			.card .latency {
+				position: absolute; bottom: 0.5rem; right: 0.5rem;
+				background: rgba(0,0,0,0.7); color: #4ade80; padding: 0.2rem 0.5rem;
+				border-radius: 4px; font-family: monospace; font-size: 0.65rem;
+				pointer-events: none; display: none;
+			}
+
+			/* Viewer latency list in controls panel */
+			.latency-list {
+				width: 100%; font-family: monospace; font-size: 0.65rem;
+			}
+			.latency-list .latency-header {
+				color: #888; text-transform: uppercase; letter-spacing: 0.05em;
+				margin-bottom: 0.3rem; font-size: 0.6rem;
+			}
+			.latency-entry {
+				display: flex; justify-content: space-between;
+				padding: 0.15rem 0; color: #aaa;
+			}
+			.latency-entry.self { color: #8bac0f; font-weight: 700; }
+			.latency-note {
+				font-family: monospace; font-size: 0.55rem; color: #555;
+				text-align: center; line-height: 1.4; margin-top: 0.25rem;
+			}
+
+			/* Controls panel */
+			.card .controls { display: none; }
+			.card.expanded .controls {
+				display: flex; flex-direction: column; align-items: center; justify-content: center;
+				width: 240px; background: #111; border-left: 1px solid #333;
+				padding: 1rem; gap: 1rem; flex-shrink: 0;
+			}
+
+			.controls-inner {
+				display: flex; flex-direction: column; align-items: center; gap: 1.5rem;
+			}
+
+			/* D-pad */
+			.dpad {
+				display: grid;
+				grid-template-columns: 52px 52px 52px;
+				grid-template-rows: 52px 52px 52px;
+				gap: 4px;
+			}
+			.dpad-btn {
+				background: #1a1a2e; color: #e0e0e0; border: 1px solid #555;
+				border-radius: 6px; cursor: pointer; font-size: 1.2rem;
+				display: flex; align-items: center; justify-content: center;
+				transition: all 0.15s;
+			}
+			.dpad-btn:hover { background: #2a2a3e; border-color: #8bac0f; }
+			.dpad-btn:active { background: #3a3a4e; transform: scale(0.95); }
+			.dpad-up { grid-column: 2; grid-row: 1; }
+			.dpad-left { grid-column: 1; grid-row: 2; }
+			.dpad-right { grid-column: 3; grid-row: 2; }
+			.dpad-down { grid-column: 2; grid-row: 3; }
+
+			/* AB buttons */
+			.ab-buttons {
+				display: flex; gap: 0.75rem;
+			}
+			.ab-btn {
+				width: 52px; height: 52px; border-radius: 50%;
+				background: #2a1a3e; color: #c084fc; border: 2px solid #7c3aed;
+				font-size: 1rem; font-weight: 700; cursor: pointer;
+				display: flex; align-items: center; justify-content: center;
+				transition: all 0.15s;
+			}
+			.ab-btn:hover { background: #3a2a4e; border-color: #a855f7; }
+			.ab-btn:active { transform: scale(0.95); }
+
+			/* Start/Select */
+			.meta-buttons { display: flex; gap: 0.5rem; }
+			.meta-btn {
+				background: #222; color: #aaa; border: 1px solid #444;
+				padding: 0.3rem 0.8rem; border-radius: 12px; cursor: pointer;
+				font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em;
+				transition: all 0.15s;
+			}
+			.meta-btn:hover { background: #333; border-color: #8bac0f; color: #e0e0e0; }
+			.meta-btn:active { transform: scale(0.95); }
+
+			/* Active button highlights (from remote status) */
+			.dpad-btn.active { background: #1a3a1a; border-color: #8bac0f; color: #8bac0f; box-shadow: 0 0 8px rgba(139, 172, 15, 0.4); }
+			.ab-btn.active { background: #3a1a4e; border-color: #a855f7; box-shadow: 0 0 8px rgba(168, 85, 247, 0.4); }
+			.meta-btn.active { background: #2a2a1a; border-color: #facc15; color: #facc15; }
+
+			/* Reset and audio */
+			.util-buttons { display: flex; gap: 0.5rem; width: 100%; }
+			.util-btn {
+				flex: 1; background: #1a1a1a; color: #888; border: 1px solid #333;
+				padding: 0.4rem; border-radius: 6px; cursor: pointer;
+				font-size: 0.7rem; transition: all 0.15s;
+			}
+			.util-btn:hover { background: #2a2a2a; border-color: #666; color: #ccc; }
+			.util-btn.unmuted { background: #1a2a1a; border-color: #8bac0f; color: #8bac0f; }
+			.util-btn.reset { color: #f87171; border-color: #7f1d1d; }
+			.util-btn.reset:hover { background: #2a1a1a; border-color: #f87171; }
+
+			.key-hints {
+				font-family: monospace; font-size: 0.6rem; color: #555;
+				text-align: center; line-height: 1.6;
+			}
+		</style>
+	</head>
+	<body>
+		<header>
+			<h1>MoQ Boy</h1>
+			<div class="info">
+				<span>Click a session to play.</span> Arrows to move, Z=B, X=A, Enter=Start, Shift=Select.
+				Everyone controls the same game (anarchy mode).
+			</div>
+			<span class="status" id="connection-status">Disconnected</span>
+		</header>
+		<div id="grid">
+			<div id="empty-state">
+				<div class="icon">&#x1F3AE;</div>
+				<div class="msg">No games online</div>
+				<div class="hint">Waiting for Game Boy sessions to connect...</div>
+			</div>
+		</div>
+		<div style="max-width:600px;margin:2rem auto;padding:1rem 1.5rem;font-size:0.75rem;color:#555;text-align:center;line-height:1.6;">
+			All games are streamed from a remote server via <a href="https://moq.dev" style="color:#8bac0f;text-decoration:none;">MoQ</a>.
+			Yes, your toaster is powerful enough to run Game Boy games.
+			But it's a good demo of how you can use MoQ for interactive experiences.
+		</div>
+		<footer style="position:fixed;bottom:0;left:0;right:0;padding:0.4rem 1rem;background:#111;border-top:1px solid #222;font-family:monospace;font-size:0.65rem;color:#555;text-align:center;">
+			Hint: Run <code style="color:#888">just boy opossum</code> to start a new game
+		</footer>
+		<script type="module" src="./index.ts"></script>
+	</body>
+</html>

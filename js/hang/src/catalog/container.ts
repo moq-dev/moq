@@ -1,4 +1,4 @@
-import { z } from "zod";
+import * as z from "zod/mini";
 
 /**
  * Container format for frame timestamp encoding and frame payload structure.
@@ -8,8 +8,8 @@ import { z } from "zod";
  * - "cmaf": Fragmented MP4 container - frames contain complete moof+mdat fragments.
  *           The init segment (ftyp+moov) is base64-encoded in the catalog.
  */
-export const ContainerSchema = z
-	.discriminatedUnion("kind", [
+export const ContainerSchema = z._default(
+	z.discriminatedUnion("kind", [
 		// The default hang container
 		z.object({ kind: z.literal("legacy") }),
 		// CMAF container with base64-encoded init segment (ftyp+moov)
@@ -18,7 +18,8 @@ export const ContainerSchema = z
 			// Base64-encoded init segment (ftyp+moov)
 			initData: z.base64(),
 		}),
-	])
-	.default({ kind: "legacy" });
+	]),
+	{ kind: "legacy" },
+);
 
 export type Container = z.infer<typeof ContainerSchema>;

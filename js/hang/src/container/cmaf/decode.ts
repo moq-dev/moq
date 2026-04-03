@@ -130,7 +130,7 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 
 	// Find moov > trak > mdia > minf > stbl > stsd for sample description
 	const stsd = findBox(boxes, isBoxType<SampleDescriptionBox & ParsedIsoBox>("stsd"));
-	if (!stsd || !stsd.entries || stsd.entries.length === 0) {
+	if (!stsd?.entries || stsd.entries.length === 0) {
 		throw new Error("No stsd box found in init segment");
 	}
 

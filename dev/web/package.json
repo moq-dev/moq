@@ -16,7 +16,7 @@
 		"@moq/watch": "workspace:^",
 		"@moq/publish": "workspace:^"
 	},
-	"//devDependencies": "solid-js and solid-element are only needed because Vite resolves raw .tsx source from workspace packages. They are NOT needed when using @moq/watch and @moq/publish as published npm packages.",
+	"//devDependencies": "These are only needed for local development with workspace packages. They are NOT needed when using the published npm packages.",
 	"devDependencies": {
 		"@tailwindcss/typography": "^0.5.16",
 		"@tailwindcss/vite": "^4.1.13",
