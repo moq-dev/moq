@@ -15,7 +15,7 @@ cluster:
 		"just wait && just leaf1" \
 		"just wait && just pub bbb http://localhost:4444/demo?jwt=$(cat demo-cli.jwt)" \
 		"just wait && just pub tos http://localhost:4443/demo?jwt=$(cat demo-cli.jwt)" \
-		"just wait && env VITE_RELAY_URL=http://localhost:4445/demo?jwt=$(cat demo-web.jwt) bun run --filter @moq/demo dev"
+		"just wait && VITE_RELAY_URL=http://localhost:4445/demo?jwt=$(cat demo-web.jwt) bun --cwd ../web vite"
 
 # Run a localhost root server, accepting connections from leaf nodes.
 root: auth-key

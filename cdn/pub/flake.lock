@@ -37,17 +37,15 @@
       "inputs": {
         "crane": "crane",
         "flake-utils": "flake-utils",
-        "nixpkgs": [
-          "nixpkgs"
-        ],
+        "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1773701800,
-        "narHash": "sha256-HHLqzT/dEJnGZRjj+eW68L+CMSDLl4ZPIKQWqR9Awro=",
+        "lastModified": 1774411175,
+        "narHash": "sha256-0Fenfc45/pozw3BA8wHFw8GT0ogupsk0EzjQ+J2L/j0=",
         "owner": "moq-dev",
         "repo": "moq",
-        "rev": "c2ea613fac343235d765e9e0d0a3ed84da2423fa",
+        "rev": "4ddd4b045e52020accb48d5d600a91e9a1f27882",
         "type": "github"
       },
       "original": {
@@ -58,24 +56,23 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1773646010,
-        "narHash": "sha256-iYrs97hS7p5u4lQzuNWzuALGIOdkPXvjz7bviiBjUu8=",
+        "lastModified": 1773597492,
+        "narHash": "sha256-hQ284SkIeNaeyud+LS0WVLX+WL2rxcVZLFEaK0e03zg=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "5b2c2d84341b2afb5647081c1386a80d7a8d8605",
+        "rev": "a07d4ce6bee67d7c838a8a5796e75dff9caa21ef",
         "type": "github"
       },
       "original": {
         "owner": "NixOS",
-        "ref": "nixos-unstable",
+        "ref": "nixpkgs-unstable",
         "repo": "nixpkgs",
         "type": "github"
       }
     },
     "root": {
       "inputs": {
-        "moq": "moq",
-        "nixpkgs": "nixpkgs"
+        "moq": "moq"
       }
     },
     "rust-overlay": {

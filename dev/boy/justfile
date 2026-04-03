@@ -55,7 +55,7 @@ start rom url='http://localhost:4443/anon':
 
 # Host the web server
 web url='http://localhost:4443/anon':
-	VITE_RELAY_URL="{{url}}" bun run --filter @moq/boy dev --open
+	VITE_RELAY_URL="{{url}}" bun vite --open
 
 # --- rom.moq.dev (R2 hosting) ---
 

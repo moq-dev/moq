@@ -15,8 +15,7 @@ pin tag="":
 		exit 1
 	fi
 	echo "Pinning to $TAG..."
-	nix flake update
-	nix flake lock --override-input moq "github:moq-dev/moq/$TAG"
+	nix flake lock --override-input moq "github:moq-dev/moq/$TAG" --update-input moq
 
 # Get the hostname for the publisher
 host:
@@ -71,6 +70,12 @@ ssh:
 	#!/usr/bin/env bash
 	HOST=$(just host)
 	ssh root@$HOST
+
+restart:
+	#!/usr/bin/env bash
+	HOST=$(just host)
+	echo "=== $HOST ==="
+	ssh root@$HOST "systemctl restart demo-bbb --no-pager"
 
 # View logs from publisher
 logs:

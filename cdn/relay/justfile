@@ -89,6 +89,11 @@ logs node:
 	#!/usr/bin/env bash
 	ssh root@$(just host {{node}}) "journalctl -u moq-relay -f"
 
+# Restart
+restart node:
+	#!/usr/bin/env bash
+	ssh root@$(just host {{node}}) "systemctl restart moq-relay --no-pager"
+
 # Profile moq-relay on a node using perf (built via nix)
 perf node *args:
 	#!/usr/bin/env bash

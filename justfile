@@ -4,6 +4,7 @@
 
 
 mod dev
+mod cdn
 
 # Shortcuts to avoid `dev::` prefix.
 mod boy 'dev/boy'
