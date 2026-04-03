@@ -31,8 +31,9 @@ pub struct Hev1 {
 }
 
 impl Hev1 {
+	// TODO: Make this fallible (return Result) instead of panicking — breaking change, do on `dev` branch.
 	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
-		let track = broadcast.unique_track(".hev1").unwrap();
+		let track = broadcast.unique_track(".hev1").expect("failed to create hev1 track");
 
 		Self {
 			catalog,
@@ -279,6 +280,7 @@ impl Hev1 {
 
 		// Don't emit frames before the codec config is known (no catalog entry yet).
 		if self.config.is_none() {
+			self.current = Frame::default();
 			return Ok(());
 		}
 

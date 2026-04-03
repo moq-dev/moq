@@ -29,10 +29,11 @@ pub struct Avc3 {
 }
 
 impl Avc3 {
+	// TODO: Make this fallible (return Result) instead of panicking — breaking change, do on `dev` branch.
 	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
 		// Create the track eagerly so callers can monitor used/unused before any frames arrive.
 		// The catalog entry is added later in init() when the codec config is known.
-		let track = broadcast.unique_track(".avc3").unwrap();
+		let track = broadcast.unique_track(".avc3").expect("failed to create avc3 track");
 
 		Self {
 			catalog,
@@ -262,6 +263,7 @@ impl Avc3 {
 
 		// Don't emit frames before the codec config is known (no catalog entry yet).
 		if self.config.is_none() {
+			self.current = Frame::default();
 			return Ok(());
 		}
 
@@ -294,12 +296,12 @@ impl Avc3 {
 		Ok(())
 	}
 
-	/// Returns a reference to the underlying track producer.
 	/// Returns true if the codec config has been detected and inserted into the catalog.
 	pub fn is_initialized(&self) -> bool {
 		self.config.is_some()
 	}
 
+	/// Returns a reference to the underlying track producer.
 	pub fn track(&self) -> &moq_lite::TrackProducer {
 		&self.track
 	}

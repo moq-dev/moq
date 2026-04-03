@@ -29,8 +29,9 @@ struct Frame {
 }
 
 impl Av01 {
+	// TODO: Make this fallible (return Result) instead of panicking — breaking change, do on `dev` branch.
 	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
-		let track = broadcast.unique_track(".av01").unwrap();
+		let track = broadcast.unique_track(".av01").expect("failed to create av01 track");
 
 		Self {
 			catalog,
