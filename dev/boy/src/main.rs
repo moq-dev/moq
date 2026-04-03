@@ -124,12 +124,12 @@ async fn run(config: &Config) -> Result<()> {
             // Drain pending commands.
             while let Ok(cmd) = cmd_rx.try_recv() {
                 match cmd {
-                    input::Command::Press {
-                        button,
+                    input::Command::Buttons {
+                        buttons,
                         viewer_id,
                         ts_ms,
                     } => {
-                        emu.press(&viewer_id, button);
+                        emu.set_buttons(&viewer_id, buttons.into_iter().collect());
                         last_input = std::time::Instant::now();
 
                         // Calculate end-to-end latency: current time - viewer's displayed time.
@@ -137,10 +137,6 @@ async fn run(config: &Config) -> Result<()> {
                         if latency >= 0.0 {
                             viewer_latency.insert(viewer_id, (latency, std::time::Instant::now()));
                         }
-                    }
-                    input::Command::Release { button, viewer_id } => {
-                        emu.release(&viewer_id, button);
-                        last_input = std::time::Instant::now();
                     }
                     input::Command::ViewerLeft { viewer_id } => {
                         emu.viewer_left(&viewer_id);

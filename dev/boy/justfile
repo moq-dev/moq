@@ -15,7 +15,8 @@ download rom:
 	#!/usr/bin/env bash
 	if [ ! -f "rom/{{rom}}" ]; then
 		mkdir -p rom
-		curl -L -o "rom/{{rom}}" "https://rom.moq.dev/{{rom}}"
+		curl -fSL -o "rom/{{rom}}.tmp" "https://rom.moq.dev/{{rom}}"
+		mv "rom/{{rom}}.tmp" "rom/{{rom}}"
 	fi
 
 # Big2Small (puzzle): https://mdsteele.itch.io/big2small
@@ -42,6 +43,11 @@ capybara:
 fofk:
 	just download FoFK.gb
 	just start rom/FoFK.gb
+
+# GB Run (racing): https://biscuitlocker.itch.io/gb-run
+gb-run:
+	just download gb-run.gbc
+	just start rom/gb-run.gbc
 
 # Start a Game Boy emulator publisher.
 start rom url='http://localhost:4443/anon':

@@ -78,6 +78,7 @@ class GameCard {
 	el: HTMLDivElement;
 	#signals = new Moq.Signals.Effect();
 	#sendCommand: (cmd: Record<string, unknown>) => void = () => {};
+	#heldButtons = new Set<string>();
 
 	constructor(sessionId: string) {
 		this.el = document.createElement("div");
@@ -119,9 +120,14 @@ class GameCard {
 			const isExpanded = exp === sessionId;
 			this.el.classList.toggle("expanded", isExpanded);
 			controls.style.display = isExpanded ? "flex" : "none";
+
+			if (!isExpanded && this.#heldButtons.size > 0) {
+				this.#heldButtons.clear();
+				this.#sendButtons();
+			}
 		});
 
-		// Keyboard input when expanded — press on keydown, release on keyup.
+		// Keyboard input when expanded — track all held buttons and send full state.
 		const keyMap: Record<string, string> = {
 			ArrowUp: "up",
 			ArrowDown: "down",
@@ -137,11 +143,12 @@ class GameCard {
 
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (expanded.peek() !== sessionId) return;
-			if (e.repeat) return; // Ignore OS key repeat
+			if (e.repeat) return;
 
 			const button = keyMap[e.key];
 			if (button) {
-				this.#sendCommand({ type: "press", button });
+				this.#heldButtons.add(button);
+				this.#sendButtons();
 				e.preventDefault();
 			} else if (e.key === "Escape") {
 				expanded.set(undefined);
@@ -153,15 +160,28 @@ class GameCard {
 
 			const button = keyMap[e.key];
 			if (button) {
-				this.#sendCommand({ type: "release", button });
+				this.#heldButtons.delete(button);
+				this.#sendButtons();
 				e.preventDefault();
+			}
+		};
+		const onBlur = () => {
+			if (this.#heldButtons.size > 0) {
+				this.#heldButtons.clear();
+				this.#sendButtons();
 			}
 		};
 		document.addEventListener("keydown", onKeyDown);
 		document.addEventListener("keyup", onKeyUp);
+		window.addEventListener("blur", onBlur);
 		this.#signals.cleanup(() => {
 			document.removeEventListener("keydown", onKeyDown);
 			document.removeEventListener("keyup", onKeyUp);
+			window.removeEventListener("blur", onBlur);
+			if (this.#heldButtons.size > 0) {
+				this.#heldButtons.clear();
+				this.#sendButtons();
+			}
 		});
 
 		// Set up video via Watch API.
@@ -373,23 +393,29 @@ class GameCard {
 			btn.dataset.button = buttonName;
 			btn.addEventListener("mousedown", (e) => {
 				e.stopPropagation();
-				this.#sendCommand({ type: "press", button: buttonName });
+				this.#heldButtons.add(buttonName);
+				this.#sendButtons();
 			});
 			btn.addEventListener("mouseup", (e) => {
 				e.stopPropagation();
-				this.#sendCommand({ type: "release", button: buttonName });
+				this.#heldButtons.delete(buttonName);
+				this.#sendButtons();
 			});
 			btn.addEventListener("mouseleave", () => {
-				// Release if the cursor leaves the button while held.
-				this.#sendCommand({ type: "release", button: buttonName });
+				if (this.#heldButtons.has(buttonName)) {
+					this.#heldButtons.delete(buttonName);
+					this.#sendButtons();
+				}
 			});
 			btn.addEventListener("touchstart", (e) => {
 				e.preventDefault();
-				this.#sendCommand({ type: "press", button: buttonName });
+				this.#heldButtons.add(buttonName);
+				this.#sendButtons();
 			});
 			btn.addEventListener("touchend", (e) => {
 				e.preventDefault();
-				this.#sendCommand({ type: "release", button: buttonName });
+				this.#heldButtons.delete(buttonName);
+				this.#sendButtons();
 			});
 			return btn;
 		};
@@ -457,6 +483,10 @@ class GameCard {
 		wrapper.appendChild(latencyNote);
 
 		return { wrapper, latencyList };
+	}
+
+	#sendButtons() {
+		this.#sendCommand({ type: "buttons", buttons: [...this.#heldButtons] });
 	}
 
 	close() {

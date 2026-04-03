@@ -6,14 +6,13 @@ use crate::emulator::Button;
 #[derive(serde::Deserialize, Debug)]
 #[serde(tag = "type")]
 enum RawCommand {
-    #[serde(rename = "press")]
-    Press {
-        button: Button,
+    #[serde(rename = "buttons")]
+    Buttons {
+        #[serde(default)]
+        buttons: Vec<Button>,
         #[serde(default)]
         ts: f64,
     },
-    #[serde(rename = "release")]
-    Release { button: Button },
     #[serde(rename = "reset")]
     Reset {},
 }
@@ -21,15 +20,12 @@ enum RawCommand {
 /// A command with viewer identity attached.
 #[derive(Debug)]
 pub enum Command {
-    Press {
-        button: Button,
+    /// Full button state for a viewer.
+    Buttons {
+        buttons: Vec<Button>,
         viewer_id: String,
         /// The viewer's current media timestamp in milliseconds.
         ts_ms: f64,
-    },
-    Release {
-        button: Button,
-        viewer_id: String,
     },
     Reset,
     /// A viewer disconnected or went offline.
@@ -89,20 +85,12 @@ async fn handle_viewer_commands(
         while let Some(frame) = group.read_frame().await? {
             let text = std::str::from_utf8(&frame).context("invalid UTF-8 in command")?;
             match serde_json::from_str::<RawCommand>(text) {
-                Ok(RawCommand::Press { button, ts }) => {
+                Ok(RawCommand::Buttons { buttons, ts }) => {
                     let _ = cmd_tx
-                        .send(Command::Press {
-                            button,
+                        .send(Command::Buttons {
+                            buttons,
                             viewer_id: viewer_id.to_string(),
                             ts_ms: ts,
-                        })
-                        .await;
-                }
-                Ok(RawCommand::Release { button }) => {
-                    let _ = cmd_tx
-                        .send(Command::Release {
-                            button,
-                            viewer_id: viewer_id.to_string(),
                         })
                         .await;
                 }

@@ -23,6 +23,17 @@ pub enum Button {
 }
 
 impl Button {
+    const ALL: [Button; 8] = [
+        Button::Up,
+        Button::Down,
+        Button::Left,
+        Button::Right,
+        Button::A,
+        Button::B,
+        Button::Start,
+        Button::Select,
+    ];
+
     fn to_pad_key(self) -> PadKey {
         match self {
             Button::Up => PadKey::Up,
@@ -116,38 +127,25 @@ impl Emulator {
         self.viewers.values().flatten().copied().collect()
     }
 
-    /// A viewer pressed a button.
-    pub fn press(&mut self, viewer_id: &str, button: Button) {
-        let viewer = self.viewers.entry(viewer_id.to_string()).or_default();
-        viewer.insert(button);
-        // Always press on the emulator.
-        self.gb.key_press(button.to_pad_key());
+    /// Set the full button state for a viewer, replacing any previous state.
+    pub fn set_buttons(&mut self, viewer_id: &str, buttons: HashSet<Button>) {
+        self.viewers.insert(viewer_id.to_string(), buttons);
+        self.sync_buttons();
     }
 
-    /// A viewer released a button. Only release on the emulator if no other viewer holds it.
-    pub fn release(&mut self, viewer_id: &str, button: Button) {
-        if let Some(viewer) = self.viewers.get_mut(viewer_id) {
-            viewer.remove(&button);
-        }
-        // Only lift if no viewer is still holding this button.
-        let any_holding = self.viewers.values().any(|v| v.contains(&button));
-        if !any_holding {
-            self.gb.key_lift(button.to_pad_key());
-        }
-    }
-
-    /// A viewer disconnected — release all their buttons.
+    /// A viewer disconnected — remove their button state.
     pub fn viewer_left(&mut self, viewer_id: &str) {
-        let buttons: Vec<Button> = self
-            .viewers
-            .remove(viewer_id)
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+        self.viewers.remove(viewer_id);
+        self.sync_buttons();
+    }
 
-        for button in buttons {
-            let any_holding = self.viewers.values().any(|v| v.contains(&button));
-            if !any_holding {
+    /// Recompute the union of all viewer buttons and sync with the emulator.
+    fn sync_buttons(&mut self) {
+        let union = self.pressed_buttons();
+        for button in Button::ALL {
+            if union.contains(&button) {
+                self.gb.key_press(button.to_pad_key());
+            } else {
                 self.gb.key_lift(button.to_pad_key());
             }
         }
