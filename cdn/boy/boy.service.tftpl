@@ -1,8 +1,8 @@
 [Unit]
 Description=MoQ Boy - ${name}
-After=network-online.target boy-${name}-prepare.service
+After=network-online.target boy-prepare.service
 Wants=network-online.target
-Requires=boy-${name}-prepare.service
+Requires=boy-prepare.service
 
 [Service]
 Type=simple

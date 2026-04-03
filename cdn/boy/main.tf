@@ -11,12 +11,10 @@ locals {
 
 # Generate systemd service files from templates
 resource "local_file" "boy_prepare_service" {
-  for_each = local.roms
   content = templatefile("${path.module}/boy-prepare.service.tftpl", {
-    name = each.key
-    rom  = each.value
+    roms = values(local.roms)
   })
-  filename = "${path.module}/gen/boy-${each.key}-prepare.service"
+  filename = "${path.module}/gen/boy-prepare.service"
 }
 
 resource "local_file" "boy_service" {

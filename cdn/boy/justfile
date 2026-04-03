@@ -52,30 +52,10 @@ deploy:
 		systemctl enable monitor.service && \
 		systemctl start vacuum.timer && \
 		systemctl restart monitor.service && \
-		systemctl enable boy-big2small-prepare.service && \
-		systemctl enable boy-big2small.service && \
-		systemctl enable boy-dangan-prepare.service && \
-		systemctl enable boy-dangan.service && \
-		systemctl enable boy-opossum-prepare.service && \
-		systemctl enable boy-opossum.service && \
-		systemctl enable boy-capybara-prepare.service && \
-		systemctl enable boy-capybara.service && \
-		systemctl enable boy-fofk-prepare.service && \
-		systemctl enable boy-fofk.service && \
-		systemctl enable boy-gb-run-prepare.service && \
-		systemctl enable boy-gb-run.service && \
-		systemctl start boy-big2small-prepare.service && \
-		systemctl start boy-dangan-prepare.service && \
-		systemctl start boy-opossum-prepare.service && \
-		systemctl start boy-capybara-prepare.service && \
-		systemctl start boy-fofk-prepare.service && \
-		systemctl start boy-gb-run-prepare.service && \
-		systemctl restart boy-big2small.service && \
-		systemctl restart boy-dangan.service && \
-		systemctl restart boy-opossum.service && \
-		systemctl restart boy-capybara.service && \
-		systemctl restart boy-fofk.service && \
-		systemctl restart boy-gb-run.service"
+		systemctl enable boy-prepare.service && \
+		systemctl start boy-prepare.service && \
+		systemctl enable boy-big2small.service boy-dangan.service boy-opossum.service boy-capybara.service boy-fofk.service boy-gb-run.service && \
+		systemctl restart boy-big2small.service boy-dangan.service boy-opossum.service boy-capybara.service boy-fofk.service boy-gb-run.service"
 
 # Check status of all boy services
 status:
