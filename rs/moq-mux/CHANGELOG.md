@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.5...moq-mux-v0.3.6) - 2026-04-03
+
+### Other
+
+- Auto-pause emulation when no viewers are watching ([#1201](https://github.com/moq-dev/moq/pull/1201))
+- release ([#1174](https://github.com/moq-dev/moq/pull/1174))
+
 ## [0.3.5](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.4...moq-mux-v0.3.5) - 2026-04-03
 
 ### Added
