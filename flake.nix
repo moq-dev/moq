@@ -68,6 +68,7 @@
           cargo-edit
           cargo-sweep
           cargo-semver-checks
+          cargo-binstall
         ];
 
         # JavaScript dependencies
