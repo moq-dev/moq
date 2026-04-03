@@ -82,7 +82,10 @@ impl AudioEncoder {
 
 	/// Feed interleaved stereo u8 samples from the emulator.
 	/// Boytacean outputs unsigned 8-bit PCM (0-255, center at 128).
-	pub fn push_samples(&mut self, samples: &[u8]) -> Result<()> {
+	///
+	/// `elapsed` is the wall-clock time since the emulator started, shared with
+	/// the video encoder so audio and video PTS stay aligned.
+	pub fn push_samples(&mut self, samples: &[u8], elapsed: std::time::Duration) -> Result<()> {
 		// Convert u8 (unsigned, center=128) to i16 (signed, center=0).
 		let i16_samples: Vec<i16> = samples.iter().map(|&s| ((s as i16) - 128) * 256).collect();
 		self.sample_buffer.extend_from_slice(&i16_samples);
@@ -90,15 +93,25 @@ impl AudioEncoder {
 		// Process full frames worth of samples.
 		let samples_per_frame = self.frame_size * CHANNELS as usize;
 
+		// Count how many frames we'll produce, so we can back-date the first frame.
+		let pending_frames = self.sample_buffer.len() / samples_per_frame;
+		let frame_duration_us = self.frame_size as u64 * 1_000_000 / OPUS_SAMPLE_RATE as u64;
+		// The first frame started accumulating before `elapsed`, offset backwards.
+		let base_ts = elapsed.as_micros() as u64
+			- pending_frames.saturating_sub(1) as u64 * frame_duration_us;
+
+		let mut frame_idx: u64 = 0;
 		while self.sample_buffer.len() >= samples_per_frame {
 			let frame_samples: Vec<i16> = self.sample_buffer.drain(..samples_per_frame).collect();
-			self.encode_frame(&frame_samples)?;
+			let ts_micros = base_ts + frame_idx * frame_duration_us;
+			self.encode_frame(&frame_samples, ts_micros)?;
+			frame_idx += 1;
 		}
 
 		Ok(())
 	}
 
-	fn encode_frame(&mut self, samples: &[i16]) -> Result<()> {
+	fn encode_frame(&mut self, samples: &[i16], ts_micros: u64) -> Result<()> {
 		// Create an audio frame with interleaved i16 samples.
 		let mut frame = ffmpeg_next::frame::Audio::new(
 			ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed),
@@ -127,9 +140,7 @@ impl AudioEncoder {
 		let mut pkt = ffmpeg_next::Packet::empty();
 		while self.ffmpeg_encoder.receive_packet(&mut pkt).is_ok() {
 			if let Some(data) = pkt.data() {
-				let ts = hang::container::Timestamp::from_micros(
-					self.frame_count * (self.frame_size as u64 * 1_000_000 / OPUS_SAMPLE_RATE as u64),
-				)?;
+				let ts = hang::container::Timestamp::from_micros(ts_micros)?;
 				self.opus.decode(&mut &*data, Some(ts))?;
 			}
 		}

@@ -218,8 +218,10 @@ async fn run(config: &Config) -> Result<()> {
 			}
 			next_frame += frame_duration;
 
-			// Current media timestamp in milliseconds.
-			let current_ts_ms = start.elapsed().as_secs_f64() * 1000.0;
+			// Capture a single reference timestamp for this tick.
+			// Used for both video and audio PTS so they stay aligned.
+			let elapsed = start.elapsed();
+			let current_ts_ms = elapsed.as_secs_f64() * 1000.0;
 
 			// Drain pending commands.
 			while let Ok(cmd) = cmd_rx.try_recv() {
@@ -292,8 +294,8 @@ async fn run(config: &Config) -> Result<()> {
 			// Grab and publish video frame (skip if no video viewers).
 			if video_active.load(Ordering::Relaxed) {
 				let rgba = Bytes::from(emu.framebuffer());
-				let pts_micros = start.elapsed().as_micros() as u64;
-				let ts = hang::container::Timestamp::from_micros(pts_micros).context("timestamp overflow")?;
+				let ts =
+					hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
 				video_encoder.try_frame(rgba, ts);
 			}
 
@@ -301,7 +303,7 @@ async fn run(config: &Config) -> Result<()> {
 			if audio_active.load(Ordering::Relaxed) {
 				let samples = emu.audio_samples();
 				if !samples.is_empty() {
-					if let Err(e) = audio_encoder.push_samples(&samples) {
+					if let Err(e) = audio_encoder.push_samples(&samples, elapsed) {
 						tracing::warn!(error = %e, "audio encode error");
 					}
 				}
