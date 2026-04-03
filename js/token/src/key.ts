@@ -2,7 +2,7 @@ import * as base64 from "@hexagon/base64";
 import * as jose from "jose";
 import * as z from "zod/mini";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
-import { type Claims, ClaimsSchema, validateClaims } from "./claims.ts";
+import { type Claims, ClaimsSchema } from "./claims.ts";
 
 /**
  * A validated key identifier (kid). Only alphanumeric, hyphens, and underscores.
@@ -209,7 +209,6 @@ export async function sign(key: Key, claims: Claims): Promise<string> {
 	// Validate claims before signing
 	try {
 		ClaimsSchema.parse(claims);
-		validateClaims(claims);
 	} catch (error) {
 		throw new Error(`Invalid claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
@@ -245,9 +244,6 @@ export async function verify(key: PublicKey | SymmetricKey, token: string, path:
 	if (claims.root !== path) {
 		throw new Error("Token path does not match provided path");
 	}
-
-	// Validate claims structure and business rules
-	validateClaims(claims);
 
 	return claims;
 }

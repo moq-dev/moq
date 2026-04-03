@@ -19,15 +19,3 @@ export const ClaimsSchema = z
  * JWT claims structure for moq-token
  */
 export type Claims = z.infer<typeof ClaimsSchema>;
-
-/**
- * Validate claims structure and business rules
- */
-export function validateClaims(claims: Claims): void {
-	if (claims.put === undefined && claims.get === undefined) {
-		throw new Error("no put or get paths specified; token is useless");
-	}
-}
-
-// Export with lowercase for backward compatibility
-export const claimsSchema = ClaimsSchema;
