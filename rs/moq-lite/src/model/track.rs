@@ -386,7 +386,6 @@ impl TrackWeak {
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
-
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}

@@ -28,7 +28,19 @@ pub struct Audio {
 }
 
 impl Audio {
+	/// Insert a track config, returning an error if the name already exists.
+	pub fn insert(&mut self, name: &str, config: AudioConfig) -> crate::Result<()> {
+		let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.to_string()) else {
+			return Err(crate::Error::Duplicate(name.to_string()));
+		};
+		entry.insert(config);
+		Ok(())
+	}
+
 	/// Create a new audio track with the given extension and configuration.
+	#[deprecated(
+		note = "use BroadcastProducer::unique_track to create the track, then insert into the catalog when initialized"
+	)]
 	pub fn create_track(&mut self, extension: &str, config: AudioConfig) -> moq_lite::Track {
 		for i in 0.. {
 			let name = match extension {
@@ -46,9 +58,14 @@ impl Audio {
 		unreachable!("no available audio track name");
 	}
 
-	// Remove the track from the catalog and return the configuration if found.
+	/// Remove a track from the catalog by name.
+	pub fn remove(&mut self, name: &str) -> Option<AudioConfig> {
+		self.renditions.remove(name)
+	}
+
+	#[deprecated(note = "use remove() instead")]
 	pub fn remove_track(&mut self, track: &moq_lite::Track) -> Option<AudioConfig> {
-		self.renditions.remove(track.name.as_str())
+		self.remove(&track.name)
 	}
 }
 

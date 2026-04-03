@@ -49,7 +49,19 @@ pub struct Video {
 }
 
 impl Video {
+	/// Insert a track config, returning an error if the name already exists.
+	pub fn insert(&mut self, name: &str, config: VideoConfig) -> crate::Result<()> {
+		let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.to_string()) else {
+			return Err(crate::Error::Duplicate(name.to_string()));
+		};
+		entry.insert(config);
+		Ok(())
+	}
+
 	/// Create a new video track with the given extension and configuration.
+	#[deprecated(
+		note = "use BroadcastProducer::unique_track to create the track, then insert into the catalog when initialized"
+	)]
 	pub fn create_track(&mut self, extension: &str, config: VideoConfig) -> moq_lite::Track {
 		for i in 0.. {
 			let name = match extension {
@@ -66,9 +78,14 @@ impl Video {
 		unreachable!("no available video track name");
 	}
 
-	// Remove the track from the catalog and return the configuration if found.
+	/// Remove a track from the catalog by name.
+	pub fn remove(&mut self, name: &str) -> Option<VideoConfig> {
+		self.renditions.remove(name)
+	}
+
+	#[deprecated(note = "use remove() instead")]
 	pub fn remove_track(&mut self, track: &moq_lite::Track) -> Option<VideoConfig> {
-		self.renditions.remove(track.name.as_str())
+		self.remove(&track.name)
 	}
 }
 

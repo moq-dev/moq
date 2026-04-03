@@ -132,13 +132,7 @@ impl<T> Drop for Consumer<T> {
 
 impl<T> Clone for Consumer<T> {
 	fn clone(&self) -> Self {
-		let prev = self.counts.consumers.fetch_add(1, Ordering::AcqRel);
-
-		// Wake waiters (e.g. `used()`) when the first consumer appears.
-		if prev == 0 {
-			let waiters = self.state.lock().waiters.take();
-			waiters.wake();
-		}
+		self.counts.consumers.fetch_add(1, Ordering::Relaxed);
 
 		Self {
 			state: self.state.clone(),

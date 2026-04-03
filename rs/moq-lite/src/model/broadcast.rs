@@ -95,6 +95,24 @@ impl BroadcastProducer {
 		Ok(track)
 	}
 
+	/// Create a track with a unique name using the given suffix.
+	///
+	/// Generates names like `0{suffix}`, `1{suffix}`, etc. and picks the first
+	/// one not already used in this broadcast.
+	pub fn unique_track(&mut self, suffix: &str) -> Result<TrackProducer, Error> {
+		let state = self.state.read();
+		let mut name = String::new();
+		for i in 0u32.. {
+			name = format!("{i}{suffix}");
+			if !state.tracks.contains_key(&name) {
+				break;
+			}
+		}
+		drop(state);
+
+		self.create_track(Track { name, priority: 0 })
+	}
+
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
 	pub fn dynamic(&self) -> BroadcastDynamic {
 		BroadcastDynamic::new(self.state.clone())

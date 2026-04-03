@@ -19,13 +19,7 @@ pub struct Avc1 {
 
 impl Avc1 {
 	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
-		// Create the track eagerly so callers can monitor used/unused before any frames arrive.
-		let track_info = moq_lite::Track {
-			name: "video0.avc1".to_string(),
-			priority: 1,
-		};
-		// unwrap: broadcast was just created and isn't closed.
-		let track = broadcast.create_track(track_info).unwrap();
+		let track = broadcast.unique_track(".avc1").unwrap();
 
 		Self {
 			catalog,
@@ -177,6 +171,11 @@ impl Avc1 {
 		Ok(())
 	}
 
+	/// Returns true if the codec config has been detected and inserted into the catalog.
+	pub fn is_initialized(&self) -> bool {
+		self.config.is_some()
+	}
+
 	/// Returns a reference to the underlying track producer.
 	pub fn track(&self) -> &moq_lite::TrackProducer {
 		&self.track
@@ -197,6 +196,6 @@ impl Avc1 {
 impl Drop for Avc1 {
 	fn drop(&mut self) {
 		tracing::debug!(name = ?self.track.info.name, "ending avc1 track");
-		self.catalog.lock().video.remove_track(&self.track.info);
+		self.catalog.lock().video.remove(&self.track.info.name);
 	}
 }
