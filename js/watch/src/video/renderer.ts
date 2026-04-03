@@ -20,6 +20,7 @@ export class Renderer {
 	#lastFrame?: VideoFrame;
 
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
+	#visible = new Signal(false);
 	#signals = new Effect();
 
 	constructor(decoder: Decoder, props?: RendererProps) {
@@ -32,6 +33,7 @@ export class Renderer {
 			this.#ctx.set(canvas?.getContext("2d") ?? undefined);
 		});
 
+		this.#signals.run(this.#runVisible.bind(this));
 		this.#signals.run(this.#runEnabled.bind(this));
 		this.#signals.run(this.#runRender.bind(this));
 		this.#signals.run(this.#runResize.bind(this));
@@ -50,41 +52,53 @@ export class Renderer {
 		}
 	}
 
-	// Detect when video should be downloaded.
-	#runEnabled(effect: Effect): void {
+	// Track whether the canvas is visible in the viewport and the tab is focused.
+	#runVisible(effect: Effect): void {
 		const canvas = effect.get(this.canvas);
-		if (!canvas) return;
-
-		const paused = effect.get(this.paused);
-		if (paused) return;
+		if (!canvas) {
+			this.#visible.set(false);
+			return;
+		}
 
 		let intersecting = false;
 
-		// Detect when the canvas is scrolled out of the viewport.
+		const update = () => {
+			this.#visible.set(intersecting && !document.hidden);
+		};
+
 		const observer = new IntersectionObserver(
 			(entries) => {
 				for (const entry of entries) {
 					intersecting = entry.isIntersecting;
-					this.decoder.enabled.set(intersecting && !document.hidden);
+					update();
 				}
 			},
-			{
-				// fire when even a small part is visible
-				threshold: 0.01,
-			},
+			{ threshold: 0.01 },
 		);
 
-		// Detect when the tab is minimized or hidden.
-		const onVisibility = () => {
-			this.decoder.enabled.set(intersecting && !document.hidden);
-		};
-		document.addEventListener("visibilitychange", onVisibility);
-		effect.cleanup(() => document.removeEventListener("visibilitychange", onVisibility));
-
-		effect.cleanup(() => this.decoder.enabled.set(false));
+		document.addEventListener("visibilitychange", update);
+		effect.cleanup(() => document.removeEventListener("visibilitychange", update));
 
 		observer.observe(canvas);
 		effect.cleanup(() => observer.disconnect());
+		effect.cleanup(() => this.#visible.set(false));
+	}
+
+	// Detect when video should be downloaded.
+	#runEnabled(effect: Effect): void {
+		const paused = effect.get(this.paused);
+		const visible = effect.get(this.#visible);
+
+		effect.cleanup(() => this.decoder.enabled.set(false));
+
+		if (!paused) {
+			this.decoder.enabled.set(visible);
+			return;
+		}
+
+		// When paused, fetch a single preview frame then disable.
+		const frame = effect.get(this.decoder.frame);
+		this.decoder.enabled.set(!frame);
 	}
 
 	#runRender(effect: Effect) {
@@ -97,6 +111,10 @@ export class Renderer {
 		if (!paused) {
 			frame = effect.get(this.decoder.frame);
 			this.#lastFrame?.close();
+			this.#lastFrame = frame?.clone();
+		} else if (!this.#lastFrame) {
+			// Waiting for a preview frame from the decoder.
+			frame = effect.get(this.decoder.frame);
 			this.#lastFrame = frame?.clone();
 		} else {
 			frame = this.#lastFrame?.clone();
