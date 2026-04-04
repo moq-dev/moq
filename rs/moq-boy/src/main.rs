@@ -306,8 +306,8 @@ async fn run(config: &Config) -> Result<()> {
 			// Grab and publish video frame (skip if no video viewers).
 			if video_active.load(Ordering::Relaxed) {
 				let rgba = Bytes::from(emu.framebuffer());
-				let ts =
-					hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
+				let ts = hang::container::Timestamp::from_micros(elapsed.as_micros() as u64)
+					.context("timestamp overflow")?;
 				video_encoder.try_frame(rgba, ts);
 			}
 
