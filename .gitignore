@@ -30,6 +30,9 @@ node_modules
 *.m3u8
 *.m4s
 
+# Cloudflare Wrangler
+.wrangler/
+
 # We're using bun
 package-lock.json
 yarn.lock

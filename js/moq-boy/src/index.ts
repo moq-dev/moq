@@ -1,86 +1,45 @@
 import * as Moq from "@moq/lite";
 import * as Watch from "@moq/watch";
 
-// Parse URL params.
-const params = new URLSearchParams(window.location.search);
-const url = new URL(params.get("url") ?? import.meta.env.VITE_RELAY_URL ?? "https://cdn.moq.dev/anon");
+export { Moq, Watch };
 
-const statusEl = document.getElementById("connection-status") as HTMLElement;
-const gridEl = document.getElementById("grid") as HTMLElement;
-const emptyState = document.getElementById("empty-state") as HTMLElement;
-
-function updateEmptyState() {
-	emptyState.style.display = sessions.size === 0 ? "block" : "none";
-}
-
-// Single shared connection.
-const connection = new Moq.Connection.Reload({ url, enabled: true });
-
-// Track connection status.
-const root = new Moq.Signals.Effect();
-root.run((e) => {
-	const status = e.get(connection.status);
-	statusEl.textContent = status.charAt(0).toUpperCase() + status.slice(1);
-	statusEl.style.color = status === "connected" ? "#8bac0f" : status === "connecting" ? "#facc15" : "#888";
-});
-
-// Track which session is expanded.
-const expanded = new Moq.Signals.Signal<string | undefined>(undefined);
-
-// Active game sessions.
-const sessions = new Map<string, GameCard>();
-updateEmptyState();
-
-// Discover game sessions via announcements.
-root.run((effect) => {
-	const conn = effect.get(connection.established);
-	if (!conn) return;
-
-	const announced = conn.announced(Moq.Path.from("boy"));
-	effect.cleanup(() => announced.close());
-
-	effect.spawn(async () => {
-		for (;;) {
-			const entry = await Promise.race([effect.cancel, announced.next()]);
-			if (!entry) break;
-
-			// Strip "boy/" prefix, skip nested paths like "boy/x/viewer/..."
-			const suffix = Moq.Path.stripPrefix(Moq.Path.from("boy"), entry.path);
-			if (!suffix || suffix.includes("/")) continue;
-
-			const id = suffix;
-			if (entry.active && !sessions.has(id)) {
-				const card = new GameCard(id);
-				sessions.set(id, card);
-				gridEl.appendChild(card.el);
-				updateEmptyState();
-			} else if (!entry.active) {
-				const card = sessions.get(id);
-				if (card) {
-					card.close();
-					card.el.remove();
-					sessions.delete(id);
-					updateEmptyState();
-				}
-			}
-		}
-	});
-});
-
-interface GameStatus {
+export interface GameStatus {
 	buttons: string[];
 	reset_in: number;
 	latency: Record<string, number>;
 }
 
+export interface GameCardConfig {
+	sessionId: string;
+	connection: Moq.Connection.Reload;
+	expanded: Moq.Signals.Signal<string | undefined>;
+	root: ShadowRoot | HTMLElement;
+}
+
+// Key mapping for keyboard input.
+const KEY_MAP: Record<string, string> = {
+	ArrowUp: "up",
+	ArrowDown: "down",
+	ArrowLeft: "left",
+	ArrowRight: "right",
+	z: "b",
+	Z: "b",
+	x: "a",
+	X: "a",
+	Enter: "start",
+	Shift: "select",
+};
+
 // A game session card: live video + audio, expandable with controls.
-class GameCard {
+export class GameCard {
 	el: HTMLDivElement;
 	#signals = new Moq.Signals.Effect();
 	#sendCommand: (cmd: Record<string, unknown>) => void = () => {};
 	#heldButtons = new Set<string>();
 
-	constructor(sessionId: string) {
+	constructor(config: GameCardConfig) {
+		const { sessionId, connection, expanded } = config;
+
 		this.el = document.createElement("div");
 		this.el.className = "card";
 
@@ -106,13 +65,27 @@ class GameCard {
 		this.el.appendChild(controls);
 
 		// Build controls.
-		const { wrapper: controlsInner, latencyList } = this.buildControls();
+		const { wrapper: controlsInner, latencyList, muteBtn } = this.#buildControls();
 		controls.appendChild(controlsInner);
 
-		// Click to toggle expand.
+		// Click to toggle expand via Fullscreen API.
 		canvas.addEventListener("click", () => {
-			expanded.set(expanded.peek() === sessionId ? undefined : sessionId);
+			if (expanded.peek() === sessionId) {
+				document.exitFullscreen().catch(() => {});
+			} else {
+				expanded.set(sessionId);
+				this.el.requestFullscreen().catch(() => {});
+			}
 		});
+
+		// Listen for fullscreen exit to sync expanded state.
+		const onFullscreenChange = () => {
+			if (!document.fullscreenElement && expanded.peek() === sessionId) {
+				expanded.set(undefined);
+			}
+		};
+		document.addEventListener("fullscreenchange", onFullscreenChange);
+		this.#signals.cleanup(() => document.removeEventListener("fullscreenchange", onFullscreenChange));
 
 		// React to expand state.
 		this.#signals.run((effect) => {
@@ -127,38 +100,24 @@ class GameCard {
 			}
 		});
 
-		// Keyboard input when expanded — track all held buttons and send full state.
-		const keyMap: Record<string, string> = {
-			ArrowUp: "up",
-			ArrowDown: "down",
-			ArrowLeft: "left",
-			ArrowRight: "right",
-			z: "b",
-			Z: "b",
-			x: "a",
-			X: "a",
-			Enter: "start",
-			Shift: "select",
-		};
-
+		// Keyboard input when expanded.
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (expanded.peek() !== sessionId) return;
 			if (e.repeat) return;
 
-			const button = keyMap[e.key];
+			const button = KEY_MAP[e.key];
 			if (button) {
 				this.#heldButtons.add(button);
 				this.#sendButtons();
 				e.preventDefault();
 			} else if (e.key === "Escape") {
-				expanded.set(undefined);
+				document.exitFullscreen().catch(() => {});
 				e.preventDefault();
 			}
 		};
 		const onKeyUp = (e: KeyboardEvent) => {
 			if (expanded.peek() !== sessionId) return;
-
-			const button = keyMap[e.key];
+			const button = KEY_MAP[e.key];
 			if (button) {
 				this.#heldButtons.delete(button);
 				this.#sendButtons();
@@ -365,20 +324,17 @@ class GameCard {
 		};
 
 		// Wire up mute toggle button.
-		const muteBtn = controls.querySelector(".mute-btn") as HTMLButtonElement | null;
-		if (muteBtn) {
-			muteBtn.textContent = "Mute";
-			muteBtn.addEventListener("click", (e) => {
-				e.stopPropagation();
-				const muted = !userMuted.peek();
-				userMuted.set(muted);
-				muteBtn.textContent = muted ? "Unmute" : "Mute";
-				muteBtn.classList.toggle("unmuted", !muted);
-			});
-		}
+		muteBtn.textContent = "Mute";
+		muteBtn.addEventListener("click", (e) => {
+			e.stopPropagation();
+			const muted = !userMuted.peek();
+			userMuted.set(muted);
+			muteBtn.textContent = muted ? "Unmute" : "Mute";
+			muteBtn.classList.toggle("unmuted", !muted);
+		});
 	}
 
-	buildControls(): { wrapper: HTMLElement; latencyList: HTMLElement } {
+	#buildControls(): { wrapper: HTMLElement; latencyList: HTMLElement; muteBtn: HTMLButtonElement } {
 		const wrapper = document.createElement("div");
 		wrapper.className = "controls-inner";
 
@@ -473,7 +429,7 @@ class GameCard {
 		wrapper.appendChild(abBtns);
 		wrapper.appendChild(metaBtns);
 		wrapper.appendChild(utilBtns);
-		// Latency explanation (below viewer list)
+
 		const latencyNote = document.createElement("div");
 		latencyNote.className = "latency-note";
 		latencyNote.textContent = "Includes both the render delay AND the input delay.";
@@ -482,7 +438,7 @@ class GameCard {
 		wrapper.appendChild(latencyList);
 		wrapper.appendChild(latencyNote);
 
-		return { wrapper, latencyList };
+		return { wrapper, latencyList, muteBtn };
 	}
 
 	#sendButtons() {

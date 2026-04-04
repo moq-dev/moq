@@ -1,0 +1,15 @@
+[Unit]
+Description=Download all Game Boy ROMs
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+WorkingDirectory=/var/lib/moq
+
+%{ for rom in roms ~}
+ExecStart=/var/lib/moq/pkg/bin/wget -nv https://rom.moq.dev/${rom} -O /var/lib/moq/${rom}
+%{ endfor ~}
+
+[Install]
+WantedBy=multi-user.target

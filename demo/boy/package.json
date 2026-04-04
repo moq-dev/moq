@@ -1,0 +1,19 @@
+{
+	"name": "@moq/demo-boy",
+	"private": true,
+	"type": "module",
+	"version": "0.1.0",
+	"description": "MoQ Boy Demo - Crowd-controlled Game Boy streaming",
+	"license": "(MIT OR Apache-2.0)",
+	"scripts": {
+		"dev": "vite --open"
+	},
+	"dependencies": {
+		"@moq/boy": "workspace:^"
+	},
+	"devDependencies": {
+		"esbuild": "^0.27.0",
+		"typescript": "^6.0.0",
+		"vite": "^7.3.1"
+	}
+}

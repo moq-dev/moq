@@ -185,10 +185,22 @@ async fn run(config: &Config) -> Result<()> {
 	let timeout_secs = config.timeout;
 	let emulator_handle = tokio::task::spawn_blocking(move || -> Result<()> {
 		let mut emu = emulator::Emulator::new(&rom_path)?;
+		let start = std::time::Instant::now();
+
+		// Bootstrap: tick once and encode a frame so the video codec config
+		// is inserted into the catalog before any viewer connects.
+		{
+			emu.tick();
+			let rgba = Bytes::from(emu.framebuffer());
+			let pts_micros = start.elapsed().as_micros() as u64;
+			let ts = hang::container::Timestamp::from_micros(pts_micros).context("timestamp overflow")?;
+			video_encoder.try_frame(rgba, ts);
+			// Give the encoder thread time to process.
+			std::thread::sleep(std::time::Duration::from_millis(100));
+		}
 
 		let frame_duration = std::time::Duration::from_micros(16_742); // ~59.73fps
 		let mut next_frame = std::time::Instant::now();
-		let start = std::time::Instant::now();
 		let mut last_input = std::time::Instant::now();
 		let mut last_status = String::new();
 		let timeout = std::time::Duration::from_secs(timeout_secs);
