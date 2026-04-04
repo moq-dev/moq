@@ -2,7 +2,7 @@
 	// Cloudflare Wrangler configuration for ROM hosting (rom.moq.dev)
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "rom-moq-dev",
-	"main": "worker.ts",
+	"main": "src/worker.ts",
 	"compatibility_date": "2025-07-09",
 	"account_id": "dd618f5dbd5da77b8296f1613c301f5c",
 	"workers_dev": false,

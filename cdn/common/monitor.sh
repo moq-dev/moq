@@ -122,7 +122,6 @@ check_health() {
 
 while true; do
 	check_memory
-	check_health
 
 	# Use memory backoff if alerting, otherwise check every 60s
 	if [[ "$MEMORY_STATE" == "alerting" ]]; then

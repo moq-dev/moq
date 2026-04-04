@@ -68,6 +68,10 @@
           cargo-edit
           cargo-sweep
           cargo-semver-checks
+        ]
+        ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
+          # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
+          pkgs.release-plz
         ];
 
         # JavaScript dependencies
@@ -109,6 +113,7 @@
             moq-clock
             moq-cli
             moq-token-cli
+            moq-boy
             ;
         };
 

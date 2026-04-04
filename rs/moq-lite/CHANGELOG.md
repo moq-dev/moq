@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.7](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.6...moq-lite-v0.15.7) - 2026-04-03
+
+### Other
+
+- Auto-pause emulation when no viewers are watching ([#1201](https://github.com/moq-dev/moq/pull/1201))
+
 ## [0.15.6](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.5...moq-lite-v0.15.6) - 2026-04-03
 
 ### Fixed

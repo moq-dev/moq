@@ -10,6 +10,7 @@ User=root
 WorkingDirectory=/var/lib/moq
 Environment="RUST_LOG=info"
 Environment="RUST_BACKTRACE=1"
+Environment="MALLOC_CONF=prof:true,prof_active:true,prof_prefix:/tmp/moq-relay.heap"
 
 ExecStart=/var/lib/moq/pkg/bin/moq-relay \
   --listen [::]:443 \

@@ -64,6 +64,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.14](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.12...moq-relay-v0.10.14) - 2026-04-03
+
+### Added
+
+- *(moq-relay)* on-demand key resolution via --auth-keys ([#1188](https://github.com/moq-dev/moq/pull/1188))
+- key-based public access for anonymous subscribe/publish ([#1180](https://github.com/moq-dev/moq/pull/1180))
+
+### Other
+
+- Add --version flag to all CLI tools ([#1203](https://github.com/moq-dev/moq/pull/1203))
+- Rename dev/ to demo/, split moq-boy into rs/ and js/ ([#1204](https://github.com/moq-dev/moq/pull/1204))
+- release ([#1174](https://github.com/moq-dev/moq/pull/1174))
+- Add jemalloc heap profiling to moq-relay ([#1194](https://github.com/moq-dev/moq/pull/1194))
+- Add Markdown linting with remark configuration ([#1183](https://github.com/moq-dev/moq/pull/1183))
+- Add moq-relay release workflow and Nix cache configuration ([#1178](https://github.com/moq-dev/moq/pull/1178))
+- Update dependencies including breaking changes ([#1175](https://github.com/moq-dev/moq/pull/1175))
+- release ([#1168](https://github.com/moq-dev/moq/pull/1168))
+- Drone demo: real-time 2D game with physics ([#1171](https://github.com/moq-dev/moq/pull/1171))
+
 ## [0.10.13](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.12...moq-relay-v0.10.13) - 2026-04-03
 
 ### Added

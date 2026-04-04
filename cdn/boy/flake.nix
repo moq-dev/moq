@@ -1,5 +1,10 @@
 {
-  description = "MoQ publisher dependencies";
+  description = "MoQ Boy - Game Boy emulator publisher";
+
+  nixConfig = {
+    extra-substituters = [ "https://kixelated.cachix.org" ];
+    extra-trusted-public-keys = [ "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=" ];
+  };
 
   inputs = {
     # Pin to a release tag via: just pin
@@ -17,12 +22,10 @@
         in
         {
           default = pkgs.symlinkJoin {
-            name = "moq-pub";
+            name = "moq-boy";
             paths = [
-              moq.packages.${system}.moq-cli
-              pkgs.ffmpeg
+              moq.packages.${system}.moq-boy
               pkgs.wget
-              pkgs.jq
             ];
           };
         };
