@@ -107,51 +107,9 @@ moq-token-cli verify --key root.jwk < alice.jwt
 
 ## Library Usage
 
-### Generate a Key
+See the [test suite](https://github.com/moq-dev/moq/blob/main/rs/moq-token/src/key.rs) for working examples of key generation (`Key::generate`), token signing (`key.encode`), and verification (`key.decode`).
 
-```rust
-use moq_token::*;
-
-// Generate HMAC key
-let key = Key::generate(Algorithm::HS256, None)?;
-key.to_file("root.jwk")?;
-
-// Generate RSA key pair
-let key = Key::generate(Algorithm::RS256, None)?;
-key.to_public()?.to_file("public.jwk")?;
-key.to_file("private.jwk")?;
-```
-
-### Sign a Token
-
-```rust
-use moq_token::*;
-
-let key = Key::from_file("root.jwk")?;
-
-let claims = Claims {
-    root: "rooms/123".to_string(),
-    publish: vec!["alice".to_string()],
-    subscribe: vec!["".to_string()],
-    ..Default::default()
-};
-
-let token = key.encode(&claims)?;
-println!("Token: {}", token);
-```
-
-### Verify a Token
-
-```rust
-use moq_token::*;
-
-let key = Key::from_file("root.jwk")?;
-let claims = key.decode(&token)?;
-
-println!("Root: {}", claims.root);
-println!("Publish: {:?}", claims.publish);
-println!("Subscribe: {:?}", claims.subscribe);
-```
+For the TypeScript equivalent, see [`js/token/examples/sign-and-verify.ts`](https://github.com/moq-dev/moq/blob/main/js/token/examples/sign-and-verify.ts).
 
 ## Token Claims
 
@@ -186,29 +144,7 @@ See [Relay Authentication](/app/relay/auth) for details.
 
 ## JWK Set Support
 
-For key rotation, you can host a JWK set:
-
-```json
-{
-  "keys": [
-    {
-      "kid": "2026-01-01",
-      "alg": "RS256",
-      "kty": "RSA",
-      "n": "...",
-      "e": "AQAB"
-    }
-  ]
-}
-```
-
-Configure the relay:
-
-```toml
-[auth]
-key = "https://auth.example.com/keys.json"
-refresh_interval = 86400
-```
+For key rotation, you can host a JWK set and configure the relay to fetch keys from a URL. See [Relay Authentication](/app/relay/auth) for configuration details.
 
 ## API Reference
 

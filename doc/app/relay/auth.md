@@ -168,65 +168,16 @@ Set `public = ""` to make everything public (development only).
 
 ## Example Configurations
 
-### Development (no auth)
+See the [`demo/relay/`](https://github.com/moq-dev/moq/tree/main/demo/relay) directory for complete working configuration files, including authentication setup:
 
-```toml
-[auth]
-public = ""
-```
-
-### Development (single key)
-
-```toml
-[auth]
-key = "dev.jwk"
-public = "anon"
-```
-
-### Production (local keys with rotation)
-
-```toml
-[auth]
-key_dir = "/etc/moq/keys/"
-```
-
-### Production (remote key server)
-
-```toml
-[auth]
-key_dir = "https://api.example.com/keys"
-```
+- **Development** - [`demo/relay/root.toml`](https://github.com/moq-dev/moq/blob/main/demo/relay/root.toml) (single key with anonymous access)
+- **Production** - [`demo/relay/prod.toml`](https://github.com/moq-dev/moq/blob/main/demo/relay/prod.toml) (key and key directory options)
 
 ## Library Usage
 
 ### TypeScript
 
-```typescript
-import { generate, load, sign, type Claims } from "@moq/token"
-
-// Generate a key (random kid assigned automatically)
-const keyString = await generate('HS256')
-
-// Load and sign
-const key = load(keyString)
-const claims: Claims = {
-  root: "demo",
-  pub: "my-stream",
-  sub: "",
-  exp: Math.floor(Date.now() / 1000) + 3600,
-}
-const token = await sign(key, claims)
-```
-
-### Rust
-
-```bash
-moq-token-cli sign --key my-key.jwk \
-  --root demo \
-  --publish my-stream \
-  --subscribe "" \
-  --expires 3600
-```
+See [`js/token/examples/sign-and-verify.ts`](https://github.com/moq-dev/moq/blob/main/js/token/examples/sign-and-verify.ts) for a complete working example of signing and verifying tokens.
 
 ## See Also
 

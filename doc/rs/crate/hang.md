@@ -51,93 +51,11 @@ hang = "0.1"
 
 ### Publishing Video
 
-```rust
-use hang::*;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect to relay
-    let connection = moq_lite::Connection::connect(
-        "https://relay.example.com/demo"
-    ).await?;
-
-    // Create a hang broadcast
-    let mut broadcast = Broadcast::new("my-stream");
-
-    // Create video track
-    let video_track = broadcast.create_video_track(VideoConfig {
-        codec: "avc1.64002a".to_string(),
-        width: 1920,
-        height: 1080,
-        framerate: 30.0,
-        bitrate: 5_000_000,
-    })?;
-
-    // Create audio track
-    let audio_track = broadcast.create_audio_track(AudioConfig {
-        codec: "opus".to_string(),
-        sample_rate: 48000,
-        channels: 2,
-        bitrate: 128_000,
-    })?;
-
-    // Publish encoded frames
-    video_track.append_frame(Frame {
-        timestamp: 0,
-        data: h264_keyframe_data,
-        is_keyframe: true,
-    })?;
-
-    audio_track.append_frame(Frame {
-        timestamp: 0,
-        data: opus_packet_data,
-        is_keyframe: false,
-    })?;
-
-    // Publish to relay
-    connection.publish_broadcast(broadcast).await?;
-
-    Ok(())
-}
-```
+See [`rs/hang/examples/video.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) for a complete example of creating a broadcast with a video track, catalog, and publishing frames.
 
 ### Subscribing to Video
 
-```rust
-use hang::*;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect to relay
-    let connection = moq_lite::Connection::connect(
-        "https://relay.example.com/demo"
-    ).await?;
-
-    // Subscribe to broadcast
-    let broadcast = connection.consume_broadcast("my-stream").await?;
-
-    // Read catalog to discover tracks
-    let catalog = broadcast.catalog().await?;
-
-    for track_info in catalog.tracks {
-        println!("Track: {} ({})", track_info.name, track_info.codec);
-
-        if track_info.kind == "video" {
-            // Subscribe to video track
-            let track = broadcast.subscribe(&track_info.name).await?;
-
-            // Read frames
-            while let Some(frame) = track.next_frame().await? {
-                println!("Video frame: {}µs, {} bytes",
-                    frame.timestamp, frame.data.len());
-                // Decode with your video decoder
-            }
-        }
-    }
-
-    Ok(())
-}
-```
+See [`rs/hang/examples/subscribe.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs) for a complete example of subscribing to a broadcast, reading the catalog, and consuming video frames.
 
 ## Catalog
 
@@ -172,44 +90,11 @@ The catalog is updated live as tracks are added, removed, or changed.
 
 ## Frame Container
 
-Each frame in `hang` consists of:
-
-```rust
-pub struct Frame {
-    pub timestamp: u64,      // Microseconds
-    pub data: Vec<u8>,       // Codec bitstream
-    pub is_keyframe: bool,   // Keyframe flag
-}
-```
-
-This simple container:
-
-- Works with WebCodecs
-- Minimal overhead
-- Codec-agnostic
-- Any timestamp base
+Each frame in `hang` consists of a timestamp and codec bitstream payload. See the [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) for the `Frame` struct in action.
 
 ## CMAF Import
 
-For importing fMP4/CMAF/HLS files, see the `moq-mux` crate:
-
-```rust
-use moq_mux::*;
-
-// Import fMP4 file
-let fmp4 = Fmp4::new(broadcast, Fmp4Config::default());
-fmp4.decode_from(&mut reader).await?;
-
-// Import HLS playlist
-let hls = Hls::new(broadcast, HlsConfig::new(playlist_url))?;
-hls.run().await?;
-```
-
-This is useful for:
-
-- Ingesting existing content
-- Converting VOD to live
-- Testing with sample files
+For importing fMP4/CMAF/HLS files, see the [moq-mux](/rs/crate/moq-mux) crate.
 
 ## Grouping
 
@@ -227,13 +112,7 @@ Groups are aligned with natural boundaries:
 - Usually 1 second of audio
 - Independent decoding
 
-```rust
-let mut group = track.new_group();
-group.append(keyframe)?;
-group.append(p_frame_1)?;
-group.append(p_frame_2)?;
-group.finalize()?;
-```
+See the [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) for grouping with `OrderedProducer`.
 
 ## Prioritization
 

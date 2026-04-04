@@ -46,171 +46,23 @@ web-transport-quinn = "0.1"
 
 ## Quick Start
 
-### Client
+### Client & Server
 
-```rust
-use web_transport_quinn::*;
+See the [web-transport repository](https://github.com/moq-dev/web-transport) for client and server examples.
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create client
-    let client = Client::new()?;
-
-    // Connect to server
-    let session = client.connect("https://server.example.com").await?;
-
-    // Open a bidirectional stream
-    let (send, recv) = session.open_bi().await?;
-
-    // Send data
-    send.write_all(b"Hello, WebTransport!").await?;
-
-    // Receive data
-    let mut buf = vec![0u8; 1024];
-    let n = recv.read(&mut buf).await?;
-
-    Ok(())
-}
-```
-
-### Server
-
-```rust
-use web_transport_quinn::*;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load TLS certificate
-    let cert = Certificate::load("cert.pem", "key.pem")?;
-
-    // Create server
-    let server = Server::new(cert)?;
-
-    // Bind to address
-    let endpoint = server.bind("[::]:4443").await?;
-
-    // Accept connections
-    while let Some(session) = endpoint.accept().await {
-        tokio::spawn(async move {
-            handle_session(session).await;
-        });
-    }
-
-    Ok(())
-}
-
-async fn handle_session(session: Session) {
-    // Accept bidirectional streams
-    while let Some((send, recv)) = session.accept_bi().await {
-        // Handle stream...
-    }
-}
-```
+For a real-world example of using `web-transport` with MoQ, see the [`rs/moq-native/examples/chat.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-native/examples/chat.rs) example which demonstrates connection setup, publishing, and session management.
 
 ## Features
 
-### Streams
-
-WebTransport supports multiple stream types:
-
-```rust
-// Bidirectional stream
-let (send, recv) = session.open_bi().await?;
-
-// Unidirectional stream (send only)
-let send = session.open_uni().await?;
-
-// Accept incoming unidirectional stream
-let recv = session.accept_uni().await?;
-```
-
-### Datagrams
-
-For unreliable, unordered data:
-
-```rust
-// Send datagram
-session.send_datagram(data).await?;
-
-// Receive datagram
-let data = session.receive_datagram().await?;
-```
-
-### Session Management
-
-```rust
-// Get session info
-let peer_addr = session.peer_addr();
-let local_addr = session.local_addr();
-
-// Close session
-session.close(0, b"goodbye").await?;
-```
-
-## TLS Configuration
-
-### Self-Signed Certificates
-
-For development:
-
-```rust
-let cert = Certificate::generate_self_signed("localhost")?;
-```
-
-### Let's Encrypt Certificates
-
-For production:
-
-```rust
-let cert = Certificate::load(
-    "/etc/letsencrypt/live/example.com/fullchain.pem",
-    "/etc/letsencrypt/live/example.com/privkey.pem"
-)?;
-```
-
-### Certificate Fingerprints
-
-For browser connections with self-signed certs:
-
-```rust
-let fingerprint = cert.fingerprint_sha256();
-// Pass to browser: serverCertificateHashes option
-```
-
-## WebSocket Polyfill
-
-For browsers without WebTransport support:
-
-```rust
-use web_transport_ws::*;
-
-// Server accepts both WebTransport and WebSocket
-let server = HybridServer::new(cert)?;
-```
-
-See [web-transport-ws](https://github.com/moq-dev/web-transport/tree/main/web-transport-ws) for details.
+- **Streams** - Bidirectional and unidirectional streams
+- **Datagrams** - Unreliable, unordered data
+- **Session Management** - Peer/local addresses, graceful close
+- **TLS** - Self-signed certificates (dev), Let's Encrypt (production), certificate fingerprints
+- **WebSocket Polyfill** - See [web-transport-ws](https://github.com/moq-dev/web-transport/tree/main/web-transport-ws)
 
 ## Integration with MoQ
 
-The `moq-lite` crate uses `web-transport` internally:
-
-```rust
-use moq_lite::*;
-
-// Connection uses WebTransport under the hood
-let connection = Connection::connect("https://relay.example.com/demo").await?;
-```
-
-For custom transport configuration, use the lower-level API:
-
-```rust
-use moq_lite::*;
-use web_transport_quinn::*;
-
-let client = Client::with_config(custom_config)?;
-let session = client.connect("https://relay.example.com").await?;
-let connection = Connection::from_session(session);
-```
+The `moq-lite` crate uses `web-transport` internally. See the [moq-native examples](https://github.com/moq-dev/moq/tree/main/rs/moq-native/examples) for how connections are established.
 
 ## Next Steps
 
