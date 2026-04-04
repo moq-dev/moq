@@ -97,8 +97,7 @@ impl AudioEncoder {
 		let pending_frames = self.sample_buffer.len() / samples_per_frame;
 		let frame_duration_us = self.frame_size as u64 * 1_000_000 / OPUS_SAMPLE_RATE as u64;
 		// The first frame started accumulating before `elapsed`, offset backwards.
-		let base_ts = elapsed.as_micros() as u64
-			- pending_frames.saturating_sub(1) as u64 * frame_duration_us;
+		let base_ts = elapsed.as_micros() as u64 - pending_frames.saturating_sub(1) as u64 * frame_duration_us;
 
 		let mut frame_idx: u64 = 0;
 		while self.sample_buffer.len() >= samples_per_frame {
