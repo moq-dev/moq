@@ -219,7 +219,7 @@ export class Source {
 			const connection = broadcast ? effect.get(broadcast.connection) : undefined;
 			const recvBw = connection?.recvBandwidth;
 			if (recvBw) {
-				const estimate = effect.get(recvBw.signal);
+				const estimate = effect.get(recvBw);
 				if (estimate != null) {
 					// Apply a safety margin (80%) to avoid oscillation.
 					const safeBitrate = Math.round(estimate * 0.8);

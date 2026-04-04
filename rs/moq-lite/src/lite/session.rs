@@ -2,14 +2,12 @@ use std::time::Duration;
 
 use web_transport_trait::Stats;
 
-use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo,
-};
+use crate::{BandwidthProducer, Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo};
 
 use super::{Publisher, Subscriber, Version};
 
 /// Returned by `start()`: (send_bandwidth, recv_bandwidth)
-pub type Bandwidth = (Option<BandwidthConsumer>, Option<BandwidthConsumer>);
+pub type Bandwidth = (Option<BandwidthProducer>, Option<BandwidthProducer>);
 
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
@@ -24,17 +22,12 @@ pub fn start<S: web_transport_trait::Session>(
 	version: Version,
 ) -> Result<Bandwidth, Error> {
 	let send_bw = BandwidthProducer::new();
-	let send_bw_consumer = send_bw.consume();
+	let send_bw_task = send_bw.clone();
 
 	let recv_bw = BandwidthProducer::new();
-	let recv_bw_consumer = match version {
-		Version::Lite03 => Some(recv_bw.consume()),
-		_ => None,
-	};
-
-	let recv_bw_for_sub = match version {
-		Version::Lite03 => Some(recv_bw),
-		_ => None,
+	let (recv_bw_ret, recv_bw_for_sub) = match version {
+		Version::Lite01 | Version::Lite02 => (None, None),
+		_ => (Some(recv_bw.clone()), Some(recv_bw)),
 	};
 
 	let publisher = Publisher::new(session.clone(), publish, version);
@@ -45,7 +38,7 @@ pub fn start<S: web_transport_trait::Session>(
 			Err(res) = run_session(setup) => Err(res),
 			res = publisher.run() => res,
 			res = subscriber.run() => res,
-			_ = run_send_bandwidth(&session, send_bw) => Ok(()),
+			_ = run_send_bandwidth(&session, send_bw_task) => Ok(()),
 		};
 
 		match res {
@@ -64,7 +57,7 @@ pub fn start<S: web_transport_trait::Session>(
 		}
 	});
 
-	Ok((Some(send_bw_consumer), recv_bw_consumer))
+	Ok((Some(send_bw), recv_bw_ret))
 }
 
 /// Polls the QUIC congestion controller for estimated send rate.

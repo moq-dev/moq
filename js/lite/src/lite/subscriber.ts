@@ -207,13 +207,15 @@ export class Subscriber {
 		}
 	}
 
+	#closed = false;
+
 	/**
 	 * Opens a PROBE bidi stream to receive bandwidth estimates from the publisher.
 	 * Retries on error.
 	 */
 	#runProbe() {
 		const run = async () => {
-			for (;;) {
+			while (!this.#closed) {
 				try {
 					const stream = await Stream.open(this.#quic);
 					await stream.writer.u53(StreamId.Probe);
@@ -231,6 +233,8 @@ export class Subscriber {
 				// Clear the bitrate on disconnect.
 				this.#recvBandwidth?.set(undefined);
 
+				if (this.#closed) break;
+
 				// Wait before retrying.
 				await new Promise((resolve) => setTimeout(resolve, 1000));
 			}
@@ -240,6 +244,7 @@ export class Subscriber {
 	}
 
 	close() {
+		this.#closed = true;
 		for (const track of this.#subscribes.values()) {
 			track.close();
 		}

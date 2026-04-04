@@ -1,5 +1,5 @@
 import type { Announced } from "../announced.ts";
-import { Bandwidth } from "../bandwidth.ts";
+import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
@@ -68,8 +68,8 @@ export class Connection implements Established {
 
 		// Set up bandwidth estimation for Lite03+.
 		if (version === Version.DRAFT_03) {
-			this.sendBandwidth = new Bandwidth();
-			this.recvBandwidth = new Bandwidth();
+			this.sendBandwidth = createBandwidth();
+			this.recvBandwidth = createBandwidth();
 		}
 
 		this.#publisher = new Publisher(this.#quic, this.#version);
@@ -244,18 +244,16 @@ export class Connection implements Established {
 		if (!getStats) return;
 
 		const run = async () => {
-			try {
-				while (!this.#closed) {
-					const timeout = new Promise<void>((resolve) => setTimeout(resolve, SEND_BW_POLL_INTERVAL));
-					await timeout;
+			while (!this.#closed) {
+				await new Promise<void>((resolve) => setTimeout(resolve, SEND_BW_POLL_INTERVAL));
+				if (this.#closed) break;
 
-					if (this.#closed) break;
-
+				try {
 					const stats = await getStats();
 					bandwidth.set(stats.estimatedSendRate ?? undefined);
+				} catch {
+					if (this.#closed) break;
 				}
-			} catch {
-				// Connection closed.
 			}
 		};
 

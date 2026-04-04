@@ -44,11 +44,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
+		let recv_bandwidth_enabled = self.recv_bandwidth.is_some();
 		let bw = self.clone();
 		tokio::select! {
 			Err(err) = self.clone().run_announce() => Err(err),
 			res = self.run_uni() => res,
-			_ = bw.run_recv_bandwidth() => Ok(()),
+			_ = bw.run_recv_bandwidth(), if recv_bandwidth_enabled => Ok(()),
 		}
 	}
 

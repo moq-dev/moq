@@ -63,7 +63,7 @@ export class Broadcast {
 			return;
 		}
 
-		const estimate = effect.get(connection.sendBandwidth.signal);
+		const estimate = effect.get(connection.sendBandwidth);
 		effect.set(this.#sendBandwidth, estimate);
 	}
 

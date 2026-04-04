@@ -1,5 +1,5 @@
 use crate::{
-	BandwidthConsumer, Error, OriginConsumer, OriginProducer,
+	BandwidthProducer, Error, OriginConsumer, OriginProducer,
 	coding::{Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, GroupFlags, RequestId},
 	setup,
@@ -8,7 +8,7 @@ use crate::{
 use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter};
 
 /// Returned by `start()`: (send_bandwidth, recv_bandwidth)
-pub type Bandwidth = (Option<BandwidthConsumer>, Option<BandwidthConsumer>);
+pub type Bandwidth = (Option<BandwidthProducer>, Option<BandwidthProducer>);
 
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
