@@ -54,6 +54,19 @@ export const cardStyles = `
 		text-align: center; line-height: 1.4; margin-top: 0.25rem;
 	}
 
+	/* Encoding stats list in controls panel */
+	.stats-list {
+		width: 100%; font-family: monospace; font-size: 0.65rem;
+	}
+	.stats-list .stats-header {
+		color: #888; text-transform: uppercase; letter-spacing: 0.05em;
+		margin-bottom: 0.3rem; font-size: 0.6rem;
+	}
+	.stats-entry {
+		display: flex; justify-content: space-between;
+		padding: 0.15rem 0; color: #aaa;
+	}
+
 	/* Controls panel */
 	.card .controls { display: none; }
 	.card.expanded .controls {

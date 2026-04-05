@@ -207,6 +207,12 @@ async fn run(config: &Config) -> Result<()> {
 		let mut viewer_latency: std::collections::HashMap<String, (f64, std::time::Instant)> =
 			std::collections::HashMap::new();
 
+		// Stats accumulators (microseconds) — reset each reporting interval.
+		let mut stats_emulation_us: u64 = 0;
+		let mut stats_audio_us: u64 = 0;
+		let mut stats_total = std::time::Instant::now();
+		let mut last_stats_report = std::time::Instant::now();
+
 		loop {
 			// Pause emulation when no viewers are watching.
 			if paused.load(Ordering::Acquire) {
@@ -257,6 +263,11 @@ async fn run(config: &Config) -> Result<()> {
 						tracing::info!("resetting emulator (viewer request)");
 						emu.reset()?;
 						last_input = std::time::Instant::now();
+						stats_emulation_us = 0;
+						stats_audio_us = 0;
+						video_encoder.take_encode_us();
+						stats_total = std::time::Instant::now();
+						last_stats_report = std::time::Instant::now();
 					}
 				}
 			}
@@ -267,10 +278,17 @@ async fn run(config: &Config) -> Result<()> {
 				tracing::info!("resetting emulator (inactivity timeout)");
 				emu.reset()?;
 				last_input = std::time::Instant::now();
+				stats_emulation_us = 0;
+				stats_audio_us = 0;
+				video_encoder.take_encode_us();
+				stats_total = std::time::Instant::now();
+				last_stats_report = std::time::Instant::now();
 			}
 
 			// Tick the emulator.
+			let emu_start = std::time::Instant::now();
 			emu.tick();
+			stats_emulation_us += emu_start.elapsed().as_micros() as u64;
 
 			// Expire stale viewer latency entries (no input for 30s).
 			let stale = std::time::Duration::from_secs(30);
@@ -286,11 +304,56 @@ async fn run(config: &Config) -> Result<()> {
 				.map(|(k, (ms, _))| (k.clone(), serde_json::json!((*ms as u32))))
 				.collect();
 
-			let new_status = serde_json::json!({
+			// Collect stats every second.
+			let stats_elapsed = last_stats_report.elapsed();
+			let stats = if stats_elapsed >= std::time::Duration::from_secs(1) {
+				let total_us = stats_total.elapsed().as_micros() as u64;
+				let video_us = video_encoder.take_encode_us();
+				let emu_us = stats_emulation_us;
+				let audio_us = stats_audio_us;
+
+				// Reset accumulators.
+				stats_emulation_us = 0;
+				stats_audio_us = 0;
+				stats_total = std::time::Instant::now();
+				last_stats_report = std::time::Instant::now();
+
+				// Round to nearest second.
+				let to_secs = |us: u64| ((us + 500_000) / 1_000_000) as u64;
+				let total_secs = to_secs(total_us);
+
+				// Percentage of total time (0-100).
+				let pct = |us: u64| {
+					if total_us == 0 {
+						0u32
+					} else {
+						((us as f64 / total_us as f64) * 100.0).round() as u32
+					}
+				};
+
+				Some(serde_json::json!({
+					"video_secs": to_secs(video_us),
+					"audio_secs": to_secs(audio_us),
+					"emulation_secs": to_secs(emu_us),
+					"total_secs": total_secs,
+					"video_pct": pct(video_us),
+					"audio_pct": pct(audio_us),
+					"emulation_pct": pct(emu_us),
+				}))
+			} else {
+				None
+			};
+
+			let mut new_status = serde_json::json!({
 				"buttons": held,
 				"reset_in": remaining,
 				"latency": latency_map,
 			});
+
+			if let Some(stats) = stats {
+				new_status["stats"] = stats;
+			}
+
 			let new_status_str = new_status.to_string();
 
 			if new_status_str != last_status {
@@ -311,12 +374,14 @@ async fn run(config: &Config) -> Result<()> {
 
 			// Grab and encode audio (skip if no audio viewers).
 			if audio_active.load(Ordering::Relaxed) {
+				let audio_start = std::time::Instant::now();
 				let samples = emu.audio_samples();
 				if !samples.is_empty() {
 					if let Err(e) = audio_encoder.push_samples(&samples) {
 						tracing::warn!(error = %e, "audio encode error");
 					}
 				}
+				stats_audio_us += audio_start.elapsed().as_micros() as u64;
 			} else {
 				// Drain audio buffer even when not encoding to prevent buildup.
 				emu.audio_samples();

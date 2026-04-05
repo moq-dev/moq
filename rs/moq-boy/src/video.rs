@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -13,6 +13,8 @@ pub struct VideoEncoder {
 	/// Clone of the video track producer, for monitoring used/unused.
 	pub track: moq_lite::TrackProducer,
 	force_keyframe: Arc<AtomicBool>,
+	/// Cumulative video encoding time in microseconds (updated by encoder thread).
+	encode_us: Arc<AtomicU64>,
 	_thread: std::thread::JoinHandle<()>,
 }
 
@@ -26,19 +28,22 @@ impl VideoEncoder {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 		let avc3 = moq_mux::import::Avc3::new(broadcast, catalog);
 		let force_keyframe = Arc::new(AtomicBool::new(false));
+		let encode_us = Arc::new(AtomicU64::new(0));
 
 		let track = avc3.track().clone();
 
 		let fk = force_keyframe.clone();
+		let eu = encode_us.clone();
 		let thread = std::thread::Builder::new()
 			.name("video-encoder".into())
-			.spawn(move || encoder_thread(rx, avc3, fk))
+			.spawn(move || encoder_thread(rx, avc3, fk, eu))
 			.expect("failed to spawn video encoder thread");
 
 		Self {
 			tx,
 			track,
 			force_keyframe,
+			encode_us,
 			_thread: thread,
 		}
 	}
@@ -52,17 +57,25 @@ impl VideoEncoder {
 	pub fn force_keyframe(&self) {
 		self.force_keyframe.store(true, Ordering::Release);
 	}
+
+	/// Read and reset cumulative video encoding time in microseconds.
+	pub fn take_encode_us(&self) -> u64 {
+		self.encode_us.swap(0, Ordering::Relaxed)
+	}
 }
 
 fn encoder_thread(
 	mut rx: tokio::sync::mpsc::Receiver<EncoderMsg>,
 	mut avc3: moq_mux::import::Avc3,
 	force_keyframe: Arc<AtomicBool>,
+	encode_us: Arc<AtomicU64>,
 ) {
 	let mut encoder: Option<Encoder> = None;
 	let mut scaler: Option<ffmpeg_next::software::scaling::Context> = None;
 
 	while let Some(msg) = rx.blocking_recv() {
+		let frame_start = std::time::Instant::now();
+
 		let enc = lazy_init(&mut encoder, || Encoder::new(WIDTH, HEIGHT), "H.264 encoder");
 		let color_scaler = lazy_init(
 			&mut scaler,
@@ -100,6 +113,8 @@ fn encoder_thread(
 		if let Err(e) = enc.encode_yuv(&yuv, msg.ts, &mut avc3) {
 			tracing::error!(error = %e, "H.264 encode error");
 		}
+
+		encode_us.fetch_add(frame_start.elapsed().as_micros() as u64, Ordering::Relaxed);
 	}
 }
 
