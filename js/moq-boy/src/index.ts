@@ -5,7 +5,6 @@ export { Moq, Watch };
 
 export interface GameStatus {
 	buttons: string[];
-	reset_in: number;
 	latency: Record<string, number>;
 }
 
@@ -53,11 +52,6 @@ export class GameCard {
 		label.className = "label";
 		label.textContent = sessionId;
 		this.el.appendChild(label);
-
-		// Countdown overlay.
-		const countdown = document.createElement("div");
-		countdown.className = "countdown";
-		this.el.appendChild(countdown);
 
 		// Controls container.
 		const controls = document.createElement("div");
@@ -226,7 +220,7 @@ export class GameCard {
 			audioEmitter.muted.set(muted || !(exp === sessionId || hover));
 		});
 
-		// Subscribe to status track for button highlights and countdown.
+		// Subscribe to status track for button highlights and latency.
 		this.#signals.run((effect) => {
 			const active = effect.get(broadcast.active);
 			if (!active) return;
@@ -246,14 +240,6 @@ export class GameCard {
 					for (const btn of allBtns) {
 						const name = (btn as HTMLElement).dataset.button;
 						(btn as HTMLElement).classList.toggle("active", json.buttons.includes(name ?? ""));
-					}
-
-					// Show countdown when approaching timeout.
-					if (json.reset_in <= 60) {
-						countdown.style.display = "block";
-						countdown.textContent = `Reset in ${json.reset_in}s`;
-					} else {
-						countdown.style.display = "none";
 					}
 
 					// Show per-viewer latency.
@@ -287,16 +273,28 @@ export class GameCard {
 			});
 		});
 
-		// Command publishing.
+		// Command publishing — only publish feedback broadcast when there's recent input.
 		let commandTrack: Moq.Track | undefined;
 		const currentViewerId = new Moq.Signals.Signal<string | undefined>(undefined);
+		const feedbackActive = new Moq.Signals.Signal(false);
+		let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
+
+		this.#signals.cleanup(() => clearTimeout(feedbackTimer));
 
 		this.#signals.run((effect) => {
 			const conn = effect.get(connection.established);
 			if (!conn) return;
 
 			const exp = effect.get(expanded);
-			if (exp !== sessionId) return;
+			if (exp !== sessionId) {
+				// Clear feedback state when collapsing.
+				feedbackActive.set(false);
+				clearTimeout(feedbackTimer);
+				return;
+			}
+
+			const active = effect.get(feedbackActive);
+			if (!active) return;
 
 			const viewerId = Math.random().toString(36).slice(2, 8);
 			currentViewerId.set(viewerId);
@@ -305,6 +303,7 @@ export class GameCard {
 			effect.cleanup(() => {
 				viewerBroadcast.close();
 				commandTrack = undefined;
+				currentViewerId.set(undefined);
 			});
 
 			effect.spawn(async () => {
@@ -317,6 +316,11 @@ export class GameCard {
 		});
 
 		this.#sendCommand = (cmd: Record<string, unknown>) => {
+			// Activate feedback broadcasting on input, with 60s idle timeout.
+			feedbackActive.set(true);
+			clearTimeout(feedbackTimer);
+			feedbackTimer = setTimeout(() => feedbackActive.set(false), 60_000);
+
 			if (!commandTrack) return;
 			// Attach the current video timestamp so the publisher can measure latency.
 			const ts = videoDecoder.timestamp.peek();

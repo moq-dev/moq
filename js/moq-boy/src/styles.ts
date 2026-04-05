@@ -29,13 +29,6 @@ export const cardStyles = `
 		border-radius: 4px; font-family: monospace; font-size: 0.7rem;
 	}
 
-	.card .countdown {
-		position: absolute; top: 0.5rem; left: 0.5rem;
-		background: rgba(0,0,0,0.7); color: #facc15; padding: 0.2rem 0.5rem;
-		border-radius: 4px; font-family: monospace; font-size: 0.65rem;
-		pointer-events: none; display: none;
-	}
-
 	/* Viewer latency list in controls panel */
 	.latency-list {
 		width: 100%; font-family: monospace; font-size: 0.65rem;

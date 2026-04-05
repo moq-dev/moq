@@ -201,7 +201,6 @@ async fn run(config: &Config) -> Result<()> {
 
 		let frame_duration = std::time::Duration::from_micros(16_742); // ~59.73fps
 		let mut next_frame = std::time::Instant::now();
-		let mut last_input = std::time::Instant::now();
 		let mut last_status = String::new();
 		let timeout = std::time::Duration::from_secs(timeout_secs);
 		let mut viewer_latency: std::collections::HashMap<String, (f64, std::time::Instant)> =
@@ -213,9 +212,24 @@ async fn run(config: &Config) -> Result<()> {
 				tracing::info!("pausing encoding");
 				let (lock, cvar) = &*resume_notify;
 				let mut guard = lock.lock().unwrap();
+				let pause_start = std::time::Instant::now();
+
 				while paused.load(Ordering::Acquire) {
-					guard = cvar.wait(guard).unwrap();
+					let elapsed = pause_start.elapsed();
+					if elapsed >= timeout {
+						tracing::info!("resetting emulator (paused too long)");
+						emu.reset()?;
+						// Wait indefinitely for a viewer to resume.
+						while paused.load(Ordering::Acquire) {
+							guard = cvar.wait(guard).unwrap();
+						}
+						break;
+					}
+					let remaining = timeout - elapsed;
+					let (g, _) = cvar.wait_timeout(guard, remaining).unwrap();
+					guard = g;
 				}
+
 				tracing::info!("resuming encoding");
 				// Don't try to catch up after a pause.
 				next_frame = std::time::Instant::now();
@@ -242,7 +256,6 @@ async fn run(config: &Config) -> Result<()> {
 						ts_ms,
 					} => {
 						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
-						last_input = std::time::Instant::now();
 
 						let latency = current_ts_ms - ts_ms;
 						if latency >= 0.0 {
@@ -256,30 +269,15 @@ async fn run(config: &Config) -> Result<()> {
 					input::Command::Reset => {
 						tracing::info!("resetting emulator (viewer request)");
 						emu.reset()?;
-						last_input = std::time::Instant::now();
 					}
 				}
-			}
-
-			// Check inactivity timeout.
-			let idle_time = std::time::Instant::now() - last_input;
-			if idle_time > timeout {
-				tracing::info!("resetting emulator (inactivity timeout)");
-				emu.reset()?;
-				last_input = std::time::Instant::now();
 			}
 
 			// Tick the emulator.
 			emu.tick();
 
-			// Expire stale viewer latency entries (no input for 30s).
-			let stale = std::time::Duration::from_secs(30);
-			viewer_latency.retain(|_, (_, last_seen)| last_seen.elapsed() < stale);
-
 			// Publish status.
 			let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
-			let idle_secs = idle_time.as_secs();
-			let remaining = timeout_secs.saturating_sub(idle_secs);
 
 			let latency_map: serde_json::Map<String, serde_json::Value> = viewer_latency
 				.iter()
@@ -288,7 +286,6 @@ async fn run(config: &Config) -> Result<()> {
 
 			let new_status = serde_json::json!({
 				"buttons": held,
-				"reset_in": remaining,
 				"latency": latency_map,
 			});
 			let new_status_str = new_status.to_string();
