@@ -8,7 +8,7 @@ export const cardStyles = `
 	}
 	.card:hover { border-color: #8bac0f; }
 
-	/* Fullscreen mode replaces the old CSS position:fixed approach */
+	/* Expanded mode: fill the container */
 	.card.expanded {
 		width: 100%; height: 100%;
 		border-radius: 0; border: none; aspect-ratio: auto;
@@ -134,7 +134,7 @@ export const cardStyles = `
 
 export const gridStyles = `
 	* { margin: 0; padding: 0; box-sizing: border-box; }
-	:host { display: block; font-family: system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; }
+	:host { display: flex; flex-direction: column; font-family: system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
 
 	header {
 		background: #111; border-bottom: 1px solid #333;
@@ -156,6 +156,16 @@ export const gridStyles = `
 
 	.grid {
 		display: flex; flex-wrap: wrap; gap: 1rem; padding: 1rem;
+	}
+	.grid:has(.card.expanded) {
+		padding: 0; gap: 0; flex: 1;
+	}
+	.grid:has(.card.expanded) .card:not(.expanded) {
+		display: none;
+	}
+	:host:has(.card.expanded) header,
+	:host:has(.card.expanded) .about {
+		display: none;
 	}
 
 	.empty-state {

@@ -68,41 +68,39 @@ export class GameCard {
 		const { wrapper: controlsInner, latencyList, muteBtn } = this.#buildControls();
 		controls.appendChild(controlsInner);
 
-		// Click to toggle expand via Fullscreen API.
+		// Track hover state (before keyboard setup so handlers can use it).
+		const hovered = new Moq.Signals.Signal(false);
+		this.el.addEventListener("mouseenter", () => hovered.set(true));
+		this.el.addEventListener("mouseleave", () => hovered.set(false));
+
+		// Click to toggle expand (fills container instead of browser fullscreen).
 		canvas.addEventListener("click", () => {
 			if (expanded.peek() === sessionId) {
-				document.exitFullscreen().catch(() => {});
+				expanded.set(undefined);
 			} else {
 				expanded.set(sessionId);
-				this.el.requestFullscreen().catch(() => {});
 			}
 		});
 
-		// Listen for fullscreen exit to sync expanded state.
-		const onFullscreenChange = () => {
-			if (!document.fullscreenElement && expanded.peek() === sessionId) {
-				expanded.set(undefined);
-			}
-		};
-		document.addEventListener("fullscreenchange", onFullscreenChange);
-		this.#signals.cleanup(() => document.removeEventListener("fullscreenchange", onFullscreenChange));
-
-		// React to expand state.
+		// React to expand/hover state.
 		this.#signals.run((effect) => {
 			const exp = effect.get(expanded);
+			const hover = effect.get(hovered);
 			const isExpanded = exp === sessionId;
+			const isActive = isExpanded || hover;
 			this.el.classList.toggle("expanded", isExpanded);
 			controls.style.display = isExpanded ? "flex" : "none";
 
-			if (!isExpanded && this.#heldButtons.size > 0) {
+			if (!isActive && this.#heldButtons.size > 0) {
 				this.#heldButtons.clear();
 				this.#sendButtons();
 			}
 		});
 
-		// Keyboard input when expanded.
+		// Keyboard input when hovered or expanded.
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (expanded.peek() !== sessionId) return;
+			const isActive = expanded.peek() === sessionId || hovered.peek();
+			if (!isActive) return;
 			if (e.repeat) return;
 
 			const button = KEY_MAP[e.key];
@@ -110,13 +108,14 @@ export class GameCard {
 				this.#heldButtons.add(button);
 				this.#sendButtons();
 				e.preventDefault();
-			} else if (e.key === "Escape") {
-				document.exitFullscreen().catch(() => {});
+			} else if (e.key === "Escape" && expanded.peek() === sessionId) {
+				expanded.set(undefined);
 				e.preventDefault();
 			}
 		};
 		const onKeyUp = (e: KeyboardEvent) => {
-			if (expanded.peek() !== sessionId) return;
+			const isActive = expanded.peek() === sessionId || hovered.peek();
+			if (!isActive) return;
 			const button = KEY_MAP[e.key];
 			if (button) {
 				this.#heldButtons.delete(button);
@@ -205,11 +204,6 @@ export class GameCard {
 			}
 		});
 
-		// Track hover state.
-		const hovered = new Moq.Signals.Signal(false);
-		this.el.addEventListener("mouseenter", () => hovered.set(true));
-		this.el.addEventListener("mouseleave", () => hovered.set(false));
-
 		// Enable audio decoding when hovered or expanded.
 		this.#signals.run((effect) => {
 			const exp = effect.get(expanded);
@@ -296,7 +290,8 @@ export class GameCard {
 			if (!conn) return;
 
 			const exp = effect.get(expanded);
-			if (exp !== sessionId) return;
+			const hover = effect.get(hovered);
+			if (exp !== sessionId && !hover) return;
 
 			const viewerId = Math.random().toString(36).slice(2, 8);
 			currentViewerId.set(viewerId);
@@ -414,7 +409,7 @@ export class GameCard {
 		// Key hints
 		const hints = document.createElement("div");
 		hints.className = "key-hints";
-		const lines = ["Arrows: D-pad", "Z: B \u00A0 X: A", "Enter: Start \u00A0 Shift: Select", "Esc: Exit"];
+		const lines = ["Arrows: D-pad", "Z: B \u00A0 X: A", "Enter: Start \u00A0 Shift: Select", "Esc: Collapse"];
 		for (const line of lines) {
 			const div = document.createElement("div");
 			div.textContent = line;
