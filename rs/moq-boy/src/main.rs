@@ -320,25 +320,12 @@ async fn run(config: &Config) -> Result<()> {
 
 				// Round to nearest second.
 				let to_secs = |us: u64| ((us + 500_000) / 1_000_000) as u64;
-				let total_secs = to_secs(total_us);
-
-				// Percentage of total time (0-100).
-				let pct = |us: u64| {
-					if total_us == 0 {
-						0u32
-					} else {
-						((us as f64 / total_us as f64) * 100.0).round() as u32
-					}
-				};
 
 				Some(serde_json::json!({
 					"video_secs": to_secs(video_us),
 					"audio_secs": to_secs(audio_us),
 					"emulation_secs": to_secs(emu_us),
-					"total_secs": total_secs,
-					"video_pct": pct(video_us),
-					"audio_pct": pct(audio_us),
-					"emulation_pct": pct(emu_us),
+					"total_secs": to_secs(total_us),
 				}))
 			} else {
 				None

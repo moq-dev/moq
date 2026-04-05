@@ -8,9 +8,6 @@ export interface GameStats {
 	audio_secs: number;
 	emulation_secs: number;
 	total_secs: number;
-	video_pct: number;
-	audio_pct: number;
-	emulation_pct: number;
 }
 
 export interface GameStatus {
@@ -298,25 +295,27 @@ export class GameCard {
 					// Stats panel: show encoding/emulation time.
 					if (json.stats) {
 						const s = json.stats;
+						const pct = (v: number) => (s.total_secs > 0 ? Math.round((v / s.total_secs) * 100) : 0);
+
 						statsList.replaceChildren();
 						const header = document.createElement("div");
 						header.className = "stats-header";
 						header.textContent = `Stats (${s.total_secs}s total)`;
 						statsList.appendChild(header);
 
-						const items: [string, number, number][] = [
-							["Video", s.video_secs, s.video_pct],
-							["Audio", s.audio_secs, s.audio_pct],
-							["Emulation", s.emulation_secs, s.emulation_pct],
+						const items: [string, number][] = [
+							["Video", s.video_secs],
+							["Audio", s.audio_secs],
+							["Emulation", s.emulation_secs],
 						];
 
-						for (const [label, secs, pct] of items) {
+						for (const [label, secs] of items) {
 							const row = document.createElement("div");
 							row.className = "stats-entry";
 							const nameSpan = document.createElement("span");
 							nameSpan.textContent = label;
 							const valSpan = document.createElement("span");
-							valSpan.textContent = `${secs}s (${pct}%)`;
+							valSpan.textContent = `${secs}s (${pct(secs)}%)`;
 							row.appendChild(nameSpan);
 							row.appendChild(valSpan);
 							statsList.appendChild(row);
