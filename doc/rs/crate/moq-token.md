@@ -107,7 +107,8 @@ moq-token-cli verify --key root.jwk < alice.jwt
 
 ## Library Usage
 
-See the [test suite](https://github.com/moq-dev/moq/blob/main/rs/moq-token/src/key.rs) for working examples of key generation (`Key::generate`), token signing (`key.encode`), and verification (`key.decode`).
+- [`rs/moq-token/examples/basic.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-token/examples/basic.rs) - Generate a symmetric key, sign a token, verify it, and round-trip the key
+- [`rs/moq-token/examples/asymmetric.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-token/examples/asymmetric.rs) - Generate an ECDSA key pair, extract the public key for the relay, sign and verify
 
 For the TypeScript equivalent, see [`js/token/examples/sign-and-verify.ts`](https://github.com/moq-dev/moq/blob/main/js/token/examples/sign-and-verify.ts).
 

@@ -175,6 +175,11 @@ See the [`demo/relay/`](https://github.com/moq-dev/moq/tree/main/demo/relay) dir
 
 ## Library Usage
 
+### Rust
+
+- [`rs/moq-token/examples/basic.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-token/examples/basic.rs) - Symmetric key generation, signing, and verification
+- [`rs/moq-token/examples/asymmetric.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-token/examples/asymmetric.rs) - Asymmetric key pair with public key extraction
+
 ### TypeScript
 
 See [`js/token/examples/sign-and-verify.ts`](https://github.com/moq-dev/moq/blob/main/js/token/examples/sign-and-verify.ts) for a complete working example of signing and verifying tokens.
