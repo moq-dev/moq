@@ -158,7 +158,7 @@ impl Encoder {
 		enc.set_format(ffmpeg_next::format::Pixel::YUV420P);
 		enc.set_time_base(ffmpeg_next::Rational::new(1, 60));
 		enc.set_frame_rate(Some(ffmpeg_next::Rational::new(60, 1)));
-		enc.set_gop(120);
+		enc.set_gop(240);
 
 		let mut opts = ffmpeg_next::Dictionary::new();
 		opts.set("preset", "ultrafast");
