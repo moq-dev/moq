@@ -64,7 +64,8 @@ impl Opus {
 			bitrate: None,
 			description: None,
 			container: hang::catalog::Container::Legacy,
-			jitter: None,
+			// Opus default frame duration is 20ms.
+			jitter: Some(moq_lite::Time::new(20)),
 		};
 
 		catalog.lock().audio.insert(&track.info.name, audio_config.clone())?;

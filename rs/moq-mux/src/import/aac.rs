@@ -114,6 +114,10 @@ impl Aac {
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".aac")?;
 
+		// AAC typically uses 1024 samples per frame.
+		let frame_duration_us = 1024u64 * 1_000_000 / config.sample_rate as u64;
+		let jitter = moq_lite::Time::from_micros(frame_duration_us).ok();
+
 		let audio_config = hang::catalog::AudioConfig {
 			codec: hang::catalog::AAC {
 				profile: config.profile,
@@ -124,7 +128,7 @@ impl Aac {
 			bitrate: None,
 			description: None,
 			container: hang::catalog::Container::Legacy,
-			jitter: None,
+			jitter,
 		};
 
 		catalog.lock().audio.insert(&track.info.name, audio_config.clone())?;
