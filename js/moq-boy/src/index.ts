@@ -316,6 +316,7 @@ export class GameCard {
 
 		// Command publishing — only publish feedback broadcast when there's recent input.
 		let commandTrack: Moq.Track | undefined;
+		let pendingCommand: Record<string, unknown> | undefined;
 		const currentViewerId = new Moq.Signals.Signal<string | undefined>(undefined);
 		const feedbackActive = new Moq.Signals.Signal(false);
 		let feedbackTimeout: Moq.Signals.Effect | undefined;
@@ -330,6 +331,7 @@ export class GameCard {
 				// Clear feedback state when deactivating.
 				feedbackActive.set(false);
 				feedbackTimeout?.close();
+				pendingCommand = undefined;
 				return;
 			}
 
@@ -350,7 +352,15 @@ export class GameCard {
 				for (;;) {
 					const req = await Promise.race([effect.cancel, viewerBroadcast.requested()]);
 					if (!req) break;
-					if (req.track.name === "command") commandTrack = req.track;
+					if (req.track.name === "command") {
+						commandTrack = req.track;
+						// Flush any pending command that triggered activation.
+						if (pendingCommand) {
+							const ts = videoDecoder.timestamp.peek();
+							commandTrack.writeJson({ ...pendingCommand, ts: ts ?? 0 });
+							pendingCommand = undefined;
+						}
+					}
 				}
 			});
 		});
@@ -362,7 +372,10 @@ export class GameCard {
 			feedbackTimeout = new Moq.Signals.Effect();
 			feedbackTimeout.timer(() => feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
-			if (!commandTrack) return;
+			if (!commandTrack) {
+				pendingCommand = cmd;
+				return;
+			}
 			// Attach the current video timestamp so the publisher can measure latency.
 			const ts = videoDecoder.timestamp.peek();
 			commandTrack.writeJson({ ...cmd, ts: ts ?? 0 });

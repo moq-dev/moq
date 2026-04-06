@@ -351,14 +351,11 @@ async fn run(config: &Config) -> Result<()> {
 			// Tick the emulator.
 			emu.tick();
 
-
 			// Publish status.
 			let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
 
-			let latency_map: BTreeMap<String, u32> = viewer_latency
-				.iter()
-				.map(|(k, ms)| (k.clone(), *ms as u32))
-				.collect();
+			let latency_map: BTreeMap<String, u32> =
+				viewer_latency.iter().map(|(k, ms)| (k.clone(), *ms as u32)).collect();
 
 			let status = Status {
 				buttons: held,
