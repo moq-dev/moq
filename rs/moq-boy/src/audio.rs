@@ -93,6 +93,16 @@ impl AudioEncoder {
 		self.opus.track()
 	}
 
+	/// Reset the epoch so audio timestamps re-anchor to wall clock on the next push.
+	/// Call this on pause/resume so the gap appears in audio PTS too.
+	/// Also drains buffered samples so stale pre-pause audio isn't encoded
+	/// with post-pause timestamps.
+	pub fn reset_epoch(&mut self) {
+		self.epoch = None;
+		self.input_buffer.clear();
+		self.encode_buffer.clear();
+	}
+
 	/// Feed interleaved stereo u8 samples from the emulator.
 	/// Boytacean outputs unsigned 8-bit PCM (0-255, center at 128).
 	///

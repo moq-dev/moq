@@ -221,6 +221,8 @@ async fn run(config: &Config) -> Result<()> {
 				next_frame = std::time::Instant::now();
 				// Force a keyframe so new viewers can start decoding.
 				video_encoder.force_keyframe();
+				// Re-anchor audio timestamps so the pause gap appears in PTS.
+				audio_encoder.reset_epoch();
 			}
 
 			// Wait for next frame.
