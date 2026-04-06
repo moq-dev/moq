@@ -29,10 +29,8 @@ export class Sync {
 	// There's probably a way to use Effect, but lets keep it simple for now.
 	#update: PromiseWithResolvers<void>;
 
-	// Batched late-frame tracking: accumulate count and max lateness, log on recovery.
-	#lateCount = 0;
-	#lateMaxMs = 0;
-	#lateLabel = "";
+	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
+	#late = new Map<string, { count: number; maxMs: number }>();
 
 	signals = new Effect();
 
@@ -70,16 +68,21 @@ export class Sync {
 			// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
 			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#latency.peek());
 			if (sleep < 0) {
-				this.#lateCount++;
-				this.#lateMaxMs = Math.max(this.#lateMaxMs, -sleep);
-				if (label) this.#lateLabel = label;
-			} else if (this.#lateCount > 0) {
-				const prefix = this.#lateLabel ? `sync[${this.#lateLabel}]` : "sync";
-				const behind = Sync.#formatDuration(this.#lateMaxMs);
-				console.warn(`${prefix}: ${this.#lateCount} late frame(s), max ${behind} behind`);
-				this.#lateCount = 0;
-				this.#lateMaxMs = 0;
-				this.#lateLabel = "";
+				const entry = this.#late.get(label);
+				if (entry) {
+					entry.count++;
+					entry.maxMs = Math.max(entry.maxMs, -sleep);
+				} else {
+					this.#late.set(label, { count: 1, maxMs: -sleep });
+				}
+			} else {
+				const entry = this.#late.get(label);
+				if (entry) {
+					const prefix = label ? `sync[${label}]` : "sync";
+					const behind = Sync.#formatDuration(entry.maxMs);
+					console.warn(`${prefix}: ${entry.count} late frame(s), max ${behind} behind`);
+					this.#late.delete(label);
+				}
 			}
 
 			if (ref >= currentRef) {
