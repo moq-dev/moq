@@ -70,28 +70,47 @@ export class GameCard {
 
 		// Track hover state (before keyboard setup so handlers can use it).
 		const hovered = new Moq.Signals.Signal(false);
-		this.el.addEventListener("mouseenter", () => hovered.set(true));
-		this.el.addEventListener("mouseleave", () => hovered.set(false));
+		this.#signals.event(this.el, "mouseenter", () => hovered.set(true));
+		this.#signals.event(this.el, "mouseleave", () => hovered.set(false));
 
-		// Click to toggle expand (fills container instead of browser fullscreen).
-		canvas.addEventListener("click", () => {
+		// Derive a stable active signal for gating input/commands.
+		const isActive = new Moq.Signals.Signal(false);
+		this.#signals.run((effect) => {
+			const exp = effect.get(expanded);
+			const hover = effect.get(hovered);
+			isActive.set(exp === sessionId || hover);
+		});
+
+		// Toggle expand on click or keyboard (Enter/Space) for accessibility.
+		const toggleExpand = () => {
 			if (expanded.peek() === sessionId) {
 				expanded.set(undefined);
 			} else {
 				expanded.set(sessionId);
 			}
+		};
+		canvas.tabIndex = 0;
+		this.#signals.event(canvas, "click", toggleExpand);
+		this.#signals.event(canvas, "keydown", (e) => {
+			const ke = e as KeyboardEvent;
+			if (ke.key === "Enter" || ke.key === " ") {
+				ke.preventDefault();
+				toggleExpand();
+			}
 		});
 
-		// React to expand/hover state.
+		// React to expand state for CSS class and controls visibility.
 		this.#signals.run((effect) => {
 			const exp = effect.get(expanded);
-			const hover = effect.get(hovered);
 			const isExpanded = exp === sessionId;
-			const isActive = isExpanded || hover;
 			this.el.classList.toggle("expanded", isExpanded);
 			controls.style.display = isExpanded ? "flex" : "none";
+		});
 
-			if (!isActive && this.#heldButtons.size > 0) {
+		// Clear held buttons when card becomes inactive.
+		this.#signals.run((effect) => {
+			const active = effect.get(isActive);
+			if (!active && this.#heldButtons.size > 0) {
 				this.#heldButtons.clear();
 				this.#sendButtons();
 			}
@@ -99,8 +118,7 @@ export class GameCard {
 
 		// Keyboard input when hovered or expanded.
 		const onKeyDown = (e: KeyboardEvent) => {
-			const isActive = expanded.peek() === sessionId || hovered.peek();
-			if (!isActive) return;
+			if (!isActive.peek()) return;
 			if (e.repeat) return;
 
 			const button = KEY_MAP[e.key];
@@ -114,8 +132,7 @@ export class GameCard {
 			}
 		};
 		const onKeyUp = (e: KeyboardEvent) => {
-			const isActive = expanded.peek() === sessionId || hovered.peek();
-			if (!isActive) return;
+			if (!isActive.peek()) return;
 			const button = KEY_MAP[e.key];
 			if (button) {
 				this.#heldButtons.delete(button);
@@ -129,18 +146,9 @@ export class GameCard {
 				this.#sendButtons();
 			}
 		};
-		document.addEventListener("keydown", onKeyDown);
-		document.addEventListener("keyup", onKeyUp);
-		window.addEventListener("blur", onBlur);
-		this.#signals.cleanup(() => {
-			document.removeEventListener("keydown", onKeyDown);
-			document.removeEventListener("keyup", onKeyUp);
-			window.removeEventListener("blur", onBlur);
-			if (this.#heldButtons.size > 0) {
-				this.#heldButtons.clear();
-				this.#sendButtons();
-			}
-		});
+		this.#signals.event(document, "keydown", onKeyDown);
+		this.#signals.event(document, "keyup", onKeyUp);
+		this.#signals.event(window, "blur", onBlur);
 
 		// Set up video via Watch API.
 		const broadcast = new Watch.Broadcast({
@@ -206,18 +214,15 @@ export class GameCard {
 
 		// Enable audio decoding when hovered or expanded.
 		this.#signals.run((effect) => {
-			const exp = effect.get(expanded);
-			const hover = effect.get(hovered);
-			audioDecoder.enabled.set(exp === sessionId || hover);
+			audioDecoder.enabled.set(effect.get(isActive));
 		});
 
 		// Unmute on hover/expand (user gesture satisfies autoplay policy).
 		const userMuted = new Moq.Signals.Signal(false);
 		this.#signals.run((effect) => {
-			const exp = effect.get(expanded);
-			const hover = effect.get(hovered);
+			const active = effect.get(isActive);
 			const muted = effect.get(userMuted);
-			audioEmitter.muted.set(muted || !(exp === sessionId || hover));
+			audioEmitter.muted.set(muted || !active);
 		});
 
 		// Subscribe to status track for button highlights and countdown.
@@ -289,9 +294,7 @@ export class GameCard {
 			const conn = effect.get(connection.established);
 			if (!conn) return;
 
-			const exp = effect.get(expanded);
-			const hover = effect.get(hovered);
-			if (exp !== sessionId && !hover) return;
+			if (!effect.get(isActive)) return;
 
 			const viewerId = Math.random().toString(36).slice(2, 8);
 			currentViewerId.set(viewerId);

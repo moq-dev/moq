@@ -17,7 +17,10 @@ export const cardStyles = `
 
 	.card .video {
 		width: 100%; height: 100%; object-fit: contain; background: #000; display: block;
-		image-rendering: pixelated;
+		image-rendering: pixelated; outline: none;
+	}
+	.card .video:focus-visible {
+		outline: 2px solid #8bac0f; outline-offset: -2px;
 	}
 	.card.expanded .video {
 		flex: 1; min-width: 0;
@@ -134,7 +137,7 @@ export const cardStyles = `
 
 export const gridStyles = `
 	* { margin: 0; padding: 0; box-sizing: border-box; }
-	:host { display: flex; flex-direction: column; font-family: system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
+	:host, body { display: flex; flex-direction: column; font-family: system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
 
 	header {
 		background: #111; border-bottom: 1px solid #333;
@@ -164,7 +167,9 @@ export const gridStyles = `
 		display: none;
 	}
 	:host:has(.card.expanded) header,
-	:host:has(.card.expanded) .about {
+	:host:has(.card.expanded) .about,
+	body:has(.card.expanded) > header,
+	body:has(.card.expanded) > .about {
 		display: none;
 	}
 
