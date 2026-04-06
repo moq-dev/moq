@@ -203,8 +203,6 @@ export class Subscriber {
 		}
 	}
 
-	#closed = false;
-
 	/**
 	 * Opens a PROBE bidi stream to receive bandwidth estimates from the publisher.
 	 * Returns immediately if recv bandwidth is not supported.
@@ -227,7 +225,6 @@ export class Subscriber {
 	}
 
 	close() {
-		this.#closed = true;
 		for (const track of this.#subscribes.values()) {
 			track.close();
 		}

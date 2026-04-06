@@ -217,7 +217,7 @@ export class Encoder {
 				const conn = effect.get(this.connection);
 				const sendBw = conn?.sendBandwidth;
 				if (sendBw) {
-					const estimate = effect.get(sendBw.signal);
+					const estimate = effect.get(sendBw);
 					if (estimate != null) {
 						// Reserve ~10% for audio and protocol overhead.
 						const cap = Math.round(estimate * 0.9);
