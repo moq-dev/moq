@@ -213,6 +213,16 @@ async fn run(config: &Config) -> Result<()> {
 		let mut stats_total = std::time::Instant::now();
 		let mut last_stats_report = std::time::Instant::now();
 
+		macro_rules! reset_stats {
+			() => {
+				stats_emulation_us = 0;
+				stats_audio_us = 0;
+				video_encoder.take_video_us();
+				stats_total = std::time::Instant::now();
+				last_stats_report = std::time::Instant::now();
+			};
+		}
+
 		loop {
 			// Pause emulation when no viewers are watching.
 			if paused.load(Ordering::Acquire) {
@@ -263,11 +273,7 @@ async fn run(config: &Config) -> Result<()> {
 						tracing::info!("resetting emulator (viewer request)");
 						emu.reset()?;
 						last_input = std::time::Instant::now();
-						stats_emulation_us = 0;
-						stats_audio_us = 0;
-						video_encoder.take_encode_us();
-						stats_total = std::time::Instant::now();
-						last_stats_report = std::time::Instant::now();
+						reset_stats!();
 					}
 				}
 			}
@@ -278,11 +284,7 @@ async fn run(config: &Config) -> Result<()> {
 				tracing::info!("resetting emulator (inactivity timeout)");
 				emu.reset()?;
 				last_input = std::time::Instant::now();
-				stats_emulation_us = 0;
-				stats_audio_us = 0;
-				video_encoder.take_encode_us();
-				stats_total = std::time::Instant::now();
-				last_stats_report = std::time::Instant::now();
+				reset_stats!();
 			}
 
 			// Tick the emulator.
@@ -307,8 +309,8 @@ async fn run(config: &Config) -> Result<()> {
 			// Collect stats every second.
 			let stats_elapsed = last_stats_report.elapsed();
 			let stats = if stats_elapsed >= std::time::Duration::from_secs(1) {
-				let total_us = stats_total.elapsed().as_micros() as u64;
-				let video_us = video_encoder.take_encode_us();
+				let wall_us = stats_total.elapsed().as_micros() as u64;
+				let video_us = video_encoder.take_video_us();
 				let emu_us = stats_emulation_us;
 				let audio_us = stats_audio_us;
 
@@ -318,14 +320,14 @@ async fn run(config: &Config) -> Result<()> {
 				stats_total = std::time::Instant::now();
 				last_stats_report = std::time::Instant::now();
 
-				// Round to nearest second.
-				let to_secs = |us: u64| ((us + 500_000) / 1_000_000) as u64;
+				let to_ms = |us: u64| ((us + 500) / 1_000) as u64;
 
 				Some(serde_json::json!({
-					"video_secs": to_secs(video_us),
-					"audio_secs": to_secs(audio_us),
-					"emulation_secs": to_secs(emu_us),
-					"total_secs": to_secs(total_us),
+					"video_ms": to_ms(video_us),
+					"audio_ms": to_ms(audio_us),
+					"emulation_ms": to_ms(emu_us),
+					"cpu_ms": to_ms(video_us + audio_us + emu_us),
+					"wall_ms": to_ms(wall_us),
 				}))
 			} else {
 				None
