@@ -7,6 +7,7 @@ export interface GameStatus {
 	buttons: string[];
 	reset_in: number;
 	latency: Record<string, number>;
+	location?: string;
 }
 
 export interface GameCardConfig {
@@ -65,7 +66,7 @@ export class GameCard {
 		this.el.appendChild(controls);
 
 		// Build controls.
-		const { wrapper: controlsInner, latencyList, muteBtn } = this.#buildControls();
+		const { wrapper: controlsInner, locationEl, latencyList, muteBtn } = this.#buildControls();
 		controls.appendChild(controlsInner);
 
 		// Click to toggle expand via Fullscreen API.
@@ -256,6 +257,14 @@ export class GameCard {
 						countdown.style.display = "none";
 					}
 
+					// Show location if available.
+					if (json.location) {
+						locationEl.style.display = "block";
+						locationEl.textContent = json.location;
+					} else {
+						locationEl.style.display = "none";
+					}
+
 					// Show per-viewer latency.
 					const vid = currentViewerId.peek();
 					const entries = Object.entries(json.latency ?? {});
@@ -334,7 +343,7 @@ export class GameCard {
 		});
 	}
 
-	#buildControls(): { wrapper: HTMLElement; latencyList: HTMLElement; muteBtn: HTMLButtonElement } {
+	#buildControls(): { wrapper: HTMLElement; locationEl: HTMLElement; latencyList: HTMLElement; muteBtn: HTMLButtonElement } {
 		const wrapper = document.createElement("div");
 		wrapper.className = "controls-inner";
 
@@ -421,6 +430,11 @@ export class GameCard {
 			hints.appendChild(div);
 		}
 
+		// Location label (populated by status track)
+		const locationEl = document.createElement("div");
+		locationEl.className = "location";
+		locationEl.style.display = "none";
+
 		// Latency list (populated by status track)
 		const latencyList = document.createElement("div");
 		latencyList.className = "latency-list";
@@ -435,10 +449,11 @@ export class GameCard {
 		latencyNote.textContent = "Includes both the render delay AND the input delay.";
 
 		wrapper.appendChild(hints);
+		wrapper.appendChild(locationEl);
 		wrapper.appendChild(latencyList);
 		wrapper.appendChild(latencyNote);
 
-		return { wrapper, latencyList, muteBtn };
+		return { wrapper, locationEl, latencyList, muteBtn };
 	}
 
 	#sendButtons() {
