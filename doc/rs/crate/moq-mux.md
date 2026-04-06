@@ -41,52 +41,9 @@ moq-mux = "0.1"
 
 ## Quick Start
 
-### Import fMP4 File
+### Import fMP4 / HLS
 
-```rust
-use moq_mux::import::*;
-use hang::BroadcastProducer;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a hang broadcast
-    let broadcast = BroadcastProducer::new();
-
-    // Create fMP4 importer
-    let fmp4 = Fmp4::new(broadcast, Fmp4Config::default());
-
-    // Import from file
-    let file = tokio::fs::File::open("video.mp4").await?;
-    let reader = tokio::io::BufReader::new(file);
-    fmp4.decode(reader).await?;
-
-    Ok(())
-}
-```
-
-### Import HLS Stream
-
-```rust
-use moq_mux::import::*;
-use hang::BroadcastProducer;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a hang broadcast
-    let broadcast = BroadcastProducer::new();
-
-    // Create HLS importer with playlist URL
-    let hls = Hls::new(
-        broadcast,
-        "https://example.com/stream.m3u8".parse()?,
-    )?;
-
-    // Run the importer (fetches and processes segments)
-    hls.run().await?;
-
-    Ok(())
-}
-```
+See the [moq-cli source](https://github.com/moq-dev/moq/tree/main/rs/moq-cli) for real-world usage of `moq-mux` for importing fMP4 and HLS streams.
 
 ## Supported Codecs
 
@@ -109,34 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Integration with hang
 
-`moq-mux` produces [hang](/rs/crate/hang) broadcasts with proper catalog and frame metadata:
-
-```rust
-use moq_mux::import::*;
-use hang::BroadcastProducer;
-use moq_lite::Connection;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect to relay
-    let connection = Connection::connect("https://relay.example.com/demo").await?;
-
-    // Create broadcast
-    let broadcast = BroadcastProducer::new();
-
-    // Import media
-    let fmp4 = Fmp4::new(broadcast.clone(), Fmp4Config::default());
-    tokio::spawn(async move {
-        let file = tokio::fs::File::open("video.mp4").await.unwrap();
-        fmp4.decode(tokio::io::BufReader::new(file)).await.unwrap();
-    });
-
-    // Publish to relay
-    connection.publish(broadcast).await?;
-
-    Ok(())
-}
-```
+`moq-mux` produces [hang](/rs/crate/hang) broadcasts with proper catalog and frame metadata. See the [hang video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs) for how to publish a broadcast with proper catalog setup.
 
 ## API Reference
 

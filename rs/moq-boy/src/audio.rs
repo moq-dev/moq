@@ -46,6 +46,7 @@ impl AudioEncoder {
 		));
 		enc.set_channel_layout(ffmpeg_next::ChannelLayout::STEREO);
 		enc.set_time_base(ffmpeg_next::Rational::new(1, OPUS_SAMPLE_RATE as i32));
+		enc.set_bit_rate(64000);
 
 		let ffmpeg_encoder = enc.open()?;
 		let frame_size = ffmpeg_encoder.frame_size() as usize;

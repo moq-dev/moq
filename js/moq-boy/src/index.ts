@@ -3,9 +3,17 @@ import * as Watch from "@moq/watch";
 
 export { Moq, Watch };
 
+export interface GameStats {
+	video_secs: number;
+	audio_secs: number;
+	emulation_secs: number;
+	wall_secs: number;
+}
+
 export interface GameStatus {
 	buttons: string[];
 	latency: Record<string, number>;
+	stats?: GameStats;
 }
 
 export interface GameCardConfig {
@@ -62,44 +70,61 @@ export class GameCard {
 		this.el.appendChild(controls);
 
 		// Build controls.
-		const { wrapper: controlsInner, latencyList, muteBtn } = this.#buildControls();
+		const { wrapper: controlsInner, latencyList, statsList, muteBtn } = this.#buildControls();
 		controls.appendChild(controlsInner);
 
-		// Click to toggle expand via Fullscreen API.
-		canvas.addEventListener("click", () => {
+		// Track hover state (before keyboard setup so handlers can use it).
+		const hovered = new Moq.Signals.Signal(false);
+		this.#signals.event(this.el, "mouseenter", () => hovered.set(true));
+		this.#signals.event(this.el, "mouseleave", () => hovered.set(false));
+
+		// Derive a stable active signal for gating input/commands.
+		const isActive = new Moq.Signals.Signal(false);
+		this.#signals.run((effect) => {
+			const exp = effect.get(expanded);
+			const hover = effect.get(hovered);
+			isActive.set(exp === sessionId || hover);
+		});
+
+		// Toggle expand on click or keyboard (Enter/Space) for accessibility.
+		const toggleExpand = () => {
 			if (expanded.peek() === sessionId) {
-				document.exitFullscreen().catch(() => {});
+				expanded.set(undefined);
 			} else {
 				expanded.set(sessionId);
-				this.el.requestFullscreen().catch(() => {});
+			}
+		};
+		canvas.tabIndex = 0;
+		this.#signals.event(canvas, "click", toggleExpand);
+		this.#signals.event(canvas, "keydown", (e) => {
+			const ke = e as KeyboardEvent;
+			if (ke.key === "Enter" || ke.key === " ") {
+				ke.preventDefault();
+				ke.stopPropagation();
+				toggleExpand();
 			}
 		});
 
-		// Listen for fullscreen exit to sync expanded state.
-		const onFullscreenChange = () => {
-			if (!document.fullscreenElement && expanded.peek() === sessionId) {
-				expanded.set(undefined);
-			}
-		};
-		document.addEventListener("fullscreenchange", onFullscreenChange);
-		this.#signals.cleanup(() => document.removeEventListener("fullscreenchange", onFullscreenChange));
-
-		// React to expand state.
+		// React to expand state for CSS class and controls visibility.
 		this.#signals.run((effect) => {
 			const exp = effect.get(expanded);
 			const isExpanded = exp === sessionId;
 			this.el.classList.toggle("expanded", isExpanded);
 			controls.style.display = isExpanded ? "flex" : "none";
+		});
 
-			if (!isExpanded && this.#heldButtons.size > 0) {
+		// Clear held buttons when card becomes inactive.
+		this.#signals.run((effect) => {
+			const active = effect.get(isActive);
+			if (!active && this.#heldButtons.size > 0) {
 				this.#heldButtons.clear();
 				this.#sendButtons();
 			}
 		});
 
-		// Keyboard input when expanded.
+		// Keyboard input when hovered or expanded.
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (expanded.peek() !== sessionId) return;
+			if (!isActive.peek()) return;
 			if (e.repeat) return;
 
 			const button = KEY_MAP[e.key];
@@ -107,13 +132,13 @@ export class GameCard {
 				this.#heldButtons.add(button);
 				this.#sendButtons();
 				e.preventDefault();
-			} else if (e.key === "Escape") {
-				document.exitFullscreen().catch(() => {});
+			} else if (e.key === "Escape" && expanded.peek() === sessionId) {
+				expanded.set(undefined);
 				e.preventDefault();
 			}
 		};
 		const onKeyUp = (e: KeyboardEvent) => {
-			if (expanded.peek() !== sessionId) return;
+			if (!isActive.peek()) return;
 			const button = KEY_MAP[e.key];
 			if (button) {
 				this.#heldButtons.delete(button);
@@ -127,18 +152,9 @@ export class GameCard {
 				this.#sendButtons();
 			}
 		};
-		document.addEventListener("keydown", onKeyDown);
-		document.addEventListener("keyup", onKeyUp);
-		window.addEventListener("blur", onBlur);
-		this.#signals.cleanup(() => {
-			document.removeEventListener("keydown", onKeyDown);
-			document.removeEventListener("keyup", onKeyUp);
-			window.removeEventListener("blur", onBlur);
-			if (this.#heldButtons.size > 0) {
-				this.#heldButtons.clear();
-				this.#sendButtons();
-			}
-		});
+		this.#signals.event(document, "keydown", onKeyDown);
+		this.#signals.event(document, "keyup", onKeyUp);
+		this.#signals.event(window, "blur", onBlur);
 
 		// Set up video via Watch API.
 		const broadcast = new Watch.Broadcast({
@@ -202,25 +218,17 @@ export class GameCard {
 			}
 		});
 
-		// Track hover state.
-		const hovered = new Moq.Signals.Signal(false);
-		this.el.addEventListener("mouseenter", () => hovered.set(true));
-		this.el.addEventListener("mouseleave", () => hovered.set(false));
-
 		// Enable audio decoding when hovered or expanded.
 		this.#signals.run((effect) => {
-			const exp = effect.get(expanded);
-			const hover = effect.get(hovered);
-			audioDecoder.enabled.set(exp === sessionId || hover);
+			audioDecoder.enabled.set(effect.get(isActive));
 		});
 
 		// Unmute on hover/expand (user gesture satisfies autoplay policy).
 		const userMuted = new Moq.Signals.Signal(false);
 		this.#signals.run((effect) => {
-			const exp = effect.get(expanded);
-			const hover = effect.get(hovered);
+			const active = effect.get(isActive);
 			const muted = effect.get(userMuted);
-			audioEmitter.muted.set(muted || !(exp === sessionId || hover));
+			audioEmitter.muted.set(muted || !active);
 		});
 
 		// Subscribe to status track for button highlights and latency.
@@ -272,6 +280,36 @@ export class GameCard {
 							latencyList.appendChild(row);
 						}
 					}
+
+					// Stats panel: show encoding/emulation time.
+					if (json.stats) {
+						const s = json.stats;
+						const pct = (v: number) => (s.wall_secs > 0 ? Math.round((v / s.wall_secs) * 100) : 0);
+
+						statsList.replaceChildren();
+						const statsHeader = document.createElement("div");
+						statsHeader.className = "stats-header";
+						statsHeader.textContent = `Stats (${s.wall_secs}s)`;
+						statsList.appendChild(statsHeader);
+
+						const items: [string, number][] = [
+							["Video", s.video_secs],
+							["Audio", s.audio_secs],
+							["Emulation", s.emulation_secs],
+						];
+
+						for (const [itemLabel, secs] of items) {
+							const row = document.createElement("div");
+							row.className = "stats-entry";
+							const nameSpan = document.createElement("span");
+							nameSpan.textContent = itemLabel;
+							const valSpan = document.createElement("span");
+							valSpan.textContent = `${secs}s (${pct(secs)}%)`;
+							row.appendChild(nameSpan);
+							row.appendChild(valSpan);
+							statsList.appendChild(row);
+						}
+					}
 				}
 			});
 		});
@@ -288,9 +326,8 @@ export class GameCard {
 			const conn = effect.get(connection.established);
 			if (!conn) return;
 
-			const exp = effect.get(expanded);
-			if (exp !== sessionId) {
-				// Clear feedback state when collapsing.
+			if (!effect.get(isActive)) {
+				// Clear feedback state when deactivating.
 				feedbackActive.set(false);
 				feedbackTimeout?.close();
 				return;
@@ -342,7 +379,12 @@ export class GameCard {
 		});
 	}
 
-	#buildControls(): { wrapper: HTMLElement; latencyList: HTMLElement; muteBtn: HTMLButtonElement } {
+	#buildControls(): {
+		wrapper: HTMLElement;
+		latencyList: HTMLElement;
+		statsList: HTMLElement;
+		muteBtn: HTMLButtonElement;
+	} {
 		const wrapper = document.createElement("div");
 		wrapper.className = "controls-inner";
 
@@ -422,7 +464,7 @@ export class GameCard {
 		// Key hints
 		const hints = document.createElement("div");
 		hints.className = "key-hints";
-		const lines = ["Arrows: D-pad", "Z: B \u00A0 X: A", "Enter: Start \u00A0 Shift: Select", "Esc: Exit"];
+		const lines = ["Arrows: D-pad", "Z: B \u00A0 X: A", "Enter: Start \u00A0 Shift: Select", "Esc: Collapse"];
 		for (const line of lines) {
 			const div = document.createElement("div");
 			div.textContent = line;
@@ -442,11 +484,16 @@ export class GameCard {
 		latencyNote.className = "latency-note";
 		latencyNote.textContent = "Includes both the render delay AND the input delay.";
 
+		// Stats list (populated by status track)
+		const statsList = document.createElement("div");
+		statsList.className = "stats-list";
+
 		wrapper.appendChild(hints);
 		wrapper.appendChild(latencyList);
+		wrapper.appendChild(statsList);
 		wrapper.appendChild(latencyNote);
 
-		return { wrapper, latencyList, muteBtn };
+		return { wrapper, latencyList, statsList, muteBtn };
 	}
 
 	#sendButtons() {
