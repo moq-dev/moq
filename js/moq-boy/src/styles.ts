@@ -8,7 +8,7 @@ export const cardStyles = `
 	}
 	.card:hover { border-color: #8bac0f; }
 
-	/* Fullscreen mode replaces the old CSS position:fixed approach */
+	/* Expanded mode: fill the container */
 	.card.expanded {
 		width: 100%; height: 100%;
 		border-radius: 0; border: none; aspect-ratio: auto;
@@ -17,7 +17,10 @@ export const cardStyles = `
 
 	.card .video {
 		width: 100%; height: 100%; object-fit: contain; background: #000; display: block;
-		image-rendering: pixelated;
+		image-rendering: pixelated; outline: none;
+	}
+	.card .video:focus-visible {
+		outline: 2px solid #8bac0f; outline-offset: -2px;
 	}
 	.card.expanded .video {
 		flex: 1; min-width: 0;
@@ -52,6 +55,19 @@ export const cardStyles = `
 	.latency-note {
 		font-family: monospace; font-size: 0.55rem; color: #555;
 		text-align: center; line-height: 1.4; margin-top: 0.25rem;
+	}
+
+	/* Encoding stats list in controls panel */
+	.stats-list {
+		width: 100%; font-family: monospace; font-size: 0.65rem;
+	}
+	.stats-list .stats-header {
+		color: #888; text-transform: uppercase; letter-spacing: 0.05em;
+		margin-bottom: 0.3rem; font-size: 0.6rem;
+	}
+	.stats-entry {
+		display: flex; justify-content: space-between;
+		padding: 0.15rem 0; color: #aaa;
 	}
 
 	/* Controls panel */
@@ -134,7 +150,7 @@ export const cardStyles = `
 
 export const gridStyles = `
 	* { margin: 0; padding: 0; box-sizing: border-box; }
-	:host { display: block; font-family: system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; }
+	:host, body { display: flex; flex-direction: column; font-family: system-ui, sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
 
 	header {
 		background: #111; border-bottom: 1px solid #333;
@@ -156,6 +172,18 @@ export const gridStyles = `
 
 	.grid {
 		display: flex; flex-wrap: wrap; gap: 1rem; padding: 1rem;
+	}
+	.grid:has(.card.expanded) {
+		padding: 0; gap: 0; flex: 1;
+	}
+	.grid:has(.card.expanded) .card:not(.expanded) {
+		display: none;
+	}
+	:host:has(.card.expanded) header,
+	:host:has(.card.expanded) .about,
+	body:has(.card.expanded) > header,
+	body:has(.card.expanded) > .about {
+		display: none;
 	}
 
 	.empty-state {

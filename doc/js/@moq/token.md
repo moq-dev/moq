@@ -23,72 +23,7 @@ bun add @moq/token
 
 ## Usage
 
-### Load a Key
-
-```typescript
-import { load, loadPublic } from "@moq/token";
-
-// Load a key from JWK JSON string
-const key = load(jwkString);
-
-// Load only the public portion of an asymmetric key
-const publicKey = loadPublic(jwkString);
-```
-
-### Generate a Key
-
-```typescript
-import { generate } from "@moq/token";
-
-// HMAC key (symmetric)
-const hmacKey = await generate("HS256");
-
-// RSA key pair (asymmetric)
-const rsaKey = await generate("RS256");
-
-// EdDSA key pair (asymmetric)
-const edKey = await generate("EdDSA");
-```
-
-### Extract Public Key
-
-```typescript
-import { toPublicKey } from "@moq/token";
-
-const publicKey = toPublicKey(rsaKey);
-```
-
-### Sign a Token
-
-```typescript
-import { load, sign } from "@moq/token";
-
-const key = load(jwkString);
-
-const token = await sign(key, {
-    root: "rooms/123",
-    put: ["alice"],
-    get: [""],
-    exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour
-});
-```
-
-### Verify a Token
-
-```typescript
-import { load, verify } from "@moq/token";
-
-const key = load(jwkString);
-
-try {
-    const claims = await verify(key, token, "rooms/123");
-    console.log("Root:", claims.root);
-    console.log("Publish:", claims.put);
-    console.log("Subscribe:", claims.get);
-} catch (error) {
-    console.error("Invalid token:", error);
-}
-```
+For a complete working example covering key loading, signing, and verification, see [`js/token/examples/sign-and-verify.ts`](https://github.com/moq-dev/moq/blob/main/js/token/examples/sign-and-verify.ts).
 
 ## Token Claims
 

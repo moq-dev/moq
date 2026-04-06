@@ -30,3 +30,6 @@ serde_json = "1"
 serde_with = { version = "3", features = ["base64"] }
 thiserror = "2"
 tokio = { version = "1", features = ["fs"], optional = true }
+
+[dev-dependencies]
+anyhow = "1"

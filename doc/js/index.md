@@ -134,24 +134,7 @@ The easiest way to add MoQ to your web page:
 
 ### Using JavaScript API
 
-For more control, use the JavaScript API:
-
-```typescript
-import * as Moq from "@moq/lite";
-
-// Connect to relay
-const connection = await Moq.connect("https://relay.example.com/anon");
-
-// Create and publish a broadcast
-const broadcast = new Moq.BroadcastProducer();
-const track = broadcast.createTrack("chat");
-
-const group = track.appendGroup();
-group.writeString("Hello, MoQ!");
-group.close();
-
-connection.publish("my-broadcast", broadcast.consume());
-```
+For more control, use the JavaScript API directly. See the [`js/lite/examples/`](https://github.com/moq-dev/moq/tree/main/js/lite/examples) directory for working examples of [connecting](https://github.com/moq-dev/moq/blob/main/js/lite/examples/connection.ts), [publishing](https://github.com/moq-dev/moq/blob/main/js/lite/examples/publish.ts), [subscribing](https://github.com/moq-dev/moq/blob/main/js/lite/examples/subscribe.ts), and [discovery](https://github.com/moq-dev/moq/blob/main/js/lite/examples/discovery.ts).
 
 [Learn more about @moq/lite](/js/@moq/lite)
 
@@ -178,31 +161,8 @@ Requires modern browser features:
 
 The reactive API works with popular frameworks:
 
-### React
-
-```typescript
-import { useValue } from "@moq/signals/react";
-
-const publish = document.querySelector("moq-publish") as MoqPublish;
-const media = useValue(publish.video.media);
-
-useEffect(() => {
-    video.srcObject = media;
-}, [media]);
-```
-
-### SolidJS
-
-```typescript
-import { createAccessor } from "@moq/signals/solid";
-
-const publish = document.querySelector("moq-publish") as MoqPublish;
-const media = createAccessor(publish.video.media);
-
-createEffect(() => {
-    video.srcObject = media();
-});
-```
+- **React** — See [`js/signals/src/react.ts`](https://github.com/moq-dev/moq/blob/main/js/signals/src/react.ts) for `useValue` and `useSignal` hooks
+- **SolidJS** — See [`js/signals/src/solid.ts`](https://github.com/moq-dev/moq/blob/main/js/signals/src/solid.ts) for `createAccessor` and `createPair` helpers
 
 Use `@moq/watch/ui` and `@moq/publish/ui` for ready-made SolidJS UI overlays.
 
