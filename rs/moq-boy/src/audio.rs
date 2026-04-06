@@ -103,6 +103,13 @@ impl AudioEncoder {
 		self.frame_count = 0;
 		self.input_buffer.clear();
 		self.encode_buffer.clear();
+
+		// Flush the resampler's internal delay buffer so pre-pause samples
+		// don't leak into post-pause audio.
+		if let Some(resampler) = &mut self.resampler {
+			let mut flushed = ffmpeg_next::frame::Audio::empty();
+			let _ = resampler.flush(&mut flushed);
+		}
 	}
 
 	/// Feed interleaved stereo u8 samples from the emulator.
@@ -126,7 +133,7 @@ impl AudioEncoder {
 		// Initialize epoch on first call so audio timestamps align with video.
 		if self.epoch.is_none() && self.encode_buffer.len() >= samples_per_frame {
 			let buffered_us = self.encode_buffer.len() as u64 * 1_000_000 / (OPUS_SAMPLE_RATE as u64 * CHANNELS as u64);
-			self.epoch = Some(elapsed.as_micros() as u64 - buffered_us);
+			self.epoch = Some((elapsed.as_micros() as u64).saturating_sub(buffered_us));
 		}
 
 		while self.encode_buffer.len() >= samples_per_frame {
