@@ -206,6 +206,7 @@ async fn run(config: &Config) -> Result<()> {
 		let timeout = std::time::Duration::from_secs(timeout_secs);
 		let mut viewer_latency: std::collections::HashMap<String, (f64, std::time::Instant)> =
 			std::collections::HashMap::new();
+		let mut was_audio_active = false;
 
 		loop {
 			// Pause emulation when no viewers are watching.
@@ -314,7 +315,12 @@ async fn run(config: &Config) -> Result<()> {
 			}
 
 			// Grab and encode audio (skip if no audio viewers).
-			if audio_active.load(Ordering::Relaxed) {
+			let is_audio_active = audio_active.load(Ordering::Relaxed);
+			if is_audio_active {
+				// Re-anchor audio PTS when audio resumes after being inactive.
+				if !was_audio_active {
+					audio_encoder.reset_epoch();
+				}
 				let samples = emu.audio_samples();
 				if !samples.is_empty() {
 					if let Err(e) = audio_encoder.push_samples(&samples, elapsed) {
@@ -325,6 +331,7 @@ async fn run(config: &Config) -> Result<()> {
 				// Drain audio buffer even when not encoding to prevent buildup.
 				emu.audio_samples();
 			}
+			was_audio_active = is_audio_active;
 		}
 	});
 

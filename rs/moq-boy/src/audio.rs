@@ -99,6 +99,7 @@ impl AudioEncoder {
 	/// with post-pause timestamps.
 	pub fn reset_epoch(&mut self) {
 		self.epoch = None;
+		self.frame_count = 0;
 		self.input_buffer.clear();
 		self.encode_buffer.clear();
 	}
