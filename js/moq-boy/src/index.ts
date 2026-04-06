@@ -95,6 +95,7 @@ export class GameCard {
 			const ke = e as KeyboardEvent;
 			if (ke.key === "Enter" || ke.key === " ") {
 				ke.preventDefault();
+				ke.stopPropagation();
 				toggleExpand();
 			}
 		});
