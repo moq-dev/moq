@@ -4,11 +4,10 @@ import * as Watch from "@moq/watch";
 export { Moq, Watch };
 
 export interface GameStats {
-	video_ms: number;
-	audio_ms: number;
-	emulation_ms: number;
-	cpu_ms: number;
-	wall_ms: number;
+	video_secs: number;
+	audio_secs: number;
+	emulation_secs: number;
+	wall_secs: number;
 }
 
 export interface GameStatus {
@@ -296,28 +295,27 @@ export class GameCard {
 					// Stats panel: show encoding/emulation time.
 					if (json.stats) {
 						const s = json.stats;
-						const pct = (ms: number) => (s.wall_ms > 0 ? Math.round((ms / s.wall_ms) * 100) : 0);
-						const fmtSecs = (ms: number) => Math.round(ms / 1000);
+						const pct = (v: number) => (s.wall_secs > 0 ? Math.round((v / s.wall_secs) * 100) : 0);
 
 						statsList.replaceChildren();
-						const header = document.createElement("div");
-						header.className = "stats-header";
-						header.textContent = `Stats (${fmtSecs(s.wall_ms)}s wall, ${fmtSecs(s.cpu_ms)}s cpu)`;
-						statsList.appendChild(header);
+						const statsHeader = document.createElement("div");
+						statsHeader.className = "stats-header";
+						statsHeader.textContent = `Stats (${s.wall_secs}s)`;
+						statsList.appendChild(statsHeader);
 
 						const items: [string, number][] = [
-							["Video", s.video_ms],
-							["Audio", s.audio_ms],
-							["Emulation", s.emulation_ms],
+							["Video", s.video_secs],
+							["Audio", s.audio_secs],
+							["Emulation", s.emulation_secs],
 						];
 
-						for (const [itemLabel, ms] of items) {
+						for (const [itemLabel, secs] of items) {
 							const row = document.createElement("div");
 							row.className = "stats-entry";
 							const nameSpan = document.createElement("span");
 							nameSpan.textContent = itemLabel;
 							const valSpan = document.createElement("span");
-							valSpan.textContent = `${fmtSecs(ms)}s (${pct(ms)}%)`;
+							valSpan.textContent = `${secs}s (${pct(secs)}%)`;
 							row.appendChild(nameSpan);
 							row.appendChild(valSpan);
 							statsList.appendChild(row);

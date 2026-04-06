@@ -1,15 +1,81 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
+use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 use url::Url;
 
 mod audio;
 mod emulator;
 mod input;
 mod video;
+
+/// Cumulative stats since last emulator reset.
+struct Stats {
+	start: Instant,
+	emulation: Duration,
+	video: Duration,
+	audio: Duration,
+	last_tick: Instant,
+}
+
+impl Stats {
+	fn new() -> Self {
+		let now = Instant::now();
+		Self {
+			start: now,
+			emulation: Duration::ZERO,
+			video: Duration::ZERO,
+			audio: Duration::ZERO,
+			last_tick: now,
+		}
+	}
+
+	/// Accumulate one frame's worth of time.
+	fn tick(&mut self, video_active: bool, audio_active: bool) {
+		let now = Instant::now();
+		let elapsed = now - self.last_tick;
+		self.last_tick = now;
+
+		self.emulation += elapsed;
+		if video_active {
+			self.video += elapsed;
+		}
+		if audio_active {
+			self.audio += elapsed;
+		}
+	}
+
+	fn report(&self) -> StatsReport {
+		let to_secs = |d: Duration| d.as_secs();
+		StatsReport {
+			video_secs: to_secs(self.video),
+			audio_secs: to_secs(self.audio),
+			emulation_secs: to_secs(self.emulation),
+			wall_secs: to_secs(self.start.elapsed()),
+		}
+	}
+}
+
+#[derive(Serialize, PartialEq, Eq)]
+struct StatsReport {
+	video_secs: u64,
+	audio_secs: u64,
+	emulation_secs: u64,
+	wall_secs: u64,
+}
+
+#[derive(Serialize)]
+struct Status {
+	buttons: Vec<emulator::Button>,
+	reset_in: u64,
+	latency: BTreeMap<String, u32>,
+	stats: StatsReport,
+}
 
 #[derive(Parser, Clone)]
 pub struct Config {
@@ -199,29 +265,14 @@ async fn run(config: &Config) -> Result<()> {
 			std::thread::sleep(std::time::Duration::from_millis(100));
 		}
 
-		let frame_duration = std::time::Duration::from_micros(16_742); // ~59.73fps
-		let mut next_frame = std::time::Instant::now();
-		let mut last_input = std::time::Instant::now();
+		let frame_duration = Duration::from_micros(16_742); // ~59.73fps
+		let mut next_frame = Instant::now();
+		let mut last_input = Instant::now();
 		let mut last_status = String::new();
-		let timeout = std::time::Duration::from_secs(timeout_secs);
-		let mut viewer_latency: std::collections::HashMap<String, (f64, std::time::Instant)> =
+		let timeout = Duration::from_secs(timeout_secs);
+		let mut viewer_latency: std::collections::HashMap<String, (f64, Instant)> =
 			std::collections::HashMap::new();
-
-		// Stats accumulators (microseconds) — reset each reporting interval.
-		let mut stats_emulation_us: u64 = 0;
-		let mut stats_audio_us: u64 = 0;
-		let mut stats_total = std::time::Instant::now();
-		let mut last_stats_report = std::time::Instant::now();
-
-		macro_rules! reset_stats {
-			() => {
-				stats_emulation_us = 0;
-				stats_audio_us = 0;
-				video_encoder.take_video_us();
-				stats_total = std::time::Instant::now();
-				last_stats_report = std::time::Instant::now();
-			};
-		}
+		let mut stats = Stats::new();
 
 		loop {
 			// Pause emulation when no viewers are watching.
@@ -234,13 +285,15 @@ async fn run(config: &Config) -> Result<()> {
 				}
 				tracing::info!("resuming encoding");
 				// Don't try to catch up after a pause.
-				next_frame = std::time::Instant::now();
+				next_frame = Instant::now();
+				// Reset tick timer so pause duration isn't counted.
+				stats.last_tick = Instant::now();
 				// Force a keyframe so new viewers can start decoding.
 				video_encoder.force_keyframe();
 			}
 
 			// Wait for next frame.
-			let now = std::time::Instant::now();
+			let now = Instant::now();
 			if now < next_frame {
 				std::thread::sleep(next_frame - now);
 			}
@@ -248,6 +301,11 @@ async fn run(config: &Config) -> Result<()> {
 
 			// Current media timestamp in milliseconds.
 			let current_ts_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+			// Accumulate stats for this frame.
+			let is_video = video_active.load(Ordering::Relaxed);
+			let is_audio = audio_active.load(Ordering::Relaxed);
+			stats.tick(is_video, is_audio);
 
 			// Drain pending commands.
 			while let Ok(cmd) = cmd_rx.try_recv() {
@@ -258,11 +316,11 @@ async fn run(config: &Config) -> Result<()> {
 						ts_ms,
 					} => {
 						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
-						last_input = std::time::Instant::now();
+						last_input = Instant::now();
 
 						let latency = current_ts_ms - ts_ms;
 						if latency >= 0.0 {
-							viewer_latency.insert(viewer_id, (latency, std::time::Instant::now()));
+							viewer_latency.insert(viewer_id, (latency, Instant::now()));
 						}
 					}
 					input::Command::ViewerLeft { viewer_id } => {
@@ -272,28 +330,26 @@ async fn run(config: &Config) -> Result<()> {
 					input::Command::Reset => {
 						tracing::info!("resetting emulator (viewer request)");
 						emu.reset()?;
-						last_input = std::time::Instant::now();
-						reset_stats!();
+						last_input = Instant::now();
+						stats = Stats::new();
 					}
 				}
 			}
 
 			// Check inactivity timeout.
-			let idle_time = std::time::Instant::now() - last_input;
+			let idle_time = Instant::now() - last_input;
 			if idle_time > timeout {
 				tracing::info!("resetting emulator (inactivity timeout)");
 				emu.reset()?;
-				last_input = std::time::Instant::now();
-				reset_stats!();
+				last_input = Instant::now();
+				stats = Stats::new();
 			}
 
 			// Tick the emulator.
-			let emu_start = std::time::Instant::now();
 			emu.tick();
-			stats_emulation_us += emu_start.elapsed().as_micros() as u64;
 
 			// Expire stale viewer latency entries (no input for 30s).
-			let stale = std::time::Duration::from_secs(30);
+			let stale = Duration::from_secs(30);
 			viewer_latency.retain(|_, (_, last_seen)| last_seen.elapsed() < stale);
 
 			// Publish status.
@@ -301,49 +357,19 @@ async fn run(config: &Config) -> Result<()> {
 			let idle_secs = idle_time.as_secs();
 			let remaining = timeout_secs.saturating_sub(idle_secs);
 
-			let latency_map: serde_json::Map<String, serde_json::Value> = viewer_latency
+			let latency_map: BTreeMap<String, u32> = viewer_latency
 				.iter()
-				.map(|(k, (ms, _))| (k.clone(), serde_json::json!((*ms as u32))))
+				.map(|(k, (ms, _))| (k.clone(), *ms as u32))
 				.collect();
 
-			// Collect stats every second.
-			let stats_elapsed = last_stats_report.elapsed();
-			let stats = if stats_elapsed >= std::time::Duration::from_secs(1) {
-				let wall_us = stats_total.elapsed().as_micros() as u64;
-				let video_us = video_encoder.take_video_us();
-				let emu_us = stats_emulation_us;
-				let audio_us = stats_audio_us;
-
-				// Reset accumulators.
-				stats_emulation_us = 0;
-				stats_audio_us = 0;
-				stats_total = std::time::Instant::now();
-				last_stats_report = std::time::Instant::now();
-
-				let to_ms = |us: u64| ((us + 500) / 1_000) as u64;
-
-				Some(serde_json::json!({
-					"video_ms": to_ms(video_us),
-					"audio_ms": to_ms(audio_us),
-					"emulation_ms": to_ms(emu_us),
-					"cpu_ms": to_ms(video_us + audio_us + emu_us),
-					"wall_ms": to_ms(wall_us),
-				}))
-			} else {
-				None
+			let status = Status {
+				buttons: held,
+				reset_in: remaining,
+				latency: latency_map,
+				stats: stats.report(),
 			};
 
-			let mut new_status = serde_json::json!({
-				"buttons": held,
-				"reset_in": remaining,
-				"latency": latency_map,
-			});
-
-			if let Some(stats) = stats {
-				new_status["stats"] = stats;
-			}
-
-			let new_status_str = new_status.to_string();
+			let new_status_str = serde_json::to_string(&status).unwrap();
 
 			if new_status_str != last_status {
 				last_status = new_status_str.clone();
@@ -354,7 +380,7 @@ async fn run(config: &Config) -> Result<()> {
 			}
 
 			// Grab and publish video frame (skip if no video viewers).
-			if video_active.load(Ordering::Relaxed) {
+			if is_video {
 				let rgba = Bytes::from(emu.framebuffer());
 				let pts_micros = start.elapsed().as_micros() as u64;
 				let ts = hang::container::Timestamp::from_micros(pts_micros).context("timestamp overflow")?;
@@ -362,15 +388,13 @@ async fn run(config: &Config) -> Result<()> {
 			}
 
 			// Grab and encode audio (skip if no audio viewers).
-			if audio_active.load(Ordering::Relaxed) {
-				let audio_start = std::time::Instant::now();
+			if is_audio {
 				let samples = emu.audio_samples();
 				if !samples.is_empty() {
 					if let Err(e) = audio_encoder.push_samples(&samples) {
 						tracing::warn!(error = %e, "audio encode error");
 					}
 				}
-				stats_audio_us += audio_start.elapsed().as_micros() as u64;
 			} else {
 				// Drain audio buffer even when not encoding to prevent buildup.
 				emu.audio_samples();
