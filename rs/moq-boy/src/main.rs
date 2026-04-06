@@ -51,7 +51,7 @@ impl Stats {
 	}
 
 	fn report(&self) -> StatsReport {
-		let to_secs = |d: Duration| d.as_secs();
+		let to_secs = |d: Duration| d.as_secs_f64().round() as u64;
 		StatsReport {
 			video_secs: to_secs(self.video),
 			audio_secs: to_secs(self.audio),

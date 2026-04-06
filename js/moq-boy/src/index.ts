@@ -65,21 +65,29 @@ export class GameCard {
 		label.textContent = sessionId;
 		this.el.appendChild(label);
 
-		// Controls container.
-		const controls = document.createElement("div");
-		controls.className = "controls";
-		this.el.appendChild(controls);
+		// Controls panel (left side when expanded).
+		const controlsPanel = document.createElement("div");
+		controlsPanel.className = "panel panel-left";
+		this.el.appendChild(controlsPanel);
 
-		// Build controls.
+		// Stats panel (right side when expanded).
+		const statsPanel = document.createElement("div");
+		statsPanel.className = "panel panel-right";
+		this.el.appendChild(statsPanel);
+
+		// Build controls and stats.
 		const {
-			wrapper: controlsInner,
+			controls: controlsInner,
+			stats: statsInner,
 			locationEl,
 			latencyList,
+			latencyNote,
 			statsList,
 			muteBtn,
 			jitterSlider,
 		} = this.#buildControls();
-		controls.appendChild(controlsInner);
+		controlsPanel.appendChild(controlsInner);
+		statsPanel.appendChild(statsInner);
 
 		// Track hover state (before keyboard setup so handlers can use it).
 		const hovered = new Moq.Signals.Signal(false);
@@ -106,19 +114,20 @@ export class GameCard {
 		this.#signals.event(canvas, "click", toggleExpand);
 		this.#signals.event(canvas, "keydown", (e) => {
 			const ke = e as KeyboardEvent;
-			if (ke.key === "Enter" || ke.key === " ") {
+			if (ke.key === " ") {
 				ke.preventDefault();
 				ke.stopPropagation();
 				toggleExpand();
 			}
 		});
 
-		// React to expand state for CSS class and controls visibility.
+		// React to expand state for CSS class and panel visibility.
 		this.#signals.run((effect) => {
 			const exp = effect.get(expanded);
 			const isExpanded = exp === sessionId;
 			this.el.classList.toggle("expanded", isExpanded);
-			controls.style.display = isExpanded ? "flex" : "none";
+			controlsPanel.style.display = isExpanded ? "flex" : "none";
+			statsPanel.style.display = isExpanded ? "flex" : "none";
 		});
 
 		// Clear held buttons when card becomes inactive.
@@ -256,7 +265,7 @@ export class GameCard {
 					if (!json) break;
 
 					// Highlight currently pressed buttons.
-					const allBtns = controls.querySelectorAll("[data-button]");
+					const allBtns = controlsPanel.querySelectorAll("[data-button]");
 					for (const btn of allBtns) {
 						const name = (btn as HTMLElement).dataset.button;
 						(btn as HTMLElement).classList.toggle("active", json.buttons.includes(name ?? ""));
@@ -278,12 +287,13 @@ export class GameCard {
 					const n = entries.length;
 					label.textContent = n > 0 ? `${sessionId} (${n})` : sessionId;
 
-					// Controls panel: show all viewers with latency.
+					// Show player latency list and note only when there are players.
 					latencyList.replaceChildren();
+					latencyNote.style.display = entries.length > 0 ? "block" : "none";
 					if (entries.length > 0) {
 						const header = document.createElement("div");
 						header.className = "latency-header";
-						header.textContent = `Latency (${n} viewer${n !== 1 ? "s" : ""})`;
+						header.textContent = `Players (${n})`;
 						latencyList.appendChild(header);
 						for (const [id, ms] of entries) {
 							const row = document.createElement("div");
@@ -306,13 +316,13 @@ export class GameCard {
 						statsList.replaceChildren();
 						const statsHeader = document.createElement("div");
 						statsHeader.className = "stats-header";
-						statsHeader.textContent = `Stats (${s.wall_secs}s)`;
+						statsHeader.textContent = `Uptime (${s.wall_secs}s)`;
 						statsList.appendChild(statsHeader);
 
 						const items: [string, number][] = [
+							["Emulation", s.emulation_secs],
 							["Video", s.video_secs],
 							["Audio", s.audio_secs],
-							["Emulation", s.emulation_secs],
 						];
 
 						for (const [itemLabel, secs] of items) {
@@ -336,9 +346,7 @@ export class GameCard {
 		let pendingCommand: Record<string, unknown> | undefined;
 		const currentViewerId = new Moq.Signals.Signal<string | undefined>(undefined);
 		const feedbackActive = new Moq.Signals.Signal(false);
-		let feedbackTimeout: Moq.Signals.Effect | undefined;
-
-		this.#signals.cleanup(() => feedbackTimeout?.close());
+		let feedbackTimeout: ReturnType<typeof setTimeout> | undefined;
 
 		this.#signals.run((effect) => {
 			const conn = effect.get(connection.established);
@@ -347,7 +355,7 @@ export class GameCard {
 			if (!effect.get(isActive)) {
 				// Clear feedback state when deactivating.
 				feedbackActive.set(false);
-				feedbackTimeout?.close();
+				clearTimeout(feedbackTimeout);
 				pendingCommand = undefined;
 				return;
 			}
@@ -385,9 +393,8 @@ export class GameCard {
 		this.#sendCommand = (cmd: Record<string, unknown>) => {
 			// Activate feedback broadcasting on input, with idle timeout.
 			feedbackActive.set(true);
-			feedbackTimeout?.close();
-			feedbackTimeout = new Moq.Signals.Effect();
-			feedbackTimeout.timer(() => feedbackActive.set(false), FEEDBACK_IDLE_MS);
+			clearTimeout(feedbackTimeout);
+			feedbackTimeout = setTimeout(() => feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
 			if (!commandTrack) {
 				pendingCommand = cmd;
@@ -415,15 +422,17 @@ export class GameCard {
 	}
 
 	#buildControls(): {
-		wrapper: HTMLElement;
+		controls: HTMLElement;
+		stats: HTMLElement;
 		locationEl: HTMLElement;
 		latencyList: HTMLElement;
+		latencyNote: HTMLElement;
 		statsList: HTMLElement;
 		muteBtn: HTMLButtonElement;
 		jitterSlider: HTMLInputElement;
 	} {
-		const wrapper = document.createElement("div");
-		wrapper.className = "controls-inner";
+		const controls = document.createElement("div");
+		controls.className = "controls-inner";
 
 		// D-pad
 		const dpad = document.createElement("div");
@@ -539,27 +548,39 @@ export class GameCard {
 		const latencyList = document.createElement("div");
 		latencyList.className = "latency-list";
 
-		wrapper.appendChild(dpad);
-		wrapper.appendChild(abBtns);
-		wrapper.appendChild(metaBtns);
-		wrapper.appendChild(utilBtns);
-		wrapper.appendChild(jitterContainer);
+		controls.appendChild(dpad);
+		controls.appendChild(abBtns);
+		controls.appendChild(metaBtns);
+		controls.appendChild(utilBtns);
+		controls.appendChild(jitterContainer);
+		controls.appendChild(hints);
+
+		// Stats panel (right side)
+		const stats = document.createElement("div");
+		stats.className = "stats-inner";
+
+		stats.appendChild(locationEl);
+
+		// Uptime / encoding stats
+		const statsList = document.createElement("div");
+		statsList.className = "stats-list";
+		stats.appendChild(statsList);
+
+		const statsNote = document.createElement("div");
+		statsNote.className = "latency-note";
+		statsNote.textContent = "Emulation and encoding are paused when there are no viewers.";
+		stats.appendChild(statsNote);
+
+		// Player latency (shown conditionally)
+		stats.appendChild(latencyList);
 
 		const latencyNote = document.createElement("div");
 		latencyNote.className = "latency-note";
 		latencyNote.textContent = "Includes both the render delay AND the input delay.";
+		latencyNote.style.display = "none";
+		stats.appendChild(latencyNote);
 
-		// Stats list (populated by status track)
-		const statsList = document.createElement("div");
-		statsList.className = "stats-list";
-
-		wrapper.appendChild(hints);
-		wrapper.appendChild(locationEl);
-		wrapper.appendChild(latencyList);
-		wrapper.appendChild(statsList);
-		wrapper.appendChild(latencyNote);
-
-		return { wrapper, locationEl, latencyList, statsList, muteBtn, jitterSlider };
+		return { controls, stats, locationEl, latencyList, latencyNote, statsList, muteBtn, jitterSlider };
 	}
 
 	#sendButtons() {

@@ -48,7 +48,7 @@ const about = document.createElement("div");
 about.className = "about";
 
 const aboutP1 = document.createElement("p");
-aboutP1.textContent = "Click a game to play. Everyone controls the same game (anarchy mode).";
+aboutP1.textContent = "Click a game to play, multiple players can control it. (anarchy!)";
 about.appendChild(aboutP1);
 
 const aboutP2 = document.createElement("p");
@@ -63,8 +63,7 @@ about.appendChild(aboutP2);
 const aboutUl = document.createElement("ul");
 for (const text of [
 	"Discovering online games and players.",
-	"Transmitting audio/video tracks, metadata, and (multiple) player controls.",
-	"Subscribing to audio/video on-demand.",
+	"Transmitting audio/video tracks, metadata, and player controls.",
 	"Pausing emulation/encoding when there are no subscribers.",
 ]) {
 	const li = document.createElement("li");

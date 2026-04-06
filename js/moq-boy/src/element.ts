@@ -89,8 +89,7 @@ export default class MoqBoy extends HTMLElement {
 		const aboutUl = document.createElement("ul");
 		for (const text of [
 			"Discovering online games and players.",
-			"Transmitting audio/video tracks, metadata, and (multiple) player controls.",
-			"Subscribing to audio/video on-demand.",
+			"Transmitting audio/video tracks, metadata, and player controls.",
 			"Pausing emulation/encoding when there are no subscribers.",
 		]) {
 			const li = document.createElement("li");

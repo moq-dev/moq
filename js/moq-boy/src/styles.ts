@@ -12,7 +12,7 @@ export const cardStyles = `
 	.card.expanded {
 		width: 100%; height: 100%;
 		border-radius: 0; border: none; aspect-ratio: auto;
-		display: flex; flex-direction: row;
+		display: flex; flex-direction: row; justify-content: space-around;
 	}
 
 	.card .video {
@@ -23,7 +23,8 @@ export const cardStyles = `
 		outline: 2px solid #8bac0f; outline-offset: -2px;
 	}
 	.card.expanded .video {
-		flex: 1; min-width: 0;
+		flex: 1; min-width: 0; max-width: 640px; max-height: 576px;
+		align-self: center;
 	}
 
 	.card .label {
@@ -69,16 +70,21 @@ export const cardStyles = `
 		padding: 0.15rem 0; color: #aaa;
 	}
 
-	/* Controls panel */
-	.card .controls { display: none; }
-	.card.expanded .controls {
+	/* Side panels */
+	.card .panel { display: none; }
+	.card.expanded .panel {
 		display: flex; flex-direction: column; align-items: center; justify-content: center;
-		width: 240px; background: #111; border-left: 1px solid #333;
-		padding: 1rem; gap: 1rem; flex-shrink: 0;
+		width: 240px; background: #111; flex-shrink: 0;
+		padding: 1rem; gap: 1rem;
 	}
+	.card.expanded .panel-left { border-right: 1px solid #333; order: -1; }
+	.card.expanded .panel-right { border-left: 1px solid #333; }
 
 	.controls-inner {
 		display: flex; flex-direction: column; align-items: center; gap: 1.5rem;
+	}
+	.stats-inner {
+		display: flex; flex-direction: column; align-items: center; gap: 1rem; width: 100%;
 	}
 
 	/* D-pad */
