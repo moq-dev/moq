@@ -203,8 +203,7 @@ async fn run(config: &Config) -> Result<()> {
 		let mut next_frame = std::time::Instant::now();
 		let mut last_status = String::new();
 		let timeout = std::time::Duration::from_secs(timeout_secs);
-		let mut viewer_latency: std::collections::HashMap<String, f64> =
-			std::collections::HashMap::new();
+		let mut viewer_latency: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
 
 		loop {
 			// Pause emulation when no viewers are watching.
