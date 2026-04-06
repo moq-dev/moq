@@ -15,6 +15,9 @@ export interface GameCardConfig {
 	root: ShadowRoot | HTMLElement;
 }
 
+// Stop publishing feedback after 60s of no input.
+const FEEDBACK_IDLE_MS = 60_000;
+
 // Key mapping for keyboard input.
 const KEY_MAP: Record<string, string> = {
 	ArrowUp: "up",
@@ -319,7 +322,7 @@ export class GameCard {
 			// Activate feedback broadcasting on input, with 60s idle timeout.
 			feedbackActive.set(true);
 			clearTimeout(feedbackTimer);
-			feedbackTimer = setTimeout(() => feedbackActive.set(false), 60_000);
+			feedbackTimer = setTimeout(() => feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
 			if (!commandTrack) return;
 			// Attach the current video timestamp so the publisher can measure latency.

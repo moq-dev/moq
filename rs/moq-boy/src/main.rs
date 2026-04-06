@@ -203,7 +203,7 @@ async fn run(config: &Config) -> Result<()> {
 		let mut next_frame = std::time::Instant::now();
 		let mut last_status = String::new();
 		let timeout = std::time::Duration::from_secs(timeout_secs);
-		let mut viewer_latency: std::collections::HashMap<String, (f64, std::time::Instant)> =
+		let mut viewer_latency: std::collections::HashMap<String, f64> =
 			std::collections::HashMap::new();
 
 		loop {
@@ -259,7 +259,7 @@ async fn run(config: &Config) -> Result<()> {
 
 						let latency = current_ts_ms - ts_ms;
 						if latency >= 0.0 {
-							viewer_latency.insert(viewer_id, (latency, std::time::Instant::now()));
+							viewer_latency.insert(viewer_id, latency);
 						}
 					}
 					input::Command::ViewerLeft { viewer_id } => {
@@ -281,7 +281,7 @@ async fn run(config: &Config) -> Result<()> {
 
 			let latency_map: serde_json::Map<String, serde_json::Value> = viewer_latency
 				.iter()
-				.map(|(k, (ms, _))| (k.clone(), serde_json::json!((*ms as u32))))
+				.map(|(k, ms)| (k.clone(), serde_json::json!(*ms as u32)))
 				.collect();
 
 			let new_status = serde_json::json!({
