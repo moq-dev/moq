@@ -170,7 +170,8 @@ export class Mse implements Backend {
 				pending = next.frame;
 
 				// Mark that we received this frame right now.
-				this.source.sync.received(Moq.Time.Milli.fromMicro(pending.timestamp as Moq.Time.Micro), "video");
+				const timestamp = Moq.Time.Milli.fromMicro(pending.timestamp as Moq.Time.Micro);
+				this.source.sync.received(timestamp, "video");
 
 				break;
 			}
@@ -185,7 +186,8 @@ export class Mse implements Backend {
 					duration = Moq.Time.Micro.sub(frame.timestamp, pending.timestamp);
 
 					// Mark that we received this frame right now for latency calculation.
-					this.source.sync.received(Moq.Time.Milli.fromMicro(frame.timestamp as Moq.Time.Micro), "video");
+					const timestamp = Moq.Time.Milli.fromMicro(frame.timestamp as Moq.Time.Micro);
+					this.source.sync.received(timestamp, "video");
 				}
 
 				// Wrap raw frame in moof+mdat
