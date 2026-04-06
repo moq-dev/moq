@@ -3569,6 +3569,7 @@ dependencies = [
 name = "moq-token"
 version = "0.5.12"
 dependencies = [
+ "anyhow",
  "aws-lc-rs",
  "base64 0.22.1",
  "elliptic-curve",
