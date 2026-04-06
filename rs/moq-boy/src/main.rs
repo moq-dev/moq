@@ -214,20 +214,21 @@ async fn run(config: &Config) -> Result<()> {
 				let mut guard = lock.lock().unwrap();
 				let pause_start = std::time::Instant::now();
 
+				let mut reset_done = false;
 				while paused.load(Ordering::Acquire) {
-					let elapsed = pause_start.elapsed();
-					if elapsed >= timeout {
+					if !reset_done && pause_start.elapsed() >= timeout {
 						tracing::info!("resetting emulator (paused too long)");
 						emu.reset()?;
-						// Wait indefinitely for a viewer to resume.
-						while paused.load(Ordering::Acquire) {
-							guard = cvar.wait(guard).unwrap();
-						}
-						break;
+						reset_done = true;
 					}
-					let remaining = timeout - elapsed;
-					let (g, _) = cvar.wait_timeout(guard, remaining).unwrap();
-					guard = g;
+
+					if reset_done {
+						guard = cvar.wait(guard).unwrap();
+					} else {
+						let remaining = timeout - pause_start.elapsed();
+						let (g, _) = cvar.wait_timeout(guard, remaining).unwrap();
+						guard = g;
+					}
 				}
 
 				tracing::info!("resuming encoding");

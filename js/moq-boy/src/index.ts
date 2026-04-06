@@ -280,9 +280,9 @@ export class GameCard {
 		let commandTrack: Moq.Track | undefined;
 		const currentViewerId = new Moq.Signals.Signal<string | undefined>(undefined);
 		const feedbackActive = new Moq.Signals.Signal(false);
-		let feedbackTimer: ReturnType<typeof setTimeout> | undefined;
+		let feedbackTimeout: Moq.Signals.Effect | undefined;
 
-		this.#signals.cleanup(() => clearTimeout(feedbackTimer));
+		this.#signals.cleanup(() => feedbackTimeout?.close());
 
 		this.#signals.run((effect) => {
 			const conn = effect.get(connection.established);
@@ -292,7 +292,7 @@ export class GameCard {
 			if (exp !== sessionId) {
 				// Clear feedback state when collapsing.
 				feedbackActive.set(false);
-				clearTimeout(feedbackTimer);
+				feedbackTimeout?.close();
 				return;
 			}
 
@@ -319,10 +319,11 @@ export class GameCard {
 		});
 
 		this.#sendCommand = (cmd: Record<string, unknown>) => {
-			// Activate feedback broadcasting on input, with 60s idle timeout.
+			// Activate feedback broadcasting on input, with idle timeout.
 			feedbackActive.set(true);
-			clearTimeout(feedbackTimer);
-			feedbackTimer = setTimeout(() => feedbackActive.set(false), FEEDBACK_IDLE_MS);
+			feedbackTimeout?.close();
+			feedbackTimeout = new Moq.Signals.Effect();
+			feedbackTimeout.timer(() => feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
 			if (!commandTrack) return;
 			// Attach the current video timestamp so the publisher can measure latency.
