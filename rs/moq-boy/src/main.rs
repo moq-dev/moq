@@ -270,8 +270,7 @@ async fn run(config: &Config) -> Result<()> {
 		let mut last_input = Instant::now();
 		let mut last_status = String::new();
 		let timeout = Duration::from_secs(timeout_secs);
-		let mut viewer_latency: std::collections::HashMap<String, (f64, Instant)> =
-			std::collections::HashMap::new();
+		let mut viewer_latency: std::collections::HashMap<String, (f64, Instant)> = std::collections::HashMap::new();
 		let mut stats = Stats::new();
 
 		loop {
