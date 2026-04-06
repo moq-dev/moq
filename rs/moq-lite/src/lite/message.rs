@@ -49,6 +49,9 @@ impl<T: Message> Decode<Version> for T {
 				}
 			}
 		} else {
+			if buf.remaining() < size {
+				return Err(DecodeError::Short);
+			}
 			let mut limited = buf.take(size);
 			match Self::decode_msg(&mut limited, version) {
 				Ok(result) => {
