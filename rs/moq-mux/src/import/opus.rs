@@ -64,7 +64,8 @@ impl Opus {
 			bitrate: None,
 			description: None,
 			container: hang::catalog::Container::Legacy,
-			// Opus default frame duration is 20ms.
+			// TODO parse the actual frame duration from each packet instead of assuming 20ms.
+			// Opus supports 2.5, 5, 10, 20, 40, 60ms but 20ms is the real-time default.
 			jitter: Some(moq_lite::Time::new(20)),
 		};
 

@@ -149,13 +149,15 @@ export class Source {
 }
 
 // Estimate the minimum jitter (frame duration) based on the audio codec.
+// TODO these are defaults; the actual frame duration depends on encoder config.
 function defaultAudioJitter(config: Catalog.AudioConfig): number | undefined {
 	if (config.codec.startsWith("opus")) {
-		return 20; // Opus default: 20ms frames
+		// Opus supports 2.5–60ms but 20ms is the real-time default.
+		return 20;
 	}
 
 	if (config.codec.startsWith("mp4a")) {
-		// AAC: typically 1024 samples per frame
+		// 1024 samples for LC-AAC; HE-AAC/AAC-LD use different sizes.
 		return Math.ceil((1024 / config.sampleRate) * 1000);
 	}
 
