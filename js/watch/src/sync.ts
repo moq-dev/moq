@@ -29,6 +29,10 @@ export class Sync {
 	// There's probably a way to use Effect, but lets keep it simple for now.
 	#update: PromiseWithResolvers<void>;
 
+	// Batched late-frame tracking: accumulate count and max lateness, log on recovery.
+	#lateCount = 0;
+	#lateMaxMs = 0;
+
 	signals = new Effect();
 
 	constructor(props?: SyncProps) {
@@ -55,12 +59,30 @@ export class Sync {
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
 	received(timestamp: Time.Milli): void {
-		const ref = Time.Milli.sub(Time.Milli.now(), timestamp);
-		const current = this.#reference.peek();
+		const now = Time.Milli.now();
+		const ref = Time.Milli.sub(now, timestamp);
+		const currentRef = this.#reference.peek();
 
-		if (current !== undefined && ref >= current) {
-			return;
+		if (currentRef !== undefined) {
+			// Check if `wait()` would not sleep at all.
+			// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
+			// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
+			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#latency.peek());
+			if (sleep < 0) {
+				this.#lateCount++;
+				this.#lateMaxMs = Math.max(this.#lateMaxMs, -sleep);
+			} else if (this.#lateCount > 0) {
+				console.warn(`sync: ${this.#lateCount} late frame(s), max ${Math.round(this.#lateMaxMs)}ms behind`);
+				this.#lateCount = 0;
+				this.#lateMaxMs = 0;
+			}
+
+			if (ref >= currentRef) {
+				// Our frame was not relatively newer than any other frame.
+				return;
+			}
 		}
+
 		this.#reference.set(ref);
 		this.#update.resolve();
 		this.#update = Promise.withResolvers();
@@ -84,6 +106,7 @@ export class Sync {
 
 			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#latency.peek());
 			if (sleep <= 0) return;
+
 			const wait = new Promise((resolve) => setTimeout(resolve, sleep)).then(() => true);
 
 			const ok = await Promise.race([this.#update.promise, wait]);

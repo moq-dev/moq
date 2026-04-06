@@ -3,11 +3,18 @@ import * as Watch from "@moq/watch";
 
 export { Moq, Watch };
 
+export interface GameStats {
+	video_secs: number;
+	audio_secs: number;
+	emulation_secs: number;
+	wall_secs: number;
+}
+
 export interface GameStatus {
 	buttons: string[];
-	reset_in: number;
 	latency: Record<string, number>;
 	location?: string;
+	stats?: GameStats;
 }
 
 export interface GameCardConfig {
@@ -16,6 +23,9 @@ export interface GameCardConfig {
 	expanded: Moq.Signals.Signal<string | undefined>;
 	root: ShadowRoot | HTMLElement;
 }
+
+// Stop publishing feedback after 60s of no input.
+const FEEDBACK_IDLE_MS = 60_000;
 
 // Key mapping for keyboard input.
 const KEY_MAP: Record<string, string> = {
@@ -55,55 +65,67 @@ export class GameCard {
 		label.textContent = sessionId;
 		this.el.appendChild(label);
 
-		// Countdown overlay.
-		const countdown = document.createElement("div");
-		countdown.className = "countdown";
-		this.el.appendChild(countdown);
-
 		// Controls container.
 		const controls = document.createElement("div");
 		controls.className = "controls";
 		this.el.appendChild(controls);
 
 		// Build controls.
-		const { wrapper: controlsInner, locationEl, latencyList, muteBtn } = this.#buildControls();
+		const { wrapper: controlsInner, locationEl, latencyList, statsList, muteBtn, jitterSlider } = this.#buildControls();
 		controls.appendChild(controlsInner);
 
-		// Click to toggle expand via Fullscreen API.
-		canvas.addEventListener("click", () => {
+		// Track hover state (before keyboard setup so handlers can use it).
+		const hovered = new Moq.Signals.Signal(false);
+		this.#signals.event(this.el, "mouseenter", () => hovered.set(true));
+		this.#signals.event(this.el, "mouseleave", () => hovered.set(false));
+
+		// Derive a stable active signal for gating input/commands.
+		const isActive = new Moq.Signals.Signal(false);
+		this.#signals.run((effect) => {
+			const exp = effect.get(expanded);
+			const hover = effect.get(hovered);
+			isActive.set(exp === sessionId || hover);
+		});
+
+		// Toggle expand on click or keyboard (Enter/Space) for accessibility.
+		const toggleExpand = () => {
 			if (expanded.peek() === sessionId) {
-				document.exitFullscreen().catch(() => {});
+				expanded.set(undefined);
 			} else {
 				expanded.set(sessionId);
-				this.el.requestFullscreen().catch(() => {});
+			}
+		};
+		canvas.tabIndex = 0;
+		this.#signals.event(canvas, "click", toggleExpand);
+		this.#signals.event(canvas, "keydown", (e) => {
+			const ke = e as KeyboardEvent;
+			if (ke.key === "Enter" || ke.key === " ") {
+				ke.preventDefault();
+				ke.stopPropagation();
+				toggleExpand();
 			}
 		});
 
-		// Listen for fullscreen exit to sync expanded state.
-		const onFullscreenChange = () => {
-			if (!document.fullscreenElement && expanded.peek() === sessionId) {
-				expanded.set(undefined);
-			}
-		};
-		document.addEventListener("fullscreenchange", onFullscreenChange);
-		this.#signals.cleanup(() => document.removeEventListener("fullscreenchange", onFullscreenChange));
-
-		// React to expand state.
+		// React to expand state for CSS class and controls visibility.
 		this.#signals.run((effect) => {
 			const exp = effect.get(expanded);
 			const isExpanded = exp === sessionId;
 			this.el.classList.toggle("expanded", isExpanded);
 			controls.style.display = isExpanded ? "flex" : "none";
+		});
 
-			if (!isExpanded && this.#heldButtons.size > 0) {
+		// Clear held buttons when card becomes inactive.
+		this.#signals.run((effect) => {
+			const active = effect.get(isActive);
+			if (!active && this.#heldButtons.size > 0) {
 				this.#heldButtons.clear();
 				this.#sendButtons();
 			}
 		});
 
-		// Keyboard input when expanded.
+		// Keyboard input when hovered or expanded.
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (expanded.peek() !== sessionId) return;
+			if (!isActive.peek()) return;
 			if (e.repeat) return;
 
 			const button = KEY_MAP[e.key];
@@ -111,13 +133,13 @@ export class GameCard {
 				this.#heldButtons.add(button);
 				this.#sendButtons();
 				e.preventDefault();
-			} else if (e.key === "Escape") {
-				document.exitFullscreen().catch(() => {});
+			} else if (e.key === "Escape" && expanded.peek() === sessionId) {
+				expanded.set(undefined);
 				e.preventDefault();
 			}
 		};
 		const onKeyUp = (e: KeyboardEvent) => {
-			if (expanded.peek() !== sessionId) return;
+			if (!isActive.peek()) return;
 			const button = KEY_MAP[e.key];
 			if (button) {
 				this.#heldButtons.delete(button);
@@ -131,18 +153,9 @@ export class GameCard {
 				this.#sendButtons();
 			}
 		};
-		document.addEventListener("keydown", onKeyDown);
-		document.addEventListener("keyup", onKeyUp);
-		window.addEventListener("blur", onBlur);
-		this.#signals.cleanup(() => {
-			document.removeEventListener("keydown", onKeyDown);
-			document.removeEventListener("keyup", onKeyUp);
-			window.removeEventListener("blur", onBlur);
-			if (this.#heldButtons.size > 0) {
-				this.#heldButtons.clear();
-				this.#sendButtons();
-			}
-		});
+		this.#signals.event(document, "keydown", onKeyDown);
+		this.#signals.event(document, "keyup", onKeyUp);
+		this.#signals.event(window, "blur", onBlur);
 
 		// Set up video via Watch API.
 		const broadcast = new Watch.Broadcast({
@@ -152,7 +165,8 @@ export class GameCard {
 		});
 		this.#signals.cleanup(() => broadcast.close());
 
-		const sync = new Watch.Sync({ jitter: 50 as Moq.Time.Milli });
+		const jitter = new Moq.Signals.Signal<Moq.Time.Milli>(50 as Moq.Time.Milli);
+		const sync = new Watch.Sync({ jitter });
 		this.#signals.cleanup(() => sync.close());
 
 		const videoSource = new Watch.Video.Source(sync, { broadcast });
@@ -206,28 +220,20 @@ export class GameCard {
 			}
 		});
 
-		// Track hover state.
-		const hovered = new Moq.Signals.Signal(false);
-		this.el.addEventListener("mouseenter", () => hovered.set(true));
-		this.el.addEventListener("mouseleave", () => hovered.set(false));
-
 		// Enable audio decoding when hovered or expanded.
 		this.#signals.run((effect) => {
-			const exp = effect.get(expanded);
-			const hover = effect.get(hovered);
-			audioDecoder.enabled.set(exp === sessionId || hover);
+			audioDecoder.enabled.set(effect.get(isActive));
 		});
 
 		// Unmute on hover/expand (user gesture satisfies autoplay policy).
 		const userMuted = new Moq.Signals.Signal(false);
 		this.#signals.run((effect) => {
-			const exp = effect.get(expanded);
-			const hover = effect.get(hovered);
+			const active = effect.get(isActive);
 			const muted = effect.get(userMuted);
-			audioEmitter.muted.set(muted || !(exp === sessionId || hover));
+			audioEmitter.muted.set(muted || !active);
 		});
 
-		// Subscribe to status track for button highlights and countdown.
+		// Subscribe to status track for button highlights and latency.
 		this.#signals.run((effect) => {
 			const active = effect.get(broadcast.active);
 			if (!active) return;
@@ -247,14 +253,6 @@ export class GameCard {
 					for (const btn of allBtns) {
 						const name = (btn as HTMLElement).dataset.button;
 						(btn as HTMLElement).classList.toggle("active", json.buttons.includes(name ?? ""));
-					}
-
-					// Show countdown when approaching timeout.
-					if (json.reset_in <= 60) {
-						countdown.style.display = "block";
-						countdown.textContent = `Reset in ${json.reset_in}s`;
-					} else {
-						countdown.style.display = "none";
 					}
 
 					// Show location if available.
@@ -292,20 +290,63 @@ export class GameCard {
 							latencyList.appendChild(row);
 						}
 					}
+
+					// Stats panel: show encoding/emulation time.
+					if (json.stats) {
+						const s = json.stats;
+						const pct = (v: number) => (s.wall_secs > 0 ? Math.round((v / s.wall_secs) * 100) : 0);
+
+						statsList.replaceChildren();
+						const statsHeader = document.createElement("div");
+						statsHeader.className = "stats-header";
+						statsHeader.textContent = `Stats (${s.wall_secs}s)`;
+						statsList.appendChild(statsHeader);
+
+						const items: [string, number][] = [
+							["Video", s.video_secs],
+							["Audio", s.audio_secs],
+							["Emulation", s.emulation_secs],
+						];
+
+						for (const [itemLabel, secs] of items) {
+							const row = document.createElement("div");
+							row.className = "stats-entry";
+							const nameSpan = document.createElement("span");
+							nameSpan.textContent = itemLabel;
+							const valSpan = document.createElement("span");
+							valSpan.textContent = `${secs}s (${pct(secs)}%)`;
+							row.appendChild(nameSpan);
+							row.appendChild(valSpan);
+							statsList.appendChild(row);
+						}
+					}
 				}
 			});
 		});
 
-		// Command publishing.
+		// Command publishing — only publish feedback broadcast when there's recent input.
 		let commandTrack: Moq.Track | undefined;
+		let pendingCommand: Record<string, unknown> | undefined;
 		const currentViewerId = new Moq.Signals.Signal<string | undefined>(undefined);
+		const feedbackActive = new Moq.Signals.Signal(false);
+		let feedbackTimeout: Moq.Signals.Effect | undefined;
+
+		this.#signals.cleanup(() => feedbackTimeout?.close());
 
 		this.#signals.run((effect) => {
 			const conn = effect.get(connection.established);
 			if (!conn) return;
 
-			const exp = effect.get(expanded);
-			if (exp !== sessionId) return;
+			if (!effect.get(isActive)) {
+				// Clear feedback state when deactivating.
+				feedbackActive.set(false);
+				feedbackTimeout?.close();
+				pendingCommand = undefined;
+				return;
+			}
+
+			const active = effect.get(feedbackActive);
+			if (!active) return;
 
 			const viewerId = Math.random().toString(36).slice(2, 8);
 			currentViewerId.set(viewerId);
@@ -314,23 +355,46 @@ export class GameCard {
 			effect.cleanup(() => {
 				viewerBroadcast.close();
 				commandTrack = undefined;
+				currentViewerId.set(undefined);
 			});
 
 			effect.spawn(async () => {
 				for (;;) {
 					const req = await Promise.race([effect.cancel, viewerBroadcast.requested()]);
 					if (!req) break;
-					if (req.track.name === "command") commandTrack = req.track;
+					if (req.track.name === "command") {
+						commandTrack = req.track;
+						// Flush any pending command that triggered activation.
+						if (pendingCommand) {
+							const ts = videoDecoder.timestamp.peek();
+							commandTrack.writeJson({ ...pendingCommand, ts: ts ?? 0 });
+							pendingCommand = undefined;
+						}
+					}
 				}
 			});
 		});
 
 		this.#sendCommand = (cmd: Record<string, unknown>) => {
-			if (!commandTrack) return;
+			// Activate feedback broadcasting on input, with idle timeout.
+			feedbackActive.set(true);
+			feedbackTimeout?.close();
+			feedbackTimeout = new Moq.Signals.Effect();
+			feedbackTimeout.timer(() => feedbackActive.set(false), FEEDBACK_IDLE_MS);
+
+			if (!commandTrack) {
+				pendingCommand = cmd;
+				return;
+			}
 			// Attach the current video timestamp so the publisher can measure latency.
 			const ts = videoDecoder.timestamp.peek();
 			commandTrack.writeJson({ ...cmd, ts: ts ?? 0 });
 		};
+
+		// Wire up jitter slider to sync.
+		jitterSlider.addEventListener("input", () => {
+			jitter.set(Number.parseInt(jitterSlider.value, 10) as Moq.Time.Milli);
+		});
 
 		// Wire up mute toggle button.
 		muteBtn.textContent = "Mute";
@@ -343,7 +407,14 @@ export class GameCard {
 		});
 	}
 
-	#buildControls(): { wrapper: HTMLElement; locationEl: HTMLElement; latencyList: HTMLElement; muteBtn: HTMLButtonElement } {
+	#buildControls(): {
+		wrapper: HTMLElement;
+		locationEl: HTMLElement;
+		latencyList: HTMLElement;
+		statsList: HTMLElement;
+		muteBtn: HTMLButtonElement;
+		jitterSlider: HTMLInputElement;
+	} {
 		const wrapper = document.createElement("div");
 		wrapper.className = "controls-inner";
 
@@ -420,10 +491,32 @@ export class GameCard {
 		});
 		utilBtns.appendChild(resetBtn);
 
+		// Jitter/latency slider
+		const jitterContainer = document.createElement("div");
+		jitterContainer.className = "jitter-container";
+
+		const jitterLabel = document.createElement("label");
+		jitterLabel.className = "jitter-label";
+		jitterLabel.textContent = "Buffer: 50ms";
+
+		const jitterSlider = document.createElement("input");
+		jitterSlider.type = "range";
+		jitterSlider.className = "jitter-slider";
+		jitterSlider.min = "0";
+		jitterSlider.max = "500";
+		jitterSlider.value = "50";
+		jitterSlider.addEventListener("input", () => {
+			jitterLabel.textContent = `Buffer: ${jitterSlider.value}ms`;
+		});
+		jitterSlider.addEventListener("click", (e) => e.stopPropagation());
+
+		jitterContainer.appendChild(jitterLabel);
+		jitterContainer.appendChild(jitterSlider);
+
 		// Key hints
 		const hints = document.createElement("div");
 		hints.className = "key-hints";
-		const lines = ["Arrows: D-pad", "Z: B \u00A0 X: A", "Enter: Start \u00A0 Shift: Select", "Esc: Exit"];
+		const lines = ["Arrows: D-pad", "Z: B \u00A0 X: A", "Enter: Start \u00A0 Shift: Select", "Esc: Collapse"];
 		for (const line of lines) {
 			const div = document.createElement("div");
 			div.textContent = line;
@@ -443,17 +536,23 @@ export class GameCard {
 		wrapper.appendChild(abBtns);
 		wrapper.appendChild(metaBtns);
 		wrapper.appendChild(utilBtns);
+		wrapper.appendChild(jitterContainer);
 
 		const latencyNote = document.createElement("div");
 		latencyNote.className = "latency-note";
 		latencyNote.textContent = "Includes both the render delay AND the input delay.";
 
+		// Stats list (populated by status track)
+		const statsList = document.createElement("div");
+		statsList.className = "stats-list";
+
 		wrapper.appendChild(hints);
 		wrapper.appendChild(locationEl);
 		wrapper.appendChild(latencyList);
+		wrapper.appendChild(statsList);
 		wrapper.appendChild(latencyNote);
 
-		return { wrapper, locationEl, latencyList, muteBtn };
+		return { wrapper, locationEl, latencyList, statsList, muteBtn, jitterSlider };
 	}
 
 	#sendButtons() {
