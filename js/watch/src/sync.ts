@@ -32,6 +32,7 @@ export class Sync {
 	// Batched late-frame tracking: accumulate count and max lateness, log on recovery.
 	#lateCount = 0;
 	#lateMaxMs = 0;
+	#lateLabel = "";
 
 	signals = new Effect();
 
@@ -58,7 +59,7 @@ export class Sync {
 	}
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
-	received(timestamp: Time.Milli): void {
+	received(timestamp: Time.Milli, label = ""): void {
 		const now = Time.Milli.now();
 		const ref = Time.Milli.sub(now, timestamp);
 		const currentRef = this.#reference.peek();
@@ -71,10 +72,14 @@ export class Sync {
 			if (sleep < 0) {
 				this.#lateCount++;
 				this.#lateMaxMs = Math.max(this.#lateMaxMs, -sleep);
+				if (label) this.#lateLabel = label;
 			} else if (this.#lateCount > 0) {
-				console.warn(`sync: ${this.#lateCount} late frame(s), max ${Math.round(this.#lateMaxMs)}ms behind`);
+				const prefix = this.#lateLabel ? `sync[${this.#lateLabel}]` : "sync";
+				const behind = Sync.#formatDuration(this.#lateMaxMs);
+				console.warn(`${prefix}: ${this.#lateCount} late frame(s), max ${behind} behind`);
 				this.#lateCount = 0;
 				this.#lateMaxMs = 0;
+				this.#lateLabel = "";
 			}
 
 			if (ref >= currentRef) {
@@ -112,6 +117,15 @@ export class Sync {
 			const ok = await Promise.race([this.#update.promise, wait]);
 			if (ok) return;
 		}
+	}
+
+	static #formatDuration(ms: number): string {
+		ms = Math.round(ms);
+		if (ms < 1000) return `${ms}ms`;
+		const s = ms / 1000;
+		if (s < 60) return `${Math.round(s * 10) / 10}s`;
+		const m = s / 60;
+		return `${Math.round(m * 10) / 10}m`;
 	}
 
 	close() {

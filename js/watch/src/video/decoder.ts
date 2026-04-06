@@ -320,7 +320,7 @@ class DecoderTrack {
 				}
 
 				// Mark that we received this frame right now.
-				this.source.sync.received(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
+				this.source.sync.received(Time.Milli.fromMicro(frame.timestamp as Time.Micro), "video");
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -398,7 +398,10 @@ class DecoderTrack {
 								});
 
 								// Mark that we received this frame right now.
-								this.source.sync.received(Time.Milli.fromMicro(sample.timestamp as Time.Micro));
+								this.source.sync.received(
+									Time.Milli.fromMicro(sample.timestamp as Time.Micro),
+									"video",
+								);
 
 								// Track stats
 								this.stats.update((current) => ({
