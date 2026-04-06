@@ -221,7 +221,10 @@ export class Source {
 
 		effect.set(this.#track, selected);
 		effect.set(this.#config, config);
-		effect.set(this.sync.video, config.jitter as Moq.Time.Milli | undefined);
+
+		// Use catalog jitter if available, otherwise estimate from framerate.
+		const jitter = config.jitter ?? (config.framerate ? Math.ceil(1000 / config.framerate) : undefined);
+		effect.set(this.sync.video, jitter as Moq.Time.Milli | undefined);
 	}
 
 	/**

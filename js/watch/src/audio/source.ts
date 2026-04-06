@@ -113,7 +113,10 @@ export class Source {
 
 		effect.set(this.#track, selected.track);
 		effect.set(this.#config, selected.config);
-		effect.set(this.sync.audio, selected.config.jitter as Moq.Time.Milli | undefined);
+
+		// Use catalog jitter if available, otherwise estimate from codec frame duration.
+		const jitter = selected.config.jitter ?? defaultAudioJitter(selected.config);
+		effect.set(this.sync.audio, jitter as Moq.Time.Milli | undefined);
 	}
 
 	/**
@@ -143,4 +146,18 @@ export class Source {
 	close(): void {
 		this.#signals.close();
 	}
+}
+
+// Estimate the minimum jitter (frame duration) based on the audio codec.
+function defaultAudioJitter(config: Catalog.AudioConfig): number | undefined {
+	if (config.codec.startsWith("opus")) {
+		return 20; // Opus default: 20ms frames
+	}
+
+	if (config.codec.startsWith("mp4a")) {
+		// AAC: typically 1024 samples per frame
+		return Math.ceil((1024 / config.sampleRate) * 1000);
+	}
+
+	return undefined;
 }

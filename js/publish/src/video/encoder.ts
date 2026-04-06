@@ -135,6 +135,8 @@ export class Encoder {
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
 			container: { kind: "legacy" } as const,
+			// Each frame is flushed immediately, so the jitter is one frame duration.
+			jitter: config.framerate ? Catalog.u53(Math.ceil(1000 / config.framerate)) : undefined,
 		};
 
 		effect.set(this.#catalog, catalog);
