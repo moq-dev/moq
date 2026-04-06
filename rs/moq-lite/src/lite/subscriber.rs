@@ -44,12 +44,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
-		let recv_bandwidth_enabled = self.recv_bandwidth.is_some();
 		let bw = self.clone();
 		tokio::select! {
 			Err(err) = self.clone().run_announce() => Err(err),
 			res = self.run_uni() => res,
-			_ = bw.run_recv_bandwidth(), if recv_bandwidth_enabled => Ok(()),
+			Err(err) = bw.run_recv_bandwidth() => Err(err),
 		}
 	}
 
@@ -131,53 +130,34 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	/// Opens a PROBE stream when consumers exist, reads bandwidth estimates.
-	async fn run_recv_bandwidth(self) {
+	/// Returns Ok(()) only when recv_bandwidth is None (disabled).
+	/// Errors are fatal and propagate to the session.
+	async fn run_recv_bandwidth(self) -> Result<(), Error> {
 		let Some(bandwidth) = &self.recv_bandwidth else {
-			return;
+			return Ok(());
 		};
 
-		loop {
-			// Wait until someone cares about recv bandwidth.
-			if bandwidth.used().await.is_err() {
-				return;
-			}
+		bandwidth.used().await?;
 
-			// Open a PROBE bidi stream.
-			let res = self.run_probe_stream(bandwidth).await;
-
-			match res {
-				Err(Error::Cancel | Error::Transport) => {
-					tracing::debug!("probe recv stream closed");
-				}
-				Err(err) => {
-					tracing::warn!(%err, "probe recv stream error");
-				}
-				Ok(()) => {}
-			}
-
-			// Clear the bitrate on disconnect.
-			let _ = bandwidth.set(None);
-		}
-	}
-
-	async fn run_probe_stream(&self, bandwidth: &BandwidthProducer) -> Result<(), Error> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Probe).await?;
 
 		loop {
 			tokio::select! {
 				biased;
+				_ = bandwidth.closed() => {
+					stream.writer.finish()?;
+					return stream.writer.closed().await;
+				}
 				res = bandwidth.unused() => {
-					if res.is_err() {
-						return Ok(());
-					}
+					res?;
 					// No more consumers, close the probe stream.
 					stream.writer.finish()?;
 					return stream.writer.closed().await;
 				}
 				probe = stream.reader.decode::<lite::Probe>() => {
 					let probe = probe?;
-					let _ = bandwidth.set(Some(probe.bitrate));
+					bandwidth.set(Some(probe.bitrate))?;
 				}
 			}
 		}

@@ -1,4 +1,6 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+
+use web_transport_trait::Stats;
 
 use crate::{BandwidthConsumer, BandwidthProducer, Error, Version};
 
@@ -11,8 +13,8 @@ use crate::{BandwidthConsumer, BandwidthProducer, Error, Version};
 pub struct Session {
 	session: Arc<dyn SessionInner>,
 	version: Version,
-	send_bandwidth: Option<BandwidthProducer>,
-	recv_bandwidth: Option<BandwidthProducer>,
+	send_bandwidth: Option<BandwidthConsumer>,
+	recv_bandwidth: Option<BandwidthConsumer>,
 	closed: bool,
 }
 
@@ -20,9 +22,23 @@ impl Session {
 	pub(super) fn new<S: web_transport_trait::Session>(
 		session: S,
 		version: Version,
-		send_bandwidth: Option<BandwidthProducer>,
-		recv_bandwidth: Option<BandwidthProducer>,
+		recv_bandwidth: Option<BandwidthConsumer>,
 	) -> Self {
+		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
+		let send_bandwidth = if session.stats().estimated_send_rate().is_some() {
+			let producer = BandwidthProducer::new();
+			let consumer = producer.consume();
+
+			let session = session.clone();
+			web_async::spawn(async move {
+				run_send_bandwidth(&session, producer).await;
+			});
+
+			Some(consumer)
+		} else {
+			None
+		};
+
 		Self {
 			session: Arc::new(session),
 			version,
@@ -39,16 +55,16 @@ impl Session {
 
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
 	///
-	/// Returns `None` if the QUIC backend or MoQ version doesn't support bandwidth estimation.
+	/// Returns `None` if the QUIC backend doesn't support bandwidth estimation.
 	pub fn send_bandwidth(&self) -> Option<BandwidthConsumer> {
-		self.send_bandwidth.as_ref().map(|p| p.consume())
+		self.send_bandwidth.clone()
 	}
 
 	/// Returns a consumer for the estimated receive bitrate (from PROBE).
 	///
 	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
 	pub fn recv_bandwidth(&self) -> Option<BandwidthConsumer> {
-		self.recv_bandwidth.as_ref().map(|p| p.consume())
+		self.recv_bandwidth.clone()
 	}
 
 	/// Close the underlying transport session.
@@ -72,6 +88,46 @@ impl Drop for Session {
 	fn drop(&mut self) {
 		if !self.closed {
 			self.session.close(Error::Cancel.to_code(), "dropped");
+		}
+	}
+}
+
+/// Polls the QUIC congestion controller for estimated send rate.
+/// Only active when at least one consumer exists.
+async fn run_send_bandwidth<S: web_transport_trait::Session>(session: &S, producer: BandwidthProducer) {
+	const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+	loop {
+		tokio::select! {
+			biased;
+			_ = producer.closed() => return,
+			res = producer.used() => {
+				if res.is_err() {
+					return;
+				}
+			}
+		}
+
+		let mut interval = tokio::time::interval(POLL_INTERVAL);
+
+		loop {
+			tokio::select! {
+				biased;
+				_ = producer.closed() => return,
+				res = producer.unused() => {
+					if res.is_err() {
+						return;
+					}
+					// No more consumers, pause polling.
+					break;
+				}
+				_ = interval.tick() => {
+					let bitrate = session.stats().estimated_send_rate();
+					if producer.set(bitrate).is_err() {
+						return;
+					}
+				}
+			}
 		}
 	}
 }

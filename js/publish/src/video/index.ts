@@ -1,4 +1,5 @@
 import * as Catalog from "@moq/hang/catalog";
+import type * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { Encoder, type EncoderProps } from "./encoder";
 import { TrackProcessor } from "./polyfill";
@@ -12,7 +13,7 @@ export type Props = {
 	hd?: EncoderProps;
 	sd?: EncoderProps;
 	flip?: boolean | Signal<boolean>;
-	sendBandwidth?: Getter<number | undefined>;
+	connection?: Getter<Moq.Connection.Established | undefined>;
 };
 
 export class Root {
@@ -35,10 +36,9 @@ export class Root {
 	constructor(props?: Props) {
 		this.source = Signal.from(props?.source);
 
-		const hdProps = props?.sendBandwidth ? { ...props?.hd, sendBandwidth: props.sendBandwidth } : props?.hd;
-		const sdProps = props?.sendBandwidth ? { ...props?.sd, sendBandwidth: props.sendBandwidth } : props?.sd;
-		this.hd = new Encoder(this.frame, this.source, hdProps);
-		this.sd = new Encoder(this.frame, this.source, sdProps);
+		const connection = props?.connection ?? new Signal<Moq.Connection.Established | undefined>(undefined);
+		this.hd = new Encoder(this.frame, this.source, connection, props?.hd);
+		this.sd = new Encoder(this.frame, this.source, connection, props?.sd);
 
 		this.flip = Signal.from(props?.flip ?? false);
 

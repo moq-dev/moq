@@ -111,6 +111,7 @@ match version {
 - **Formatting/Linting**: Biome for JS/TS formatting and linting
 - **UI**: Solid.js for Web Components in `@moq/watch/ui` and `@moq/publish/ui`
 - **Builds**: Nix flake for reproducible builds (optional)
+- **JS async patterns**: Use `Effect.interval()`, `Effect.timer()`, and `Effect.event()` helpers from `@moq/signals` instead of raw `setInterval`, `setTimeout`, `addEventListener`. These handle cleanup automatically when the Effect is closed.
 
 ## Testing Approach
 

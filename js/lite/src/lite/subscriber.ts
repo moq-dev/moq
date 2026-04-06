@@ -35,7 +35,7 @@ export class Subscriber {
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
 	 * @param version - The protocol version
-	 * @param recvBandwidth - Optional bandwidth producer for PROBE (Lite03+ only)
+	 * @param recvBandwidth - Optional bandwidth producer for PROBE
 	 *
 	 * @internal
 	 */
@@ -43,10 +43,6 @@ export class Subscriber {
 		this.#quic = quic;
 		this.version = version;
 		this.#recvBandwidth = recvBandwidth;
-
-		if (recvBandwidth && version === Version.DRAFT_03) {
-			this.#runProbe();
-		}
 	}
 
 	/**
@@ -211,36 +207,23 @@ export class Subscriber {
 
 	/**
 	 * Opens a PROBE bidi stream to receive bandwidth estimates from the publisher.
-	 * Retries on error.
+	 * Returns immediately if recv bandwidth is not supported.
+	 * Errors are fatal and propagate to the connection.
+	 *
+	 * @internal
 	 */
-	#runProbe() {
-		const run = async () => {
-			while (!this.#closed) {
-				try {
-					const stream = await Stream.open(this.#quic);
-					await stream.writer.u53(StreamId.Probe);
+	async runProbe(): Promise<void> {
+		if (!this.#recvBandwidth) return;
+		if (this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02) return;
 
-					for (;;) {
-						const probe = await Probe.decodeMaybe(stream.reader, this.version);
-						if (!probe) break;
-						this.#recvBandwidth?.set(probe.bitrate);
-					}
-				} catch (err: unknown) {
-					const e = error(err);
-					console.debug(`probe recv error: ${e.message}`);
-				}
+		const stream = await Stream.open(this.#quic);
+		await stream.writer.u53(StreamId.Probe);
 
-				// Clear the bitrate on disconnect.
-				this.#recvBandwidth?.set(undefined);
-
-				if (this.#closed) break;
-
-				// Wait before retrying.
-				await new Promise((resolve) => setTimeout(resolve, 1000));
-			}
-		};
-
-		void run();
+		for (;;) {
+			const probe = await Probe.decodeMaybe(stream.reader, this.version);
+			if (!probe) break;
+			this.#recvBandwidth.set(probe.bitrate);
+		}
 	}
 
 	close() {

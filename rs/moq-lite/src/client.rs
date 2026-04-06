@@ -57,7 +57,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Draft-17: SETUP is exchanged in the background by the session.
-				let (send_bw, recv_bw) = ietf::start(
+				ietf::start(
 					session.clone(),
 					None,
 					None,
@@ -68,7 +68,7 @@ impl Client {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v, send_bw, recv_bw));
+				return Ok(Session::new(session, v, None));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -97,7 +97,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
-				let (send_bw, recv_bw) = lite::start(
+				let recv_bw = lite::start(
 					session.clone(),
 					None,
 					self.publish.clone(),
@@ -105,7 +105,7 @@ impl Client {
 					lite::Version::Lite03,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite03.into(), send_bw, recv_bw));
+				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -139,7 +139,7 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		let (send_bw, recv_bw) = match version {
+		let recv_bw = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				lite::start(
@@ -166,11 +166,12 @@ impl Client {
 					self.publish.clone(),
 					self.consume.clone(),
 					v,
-				)?
+				)?;
+				None
 			}
 		};
 
-		Ok(Session::new(session, version, send_bw, recv_bw))
+		Ok(Session::new(session, version, recv_bw))
 	}
 }
 

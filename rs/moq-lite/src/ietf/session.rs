@@ -1,14 +1,11 @@
 use crate::{
-	BandwidthProducer, Error, OriginConsumer, OriginProducer,
+	Error, OriginConsumer, OriginProducer,
 	coding::{Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, GroupFlags, RequestId},
 	setup,
 };
 
 use super::{Control, Message, Publisher, Subscriber, Version, adapter::ControlStreamAdapter};
-
-/// Returned by `start()`: (send_bandwidth, recv_bandwidth)
-pub type Bandwidth = (Option<BandwidthProducer>, Option<BandwidthProducer>);
 
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
@@ -18,7 +15,7 @@ pub fn start<S: web_transport_trait::Session>(
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
 	version: Version,
-) -> Result<Bandwidth, Error> {
+) -> Result<(), Error> {
 	web_async::spawn(async move {
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
@@ -114,8 +111,7 @@ pub fn start<S: web_transport_trait::Session>(
 		}
 	});
 
-	// IETF versions don't support bandwidth estimation yet.
-	Ok((None, None))
+	Ok(())
 }
 
 /// Send our SETUP on a uni stream and keep it alive for potential GOAWAY.

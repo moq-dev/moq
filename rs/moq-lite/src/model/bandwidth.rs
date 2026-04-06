@@ -10,6 +10,7 @@ use crate::{Error, Result};
 #[derive(Default)]
 struct State {
 	bitrate: Option<u64>,
+	abort: Option<Error>,
 }
 
 /// Produces bandwidth estimates, notifying consumers when the value changes.
@@ -42,18 +43,39 @@ impl BandwidthProducer {
 		}
 	}
 
+	/// Close the producer with an error, notifying all consumers.
+	pub fn close(&self, err: Error) -> Result<()> {
+		let mut state = self.modify()?;
+		state.abort = Some(err);
+		state.close();
+		Ok(())
+	}
+
+	/// Block until the channel is closed.
+	pub async fn closed(&self) {
+		self.state.closed().await
+	}
+
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
-		self.state.unused().await.map_err(|_| Error::Dropped)
+		self.state
+			.unused()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
 	/// Block until there is at least one active consumer.
 	pub async fn used(&self) -> Result<()> {
-		self.state.used().await.map_err(|_| Error::Dropped)
+		self.state
+			.used()
+			.await
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
 	fn modify(&self) -> Result<conducer::Mut<'_, State>> {
-		self.state.write().map_err(|_| Error::Dropped)
+		self.state
+			.write()
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 }
 
@@ -72,7 +94,7 @@ pub struct BandwidthConsumer {
 
 impl BandwidthConsumer {
 	/// Get the current bandwidth estimate synchronously.
-	pub fn get(&self) -> Option<u64> {
+	pub fn peek(&self) -> Option<u64> {
 		self.state.read().bitrate
 	}
 
