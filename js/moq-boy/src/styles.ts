@@ -126,6 +126,16 @@ export const cardStyles = `
 	.util-btn.reset { color: #f87171; border-color: #7f1d1d; }
 	.util-btn.reset:hover { background: #2a1a1a; border-color: #f87171; }
 
+	.jitter-container {
+		width: 100%; display: flex; flex-direction: column; align-items: center; gap: 0.3rem;
+	}
+	.jitter-label {
+		font-family: monospace; font-size: 0.65rem; color: #888;
+	}
+	.jitter-slider {
+		width: 100%; accent-color: #8bac0f; cursor: pointer;
+	}
+
 	.key-hints {
 		font-family: monospace; font-size: 0.6rem; color: #555;
 		text-align: center; line-height: 1.6;
