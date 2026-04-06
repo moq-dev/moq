@@ -71,7 +71,14 @@ export class GameCard {
 		this.el.appendChild(controls);
 
 		// Build controls.
-		const { wrapper: controlsInner, locationEl, latencyList, statsList, muteBtn, jitterSlider } = this.#buildControls();
+		const {
+			wrapper: controlsInner,
+			locationEl,
+			latencyList,
+			statsList,
+			muteBtn,
+			jitterSlider,
+		} = this.#buildControls();
 		controls.appendChild(controlsInner);
 
 		// Track hover state (before keyboard setup so handlers can use it).
