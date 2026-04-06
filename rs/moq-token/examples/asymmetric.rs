@@ -6,7 +6,7 @@
 
 use std::time::{Duration, SystemTime};
 
-fn main() -> moq_token::Result<()> {
+fn main() -> anyhow::Result<()> {
 	// Generate an ECDSA P-256 key pair.
 	let private_key = moq_token::Key::generate(moq_token::Algorithm::ES256, Some(moq_token::KeyId::random()))?;
 	println!("Private key:\n{}\n", private_key.to_str()?);

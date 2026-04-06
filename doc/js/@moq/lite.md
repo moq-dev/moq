@@ -50,7 +50,7 @@ A collection of related tracks.
 
 ### Tracks
 
-Named streams within a broadcast, created via `subscribe`.
+Named streams within a broadcast, published by the producer and consumed via `subscribe`.
 
 ### Groups
 

@@ -2,7 +2,7 @@
 
 use std::time::{Duration, SystemTime};
 
-fn main() -> moq_token::Result<()> {
+fn main() -> anyhow::Result<()> {
 	// Generate an HMAC key with a random key ID.
 	let key = moq_token::Key::generate(moq_token::Algorithm::HS256, Some(moq_token::KeyId::random()))?;
 

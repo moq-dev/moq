@@ -145,7 +145,7 @@ See [Relay Authentication](/app/relay/auth) for details.
 
 ## JWK Set Support
 
-For key rotation, you can host a JWK set and configure the relay to fetch keys from a URL. See [Relay Authentication](/app/relay/auth) for configuration details.
+For key rotation, use the relay's `key_dir` option pointing to a directory or URL. The relay resolves keys on demand by extracting the `kid` (key ID) from the JWT header and fetching the corresponding `{kid}.jwk` file. See [Relay Authentication](/app/relay/auth) for configuration details.
 
 ## API Reference
 
