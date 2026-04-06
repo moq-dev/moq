@@ -149,12 +149,7 @@ impl Avc1 {
 				self.jitter = Some(duration);
 
 				if let Ok(jitter) = duration.convert() {
-					if let Some(c) = self.catalog
-						.lock()
-						.video
-						.renditions
-						.get_mut(&self.track.info.name)
-					{
+					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.info.name) {
 						c.jitter = Some(jitter);
 					}
 				}
