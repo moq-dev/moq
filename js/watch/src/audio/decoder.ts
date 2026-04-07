@@ -211,7 +211,9 @@ export class Decoder {
 				},
 				error: (error) => console.error(error),
 			});
-			effect.cleanup(() => decoder.close());
+			effect.cleanup(() => {
+				if (decoder.state !== "closed") decoder.close();
+			});
 
 			const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 			decoder.configure({
@@ -262,7 +264,9 @@ export class Decoder {
 				output: (data) => this.#emit(data),
 				error: (error) => console.error(error),
 			});
-			effect.cleanup(() => decoder.close());
+			effect.cleanup(() => {
+				if (decoder.state !== "closed") decoder.close();
+			});
 
 			// Configure decoder with description from catalog
 			decoder.configure({
