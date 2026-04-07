@@ -1,3 +1,9 @@
+//! Video encoding pipeline: RGBA framebuffer -> H.264 -> MoQ.
+//!
+//! Runs on a dedicated thread to avoid blocking the emulator's frame loop.
+//! The emulator sends RGBA frames via a bounded channel; if the encoder
+//! falls behind, frames are dropped with a warning (to keep latency low).
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -6,8 +12,11 @@ use bytes::Bytes;
 
 use crate::emulator::{HEIGHT, WIDTH};
 
-/// Run the video encoding pipeline on a dedicated thread.
-/// Receives RGBA frames, encodes to H.264, publishes via MoQ.
+/// Handle to the video encoding thread.
+///
+/// Frames are submitted via `try_frame()` (non-blocking, drops if full).
+/// The encoder thread converts RGBA -> YUV420P -> H.264 and publishes
+/// encoded packets via `moq_mux::import::Avc3`.
 pub struct VideoEncoder {
 	tx: tokio::sync::mpsc::Sender<EncoderMsg>,
 	/// Clone of the video track producer, for monitoring used/unused.
@@ -43,14 +52,31 @@ impl VideoEncoder {
 		}
 	}
 
-	/// Send a frame to the encoder. Non-blocking: drops the frame if the channel is full.
+	/// Send a frame to the encoder. Non-blocking: drops the frame if the
+	/// channel is full (capacity=4) to keep latency low.
 	pub fn try_frame(&self, rgba: Bytes, ts: hang::container::Timestamp) {
-		let _ = self.tx.try_send(EncoderMsg { rgba, ts });
+		if self.tx.try_send(EncoderMsg { rgba, ts }).is_err() {
+			tracing::warn!("video frame dropped: encoder backpressure");
+		}
 	}
 
-	/// Force the next encoded frame to be a keyframe. Cannot be lost.
+	/// Force the next encoded frame to be a keyframe (I-frame).
+	/// Used on resume after pause so new viewers can start decoding.
 	pub fn force_keyframe(&self) {
 		self.force_keyframe.store(true, Ordering::Release);
+	}
+
+	/// Bootstrap: encode one frame so the codec config (SPS/PPS) is
+	/// inserted into the catalog before any viewer connects.
+	pub fn bootstrap(&self, emu: &mut crate::emulator::Emulator, start: std::time::Instant) -> Result<()> {
+		emu.tick();
+		let rgba = Bytes::from(emu.framebuffer());
+		let pts_micros = start.elapsed().as_micros() as u64;
+		let ts = hang::container::Timestamp::from_micros(pts_micros).context("timestamp overflow")?;
+		self.try_frame(rgba, ts);
+		// Give the encoder thread time to process the initial frame.
+		std::thread::sleep(std::time::Duration::from_millis(100));
+		Ok(())
 	}
 }
 
@@ -67,6 +93,7 @@ fn encoder_thread(
 		let color_scaler = lazy_init(
 			&mut scaler,
 			|| {
+				// POINT filtering (nearest neighbor) preserves pixel-art crispness.
 				ffmpeg_next::software::scaling::Context::get(
 					ffmpeg_next::format::Pixel::RGBA,
 					WIDTH,
@@ -116,6 +143,8 @@ fn lazy_init<'a, T>(slot: &'a mut Option<T>, init: impl FnOnce() -> Result<T>, n
 	slot.as_mut()
 }
 
+/// Convert RGBA framebuffer to YUV420P for the H.264 encoder.
+/// Copies row-by-row to handle ffmpeg's stride (which may differ from width*4).
 fn rgba_to_yuv(
 	rgba: &[u8],
 	scaler: &mut ffmpeg_next::software::scaling::Context,
@@ -136,6 +165,7 @@ fn rgba_to_yuv(
 	scaler.run(&rgba_frame, &mut yuv)?;
 	yuv.set_pts(Some(frame_count as i64));
 
+	// First frame is always an I-frame to bootstrap the decoder.
 	if frame_count == 0 {
 		yuv.set_kind(ffmpeg_next::picture::Type::I);
 	}
@@ -158,12 +188,14 @@ impl Encoder {
 		enc.set_format(ffmpeg_next::format::Pixel::YUV420P);
 		enc.set_time_base(ffmpeg_next::Rational::new(1, 60));
 		enc.set_frame_rate(Some(ffmpeg_next::Rational::new(60, 1)));
+		// Keyframe every 240 frames (~4 seconds at 60fps).
+		// Viewers joining mid-stream wait at most this long for a keyframe.
 		enc.set_gop(240);
 
 		let mut opts = ffmpeg_next::Dictionary::new();
-		opts.set("preset", "ultrafast");
-		opts.set("tune", "zerolatency");
-		opts.set("crf", "18");
+		opts.set("preset", "ultrafast"); // Minimize encoding latency.
+		opts.set("tune", "zerolatency"); // Disable B-frames and lookahead.
+		opts.set("crf", "18"); // High quality — GB content is very low bitrate regardless.
 		let encoder = enc.open_with(opts)?;
 
 		Ok(Self {
