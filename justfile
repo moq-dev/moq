@@ -16,9 +16,9 @@ mod web 'demo/web'
 default:
 	just demo
 
-# Alias for `just demo web`.
+# Alias for `just demo`.
 dev:
-	just demo web
+	just demo
 
 # Install any dependencies.
 install:
