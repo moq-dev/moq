@@ -1,6 +1,20 @@
-# moq-token
+# moq-token-cli
 
 A simple JWT-based authentication scheme for moq-relay.
+
+## Install
+
+```bash
+cargo install moq-token-cli
+```
+
+### Docker
+
+```bash
+docker pull moqdev/moq-token-cli
+```
+
+Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-token-cli).
 
 ## Quick Usage (symmetric keys)
 

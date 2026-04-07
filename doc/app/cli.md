@@ -28,11 +28,11 @@ nix build github:moq-dev/moq#moq-cli
 ### Using Docker
 
 ```bash
-docker pull kixelated/moq-cli
-docker run -v "$(pwd)/video.mp4:/app/video.mp4:ro" kixelated/moq-cli publish /app/video.mp4 https://relay.example.com/anon/stream
+docker pull moqdev/moq-cli
+docker run -v "$(pwd)/video.mp4:/app/video.mp4:ro" moqdev/moq-cli publish /app/video.mp4 https://relay.example.com/anon/stream
 ```
 
-Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/kixelated/moq-cli).
+Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-cli).
 
 ### From Source
 
