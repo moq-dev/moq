@@ -21,17 +21,10 @@ program
 	.option("--id <id>", "Key ID (randomly generated if not provided)")
 	.option("--public <path>", "Path to save the public key (for asymmetric algorithms)")
 	.option("--base64", "Output as base64url instead of JSON", false)
-	.option("--guest-subscribe <path...>", "Path prefixes for unauthenticated subscribe access")
-	.option("--guest-publish <path...>", "Path prefixes for unauthenticated publish access")
-	.option("--guest <path...>", "Path prefixes for both unauthenticated subscribe and publish access")
 	.action(async (options) => {
 		try {
 			const algorithm = options.algorithm as Algorithm;
-			const key = await generate(algorithm, options.id, {
-				...(options.guest?.length && { guest: options.guest }),
-				...(options.guestSubscribe?.length && { guest_sub: options.guestSubscribe }),
-				...(options.guestPublish?.length && { guest_pub: options.guestPublish }),
-			});
+			const key = await generate(algorithm, options.id);
 
 			const encodeKey = (k: object): string => {
 				const json = JSON.stringify(k, null, 2);

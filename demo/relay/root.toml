@@ -30,5 +30,8 @@ listen = "[::]:4443"
 # If you want to disable authentication, don't specify a key.
 key = "dev.jwk"
 
-# Allow anonymous publishing and subscribing for anon/**
-public = "anon"
+# Allow anonymous subscribing for anon/** and demo/**
+# Allow anonymous publishing for anon/** only
+[auth.public]
+subscribe = ["anon", "demo"]
+publish = "anon"

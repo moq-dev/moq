@@ -26,9 +26,6 @@ pub fn generate(algorithm: Algorithm, id: Option<crate::KeyId>) -> crate::Result
 		operations: [KeyOperation::Sign, KeyOperation::Verify].into(),
 		algorithm,
 		key: key?,
-		guest: vec![],
-		guest_sub: vec![],
-		guest_pub: vec![],
 		decode: Default::default(),
 		encode: Default::default(),
 	})
