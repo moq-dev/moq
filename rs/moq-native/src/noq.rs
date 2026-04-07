@@ -23,8 +23,8 @@ impl NoqClient {
 		let socket = std::net::UdpSocket::bind(config.bind).context("failed to bind UDP socket")?;
 
 		let mut transport = noq::TransportConfig::default();
-		transport.max_idle_timeout(Some(time::Duration::from_secs(10).try_into().unwrap()));
-		transport.keep_alive_interval(Some(time::Duration::from_secs(4)));
+		transport.max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()));
+		transport.keep_alive_interval(Some(time::Duration::from_secs(5)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
@@ -148,8 +148,8 @@ pub(crate) struct NoqServer {
 impl NoqServer {
 	pub fn new(config: ServerConfig) -> anyhow::Result<Self> {
 		let mut transport = noq::TransportConfig::default();
-		transport.max_idle_timeout(Some(Duration::from_secs(10).try_into().unwrap()));
-		transport.keep_alive_interval(Some(Duration::from_secs(4)));
+		transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
+		transport.keep_alive_interval(Some(Duration::from_secs(5)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);

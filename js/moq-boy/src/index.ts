@@ -1,34 +1,41 @@
 import * as Moq from "@moq/lite";
 import * as Watch from "@moq/watch";
 
+export type { default as MoqBoy } from "./element.ts";
+export type { GameStats, GameStatus } from "./schemas.ts";
+export { GameStatsSchema, GameStatusSchema } from "./schemas.ts";
 export { Moq, Watch };
 
-export interface GameStats {
-	video_secs: number;
-	audio_secs: number;
-	emulation_secs: number;
-	wall_secs: number;
-}
+import type { GameStatus } from "./schemas.ts";
+import { GameStatusSchema } from "./schemas.ts";
 
-export interface GameStatus {
-	buttons: string[];
-	latency: Record<string, number>;
-	location?: string;
-	stats?: GameStats;
-}
-
-export interface GameCardConfig {
+/** Configuration for creating a Game instance. */
+export interface GameConfig {
+	/** Unique session identifier (e.g. the ROM name). */
 	sessionId: string;
+	/** MoQ connection to the relay. */
 	connection: Moq.Connection.Reload;
+	/** Shared signal tracking which game is currently expanded. */
 	expanded: Moq.Signals.Signal<string | undefined>;
-	root: ShadowRoot | HTMLElement;
+	/** MoQ path prefix for game broadcasts (e.g. "anon/boy/game"). */
+	gamePrefix: string;
+	/** MoQ path prefix for viewer broadcasts (e.g. "anon/boy/viewer"). */
+	viewerPrefix: string;
 }
 
 // Stop publishing feedback after 60s of no input.
 const FEEDBACK_IDLE_MS = 60_000;
 
-// Key mapping for keyboard input.
-const KEY_MAP: Record<string, string> = {
+// Game Boy native resolution.
+const GB_WIDTH = 160;
+const GB_HEIGHT = 144;
+const GB_PIXELS = GB_WIDTH * GB_HEIGHT;
+
+// Default jitter buffer in milliseconds.
+const DEFAULT_JITTER = 50 as Moq.Time.Milli;
+
+/** Key mapping from keyboard keys to Game Boy buttons. */
+export const KEY_MAP: Record<string, string> = {
 	ArrowUp: "up",
 	ArrowDown: "down",
 	ArrowLeft: "left",
@@ -41,532 +48,225 @@ const KEY_MAP: Record<string, string> = {
 	Shift: "select",
 };
 
-// A game session card: live video + audio, expandable with controls.
-export class GameCard {
-	el: HTMLDivElement;
-	#signals = new Moq.Signals.Effect();
-	#sendCommand: (cmd: Record<string, unknown>) => void = () => {};
-	#heldButtons = new Set<string>();
+/**
+ * A Game Boy streaming session — the non-UI backend.
+ *
+ * Manages video/audio playback, input commands, and status tracking
+ * for a single game session. The UI layer (SolidJS components) reads
+ * signals from this class to render the interface.
+ */
+export class Game {
+	readonly sessionId: string;
+	readonly #signals = new Moq.Signals.Effect();
 
-	constructor(config: GameCardConfig) {
-		const { sessionId, connection, expanded } = config;
+	// Config references.
+	readonly expanded: Moq.Signals.Signal<string | undefined>;
+	readonly #viewerPrefix: string;
 
-		this.el = document.createElement("div");
-		this.el.className = "card";
+	// Reactive state exposed to UI.
+	readonly hovered = new Moq.Signals.Signal(false);
+	readonly active = new Moq.Signals.Signal(false);
+	readonly jitter = new Moq.Signals.Signal<Moq.Time.Milli>(DEFAULT_JITTER);
+	readonly userMuted = new Moq.Signals.Signal(false);
+	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
+	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
 
-		// Canvas for video.
-		const canvas = document.createElement("canvas");
-		canvas.className = "video";
-		this.el.appendChild(canvas);
+	// Watch API objects — exposed so UI can access canvas, etc.
+	readonly broadcast: Watch.Broadcast;
+	readonly sync: Watch.Sync;
+	readonly videoSource: Watch.Video.Source;
+	readonly videoDecoder: Watch.Video.Decoder;
+	readonly videoRenderer: Watch.Video.Renderer;
+	readonly audioSource: Watch.Audio.Source;
+	readonly audioDecoder: Watch.Audio.Decoder;
+	readonly audioEmitter: Watch.Audio.Emitter;
 
-		// Label overlay.
-		const label = document.createElement("div");
-		label.className = "label";
-		label.textContent = sessionId;
-		this.el.appendChild(label);
+	// Input state.
+	readonly heldButtons = new Set<string>();
 
-		// Controls container.
-		const controls = document.createElement("div");
-		controls.className = "controls";
-		this.el.appendChild(controls);
+	// Internal command publishing state.
+	#commandTrack: Moq.Track | undefined;
+	#pendingCommand: Record<string, unknown> | undefined;
+	#feedbackActive = new Moq.Signals.Signal(false);
+	#feedbackTimeout: ReturnType<typeof setTimeout> | undefined;
 
-		// Build controls.
-		const {
-			wrapper: controlsInner,
-			locationEl,
-			latencyList,
-			statsList,
-			muteBtn,
-			jitterSlider,
-		} = this.#buildControls();
-		controls.appendChild(controlsInner);
+	constructor(config: GameConfig) {
+		const { sessionId, connection, expanded, gamePrefix, viewerPrefix } = config;
+		this.sessionId = sessionId;
+		this.expanded = expanded;
+		this.#viewerPrefix = viewerPrefix;
 
-		// Track hover state (before keyboard setup so handlers can use it).
-		const hovered = new Moq.Signals.Signal(false);
-		this.#signals.event(this.el, "mouseenter", () => hovered.set(true));
-		this.#signals.event(this.el, "mouseleave", () => hovered.set(false));
+		// Derive active state from expanded + hovered.
+		this.#signals.run(this.#runActive.bind(this));
 
-		// Derive a stable active signal for gating input/commands.
-		const isActive = new Moq.Signals.Signal(false);
-		this.#signals.run((effect) => {
-			const exp = effect.get(expanded);
-			const hover = effect.get(hovered);
-			isActive.set(exp === sessionId || hover);
-		});
-
-		// Toggle expand on click or keyboard (Enter/Space) for accessibility.
-		const toggleExpand = () => {
-			if (expanded.peek() === sessionId) {
-				expanded.set(undefined);
-			} else {
-				expanded.set(sessionId);
-			}
-		};
-		canvas.tabIndex = 0;
-		this.#signals.event(canvas, "click", toggleExpand);
-		this.#signals.event(canvas, "keydown", (e) => {
-			const ke = e as KeyboardEvent;
-			if (ke.key === "Enter" || ke.key === " ") {
-				ke.preventDefault();
-				ke.stopPropagation();
-				toggleExpand();
-			}
-		});
-
-		// React to expand state for CSS class and controls visibility.
-		this.#signals.run((effect) => {
-			const exp = effect.get(expanded);
-			const isExpanded = exp === sessionId;
-			this.el.classList.toggle("expanded", isExpanded);
-			controls.style.display = isExpanded ? "flex" : "none";
-		});
-
-		// Clear held buttons when card becomes inactive.
-		this.#signals.run((effect) => {
-			const active = effect.get(isActive);
-			if (!active && this.#heldButtons.size > 0) {
-				this.#heldButtons.clear();
-				this.#sendButtons();
-			}
-		});
-
-		// Keyboard input when hovered or expanded.
-		const onKeyDown = (e: KeyboardEvent) => {
-			if (!isActive.peek()) return;
-			if (e.repeat) return;
-
-			const button = KEY_MAP[e.key];
-			if (button) {
-				this.#heldButtons.add(button);
-				this.#sendButtons();
-				e.preventDefault();
-			} else if (e.key === "Escape" && expanded.peek() === sessionId) {
-				expanded.set(undefined);
-				e.preventDefault();
-			}
-		};
-		const onKeyUp = (e: KeyboardEvent) => {
-			if (!isActive.peek()) return;
-			const button = KEY_MAP[e.key];
-			if (button) {
-				this.#heldButtons.delete(button);
-				this.#sendButtons();
-				e.preventDefault();
-			}
-		};
-		const onBlur = () => {
-			if (this.#heldButtons.size > 0) {
-				this.#heldButtons.clear();
-				this.#sendButtons();
-			}
-		};
-		this.#signals.event(document, "keydown", onKeyDown);
-		this.#signals.event(document, "keyup", onKeyUp);
-		this.#signals.event(window, "blur", onBlur);
-
-		// Set up video via Watch API.
-		const broadcast = new Watch.Broadcast({
+		// Video pipeline.
+		this.broadcast = new Watch.Broadcast({
 			connection: connection.established,
-			name: Moq.Path.from(`boy/${sessionId}`),
+			name: Moq.Path.from(`${gamePrefix}/${sessionId}`),
 			enabled: true,
 		});
-		this.#signals.cleanup(() => broadcast.close());
+		this.#signals.cleanup(() => this.broadcast.close());
 
-		const jitter = new Moq.Signals.Signal<Moq.Time.Milli>(50 as Moq.Time.Milli);
-		const sync = new Watch.Sync({ jitter });
-		this.#signals.cleanup(() => sync.close());
+		this.sync = new Watch.Sync({ jitter: this.jitter });
+		this.#signals.cleanup(() => this.sync.close());
 
-		const videoSource = new Watch.Video.Source(sync, { broadcast });
-		this.#signals.cleanup(() => videoSource.close());
+		this.videoSource = new Watch.Video.Source(this.sync, { broadcast: this.broadcast });
+		this.#signals.cleanup(() => this.videoSource.close());
 
-		// Set pixel budget based on expanded state.
-		this.#signals.run((effect) => {
-			const exp = effect.get(expanded);
-			// Native GB is 160x144 = 23040 pixels. When expanded, allow more for quality.
-			const pixels = exp === sessionId ? 160 * 144 * 4 : 160 * 144;
-			videoSource.target.set({ pixels });
-		});
+		this.#signals.run(this.#runPixelBudget.bind(this));
 
-		const videoDecoder = new Watch.Video.Decoder(videoSource);
-		this.#signals.cleanup(() => videoDecoder.close());
+		// Pass active signal directly — no effect wrapper needed.
+		this.videoDecoder = new Watch.Video.Decoder(this.videoSource, { enabled: this.active });
+		this.#signals.cleanup(() => this.videoDecoder.close());
 
-		// Disable non-expanded cards to save bandwidth.
-		this.#signals.run((effect) => {
-			const exp = effect.get(expanded);
-			const active = exp === undefined || exp === sessionId;
-			videoDecoder.enabled.set(active);
-		});
+		// Renderer needs a canvas — created by the UI layer, set via setCanvas().
+		this.videoRenderer = new Watch.Video.Renderer(this.videoDecoder);
+		this.#signals.cleanup(() => this.videoRenderer.close());
 
-		const videoRenderer = new Watch.Video.Renderer(videoDecoder, { canvas });
-		this.#signals.cleanup(() => videoRenderer.close());
+		// Audio pipeline — pass signals directly.
+		this.audioSource = new Watch.Audio.Source(this.sync, { broadcast: this.broadcast });
+		this.#signals.cleanup(() => this.audioSource.close());
 
-		// Set up audio — play on hover at 50% volume.
-		const audioSource = new Watch.Audio.Source(sync, { broadcast });
-		this.#signals.cleanup(() => audioSource.close());
+		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, { enabled: this.active });
+		this.#signals.cleanup(() => this.audioDecoder.close());
 
-		const audioDecoder = new Watch.Audio.Decoder(audioSource);
-		this.#signals.cleanup(() => audioDecoder.close());
+		// Derive a muted signal: muted when user mutes OR when not active.
+		const muted = new Moq.Signals.Signal(true);
+		this.#signals.run(this.#runAudioMuted.bind(this, muted));
 
-		const audioEmitter = new Watch.Audio.Emitter(audioDecoder, { volume: 0.5, muted: true });
-		this.#signals.cleanup(() => audioEmitter.close());
+		this.audioEmitter = new Watch.Audio.Emitter(this.audioDecoder, { volume: 0.5, muted });
+		this.#signals.cleanup(() => this.audioEmitter.close());
 
 		// Resume AudioContext on first user interaction (browser autoplay policy).
-		const resumeEvents = ["click", "touchstart", "touchend", "mousedown", "keydown"];
-		const resumeAudio = () => {
-			const ctx = audioDecoder.context.peek();
-			if (ctx && ctx.state === "suspended") {
-				ctx.resume();
-			}
-		};
-		for (const event of resumeEvents) {
-			document.addEventListener(event, resumeAudio, { once: true });
-		}
-		this.#signals.cleanup(() => {
-			for (const event of resumeEvents) {
-				document.removeEventListener(event, resumeAudio);
-			}
-		});
-
-		// Enable audio decoding when hovered or expanded.
-		this.#signals.run((effect) => {
-			audioDecoder.enabled.set(effect.get(isActive));
-		});
-
-		// Unmute on hover/expand (user gesture satisfies autoplay policy).
-		const userMuted = new Moq.Signals.Signal(false);
-		this.#signals.run((effect) => {
-			const active = effect.get(isActive);
-			const muted = effect.get(userMuted);
-			audioEmitter.muted.set(muted || !active);
-		});
-
-		// Subscribe to status track for button highlights and latency.
-		this.#signals.run((effect) => {
-			const active = effect.get(broadcast.active);
-			if (!active) return;
-
-			const statusTrack = active.subscribe("status", 10);
-			effect.cleanup(() => statusTrack.close());
-
-			effect.spawn(async () => {
-				for (;;) {
-					const json = (await Promise.race([effect.cancel, statusTrack.readJson()])) as
-						| GameStatus
-						| undefined;
-					if (!json) break;
-
-					// Highlight currently pressed buttons.
-					const allBtns = controls.querySelectorAll("[data-button]");
-					for (const btn of allBtns) {
-						const name = (btn as HTMLElement).dataset.button;
-						(btn as HTMLElement).classList.toggle("active", json.buttons.includes(name ?? ""));
-					}
-
-					// Show location if available.
-					if (json.location) {
-						locationEl.style.display = "block";
-						locationEl.textContent = json.location;
-					} else {
-						locationEl.style.display = "none";
-					}
-
-					// Show per-viewer latency.
-					const vid = currentViewerId.peek();
-					const entries = Object.entries(json.latency ?? {});
-
-					// Update label with viewer count.
-					const n = entries.length;
-					label.textContent = n > 0 ? `${sessionId} (${n})` : sessionId;
-
-					// Controls panel: show all viewers with latency.
-					latencyList.replaceChildren();
-					if (entries.length > 0) {
-						const header = document.createElement("div");
-						header.className = "latency-header";
-						header.textContent = `Latency (${n} viewer${n !== 1 ? "s" : ""})`;
-						latencyList.appendChild(header);
-						for (const [id, ms] of entries) {
-							const row = document.createElement("div");
-							row.className = id === vid ? "latency-entry self" : "latency-entry";
-							const nameSpan = document.createElement("span");
-							nameSpan.textContent = id === vid ? `${id} (you)` : id;
-							const msSpan = document.createElement("span");
-							msSpan.textContent = `${ms}ms`;
-							row.appendChild(nameSpan);
-							row.appendChild(msSpan);
-							latencyList.appendChild(row);
-						}
-					}
-
-					// Stats panel: show encoding/emulation time.
-					if (json.stats) {
-						const s = json.stats;
-						const pct = (v: number) => (s.wall_secs > 0 ? Math.round((v / s.wall_secs) * 100) : 0);
-
-						statsList.replaceChildren();
-						const statsHeader = document.createElement("div");
-						statsHeader.className = "stats-header";
-						statsHeader.textContent = `Stats (${s.wall_secs}s)`;
-						statsList.appendChild(statsHeader);
-
-						const items: [string, number][] = [
-							["Video", s.video_secs],
-							["Audio", s.audio_secs],
-							["Emulation", s.emulation_secs],
-						];
-
-						for (const [itemLabel, secs] of items) {
-							const row = document.createElement("div");
-							row.className = "stats-entry";
-							const nameSpan = document.createElement("span");
-							nameSpan.textContent = itemLabel;
-							const valSpan = document.createElement("span");
-							valSpan.textContent = `${secs}s (${pct(secs)}%)`;
-							row.appendChild(nameSpan);
-							row.appendChild(valSpan);
-							statsList.appendChild(row);
-						}
-					}
-				}
+		for (const event of ["click", "touchstart", "touchend", "mousedown", "keydown"]) {
+			this.#signals.event(document, event, () => {
+				const ctx = this.audioDecoder.context.peek();
+				if (ctx?.state === "suspended") ctx.resume();
 			});
-		});
-
-		// Command publishing — only publish feedback broadcast when there's recent input.
-		let commandTrack: Moq.Track | undefined;
-		let pendingCommand: Record<string, unknown> | undefined;
-		const currentViewerId = new Moq.Signals.Signal<string | undefined>(undefined);
-		const feedbackActive = new Moq.Signals.Signal(false);
-		let feedbackTimeout: Moq.Signals.Effect | undefined;
-
-		this.#signals.cleanup(() => feedbackTimeout?.close());
-
-		this.#signals.run((effect) => {
-			const conn = effect.get(connection.established);
-			if (!conn) return;
-
-			if (!effect.get(isActive)) {
-				// Clear feedback state when deactivating.
-				feedbackActive.set(false);
-				feedbackTimeout?.close();
-				pendingCommand = undefined;
-				return;
-			}
-
-			const active = effect.get(feedbackActive);
-			if (!active) return;
-
-			const viewerId = Math.random().toString(36).slice(2, 8);
-			currentViewerId.set(viewerId);
-			const viewerBroadcast = new Moq.Broadcast();
-			conn.publish(Moq.Path.from(`boy/${sessionId}/viewer/${viewerId}`), viewerBroadcast);
-			effect.cleanup(() => {
-				viewerBroadcast.close();
-				commandTrack = undefined;
-				currentViewerId.set(undefined);
-			});
-
-			effect.spawn(async () => {
-				for (;;) {
-					const req = await Promise.race([effect.cancel, viewerBroadcast.requested()]);
-					if (!req) break;
-					if (req.track.name === "command") {
-						commandTrack = req.track;
-						// Flush any pending command that triggered activation.
-						if (pendingCommand) {
-							const ts = videoDecoder.timestamp.peek();
-							commandTrack.writeJson({ ...pendingCommand, ts: ts ?? 0 });
-							pendingCommand = undefined;
-						}
-					}
-				}
-			});
-		});
-
-		this.#sendCommand = (cmd: Record<string, unknown>) => {
-			// Activate feedback broadcasting on input, with idle timeout.
-			feedbackActive.set(true);
-			feedbackTimeout?.close();
-			feedbackTimeout = new Moq.Signals.Effect();
-			feedbackTimeout.timer(() => feedbackActive.set(false), FEEDBACK_IDLE_MS);
-
-			if (!commandTrack) {
-				pendingCommand = cmd;
-				return;
-			}
-			// Attach the current video timestamp so the publisher can measure latency.
-			const ts = videoDecoder.timestamp.peek();
-			commandTrack.writeJson({ ...cmd, ts: ts ?? 0 });
-		};
-
-		// Wire up jitter slider to sync.
-		jitterSlider.addEventListener("input", () => {
-			jitter.set(Number.parseInt(jitterSlider.value, 10) as Moq.Time.Milli);
-		});
-
-		// Wire up mute toggle button.
-		muteBtn.textContent = "Mute";
-		muteBtn.addEventListener("click", (e) => {
-			e.stopPropagation();
-			const muted = !userMuted.peek();
-			userMuted.set(muted);
-			muteBtn.textContent = muted ? "Unmute" : "Mute";
-			muteBtn.classList.toggle("unmuted", !muted);
-		});
-	}
-
-	#buildControls(): {
-		wrapper: HTMLElement;
-		locationEl: HTMLElement;
-		latencyList: HTMLElement;
-		statsList: HTMLElement;
-		muteBtn: HTMLButtonElement;
-		jitterSlider: HTMLInputElement;
-	} {
-		const wrapper = document.createElement("div");
-		wrapper.className = "controls-inner";
-
-		// D-pad
-		const dpad = document.createElement("div");
-		dpad.className = "dpad";
-
-		const makeBtn = (className: string, label: string, buttonName: string) => {
-			const btn = document.createElement("button");
-			btn.textContent = label;
-			btn.className = className;
-			btn.dataset.button = buttonName;
-			btn.addEventListener("mousedown", (e) => {
-				e.stopPropagation();
-				this.#heldButtons.add(buttonName);
-				this.#sendButtons();
-			});
-			btn.addEventListener("mouseup", (e) => {
-				e.stopPropagation();
-				this.#heldButtons.delete(buttonName);
-				this.#sendButtons();
-			});
-			btn.addEventListener("mouseleave", () => {
-				if (this.#heldButtons.has(buttonName)) {
-					this.#heldButtons.delete(buttonName);
-					this.#sendButtons();
-				}
-			});
-			btn.addEventListener("touchstart", (e) => {
-				e.preventDefault();
-				this.#heldButtons.add(buttonName);
-				this.#sendButtons();
-			});
-			btn.addEventListener("touchend", (e) => {
-				e.preventDefault();
-				this.#heldButtons.delete(buttonName);
-				this.#sendButtons();
-			});
-			return btn;
-		};
-
-		dpad.appendChild(makeBtn("dpad-btn dpad-up", "\u25B2", "up"));
-		dpad.appendChild(makeBtn("dpad-btn dpad-left", "\u25C4", "left"));
-		dpad.appendChild(makeBtn("dpad-btn dpad-right", "\u25BA", "right"));
-		dpad.appendChild(makeBtn("dpad-btn dpad-down", "\u25BC", "down"));
-
-		// A/B buttons
-		const abBtns = document.createElement("div");
-		abBtns.className = "ab-buttons";
-		abBtns.appendChild(makeBtn("ab-btn", "B", "b"));
-		abBtns.appendChild(makeBtn("ab-btn", "A", "a"));
-
-		// Start/Select
-		const metaBtns = document.createElement("div");
-		metaBtns.className = "meta-buttons";
-		metaBtns.appendChild(makeBtn("meta-btn", "Select", "select"));
-		metaBtns.appendChild(makeBtn("meta-btn", "Start", "start"));
-
-		// Utility buttons
-		const utilBtns = document.createElement("div");
-		utilBtns.className = "util-buttons";
-
-		const muteBtn = document.createElement("button");
-		muteBtn.className = "util-btn mute-btn";
-		muteBtn.textContent = "Unmute";
-		utilBtns.appendChild(muteBtn);
-
-		const resetBtn = document.createElement("button");
-		resetBtn.className = "util-btn reset";
-		resetBtn.textContent = "Reset";
-		resetBtn.addEventListener("click", (e) => {
-			e.stopPropagation();
-			this.#sendCommand({ type: "reset" });
-		});
-		utilBtns.appendChild(resetBtn);
-
-		// Jitter/latency slider
-		const jitterContainer = document.createElement("div");
-		jitterContainer.className = "jitter-container";
-
-		const jitterLabel = document.createElement("label");
-		jitterLabel.className = "jitter-label";
-		jitterLabel.textContent = "Buffer: 50ms";
-
-		const jitterSlider = document.createElement("input");
-		jitterSlider.type = "range";
-		jitterSlider.className = "jitter-slider";
-		jitterSlider.min = "0";
-		jitterSlider.max = "500";
-		jitterSlider.value = "50";
-		jitterSlider.addEventListener("input", () => {
-			jitterLabel.textContent = `Buffer: ${jitterSlider.value}ms`;
-		});
-		jitterSlider.addEventListener("click", (e) => e.stopPropagation());
-
-		jitterContainer.appendChild(jitterLabel);
-		jitterContainer.appendChild(jitterSlider);
-
-		// Key hints
-		const hints = document.createElement("div");
-		hints.className = "key-hints";
-		const lines = ["Arrows: D-pad", "Z: B \u00A0 X: A", "Enter: Start \u00A0 Shift: Select", "Esc: Collapse"];
-		for (const line of lines) {
-			const div = document.createElement("div");
-			div.textContent = line;
-			hints.appendChild(div);
 		}
 
-		// Location label (populated by status track)
-		const locationEl = document.createElement("div");
-		locationEl.className = "location";
-		locationEl.style.display = "none";
+		// Subscribe to status track.
+		this.#signals.run(this.#runStatus.bind(this));
 
-		// Latency list (populated by status track)
-		const latencyList = document.createElement("div");
-		latencyList.className = "latency-list";
-
-		wrapper.appendChild(dpad);
-		wrapper.appendChild(abBtns);
-		wrapper.appendChild(metaBtns);
-		wrapper.appendChild(utilBtns);
-		wrapper.appendChild(jitterContainer);
-
-		const latencyNote = document.createElement("div");
-		latencyNote.className = "latency-note";
-		latencyNote.textContent = "Includes both the render delay AND the input delay.";
-
-		// Stats list (populated by status track)
-		const statsList = document.createElement("div");
-		statsList.className = "stats-list";
-
-		wrapper.appendChild(hints);
-		wrapper.appendChild(locationEl);
-		wrapper.appendChild(latencyList);
-		wrapper.appendChild(statsList);
-		wrapper.appendChild(latencyNote);
-
-		return { wrapper, locationEl, latencyList, statsList, muteBtn, jitterSlider };
+		// Command publishing.
+		this.#signals.run(this.#runCommands.bind(this, connection));
 	}
 
-	#sendButtons() {
-		this.#sendCommand({ type: "buttons", buttons: [...this.#heldButtons] });
+	/** Toggle this game's expanded state. */
+	toggleExpand() {
+		this.expanded.update((old) => (old === this.sessionId ? undefined : this.sessionId));
+	}
+
+	/** Send a button state update. */
+	sendButtons() {
+		this.sendCommand({ type: "buttons", buttons: [...this.heldButtons] });
+	}
+
+	/** Send a command to the emulator. */
+	sendCommand(cmd: Record<string, unknown>) {
+		// Activate feedback broadcasting on input, with idle timeout.
+		this.#feedbackActive.set(true);
+		clearTimeout(this.#feedbackTimeout);
+		this.#feedbackTimeout = setTimeout(() => this.#feedbackActive.set(false), FEEDBACK_IDLE_MS);
+
+		if (!this.#commandTrack) {
+			this.#pendingCommand = cmd;
+			return;
+		}
+
+		const ts = this.videoDecoder.timestamp.peek();
+		this.#commandTrack.writeJson({ ...cmd, ts: ts ?? 0 });
 	}
 
 	close() {
+		clearTimeout(this.#feedbackTimeout);
 		this.#signals.close();
+	}
+
+	// --- Effect callbacks ---
+
+	#runActive(effect: Moq.Signals.Effect) {
+		const exp = effect.get(this.expanded);
+		const hover = effect.get(this.hovered);
+		this.active.set(exp === this.sessionId || hover);
+	}
+
+	#runPixelBudget(effect: Moq.Signals.Effect) {
+		const exp = effect.get(this.expanded);
+		// Native GB is 160x144 = 23040 pixels. When expanded, allow 4x for quality.
+		const pixels = exp === this.sessionId ? GB_PIXELS * 4 : GB_PIXELS;
+		this.videoSource.target.set({ pixels });
+	}
+
+	#runAudioMuted(muted: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
+		const active = effect.get(this.active);
+		const userMuted = effect.get(this.userMuted);
+		muted.set(userMuted || !active);
+	}
+
+	#runStatus(effect: Moq.Signals.Effect) {
+		const active = effect.get(this.broadcast.active);
+		if (!active) return;
+
+		const statusTrack = active.subscribe("status", 10);
+		effect.cleanup(() => statusTrack.close());
+
+		effect.spawn(async () => {
+			for (;;) {
+				const json = await Promise.race([effect.cancel, statusTrack.readJson()]);
+				if (!json) break;
+
+				const result = GameStatusSchema.safeParse(json);
+				if (!result.success) {
+					console.warn("Invalid status JSON:", result.error);
+					continue;
+				}
+
+				this.status.set(result.data);
+			}
+		});
+	}
+
+	#runCommands(connection: Moq.Connection.Reload, effect: Moq.Signals.Effect) {
+		const conn = effect.get(connection.established);
+		if (!conn) return;
+
+		if (!effect.get(this.active)) {
+			// Clear feedback state when deactivating.
+			this.#feedbackActive.set(false);
+			clearTimeout(this.#feedbackTimeout);
+			this.#pendingCommand = undefined;
+			return;
+		}
+
+		const active = effect.get(this.#feedbackActive);
+		if (!active) return;
+
+		const viewerId = Math.random().toString(36).slice(2, 8);
+		this.viewerId.set(viewerId);
+
+		const viewerBroadcast = new Moq.Broadcast();
+		conn.publish(Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`), viewerBroadcast);
+		effect.cleanup(() => {
+			viewerBroadcast.close();
+			this.#commandTrack = undefined;
+			this.viewerId.set(undefined);
+		});
+
+		effect.spawn(async () => {
+			for (;;) {
+				const req = await Promise.race([effect.cancel, viewerBroadcast.requested()]);
+				if (!req) break;
+				if (req.track.name === "command") {
+					this.#commandTrack = req.track;
+					// Flush any pending command that triggered activation.
+					if (this.#pendingCommand) {
+						const ts = this.videoDecoder.timestamp.peek();
+						this.#commandTrack.writeJson({ ...this.#pendingCommand, ts: ts ?? 0 });
+						this.#pendingCommand = undefined;
+					}
+				}
+			}
+		});
 	}
 }

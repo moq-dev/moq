@@ -1,0 +1,116 @@
+.boy__card {
+	position: relative;
+	background: var(--boy-bg-card);
+	border: 1px solid var(--boy-border);
+	border-radius: var(--spacing-8);
+	overflow: hidden;
+	cursor: pointer;
+	transition: all 0.3s ease;
+	width: 320px;
+	aspect-ratio: 10 / 9;
+}
+
+.boy__card:hover {
+	border-color: var(--boy-accent);
+}
+
+/* Expanded: fill container, hide non-expanded cards via grid */
+.boy__card--expanded {
+	width: 100%;
+	height: 100%;
+	border-radius: 0;
+	border: none;
+	aspect-ratio: auto;
+	display: flex;
+	flex-direction: row;
+	justify-content: space-around;
+}
+
+.boy__grid--expanded .boy__card:not(.boy__card--expanded) {
+	display: none;
+}
+
+/* Video canvas */
+.boy__video {
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+	background: #000;
+	display: block;
+	image-rendering: pixelated;
+	outline: none;
+}
+
+.boy__video:focus-visible {
+	outline: 2px solid var(--boy-accent);
+	outline-offset: -2px;
+}
+
+.boy__card--expanded .boy__video {
+	flex: 1;
+	min-width: 0;
+	max-width: 640px;
+	max-height: 576px;
+	align-self: center;
+}
+
+/* Session label overlay */
+.boy__label {
+	position: absolute;
+	top: var(--spacing-8);
+	right: var(--spacing-8);
+	background: var(--color-black-alpha-70);
+	color: var(--boy-accent);
+	padding: var(--spacing-2) var(--spacing-8);
+	border-radius: var(--spacing-4);
+	font-family: monospace;
+	font-size: 0.7rem;
+}
+
+/* Side panels (expanded only) */
+.boy__panel {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	width: 240px;
+	background: var(--boy-bg-card);
+	flex-shrink: 0;
+	padding: var(--spacing-16);
+	gap: var(--spacing-16);
+}
+
+.boy__panel--left {
+	border-right: 1px solid var(--boy-border);
+	order: -1;
+}
+
+.boy__panel--right {
+	border-left: 1px solid var(--boy-border);
+}
+
+/* On narrow screens, stack panels below video instead of side-by-side. */
+@media (max-width: 640px) {
+	.boy__card--expanded {
+		flex-direction: column;
+		overflow-y: auto;
+	}
+
+	.boy__card--expanded .boy__video {
+		max-width: 100%;
+		max-height: none;
+	}
+
+	.boy__panel,
+	.boy__panel--left,
+	.boy__panel--right {
+		width: 100%;
+		border-left: none;
+		border-right: none;
+		border-top: 1px solid var(--boy-border);
+	}
+
+	.boy__panel--left {
+		order: 0;
+	}
+}

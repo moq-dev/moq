@@ -1,161 +1,51 @@
 import * as Moq from "@moq/lite";
-import { GameCard } from "./index.ts";
-import { gridStyles } from "./styles.ts";
+import type { GameConfig } from "./index.ts";
+import { Game } from "./index.ts";
 
-const OBSERVED = ["url"] as const;
+const OBSERVED = ["url", "game-prefix", "viewer-prefix"] as const;
 type Observed = (typeof OBSERVED)[number];
+
+const DEFAULT_GAME_PREFIX = "anon/boy/game";
+const DEFAULT_VIEWER_PREFIX = "anon/boy/viewer";
 
 const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
 
+/**
+ * `<moq-boy>` web component — discovers and manages Game Boy streaming sessions.
+ *
+ * Connects to a MoQ relay, discovers game sessions via announcements,
+ * and creates Game instances for each. The UI layer (moq-boy-ui) renders
+ * the visual interface by reading signals from this element.
+ *
+ * Attributes:
+ *   - `url` — MoQ relay URL
+ *   - `game-prefix` — Path prefix for game broadcasts (default: "anon/boy/game")
+ *   - `viewer-prefix` — Path prefix for viewer broadcasts (default: "anon/boy/viewer")
+ */
 export default class MoqBoy extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
-	connection: Moq.Connection.Reload;
-	#signals = new Moq.Signals.Effect();
-	#enabled = new Moq.Signals.Signal(false);
-	#sessions = new Map<string, GameCard>();
-	#expanded = new Moq.Signals.Signal<string | undefined>(undefined);
-	#gridEl: HTMLDivElement;
-	#emptyState: HTMLDivElement;
-	#statusEl: HTMLSpanElement;
+	readonly connection: Moq.Connection.Reload;
+	readonly expanded = new Moq.Signals.Signal<string | undefined>(undefined);
+
+	/** Reactive map of active game sessions. Emits on add/remove. */
+	readonly games = new Moq.Signals.Signal<ReadonlyMap<string, Game>>(new Map());
+
+	readonly #signals = new Moq.Signals.Effect();
+	readonly #enabled = new Moq.Signals.Signal(false);
+	readonly #gamePrefix = new Moq.Signals.Signal(DEFAULT_GAME_PREFIX);
+	readonly #viewerPrefix = new Moq.Signals.Signal(DEFAULT_VIEWER_PREFIX);
+	readonly #sessions = new Map<string, Game>();
 
 	constructor() {
 		super();
-
 		cleanup.register(this, this.#signals);
 
-		const shadow = this.attachShadow({ mode: "open" });
-
-		// Inject styles.
-		const style = document.createElement("style");
-		style.textContent = gridStyles;
-		shadow.appendChild(style);
-
-		// Header.
-		const header = document.createElement("header");
-		const h1 = document.createElement("h1");
-		h1.textContent = "MoQ Boy";
-		this.#statusEl = document.createElement("span");
-		this.#statusEl.className = "status";
-		this.#statusEl.textContent = "Disconnected";
-		header.appendChild(h1);
-		header.appendChild(this.#statusEl);
-		shadow.appendChild(header);
-
-		// Grid.
-		this.#gridEl = document.createElement("div");
-		this.#gridEl.className = "grid";
-		shadow.appendChild(this.#gridEl);
-
-		// Empty state.
-		this.#emptyState = document.createElement("div");
-		this.#emptyState.className = "empty-state";
-		this.#emptyState.style.display = "block";
-
-		const emptyIcon = document.createElement("div");
-		emptyIcon.className = "icon";
-		emptyIcon.textContent = "\u{1F3AE}";
-		this.#emptyState.appendChild(emptyIcon);
-
-		const emptyMsg = document.createElement("div");
-		emptyMsg.className = "msg";
-		emptyMsg.textContent = "No games online";
-		this.#emptyState.appendChild(emptyMsg);
-
-		const emptyHint = document.createElement("div");
-		emptyHint.className = "hint";
-		emptyHint.textContent = "Waiting for Game Boy sessions to connect...";
-		this.#emptyState.appendChild(emptyHint);
-
-		this.#gridEl.appendChild(this.#emptyState);
-
-		// About section.
-		const about = document.createElement("div");
-		about.className = "about";
-
-		const aboutP1 = document.createElement("p");
-		aboutP1.textContent = "Click a game to play. Everyone controls the same game (anarchy mode).";
-		about.appendChild(aboutP1);
-
-		const aboutP2 = document.createElement("p");
-		aboutP2.textContent = "A generic ";
-		const moqLink = document.createElement("a");
-		moqLink.href = "https://moq.dev";
-		moqLink.textContent = "MoQ";
-		aboutP2.appendChild(moqLink);
-		aboutP2.appendChild(document.createTextNode(" relay is used for everything:"));
-		about.appendChild(aboutP2);
-
-		const aboutUl = document.createElement("ul");
-		for (const text of [
-			"Discovering online games and players.",
-			"Transmitting audio/video tracks, metadata, and (multiple) player controls.",
-			"Subscribing to audio/video on-demand.",
-			"Pausing emulation/encoding when there are no subscribers.",
-		]) {
-			const li = document.createElement("li");
-			li.textContent = text;
-			aboutUl.appendChild(li);
-		}
-		about.appendChild(aboutUl);
-		shadow.appendChild(about);
-
-		// Connection.
 		this.connection = new Moq.Connection.Reload({ enabled: this.#enabled });
 		this.#signals.cleanup(() => this.connection.close());
 
-		// Track connection status.
-		this.#signals.run((e) => {
-			const status = e.get(this.connection.status);
-			this.#statusEl.textContent = status.charAt(0).toUpperCase() + status.slice(1);
-			this.#statusEl.style.color =
-				status === "connected" ? "#8bac0f" : status === "connecting" ? "#facc15" : "#888";
-		});
-
 		// Discover game sessions via announcements.
-		this.#signals.run((effect) => {
-			const conn = effect.get(this.connection.established);
-			if (!conn) return;
-
-			const announced = conn.announced(Moq.Path.from("boy"));
-			effect.cleanup(() => announced.close());
-
-			effect.spawn(async () => {
-				for (;;) {
-					const entry = await Promise.race([effect.cancel, announced.next()]);
-					if (!entry) break;
-
-					// Strip "boy/" prefix, skip nested paths like "boy/x/viewer/..."
-					const suffix = Moq.Path.stripPrefix(Moq.Path.from("boy"), entry.path);
-					if (!suffix || suffix.includes("/")) continue;
-
-					const id = suffix;
-					if (entry.active && !this.#sessions.has(id)) {
-						const card = new GameCard({
-							sessionId: id,
-							connection: this.connection,
-							expanded: this.#expanded,
-							root: shadow,
-						});
-						this.#sessions.set(id, card);
-						this.#gridEl.appendChild(card.el);
-						this.#updateEmptyState();
-					} else if (!entry.active) {
-						const card = this.#sessions.get(id);
-						if (card) {
-							card.close();
-							card.el.remove();
-							this.#sessions.delete(id);
-							this.#updateEmptyState();
-						}
-					}
-				}
-			});
-		});
-	}
-
-	#updateEmptyState() {
-		this.#emptyState.style.display = this.#sessions.size === 0 ? "block" : "none";
+		this.#signals.run(this.#runDiscovery.bind(this));
 	}
 
 	connectedCallback() {
@@ -167,8 +57,16 @@ export default class MoqBoy extends HTMLElement {
 	}
 
 	attributeChangedCallback(name: Observed, _oldValue: string | null, newValue: string | null) {
-		if (name === "url") {
-			this.connection.url.set(newValue ? new URL(newValue) : undefined);
+		switch (name) {
+			case "url":
+				this.connection.url.set(newValue ? new URL(newValue) : undefined);
+				break;
+			case "game-prefix":
+				this.#gamePrefix.set(newValue ?? DEFAULT_GAME_PREFIX);
+				break;
+			case "viewer-prefix":
+				this.#viewerPrefix.set(newValue ?? DEFAULT_VIEWER_PREFIX);
+				break;
 		}
 	}
 
@@ -178,6 +76,66 @@ export default class MoqBoy extends HTMLElement {
 
 	set url(value: string | URL | undefined) {
 		this.connection.url.set(value ? new URL(value) : undefined);
+	}
+
+	get gamePrefix(): string {
+		return this.#gamePrefix.peek();
+	}
+
+	set gamePrefix(value: string) {
+		this.#gamePrefix.set(value);
+	}
+
+	get viewerPrefix(): string {
+		return this.#viewerPrefix.peek();
+	}
+
+	set viewerPrefix(value: string) {
+		this.#viewerPrefix.set(value);
+	}
+
+	#runDiscovery(effect: Moq.Signals.Effect) {
+		const conn = effect.get(this.connection.established);
+		if (!conn) return;
+
+		const gamePrefix = effect.get(this.#gamePrefix);
+		const viewerPrefix = effect.get(this.#viewerPrefix);
+		const prefix = Moq.Path.from(gamePrefix);
+
+		const announced = conn.announced(prefix);
+		effect.cleanup(() => announced.close());
+
+		effect.spawn(async () => {
+			for (;;) {
+				const entry = await Promise.race([effect.cancel, announced.next()]);
+				if (!entry) break;
+
+				// Strip prefix, skip nested paths (e.g. "viewer/..." sub-broadcasts).
+				const suffix = Moq.Path.stripPrefix(prefix, entry.path);
+				if (!suffix || suffix.includes("/")) continue;
+
+				const id = suffix;
+				if (entry.active && !this.#sessions.has(id)) {
+					const config: GameConfig = {
+						sessionId: id,
+						connection: this.connection,
+						expanded: this.expanded,
+						gamePrefix,
+						viewerPrefix,
+					};
+					const game = new Game(config);
+					this.#sessions.set(id, game);
+					this.games.set(new Map(this.#sessions));
+				} else if (!entry.active) {
+					const game = this.#sessions.get(id);
+					if (game) {
+						game.close();
+						this.#sessions.delete(id);
+						this.games.set(new Map(this.#sessions));
+					}
+				}
+			}
+		});
 	}
 }
 

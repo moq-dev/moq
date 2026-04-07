@@ -1,0 +1,199 @@
+.boy__controls {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 1.5rem;
+}
+
+/* D-pad grid */
+.boy__dpad {
+	display: grid;
+	grid-template-columns: 52px 52px 52px;
+	grid-template-rows: 52px 52px 52px;
+	gap: 4px;
+}
+
+.boy__dpad-btn {
+	background: var(--color-white-alpha-05);
+	color: var(--boy-text);
+	border: 1px solid var(--boy-border);
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 1.2rem;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	transition: all 0.15s;
+}
+
+.boy__dpad-btn:hover {
+	border-color: var(--boy-accent);
+}
+
+.boy__dpad-btn:active {
+	transform: scale(0.95);
+}
+
+.boy__dpad-up {
+	grid-column: 2;
+	grid-row: 1;
+}
+.boy__dpad-left {
+	grid-column: 1;
+	grid-row: 2;
+}
+.boy__dpad-right {
+	grid-column: 3;
+	grid-row: 2;
+}
+.boy__dpad-down {
+	grid-column: 2;
+	grid-row: 3;
+}
+
+/* A/B buttons */
+.boy__ab-buttons {
+	display: flex;
+	gap: 0.75rem;
+}
+
+.boy__ab-btn {
+	width: 52px;
+	height: 52px;
+	border-radius: 50%;
+	background: var(--color-purple-900);
+	color: var(--color-purple-400);
+	border: 2px solid var(--color-purple-400);
+	font-size: 1rem;
+	font-weight: 700;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	transition: all 0.15s;
+}
+
+.boy__ab-btn:hover {
+	border-color: var(--color-purple-500);
+}
+
+.boy__ab-btn:active {
+	transform: scale(0.95);
+}
+
+/* Start/Select */
+.boy__meta-buttons {
+	display: flex;
+	gap: 0.5rem;
+}
+
+.boy__meta-btn {
+	background: var(--color-white-alpha-05);
+	color: var(--boy-text-muted);
+	border: 1px solid var(--boy-border);
+	padding: 0.3rem 0.8rem;
+	border-radius: 12px;
+	cursor: pointer;
+	font-size: 0.65rem;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	transition: all 0.15s;
+}
+
+.boy__meta-btn:hover {
+	border-color: var(--boy-accent);
+	color: var(--boy-text);
+}
+
+.boy__meta-btn:active {
+	transform: scale(0.95);
+}
+
+/* Active button highlights (from server status) */
+.boy__dpad-btn.boy__btn--active {
+	background: color-mix(in srgb, var(--boy-accent) 15%, transparent);
+	border-color: var(--boy-accent);
+	color: var(--boy-accent);
+	box-shadow: 0 0 8px color-mix(in srgb, var(--boy-accent) 40%, transparent);
+}
+
+.boy__ab-btn.boy__btn--active {
+	background: color-mix(in srgb, var(--color-purple-400) 20%, transparent);
+	border-color: var(--color-purple-500);
+	box-shadow: 0 0 8px color-mix(in srgb, var(--color-purple-400) 40%, transparent);
+}
+
+.boy__meta-btn.boy__btn--active {
+	background: color-mix(in srgb, var(--color-yellow-400) 15%, transparent);
+	border-color: var(--color-yellow-400);
+	color: var(--color-yellow-400);
+}
+
+/* Utility buttons */
+.boy__util-buttons {
+	display: flex;
+	gap: 0.5rem;
+	width: 100%;
+}
+
+.boy__util-btn {
+	flex: 1;
+	background: var(--color-white-alpha-05);
+	color: var(--boy-text-muted);
+	border: 1px solid var(--boy-border);
+	padding: 0.4rem;
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 0.7rem;
+	transition: all 0.15s;
+}
+
+.boy__util-btn:hover {
+	border-color: var(--boy-text-muted);
+	color: var(--boy-text);
+}
+
+.boy__util-btn--unmuted {
+	background: color-mix(in srgb, var(--boy-accent) 10%, transparent);
+	border-color: var(--boy-accent);
+	color: var(--boy-accent);
+}
+
+.boy__util-btn--reset {
+	color: var(--color-red);
+	border-color: var(--color-red-500-alpha-25);
+}
+
+.boy__util-btn--reset:hover {
+	border-color: var(--color-red);
+}
+
+/* Jitter/buffer slider */
+.boy__jitter {
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.3rem;
+}
+
+.boy__jitter-label {
+	font-family: monospace;
+	font-size: 0.65rem;
+	color: var(--boy-text-muted);
+}
+
+.boy__jitter-slider {
+	width: 100%;
+	accent-color: var(--boy-accent);
+	cursor: pointer;
+}
+
+/* Key hints */
+.boy__key-hints {
+	font-family: monospace;
+	font-size: 0.6rem;
+	color: var(--boy-text-dim);
+	text-align: center;
+	line-height: 1.6;
+}
