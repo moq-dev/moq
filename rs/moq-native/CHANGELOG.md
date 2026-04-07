@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.9](https://github.com/moq-dev/moq/compare/moq-native-v0.13.8...moq-native-v0.13.9) - 2026-04-07
+
+### Added
+
+- *(moq-native)* support websocket-only client ([#1235](https://github.com/moq-dev/moq/pull/1235))
+
 ## [0.13.8](https://github.com/moq-dev/moq/compare/moq-native-v0.13.7...moq-native-v0.13.8) - 2026-04-07
 
 ### Other

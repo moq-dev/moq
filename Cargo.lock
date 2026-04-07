@@ -3368,7 +3368,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -3388,7 +3388,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.13"
+version = "0.7.14"
 dependencies = [
  "anyhow",
  "axum",
@@ -3407,7 +3407,7 @@ dependencies = [
 
 [[package]]
 name = "moq-clock"
-version = "0.10.11"
+version = "0.10.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3425,7 +3425,7 @@ version = "0.0.2"
 
 [[package]]
 name = "moq-ffi"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "hang",
@@ -3494,7 +3494,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.13.8"
+version = "0.13.9"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3533,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.10.15"
+version = "0.10.16"
 dependencies = [
  "anyhow",
  "axum",
@@ -3588,7 +3588,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "anyhow",
  "clap",
@@ -7281,9 +7281,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-quinn"
-version = "0.11.8"
+version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82e77c81fe4cf56c1049e07c6ed9c00862a967010fe9da4f5e02dc7f4d71fdac"
+checksum = "cac11b6caf163be7f980442a26fcba15e8074a5f22e85fbb71f0f77d11cecf60"
 dependencies = [
  "bytes",
  "futures",

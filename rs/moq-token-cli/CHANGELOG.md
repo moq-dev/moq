@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.18](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.17...moq-token-cli-v0.5.18) - 2026-04-07
+
+### Other
+
+- Replace guest access with programmatic public access config ([#1233](https://github.com/moq-dev/moq/pull/1233))
+- Switch Docker images from kixelated/ to moqdev/ ([#1234](https://github.com/moq-dev/moq/pull/1234))
+
 ## [0.5.17](https://github.com/moq-dev/moq/compare/moq-token-cli-v0.5.16...moq-token-cli-v0.5.17) - 2026-04-03
 
 ### Added

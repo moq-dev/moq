@@ -64,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.16](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.15...moq-relay-v0.10.16) - 2026-04-07
+
+### Other
+
+- Replace guest access with programmatic public access config ([#1233](https://github.com/moq-dev/moq/pull/1233))
+- Switch Docker images from kixelated/ to moqdev/ ([#1234](https://github.com/moq-dev/moq/pull/1234))
+
 ## [0.10.15](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.14...moq-relay-v0.10.15) - 2026-04-07
 
 ### Fixed

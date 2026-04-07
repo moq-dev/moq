@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.14](https://github.com/moq-dev/moq/compare/moq-token-v0.5.13...moq-token-v0.5.14) - 2026-04-07
+
+### Other
+
+- Replace guest access with programmatic public access config ([#1233](https://github.com/moq-dev/moq/pull/1233))
+
 ## [0.5.13](https://github.com/moq-dev/moq/compare/moq-token-v0.5.12...moq-token-v0.5.13) - 2026-04-07
 
 ### Other
