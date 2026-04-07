@@ -15,6 +15,11 @@ pub struct Avc1 {
 
 	/// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
+
+	// Jitter tracking: minimum duration between consecutive frames.
+	last_timestamp: Option<hang::container::Timestamp>,
+	min_duration: Option<hang::container::Timestamp>,
+	jitter: Option<hang::container::Timestamp>,
 }
 
 impl Avc1 {
@@ -28,6 +33,9 @@ impl Avc1 {
 			config: None,
 			length_size: 4,
 			zero: None,
+			last_timestamp: None,
+			min_duration: None,
+			jitter: None,
 		}
 	}
 
@@ -129,6 +137,25 @@ impl Avc1 {
 			timestamp: pts,
 			payload: data.to_vec().into(),
 		})?;
+
+		// Track the minimum frame duration and update catalog jitter.
+		if let Some(last) = self.last_timestamp
+			&& let Ok(duration) = pts.checked_sub(last)
+			&& duration < self.min_duration.unwrap_or(hang::container::Timestamp::MAX)
+		{
+			self.min_duration = Some(duration);
+
+			if duration < self.jitter.unwrap_or(hang::container::Timestamp::MAX) {
+				self.jitter = Some(duration);
+
+				if let Ok(jitter) = duration.convert() {
+					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.info.name) {
+						c.jitter = Some(jitter);
+					}
+				}
+			}
+		}
+		self.last_timestamp = Some(pts);
 
 		buf.advance(buf.remaining());
 

@@ -118,7 +118,7 @@ export class Mse implements Backend {
 
 				// Extract the timestamp from the CMAF segment and mark when we received it.
 				const timestamp = Container.Cmaf.decodeTimestamp(frame, timescale);
-				this.source.sync.received(Moq.Time.Milli.fromMicro(timestamp));
+				this.source.sync.received(Moq.Time.Milli.fromMicro(timestamp), "audio");
 
 				await this.#appendBuffer(sourceBuffer, frame);
 
@@ -162,7 +162,8 @@ export class Mse implements Backend {
 				pending = next.frame;
 
 				// Mark that we received this frame for latency calculation.
-				this.source.sync.received(Moq.Time.Milli.fromMicro(pending.timestamp as Moq.Time.Micro));
+				const timestamp = Moq.Time.Milli.fromMicro(pending.timestamp as Moq.Time.Micro);
+				this.source.sync.received(timestamp, "audio");
 
 				break;
 			}
@@ -178,7 +179,8 @@ export class Mse implements Backend {
 					duration = Moq.Time.Micro.sub(frame.timestamp, pending.timestamp);
 
 					// Mark that we received this frame for latency calculation.
-					this.source.sync.received(Moq.Time.Milli.fromMicro(frame.timestamp as Moq.Time.Micro));
+					const timestamp = Moq.Time.Milli.fromMicro(frame.timestamp as Moq.Time.Micro);
+					this.source.sync.received(timestamp, "audio");
 				}
 
 				// Wrap raw frame in moof+mdat

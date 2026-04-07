@@ -33,7 +33,7 @@ leaf1: auth-token
 auth-key:
 	@if [ ! -f "dev.jwk" ]; then \
 		rm -f *.jwt; \
-		cargo run --bin moq-token-cli -- generate --out "dev.jwk" --guest anon --guest-subscribe demo; \
+		cargo run --bin moq-token-cli -- generate --out "dev.jwk"; \
 	fi
 
 # Generate authentication tokens for local development.

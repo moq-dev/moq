@@ -28,186 +28,49 @@ yarn add @moq/lite
 
 ### Basic Connection
 
-```typescript
-import * as Moq from "@moq/lite";
-
-// Connect to a MoQ relay server
-const connection = await Moq.Connection.connect(
-    new URL("https://relay.example.com/anon")
-);
-console.log("Connected to MoQ relay!");
-```
+See [`js/lite/examples/connection.ts`](https://github.com/moq-dev/moq/blob/main/js/lite/examples/connection.ts)
 
 ### Publishing Data
 
-```typescript
-import * as Moq from "@moq/lite";
-
-const connection = await Moq.Connection.connect(
-    new URL("https://relay.example.com/anon")
-);
-
-// Create a broadcast
-const broadcast = new Moq.Broadcast();
-
-// Subscribe to a track (creates it for writing)
-const track = broadcast.subscribe("chat", 0);
-
-// Send data in groups
-const group = track.appendGroup();
-group.writeString("Hello, MoQ!");
-group.close();
-
-// Publish to the relay
-connection.publish("my-broadcast", broadcast);
-```
+See [`js/lite/examples/publish.ts`](https://github.com/moq-dev/moq/blob/main/js/lite/examples/publish.ts)
 
 ### Subscribing to Data
 
-```typescript
-import * as Moq from "@moq/lite";
-
-const connection = await Moq.Connection.connect(
-    new URL("https://relay.example.com/anon")
-);
-
-// Subscribe to a broadcast
-const broadcast = connection.consume("my-broadcast");
-
-// Wait for a track request
-const request = await broadcast.requested();
-if (request) {
-    const track = request.track;
-
-    // Read data as it arrives
-    for (;;) {
-        const group = await track.nextGroup();
-        if (!group) break;
-
-        for (;;) {
-            const frame = await group.readString();
-            if (!frame) break;
-
-            console.log("Received:", frame);
-        }
-    }
-}
-```
+See [`js/lite/examples/subscribe.ts`](https://github.com/moq-dev/moq/blob/main/js/lite/examples/subscribe.ts)
 
 ### Stream Discovery
 
-```typescript
-import * as Moq from "@moq/lite";
-
-const connection = await Moq.Connection.connect(
-    new URL("https://relay.example.com/anon")
-);
-
-// Discover broadcasts announced by the server
-const announced = connection.announced();
-for (;;) {
-    const entry = await announced.next();
-    if (!entry) break;
-
-    console.log("Broadcast:", entry.path, entry.active ? "online" : "offline");
-
-    if (entry.active) {
-        // Subscribe to the broadcast
-        const broadcast = connection.consume(entry.path);
-        // ... handle the broadcast
-    }
-}
-```
+See [`js/lite/examples/discovery.ts`](https://github.com/moq-dev/moq/blob/main/js/lite/examples/discovery.ts)
 
 ## Core Concepts
 
 ### Broadcasts
 
-A collection of related tracks:
-
-```typescript
-const broadcast = new Moq.Broadcast();
-```
+A collection of related tracks.
 
 ### Tracks
 
-Named streams within a broadcast, created via `subscribe`:
-
-```typescript
-const track = broadcast.subscribe("video", 0);
-```
+Named streams within a broadcast, published by the producer and consumed via `subscribe`.
 
 ### Groups
 
-Collections of frames (usually aligned with keyframes):
-
-```typescript
-const group = track.appendGroup();
-group.writeFrame(frameData);
-group.close();
-```
+Collections of frames (usually aligned with keyframes).
 
 ### Frames
 
-Individual data chunks:
+Individual data chunks.
 
-```typescript
-// Write raw bytes
-group.writeFrame(new Uint8Array([1, 2, 3]));
-
-// Write string (convenience method)
-group.writeString("Hello!");
-```
+See the [publishing example](https://github.com/moq-dev/moq/blob/main/js/lite/examples/publish.ts) for usage of all core concepts.
 
 ## Advanced Usage
 
 ### Authentication
 
-Pass JWT tokens via query parameters:
-
-```typescript
-const connection = await Moq.Connection.connect(
-    new URL(`https://relay.example.com/room/123?jwt=${token}`)
-);
-```
-
-See [Authentication guide](/app/relay/auth) for details.
-
-### Priority
-
-Set priority when subscribing to a track:
-
-```typescript
-const track = broadcast.subscribe("video", 10); // Higher priority
-```
+Pass JWT tokens via query parameters in the URL. See [Authentication guide](/app/relay/auth) for details and [`js/token/examples/sign-and-verify.ts`](https://github.com/moq-dev/moq/blob/main/js/token/examples/sign-and-verify.ts) for a working example.
 
 ## Running Server-Side
 
-`@moq/lite` can also run server-side using a [WebTransport polyfill](https://github.com/fails-components/webtransport):
-
-```typescript
-import { WebTransport, quicheLoaded } from "@fails-components/webtransport";
-globalThis.WebTransport = WebTransport;
-
-import * as Moq from "@moq/lite";
-
-await quicheLoaded;
-const connection = await Moq.Connection.connect(
-    new URL("https://relay.example.com/anon")
-);
-// Same API as browser
-```
-
-## TypeScript Support
-
-Full TypeScript support with type definitions:
-
-```typescript
-import type { Broadcast, Track } from "@moq/lite";
-
-const broadcast: Broadcast = new Moq.Broadcast();
-const track: Track = broadcast.subscribe("video", 0);
-```
+`@moq/lite` can also run server-side using a [WebTransport polyfill](https://github.com/fails-components/webtransport). See the [`js/lite/README.md`](https://github.com/moq-dev/moq/blob/main/js/lite/README.md#server-side-usage) for setup instructions.
 
 ## Browser Compatibility
 

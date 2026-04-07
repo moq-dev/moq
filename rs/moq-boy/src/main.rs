@@ -1,14 +1,42 @@
+//! MoQ Boy: a crowd-controlled Game Boy Color emulator that streams over MoQ.
+//!
+//! Architecture:
+//! - **Emulator thread** (blocking): runs the Game Boy at ~59.73fps, captures
+//!   framebuffers and audio samples, publishes status JSON.
+//! - **Video encoder thread**: receives RGBA frames, converts to H.264, publishes.
+//! - **Audio encoder** (on emulator thread): resamples and encodes to Opus.
+//! - **Monitor tasks** (async): watch video/audio track subscriptions to
+//!   pause/resume the emulator when no viewers are watching.
+//! - **Viewer handler** (async): discovers viewer broadcasts, relays button
+//!   commands to the emulator.
+//!
+//! Pause/resume state machine:
+//! ```text
+//!   video_active ─┐
+//!                  ├─ both false → paused (emulation stops, condvar blocks)
+//!   audio_active ─┘
+//!                    either true → resumed (condvar notified)
+//!
+//!   While paused:
+//!     - After `timeout` seconds → auto-reset emulator
+//!     - On resume → force video keyframe, re-anchor audio epoch
+//! ```
+
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 use url::Url;
 
 mod audio;
 mod emulator;
 mod input;
+mod stats;
+mod status;
 mod video;
 
 #[derive(Parser, Clone)]
@@ -21,13 +49,29 @@ pub struct Config {
 	#[arg(long)]
 	pub rom: PathBuf,
 
-	/// Session name (used in broadcast path: boy/{name}). Defaults to ROM filename.
+	/// Session name (used in broadcast path). Defaults to ROM filename.
 	#[arg(long)]
 	pub name: Option<String>,
+
+	/// Base path prefix. Used to derive --prefix-game and --prefix-viewer defaults.
+	#[arg(long, default_value = "boy")]
+	pub prefix: String,
+
+	/// Path prefix for game broadcasts ("{prefix-game}/{name}"). Defaults to "{prefix}/game".
+	#[arg(long)]
+	pub prefix_game: Option<String>,
+
+	/// Path prefix for viewer broadcasts ("{prefix-viewer}/{name}"). Defaults to "{prefix}/viewer".
+	#[arg(long)]
+	pub prefix_viewer: Option<String>,
 
 	/// Inactivity timeout in seconds before auto-reset.
 	#[arg(long, default_value_t = 300)]
 	pub timeout: u64,
+
+	/// Location label shown in viewer stats (e.g. "Dallas, TX").
+	#[arg(long)]
+	pub location: Option<String>,
 
 	/// The MoQ client configuration.
 	#[command(flatten)]
@@ -36,6 +80,131 @@ pub struct Config {
 	/// The log configuration.
 	#[command(flatten)]
 	pub log: moq_native::Log,
+}
+
+/// Shared state for a game session, accessible from multiple threads/tasks.
+///
+/// Everything here is either atomic, behind a mutex, or immutable —
+/// safe to share via `Arc<Session>` between the emulator thread,
+/// track monitors, and async tasks.
+struct Session {
+	video_encoder: video::VideoEncoder,
+	video_track: moq_lite::TrackProducer,
+	audio_track: moq_lite::TrackProducer,
+
+	/// Whether anyone is subscribed to the video/audio tracks.
+	video_active: AtomicBool,
+	audio_active: AtomicBool,
+
+	/// True when no viewers are watching (both tracks unused).
+	paused: AtomicBool,
+	/// Condvar to wake the emulator thread on resume.
+	resume: (Mutex<()>, Condvar),
+
+	/// Auto-reset timeout when paused.
+	timeout: Duration,
+	/// Location label for status reporting.
+	location: Option<String>,
+}
+
+impl Session {
+	/// Monitor a single track's subscription state.
+	/// Sets the flag when a viewer subscribes, clears it when all unsubscribe.
+	async fn run_track_monitor(&self, name: &str, track: &moq_lite::TrackProducer, flag: &AtomicBool) {
+		loop {
+			if track.used().await.is_err() {
+				break;
+			}
+			tracing::info!("resuming {name}: viewer subscribed");
+			flag.store(true, Ordering::Release);
+			self.paused.store(false, Ordering::Release);
+			self.resume.1.notify_all();
+
+			if track.unused().await.is_err() {
+				break;
+			}
+			tracing::info!("pausing {name}: no viewers");
+			flag.store(false, Ordering::Release);
+		}
+	}
+
+	/// Monitor overall pause state.
+	/// Pauses when BOTH tracks are unused, resumes when EITHER becomes used.
+	async fn run_pause_monitor(&self) {
+		loop {
+			// Wait for BOTH tracks to become unused.
+			let (v, a) = tokio::join!(self.video_track.unused(), self.audio_track.unused());
+			if v.is_err() || a.is_err() {
+				break;
+			}
+			tracing::info!("pausing emulation: no viewers");
+			self.paused.store(true, Ordering::Release);
+
+			// Wait for EITHER track to become used.
+			tokio::select! {
+				Err(_) = self.video_track.used() => break,
+				Err(_) = self.audio_track.used() => break,
+				else => {},
+			}
+			tracing::info!("resuming emulation: viewer connected");
+			self.paused.store(false, Ordering::Release);
+			self.resume.1.notify_all();
+		}
+		// Ensure emulator thread isn't stuck waiting on resume.
+		self.paused.store(false, Ordering::Release);
+		self.resume.1.notify_all();
+	}
+
+	/// Block the emulator thread until viewers connect.
+	/// Auto-resets the emulator if paused longer than `timeout`.
+	fn wait_for_resume(&self, emu: &mut emulator::Emulator, game_stats: &mut stats::Stats) -> Result<()> {
+		tracing::info!("pausing encoding");
+		let (lock, cvar) = &self.resume;
+		let mut guard = lock.lock().unwrap();
+		let pause_start = Instant::now();
+
+		let mut reset_done = false;
+		while self.paused.load(Ordering::Acquire) {
+			if !reset_done && pause_start.elapsed() >= self.timeout {
+				tracing::info!("resetting emulator (paused too long)");
+				emu.reset()?;
+				*game_stats = stats::Stats::new();
+				reset_done = true;
+			}
+
+			if reset_done {
+				guard = cvar.wait(guard).unwrap();
+			} else {
+				let remaining = self.timeout.saturating_sub(pause_start.elapsed());
+				let (g, _) = cvar.wait_timeout(guard, remaining).unwrap();
+				guard = g;
+			}
+		}
+
+		tracing::info!("resuming encoding");
+		Ok(())
+	}
+
+	/// Publish status if it changed since last frame.
+	fn publish_status(
+		&self,
+		emu: &emulator::Emulator,
+		viewer_latency: &std::collections::HashMap<String, f64>,
+		game_stats: &stats::Stats,
+		publisher: &mut status::StatusPublisher,
+	) {
+		let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
+		let latency_map: BTreeMap<String, u32> = viewer_latency.iter().map(|(k, ms)| (k.clone(), *ms as u32)).collect();
+
+		let status = status::Status {
+			buttons: held,
+			latency: latency_map,
+			stats: game_stats.report(),
+			location: self.location.clone(),
+		};
+
+		publisher.publish(&status);
+	}
 }
 
 async fn run(config: &Config) -> Result<()> {
@@ -52,28 +221,34 @@ async fn run(config: &Config) -> Result<()> {
 
 	tracing::info!(rom = %rom_path.display(), %name, "starting Game Boy emulator");
 
-	let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<input::Command>(64);
+	let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<input::Command>(64);
 	let client = config.client.clone().init()?;
 
 	// Create the broadcast producer.
 	let mut broadcast = moq_lite::BroadcastProducer::default();
 
-	// Publish origin: the GB session broadcast.
+	// Publish origin: the game session broadcast.
 	let publish_origin = moq_lite::Origin::produce();
-	let broadcast_path = format!("boy/{}", name);
+	let default_game_prefix = format!("{}/game", config.prefix);
+	let default_viewer_prefix = format!("{}/viewer", config.prefix);
+	let game_prefix = config.prefix_game.as_deref().unwrap_or(&default_game_prefix);
+	let viewer_prefix = config.prefix_viewer.as_deref().unwrap_or(&default_viewer_prefix);
+
+	let broadcast_path = format!("{game_prefix}/{name}");
 	publish_origin.publish_broadcast(&broadcast_path, broadcast.consume());
 
-	// Consume origin: viewer broadcasts under boy/{name}/viewer/.
-	let viewer_prefix = format!("boy/{}/viewer", name);
+	// Consume origin: viewer broadcasts under the viewer prefix.
+	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
+	let viewer_path = format!("{viewer_prefix}/{name}");
 	let consume_origin = moq_lite::Origin::produce();
 	let mut viewer_consumer = consume_origin
-		.with_root(&viewer_prefix)
+		.with_root(&viewer_path)
 		.expect("viewer prefix should be valid")
 		.consume();
 
-	tracing::info!(url = %config.url, name = %name, "connecting to relay");
+	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
 
-	let session = client
+	let session_handle = client
 		.with_publish(publish_origin.consume())
 		.with_consume(consume_origin)
 		.connect(config.url.clone())
@@ -83,251 +258,164 @@ async fn run(config: &Config) -> Result<()> {
 	let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone());
 
-	// Init ffmpeg and create audio encoder before the blocking thread
-	// so we can clone its track producer for monitoring.
 	ffmpeg_next::init().context("failed to init ffmpeg")?;
-	let mut audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
+	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
 
-	// Clone track producers for the monitoring task.
 	let video_track = video_encoder.track.clone();
 	let audio_track = audio_encoder.track().clone();
 
-	// Create status track.
-	let status_track = moq_lite::Track {
-		name: "status".to_string(),
-		priority: 10,
-	};
-	let mut status_producer = broadcast.create_track(status_track)?;
+	let status_publisher = status::StatusPublisher::new(&mut broadcast)?;
 
-	// Per-track and overall pause signaling.
-	let video_active = Arc::new(AtomicBool::new(false));
-	let audio_active = Arc::new(AtomicBool::new(false));
-	let paused = Arc::new(AtomicBool::new(true)); // Start paused until first viewer.
-	let resume_notify = Arc::new((Mutex::new(()), Condvar::new()));
-
-	// Monitor video track.
-	let flag = video_active.clone();
-	let all_paused = paused.clone();
-	let resume = resume_notify.clone();
-	let vt = video_track.clone();
-	tokio::spawn(async move {
-		loop {
-			if vt.used().await.is_err() {
-				break;
-			}
-			tracing::info!("resuming video: viewer subscribed");
-			flag.store(true, Ordering::Release);
-			all_paused.store(false, Ordering::Release);
-			resume.1.notify_all();
-
-			if vt.unused().await.is_err() {
-				break;
-			}
-			tracing::info!("pausing video: no viewers");
-			flag.store(false, Ordering::Release);
-		}
+	let session = Arc::new(Session {
+		video_encoder,
+		video_track,
+		audio_track,
+		video_active: AtomicBool::new(false),
+		audio_active: AtomicBool::new(false),
+		paused: AtomicBool::new(true), // Start paused until first viewer.
+		resume: (Mutex::new(()), Condvar::new()),
+		timeout: Duration::from_secs(config.timeout),
+		location: config.location.clone(),
 	});
 
-	// Monitor audio track.
-	let flag = audio_active.clone();
-	let all_paused = paused.clone();
-	let resume = resume_notify.clone();
-	let at = audio_track.clone();
-	tokio::spawn(async move {
-		loop {
-			if at.used().await.is_err() {
-				break;
-			}
-			tracing::info!("resuming audio: viewer subscribed");
-			flag.store(true, Ordering::Release);
-			all_paused.store(false, Ordering::Release);
-			resume.1.notify_all();
+	// Monitor track subscriptions.
+	let s = session.clone();
+	tokio::spawn(async move { s.run_track_monitor("video", &s.video_track, &s.video_active).await });
 
-			if at.unused().await.is_err() {
-				break;
-			}
-			tracing::info!("pausing audio: no viewers");
-			flag.store(false, Ordering::Release);
-		}
-	});
+	let s = session.clone();
+	tokio::spawn(async move { s.run_track_monitor("audio", &s.audio_track, &s.audio_active).await });
 
-	// Monitor overall pause state (both unused = pause emulation).
-	{
-		let paused = paused.clone();
-		let resume = resume_notify.clone();
-		tokio::spawn(async move {
-			loop {
-				// Wait for BOTH tracks to become unused.
-				let (v, a) = tokio::join!(video_track.unused(), audio_track.unused());
-				if v.is_err() || a.is_err() {
-					break;
-				}
-				tracing::info!("pausing emulation: no viewers");
-				paused.store(true, Ordering::Release);
-
-				// Wait for EITHER track to become used.
-				tokio::select! {
-					Err(_) = video_track.used() => break,
-					Err(_) = audio_track.used() => break,
-					else => {},
-				}
-				tracing::info!("resuming emulation: viewer connected");
-				paused.store(false, Ordering::Release);
-				resume.1.notify_all();
-			}
-			// Ensure emulator thread isn't stuck waiting on resume.
-			paused.store(false, Ordering::Release);
-			resume.1.notify_all();
-		});
-	}
+	let s = session.clone();
+	tokio::spawn(async move { s.run_pause_monitor().await });
 
 	// Run the emulator on a blocking thread.
-	let timeout_secs = config.timeout;
-	let emulator_handle = tokio::task::spawn_blocking(move || -> Result<()> {
-		let mut emu = emulator::Emulator::new(&rom_path)?;
-		let start = std::time::Instant::now();
-
-		// Bootstrap: tick once and encode a frame so the video codec config
-		// is inserted into the catalog before any viewer connects.
-		{
-			emu.tick();
-			let rgba = Bytes::from(emu.framebuffer());
-			let pts_micros = start.elapsed().as_micros() as u64;
-			let ts = hang::container::Timestamp::from_micros(pts_micros).context("timestamp overflow")?;
-			video_encoder.try_frame(rgba, ts);
-			// Give the encoder thread time to process.
-			std::thread::sleep(std::time::Duration::from_millis(100));
-		}
-
-		let frame_duration = std::time::Duration::from_micros(16_742); // ~59.73fps
-		let mut next_frame = std::time::Instant::now();
-		let mut last_input = std::time::Instant::now();
-		let mut last_status = String::new();
-		let timeout = std::time::Duration::from_secs(timeout_secs);
-		let mut viewer_latency: std::collections::HashMap<String, (f64, std::time::Instant)> =
-			std::collections::HashMap::new();
-
-		loop {
-			// Pause emulation when no viewers are watching.
-			if paused.load(Ordering::Acquire) {
-				tracing::info!("pausing encoding");
-				let (lock, cvar) = &*resume_notify;
-				let mut guard = lock.lock().unwrap();
-				while paused.load(Ordering::Acquire) {
-					guard = cvar.wait(guard).unwrap();
-				}
-				tracing::info!("resuming encoding");
-				// Don't try to catch up after a pause.
-				next_frame = std::time::Instant::now();
-				// Force a keyframe so new viewers can start decoding.
-				video_encoder.force_keyframe();
-			}
-
-			// Wait for next frame.
-			let now = std::time::Instant::now();
-			if now < next_frame {
-				std::thread::sleep(next_frame - now);
-			}
-			next_frame += frame_duration;
-
-			// Current media timestamp in milliseconds.
-			let current_ts_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-			// Drain pending commands.
-			while let Ok(cmd) = cmd_rx.try_recv() {
-				match cmd {
-					input::Command::Buttons {
-						buttons,
-						viewer_id,
-						ts_ms,
-					} => {
-						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
-						last_input = std::time::Instant::now();
-
-						let latency = current_ts_ms - ts_ms;
-						if latency >= 0.0 {
-							viewer_latency.insert(viewer_id, (latency, std::time::Instant::now()));
-						}
-					}
-					input::Command::ViewerLeft { viewer_id } => {
-						emu.viewer_left(&viewer_id);
-						viewer_latency.remove(&viewer_id);
-					}
-					input::Command::Reset => {
-						tracing::info!("resetting emulator (viewer request)");
-						emu.reset()?;
-						last_input = std::time::Instant::now();
-					}
-				}
-			}
-
-			// Check inactivity timeout.
-			let idle_time = std::time::Instant::now() - last_input;
-			if idle_time > timeout {
-				tracing::info!("resetting emulator (inactivity timeout)");
-				emu.reset()?;
-				last_input = std::time::Instant::now();
-			}
-
-			// Tick the emulator.
-			emu.tick();
-
-			// Expire stale viewer latency entries (no input for 30s).
-			let stale = std::time::Duration::from_secs(30);
-			viewer_latency.retain(|_, (_, last_seen)| last_seen.elapsed() < stale);
-
-			// Publish status.
-			let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
-			let idle_secs = idle_time.as_secs();
-			let remaining = timeout_secs.saturating_sub(idle_secs);
-
-			let latency_map: serde_json::Map<String, serde_json::Value> = viewer_latency
-				.iter()
-				.map(|(k, (ms, _))| (k.clone(), serde_json::json!((*ms as u32))))
-				.collect();
-
-			let new_status = serde_json::json!({
-				"buttons": held,
-				"reset_in": remaining,
-				"latency": latency_map,
-			});
-			let new_status_str = new_status.to_string();
-
-			if new_status_str != last_status {
-				last_status = new_status_str.clone();
-				if let Ok(mut group) = status_producer.append_group() {
-					let _ = group.write_frame(new_status_str.into_bytes());
-					let _ = group.finish();
-				}
-			}
-
-			// Grab and publish video frame (skip if no video viewers).
-			if video_active.load(Ordering::Relaxed) {
-				let rgba = Bytes::from(emu.framebuffer());
-				let pts_micros = start.elapsed().as_micros() as u64;
-				let ts = hang::container::Timestamp::from_micros(pts_micros).context("timestamp overflow")?;
-				video_encoder.try_frame(rgba, ts);
-			}
-
-			// Grab and encode audio (skip if no audio viewers).
-			if audio_active.load(Ordering::Relaxed) {
-				let samples = emu.audio_samples();
-				if !samples.is_empty() {
-					if let Err(e) = audio_encoder.push_samples(&samples) {
-						tracing::warn!(error = %e, "audio encode error");
-					}
-				}
-			} else {
-				// Drain audio buffer even when not encoding to prevent buildup.
-				emu.audio_samples();
-			}
-		}
+	let emulator_handle = tokio::task::spawn_blocking({
+		let session = session.clone();
+		move || run_emulator(session, &rom_path, audio_encoder, status_publisher, cmd_rx)
 	});
 
 	tokio::select! {
 		res = emulator_handle => res?.context("emulator error"),
-		res = session.closed() => res.map_err(Into::into),
+		res = session_handle.closed() => res.map_err(Into::into),
 		res = input::handle_viewers(&mut viewer_consumer, &cmd_tx) => res,
+	}
+}
+
+/// The main emulator loop, running on a blocking thread.
+///
+/// Ticks the Game Boy at ~59.73fps (the real hardware rate), captures
+/// video/audio, publishes status, and handles pause/resume.
+fn run_emulator(
+	session: Arc<Session>,
+	rom_path: &std::path::Path,
+	mut audio_encoder: audio::AudioEncoder,
+	mut status_publisher: status::StatusPublisher,
+	mut cmd_rx: tokio::sync::mpsc::Receiver<input::Command>,
+) -> Result<()> {
+	let mut emu = emulator::Emulator::new(rom_path)?;
+	let start = Instant::now();
+
+	// Bootstrap: encode one frame so the codec config (SPS/PPS) appears
+	// in the catalog before any viewer connects.
+	session.video_encoder.bootstrap(&mut emu, start)?;
+
+	// Game Boy runs at exactly 59.727 Hz (4194304 Hz CPU / 70224 cycles per frame).
+	// 1/59.727 ≈ 16742 microseconds per frame.
+	let frame_duration = Duration::from_micros(16_742);
+	let mut next_frame = Instant::now();
+	let mut viewer_latency: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+	let mut game_stats = stats::Stats::new();
+	let mut was_audio_active = false;
+
+	loop {
+		// Block when no viewers are watching. See state diagram in module docs.
+		if session.paused.load(Ordering::Acquire) {
+			session.wait_for_resume(&mut emu, &mut game_stats)?;
+
+			// Don't try to catch up after a pause.
+			next_frame = Instant::now();
+			// Reset tick timer so pause duration isn't counted.
+			game_stats.reset_tick();
+			// Force a keyframe so new viewers can start decoding.
+			session.video_encoder.force_keyframe();
+			// Re-anchor audio timestamps so the pause gap appears in PTS.
+			audio_encoder.reset_epoch();
+		}
+
+		// Wait for next frame.
+		let now = Instant::now();
+		if now < next_frame {
+			std::thread::sleep(next_frame - now);
+		}
+		next_frame += frame_duration;
+
+		// Capture a single reference timestamp for this tick.
+		// Used for both video and audio PTS so they stay aligned.
+		let elapsed = start.elapsed();
+		let current_ts_ms = elapsed.as_secs_f64() * 1000.0;
+
+		// Accumulate stats for this frame.
+		let is_video = session.video_active.load(Ordering::Relaxed);
+		let is_audio = session.audio_active.load(Ordering::Relaxed);
+		game_stats.tick(is_video, is_audio);
+
+		// Drain pending viewer commands.
+		while let Ok(cmd) = cmd_rx.try_recv() {
+			match cmd {
+				input::Command::Buttons {
+					buttons,
+					viewer_id,
+					ts_ms,
+				} => {
+					emu.set_buttons(&viewer_id, buttons.into_iter().collect());
+					let latency = current_ts_ms - ts_ms;
+					if latency >= 0.0 {
+						viewer_latency.insert(viewer_id, latency);
+					}
+				}
+				input::Command::ViewerLeft { viewer_id } => {
+					emu.viewer_left(&viewer_id);
+					viewer_latency.remove(&viewer_id);
+				}
+				input::Command::Reset => {
+					tracing::info!("resetting emulator (viewer request)");
+					emu.reset()?;
+					game_stats = stats::Stats::new();
+				}
+			}
+		}
+
+		// Tick the emulator.
+		emu.tick();
+
+		// Publish status (only if changed).
+		session.publish_status(&emu, &viewer_latency, &game_stats, &mut status_publisher);
+
+		// Encode and publish video frame.
+		if is_video {
+			let rgba = Bytes::from(emu.framebuffer());
+			let ts =
+				hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
+			session.video_encoder.try_frame(rgba, ts);
+		}
+
+		// Encode and publish audio.
+		if is_audio {
+			// Re-anchor audio PTS when audio resumes after being inactive.
+			if !was_audio_active {
+				audio_encoder.reset_epoch();
+			}
+			let samples = emu.audio_samples();
+			if !samples.is_empty() {
+				if let Err(e) = audio_encoder.push_samples(&samples, elapsed) {
+					tracing::warn!(error = %e, "audio encode error");
+				}
+			}
+		} else {
+			// Drain audio buffer even when not encoding to prevent buildup.
+			emu.audio_samples();
+		}
+		was_audio_active = is_audio;
 	}
 }
 

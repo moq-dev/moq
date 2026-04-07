@@ -1,10 +1,13 @@
 use anyhow::Context;
 use axum::http;
 use http_cache_reqwest::{Cache, CacheMode, HttpCache, HttpCacheOptions, MokaManager};
-use moq_lite::{AsPath, Path, PathOwned};
+#[cfg(test)]
+use moq_lite::AsPath;
+use moq_lite::{Path, PathOwned};
 use moq_token::{Key, KeyId};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
+use serde_with::{OneOrMany, formats::PreferMany, serde_as};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -107,11 +110,168 @@ pub struct AuthConfig {
 	#[arg(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR")]
 	pub key_dir: Option<String>,
 
-	/// The prefix that will be public for reading and writing.
-	/// If present, unauthorized users will be able to read and write to this prefix ONLY.
-	/// If a user provides a token, then they can only access the prefix only if it is specified in the token.
+	/// Public (unauthenticated) access configuration.
+	///
+	/// CLI: `--auth-public <prefix>` sets both subscribe and publish for the prefix.
+	/// TOML: Accepts a string, array, or table `{ subscribe = ..., publish = ... }`.
+	/// Any value starting with `http://` or `https://` is treated as a URL endpoint.
 	#[arg(long = "auth-public", env = "MOQ_AUTH_PUBLIC")]
-	pub public: Option<String>,
+	#[serde(default, deserialize_with = "PublicConfig::deserialize_option")]
+	pub public: Option<PublicConfig>,
+
+	/// Public (unauthenticated) subscribe access configuration.
+	///
+	/// CLI: `--auth-public-subscribe <prefix>` sets subscribe-only access for the prefix.
+	/// TOML: Accepts a string, array, or table `{ subscribe = ..., publish = ... }`.
+	/// Any value starting with `http://` or `https://` is treated as a URL endpoint.
+	#[arg(long = "auth-public-subscribe", env = "MOQ_AUTH_PUBLIC_SUBSCRIBE")]
+	#[serde(default, deserialize_with = "PublicConfig::deserialize_option")]
+	pub public_subscribe: Option<PublicConfig>,
+
+	/// Public (unauthenticated) publish access configuration.
+	///
+	/// CLI: `--auth-public-publish <prefix>` sets publish-only access for the prefix.
+	/// TOML: Accepts a string, array, or table `{ subscribe = ..., publish = ... }`.
+	/// Any value starting with `http://` or `https://` is treated as a URL endpoint.
+	#[arg(long = "auth-public-publish", env = "MOQ_AUTH_PUBLIC_PUBLISH")]
+	#[serde(default, deserialize_with = "PublicConfig::deserialize_option")]
+	pub public_publish: Option<PublicConfig>,
+}
+
+/// Public access configuration.
+///
+/// TOML examples:
+/// - `public = "anon"` → both subscribe and publish under "anon"
+/// - `public = ["anon", "demo"]` → both subscribe and publish under both prefixes
+/// - `[auth.public]` with `subscribe`/`publish` → separate static control
+/// - `[auth.public]` with `api` → dynamic URL endpoint (with optional static fallbacks)
+///
+/// CLI: `--auth-public <prefix>` creates `Simple(vec![prefix])`.
+#[derive(Clone, Debug)]
+pub enum PublicConfig {
+	/// One or more prefixes granting both subscribe and publish.
+	Simple(Vec<String>),
+	/// Separate subscribe/publish prefixes and/or an API URL.
+	Detailed(PublicDetailed),
+}
+
+/// Detailed public access configuration with separate subscribe/publish and optional API.
+#[serde_as]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PublicDetailed {
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
+	pub subscribe: Vec<String>,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
+	pub publish: Vec<String>,
+	/// A URL endpoint that returns `{ subscribe: [...], publish: [...] }`.
+	/// The connection namespace is appended to the URL.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub api: Option<String>,
+}
+
+impl PublicConfig {
+	/// Normalize into the detailed form.
+	pub fn into_detailed(self) -> PublicDetailed {
+		match self {
+			PublicConfig::Simple(prefixes) => PublicDetailed {
+				subscribe: prefixes.clone(),
+				publish: prefixes,
+				api: None,
+			},
+			PublicConfig::Detailed(d) => d,
+		}
+	}
+
+	/// Deserialize `Option<PublicConfig>` from TOML: dispatches based on value type.
+	fn deserialize_option<'de, D>(deserializer: D) -> Result<Option<PublicConfig>, D::Error>
+	where
+		D: serde::Deserializer<'de>,
+	{
+		let value = Option::<toml::Value>::deserialize(deserializer)?;
+		let Some(value) = value else {
+			return Ok(None);
+		};
+
+		match value {
+			toml::Value::String(s) => Ok(Some(PublicConfig::Simple(vec![s]))),
+			toml::Value::Array(arr) => {
+				let strings: Vec<String> = arr
+					.into_iter()
+					.map(|v| v.try_into::<String>().map_err(serde::de::Error::custom))
+					.collect::<Result<_, _>>()?;
+				if strings.is_empty() {
+					Ok(None)
+				} else {
+					Ok(Some(PublicConfig::Simple(strings)))
+				}
+			}
+			toml::Value::Table(table) => {
+				let d: PublicDetailed = toml::Value::Table(table).try_into().map_err(serde::de::Error::custom)?;
+				if d.subscribe.is_empty() && d.publish.is_empty() && d.api.is_none() {
+					Ok(None)
+				} else {
+					Ok(Some(PublicConfig::Detailed(d)))
+				}
+			}
+			other => Err(serde::de::Error::custom(format!(
+				"expected string, array, or table for public config, got {other}"
+			))),
+		}
+	}
+}
+
+/// Clap parses `--auth-public <value>` as a string.
+impl std::str::FromStr for PublicConfig {
+	type Err = std::convert::Infallible;
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		Ok(PublicConfig::Simple(vec![s.to_string()]))
+	}
+}
+
+impl Serialize for PublicConfig {
+	fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+	where
+		S: serde::Serializer,
+	{
+		match self {
+			PublicConfig::Simple(v) if v.len() == 1 => v[0].serialize(serializer),
+			PublicConfig::Simple(v) => v.serialize(serializer),
+			PublicConfig::Detailed(d) => d.serialize(serializer),
+		}
+	}
+}
+
+/// Response from a public access API endpoint.
+#[derive(Debug, Deserialize)]
+struct PublicResponse {
+	#[serde(default)]
+	subscribe: Vec<String>,
+	#[serde(default)]
+	publish: Vec<String>,
+}
+
+/// Resolved public access configuration.
+#[derive(Clone, Default)]
+struct PublicAccess {
+	subscribe: Vec<PathOwned>,
+	publish: Vec<PathOwned>,
+	/// Optional API URL for dynamic resolution (namespace appended).
+	api: Option<(url::Url, ClientWithMiddleware)>,
+}
+
+impl PublicAccess {
+	fn is_empty(&self) -> bool {
+		self.subscribe.is_empty() && self.publish.is_empty() && self.api.is_none()
+	}
+
+	/// Check if the given path is already fully covered by static prefixes for both directions.
+	fn static_covers(&self, path: &Path) -> bool {
+		let sub_covered = self.subscribe.iter().any(|p| path.has_prefix(p));
+		let pub_covered = self.publish.iter().any(|p| path.has_prefix(p));
+		sub_covered && pub_covered
+	}
 }
 
 impl AuthConfig {
@@ -161,15 +321,6 @@ struct KeyResolver {
 impl KeyResolver {
 	fn new(source: KeySource) -> Self {
 		Self { source }
-	}
-
-	/// Try to load the default key (only works for single-key sources: File/Url).
-	/// Returns Err for directory sources that require a kid.
-	async fn resolve_default(&self) -> Result<Arc<Key>, AuthError> {
-		match &self.source {
-			KeySource::File(_) | KeySource::Url { .. } => self.resolve(None).await,
-			KeySource::Dir(_) | KeySource::UrlDir { .. } => Err(AuthError::MissingKeyId),
-		}
 	}
 
 	async fn resolve(&self, kid: Option<&str>) -> Result<Arc<Key>, AuthError> {
@@ -226,7 +377,8 @@ impl KeyResolver {
 #[derive(Clone)]
 pub struct Auth {
 	resolver: Option<Arc<KeyResolver>>,
-	public: Option<PathOwned>,
+	/// Public (unauthenticated) access with static prefixes and/or an API.
+	public: PublicAccess,
 }
 
 fn build_http_client() -> anyhow::Result<ClientWithMiddleware> {
@@ -253,41 +405,6 @@ fn parse_url(s: &str) -> Option<url::Url> {
 }
 
 impl Auth {
-	/// Creates a new authenticator from the given configuration.
-	///
-	/// Collect guest access paths from a key, removing duplicates and subsets.
-	/// For example, a key with paths ["foo", "foo/bar", "baz"] yields ["foo", "baz"]
-	/// since "foo/bar" is a subset of "foo".
-	fn aggregate_guest_paths(key: &Key, public: Option<&PathOwned>) -> (Vec<PathOwned>, Vec<PathOwned>) {
-		let mut guest_sub: Vec<PathOwned> = Vec::new();
-		let mut guest_pub: Vec<PathOwned> = Vec::new();
-
-		// Backwards compatibility: --auth-public sets both guest_sub and guest_pub
-		if let Some(public) = public {
-			guest_sub.push(public.to_owned());
-			guest_pub.push(public.to_owned());
-		}
-
-		for sub in key.guest_sub.iter().chain(key.guest.iter()) {
-			guest_sub.push(Path::new(sub).to_owned());
-		}
-		for pub_ in key.guest_pub.iter().chain(key.guest.iter()) {
-			guest_pub.push(Path::new(pub_).to_owned());
-		}
-
-		let guest_sub = Self::dedup_paths(guest_sub);
-		let guest_pub = Self::dedup_paths(guest_pub);
-
-		if guest_sub.len() > 1 {
-			tracing::debug!("key has multiple guest_sub paths: {:?}", guest_sub);
-		}
-		if guest_pub.len() > 1 {
-			tracing::debug!("key has multiple guest_pub paths: {:?}", guest_pub);
-		}
-
-		(guest_sub, guest_pub)
-	}
-
 	/// Remove duplicate and subset paths, keeping only the shortest prefixes.
 	fn dedup_paths(mut paths: Vec<PathOwned>) -> Vec<PathOwned> {
 		if paths.len() <= 1 {
@@ -311,11 +428,6 @@ impl Auth {
 	}
 
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
-		let public = config.public.as_ref().map(|p| {
-			tracing::warn!("--auth-public is deprecated; use --guest when generating an auth key instead");
-			p.as_path().to_owned()
-		});
-
 		anyhow::ensure!(
 			config.key.is_none() || config.key_dir.is_none(),
 			"cannot specify both --auth-key and --auth-key-dir"
@@ -355,15 +467,60 @@ impl Auth {
 
 		let resolver = source.map(|s| Arc::new(KeyResolver::new(s)));
 
-		if resolver.is_none() && public.is_none() {
+		// Resolve public access from config.
+		let public = match config.public {
+			Some(config) => {
+				let d = config.into_detailed();
+				let subscribe = Self::dedup_paths(d.subscribe.iter().map(|s| Path::new(s).to_owned()).collect());
+				let publish = Self::dedup_paths(d.publish.iter().map(|s| Path::new(s).to_owned()).collect());
+				let api = match d.api {
+					Some(url_str) => {
+						let mut url = parse_url(&url_str).context("invalid public API URL")?;
+						if !url.path().ends_with('/') {
+							url.set_path(&format!("{}/", url.path()));
+						}
+						Some((url, build_http_client()?))
+					}
+					None => None,
+				};
+
+				PublicAccess {
+					subscribe,
+					publish,
+					api,
+				}
+			}
+			None => PublicAccess::default(),
+		};
+
+		if resolver.is_none() && public.is_empty() {
 			anyhow::bail!("no auth-key, auth-key-dir, or public path configured");
 		}
 
 		Ok(Self { resolver, public })
 	}
 
+	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, AuthError> {
+		let response = client.get(url.clone()).send().await.map_err(|e| {
+			tracing::warn!(%url, %e, "failed to fetch public access");
+			AuthError::ExpectedToken
+		})?;
+
+		let response = response.error_for_status().map_err(|_| AuthError::ExpectedToken)?;
+
+		let body = response.text().await.map_err(|e| {
+			tracing::warn!(%url, %e, "failed to read public access response");
+			AuthError::ExpectedToken
+		})?;
+
+		serde_json::from_str(&body).map_err(|e| {
+			tracing::warn!(%url, %e, "failed to parse public access response");
+			AuthError::DecodeFailed
+		})
+	}
+
 	/// Parse the token from the user provided URL, returning the claims if successful.
-	/// If no token is provided, then the claims will use the public path if it is set.
+	/// If no token is provided, then the claims will use the public access configuration.
 	pub async fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
 		let claims = if let Some(token) = params.jwt.as_deref() {
 			let Some(resolver) = &self.resolver else {
@@ -378,35 +535,42 @@ impl Auth {
 
 			// Verify the token with the resolved key
 			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
-		} else if let Some(resolver) = &self.resolver {
-			// No JWT provided -- check if the key has guest access configured.
-			// This only works for single-key sources (File/Url), not directory sources.
-			let key = resolver.resolve_default().await.ok();
+		} else if !self.public.is_empty() {
+			// No JWT — use public access (static prefixes + optional API).
+			let root = Path::new(&params.path);
+			let mut subscribe: Vec<String> = self.public.subscribe.iter().map(|p| p.to_string()).collect();
+			let mut publish: Vec<String> = self.public.publish.iter().map(|p| p.to_string()).collect();
 
-			if let Some(key) = key {
-				let (guest_sub, guest_pub) = Self::aggregate_guest_paths(&key, self.public.as_ref());
-
-				if !guest_sub.is_empty() || !guest_pub.is_empty() {
-					let subscribe = guest_sub.into_iter().map(|p| p.to_string()).collect();
-					let publish = guest_pub.into_iter().map(|p| p.to_string()).collect();
-					moq_token::Claims {
-						root: "".to_string(),
-						subscribe,
-						publish,
-						..Default::default()
+			// If an API is configured and static prefixes don't already cover this path,
+			// fetch additional permissions for this namespace.
+			if let Some((base, client)) = &self.public.api {
+				if !self.public.static_covers(&root) {
+					let namespace = root.to_string();
+					match base.join(&namespace) {
+						Ok(url) => match Self::fetch_public_response(client, &url).await {
+							Ok(response) => {
+								subscribe.extend(response.subscribe);
+								publish.extend(response.publish);
+							}
+							Err(e) => {
+								tracing::debug!(%url, %e, "public access API denied or failed");
+							}
+						},
+						Err(e) => {
+							tracing::warn!(%base, %e, "failed to construct public access URL");
+						}
 					}
-				} else {
-					return Err(AuthError::ExpectedToken);
 				}
-			} else {
+			}
+
+			if subscribe.is_empty() && publish.is_empty() {
 				return Err(AuthError::ExpectedToken);
 			}
-		} else if let Some(public) = &self.public {
-			// Deprecated: --auth-public without a key
+
 			moq_token::Claims {
-				root: public.to_string(),
-				subscribe: vec!["".to_string()],
-				publish: vec!["".to_string()],
+				root: "".to_string(),
+				subscribe,
+				publish,
 				..Default::default()
 			}
 		} else {
@@ -487,7 +651,7 @@ impl Auth {
 mod tests {
 	use super::*;
 	use moq_token::{Algorithm, Key, KeyId};
-	use tempfile::{NamedTempFile, TempDir};
+	use tempfile::TempDir;
 
 	fn create_test_key_with_kid(kid: &str) -> Key {
 		Key::generate(Algorithm::HS256, Some(moq_token::KeyId::decode(kid).unwrap())).unwrap()
@@ -502,19 +666,22 @@ mod tests {
 		dir
 	}
 
-	fn create_test_key_with_public(guest_sub: &[&str], guest_pub: &[&str]) -> anyhow::Result<(NamedTempFile, Key)> {
-		let key_file = NamedTempFile::new()?;
-		let mut key = Key::generate(Algorithm::HS256, None)?;
-		key.guest_sub = guest_sub.iter().map(|s| s.to_string()).collect();
-		key.guest_pub = guest_pub.iter().map(|s| s.to_string()).collect();
-		key.to_file(key_file.path())?;
-		Ok((key_file, key))
+	fn simple_public(prefix: &str) -> Option<PublicConfig> {
+		Some(PublicConfig::Simple(vec![prefix.to_string()]))
+	}
+
+	fn detailed_public(subscribe: &[&str], publish: &[&str]) -> Option<PublicConfig> {
+		Some(PublicConfig::Detailed(PublicDetailed {
+			subscribe: subscribe.iter().map(|s| s.to_string()).collect(),
+			publish: publish.iter().map(|s| s.to_string()).collect(),
+			api: None,
+		}))
 	}
 
 	#[tokio::test]
 	async fn test_anonymous_access_with_public_path() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			public: Some("anon".to_string()),
+			public: simple_public("anon"),
 			..Default::default()
 		})
 		.await?;
@@ -535,7 +702,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_anonymous_access_fully_public() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			public: Some("".to_string()),
+			public: simple_public(""),
 			..Default::default()
 		})
 		.await?;
@@ -551,7 +718,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_anonymous_access_denied_wrong_prefix() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			public: Some("anon".to_string()),
+			public: simple_public("anon"),
 			..Default::default()
 		})
 		.await?;
@@ -582,7 +749,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_token_provided_but_no_key_configured() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			public: Some("anon".to_string()),
+			public: simple_public("anon"),
 			..Default::default()
 		})
 		.await?;
@@ -1036,10 +1203,9 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_key_guest_sub_allows_anonymous_subscribe() -> anyhow::Result<()> {
-		let (key_file, _) = create_test_key_with_public(&["demo"], &[])?;
+	async fn test_public_subscribe_only() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			public: detailed_public(&["demo"], &[]),
 			..Default::default()
 		})
 		.await?;
@@ -1056,13 +1222,13 @@ mod tests {
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec![]);
 
-		// Anonymous access to /demo/room/123 — still allowed (subpath of guest prefix)
+		// Anonymous access to /demo/room/123 — still allowed (subpath of public prefix)
 		let token = auth.verify(&AuthParams::new("/demo/room/123")).await?;
 		assert_eq!(token.root, Path::new("demo/room/123").to_owned());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec![]);
 
-		// Anonymous access to /other — should fail (not under guest prefix)
+		// Anonymous access to /other — should fail (not under public prefix)
 		let result = auth.verify(&AuthParams::new("/other")).await;
 		assert!(result.is_err());
 
@@ -1119,10 +1285,9 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_key_guest_pub_allows_anonymous_publish() -> anyhow::Result<()> {
-		let (key_file, _) = create_test_key_with_public(&[], &["demo"])?;
+	async fn test_public_publish_only() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			public: detailed_public(&[], &["demo"]),
 			..Default::default()
 		})
 		.await?;
@@ -1176,10 +1341,9 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_key_public_both() -> anyhow::Result<()> {
-		let (key_file, _) = create_test_key_with_public(&["demo"], &["demo"])?;
+	async fn test_public_detailed_both() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			public: detailed_public(&["demo"], &["demo"]),
 			..Default::default()
 		})
 		.await?;
@@ -1197,10 +1361,9 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_key_public_empty_string_allows_everything() -> anyhow::Result<()> {
-		let (key_file, _) = create_test_key_with_public(&[""], &[""])?;
+	async fn test_public_empty_string_allows_everything() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			public: simple_public(""),
 			..Default::default()
 		})
 		.await?;
@@ -1214,15 +1377,19 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_key_public_jwt_still_works() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key_with_public(&["demo"], &[])?;
+	async fn test_public_with_jwt_still_works() -> anyhow::Result<()> {
+		let key = create_test_key_with_kid("test-key");
+		let key_file = tempfile::NamedTempFile::new()?;
+		key.to_file(key_file.path())?;
+
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
+			public: detailed_public(&["demo"], &[]),
 			..Default::default()
 		})
 		.await?;
 
-		// JWT tokens should still work normally, ignoring key public fields
+		// JWT tokens should still work normally
 		let claims = moq_token::Claims {
 			root: "secret".to_string(),
 			subscribe: vec!["".to_string()],
@@ -1245,19 +1412,141 @@ mod tests {
 		Ok(())
 	}
 
-	#[tokio::test]
-	async fn test_key_no_public_fields_requires_token() -> anyhow::Result<()> {
-		let (key_file, _) = create_test_key_with_public(&[], &[])?;
-		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
-		.await?;
+	#[test]
+	fn test_toml_public_string() {
+		let config: AuthConfig = toml::from_str(r#"public = "anon""#).unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["anon"]);
+		assert_eq!(d.publish, vec!["anon"]);
+	}
 
-		// No public fields and no JWT -> should fail
-		let result = auth.verify(&AuthParams::new("/demo")).await;
-		assert!(result.is_err());
+	#[test]
+	fn test_toml_public_empty_string() {
+		let config: AuthConfig = toml::from_str(r#"public = """#).unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec![""]);
+		assert_eq!(d.publish, vec![""]);
+	}
 
-		Ok(())
+	#[test]
+	fn test_toml_public_array() {
+		let config: AuthConfig = toml::from_str(r#"public = ["anon", "demo"]"#).unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["anon", "demo"]);
+		assert_eq!(d.publish, vec!["anon", "demo"]);
+	}
+
+	#[test]
+	fn test_toml_public_table_both() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+subscribe = "demo"
+publish = "anon"
+"#,
+		)
+		.unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["demo"]);
+		assert_eq!(d.publish, vec!["anon"]);
+	}
+
+	#[test]
+	fn test_toml_public_table_arrays() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+subscribe = ["anon", "demo"]
+publish = ["anon"]
+"#,
+		)
+		.unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["anon", "demo"]);
+		assert_eq!(d.publish, vec!["anon"]);
+	}
+
+	#[test]
+	fn test_toml_public_table_subscribe_only() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+subscribe = "demo"
+"#,
+		)
+		.unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["demo"]);
+		assert!(d.publish.is_empty());
+	}
+
+	#[test]
+	fn test_toml_public_table_publish_only() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+publish = ["anon", "demo"]
+"#,
+		)
+		.unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert!(d.subscribe.is_empty());
+		assert_eq!(d.publish, vec!["anon", "demo"]);
+	}
+
+	#[test]
+	fn test_toml_public_not_set() {
+		let config: AuthConfig = toml::from_str("").unwrap();
+		assert!(config.public.is_none());
+	}
+
+	#[test]
+	fn test_toml_public_url_string() {
+		let config: AuthConfig = toml::from_str(r#"public = "https://api.example.com/access""#).unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["https://api.example.com/access"]);
+		assert_eq!(d.publish, vec!["https://api.example.com/access"]);
+	}
+
+	#[test]
+	fn test_toml_public_table_api() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+api = "https://api.example.com/access"
+"#,
+		)
+		.unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.api.as_deref(), Some("https://api.example.com/access"));
+		assert!(d.subscribe.is_empty());
+		assert!(d.publish.is_empty());
+	}
+
+	#[test]
+	fn test_toml_public_table_api_with_static() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+subscribe = "anon"
+publish = "anon"
+api = "https://api.example.com/access"
+"#,
+		)
+		.unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["anon"]);
+		assert_eq!(d.publish, vec!["anon"]);
+		assert_eq!(d.api.as_deref(), Some("https://api.example.com/access"));
+	}
+
+	#[test]
+	fn test_clap_public_from_str() {
+		let config: PublicConfig = "anon".parse().unwrap();
+		let d = config.into_detailed();
+		assert_eq!(d.subscribe, vec!["anon"]);
+		assert_eq!(d.publish, vec!["anon"]);
+	}
+
+	#[test]
+	fn test_clap_public_url_from_str() {
+		let config: PublicConfig = "https://api.example.com/access".parse().unwrap();
+		let d = config.into_detailed();
+		assert_eq!(d.subscribe, vec!["https://api.example.com/access"]);
+		assert_eq!(d.publish, vec!["https://api.example.com/access"]);
 	}
 }

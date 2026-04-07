@@ -270,7 +270,9 @@ class DecoderTrack {
 				effect.close();
 			},
 		});
-		effect.cleanup(() => decoder.close());
+		effect.cleanup(() => {
+			if (decoder.state !== "closed") decoder.close();
+		});
 
 		// Input processing - depends on container type
 		if (this.config.container.kind === "cmaf") {
@@ -320,7 +322,8 @@ class DecoderTrack {
 				}
 
 				// Mark that we received this frame right now.
-				this.source.sync.received(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
+				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
+				this.source.sync.received(timestamp, "video");
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -398,7 +401,8 @@ class DecoderTrack {
 								});
 
 								// Mark that we received this frame right now.
-								this.source.sync.received(Time.Milli.fromMicro(sample.timestamp as Time.Micro));
+								const timestamp = Time.Milli.fromMicro(sample.timestamp as Time.Micro);
+								this.source.sync.received(timestamp, "video");
 
 								// Track stats
 								this.stats.update((current) => ({

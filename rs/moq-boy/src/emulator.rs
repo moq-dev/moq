@@ -1,3 +1,9 @@
+//! Game Boy Color emulator wrapper.
+//!
+//! Wraps the `boytacean` emulator library, adding per-viewer button tracking
+//! for crowd-control input. A button is pressed on the emulator as long as
+//! at least one viewer is holding it (union semantics — "anarchy mode").
+
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -5,7 +11,9 @@ use std::path::Path;
 use boytacean::gb::{AudioProvider, GameBoy, GameBoyMode};
 use boytacean::pad::PadKey;
 
+/// Game Boy native screen width.
 pub const WIDTH: u32 = 160;
+/// Game Boy native screen height.
 pub const HEIGHT: u32 = 144;
 
 /// Game Boy button inputs.
@@ -70,6 +78,8 @@ impl Emulator {
 		gb.load_rom(&rom, None)
 			.map_err(|e| anyhow::anyhow!("failed to load ROM: {e}"))?;
 		gb.load_boot_state();
+		// A=0x11 signals CGB (Color Game Boy) mode to the ROM.
+		// The boot ROM normally sets this, but we skip boot.
 		gb.cpu().a = 0x11;
 
 		Ok(Self {

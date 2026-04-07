@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.10.14"
+version = "0.10.16"
 edition = "2024"
 rust-version.workspace = true
 
@@ -49,6 +49,7 @@ rustls = { version = "0.23", features = [
     "aws-lc-rs",
 ], default-features = false }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 serde_with = { version = "3", features = ["json", "base64"] }
 thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.6", optional = true }

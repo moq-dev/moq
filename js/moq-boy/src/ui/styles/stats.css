@@ -1,0 +1,73 @@
+.boy__stats {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: var(--spacing-16);
+	width: 100%;
+}
+
+/* Location label */
+.boy__location {
+	width: 100%;
+	font-family: monospace;
+	font-size: 0.65rem;
+	color: var(--boy-accent);
+	text-align: center;
+}
+
+/* Encoding stats */
+.boy__stats-list {
+	width: 100%;
+	font-family: monospace;
+	font-size: 0.65rem;
+}
+
+.boy__stats-header {
+	color: var(--boy-text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	margin-bottom: 0.3rem;
+	font-size: 0.6rem;
+}
+
+.boy__stats-entry {
+	display: flex;
+	justify-content: space-between;
+	padding: 0.15rem 0;
+	color: var(--boy-text-dim);
+}
+
+.boy__stats-note {
+	font-family: monospace;
+	font-size: 0.55rem;
+	color: var(--boy-text-dim);
+	text-align: center;
+	line-height: 1.4;
+}
+
+/* Player latency list */
+.boy__latency-list {
+	width: 100%;
+	font-family: monospace;
+	font-size: 0.65rem;
+}
+
+.boy__latency-header {
+	color: var(--boy-text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	margin-bottom: 0.3rem;
+	font-size: 0.6rem;
+}
+
+.boy__latency-entry {
+	display: flex;
+	justify-content: space-between;
+	padding: 0.15rem 0;
+	color: var(--boy-text-dim);
+}
+
+.boy__latency-entry--self {
+	color: var(--boy-accent);
+	font-weight: 700;
+}

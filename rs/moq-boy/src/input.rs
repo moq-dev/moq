@@ -1,3 +1,10 @@
+//! Viewer discovery and command handling.
+//!
+//! Viewers are MoQ publishers: each creates a broadcast under the viewer prefix
+//! with a "command" track containing JSON button states and reset requests.
+//! This module discovers viewer broadcasts and relays their commands to the
+//! emulator thread via an mpsc channel.
+
 use anyhow::Context;
 
 use crate::emulator::Button;

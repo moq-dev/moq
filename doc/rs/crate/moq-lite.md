@@ -47,13 +47,7 @@ The Rust API uses a builder pattern with `Session`, `OriginProducer`/`OriginCons
 
 ## Authentication
 
-Pass JWT tokens via query parameters:
-
-```rust
-let url = format!("https://relay.example.com/demo?jwt={}", token);
-```
-
-See [Authentication guide](/app/relay/auth) for details.
+Pass JWT tokens via query parameters in the URL. See [Authentication guide](/app/relay/auth) for details.
 
 ## Protocol Specification
 
@@ -65,4 +59,4 @@ See the [moq-lite specification](/spec/draft-lcurley-moq-lite) for protocol deta
 - Use [moq-native](/rs/crate/moq-native) for QUIC/WebTransport connection helpers
 - Deploy a [relay server](/app/relay/)
 - Read the [Concepts guide](/concept/)
-- View [code examples](https://github.com/moq-dev/moq/tree/main/rs)
+- View [code examples](https://github.com/moq-dev/moq/tree/main/rs/moq-native/examples)

@@ -4,12 +4,11 @@ on:
   push:
     tags:
       - 'moq-relay-v*'
-      - 'moq-clock-v*'
       - 'moq-cli-v*'
       - 'moq-token-cli-v*'
 
 env:
-  REGISTRY: docker.io/kixelated
+  REGISTRY: docker.io/moqdev
 
 jobs:
   deploy:

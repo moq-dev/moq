@@ -8,7 +8,6 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header};
 use rsa::BigUint;
 use rsa::pkcs1::EncodeRsaPrivateKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_with::{OneOrMany, formats::PreferMany, serde_as};
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
 
@@ -142,7 +141,6 @@ pub struct RsaAdditionalPrime {
 
 /// JWK, almost to spec (<https://datatracker.ietf.org/doc/html/rfc7517>) but not quite the same
 /// because it's annoying to implement.
-#[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(remote = "Self")]
 pub struct Key {
@@ -161,22 +159,6 @@ pub struct Key {
 	/// The key ID, useful for rotating keys.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub kid: Option<crate::KeyId>,
-
-	/// Path prefixes for both unauthenticated subscribe and publish access.
-	/// Shorthand for setting both `guest_sub` and `guest_pub`.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "OneOrMany<_, PreferMany>")]
-	pub guest: Vec<String>,
-
-	/// Path prefixes for unauthenticated subscribe access. `""` means everything.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "OneOrMany<_, PreferMany>")]
-	pub guest_sub: Vec<String>,
-
-	/// Path prefixes for unauthenticated publish access. `""` means everything.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "OneOrMany<_, PreferMany>")]
-	pub guest_pub: Vec<String>,
 
 	// Cached for performance reasons, unfortunately.
 	#[serde(skip)]
@@ -309,9 +291,6 @@ impl Key {
 			operations: [KeyOperation::Verify].into(),
 			key,
 			kid: self.kid.clone(),
-			guest: self.guest.clone(),
-			guest_sub: self.guest_sub.clone(),
-			guest_pub: self.guest_pub.clone(),
 			decode: Default::default(),
 			encode: Default::default(),
 		})
@@ -555,9 +534,6 @@ mod tests {
 				secret: b"test-secret-that-is-long-enough-for-hmac-sha256".to_vec(),
 			},
 			kid: Some(crate::KeyId::decode("test-key-1").unwrap()),
-			guest: vec![],
-			guest_sub: vec![],
-			guest_pub: vec![],
 			decode: Default::default(),
 			encode: Default::default(),
 		}

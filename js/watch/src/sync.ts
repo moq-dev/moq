@@ -29,6 +29,9 @@ export class Sync {
 	// There's probably a way to use Effect, but lets keep it simple for now.
 	#update: PromiseWithResolvers<void>;
 
+	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
+	#late = new Map<string, { count: number; maxMs: number }>();
+
 	signals = new Effect();
 
 	constructor(props?: SyncProps) {
@@ -54,13 +57,40 @@ export class Sync {
 	}
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
-	received(timestamp: Time.Milli): void {
-		const ref = Time.Milli.sub(Time.Milli.now(), timestamp);
-		const current = this.#reference.peek();
+	received(timestamp: Time.Milli, label = ""): void {
+		const now = Time.Milli.now();
+		const ref = Time.Milli.sub(now, timestamp);
+		const currentRef = this.#reference.peek();
 
-		if (current !== undefined && ref >= current) {
-			return;
+		if (currentRef !== undefined) {
+			// Check if `wait()` would not sleep at all.
+			// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
+			// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
+			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#latency.peek());
+			if (sleep < 0) {
+				const entry = this.#late.get(label);
+				if (entry) {
+					entry.count++;
+					entry.maxMs = Math.max(entry.maxMs, -sleep);
+				} else {
+					this.#late.set(label, { count: 1, maxMs: -sleep });
+				}
+			} else {
+				const entry = this.#late.get(label);
+				if (entry) {
+					const prefix = label ? `sync[${label}]` : "sync";
+					const behind = Sync.#formatDuration(entry.maxMs);
+					console.warn(`${prefix}: ${entry.count} late frame(s), max ${behind} behind`);
+					this.#late.delete(label);
+				}
+			}
+
+			if (ref >= currentRef) {
+				// Our frame was not relatively newer than any other frame.
+				return;
+			}
 		}
+
 		this.#reference.set(ref);
 		this.#update.resolve();
 		this.#update = Promise.withResolvers();
@@ -84,11 +114,21 @@ export class Sync {
 
 			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#latency.peek());
 			if (sleep <= 0) return;
+
 			const wait = new Promise((resolve) => setTimeout(resolve, sleep)).then(() => true);
 
 			const ok = await Promise.race([this.#update.promise, wait]);
 			if (ok) return;
 		}
+	}
+
+	static #formatDuration(ms: number): string {
+		ms = Math.round(ms);
+		if (ms < 1000) return `${ms}ms`;
+		const s = ms / 1000;
+		if (s < 60) return `${Math.round(s * 10) / 10}s`;
+		const m = s / 60;
+		return `${Math.round(m * 10) / 10}m`;
 	}
 
 	close() {

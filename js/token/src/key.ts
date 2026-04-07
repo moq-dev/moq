@@ -35,24 +35,10 @@ const Base64FieldSchema = z.string().check(
 	}),
 );
 
-const StringOrArray = z._default(
-	z.union([
-		z.pipe(
-			z.string(),
-			z.transform((s) => [s]),
-		),
-		z.array(z.string()),
-	]),
-	[],
-);
-
 const BaseKeySchema = z.object({
 	alg: AlgorithmSchema,
 	key_ops: z.array(OperationSchema).check(z.minLength(1)),
 	kid: z.optional(KeyIdSchema),
-	guest: StringOrArray,
-	guest_sub: StringOrArray,
-	guest_pub: StringOrArray,
 });
 
 const OctKeySchema = z.extend(BaseKeySchema, {

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.14](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.13...moq-cli-v0.7.14) - 2026-04-07
+
+### Other
+
+- Switch Docker images from kixelated/ to moqdev/ ([#1234](https://github.com/moq-dev/moq/pull/1234))
+
 ## [0.7.13](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.12...moq-cli-v0.7.13) - 2026-03-31
 
 ### Other

@@ -1,20 +1,21 @@
 import { resolve } from "path";
 import { defineConfig } from "vite";
+import solidPlugin from "vite-plugin-solid";
 import { workletInline } from "../common/vite-plugin-worklet";
 
 export default defineConfig({
-	plugins: [workletInline()],
+	plugins: [solidPlugin(), workletInline()],
 	build: {
 		lib: {
 			entry: {
 				index: resolve(__dirname, "src/index.ts"),
 				element: resolve(__dirname, "src/element.ts"),
-				styles: resolve(__dirname, "src/styles.ts"),
+				"ui/index": resolve(__dirname, "src/ui/index.tsx"),
 			},
 			formats: ["es"],
 		},
 		rollupOptions: {
-			external: ["@moq/hang", "@moq/lite", "@moq/signals", "@moq/watch"],
+			external: ["@moq/lite", "@moq/signals", "@moq/ui-core", "@moq/watch"],
 		},
 		sourcemap: true,
 		target: "esnext",

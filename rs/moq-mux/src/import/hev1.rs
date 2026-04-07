@@ -28,6 +28,11 @@ pub struct Hev1 {
 	cached_vps: Option<Bytes>,
 	cached_sps: Option<Bytes>,
 	cached_pps: Option<Bytes>,
+
+	// Jitter tracking: minimum duration between consecutive frames.
+	last_timestamp: Option<hang::container::Timestamp>,
+	min_duration: Option<hang::container::Timestamp>,
+	jitter: Option<hang::container::Timestamp>,
 }
 
 impl Hev1 {
@@ -44,6 +49,9 @@ impl Hev1 {
 			cached_vps: None,
 			cached_sps: None,
 			cached_pps: None,
+			last_timestamp: None,
+			min_duration: None,
+			jitter: None,
 		}
 	}
 
@@ -299,6 +307,25 @@ impl Hev1 {
 		};
 
 		track.write(frame)?;
+
+		// Track the minimum frame duration and update catalog jitter.
+		if let Some(last) = self.last_timestamp
+			&& let Ok(duration) = pts.checked_sub(last)
+			&& duration < self.min_duration.unwrap_or(hang::container::Timestamp::MAX)
+		{
+			self.min_duration = Some(duration);
+
+			if duration < self.jitter.unwrap_or(hang::container::Timestamp::MAX) {
+				self.jitter = Some(duration);
+
+				if let Ok(jitter) = duration.convert() {
+					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.info.name) {
+						c.jitter = Some(jitter);
+					}
+				}
+			}
+		}
+		self.last_timestamp = Some(pts);
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;

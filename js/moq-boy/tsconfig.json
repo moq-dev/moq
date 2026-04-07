@@ -2,6 +2,8 @@
 	"extends": "../tsconfig.json",
 	"compilerOptions": {
 		"rootDir": "./src",
+		"jsx": "preserve",
+		"jsxImportSource": "solid-js",
 		"outDir": "dist",
 		"emitDeclarationOnly": true,
 		"types": ["bun"]

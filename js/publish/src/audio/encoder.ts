@@ -124,6 +124,9 @@ export class Encoder {
 			numberOfChannels: Catalog.u53(worklet.channelCount),
 			bitrate: Catalog.u53(worklet.channelCount * 32_000),
 			container: { kind: "legacy" } as const,
+			// TODO parse the actual frame duration instead of assuming 20ms.
+			// Opus supports 2.5–60ms but 20ms is the real-time default.
+			jitter: Catalog.u53(20),
 		};
 
 		effect.set(this.#config, config);
