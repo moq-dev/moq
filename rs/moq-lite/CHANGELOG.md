@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.8](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.7...moq-lite-v0.15.8) - 2026-04-07
+
+### Other
+
+- Fix spurious "short buffer" warnings during message decode ([#1223](https://github.com/moq-dev/moq/pull/1223))
+
 ## [0.15.7](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.6...moq-lite-v0.15.7) - 2026-04-03
 
 ### Other

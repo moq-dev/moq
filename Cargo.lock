@@ -134,9 +134,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "arc-swap"
-version = "1.9.0"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a07d1f37ff60921c83bdfc7407723bdefe89b44b98a9b772f225c8f9d67141a6"
+checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
 dependencies = [
  "rustversion",
 ]
@@ -1681,9 +1681,9 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
-version = "2.3.0"
+version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "ff"
@@ -3442,7 +3442,7 @@ dependencies = [
 
 [[package]]
 name = "moq-lite"
-version = "0.15.7"
+version = "0.15.8"
 dependencies = [
  "bytes",
  "conducer",
@@ -3468,7 +3468,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3494,7 +3494,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.13.7"
+version = "0.13.8"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3533,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.10.14"
+version = "0.10.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -3567,7 +3567,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4428,7 +4428,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12922b6296c06eb741b02d7b5161e3aaa22864af38dfa025a1a3ba3f68c84577"
 dependencies = [
  "der 0.8.0",
- "spki 0.8.0-rc.4",
+ "spki 0.8.0",
 ]
 
 [[package]]
@@ -5516,9 +5516,9 @@ checksum = "b12e76d157a900eb52e81bc6e9f3069344290341720e9178cde2407113ac8d89"
 
 [[package]]
 name = "semver"
-version = "1.0.27"
+version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 dependencies = [
  "serde",
  "serde_core",
@@ -5948,9 +5948,9 @@ dependencies = [
 
 [[package]]
 name = "spki"
-version = "0.8.0-rc.4"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8baeff88f34ed0691978ec34440140e1572b68c7dd4a495fd14a3dc1944daa80"
+checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
 dependencies = [
  "base64ct",
  "der 0.8.0",

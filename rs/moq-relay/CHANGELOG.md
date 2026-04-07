@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.15](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.14...moq-relay-v0.10.15) - 2026-04-07
+
+### Fixed
+
+- pass null pointer for jemalloc prof.dump ([#1227](https://github.com/moq-dev/moq/pull/1227))
+
 ## [0.10.14](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.12...moq-relay-v0.10.14) - 2026-04-03
 
 ### Added
