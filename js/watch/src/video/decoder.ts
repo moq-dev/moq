@@ -270,7 +270,9 @@ class DecoderTrack {
 				effect.close();
 			},
 		});
-		effect.cleanup(() => decoder.close());
+		effect.cleanup(() => {
+			if (decoder.state !== "closed") decoder.close();
+		});
 
 		// Input processing - depends on container type
 		if (this.config.container.kind === "cmaf") {

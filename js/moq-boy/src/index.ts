@@ -115,26 +115,28 @@ export class Game {
 
 		this.#signals.run(this.#runPixelBudget.bind(this));
 
-		// Pass active signal directly — no effect wrapper needed.
-		this.videoDecoder = new Watch.Video.Decoder(this.videoSource, { enabled: this.active });
+		// Video is enabled on the grid or when this game is expanded.
+		const videoEnabled = new Moq.Signals.Signal(true);
+		this.#signals.run(this.#runVideoEnabled.bind(this, videoEnabled));
+
+		this.videoDecoder = new Watch.Video.Decoder(this.videoSource, { enabled: videoEnabled });
 		this.#signals.cleanup(() => this.videoDecoder.close());
 
 		// Renderer needs a canvas — created by the UI layer, set via setCanvas().
 		this.videoRenderer = new Watch.Video.Renderer(this.videoDecoder);
 		this.#signals.cleanup(() => this.videoRenderer.close());
 
-		// Audio pipeline — pass signals directly.
+		// Audio pipeline — only download audio when active AND unmuted.
 		this.audioSource = new Watch.Audio.Source(this.sync, { broadcast: this.broadcast });
 		this.#signals.cleanup(() => this.audioSource.close());
 
-		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, { enabled: this.active });
+		const audioEnabled = new Moq.Signals.Signal(false);
+		this.#signals.run(this.#runAudioEnabled.bind(this, audioEnabled));
+
+		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, { enabled: audioEnabled });
 		this.#signals.cleanup(() => this.audioDecoder.close());
 
-		// Derive a muted signal: muted when user mutes OR when not active.
-		const muted = new Moq.Signals.Signal(true);
-		this.#signals.run(this.#runAudioMuted.bind(this, muted));
-
-		this.audioEmitter = new Watch.Audio.Emitter(this.audioDecoder, { volume: 0.5, muted });
+		this.audioEmitter = new Watch.Audio.Emitter(this.audioDecoder, { volume: 0.5 });
 		this.#signals.cleanup(() => this.audioEmitter.close());
 
 		// Resume AudioContext on first user interaction (browser autoplay policy).
@@ -198,10 +200,15 @@ export class Game {
 		this.videoSource.target.set({ pixels });
 	}
 
-	#runAudioMuted(muted: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
+	#runVideoEnabled(videoEnabled: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
+		const exp = effect.get(this.expanded);
+		videoEnabled.set(exp === undefined || exp === this.sessionId);
+	}
+
+	#runAudioEnabled(audioEnabled: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
 		const active = effect.get(this.active);
 		const userMuted = effect.get(this.userMuted);
-		muted.set(userMuted || !active);
+		audioEnabled.set(active && !userMuted);
 	}
 
 	#runStatus(effect: Moq.Signals.Effect) {

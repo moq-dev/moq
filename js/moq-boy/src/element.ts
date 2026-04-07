@@ -2,11 +2,10 @@ import * as Moq from "@moq/lite";
 import type { GameConfig } from "./index.ts";
 import { Game } from "./index.ts";
 
-const OBSERVED = ["url", "game-prefix", "viewer-prefix"] as const;
+const OBSERVED = ["url", "prefix", "prefix-game", "prefix-viewer"] as const;
 type Observed = (typeof OBSERVED)[number];
 
-const DEFAULT_GAME_PREFIX = "anon/boy/game";
-const DEFAULT_VIEWER_PREFIX = "anon/boy/viewer";
+const DEFAULT_PREFIX = "boy";
 
 const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
 
@@ -19,8 +18,10 @@ const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signal
  *
  * Attributes:
  *   - `url` — MoQ relay URL
- *   - `game-prefix` — Path prefix for game broadcasts (default: "anon/boy/game")
- *   - `viewer-prefix` — Path prefix for viewer broadcasts (default: "anon/boy/viewer")
+ *   - `prefix` — Base path prefix (default: "boy"). Derives prefix-game and prefix-viewer.
+ *     **Breaking change**: previously the derived attributes were named game-prefix/viewer-prefix.
+ *   - `prefix-game` — Path prefix for game broadcasts (default: "{prefix}/game")
+ *   - `prefix-viewer` — Path prefix for viewer broadcasts (default: "{prefix}/viewer")
  */
 export default class MoqBoy extends HTMLElement {
 	static observedAttributes = OBSERVED;
@@ -33,8 +34,9 @@ export default class MoqBoy extends HTMLElement {
 
 	readonly #signals = new Moq.Signals.Effect();
 	readonly #enabled = new Moq.Signals.Signal(false);
-	readonly #gamePrefix = new Moq.Signals.Signal(DEFAULT_GAME_PREFIX);
-	readonly #viewerPrefix = new Moq.Signals.Signal(DEFAULT_VIEWER_PREFIX);
+	readonly #prefix = new Moq.Signals.Signal(DEFAULT_PREFIX);
+	readonly #gamePrefixOverride = new Moq.Signals.Signal<string | undefined>(undefined);
+	readonly #viewerPrefixOverride = new Moq.Signals.Signal<string | undefined>(undefined);
 	readonly #sessions = new Map<string, Game>();
 
 	constructor() {
@@ -61,11 +63,14 @@ export default class MoqBoy extends HTMLElement {
 			case "url":
 				this.connection.url.set(newValue ? new URL(newValue) : undefined);
 				break;
-			case "game-prefix":
-				this.#gamePrefix.set(newValue ?? DEFAULT_GAME_PREFIX);
+			case "prefix":
+				this.#prefix.set(newValue ?? DEFAULT_PREFIX);
 				break;
-			case "viewer-prefix":
-				this.#viewerPrefix.set(newValue ?? DEFAULT_VIEWER_PREFIX);
+			case "prefix-game":
+				this.#gamePrefixOverride.set(newValue ?? undefined);
+				break;
+			case "prefix-viewer":
+				this.#viewerPrefixOverride.set(newValue ?? undefined);
 				break;
 		}
 	}
@@ -78,28 +83,37 @@ export default class MoqBoy extends HTMLElement {
 		this.connection.url.set(value ? new URL(value) : undefined);
 	}
 
-	get gamePrefix(): string {
-		return this.#gamePrefix.peek();
+	get prefixPath(): string {
+		return this.#prefix.peek();
 	}
 
-	set gamePrefix(value: string) {
-		this.#gamePrefix.set(value);
+	set prefixPath(value: string) {
+		this.#prefix.set(value);
 	}
 
-	get viewerPrefix(): string {
-		return this.#viewerPrefix.peek();
+	get prefixGame(): string {
+		return this.#gamePrefixOverride.peek() ?? `${this.#prefix.peek()}/game`;
 	}
 
-	set viewerPrefix(value: string) {
-		this.#viewerPrefix.set(value);
+	set prefixGame(value: string) {
+		this.#gamePrefixOverride.set(value);
+	}
+
+	get prefixViewer(): string {
+		return this.#viewerPrefixOverride.peek() ?? `${this.#prefix.peek()}/viewer`;
+	}
+
+	set prefixViewer(value: string) {
+		this.#viewerPrefixOverride.set(value);
 	}
 
 	#runDiscovery(effect: Moq.Signals.Effect) {
 		const conn = effect.get(this.connection.established);
 		if (!conn) return;
 
-		const gamePrefix = effect.get(this.#gamePrefix);
-		const viewerPrefix = effect.get(this.#viewerPrefix);
+		const base = effect.get(this.#prefix);
+		const gamePrefix = effect.get(this.#gamePrefixOverride) ?? `${base}/game`;
+		const viewerPrefix = effect.get(this.#viewerPrefixOverride) ?? `${base}/viewer`;
 		const prefix = Moq.Path.from(gamePrefix);
 
 		const announced = conn.announced(prefix);

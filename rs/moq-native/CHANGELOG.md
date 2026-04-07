@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.8](https://github.com/moq-dev/moq/compare/moq-native-v0.13.7...moq-native-v0.13.8) - 2026-04-07
+
+### Other
+
+- Increase QUIC idle timeout to 30s and keep-alive to 5s ([#1221](https://github.com/moq-dev/moq/pull/1221))
+
 ## [0.13.7](https://github.com/moq-dev/moq/compare/moq-native-v0.13.6...moq-native-v0.13.7) - 2026-04-03
 
 ### Other

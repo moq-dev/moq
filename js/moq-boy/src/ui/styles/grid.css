@@ -1,24 +1,24 @@
 :host {
 	--boy-accent: #8bac0f;
-	--boy-bg: #f5f5f5;
-	--boy-bg-card: #ffffff;
-	--boy-border: #ddd;
-	--boy-text: #222;
+	--boy-bg: #0a0a0a;
+	--boy-bg-card: #111;
+	--boy-border: #333;
+	--boy-text: #e0e0e0;
 	--boy-text-muted: #888;
-	--boy-text-dim: #aaa;
+	--boy-text-dim: #555;
 
 	display: block;
-	color-scheme: light dark;
+	color-scheme: dark;
 }
 
-@media (prefers-color-scheme: dark) {
+@media (prefers-color-scheme: light) {
 	:host {
-		--boy-bg: #0a0a0a;
-		--boy-bg-card: #111;
-		--boy-border: #333;
-		--boy-text: #e0e0e0;
+		--boy-bg: #f5f5f5;
+		--boy-bg-card: #ffffff;
+		--boy-border: #ddd;
+		--boy-text: #222;
 		--boy-text-muted: #888;
-		--boy-text-dim: #555;
+		--boy-text-dim: #aaa;
 	}
 }
 

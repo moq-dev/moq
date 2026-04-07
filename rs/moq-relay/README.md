@@ -6,6 +6,20 @@ It's designed to be run in a datacenter, relaying media across multiple hops to 
 The only argument is the path to a TOML configuration file.
 See [localhost.toml](../../demo/relay/localhost.toml) for an example configuration.
 
+## Install
+
+```bash
+cargo install moq-relay
+```
+
+### Docker
+
+```bash
+docker pull moqdev/moq-relay
+```
+
+Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-relay).
+
 ## HTTP
 
 Primarily for debugging, you can also connect to the relay via HTTP.

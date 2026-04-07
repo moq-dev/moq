@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.13](https://github.com/moq-dev/moq/compare/moq-token-v0.5.12...moq-token-v0.5.13) - 2026-04-07
+
+### Other
+
+- Replace fabricated code samples in docs with links to actual source files ([#1216](https://github.com/moq-dev/moq/pull/1216))
+
 ## [0.5.12](https://github.com/moq-dev/moq/compare/moq-token-v0.5.11...moq-token-v0.5.12) - 2026-04-03
 
 ### Added

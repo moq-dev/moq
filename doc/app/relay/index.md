@@ -50,11 +50,11 @@ nix build github:moq-dev/moq#moq-relay
 ### Using Docker
 
 ```bash
-docker pull kixelated/moq-relay
-docker run -p 4443:4443/udp -v "$(pwd)/relay.toml:/app/relay.toml:ro" kixelated/moq-relay -- --config /app/relay.toml
+docker pull moqdev/moq-relay
+docker run -p 4443:4443/udp -v "$(pwd)/relay.toml:/app/relay.toml:ro" moqdev/moq-relay -- --config /app/relay.toml
 ```
 
-Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/kixelated/moq-relay).
+Multi-arch images (`linux/amd64` and `linux/arm64`) are published to [Docker Hub](https://hub.docker.com/r/moqdev/moq-relay).
 
 ## Configuration
 

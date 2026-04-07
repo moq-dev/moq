@@ -53,9 +53,17 @@ pub struct Config {
 	#[arg(long)]
 	pub name: Option<String>,
 
-	/// Path prefix for broadcasts (e.g. "boy").
+	/// Base path prefix. Used to derive --prefix-game and --prefix-viewer defaults.
 	#[arg(long, default_value = "boy")]
 	pub prefix: String,
+
+	/// Path prefix for game broadcasts ("{prefix-game}/{name}"). Defaults to "{prefix}/game".
+	#[arg(long)]
+	pub prefix_game: Option<String>,
+
+	/// Path prefix for viewer broadcasts ("{prefix-viewer}/{name}"). Defaults to "{prefix}/viewer".
+	#[arg(long)]
+	pub prefix_viewer: Option<String>,
 
 	/// Inactivity timeout in seconds before auto-reset.
 	#[arg(long, default_value_t = 300)]
@@ -221,12 +229,17 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_lite::Origin::produce();
-	let broadcast_path = format!("{}/{}", config.prefix, name);
+	let default_game_prefix = format!("{}/game", config.prefix);
+	let default_viewer_prefix = format!("{}/viewer", config.prefix);
+	let game_prefix = config.prefix_game.as_deref().unwrap_or(&default_game_prefix);
+	let viewer_prefix = config.prefix_viewer.as_deref().unwrap_or(&default_viewer_prefix);
+
+	let broadcast_path = format!("{game_prefix}/{name}");
 	publish_origin.publish_broadcast(&broadcast_path, broadcast.consume());
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
-	// JS publishes viewer feedback at "{prefix}/{name}/viewer/{viewerId}"
-	let viewer_path = format!("{}/{}/viewer", config.prefix, name);
+	// JS publishes viewer feedback at "{viewer_prefix}/{name}/{viewerId}"
+	let viewer_path = format!("{viewer_prefix}/{name}");
 	let consume_origin = moq_lite::Origin::produce();
 	let mut viewer_consumer = consume_origin
 		.with_root(&viewer_path)

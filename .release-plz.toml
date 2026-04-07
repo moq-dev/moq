@@ -2,10 +2,3 @@
 dependencies_update = true
 git_release_enable = false
 
-[[package]]
-name = "libmoq"
-git_only = true
-
-[[package]]
-name = "moq-ffi"
-git_only = true

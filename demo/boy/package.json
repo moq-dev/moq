@@ -2,7 +2,7 @@
 	"name": "@moq/demo-boy",
 	"private": true,
 	"type": "module",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "MoQ Boy Demo - Crowd-controlled Game Boy streaming",
 	"license": "(MIT OR Apache-2.0)",
 	"scripts": {
