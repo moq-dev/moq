@@ -73,7 +73,9 @@ impl IrohEndpointConfig {
 		let mut alpns: Vec<Vec<u8>> = moq_lite::ALPNS.iter().map(|alpn| alpn.as_bytes().to_vec()).collect();
 		alpns.push(web_transport_iroh::ALPN_H3.as_bytes().to_vec());
 
-		let mut builder = IrohEndpoint::builder().secret_key(secret_key).alpns(alpns);
+		let mut builder = IrohEndpoint::builder(iroh::endpoint::presets::N0)
+			.secret_key(secret_key)
+			.alpns(alpns);
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr(addr)?;
 		}
