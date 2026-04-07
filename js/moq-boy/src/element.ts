@@ -18,7 +18,8 @@ const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signal
  *
  * Attributes:
  *   - `url` — MoQ relay URL
- *   - `prefix` — Base path prefix (default: "boy"). Derives game-prefix and viewer-prefix.
+ *   - `prefix` — Base path prefix (default: "boy"). Derives prefix-game and prefix-viewer.
+ *     **Breaking change**: previously the derived attributes were named game-prefix/viewer-prefix.
  *   - `prefix-game` — Path prefix for game broadcasts (default: "{prefix}/game")
  *   - `prefix-viewer` — Path prefix for viewer broadcasts (default: "{prefix}/viewer")
  */
