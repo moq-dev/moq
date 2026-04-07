@@ -120,45 +120,51 @@ pub struct AuthConfig {
 	pub public: Option<PublicConfig>,
 }
 
-/// Public access configuration supporting simple prefix(es) or separate subscribe/publish.
+/// Public access configuration.
 ///
 /// TOML examples:
 /// - `public = "anon"` → both subscribe and publish under "anon"
 /// - `public = ["anon", "demo"]` → both subscribe and publish under both prefixes
-/// - `[auth.public]` with `subscribe = "demo"` → separate subscribe/publish control
+/// - `[auth.public]` with `subscribe`/`publish` → separate static control
+/// - `[auth.public]` with `api` → dynamic URL endpoint (with optional static fallbacks)
 ///
 /// CLI: `--auth-public <prefix>` creates `Simple(vec![prefix])`.
 #[derive(Clone, Debug)]
 pub enum PublicConfig {
 	/// One or more prefixes granting both subscribe and publish.
 	Simple(Vec<String>),
-	/// Separate subscribe and publish configuration.
-	Detailed {
-		subscribe: Vec<String>,
-		publish: Vec<String>,
-	},
+	/// Separate subscribe/publish prefixes and/or an API URL.
+	Detailed(PublicDetailed),
+}
+
+/// Detailed public access configuration with separate subscribe/publish and optional API.
+#[derive(Clone, Debug, Default)]
+pub struct PublicDetailed {
+	pub subscribe: Vec<String>,
+	pub publish: Vec<String>,
+	/// A URL endpoint that returns `{ subscribe: [...], publish: [...] }`.
+	/// The connection namespace is appended to the URL.
+	pub api: Option<String>,
 }
 
 impl PublicConfig {
-	/// Returns the subscribe and publish prefix lists.
-	fn into_parts(self) -> (Vec<String>, Vec<String>) {
+	/// Normalize into the detailed form.
+	pub fn into_detailed(self) -> PublicDetailed {
 		match self {
-			PublicConfig::Simple(prefixes) => (prefixes.clone(), prefixes),
-			PublicConfig::Detailed { subscribe, publish } => (subscribe, publish),
+			PublicConfig::Simple(prefixes) => PublicDetailed {
+				subscribe: prefixes.clone(),
+				publish: prefixes,
+				api: None,
+			},
+			PublicConfig::Detailed(d) => d,
 		}
 	}
 
 	/// Deserialize `Option<PublicConfig>` from TOML: dispatches based on value type.
-	///
-	/// serde_with's `OneOrMany` handles string-vs-array within each variant,
-	/// but we still need a custom top-level deserializer because TOML can present
-	/// the `public` key as a string, array, OR table — and `#[serde(untagged)]`
-	/// can't distinguish a string from a single-element array in TOML.
 	fn deserialize_option<'de, D>(deserializer: D) -> Result<Option<PublicConfig>, D::Error>
 	where
 		D: serde::Deserializer<'de>,
 	{
-		// Deserialize into a generic TOML value first, then dispatch.
 		let value = Option::<toml::Value>::deserialize(deserializer)?;
 		let Some(value) = value else {
 			return Ok(None);
@@ -178,26 +184,27 @@ impl PublicConfig {
 				}
 			}
 			toml::Value::Table(table) => {
-				// Use serde_with to handle OneOrMany within the table fields.
 				#[serde_as]
 				#[derive(Deserialize)]
-				struct Detailed {
+				struct Raw {
 					#[serde(default)]
 					#[serde_as(as = "OneOrMany<_, PreferMany>")]
 					subscribe: Vec<String>,
 					#[serde(default)]
 					#[serde_as(as = "OneOrMany<_, PreferMany>")]
 					publish: Vec<String>,
+					api: Option<String>,
 				}
 
-				let d: Detailed = toml::Value::Table(table).try_into().map_err(serde::de::Error::custom)?;
-				if d.subscribe.is_empty() && d.publish.is_empty() {
+				let raw: Raw = toml::Value::Table(table).try_into().map_err(serde::de::Error::custom)?;
+				if raw.subscribe.is_empty() && raw.publish.is_empty() && raw.api.is_none() {
 					Ok(None)
 				} else {
-					Ok(Some(PublicConfig::Detailed {
-						subscribe: d.subscribe,
-						publish: d.publish,
-					}))
+					Ok(Some(PublicConfig::Detailed(PublicDetailed {
+						subscribe: raw.subscribe,
+						publish: raw.publish,
+						api: raw.api,
+					})))
 				}
 			}
 			other => Err(serde::de::Error::custom(format!(
@@ -223,18 +230,28 @@ impl Serialize for PublicConfig {
 		match self {
 			PublicConfig::Simple(v) if v.len() == 1 => v[0].serialize(serializer),
 			PublicConfig::Simple(v) => v.serialize(serializer),
-			PublicConfig::Detailed { subscribe, publish } => {
+			PublicConfig::Detailed(d) => {
 				use serde::ser::SerializeMap;
-				let mut map = serializer.serialize_map(Some(2))?;
-				map.serialize_entry("subscribe", subscribe)?;
-				map.serialize_entry("publish", publish)?;
+				let len = usize::from(!d.subscribe.is_empty())
+					+ usize::from(!d.publish.is_empty())
+					+ usize::from(d.api.is_some());
+				let mut map = serializer.serialize_map(Some(len))?;
+				if !d.subscribe.is_empty() {
+					map.serialize_entry("subscribe", &d.subscribe)?;
+				}
+				if !d.publish.is_empty() {
+					map.serialize_entry("publish", &d.publish)?;
+				}
+				if let Some(api) = &d.api {
+					map.serialize_entry("api", api)?;
+				}
 				map.end()
 			}
 		}
 	}
 }
 
-/// Response from a public access URL endpoint.
+/// Response from a public access API endpoint.
 #[derive(Debug, Deserialize)]
 struct PublicResponse {
 	#[serde(default)]
@@ -243,16 +260,13 @@ struct PublicResponse {
 	publish: Vec<String>,
 }
 
-/// Resolved public access source for a single direction.
+/// Resolved public access configuration.
 #[derive(Clone)]
-enum PublicAccess {
-	/// Fixed prefix list.
-	Static(Vec<PathOwned>),
-	/// Fetch from URL, appending the connection namespace.
-	Url {
-		base: url::Url,
-		client: ClientWithMiddleware,
-	},
+struct PublicAccess {
+	subscribe: Vec<PathOwned>,
+	publish: Vec<PathOwned>,
+	/// Optional API URL for dynamic resolution (namespace appended).
+	api: Option<(url::Url, ClientWithMiddleware)>,
 }
 
 impl AuthConfig {
@@ -358,8 +372,8 @@ impl KeyResolver {
 #[derive(Clone)]
 pub struct Auth {
 	resolver: Option<Arc<KeyResolver>>,
-	public_subscribe: Vec<PublicAccess>,
-	public_publish: Vec<PublicAccess>,
+	/// Public (unauthenticated) access with static prefixes and/or an API.
+	public: Option<PublicAccess>,
 }
 
 fn build_http_client() -> anyhow::Result<ClientWithMiddleware> {
@@ -408,35 +422,6 @@ impl Auth {
 		result
 	}
 
-	/// Parse a list of string values into PublicAccess entries.
-	/// Strings starting with http/https are URL sources; others are static prefixes.
-	fn parse_public_values(values: &[String], client: &ClientWithMiddleware) -> Vec<PublicAccess> {
-		let mut url_sources: Vec<PublicAccess> = Vec::new();
-		let mut static_prefixes: Vec<PathOwned> = Vec::new();
-
-		for value in values {
-			if let Some(mut url) = parse_url(value) {
-				// Ensure trailing slash so Url::join appends properly
-				if !url.path().ends_with('/') {
-					url.set_path(&format!("{}/", url.path()));
-				}
-				url_sources.push(PublicAccess::Url {
-					base: url,
-					client: client.clone(),
-				});
-			} else {
-				static_prefixes.push(Path::new(value).to_owned());
-			}
-		}
-
-		let static_prefixes = Self::dedup_paths(static_prefixes);
-		let mut result = url_sources;
-		if !static_prefixes.is_empty() {
-			result.push(PublicAccess::Static(static_prefixes));
-		}
-		result
-	}
-
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
 		anyhow::ensure!(
 			config.key.is_none() || config.key_dir.is_none(),
@@ -477,83 +462,42 @@ impl Auth {
 
 		let resolver = source.map(|s| Arc::new(KeyResolver::new(s)));
 
-		// Collect public access configuration.
-		let (sub_values, pub_values) = config.public.map(|p| p.into_parts()).unwrap_or_default();
+		// Resolve public access from config.
+		let public = match config.public {
+			Some(config) => {
+				let d = config.into_detailed();
+				let subscribe = Self::dedup_paths(d.subscribe.iter().map(|s| Path::new(s).to_owned()).collect());
+				let publish = Self::dedup_paths(d.publish.iter().map(|s| Path::new(s).to_owned()).collect());
+				let api = match d.api {
+					Some(url_str) => {
+						let mut url =
+							parse_url(&url_str).ok_or_else(|| anyhow::anyhow!("invalid public API URL: {url_str}"))?;
+						if !url.path().ends_with('/') {
+							url.set_path(&format!("{}/", url.path()));
+						}
+						Some((url, build_http_client()?))
+					}
+					None => None,
+				};
 
-		let has_public = !sub_values.is_empty() || !pub_values.is_empty();
+				if subscribe.is_empty() && publish.is_empty() && api.is_none() {
+					None
+				} else {
+					Some(PublicAccess {
+						subscribe,
+						publish,
+						api,
+					})
+				}
+			}
+			None => None,
+		};
 
-		if resolver.is_none() && !has_public {
+		if resolver.is_none() && public.is_none() {
 			anyhow::bail!("no auth-key, auth-key-dir, or public path configured");
 		}
 
-		let client = build_http_client()?;
-		let public_subscribe = Self::parse_public_values(&sub_values, &client);
-		let public_publish = Self::parse_public_values(&pub_values, &client);
-
-		Ok(Self {
-			resolver,
-			public_subscribe,
-			public_publish,
-		})
-	}
-
-	/// Resolve public subscribe and publish access for a specific path.
-	async fn resolve_public(
-		subscribe_sources: &[PublicAccess],
-		publish_sources: &[PublicAccess],
-		path: &str,
-	) -> (Vec<String>, Vec<String>) {
-		let mut subscribe = Vec::new();
-		let mut publish = Vec::new();
-
-		// Collect static prefixes.
-		for source in subscribe_sources {
-			if let PublicAccess::Static(paths) = source {
-				for p in paths {
-					subscribe.push(p.to_string());
-				}
-			}
-		}
-		for source in publish_sources {
-			if let PublicAccess::Static(paths) = source {
-				for p in paths {
-					publish.push(p.to_string());
-				}
-			}
-		}
-
-		// Collect URL sources (deduplicated — same URL used for both directions).
-		let mut fetched_urls = std::collections::HashSet::new();
-		let all_url_sources = subscribe_sources.iter().chain(publish_sources.iter());
-		for source in all_url_sources {
-			if let PublicAccess::Url { base, client } = source {
-				let path_trimmed = path.trim_start_matches('/');
-				let url = match base.join(path_trimmed) {
-					Ok(url) => url,
-					Err(e) => {
-						tracing::warn!(%base, %e, "failed to construct public access URL");
-						continue;
-					}
-				};
-
-				// Skip duplicate URLs.
-				if !fetched_urls.insert(url.to_string()) {
-					continue;
-				}
-
-				match Self::fetch_public_response(client, &url).await {
-					Ok(response) => {
-						subscribe.extend(response.subscribe);
-						publish.extend(response.publish);
-					}
-					Err(e) => {
-						tracing::debug!(%url, %e, "public access URL denied or failed");
-					}
-				}
-			}
-		}
-
-		(subscribe, publish)
+		Ok(Self { resolver, public })
 	}
 
 	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, AuthError> {
@@ -591,10 +535,29 @@ impl Auth {
 
 			// Verify the token with the resolved key
 			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
-		} else if !self.public_subscribe.is_empty() || !self.public_publish.is_empty() {
-			// No JWT provided — resolve public access.
-			let (subscribe, publish) =
-				Self::resolve_public(&self.public_subscribe, &self.public_publish, &params.path).await;
+		} else if let Some(public) = &self.public {
+			// No JWT — use public access (static prefixes + optional API).
+			let mut subscribe: Vec<String> = public.subscribe.iter().map(|p| p.to_string()).collect();
+			let mut publish: Vec<String> = public.publish.iter().map(|p| p.to_string()).collect();
+
+			// If an API is configured, fetch additional permissions for this namespace.
+			if let Some((base, client)) = &public.api {
+				let path_trimmed = params.path.trim_start_matches('/');
+				match base.join(path_trimmed) {
+					Ok(url) => match Self::fetch_public_response(client, &url).await {
+						Ok(response) => {
+							subscribe.extend(response.subscribe);
+							publish.extend(response.publish);
+						}
+						Err(e) => {
+							tracing::debug!(%url, %e, "public access API denied or failed");
+						}
+					},
+					Err(e) => {
+						tracing::warn!(%base, %e, "failed to construct public access URL");
+					}
+				}
+			}
 
 			if subscribe.is_empty() && publish.is_empty() {
 				return Err(AuthError::ExpectedToken);
@@ -704,10 +667,11 @@ mod tests {
 	}
 
 	fn detailed_public(subscribe: &[&str], publish: &[&str]) -> Option<PublicConfig> {
-		Some(PublicConfig::Detailed {
+		Some(PublicConfig::Detailed(PublicDetailed {
 			subscribe: subscribe.iter().map(|s| s.to_string()).collect(),
 			publish: publish.iter().map(|s| s.to_string()).collect(),
-		})
+			api: None,
+		}))
 	}
 
 	#[tokio::test]
@@ -1447,25 +1411,25 @@ mod tests {
 	#[test]
 	fn test_toml_public_string() {
 		let config: AuthConfig = toml::from_str(r#"public = "anon""#).unwrap();
-		let (sub, pub_) = config.public.unwrap().into_parts();
-		assert_eq!(sub, vec!["anon"]);
-		assert_eq!(pub_, vec!["anon"]);
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["anon"]);
+		assert_eq!(d.publish, vec!["anon"]);
 	}
 
 	#[test]
 	fn test_toml_public_empty_string() {
 		let config: AuthConfig = toml::from_str(r#"public = """#).unwrap();
-		let (sub, pub_) = config.public.unwrap().into_parts();
-		assert_eq!(sub, vec![""]);
-		assert_eq!(pub_, vec![""]);
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec![""]);
+		assert_eq!(d.publish, vec![""]);
 	}
 
 	#[test]
 	fn test_toml_public_array() {
 		let config: AuthConfig = toml::from_str(r#"public = ["anon", "demo"]"#).unwrap();
-		let (sub, pub_) = config.public.unwrap().into_parts();
-		assert_eq!(sub, vec!["anon", "demo"]);
-		assert_eq!(pub_, vec!["anon", "demo"]);
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["anon", "demo"]);
+		assert_eq!(d.publish, vec!["anon", "demo"]);
 	}
 
 	#[test]
@@ -1477,9 +1441,9 @@ publish = "anon"
 "#,
 		)
 		.unwrap();
-		let (sub, pub_) = config.public.unwrap().into_parts();
-		assert_eq!(sub, vec!["demo"]);
-		assert_eq!(pub_, vec!["anon"]);
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["demo"]);
+		assert_eq!(d.publish, vec!["anon"]);
 	}
 
 	#[test]
@@ -1491,9 +1455,9 @@ publish = ["anon"]
 "#,
 		)
 		.unwrap();
-		let (sub, pub_) = config.public.unwrap().into_parts();
-		assert_eq!(sub, vec!["anon", "demo"]);
-		assert_eq!(pub_, vec!["anon"]);
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["anon", "demo"]);
+		assert_eq!(d.publish, vec!["anon"]);
 	}
 
 	#[test]
@@ -1504,9 +1468,9 @@ subscribe = "demo"
 "#,
 		)
 		.unwrap();
-		let (sub, pub_) = config.public.unwrap().into_parts();
-		assert_eq!(sub, vec!["demo"]);
-		assert!(pub_.is_empty());
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["demo"]);
+		assert!(d.publish.is_empty());
 	}
 
 	#[test]
@@ -1517,9 +1481,9 @@ publish = ["anon", "demo"]
 "#,
 		)
 		.unwrap();
-		let (sub, pub_) = config.public.unwrap().into_parts();
-		assert!(sub.is_empty());
-		assert_eq!(pub_, vec!["anon", "demo"]);
+		let d = config.public.unwrap().into_detailed();
+		assert!(d.subscribe.is_empty());
+		assert_eq!(d.publish, vec!["anon", "demo"]);
 	}
 
 	#[test]
@@ -1531,38 +1495,54 @@ publish = ["anon", "demo"]
 	#[test]
 	fn test_toml_public_url_string() {
 		let config: AuthConfig = toml::from_str(r#"public = "https://api.example.com/access""#).unwrap();
-		let (sub, pub_) = config.public.unwrap().into_parts();
-		assert_eq!(sub, vec!["https://api.example.com/access"]);
-		assert_eq!(pub_, vec!["https://api.example.com/access"]);
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["https://api.example.com/access"]);
+		assert_eq!(d.publish, vec!["https://api.example.com/access"]);
 	}
 
 	#[test]
-	fn test_toml_public_table_url() {
+	fn test_toml_public_table_api() {
 		let config: AuthConfig = toml::from_str(
 			r#"[public]
-subscribe = "https://api.example.com/access"
-publish = "https://api.example.com/access"
+api = "https://api.example.com/access"
 "#,
 		)
 		.unwrap();
-		let (sub, pub_) = config.public.unwrap().into_parts();
-		assert_eq!(sub, vec!["https://api.example.com/access"]);
-		assert_eq!(pub_, vec!["https://api.example.com/access"]);
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.api.as_deref(), Some("https://api.example.com/access"));
+		assert!(d.subscribe.is_empty());
+		assert!(d.publish.is_empty());
+	}
+
+	#[test]
+	fn test_toml_public_table_api_with_static() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+subscribe = "anon"
+publish = "anon"
+api = "https://api.example.com/access"
+"#,
+		)
+		.unwrap();
+		let d = config.public.unwrap().into_detailed();
+		assert_eq!(d.subscribe, vec!["anon"]);
+		assert_eq!(d.publish, vec!["anon"]);
+		assert_eq!(d.api.as_deref(), Some("https://api.example.com/access"));
 	}
 
 	#[test]
 	fn test_clap_public_from_str() {
 		let config: PublicConfig = "anon".parse().unwrap();
-		let (sub, pub_) = config.into_parts();
-		assert_eq!(sub, vec!["anon"]);
-		assert_eq!(pub_, vec!["anon"]);
+		let d = config.into_detailed();
+		assert_eq!(d.subscribe, vec!["anon"]);
+		assert_eq!(d.publish, vec!["anon"]);
 	}
 
 	#[test]
 	fn test_clap_public_url_from_str() {
 		let config: PublicConfig = "https://api.example.com/access".parse().unwrap();
-		let (sub, pub_) = config.into_parts();
-		assert_eq!(sub, vec!["https://api.example.com/access"]);
-		assert_eq!(pub_, vec!["https://api.example.com/access"]);
+		let d = config.into_detailed();
+		assert_eq!(d.subscribe, vec!["https://api.example.com/access"]);
+		assert_eq!(d.publish, vec!["https://api.example.com/access"]);
 	}
 }
