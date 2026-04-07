@@ -117,16 +117,6 @@ pub struct AuthConfig {
 	#[arg(long = "auth-public", env = "MOQ_AUTH_PUBLIC")]
 	#[serde(default, deserialize_with = "PublicConfig::deserialize_option")]
 	pub public: Option<PublicConfig>,
-
-	/// Additional public subscribe-only prefixes or URL.
-	#[arg(long = "auth-public-subscribe", env = "MOQ_AUTH_PUBLIC_SUBSCRIBE")]
-	#[serde(skip)]
-	pub public_subscribe: Vec<String>,
-
-	/// Additional public publish-only prefixes or URL.
-	#[arg(long = "auth-public-publish", env = "MOQ_AUTH_PUBLIC_PUBLISH")]
-	#[serde(skip)]
-	pub public_publish: Vec<String>,
 }
 
 /// Public access configuration supporting simple prefix(es) or separate subscribe/publish.
@@ -531,22 +521,11 @@ impl Auth {
 
 		let resolver = source.map(|s| Arc::new(KeyResolver::new(s)));
 
-		// Collect public access configuration from all sources.
-		let mut sub_values: Vec<String> = Vec::new();
-		let mut pub_values: Vec<String> = Vec::new();
-
-		// --auth-public (or TOML `public = ...`) contributes to both directions.
-		if let Some(public) = config.public {
-			let (s, p) = public.into_parts();
-			sub_values.extend(s);
-			pub_values.extend(p);
-		}
-
-		// --auth-public-subscribe contributes subscribe-only.
-		sub_values.extend(config.public_subscribe);
-
-		// --auth-public-publish contributes publish-only.
-		pub_values.extend(config.public_publish);
+		// Collect public access configuration.
+		let (sub_values, pub_values) = config
+			.public
+			.map(|p| p.into_parts())
+			.unwrap_or_default();
 
 		let has_public = !sub_values.is_empty() || !pub_values.is_empty();
 
@@ -1305,7 +1284,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_public_subscribe_only() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			public_subscribe: vec!["demo".to_string()],
+			public: detailed_public(&["demo"], &[]),
 			..Default::default()
 		})
 		.await?;
@@ -1387,7 +1366,7 @@ mod tests {
 	#[tokio::test]
 	async fn test_public_publish_only() -> anyhow::Result<()> {
 		let auth = Auth::new(AuthConfig {
-			public_publish: vec!["demo".to_string()],
+			public: detailed_public(&[], &["demo"]),
 			..Default::default()
 		})
 		.await?;
@@ -1484,7 +1463,7 @@ mod tests {
 
 		let auth = Auth::new(AuthConfig {
 			key: Some(key_file.path().to_string_lossy().to_string()),
-			public_subscribe: vec!["demo".to_string()],
+			public: detailed_public(&["demo"], &[]),
 			..Default::default()
 		})
 		.await?;
@@ -1512,24 +1491,125 @@ mod tests {
 		Ok(())
 	}
 
-	#[tokio::test]
-	async fn test_public_config_deserialization() {
-		// String → Simple
-		let toml: AuthConfig = toml::from_str(r#"public = "anon""#).unwrap();
-		assert!(matches!(toml.public, Some(PublicConfig::Simple(ref v)) if v == &["anon"]));
+	#[test]
+	fn test_toml_public_string() {
+		let config: AuthConfig = toml::from_str(r#"public = "anon""#).unwrap();
+		let (sub, pub_) = config.public.unwrap().into_parts();
+		assert_eq!(sub, vec!["anon"]);
+		assert_eq!(pub_, vec!["anon"]);
+	}
 
-		// Array → Simple with multiple
-		let toml: AuthConfig = toml::from_str(r#"public = ["anon", "demo"]"#).unwrap();
-		assert!(matches!(toml.public, Some(PublicConfig::Simple(ref v)) if v.len() == 2));
+	#[test]
+	fn test_toml_public_empty_string() {
+		let config: AuthConfig = toml::from_str(r#"public = """#).unwrap();
+		let (sub, pub_) = config.public.unwrap().into_parts();
+		assert_eq!(sub, vec![""]);
+		assert_eq!(pub_, vec![""]);
+	}
 
-		// Table → Detailed
-		let toml: AuthConfig = toml::from_str(
+	#[test]
+	fn test_toml_public_array() {
+		let config: AuthConfig = toml::from_str(r#"public = ["anon", "demo"]"#).unwrap();
+		let (sub, pub_) = config.public.unwrap().into_parts();
+		assert_eq!(sub, vec!["anon", "demo"]);
+		assert_eq!(pub_, vec!["anon", "demo"]);
+	}
+
+	#[test]
+	fn test_toml_public_table_both() {
+		let config: AuthConfig = toml::from_str(
 			r#"[public]
 subscribe = "demo"
+publish = "anon"
+"#,
+		)
+		.unwrap();
+		let (sub, pub_) = config.public.unwrap().into_parts();
+		assert_eq!(sub, vec!["demo"]);
+		assert_eq!(pub_, vec!["anon"]);
+	}
+
+	#[test]
+	fn test_toml_public_table_arrays() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+subscribe = ["anon", "demo"]
 publish = ["anon"]
 "#,
 		)
 		.unwrap();
-		assert!(matches!(toml.public, Some(PublicConfig::Detailed { .. })));
+		let (sub, pub_) = config.public.unwrap().into_parts();
+		assert_eq!(sub, vec!["anon", "demo"]);
+		assert_eq!(pub_, vec!["anon"]);
+	}
+
+	#[test]
+	fn test_toml_public_table_subscribe_only() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+subscribe = "demo"
+"#,
+		)
+		.unwrap();
+		let (sub, pub_) = config.public.unwrap().into_parts();
+		assert_eq!(sub, vec!["demo"]);
+		assert!(pub_.is_empty());
+	}
+
+	#[test]
+	fn test_toml_public_table_publish_only() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+publish = ["anon", "demo"]
+"#,
+		)
+		.unwrap();
+		let (sub, pub_) = config.public.unwrap().into_parts();
+		assert!(sub.is_empty());
+		assert_eq!(pub_, vec!["anon", "demo"]);
+	}
+
+	#[test]
+	fn test_toml_public_not_set() {
+		let config: AuthConfig = toml::from_str("").unwrap();
+		assert!(config.public.is_none());
+	}
+
+	#[test]
+	fn test_toml_public_url_string() {
+		let config: AuthConfig = toml::from_str(r#"public = "https://api.example.com/access""#).unwrap();
+		let (sub, pub_) = config.public.unwrap().into_parts();
+		assert_eq!(sub, vec!["https://api.example.com/access"]);
+		assert_eq!(pub_, vec!["https://api.example.com/access"]);
+	}
+
+	#[test]
+	fn test_toml_public_table_url() {
+		let config: AuthConfig = toml::from_str(
+			r#"[public]
+subscribe = "https://api.example.com/access"
+publish = "https://api.example.com/access"
+"#,
+		)
+		.unwrap();
+		let (sub, pub_) = config.public.unwrap().into_parts();
+		assert_eq!(sub, vec!["https://api.example.com/access"]);
+		assert_eq!(pub_, vec!["https://api.example.com/access"]);
+	}
+
+	#[test]
+	fn test_clap_public_from_str() {
+		let config: PublicConfig = "anon".parse().unwrap();
+		let (sub, pub_) = config.into_parts();
+		assert_eq!(sub, vec!["anon"]);
+		assert_eq!(pub_, vec!["anon"]);
+	}
+
+	#[test]
+	fn test_clap_public_url_from_str() {
+		let config: PublicConfig = "https://api.example.com/access".parse().unwrap();
+		let (sub, pub_) = config.into_parts();
+		assert_eq!(sub, vec!["https://api.example.com/access"]);
+		assert_eq!(pub_, vec!["https://api.example.com/access"]);
 	}
 }
