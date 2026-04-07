@@ -275,19 +275,37 @@ impl Client {
 		self
 	}
 
-	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh", feature = "websocket")))]
+	#[cfg(not(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket"
+	)))]
 	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_lite::Session> {
 		anyhow::bail!("no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature");
 	}
 
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh", feature = "websocket"))]
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket"
+	))]
 	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
 		let session = self.connect_inner(url).await?;
 		tracing::info!(version = %session.version(), "connected");
 		Ok(session)
 	}
 
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh", feature = "websocket"))]
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket"
+	))]
 	async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
