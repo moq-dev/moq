@@ -50,7 +50,9 @@ export default function StatsPanel() {
 				</div>
 			</Show>
 
-			<div class="boy__stats-note">Emulation and encoding are paused when there are no viewers.</div>
+			<div class="boy__stats-note">
+				Emulation and encoding are paused when there are no viewers. Try muting or tabbing away!
+			</div>
 
 			<Show when={latencyEntries().length > 0}>
 				<div class="boy__latency-list">
