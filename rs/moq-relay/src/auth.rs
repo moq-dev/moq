@@ -7,6 +7,7 @@ use moq_lite::{Path, PathOwned};
 use moq_token::{Key, KeyId};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
+use serde_with::{OneOrMany, formats::PreferMany, serde_as};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -147,73 +148,62 @@ impl PublicConfig {
 		}
 	}
 
-	/// Custom deserializer for `Option<PublicConfig>` that handles string, array, or table.
+	/// Deserialize `Option<PublicConfig>` from TOML: dispatches based on value type.
+	///
+	/// serde_with's `OneOrMany` handles string-vs-array within each variant,
+	/// but we still need a custom top-level deserializer because TOML can present
+	/// the `public` key as a string, array, OR table — and `#[serde(untagged)]`
+	/// can't distinguish a string from a single-element array in TOML.
 	fn deserialize_option<'de, D>(deserializer: D) -> Result<Option<PublicConfig>, D::Error>
 	where
 		D: serde::Deserializer<'de>,
 	{
-		use serde::de;
+		// Deserialize into a generic TOML value first, then dispatch.
+		let value = Option::<toml::Value>::deserialize(deserializer)?;
+		let Some(value) = value else {
+			return Ok(None);
+		};
 
-		struct Visitor;
-
-		impl<'de> de::Visitor<'de> for Visitor {
-			type Value = Option<PublicConfig>;
-
-			fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-				f.write_str("a string, array of strings, or table with subscribe/publish")
-			}
-
-			fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
-				Ok(None)
-			}
-
-			fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
-				Ok(None)
-			}
-
-			fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-				Ok(Some(PublicConfig::Simple(vec![v.to_string()])))
-			}
-
-			fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
-				Ok(Some(PublicConfig::Simple(vec![v])))
-			}
-
-			fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-				let mut values = Vec::new();
-				while let Some(v) = seq.next_element::<String>()? {
-					values.push(v);
-				}
-				if values.is_empty() {
+		match value {
+			toml::Value::String(s) => Ok(Some(PublicConfig::Simple(vec![s]))),
+			toml::Value::Array(arr) => {
+				let strings: Vec<String> = arr
+					.into_iter()
+					.map(|v| v.try_into::<String>().map_err(serde::de::Error::custom))
+					.collect::<Result<_, _>>()?;
+				if strings.is_empty() {
 					Ok(None)
 				} else {
-					Ok(Some(PublicConfig::Simple(values)))
+					Ok(Some(PublicConfig::Simple(strings)))
 				}
 			}
-
-			fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-				let mut subscribe = Vec::new();
-				let mut publish = Vec::new();
-
-				while let Some(key) = map.next_key::<String>()? {
-					match key.as_str() {
-						"subscribe" => subscribe = map.next_value::<StringOrVec>()?.0,
-						"publish" => publish = map.next_value::<StringOrVec>()?.0,
-						_ => {
-							map.next_value::<de::IgnoredAny>()?;
-						}
-					}
+			toml::Value::Table(table) => {
+				// Use serde_with to handle OneOrMany within the table fields.
+				#[serde_as]
+				#[derive(Deserialize)]
+				struct Detailed {
+					#[serde(default)]
+					#[serde_as(as = "OneOrMany<_, PreferMany>")]
+					subscribe: Vec<String>,
+					#[serde(default)]
+					#[serde_as(as = "OneOrMany<_, PreferMany>")]
+					publish: Vec<String>,
 				}
 
-				if subscribe.is_empty() && publish.is_empty() {
+				let d: Detailed = toml::Value::Table(table).try_into().map_err(serde::de::Error::custom)?;
+				if d.subscribe.is_empty() && d.publish.is_empty() {
 					Ok(None)
 				} else {
-					Ok(Some(PublicConfig::Detailed { subscribe, publish }))
+					Ok(Some(PublicConfig::Detailed {
+						subscribe: d.subscribe,
+						publish: d.publish,
+					}))
 				}
 			}
+			other => Err(serde::de::Error::custom(format!(
+				"expected string, array, or table for public config, got {other}"
+			))),
 		}
-
-		deserializer.deserialize_any(Visitor)
 	}
 }
 
@@ -241,40 +231,6 @@ impl Serialize for PublicConfig {
 				map.end()
 			}
 		}
-	}
-}
-
-/// Helper for deserializing a string or array of strings.
-struct StringOrVec(Vec<String>);
-
-impl<'de> Deserialize<'de> for StringOrVec {
-	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-	where
-		D: serde::Deserializer<'de>,
-	{
-		use serde::de;
-
-		struct Visitor;
-		impl<'de> de::Visitor<'de> for Visitor {
-			type Value = StringOrVec;
-			fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-				f.write_str("a string or array of strings")
-			}
-			fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-				Ok(StringOrVec(vec![v.to_string()]))
-			}
-			fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
-				Ok(StringOrVec(vec![v]))
-			}
-			fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
-				let mut values = Vec::new();
-				while let Some(v) = seq.next_element::<String>()? {
-					values.push(v);
-				}
-				Ok(StringOrVec(values))
-			}
-		}
-		deserializer.deserialize_any(Visitor)
 	}
 }
 
@@ -522,10 +478,7 @@ impl Auth {
 		let resolver = source.map(|s| Arc::new(KeyResolver::new(s)));
 
 		// Collect public access configuration.
-		let (sub_values, pub_values) = config
-			.public
-			.map(|p| p.into_parts())
-			.unwrap_or_default();
+		let (sub_values, pub_values) = config.public.map(|p| p.into_parts()).unwrap_or_default();
 
 		let has_public = !sub_values.is_empty() || !pub_values.is_empty();
 
