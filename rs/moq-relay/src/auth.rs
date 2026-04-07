@@ -467,30 +467,38 @@ impl Auth {
 
 		let resolver = source.map(|s| Arc::new(KeyResolver::new(s)));
 
-		// Resolve public access from config.
-		let public = match config.public {
-			Some(config) => {
-				let d = config.into_detailed();
-				let subscribe = Self::dedup_paths(d.subscribe.iter().map(|s| Path::new(s).to_owned()).collect());
-				let publish = Self::dedup_paths(d.publish.iter().map(|s| Path::new(s).to_owned()).collect());
-				let api = match d.api {
-					Some(url_str) => {
-						let mut url = parse_url(&url_str).context("invalid public API URL")?;
-						if !url.path().ends_with('/') {
-							url.set_path(&format!("{}/", url.path()));
-						}
-						Some((url, build_http_client()?))
-					}
-					None => None,
-				};
+		// Resolve public access by merging all three config sources.
+		let mut subscribe = Vec::new();
+		let mut publish = Vec::new();
+		let mut api = None;
 
-				PublicAccess {
-					subscribe,
-					publish,
-					api,
+		if let Some(config) = config.public {
+			let d = config.into_detailed();
+			subscribe.extend(d.subscribe.iter().map(|s| Path::new(s).to_owned()));
+			publish.extend(d.publish.iter().map(|s| Path::new(s).to_owned()));
+			if let Some(url_str) = d.api {
+				let mut url = parse_url(&url_str).context("invalid public API URL")?;
+				if !url.path().ends_with('/') {
+					url.set_path(&format!("{}/", url.path()));
 				}
+				api = Some((url, build_http_client()?));
 			}
-			None => PublicAccess::default(),
+		}
+
+		if let Some(config) = config.public_subscribe {
+			let d = config.into_detailed();
+			subscribe.extend(d.subscribe.iter().map(|s| Path::new(s).to_owned()));
+		}
+
+		if let Some(config) = config.public_publish {
+			let d = config.into_detailed();
+			publish.extend(d.publish.iter().map(|s| Path::new(s).to_owned()));
+		}
+
+		let public = PublicAccess {
+			subscribe: Self::dedup_paths(subscribe),
+			publish: Self::dedup_paths(publish),
+			api,
 		};
 
 		if resolver.is_none() && public.is_empty() {
@@ -1548,5 +1556,50 @@ api = "https://api.example.com/access"
 		let d = config.into_detailed();
 		assert_eq!(d.subscribe, vec!["https://api.example.com/access"]);
 		assert_eq!(d.publish, vec!["https://api.example.com/access"]);
+	}
+
+	#[tokio::test]
+	async fn test_public_subscribe_flag_merged() -> anyhow::Result<()> {
+		// Simulates: --auth-public anon --auth-public-subscribe demo
+		let auth = Auth::new(AuthConfig {
+			public: simple_public("anon"),
+			public_subscribe: simple_public("demo"),
+			..Default::default()
+		})
+		.await?;
+
+		// /anon gets full pub+sub from --auth-public
+		let token = auth.verify(&AuthParams::new("/anon")).await?;
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["".as_path()]);
+
+		// /demo gets subscribe-only from --auth-public-subscribe
+		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec![]);
+
+		// /secret gets nothing
+		let result = auth.verify(&AuthParams::new("/secret")).await;
+		assert!(result.is_err());
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_public_publish_flag_merged() -> anyhow::Result<()> {
+		// Simulates: --auth-public anon --auth-public-publish uploads
+		let auth = Auth::new(AuthConfig {
+			public: simple_public("anon"),
+			public_publish: simple_public("uploads"),
+			..Default::default()
+		})
+		.await?;
+
+		// /uploads gets publish-only from --auth-public-publish
+		let token = auth.verify(&AuthParams::new("/uploads")).await?;
+		assert_eq!(token.subscribe, vec![]);
+		assert_eq!(token.publish, vec!["".as_path()]);
+
+		Ok(())
 	}
 }
