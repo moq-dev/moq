@@ -77,10 +77,11 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		if (notify === true) this.#forceNotify = true;
 
 		// If there are no subscribers, don't queue a microtask.
-		// Reset old value state since no flush will occur to clear it.
+		// Reset all pending state since no flush will occur to clear it.
 		if (this.#subscribers.size === 0 && this.#changed.size === 0) {
 			this.#hasCapturedOldValue = false;
 			this.#oldValue = undefined;
+			this.#forceNotify = false;
 			return;
 		}
 
