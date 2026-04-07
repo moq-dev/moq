@@ -15,7 +15,8 @@ pin tag="":
 		exit 1
 	fi
 	echo "Pinning to $TAG..."
-	nix flake lock --override-input moq "github:moq-dev/moq/$TAG" --update-input moq
+	nix flake update
+	nix flake lock --override-input moq "github:moq-dev/moq/$TAG"
 
 # Get the hostname for the publisher
 host:

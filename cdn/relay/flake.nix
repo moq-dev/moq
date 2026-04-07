@@ -30,6 +30,7 @@
               (pkgs.certbot.withPlugins (ps: [ ps.certbot-dns-google ]))
               pkgs.jq
               pkgs.perf
+              pkgs.jemalloc # jeprof for heap profiling
             ];
           };
         };
