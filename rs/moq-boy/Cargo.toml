@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["moq", "gameboy", "streaming", "emulator", "live"]
 categories = ["multimedia::video", "emulators", "network-programming"]
 
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version.workspace = true
 
@@ -18,7 +18,7 @@ websocket = ["moq-native/websocket"]
 
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
-boytacean = "0.11"
+boytacean = { version = "0.11", features = ["gen-mock"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 ffmpeg-next = "8"
