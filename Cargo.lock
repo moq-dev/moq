@@ -3533,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.10.16"
+version = "0.10.17"
 dependencies = [
  "anyhow",
  "axum",

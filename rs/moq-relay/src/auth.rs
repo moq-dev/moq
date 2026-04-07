@@ -121,20 +121,18 @@ pub struct AuthConfig {
 
 	/// Public (unauthenticated) subscribe access configuration.
 	///
-	/// CLI: `--auth-public-subscribe <prefix>` sets subscribe-only access for the prefix.
-	/// TOML: Accepts a string, array, or table `{ subscribe = ..., publish = ... }`.
-	/// Any value starting with `http://` or `https://` is treated as a URL endpoint.
+	/// CLI-only shorthand: `--auth-public-subscribe <prefix>` sets subscribe-only access.
+	/// For TOML, use `[auth.public]` with separate `subscribe`/`publish` fields instead.
 	#[arg(long = "auth-public-subscribe", env = "MOQ_AUTH_PUBLIC_SUBSCRIBE")]
-	#[serde(default, deserialize_with = "PublicConfig::deserialize_option")]
+	#[serde(skip)]
 	pub public_subscribe: Option<PublicConfig>,
 
 	/// Public (unauthenticated) publish access configuration.
 	///
-	/// CLI: `--auth-public-publish <prefix>` sets publish-only access for the prefix.
-	/// TOML: Accepts a string, array, or table `{ subscribe = ..., publish = ... }`.
-	/// Any value starting with `http://` or `https://` is treated as a URL endpoint.
+	/// CLI-only shorthand: `--auth-public-publish <prefix>` sets publish-only access.
+	/// For TOML, use `[auth.public]` with separate `subscribe`/`publish` fields instead.
 	#[arg(long = "auth-public-publish", env = "MOQ_AUTH_PUBLIC_PUBLISH")]
-	#[serde(default, deserialize_with = "PublicConfig::deserialize_option")]
+	#[serde(skip)]
 	pub public_publish: Option<PublicConfig>,
 }
 

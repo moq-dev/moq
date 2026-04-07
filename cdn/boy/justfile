@@ -1,3 +1,7 @@
+# Regenerate the boy JWT token: publish to demo, subscribe to anon
+token:
+	cargo run -p moq-token-cli -- sign --key ../secrets/root.jwk --publish "demo" --subscribe "anon" > ../secrets/demo-boy.jwt
+
 # List all of the available commands.
 default:
   just --list

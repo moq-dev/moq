@@ -30,6 +30,12 @@ key = "key.pem"
 # A single JWK key file for authentication. No kid required in JWTs.
 key = "root.jwk"
 
+# Allow anonymous subscribing for anon/** and demo/**
+# Allow anonymous publishing for anon/** only
+[auth.public]
+subscribe = ["anon", "demo"]
+publish = "anon"
+
 # For multiple keys with rotation, use a directory instead:
 # key_dir = "/path/to/keys/"
 # Keys are named {kid}.jwk and resolved by the kid in the JWT header.

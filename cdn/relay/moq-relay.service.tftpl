@@ -18,6 +18,7 @@ ExecStart=/var/lib/moq/pkg/bin/moq-relay \
   --tls-key /etc/letsencrypt/live/${domain}/privkey.pem \
   --auth-key /var/lib/moq/root.jwk \
   --auth-public anon \
+  --auth-public-subscribe demo \
   --web-https-listen [::]:443 \
   --web-https-cert /etc/letsencrypt/live/${domain}/fullchain.pem \
   --web-https-key /etc/letsencrypt/live/${domain}/privkey.pem \

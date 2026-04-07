@@ -1,5 +1,6 @@
 mod relay
 mod pub
+mod boy
 
 # List all of the available commands.
 default:
