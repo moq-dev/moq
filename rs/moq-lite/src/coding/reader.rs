@@ -36,7 +36,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 					// Try to read more data
 					if !self.read_more().await? {
 						// Stream closed while we still need more data
-						return Err(Error::Decode);
+						return Err(DecodeError::Short.into());
 					}
 				}
 				Err(e) => return Err(e.into()),
@@ -69,7 +69,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 					// Try to read more data
 					if !self.read_more().await? {
 						// Stream closed while we still need more data
-						return Err(Error::Decode);
+						return Err(DecodeError::Short.into());
 					}
 				}
 				Err(e) => return Err(e.into()),
@@ -105,7 +105,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		while buf.has_remaining_mut() {
 			match self.stream.read_buf(&mut buf).await {
 				Ok(Some(_)) => {}
-				Ok(None) => return Err(Error::Decode),
+				Ok(None) => return Err(DecodeError::Short.into()),
 				Err(e) => return Err(Error::from_transport(e)),
 			}
 		}
@@ -125,7 +125,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 				.read_chunk(size)
 				.await
 				.map_err(Error::from_transport)?
-				.ok_or(Error::Decode)?;
+				.ok_or(DecodeError::Short)?;
 			size -= chunk.len();
 		}
 
@@ -135,7 +135,7 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 	/// Wait until the stream is closed, erroring if there are any additional bytes.
 	pub async fn closed(&mut self) -> Result<(), Error> {
 		if self.has_more().await? {
-			return Err(Error::Decode);
+			return Err(DecodeError::Short.into());
 		}
 
 		Ok(())

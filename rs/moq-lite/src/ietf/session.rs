@@ -96,7 +96,7 @@ pub fn start<S: web_transport_trait::Session>(
 		};
 
 		match res {
-			Err(Error::Transport) => {
+			Err(Error::Transport(_)) => {
 				tracing::info!("session terminated");
 				session.close(1, "");
 			}

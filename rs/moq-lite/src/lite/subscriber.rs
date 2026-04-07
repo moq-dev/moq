@@ -131,7 +131,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	/// Opens a PROBE stream when consumers exist, reads bandwidth estimates.
 	/// Returns Ok(()) only when recv_bandwidth is None (disabled).
-	/// Errors are fatal and propagate to the session.
+	/// Stream-level errors (e.g. peer reset) are non-fatal and logged as debug.
 	async fn run_recv_bandwidth(self) -> Result<(), Error> {
 		let Some(bandwidth) = &self.recv_bandwidth else {
 			return Ok(());
@@ -139,6 +139,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		bandwidth.used().await?;
 
+		let res = self.run_probe_stream(bandwidth).await;
+		match res {
+			Ok(()) | Err(Error::Cancel | Error::Transport(_) | Error::Decode(_) | Error::Remote(_)) => {
+				tracing::debug!("probe stream closed");
+				Ok(())
+			}
+			Err(err) => Err(err),
+		}
+	}
+
+	async fn run_probe_stream(&self, bandwidth: &BandwidthProducer) -> Result<(), Error> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Probe).await?;
 

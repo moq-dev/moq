@@ -77,10 +77,9 @@ impl Session {
 	}
 
 	/// Block until the transport session is closed.
-	// TODO Remove the Result the next time we make a breaking change.
 	pub async fn closed(&self) -> Result<(), Error> {
-		self.session.closed().await;
-		Err(Error::Transport)
+		let err = self.session.closed().await;
+		Err(Error::Transport(err))
 	}
 }
 
@@ -135,7 +134,7 @@ async fn run_send_bandwidth<S: web_transport_trait::Session>(session: &S, produc
 // We use a wrapper type that is dyn-compatible to remove the generic bounds from Session.
 trait SessionInner: Send + Sync {
 	fn close(&self, code: u32, reason: &str);
-	fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + Send + '_>>;
 }
 
 impl<S: web_transport_trait::Session> SessionInner for S {
@@ -143,9 +142,7 @@ impl<S: web_transport_trait::Session> SessionInner for S {
 		S::close(self, code, reason);
 	}
 
-	fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-		Box::pin(async move {
-			let _ = S::closed(self).await;
-		})
+	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + Send + '_>> {
+		Box::pin(async move { S::closed(self).await.to_string() })
 	}
 }

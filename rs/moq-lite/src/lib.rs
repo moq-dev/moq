@@ -16,7 +16,7 @@
 //! - [Frame]: Chunks of data with an upfront size.
 
 mod client;
-mod coding;
+pub mod coding;
 mod error;
 mod ietf;
 mod lite;

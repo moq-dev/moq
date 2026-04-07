@@ -121,7 +121,7 @@ impl MoqSession {
 	pub fn cancel(&self, code: u32) {
 		let _guard = crate::ffi::RUNTIME.enter();
 		if let Some(inner) = &self.inner {
-			inner.clone().close(moq_lite::Error::from_code(code));
+			inner.clone().close(moq_lite::Error::Remote(code));
 		}
 		// NOTE: we don't abort the closed Task because it will be aborted via above ^
 		// We'll get a slightly better error message instead of Cancelled.

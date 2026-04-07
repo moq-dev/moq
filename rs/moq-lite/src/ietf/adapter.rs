@@ -147,7 +147,7 @@ impl OutgoingRegistration {
 		}
 
 		// We have enough bytes for the full message; decoding must succeed.
-		let request_id = RequestId::decode(&mut cursor, self.version).map_err(|_| crate::Error::Decode)?;
+		let request_id = RequestId::decode(&mut cursor, self.version)?;
 
 		// For PublishNamespace, also extract the namespace for reverse lookup.
 		if type_id == ietf::PublishNamespace::ID {
