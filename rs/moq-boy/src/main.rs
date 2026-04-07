@@ -53,13 +53,9 @@ pub struct Config {
 	#[arg(long)]
 	pub name: Option<String>,
 
-	/// Path prefix for the game broadcast (e.g. "anon/boy/game").
-	#[arg(long, default_value = "anon/boy/game")]
-	pub game_prefix: String,
-
-	/// Path prefix for viewer broadcasts (e.g. "anon/boy/viewer").
-	#[arg(long, default_value = "anon/boy/viewer")]
-	pub viewer_prefix: String,
+	/// Path prefix for broadcasts (e.g. "boy").
+	#[arg(long, default_value = "boy")]
+	pub prefix: String,
 
 	/// Inactivity timeout in seconds before auto-reset.
 	#[arg(long, default_value_t = 300)]
@@ -225,11 +221,12 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Publish origin: the game session broadcast.
 	let publish_origin = moq_lite::Origin::produce();
-	let broadcast_path = format!("{}/{}", config.game_prefix, name);
+	let broadcast_path = format!("{}/{}", config.prefix, name);
 	publish_origin.publish_broadcast(&broadcast_path, broadcast.consume());
 
 	// Consume origin: viewer broadcasts under the viewer prefix.
-	let viewer_path = format!("{}/{}", config.viewer_prefix, name);
+	// JS publishes viewer feedback at "{prefix}/{name}/viewer/{viewerId}"
+	let viewer_path = format!("{}/{}/viewer", config.prefix, name);
 	let consume_origin = moq_lite::Origin::produce();
 	let mut viewer_consumer = consume_origin
 		.with_root(&viewer_path)
