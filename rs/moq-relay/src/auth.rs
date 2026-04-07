@@ -190,8 +190,7 @@ impl PublicConfig {
 				}
 			}
 			toml::Value::Table(table) => {
-				let d: PublicDetailed =
-					toml::Value::Table(table).try_into().map_err(serde::de::Error::custom)?;
+				let d: PublicDetailed = toml::Value::Table(table).try_into().map_err(serde::de::Error::custom)?;
 				if d.subscribe.is_empty() && d.publish.is_empty() && d.api.is_none() {
 					Ok(None)
 				} else {
@@ -517,8 +516,8 @@ impl Auth {
 
 			// If an API is configured, fetch additional permissions for this namespace.
 			if let Some((base, client)) = &public.api {
-				let path_trimmed = params.path.trim_start_matches('/');
-				match base.join(path_trimmed) {
+				let namespace = Path::new(&params.path).to_string();
+				match base.join(&namespace) {
 					Ok(url) => match Self::fetch_public_response(client, &url).await {
 						Ok(response) => {
 							subscribe.extend(response.subscribe);
