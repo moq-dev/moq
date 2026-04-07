@@ -138,12 +138,18 @@ pub enum PublicConfig {
 }
 
 /// Detailed public access configuration with separate subscribe/publish and optional API.
-#[derive(Clone, Debug, Default)]
+#[serde_as]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PublicDetailed {
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
 	pub subscribe: Vec<String>,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_, PreferMany>")]
 	pub publish: Vec<String>,
 	/// A URL endpoint that returns `{ subscribe: [...], publish: [...] }`.
 	/// The connection namespace is appended to the URL.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub api: Option<String>,
 }
 
@@ -184,27 +190,12 @@ impl PublicConfig {
 				}
 			}
 			toml::Value::Table(table) => {
-				#[serde_as]
-				#[derive(Deserialize)]
-				struct Raw {
-					#[serde(default)]
-					#[serde_as(as = "OneOrMany<_, PreferMany>")]
-					subscribe: Vec<String>,
-					#[serde(default)]
-					#[serde_as(as = "OneOrMany<_, PreferMany>")]
-					publish: Vec<String>,
-					api: Option<String>,
-				}
-
-				let raw: Raw = toml::Value::Table(table).try_into().map_err(serde::de::Error::custom)?;
-				if raw.subscribe.is_empty() && raw.publish.is_empty() && raw.api.is_none() {
+				let d: PublicDetailed =
+					toml::Value::Table(table).try_into().map_err(serde::de::Error::custom)?;
+				if d.subscribe.is_empty() && d.publish.is_empty() && d.api.is_none() {
 					Ok(None)
 				} else {
-					Ok(Some(PublicConfig::Detailed(PublicDetailed {
-						subscribe: raw.subscribe,
-						publish: raw.publish,
-						api: raw.api,
-					})))
+					Ok(Some(PublicConfig::Detailed(d)))
 				}
 			}
 			other => Err(serde::de::Error::custom(format!(
@@ -230,23 +221,7 @@ impl Serialize for PublicConfig {
 		match self {
 			PublicConfig::Simple(v) if v.len() == 1 => v[0].serialize(serializer),
 			PublicConfig::Simple(v) => v.serialize(serializer),
-			PublicConfig::Detailed(d) => {
-				use serde::ser::SerializeMap;
-				let len = usize::from(!d.subscribe.is_empty())
-					+ usize::from(!d.publish.is_empty())
-					+ usize::from(d.api.is_some());
-				let mut map = serializer.serialize_map(Some(len))?;
-				if !d.subscribe.is_empty() {
-					map.serialize_entry("subscribe", &d.subscribe)?;
-				}
-				if !d.publish.is_empty() {
-					map.serialize_entry("publish", &d.publish)?;
-				}
-				if let Some(api) = &d.api {
-					map.serialize_entry("api", api)?;
-				}
-				map.end()
-			}
+			PublicConfig::Detailed(d) => d.serialize(serializer),
 		}
 	}
 }
