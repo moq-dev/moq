@@ -25,8 +25,8 @@ pub async fn run() -> anyhow::Result<()> {
 	loop {
 		sig.recv().await;
 
-		// Empty path tells jemalloc to use prof_prefix from MALLOC_CONF.
-		match unsafe { raw::write(b"prof.dump\0", b"\0" as *const u8) } {
+		// Null pointer tells jemalloc to use prof_prefix from MALLOC_CONF.
+		match unsafe { raw::write(b"prof.dump\0", std::ptr::null::<u8>()) } {
 			Ok(()) => tracing::info!("heap profile dumped"),
 			Err(err) => tracing::error!(%err, "failed to dump heap profile"),
 		}
