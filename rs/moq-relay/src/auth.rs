@@ -235,12 +235,25 @@ struct PublicResponse {
 }
 
 /// Resolved public access configuration.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct PublicAccess {
 	subscribe: Vec<PathOwned>,
 	publish: Vec<PathOwned>,
 	/// Optional API URL for dynamic resolution (namespace appended).
 	api: Option<(url::Url, ClientWithMiddleware)>,
+}
+
+impl PublicAccess {
+	fn is_empty(&self) -> bool {
+		self.subscribe.is_empty() && self.publish.is_empty() && self.api.is_none()
+	}
+
+	/// Check if the given path is already fully covered by static prefixes for both directions.
+	fn static_covers(&self, path: &Path) -> bool {
+		let sub_covered = self.subscribe.iter().any(|p| path.has_prefix(p));
+		let pub_covered = self.publish.iter().any(|p| path.has_prefix(p));
+		sub_covered && pub_covered
+	}
 }
 
 impl AuthConfig {
@@ -347,7 +360,7 @@ impl KeyResolver {
 pub struct Auth {
 	resolver: Option<Arc<KeyResolver>>,
 	/// Public (unauthenticated) access with static prefixes and/or an API.
-	public: Option<PublicAccess>,
+	public: PublicAccess,
 }
 
 fn build_http_client() -> anyhow::Result<ClientWithMiddleware> {
@@ -444,8 +457,7 @@ impl Auth {
 				let publish = Self::dedup_paths(d.publish.iter().map(|s| Path::new(s).to_owned()).collect());
 				let api = match d.api {
 					Some(url_str) => {
-						let mut url =
-							parse_url(&url_str).ok_or_else(|| anyhow::anyhow!("invalid public API URL: {url_str}"))?;
+						let mut url = parse_url(&url_str).context("invalid public API URL")?;
 						if !url.path().ends_with('/') {
 							url.set_path(&format!("{}/", url.path()));
 						}
@@ -454,20 +466,16 @@ impl Auth {
 					None => None,
 				};
 
-				if subscribe.is_empty() && publish.is_empty() && api.is_none() {
-					None
-				} else {
-					Some(PublicAccess {
-						subscribe,
-						publish,
-						api,
-					})
+				PublicAccess {
+					subscribe,
+					publish,
+					api,
 				}
 			}
-			None => None,
+			None => PublicAccess::default(),
 		};
 
-		if resolver.is_none() && public.is_none() {
+		if resolver.is_none() && public.is_empty() {
 			anyhow::bail!("no auth-key, auth-key-dir, or public path configured");
 		}
 
@@ -509,26 +517,30 @@ impl Auth {
 
 			// Verify the token with the resolved key
 			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
-		} else if let Some(public) = &self.public {
+		} else if !self.public.is_empty() {
 			// No JWT — use public access (static prefixes + optional API).
-			let mut subscribe: Vec<String> = public.subscribe.iter().map(|p| p.to_string()).collect();
-			let mut publish: Vec<String> = public.publish.iter().map(|p| p.to_string()).collect();
+			let root = Path::new(&params.path);
+			let mut subscribe: Vec<String> = self.public.subscribe.iter().map(|p| p.to_string()).collect();
+			let mut publish: Vec<String> = self.public.publish.iter().map(|p| p.to_string()).collect();
 
-			// If an API is configured, fetch additional permissions for this namespace.
-			if let Some((base, client)) = &public.api {
-				let namespace = Path::new(&params.path).to_string();
-				match base.join(&namespace) {
-					Ok(url) => match Self::fetch_public_response(client, &url).await {
-						Ok(response) => {
-							subscribe.extend(response.subscribe);
-							publish.extend(response.publish);
-						}
+			// If an API is configured and static prefixes don't already cover this path,
+			// fetch additional permissions for this namespace.
+			if let Some((base, client)) = &self.public.api {
+				if !self.public.static_covers(&root) {
+					let namespace = root.to_string();
+					match base.join(&namespace) {
+						Ok(url) => match Self::fetch_public_response(client, &url).await {
+							Ok(response) => {
+								subscribe.extend(response.subscribe);
+								publish.extend(response.publish);
+							}
+							Err(e) => {
+								tracing::debug!(%url, %e, "public access API denied or failed");
+							}
+						},
 						Err(e) => {
-							tracing::debug!(%url, %e, "public access API denied or failed");
+							tracing::warn!(%base, %e, "failed to construct public access URL");
 						}
-					},
-					Err(e) => {
-						tracing::warn!(%base, %e, "failed to construct public access URL");
 					}
 				}
 			}
