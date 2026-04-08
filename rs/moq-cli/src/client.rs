@@ -1,9 +1,17 @@
+use std::time::Duration;
+
 use crate::Publish;
 
 use hang::moq_lite;
 use url::Url;
 
-pub async fn run_client(client: moq_native::Client, url: Url, name: String, publish: Publish) -> anyhow::Result<()> {
+pub async fn run_client(
+	client: moq_native::Client,
+	url: Url,
+	name: String,
+	publish: Publish,
+	stats_interval: Option<Duration>,
+) -> anyhow::Result<()> {
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_lite::Origin::produce();
 	origin.publish_broadcast(&name, publish.consume());
@@ -17,7 +25,7 @@ pub async fn run_client(client: moq_native::Client, url: Url, name: String, publ
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 	tokio::select! {
-		res = publish.run() => res,
+		res = publish.run(stats_interval) => res,
 		res = reconnect.closed() => res,
 		_ = tokio::signal::ctrl_c() => Ok(()),
 	}

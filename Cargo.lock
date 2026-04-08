@@ -3518,6 +3518,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "bytes",
  "clap",
  "hang",
  "moq-mux",

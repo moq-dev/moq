@@ -19,6 +19,7 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
+use super::stats::Stats;
 use super::{Fmp4, Fmp4Config};
 
 /// Configuration for the single-rendition HLS ingest loop.
@@ -166,16 +167,7 @@ impl Hls {
 	/// Run the ingest loop until cancelled.
 	pub async fn run(&mut self) -> anyhow::Result<()> {
 		loop {
-			let outcome = self.step().await?;
-			let delay = self.refresh_delay(outcome.target_duration, outcome.wrote_segments);
-
-			info!(
-				wrote_segments = outcome.wrote_segments,
-				target_duration = ?outcome.target_duration,
-				delay_secs = delay.as_secs_f32(),
-				"HLS ingest step complete"
-			);
-
+			let delay = self.step().await?;
 			tokio::time::sleep(delay).await;
 		}
 	}
@@ -214,12 +206,24 @@ impl Hls {
 		Ok(buffered)
 	}
 
-	/// Perform a single ingest step for all active tracks.
+	/// Perform a single ingest step: fetch playlists, consume new segments.
 	///
-	/// This fetches the current media playlists, consumes any fresh segments,
-	/// and returns how many segments were written along with the target
-	/// duration to guide scheduling of the next step.
-	async fn step(&mut self) -> anyhow::Result<StepOutcome> {
+	/// Returns the recommended delay before the next step.
+	pub async fn step(&mut self) -> anyhow::Result<Duration> {
+		let outcome = self.step_inner().await?;
+		let delay = self.refresh_delay(outcome.target_duration, outcome.wrote_segments);
+
+		info!(
+			wrote_segments = outcome.wrote_segments,
+			target_duration = ?outcome.target_duration,
+			delay_secs = delay.as_secs_f32(),
+			"HLS ingest step complete"
+		);
+
+		Ok(delay)
+	}
+
+	async fn step_inner(&mut self) -> anyhow::Result<StepOutcome> {
 		self.ensure_tracks().await?;
 
 		let mut wrote = 0usize;
@@ -257,6 +261,28 @@ impl Hls {
 			wrote_segments: wrote,
 			target_duration,
 		})
+	}
+
+	/// Return aggregated import statistics from all child fMP4 importers.
+	pub fn stats(&self) -> Stats {
+		let mut stats = Stats::default();
+		for importer in &self.video_importers {
+			let s = importer.stats();
+			stats.frames += s.frames;
+			stats.keyframes += s.keyframes;
+			stats.bytes += s.bytes;
+			stats.drift.count += s.drift.count;
+			stats.drift.sum += s.drift.sum;
+		}
+		if let Some(importer) = &self.audio_importer {
+			let s = importer.stats();
+			stats.frames += s.frames;
+			stats.keyframes += s.keyframes;
+			stats.bytes += s.bytes;
+			stats.drift.count += s.drift.count;
+			stats.drift.sum += s.drift.sum;
+		}
+		stats
 	}
 
 	/// Compute the delay before the next ingest step should run.

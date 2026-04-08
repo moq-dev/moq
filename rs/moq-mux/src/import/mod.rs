@@ -31,6 +31,7 @@ mod hev1;
 #[cfg(feature = "hls")]
 mod hls;
 mod opus;
+mod stats;
 
 pub use aac::*;
 #[cfg(feature = "av1")]
@@ -47,3 +48,4 @@ pub use hev1::*;
 #[cfg(feature = "hls")]
 pub use hls::*;
 pub use opus::*;
+pub use stats::*;

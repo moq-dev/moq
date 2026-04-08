@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use clap::Subcommand;
 use hang::moq_lite;
 use moq_mux::import;
@@ -76,7 +78,14 @@ impl Publish {
 }
 
 impl Publish {
-	pub async fn run(mut self) -> anyhow::Result<()> {
+	pub async fn run(mut self, stats_interval: Option<Duration>) -> anyhow::Result<()> {
+		match stats_interval {
+			Some(interval) => self.run_with_stats(interval).await,
+			None => self.run_plain().await,
+		}
+	}
+
+	async fn run_plain(&mut self) -> anyhow::Result<()> {
 		let mut stdin = tokio::io::stdin();
 
 		match &mut self.decoder {
@@ -84,5 +93,103 @@ impl Publish {
 			PublishDecoder::Fmp4(decoder) => decoder.decode_from(&mut stdin).await,
 			PublishDecoder::Hls(decoder) => decoder.run().await,
 		}
+	}
+
+	async fn run_with_stats(&mut self, interval: Duration) -> anyhow::Result<()> {
+		let mut ticker = tokio::time::interval(interval);
+		ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+		// Skip the first immediate tick.
+		ticker.tick().await;
+
+		let mut prev = import::Stats::default();
+
+		match &mut self.decoder {
+			PublishDecoder::Avc3(decoder) => {
+				let mut stdin = tokio::io::stdin();
+				let mut buffer = bytes::BytesMut::new();
+
+				loop {
+					tokio::select! {
+						result = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer) => {
+							let n = result?;
+							if n == 0 {
+								return Ok(());
+							}
+							decoder.decode_stream(&mut buffer, None)?;
+						}
+						_ = ticker.tick() => {
+							let current = decoder.stats();
+							Self::print_stats(&current, &prev, interval);
+							prev = current;
+						}
+					}
+				}
+			}
+			PublishDecoder::Fmp4(decoder) => {
+				let mut stdin = tokio::io::stdin();
+				let mut buffer = bytes::BytesMut::new();
+
+				loop {
+					tokio::select! {
+						result = tokio::io::AsyncReadExt::read_buf(&mut stdin, &mut buffer) => {
+							let n = result?;
+							if n == 0 {
+								return Ok(());
+							}
+							decoder.decode(&mut buffer)?;
+						}
+						_ = ticker.tick() => {
+							let current = decoder.stats();
+							Self::print_stats(&current, &prev, interval);
+							prev = current;
+						}
+					}
+				}
+			}
+			PublishDecoder::Hls(decoder) => {
+				decoder.init().await?;
+
+				loop {
+					let delay = decoder.step().await?;
+
+					// Interleave the step delay with stats ticks.
+					tokio::select! {
+						_ = tokio::time::sleep(delay) => {}
+						_ = ticker.tick() => {
+							let current = decoder.stats();
+							Self::print_stats(&current, &prev, interval);
+							prev = current;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	fn print_stats(current: &import::Stats, prev: &import::Stats, interval: Duration) {
+		let delta = current.delta(prev);
+		let secs = interval.as_secs_f64();
+
+		let fps = delta.frames as f64 / secs;
+		let kps = delta.keyframes as f64 / secs;
+		let bps = delta.bytes as f64 / secs;
+
+		let drift_str = match delta.drift.mean() {
+			Some(mean) => format!("μ={:.1}ms", mean.as_secs_f64() * 1000.0),
+			None => "n/a".to_string(),
+		};
+
+		let bytes_str = if bps >= 1_000_000.0 {
+			format!("{:.1} MB/s", bps / 1_000_000.0)
+		} else if bps >= 1_000.0 {
+			format!("{:.1} KB/s", bps / 1_000.0)
+		} else {
+			format!("{:.0} B/s", bps)
+		};
+
+		eprintln!(
+			"frames: {:.0}/s  keyframes: {:.0}/s  bytes: {}  drift: {}",
+			fps, kps, bytes_str, drift_str
+		);
 	}
 }

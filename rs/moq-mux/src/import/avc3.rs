@@ -1,4 +1,5 @@
 use super::annexb::{NalIterator, START_CODE};
+use super::stats::{DriftTracker, Stats};
 
 use anyhow::Context;
 use buf_list::BufList;
@@ -31,6 +32,10 @@ pub struct Avc3 {
 	last_timestamp: Option<hang::container::Timestamp>,
 	min_duration: Option<hang::container::Timestamp>,
 	jitter: Option<hang::container::Timestamp>,
+
+	// Import statistics.
+	stats: Stats,
+	drift: DriftTracker,
 }
 
 impl Avc3 {
@@ -51,6 +56,8 @@ impl Avc3 {
 			last_timestamp: None,
 			min_duration: None,
 			jitter: None,
+			stats: Stats::default(),
+			drift: DriftTracker::default(),
 		}
 	}
 
@@ -278,8 +285,10 @@ impl Avc3 {
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
+		let payload_bytes = payload.remaining() as u64;
+		let is_keyframe = self.current.contains_idr;
 
-		if self.current.contains_idr {
+		if is_keyframe {
 			self.track.keyframe()?;
 		}
 
@@ -289,6 +298,10 @@ impl Avc3 {
 		};
 
 		self.track.write(frame)?;
+
+		// Record import stats for this frame.
+		let drift = self.drift.track(pts.into());
+		self.stats.record_frame(payload_bytes, is_keyframe, drift);
 
 		// Track the minimum frame duration and update catalog jitter.
 		if let Some(last) = self.last_timestamp
@@ -316,6 +329,11 @@ impl Avc3 {
 		self.current.contains_pps = false;
 
 		Ok(())
+	}
+
+	/// Return a snapshot of cumulative import statistics.
+	pub fn stats(&self) -> Stats {
+		self.stats.clone()
 	}
 
 	/// Finish the track, flushing the current group.
