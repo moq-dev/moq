@@ -15,5 +15,5 @@ resource "linode_stackscript" "bootstrap" {
   label       = "moq-bootstrap"
   description = "Bootstrap Debian with Nix"
   script      = file("${path.module}/bootstrap.sh")
-  images      = ["linode/debian12"]
+  images      = ["linode/debian12", "linode/ubuntu25.10"]
 }
