@@ -56,7 +56,7 @@ Change the number of nodes in [input.tf](input.tf).
 - $25/month for `g6-standard-2` nodes.
 - $5/month for `g6-nanode-1` nodes.
 
-The default configuration is 3 `g6-standard-2` relay nodes and 1 `g6-nanode-1` publisher node. So $80/month.
+The default configuration is 5 `g6-standard-2` relay nodes and 1 `g6-nanode-1` publisher node. So $130/month.
 
 **NOTE**: `moq-relay` does not scale particularly well right now.
 

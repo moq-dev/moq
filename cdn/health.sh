@@ -23,7 +23,7 @@ JWT=$(cat "$JWT_FILE")
 WEBHOOK_URL="${1:-}"
 
 DOMAIN=$(cd "$SCRIPT_DIR" && tofu output -raw domain 2>/dev/null || echo "cdn.moq.dev")
-NODES=("usc" "euc" "sea")
+NODES=("usc" "usw" "use" "euc" "sea")
 PATH_AND_QUERY="/fetch/demo/bbb/catalog.json?jwt=${JWT}"
 
 failed=()

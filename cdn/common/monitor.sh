@@ -15,7 +15,7 @@ WEBHOOK="${MONITOR_WEBHOOK:-}"
 MEMORY_THRESHOLD="${MONITOR_MEMORY_THRESHOLD:-20}"
 HEALTH_DOMAIN="${MONITOR_HEALTH_DOMAIN:-cdn.moq.dev}"
 HEALTH_JWT_FILE="${MONITOR_HEALTH_JWT:-/var/lib/moq/demo-sub.jwt}"
-IFS=' ' read -r -a HEALTH_NODES <<< "${MONITOR_HEALTH_NODES:-usc euc sea}"
+IFS=' ' read -r -a HEALTH_NODES <<< "${MONITOR_HEALTH_NODES:-usc usw use euc sea}"
 HOSTNAME=$(hostname)
 
 MEMORY_STATE="ok"

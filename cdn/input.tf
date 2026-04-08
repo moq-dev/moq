@@ -40,6 +40,14 @@ locals {
       region = "us-central"    # Dallas, TX
       type   = "g6-standard-2" # 4GB RAM, 2 vCPU, $24/mo, 4TB out
     }
+    usw = {
+      region = "us-west" # Fremont, CA
+      type   = "g6-standard-2"
+    }
+    use = {
+      region = "us-east" # Newark, NJ
+      type   = "g6-standard-2"
+    }
     euc = {
       region = "eu-central" # Frankfurt, Germany
       type   = "g6-standard-2"

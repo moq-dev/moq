@@ -27,12 +27,14 @@ host node:
 # List the available nodes.
 nodes:
 	@echo "usc: Dallas, TX"
+	@echo "usw: Fremont, CA"
+	@echo "use: Newark, NJ"
 	@echo "euc: Frankfurt, Germany"
 	@echo "sea: Singapore"
 
 # Deploy moq-relay and moq-cert to all nodes
 [parallel]
-deploy-all: (deploy "usc") (deploy "euc") (deploy "sea")
+deploy-all: (deploy "usc") (deploy "usw") (deploy "use") (deploy "euc") (deploy "sea")
 
 # Deploy moq-relay and moq-cert to a specific node
 deploy node:
@@ -78,7 +80,7 @@ status node:
 	echo "=== $HOST ==="
 	ssh root@$HOST "systemctl status moq-relay --no-pager"
 
-status-all: (status "usc") (status "euc") (status "sea")
+status-all: (status "usc") (status "usw") (status "use") (status "euc") (status "sea")
 
 ssh node:
 	#!/usr/bin/env bash
