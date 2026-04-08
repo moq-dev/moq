@@ -1,5 +1,4 @@
 import "@moq/boy/element";
-import "@moq/boy/ui";
 import { Effect } from "@moq/signals";
 
 const url = import.meta.env.VITE_RELAY_URL || "http://localhost:4443/anon";
