@@ -52,8 +52,8 @@ export default class MoqBoy extends HTMLElement {
 	connectedCallback() {
 		this.#enabled.set(true);
 
-		// Render the UI into a Shadow DOM.
-		const shadow = this.attachShadow({ mode: "open" });
+		// Render the UI into a Shadow DOM (reuse existing on reconnect).
+		const shadow = this.shadowRoot ?? this.attachShadow({ mode: "open" });
 		this.#dispose = render(() => <BoyUI boy={this} />, shadow);
 	}
 
