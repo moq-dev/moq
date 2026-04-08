@@ -34,7 +34,7 @@ key = "root.jwk"
 # Allow anonymous publishing for anon/** only
 [auth.public]
 subscribe = ["anon", "demo"]
-publish = "anon"
+publish = ["anon", "demo/viewer"]
 
 # For multiple keys with rotation, use a directory instead:
 # key_dir = "/path/to/keys/"
