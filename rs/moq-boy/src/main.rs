@@ -248,11 +248,10 @@ async fn run(config: &Config) -> Result<()> {
 
 	tracing::info!(url = %config.url, %name, broadcast = %broadcast_path, "connecting to relay");
 
-	let session_handle = client
+	let reconnect = client
 		.with_publish(publish_origin.consume())
 		.with_consume(consume_origin)
-		.connect(config.url.clone())
-		.await?;
+		.reconnect(config.url.clone());
 
 	// Set up catalog and encoders.
 	let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
@@ -296,7 +295,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	tokio::select! {
 		res = emulator_handle => res?.context("emulator error"),
-		res = session_handle.closed() => res.map_err(Into::into),
+		res = reconnect.closed() => res,
 		res = input::handle_viewers(&mut viewer_consumer, &cmd_tx) => res,
 	}
 }

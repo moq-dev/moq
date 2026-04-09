@@ -19,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // Connect to the server and subscribe to broadcasts.
+// Automatically reconnects if the connection drops.
 async fn run_session(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
@@ -27,13 +28,13 @@ async fn run_session(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// The "anon" path is usually configured to bypass authentication; be careful!
 	let url = url::Url::parse("https://cdn.moq.dev/anon/video-example").unwrap();
 
-	// Establish a WebTransport/QUIC connection and MoQ handshake for subscribing.
+	// Establish a connection with automatic reconnection.
 	// with_consume() registers an OriginProducer for incoming data.
 	// Use with_publish() if you also want to publish from the session.
-	let session = client.with_consume(origin).connect(url).await?;
+	let reconnect = client.with_consume(origin).reconnect(url);
 
-	// Wait until the session is closed.
-	session.closed().await.map_err(Into::into)
+	// Wait until the reconnect loop stops (e.g. timeout exceeded).
+	reconnect.closed().await
 }
 
 // Subscribe to a broadcast and read media frames.

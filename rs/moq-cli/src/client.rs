@@ -10,8 +10,7 @@ pub async fn run_client(client: moq_native::Client, url: Url, name: String, publ
 
 	tracing::info!(%url, %name, "connecting");
 
-	// Establish the connection, not providing a subscriber.
-	let mut session = client.with_publish(origin.consume()).connect(url).await?;
+	let reconnect = client.with_publish(origin.consume()).reconnect(url);
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready.
@@ -19,11 +18,7 @@ pub async fn run_client(client: moq_native::Client, url: Url, name: String, publ
 
 	tokio::select! {
 		res = publish.run() => res,
-		res = session.closed() => res.map_err(Into::into),
-		_ = tokio::signal::ctrl_c() => {
-			session.close(moq_lite::Error::Cancel);
-			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-			Ok(())
-		},
+		res = reconnect.closed() => res,
+		_ = tokio::signal::ctrl_c() => Ok(()),
 	}
 }
