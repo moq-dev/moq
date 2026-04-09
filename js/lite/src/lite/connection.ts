@@ -1,9 +1,11 @@
+import { Signal } from "@moq/signals";
 import type { Announced } from "../announced.ts";
 import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream } from "../stream.ts";
+import type * as Time from "../time.ts";
 import { AnnounceInterest } from "./announce.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
@@ -50,7 +52,7 @@ export class Connection implements Established {
 	readonly recvBandwidth?: Bandwidth;
 
 	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
-	readonly rtt?: Bandwidth;
+	readonly rtt?: Signal<Time.Milli | undefined>;
 
 	/**
 	 * Creates a new Connection instance.
@@ -80,7 +82,7 @@ export class Connection implements Established {
 
 		// RTT requires PROBE with RTT field (Lite04+).
 		if (version !== Version.DRAFT_01 && version !== Version.DRAFT_02 && version !== Version.DRAFT_03) {
-			this.rtt = createBandwidth();
+			this.rtt = new Signal<Time.Milli | undefined>(undefined);
 		}
 
 		this.#publisher = new Publisher(this.#quic, this.#version);

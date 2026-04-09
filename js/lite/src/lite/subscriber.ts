@@ -1,9 +1,11 @@
+import type { Signal } from "@moq/signals";
 import { Announced } from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
 import { Broadcast, type TrackRequest } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
+import type * as Time from "../time.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
@@ -32,18 +34,18 @@ export class Subscriber {
 	#recvBandwidth?: Bandwidth;
 
 	// RTT producer (Lite04+ only).
-	#rtt?: Bandwidth;
+	#rtt?: Signal<Time.Milli | undefined>;
 
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
 	 * @param version - The protocol version
 	 * @param recvBandwidth - Optional bandwidth producer for PROBE
-	 * @param rtt - Optional RTT producer for PROBE
+	 * @param rtt - Optional RTT signal for PROBE
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, recvBandwidth?: Bandwidth, rtt?: Bandwidth) {
+	constructor(quic: WebTransport, version: Version, recvBandwidth?: Bandwidth, rtt?: Signal<Time.Milli | undefined>) {
 		this.#quic = quic;
 		this.version = version;
 		this.#recvBandwidth = recvBandwidth;
@@ -227,7 +229,7 @@ export class Subscriber {
 			if (!probe) break;
 			this.#recvBandwidth.set(probe.bitrate);
 			if (this.#rtt && probe.rtt !== undefined) {
-				this.#rtt.set(probe.rtt);
+				this.#rtt.set(probe.rtt as Time.Milli);
 			}
 		}
 	}
