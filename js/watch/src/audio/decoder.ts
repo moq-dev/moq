@@ -291,6 +291,10 @@ export class Decoder {
 							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
 
 							for (const sample of samples) {
+								// Mark that we received this frame right now.
+								const timestamp = Time.Milli.fromMicro(sample.timestamp as Time.Micro);
+								this.source.sync.received(timestamp, "audio");
+
 								this.#stats.update((stats) => ({
 									bytesReceived: (stats?.bytesReceived ?? 0) + sample.data.byteLength,
 								}));
