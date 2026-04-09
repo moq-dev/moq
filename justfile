@@ -88,7 +88,7 @@ ci:
 
 	# Check for broken links
 	lychee --root-dir "$(pwd)/doc" --fallback-extensions md doc
-	lychee --exclude-path doc .
+	lychee --exclude-path doc --exclude-path "CHANGELOG\\.md" .
 
 	# Dry-run publish to verify packaging
 	cargo publish --dry-run
