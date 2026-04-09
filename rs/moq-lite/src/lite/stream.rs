@@ -12,6 +12,7 @@ pub enum ControlType {
 	Subscribe = 2,
 	Fetch = 3,
 	Probe = 4,
+	Goaway = 5,
 }
 
 impl Decode<Version> for ControlType {

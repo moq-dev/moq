@@ -92,7 +92,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Ask for everything.
 		// TODO This should actually ask for each root.
-		let msg = lite::AnnouncePlease { prefix: "".into() };
+		let msg = lite::AnnounceInterest {
+			prefix: "".into(),
+			exclude_hop: 0,
+		};
 		stream.writer.encode(&msg).await?;
 
 		let mut producers = HashMap::new();
@@ -104,8 +107,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					self.start_announce(path, &mut producers)?;
 				}
 			}
-			Version::Lite03 => {
-				// Lite03: no AnnounceInit, initial state comes via Announce messages.
+			_ => {
+				// Lite03+: no AnnounceInit, initial state comes via Announce messages.
 			}
 		}
 

@@ -6,6 +6,7 @@ pub enum Version {
 	Lite01,
 	Lite02,
 	Lite03,
+	Lite04,
 }
 
 impl fmt::Display for Version {
@@ -14,6 +15,7 @@ impl fmt::Display for Version {
 			Self::Lite01 => write!(f, "moq-lite-01"),
 			Self::Lite02 => write!(f, "moq-lite-02"),
 			Self::Lite03 => write!(f, "moq-lite-03"),
+			Self::Lite04 => write!(f, "moq-lite-04"),
 		}
 	}
 }
@@ -24,6 +26,7 @@ impl From<Version> for crate::Version {
 			Version::Lite01 => crate::Version::Lite(Version::Lite01),
 			Version::Lite02 => crate::Version::Lite(Version::Lite02),
 			Version::Lite03 => crate::Version::Lite(Version::Lite03),
+			Version::Lite04 => crate::Version::Lite(Version::Lite04),
 		}
 	}
 }

@@ -15,11 +15,20 @@ pub(crate) const NEGOTIATED: [Version; 3] = [
 ];
 
 /// ALPN strings for supported versions.
-pub const ALPNS: &[&str] = &[ALPN_LITE_03, ALPN_LITE, ALPN_17, ALPN_16, ALPN_15, ALPN_14];
+pub const ALPNS: &[&str] = &[
+	ALPN_LITE_04,
+	ALPN_LITE_03,
+	ALPN_LITE,
+	ALPN_17,
+	ALPN_16,
+	ALPN_15,
+	ALPN_14,
+];
 
 // ALPN constants
 pub const ALPN_LITE: &str = "moql";
 pub const ALPN_LITE_03: &str = "moq-lite-03";
+pub const ALPN_LITE_04: &str = "moq-lite-04";
 pub const ALPN_14: &str = "moq-00";
 pub const ALPN_15: &str = "moqt-15";
 pub const ALPN_16: &str = "moqt-16";
@@ -40,6 +49,7 @@ impl Version {
 			0xff0dad01 => Some(Self::Lite(lite::Version::Lite01)),
 			0xff0dad02 => Some(Self::Lite(lite::Version::Lite02)),
 			0xff0dad03 => Some(Self::Lite(lite::Version::Lite03)),
+			0xff0dad04 => Some(Self::Lite(lite::Version::Lite04)),
 			0xff00000e => Some(Self::Ietf(ietf::Version::Draft14)),
 			0xff00000f => Some(Self::Ietf(ietf::Version::Draft15)),
 			0xff000010 => Some(Self::Ietf(ietf::Version::Draft16)),
@@ -54,6 +64,7 @@ impl Version {
 			Self::Lite(lite::Version::Lite01) => 0xff0dad01,
 			Self::Lite(lite::Version::Lite02) => 0xff0dad02,
 			Self::Lite(lite::Version::Lite03) => 0xff0dad03,
+			Self::Lite(lite::Version::Lite04) => 0xff0dad04,
 			Self::Ietf(ietf::Version::Draft14) => 0xff00000e,
 			Self::Ietf(ietf::Version::Draft15) => 0xff00000f,
 			Self::Ietf(ietf::Version::Draft16) => 0xff000010,
@@ -69,6 +80,7 @@ impl Version {
 		match alpn {
 			ALPN_LITE => None, // Multiple versions share this ALPN, need SETUP negotiation
 			ALPN_LITE_03 => Some(Self::Lite(lite::Version::Lite03)),
+			ALPN_LITE_04 => Some(Self::Lite(lite::Version::Lite04)),
 			ALPN_14 => Some(Self::Ietf(ietf::Version::Draft14)),
 			ALPN_15 => Some(Self::Ietf(ietf::Version::Draft15)),
 			ALPN_16 => Some(Self::Ietf(ietf::Version::Draft16)),
@@ -80,6 +92,7 @@ impl Version {
 	/// Returns the ALPN string for this version.
 	pub fn alpn(&self) -> &'static str {
 		match self {
+			Self::Lite(lite::Version::Lite04) => ALPN_LITE_04,
 			Self::Lite(lite::Version::Lite03) => ALPN_LITE_03,
 			Self::Lite(lite::Version::Lite01 | lite::Version::Lite02) => ALPN_LITE,
 			Self::Ietf(ietf::Version::Draft14) => ALPN_14,
@@ -132,6 +145,7 @@ impl FromStr for Version {
 			"moq-lite-01" => Ok(Self::Lite(lite::Version::Lite01)),
 			"moq-lite-02" => Ok(Self::Lite(lite::Version::Lite02)),
 			"moq-lite-03" => Ok(Self::Lite(lite::Version::Lite03)),
+			"moq-lite-04" => Ok(Self::Lite(lite::Version::Lite04)),
 			"moq-transport-14" => Ok(Self::Ietf(ietf::Version::Draft14)),
 			"moq-transport-15" => Ok(Self::Ietf(ietf::Version::Draft15)),
 			"moq-transport-16" => Ok(Self::Ietf(ietf::Version::Draft16)),
@@ -197,6 +211,7 @@ impl Versions {
 	/// All supported versions exposed by default.
 	pub fn all() -> Self {
 		Self(vec![
+			Version::Lite(lite::Version::Lite04),
 			Version::Lite(lite::Version::Lite03),
 			Version::Lite(lite::Version::Lite02),
 			Version::Lite(lite::Version::Lite01),

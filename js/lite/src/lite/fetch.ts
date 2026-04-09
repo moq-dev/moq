@@ -1,18 +1,15 @@
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
 
-function guardDraft03(version: Version) {
+function guardFetch(version: Version) {
 	switch (version) {
-		case Version.DRAFT_03:
-			break;
 		case Version.DRAFT_01:
 		case Version.DRAFT_02:
 			throw new Error("fetch not supported for this version");
 		default:
-			unreachable(version);
+			break;
 	}
 }
 
@@ -45,12 +42,12 @@ export class Fetch {
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
-		guardDraft03(version);
+		guardFetch(version);
 		return Message.encode(w, this.#encode.bind(this));
 	}
 
 	static async decode(r: Reader, version: Version): Promise<Fetch> {
-		guardDraft03(version);
+		guardFetch(version);
 		return Message.decode(r, Fetch.#decode);
 	}
 }
