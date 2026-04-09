@@ -7,6 +7,7 @@
 //! The reader can be cloned, in which case each reader receives a copy of each frame. (fanout)
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
+use std::collections::VecDeque;
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
@@ -68,16 +69,15 @@ impl From<u16> for Group {
 
 #[derive(Default)]
 struct GroupState {
-	// The frames that have been written thus far.
-	// We store producers so consumers can be created on-demand.
-	// Entries may be None if evicted due to the group size limit.
-	frames: Vec<Option<FrameProducer>>,
+	// The frames currently cached in the group.
+	// Evicted frames are popped from the front; `offset` tracks how many.
+	frames: VecDeque<FrameProducer>,
 
-	// The total size (in bytes) of all cached (non-evicted) frames.
+	// The number of frames evicted from the front of the group.
+	offset: usize,
+
+	// The total size (in bytes) of all cached frames.
 	cache_size: usize,
-
-	// The number of cached (non-evicted) frames.
-	cache_count: usize,
 
 	// Whether the group has been finalized (no more frames).
 	fin: bool,
@@ -88,11 +88,10 @@ struct GroupState {
 
 impl GroupState {
 	fn poll_get_frame(&self, index: usize) -> Poll<Result<Option<FrameConsumer>>> {
-		if let Some(slot) = self.frames.get(index) {
-			match slot {
-				Some(frame) => Poll::Ready(Ok(Some(frame.consume()))),
-				None => Poll::Ready(Err(Error::CacheFull)),
-			}
+		if index < self.offset {
+			Poll::Ready(Err(Error::CacheFull))
+		} else if let Some(frame) = self.frames.get(index - self.offset) {
+			Poll::Ready(Ok(Some(frame.consume())))
 		} else if self.fin {
 			Poll::Ready(Ok(None))
 		} else if let Some(err) = &self.abort {
@@ -104,7 +103,7 @@ impl GroupState {
 
 	fn poll_finished(&self) -> Poll<Result<u64>> {
 		if self.fin {
-			Poll::Ready(Ok(self.frames.len() as u64))
+			Poll::Ready(Ok((self.offset + self.frames.len()) as u64))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
 		} else {
@@ -114,13 +113,12 @@ impl GroupState {
 
 	/// Evict frames from the front of the group until within both limits.
 	fn evict(&mut self) {
-		while self.cache_size > MAX_GROUP_CACHE || self.cache_count > MAX_GROUP_FRAMES {
-			let Some(slot) = self.frames.iter_mut().find(|s| s.is_some()) else {
+		while self.cache_size > MAX_GROUP_CACHE || self.frames.len() > MAX_GROUP_FRAMES {
+			let Some(frame) = self.frames.pop_front() else {
 				break;
 			};
-			let frame = slot.take().unwrap();
 			self.cache_size -= frame.info.size as usize;
-			self.cache_count -= 1;
+			self.offset += 1;
 		}
 	}
 }
@@ -180,15 +178,15 @@ impl GroupProducer {
 			return Err(Error::Closed);
 		}
 		state.cache_size += frame.info.size as usize;
-		state.cache_count += 1;
-		state.frames.push(Some(frame));
+		state.frames.push_back(frame);
 		state.evict();
 		Ok(())
 	}
 
 	/// Return the number of frames written so far.
 	pub fn frame_count(&self) -> usize {
-		self.state.read().frames.len()
+		let state = self.state.read();
+		state.offset + state.frames.len()
 	}
 
 	/// Mark the group as complete; no more frames will be written.
@@ -205,7 +203,7 @@ impl GroupProducer {
 		let mut guard = modify(&self.state)?;
 
 		// Abort all frames still in progress.
-		for frame in guard.frames.iter_mut().flatten() {
+		for frame in guard.frames.iter_mut() {
 			// Ignore errors, we don't care if the frame was already closed.
 			frame.abort(err.clone()).ok();
 		}
