@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.15](https://github.com/moq-dev/moq/compare/moq-token-v0.5.14...moq-token-v0.5.15) - 2026-04-09
+
+### Other
+
+- Fix lychee CI link checker failures ([#1269](https://github.com/moq-dev/moq/pull/1269))
+- release ([#1229](https://github.com/moq-dev/moq/pull/1229))
+
 ## [0.5.14](https://github.com/moq-dev/moq/compare/moq-token-v0.5.13...moq-token-v0.5.14) - 2026-04-07
 
 ### Other

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.10](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.9...moq-lite-v0.15.10) - 2026-04-09
+
+### Other
+
+- Fix lychee CI link checker failures ([#1269](https://github.com/moq-dev/moq/pull/1269))
+- Send RTT in probe messages and tune jitter buffer ([#1265](https://github.com/moq-dev/moq/pull/1265))
+- Support multiple announce prefixes in MOQ subscriber ([#1249](https://github.com/moq-dev/moq/pull/1249))
+- Add support for MOQ Lite Draft 04 with enhanced features ([#1257](https://github.com/moq-dev/moq/pull/1257))
+- Add frame eviction to groups with configurable size limits ([#1256](https://github.com/moq-dev/moq/pull/1256))
+
 ## [0.15.8](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.7...moq-lite-v0.15.8) - 2026-04-07
 
 ### Other

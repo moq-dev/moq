@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.7](https://github.com/moq-dev/moq/compare/hang-v0.15.6...hang-v0.15.7) - 2026-04-09
+
+### Other
+
+- Add automatic reconnection with exponential backoff ([#1246](https://github.com/moq-dev/moq/pull/1246))
+
 ## [0.15.6](https://github.com/moq-dev/moq/compare/hang-v0.15.5...hang-v0.15.6) - 2026-04-03
 
 ### Other

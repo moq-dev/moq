@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.13](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.12...moq-clock-v0.10.13) - 2026-04-09
+
+### Other
+
+- Add automatic reconnection with exponential backoff ([#1246](https://github.com/moq-dev/moq/pull/1246))
+
 ## [0.10.12](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.11...moq-clock-v0.10.12) - 2026-04-07
 
 ### Other

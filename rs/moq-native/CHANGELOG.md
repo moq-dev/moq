@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.10](https://github.com/moq-dev/moq/compare/moq-native-v0.13.9...moq-native-v0.13.10) - 2026-04-09
+
+### Other
+
+- Add automatic reconnection with exponential backoff ([#1246](https://github.com/moq-dev/moq/pull/1246))
+
 ## [0.13.9](https://github.com/moq-dev/moq/compare/moq-native-v0.13.8...moq-native-v0.13.9) - 2026-04-07
 
 ### Added
