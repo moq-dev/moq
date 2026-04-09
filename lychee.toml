@@ -1,0 +1,8 @@
+# Exclude VitePress root-relative links (valid when served, not locally)
+exclude = ['^/']
+
+# Exclude localhost URLs (intentional for dev docs)
+exclude_loopback = true
+
+# Don't check auto-generated changelogs
+exclude_path = ["CHANGELOG.md"]
