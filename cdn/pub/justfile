@@ -2,6 +2,10 @@
 default:
   just --list
 
+# Regenerate the pub JWT token: publish under demo
+token:
+	cargo run -p moq-token-cli -- sign --key ../secrets/root.jwk --root "demo" --publish "" > ../secrets/demo-pub.jwt
+
 # Pin to the latest moq-cli release tag (or a specific tag)
 pin tag="":
 	#!/usr/bin/env bash
@@ -25,7 +29,7 @@ host:
 	echo "pub.$DOMAIN"
 
 # Deploy publisher
-deploy:
+deploy: token
 	#!/usr/bin/env bash
 	set -euo pipefail
 	HOST=$(just host)

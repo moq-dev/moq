@@ -1,6 +1,8 @@
 import * as Moq from "@moq/lite";
+import { render } from "solid-js/web";
 import type { GameConfig } from "./index.ts";
 import { Game } from "./index.ts";
+import { BoyUI } from "./ui/element.tsx";
 
 const OBSERVED = ["url", "prefix", "prefix-game", "prefix-viewer"] as const;
 type Observed = (typeof OBSERVED)[number];
@@ -10,16 +12,12 @@ const DEFAULT_PREFIX = "boy";
 const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signals.close());
 
 /**
- * `<moq-boy>` web component — discovers and manages Game Boy streaming sessions.
- *
- * Connects to a MoQ relay, discovers game sessions via announcements,
- * and creates Game instances for each. The UI layer (moq-boy-ui) renders
- * the visual interface by reading signals from this element.
+ * `<moq-boy>` web component — discovers and manages Game Boy streaming sessions,
+ * and renders the interactive UI in a Shadow DOM.
  *
  * Attributes:
  *   - `url` — MoQ relay URL
  *   - `prefix` — Base path prefix (default: "boy"). Derives prefix-game and prefix-viewer.
- *     **Breaking change**: previously the derived attributes were named game-prefix/viewer-prefix.
  *   - `prefix-game` — Path prefix for game broadcasts (default: "{prefix}/game")
  *   - `prefix-viewer` — Path prefix for viewer broadcasts (default: "{prefix}/viewer")
  */
@@ -38,6 +36,7 @@ export default class MoqBoy extends HTMLElement {
 	readonly #gamePrefixOverride = new Moq.Signals.Signal<string | undefined>(undefined);
 	readonly #viewerPrefixOverride = new Moq.Signals.Signal<string | undefined>(undefined);
 	readonly #sessions = new Map<string, Game>();
+	#dispose?: () => void;
 
 	constructor() {
 		super();
@@ -52,10 +51,16 @@ export default class MoqBoy extends HTMLElement {
 
 	connectedCallback() {
 		this.#enabled.set(true);
+
+		// Render the UI into a Shadow DOM (reuse existing on reconnect).
+		const shadow = this.shadowRoot ?? this.attachShadow({ mode: "open" });
+		this.#dispose = render(() => <BoyUI boy={this} />, shadow);
 	}
 
 	disconnectedCallback() {
 		this.#enabled.set(false);
+		this.#dispose?.();
+		this.#dispose = undefined;
 	}
 
 	attributeChangedCallback(name: Observed, _oldValue: string | null, newValue: string | null) {

@@ -1,35 +1,24 @@
 #!/usr/bin/env bash
 # Health check script for MoQ CDN relay nodes.
-# Fetches the BBB demo catalog from each node individually.
+# Fetches the BBB demo catalog from each node individually (anonymous subscribe).
 #
 # Usage:
 #   ./health.sh [webhook_url]
 #
-# Reads the JWT from secrets/demo-sub.jwt (same place as other tokens).
 # Exit code 0 if all nodes are healthy, 1 if any failed.
 
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-JWT_FILE="${SCRIPT_DIR}/secrets/demo-sub.jwt"
-
-if [ ! -f "$JWT_FILE" ]; then
-	echo "Error: $JWT_FILE not found."
-	echo "Generate it with: cargo run --bin moq-token-cli -- --key secrets/root.jwk sign --root \"demo\" --subscribe \"\" > secrets/demo-sub.jwt"
-	exit 1
-fi
-
-JWT=$(cat "$JWT_FILE")
 WEBHOOK_URL="${1:-}"
 
 DOMAIN=$(cd "$SCRIPT_DIR" && tofu output -raw domain 2>/dev/null || echo "cdn.moq.dev")
 NODES=("usc" "usw" "use" "euc" "sea")
-PATH_AND_QUERY="/fetch/demo/bbb/catalog.json?jwt=${JWT}"
 
 failed=()
 
 for node in "${NODES[@]}"; do
-	url="https://${node}.${DOMAIN}${PATH_AND_QUERY}"
+	url="https://${node}.${DOMAIN}/fetch/demo/bbb/catalog.json"
 	printf "%-4s %s.%s ... " "[$node]" "$node" "$DOMAIN"
 
 	status=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null) && ok=true || ok=false
