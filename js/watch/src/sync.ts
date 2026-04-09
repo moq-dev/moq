@@ -40,6 +40,11 @@ export class Sync {
 	// There's probably a way to use Effect, but lets keep it simple for now.
 	#update: PromiseWithResolvers<void>;
 
+	// Per-label reference tracking: minimum ref per label.
+	// The effective #reference is the max across all labels,
+	// ensuring the slowest track sets the pace (late audio stalls early video).
+	#labelRefs = new Map<string, Time.Milli>();
+
 	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
 	#late = new Map<string, { count: number; maxMs: number }>();
 
@@ -107,7 +112,8 @@ export class Sync {
 		this.#update = Promise.withResolvers();
 	}
 
-	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
+	// Update the reference if this is the earliest frame we've seen for this label, relative to its timestamp.
+	// The effective reference is the max across all labels so the slowest track sets the pace.
 	received(timestamp: Time.Milli, label = ""): void {
 		const now = Time.Milli.now();
 		const ref = Time.Milli.sub(now, timestamp);
@@ -135,14 +141,26 @@ export class Sync {
 					this.#late.delete(label);
 				}
 			}
-
-			if (ref >= currentRef) {
-				// Our frame was not relatively newer than any other frame.
-				return;
-			}
 		}
 
-		this.#reference.set(ref);
+		// Update per-label reference (keep the minimum ref for each label).
+		const currentLabelRef = this.#labelRefs.get(label);
+		if (currentLabelRef !== undefined && ref >= currentLabelRef) {
+			// Not relatively newer than what we've seen for this label.
+			return;
+		}
+		this.#labelRefs.set(label, ref);
+
+		// Recompute effective reference as max of all per-label references.
+		// Using max ensures the slowest track (e.g. late audio) stalls faster tracks (e.g. early video).
+		let effectiveRef = ref;
+		for (const r of this.#labelRefs.values()) {
+			if (r > effectiveRef) effectiveRef = r;
+		}
+
+		if (currentRef === effectiveRef) return;
+
+		this.#reference.set(effectiveRef);
 		this.#update.resolve();
 		this.#update = Promise.withResolvers();
 	}
