@@ -470,7 +470,7 @@ mod test {
 
 		// The second frame should still be available.
 		let f1 = consumer.get_frame(1).now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(f1.info.size, MAX_GROUP_CACHE as u64);
+		assert_eq!(f1.info.size, MAX_GROUP_CACHE);
 	}
 
 	#[test]
