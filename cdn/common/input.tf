@@ -14,7 +14,9 @@ variable "domain" {
   type        = string
 }
 
-variable "ssh_keys" {
-  description = "SSH public keys for root access"
-  type        = list(string)
+variable "webhook" {
+  description = "Webhook URL for all alerts (Slack, Discord, etc.)"
+  type        = string
+  sensitive   = true
+  default     = ""
 }

@@ -1,3 +1,4 @@
+mod common
 mod relay
 mod pub
 mod boy
@@ -6,10 +7,12 @@ mod boy
 default:
   just --list
 
+# Deploy all infrastructure and services
 deploy:
-	tofu apply
-	just relay deploy-all
-	just pub deploy
+	just common deploy
+	just relay deploy-infra
+	just pub deploy-infra
+	just boy deploy-infra
 
 # Pin relay and pub to their latest release tags
 pin:
@@ -26,8 +29,8 @@ health-notify webhook:
 
 # Check tofu formatting
 check:
-	tofu fmt -check -recursive
+	just common check
 
 # Fix tofu formatting
 fix:
-	tofu fmt -recursive
+	just common fix

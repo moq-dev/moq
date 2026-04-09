@@ -21,8 +21,15 @@ pin tag="":
 # Get the hostname for the publisher
 host:
 	#!/usr/bin/env bash
-	DOMAIN=$(cd .. && tofu output -raw domain)
+	DOMAIN=$(cd ../common && tofu output -raw domain)
 	echo "pub.$DOMAIN"
+
+# Apply infrastructure changes
+apply *args:
+	tofu apply {{args}}
+
+# Deploy infrastructure and software
+deploy-infra: apply deploy
 
 # Deploy publisher
 deploy:

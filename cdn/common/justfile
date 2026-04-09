@@ -1,0 +1,12 @@
+# List all of the available commands.
+default:
+  just --list
+
+deploy:
+	tofu apply
+
+check:
+	tofu fmt -check -recursive
+
+fix:
+	tofu fmt -recursive

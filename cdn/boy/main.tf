@@ -1,3 +1,10 @@
+data "terraform_remote_state" "common" {
+  backend = "local"
+  config = {
+    path = "${path.module}/../common/tofu.tfstate"
+  }
+}
+
 locals {
   roms = {
     "big2small" = "big2small.gb"
@@ -39,10 +46,10 @@ resource "linode_instance" "boy" {
 
   firewall_id = linode_firewall.boy.id
 
-  stackscript_id = var.stackscript_id
+  stackscript_id = data.terraform_remote_state.common.outputs.stackscript_id
   stackscript_data = {
     hostname    = "boy.${var.domain}"
-    gcp_account = var.gcp_account_key
+    gcp_account = data.terraform_remote_state.common.outputs.gcp_account_key
   }
 
   tags = ["boy", "moq"]

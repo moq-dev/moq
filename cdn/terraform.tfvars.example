@@ -1,4 +1,10 @@
-# Copy this file to terraform.tfvars and fill in your values
+# Each tofu root module (common/, relay/, pub/, boy/) needs its own terraform.tfvars.
+# Copy this file into each directory and fill in the values needed by that module.
+#
+# common/terraform.tfvars: linode_token, gcp_project, domain, webhook (optional)
+# relay/terraform.tfvars:  linode_token, gcp_project, domain, email, ssh_keys
+# pub/terraform.tfvars:    linode_token, gcp_project, domain, ssh_keys
+# boy/terraform.tfvars:    linode_token, gcp_project, domain, ssh_keys
 
 # The domain to use for the GeoDNS entry.
 # Each node will register its own subdomain.
@@ -11,7 +17,7 @@ linode_token = "your-linode-api-token"
 # Note: GCP credentials will be read from ~/.config/gcloud or GOOGLE_APPLICATION_CREDENTIALS
 gcp_project = "your-gcp-project-id"
 
-# Email for LetsEncrypt notifications
+# Email for LetsEncrypt notifications (relay only)
 email = "admin@moq.dev"
 
 # Your SSH public key for root access

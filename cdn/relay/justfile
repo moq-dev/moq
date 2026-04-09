@@ -21,7 +21,7 @@ pin tag="":
 # Get the hostname for a node
 host node:
 	#!/usr/bin/env bash
-	DOMAIN=$(cd .. && tofu output -raw domain)
+	DOMAIN=$(cd ../common && tofu output -raw domain)
 	echo "{{node}}.$DOMAIN"
 
 # List the available nodes.
@@ -32,9 +32,16 @@ nodes:
 	@echo "euc: Frankfurt, Germany"
 	@echo "sea: Singapore"
 
+# Apply infrastructure changes
+apply *args:
+	tofu apply {{args}}
+
 # Deploy moq-relay and moq-cert to all nodes
 [parallel]
 deploy-all: (deploy "usc") (deploy "usw") (deploy "use") (deploy "euc") (deploy "sea")
+
+# Deploy infrastructure and software to all nodes
+deploy-infra: apply deploy-all
 
 # Deploy moq-relay and moq-cert to a specific node
 deploy node:

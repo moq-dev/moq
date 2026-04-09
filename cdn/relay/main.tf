@@ -1,3 +1,10 @@
+data "terraform_remote_state" "common" {
+  backend = "local"
+  config = {
+    path = "${path.module}/../common/tofu.tfstate"
+  }
+}
+
 # Generate systemd service files from templates
 resource "local_file" "moq_relay_service" {
   content = templatefile("${path.module}/moq-relay.service.tftpl", {
@@ -16,7 +23,7 @@ resource "local_file" "moq_cert_service" {
 
 # Create Linode instances
 resource "linode_instance" "relay" {
-  for_each = var.relays
+  for_each = local.relays
 
   label  = "relay-${each.key}"
   region = each.value.region
@@ -31,10 +38,10 @@ resource "linode_instance" "relay" {
   firewall_id = linode_firewall.relay.id
 
   # Bootstrap script - only installs Nix and creates directories
-  stackscript_id = var.stackscript_id
+  stackscript_id = data.terraform_remote_state.common.outputs.stackscript_id
   stackscript_data = {
     hostname    = "${each.key}.${var.domain}"
-    gcp_account = var.gcp_account_key
+    gcp_account = data.terraform_remote_state.common.outputs.gcp_account_key
   }
 
   tags = ["relay", "moq"]
@@ -42,7 +49,7 @@ resource "linode_instance" "relay" {
 
 # Generate random root passwords (store these securely!)
 resource "random_password" "relay_root" {
-  for_each = var.relays
+  for_each = local.relays
 
   length  = 32
   special = true

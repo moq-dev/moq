@@ -5,10 +5,20 @@ There's nothing special about Linode, other cloud providers will work provided t
 
 However, we do use GCP for GeoDNS because most providers don't support it or too expensive (Cloudflare).
 
+## Structure
+
+The infrastructure is split into four independent tofu root modules, each with its own state:
+
+- **`common/`** - Shared infrastructure: DNS zone, GCP service account, Linode bootstrap script, monitoring
+- **`relay/`** - Relay server instances, firewalls, and geo-DNS records
+- **`pub/`** - Publisher instance and DNS record
+- **`boy/`** - MoQ Boy emulator instance and DNS record
+
+Each module can be deployed independently via `just cdn <module> deploy-infra`, or all at once via `just cdn deploy`.
+
 ## Setup
 
-1. Copy `terraform.tfvars.example` to `terraform.tfvars` and fill in values.
-2. Create a `secrets/` directory with JWT/JWK credentials:
+1. Create a `secrets/` directory with JWT/JWK credentials:
    ```bash
    mkdir -p secrets
 
@@ -27,38 +37,36 @@ However, we do use GCP for GeoDNS because most providers don't support it or too
    # to allow moq-boy to publish to `demo/boy` and subscribe to `anon/boy`
    cargo run --bin moq-token-cli -- sign --key secrets/root.jwk --root "" --publish "demo/boy" --subscribe "anon/boy" > secrets/boy.jwt
    ```
-3. Run `tofu init`.
-4. Run `tofu apply`.
+2. Create `terraform.tfvars` in each module directory (see `terraform.tfvars.example` for reference).
+3. Initialize and apply each module:
+   ```bash
+   cd common && tofu init && tofu apply
+   cd relay && tofu init && tofu apply
+   cd pub && tofu init && tofu apply
+   cd boy && tofu init && tofu apply
+   ```
 
 ## Deploy
 
-1. `nix flake update` to update the `moq-relay` and `moq-cli` binaries.
-
-- **NOTE**: This pulls from `main` on github, not a local path or the latest release.
-
-2. `just deploy-all` to deploy to all nodes in parallel.
-
-- This will take a while as the builds *currently* occur on the remote nodes.
-- Somebody should set up remote builders or cross-compilation.
+1. `just cdn relay pin` / `just cdn pub pin` / `just cdn boy pin` to pin to the latest release tags.
+2. `just cdn deploy` to deploy everything, or deploy individually:
+   - `just cdn relay deploy-all` to deploy software to all relay nodes
+   - `just cdn pub deploy` to deploy the publisher
+   - `just cdn boy deploy` to deploy the boy emulator
 
 ## Monitor
 
-Use `just` to see all of the available commands.
+Use `just cdn` to see all of the available commands.
 
-1. `just ssh <node>` to SSH into a specific node.
-2. `just logs <node>` to view the logs of a specific node.
-3. etc
+1. `just cdn relay ssh <node>` to SSH into a specific relay node.
+2. `just cdn relay logs <node>` to view the logs of a specific node.
+3. `just cdn health` to run health checks against all relay nodes.
 
 ## Costs
 
-Change the number of nodes in [input.tf](input.tf).
+Change the relay nodes in [relay/variables.tf](relay/variables.tf).
 
 - $25/month for `g6-standard-2` nodes.
 - $5/month for `g6-nanode-1` nodes.
 
-The default configuration is 5 `g6-standard-2` relay nodes and 1 `g6-nanode-1` publisher node. So $130/month.
-
-**NOTE**: `moq-relay` does not scale particularly well right now.
-
-- The current design is a mesh network, so more nodes means more unnecessary backbone traffic.
-- Quinn currently uses a single UDP receive thread, so scaling to multiple cores won't help.
+The default configuration is 5 `g6-standard-2` relay nodes, 1 `g6-standard-2` boy node, and 1 `g6-nanode-1` publisher node. So ~$154/month.
