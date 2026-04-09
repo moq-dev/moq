@@ -22,7 +22,7 @@ export default function Controls() {
 
 	const onJitterInput = (e: Event) => {
 		const el = e.currentTarget as HTMLInputElement;
-		game.jitter.set(Number.parseInt(el.value, 10) as import("@moq/lite").Time.Milli);
+		game.latency.set(Number.parseInt(el.value, 10) as import("@moq/lite").Time.Milli);
 	};
 
 	return (

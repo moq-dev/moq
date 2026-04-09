@@ -63,7 +63,7 @@ export class Game {
 	// Reactive state exposed to UI.
 	readonly hovered = new Moq.Signals.Signal(false);
 	readonly active = new Moq.Signals.Signal(false);
-	readonly jitter = new Moq.Signals.Signal<Watch.Latency>("real-time");
+	readonly latency = new Moq.Signals.Signal<Watch.Latency>("real-time");
 	readonly userMuted = new Moq.Signals.Signal(false);
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
 	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
@@ -112,7 +112,7 @@ export class Game {
 			rtt.set(rttSignal ? effect.get(rttSignal) : undefined);
 		});
 
-		this.sync = new Watch.Sync({ latency: this.jitter, rtt });
+		this.sync = new Watch.Sync({ latency: this.latency, rtt });
 		this.#signals.cleanup(() => this.sync.close());
 
 		this.videoSource = new Watch.Video.Source(this.sync, { broadcast: this.broadcast });
