@@ -2,7 +2,5 @@
 .tofu/
 *.tfstate
 *.tfstate.backup
-.terraform.lock.hcl
-.tofu.lock.hcl
 *.tfvars
 !*.tfvars.example
