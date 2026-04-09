@@ -143,16 +143,12 @@ impl Publish {
 		}
 	}
 
-	fn tick_stats(
-		current: import::Stats,
-		prev: &mut import::Stats,
-		last_instant: &mut tokio::time::Instant,
-	) {
+	fn tick_stats(current: import::Stats, prev: &mut import::Stats, last_instant: &mut tokio::time::Instant) {
 		let now = tokio::time::Instant::now();
 		let elapsed = now - *last_instant;
 		*last_instant = now;
 
-		let delta = current.delta(prev);
+		let delta = &current - prev;
 		let secs = elapsed.as_secs_f64();
 
 		let fps = delta.frames as f64 / secs;

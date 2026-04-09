@@ -1,6 +1,7 @@
+use std::ops::Sub;
 use std::time::{Duration, Instant};
 
-/// Cumulative import statistics. Use [`Stats::delta`] to compute per-interval metrics.
+/// Cumulative import statistics.
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Stats {
@@ -10,14 +11,28 @@ pub struct Stats {
 	pub drift: StatsDrift,
 }
 
-impl Stats {
-	/// Compute the difference between two cumulative snapshots.
-	pub fn delta(&self, prev: &Stats) -> Stats {
+impl Sub for Stats {
+	type Output = Self;
+
+	fn sub(self, rhs: Self) -> Self {
 		Stats {
-			frames: self.frames.saturating_sub(prev.frames),
-			keyframes: self.keyframes.saturating_sub(prev.keyframes),
-			bytes: self.bytes.saturating_sub(prev.bytes),
-			drift: self.drift.delta(&prev.drift),
+			frames: self.frames - rhs.frames,
+			keyframes: self.keyframes - rhs.keyframes,
+			bytes: self.bytes - rhs.bytes,
+			drift: self.drift - rhs.drift,
+		}
+	}
+}
+
+impl Sub for &Stats {
+	type Output = Stats;
+
+	fn sub(self, rhs: Self) -> Stats {
+		Stats {
+			frames: self.frames - rhs.frames,
+			keyframes: self.keyframes - rhs.keyframes,
+			bytes: self.bytes - rhs.bytes,
+			drift: self.drift.clone() - rhs.drift.clone(),
 		}
 	}
 }
@@ -32,15 +47,18 @@ pub struct StatsDrift {
 	pub sum: Duration,
 }
 
-impl StatsDrift {
-	/// Compute the difference between two cumulative snapshots.
-	pub fn delta(&self, prev: &StatsDrift) -> StatsDrift {
+impl Sub for StatsDrift {
+	type Output = Self;
+
+	fn sub(self, rhs: Self) -> Self {
 		StatsDrift {
-			count: self.count.saturating_sub(prev.count),
-			sum: self.sum.saturating_sub(prev.sum),
+			count: self.count - rhs.count,
+			sum: self.sum - rhs.sum,
 		}
 	}
+}
 
+impl StatsDrift {
 	/// Mean absolute drift per frame, or `None` if no samples.
 	pub fn mean(&self) -> Option<Duration> {
 		if self.count == 0 {
