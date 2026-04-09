@@ -212,9 +212,32 @@ export class Source {
 
 		const target = effect.get(this.target);
 
-		// Manual selection by name
-		const manual = target?.name;
-		const selected = manual && manual in available ? manual : this.#select(available, target);
+		// Manual selection by name — skip all ABR logic.
+		if (target?.name && target.name in available) {
+			const config = available[target.name];
+			effect.set(this.#track, target.name);
+			effect.set(this.#config, config);
+			effect.set(this.sync.video, config.jitter as Moq.Time.Milli | undefined);
+			return;
+		}
+
+		// Auto-select: use recv bandwidth if no explicit bitrate target.
+		let effectiveTarget = target;
+		if (!target?.bitrate) {
+			const broadcast = effect.get(this.broadcast);
+			const connection = broadcast ? effect.get(broadcast.connection) : undefined;
+			const recvBw = connection?.recvBandwidth;
+			if (recvBw) {
+				const estimate = effect.get(recvBw);
+				if (estimate != null) {
+					// Apply a safety margin (80%) to avoid oscillation.
+					const safeBitrate = Math.round(estimate * 0.8);
+					effectiveTarget = { ...target, bitrate: safeBitrate };
+				}
+			}
+		}
+
+		const selected = this.#select(available, effectiveTarget);
 		if (!selected) return;
 
 		const config = available[selected];

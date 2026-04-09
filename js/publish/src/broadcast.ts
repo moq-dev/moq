@@ -43,7 +43,7 @@ export class Broadcast {
 		this.name = Signal.from(props?.name ?? Moq.Path.empty());
 
 		this.audio = new Audio.Encoder(props?.audio);
-		this.video = new Video.Root(props?.video);
+		this.video = new Video.Root({ ...props?.video, connection: this.connection });
 		this.location = new Location.Root(props?.location);
 		this.chat = new Chat.Root(props?.chat);
 		this.preview = new Preview(props?.preview);

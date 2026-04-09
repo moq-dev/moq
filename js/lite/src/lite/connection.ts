@@ -1,4 +1,5 @@
 import type { Announced } from "../announced.ts";
+import { type Bandwidth, createBandwidth } from "../bandwidth.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
@@ -10,7 +11,9 @@ import { SessionInfo } from "./session.ts";
 import { StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
-import { type Version, versionName } from "./version.ts";
+import { Version, versionName } from "./version.ts";
+
+const SEND_BW_POLL_INTERVAL = 100; // ms
 
 /**
  * Represents a connection to a MoQ server.
@@ -39,8 +42,11 @@ export class Connection implements Established {
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
 
-	// Just to avoid logging when `close()` is called.
-	#closed = false;
+	/** Estimated send bitrate from the congestion controller. */
+	readonly sendBandwidth?: Bandwidth;
+
+	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
+	readonly recvBandwidth?: Bandwidth;
 
 	/**
 	 * Creates a new Connection instance.
@@ -57,8 +63,19 @@ export class Connection implements Established {
 		this.version = versionName(version);
 		this.#version = version;
 
+		// Send bandwidth is version-agnostic: depends on browser/QUIC support.
+		const hasGetStats = typeof (quic as unknown as { getStats?: unknown }).getStats === "function";
+		if (hasGetStats) {
+			this.sendBandwidth = createBandwidth();
+		}
+
+		// Recv bandwidth requires PROBE support (not available in older drafts).
+		if (version !== Version.DRAFT_01 && version !== Version.DRAFT_02) {
+			this.recvBandwidth = createBandwidth();
+		}
+
 		this.#publisher = new Publisher(this.#quic, this.#version);
-		this.#subscriber = new Subscriber(this.#quic, this.#version);
+		this.#subscriber = new Subscriber(this.#quic, this.#version, this.recvBandwidth);
 
 		this.#run();
 	}
@@ -67,9 +84,6 @@ export class Connection implements Established {
 	 * Closes the connection.
 	 */
 	close() {
-		if (this.#closed) return;
-
-		this.#closed = true;
 		this.#publisher.close();
 		this.#subscriber.close();
 
@@ -82,62 +96,46 @@ export class Connection implements Established {
 	}
 
 	async #run(): Promise<void> {
-		const session = this.#runSession();
-		const bidis = this.#runBidis();
-		const unis = this.#runUnis();
+		const tasks: Promise<void>[] = [this.#runSession(), this.#runBidis(), this.#runUnis()];
+
+		if (this.sendBandwidth) {
+			tasks.push(this.#runSendBandwidth(this.sendBandwidth));
+		}
+
+		if (this.recvBandwidth) {
+			tasks.push(this.#subscriber.runProbe());
+		}
 
 		try {
-			await Promise.all([session, bidis, unis]);
+			await Promise.all(tasks);
 		} catch (err) {
-			if (!this.#closed) {
-				console.error("fatal error running connection", err);
-			}
+			console.error("fatal error running connection", err);
 		} finally {
 			this.close();
 		}
 	}
 
-	/**
-	 * Publishes a broadcast to the connection.
-	 * @param name - The broadcast path to publish
-	 * @param broadcast - The broadcast to publish
-	 */
 	publish(path: Path.Valid, broadcast: Broadcast) {
 		this.#publisher.publish(path, broadcast);
 	}
 
-	/**
-	 * Gets the next announced broadcast.
-	 */
 	announced(prefix = Path.empty()): Announced {
 		return this.#subscriber.announced(prefix);
 	}
 
-	/**
-	 * Consumes a broadcast from the connection.
-	 *
-	 * @remarks
-	 * If the broadcast is not found, a "not found" error will be thrown when requesting any tracks.
-	 *
-	 * @param broadcast - The path of the broadcast to consume
-	 * @returns A Broadcast instance
-	 */
 	consume(broadcast: Path.Valid): Broadcast {
 		return this.#subscriber.consume(broadcast);
 	}
 
 	async #runSession() {
 		if (!this.#session) {
-			// moq-lite draft-03 doesn't use a session stream.
 			return;
 		}
 
 		try {
-			// Receive messages until the connection is closed.
 			for (;;) {
 				const msg = await SessionInfo.decodeMaybe(this.#session.reader, this.#version);
 				if (!msg) break;
-				// TODO use the session info
 			}
 		} finally {
 			console.debug("session stream closed");
@@ -147,9 +145,7 @@ export class Connection implements Established {
 	async #runBidis() {
 		for (;;) {
 			const stream = await Stream.accept(this.#quic);
-			if (!stream) {
-				break;
-			}
+			if (!stream) break;
 
 			this.#runBidi(stream)
 				.catch((err: unknown) => {
@@ -169,14 +165,11 @@ export class Connection implements Established {
 		} else if (typ === StreamId.Announce) {
 			const msg = await AnnounceInterest.decode(stream.reader);
 			await this.#publisher.runAnnounce(msg, stream);
-			return;
 		} else if (typ === StreamId.Subscribe) {
 			const msg = await Subscribe.decode(stream.reader, this.#version);
 			await this.#publisher.runSubscribe(msg, stream);
-			return;
 		} else if (typ === StreamId.Probe) {
 			await this.#publisher.runProbe(stream);
-			return;
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}
@@ -187,9 +180,7 @@ export class Connection implements Established {
 
 		for (;;) {
 			const stream = await readers.next();
-			if (!stream) {
-				break;
-			}
+			if (!stream) break;
 
 			this.#runUni(stream)
 				.then(() => {
@@ -211,10 +202,29 @@ export class Connection implements Established {
 		}
 	}
 
-	/**
-	 * Returns a promise that resolves when the connection is closed.
-	 * @returns A promise that resolves when closed
-	 */
+	async #runSendBandwidth(bandwidth: Bandwidth): Promise<void> {
+		const quic = this.#quic as unknown as {
+			getStats: () => Promise<{ estimatedSendRate: number | null }>;
+		};
+
+		return new Promise<void>((resolve) => {
+			const id = setInterval(async () => {
+				try {
+					const stats = await quic.getStats();
+					bandwidth.set(stats.estimatedSendRate ?? undefined);
+				} catch {
+					clearInterval(id);
+					resolve();
+				}
+			}, SEND_BW_POLL_INTERVAL);
+
+			void this.closed.then(() => {
+				clearInterval(id);
+				resolve();
+			});
+		});
+	}
+
 	get closed(): Promise<void> {
 		return this.#quic.closed.then(() => undefined);
 	}

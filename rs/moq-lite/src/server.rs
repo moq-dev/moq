@@ -66,7 +66,7 @@ impl Server {
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
-				return Ok(Session::new(session, v));
+				return Ok(Session::new(session, v, None));
 			}
 			Some(ALPN_16) => {
 				let v = self
@@ -95,7 +95,7 @@ impl Server {
 					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
-				lite::start(
+				let recv_bw = lite::start(
 					session.clone(),
 					None,
 					self.publish.clone(),
@@ -103,7 +103,7 @@ impl Server {
 					lite::Version::Lite03,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite03.into()));
+				return Ok(Session::new(session, lite::Version::Lite03.into(), recv_bw));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -141,7 +141,7 @@ impl Server {
 		};
 		stream.writer.encode(&server).await?;
 
-		match version {
+		let recv_bw = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				lite::start(
@@ -150,7 +150,7 @@ impl Server {
 					self.publish.clone(),
 					self.consume.clone(),
 					v,
-				)?;
+				)?
 			}
 			Version::Ietf(v) => {
 				// Decode the client's parameters to get their max request ID.
@@ -169,9 +169,10 @@ impl Server {
 					self.consume.clone(),
 					v,
 				)?;
+				None
 			}
 		};
 
-		Ok(Session::new(session, version))
+		Ok(Session::new(session, version, recv_bw))
 	}
 }

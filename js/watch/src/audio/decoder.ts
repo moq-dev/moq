@@ -228,6 +228,10 @@ export class Decoder {
 				const { frame } = next;
 				if (!frame) continue;
 
+				// Mark that we received this frame right now.
+				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
+				this.source.sync.received(timestamp, "audio");
+
 				this.#stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
 				}));
