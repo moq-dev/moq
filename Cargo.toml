@@ -8,6 +8,25 @@ members = [
     "rs/moq-clock",
     "rs/moq-codec",
     "rs/moq-ffi",
+    "rs/moq-gst",
+    "rs/moq-lite",
+    "rs/moq-msf",
+    "rs/moq-mux",
+    "rs/moq-native",
+    "rs/moq-relay",
+    "rs/moq-token",
+    "rs/moq-token-cli",
+]
+default-members = [
+    "rs/conducer",
+    "rs/hang",
+    # "rs/libmoq",    # requires C toolchain
+    "rs/moq-boy",
+    "rs/moq-cli",
+    "rs/moq-clock",
+    "rs/moq-codec",
+    # "rs/moq-ffi",   # requires Python/maturin
+    # "rs/moq-gst",   # requires GStreamer
     "rs/moq-lite",
     "rs/moq-msf",
     "rs/moq-mux",

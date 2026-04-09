@@ -52,6 +52,14 @@ If you don't like Nix or enjoy suffering with Windows, then you can manually ins
 - [FFmpeg](https://ffmpeg.org/download.html)
 - ...more?
 
+Some workspace crates have additional system dependencies and are excluded from the default build:
+
+- **moq-gst** — requires [GStreamer](https://gstreamer.freedesktop.org/) development libraries
+- **libmoq** — requires a C toolchain
+- **moq-ffi** — requires Python and [maturin](https://www.maturin.rs/)
+
+These are all included in the Nix dev shell. To build them manually, install the deps and use `cargo build -p <crate>`.
+
 Then run:
 
 ```bash

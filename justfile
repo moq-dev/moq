@@ -26,7 +26,7 @@ install:
 	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-sweep cargo-semver-checks release-plz
 
 # Run the CI checks
-check:
+check *args:
 	#!/usr/bin/env bash
 	set -euo pipefail
 
@@ -43,12 +43,12 @@ check:
 	bun remark . --quiet --frail
 
 	# Run the (slower) Rust checks.
-	cargo check --all-targets
-	cargo clippy --all-targets -- -D warnings
+	cargo check --all-targets {{ args }}
+	cargo clippy --all-targets {{ args }} -- -D warnings
 	cargo fmt --all --check
 
-	# Check documentation warnings (only workspace crates, not dependencies)
-	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
+	# Check documentation warnings (default-members only, not dependencies)
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps {{ args }}
 
 	# requires: cargo install cargo-shear
 	cargo shear
@@ -74,8 +74,8 @@ ci:
 	#!/usr/bin/env bash
 	set -euo pipefail
 
-	# Run the standard checks first
-	just check
+	# Run the standard checks first, including non-default workspace members
+	just check --workspace
 
 	# Run the unit tests with all features to exercise all QUIC backends
 	just test --all-features
@@ -84,17 +84,16 @@ ci:
 	just build
 
 	# Check feature edge cases for all crates
-	cargo check --workspace --no-default-features --exclude moq-ffi
-	cargo check --workspace --all-features --exclude moq-ffi
+	cargo check --workspace --no-default-features
+	cargo check --workspace --all-features
 
 	# Dry-run publish to verify packaging
-	cargo publish --workspace --dry-run --exclude libmoq --exclude moq-ffi
+	cargo publish --dry-run
 
-# Check semver compatibility against crates.io
+# Check semver compatibility against crates.io (default-members only)
 # requires: cargo install cargo-semver-checks
-# libmoq and moq-ffi are internal FFI crates and are intentionally excluded from published-crate semver checks.
 semver:
-	cargo semver-checks check-release --workspace --exclude libmoq --exclude moq-ffi
+	cargo semver-checks check-release
 
 # Update versions and changelogs via release-plz
 bump:

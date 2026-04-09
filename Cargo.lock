@@ -791,6 +791,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfg-expr"
+version = "0.20.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c6b04e07d8080154ed4ac03546d9a2b303cc2fe1901ba0b35b301516e289368"
+dependencies = [
+ "smallvec",
+ "target-lexicon",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2118,6 +2128,63 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
 
 [[package]]
+name = "gio-sys"
+version = "0.20.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521e93a7e56fc89e84aea9a52cfc9436816a4b363b030260b699950ff1336c83"
+dependencies = [
+ "glib-sys",
+ "gobject-sys",
+ "libc",
+ "system-deps",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "glib"
+version = "0.20.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffc4b6e352d4716d84d7dde562dd9aee2a7d48beb872dd9ece7f2d1515b2d683"
+dependencies = [
+ "bitflags",
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-task",
+ "futures-util",
+ "gio-sys",
+ "glib-macros",
+ "glib-sys",
+ "gobject-sys",
+ "libc",
+ "memchr",
+ "smallvec",
+]
+
+[[package]]
+name = "glib-macros"
+version = "0.20.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8084af62f09475a3f529b1629c10c429d7600ee1398ae12dd3bf175d74e7145"
+dependencies = [
+ "heck",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "glib-sys"
+version = "0.20.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ab79e1ed126803a8fb827e3de0e2ff95191912b8db65cee467edb56fc4cc215"
+dependencies = [
+ "libc",
+ "system-deps",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2133,6 +2200,17 @@ dependencies = [
  "futures-core",
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "gobject-sys"
+version = "0.20.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec9aca94bb73989e3cfdbf8f2e0f1f6da04db4d291c431f444838925c4c63eda"
+dependencies = [
+ "glib-sys",
+ "libc",
+ "system-deps",
 ]
 
 [[package]]
@@ -2178,6 +2256,53 @@ dependencies = [
  "ff",
  "rand_core 0.6.4",
  "subtle",
+]
+
+[[package]]
+name = "gst-plugin-version-helper"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a68a894ef2d738054b950e1dbef5d9012b63fd968d4d32dbccd31bd8d8d4b219"
+dependencies = [
+ "chrono",
+ "toml_edit 0.23.10+spec-1.0.0",
+]
+
+[[package]]
+name = "gstreamer"
+version = "0.23.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8757a87f3706560037a01a9f06a59fcc7bdb0864744dcf73546606e60c4316e1"
+dependencies = [
+ "cfg-if",
+ "futures-channel",
+ "futures-core",
+ "futures-util",
+ "glib",
+ "gstreamer-sys",
+ "itertools 0.14.0",
+ "libc",
+ "muldiv",
+ "num-integer",
+ "num-rational",
+ "once_cell",
+ "option-operations",
+ "paste",
+ "pin-project-lite",
+ "smallvec",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "gstreamer-sys"
+version = "0.23.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "feea73b4d92dbf9c24a203c9cd0bcc740d584f6b5960d5faf359febf288919b2"
+dependencies = [
+ "glib-sys",
+ "gobject-sys",
+ "libc",
+ "system-deps",
 ]
 
 [[package]]
@@ -3441,6 +3566,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-gst"
+version = "0.2.2"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "gst-plugin-version-helper",
+ "gstreamer",
+ "hang",
+ "moq-lite",
+ "moq-mux",
+ "moq-native",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "moq-lite"
 version = "0.15.9"
 dependencies = [
@@ -3610,6 +3753,12 @@ dependencies = [
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "muldiv"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "956787520e75e9bd233246045d19f42fb73242759cc57fba9611d940ae96d4b0"
 
 [[package]]
 name = "n0-error"
@@ -4229,6 +4378,15 @@ dependencies = [
  "percent-encoding",
  "rand 0.9.2",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "option-operations"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c26d27bb1aeab65138e4bf7666045169d1717febcc9ff870166be8348b223d0"
+dependencies = [
+ "paste",
 ]
 
 [[package]]
@@ -6045,6 +6203,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "system-deps"
+version = "7.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "396a35feb67335377e0251fcbc1092fc85c484bd4e3a7a54319399da127796e7"
+dependencies = [
+ "cfg-expr",
+ "heck",
+ "pkg-config",
+ "toml 1.1.2+spec-1.1.0",
+ "version-compare",
+]
+
+[[package]]
 name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6055,6 +6226,12 @@ name = "take_mut"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
+
+[[package]]
+name = "target-lexicon"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df7f62577c25e07834649fc3b39fafdc597c0a3527dc1c60129201ccfcbaa50c"
 
 [[package]]
 name = "task-killswitch"
@@ -6415,6 +6592,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
+dependencies = [
+ "indexmap 2.13.1",
+ "serde_core",
+ "serde_spanned 1.1.1",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.1",
+]
+
+[[package]]
 name = "toml_datetime"
 version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6452,6 +6644,18 @@ dependencies = [
  "serde_spanned 0.6.9",
  "toml_datetime 0.6.11",
  "toml_write",
+ "winnow 0.7.15",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.23.10+spec-1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84c8b9f757e028cee9fa244aea147aab2a9ec09d5325a9b01e0a49730c2b5269"
+dependencies = [
+ "indexmap 2.13.1",
+ "toml_datetime 0.7.5+spec-1.1.0",
+ "toml_parser",
  "winnow 0.7.15",
 ]
 
@@ -7023,6 +7227,12 @@ dependencies = [
  "derive_builder",
  "rustversion",
 ]
+
+[[package]]
+name = "version-compare"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03c2856837ef78f57382f06b2b8563a2f512f7185d732608fd9176cb3b8edf0e"
 
 [[package]]
 name = "version_check"
