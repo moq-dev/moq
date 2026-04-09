@@ -22,6 +22,11 @@ export default defineConfig({
 	server: {
 		// TODO: properly support HMR
 		hmr: false,
+		headers: {
+			// Required for SharedArrayBuffer (used by the audio worklet).
+			"Cross-Origin-Opener-Policy": "same-origin",
+			"Cross-Origin-Embedder-Policy": "require-corp",
+		},
 	},
 	optimizeDeps: {
 		// No idea why this needs to be done, but I don't want to figure it out.

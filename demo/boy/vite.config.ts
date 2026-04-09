@@ -17,6 +17,11 @@ export default defineConfig({
 	},
 	server: {
 		hmr: false,
+		headers: {
+			// Required for SharedArrayBuffer (used by the audio worklet).
+			"Cross-Origin-Opener-Policy": "same-origin",
+			"Cross-Origin-Embedder-Policy": "require-corp",
+		},
 	},
 	optimizeDeps: {
 		exclude: ["@libav.js/variant-opus-af"],
