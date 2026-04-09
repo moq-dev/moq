@@ -23,6 +23,12 @@ export interface GameConfig {
 	viewerPrefix: string;
 }
 
+/** A command queued before the command track is ready. */
+interface PendingCommand {
+	cmd: Record<string, unknown>;
+	timestamps: { label: string; ts: number }[];
+}
+
 // Stop publishing feedback after 60s of no input.
 const FEEDBACK_IDLE_MS = 60_000;
 
@@ -30,9 +36,6 @@ const FEEDBACK_IDLE_MS = 60_000;
 const GB_WIDTH = 160;
 const GB_HEIGHT = 144;
 const GB_PIXELS = GB_WIDTH * GB_HEIGHT;
-
-// Default jitter buffer in milliseconds.
-const DEFAULT_JITTER = 50 as Moq.Time.Milli;
 
 /** Key mapping from keyboard keys to Game Boy buttons. */
 export const KEY_MAP: Record<string, string> = {
@@ -66,7 +69,7 @@ export class Game {
 	// Reactive state exposed to UI.
 	readonly hovered = new Moq.Signals.Signal(false);
 	readonly active = new Moq.Signals.Signal(false);
-	readonly jitter = new Moq.Signals.Signal<Watch.Latency>(DEFAULT_JITTER);
+	readonly latency = new Moq.Signals.Signal<Watch.Latency>("real-time");
 	readonly userMuted = new Moq.Signals.Signal(false);
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
 	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
@@ -86,7 +89,7 @@ export class Game {
 
 	// Internal command publishing state.
 	#commandTrack: Moq.Track | undefined;
-	#pendingCommand: Record<string, unknown> | undefined;
+	#pendingCommand: PendingCommand | undefined;
 	#feedbackActive = new Moq.Signals.Signal(false);
 	#feedbackTimeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -107,7 +110,15 @@ export class Game {
 		});
 		this.#signals.cleanup(() => this.broadcast.close());
 
-		this.sync = new Watch.Sync({ latency: this.jitter });
+		// Flatten the RTT signal from the connection for real-time jitter.
+		const rtt = new Moq.Signals.Signal<number | undefined>(undefined);
+		this.#signals.run((effect) => {
+			const conn = effect.get(connection.established);
+			const rttSignal = conn?.rtt;
+			rtt.set(rttSignal ? effect.get(rttSignal) : undefined);
+		});
+
+		this.sync = new Watch.Sync({ latency: this.latency, rtt });
 		this.#signals.cleanup(() => this.sync.close());
 
 		this.videoSource = new Watch.Video.Source(this.sync, { broadcast: this.broadcast });
@@ -170,13 +181,26 @@ export class Game {
 		clearTimeout(this.#feedbackTimeout);
 		this.#feedbackTimeout = setTimeout(() => this.#feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
+		const timestamps = this.#timestamps();
+
 		if (!this.#commandTrack) {
-			this.#pendingCommand = cmd;
+			this.#pendingCommand = { cmd, timestamps };
 			return;
 		}
 
-		const ts = this.videoRenderer.timestamp.peek();
-		this.#commandTrack.writeJson({ ...cmd, ts: ts ?? 0 });
+		this.#commandTrack.writeJson({ ...cmd, timestamps });
+	}
+
+	/** Collect media timestamps at each pipeline stage for latency measurement. */
+	#timestamps(): { label: string; ts: number }[] {
+		const entries: { label: string; ts: number }[] = [];
+		const received = this.sync.timestamp.peek();
+		if (received != null) entries.push({ label: "received", ts: received });
+		const decoded = this.videoDecoder.timestamp.peek();
+		if (decoded != null) entries.push({ label: "decoded", ts: decoded });
+		const rendered = this.videoRenderer.timestamp.peek();
+		if (rendered != null) entries.push({ label: "rendered", ts: rendered });
+		return entries;
 	}
 
 	close() {
@@ -266,8 +290,10 @@ export class Game {
 					this.#commandTrack = req.track;
 					// Flush any pending command that triggered activation.
 					if (this.#pendingCommand) {
-						const ts = this.videoRenderer.timestamp.peek();
-						this.#commandTrack.writeJson({ ...this.#pendingCommand, ts: ts ?? 0 });
+						this.#commandTrack.writeJson({
+							...this.#pendingCommand.cmd,
+							timestamps: this.#pendingCommand.timestamps,
+						});
 						this.#pendingCommand = undefined;
 					}
 				}

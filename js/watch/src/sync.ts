@@ -4,6 +4,12 @@ import { Effect, Signal } from "@moq/signals";
 /** Latency: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */
 export type Latency = "real-time" | Time.Milli;
 
+interface Label {
+	ref: Time.Milli;
+	lateCount: number;
+	lateMaxMs: number;
+}
+
 const MIN_JITTER = 10 as Time.Milli;
 const FALLBACK_JITTER = 100 as Time.Milli;
 
@@ -40,10 +46,13 @@ export class Sync {
 	// There's probably a way to use Effect, but lets keep it simple for now.
 	#update: PromiseWithResolvers<void>;
 
+	// The media timestamp of the most recently received frame.
+	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
+
 	// Per-label tracking: minimum reference and late-frame stats.
 	// The effective #reference is the max across all labels,
 	// ensuring the slowest track sets the pace (late audio stalls early video).
-	#labels = new Map<string, { ref: Time.Milli; lateCount: number; lateMaxMs: number }>();
+	#labels = new Map<string, Label>();
 
 	// RTT signal from the connection (PROBE or getStats).
 	rtt?: Signal<number | undefined>;
@@ -112,11 +121,16 @@ export class Sync {
 	// Update the reference if this is the earliest frame we've seen for this label, relative to its timestamp.
 	// The effective reference is the max across all labels so the slowest track sets the pace.
 	received(timestamp: Time.Milli, label = ""): void {
+		this.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
 		const now = Time.Milli.now();
 		const ref = Time.Milli.sub(now, timestamp);
 		const currentRef = this.#reference.peek();
 
-		const entry = this.#labels.get(label);
+		let entry = this.#labels.get(label);
+		if (!entry) {
+			entry = { ref, lateCount: 0, lateMaxMs: 0 };
+			this.#labels.set(label, entry);
+		}
 
 		if (currentRef !== undefined) {
 			// Check if `wait()` would not sleep at all.
@@ -124,11 +138,9 @@ export class Sync {
 			// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
 			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#buffer.peek());
 			if (sleep < 0) {
-				if (entry) {
-					entry.lateCount++;
-					entry.lateMaxMs = Math.max(entry.lateMaxMs, -sleep);
-				}
-			} else if (entry && entry.lateCount > 0) {
+				entry.lateCount++;
+				entry.lateMaxMs = Math.max(entry.lateMaxMs, -sleep);
+			} else if (entry.lateCount > 0) {
 				const prefix = label ? `sync[${label}]` : "sync";
 				const behind = Sync.#formatDuration(entry.lateMaxMs);
 				console.debug(`${prefix}: ${entry.lateCount} late frame(s), max ${behind} behind`);
@@ -138,12 +150,8 @@ export class Sync {
 		}
 
 		// Update per-label reference (keep the minimum ref for each label).
-		if (entry) {
-			if (ref >= entry.ref) return;
-			entry.ref = ref;
-		} else {
-			this.#labels.set(label, { ref, lateCount: 0, lateMaxMs: 0 });
-		}
+		if (ref >= entry.ref) return;
+		entry.ref = ref;
 
 		// Recompute effective reference as max of all per-label references.
 		// Using max ensures the slowest track (e.g. late audio) stalls faster tracks (e.g. early video).

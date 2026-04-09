@@ -25,7 +25,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -189,18 +189,13 @@ impl Session {
 	fn publish_status(
 		&self,
 		emu: &emulator::Emulator,
-		viewer_latency: &std::collections::HashMap<String, Duration>,
+		viewer_latency: &HashMap<String, Vec<status::LatencyEntry>>,
 		game_stats: &stats::Stats,
 		publisher: &mut status::StatusPublisher,
 	) {
 		let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
-		let latency_map: BTreeMap<String, u32> = viewer_latency
-			.iter()
-			.map(|(k, d)| {
-				let ms = u32::try_from(d.as_millis()).unwrap_or(u32::MAX);
-				(k.clone(), ms)
-			})
-			.collect();
+		let latency_map: BTreeMap<String, Vec<status::LatencyEntry>> =
+			viewer_latency.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
 		let status = status::Status {
 			buttons: held,
@@ -336,7 +331,7 @@ fn run_emulator(
 	// 1/59.727 ≈ 16742 microseconds per frame.
 	let frame_duration = Duration::from_micros(16_742);
 	let mut next_frame = Instant::now();
-	let mut viewer_latency: std::collections::HashMap<String, Duration> = std::collections::HashMap::new();
+	let mut viewer_latency: HashMap<String, Vec<status::LatencyEntry>> = HashMap::new();
 	let mut game_stats = stats::Stats::new();
 	let mut was_audio_active = false;
 
@@ -359,13 +354,42 @@ fn run_emulator(
 		// arrived during the previous frame's work is applied immediately.
 		{
 			let elapsed = start.elapsed();
+			let encode_ms = u32::try_from(session.video_encoder.encode_duration().as_millis()).unwrap_or(u32::MAX);
+
 			while let Ok(cmd) = cmd_rx.try_recv() {
 				match cmd {
-					input::Command::Buttons { buttons, viewer_id, ts } => {
+					input::Command::Buttons {
+						buttons,
+						viewer_id,
+						timestamps,
+					} => {
 						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
-						if let Some(latency) = elapsed.checked_sub(ts) {
-							viewer_latency.insert(viewer_id, latency);
+
+						let mut breakdown = Vec::new();
+						let entry = |label: &str, ms: u32| status::LatencyEntry {
+							label: label.to_string(),
+							ms,
+						};
+
+						breakdown.push(entry("encode", encode_ms));
+
+						let ms_saturating = |d: Duration| u32::try_from(d.as_millis()).unwrap_or(u32::MAX);
+
+						// Compute latency for each viewer-reported timestamp.
+						for t in &timestamps {
+							let latency = elapsed.saturating_sub(t.ts);
+							breakdown.push(entry(&t.label, ms_saturating(latency)));
 						}
+
+						// Input: gap between what the viewer sees and what the server
+						// is currently emulating. Uses the oldest viewer timestamp
+						// (the rendered frame the user reacted to).
+						if let Some(min_ts) = timestamps.iter().map(|t| t.ts).min() {
+							let latency = elapsed.saturating_sub(min_ts);
+							breakdown.push(entry("input", ms_saturating(latency)));
+						}
+
+						viewer_latency.insert(viewer_id, breakdown);
 					}
 					input::Command::ViewerLeft { viewer_id } => {
 						emu.viewer_left(&viewer_id);

@@ -6,8 +6,8 @@ permissions:
 
 # Only one release job can run at a time.
 concurrency:
-  group: release
-  cancel-in-progress: true
+  group: release-rs
+  cancel-in-progress: false
 
 on:
   push:

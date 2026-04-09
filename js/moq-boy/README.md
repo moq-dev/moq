@@ -37,30 +37,6 @@ Shows a grid of all active Game Boy sessions. Click a game to expand and play.
 |-----------|--------|------------------|
 | `url`     | string | Relay server URL |
 
-### `<moq-boy-preview>` — Single Game Preview
-
-A lightweight thumbnail for a single game session. Shows live video and plays audio on hover.
-
-```html
-<script type="module">
-    import "@moq/boy/preview";
-</script>
-
-<moq-boy-preview
-    url="https://cdn.moq.dev/anon"
-    name="opossum"
-    href="/demos/boy">
-</moq-boy-preview>
-```
-
-#### Attributes
-
-| Attribute | Type   | Description                              |
-|-----------|--------|------------------------------------------|
-| `url`     | string | Relay server URL                         |
-| `name`    | string | Game session ID (e.g. `opossum`)         |
-| `href`    | string | Optional URL to navigate to on click     |
-
 ## JavaScript API
 
 For programmatic use:
