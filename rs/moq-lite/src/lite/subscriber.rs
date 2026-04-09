@@ -107,8 +107,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
-		let msg = lite::AnnouncePlease {
+		let msg = lite::AnnounceInterest {
 			prefix: prefix.as_path(),
+			exclude_hop: 0,
 		};
 		stream.writer.encode(&msg).await?;
 
@@ -122,8 +123,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					self.start_announce(path, &mut producers)?;
 				}
 			}
-			Version::Lite03 => {
-				// Lite03: no AnnounceInit, initial state comes via Announce messages.
+			_ => {
+				// Lite03+: no AnnounceInit, initial state comes via Announce messages.
 			}
 		}
 

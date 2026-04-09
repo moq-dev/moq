@@ -11,7 +11,7 @@ impl Message for SessionInfo {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
-			Version::Lite03 => {
+			_ => {
 				return Err(DecodeError::Version);
 			}
 		}
@@ -27,7 +27,7 @@ impl Message for SessionInfo {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
-			Version::Lite03 => {
+			_ => {
 				return Err(EncodeError::Version);
 			}
 		}

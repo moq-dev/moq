@@ -75,7 +75,7 @@ impl SetupVersion {
 			Version::Ietf(ietf::Version::Draft15) | Version::Ietf(ietf::Version::Draft16) => Self::Draft15Plus,
 			Version::Ietf(ietf::Version::Draft17) => Self::Draft17,
 			Version::Lite(lite::Version::Lite01) | Version::Lite(lite::Version::Lite02) => Self::LiteLegacy,
-			Version::Lite(lite::Version::Lite03) => Self::Unsupported,
+			Version::Lite(lite::Version::Lite03 | lite::Version::Lite04) => Self::Unsupported,
 		}
 	}
 }

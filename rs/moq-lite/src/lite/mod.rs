@@ -6,6 +6,7 @@
 
 mod announce;
 mod fetch;
+mod goaway;
 mod group;
 mod info;
 pub mod message;
@@ -22,6 +23,8 @@ mod version;
 pub use announce::*;
 #[allow(unused_imports)]
 pub use fetch::*;
+#[allow(unused_imports)]
+pub use goaway::*;
 pub use group::*;
 pub use info::*;
 pub use message::Message;

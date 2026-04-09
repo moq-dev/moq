@@ -1,5 +1,4 @@
 import type { Reader, Writer } from "../stream.ts";
-import { unreachable } from "../util/error.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
 
@@ -132,10 +131,8 @@ export class SessionInfo {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 				break;
-			case Version.DRAFT_03:
-				throw new Error("session info not supported for Draft03");
 			default:
-				unreachable(version);
+				throw new Error("session info not supported for this version");
 		}
 	}
 

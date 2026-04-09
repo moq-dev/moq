@@ -92,9 +92,9 @@ ci:
 
 # Check semver compatibility against crates.io
 # requires: cargo install cargo-semver-checks
-# libmoq is an internal C-ABI crate and is intentionally excluded from published-crate semver checks.
+# libmoq and moq-ffi are internal FFI crates and are intentionally excluded from published-crate semver checks.
 semver:
-	cargo semver-checks check-release --workspace --exclude libmoq
+	cargo semver-checks check-release --workspace --exclude libmoq --exclude moq-ffi
 
 # Update versions and changelogs via release-plz
 bump:

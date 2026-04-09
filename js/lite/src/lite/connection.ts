@@ -5,6 +5,7 @@ import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream } from "../stream.ts";
 import { AnnounceInterest } from "./announce.ts";
+import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
 import { SessionInfo } from "./session.ts";
@@ -69,7 +70,7 @@ export class Connection implements Established {
 			this.sendBandwidth = createBandwidth();
 		}
 
-		// Recv bandwidth requires PROBE support (not available in older drafts).
+		// Recv bandwidth requires PROBE support (Lite03+).
 		if (version !== Version.DRAFT_01 && version !== Version.DRAFT_02) {
 			this.recvBandwidth = createBandwidth();
 		}
@@ -163,13 +164,16 @@ export class Connection implements Established {
 		if (typ === StreamId.Session) {
 			throw new Error("duplicate session stream");
 		} else if (typ === StreamId.Announce) {
-			const msg = await AnnounceInterest.decode(stream.reader);
+			const msg = await AnnounceInterest.decode(stream.reader, this.#version);
 			await this.#publisher.runAnnounce(msg, stream);
 		} else if (typ === StreamId.Subscribe) {
 			const msg = await Subscribe.decode(stream.reader, this.#version);
 			await this.#publisher.runSubscribe(msg, stream);
 		} else if (typ === StreamId.Probe) {
 			await this.#publisher.runProbe(stream);
+		} else if (typ === StreamId.Goaway) {
+			const msg = await Goaway.decode(stream.reader, this.#version);
+			console.info("received goaway:", msg.uri);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}

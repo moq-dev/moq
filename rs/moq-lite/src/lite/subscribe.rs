@@ -30,14 +30,14 @@ impl Message for Subscribe<'_> {
 		let priority = u8::decode(r, version)?;
 
 		let (ordered, max_latency, start_group, end_group) = match version {
-			Version::Lite03 => {
+			Version::Lite01 | Version::Lite02 => (false, std::time::Duration::ZERO, None, None),
+			_ => {
 				let ordered = u8::decode(r, version)? != 0;
 				let max_latency = std::time::Duration::decode(r, version)?;
 				let start_group = Option::<u64>::decode(r, version)?;
 				let end_group = Option::<u64>::decode(r, version)?;
 				(ordered, max_latency, start_group, end_group)
 			}
-			Version::Lite01 | Version::Lite02 => (false, std::time::Duration::ZERO, None, None),
 		};
 
 		Ok(Self {
@@ -59,13 +59,13 @@ impl Message for Subscribe<'_> {
 		self.priority.encode(w, version)?;
 
 		match version {
-			Version::Lite03 => {
+			Version::Lite01 | Version::Lite02 => {}
+			_ => {
 				(self.ordered as u8).encode(w, version)?;
 				self.max_latency.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
 			}
-			Version::Lite01 | Version::Lite02 => {}
 		}
 
 		Ok(())
@@ -84,17 +84,17 @@ pub struct SubscribeOk {
 impl Message for SubscribeOk {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Lite03 => {
+			Version::Lite01 => {
+				self.priority.encode(w, version)?;
+			}
+			Version::Lite02 => {}
+			_ => {
 				self.priority.encode(w, version)?;
 				(self.ordered as u8).encode(w, version)?;
 				self.max_latency.encode(w, version)?;
 				self.start_group.encode(w, version)?;
 				self.end_group.encode(w, version)?;
 			}
-			Version::Lite01 => {
-				self.priority.encode(w, version)?;
-			}
-			Version::Lite02 => {}
 		}
 
 		Ok(())
@@ -102,21 +102,6 @@ impl Message for SubscribeOk {
 
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Lite03 => {
-				let priority = u8::decode(r, version)?;
-				let ordered = u8::decode(r, version)? != 0;
-				let max_latency = std::time::Duration::decode(r, version)?;
-				let start_group = Option::<u64>::decode(r, version)?;
-				let end_group = Option::<u64>::decode(r, version)?;
-
-				Ok(Self {
-					priority,
-					ordered,
-					max_latency,
-					start_group,
-					end_group,
-				})
-			}
 			Version::Lite01 => Ok(Self {
 				priority: u8::decode(r, version)?,
 				ordered: false,
@@ -131,13 +116,28 @@ impl Message for SubscribeOk {
 				start_group: None,
 				end_group: None,
 			}),
+			_ => {
+				let priority = u8::decode(r, version)?;
+				let ordered = u8::decode(r, version)? != 0;
+				let max_latency = std::time::Duration::decode(r, version)?;
+				let start_group = Option::<u64>::decode(r, version)?;
+				let end_group = Option::<u64>::decode(r, version)?;
+
+				Ok(Self {
+					priority,
+					ordered,
+					max_latency,
+					start_group,
+					end_group,
+				})
+			}
 		}
 	}
 }
 
 /// Sent by the subscriber to update subscription parameters.
 ///
-/// Draft03 only.
+/// Lite03+ only.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct SubscribeUpdate {
@@ -151,10 +151,10 @@ pub struct SubscribeUpdate {
 impl Message for SubscribeUpdate {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Lite03 => {}
 			Version::Lite01 | Version::Lite02 => {
 				return Err(DecodeError::Version);
 			}
+			_ => {}
 		}
 
 		let priority = u8::decode(r, version)?;
@@ -180,10 +180,10 @@ impl Message for SubscribeUpdate {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Lite03 => {}
 			Version::Lite01 | Version::Lite02 => {
 				return Err(EncodeError::Version);
 			}
+			_ => {}
 		}
 
 		self.priority.encode(w, version)?;
@@ -215,7 +215,7 @@ impl Message for SubscribeUpdate {
 /// The range `[start, end]` is inclusive on both ends. For example,
 /// `start = 5, end = 7` means groups 5, 6, and 7 were dropped.
 ///
-/// Draft03 only.
+/// Lite03+ only.
 #[derive(Clone, Debug)]
 pub struct SubscribeDrop {
 	/// The first absolute group sequence in the dropped range.
@@ -232,10 +232,10 @@ pub struct SubscribeDrop {
 impl Message for SubscribeDrop {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Lite03 => {}
 			Version::Lite01 | Version::Lite02 => {
 				return Err(DecodeError::Version);
 			}
+			_ => {}
 		}
 
 		Ok(Self {
@@ -247,10 +247,10 @@ impl Message for SubscribeDrop {
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Lite03 => {}
 			Version::Lite01 | Version::Lite02 => {
 				return Err(EncodeError::Version);
 			}
+			_ => {}
 		}
 
 		self.start.encode(w, version)?;
@@ -277,7 +277,18 @@ pub enum SubscribeResponse {
 impl Encode<Version> for SubscribeResponse {
 	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
-			Version::Lite03 => match self {
+			Version::Lite01 | Version::Lite02 => match self {
+				Self::Ok(ok) => {
+					let mut sizer = Sizer::default();
+					Message::encode_msg(ok, &mut sizer, version)?;
+					sizer.size.encode(w, version)?;
+					Message::encode_msg(ok, w, version)?;
+				}
+				Self::Drop(_) => {
+					return Err(EncodeError::Version);
+				}
+			},
+			_ => match self {
 				Self::Ok(ok) => {
 					0u64.encode(w, version)?;
 					// Write size-prefixed body using Message trait
@@ -294,17 +305,6 @@ impl Encode<Version> for SubscribeResponse {
 					Message::encode_msg(drop, w, version)?;
 				}
 			},
-			Version::Lite01 | Version::Lite02 => match self {
-				Self::Ok(ok) => {
-					let mut sizer = Sizer::default();
-					Message::encode_msg(ok, &mut sizer, version)?;
-					sizer.size.encode(w, version)?;
-					Message::encode_msg(ok, w, version)?;
-				}
-				Self::Drop(_) => {
-					return Err(EncodeError::Version);
-				}
-			},
 		}
 
 		Ok(())
@@ -314,7 +314,8 @@ impl Encode<Version> for SubscribeResponse {
 impl Decode<Version> for SubscribeResponse {
 	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
 		match version {
-			Version::Lite03 => {
+			Version::Lite01 | Version::Lite02 => Ok(Self::Ok(SubscribeOk::decode(buf, version)?)),
+			_ => {
 				let typ = u64::decode(buf, version)?;
 				match typ {
 					0 => Ok(Self::Ok(SubscribeOk::decode(buf, version)?)),
@@ -322,7 +323,6 @@ impl Decode<Version> for SubscribeResponse {
 					_ => Err(DecodeError::InvalidMessage(typ)),
 				}
 			}
-			Version::Lite01 | Version::Lite02 => Ok(Self::Ok(SubscribeOk::decode(buf, version)?)),
 		}
 	}
 }

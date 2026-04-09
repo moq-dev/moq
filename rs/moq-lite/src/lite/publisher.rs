@@ -50,6 +50,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					self.recv_probe(stream);
 					Ok(())
 				}
+				lite::ControlType::Goaway => {
+					tracing::info!("received goaway stream");
+					Ok(())
+				}
 				lite::ControlType::Session | lite::ControlType::Fetch => Err(Error::UnexpectedStream),
 			} {
 				tracing::warn!(%err, "control stream error");
@@ -110,14 +114,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			if should_send {
-				stream.writer.encode(&lite::Probe { bitrate }).await?;
+				stream.writer.encode(&lite::Probe { bitrate, rtt: None }).await?;
 				last_sent = Some((bitrate, tokio::time::Instant::now()));
 			}
 		}
 	}
 
 	pub async fn recv_announce(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
-		let interest = stream.reader.decode::<lite::AnnouncePlease>().await?;
+		let interest = stream.reader.decode::<lite::AnnounceInterest>().await?;
 		let prefix = interest.prefix.to_owned();
 
 		let mut origin = self
@@ -174,8 +178,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.encode(&announce_init).await?;
 			}
-			Version::Lite03 => {
-				// No more announce init in Lite03.
+			_ => {
+				// Lite03+: no more announce init.
 			}
 		}
 
@@ -191,11 +195,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 							if active.is_some() {
 								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-								let msg = lite::Announce::Active { suffix, hops: 0 };
+								let msg = lite::Announce::Active { suffix, hops: Vec::new() };
 								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-								let msg = lite::Announce::Ended { suffix, hops: 0 };
+								let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
 								stream.writer.encode(&msg).await?;
 							}
 						},

@@ -12,12 +12,12 @@ pub enum Announce<'a> {
 	Active {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: u64,
+		hops: Vec<u64>,
 	},
 	Ended {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: u64,
+		hops: Vec<u64>,
 	},
 }
 
@@ -26,8 +26,25 @@ impl Message for Announce<'_> {
 		let status = AnnounceStatus::decode(r, version)?;
 		let suffix = Path::decode(r, version)?;
 		let hops = match version {
-			Version::Lite03 => u64::decode(r, version)?,
-			Version::Lite01 | Version::Lite02 => 0,
+			Version::Lite01 | Version::Lite02 => Vec::new(),
+			Version::Lite03 => {
+				let count = u64::decode(r, version)? as usize;
+				if count > 256 {
+					return Err(DecodeError::BoundsExceeded);
+				}
+				vec![0; count]
+			}
+			_ => {
+				let count = u64::decode(r, version)? as usize;
+				if count > 256 {
+					return Err(DecodeError::BoundsExceeded);
+				}
+				let mut ids = Vec::with_capacity(count);
+				for _ in 0..count {
+					ids.push(u64::decode(r, version)?);
+				}
+				ids
+			}
 		};
 
 		Ok(match status {
@@ -41,18 +58,12 @@ impl Message for Announce<'_> {
 			Self::Active { suffix, hops } => {
 				AnnounceStatus::Active.encode(w, version)?;
 				suffix.encode(w, version)?;
-				match version {
-					Version::Lite03 => hops.encode(w, version)?,
-					Version::Lite01 | Version::Lite02 => {}
-				}
+				encode_hops(w, version, hops)?;
 			}
 			Self::Ended { suffix, hops } => {
 				AnnounceStatus::Ended.encode(w, version)?;
 				suffix.encode(w, version)?;
-				match version {
-					Version::Lite03 => hops.encode(w, version)?,
-					Version::Lite01 | Version::Lite02 => {}
-				}
+				encode_hops(w, version, hops)?;
 			}
 		}
 
@@ -60,21 +71,49 @@ impl Message for Announce<'_> {
 	}
 }
 
-/// Sent by the subscriber to request ANNOUNCE messages.
-#[derive(Clone, Debug)]
-pub struct AnnouncePlease<'a> {
-	// Request tracks with this prefix.
-	pub prefix: Path<'a>,
+fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &[u64]) -> Result<(), EncodeError> {
+	match version {
+		Version::Lite01 | Version::Lite02 => {}
+		Version::Lite03 => {
+			(hops.len() as u64).encode(w, version)?;
+		}
+		_ => {
+			(hops.len() as u64).encode(w, version)?;
+			for id in hops {
+				id.encode(w, version)?;
+			}
+		}
+	}
+	Ok(())
 }
 
-impl Message for AnnouncePlease<'_> {
+/// Sent by the subscriber to request ANNOUNCE messages.
+#[derive(Clone, Debug)]
+pub struct AnnounceInterest<'a> {
+	// Request tracks with this prefix.
+	pub prefix: Path<'a>,
+	// If non-zero, the publisher SHOULD skip announces whose hop IDs contain this value.
+	pub exclude_hop: u64,
+}
+
+impl Message for AnnounceInterest<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
-		Ok(Self { prefix })
+		let exclude_hop = match version {
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => 0,
+			_ => u64::decode(r, version)?,
+		};
+		Ok(Self { prefix, exclude_hop })
 	}
 
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		self.prefix.encode(w, version)?;
+		match version {
+			Version::Lite01 | Version::Lite02 | Version::Lite03 => {}
+			_ => {
+				self.exclude_hop.encode(w, version)?;
+			}
+		}
 
 		Ok(())
 	}
@@ -116,7 +155,7 @@ impl Message for AnnounceInit<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
-			Version::Lite03 => {
+			_ => {
 				return Err(DecodeError::Version);
 			}
 		}
@@ -136,7 +175,7 @@ impl Message for AnnounceInit<'_> {
 	fn encode_msg<W: bytes::BufMut>(&self, w: &mut W, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
-			Version::Lite03 => {
+			_ => {
 				return Err(EncodeError::Version);
 			}
 		}
