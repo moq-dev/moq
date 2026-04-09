@@ -251,7 +251,6 @@ struct OriginNodes {
 
 impl OriginNodes {
 	// Returns nested roots that match the prefixes.
-	// TODO enforce that prefixes can't overlap.
 	pub fn select(&self, prefixes: &[Path]) -> Option<Self> {
 		let mut roots = Vec::new();
 		let mut seen = HashSet::new();
@@ -274,6 +273,15 @@ impl OriginNodes {
 					}
 				}
 			}
+		}
+
+		// Remove overlapping prefixes: "demo/foo" is redundant when "demo" already exists.
+		if roots.len() > 1 {
+			let paths: Vec<PathOwned> = roots.iter().map(|(p, _)| p.clone()).collect();
+			roots.retain(|(path, _)| {
+				// Keep this entry only if no strictly shorter prefix covers it.
+				!paths.iter().any(|other| other.len() < path.len() && path.has_prefix(other))
+			});
 		}
 
 		if roots.is_empty() {
