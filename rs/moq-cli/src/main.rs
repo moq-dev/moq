@@ -24,9 +24,9 @@ pub struct Cli {
 	#[cfg(feature = "iroh")]
 	iroh: moq_native::IrohEndpointConfig,
 
-	/// Print import statistics to stderr once per second.
-	#[arg(long)]
-	stats: bool,
+	/// Print import statistics to stderr at the given interval.
+	#[arg(long, default_missing_value = "1", num_args = 0..=1, value_name = "SECS")]
+	stats: Option<f64>,
 
 	#[command(subcommand)]
 	command: Command,
@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
 		Command::Publish { format, .. } => format,
 	})?;
 
-	let stats_interval = if cli.stats { Some(Duration::from_secs(1)) } else { None };
+	let stats_interval = cli.stats.map(Duration::from_secs_f64);
 
 	#[cfg(feature = "iroh")]
 	let iroh = cli.iroh.bind().await?;
