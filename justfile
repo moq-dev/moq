@@ -87,7 +87,7 @@ ci:
 	cargo check --workspace --all-features
 
 	# Check for broken links
-	lychee --root-dir "$(pwd)/doc" doc
+	lychee --root-dir "$(pwd)/doc" --fallback-extensions md doc
 	lychee --exclude-path doc .
 
 	# Dry-run publish to verify packaging
