@@ -31,7 +31,10 @@ export default function StatsPanel() {
 	return (
 		<div class="boy__stats">
 			<Show when={location()}>
-				<div class="boy__location">{location()}</div>
+				<div class="boy__location">
+					<div class="boy__location-label">Emulator Location</div>
+					<div class="boy__location-value">{location()}</div>
+				</div>
 			</Show>
 
 			<Show when={stats()}>

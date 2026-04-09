@@ -18,3 +18,8 @@ variable "gcp_account_key" {
   type        = string
   sensitive   = true
 }
+
+variable "location" {
+  description = "Human-readable server location (e.g. 'Dallas, TX')"
+  type        = string
+}

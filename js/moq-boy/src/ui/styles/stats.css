@@ -11,8 +11,19 @@
 	width: 100%;
 	font-family: monospace;
 	font-size: 0.65rem;
-	color: var(--boy-accent);
 	text-align: center;
+}
+
+.boy__location-label {
+	color: var(--boy-text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	margin-bottom: 0.15rem;
+	font-size: 0.6rem;
+}
+
+.boy__location-value {
+	color: var(--boy-accent);
 }
 
 /* Encoding stats */

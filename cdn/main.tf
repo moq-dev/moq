@@ -79,4 +79,5 @@ module "boy" {
   ssh_keys        = var.ssh_keys
   stackscript_id  = linode_stackscript.bootstrap.id
   gcp_account_key = google_service_account_key.relay.private_key
+  location        = "Dallas, TX"
 }

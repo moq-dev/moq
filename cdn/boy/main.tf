@@ -20,9 +20,10 @@ resource "local_file" "boy_prepare_service" {
 resource "local_file" "boy_service" {
   for_each = local.roms
   content = templatefile("${path.module}/boy.service.tftpl", {
-    domain = var.domain
-    name   = each.key
-    rom    = each.value
+    domain   = var.domain
+    name     = each.key
+    rom      = each.value
+    location = var.location
   })
   filename = "${path.module}/gen/boy-${each.key}.service"
 }
