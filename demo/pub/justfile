@@ -54,7 +54,7 @@ cmaf name url='http://localhost:4443/anon' *args:
 	cargo build --bin moq-cli
 	just ffmpeg-cmaf "media/{{name}}.mp4" |\
 	cargo run --bin moq-cli -- \
-		{{args}} publish --url "{{url}}" --name "{{name}}" fmp4
+		--stats=60 {{args}} publish --url "{{url}}" --name "{{name}}" fmp4
 
 # Publish a video via iroh.
 iroh name url prefix="":
@@ -62,7 +62,7 @@ iroh name url prefix="":
 	cargo build --bin moq-cli
 	just ffmpeg-cmaf "media/{{name}}.mp4" |\
 	cargo run --bin moq-cli -- \
-		--iroh-enabled publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4
+		--stats=60 --iroh-enabled publish --url "{{url}}" --name "{{prefix}}{{name}}" fmp4
 
 # Generate and ingest an HLS stream from a video file.
 hls name relay="http://localhost:4443/anon":
@@ -134,7 +134,7 @@ hls name relay="http://localhost:4443/anon":
 	trap cleanup SIGINT SIGTERM EXIT
 
 	echo ">>> Running with --passthrough flag"
-	cargo run --bin moq-cli -- publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
+	cargo run --bin moq-cli -- --stats=60 publish --url "{{relay}}" --name "{{name}}" hls --playlist "$OUT_DIR/master.m3u8" --passthrough
 	EXIT_CODE=$?
 
 	cleanup
@@ -151,7 +151,7 @@ h264 name url="http://localhost:4443/anon" *args:
 		-c:v copy -an \
 		-bsf:v h264_mp4toannexb \
 		-f h264 \
-		- | cargo run --bin moq-cli -- publish --url "{{url}}" --name "{{name}}" avc3 {{args}}
+		- | cargo run --bin moq-cli -- --stats=60 publish --url "{{url}}" --name "{{name}}" avc3 {{args}}
 
 # Publish a video using ffmpeg directly from moq to the localhost.
 serve name *args:
@@ -159,7 +159,7 @@ serve name *args:
 	cargo build --bin moq-cli
 	just ffmpeg-cmaf "media/{{name}}.mp4" |\
 	cargo run --bin moq-cli -- \
-		{{args}} serve --listen "[::]:4443" --tls-generate "localhost" \
+		--stats=60 {{args}} serve --listen "[::]:4443" --tls-generate "localhost" \
 		--name "{{name}}" fmp4
 
 # Generate and serve an HLS stream from a video for testing.
