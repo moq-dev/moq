@@ -49,9 +49,9 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 			.map_err(Error::from_transport)
 	}
 
-	/// Write the entire [Buf] to the stream.
+	/// Write the entire `Buf` to the stream.
 	///
-	/// NOTE: This can avoid performing a copy when using [Bytes].
+	/// NOTE: This can avoid performing a copy when using `Bytes`.
 	pub async fn write_all<Buf: bytes::Buf + Send>(&mut self, buf: &mut Buf) -> Result<(), Error> {
 		while buf.has_remaining() {
 			self.write(buf).await?;
@@ -97,7 +97,7 @@ impl<S: web_transport_trait::SendStream, V> Writer<S, V> {
 }
 
 impl<S: web_transport_trait::SendStream> Writer<S, ietf::Version> {
-	/// Encode an IETF [Message] to the stream, writing `[type_id][size][body]`.
+	/// Encode an IETF `Message` to the stream, writing `[type_id][size][body]`.
 	pub async fn encode_message<T: ietf::Message>(&mut self, msg: &T) -> Result<(), Error> {
 		self.encode(&T::ID).await?;
 		self.encode(msg).await

@@ -1,6 +1,8 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use crate::{Error, Version};
+use web_transport_trait::Stats;
+
+use crate::{BandwidthConsumer, BandwidthProducer, Error, Version};
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
@@ -11,14 +13,37 @@ use crate::{Error, Version};
 pub struct Session {
 	session: Arc<dyn SessionInner>,
 	version: Version,
+	send_bandwidth: Option<BandwidthConsumer>,
+	recv_bandwidth: Option<BandwidthConsumer>,
 	closed: bool,
 }
 
 impl Session {
-	pub(super) fn new<S: web_transport_trait::Session>(session: S, version: Version) -> Self {
+	pub(super) fn new<S: web_transport_trait::Session>(
+		session: S,
+		version: Version,
+		recv_bandwidth: Option<BandwidthConsumer>,
+	) -> Self {
+		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
+		let send_bandwidth = if session.stats().estimated_send_rate().is_some() {
+			let producer = BandwidthProducer::new();
+			let consumer = producer.consume();
+
+			let session = session.clone();
+			web_async::spawn(async move {
+				run_send_bandwidth(&session, producer).await;
+			});
+
+			Some(consumer)
+		} else {
+			None
+		};
+
 		Self {
 			session: Arc::new(session),
 			version,
+			send_bandwidth,
+			recv_bandwidth,
 			closed: false,
 		}
 	}
@@ -26,6 +51,20 @@ impl Session {
 	/// Returns the negotiated protocol version.
 	pub fn version(&self) -> Version {
 		self.version
+	}
+
+	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
+	///
+	/// Returns `None` if the QUIC backend doesn't support bandwidth estimation.
+	pub fn send_bandwidth(&self) -> Option<BandwidthConsumer> {
+		self.send_bandwidth.clone()
+	}
+
+	/// Returns a consumer for the estimated receive bitrate (from PROBE).
+	///
+	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
+	pub fn recv_bandwidth(&self) -> Option<BandwidthConsumer> {
+		self.recv_bandwidth.clone()
 	}
 
 	/// Close the underlying transport session.
@@ -38,10 +77,9 @@ impl Session {
 	}
 
 	/// Block until the transport session is closed.
-	// TODO Remove the Result the next time we make a breaking change.
 	pub async fn closed(&self) -> Result<(), Error> {
-		self.session.closed().await;
-		Err(Error::Transport)
+		let err = self.session.closed().await;
+		Err(Error::Transport(err))
 	}
 }
 
@@ -53,10 +91,50 @@ impl Drop for Session {
 	}
 }
 
+/// Polls the QUIC congestion controller for estimated send rate.
+/// Only active when at least one consumer exists.
+async fn run_send_bandwidth<S: web_transport_trait::Session>(session: &S, producer: BandwidthProducer) {
+	const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+	loop {
+		tokio::select! {
+			biased;
+			_ = producer.closed() => return,
+			res = producer.used() => {
+				if res.is_err() {
+					return;
+				}
+			}
+		}
+
+		let mut interval = tokio::time::interval(POLL_INTERVAL);
+
+		loop {
+			tokio::select! {
+				biased;
+				_ = producer.closed() => return,
+				res = producer.unused() => {
+					if res.is_err() {
+						return;
+					}
+					// No more consumers, pause polling.
+					break;
+				}
+				_ = interval.tick() => {
+					let bitrate = session.stats().estimated_send_rate();
+					if producer.set(bitrate).is_err() {
+						return;
+					}
+				}
+			}
+		}
+	}
+}
+
 // We use a wrapper type that is dyn-compatible to remove the generic bounds from Session.
 trait SessionInner: Send + Sync {
 	fn close(&self, code: u32, reason: &str);
-	fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + Send + '_>>;
 }
 
 impl<S: web_transport_trait::Session> SessionInner for S {
@@ -64,9 +142,7 @@ impl<S: web_transport_trait::Session> SessionInner for S {
 		S::close(self, code, reason);
 	}
 
-	fn closed(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-		Box::pin(async move {
-			let _ = S::closed(self).await;
-		})
+	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + Send + '_>> {
+		Box::pin(async move { S::closed(self).await.to_string() })
 	}
 }

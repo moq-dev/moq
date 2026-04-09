@@ -585,52 +585,40 @@ impl Auth {
 
 		// Get the path from the URL, removing any leading or trailing slashes.
 		let root = Path::new(&params.path);
+		let claims_root = Path::new(&claims.root);
 
-		// Make sure the URL path matches the root path.
-		let Some(suffix) = root.strip_prefix(&claims.root) else {
+		// The URL path and the token root must overlap:
+		// - URL extends root (e.g. URL="/demo/room", root="demo") → suffix narrows permissions
+		// - URL is parent of root (e.g. URL="/", root="demo") → prefix widens permission paths
+		let (suffix, prefix) = if let Some(suffix) = root.strip_prefix(&claims_root) {
+			(suffix, Path::new(""))
+		} else if let Some(prefix) = claims_root.strip_prefix(&root) {
+			(Path::new(""), prefix)
+		} else {
 			return Err(AuthError::IncorrectRoot);
 		};
 
-		// If a more specific path is provided, reduce the permissions.
-		let subscribe: Vec<PathOwned> = claims
-			.subscribe
-			.into_iter()
-			.filter_map(|p| {
-				let p = Path::new(&p);
-				if !p.is_empty() {
+		let scope = |paths: Vec<String>| -> Vec<PathOwned> {
+			paths
+				.into_iter()
+				.filter_map(|p| {
+					let p = prefix.join(&p);
+					if p.is_empty() {
+						return Some(p);
+					}
 					if let Some(remaining) = p.strip_prefix(&suffix) {
-						Some(remaining.to_owned())
+						Some(remaining.into_owned())
 					} else if suffix.has_prefix(&p) {
-						// Connection is under the allowed prefix — grant full access
-						Some(Path::new("").to_owned())
+						Some(Path::new("").into_owned())
 					} else {
 						None
 					}
-				} else {
-					Some(p.to_owned())
-				}
-			})
-			.collect();
+				})
+				.collect()
+		};
 
-		let publish: Vec<PathOwned> = claims
-			.publish
-			.into_iter()
-			.filter_map(|p| {
-				let p = Path::new(&p);
-				if !p.is_empty() {
-					if let Some(remaining) = p.strip_prefix(&suffix) {
-						Some(remaining.to_owned())
-					} else if suffix.has_prefix(&p) {
-						// Connection is under the allowed prefix — grant full access
-						Some(Path::new("").to_owned())
-					} else {
-						None
-					}
-				} else {
-					Some(p.to_owned())
-				}
-			})
-			.collect();
+		let subscribe = scope(claims.subscribe);
+		let publish = scope(claims.publish);
 
 		let register = match (params.register.as_deref(), claims.cluster) {
 			(Some(node), true) => Some(node.to_owned()),
@@ -1414,6 +1402,143 @@ mod tests {
 		assert_eq!(token.root, "secret".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["alice".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_jwt_connect_to_parent_of_root() -> anyhow::Result<()> {
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
+		let auth = Auth::new(AuthConfig {
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Token with root="demo", connecting to "/"
+		let claims = moq_token::Claims {
+			root: "demo".to_string(),
+			subscribe: vec!["".to_string()],
+			publish: vec!["alice".into()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
+
+		// Root is "/" (empty), permissions are prefixed with "demo"
+		assert_eq!(verified.root, "".as_path());
+		assert_eq!(verified.subscribe, vec!["demo".as_path()]);
+		assert_eq!(verified.publish, vec!["demo/alice".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_jwt_connect_to_partial_parent_of_root() -> anyhow::Result<()> {
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
+		let auth = Auth::new(AuthConfig {
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Token with root="room/123", connecting to "/room"
+		let claims = moq_token::Claims {
+			root: "room/123".to_string(),
+			subscribe: vec!["".to_string()],
+			publish: vec!["alice".into()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/room".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
+
+		// Permissions are prefixed with the remaining "123"
+		assert_eq!(verified.root, "room".as_path());
+		assert_eq!(verified.subscribe, vec!["123".as_path()]);
+		assert_eq!(verified.publish, vec!["123/alice".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_jwt_connect_to_unrelated_path_rejected() -> anyhow::Result<()> {
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
+		let auth = Auth::new(AuthConfig {
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Token with root="demo", connecting to "/other"
+		let claims = moq_token::Claims {
+			root: "demo".to_string(),
+			subscribe: vec!["".to_string()],
+			publish: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let result = auth
+			.verify(&AuthParams {
+				path: "/other".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await;
+		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_jwt_root_empty_subscribe_scoped_rejects_unrelated() -> anyhow::Result<()> {
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
+		let auth = Auth::new(AuthConfig {
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Token with root="", subscribe=["demo"] — only demo/ is accessible
+		let claims = moq_token::Claims {
+			root: "".to_string(),
+			subscribe: vec!["demo".to_string()],
+			publish: vec![],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		// Connecting to /other should fail — no permissions remain after filtering
+		let result = auth
+			.verify(&AuthParams {
+				path: "/other".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await;
+		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
 
 		Ok(())
 	}

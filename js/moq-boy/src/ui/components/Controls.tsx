@@ -1,5 +1,5 @@
-import { createAccessor } from "@moq/signals/solid";
-import { createSignal, For } from "solid-js";
+import { createAccessor, createPair } from "@moq/signals/solid";
+import { For } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
 
 /** All game controls: D-pad, A/B, Start/Select, Mute, Reset, Jitter slider, Key hints. */
@@ -8,13 +8,11 @@ export default function Controls() {
 	const game = ctx.game;
 
 	const jitter = createAccessor(game.jitter);
-	const [userMuted, setUserMuted] = createSignal(game.userMuted.peek());
+	const [userMuted, setUserMuted] = createPair(game.userMuted);
 
 	const toggleMute = (e: MouseEvent) => {
 		e.stopPropagation();
-		const muted = !game.userMuted.peek();
-		game.userMuted.set(muted);
-		setUserMuted(muted);
+		setUserMuted((prev) => !prev);
 	};
 
 	const onReset = (e: MouseEvent) => {

@@ -21,21 +21,7 @@ The `common/` module must be deployed first, as `relay/`, `pub/`, and `boy/` rea
 1. Create a `secrets/` directory with JWT/JWK credentials:
    ```bash
    mkdir -p secrets
-
-   # generate the root key private key
    cargo run --bin moq-token-cli -- generate --key secrets/root.jwk > secrets/root.jwk
-
-   # to allow relay servers to connect to each other
-   cargo run --bin moq-token-cli -- sign --key secrets/root.jwk --publish "" --subscribe "" --cluster > secrets/cluster.jwt
-
-   # to allow publishing to `demo/`
-   cargo run --bin moq-token-cli -- sign --key secrets/root.jwk --root "demo" --publish "" > secrets/demo-pub.jwt
-
-   # to allow subscribing to `demo/` (used by health checks and the website)
-   cargo run --bin moq-token-cli -- sign --key secrets/root.jwk --root "demo" --subscribe "" > secrets/demo-sub.jwt
-
-   # to allow moq-boy to publish to `demo/boy` and subscribe to `anon/boy`
-   cargo run --bin moq-token-cli -- sign --key secrets/root.jwk --root "" --publish "demo/boy" --subscribe "anon/boy" > secrets/boy.jwt
    ```
 2. Create `terraform.tfvars` in each module directory (see `terraform.tfvars.example` for reference).
 3. Initialize and apply each module:

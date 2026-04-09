@@ -64,7 +64,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		web_async::spawn(async move {
 			if let Err(err) = Self::run_probe(&session, &mut stream, version).await {
 				match &err {
-					Error::Cancel | Error::Transport => {
+					Error::Cancel | Error::Transport(_) => {
 						tracing::debug!("probe stream closed");
 					}
 					err => {
@@ -129,10 +129,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		web_async::spawn(async move {
 			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version).await {
 				match &err {
-					Error::Cancel => {
-						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
-					}
-					Error::Transport => {
+					Error::Cancel | Error::Transport(_) => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
 					}
 					err => {
@@ -231,7 +228,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			{
 				match &err {
 					// TODO better classify WebTransport errors.
-					Error::Cancel | Error::Transport => {
+					Error::Cancel | Error::Transport(_) => {
 						tracing::info!(%id, broadcast = %absolute, %track, "subscribed cancelled")
 					}
 					err => {

@@ -57,9 +57,18 @@ export class Encoder {
 	// True when the encoder is actively serving a track.
 	active = new Signal<boolean>(false);
 
-	constructor(frame: Getter<VideoFrame | undefined>, source: Signal<Source | undefined>, props?: EncoderProps) {
+	// Connection signal for reading send bandwidth.
+	connection: Getter<Moq.Connection.Established | undefined>;
+
+	constructor(
+		frame: Getter<VideoFrame | undefined>,
+		source: Signal<Source | undefined>,
+		connection: Getter<Moq.Connection.Established | undefined>,
+		props?: EncoderProps,
+	) {
 		this.frame = frame;
 		this.source = source;
+		this.connection = connection;
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.config = Signal.from(props?.config);
 
@@ -204,6 +213,20 @@ export class Encoder {
 			}
 
 			bitrate = Math.round(Math.min(bitrate, user.maxBitrate || bitrate));
+
+			// If no explicit maxBitrate, cap to the estimated send bandwidth (with 90% safety margin).
+			if (!user.maxBitrate) {
+				const conn = effect.get(this.connection);
+				const sendBw = conn?.sendBandwidth;
+				if (sendBw) {
+					const estimate = effect.get(sendBw);
+					if (estimate != null) {
+						// Reserve ~10% for audio and protocol overhead.
+						const cap = Math.round(estimate * 0.9);
+						bitrate = Math.min(bitrate, cap);
+					}
+				}
+			}
 
 			const config: VideoEncoderConfig = {
 				codec,

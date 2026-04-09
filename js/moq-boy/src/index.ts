@@ -154,11 +154,6 @@ export class Game {
 		this.#signals.run(this.#runCommands.bind(this, connection));
 	}
 
-	/** Toggle this game's expanded state. */
-	toggleExpand() {
-		this.expanded.update((old) => (old === this.sessionId ? undefined : this.sessionId));
-	}
-
 	/** Send a button state update. */
 	sendButtons() {
 		this.sendCommand({ type: "buttons", buttons: [...this.heldButtons] });
