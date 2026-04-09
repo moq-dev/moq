@@ -17,7 +17,7 @@ use crate::{Error, Result};
 use super::{Frame, FrameConsumer, FrameProducer};
 
 /// Maximum total size of frames cached in a group before old frames are evicted.
-const MAX_GROUP_CACHE: usize = 32 * 1024 * 1024; // 32 MB
+const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
 
 /// Maximum number of frames cached in a group before old frames are evicted.
 const MAX_GROUP_FRAMES: usize = 1024;
@@ -77,7 +77,7 @@ struct GroupState {
 	offset: usize,
 
 	// The total size (in bytes) of all cached frames.
-	cache_size: usize,
+	cache: u64,
 
 	// Whether the group has been finalized (no more frames).
 	fin: bool,
@@ -113,11 +113,11 @@ impl GroupState {
 
 	/// Evict frames from the front of the group until within both limits.
 	fn evict(&mut self) {
-		while self.cache_size > MAX_GROUP_CACHE || self.frames.len() > MAX_GROUP_FRAMES {
+		while self.cache > MAX_GROUP_CACHE || self.frames.len() > MAX_GROUP_FRAMES {
 			let Some(frame) = self.frames.pop_front() else {
 				break;
 			};
-			self.cache_size -= frame.info.size as usize;
+			self.cache -= frame.info.size;
 			self.offset += 1;
 		}
 	}
@@ -177,7 +177,7 @@ impl GroupProducer {
 		if state.fin {
 			return Err(Error::Closed);
 		}
-		state.cache_size += frame.info.size as usize;
+		state.cache += frame.info.size;
 		state.frames.push_back(frame);
 		state.evict();
 		Ok(())
@@ -459,7 +459,7 @@ mod test {
 		let mut producer = Group { sequence: 0 }.produce();
 
 		// Write frames that total more than MAX_GROUP_CACHE.
-		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE]);
+		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
 		producer.write_frame(big.clone()).unwrap();
 		producer.write_frame(big).unwrap();
 
@@ -515,7 +515,7 @@ mod test {
 	fn next_frame_returns_cache_full_on_tombstone() {
 		let mut producer = Group { sequence: 0 }.produce();
 
-		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE]);
+		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
 		producer.write_frame(big.clone()).unwrap();
 		producer.write_frame(big).unwrap();
 
