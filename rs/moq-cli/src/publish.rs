@@ -155,7 +155,7 @@ impl Publish {
 		let kps = delta.keyframes as f64 / secs;
 		let bps = delta.bytes as f64 / secs;
 
-		let drift_str = match current.drift.mean() {
+		let drift_str = match delta.drift.mean() {
 			Some(mean) => format!("μ={:.1}ms", mean.as_secs_f64() * 1000.0),
 			None => "n/a".to_string(),
 		};

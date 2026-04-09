@@ -97,7 +97,10 @@ async fn main() -> anyhow::Result<()> {
 	let stats_interval = cli
 		.stats
 		.map(|secs| {
-			anyhow::ensure!(secs.is_finite() && secs > 0.0, "--stats interval must be a positive number");
+			anyhow::ensure!(
+				secs.is_finite() && secs > 0.0,
+				"--stats interval must be a positive number"
+			);
 			Ok(Duration::from_secs_f64(secs))
 		})
 		.transpose()?;
