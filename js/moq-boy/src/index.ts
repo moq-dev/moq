@@ -126,17 +126,21 @@ export class Game {
 		this.videoRenderer = new Watch.Video.Renderer(this.videoDecoder);
 		this.#signals.cleanup(() => this.videoRenderer.close());
 
-		// Audio pipeline — only download audio when active AND unmuted.
+		// Audio pipeline — the emitter controls muted (volume) and paused (download).
 		this.audioSource = new Watch.Audio.Source(this.sync, { broadcast: this.broadcast });
 		this.#signals.cleanup(() => this.audioSource.close());
 
-		const audioEnabled = new Moq.Signals.Signal(false);
-		this.#signals.run(this.#runAudioEnabled.bind(this, audioEnabled));
-
-		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, { enabled: audioEnabled });
+		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource);
 		this.#signals.cleanup(() => this.audioDecoder.close());
 
-		this.audioEmitter = new Watch.Audio.Emitter(this.audioDecoder, { volume: 0.5 });
+		const audioPaused = new Moq.Signals.Signal(true);
+		this.#signals.run(this.#runAudioPaused.bind(this, audioPaused));
+
+		this.audioEmitter = new Watch.Audio.Emitter(this.audioDecoder, {
+			volume: 0.5,
+			muted: this.userMuted,
+			paused: audioPaused,
+		});
 		this.#signals.cleanup(() => this.audioEmitter.close());
 
 		// Resume AudioContext on first user interaction (browser autoplay policy).
@@ -200,10 +204,9 @@ export class Game {
 		videoEnabled.set(exp === undefined || exp === this.sessionId);
 	}
 
-	#runAudioEnabled(audioEnabled: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
+	#runAudioPaused(audioPaused: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
 		const active = effect.get(this.active);
-		const userMuted = effect.get(this.userMuted);
-		audioEnabled.set(active && !userMuted);
+		audioPaused.set(!active);
 	}
 
 	#runStatus(effect: Moq.Signals.Effect) {
