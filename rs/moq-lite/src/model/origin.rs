@@ -1,5 +1,5 @@
 use std::{
-	collections::HashMap,
+	collections::{HashMap, HashSet},
 	sync::atomic::{AtomicU64, Ordering},
 };
 use tokio::sync::mpsc;
@@ -254,19 +254,24 @@ impl OriginNodes {
 	// TODO enforce that prefixes can't overlap.
 	pub fn select(&self, prefixes: &[Path]) -> Option<Self> {
 		let mut roots = Vec::new();
+		let mut seen = HashSet::new();
 
 		for (root, state) in &self.nodes {
 			for prefix in prefixes {
 				if root.has_prefix(prefix) {
 					// Keep the existing node if we're allowed to access it.
-					roots.push((root.to_owned(), state.clone()));
+					if seen.insert(root.to_owned()) {
+						roots.push((root.to_owned(), state.clone()));
+					}
 					continue;
 				}
 
 				if let Some(suffix) = prefix.strip_prefix(root) {
 					// If the requested prefix is larger than the allowed prefix, then we further scope it.
-					let nested = state.lock().leaf(&suffix);
-					roots.push((prefix.to_owned(), nested));
+					if seen.insert(prefix.to_owned()) {
+						let nested = state.lock().leaf(&suffix);
+						roots.push((prefix.to_owned(), nested));
+					}
 				}
 			}
 		}

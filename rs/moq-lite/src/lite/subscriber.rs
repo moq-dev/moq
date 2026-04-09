@@ -3,6 +3,8 @@ use std::{
 	sync::{Arc, atomic},
 };
 
+use futures::{StreamExt, stream::FuturesUnordered};
+
 use crate::{
 	AsPath, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path,
 	PathOwned, TrackProducer,
@@ -72,18 +74,33 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_announce(mut self) -> Result<(), Error> {
-		if self.origin.is_none() {
-			// Don't do anything if there's no origin configured.
-			return Ok(());
+	async fn run_announce(self) -> Result<(), Error> {
+		let origin = match &self.origin {
+			Some(origin) => origin,
+			None => return Ok(()),
+		};
+
+		let prefixes: Vec<PathOwned> = origin.allowed().map(|p| p.to_owned()).collect();
+
+		let mut tasks = FuturesUnordered::new();
+		for prefix in prefixes {
+			tasks.push(self.clone().run_announce_prefix(prefix));
 		}
 
+		while let Some(result) = tasks.next().await {
+			result?;
+		}
+
+		Ok(())
+	}
+
+	async fn run_announce_prefix(mut self, prefix: PathOwned) -> Result<(), Error> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
-		// Ask for everything.
-		// TODO This should actually ask for each root.
-		let msg = lite::AnnouncePlease { prefix: "".into() };
+		let msg = lite::AnnouncePlease {
+			prefix: prefix.as_path(),
+		};
 		stream.writer.encode(&msg).await?;
 
 		let mut producers = HashMap::new();
@@ -91,7 +108,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
-				for path in msg.suffixes {
+				for suffix in msg.suffixes {
+					let path = prefix.join(&suffix);
 					self.start_announce(path, &mut producers)?;
 				}
 			}
@@ -102,14 +120,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {
-				lite::Announce::Active { suffix: path, .. } => {
+				lite::Announce::Active { suffix, .. } => {
+					let path = prefix.join(&suffix);
 					self.start_announce(path, &mut producers)?;
 				}
-				lite::Announce::Ended { suffix: path, .. } => {
+				lite::Announce::Ended { suffix, .. } => {
+					let path = prefix.join(&suffix);
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 
 					// Abort the producer.
-					let mut producer = producers.remove(&path.into_owned()).ok_or(Error::NotFound)?;
+					let mut producer = producers.remove(&path).ok_or(Error::NotFound)?;
 					producer.abort(Error::Cancel).ok();
 				}
 			}
