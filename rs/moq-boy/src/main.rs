@@ -194,8 +194,10 @@ impl Session {
 		publisher: &mut status::StatusPublisher,
 	) {
 		let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
-		let latency_map: BTreeMap<String, u32> =
-			viewer_latency.iter().map(|(k, d)| (k.clone(), d.as_millis() as u32)).collect();
+		let latency_map: BTreeMap<String, u32> = viewer_latency
+			.iter()
+			.map(|(k, d)| (k.clone(), d.as_millis() as u32))
+			.collect();
 
 		let status = status::Status {
 			buttons: held,
@@ -321,8 +323,7 @@ fn run_emulator(
 	emu.tick();
 	let elapsed = start.elapsed();
 	let rgba = Bytes::from(emu.framebuffer());
-	let ts = hang::container::Timestamp::from_micros(elapsed.as_micros() as u64)
-		.context("timestamp overflow")?;
+	let ts = hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
 	session.video_encoder.try_frame(rgba, ts);
 	let samples = emu.audio_samples();
 	if !samples.is_empty() {
@@ -358,11 +359,7 @@ fn run_emulator(
 			let elapsed = start.elapsed();
 			while let Ok(cmd) = cmd_rx.try_recv() {
 				match cmd {
-					input::Command::Buttons {
-						buttons,
-						viewer_id,
-						ts,
-					} => {
+					input::Command::Buttons { buttons, viewer_id, ts } => {
 						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
 						if let Some(latency) = elapsed.checked_sub(ts) {
 							viewer_latency.insert(viewer_id, latency);

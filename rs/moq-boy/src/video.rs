@@ -64,7 +64,6 @@ impl VideoEncoder {
 	pub fn force_keyframe(&self) {
 		self.force_keyframe.store(true, Ordering::Release);
 	}
-
 }
 
 fn encoder_thread(
