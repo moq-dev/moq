@@ -20,11 +20,15 @@ The GStreamer plugin provides two elements:
 
 Both elements support the following properties:
 
-| Property             | Type   | Description                        |
-| -------------------- | ------ | ---------------------------------- |
-| `url`                | string | The relay URL to connect to        |
-| `broadcast`          | string | The broadcast name                 |
-| `tls-disable-verify` | bool   | Disable TLS certificate validation |
+| Property             | Type   | Description                                                       |
+| -------------------- | ------ | ----------------------------------------------------------------- |
+| `url`                | string | The relay URL to connect to                                       |
+| `broadcast`          | string | The broadcast name                                                |
+| `tls-disable-verify` | bool   | Disable TLS certificate validation (rarely needed, default false) |
+
+::: info
+For `http://` URLs, `moq-native` automatically fetches the server's certificate fingerprint from `/certificate.sha256` and verifies TLS against it. You don't need `tls-disable-verify` for local development.
+:::
 
 ## Prerequisites
 
@@ -75,7 +79,7 @@ gst-launch-1.0 -v -e \
   multifilesrc location=demo/pub/media/bbb.mp4 loop=true ! parsebin name=parse \
     parse. ! queue ! identity sync=true ! mux.sink_0 \
     parse. ! queue ! identity sync=true ! mux.sink_1 \
-    moqsink name=mux url="http://localhost:4443/anon" broadcast="bbb" tls-disable-verify=true
+    moqsink name=mux url="http://localhost:4443/anon" broadcast="bbb"
 ```
 
 ::: tip
@@ -105,7 +109,7 @@ Or directly:
 export GST_PLUGIN_PATH_1_0="$PWD/target/debug${GST_PLUGIN_PATH_1_0:+:$GST_PLUGIN_PATH_1_0}"
 
 gst-launch-1.0 -v -e \
-  moqsrc url="http://localhost:4443/anon" broadcast="bbb" tls-disable-verify=true \
+  moqsrc url="http://localhost:4443/anon" broadcast="bbb" \
     ! decodebin3 ! videoconvert ! autovideosink
 ```
 

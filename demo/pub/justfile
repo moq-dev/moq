@@ -228,7 +228,7 @@ gst name url='http://localhost:4443/anon' *args:
 	gst-launch-1.0 -v -e multifilesrc location="media/{{name}}.mp4" loop=true ! parsebin name=parse \
 		parse. ! queue ! identity sync=true ! mux.sink_0 \
 		parse. ! queue ! identity sync=true ! mux.sink_1 \
-		moqsink name=mux url="{{url}}" broadcast="{{name}}" tls-disable-verify=true {{args}}
+		moqsink name=mux url="{{url}}" broadcast="{{name}}" {{args}}
 
 # --- Private helpers ---
 

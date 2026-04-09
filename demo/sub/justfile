@@ -5,5 +5,5 @@ gst name url='http://localhost:4443/anon' *args:
 	cargo build -p moq-gst
 
 	GST_PLUGIN_PATH_1_0="${PWD}/../../target/debug${GST_PLUGIN_PATH_1_0:+:$GST_PLUGIN_PATH_1_0}" \
-	gst-launch-1.0 -v -e moqsrc url="{{url}}" broadcast="{{name}}" tls-disable-verify=true {{args}} \
+	gst-launch-1.0 -v -e moqsrc url="{{url}}" broadcast="{{name}}" {{args}} \
 		! decodebin3 ! videoconvert ! autovideosink
