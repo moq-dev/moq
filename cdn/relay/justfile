@@ -32,6 +32,10 @@ nodes:
 	@echo "euc: Frankfurt, Germany"
 	@echo "sea: Singapore"
 
+# Initialize tofu providers and backend
+init:
+	tofu init
+
 # Apply infrastructure changes
 apply *args:
 	tofu apply {{args}}

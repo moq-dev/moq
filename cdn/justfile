@@ -7,6 +7,13 @@ mod boy
 default:
   just --list
 
+# Initialize tofu providers and backend for all modules
+init:
+	just common init
+	just relay init
+	just pub init
+	just boy init
+
 # Deploy all infrastructure and services
 deploy:
 	just common deploy

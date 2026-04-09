@@ -40,10 +40,8 @@ The `common/` module must be deployed first, as `relay/`, `pub/`, and `boy/` rea
 2. Create `terraform.tfvars` in each module directory (see `terraform.tfvars.example` for reference).
 3. Initialize and apply each module:
    ```bash
-   (cd common && tofu init && tofu apply)
-   (cd relay && tofu init && tofu apply)
-   (cd pub && tofu init && tofu apply)
-   (cd boy && tofu init && tofu apply)
+   just cdn init
+   just cdn deploy
    ```
 
 ## Deploy

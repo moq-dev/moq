@@ -24,6 +24,10 @@ host:
 	DOMAIN=$(cd ../common && tofu output -raw domain)
 	echo "pub.$DOMAIN"
 
+# Initialize tofu providers and backend
+init:
+	tofu init
+
 # Apply infrastructure changes
 apply *args:
 	tofu apply {{args}}

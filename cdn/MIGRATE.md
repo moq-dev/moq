@@ -16,10 +16,7 @@ migrate your state without recreating infrastructure.
 ## Phase 1: Initialize new modules
 
 ```bash
-(cd cdn/common && tofu init)
-(cd cdn/relay && tofu init)
-(cd cdn/pub && tofu init)
-(cd cdn/boy && tofu init)
+just cdn init
 ```
 
 ## Phase 2: Move shared resources to `common/`
@@ -171,10 +168,10 @@ tofu state list  # should output nothing
 
 Verify each module shows no planned changes:
 ```bash
-(cd cdn/common && tofu plan)   # No changes
-(cd cdn/relay && tofu plan)    # No changes
-(cd cdn/pub && tofu plan)      # No changes
-(cd cdn/boy && tofu plan)      # No changes
+(cd cdn/common && tofu plan)
+(cd cdn/relay && tofu plan)
+(cd cdn/pub && tofu plan)
+(cd cdn/boy && tofu plan)
 ```
 
 If any module shows planned changes, review carefully. Data sources

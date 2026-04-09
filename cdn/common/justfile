@@ -2,6 +2,10 @@
 default:
   just --list
 
+# Initialize tofu providers and backend
+init:
+	tofu init
+
 deploy:
 	tofu apply
 
