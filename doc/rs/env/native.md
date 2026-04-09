@@ -109,7 +109,7 @@ let broadcast = consumer.consume_broadcast("my-stream")
 ## Reading the Catalog
 
 The [hang](/concept/layer/hang) catalog describes available media tracks.
-Subscribe to it using [`CatalogConsumer`](https://docs.rs/hang/latest/hang/struct.CatalogConsumer.html):
+Subscribe to it using [`CatalogConsumer`](https://docs.rs/hang/latest/hang/catalog/struct.CatalogConsumer.html):
 
 ```rust
 let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track());

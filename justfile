@@ -88,7 +88,8 @@ ci:
 	cargo check --workspace --all-features --exclude moq-ffi
 
 	# Check for broken links
-	lychee .
+	lychee --root-dir "$(pwd)/doc" doc
+	lychee --exclude-path doc .
 
 	# Dry-run publish to verify packaging
 	cargo publish --workspace --dry-run --exclude libmoq --exclude moq-ffi

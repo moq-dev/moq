@@ -43,7 +43,7 @@ You can also connect to individual nodes directly:
 
 Here's a quick tl;dr of the setup:
 
-- [Linode](https://linode.com/) is the VM provider.
+- [Linode](https://www.linode.com/) is the VM provider.
 - [GCP](https://cloud.google.com/) is the DNS provider.
 - [OpenTofu](https://opentofu.org/) (aka Terraform) sets up the infrastructure.
 - [Nix](https://nixos.org/) is used to build/cache the binaries.

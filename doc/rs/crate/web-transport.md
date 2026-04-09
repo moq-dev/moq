@@ -58,7 +58,7 @@ For a real-world example of using `web-transport` with MoQ, see the [`rs/moq-nat
 - **Datagrams** - Unreliable, unordered data
 - **Session Management** - Peer/local addresses, graceful close
 - **TLS** - Self-signed certificates (dev), Let's Encrypt (production), certificate fingerprints
-- **WebSocket Polyfill** - See [web-transport-ws](https://github.com/moq-dev/web-transport/tree/main/web-transport-ws)
+- **WebSocket Polyfill** - See [web-transport-ws](https://github.com/moq-dev/web-transport/tree/main/rs/web-transport-ws)
 
 ## Integration with MoQ
 

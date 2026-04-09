@@ -73,7 +73,7 @@ public = "anon"     # Allow anonymous access to anon/**
 key = "root.jwk"    # JWT key for authenticated paths
 ```
 
-See [dev.toml](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/cfg/dev.toml) for a complete example.
+See [localhost.toml](https://github.com/moq-dev/moq/blob/main/demo/relay/localhost.toml) for a complete example.
 
 ## Running
 

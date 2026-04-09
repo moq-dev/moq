@@ -15,7 +15,7 @@ Here's some AI slop for now:
 WebSocket is a TCP fallback for when QUIC/WebTransport isn't available.
 This happens more often than you'd think: corporate firewalls love blocking UDP, and Safari didn't support WebTransport until 26.4.
 
-We use a thin polyfill called [web-transport-ws](https://github.com/moq-dev/web-transport/tree/main/web-transport-ws) that emulates the WebTransport API over a WebSocket connection.
+We use a thin polyfill called [web-transport-ws](https://github.com/moq-dev/web-transport/tree/main/rs/web-transport-ws) that emulates the WebTransport API over a WebSocket connection.
 It multiplexes streams using a simple binary framing protocol, so the rest of the stack doesn't need to know or care that it's running over TCP.
 
 ### How It Works
