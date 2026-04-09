@@ -1,3 +1,7 @@
+# Regenerate the boy JWT token: publish boy/ and subscribe viewer/boy/ under demo
+token:
+	cargo run -p moq-token-cli -- sign --key ../secrets/root.jwk --root "demo" --publish "boy" --subscribe "viewer/boy" > ../secrets/demo-boy.jwt
+
 # List all of the available commands.
 default:
   just --list
@@ -25,7 +29,7 @@ host:
 	echo "boy.$DOMAIN"
 
 # Deploy boy instance
-deploy:
+deploy: token
 	#!/usr/bin/env bash
 	set -euo pipefail
 	HOST=$(just host)

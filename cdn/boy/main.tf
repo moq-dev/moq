@@ -33,7 +33,7 @@ resource "linode_instance" "boy" {
   region = "us-central" # Dallas, TX
   type   = "g6-standard-2"
 
-  image           = "linode/debian12"
+  image           = "linode/ubuntu25.10"
   root_pass       = random_password.boy_root.result
   authorized_keys = var.ssh_keys
 

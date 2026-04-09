@@ -33,6 +33,8 @@ resource "google_dns_record_set" "relay_global" {
 locals {
   relay_gcp_regions = {
     usc = "us-central1"     # Dallas, TX -> closest GCP region
+    usw = "us-west1"        # Fremont, CA -> closest GCP region
+    use = "us-east4"        # Newark, NJ -> closest GCP region
     euc = "europe-west3"    # Frankfurt -> closest GCP region
     sea = "asia-southeast1" # Singapore -> closest GCP region
   }
