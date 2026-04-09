@@ -1,12 +1,12 @@
 use std::{
-	collections::{HashMap, HashSet},
+	collections::HashMap,
 	sync::atomic::{AtomicU64, Ordering},
 };
 use tokio::sync::mpsc;
 use web_async::Lock;
 
 use super::BroadcastConsumer;
-use crate::{AsPath, Broadcast, BroadcastProducer, Path, PathOwned};
+use crate::{AsPath, Broadcast, BroadcastProducer, Path, PathOwned, PathPrefixes};
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -251,39 +251,24 @@ struct OriginNodes {
 
 impl OriginNodes {
 	// Returns nested roots that match the prefixes.
-	pub fn select(&self, prefixes: &[Path]) -> Option<Self> {
+	// PathPrefixes guarantees no duplicates or overlapping prefixes.
+	pub fn select(&self, prefixes: &PathPrefixes) -> Option<Self> {
 		let mut roots = Vec::new();
-		let mut seen = HashSet::new();
 
 		for (root, state) in &self.nodes {
 			for prefix in prefixes {
 				if root.has_prefix(prefix) {
 					// Keep the existing node if we're allowed to access it.
-					if seen.insert(root.to_owned()) {
-						roots.push((root.to_owned(), state.clone()));
-					}
+					roots.push((root.to_owned(), state.clone()));
 					continue;
 				}
 
 				if let Some(suffix) = prefix.strip_prefix(root) {
 					// If the requested prefix is larger than the allowed prefix, then we further scope it.
-					if seen.insert(prefix.to_owned()) {
-						let nested = state.lock().leaf(&suffix);
-						roots.push((prefix.to_owned(), nested));
-					}
+					let nested = state.lock().leaf(&suffix);
+					roots.push((prefix.to_owned(), nested));
 				}
 			}
-		}
-
-		// Remove overlapping prefixes: "demo/foo" is redundant when "demo" already exists.
-		if roots.len() > 1 {
-			let paths: Vec<PathOwned> = roots.iter().map(|(p, _)| p.clone()).collect();
-			roots.retain(|(path, _)| {
-				// Keep this entry only if no strictly shorter prefix covers it.
-				!paths
-					.iter()
-					.any(|other| other.len() < path.len() && path.has_prefix(other))
-			});
 		}
 
 		if roots.is_empty() {
@@ -411,9 +396,11 @@ impl OriginProducer {
 	/// Returns a new OriginProducer where all published broadcasts MUST match one of the prefixes.
 	///
 	/// Returns None if there are no legal prefixes.
+	// TODO accept PathPrefixes instead of &[Path]
 	pub fn publish_only(&self, prefixes: &[Path]) -> Option<OriginProducer> {
+		let prefixes = PathPrefixes::new(prefixes);
 		Some(OriginProducer {
-			nodes: self.nodes.select(prefixes)?,
+			nodes: self.nodes.select(&prefixes)?,
 			root: self.root.clone(),
 		})
 	}
@@ -425,11 +412,11 @@ impl OriginProducer {
 
 	/// Subscribe to all announced broadcasts matching the prefix.
 	///
-	/// TODO: Don't use overlapping prefixes or duplicates will be published.
-	///
 	/// Returns None if there are no legal prefixes.
+	// TODO accept PathPrefixes instead of &[Path]
 	pub fn consume_only(&self, prefixes: &[Path]) -> Option<OriginConsumer> {
-		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(prefixes)?))
+		let prefixes = PathPrefixes::new(prefixes);
+		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(&prefixes)?))
 	}
 
 	/// Subscribe to a specific broadcast.
@@ -459,6 +446,7 @@ impl OriginProducer {
 		&self.root
 	}
 
+	// TODO return PathPrefixes
 	pub fn allowed(&self) -> impl Iterator<Item = &Path<'_>> {
 		self.nodes.nodes.iter().map(|(root, _)| root)
 	}
@@ -541,8 +529,10 @@ impl OriginConsumer {
 	/// Returns a new OriginConsumer that only consumes broadcasts matching one of the prefixes.
 	///
 	/// Returns None if there are no legal prefixes (would always return None).
+	// TODO accept PathPrefixes instead of &[Path]
 	pub fn consume_only(&self, prefixes: &[Path]) -> Option<OriginConsumer> {
-		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(prefixes)?))
+		let prefixes = PathPrefixes::new(prefixes);
+		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(&prefixes)?))
 	}
 
 	/// Returns a new OriginConsumer that automatically strips out the provided prefix.
@@ -559,6 +549,7 @@ impl OriginConsumer {
 		&self.root
 	}
 
+	// TODO return PathPrefixes
 	pub fn allowed(&self) -> impl Iterator<Item = &Path<'_>> {
 		self.nodes.nodes.iter().map(|(root, _)| root)
 	}
@@ -1149,10 +1140,14 @@ mod tests {
 			.consume_only(&["".into()])
 			.expect("should create consumer with empty prefix");
 
-		// Should still see both broadcasts
-		consumer.assert_next("worm-node/test", &broadcast1.consume());
-		consumer.assert_next("foobar/test", &broadcast2.consume());
+		// Should see both broadcasts (order depends on PathPrefixes sort)
+		let a1 = consumer.try_announced().expect("expected first announcement");
+		let a2 = consumer.try_announced().expect("expected second announcement");
 		consumer.assert_next_wait();
+
+		let mut paths: Vec<_> = [&a1, &a2].iter().map(|(p, _)| p.to_string()).collect();
+		paths.sort();
+		assert_eq!(paths, ["foobar/test", "worm-node/test"]);
 	}
 
 	#[tokio::test]
@@ -1363,10 +1358,14 @@ mod tests {
 			.consume_only(&["".into()])
 			.expect("consume_only with empty prefix should not fail when user has specific permissions");
 
-		// Should still receive broadcasts from allowed paths
-		consumer.assert_next("worm-node/data", &broadcast1.consume());
-		consumer.assert_next("foobar", &broadcast2.consume());
+		// Should still receive broadcasts from allowed paths (order not guaranteed)
+		let a1 = consumer.try_announced().expect("expected first announcement");
+		let a2 = consumer.try_announced().expect("expected second announcement");
 		consumer.assert_next_wait();
+
+		let mut paths: Vec<_> = [&a1, &a2].iter().map(|(p, _)| p.to_string()).collect();
+		paths.sort();
+		assert_eq!(paths, ["foobar", "worm-node/data"]);
 
 		// Also test that we can still narrow the scope
 		let mut narrow_consumer = user_producer
