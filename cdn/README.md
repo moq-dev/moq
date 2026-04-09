@@ -23,7 +23,7 @@ The `common/` module must be deployed first, as `relay/`, `pub/`, and `boy/` rea
    mkdir -p secrets
    cargo run --bin moq-token-cli -- generate --key secrets/root.jwk > secrets/root.jwk
    ```
-2. Create `terraform.tfvars` in each module directory (see `terraform.tfvars.example` for reference).
+2. Copy `terraform.tfvars.example` to `terraform.tfvars` and fill in your values. Each subdirectory symlinks to this shared file.
 3. Deploy (init and apply are handled automatically):
    ```bash
    just cdn deploy

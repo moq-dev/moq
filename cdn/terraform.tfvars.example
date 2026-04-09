@@ -1,10 +1,6 @@
-# Each tofu root module (common/, relay/, pub/, boy/) needs its own terraform.tfvars.
-# Copy this file into each directory and fill in the values needed by that module.
-#
-# common/terraform.tfvars: linode_token, gcp_project, domain, webhook (optional)
-# relay/terraform.tfvars:  linode_token, gcp_project, domain, email, ssh_keys
-# pub/terraform.tfvars:    linode_token, gcp_project, domain, ssh_keys
-# boy/terraform.tfvars:    linode_token, gcp_project, domain, ssh_keys
+# Shared terraform.tfvars for all tofu root modules.
+# Copy this file to terraform.tfvars and fill in the values.
+# Each subdirectory symlinks to this file; extra variables are ignored.
 
 # The domain to use for the GeoDNS entry.
 # Each node will register its own subdomain.
@@ -27,3 +23,6 @@ ssh_keys = [
 
 # Optional: Webhook URL for all alerts (Slack, Discord, etc.)
 # webhook = "https://discord.com/api/webhooks/..."
+
+# Human-readable location for the boy instance
+location = "Dallas, TX"
