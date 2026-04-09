@@ -40,13 +40,10 @@ export class Sync {
 	// There's probably a way to use Effect, but lets keep it simple for now.
 	#update: PromiseWithResolvers<void>;
 
-	// Per-label reference tracking: minimum ref per label.
+	// Per-label tracking: minimum reference and late-frame stats.
 	// The effective #reference is the max across all labels,
 	// ensuring the slowest track sets the pace (late audio stalls early video).
-	#labelRefs = new Map<string, Time.Milli>();
-
-	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
-	#late = new Map<string, { count: number; maxMs: number }>();
+	#labels = new Map<string, { ref: Time.Milli; lateCount: number; lateMaxMs: number }>();
 
 	// RTT signal from the connection (PROBE or getStats).
 	rtt?: Signal<number | undefined>;
@@ -119,42 +116,39 @@ export class Sync {
 		const ref = Time.Milli.sub(now, timestamp);
 		const currentRef = this.#reference.peek();
 
+		const entry = this.#labels.get(label);
+
 		if (currentRef !== undefined) {
 			// Check if `wait()` would not sleep at all.
 			// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
 			// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
 			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#buffer.peek());
 			if (sleep < 0) {
-				const entry = this.#late.get(label);
 				if (entry) {
-					entry.count++;
-					entry.maxMs = Math.max(entry.maxMs, -sleep);
-				} else {
-					this.#late.set(label, { count: 1, maxMs: -sleep });
+					entry.lateCount++;
+					entry.lateMaxMs = Math.max(entry.lateMaxMs, -sleep);
 				}
-			} else {
-				const entry = this.#late.get(label);
-				if (entry) {
-					const prefix = label ? `sync[${label}]` : "sync";
-					const behind = Sync.#formatDuration(entry.maxMs);
-					console.debug(`${prefix}: ${entry.count} late frame(s), max ${behind} behind`);
-					this.#late.delete(label);
-				}
+			} else if (entry && entry.lateCount > 0) {
+				const prefix = label ? `sync[${label}]` : "sync";
+				const behind = Sync.#formatDuration(entry.lateMaxMs);
+				console.debug(`${prefix}: ${entry.lateCount} late frame(s), max ${behind} behind`);
+				entry.lateCount = 0;
+				entry.lateMaxMs = 0;
 			}
 		}
 
 		// Update per-label reference (keep the minimum ref for each label).
-		const currentLabelRef = this.#labelRefs.get(label);
-		if (currentLabelRef !== undefined && ref >= currentLabelRef) {
-			// Not relatively newer than what we've seen for this label.
-			return;
+		if (entry) {
+			if (ref >= entry.ref) return;
+			entry.ref = ref;
+		} else {
+			this.#labels.set(label, { ref, lateCount: 0, lateMaxMs: 0 });
 		}
-		this.#labelRefs.set(label, ref);
 
 		// Recompute effective reference as max of all per-label references.
 		// Using max ensures the slowest track (e.g. late audio) stalls faster tracks (e.g. early video).
 		let effectiveRef = ref;
-		for (const r of this.#labelRefs.values()) {
+		for (const { ref: r } of this.#labels.values()) {
 			if (r > effectiveRef) effectiveRef = r;
 		}
 
