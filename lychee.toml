@@ -2,7 +2,7 @@
 exclude_loopback = true
 
 # Don't check auto-generated changelogs
-exclude_path = ["CHANGELOG.md"]
+exclude_path = ["**/CHANGELOG.md"]
 
 # Accept 403 status codes (npmjs.com, linode.com block automated requests)
 accept = [200, 403]

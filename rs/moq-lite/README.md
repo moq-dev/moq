@@ -1,6 +1,6 @@
 [![Documentation](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite/)
 [![Crates.io](https://img.shields.io/crates/v/moq-lite.svg)](https://crates.io/crates/moq-lite)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE-MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE-MIT)
 
 # moq-lite
 
