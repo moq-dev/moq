@@ -7,7 +7,7 @@ export default function Controls() {
 	const ctx = useGameUI();
 	const game = ctx.game;
 
-	const jitter = createAccessor(game.jitter);
+	const jitter = createAccessor(game.sync.computedJitter);
 	const [userMuted, setUserMuted] = createPair(game.userMuted);
 
 	const toggleMute = (e: MouseEvent) => {
