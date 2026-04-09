@@ -104,7 +104,15 @@ export class Game {
 		});
 		this.#signals.cleanup(() => this.broadcast.close());
 
-		this.sync = new Watch.Sync({ latency: this.jitter });
+		// Flatten the RTT signal from the connection for real-time jitter.
+		const rtt = new Moq.Signals.Signal<number | undefined>(undefined);
+		this.#signals.run((effect) => {
+			const conn = effect.get(connection.established);
+			const rttSignal = conn?.rtt;
+			rtt.set(rttSignal ? effect.get(rttSignal) : undefined);
+		});
+
+		this.sync = new Watch.Sync({ latency: this.jitter, rtt });
 		this.#signals.cleanup(() => this.sync.close());
 
 		this.videoSource = new Watch.Video.Source(this.sync, { broadcast: this.broadcast });
