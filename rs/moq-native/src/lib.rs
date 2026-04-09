@@ -18,6 +18,7 @@ mod log;
 mod noq;
 #[cfg(feature = "quinn")]
 mod quinn;
+mod reconnect;
 mod server;
 #[cfg(any(feature = "noq", feature = "quinn"))]
 mod tls;
@@ -26,6 +27,7 @@ mod websocket;
 
 pub use client::*;
 pub use log::*;
+pub use reconnect::*;
 pub use server::*;
 #[cfg(feature = "websocket")]
 pub use websocket::*;

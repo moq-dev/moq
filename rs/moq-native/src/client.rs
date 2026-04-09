@@ -1,5 +1,5 @@
-use crate::QuicBackend;
 use crate::crypto;
+use crate::{Backoff, QuicBackend, Reconnect};
 use anyhow::Context;
 use std::path::PathBuf;
 use std::{net, sync::Arc};
@@ -77,6 +77,10 @@ pub struct ClientConfig {
 	#[serde(default)]
 	pub tls: ClientTls,
 
+	#[command(flatten)]
+	#[serde(default)]
+	pub backoff: Backoff,
+
 	#[cfg(feature = "websocket")]
 	#[command(flatten)]
 	#[serde(default)]
@@ -106,6 +110,7 @@ impl Default for ClientConfig {
 			max_streams: None,
 			version: Vec::new(),
 			tls: ClientTls::default(),
+			backoff: Backoff::default(),
 			#[cfg(feature = "websocket")]
 			websocket: super::ClientWebSocket::default(),
 		}
@@ -119,6 +124,7 @@ impl Default for ClientConfig {
 pub struct Client {
 	moq: moq_lite::Client,
 	versions: moq_lite::Versions,
+	backoff: Backoff,
 	#[cfg(feature = "websocket")]
 	websocket: super::ClientWebSocket,
 	tls: rustls::ClientConfig,
@@ -233,6 +239,7 @@ impl Client {
 		Ok(Self {
 			moq: moq_lite::Client::new().with_versions(versions.clone()),
 			versions,
+			backoff: config.backoff,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
@@ -273,6 +280,14 @@ impl Client {
 	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
 		self.moq = self.moq.with_consume(consume);
 		self
+	}
+
+	/// Start a background reconnect loop that connects to the given URL,
+	/// waits for the session to close, then reconnects with exponential backoff.
+	///
+	/// Returns a [`Reconnect`] handle. Drop or call [`Reconnect::close`] to stop.
+	pub fn reconnect(&self, url: Url) -> Reconnect {
+		Reconnect::new(self.clone(), url, self.backoff.clone())
 	}
 
 	#[cfg(not(any(
