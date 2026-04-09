@@ -14,7 +14,7 @@ The infrastructure is split into four independent tofu root modules, each with i
 - **`pub/`** - Publisher instance and DNS record
 - **`boy/`** - MoQ Boy emulator instance and DNS record
 
-The `common/` module must be deployed first, as `relay/`, `pub/`, and `boy/` read its outputs via `terraform_remote_state` (from `../common/tofu.tfstate`). After that, each service module can be deployed independently via `just cdn <module> deploy-infra`, or all at once via `just cdn deploy`.
+The `common/` module must be deployed first, as `relay/`, `pub/`, and `boy/` read its outputs via `terraform_remote_state` (from `../common/tofu.tfstate`). Each service module's `deploy` recipe handles this automatically. Deploy individually via `just cdn relay deploy`, `just cdn pub deploy`, or `just cdn boy deploy`, or all at once via `just cdn deploy`.
 
 ## Setup
 
@@ -24,9 +24,8 @@ The `common/` module must be deployed first, as `relay/`, `pub/`, and `boy/` rea
    cargo run --bin moq-token-cli -- generate --key secrets/root.jwk > secrets/root.jwk
    ```
 2. Create `terraform.tfvars` in each module directory (see `terraform.tfvars.example` for reference).
-3. Initialize and apply each module:
+3. Deploy (init and apply are handled automatically):
    ```bash
-   just cdn init
    just cdn deploy
    ```
 
@@ -34,7 +33,7 @@ The `common/` module must be deployed first, as `relay/`, `pub/`, and `boy/` rea
 
 1. `just cdn relay pin` / `just cdn pub pin` / `just cdn boy pin` to pin to the latest release tags.
 2. `just cdn deploy` to deploy everything, or deploy individually:
-   - `just cdn relay deploy-all` to deploy software to all relay nodes
+   - `just cdn relay deploy` to deploy all relay nodes (or `just cdn relay deploy usc` for a single node)
    - `just cdn pub deploy` to deploy the publisher
    - `just cdn boy deploy` to deploy the boy emulator
 
@@ -53,4 +52,4 @@ Change the relay nodes in [relay/variables.tf](relay/variables.tf).
 - $25/month for `g6-standard-2` nodes.
 - $5/month for `g6-nanode-1` nodes.
 
-The default configuration is 5 `g6-standard-2` relay nodes, 1 `g6-standard-2` boy node, and 1 `g6-nanode-1` publisher node. So ~$155/month.
+The default configuration is 5 `g6-standard-2` relay nodes, 1 `g6-standard-1` boy node, and 1 `g6-nanode-1` publisher node. So ~$142/month.

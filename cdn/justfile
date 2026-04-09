@@ -13,7 +13,7 @@ deploy:
 	just pub deploy
 	just boy deploy
 
-# Pin relay and pub to their latest release tags
+# Pin relay, pub, and boy to their latest release tags
 pin:
 	just relay pin
 	just pub pin

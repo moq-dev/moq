@@ -52,7 +52,7 @@ deploy: apply token
 
 	echo "  Copying secrets to /var/lib/moq"
 	rsync -az ../secrets/ root@$HOST:/var/lib/moq/
-	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwt"
+	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwk /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
 	rsync -az demo-bbb-prepare.service root@$HOST:/etc/systemd/system/
