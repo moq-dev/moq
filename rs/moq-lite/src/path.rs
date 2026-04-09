@@ -320,6 +320,111 @@ impl<'de: 'a, 'a> serde::Deserialize<'de> for Path<'a> {
 	}
 }
 
+/// A deduplicated list of path prefixes.
+///
+/// Automatically removes exact duplicates and overlapping prefixes on construction.
+/// For example, `["demo", "demo/foo", "anon"]` becomes `["demo", "anon"]` since
+/// `"demo"` already covers `"demo/foo"`.
+#[derive(Debug, Clone, Default, Eq)]
+pub struct PathPrefixes {
+	paths: Vec<PathOwned>,
+}
+
+impl PathPrefixes {
+	/// Create a new PathPrefixes, deduplicating and removing overlapping prefixes.
+	///
+	/// Shorter prefixes subsume longer ones: `"demo"` covers `"demo/foo"`.
+	pub fn new(mut paths: Vec<PathOwned>) -> Self {
+		if paths.len() <= 1 {
+			return Self { paths };
+		}
+
+		// Sort by length so shorter (more permissive) prefixes come first.
+		paths.sort_by_key(|p| p.len());
+		paths.dedup();
+
+		let mut result: Vec<PathOwned> = Vec::new();
+		'outer: for path in paths {
+			for existing in &result {
+				if path.has_prefix(existing) {
+					continue 'outer;
+				}
+			}
+			result.push(path);
+		}
+
+		Self { paths: result }
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.paths.is_empty()
+	}
+
+	pub fn len(&self) -> usize {
+		self.paths.len()
+	}
+
+	pub fn iter(&self) -> std::slice::Iter<'_, PathOwned> {
+		self.paths.iter()
+	}
+}
+
+impl std::ops::Deref for PathPrefixes {
+	type Target = [PathOwned];
+
+	fn deref(&self) -> &[PathOwned] {
+		&self.paths
+	}
+}
+
+impl FromIterator<PathOwned> for PathPrefixes {
+	fn from_iter<I: IntoIterator<Item = PathOwned>>(iter: I) -> Self {
+		Self::new(iter.into_iter().collect())
+	}
+}
+
+impl From<Vec<PathOwned>> for PathPrefixes {
+	fn from(paths: Vec<PathOwned>) -> Self {
+		Self::new(paths)
+	}
+}
+
+impl<'a> PartialEq<Vec<Path<'a>>> for PathPrefixes {
+	fn eq(&self, other: &Vec<Path<'a>>) -> bool {
+		self.paths == *other
+	}
+}
+
+impl<'a> PartialEq<PathPrefixes> for Vec<Path<'a>> {
+	fn eq(&self, other: &PathPrefixes) -> bool {
+		*self == other.paths
+	}
+}
+
+impl PartialEq for PathPrefixes {
+	fn eq(&self, other: &Self) -> bool {
+		self.paths == other.paths
+	}
+}
+
+impl IntoIterator for PathPrefixes {
+	type Item = PathOwned;
+	type IntoIter = std::vec::IntoIter<PathOwned>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.paths.into_iter()
+	}
+}
+
+impl<'a> IntoIterator for &'a PathPrefixes {
+	type Item = &'a PathOwned;
+	type IntoIter = std::slice::Iter<'a, PathOwned>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.paths.iter()
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -755,5 +860,87 @@ mod tests {
 		assert_eq!(prefix.strip_prefix("foo/").unwrap().as_str(), "bar");
 		assert_eq!(prefix.strip_prefix("foo/bar").unwrap().as_str(), "");
 		assert_eq!(prefix.strip_prefix("foo/bar/").unwrap().as_str(), "");
+	}
+
+	#[test]
+	fn test_prefix_list_dedup() {
+		// Exact duplicates are removed
+		let list = PathPrefixes::new(vec!["demo".into(), "demo".into()]);
+		assert_eq!(list.len(), 1);
+		assert_eq!(list[0], Path::new("demo"));
+	}
+
+	#[test]
+	fn test_prefix_list_overlap() {
+		// "demo/foo" is redundant when "demo" exists
+		let list = PathPrefixes::new(vec!["demo".into(), "demo/foo".into(), "anon".into()]);
+		assert_eq!(list.len(), 2);
+		assert!(list.iter().any(|p| p == &Path::new("demo")));
+		assert!(list.iter().any(|p| p == &Path::new("anon")));
+	}
+
+	#[test]
+	fn test_prefix_list_overlap_reverse_order() {
+		// Order shouldn't matter
+		let list = PathPrefixes::new(vec!["demo/foo".into(), "demo".into()]);
+		assert_eq!(list.len(), 1);
+		assert_eq!(list[0], Path::new("demo"));
+	}
+
+	#[test]
+	fn test_prefix_list_empty_covers_all() {
+		// Empty prefix covers everything
+		let list = PathPrefixes::new(vec!["".into(), "demo".into(), "anon".into()]);
+		assert_eq!(list.len(), 1);
+		assert_eq!(list[0], Path::new(""));
+	}
+
+	#[test]
+	fn test_prefix_list_no_overlap() {
+		// Unrelated prefixes are all kept
+		let list = PathPrefixes::new(vec!["demo".into(), "anon".into(), "secret".into()]);
+		assert_eq!(list.len(), 3);
+	}
+
+	#[test]
+	fn test_prefix_list_single() {
+		let list = PathPrefixes::new(vec!["demo".into()]);
+		assert_eq!(list.len(), 1);
+	}
+
+	#[test]
+	fn test_prefix_list_empty() {
+		let list = PathPrefixes::new(vec![]);
+		assert!(list.is_empty());
+		assert_eq!(list.len(), 0);
+	}
+
+	#[test]
+	fn test_prefix_list_deep_overlap() {
+		// "a/b/c" is covered by "a/b" which is covered by "a"
+		let list = PathPrefixes::new(vec!["a/b/c".into(), "a/b".into(), "a".into()]);
+		assert_eq!(list.len(), 1);
+		assert_eq!(list[0], Path::new("a"));
+	}
+
+	#[test]
+	fn test_prefix_list_partial_name_not_overlap() {
+		// "demo" should NOT cover "demonstration" (different path component)
+		let list = PathPrefixes::new(vec!["demo".into(), "demonstration".into()]);
+		assert_eq!(list.len(), 2);
+	}
+
+	#[test]
+	fn test_prefix_list_collect() {
+		let list: PathPrefixes = vec!["demo".into(), "demo/foo".into()].into_iter().collect();
+		assert_eq!(list.len(), 1);
+		assert_eq!(list[0], Path::new("demo"));
+	}
+
+	#[test]
+	fn test_prefix_list_eq_vec() {
+		let list = PathPrefixes::new(vec!["demo".into(), "anon".into()]);
+		// Comparison preserves sorted order (by length)
+		assert_eq!(list, vec!["demo".as_path(), "anon".as_path()]);
 	}
 }

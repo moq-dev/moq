@@ -280,7 +280,9 @@ impl OriginNodes {
 			let paths: Vec<PathOwned> = roots.iter().map(|(p, _)| p.clone()).collect();
 			roots.retain(|(path, _)| {
 				// Keep this entry only if no strictly shorter prefix covers it.
-				!paths.iter().any(|other| other.len() < path.len() && path.has_prefix(other))
+				!paths
+					.iter()
+					.any(|other| other.len() < path.len() && path.has_prefix(other))
 			});
 		}
 
@@ -1373,5 +1375,70 @@ mod tests {
 
 		narrow_consumer.assert_next("worm-node/data", &broadcast1.consume());
 		narrow_consumer.assert_next_wait(); // Should not see foobar
+	}
+
+	#[tokio::test]
+	async fn test_duplicate_prefixes_deduped() {
+		let origin = Origin::produce();
+		let broadcast = Broadcast::produce();
+
+		// publish_only with duplicate prefixes should work (deduped internally)
+		let producer = origin
+			.publish_only(&["demo".into(), "demo".into()])
+			.expect("should create producer");
+
+		assert!(producer.publish_broadcast("demo/stream", broadcast.consume()));
+
+		let mut consumer = producer.consume();
+		consumer.assert_next("demo/stream", &broadcast.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_overlapping_prefixes_deduped() {
+		let origin = Origin::produce();
+		let broadcast = Broadcast::produce();
+
+		// "demo" and "demo/foo" — "demo/foo" is redundant, only "demo" should remain
+		let producer = origin
+			.publish_only(&["demo".into(), "demo/foo".into()])
+			.expect("should create producer");
+
+		// Can still publish under "demo/bar" since "demo" covers everything
+		assert!(producer.publish_broadcast("demo/bar/stream", broadcast.consume()));
+
+		let mut consumer = producer.consume();
+		consumer.assert_next("demo/bar/stream", &broadcast.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_overlapping_prefixes_no_duplicate_announcements() {
+		let origin = Origin::produce();
+		let broadcast = Broadcast::produce();
+
+		// Both "demo" and "demo/foo" are requested — should only have one node
+		let producer = origin
+			.publish_only(&["demo".into(), "demo/foo".into()])
+			.expect("should create producer");
+
+		assert!(producer.publish_broadcast("demo/foo/stream", broadcast.consume()));
+
+		let mut consumer = producer.consume();
+		// Should only get ONE announcement (not two from overlapping nodes)
+		consumer.assert_next("demo/foo/stream", &broadcast.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_allowed_returns_deduped_prefixes() {
+		let origin = Origin::produce();
+
+		let producer = origin
+			.publish_only(&["demo".into(), "demo/foo".into(), "anon".into()])
+			.expect("should create producer");
+
+		let allowed: Vec<_> = producer.allowed().collect();
+		assert_eq!(allowed.len(), 2, "demo/foo should be subsumed by demo");
 	}
 }

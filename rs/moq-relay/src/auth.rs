@@ -3,7 +3,7 @@ use axum::http;
 use http_cache_reqwest::{Cache, CacheMode, HttpCache, HttpCacheOptions, MokaManager};
 #[cfg(test)]
 use moq_lite::AsPath;
-use moq_lite::{Path, PathOwned};
+use moq_lite::{Path, PathOwned, PathPrefixes};
 use moq_token::{Key, KeyId};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
@@ -253,8 +253,8 @@ struct PublicResponse {
 /// Resolved public access configuration.
 #[derive(Clone, Default)]
 struct PublicAccess {
-	subscribe: Vec<PathOwned>,
-	publish: Vec<PathOwned>,
+	subscribe: PathPrefixes,
+	publish: PathPrefixes,
 	/// Optional API URL for dynamic resolution (namespace appended).
 	api: Option<(url::Url, ClientWithMiddleware)>,
 }
@@ -286,9 +286,9 @@ pub struct AuthToken {
 	/// The root path this token is scoped to.
 	pub root: PathOwned,
 	/// Paths the holder is allowed to subscribe to, relative to `root`.
-	pub subscribe: Vec<PathOwned>,
+	pub subscribe: PathPrefixes,
 	/// Paths the holder is allowed to publish to, relative to `root`.
-	pub publish: Vec<PathOwned>,
+	pub publish: PathPrefixes,
 	/// Whether this token grants cluster-level privileges.
 	pub cluster: bool,
 	/// The cluster node name to register, if this is a cluster connection.
@@ -403,28 +403,6 @@ fn parse_url(s: &str) -> Option<url::Url> {
 }
 
 impl Auth {
-	/// Remove duplicate and subset paths, keeping only the shortest prefixes.
-	fn dedup_paths(mut paths: Vec<PathOwned>) -> Vec<PathOwned> {
-		if paths.len() <= 1 {
-			return paths;
-		}
-
-		// Sort by length so shorter (more permissive) prefixes come first
-		paths.sort_by_key(|p| p.len());
-		paths.dedup();
-
-		let mut result: Vec<PathOwned> = Vec::new();
-		'outer: for path in paths {
-			for existing in &result {
-				if path.has_prefix(existing) {
-					continue 'outer;
-				}
-			}
-			result.push(path);
-		}
-		result
-	}
-
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
 		anyhow::ensure!(
 			config.key.is_none() || config.key_dir.is_none(),
@@ -494,8 +472,8 @@ impl Auth {
 		}
 
 		let public = PublicAccess {
-			subscribe: Self::dedup_paths(subscribe),
-			publish: Self::dedup_paths(publish),
+			subscribe: PathPrefixes::from(subscribe),
+			publish: PathPrefixes::from(publish),
 			api,
 		};
 
@@ -592,7 +570,7 @@ impl Auth {
 		};
 
 		// If a more specific path is provided, reduce the permissions.
-		let subscribe: Vec<PathOwned> = claims
+		let subscribe: PathPrefixes = claims
 			.subscribe
 			.into_iter()
 			.filter_map(|p| {
@@ -612,7 +590,7 @@ impl Auth {
 			})
 			.collect();
 
-		let publish: Vec<PathOwned> = claims
+		let publish: PathPrefixes = claims
 			.publish
 			.into_iter()
 			.filter_map(|p| {
