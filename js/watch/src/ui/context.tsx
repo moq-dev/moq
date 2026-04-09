@@ -4,7 +4,7 @@ import type { JSX } from "solid-js";
 import { createContext, createSignal, onCleanup } from "solid-js";
 import type { BufferedRanges } from "..";
 import type MoqWatch from "../element";
-import type { LatencyMode } from "../sync";
+import type { Latency } from "../sync";
 
 type WatchUIContextProviderProps = {
 	moqWatch: MoqWatch;
@@ -30,10 +30,9 @@ export type WatchUIContextValues = {
 	togglePlayback: () => void;
 	toggleMuted: () => void;
 	buffering: () => boolean;
-	latency: () => LatencyMode;
+	latency: () => Latency;
 	jitter: () => Moq.Time.Milli;
-	setLatency: (value: LatencyMode) => void;
-	setJitter: (value: Moq.Time.Milli) => void;
+	setLatency: (value: Latency) => void;
 	availableRenditions: () => Rendition[];
 	activeRendition: () => string | undefined;
 	setActiveRendition: (name: string | undefined) => void;
@@ -81,12 +80,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		props.moqWatch.backend.audio.muted.update((muted) => !muted);
 	};
 
-	const setLatency = (mode: LatencyMode) => {
+	const setLatency = (mode: Latency) => {
 		props.moqWatch.latency = mode;
-	};
-
-	const setJitter = (value: Moq.Time.Milli) => {
-		props.moqWatch.jitter = value;
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
@@ -113,7 +108,6 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		latency,
 		jitter,
 		setLatency,
-		setJitter,
 		availableRenditions,
 		activeRendition,
 		setActiveRendition: setActiveRenditionValue,

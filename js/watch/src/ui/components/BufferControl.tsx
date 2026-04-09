@@ -102,8 +102,7 @@ export default function BufferControl(props: BufferControlProps) {
 		const ms = (x / trackWidth) * maxRange();
 		const snapped = (Math.round(ms / RANGE_STEP) * RANGE_STEP) as Moq.Time.Milli;
 		const clamped = Math.max(MIN_RANGE, Math.min(maxRange(), snapped)) as Moq.Time.Milli;
-		context.setLatency("fixed");
-		context.setJitter(clamped);
+		context.setLatency(clamped);
 	};
 
 	const onMouseDown = (e: MouseEvent) => {
@@ -138,8 +137,7 @@ export default function BufferControl(props: BufferControlProps) {
 		e.preventDefault();
 		setHasInteracted(true);
 		const value = Math.max(MIN_RANGE, Math.min(maxRange(), context.jitter() + delta)) as Moq.Time.Milli;
-		context.setLatency("fixed");
-		context.setJitter(value);
+		context.setLatency(value);
 	};
 
 	// Paint buffer ranges to canvas on each animation frame.

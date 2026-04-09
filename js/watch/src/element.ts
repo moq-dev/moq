@@ -3,9 +3,9 @@ import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
 import { Broadcast } from "./broadcast";
-import { type LatencyMode, Sync } from "./sync";
+import { type Latency, Sync } from "./sync";
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency"] as const;
+const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -115,7 +115,12 @@ export default class MoqWatch extends HTMLElement {
 
 		this.signals.run((effect) => {
 			const latency = effect.get(this.backend.latency);
-			this.setAttribute("latency", latency);
+			if (latency === "real-time") {
+				this.setAttribute("latency", "real-time");
+			} else {
+				const jitter = Math.floor(effect.get(this.backend.jitter));
+				this.setAttribute("latency", jitter.toString());
+			}
 		});
 	}
 
@@ -130,6 +135,10 @@ export default class MoqWatch extends HTMLElement {
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
 		this.#enabled.set(false);
+	}
+
+	#setLatencyNumber(value: string | null) {
+		this.backend.latency.set((value ? Number.parseFloat(value) : 100) as Time.Milli);
 	}
 
 	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
@@ -151,13 +160,14 @@ export default class MoqWatch extends HTMLElement {
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "latency") {
-			if (newValue === "real-time" || newValue === "fixed") {
-				this.backend.latency.set(newValue);
+			if (!newValue || newValue === "real-time") {
+				this.backend.latency.set("real-time");
 			} else {
-				// Numeric value: switch to fixed mode and set jitter.
-				this.backend.latency.set("fixed");
-				this.backend.jitter.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
+				this.#setLatencyNumber(newValue);
 			}
+		} else if (name === "jitter") {
+			// Deprecated: use latency="<number>" instead.
+			this.#setLatencyNumber(newValue);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -212,20 +222,22 @@ export default class MoqWatch extends HTMLElement {
 		this.broadcast.reload.set(value);
 	}
 
-	get latency(): LatencyMode {
+	get latency(): Latency {
 		return this.backend.latency.peek();
 	}
 
-	set latency(value: LatencyMode) {
+	set latency(value: Latency) {
 		this.backend.latency.set(value);
 	}
 
+	/** The jitter buffer in milliseconds. */
 	get jitter(): Time.Milli {
 		return this.backend.jitter.peek();
 	}
 
+	/** @deprecated Use `latency = <number>` instead. */
 	set jitter(value: number) {
-		this.backend.jitter.set(value as Time.Milli);
+		this.backend.latency.set(value as Time.Milli);
 	}
 }
 

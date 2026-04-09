@@ -1,15 +1,14 @@
 import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 
-/** Latency mode: `"real-time"` auto-computes jitter from RTT; `"fixed"` lets the user set jitter manually. */
-export type LatencyMode = "real-time" | "fixed";
+/** Latency: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */
+export type Latency = "real-time" | Time.Milli;
 
 const MIN_JITTER = 10 as Time.Milli;
 const FALLBACK_JITTER = 100 as Time.Milli;
 
 export interface SyncProps {
-	latency?: LatencyMode | Signal<LatencyMode>;
-	jitter?: Time.Milli | Signal<Time.Milli>;
+	latency?: Latency | Signal<Latency>;
 	rtt?: Signal<number | undefined>;
 	audio?: Time.Milli | Signal<Time.Milli | undefined>;
 	video?: Time.Milli | Signal<Time.Milli | undefined>;
@@ -21,12 +20,12 @@ export class Sync {
 	#reference = new Signal<Time.Milli | undefined>(undefined);
 	readonly reference: Signal<Time.Milli | undefined> = this.#reference;
 
-	// The latency mode: "real-time" auto-computes jitter from RTT, "fixed" uses the jitter signal directly.
-	latency: Signal<LatencyMode>;
+	// The latency setting: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter.
+	latency: Signal<Latency>;
 
-	// The jitter buffer in milliseconds.
+	// The jitter buffer in milliseconds (always numeric).
 	// In "real-time" mode this is updated automatically from RTT.
-	// In "fixed" mode the user sets this directly (default 100ms).
+	// When latency is a number, jitter equals that number.
 	jitter: Signal<Time.Milli>;
 
 	// Any additional delay required for audio or video.
@@ -47,15 +46,14 @@ export class Sync {
 	// RTT signal from the connection (PROBE).
 	#rtt?: Signal<number | undefined>;
 
-	// EWMA state for RTT smoothing (RFC 9002 Section 5.3).
-	#smoothedRtt: number | undefined;
-	#rttVar: number | undefined;
+	// Previous RTT for reference reset detection.
+	#prevRtt: number | undefined;
 
 	signals = new Effect();
 
 	constructor(props?: SyncProps) {
-		this.latency = Signal.from(props?.latency ?? ("real-time" as LatencyMode));
-		this.jitter = Signal.from(props?.jitter ?? (FALLBACK_JITTER as Time.Milli));
+		this.latency = Signal.from(props?.latency ?? ("real-time" as Latency));
+		this.jitter = new Signal<Time.Milli>(FALLBACK_JITTER);
 		this.#rtt = props?.rtt;
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
@@ -67,12 +65,12 @@ export class Sync {
 	}
 
 	#runJitter(effect: Effect): void {
-		const mode = effect.get(this.latency);
+		const latency = effect.get(this.latency);
 
-		if (mode === "fixed") {
-			// In fixed mode, jitter is set by the user. Just reset EWMA state.
-			this.#smoothedRtt = undefined;
-			this.#rttVar = undefined;
+		if (typeof latency === "number") {
+			// Fixed mode: latency value is the jitter.
+			this.#prevRtt = undefined;
+			this.jitter.set(latency);
 			return;
 		}
 
@@ -80,37 +78,23 @@ export class Sync {
 		if (this.#rtt) {
 			const rtt = effect.get(this.#rtt);
 			if (rtt !== undefined) {
-				const prev = this.#smoothedRtt;
-				const { smoothed, variation } = this.#updateRtt(rtt);
-
-				const jitter = Math.max(MIN_JITTER, smoothed / 2 + 4 * variation) as Time.Milli;
+				// Use RTT/2 as one-way delay estimate, with a floor.
+				const jitter = Math.max(MIN_JITTER, rtt / 2) as Time.Milli;
 				this.jitter.set(jitter);
 
 				// Reset the reference when RTT drops so we re-anchor to the lower baseline.
-				if (prev !== undefined && smoothed < prev * 0.8) {
+				if (this.#prevRtt !== undefined && rtt < this.#prevRtt * 0.8) {
 					this.#reference.set(undefined);
 				}
+				this.#prevRtt = rtt;
 
 				return;
 			}
 		}
 
 		// No RTT available: fall back to static default.
-		this.#smoothedRtt = undefined;
-		this.#rttVar = undefined;
+		this.#prevRtt = undefined;
 		this.jitter.set(FALLBACK_JITTER);
-	}
-
-	// RFC 9002 Section 5.3 EWMA update. Returns the updated values.
-	#updateRtt(sample: number): { smoothed: number; variation: number } {
-		if (this.#smoothedRtt === undefined || this.#rttVar === undefined) {
-			this.#smoothedRtt = sample;
-			this.#rttVar = sample / 2;
-		} else {
-			this.#rttVar = 0.75 * this.#rttVar + 0.25 * Math.abs(this.#smoothedRtt - sample);
-			this.#smoothedRtt = 0.875 * this.#smoothedRtt + 0.125 * sample;
-		}
-		return { smoothed: this.#smoothedRtt, variation: this.#rttVar };
 	}
 
 	#runBuffer(effect: Effect): void {

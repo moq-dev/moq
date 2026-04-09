@@ -3,7 +3,7 @@ import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
 import { Muxer } from "./mse";
-import { type LatencyMode, Sync } from "./sync";
+import { type Latency, Sync } from "./sync";
 import * as Video from "./video";
 
 // Serializable representation of TimeRanges
@@ -36,8 +36,8 @@ export interface Backend {
 	// Audio specific signals.
 	audio?: Audio.Backend;
 
-	// The latency mode: "real-time" auto-computes jitter, "fixed" lets the user set it.
-	latency: Signal<LatencyMode>;
+	// The latency setting: "real-time" auto-computes jitter, a number sets a fixed jitter.
+	latency: Signal<Latency>;
 
 	// The jitter buffer in milliseconds.
 	jitter: Signal<Moq.Time.Milli>;
@@ -47,11 +47,8 @@ export interface MultiBackendProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
-	// Latency mode: "real-time" auto-computes jitter from RTT, "fixed" lets the user set jitter.
-	latency?: LatencyMode | Signal<LatencyMode>;
-
-	// Initial jitter value in milliseconds (default 100ms, only used in "fixed" mode).
-	jitter?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
+	// Latency: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter in ms.
+	latency?: Latency | Signal<Latency>;
 
 	// RTT signal from the connection (PROBE), used for dynamic jitter in "real-time" mode.
 	rtt?: Signal<number | undefined>;
@@ -108,7 +105,7 @@ class AudioBackend implements Audio.Backend {
 export class MultiBackend implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;
-	latency: Signal<LatencyMode>;
+	latency: Signal<Latency>;
 	jitter: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
@@ -126,7 +123,7 @@ export class MultiBackend implements Backend {
 	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
-		this.#sync = new Sync({ latency: props?.latency, jitter: props?.jitter, rtt: props?.rtt });
+		this.#sync = new Sync({ latency: props?.latency, rtt: props?.rtt });
 		this.latency = this.#sync.latency;
 		this.jitter = this.#sync.jitter;
 
