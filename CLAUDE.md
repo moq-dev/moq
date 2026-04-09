@@ -37,6 +37,7 @@ make gh-pages
    - Main branch: `main`
    - Pull requests automatically trigger CI builds
    - GitHub Pages updates on push to main
+   - Draft versions are released to the IETF datatracker by pushing a tag: `draft-lcurley-<name>-XX` (e.g. `draft-lcurley-moq-lite-04`)
 
 ## Architecture
 
