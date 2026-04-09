@@ -8,13 +8,11 @@ set -euo pipefail
 #   MONITOR_WEBHOOK           - Discord webhook URL
 #   MONITOR_MEMORY_THRESHOLD  - Alert when available memory drops below this % (default: 20)
 #   MONITOR_HEALTH_DOMAIN     - Domain name for health checks (default: cdn.moq.dev)
-#   MONITOR_HEALTH_JWT        - Path to subscriber JWT (default: /var/lib/moq/demo-sub.jwt)
 #   MONITOR_HEALTH_NODES      - Space-separated list of nodes (default: "usc euc sea")
 
 WEBHOOK="${MONITOR_WEBHOOK:-}"
 MEMORY_THRESHOLD="${MONITOR_MEMORY_THRESHOLD:-20}"
 HEALTH_DOMAIN="${MONITOR_HEALTH_DOMAIN:-cdn.moq.dev}"
-HEALTH_JWT_FILE="${MONITOR_HEALTH_JWT:-/var/lib/moq/demo-sub.jwt}"
 IFS=' ' read -r -a HEALTH_NODES <<< "${MONITOR_HEALTH_NODES:-usc usw use euc sea}"
 HOSTNAME=$(hostname)
 
@@ -84,16 +82,8 @@ ${top}"
 # ── Health check ────────────────────────────────────────────────────
 
 check_health() {
-	if [ ! -f "$HEALTH_JWT_FILE" ]; then
-		echo "Health check skipped: $HEALTH_JWT_FILE not found"
-		return
-	fi
-
-	local jwt
-	jwt=$(cat "$HEALTH_JWT_FILE")
-
 	for node in "${HEALTH_NODES[@]}"; do
-		local url="https://${node}.${HEALTH_DOMAIN}/fetch/demo/bbb/catalog.json?jwt=${jwt}"
+		local url="https://${node}.${HEALTH_DOMAIN}/fetch/demo/bbb/catalog.json"
 		local status ok=false
 
 		status=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null) && ok=true

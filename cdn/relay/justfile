@@ -2,6 +2,10 @@
 default:
   just --list
 
+# Generate the cluster JWT token
+token:
+	cargo run -p moq-token-cli -- sign --key ../secrets/root.jwk --publish "" --subscribe "" --cluster > ../secrets/cluster.jwt
+
 # Pin to the latest moq-relay release tag (or a specific tag)
 pin tag="":
 	#!/usr/bin/env bash
@@ -34,7 +38,7 @@ nodes:
 
 # Deploy moq-relay and moq-cert to all nodes
 [parallel]
-deploy-all: (deploy "usc") (deploy "usw") (deploy "use") (deploy "euc") (deploy "sea")
+deploy-all: token (deploy "usc") (deploy "usw") (deploy "use") (deploy "euc") (deploy "sea")
 
 # Deploy moq-relay and moq-cert to a specific node
 deploy node:
