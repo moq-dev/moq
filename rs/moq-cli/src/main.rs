@@ -25,7 +25,7 @@ pub struct Cli {
 	iroh: moq_native::IrohEndpointConfig,
 
 	/// Print import statistics to stderr at the given interval.
-	#[arg(long, default_missing_value = "1", num_args = 0..=1, value_name = "SECS")]
+	#[arg(long, default_missing_value = "1", num_args = 0..=1, require_equals = true, value_name = "SECS")]
 	stats: Option<f64>,
 
 	#[command(subcommand)]
@@ -94,7 +94,13 @@ async fn main() -> anyhow::Result<()> {
 		Command::Publish { format, .. } => format,
 	})?;
 
-	let stats_interval = cli.stats.map(Duration::from_secs_f64);
+	let stats_interval = cli
+		.stats
+		.map(|secs| {
+			anyhow::ensure!(secs.is_finite() && secs > 0.0, "--stats interval must be a positive number");
+			Ok(Duration::from_secs_f64(secs))
+		})
+		.transpose()?;
 
 	#[cfg(feature = "iroh")]
 	let iroh = cli.iroh.bind().await?;
