@@ -43,11 +43,12 @@ export class Sync {
 	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
 	#late = new Map<string, { count: number; maxMs: number }>();
 
-	// RTT signal from the connection (PROBE).
+	// RTT signal from the connection (PROBE or getStats).
 	#rtt?: Signal<number | undefined>;
 
-	// Previous RTT for reference reset detection.
-	#prevRtt: number | undefined;
+	// Minimum RTT seen, used as the baseline for jitter calculation.
+	// Avoids inflating jitter due to bufferbloat.
+	#minRtt: number | undefined;
 
 	signals = new Effect();
 
@@ -69,7 +70,7 @@ export class Sync {
 
 		if (typeof latency === "number") {
 			// Fixed mode: latency value is the jitter.
-			this.#prevRtt = undefined;
+			this.#minRtt = undefined;
 			this.jitter.set(latency);
 			return;
 		}
@@ -78,22 +79,19 @@ export class Sync {
 		if (this.#rtt) {
 			const rtt = effect.get(this.#rtt);
 			if (rtt !== undefined) {
-				// Use RTT/2 as one-way delay estimate, with a floor.
-				const jitter = Math.max(MIN_JITTER, rtt / 2) as Time.Milli;
-				this.jitter.set(jitter);
+				// Track minimum RTT as baseline, ignoring bufferbloat.
+				this.#minRtt = this.#minRtt !== undefined ? Math.min(this.#minRtt, rtt) : rtt;
 
-				// Reset the reference when RTT drops so we re-anchor to the lower baseline.
-				if (this.#prevRtt !== undefined && rtt < this.#prevRtt * 0.8) {
-					this.#reference.set(undefined);
-				}
-				this.#prevRtt = rtt;
+				// Buffer enough for a retransmit (1 RTT for ACK + retransmit).
+				const jitter = Math.max(MIN_JITTER, this.#minRtt * 1.25) as Time.Milli;
+				this.jitter.set(jitter);
 
 				return;
 			}
 		}
 
 		// No RTT available: fall back to static default.
-		this.#prevRtt = undefined;
+		this.#minRtt = undefined;
 		this.jitter.set(FALLBACK_JITTER);
 	}
 

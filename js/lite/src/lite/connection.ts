@@ -80,10 +80,9 @@ export class Connection implements Established {
 			this.recvBandwidth = createBandwidth();
 		}
 
-		// RTT requires PROBE with RTT field (Lite04+).
-		if (version !== Version.DRAFT_01 && version !== Version.DRAFT_02 && version !== Version.DRAFT_03) {
-			this.rtt = new Signal<Time.Milli | undefined>(undefined);
-		}
+		// RTT can be populated by PROBE (Lite04+) or getStats() (when supported).
+		// TODO prefer getStats() when both are available.
+		this.rtt = new Signal<Time.Milli | undefined>(undefined);
 
 		this.#publisher = new Publisher(this.#quic, this.#version);
 		this.#subscriber = new Subscriber(this.#quic, this.#version, this.recvBandwidth, this.rtt);
