@@ -25,12 +25,12 @@
 				- `paused`: Video and audio are paused.
 				- `muted`: Audio is muted.
 				- `volume`: The audio volume (0-1).
-				- `jitter`: The target jitter buffer size in milliseconds.
+				- `latency`: The target jitter buffer size in milliseconds, or "real-time" to use the RTT.
 				- `reload`: Whether to automatically reconnect when the broadcast goes offline/online.
 
 				NOTE: Cloudflare doesn't support reload yet.
 			-->
-			<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" muted jitter="100" reload>
+			<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" muted latency="real-time" reload>
 				<!-- Provide a canvas element to render the video via WebCodecs. -->
 				<canvas style="width: 100%; height: auto;"></canvas>
 				<!-- Or provide a video element to use the (higher latency) MSE backend. -->
