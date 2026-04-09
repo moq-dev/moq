@@ -136,7 +136,7 @@ impl<'a> Path<'a> {
 		}
 
 		// Otherwise, ensure the character after the prefix is a delimiter
-		self.0.chars().nth(prefix.len()) == Some('/')
+		self.0.as_bytes().get(prefix.len()) == Some(&b'/')
 	}
 
 	pub fn strip_prefix(&'a self, prefix: impl AsPath) -> Option<Path<'a>> {
@@ -156,7 +156,7 @@ impl<'a> Path<'a> {
 		}
 
 		// Otherwise, ensure the character after the prefix is a delimiter
-		if self.0.chars().nth(prefix.len()) != Some('/') {
+		if self.0.as_bytes().get(prefix.len()) != Some(&b'/') {
 			return None;
 		}
 
@@ -350,7 +350,8 @@ impl PathPrefixes {
 		}
 
 		// Sort by length so shorter (more permissive) prefixes come first.
-		paths.sort_by_key(|p| p.len());
+		// Tie-break lexicographically for canonical ordering.
+		paths.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.as_str().cmp(b.as_str())));
 		paths.dedup();
 
 		let mut result: Vec<PathOwned> = Vec::new();
@@ -951,7 +952,15 @@ mod tests {
 	#[test]
 	fn test_prefix_list_eq_vec() {
 		let list = PathPrefixes::new(["demo", "anon"]);
-		// Comparison preserves sorted order (by length)
-		assert_eq!(list, vec!["demo".as_path(), "anon".as_path()]);
+		// Canonical order: sorted by length, then lexicographically
+		assert_eq!(list, vec!["anon".as_path(), "demo".as_path()]);
+	}
+
+	#[test]
+	fn test_prefix_list_canonical_order() {
+		// Same inputs in different order produce identical results
+		let a = PathPrefixes::new(["foo", "bar"]);
+		let b = PathPrefixes::new(["bar", "foo"]);
+		assert_eq!(a, b);
 	}
 }

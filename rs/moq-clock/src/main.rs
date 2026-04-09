@@ -69,15 +69,15 @@ async fn main() -> anyhow::Result<()> {
 
 			origin.publish_broadcast(&config.broadcast, broadcast.consume());
 
-			let session = client.with_publish(origin.consume()).connect(config.url).await?;
+			let reconnect = client.with_publish(origin.consume()).reconnect(config.url);
 
 			tokio::select! {
-				res = session.closed() => res.context("session closed"),
+				res = reconnect.closed() => res,
 				_ = clock.run() => Ok(()),
 			}
 		}
 		Command::Subscribe => {
-			let session = client.with_consume(origin.clone()).connect(config.url).await?;
+			let reconnect = client.with_consume(origin.clone()).reconnect(config.url);
 
 			// NOTE: We could just call `session.consume_broadcast(&config.broadcast)` instead,
 			// However that won't work with IETF MoQ and the current OriginConsumer API the moment.
@@ -105,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
 							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
 						}
 					},
-					res = session.closed() => return res.context("session closed"),
+					res = reconnect.closed() => return res,
 					// NOTE: This drops clock when a new announce arrives, canceling it.
 					Some(res) = async { Some(clock.take()?.run().await) } => res.context("clock error")?,
 				}

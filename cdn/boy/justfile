@@ -1,6 +1,8 @@
-# Regenerate the boy JWT token: publish to demo, subscribe to anon
+set fallback
+
+# Regenerate the boy JWT token: publish boy/ and subscribe viewer/boy/ under demo
 token:
-	cargo run -p moq-token-cli -- sign --key ../secrets/root.jwk --publish "demo" --subscribe "anon" > ../secrets/demo-boy.jwt
+	cargo run -p moq-token-cli -- sign --key ../secrets/root.jwk --root "demo" --publish "boy" --subscribe "viewer/boy" > ../secrets/demo-boy.jwt
 
 # List all of the available commands.
 default:
@@ -25,11 +27,21 @@ pin tag="":
 # Get the hostname for the boy instance
 host:
 	#!/usr/bin/env bash
-	DOMAIN=$(cd .. && tofu output -raw domain)
+	DOMAIN=$(cd ../common && tofu output -raw domain)
 	echo "boy.$DOMAIN"
 
-# Deploy boy instance
-deploy:
+# Initialize tofu providers and backend
+init:
+	tofu init
+
+# Apply infrastructure changes (runs init first)
+apply:
+	just common
+	tofu init
+	tofu apply
+
+# Deploy infrastructure and software
+deploy: apply token
 	#!/usr/bin/env bash
 	set -euo pipefail
 	HOST=$(just host)
@@ -40,7 +52,7 @@ deploy:
 
 	echo "  Copying secrets to /var/lib/moq"
 	rsync -az ../secrets/ root@$HOST:/var/lib/moq/
-	ssh root@$HOST "find /var/lib/moq -type d -exec chmod 755 {} + && find /var/lib/moq -type f -exec chmod 644 {} + && chmod 600 /var/lib/moq/*.jwt"
+	ssh root@$HOST "find /var/lib/moq -type d -exec chmod 755 {} + && find /var/lib/moq -type f -exec chmod 644 {} + && chmod 600 /var/lib/moq/*.jwk /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
 	rsync -az --exclude='.gitignore' gen/ root@$HOST:/etc/systemd/system/

@@ -1,6 +1,12 @@
+set fallback
+
 # List all of the available commands.
 default:
   just --list
+
+# Regenerate the pub JWT token: publish under demo
+token:
+	cargo run -p moq-token-cli -- sign --key ../secrets/root.jwk --root "demo" --publish "" > ../secrets/demo-pub.jwt
 
 # Pin to the latest moq-cli release tag (or a specific tag)
 pin tag="":
@@ -21,11 +27,21 @@ pin tag="":
 # Get the hostname for the publisher
 host:
 	#!/usr/bin/env bash
-	DOMAIN=$(cd .. && tofu output -raw domain)
+	DOMAIN=$(cd ../common && tofu output -raw domain)
 	echo "pub.$DOMAIN"
 
-# Deploy publisher
-deploy:
+# Initialize tofu providers and backend
+init:
+	tofu init
+
+# Apply infrastructure changes (runs init first)
+apply:
+	just common
+	tofu init
+	tofu apply
+
+# Deploy infrastructure and software
+deploy: apply token
 	#!/usr/bin/env bash
 	set -euo pipefail
 	HOST=$(just host)
@@ -36,7 +52,7 @@ deploy:
 
 	echo "  Copying secrets to /var/lib/moq"
 	rsync -az ../secrets/ root@$HOST:/var/lib/moq/
-	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwt"
+	ssh root@$HOST "chmod -R 755 /var/lib/moq && chmod 600 /var/lib/moq/*.jwk /var/lib/moq/*.jwt"
 
 	echo "  Copying systemd units to /etc/systemd/system/..."
 	rsync -az demo-bbb-prepare.service root@$HOST:/etc/systemd/system/

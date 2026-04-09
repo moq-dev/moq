@@ -1,3 +1,4 @@
+mod common
 mod relay
 mod pub
 mod boy
@@ -6,15 +7,17 @@ mod boy
 default:
   just --list
 
+# Deploy all infrastructure and services
 deploy:
-	tofu apply
-	just relay deploy-all
+	just relay deploy
 	just pub deploy
+	just boy deploy
 
-# Pin relay and pub to their latest release tags
+# Pin relay, pub, and boy to their latest release tags
 pin:
 	just relay pin
 	just pub pin
+	just boy pin
 
 # Run health checks against all relay nodes
 health:

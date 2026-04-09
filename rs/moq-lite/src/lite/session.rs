@@ -1,7 +1,8 @@
-use crate::{Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo};
+use crate::{
+	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo,
+};
 
 use super::{Publisher, Subscriber, Version};
-
 pub fn start<S: web_transport_trait::Session>(
 	session: S,
 	// The stream used to setup the session, after exchanging setup messages.
@@ -13,9 +14,21 @@ pub fn start<S: web_transport_trait::Session>(
 	subscribe: Option<OriginProducer>,
 	// The version of the protocol to use.
 	version: Version,
-) -> Result<(), Error> {
+) -> Result<Option<BandwidthConsumer>, Error> {
+	let recv_bw = BandwidthProducer::new();
+
+	let recv_bw_consumer = match version {
+		Version::Lite01 | Version::Lite02 => None,
+		_ => Some(recv_bw.consume()),
+	};
+
+	let recv_bw_for_sub = match version {
+		Version::Lite01 | Version::Lite02 => None,
+		_ => Some(recv_bw),
+	};
+
 	let publisher = Publisher::new(session.clone(), publish, version);
-	let subscriber = Subscriber::new(session.clone(), subscribe, version);
+	let subscriber = Subscriber::new(session.clone(), subscribe, recv_bw_for_sub, version);
 
 	web_async::spawn(async move {
 		let res = tokio::select! {
@@ -25,7 +38,7 @@ pub fn start<S: web_transport_trait::Session>(
 		};
 
 		match res {
-			Err(Error::Transport) => {
+			Err(Error::Transport(_)) => {
 				tracing::info!("session terminated");
 				session.close(1, "");
 			}
@@ -40,7 +53,7 @@ pub fn start<S: web_transport_trait::Session>(
 		}
 	});
 
-	Ok(())
+	Ok(recv_bw_consumer)
 }
 
 // TODO do something useful with this

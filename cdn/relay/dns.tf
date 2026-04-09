@@ -1,9 +1,9 @@
 # Individual DNS records for each relay node (for direct access)
 resource "google_dns_record_set" "relay_node" {
-  for_each = var.relays
+  for_each = local.relays
 
   name         = "${each.key}.${var.domain}."
-  managed_zone = var.dns_zone_name
+  managed_zone = data.terraform_remote_state.common.outputs.dns_zone_name
   type         = "A"
   ttl          = 300
   rrdatas      = linode_instance.relay[each.key].ipv4
@@ -12,7 +12,7 @@ resource "google_dns_record_set" "relay_node" {
 # Global Geo DNS, routing to the closest region
 resource "google_dns_record_set" "relay_global" {
   name         = "${var.domain}."
-  managed_zone = var.dns_zone_name
+  managed_zone = data.terraform_remote_state.common.outputs.dns_zone_name
   type         = "A"
   ttl          = 300
 

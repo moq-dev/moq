@@ -154,11 +154,6 @@ export class Game {
 		this.#signals.run(this.#runCommands.bind(this, connection));
 	}
 
-	/** Toggle this game's expanded state. */
-	toggleExpand() {
-		this.expanded.update((old) => (old === this.sessionId ? undefined : this.sessionId));
-	}
-
 	/** Send a button state update. */
 	sendButtons() {
 		this.sendCommand({ type: "buttons", buttons: [...this.heldButtons] });
@@ -176,7 +171,7 @@ export class Game {
 			return;
 		}
 
-		const ts = this.videoDecoder.timestamp.peek();
+		const ts = this.videoRenderer.timestamp.peek();
 		this.#commandTrack.writeJson({ ...cmd, ts: ts ?? 0 });
 	}
 
@@ -268,7 +263,7 @@ export class Game {
 					this.#commandTrack = req.track;
 					// Flush any pending command that triggered activation.
 					if (this.#pendingCommand) {
-						const ts = this.videoDecoder.timestamp.peek();
+						const ts = this.videoRenderer.timestamp.peek();
 						this.#commandTrack.writeJson({ ...this.#pendingCommand, ts: ts ?? 0 });
 						this.#pendingCommand = undefined;
 					}

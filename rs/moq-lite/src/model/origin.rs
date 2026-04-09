@@ -933,8 +933,9 @@ mod tests {
 			.consume_only(&["foo".into(), "bar".into()])
 			.expect("should create limited consumer");
 
-		limited_consumer.assert_next("foo/test", &broadcast1.consume());
+		// Order depends on PathPrefixes canonical sort (lexicographic for same length)
 		limited_consumer.assert_next("bar/test", &broadcast2.consume());
+		limited_consumer.assert_next("foo/test", &broadcast1.consume());
 		limited_consumer.assert_next_wait(); // Should not see "baz/test"
 	}
 
@@ -1114,8 +1115,8 @@ mod tests {
 		bar_consumer.assert_next("bar/test", &broadcast2.consume());
 		bar_consumer.assert_next_wait();
 
-		foobar_consumer.assert_next("foo/test", &broadcast1.consume());
 		foobar_consumer.assert_next("bar/test", &broadcast2.consume());
+		foobar_consumer.assert_next("foo/test", &broadcast1.consume());
 		foobar_consumer.assert_next_wait();
 	}
 

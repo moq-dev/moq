@@ -9,6 +9,11 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 5.0"
     }
+
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
   }
 
   backend "local" {
@@ -47,36 +52,9 @@ resource "google_project_service" "all" {
 
 # Shared monitor service (memory + health checks)
 resource "local_file" "monitor_service" {
-  content = templatefile("${path.module}/common/monitor.service.tftpl", {
+  content = templatefile("${path.module}/monitor.service.tftpl", {
     webhook = var.webhook
     domain  = var.domain
   })
-  filename = "${path.module}/common/gen/monitor.service"
-}
-
-module "relay" {
-  source          = "./relay"
-  domain          = var.domain
-  email           = var.email
-  ssh_keys        = var.ssh_keys
-  relays          = local.relays
-  stackscript_id  = linode_stackscript.bootstrap.id
-  gcp_account_key = google_service_account_key.relay.private_key
-  dns_zone_name   = google_dns_managed_zone.relay.name
-}
-
-module "pub" {
-  source          = "./pub"
-  domain          = var.domain
-  ssh_keys        = var.ssh_keys
-  stackscript_id  = linode_stackscript.bootstrap.id
-  gcp_account_key = google_service_account_key.relay.private_key
-}
-
-module "boy" {
-  source          = "./boy"
-  domain          = var.domain
-  ssh_keys        = var.ssh_keys
-  stackscript_id  = linode_stackscript.bootstrap.id
-  gcp_account_key = google_service_account_key.relay.private_key
+  filename = "${path.module}/gen/monitor.service"
 }

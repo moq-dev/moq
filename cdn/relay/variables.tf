@@ -1,5 +1,16 @@
+variable "linode_token" {
+  description = "Linode API token"
+  type        = string
+  sensitive   = true
+}
+
+variable "gcp_project" {
+  description = "GCP project ID for DNS management"
+  type        = string
+}
+
 variable "domain" {
-  description = "Relay domain name"
+  description = "CDN domain name"
   type        = string
 }
 
@@ -13,26 +24,30 @@ variable "ssh_keys" {
   type        = list(string)
 }
 
-variable "relays" {
-  description = "Map of relay node configurations"
-  type = map(object({
-    region = string
-    type   = string
-  }))
-}
-
-variable "stackscript_id" {
-  description = "Linode StackScript ID for bootstrap"
-  type        = number
-}
-
-variable "gcp_account_key" {
-  description = "GCP service account private key"
-  type        = string
-  sensitive   = true
-}
-
-variable "dns_zone_name" {
-  description = "Google Cloud DNS managed zone name"
-  type        = string
+# Relay node definitions
+# regions: https://api.linode.com/v4/regions
+# instance types: https://api.linode.com/v4/linode/types
+locals {
+  relays = {
+    usc = {
+      region = "us-central"    # Dallas, TX
+      type   = "g6-standard-2" # 4GB RAM, 2 vCPU, $24/mo, 4TB out
+    }
+    usw = {
+      region = "us-west" # Fremont, CA
+      type   = "g6-standard-2"
+    }
+    use = {
+      region = "us-east" # Newark, NJ
+      type   = "g6-standard-2"
+    }
+    euc = {
+      region = "eu-central" # Frankfurt, Germany
+      type   = "g6-standard-2"
+    }
+    sea = {
+      region = "ap-south" # Singapore
+      type   = "g6-standard-2"
+    }
+  }
 }

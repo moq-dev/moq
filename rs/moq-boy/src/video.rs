@@ -35,7 +35,6 @@ impl VideoEncoder {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 		let avc3 = moq_mux::import::Avc3::new(broadcast, catalog);
 		let force_keyframe = Arc::new(AtomicBool::new(false));
-
 		let track = avc3.track().clone();
 
 		let fk = force_keyframe.clone();
@@ -64,19 +63,6 @@ impl VideoEncoder {
 	/// Used on resume after pause so new viewers can start decoding.
 	pub fn force_keyframe(&self) {
 		self.force_keyframe.store(true, Ordering::Release);
-	}
-
-	/// Bootstrap: encode one frame so the codec config (SPS/PPS) is
-	/// inserted into the catalog before any viewer connects.
-	pub fn bootstrap(&self, emu: &mut crate::emulator::Emulator, start: std::time::Instant) -> Result<()> {
-		emu.tick();
-		let rgba = Bytes::from(emu.framebuffer());
-		let pts_micros = start.elapsed().as_micros() as u64;
-		let ts = hang::container::Timestamp::from_micros(pts_micros).context("timestamp overflow")?;
-		self.try_frame(rgba, ts);
-		// Give the encoder thread time to process the initial frame.
-		std::thread::sleep(std::time::Duration::from_millis(100));
-		Ok(())
 	}
 }
 

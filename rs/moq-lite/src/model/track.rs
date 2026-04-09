@@ -12,7 +12,7 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::{Error, Result};
+use crate::{Error, Result, coding};
 
 use super::{Group, GroupConsumer, GroupProducer};
 
@@ -195,7 +195,7 @@ impl TrackProducer {
 	pub fn append_group(&mut self) -> Result<GroupProducer> {
 		let mut state = self.modify()?;
 		let sequence = match state.max_sequence {
-			Some(s) => s.checked_add(1).ok_or(Error::BoundsExceeded)?,
+			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
 			None => 0,
 		};
 		if let Some(fin) = state.final_sequence
@@ -234,7 +234,7 @@ impl TrackProducer {
 			return Err(Error::Closed);
 		}
 		state.final_sequence = Some(match state.max_sequence {
-			Some(max) => max.checked_add(1).ok_or(Error::BoundsExceeded)?,
+			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
 			None => 0,
 		});
 		Ok(())
@@ -261,7 +261,7 @@ impl TrackProducer {
 		if state.final_sequence.is_some() || sequence != max {
 			return Err(Error::Closed);
 		}
-		state.final_sequence = Some(max.checked_add(1).ok_or(Error::BoundsExceeded)?);
+		state.final_sequence = Some(max.checked_add(1).ok_or(coding::BoundsExceeded)?);
 		Ok(())
 	}
 
@@ -808,6 +808,6 @@ mod test {
 			state.max_sequence = Some(u64::MAX);
 		}
 
-		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded)));
+		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded(_))));
 	}
 }

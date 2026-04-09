@@ -1,3 +1,10 @@
+data "terraform_remote_state" "common" {
+  backend = "local"
+  config = {
+    path = "${path.module}/../common/tofu.tfstate"
+  }
+}
+
 # Generate systemd service files from templates
 resource "local_file" "demo_bbb_service" {
   content = templatefile("${path.module}/demo-bbb.service.tftpl", {
@@ -21,10 +28,10 @@ resource "linode_instance" "publisher" {
   firewall_id = linode_firewall.publisher.id
 
   # Bootstrap script - only installs Nix and creates directories
-  stackscript_id = var.stackscript_id
+  stackscript_id = data.terraform_remote_state.common.outputs.stackscript_id
   stackscript_data = {
     hostname    = "pub.${var.domain}"
-    gcp_account = var.gcp_account_key
+    gcp_account = data.terraform_remote_state.common.outputs.gcp_account_key
   }
 
   tags = ["publisher", "moq"]
