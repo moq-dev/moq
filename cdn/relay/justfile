@@ -30,13 +30,9 @@ host node:
 	DOMAIN=$(cd ../common && tofu output -raw domain)
 	echo "{{node}}.$DOMAIN"
 
-# List the available nodes.
+# List the available nodes from tofu state.
 nodes:
-	@echo "usc: Dallas, TX"
-	@echo "usw: Fremont, CA"
-	@echo "use: Newark, NJ"
-	@echo "euc: Frankfurt, Germany"
-	@echo "sea: Singapore"
+	@tofu output -json instance_ips | jq -r 'keys[]'
 
 # Initialize tofu providers and backend
 init:
@@ -54,7 +50,7 @@ deploy *node: apply token
 	set -euo pipefail
 	NODES="{{node}}"
 	if [ -z "$NODES" ]; then
-		NODES="usc usw use euc sea"
+		NODES=$(just nodes)
 	fi
 	for NODE in $NODES; do
 		HOST=$(just host $NODE)
@@ -91,14 +87,18 @@ deploy *node: apply token
 			systemctl restart moq-relay.service"
 	done
 
-# Check status of a node
-status node:
+# Check status of a node (all nodes if none specified)
+status *node:
 	#!/usr/bin/env bash
-	HOST=$(just host {{node}})
-	echo "=== $HOST ==="
-	ssh root@$HOST "systemctl status moq-relay --no-pager"
-
-status-all: (status "usc") (status "usw") (status "use") (status "euc") (status "sea")
+	NODES="{{node}}"
+	if [ -z "$NODES" ]; then
+		NODES=$(just nodes)
+	fi
+	for NODE in $NODES; do
+		HOST=$(just host $NODE)
+		echo "=== $HOST ==="
+		ssh root@$HOST "systemctl status moq-relay --no-pager"
+	done
 
 ssh node:
 	#!/usr/bin/env bash
