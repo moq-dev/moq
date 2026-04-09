@@ -87,6 +87,11 @@
           python3
         ];
 
+        # Documentation dependencies
+        docDeps = with pkgs; [
+          lychee
+        ];
+
         # CDN/deployment dependencies
         cdnDeps = with pkgs; [
           opentofu
@@ -118,7 +123,7 @@
         };
 
         devShells.default = pkgs.mkShell {
-          packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps;
+          packages = rustDeps ++ jsDeps ++ pyDeps ++ docDeps ++ cdnDeps;
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

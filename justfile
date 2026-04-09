@@ -87,6 +87,9 @@ ci:
 	cargo check --workspace --no-default-features --exclude moq-ffi
 	cargo check --workspace --all-features --exclude moq-ffi
 
+	# Check for broken links
+	if command -v lychee &> /dev/null; then lychee .; fi
+
 	# Dry-run publish to verify packaging
 	cargo publish --workspace --dry-run --exclude libmoq --exclude moq-ffi
 
