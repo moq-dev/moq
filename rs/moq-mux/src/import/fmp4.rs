@@ -59,7 +59,6 @@ pub struct Fmp4 {
 
 	// -- STATS --
 	stats: Stats,
-	drift: DriftTracker,
 }
 
 #[derive(PartialEq, Debug)]
@@ -103,6 +102,9 @@ struct Fmp4Track {
 
 	// The minimum duration between frames for this track.
 	min_duration: Option<Timestamp>,
+
+	// Per-track drift tracker (each track has its own PTS timeline).
+	drift: DriftTracker,
 }
 
 impl Fmp4 {
@@ -120,7 +122,6 @@ impl Fmp4 {
 			config,
 			moof_raw: None,
 			stats: Stats::default(),
-			drift: DriftTracker::default(),
 		}
 	}
 
@@ -225,6 +226,7 @@ impl Fmp4 {
 					jitter: None,
 					last_timestamp: None,
 					min_duration: None,
+					drift: DriftTracker::default(),
 				},
 			);
 		}
@@ -593,8 +595,9 @@ impl Fmp4 {
 					}
 
 					// Record stats for this frame.
-					let drift = self.drift.track(timestamp.into());
-					self.stats.record_frame(size as u64, keyframe, drift);
+					let drift = track.drift.track(timestamp.into());
+					let is_video_keyframe = keyframe && track.kind == TrackKind::Video;
+					self.stats.record_frame(size as u64, is_video_keyframe, drift);
 
 					if timestamp >= max_timestamp.unwrap_or(Timestamp::ZERO) {
 						max_timestamp = Some(timestamp);

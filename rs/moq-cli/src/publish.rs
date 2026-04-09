@@ -102,6 +102,7 @@ impl Publish {
 		ticker.tick().await;
 
 		let mut prev = import::Stats::default();
+		let mut last_instant = tokio::time::Instant::now();
 
 		match &mut self.decoder {
 			PublishDecoder::Avc3(decoder) => {
@@ -118,8 +119,11 @@ impl Publish {
 							decoder.decode_stream(&mut buffer, None)?;
 						}
 						_ = ticker.tick() => {
+							let now = tokio::time::Instant::now();
+							let elapsed = now - last_instant;
+							last_instant = now;
 							let current = decoder.stats();
-							Self::print_stats(&current, &prev, interval);
+							Self::print_stats(&current, &prev, elapsed);
 							prev = current;
 						}
 					}
@@ -139,8 +143,11 @@ impl Publish {
 							decoder.decode(&mut buffer)?;
 						}
 						_ = ticker.tick() => {
+							let now = tokio::time::Instant::now();
+							let elapsed = now - last_instant;
+							last_instant = now;
 							let current = decoder.stats();
-							Self::print_stats(&current, &prev, interval);
+							Self::print_stats(&current, &prev, elapsed);
 							prev = current;
 						}
 					}
@@ -151,14 +158,21 @@ impl Publish {
 
 				loop {
 					let delay = decoder.step().await?;
+					let sleep = tokio::time::sleep(delay);
+					tokio::pin!(sleep);
 
-					// Interleave the step delay with stats ticks.
-					tokio::select! {
-						_ = tokio::time::sleep(delay) => {}
-						_ = ticker.tick() => {
-							let current = decoder.stats();
-							Self::print_stats(&current, &prev, interval);
-							prev = current;
+					// Wait for the full delay, printing stats if a tick fires mid-sleep.
+					loop {
+						tokio::select! {
+							_ = &mut sleep => break,
+							_ = ticker.tick() => {
+								let now = tokio::time::Instant::now();
+								let elapsed = now - last_instant;
+								last_instant = now;
+								let current = decoder.stats();
+								Self::print_stats(&current, &prev, elapsed);
+								prev = current;
+							}
 						}
 					}
 				}
@@ -166,9 +180,9 @@ impl Publish {
 		}
 	}
 
-	fn print_stats(current: &import::Stats, prev: &import::Stats, interval: Duration) {
+	fn print_stats(current: &import::Stats, prev: &import::Stats, elapsed: Duration) {
 		let delta = current.delta(prev);
-		let secs = interval.as_secs_f64();
+		let secs = elapsed.as_secs_f64();
 
 		let fps = delta.frames as f64 / secs;
 		let kps = delta.keyframes as f64 / secs;

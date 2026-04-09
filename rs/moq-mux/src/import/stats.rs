@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 /// Cumulative import statistics. Use [`Stats::delta`] to compute per-interval metrics.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Stats {
 	pub frames: u64,
 	pub keyframes: u64,
@@ -25,6 +26,7 @@ impl Stats {
 ///
 /// Mean is ~0 for a perfectly real-time feed; higher means more jitter.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct StatsDrift {
 	pub count: u64,
 	pub sum: Duration,
@@ -44,7 +46,8 @@ impl StatsDrift {
 		if self.count == 0 {
 			return None;
 		}
-		Some(self.sum / self.count as u32)
+		let nanos = self.sum.as_nanos() / self.count as u128;
+		Some(Duration::from_nanos(nanos as u64))
 	}
 }
 
