@@ -167,10 +167,7 @@ impl Publish {
 			format!("{:.0} bps", bps)
 		};
 
-		eprintln!(
-			"frames: {:.0}/s  bitrate: {}  drift: {}",
-			fps, bitrate_str, drift_str
-		);
+		eprintln!("frames: {:.0}/s  bitrate: {}  drift: {}", fps, bitrate_str, drift_str);
 
 		*prev = current;
 	}
