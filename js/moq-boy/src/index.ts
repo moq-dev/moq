@@ -23,8 +23,8 @@ export interface GameConfig {
 	viewerPrefix: string;
 }
 
-/** A command queued before the command track is ready. */
-interface PendingCommand {
+/** A command with captured timestamps, published via the command signal. */
+interface Command {
 	cmd: Record<string, unknown>;
 	timestamps: { label: string; ts: number }[];
 }
@@ -88,8 +88,7 @@ export class Game {
 	readonly heldButtons = new Set<string>();
 
 	// Internal command publishing state.
-	#commandTrack: Moq.Track | undefined;
-	#pendingCommand: PendingCommand | undefined;
+	#command = new Moq.Signals.Signal<Command | undefined>(undefined);
 	#feedbackActive = new Moq.Signals.Signal(false);
 	#feedbackTimeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -181,14 +180,7 @@ export class Game {
 		clearTimeout(this.#feedbackTimeout);
 		this.#feedbackTimeout = setTimeout(() => this.#feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
-		const timestamps = this.#timestamps();
-
-		if (!this.#commandTrack) {
-			this.#pendingCommand = { cmd, timestamps };
-			return;
-		}
-
-		this.#commandTrack.writeJson({ ...cmd, timestamps });
+		this.#command.set({ cmd, timestamps: this.#timestamps() }, true);
 	}
 
 	/** Collect media timestamps at each pipeline stage for latency measurement. */
@@ -264,7 +256,7 @@ export class Game {
 			// Clear feedback state when deactivating.
 			this.#feedbackActive.set(false);
 			clearTimeout(this.#feedbackTimeout);
-			this.#pendingCommand = undefined;
+			this.#command.set(undefined);
 			return;
 		}
 
@@ -278,7 +270,6 @@ export class Game {
 		conn.publish(Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`), viewerBroadcast);
 		effect.cleanup(() => {
 			viewerBroadcast.close();
-			this.#commandTrack = undefined;
 			this.viewerId.set(undefined);
 		});
 
@@ -286,18 +277,20 @@ export class Game {
 			for (;;) {
 				const req = await Promise.race([effect.cancel, viewerBroadcast.requested()]);
 				if (!req) break;
+
 				if (req.track.name === "command") {
-					this.#commandTrack = req.track;
-					// Flush any pending command that triggered activation.
-					if (this.#pendingCommand) {
-						this.#commandTrack.writeJson({
-							...this.#pendingCommand.cmd,
-							timestamps: this.#pendingCommand.timestamps,
-						});
-						this.#pendingCommand = undefined;
-					}
+					effect.run(this.#runCommandTrack.bind(this, req.track));
 				}
 			}
 		});
+	}
+
+	#runCommandTrack(track: Moq.Track, effect: Moq.Signals.Effect) {
+		if (effect.get(track.state.closed)) return;
+
+		const command = effect.get(this.#command);
+		if (!command) return;
+
+		track.writeJson({ ...command.cmd, timestamps: command.timestamps });
 	}
 }
