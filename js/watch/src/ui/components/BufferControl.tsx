@@ -4,10 +4,10 @@ import type { BufferedRanges } from "../..";
 import useWatchUIContext from "../hooks/use-watch-ui";
 
 const MIN_RANGE = 0 as Moq.Time.Milli;
-const RANGE_STEP = 100 as Moq.Time.Milli;
+const RANGE_STEP = 10 as Moq.Time.Milli;
 
 type BufferControlProps = {
-	/** Maximum buffer range in milliseconds (default: 5000ms = 5s) */
+	/** Maximum buffer range in milliseconds (default: 4000ms = 4s) */
 	max?: Moq.Time.Milli;
 };
 
@@ -81,7 +81,7 @@ function drawRanges(
 
 export default function BufferControl(props: BufferControlProps) {
 	const context = useWatchUIContext();
-	const maxRange = (): Moq.Time.Milli => props.max ?? (5000 as Moq.Time.Milli);
+	const maxRange = (): Moq.Time.Milli => props.max ?? (4000 as Moq.Time.Milli);
 	const [isDragging, setIsDragging] = createSignal(false);
 	const [hasInteracted, setHasInteracted] = createSignal(false);
 
