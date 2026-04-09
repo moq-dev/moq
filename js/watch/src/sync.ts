@@ -68,8 +68,6 @@ export class Sync {
 	#runJitter(effect: Effect): void {
 		const latency = effect.get(this.latency);
 
-		console.log("runJitter", latency);
-
 		if (typeof latency === "number") {
 			// Fixed mode: latency value is the jitter.
 			this.#minRtt = undefined;
@@ -77,12 +75,9 @@ export class Sync {
 			return;
 		}
 
-		console.log(this.rtt)
-
 		// "real-time" mode: compute jitter from RTT.
 		if (this.rtt) {
 			const rtt = effect.get(this.rtt);
-			console.log("rtt", rtt);
 			if (rtt !== undefined) {
 				// Track minimum RTT as baseline, ignoring bufferbloat.
 				this.#minRtt = this.#minRtt !== undefined ? Math.min(this.#minRtt, rtt) : rtt;
