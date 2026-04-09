@@ -49,6 +49,9 @@ export class Connection implements Established {
 	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
 	readonly recvBandwidth?: Bandwidth;
 
+	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
+	readonly rtt?: Bandwidth;
+
 	/**
 	 * Creates a new Connection instance.
 	 * @param url - The URL of the connection
@@ -75,8 +78,13 @@ export class Connection implements Established {
 			this.recvBandwidth = createBandwidth();
 		}
 
+		// RTT requires PROBE with RTT field (Lite04+).
+		if (version !== Version.DRAFT_01 && version !== Version.DRAFT_02 && version !== Version.DRAFT_03) {
+			this.rtt = createBandwidth();
+		}
+
 		this.#publisher = new Publisher(this.#quic, this.#version);
-		this.#subscriber = new Subscriber(this.#quic, this.#version, this.recvBandwidth);
+		this.#subscriber = new Subscriber(this.#quic, this.#version, this.recvBandwidth, this.rtt);
 
 		this.#run();
 	}

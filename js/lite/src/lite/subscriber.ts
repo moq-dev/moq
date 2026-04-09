@@ -31,18 +31,23 @@ export class Subscriber {
 	// Recv bandwidth producer (Lite03+ only).
 	#recvBandwidth?: Bandwidth;
 
+	// RTT producer (Lite04+ only).
+	#rtt?: Bandwidth;
+
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
 	 * @param version - The protocol version
 	 * @param recvBandwidth - Optional bandwidth producer for PROBE
+	 * @param rtt - Optional RTT producer for PROBE
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, recvBandwidth?: Bandwidth) {
+	constructor(quic: WebTransport, version: Version, recvBandwidth?: Bandwidth, rtt?: Bandwidth) {
 		this.#quic = quic;
 		this.version = version;
 		this.#recvBandwidth = recvBandwidth;
+		this.#rtt = rtt;
 	}
 
 	/**
@@ -221,6 +226,9 @@ export class Subscriber {
 			const probe = await Probe.decodeMaybe(stream.reader, this.version);
 			if (!probe) break;
 			this.#recvBandwidth.set(probe.bitrate);
+			if (this.#rtt && probe.rtt !== undefined) {
+				this.#rtt.set(probe.rtt);
+			}
 		}
 	}
 

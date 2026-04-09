@@ -52,8 +52,17 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
+		// Flatten the RTT signal from the connection for the backend.
+		const rtt = new Signal<number | undefined>(undefined);
+		this.signals.run((effect) => {
+			const conn = effect.get(this.connection.established);
+			const rttSignal = conn?.rtt;
+			rtt.set(rttSignal ? effect.get(rttSignal) : undefined);
+		});
+
 		this.backend = new MultiBackend({
 			broadcast: this.broadcast,
+			rtt,
 		});
 		this.signals.cleanup(() => this.backend.close());
 
@@ -138,7 +147,8 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	#setLatencyNumber(value: string | null) {
-		this.backend.latency.set((value ? Number.parseFloat(value) : 100) as Time.Milli);
+		const parsed = value ? Number.parseFloat(value) : Number.NaN;
+		this.backend.latency.set((Number.isFinite(parsed) ? parsed : 100) as Time.Milli);
 	}
 
 	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {

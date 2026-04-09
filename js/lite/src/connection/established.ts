@@ -14,6 +14,9 @@ export interface Established {
 	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
 	readonly recvBandwidth?: Bandwidth;
 
+	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
+	readonly rtt?: Bandwidth;
+
 	announced(prefix?: Path.Valid): Announced;
 	publish(path: Path.Valid, broadcast: Broadcast): void;
 	consume(broadcast: Path.Valid): Broadcast;
