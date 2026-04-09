@@ -363,7 +363,6 @@ fn run_emulator(
 						buttons,
 						viewer_id,
 						timestamps,
-						received_at,
 					} => {
 						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
 
@@ -375,27 +374,18 @@ fn run_emulator(
 
 						breakdown.push(entry("encode", encode_ms));
 
-						// Compute latency for each viewer-reported timestamp in order.
-						let mut rendered_ts = None;
+						// Compute latency for each viewer-reported timestamp.
 						for t in &timestamps {
-							if let Some(latency) = elapsed.checked_sub(t.ts) {
-								breakdown.push(entry(&t.label, latency.as_millis() as u32));
-							}
-							if t.label == "rendered" {
-								rendered_ts = Some(t.ts);
-							}
+							let latency = elapsed.saturating_sub(t.ts);
+							breakdown.push(entry(&t.label, latency.as_millis() as u32));
 						}
 
-						// Input latency: when the command arrived at the server.
-						if let Some(rendered_ts) = rendered_ts {
-							let input_elapsed = received_at - start;
-							if let Some(latency) = input_elapsed.checked_sub(rendered_ts) {
-								breakdown.push(entry("input", latency.as_millis() as u32));
-							}
-							// Processed latency: when the command is applied to the emulator.
-							if let Some(latency) = elapsed.checked_sub(rendered_ts) {
-								breakdown.push(entry("processed", latency.as_millis() as u32));
-							}
+						// Input: gap between what the viewer sees and what the server
+						// is currently emulating. Uses the oldest viewer timestamp
+						// (the rendered frame the user reacted to).
+						if let Some(min_ts) = timestamps.iter().map(|t| t.ts).min() {
+							let latency = elapsed.saturating_sub(min_ts);
+							breakdown.push(entry("input", latency.as_millis() as u32));
 						}
 
 						viewer_latency.insert(viewer_id, breakdown);

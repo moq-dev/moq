@@ -7,7 +7,7 @@
 
 use anyhow::Context;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::emulator::Button;
 
@@ -51,8 +51,6 @@ pub enum Command {
 		viewer_id: String,
 		/// Ordered media timestamps at each pipeline stage.
 		timestamps: Vec<TimestampEntry>,
-		/// When this command was received by the server.
-		received_at: Instant,
 	},
 	Reset,
 	/// A viewer disconnected or went offline.
@@ -125,7 +123,6 @@ async fn handle_viewer_commands(
 							buttons,
 							viewer_id: viewer_id.to_string(),
 							timestamps,
-							received_at: Instant::now(),
 						})
 						.await;
 				}
