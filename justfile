@@ -10,6 +10,7 @@ mod cdn
 mod boy 'demo/boy'
 mod pub 'demo/pub'
 mod relay 'demo/relay'
+mod sub 'demo/sub'
 mod web 'demo/web'
 
 # Run the demo by default.

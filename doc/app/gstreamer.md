@@ -58,10 +58,10 @@ Use the `just` shortcut to publish a test video via GStreamer:
 
 ```bash
 # Publish Big Buck Bunny (downloads automatically)
-just pub gst-pub bbb
+just pub gst bbb
 
 # Publish to a remote relay
-just pub gst-pub bbb https://cdn.moq.dev/anon
+just pub gst bbb https://cdn.moq.dev/anon
 ```
 
 Or run `gst-launch-1.0` directly:
@@ -93,10 +93,10 @@ ffmpeg -i input.mp4 -c copy \
 
 ```bash
 # Subscribe and render to the screen
-just pub gst-sub bbb
+just sub gst bbb
 
 # Subscribe from a remote relay
-just pub gst-sub bbb https://cdn.moq.dev/anon
+just sub gst bbb https://cdn.moq.dev/anon
 ```
 
 Or directly:
@@ -131,8 +131,8 @@ Enable GStreamer debug output:
 
 ```bash
 # GStreamer debug (verbose)
-GST_DEBUG=*:4 just pub gst-pub bbb
+GST_DEBUG=*:4 just pub gst bbb
 
 # Rust logging
-RUST_LOG=debug just pub gst-pub bbb
+RUST_LOG=debug just pub gst bbb
 ```
