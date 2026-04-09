@@ -3,6 +3,7 @@ set fallback
 mod boy
 mod pub
 mod relay
+mod sub
 mod web
 
 # Run the web demo (default).

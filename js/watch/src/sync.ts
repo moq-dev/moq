@@ -47,7 +47,7 @@ export class Sync {
 	#late = new Map<string, { count: number; maxMs: number }>();
 
 	// RTT signal from the connection (PROBE or getStats).
-	#rtt?: Signal<number | undefined>;
+	rtt?: Signal<number | undefined>;
 
 	// Minimum RTT seen, used as the baseline for jitter calculation.
 	// Avoids inflating jitter due to bufferbloat.
@@ -58,7 +58,7 @@ export class Sync {
 	constructor(props?: SyncProps) {
 		this.latency = Signal.from(props?.latency ?? ("real-time" as Latency));
 		this.jitter = new Signal<Time.Milli>(FALLBACK_JITTER);
-		this.#rtt = props?.rtt;
+		this.rtt = props?.rtt;
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
 
@@ -79,8 +79,8 @@ export class Sync {
 		}
 
 		// "real-time" mode: compute jitter from RTT.
-		if (this.#rtt) {
-			const rtt = effect.get(this.#rtt);
+		if (this.rtt) {
+			const rtt = effect.get(this.rtt);
 			if (rtt !== undefined) {
 				// Track minimum RTT as baseline, ignoring bufferbloat.
 				this.#minRtt = this.#minRtt !== undefined ? Math.min(this.#minRtt, rtt) : rtt;
@@ -135,7 +135,7 @@ export class Sync {
 				if (entry) {
 					const prefix = label ? `sync[${label}]` : "sync";
 					const behind = Sync.#formatDuration(entry.maxMs);
-					console.warn(`${prefix}: ${entry.count} late frame(s), max ${behind} behind`);
+					console.debug(`${prefix}: ${entry.count} late frame(s), max ${behind} behind`);
 					this.#late.delete(label);
 				}
 			}
