@@ -14,9 +14,9 @@ function guardProbe(version: Version) {
 
 export class Probe {
 	bitrate: number;
-	rtt: number;
+	rtt?: number;
 
-	constructor(bitrate: number, rtt = 0) {
+	constructor(bitrate: number, rtt?: number) {
 		this.bitrate = bitrate;
 		this.rtt = rtt;
 	}
@@ -26,22 +26,26 @@ export class Probe {
 		switch (version) {
 			case Version.DRAFT_03:
 				break;
-			default:
-				// Lite04+: rtt field
-				await w.u53(this.rtt);
+			default: {
+				// 0 means unknown; round Some(0) up to 1.
+				const wire = this.rtt !== undefined ? Math.max(this.rtt, 1) : 0;
+				await w.u53(wire);
 				break;
+			}
 		}
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Probe> {
 		const bitrate = await r.u53();
-		let rtt = 0;
+		let rtt: number | undefined;
 		switch (version) {
 			case Version.DRAFT_03:
 				break;
-			default:
-				rtt = await r.u53();
+			default: {
+				const wire = await r.u53();
+				rtt = wire === 0 ? undefined : wire;
 				break;
+			}
 		}
 		return new Probe(bitrate, rtt);
 	}

@@ -172,7 +172,7 @@ export class Connection implements Established {
 		} else if (typ === StreamId.Probe) {
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Goaway) {
-			const msg = await Goaway.decode(stream.reader);
+			const msg = await Goaway.decode(stream.reader, this.#version);
 			console.info("received goaway:", msg.uri);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);

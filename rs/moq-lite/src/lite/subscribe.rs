@@ -137,7 +137,7 @@ impl Message for SubscribeOk {
 
 /// Sent by the subscriber to update subscription parameters.
 ///
-/// Draft03 only.
+/// Lite03+ only.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct SubscribeUpdate {
@@ -215,7 +215,7 @@ impl Message for SubscribeUpdate {
 /// The range `[start, end]` is inclusive on both ends. For example,
 /// `start = 5, end = 7` means groups 5, 6, and 7 were dropped.
 ///
-/// Draft03 only.
+/// Lite03+ only.
 #[derive(Clone, Debug)]
 pub struct SubscribeDrop {
 	/// The first absolute group sequence in the dropped range.

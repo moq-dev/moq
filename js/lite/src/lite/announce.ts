@@ -3,6 +3,8 @@ import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
 
+const MAX_HOPS = 256;
+
 export class Announce {
 	suffix: Path.Valid;
 	active: boolean;
@@ -46,12 +48,14 @@ export class Announce {
 				break;
 			case Version.DRAFT_03: {
 				const count = await r.u53();
+				if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
 				hops = new Array(count).fill(0);
 				break;
 			}
 			default: {
 				// Lite04+: hop count + individual hop IDs
 				const count = await r.u53();
+				if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
 				hops = [];
 				for (let i = 0; i < count; i++) {
 					hops.push(await r.u53());

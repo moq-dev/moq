@@ -9,7 +9,7 @@ use super::{Message, Version};
 
 /// Sent by the subscriber to fetch a specific group from a track.
 ///
-/// Draft03 only.
+/// Lite03+ only.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct Fetch<'a> {

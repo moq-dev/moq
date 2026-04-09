@@ -28,12 +28,18 @@ impl Message for Announce<'_> {
 		let hops = match version {
 			Version::Lite01 | Version::Lite02 => Vec::new(),
 			Version::Lite03 => {
-				let count = u64::decode(r, version)?;
-				vec![0; count.min(1024) as usize]
+				let count = u64::decode(r, version)? as usize;
+				if count > 256 {
+					return Err(DecodeError::BoundsExceeded);
+				}
+				vec![0; count]
 			}
 			_ => {
-				let count = u64::decode(r, version)?;
-				let mut ids = Vec::with_capacity(count.min(1024) as usize);
+				let count = u64::decode(r, version)? as usize;
+				if count > 256 {
+					return Err(DecodeError::BoundsExceeded);
+				}
+				let mut ids = Vec::with_capacity(count);
 				for _ in 0..count {
 					ids.push(u64::decode(r, version)?);
 				}
