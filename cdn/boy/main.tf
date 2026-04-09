@@ -34,11 +34,11 @@ resource "local_file" "boy_service" {
   filename = "${path.module}/gen/boy-${each.key}.service"
 }
 
-# Boy instance (beefier than pub for concurrent emulation + encoding)
+# Boy instance for concurrent emulation + encoding
 resource "linode_instance" "boy" {
   label  = "boy-moq"
   region = "us-central" # Dallas, TX
-  type   = "g6-standard-2"
+  type   = "g6-standard-1"
 
   image           = "linode/ubuntu25.10"
   root_pass       = random_password.boy_root.result

@@ -7,24 +7,17 @@ mod boy
 default:
   just --list
 
-# Initialize tofu providers and backend for all modules
-init:
-	just common init
-	just relay init
-	just pub init
-	just boy init
-
 # Deploy all infrastructure and services
 deploy:
-	just common deploy
-	just relay deploy-infra
-	just pub deploy-infra
-	just boy deploy-infra
+	just relay deploy
+	just pub deploy
+	just boy deploy
 
 # Pin relay and pub to their latest release tags
 pin:
 	just relay pin
 	just pub pin
+	just boy pin
 
 # Run health checks against all relay nodes
 health:
@@ -36,8 +29,8 @@ health-notify webhook:
 
 # Check tofu formatting
 check:
-	just common check
+	tofu fmt -check -recursive
 
 # Fix tofu formatting
 fix:
-	just common fix
+	tofu fmt -recursive

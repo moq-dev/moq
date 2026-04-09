@@ -1,16 +1,4 @@
-# List all of the available commands.
+# Apply infrastructure changes (runs init first)
 default:
-  just --list
-
-# Initialize tofu providers and backend
-init:
 	tofu init
-
-deploy:
 	tofu apply
-
-check:
-	tofu fmt -check -recursive
-
-fix:
-	tofu fmt -recursive
