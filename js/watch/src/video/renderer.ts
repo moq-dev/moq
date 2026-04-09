@@ -1,3 +1,4 @@
+import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
@@ -16,8 +17,11 @@ export class Renderer {
 	// Whether the video is paused.
 	paused: Signal<boolean>;
 
-	// Cache the last rendered frame to keep it visible when paused
-	#lastFrame?: VideoFrame;
+	// The most recently rendered frame, updated after each rAF paint.
+	readonly frame = new Signal<VideoFrame | undefined>(undefined);
+
+	// The media timestamp of the most recently rendered frame.
+	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
 
 	#ctx = new Signal<CanvasRenderingContext2D | undefined>(undefined);
 	#visible = new Signal(false);
@@ -96,7 +100,7 @@ export class Renderer {
 		}
 
 		// When paused, fetch a single preview frame then disable.
-		const frame = effect.get(this.decoder.frame);
+		const frame = effect.get(this.frame);
 		this.decoder.enabled.set(!frame);
 	}
 
@@ -104,29 +108,35 @@ export class Renderer {
 		const ctx = effect.get(this.#ctx);
 		if (!ctx) return;
 
-		let frame: VideoFrame | undefined;
-
 		const paused = effect.get(this.paused);
-		if (!paused || !this.#lastFrame) {
-			frame = effect.get(this.decoder.frame);
-			this.#lastFrame?.close();
-			this.#lastFrame = frame?.clone();
-		} else {
-			frame = this.#lastFrame?.clone();
+
+		// Read new frames from the decoder when not paused.
+		let decoded: VideoFrame | undefined;
+		if (!paused) {
+			decoded = effect.get(this.decoder.frame);
 		}
 
 		// Request a callback to render the frame based on the monitor's refresh rate.
 		// Always render, even when paused (to show last frame)
 		let animate: number | undefined = requestAnimationFrame(() => {
+			const frame = decoded ?? this.frame.peek();
 			this.#render(ctx, frame);
+
+			// Update signals to reflect what's actually on screen.
+			if (decoded) {
+				this.frame.update((old) => {
+					old?.close();
+					return decoded.clone();
+				});
+				this.timestamp.set(Time.Milli.fromMicro(decoded.timestamp as Time.Micro));
+			}
+
 			animate = undefined;
 		});
 
-		// Clean up the frame and any pending animation request.
+		// Clean up any pending animation request.
 		effect.cleanup(() => {
-			// NOTE: Closing this frame is the only reason we don't use `effect.animate`.
-			// It's slighly more efficient to use one .cleanup() callback instead of two.
-			frame?.close();
+			decoded?.close();
 			if (animate) cancelAnimationFrame(animate);
 		});
 	}
@@ -157,9 +167,10 @@ export class Renderer {
 
 	// Close the track and all associated resources.
 	close() {
-		// Clean up cached frame
-		this.#lastFrame?.close();
-		this.#lastFrame = undefined;
+		this.frame.update((old) => {
+			old?.close();
+			return undefined;
+		});
 		this.#signals.close();
 	}
 }

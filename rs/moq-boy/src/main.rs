@@ -189,12 +189,18 @@ impl Session {
 	fn publish_status(
 		&self,
 		emu: &emulator::Emulator,
-		viewer_latency: &std::collections::HashMap<String, f64>,
+		viewer_latency: &std::collections::HashMap<String, Duration>,
 		game_stats: &stats::Stats,
 		publisher: &mut status::StatusPublisher,
 	) {
 		let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
-		let latency_map: BTreeMap<String, u32> = viewer_latency.iter().map(|(k, ms)| (k.clone(), *ms as u32)).collect();
+		let latency_map: BTreeMap<String, u32> = viewer_latency
+			.iter()
+			.map(|(k, d)| {
+				let ms = u32::try_from(d.as_millis()).unwrap_or(u32::MAX);
+				(k.clone(), ms)
+			})
+			.collect();
 
 		let status = status::Status {
 			buttons: held,
@@ -315,15 +321,23 @@ fn run_emulator(
 	let mut emu = emulator::Emulator::new(rom_path)?;
 	let start = Instant::now();
 
-	// Bootstrap: encode one frame so the codec config (SPS/PPS) appears
-	// in the catalog before any viewer connects.
-	session.video_encoder.bootstrap(&mut emu, start)?;
+	// Run a single tick so the encoders get initial data and publish
+	// codec config, even before any viewer subscribes.
+	emu.tick();
+	let elapsed = start.elapsed();
+	let rgba = Bytes::from(emu.framebuffer());
+	let ts = hang::container::Timestamp::from_micros(elapsed.as_micros() as u64).context("timestamp overflow")?;
+	session.video_encoder.try_frame(rgba, ts);
+	let samples = emu.audio_samples();
+	if !samples.is_empty() {
+		audio_encoder.push_samples(&samples, elapsed)?;
+	}
 
 	// Game Boy runs at exactly 59.727 Hz (4194304 Hz CPU / 70224 cycles per frame).
 	// 1/59.727 ≈ 16742 microseconds per frame.
 	let frame_duration = Duration::from_micros(16_742);
 	let mut next_frame = Instant::now();
-	let mut viewer_latency: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+	let mut viewer_latency: std::collections::HashMap<String, Duration> = std::collections::HashMap::new();
 	let mut game_stats = stats::Stats::new();
 	let mut was_audio_active = false;
 
@@ -342,6 +356,31 @@ fn run_emulator(
 			audio_encoder.reset_epoch();
 		}
 
+		// Drain pending viewer commands before sleeping, so input that
+		// arrived during the previous frame's work is applied immediately.
+		{
+			let elapsed = start.elapsed();
+			while let Ok(cmd) = cmd_rx.try_recv() {
+				match cmd {
+					input::Command::Buttons { buttons, viewer_id, ts } => {
+						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
+						if let Some(latency) = elapsed.checked_sub(ts) {
+							viewer_latency.insert(viewer_id, latency);
+						}
+					}
+					input::Command::ViewerLeft { viewer_id } => {
+						emu.viewer_left(&viewer_id);
+						viewer_latency.remove(&viewer_id);
+					}
+					input::Command::Reset => {
+						tracing::info!("resetting emulator (viewer request)");
+						emu.reset()?;
+						game_stats = stats::Stats::new();
+					}
+				}
+			}
+		}
+
 		// Wait for next frame.
 		let now = Instant::now();
 		if now < next_frame {
@@ -352,38 +391,11 @@ fn run_emulator(
 		// Capture a single reference timestamp for this tick.
 		// Used for both video and audio PTS so they stay aligned.
 		let elapsed = start.elapsed();
-		let current_ts_ms = elapsed.as_secs_f64() * 1000.0;
 
 		// Accumulate stats for this frame.
 		let is_video = session.video_active.load(Ordering::Relaxed);
 		let is_audio = session.audio_active.load(Ordering::Relaxed);
 		game_stats.tick(is_video, is_audio);
-
-		// Drain pending viewer commands.
-		while let Ok(cmd) = cmd_rx.try_recv() {
-			match cmd {
-				input::Command::Buttons {
-					buttons,
-					viewer_id,
-					ts_ms,
-				} => {
-					emu.set_buttons(&viewer_id, buttons.into_iter().collect());
-					let latency = current_ts_ms - ts_ms;
-					if latency >= 0.0 {
-						viewer_latency.insert(viewer_id, latency);
-					}
-				}
-				input::Command::ViewerLeft { viewer_id } => {
-					emu.viewer_left(&viewer_id);
-					viewer_latency.remove(&viewer_id);
-				}
-				input::Command::Reset => {
-					tracing::info!("resetting emulator (viewer request)");
-					emu.reset()?;
-					game_stats = stats::Stats::new();
-				}
-			}
-		}
 
 		// Tick the emulator.
 		emu.tick();

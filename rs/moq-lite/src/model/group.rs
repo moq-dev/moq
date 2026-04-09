@@ -7,6 +7,7 @@
 //! The reader can be cloned, in which case each reader receives a copy of each frame. (fanout)
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
+use std::collections::VecDeque;
 use std::task::{Poll, ready};
 
 use bytes::Bytes;
@@ -14,6 +15,12 @@ use bytes::Bytes;
 use crate::{Error, Result};
 
 use super::{Frame, FrameConsumer, FrameProducer};
+
+/// Maximum total size of frames cached in a group before old frames are evicted.
+const MAX_GROUP_CACHE: u64 = 32 * 1024 * 1024; // 32 MB
+
+/// Maximum number of frames cached in a group before old frames are evicted.
+const MAX_GROUP_FRAMES: usize = 1024;
 
 /// A group contains a sequence number because they can arrive out of order.
 ///
@@ -62,9 +69,15 @@ impl From<u16> for Group {
 
 #[derive(Default)]
 struct GroupState {
-	// The frames that have been written thus far.
-	// We store producers so consumers can be created on-demand.
-	frames: Vec<FrameProducer>,
+	// The frames currently cached in the group.
+	// Evicted frames are popped from the front; `offset` tracks how many.
+	frames: VecDeque<FrameProducer>,
+
+	// The number of frames evicted from the front of the group.
+	offset: usize,
+
+	// The total size (in bytes) of all cached frames.
+	cache: u64,
 
 	// Whether the group has been finalized (no more frames).
 	fin: bool,
@@ -75,7 +88,9 @@ struct GroupState {
 
 impl GroupState {
 	fn poll_get_frame(&self, index: usize) -> Poll<Result<Option<FrameConsumer>>> {
-		if let Some(frame) = self.frames.get(index) {
+		if index < self.offset {
+			Poll::Ready(Err(Error::CacheFull))
+		} else if let Some(frame) = self.frames.get(index - self.offset) {
 			Poll::Ready(Ok(Some(frame.consume())))
 		} else if self.fin {
 			Poll::Ready(Ok(None))
@@ -88,11 +103,22 @@ impl GroupState {
 
 	fn poll_finished(&self) -> Poll<Result<u64>> {
 		if self.fin {
-			Poll::Ready(Ok(self.frames.len() as u64))
+			Poll::Ready(Ok((self.offset + self.frames.len()) as u64))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
 		} else {
 			Poll::Pending
+		}
+	}
+
+	/// Evict frames from the front of the group until within both limits.
+	fn evict(&mut self) {
+		while self.cache > MAX_GROUP_CACHE || self.frames.len() > MAX_GROUP_FRAMES {
+			let Some(frame) = self.frames.pop_front() else {
+				break;
+			};
+			self.cache -= frame.info.size;
+			self.offset += 1;
 		}
 	}
 }
@@ -151,13 +177,16 @@ impl GroupProducer {
 		if state.fin {
 			return Err(Error::Closed);
 		}
-		state.frames.push(frame);
+		state.cache += frame.info.size;
+		state.frames.push_back(frame);
+		state.evict();
 		Ok(())
 	}
 
 	/// Return the number of frames written so far.
 	pub fn frame_count(&self) -> usize {
-		self.state.read().frames.len()
+		let state = self.state.read();
+		state.offset + state.frames.len()
 	}
 
 	/// Mark the group as complete; no more frames will be written.
@@ -423,6 +452,77 @@ mod test {
 
 		let frame = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(frame.info.size, 4);
+	}
+
+	#[test]
+	fn eviction_drops_old_frames() {
+		let mut producer = Group { sequence: 0 }.produce();
+
+		// Write frames that total more than MAX_GROUP_CACHE.
+		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
+		producer.write_frame(big.clone()).unwrap();
+		producer.write_frame(big).unwrap();
+
+		// The first frame should have been evicted.
+		let consumer = producer.consume();
+		let result = consumer.get_frame(0).now_or_never().unwrap();
+		assert!(matches!(result, Err(crate::Error::CacheFull)));
+
+		// The second frame should still be available.
+		let f1 = consumer.get_frame(1).now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(f1.info.size, MAX_GROUP_CACHE);
+	}
+
+	#[test]
+	fn no_eviction_under_limit() {
+		let mut producer = Group { sequence: 0 }.produce();
+		producer.write_frame(Bytes::from_static(b"small")).unwrap();
+		producer.write_frame(Bytes::from_static(b"frames")).unwrap();
+		producer.finish().unwrap();
+
+		let consumer = producer.consume();
+		let f0 = consumer.get_frame(0).now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(f0.info.size, 5);
+		let f1 = consumer.get_frame(1).now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(f1.info.size, 6);
+	}
+
+	#[test]
+	fn eviction_by_frame_count() {
+		let mut producer = Group { sequence: 0 }.produce();
+
+		// Write more than MAX_GROUP_FRAMES frames.
+		for _ in 0..=MAX_GROUP_FRAMES {
+			producer.write_frame(Bytes::from_static(b"x")).unwrap();
+		}
+
+		// The first frame should have been evicted.
+		let consumer = producer.consume();
+		let result = consumer.get_frame(0).now_or_never().unwrap();
+		assert!(matches!(result, Err(crate::Error::CacheFull)));
+
+		// The last frame should still be available.
+		let f = consumer
+			.get_frame(MAX_GROUP_FRAMES)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(f.info.size, 1);
+	}
+
+	#[test]
+	fn next_frame_returns_cache_full_on_tombstone() {
+		let mut producer = Group { sequence: 0 }.produce();
+
+		let big = Bytes::from(vec![0u8; MAX_GROUP_CACHE as usize]);
+		producer.write_frame(big.clone()).unwrap();
+		producer.write_frame(big).unwrap();
+
+		let mut consumer = producer.consume();
+		// First frame was evicted, next_frame should return CacheFull.
+		let result = consumer.next_frame().now_or_never().unwrap();
+		assert!(matches!(result, Err(crate::Error::CacheFull)));
 	}
 
 	#[test]

@@ -15,7 +15,8 @@ ExecStart=/bin/bash -c '/var/lib/moq/pkg/bin/moq-boy \
   --rom "/var/lib/moq/${rom}" \
   --name "${name}" \
   --prefix-game "boy" \
-  --prefix-viewer "viewer/boy"'
+  --prefix-viewer "viewer/boy" \
+  --location "${location}"'
 
 # Restart with exponential backoff
 Restart=always

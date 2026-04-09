@@ -51,7 +51,7 @@ gb-run:
 
 # Start a Game Boy emulator publisher.
 start rom url='http://localhost:4443/anon':
-	cargo run --bin moq-boy -- --url "{{url}}" --rom "{{rom}}"
+	cargo run --bin moq-boy -- --url "{{url}}" --rom "{{rom}}" --location localhost
 
 # Host the web server
 web url='http://localhost:4443/anon':
