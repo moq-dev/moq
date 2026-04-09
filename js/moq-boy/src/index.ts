@@ -31,9 +31,6 @@ const GB_WIDTH = 160;
 const GB_HEIGHT = 144;
 const GB_PIXELS = GB_WIDTH * GB_HEIGHT;
 
-// Default jitter buffer in milliseconds.
-const DEFAULT_JITTER = 50 as Moq.Time.Milli;
-
 /** Key mapping from keyboard keys to Game Boy buttons. */
 export const KEY_MAP: Record<string, string> = {
 	ArrowUp: "up",
@@ -66,7 +63,7 @@ export class Game {
 	// Reactive state exposed to UI.
 	readonly hovered = new Moq.Signals.Signal(false);
 	readonly active = new Moq.Signals.Signal(false);
-	readonly jitter = new Moq.Signals.Signal<Watch.Latency>(DEFAULT_JITTER);
+	readonly jitter = new Moq.Signals.Signal<Watch.Latency>("real-time");
 	readonly userMuted = new Moq.Signals.Signal(false);
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
 	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
