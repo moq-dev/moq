@@ -18,15 +18,22 @@ The GStreamer plugin provides elements for:
 - **moqsrc** - Subscribe to MoQ broadcasts
 - **moqsink** - Publish to MoQ relays
 
-## Repository
+## Setup
 
-The plugin is maintained in a separate repository:
+The plugin lives in the monorepo at `rs/moq-gst` but is not built by default since it requires GStreamer development libraries.
 
-**GitHub:** [moq-dev/gstreamer](https://github.com/moq-dev/gstreamer)
+If you're using Nix, GStreamer is included in the dev shell automatically. Otherwise, install GStreamer and its development packages manually:
+
+- **macOS:** `brew install gstreamer`
+- **Debian/Ubuntu:** `apt install libgstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad`
+
+Then build the plugin:
+
+```bash
+cargo build -p moq-gst
+```
 
 ## Usage
-
-See the [Justfile](https://github.com/moq-dev/gstreamer/blob/main/justfile) for more complex and up-to-date examples.
 
 ```bash
 gst-launch-1.0 videotestsrc ! x264enc ! isofmp4mux name=mux chunk-duration=1 fragment-duration=1 ! moqsink url=https://cdn.moq.dev/anon broadcast=test

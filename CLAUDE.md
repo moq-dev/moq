@@ -51,6 +51,7 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   hang/              # Media encoding/streaming (catalog/container format)
   libmoq/            # C bindings (staticlib)
   moq-boy/           # MoQ Boy emulator publisher (binary: moq-boy)
+  moq-gst/           # GStreamer plugin (moqsink/moqsrc elements)
 
 /js/                  # TypeScript/JavaScript packages
   lite/              # Core protocol for browsers (published as @moq/lite)
