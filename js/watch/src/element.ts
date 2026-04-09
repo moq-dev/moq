@@ -3,7 +3,7 @@ import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
 import { Broadcast } from "./broadcast";
-import { Sync } from "./sync";
+import { type JitterMode, Sync } from "./sync";
 
 const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "jitter"] as const;
 type Observed = (typeof OBSERVED)[number];
@@ -114,8 +114,8 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			const jitter = Math.floor(effect.get(this.backend.jitter));
-			this.setAttribute("jitter", jitter.toString());
+			const jitter = effect.get(this.backend.jitter);
+			this.setAttribute("jitter", typeof jitter === "number" ? Math.floor(jitter).toString() : jitter);
 		});
 	}
 
@@ -151,7 +151,11 @@ export default class MoqWatch extends HTMLElement {
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
 		} else if (name === "jitter") {
-			this.backend.jitter.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
+			if (!newValue || newValue === "real-time") {
+				this.backend.jitter.set("real-time");
+			} else {
+				this.backend.jitter.set(Number.parseFloat(newValue) as Time.Milli);
+			}
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -206,12 +210,12 @@ export default class MoqWatch extends HTMLElement {
 		this.broadcast.reload.set(value);
 	}
 
-	get jitter(): Time.Milli {
+	get jitter(): JitterMode {
 		return this.backend.jitter.peek();
 	}
 
-	set jitter(value: number) {
-		this.backend.jitter.set(value as Time.Milli);
+	set jitter(value: number | "real-time") {
+		this.backend.jitter.set(typeof value === "number" ? (value as Time.Milli) : value);
 	}
 }
 

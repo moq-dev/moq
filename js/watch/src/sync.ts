@@ -1,8 +1,15 @@
 import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 
+/** Jitter mode: a fixed number of milliseconds, or `"real-time"` for automatic RTT-based jitter. */
+export type JitterMode = Time.Milli | "real-time";
+
+const MIN_JITTER = 10 as Time.Milli;
+const FALLBACK_JITTER = 100 as Time.Milli;
+
 export interface SyncProps {
-	jitter?: Time.Milli | Signal<Time.Milli>;
+	jitter?: JitterMode | Signal<JitterMode>;
+	rtt?: Signal<number | undefined>;
 	audio?: Time.Milli | Signal<Time.Milli | undefined>;
 	video?: Time.Milli | Signal<Time.Milli | undefined>;
 }
@@ -10,12 +17,11 @@ export interface SyncProps {
 export class Sync {
 	// The earliest time we've received a frame, relative to its timestamp.
 	// This will keep being updated as we catch up to the live playhead then will be relatively static.
-	// TODO Update this when RTT changes
 	#reference = new Signal<Time.Milli | undefined>(undefined);
 	readonly reference: Signal<Time.Milli | undefined> = this.#reference;
 
-	// The minimum buffer size, to account for network jitter.
-	jitter: Signal<Time.Milli>;
+	// The jitter mode: a fixed number or "real-time" for dynamic RTT-based jitter.
+	jitter: Signal<JitterMode>;
 
 	// Any additional delay required for audio or video.
 	audio: Signal<Time.Milli | undefined>;
@@ -32,20 +38,80 @@ export class Sync {
 	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
 	#late = new Map<string, { count: number; maxMs: number }>();
 
+	// RTT signal from the connection (PROBE).
+	#rtt?: Signal<number | undefined>;
+
+	// EWMA state for RTT smoothing (RFC 9002 Section 5.3).
+	#smoothedRtt: number | undefined;
+	#rttVar: number | undefined;
+
+	// The computed jitter value, always a number.
+	#computedJitter = new Signal<Time.Milli>(FALLBACK_JITTER);
+	readonly computedJitter: Signal<Time.Milli> = this.#computedJitter;
+
 	signals = new Effect();
 
 	constructor(props?: SyncProps) {
-		this.jitter = Signal.from(props?.jitter ?? (100 as Time.Milli));
+		this.jitter = Signal.from(props?.jitter ?? ("real-time" as JitterMode));
+		this.#rtt = props?.rtt;
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
 
 		this.#update = Promise.withResolvers();
 
+		this.signals.run(this.#runJitter.bind(this));
 		this.signals.run(this.#runLatency.bind(this));
 	}
 
+	#runJitter(effect: Effect): void {
+		const mode = effect.get(this.jitter);
+
+		if (typeof mode === "number") {
+			this.#smoothedRtt = undefined;
+			this.#rttVar = undefined;
+			this.#computedJitter.set(mode);
+			return;
+		}
+
+		// "real-time" mode: compute jitter from RTT.
+		if (this.#rtt) {
+			const rtt = effect.get(this.#rtt);
+			if (rtt !== undefined) {
+				const prev = this.#smoothedRtt;
+				const { smoothed, variation } = this.#updateRtt(rtt);
+
+				const jitter = Math.max(MIN_JITTER, smoothed / 2 + 4 * variation) as Time.Milli;
+				this.#computedJitter.set(jitter);
+
+				// Reset the reference when RTT drops so we re-anchor to the lower baseline.
+				if (prev !== undefined && smoothed < prev * 0.8) {
+					this.#reference.set(undefined);
+				}
+
+				return;
+			}
+		}
+
+		// No RTT available: fall back to static default.
+		this.#smoothedRtt = undefined;
+		this.#rttVar = undefined;
+		this.#computedJitter.set(FALLBACK_JITTER);
+	}
+
+	// RFC 9002 Section 5.3 EWMA update. Returns the updated values.
+	#updateRtt(sample: number): { smoothed: number; variation: number } {
+		if (this.#smoothedRtt === undefined || this.#rttVar === undefined) {
+			this.#smoothedRtt = sample;
+			this.#rttVar = sample / 2;
+		} else {
+			this.#rttVar = 0.75 * this.#rttVar + 0.25 * Math.abs(this.#smoothedRtt - sample);
+			this.#smoothedRtt = 0.875 * this.#smoothedRtt + 0.125 * sample;
+		}
+		return { smoothed: this.#smoothedRtt, variation: this.#rttVar };
+	}
+
 	#runLatency(effect: Effect): void {
-		const jitter = effect.get(this.jitter);
+		const jitter = effect.get(this.#computedJitter);
 		const video = effect.get(this.video) ?? Time.Milli.zero;
 		const audio = effect.get(this.audio) ?? Time.Milli.zero;
 

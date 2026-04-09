@@ -3,7 +3,7 @@ import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
 import { Muxer } from "./mse";
-import { Sync } from "./sync";
+import { type JitterMode, Sync } from "./sync";
 import * as Video from "./video";
 
 // Serializable representation of TimeRanges
@@ -36,16 +36,22 @@ export interface Backend {
 	// Audio specific signals.
 	audio?: Audio.Backend;
 
-	// The jitter in milliseconds required for smooth playback.
-	jitter: Signal<Moq.Time.Milli>;
+	// The jitter mode: a fixed number of milliseconds, or "real-time" for dynamic RTT-based jitter.
+	jitter: Signal<JitterMode>;
+
+	// The computed jitter in milliseconds (resolved from mode + RTT).
+	computedJitter: Signal<Moq.Time.Milli>;
 }
 
 export interface MultiBackendProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
-	// Additional jitter in milliseconds on top of catalog jitter.
-	jitter?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
+	// Jitter mode: fixed milliseconds or "real-time" for dynamic RTT-based jitter.
+	jitter?: JitterMode | Signal<JitterMode>;
+
+	// RTT signal from the connection (PROBE), used for dynamic jitter in "real-time" mode.
+	rtt?: Signal<number | undefined>;
 
 	paused?: boolean | Signal<boolean>;
 }
@@ -99,7 +105,8 @@ class AudioBackend implements Audio.Backend {
 export class MultiBackend implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;
-	jitter: Signal<Moq.Time.Milli>;
+	jitter: Signal<JitterMode>;
+	computedJitter: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
 	video: VideoBackend;
@@ -116,8 +123,9 @@ export class MultiBackend implements Backend {
 	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
-		this.jitter = Signal.from(props?.jitter ?? (100 as Moq.Time.Milli));
-		this.#sync = new Sync({ jitter: this.jitter });
+		this.jitter = Signal.from(props?.jitter ?? ("real-time" as JitterMode));
+		this.#sync = new Sync({ jitter: this.jitter, rtt: props?.rtt });
+		this.computedJitter = this.#sync.computedJitter;
 
 		this.#videoSource = new Video.Source(this.#sync, {
 			broadcast: this.broadcast,
