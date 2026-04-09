@@ -114,7 +114,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			if should_send {
-				stream.writer.encode(&lite::Probe { bitrate, rtt: None }).await?;
+				let rtt = session.stats().rtt().map(|d| d.as_millis() as u64);
+				stream.writer.encode(&lite::Probe { bitrate, rtt }).await?;
 				last_sent = Some((bitrate, tokio::time::Instant::now()));
 			}
 		}
