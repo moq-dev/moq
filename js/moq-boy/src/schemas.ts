@@ -8,13 +8,16 @@ export const GameStatsSchema = z.object({
 	wall_secs: z.number(),
 });
 
-/** Per-viewer latency breakdown (key → milliseconds), sorted by value for display. */
-export const ViewerLatencySchema = z.record(z.string(), z.number());
+/** A single latency component measurement. */
+export const LatencyEntrySchema = z.object({
+	label: z.string(),
+	ms: z.number(),
+});
 
 /** Per-frame status published by the emulator on the "status" track. */
 export const GameStatusSchema = z.object({
 	buttons: z.array(z.string()),
-	latency: z.record(z.string(), ViewerLatencySchema),
+	latency: z.record(z.string(), z.array(LatencyEntrySchema)),
 	location: z.optional(z.string()),
 	stats: z.optional(GameStatsSchema),
 });

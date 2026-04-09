@@ -13,9 +13,7 @@ export default function StatsPanel() {
 	const latencyEntries = () => {
 		const id = ctx.viewerId();
 		if (!id) return [];
-		const breakdown = ctx.status()?.latency?.[id];
-		if (!breakdown) return [];
-		return Object.entries(breakdown).sort(([, a], [, b]) => a - b);
+		return ctx.status()?.latency?.[id] ?? [];
 	};
 
 	const pct = (value: number) => {
@@ -66,10 +64,10 @@ export default function StatsPanel() {
 				<div class="boy__latency-list">
 					<div class="boy__latency-header">Latency ({playerCount()} players)</div>
 					<For each={latencyEntries()}>
-						{([key, ms]) => (
+						{(entry) => (
 							<div class="boy__latency-entry">
-								<span>{key}</span>
-								<span>{ms}ms</span>
+								<span>{entry.label}</span>
+								<span>{entry.ms}ms</span>
 							</div>
 						)}
 					</For>
