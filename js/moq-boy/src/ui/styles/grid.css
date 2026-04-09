@@ -23,6 +23,7 @@
 .boy__grid {
 	display: flex;
 	flex-wrap: wrap;
+	justify-content: center;
 	gap: var(--spacing-16);
 	padding: var(--spacing-16);
 }

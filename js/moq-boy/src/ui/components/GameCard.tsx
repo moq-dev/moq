@@ -27,9 +27,11 @@ function GameCardInner() {
 		game.videoRenderer.canvas.set(canvasRef);
 	});
 
-	// Keyboard input.
+	// Keyboard input — preventDefault when expanded or hovered.
+	const isActive = () => game.expanded.peek() === game.sessionId || game.hovered.peek();
+
 	const onKeyDown = (e: KeyboardEvent) => {
-		if (!game.active.peek()) return;
+		if (!isActive()) return;
 		if (e.repeat) return;
 
 		const button = KEY_MAP[e.key];
@@ -44,7 +46,7 @@ function GameCardInner() {
 	};
 
 	const onKeyUp = (e: KeyboardEvent) => {
-		if (!game.active.peek()) return;
+		if (!isActive()) return;
 		const button = KEY_MAP[e.key];
 		if (button) {
 			game.heldButtons.delete(button);
@@ -94,12 +96,12 @@ function GameCardInner() {
 				ref={canvasRef}
 				class="boy__video"
 				tabIndex={0}
-				onClick={() => game.toggleExpand()}
+				onClick={() => game.expanded.set(game.sessionId)}
 				onKeyDown={(e) => {
 					if (e.key === " ") {
 						e.preventDefault();
 						e.stopPropagation();
-						game.toggleExpand();
+						game.expanded.set(game.sessionId);
 					}
 				}}
 			/>

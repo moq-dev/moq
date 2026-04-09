@@ -8,7 +8,7 @@ export default function Controls() {
 	const game = ctx.game;
 
 	const jitter = createAccessor(game.jitter);
-	const [userMuted, setUserMuted] = createSignal(game.userMuted.peek());
+	const [userMuted, setUserMuted] = createSignal(true);
 
 	const toggleMute = (e: MouseEvent) => {
 		e.stopPropagation();

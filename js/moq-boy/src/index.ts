@@ -67,7 +67,7 @@ export class Game {
 	readonly hovered = new Moq.Signals.Signal(false);
 	readonly active = new Moq.Signals.Signal(false);
 	readonly jitter = new Moq.Signals.Signal<Moq.Time.Milli>(DEFAULT_JITTER);
-	readonly userMuted = new Moq.Signals.Signal(false);
+	readonly userMuted = new Moq.Signals.Signal(true);
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
 	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
 
@@ -152,11 +152,6 @@ export class Game {
 
 		// Command publishing.
 		this.#signals.run(this.#runCommands.bind(this, connection));
-	}
-
-	/** Toggle this game's expanded state. */
-	toggleExpand() {
-		this.expanded.update((old) => (old === this.sessionId ? undefined : this.sessionId));
 	}
 
 	/** Send a button state update. */
