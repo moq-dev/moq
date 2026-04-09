@@ -183,7 +183,7 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 | ------- | ------------- | ----------- |
 
 ### Announce
-A subscriber can open a Announce Stream to discover broadcasts matching a prefix.
+A subscriber can open an Announce Stream to discover broadcasts matching a prefix.
 
 The subscriber creates the stream with a ANNOUNCE_INTEREST message.
 The publisher replies with ANNOUNCE messages for any matching broadcasts and any future changes.
@@ -658,10 +658,10 @@ A generic library or relay MUST NOT inspect or modify the contents unless otherw
 # Appendix A: Changelog
 
 ## moq-lite-04
-- ANNOUNCE `Hops` count replaced with explicit `Hop ID` list for loop detection.
-- Added `Exclude Hop` to ANNOUNCE_PLEASE for relay loop avoidance.
-- Added GOAWAY stream for graceful session shutdown and migration.
 - Renamed ANNOUNCE_PLEASE to ANNOUNCE_INTEREST.
+- ANNOUNCE `Hops` count replaced with explicit `Hop ID` list for loop detection.
+- Added `Exclude Hop` to ANNOUNCE_INTEREST for relay loop avoidance.
+- Added GOAWAY stream for graceful session shutdown and migration.
 - Added RTT to PROBE message. Bitrate and RTT use 0 for unknown.
 
 ## moq-lite-03
