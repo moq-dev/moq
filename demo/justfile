@@ -18,7 +18,7 @@ default:
 wait url="http://localhost:4443/certificate.sha256":
 	#!/usr/bin/env bash
 	set -euo pipefail
-	for i in $(seq 1 60); do
+	for i in $(seq 1 600); do
 		curl -sf "{{url}}" > /dev/null 2>&1 && exit 0
 		sleep 1
 	done
