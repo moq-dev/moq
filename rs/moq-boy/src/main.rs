@@ -196,7 +196,10 @@ impl Session {
 		let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
 		let latency_map: BTreeMap<String, u32> = viewer_latency
 			.iter()
-			.map(|(k, d)| (k.clone(), d.as_millis() as u32))
+			.map(|(k, d)| {
+				let ms = u32::try_from(d.as_millis()).unwrap_or(u32::MAX);
+				(k.clone(), ms)
+			})
 			.collect();
 
 		let status = status::Status {
