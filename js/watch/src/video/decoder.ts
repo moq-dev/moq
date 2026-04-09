@@ -285,7 +285,7 @@ class DecoderTrack {
 	#runLegacy(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Legacy.Consumer(sub, {
-			latency: this.source.sync.latency,
+			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 

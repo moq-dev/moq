@@ -3,7 +3,7 @@ import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
 import { Muxer } from "./mse";
-import { type JitterMode, Sync } from "./sync";
+import { type LatencyMode, Sync } from "./sync";
 import * as Video from "./video";
 
 // Serializable representation of TimeRanges
@@ -36,19 +36,22 @@ export interface Backend {
 	// Audio specific signals.
 	audio?: Audio.Backend;
 
-	// The jitter mode: a fixed number of milliseconds, or "real-time" for dynamic RTT-based jitter.
-	jitter: Signal<JitterMode>;
+	// The latency mode: "real-time" auto-computes jitter, "fixed" lets the user set it.
+	latency: Signal<LatencyMode>;
 
-	// The computed jitter in milliseconds (resolved from mode + RTT).
-	computedJitter: Signal<Moq.Time.Milli>;
+	// The jitter buffer in milliseconds.
+	jitter: Signal<Moq.Time.Milli>;
 }
 
 export interface MultiBackendProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
-	// Jitter mode: fixed milliseconds or "real-time" for dynamic RTT-based jitter.
-	jitter?: JitterMode | Signal<JitterMode>;
+	// Latency mode: "real-time" auto-computes jitter from RTT, "fixed" lets the user set jitter.
+	latency?: LatencyMode | Signal<LatencyMode>;
+
+	// Initial jitter value in milliseconds (default 100ms, only used in "fixed" mode).
+	jitter?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
 
 	// RTT signal from the connection (PROBE), used for dynamic jitter in "real-time" mode.
 	rtt?: Signal<number | undefined>;
@@ -105,8 +108,8 @@ class AudioBackend implements Audio.Backend {
 export class MultiBackend implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;
-	jitter: Signal<JitterMode>;
-	computedJitter: Signal<Moq.Time.Milli>;
+	latency: Signal<LatencyMode>;
+	jitter: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
 	video: VideoBackend;
@@ -123,9 +126,9 @@ export class MultiBackend implements Backend {
 	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
-		this.jitter = Signal.from(props?.jitter ?? ("real-time" as JitterMode));
-		this.#sync = new Sync({ jitter: this.jitter, rtt: props?.rtt });
-		this.computedJitter = this.#sync.computedJitter;
+		this.#sync = new Sync({ latency: props?.latency, jitter: props?.jitter, rtt: props?.rtt });
+		this.latency = this.#sync.latency;
+		this.jitter = this.#sync.jitter;
 
 		this.#videoSource = new Video.Source(this.#sync, {
 			broadcast: this.broadcast,

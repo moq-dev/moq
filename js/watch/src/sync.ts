@@ -1,14 +1,15 @@
 import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 
-/** Jitter mode: a fixed number of milliseconds, or `"real-time"` for automatic RTT-based jitter. */
-export type JitterMode = Time.Milli | "real-time";
+/** Latency mode: `"real-time"` auto-computes jitter from RTT; `"fixed"` lets the user set jitter manually. */
+export type LatencyMode = "real-time" | "fixed";
 
 const MIN_JITTER = 10 as Time.Milli;
 const FALLBACK_JITTER = 100 as Time.Milli;
 
 export interface SyncProps {
-	jitter?: JitterMode | Signal<JitterMode>;
+	latency?: LatencyMode | Signal<LatencyMode>;
+	jitter?: Time.Milli | Signal<Time.Milli>;
 	rtt?: Signal<number | undefined>;
 	audio?: Time.Milli | Signal<Time.Milli | undefined>;
 	video?: Time.Milli | Signal<Time.Milli | undefined>;
@@ -20,18 +21,23 @@ export class Sync {
 	#reference = new Signal<Time.Milli | undefined>(undefined);
 	readonly reference: Signal<Time.Milli | undefined> = this.#reference;
 
-	// The jitter mode: a fixed number or "real-time" for dynamic RTT-based jitter.
-	jitter: Signal<JitterMode>;
+	// The latency mode: "real-time" auto-computes jitter from RTT, "fixed" uses the jitter signal directly.
+	latency: Signal<LatencyMode>;
+
+	// The jitter buffer in milliseconds.
+	// In "real-time" mode this is updated automatically from RTT.
+	// In "fixed" mode the user sets this directly (default 100ms).
+	jitter: Signal<Time.Milli>;
 
 	// Any additional delay required for audio or video.
 	audio: Signal<Time.Milli | undefined>;
 	video: Signal<Time.Milli | undefined>;
 
-	// The buffer required, based on both audio and video.
-	#latency = new Signal<Time.Milli>(Time.Milli.zero);
-	readonly latency: Signal<Time.Milli> = this.#latency;
+	// The total buffer required: jitter + max(audio, video).
+	#buffer = new Signal<Time.Milli>(Time.Milli.zero);
+	readonly buffer: Signal<Time.Milli> = this.#buffer;
 
-	// A ghetto way to learn when the reference/latency changes.
+	// A ghetto way to learn when the reference/buffer changes.
 	// There's probably a way to use Effect, but lets keep it simple for now.
 	#update: PromiseWithResolvers<void>;
 
@@ -45,14 +51,11 @@ export class Sync {
 	#smoothedRtt: number | undefined;
 	#rttVar: number | undefined;
 
-	// The computed jitter value, always a number.
-	#computedJitter = new Signal<Time.Milli>(FALLBACK_JITTER);
-	readonly computedJitter: Signal<Time.Milli> = this.#computedJitter;
-
 	signals = new Effect();
 
 	constructor(props?: SyncProps) {
-		this.jitter = Signal.from(props?.jitter ?? ("real-time" as JitterMode));
+		this.latency = Signal.from(props?.latency ?? ("real-time" as LatencyMode));
+		this.jitter = Signal.from(props?.jitter ?? (FALLBACK_JITTER as Time.Milli));
 		this.#rtt = props?.rtt;
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
@@ -60,16 +63,16 @@ export class Sync {
 		this.#update = Promise.withResolvers();
 
 		this.signals.run(this.#runJitter.bind(this));
-		this.signals.run(this.#runLatency.bind(this));
+		this.signals.run(this.#runBuffer.bind(this));
 	}
 
 	#runJitter(effect: Effect): void {
-		const mode = effect.get(this.jitter);
+		const mode = effect.get(this.latency);
 
-		if (typeof mode === "number") {
+		if (mode === "fixed") {
+			// In fixed mode, jitter is set by the user. Just reset EWMA state.
 			this.#smoothedRtt = undefined;
 			this.#rttVar = undefined;
-			this.#computedJitter.set(mode);
 			return;
 		}
 
@@ -81,7 +84,7 @@ export class Sync {
 				const { smoothed, variation } = this.#updateRtt(rtt);
 
 				const jitter = Math.max(MIN_JITTER, smoothed / 2 + 4 * variation) as Time.Milli;
-				this.#computedJitter.set(jitter);
+				this.jitter.set(jitter);
 
 				// Reset the reference when RTT drops so we re-anchor to the lower baseline.
 				if (prev !== undefined && smoothed < prev * 0.8) {
@@ -95,7 +98,7 @@ export class Sync {
 		// No RTT available: fall back to static default.
 		this.#smoothedRtt = undefined;
 		this.#rttVar = undefined;
-		this.#computedJitter.set(FALLBACK_JITTER);
+		this.jitter.set(FALLBACK_JITTER);
 	}
 
 	// RFC 9002 Section 5.3 EWMA update. Returns the updated values.
@@ -110,13 +113,13 @@ export class Sync {
 		return { smoothed: this.#smoothedRtt, variation: this.#rttVar };
 	}
 
-	#runLatency(effect: Effect): void {
-		const jitter = effect.get(this.#computedJitter);
+	#runBuffer(effect: Effect): void {
+		const jitter = effect.get(this.jitter);
 		const video = effect.get(this.video) ?? Time.Milli.zero;
 		const audio = effect.get(this.audio) ?? Time.Milli.zero;
 
-		const latency = Time.Milli.add(Time.Milli.max(video, audio), jitter);
-		this.#latency.set(latency);
+		const buffer = Time.Milli.add(Time.Milli.max(video, audio), jitter);
+		this.#buffer.set(buffer);
 
 		this.#update.resolve();
 		this.#update = Promise.withResolvers();
@@ -132,7 +135,7 @@ export class Sync {
 			// Check if `wait()` would not sleep at all.
 			// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
 			// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
-			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#latency.peek());
+			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#buffer.peek());
 			if (sleep < 0) {
 				const entry = this.#late.get(label);
 				if (entry) {
@@ -178,7 +181,7 @@ export class Sync {
 			const currentRef = this.#reference.peek();
 			if (currentRef === undefined) return;
 
-			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#latency.peek());
+			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#buffer.peek());
 			if (sleep <= 0) return;
 
 			// Skip setTimeout for small sleeps; the timer resolution (~4ms) would overshoot.

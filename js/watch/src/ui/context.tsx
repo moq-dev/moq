@@ -4,7 +4,7 @@ import type { JSX } from "solid-js";
 import { createContext, createSignal, onCleanup } from "solid-js";
 import type { BufferedRanges } from "..";
 import type MoqWatch from "../element";
-import type { JitterMode } from "../sync";
+import type { LatencyMode } from "../sync";
 
 type WatchUIContextProviderProps = {
 	moqWatch: MoqWatch;
@@ -30,9 +30,10 @@ export type WatchUIContextValues = {
 	togglePlayback: () => void;
 	toggleMuted: () => void;
 	buffering: () => boolean;
-	jitter: () => JitterMode;
-	computedJitter: () => Moq.Time.Milli;
-	setJitter: (value: JitterMode) => void;
+	latency: () => LatencyMode;
+	jitter: () => Moq.Time.Milli;
+	setLatency: (value: LatencyMode) => void;
+	setJitter: (value: Moq.Time.Milli) => void;
 	availableRenditions: () => Rendition[];
 	activeRendition: () => string | undefined;
 	setActiveRendition: (name: string | undefined) => void;
@@ -53,8 +54,8 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 	const isMuted = createAccessor(props.moqWatch.backend.audio.muted);
 	const [currentVolume, setCurrentVolume] = createSignal<number>(0);
 	const buffering = createAccessor(props.moqWatch.backend.video.stalled);
+	const latency = createAccessor(props.moqWatch.backend.latency);
 	const jitter = createAccessor(props.moqWatch.backend.jitter);
-	const computedJitter = createAccessor(props.moqWatch.backend.computedJitter);
 	const [availableRenditions, setAvailableRenditions] = createSignal<Rendition[]>([]);
 	const activeRendition = createAccessor(props.moqWatch.backend.video.source.track);
 	const [isStatsPanelVisible, setIsStatsPanelVisible] = createSignal<boolean>(false);
@@ -80,8 +81,12 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		props.moqWatch.backend.audio.muted.update((muted) => !muted);
 	};
 
-	const setJitter = (latency: JitterMode) => {
-		props.moqWatch.jitter = latency;
+	const setLatency = (mode: LatencyMode) => {
+		props.moqWatch.latency = mode;
+	};
+
+	const setJitter = (value: Moq.Time.Milli) => {
+		props.moqWatch.jitter = value;
 	};
 
 	const setActiveRenditionValue = (name: string | undefined) => {
@@ -105,8 +110,9 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		currentVolume,
 		toggleMuted,
 		buffering,
+		latency,
 		jitter,
-		computedJitter,
+		setLatency,
 		setJitter,
 		availableRenditions,
 		activeRendition,

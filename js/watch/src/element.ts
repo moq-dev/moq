@@ -3,9 +3,9 @@ import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
 import { Broadcast } from "./broadcast";
-import { type JitterMode, Sync } from "./sync";
+import { type LatencyMode, Sync } from "./sync";
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "jitter"] as const;
+const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -114,8 +114,8 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			const jitter = effect.get(this.backend.jitter);
-			this.setAttribute("jitter", typeof jitter === "number" ? Math.floor(jitter).toString() : jitter);
+			const latency = effect.get(this.backend.latency);
+			this.setAttribute("latency", latency);
 		});
 	}
 
@@ -150,11 +150,13 @@ export default class MoqWatch extends HTMLElement {
 			this.backend.audio.muted.set(newValue !== null);
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
-		} else if (name === "jitter") {
-			if (!newValue || newValue === "real-time") {
-				this.backend.jitter.set("real-time");
+		} else if (name === "latency") {
+			if (newValue === "real-time" || newValue === "fixed") {
+				this.backend.latency.set(newValue);
 			} else {
-				this.backend.jitter.set(Number.parseFloat(newValue) as Time.Milli);
+				// Numeric value: switch to fixed mode and set jitter.
+				this.backend.latency.set("fixed");
+				this.backend.jitter.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
 			}
 		} else {
 			const exhaustive: never = name;
@@ -210,12 +212,20 @@ export default class MoqWatch extends HTMLElement {
 		this.broadcast.reload.set(value);
 	}
 
-	get jitter(): JitterMode {
+	get latency(): LatencyMode {
+		return this.backend.latency.peek();
+	}
+
+	set latency(value: LatencyMode) {
+		this.backend.latency.set(value);
+	}
+
+	get jitter(): Time.Milli {
 		return this.backend.jitter.peek();
 	}
 
-	set jitter(value: number | "real-time") {
-		this.backend.jitter.set(typeof value === "number" ? (value as Time.Milli) : value);
+	set jitter(value: number) {
+		this.backend.jitter.set(value as Time.Milli);
 	}
 }
 

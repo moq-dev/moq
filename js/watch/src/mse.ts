@@ -68,7 +68,7 @@ export class Muxer {
 
 		// Use the computed latency (catalog jitter + user jitter)
 		// Convert to seconds since DOM APIs use seconds
-		const latency = Time.Milli.toSecond(effect.get(this.#sync.latency));
+		const latency = Time.Milli.toSecond(effect.get(this.#sync.buffer));
 
 		effect.interval(() => {
 			// Skip over gaps based on the effective latency.
@@ -135,7 +135,7 @@ export class Muxer {
 		const reference = effect.get(this.#sync.reference);
 		if (reference === undefined) return;
 
-		const latency = effect.get(this.#sync.latency);
+		const latency = effect.get(this.#sync.buffer);
 
 		// Compute the target currentTime based on reference and latency.
 		// reference = performance.now() - frameTimestamp (in ms) when we received the earliest frame

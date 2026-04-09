@@ -111,7 +111,7 @@ export class Decoder {
 				type: "init",
 				rate: sampleRate,
 				channels: channelCount,
-				latency: this.source.sync.latency.peek(), // Updated reactively via #runLatency
+				latency: this.source.sync.buffer.peek(), // Updated reactively via #runLatency
 			};
 			worklet.port.postMessage(init);
 
@@ -143,7 +143,7 @@ export class Decoder {
 		const worklet = effect.get(this.#worklet);
 		if (!worklet) return;
 
-		const latency = effect.get(this.source.sync.latency);
+		const latency = effect.get(this.source.sync.buffer);
 
 		const msg: Render.Latency = {
 			type: "latency",
@@ -182,7 +182,7 @@ export class Decoder {
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Legacy.Consumer(sub, {
-			latency: this.source.sync.latency,
+			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 

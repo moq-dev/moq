@@ -85,7 +85,7 @@ export default function BufferControl(props: BufferControlProps) {
 	const [isDragging, setIsDragging] = createSignal(false);
 	const [hasInteracted, setHasInteracted] = createSignal(false);
 
-	const bufferTargetPct = createMemo(() => (context.computedJitter() / maxRange()) * 100);
+	const bufferTargetPct = createMemo(() => (context.jitter() / maxRange()) * 100);
 
 	// Handle mouse interaction to set buffer via clicking/dragging on the visualization
 	let containerRef: HTMLDivElement | undefined;
@@ -102,6 +102,7 @@ export default function BufferControl(props: BufferControlProps) {
 		const ms = (x / trackWidth) * maxRange();
 		const snapped = (Math.round(ms / RANGE_STEP) * RANGE_STEP) as Moq.Time.Milli;
 		const clamped = Math.max(MIN_RANGE, Math.min(maxRange(), snapped)) as Moq.Time.Milli;
+		context.setLatency("fixed");
 		context.setJitter(clamped);
 	};
 
@@ -136,7 +137,8 @@ export default function BufferControl(props: BufferControlProps) {
 		}
 		e.preventDefault();
 		setHasInteracted(true);
-		const value = Math.max(MIN_RANGE, Math.min(maxRange(), context.computedJitter() + delta)) as Moq.Time.Milli;
+		const value = Math.max(MIN_RANGE, Math.min(maxRange(), context.jitter() + delta)) as Moq.Time.Milli;
+		context.setLatency("fixed");
 		context.setJitter(value);
 	};
 
@@ -179,7 +181,7 @@ export default function BufferControl(props: BufferControlProps) {
 				onKeyDown={onKeyDown}
 				role="slider"
 				tabIndex={0}
-				aria-valuenow={context.computedJitter()}
+				aria-valuenow={context.jitter()}
 				aria-valuemin={MIN_RANGE}
 				aria-valuemax={maxRange()}
 				aria-label="Buffer jitter"
@@ -202,7 +204,7 @@ export default function BufferControl(props: BufferControlProps) {
 				{/* Buffer target line (draggable) - wrapped in track-area container */}
 				<div class="watch-ui__buffer-target-area">
 					<div class="watch-ui__buffer-target-line" style={{ left: `${bufferTargetPct()}%` }}>
-						<span class="watch-ui__buffer-target-label">{`${Math.round(context.computedJitter())}ms`}</span>
+						<span class="watch-ui__buffer-target-label">{`${Math.round(context.jitter())}ms`}</span>
 					</div>
 				</div>
 

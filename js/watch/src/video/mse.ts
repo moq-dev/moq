@@ -148,7 +148,7 @@ export class Mse implements Backend {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		// Legacy container uses microsecond timescale implicitly.
 		const consumer = new Container.Legacy.Consumer(data, {
-			latency: this.source.sync.latency,
+			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
