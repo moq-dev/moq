@@ -25,7 +25,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -189,7 +189,7 @@ impl Session {
 	fn publish_status(
 		&self,
 		emu: &emulator::Emulator,
-		viewer_latency: &std::collections::HashMap<String, Vec<status::LatencyEntry>>,
+		viewer_latency: &HashMap<String, Vec<status::LatencyEntry>>,
 		game_stats: &stats::Stats,
 		publisher: &mut status::StatusPublisher,
 	) {
@@ -331,8 +331,7 @@ fn run_emulator(
 	// 1/59.727 ≈ 16742 microseconds per frame.
 	let frame_duration = Duration::from_micros(16_742);
 	let mut next_frame = Instant::now();
-	let mut viewer_latency: std::collections::HashMap<String, Vec<status::LatencyEntry>> =
-		std::collections::HashMap::new();
+	let mut viewer_latency: HashMap<String, Vec<status::LatencyEntry>> = HashMap::new();
 	let mut game_stats = stats::Stats::new();
 	let mut was_audio_active = false;
 
@@ -374,10 +373,12 @@ fn run_emulator(
 
 						breakdown.push(entry("encode", encode_ms));
 
+						let ms_saturating = |d: Duration| u32::try_from(d.as_millis()).unwrap_or(u32::MAX);
+
 						// Compute latency for each viewer-reported timestamp.
 						for t in &timestamps {
 							let latency = elapsed.saturating_sub(t.ts);
-							breakdown.push(entry(&t.label, latency.as_millis() as u32));
+							breakdown.push(entry(&t.label, ms_saturating(latency)));
 						}
 
 						// Input: gap between what the viewer sees and what the server
@@ -385,7 +386,7 @@ fn run_emulator(
 						// (the rendered frame the user reacted to).
 						if let Some(min_ts) = timestamps.iter().map(|t| t.ts).min() {
 							let latency = elapsed.saturating_sub(min_ts);
-							breakdown.push(entry("input", latency.as_millis() as u32));
+							breakdown.push(entry("input", ms_saturating(latency)));
 						}
 
 						viewer_latency.insert(viewer_id, breakdown);

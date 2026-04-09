@@ -111,11 +111,11 @@ async fn handle_viewer_commands(
 			let text = std::str::from_utf8(&frame).context("invalid UTF-8 in command")?;
 			match serde_json::from_str::<RawCommand>(text) {
 				Ok(RawCommand::Buttons { buttons, timestamps }) => {
-					let timestamps = timestamps
+					let timestamps: Vec<_> = timestamps
 						.into_iter()
-						.map(|t| TimestampEntry {
-							label: t.label,
-							ts: Duration::from_secs_f64(t.ts / 1000.0),
+						.filter_map(|t| {
+							let ts = Duration::try_from_secs_f64(t.ts / 1000.0).ok()?;
+							Some(TimestampEntry { label: t.label, ts })
 						})
 						.collect();
 					let _ = cmd_tx

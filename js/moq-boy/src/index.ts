@@ -23,6 +23,12 @@ export interface GameConfig {
 	viewerPrefix: string;
 }
 
+/** A command queued before the command track is ready. */
+interface PendingCommand {
+	cmd: Record<string, unknown>;
+	timestamps: { label: string; ts: number }[];
+}
+
 // Stop publishing feedback after 60s of no input.
 const FEEDBACK_IDLE_MS = 60_000;
 
@@ -83,7 +89,7 @@ export class Game {
 
 	// Internal command publishing state.
 	#commandTrack: Moq.Track | undefined;
-	#pendingCommand: Record<string, unknown> | undefined;
+	#pendingCommand: PendingCommand | undefined;
 	#feedbackActive = new Moq.Signals.Signal(false);
 	#feedbackTimeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -175,12 +181,14 @@ export class Game {
 		clearTimeout(this.#feedbackTimeout);
 		this.#feedbackTimeout = setTimeout(() => this.#feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
+		const timestamps = this.#timestamps();
+
 		if (!this.#commandTrack) {
-			this.#pendingCommand = cmd;
+			this.#pendingCommand = { cmd, timestamps };
 			return;
 		}
 
-		this.#commandTrack.writeJson({ ...cmd, timestamps: this.#timestamps() });
+		this.#commandTrack.writeJson({ ...cmd, timestamps });
 	}
 
 	/** Collect media timestamps at each pipeline stage for latency measurement. */
@@ -282,7 +290,10 @@ export class Game {
 					this.#commandTrack = req.track;
 					// Flush any pending command that triggered activation.
 					if (this.#pendingCommand) {
-						this.#commandTrack.writeJson({ ...this.#pendingCommand, timestamps: this.#timestamps() });
+						this.#commandTrack.writeJson({
+							...this.#pendingCommand.cmd,
+							timestamps: this.#pendingCommand.timestamps,
+						});
 						this.#pendingCommand = undefined;
 					}
 				}

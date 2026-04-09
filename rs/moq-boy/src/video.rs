@@ -87,8 +87,6 @@ fn encoder_thread(
 	let mut scaler: Option<ffmpeg_next::software::scaling::Context> = None;
 
 	while let Some(msg) = rx.blocking_recv() {
-		let start = Instant::now();
-
 		let enc = lazy_init(&mut encoder, || Encoder::new(WIDTH, HEIGHT), "H.264 encoder");
 		let color_scaler = lazy_init(
 			&mut scaler,
@@ -111,6 +109,8 @@ fn encoder_thread(
 		let (Some(enc), Some(color_scaler)) = (enc, color_scaler) else {
 			return;
 		};
+
+		let start = Instant::now();
 
 		let mut yuv = match rgba_to_yuv(&msg.rgba, color_scaler, enc.frame_count) {
 			Ok(f) => f,
