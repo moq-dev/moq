@@ -1,6 +1,6 @@
 import type { Time } from "@moq/lite";
 
-export type Message = Init | Data | Latency;
+export type Message = Init | SharedInit | Data | Latency;
 
 export type ToMain = State;
 
@@ -21,6 +21,14 @@ export interface Init {
 	rate: number;
 	channels: number;
 	latency: Time.Milli;
+}
+
+export interface SharedInit {
+	type: "shared-init";
+	channels: number;
+	capacity: number;
+	samples: SharedArrayBuffer;
+	control: SharedArrayBuffer;
 }
 
 export interface Latency {

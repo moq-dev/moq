@@ -9,6 +9,7 @@ import type * as Render from "./render";
 import type { ToMain } from "./render";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
+import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 import type { Source } from "./source";
 
 export type DecoderProps = {
@@ -54,6 +55,9 @@ export class Decoder {
 	// Combined buffered ranges (network jitter + decode buffer)
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
+
+	// SharedArrayBuffer ring buffer for zero-copy audio delivery (when available).
+	#shared: SharedRingBuffer | undefined;
 
 	#signals = new Effect();
 
@@ -107,15 +111,30 @@ export class Decoder {
 			});
 			effect.cleanup(() => worklet.disconnect());
 
-			const init: Render.Init = {
-				type: "init",
-				rate: sampleRate,
-				channels: channelCount,
-				latency: this.source.sync.buffer.peek(), // Updated reactively via #runLatency
-			};
-			worklet.port.postMessage(init);
+			if (typeof SharedArrayBuffer !== "undefined") {
+				// Shared path: allocate SharedArrayBuffers and write directly from main thread.
+				const latency = this.source.sync.buffer.peek();
+				const capacity = Math.ceil(sampleRate * Time.Second.fromMilli(latency));
+				this.#initShared(worklet, channelCount, capacity);
+				effect.cleanup(() => {
+					this.#shared = undefined;
+				});
 
-			// Listen for state updates from worklet
+				console.debug("audio: using SharedArrayBuffer path");
+			} else {
+				// Fallback: postMessage with transferable buffers.
+				const init: Render.Init = {
+					type: "init",
+					rate: sampleRate,
+					channels: channelCount,
+					latency: this.source.sync.buffer.peek(),
+				};
+				worklet.port.postMessage(init);
+
+				console.debug("audio: using postMessage path");
+			}
+
+			// Listen for state updates from worklet (postMessage path only).
 			worklet.port.onmessage = (event: MessageEvent<ToMain>) => {
 				if (event.data.type === "state") {
 					const timestamp = Time.Milli.fromMicro(event.data.timestamp);
@@ -139,17 +158,40 @@ export class Decoder {
 		// NOTE: You should disconnect/reconnect the worklet to save power when disabled.
 	}
 
+	#initShared(worklet: AudioWorkletNode, channels: number, capacity: number): void {
+		const init = allocSharedRingBuffer(channels, capacity);
+		this.#shared = new SharedRingBuffer(init);
+
+		const msg: Render.SharedInit = {
+			type: "shared-init",
+			...init,
+		};
+		worklet.port.postMessage(msg);
+	}
+
 	#runLatency(effect: Effect): void {
 		const worklet = effect.get(this.#worklet);
 		if (!worklet) return;
 
 		const latency = effect.get(this.source.sync.buffer);
 
-		const msg: Render.Latency = {
-			type: "latency",
-			latency,
-		};
-		worklet.port.postMessage(msg);
+		if (this.#shared) {
+			// Shared path: reallocate with new capacity.
+			const config = this.source.config.peek();
+			if (!config) return;
+
+			const capacity = Math.ceil(config.sampleRate * Time.Second.fromMilli(latency));
+			if (capacity === this.#shared.capacity) return;
+
+			this.#initShared(worklet, config.numberOfChannels, capacity);
+		} else {
+			// Fallback: send latency message.
+			const msg: Render.Latency = {
+				type: "latency",
+				latency,
+			};
+			worklet.port.postMessage(msg);
+		}
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -326,7 +368,6 @@ export class Decoder {
 
 		const worklet = this.#worklet.peek();
 		if (!worklet) {
-			// We're probably in the process of closing.
 			sample.close();
 			return;
 		}
@@ -346,18 +387,21 @@ export class Decoder {
 			channelData.push(data);
 		}
 
-		const msg: Render.Data = {
-			type: "data",
-			data: channelData,
-			timestamp,
-		};
-
-		// Send audio data to worklet via postMessage
-		// TODO: At some point, use SharedArrayBuffer to avoid dropping samples.
-		worklet.port.postMessage(
-			msg,
-			msg.data.map((data) => data.buffer),
-		);
+		if (this.#shared) {
+			// Shared path: write directly into shared memory.
+			this.#shared.write(channelData);
+		} else {
+			// Fallback: send via postMessage with transferable buffers.
+			const msg: Render.Data = {
+				type: "data",
+				data: channelData,
+				timestamp,
+			};
+			worklet.port.postMessage(
+				msg,
+				msg.data.map((data) => data.buffer),
+			);
+		}
 
 		sample.close();
 	}
