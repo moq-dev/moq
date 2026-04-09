@@ -1,5 +1,5 @@
-# Exclude VitePress root-relative links (valid when served, not locally)
-exclude = ['^/']
+# Only check remote URLs (VitePress already validates local links)
+scheme = ["https", "http"]
 
 # Exclude localhost URLs (intentional for dev docs)
 exclude_loopback = true
