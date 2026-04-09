@@ -7,10 +7,24 @@
 
 use anyhow::Context;
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::emulator::Button;
+
+/// A single timestamp entry from the viewer.
+#[derive(serde::Deserialize, Debug)]
+struct RawTimestamp {
+	label: String,
+	/// Media timestamp in milliseconds.
+	ts: f64,
+}
+
+/// A parsed timestamp entry with Duration.
+#[derive(Debug)]
+pub struct TimestampEntry {
+	pub label: String,
+	pub ts: Duration,
+}
 
 /// A command sent by a viewer.
 #[derive(serde::Deserialize, Debug)]
@@ -20,9 +34,9 @@ enum RawCommand {
 	Buttons {
 		#[serde(default)]
 		buttons: Vec<Button>,
-		/// Media timestamps (ms) at each pipeline stage for latency measurement.
+		/// Ordered media timestamps at each pipeline stage.
 		#[serde(default)]
-		timestamps: HashMap<String, f64>,
+		timestamps: Vec<RawTimestamp>,
 	},
 	#[serde(rename = "reset")]
 	Reset {},
@@ -35,8 +49,8 @@ pub enum Command {
 	Buttons {
 		buttons: Vec<Button>,
 		viewer_id: String,
-		/// Media timestamps at each pipeline stage.
-		timestamps: HashMap<String, Duration>,
+		/// Ordered media timestamps at each pipeline stage.
+		timestamps: Vec<TimestampEntry>,
 		/// When this command was received by the server.
 		received_at: Instant,
 	},
@@ -101,7 +115,10 @@ async fn handle_viewer_commands(
 				Ok(RawCommand::Buttons { buttons, timestamps }) => {
 					let timestamps = timestamps
 						.into_iter()
-						.map(|(k, v)| (k, Duration::from_secs_f64(v / 1000.0)))
+						.map(|t| TimestampEntry {
+							label: t.label,
+							ts: Duration::from_secs_f64(t.ts / 1000.0),
+						})
 						.collect();
 					let _ = cmd_tx
 						.send(Command::Buttons {

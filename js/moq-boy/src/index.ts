@@ -180,12 +180,15 @@ export class Game {
 	}
 
 	/** Collect media timestamps at each pipeline stage for latency measurement. */
-	#timestamps(): Record<string, number | undefined> {
-		return {
-			received: this.sync.timestamp.peek(),
-			decoded: this.videoDecoder.timestamp.peek(),
-			rendered: this.videoRenderer.timestamp.peek(),
-		};
+	#timestamps(): { label: string; ts: number }[] {
+		const entries: { label: string; ts: number }[] = [];
+		const received = this.sync.timestamp.peek();
+		if (received != null) entries.push({ label: "received", ts: received });
+		const decoded = this.videoDecoder.timestamp.peek();
+		if (decoded != null) entries.push({ label: "decoded", ts: decoded });
+		const rendered = this.videoRenderer.timestamp.peek();
+		if (rendered != null) entries.push({ label: "rendered", ts: rendered });
+		return entries;
 	}
 
 	close() {
