@@ -82,6 +82,10 @@ pub enum Error {
 	#[error("closed")]
 	Closed,
 
+	/// The cached frame has been evicted due to the group size limit.
+	#[error("cache full")]
+	CacheFull,
+
 	/// A remote error received via a stream/session reset code.
 	#[error("remote error: code={0}")]
 	Remote(u32),
@@ -113,6 +117,7 @@ impl Error {
 			Self::UnknownAlpn(_) => 21,
 			Self::Dropped => 24,
 			Self::Closed => 25,
+			Self::CacheFull => 26,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}
