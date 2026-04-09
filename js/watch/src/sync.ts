@@ -115,6 +115,9 @@ export class Sync {
 			const sleep = Time.Milli.add(Time.Milli.sub(currentRef, ref), this.#latency.peek());
 			if (sleep <= 0) return;
 
+			// Skip setTimeout for small sleeps; the timer resolution (~4ms) would overshoot.
+			if (sleep < 5) return;
+
 			const wait = new Promise((resolve) => setTimeout(resolve, sleep)).then(() => true);
 
 			const ok = await Promise.race([this.#update.promise, wait]);
