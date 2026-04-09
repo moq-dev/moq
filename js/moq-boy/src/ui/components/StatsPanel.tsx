@@ -8,9 +8,14 @@ export default function StatsPanel() {
 	const location = () => ctx.status()?.location;
 	const stats = () => ctx.status()?.stats;
 
+	const playerCount = () => Object.keys(ctx.status()?.latency ?? {}).length;
+
 	const latencyEntries = () => {
-		const lat = ctx.status()?.latency ?? {};
-		return Object.entries(lat);
+		const id = ctx.viewerId();
+		if (!id) return [];
+		const breakdown = ctx.status()?.latency?.[id];
+		if (!breakdown) return [];
+		return Object.entries(breakdown).sort(([, a], [, b]) => a - b);
 	};
 
 	const pct = (value: number) => {
@@ -57,22 +62,21 @@ export default function StatsPanel() {
 				Emulation and encoding are paused when there are no viewers. Try muting or tabbing away!
 			</div>
 
-			<Show when={latencyEntries().length > 0}>
+			<Show when={playerCount() > 0}>
 				<div class="boy__latency-list">
-					<div class="boy__latency-header">Players ({latencyEntries().length})</div>
+					<div class="boy__latency-header">Latency ({playerCount()} players)</div>
 					<For each={latencyEntries()}>
-						{([id, ms]) => (
-							<div
-								class="boy__latency-entry"
-								classList={{ "boy__latency-entry--self": id === ctx.viewerId() }}
-							>
-								<span>{id === ctx.viewerId() ? `${id} (you)` : id}</span>
+						{([key, ms]) => (
+							<div class="boy__latency-entry">
+								<span>{key}</span>
 								<span>{ms}ms</span>
 							</div>
 						)}
 					</For>
+					<Show when={latencyEntries().length === 0}>
+						<div class="boy__stats-note">Press a button to see your latency breakdown.</div>
+					</Show>
 				</div>
-				<div class="boy__stats-note">Includes both the render delay AND the input delay.</div>
 			</Show>
 		</div>
 	);

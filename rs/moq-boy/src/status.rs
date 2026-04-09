@@ -16,8 +16,8 @@ use crate::stats::StatsReport;
 pub struct Status {
 	/// Currently pressed buttons (union across all viewers).
 	pub buttons: Vec<Button>,
-	/// Per-viewer round-trip latency in milliseconds.
-	pub latency: BTreeMap<String, u32>,
+	/// Per-viewer latency breakdown: viewer_id → { component → milliseconds }.
+	pub latency: BTreeMap<String, BTreeMap<String, u32>>,
 	/// Encoding and emulation performance stats.
 	pub stats: StatsReport,
 	/// Optional server location label (e.g. "Dallas, TX").

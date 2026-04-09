@@ -7,7 +7,8 @@
 
 use anyhow::Context;
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::emulator::Button;
 
@@ -19,9 +20,9 @@ enum RawCommand {
 	Buttons {
 		#[serde(default)]
 		buttons: Vec<Button>,
-		/// The viewer's current media timestamp in milliseconds (from JSON).
+		/// Media timestamps (ms) at each pipeline stage for latency measurement.
 		#[serde(default)]
-		ts: f64,
+		timestamps: HashMap<String, f64>,
 	},
 	#[serde(rename = "reset")]
 	Reset {},
@@ -34,8 +35,10 @@ pub enum Command {
 	Buttons {
 		buttons: Vec<Button>,
 		viewer_id: String,
-		/// The viewer's current media timestamp.
-		ts: Duration,
+		/// Media timestamps at each pipeline stage.
+		timestamps: HashMap<String, Duration>,
+		/// When this command was received by the server.
+		received_at: Instant,
 	},
 	Reset,
 	/// A viewer disconnected or went offline.
@@ -95,12 +98,17 @@ async fn handle_viewer_commands(
 		while let Some(frame) = group.read_frame().await? {
 			let text = std::str::from_utf8(&frame).context("invalid UTF-8 in command")?;
 			match serde_json::from_str::<RawCommand>(text) {
-				Ok(RawCommand::Buttons { buttons, ts }) => {
+				Ok(RawCommand::Buttons { buttons, timestamps }) => {
+					let timestamps = timestamps
+						.into_iter()
+						.map(|(k, v)| (k, Duration::from_secs_f64(v / 1000.0)))
+						.collect();
 					let _ = cmd_tx
 						.send(Command::Buttons {
 							buttons,
 							viewer_id: viewer_id.to_string(),
-							ts: Duration::from_secs_f64(ts / 1000.0),
+							timestamps,
+							received_at: Instant::now(),
 						})
 						.await;
 				}

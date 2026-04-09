@@ -40,6 +40,9 @@ export class Sync {
 	// There's probably a way to use Effect, but lets keep it simple for now.
 	#update: PromiseWithResolvers<void>;
 
+	// The media timestamp of the most recently received frame.
+	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
+
 	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
 	#late = new Map<string, { count: number; maxMs: number }>();
 
@@ -109,6 +112,7 @@ export class Sync {
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
 	received(timestamp: Time.Milli, label = ""): void {
+		this.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
 		const now = Time.Milli.now();
 		const ref = Time.Milli.sub(now, timestamp);
 		const currentRef = this.#reference.peek();

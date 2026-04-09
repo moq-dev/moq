@@ -171,8 +171,16 @@ export class Game {
 			return;
 		}
 
-		const ts = this.videoRenderer.timestamp.peek();
-		this.#commandTrack.writeJson({ ...cmd, ts: ts ?? 0 });
+		this.#commandTrack.writeJson({ ...cmd, timestamps: this.#timestamps() });
+	}
+
+	/** Collect media timestamps at each pipeline stage for latency measurement. */
+	#timestamps(): Record<string, number | undefined> {
+		return {
+			received: this.sync.timestamp.peek(),
+			decoded: this.videoDecoder.timestamp.peek(),
+			rendered: this.videoRenderer.timestamp.peek(),
+		};
 	}
 
 	close() {
@@ -263,8 +271,7 @@ export class Game {
 					this.#commandTrack = req.track;
 					// Flush any pending command that triggered activation.
 					if (this.#pendingCommand) {
-						const ts = this.videoRenderer.timestamp.peek();
-						this.#commandTrack.writeJson({ ...this.#pendingCommand, ts: ts ?? 0 });
+						this.#commandTrack.writeJson({ ...this.#pendingCommand, timestamps: this.#timestamps() });
 						this.#pendingCommand = undefined;
 					}
 				}

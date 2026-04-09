@@ -189,18 +189,13 @@ impl Session {
 	fn publish_status(
 		&self,
 		emu: &emulator::Emulator,
-		viewer_latency: &std::collections::HashMap<String, Duration>,
+		viewer_latency: &std::collections::HashMap<String, BTreeMap<String, u32>>,
 		game_stats: &stats::Stats,
 		publisher: &mut status::StatusPublisher,
 	) {
 		let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
-		let latency_map: BTreeMap<String, u32> = viewer_latency
-			.iter()
-			.map(|(k, d)| {
-				let ms = u32::try_from(d.as_millis()).unwrap_or(u32::MAX);
-				(k.clone(), ms)
-			})
-			.collect();
+		let latency_map: BTreeMap<String, BTreeMap<String, u32>> =
+			viewer_latency.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
 		let status = status::Status {
 			buttons: held,
@@ -336,7 +331,7 @@ fn run_emulator(
 	// 1/59.727 ≈ 16742 microseconds per frame.
 	let frame_duration = Duration::from_micros(16_742);
 	let mut next_frame = Instant::now();
-	let mut viewer_latency: std::collections::HashMap<String, Duration> = std::collections::HashMap::new();
+	let mut viewer_latency: std::collections::HashMap<String, BTreeMap<String, u32>> = std::collections::HashMap::new();
 	let mut game_stats = stats::Stats::new();
 	let mut was_audio_active = false;
 
@@ -359,13 +354,41 @@ fn run_emulator(
 		// arrived during the previous frame's work is applied immediately.
 		{
 			let elapsed = start.elapsed();
+			let encode_ms = u32::try_from(session.video_encoder.encode_duration().as_millis()).unwrap_or(u32::MAX);
+
 			while let Ok(cmd) = cmd_rx.try_recv() {
 				match cmd {
-					input::Command::Buttons { buttons, viewer_id, ts } => {
+					input::Command::Buttons {
+						buttons,
+						viewer_id,
+						timestamps,
+						received_at,
+					} => {
 						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
-						if let Some(latency) = elapsed.checked_sub(ts) {
-							viewer_latency.insert(viewer_id, latency);
+
+						let mut breakdown = BTreeMap::new();
+						breakdown.insert("encode".to_string(), encode_ms);
+
+						// Compute latency for each viewer-reported timestamp.
+						for (key, ts) in &timestamps {
+							if let Some(latency) = elapsed.checked_sub(*ts) {
+								breakdown.insert(key.clone(), latency.as_millis() as u32);
+							}
 						}
+
+						// Input latency: when the command arrived at the server.
+						if let Some(rendered_ts) = timestamps.get("rendered") {
+							let input_elapsed = received_at - start;
+							if let Some(latency) = input_elapsed.checked_sub(*rendered_ts) {
+								breakdown.insert("input".to_string(), latency.as_millis() as u32);
+							}
+							// Processed latency: when the command is applied to the emulator.
+							if let Some(latency) = elapsed.checked_sub(*rendered_ts) {
+								breakdown.insert("processed".to_string(), latency.as_millis() as u32);
+							}
+						}
+
+						viewer_latency.insert(viewer_id, breakdown);
 					}
 					input::Command::ViewerLeft { viewer_id } => {
 						emu.viewer_left(&viewer_id);
