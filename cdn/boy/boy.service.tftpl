@@ -10,12 +10,12 @@ User=root
 WorkingDirectory=/var/lib/moq
 Environment="RUST_LOG=info"
 
-ExecStart=/var/lib/moq/pkg/bin/moq-boy \
+ExecStart=/bin/bash -c '/var/lib/moq/pkg/bin/moq-boy \
   --url "https://${domain}/demo?jwt=$(cat /var/lib/moq/boy.jwt)" \
   --rom "/var/lib/moq/${rom}" \
   --name "${name}" \
   --prefix-game "boy" \
-  --prefix-viewer "viewer/boy"
+  --prefix-viewer "viewer/boy"'
 
 # Restart with exponential backoff
 Restart=always
