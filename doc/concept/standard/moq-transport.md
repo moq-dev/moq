@@ -12,7 +12,7 @@ CDNs implement this layer, and it's designed to scale to millions of subscribers
 This guide assumes that you are familiar with [moq-lite](/concept/layer/moq-lite).
 Many of the concepts are the same and it's easier to point out the differences rather than start from scratch.
 
-- [Latest Draft](https://www.ietf.org/archive/id/draft-ietf-moq-transport-16.html)
+- [Latest Draft](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/)
 
 ## Model
 

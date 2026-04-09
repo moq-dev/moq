@@ -9,7 +9,7 @@ description: Core pub/sub transport protocol in Rust
 [![docs.rs](https://docs.rs/moq-lite/badge.svg)](https://docs.rs/moq-lite)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
 
-The core pub/sub transport protocol implementing the [moq-lite specification](/spec/draft-lcurley-moq-lite).
+The core pub/sub transport protocol implementing the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/).
 
 ## Overview
 
@@ -51,7 +51,7 @@ Pass JWT tokens via query parameters in the URL. See [Authentication guide](/app
 
 ## Protocol Specification
 
-See the [moq-lite specification](/spec/draft-lcurley-moq-lite) for protocol details.
+See the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) for protocol details.
 
 ## Next Steps
 

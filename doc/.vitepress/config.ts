@@ -42,24 +42,12 @@ export default defineConfig({
 		nav: [
 			{ text: "Setup", link: "/setup/" },
 			{ text: "Concepts", link: "/concept/" },
-			{ text: "Specs", link: "/spec/" },
 			{ text: "Apps", link: "/app/" },
 			{ text: "Rust", link: "/rs/" },
 			{ text: "TypeScript", link: "/js/" },
 		],
 
 		sidebar: {
-			"/spec/": [
-				{
-					text: "Specifications",
-					link: "/spec/",
-					items: [
-						{ text: "moq-lite", link: "/spec/draft-lcurley-moq-lite" },
-						{ text: "hang", link: "/spec/draft-lcurley-moq-hang" },
-						{ text: "Use Cases", link: "/spec/draft-lcurley-moq-use-cases" },
-					],
-				},
-			],
 			"/setup/": [
 				{
 					text: "Setup",

@@ -5,7 +5,7 @@ description: A simple, WebCodecs-based media format utilizing MoQ.
 
 # hang
 
-A simple, WebCodecs-based media format utilizing MoQ. See the [specification](/spec/draft-lcurley-moq-hang) for wire-level details.
+A simple, WebCodecs-based media format utilizing MoQ. See the [specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-hang/) for wire-level details.
 
 ## Catalog
 

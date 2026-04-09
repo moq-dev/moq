@@ -62,7 +62,7 @@ import * as Publish from "@moq/publish";
 
 ## Protocol Specification
 
-See the [hang specification](/spec/draft-lcurley-moq-hang).
+See the [hang specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-hang/).
 
 ## Next Steps
 

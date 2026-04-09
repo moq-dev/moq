@@ -10,7 +10,7 @@ moq-lite is forwards compatible with moq-transport so it works with any moq-tran
 The principles behind MoQ are fantastic, but standards are **SLOW** and involve too much arguing.
 My goal is to build something simple that you can use *now*, even if it's not a standard *yet*.
 
-See the [specification](/spec/draft-lcurley-moq-lite) for low-level details.
+See the [specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) for low-level details.
 
 ## API
 
