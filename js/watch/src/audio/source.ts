@@ -123,10 +123,10 @@ export class Source {
 		// Use catalog jitter if available, otherwise estimate from codec frame duration.
 		// Add worklet render quantum (~3ms) + postMessage overhead (~5ms) so the ring
 		// buffer has enough margin between Opus frame arrivals.
-		const codecJitter = selected.config.jitter ?? defaultAudioJitter(selected.config);
+		const codecJitter = selected.config.jitter ?? defaultAudioJitter(selected.config) ?? 0;
 		const overhead = Math.ceil((WORKLET_QUANTUM / selected.config.sampleRate) * 1000) + POST_MESSAGE_OVERHEAD;
-		const jitter = codecJitter !== undefined ? codecJitter + overhead : undefined;
-		effect.set(this.sync.audio, jitter as Moq.Time.Milli | undefined);
+		const jitter = codecJitter + overhead;
+		effect.set(this.sync.audio, jitter as Moq.Time.Milli);
 	}
 
 	/**

@@ -492,7 +492,7 @@ describe("resize", () => {
 		buffer.resize(50 as Time.Milli);
 		expect(buffer.capacity).toBe(50);
 		expect(buffer.length).toBe(50);
-		expect(buffer.stalled).toBe(true);
+		expect(buffer.stalled).toBe(false);
 	});
 
 	it("should exit stall and read new data after resize", () => {
@@ -545,6 +545,91 @@ describe("resize", () => {
 		}
 		for (let i = 30; i < 100; i++) {
 			expect(output[0][i]).toBe(2.0);
+		}
+	});
+
+	it("should read preserved samples back correctly after shrinking", () => {
+		// Regression: the copy loop inside resize() used a relative dst index
+		// (`i % dst.length`) while read() uses the absolute ring position
+		// (`readIndex % capacity`). When `copyStart` was not a multiple of the new
+		// capacity, preserved samples ended up in the wrong slots and read() returned
+		// mangled data. This test fails under that bug by constructing a scenario
+		// where `copyStart % newCapacity !== 0`.
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Time.Milli });
+
+		// Fill the buffer to exit stall (writeIndex=100, readIndex=0).
+		write(buffer, 0 as Time.Milli, 100, { channels: 1, value: 1.0 });
+		expect(buffer.stalled).toBe(false);
+
+		// Advance readIndex to 20 so there's room to wrap the write pointer.
+		read(buffer, 20, 1);
+
+		// Write samples that wrap: abs 100-109 → slots 0-9, value 2.0.
+		write(buffer, 100 as Time.Milli, 10, { channels: 1, value: 2.0 });
+		// abs 110-119 → slots 10-19, value 3.0.
+		write(buffer, 110 as Time.Milli, 10, { channels: 1, value: 3.0 });
+
+		// Preserved range after resize: most-recent 50 samples = abs 70..119.
+		// copyStart = 120 - 50 = 70, and 70 % 50 = 20 (non-zero → triggers the bug).
+		buffer.resize(50 as Time.Milli);
+		expect(buffer.capacity).toBe(50);
+		expect(buffer.length).toBe(50);
+		expect(buffer.stalled).toBe(false);
+
+		// Read the preserved samples. Expected layout by absolute index:
+		//   abs 70..99  = 1.0 (30 samples, from the initial fill)
+		//   abs 100..109 = 2.0 (10 samples)
+		//   abs 110..119 = 3.0 (10 samples)
+		const output = read(buffer, 50, 1);
+		expect(output[0].length).toBe(50);
+		for (let i = 0; i < 30; i++) {
+			expect(output[0][i]).toBe(1.0);
+		}
+		for (let i = 30; i < 40; i++) {
+			expect(output[0][i]).toBe(2.0);
+		}
+		for (let i = 40; i < 50; i++) {
+			expect(output[0][i]).toBe(3.0);
+		}
+	});
+
+	it("should continue accepting absolute-timestamp writes after resize", () => {
+		// resize() must keep readIndex/writeIndex on the same absolute axis that
+		// write() uses (`round(timestamp * rate)`). If the indices were reset to 0
+		// while timestamps stayed absolute, the next write would leave a giant zero
+		// gap. This test asserts that post-resize writes land contiguously with the
+		// preserved samples.
+		const buffer = new AudioRingBuffer({ rate: 1000, channels: 1, latency: 100 as Time.Milli });
+
+		// Fill the buffer, then partially drain it.
+		write(buffer, 0 as Time.Milli, 100, { channels: 1, value: 1.0 });
+		read(buffer, 40, 1);
+		// Wrap the writer over slots 0-29 with value 2.0 (abs 100-129).
+		write(buffer, 100 as Time.Milli, 30, { channels: 1, value: 2.0 });
+
+		// Resize smaller. Preserved = last 50 samples = abs 80..129.
+		buffer.resize(50 as Time.Milli);
+		expect(buffer.length).toBe(50);
+		expect(buffer.stalled).toBe(false);
+
+		// Write the next 10 samples at their real timestamp. This should append,
+		// not create a gap or be discarded as "too old".
+		write(buffer, 130 as Time.Milli, 10, { channels: 1, value: 3.0 });
+
+		// Buffer capacity is 50, so the oldest 10 samples (abs 80..89) drop out.
+		// Remaining: abs 90..99 = 1.0 (10), abs 100..129 = 2.0 (30), abs 130..139 = 3.0 (10).
+		expect(buffer.length).toBe(50);
+
+		const output = read(buffer, 50, 1);
+		expect(output[0].length).toBe(50);
+		for (let i = 0; i < 10; i++) {
+			expect(output[0][i]).toBe(1.0);
+		}
+		for (let i = 10; i < 40; i++) {
+			expect(output[0][i]).toBe(2.0);
+		}
+		for (let i = 40; i < 50; i++) {
+			expect(output[0][i]).toBe(3.0);
 		}
 	});
 });

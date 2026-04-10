@@ -62,7 +62,7 @@ export class AudioRingBuffer {
 				const dst = newBuffer[channel];
 				for (let i = 0; i < samplesToKeep; i++) {
 					const srcPos = (copyStart + i) % src.length;
-					const dstPos = i % dst.length;
+					const dstPos = (copyStart + i) % dst.length;
 					dst[dstPos] = src[srcPos];
 				}
 			}
