@@ -1,9 +1,18 @@
+import { createAccessor } from "@moq/signals/solid";
 import { For, Show } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
 
-/** Right-side panel showing location, encoding stats, and per-viewer latency. */
+/** Right-side panel showing location, encoding stats, buffer slider, and per-viewer latency. */
 export default function StatsPanel() {
 	const ctx = useGameUI();
+	const game = ctx.game;
+
+	const jitter = createAccessor(game.sync.jitter);
+
+	const onJitterInput = (e: Event) => {
+		const el = e.currentTarget as HTMLInputElement;
+		game.latency.set(Number.parseInt(el.value, 10) as import("@moq/lite").Time.Milli);
+	};
 
 	const location = () => ctx.status()?.location;
 	const stats = () => ctx.status()?.stats;
@@ -39,6 +48,19 @@ export default function StatsPanel() {
 					<div class="boy__location-value">{location()}</div>
 				</div>
 			</Show>
+
+			<label class="boy__jitter">
+				<span class="boy__jitter-label">Buffer: {jitter()}ms</span>
+				<input
+					type="range"
+					class="boy__jitter-slider"
+					min="0"
+					max="500"
+					value={jitter()}
+					onInput={onJitterInput}
+					onClick={(e) => e.stopPropagation()}
+				/>
+			</label>
 
 			<Show when={stats()}>
 				<div class="boy__stats-list">

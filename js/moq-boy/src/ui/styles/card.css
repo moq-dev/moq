@@ -80,12 +80,7 @@
 }
 
 .boy__panel--left {
-	border-right: 1px solid var(--boy-border);
 	order: -1;
-}
-
-.boy__panel--right {
-	border-left: 1px solid var(--boy-border);
 }
 
 /* On narrow screens, stack panels below video instead of side-by-side. */

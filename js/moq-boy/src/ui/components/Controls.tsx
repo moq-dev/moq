@@ -1,13 +1,12 @@
-import { createAccessor, createPair } from "@moq/signals/solid";
+import { createPair } from "@moq/signals/solid";
 import { For } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
 
-/** All game controls: D-pad, A/B, Start/Select, Mute, Reset, Jitter slider, Key hints. */
+/** All game controls: D-pad, A/B, Start/Select, Mute, Reset, Key hints. */
 export default function Controls() {
 	const ctx = useGameUI();
 	const game = ctx.game;
 
-	const jitter = createAccessor(game.sync.jitter);
 	const [userMuted, setUserMuted] = createPair(game.userMuted);
 
 	const toggleMute = (e: MouseEvent) => {
@@ -18,11 +17,6 @@ export default function Controls() {
 	const onReset = (e: MouseEvent) => {
 		e.stopPropagation();
 		game.sendCommand({ type: "reset" });
-	};
-
-	const onJitterInput = (e: Event) => {
-		const el = e.currentTarget as HTMLInputElement;
-		game.latency.set(Number.parseInt(el.value, 10) as import("@moq/lite").Time.Milli);
 	};
 
 	return (
@@ -44,19 +38,6 @@ export default function Controls() {
 					Reset
 				</button>
 			</div>
-
-			<label class="boy__jitter">
-				<span class="boy__jitter-label">Buffer: {jitter()}ms</span>
-				<input
-					type="range"
-					class="boy__jitter-slider"
-					min="0"
-					max="500"
-					value={jitter()}
-					onInput={onJitterInput}
-					onClick={(e) => e.stopPropagation()}
-				/>
-			</label>
 
 			<div class="boy__key-hints">
 				<div>Arrows: D-pad</div>
