@@ -17,10 +17,11 @@
 //!   audio_active ─┘
 //!                    either true → resumed (condvar notified)
 //!
-//!   While paused:
-//!     - After `timeout` seconds → auto-reset emulator
-//!     - On resume → force video keyframe, re-anchor audio epoch
+//!   On resume → force video keyframe, re-anchor audio epoch
 //! ```
+//!
+//! Emulator state is preserved across pauses: a new viewer joining after a
+//! break picks up mid-playthrough rather than seeing a fresh boot.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -65,10 +66,6 @@ pub struct Config {
 	#[arg(long)]
 	pub prefix_viewer: Option<String>,
 
-	/// Inactivity timeout in seconds before auto-reset.
-	#[arg(long, default_value_t = 300)]
-	pub timeout: u64,
-
 	/// Location label shown in viewer stats (e.g. "Dallas, TX").
 	#[arg(long)]
 	pub location: Option<String>,
@@ -101,8 +98,6 @@ struct Session {
 	/// Condvar to wake the emulator thread on resume.
 	resume: (Mutex<()>, Condvar),
 
-	/// Auto-reset timeout when paused.
-	timeout: Duration,
 	/// Location label for status reporting.
 	location: Option<String>,
 }
@@ -156,33 +151,17 @@ impl Session {
 	}
 
 	/// Block the emulator thread until viewers connect.
-	/// Auto-resets the emulator if paused longer than `timeout`.
-	fn wait_for_resume(&self, emu: &mut emulator::Emulator, game_stats: &mut stats::Stats) -> Result<()> {
+	///
+	/// Emulator state is preserved across pauses so that a new viewer
+	/// joins mid-playthrough rather than a fresh boot.
+	fn wait_for_resume(&self) {
 		tracing::info!("pausing encoding");
 		let (lock, cvar) = &self.resume;
 		let mut guard = lock.lock().unwrap();
-		let pause_start = Instant::now();
-
-		let mut reset_done = false;
 		while self.paused.load(Ordering::Acquire) {
-			if !reset_done && pause_start.elapsed() >= self.timeout {
-				tracing::info!("resetting emulator (paused too long)");
-				emu.reset()?;
-				*game_stats = stats::Stats::new();
-				reset_done = true;
-			}
-
-			if reset_done {
-				guard = cvar.wait(guard).unwrap();
-			} else {
-				let remaining = self.timeout.saturating_sub(pause_start.elapsed());
-				let (g, _) = cvar.wait_timeout(guard, remaining).unwrap();
-				guard = g;
-			}
+			guard = cvar.wait(guard).unwrap();
 		}
-
 		tracing::info!("resuming encoding");
-		Ok(())
 	}
 
 	/// Publish status if it changed since last frame.
@@ -274,7 +253,6 @@ async fn run(config: &Config) -> Result<()> {
 		audio_active: AtomicBool::new(false),
 		paused: AtomicBool::new(true), // Start paused until first viewer.
 		resume: (Mutex::new(()), Condvar::new()),
-		timeout: Duration::from_secs(config.timeout),
 		location: config.location.clone(),
 	});
 
@@ -338,7 +316,7 @@ fn run_emulator(
 	loop {
 		// Block when no viewers are watching. See state diagram in module docs.
 		if session.paused.load(Ordering::Acquire) {
-			session.wait_for_resume(&mut emu, &mut game_stats)?;
+			session.wait_for_resume();
 
 			// Don't try to catch up after a pause.
 			next_frame = Instant::now();
