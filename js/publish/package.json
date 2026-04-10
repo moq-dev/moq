@@ -18,7 +18,7 @@
 		"./src/support/element.ts"
 	],
 	"scripts": {
-		"build": "rimraf dist && vite build && tsc && bun ../common/package.ts",
+		"build": "rimraf dist && vite build && vite build --config vite.config.bundle.ts && tsc && bun ../common/package.ts",
 		"check": "tsc --noEmit",
 		"release": "bun ../common/release.ts"
 	},

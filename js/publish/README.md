@@ -17,9 +17,34 @@ bun add @moq/publish
 npm add @moq/publish
 ```
 
+### Without a bundler (CDN)
+
+The package ships a pre-built, self-contained ESM bundle under `bundle/`. Drop
+it in directly from jsDelivr (or any other npm-backed CDN — unpkg, esm.sh, etc.)
+and the `<moq-publish>`, `<moq-publish-ui>`, and `<moq-publish-support>` custom
+elements are registered on load:
+
+```html
+<script type="module"
+    src="https://cdn.jsdelivr.net/npm/@moq/publish/bundle/moq-publish.js"></script>
+
+<moq-publish-ui>
+    <moq-publish url="https://relay.example.com/anon" name="room/alice" source="camera">
+        <video muted autoplay></video>
+    </moq-publish>
+</moq-publish-ui>
+```
+
+Pin a specific version (recommended for production) with a version range in the
+URL, e.g. `https://cdn.jsdelivr.net/npm/@moq/publish@0.2/bundle/moq-publish.js`.
+
+The bundle inlines `@moq/lite`, `@moq/hang`, `@moq/signals`, `@moq/ui-core`,
+SolidJS and the WebCodecs/Opus fallbacks — no additional network requests are
+needed and no import map has to be configured.
+
 ## Web Component
 
-The simplest way to publish a stream:
+The simplest way to publish a stream when using a bundler:
 
 ```html
 <script type="module">
