@@ -72,7 +72,7 @@
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	width: 240px;
+	width: 200px;
 	background: var(--boy-bg-card);
 	flex-shrink: 0;
 	padding: var(--spacing-16);
