@@ -17,6 +17,33 @@ bun add @moq/watch
 npm add @moq/watch
 ```
 
+### No-build CDN usage
+
+For quick demos or embeds where a bundler is overkill, jsDelivr's `+esm`
+endpoint will transform the published npm package into a browser-ready ESM
+module — bare imports like `@moq/hang` are automatically rewritten to
+other `+esm` URLs. No build step or import map required:
+
+```html
+<script type="module">
+    import "https://cdn.jsdelivr.net/npm/@moq/watch/element.js/+esm";
+    import "https://cdn.jsdelivr.net/npm/@moq/watch/ui/index.js/+esm";
+</script>
+
+<moq-watch-ui>
+    <moq-watch url="https://relay.example.com/anon" name="room/alice">
+        <canvas></canvas>
+    </moq-watch>
+</moq-watch-ui>
+```
+
+Pin a version range in the URL for production — e.g.
+`https://cdn.jsdelivr.net/npm/@moq/watch@0.2/element.js/+esm`. esm.sh
+(`https://esm.sh/@moq/watch/element`) works the same way if you prefer it.
+
+For anything beyond embedding on a static page you should install the
+package and use a real bundler (the examples below).
+
 ## Web Component
 
 The simplest way to watch a stream:
