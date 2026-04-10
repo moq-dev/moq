@@ -17,34 +17,9 @@ bun add @moq/watch
 npm add @moq/watch
 ```
 
-### Without a bundler (CDN)
-
-The package ships a pre-built, self-contained ESM bundle under `bundle/`. Drop
-it in directly from jsDelivr (or any other npm-backed CDN — unpkg, esm.sh, etc.)
-and the `<moq-watch>`, `<moq-watch-ui>`, and `<moq-watch-support>` custom
-elements are registered on load:
-
-```html
-<script type="module"
-    src="https://cdn.jsdelivr.net/npm/@moq/watch/bundle/moq-watch.js"></script>
-
-<moq-watch-ui>
-    <moq-watch url="https://relay.example.com/anon" name="room/alice">
-        <canvas></canvas>
-    </moq-watch>
-</moq-watch-ui>
-```
-
-Pin a specific version (recommended for production) with a version range in the
-URL, e.g. `https://cdn.jsdelivr.net/npm/@moq/watch@0.2/bundle/moq-watch.js`.
-
-The bundle inlines `@moq/lite`, `@moq/hang`, `@moq/signals`, `@moq/ui-core`,
-SolidJS and the WebCodecs/Opus fallbacks — no additional network requests are
-needed and no import map has to be configured.
-
 ## Web Component
 
-The simplest way to watch a stream when using a bundler:
+The simplest way to watch a stream:
 
 ```html
 <script type="module">
