@@ -92,27 +92,31 @@ impl Drop for Session {
 }
 
 /// Polls the QUIC congestion controller for estimated send rate.
-/// Only active when at least one consumer exists.
+///
+/// Exits as soon as the session closes so we don't pin the underlying connection
+/// after the wrapping [`Session`] is dropped.
 async fn run_send_bandwidth<S: web_transport_trait::Session>(session: &S, producer: BandwidthProducer) {
+	tokio::select! {
+		_ = session.closed() => {}
+		_ = producer.closed() => {}
+		_ = run_send_bandwidth_inner(session, &producer) => {}
+	}
+}
+
+/// Toggles between waiting for a consumer and polling stats while one exists.
+/// Returns when the producer channel errors (closed by the consumer side).
+async fn run_send_bandwidth_inner<S: web_transport_trait::Session>(session: &S, producer: &BandwidthProducer) {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	loop {
-		tokio::select! {
-			biased;
-			_ = producer.closed() => return,
-			res = producer.used() => {
-				if res.is_err() {
-					return;
-				}
-			}
+		if producer.used().await.is_err() {
+			return;
 		}
 
 		let mut interval = tokio::time::interval(POLL_INTERVAL);
-
 		loop {
 			tokio::select! {
 				biased;
-				_ = producer.closed() => return,
 				res = producer.unused() => {
 					if res.is_err() {
 						return;
