@@ -62,16 +62,16 @@ export class AudioRingBuffer {
 				const dst = newBuffer[channel];
 				for (let i = 0; i < samplesToKeep; i++) {
 					const srcPos = (copyStart + i) % src.length;
-					const dstPos = (copyStart + i) % dst.length;
+					const dstPos = i % dst.length;
 					dst[dstPos] = src[srcPos];
 				}
 			}
 		}
 
-		// Update state for the new buffer, only stall if empty.
+		// Update state for the new buffer and trigger stall to refill
 		this.#buffer = newBuffer;
 		this.#readIndex = this.#writeIndex - samplesToKeep;
-		if (samplesToKeep === 0) this.#stalled = true;
+		this.#stalled = true;
 	}
 
 	write(timestamp: Time.Micro, data: Float32Array[]): void {
