@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.11](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.10...moq-lite-v0.15.11) - 2026-04-11
+
+### Fixed
+
+- *(moq-lite)* exit run_send_bandwidth when the session closes ([#1286](https://github.com/moq-dev/moq/pull/1286))
+
 ## [0.15.10](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.9...moq-lite-v0.15.10) - 2026-04-09
 
 ### Other
