@@ -35,7 +35,7 @@ class Render extends AudioWorkletProcessor {
 		if (samplesRead < output[0].length) {
 			this.#underflow += output[0].length - samplesRead;
 		} else if (this.#underflow > 0 && this.#buffer) {
-			console.warn(`audio underflow: ${Math.round((1000 * this.#underflow) / this.#buffer.rate)}ms`);
+			console.debug(`audio underflow: ${Math.round((1000 * this.#underflow) / this.#buffer.rate)}ms`);
 			this.#underflow = 0;
 		}
 
