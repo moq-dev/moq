@@ -151,15 +151,25 @@ impl Publish {
 		let delta = &current - prev;
 		let secs = elapsed.as_secs_f64();
 
-		let fps = (delta.frames as f64 / secs).round() as u64;
-		let bps = (delta.bytes as f64 * 8.0 / secs).round() as u64;
-		let drift_ms = delta
-			.drift
-			.mean()
-			.map(|d| d.as_secs_f64() * 1000.0)
-			.unwrap_or(f64::NAN);
+		let fps = delta.frames as f64 / secs;
+		let bps = delta.bytes as f64 * 8.0 / secs;
 
-		tracing::info!(fps, bps, drift_ms, "stats");
+		let frames = format!("{:.0}/s", fps);
+
+		let bitrate = if bps >= 1_000_000.0 {
+			format!("{:.1} Mbps", bps / 1_000_000.0)
+		} else if bps >= 1_000.0 {
+			format!("{:.1} Kbps", bps / 1_000.0)
+		} else {
+			format!("{:.0} bps", bps)
+		};
+
+		let drift = match delta.drift.mean() {
+			Some(mean) => format!("{:.1}ms", mean.as_secs_f64() * 1000.0),
+			None => "n/a".to_string(),
+		};
+
+		tracing::info!(frames, bitrate, drift, "stats");
 
 		*prev = current;
 	}
