@@ -154,7 +154,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received publish");
-				web_async::spawn(async move {
+				crate::task::IETF_SUB_PUBLISH.spawn(async move {
 					if let Err(err) = this.run_publish_stream(stream, msg).await {
 						tracing::debug!(%err, "publish stream error");
 					}
@@ -166,7 +166,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received publish_namespace");
-				web_async::spawn(async move {
+				crate::task::IETF_SUB_PUB_NAMESPACE.spawn(async move {
 					if let Err(err) = this.run_publish_namespace_stream(stream, msg).await {
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
@@ -428,7 +428,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let this = self.clone();
 		let producer = broadcast.clone();
 
-		web_async::spawn(async move {
+		crate::task::IETF_SUB_BROADCAST.spawn(async move {
 			if let Err(err) = this.run_broadcast(path.clone(), producer.dynamic()).await {
 				tracing::debug!(%err, "error running broadcast");
 			}
@@ -513,7 +513,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut this = self.clone();
 
 			let path = path.to_owned();
-			web_async::spawn(async move {
+			crate::task::IETF_SUB_TRACK.spawn(async move {
 				this.run_subscribe(path, track).await;
 			});
 		}

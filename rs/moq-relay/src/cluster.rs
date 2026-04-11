@@ -239,7 +239,7 @@ impl Cluster {
 			let token = token.clone();
 			let node2 = node.clone();
 
-			let handle = tokio::spawn(
+			let handle = crate::task::CLUSTER_REMOTE.spawn(
 				async move {
 					match this.run_remote(node2.as_str(), None, token, origin).await {
 						Ok(()) => tracing::info!(%node2, "origin closed"),

@@ -61,7 +61,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let stream = Reader::new(stream, self.version);
 			let this = self.clone();
 
-			web_async::spawn(async move {
+			crate::task::LITE_UNI_STREAM.spawn(async move {
 				if let Err(err) = this.run_uni_stream(stream).await {
 					tracing::debug!(%err, "error running uni stream");
 				}
@@ -222,7 +222,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.unwrap()
 			.publish_broadcast(path.clone(), broadcast.consume());
 
-		web_async::spawn(self.clone().run_broadcast(path, dynamic));
+		crate::task::LITE_BROADCAST.spawn(self.clone().run_broadcast(path, dynamic));
 
 		Ok(())
 	}
@@ -247,7 +247,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut this = self.clone();
 
 			let path = path.clone();
-			web_async::spawn(async move {
+			crate::task::LITE_TRACK.spawn(async move {
 				this.run_subscribe(id, path, track).await;
 				this.subscribes.lock().remove(&id);
 			});

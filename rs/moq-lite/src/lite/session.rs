@@ -30,7 +30,7 @@ pub fn start<S: web_transport_trait::Session>(
 	let publisher = Publisher::new(session.clone(), publish, version);
 	let subscriber = Subscriber::new(session.clone(), subscribe, recv_bw_for_sub, version);
 
-	web_async::spawn(async move {
+	crate::task::LITE_SESSION.spawn(async move {
 		let res = tokio::select! {
 			Err(res) = run_session(setup) => Err(res),
 			res = publisher.run() => res,

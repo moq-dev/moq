@@ -25,6 +25,7 @@ mod path;
 mod server;
 mod session;
 mod setup;
+pub mod task;
 mod version;
 
 pub use client::*;

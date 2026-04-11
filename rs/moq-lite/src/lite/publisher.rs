@@ -65,7 +65,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let session = self.session.clone();
 		let version = self.version;
 
-		web_async::spawn(async move {
+		crate::task::LITE_PROBE.spawn(async move {
 			if let Err(err) = Self::run_probe(&session, &mut stream, version).await {
 				match &err {
 					Error::Cancel | Error::Transport(_) => {
@@ -131,7 +131,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.ok_or(Error::Unauthorized)?;
 
 		let version = self.version;
-		web_async::spawn(async move {
+		crate::task::LITE_ANNOUNCE.spawn(async move {
 			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version).await {
 				match &err {
 					Error::Cancel | Error::Transport(_) => {
@@ -228,7 +228,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let version = self.version;
 
 		let session = self.session.clone();
-		web_async::spawn(async move {
+		crate::task::LITE_SUBSCRIBE.spawn(async move {
 			if let Err(err) = Self::run_subscribe(session, &mut stream, &subscribe, broadcast, priority, version).await
 			{
 				match &err {

@@ -30,7 +30,7 @@ impl Session {
 			let consumer = producer.consume();
 
 			let session = session.clone();
-			web_async::spawn(async move {
+			crate::task::BANDWIDTH.spawn(async move {
 				run_send_bandwidth(&session, producer).await;
 			});
 

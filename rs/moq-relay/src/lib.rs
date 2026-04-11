@@ -13,6 +13,7 @@ mod config;
 mod connection;
 #[cfg(feature = "jemalloc")]
 pub mod jemalloc;
+pub mod task;
 mod web;
 #[cfg(feature = "websocket")]
 mod websocket;

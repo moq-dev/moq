@@ -57,11 +57,14 @@ async fn main() -> anyhow::Result<()> {
 	#[cfg(not(feature = "jemalloc"))]
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
+	let task_profiler = task::run();
+
 	tokio::select! {
 		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
 		Err(err) = web.run() => return Err(err).context("web server failed"),
 		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
 		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
+		Err(err) = task_profiler => return Err(err).context("task profiler failed"),
 		else => Ok(()),
 	}
 }
@@ -78,7 +81,7 @@ async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> 
 		};
 
 		conn_id += 1;
-		tokio::spawn(async move {
+		task::CONNECTION.spawn(async move {
 			if let Err(err) = conn.run().await {
 				tracing::warn!(%err, "connection closed");
 			}

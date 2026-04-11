@@ -308,7 +308,7 @@ impl BroadcastConsumer {
 
 		// Remove the track from the lookup when it's unused.
 		let consumer_state = self.state.clone();
-		web_async::spawn(async move {
+		crate::task::BROADCAST_DEDUP.spawn(async move {
 			let _ = weak.unused().await;
 
 			let Some(producer) = consumer_state.produce() else {

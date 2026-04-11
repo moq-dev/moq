@@ -16,7 +16,7 @@ pub fn start<S: web_transport_trait::Session>(
 	subscribe: Option<OriginProducer>,
 	version: Version,
 ) -> Result<(), Error> {
-	web_async::spawn(async move {
+	crate::task::IETF_SESSION.spawn(async move {
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 				let Some(setup) = setup else {
@@ -61,7 +61,7 @@ pub fn start<S: web_transport_trait::Session>(
 			}
 			_ => {
 				// Spawn SETUP sender (keeps stream alive for GOAWAY).
-				web_async::spawn({
+				crate::task::IETF_SETUP.spawn({
 					let session = session.clone();
 					async move {
 						if let Err(err) = run_setup(session).await {
@@ -155,7 +155,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 		// We accept it in the background without blocking, since there are no
 		// extensions that require waiting on the SETUP before proceeding.
 		if kind == setup::SETUP_V17 {
-			web_async::spawn(async move {
+			crate::task::IETF_SETUP.spawn(async move {
 				// Decode and discard the unified SETUP message.
 				if let Err(err) = reader.decode::<setup::Setup>().await {
 					tracing::warn!(%err, "setup decode error");
@@ -173,7 +173,7 @@ async fn run_unis<S: web_transport_trait::Session>(
 
 		// Group data — spawn a handler for each stream.
 		let mut sub = subscriber.clone();
-		web_async::spawn(async move {
+		crate::task::IETF_UNI_STREAM.spawn(async move {
 			let mut reader = reader.with_version(version);
 			if let Err(err) = run_uni_group(&mut sub, &mut reader).await {
 				tracing::debug!(%err, "uni stream error");

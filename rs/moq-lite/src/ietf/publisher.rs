@@ -46,7 +46,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received subscribe");
-				web_async::spawn(async move {
+				crate::task::IETF_PUB_SUBSCRIBE.spawn(async move {
 					if let Err(err) = this.run_subscribe_stream(stream, msg).await {
 						tracing::debug!(%err, "subscribe stream error");
 					}
@@ -58,7 +58,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received fetch");
-				web_async::spawn(async move {
+				crate::task::IETF_PUB_FETCH.spawn(async move {
 					if let Err(err) = this.run_fetch_stream(stream, msg).await {
 						tracing::debug!(%err, "fetch stream error");
 					}
@@ -70,7 +70,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received subscribe_namespace");
-				web_async::spawn(async move {
+				crate::task::IETF_PUB_SUB_NAMESPACE.spawn(async move {
 					if let Err(err) = this.run_subscribe_namespace_stream(stream, msg).await {
 						tracing::debug!(%err, "subscribe_namespace stream error");
 					}

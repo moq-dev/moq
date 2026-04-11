@@ -385,7 +385,7 @@ impl OriginProducer {
 		root.lock().publish(&full, &broadcast, &rest);
 		let root = root.clone();
 
-		web_async::spawn(async move {
+		crate::task::ORIGIN_CLEANUP.spawn(async move {
 			broadcast.closed().await;
 			root.lock().remove(&full, broadcast, &rest);
 		});
