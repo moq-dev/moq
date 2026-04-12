@@ -5,10 +5,9 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
-import type * as Render from "./render";
+import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
-import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 import type { Source } from "./source";
 
 export type DecoderProps = {
@@ -55,8 +54,8 @@ export class Decoder {
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
-	// Shared ring buffer for lock-free audio transfer to the worklet
-	#shared: SharedRingBuffer | undefined;
+	// Audio buffer bridging main thread and worklet (shared memory or postMessage transport).
+	#buffer: AudioBuffer | undefined;
 
 	#signals = new Effect();
 
@@ -110,25 +109,24 @@ export class Decoder {
 			});
 			effect.cleanup(() => worklet.disconnect());
 
-			// Allocate shared ring buffer (1 second initial capacity)
-			const capacity = sampleRate;
-			const bufferInit = allocSharedRingBuffer(channelCount, capacity, sampleRate);
-			this.#shared = new SharedRingBuffer(bufferInit);
-
-			// Set initial latency
+			// Initial target latency in samples.
 			const latency = this.source.sync.buffer.peek();
 			const latencySamples = Math.ceil(sampleRate * Time.Second.fromMilli(latency));
-			this.#shared.setLatency(latencySamples);
 
-			const init: Render.Init = { type: "init", ...bufferInit };
-			worklet.port.postMessage(init);
+			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
+			this.#buffer = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples);
+			effect.cleanup(() => {
+				this.#buffer?.close();
+				this.#buffer = undefined;
+			});
 
-			// Poll shared state instead of receiving postMessage from worklet
+			// Poll buffer state for both transports. The shared path reads it from shared
+			// memory; the post path reads values cached from state messages.
 			effect.interval(() => {
-				if (!this.#shared) return;
-				const ts = Time.Milli.fromMicro(this.#shared.timestamp);
+				if (!this.#buffer) return;
+				const ts = Time.Milli.fromMicro(this.#buffer.timestamp);
 				this.#timestamp.set(ts);
-				this.#stalled.set(this.#shared.stalled);
+				this.#stalled.set(this.#buffer.stalled);
 				this.#trimDecodeBuffered(ts);
 			}, 50);
 
@@ -147,27 +145,16 @@ export class Decoder {
 	}
 
 	#runLatency(effect: Effect): void {
+		// Gate on the worklet signal so this effect re-runs once the buffer is created.
 		const worklet = effect.get(this.#worklet);
 		if (!worklet) return;
 
-		const shared = this.#shared;
-		if (!shared) return;
+		const buffer = this.#buffer;
+		if (!buffer) return;
 
 		const latency = effect.get(this.source.sync.buffer);
-		const latencySamples = Math.ceil(shared.rate * Time.Second.fromMilli(latency));
-
-		// Re-allocate if the buffer is too small for the target latency
-		if (shared.capacity < latencySamples * 1.5) {
-			const newCapacity = Math.max(latencySamples * 2, shared.rate);
-			const bufferInit = allocSharedRingBuffer(shared.channels, newCapacity, shared.rate);
-			this.#shared = new SharedRingBuffer(bufferInit);
-			this.#shared.setLatency(latencySamples);
-
-			const init: Render.Init = { type: "init", ...bufferInit };
-			worklet.port.postMessage(init);
-		} else {
-			shared.setLatency(latencySamples);
-		}
+		const latencySamples = Math.ceil(buffer.rate * Time.Second.fromMilli(latency));
+		buffer.setLatency(latencySamples);
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -342,8 +329,8 @@ export class Decoder {
 		const timestamp = sample.timestamp as Time.Micro;
 		const timestampMilli = Time.Milli.fromMicro(timestamp);
 
-		const shared = this.#shared;
-		if (!shared) {
+		const buffer = this.#buffer;
+		if (!buffer) {
 			// We're probably in the process of closing.
 			sample.close();
 			return;
@@ -364,8 +351,9 @@ export class Decoder {
 			channelData.push(data);
 		}
 
-		// Write directly to shared memory — no postMessage overhead or sample drops
-		shared.insert(timestamp, channelData);
+		// Hand off to the buffer. Shared transport writes directly; post transport
+		// transfers the ArrayBuffers.
+		buffer.insert(timestamp, channelData);
 
 		sample.close();
 	}
