@@ -234,7 +234,7 @@ impl ElementImpl for MoqSink {
 		let pad = if let Some(name) = name {
 			pad_builder.name(name).build()
 		} else {
-			pad_builder.build()
+			pad_builder.generated_name().build()
 		};
 
 		self.obj().add_pad(&pad).ok()?;
