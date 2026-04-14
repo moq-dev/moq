@@ -23,15 +23,22 @@ use futures::stream::StreamExt;
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ServerTlsConfig {
-	/// Load the given certificate from disk.
+	/// Load the given certificate chain from disk. Must be paired with `--tls-key`.
 	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub cert: Vec<PathBuf>,
 
-	/// Load the given key from disk.
+	/// Load the given private key from disk. Must be paired with `--tls-cert`.
 	#[arg(long = "tls-key", id = "tls-key", env = "MOQ_SERVER_TLS_KEY")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub key: Vec<PathBuf>,
+
+	/// Load a combined PEM file containing both the certificate chain and
+	/// private key. Useful for tools like HAProxy/stunnel that expect a single
+	/// file, or to avoid needing to pair `--tls-cert` and `--tls-key`.
+	#[arg(long = "tls-identity", id = "tls-identity", env = "MOQ_SERVER_TLS_IDENTITY")]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub identity: Vec<PathBuf>,
 
 	/// Or generate a new certificate and key with the given hostnames.
 	/// This won't be valid unless the client uses the fingerprint or disables verification.

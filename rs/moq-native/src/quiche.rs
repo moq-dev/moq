@@ -118,10 +118,13 @@ impl QuicheServer {
 
 		let (chain, key) = if !config.tls.generate.is_empty() {
 			generate_quiche_cert(&config.tls.generate)?
+		} else if !config.tls.identity.is_empty() {
+			// Load a combined PEM file (cert chain + private key in one file).
+			load_quiche_cert(&config.tls.identity[0], &config.tls.identity[0])?
 		} else {
 			anyhow::ensure!(
 				!config.tls.cert.is_empty() && !config.tls.key.is_empty(),
-				"--tls-cert and --tls-key are required with the quiche backend"
+				"--tls-cert/--tls-key or --tls-identity is required with the quiche backend"
 			);
 			anyhow::ensure!(
 				config.tls.cert.len() == config.tls.key.len(),

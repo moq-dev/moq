@@ -81,17 +81,25 @@ impl ServeCerts {
 	}
 
 	pub fn load_certs(&self, config: &ServerTlsConfig) -> anyhow::Result<()> {
-		anyhow::ensure!(config.cert.len() == config.key.len(), "must provide both cert and key");
 		anyhow::ensure!(
-			!config.cert.is_empty() || !config.generate.is_empty(),
-			"must provide at least one cert/key pair or a generate entry"
+			config.cert.len() == config.key.len(),
+			"must provide matching --tls-cert and --tls-key pairs"
+		);
+		anyhow::ensure!(
+			!config.cert.is_empty() || !config.identity.is_empty() || !config.generate.is_empty(),
+			"must provide at least one of --tls-cert/--tls-key, --tls-identity, or --tls-generate"
 		);
 
 		let mut certs = Vec::new();
 
-		// Load the certificate and key files based on their index.
+		// Load paired cert/key files.
 		for (cert, key) in config.cert.iter().zip(config.key.iter()) {
 			certs.push(Arc::new(self.load(cert, key)?));
+		}
+
+		// Load combined identity files (cert chain + private key in one PEM).
+		for identity in config.identity.iter() {
+			certs.push(Arc::new(self.load(identity, identity)?));
 		}
 
 		// Generate a new certificate if requested.
@@ -103,7 +111,7 @@ impl ServeCerts {
 		Ok(())
 	}
 
-	// Load a certificate and corresponding key from a file, but don't add it to the certs
+	// Load a certificate and corresponding key from files (or a single combined file if the paths match).
 	fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<rustls::sign::CertifiedKey> {
 		let chain = fs::File::open(chain_path).context("failed to open cert file")?;
 		let mut chain = io::BufReader::new(chain);
@@ -112,7 +120,11 @@ impl ServeCerts {
 			.collect::<Result<_, _>>()
 			.context("failed to read certs")?;
 
-		anyhow::ensure!(!chain.is_empty(), "could not find certificate");
+		anyhow::ensure!(
+			!chain.is_empty(),
+			"could not find certificate in {}",
+			chain_path.display()
+		);
 
 		// Read the PEM private key
 		let mut keys = fs::File::open(key_path).context("failed to open key file")?;
@@ -121,7 +133,8 @@ impl ServeCerts {
 		let mut buf = Vec::new();
 		keys.read_to_end(&mut buf)?;
 
-		let key = rustls_pemfile::private_key(&mut Cursor::new(&buf))?.context("missing private key")?;
+		let key = rustls_pemfile::private_key(&mut Cursor::new(&buf))?
+			.with_context(|| format!("missing private key in {}", key_path.display()))?;
 		let key = self.provider.key_provider.load_private_key(key)?;
 
 		let certified_key = rustls::sign::CertifiedKey::new(chain, key);
@@ -236,5 +249,159 @@ pub(crate) async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsCo
 		if let Err(err) = certs.load_certs(&tls_config) {
 			tracing::warn!(%err, "failed to reload server certificates");
 		}
+	}
+}
+
+#[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
+mod tests {
+	use super::*;
+	use std::io::Write;
+
+	fn der_to_pem(label: &str, der: &[u8]) -> String {
+		use base64::Engine;
+		let body = base64::engine::general_purpose::STANDARD.encode(der);
+		let mut out = format!("-----BEGIN {label}-----\n");
+		for chunk in body.as_bytes().chunks(64) {
+			out.push_str(std::str::from_utf8(chunk).unwrap());
+			out.push('\n');
+		}
+		out.push_str(&format!("-----END {label}-----\n"));
+		out
+	}
+
+	fn generate_pair() -> (String, String) {
+		let key_pair = rcgen::KeyPair::generate().unwrap();
+		let params = rcgen::CertificateParams::new(["localhost".to_string()]).unwrap();
+		let cert = params.self_signed(&key_pair).unwrap();
+		let cert_pem = der_to_pem("CERTIFICATE", cert.der());
+		let key_pem = der_to_pem("PRIVATE KEY", key_pair.serialized_der());
+		(cert_pem, key_pem)
+	}
+
+	fn write_tempfile(contents: &str) -> tempfile::NamedTempFile {
+		let mut f = tempfile::NamedTempFile::new().unwrap();
+		f.write_all(contents.as_bytes()).unwrap();
+		f
+	}
+
+	#[test]
+	fn load_separate_cert_and_key() {
+		let (cert_pem, key_pem) = generate_pair();
+		let cert_file = write_tempfile(&cert_pem);
+		let key_file = write_tempfile(&key_pem);
+
+		let config = ServerTlsConfig {
+			cert: vec![cert_file.path().to_path_buf()],
+			key: vec![key_file.path().to_path_buf()],
+			..Default::default()
+		};
+
+		let serve = ServeCerts::new(crypto::provider());
+		serve.load_certs(&config).expect("separate cert/key should load");
+		assert_eq!(serve.info.read().unwrap().certs.len(), 1);
+	}
+
+	#[test]
+	fn load_combined_identity() {
+		let (cert_pem, key_pem) = generate_pair();
+		let combined = write_tempfile(&format!("{cert_pem}{key_pem}"));
+
+		let config = ServerTlsConfig {
+			identity: vec![combined.path().to_path_buf()],
+			..Default::default()
+		};
+
+		let serve = ServeCerts::new(crypto::provider());
+		serve.load_certs(&config).expect("combined identity should load");
+		assert_eq!(serve.info.read().unwrap().certs.len(), 1);
+	}
+
+	#[test]
+	fn load_identity_with_key_first() {
+		// Order of blocks in the PEM shouldn't matter.
+		let (cert_pem, key_pem) = generate_pair();
+		let combined = write_tempfile(&format!("{key_pem}{cert_pem}"));
+
+		let config = ServerTlsConfig {
+			identity: vec![combined.path().to_path_buf()],
+			..Default::default()
+		};
+
+		let serve = ServeCerts::new(crypto::provider());
+		serve.load_certs(&config).expect("key-first identity should load");
+	}
+
+	#[test]
+	fn mixed_identity_and_pair() {
+		let (cert_a, key_a) = generate_pair();
+		let cert_file = write_tempfile(&cert_a);
+		let key_file = write_tempfile(&key_a);
+
+		let (cert_b, key_b) = generate_pair();
+		let combined = write_tempfile(&format!("{cert_b}{key_b}"));
+
+		let config = ServerTlsConfig {
+			cert: vec![cert_file.path().to_path_buf()],
+			key: vec![key_file.path().to_path_buf()],
+			identity: vec![combined.path().to_path_buf()],
+			..Default::default()
+		};
+
+		let serve = ServeCerts::new(crypto::provider());
+		serve.load_certs(&config).expect("mixed config should load");
+		assert_eq!(serve.info.read().unwrap().certs.len(), 2);
+	}
+
+	#[test]
+	fn reject_identity_missing_key() {
+		let (cert_pem, _) = generate_pair();
+		let cert_only = write_tempfile(&cert_pem);
+
+		let config = ServerTlsConfig {
+			identity: vec![cert_only.path().to_path_buf()],
+			..Default::default()
+		};
+
+		let serve = ServeCerts::new(crypto::provider());
+		let err = serve.load_certs(&config).expect_err("cert-only identity should fail");
+		assert!(
+			err.to_string().contains("missing private key"),
+			"unexpected error: {err}"
+		);
+	}
+
+	#[test]
+	fn reject_identity_missing_cert() {
+		let (_, key_pem) = generate_pair();
+		let key_only = write_tempfile(&key_pem);
+
+		let config = ServerTlsConfig {
+			identity: vec![key_only.path().to_path_buf()],
+			..Default::default()
+		};
+
+		let serve = ServeCerts::new(crypto::provider());
+		let err = serve.load_certs(&config).expect_err("key-only identity should fail");
+		assert!(
+			err.to_string().contains("could not find certificate"),
+			"unexpected error: {err}"
+		);
+	}
+
+	#[test]
+	fn reject_mismatched_pair_counts() {
+		let (cert_pem, _) = generate_pair();
+		let cert_file = write_tempfile(&cert_pem);
+
+		let config = ServerTlsConfig {
+			cert: vec![cert_file.path().to_path_buf()],
+			key: vec![],
+			..Default::default()
+		};
+
+		let serve = ServeCerts::new(crypto::provider());
+		serve
+			.load_certs(&config)
+			.expect_err("mismatched cert/key counts should fail");
 	}
 }

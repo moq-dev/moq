@@ -3689,6 +3689,7 @@ name = "moq-native"
 version = "0.13.10"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "console-subscriber",
@@ -3709,6 +3710,7 @@ dependencies = [
  "rustls-webpki",
  "serde",
  "serde_with",
+ "tempfile",
  "time",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
