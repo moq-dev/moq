@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, formats::PreferMany, serde_as};
 use std::path::PathBuf;
 use std::sync::Arc;
+use url::Url;
 
 /// Parameters extracted from an incoming connection URL for authentication.
 #[derive(Default, Debug)]
@@ -134,6 +135,19 @@ pub struct AuthConfig {
 	#[arg(long = "auth-public-publish", env = "MOQ_AUTH_PUBLIC_PUBLISH")]
 	#[serde(skip)]
 	pub public_publish: Option<PublicConfig>,
+
+	/// CLI-only shorthand: `--auth-public-api <url>` sets a URL endpoint that returns
+	/// `{ subscribe: [...], publish: [...] }` per namespace. The connection namespace is
+	/// appended to the URL. For TOML, use `[auth.public]` with an `api` field instead.
+	#[arg(long = "auth-public-api", env = "MOQ_AUTH_PUBLIC_API")]
+	#[serde(skip)]
+	pub public_api: Option<String>,
+
+	/// Path to a PEM file containing a client certificate and private key used for
+	/// mTLS when fetching keys (`--auth-key-dir`) or public access rules
+	/// (`--auth-public-api`).
+	#[arg(long = "auth-http-identity", env = "MOQ_AUTH_HTTP_IDENTITY")]
+	pub identity: Option<String>,
 }
 
 /// Public access configuration.
@@ -148,6 +162,7 @@ pub struct AuthConfig {
 #[derive(Clone, Debug)]
 pub enum PublicConfig {
 	/// One or more prefixes granting both subscribe and publish.
+	#[deprecated = "Use the detailed config; this is for backwards compatibility only"]
 	Simple(Vec<String>),
 	/// Separate subscribe/publish prefixes and/or an API URL.
 	Detailed(PublicDetailed),
@@ -173,6 +188,7 @@ impl PublicConfig {
 	/// Normalize into the detailed form.
 	pub fn into_detailed(self) -> PublicDetailed {
 		match self {
+			#[allow(deprecated)]
 			PublicConfig::Simple(prefixes) => PublicDetailed {
 				subscribe: prefixes.clone(),
 				publish: prefixes,
@@ -193,6 +209,7 @@ impl PublicConfig {
 		};
 
 		match value {
+			#[allow(deprecated)]
 			toml::Value::String(s) => Ok(Some(PublicConfig::Simple(vec![s]))),
 			toml::Value::Array(arr) => {
 				let strings: Vec<String> = arr
@@ -202,6 +219,7 @@ impl PublicConfig {
 				if strings.is_empty() {
 					Ok(None)
 				} else {
+					#[allow(deprecated)]
 					Ok(Some(PublicConfig::Simple(strings)))
 				}
 			}
@@ -224,6 +242,7 @@ impl PublicConfig {
 impl std::str::FromStr for PublicConfig {
 	type Err = std::convert::Infallible;
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		#[allow(deprecated)]
 		Ok(PublicConfig::Simple(vec![s.to_string()]))
 	}
 }
@@ -234,7 +253,9 @@ impl Serialize for PublicConfig {
 		S: serde::Serializer,
 	{
 		match self {
+			#[allow(deprecated)]
 			PublicConfig::Simple(v) if v.len() == 1 => v[0].serialize(serializer),
+			#[allow(deprecated)]
 			PublicConfig::Simple(v) => v.serialize(serializer),
 			PublicConfig::Detailed(d) => d.serialize(serializer),
 		}
@@ -379,29 +400,6 @@ pub struct Auth {
 	public: PublicAccess,
 }
 
-fn build_http_client() -> anyhow::Result<ClientWithMiddleware> {
-	let client = reqwest::Client::builder()
-		.timeout(std::time::Duration::from_secs(10))
-		.build()
-		.context("failed to build HTTP client")?;
-
-	Ok(reqwest_middleware::ClientBuilder::new(client)
-		.with(Cache(HttpCache {
-			mode: CacheMode::Default,
-			manager: MokaManager::default(),
-			options: HttpCacheOptions::default(),
-		}))
-		.build())
-}
-
-fn parse_url(s: &str) -> Option<url::Url> {
-	let url = url::Url::parse(s).ok()?;
-	match url.scheme() {
-		"http" | "https" => Some(url),
-		_ => None,
-	}
-}
-
 impl Auth {
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
 		anyhow::ensure!(
@@ -409,11 +407,13 @@ impl Auth {
 			"cannot specify both --auth-key and --auth-key-dir"
 		);
 
+		let identity = config.identity.as_deref().map(Self::load_identity).transpose()?;
+
 		let source = if let Some(key) = config.key {
-			let source = if let Some(url) = parse_url(&key) {
+			let source = if let Ok(url) = Url::parse(&key) {
 				KeySource::Url {
 					url,
-					client: build_http_client()?,
+					client: Self::build_client(identity.as_ref())?,
 				}
 			} else {
 				let path = PathBuf::from(&key);
@@ -422,14 +422,14 @@ impl Auth {
 			};
 			Some(source)
 		} else if let Some(key_dir) = config.key_dir {
-			let source = if let Some(mut url) = parse_url(&key_dir) {
+			let source = if let Ok(mut url) = Url::parse(&key_dir) {
 				// Ensure trailing slash so Url::join appends rather than replaces the last segment
 				if !url.path().ends_with('/') {
 					url.set_path(&format!("{}/", url.path()));
 				}
 				KeySource::UrlDir {
 					base: url,
-					client: build_http_client()?,
+					client: Self::build_client(identity.as_ref())?,
 				}
 			} else {
 				let path = PathBuf::from(&key_dir);
@@ -453,11 +453,11 @@ impl Auth {
 			subscribe.extend(d.subscribe.iter().map(|s| Path::new(s).to_owned()));
 			publish.extend(d.publish.iter().map(|s| Path::new(s).to_owned()));
 			if let Some(url_str) = d.api {
-				let mut url = parse_url(&url_str).context("invalid public API URL")?;
+				let mut url = Url::parse(&url_str).context("invalid public API URL")?;
 				if !url.path().ends_with('/') {
 					url.set_path(&format!("{}/", url.path()));
 				}
-				api = Some((url, build_http_client()?));
+				api = Some((url, Self::build_client(identity.as_ref())?));
 			}
 		}
 
@@ -469,6 +469,18 @@ impl Auth {
 		if let Some(config) = config.public_publish {
 			let d = config.into_detailed();
 			publish.extend(d.publish.iter().map(|s| Path::new(s).to_owned()));
+		}
+
+		if let Some(url_str) = config.public_api {
+			anyhow::ensure!(
+				api.is_none(),
+				"cannot specify --auth-public-api alongside [auth.public] api"
+			);
+			let mut url = Url::parse(&url_str).context("invalid --auth-public-api URL")?;
+			if !url.path().ends_with('/') {
+				url.set_path(&format!("{}/", url.path()));
+			}
+			api = Some((url, Self::build_client(identity.as_ref())?));
 		}
 
 		let public = PublicAccess {
@@ -617,6 +629,28 @@ impl Auth {
 			register,
 		})
 	}
+
+	fn build_client(identity: Option<&reqwest::Identity>) -> anyhow::Result<ClientWithMiddleware> {
+		let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
+		if let Some(identity) = identity {
+			builder = builder.identity(identity.clone()).use_rustls_tls();
+		}
+		let client = builder.build().context("failed to build HTTP client")?;
+
+		Ok(reqwest_middleware::ClientBuilder::new(client)
+			.with(Cache(HttpCache {
+				mode: CacheMode::Default,
+				manager: MokaManager::default(),
+				options: HttpCacheOptions::default(),
+			}))
+			.build())
+	}
+
+	fn load_identity(path: &str) -> anyhow::Result<reqwest::Identity> {
+		let pem = std::fs::read(path).with_context(|| format!("failed to read auth-http-identity at {path}"))?;
+		reqwest::Identity::from_pem(&pem)
+			.context("failed to parse auth-http-identity PEM (expected concatenated cert + private key)")
+	}
 }
 
 #[cfg(test)]
@@ -639,6 +673,7 @@ mod tests {
 	}
 
 	fn simple_public(prefix: &str) -> Option<PublicConfig> {
+		#[allow(deprecated)]
 		Some(PublicConfig::Simple(vec![prefix.to_string()]))
 	}
 
