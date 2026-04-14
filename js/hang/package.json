@@ -5,6 +5,7 @@
 	"description": "WebCodecs-based media format for MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
+	"sideEffects": false,
 	"exports": {
 		".": "./src/index.ts",
 		"./catalog": "./src/catalog/index.ts",
