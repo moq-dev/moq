@@ -316,6 +316,24 @@ pub struct AuthToken {
 	pub register: Option<String>,
 }
 
+impl AuthToken {
+	/// Construct a token for a peer that was authenticated at the TLS layer
+	/// via mTLS. These peers are granted full (root-scoped) publish and
+	/// subscribe access plus cluster privileges.
+	///
+	/// `node` is the peer's cluster node name, typically derived from the
+	/// first DNS SAN on its leaf certificate.
+	pub fn from_peer(node: Option<String>) -> Self {
+		Self {
+			root: PathOwned::default(),
+			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
+			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
+			cluster: true,
+			register: node,
+		}
+	}
+}
+
 enum KeySource {
 	/// A single key file. No kid required.
 	File(PathBuf),

@@ -1,4 +1,4 @@
-use crate::{Auth, AuthParams, Cluster};
+use crate::{Auth, AuthParams, AuthToken, Cluster};
 
 use axum::http;
 use moq_native::Request;
@@ -22,18 +22,26 @@ impl Connection {
 	/// Authenticates and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let params = match self.request.url() {
-			Some(url) => AuthParams::from_url(url),
-			None => AuthParams::default(),
-		};
+		// If the client presented a valid mTLS client certificate, skip JWT
+		// entirely and grant full (cluster) access. The node name comes from
+		// the cert's first DNS SAN so peers cannot spoof each other.
+		let token = if let Some(peer) = self.request.peer_identity() {
+			tracing::debug!(node = ?peer.dns_name, "mTLS peer authenticated");
+			AuthToken::from_peer(peer.dns_name)
+		} else {
+			let params = match self.request.url() {
+				Some(url) => AuthParams::from_url(url),
+				None => AuthParams::default(),
+			};
 
-		// Verify the URL before accepting the connection.
-		let token = match self.auth.verify(&params).await {
-			Ok(token) => token,
-			Err(err) => {
-				let status: http::StatusCode = err.clone().into();
-				let _ = self.request.close(status.as_u16()).await;
-				return Err(err.into());
+			// Verify the URL before accepting the connection.
+			match self.auth.verify(&params).await {
+				Ok(token) => token,
+				Err(err) => {
+					let status: http::StatusCode = err.clone().into();
+					let _ = self.request.close(status.as_u16()).await;
+					return Err(err.into());
+				}
 			}
 		};
 

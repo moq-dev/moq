@@ -43,6 +43,23 @@ pub struct ServerTlsConfig {
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub generate: Vec<String>,
+
+	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
+	///
+	/// When set, clients *may* present a certificate during the TLS handshake.
+	/// Valid presentations are exposed via [`Request::peer_identity`] and can be
+	/// used by the application to grant elevated access. Clients that do not
+	/// present a certificate are unaffected.
+	///
+	/// Only supported by the Quinn backend.
+	#[arg(
+		long = "tls-root",
+		id = "server-tls-root",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_ROOT"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub root: Vec<PathBuf>,
 }
 
 /// Configuration for the MoQ server.
@@ -157,6 +174,17 @@ impl Server {
 		});
 
 		let versions = config.versions();
+
+		if !config.tls.root.is_empty() {
+			#[cfg(feature = "quinn")]
+			let quinn_backend = matches!(backend, QuicBackend::Quinn);
+			#[cfg(not(feature = "quinn"))]
+			let quinn_backend = false;
+			anyhow::ensure!(
+				quinn_backend,
+				"tls.root (mTLS) is only supported by the quinn backend"
+			);
+		}
 
 		#[cfg(feature = "noq")]
 		#[allow(unreachable_patterns)]
@@ -445,6 +473,18 @@ impl Server {
 	}
 }
 
+/// The identity of a peer that presented a client certificate during the TLS
+/// handshake, as validated against the configured [`ServerTlsConfig::root`].
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct PeerIdentity {
+	/// The first DNS SAN on the leaf certificate, if any.
+	///
+	/// This is cryptographically bound to the cert and is suitable as a
+	/// stable node name.
+	pub dns_name: Option<String>,
+}
+
 /// An incoming connection that can be accepted or rejected.
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
@@ -573,6 +613,34 @@ impl Request {
 			RequestKind::Iroh(ref request) => request.url(),
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(_) => None,
+		}
+	}
+
+	/// Returns the peer's TLS-validated identity, if it presented a client
+	/// certificate during the handshake that chained to a configured
+	/// [`ServerTlsConfig::root`].
+	///
+	/// Only the Quinn backend supports mTLS; other backends always return `None`.
+	pub fn peer_identity(&self) -> Option<PeerIdentity> {
+		match self.kind {
+			#[cfg(feature = "quinn")]
+			RequestKind::Quinn(ref request) => request.peer_identity(),
+			#[cfg(feature = "noq")]
+			RequestKind::Noq(_) => None,
+			#[cfg(feature = "quiche")]
+			RequestKind::Quiche(_) => None,
+			#[cfg(feature = "iroh")]
+			RequestKind::Iroh(_) => None,
+			#[cfg(feature = "websocket")]
+			RequestKind::WebSocket(_) => None,
+			#[cfg(not(any(
+				feature = "noq",
+				feature = "quinn",
+				feature = "quiche",
+				feature = "iroh",
+				feature = "websocket"
+			)))]
+			_ => None,
 		}
 	}
 }

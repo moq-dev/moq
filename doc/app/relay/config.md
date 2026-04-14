@@ -59,6 +59,12 @@ key = "/path/to/key.pem"     # Private key
 
 # Option 2: Generate self-signed certificates (development only)
 generate = ["localhost", "127.0.0.1"]
+
+# Optional: root CAs to accept for mTLS peer authentication.
+# Clients that present a cert signed by one of these CAs are granted
+# full access (publish/subscribe/cluster). Intended for relay clustering.
+# Quinn backend only.
+root = ["/path/to/peer-ca.pem"]
 ```
 
 For production, use certificates from Let's Encrypt or another CA.

@@ -180,6 +180,36 @@ public = "anon"  # Anyone can publish/subscribe to anon/*
 
 Set `public = ""` to make everything public (development only).
 
+## mTLS Peer Authentication
+
+In addition to JWT auth, the relay can authenticate peers via mutual TLS. When
+the server is configured with a trusted root CA, any client that presents a
+certificate chaining to that CA is granted **full access**: root-scoped publish
+and subscribe permissions plus cluster privileges — equivalent to a JWT with
+`publish: ""`, `subscribe: ""`, and `cluster: true`.
+
+This is primarily intended for relay-to-relay (clustering) authentication, as a
+simpler alternative to distributing long-lived JWTs.
+
+Client certificate presentation is **optional**: connections without a
+certificate fall through to the normal JWT path unchanged.
+
+```toml
+[tls]
+cert = ["/etc/moq/server.pem"]
+key  = ["/etc/moq/server.key"]
+# One or more PEM files containing the CAs trusted to sign peer certificates.
+root = ["/etc/moq/peer-ca.pem"]
+```
+
+The peer's cluster node name is taken from the **first DNS SAN** on its leaf
+certificate, so node identity is cryptographically bound to the cert.
+Certificates without a DNS SAN are still accepted but will not register as
+cluster nodes.
+
+Only the `quinn` QUIC backend supports mTLS; configuring `tls.root` with any
+other backend is a startup error.
+
 ## Example Configurations
 
 See the [`demo/relay/`](https://github.com/moq-dev/moq/tree/main/demo/relay) directory for complete working configuration files, including authentication setup:

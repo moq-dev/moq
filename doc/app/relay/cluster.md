@@ -58,6 +58,26 @@ node = "https://us-east.relay.example.com"  # This node's address
     └─────────────┘ └─────────────┘ └─────────────┘
 ```
 
+## Peer Authentication
+
+Cluster peers must authenticate to each other. Two options:
+
+### JWT token
+
+Each leaf reads a JWT from `cluster.token` (see [Authentication](/app/relay/auth))
+and presents it to the root on connect. The token must grant cluster privileges
+and full publish/subscribe access.
+
+### mTLS (recommended for new deployments)
+
+Configure the root with `tls.root` pointing at the CA that signed the leaf
+certificates. Leaves connect with a client certificate signed by that CA —
+no JWT needed. The leaf's cluster node name is taken from the first DNS SAN on
+its certificate, so identity is bound to the cert rather than self-declared.
+
+See [Authentication → mTLS Peer Authentication](/app/relay/auth#mtls-peer-authentication)
+for details.
+
 ## Current Limitations
 
 - **Mesh topology** - All relays connect to all others
