@@ -20,7 +20,7 @@ bytes = "1"
 conducer = { workspace = true }
 futures = "0.3"
 num_enum = "0.7"
-rand = "0.9.2"
+rand = "0.10.0"
 serde = { workspace = true, optional = true, features = ["rc"] }
 thiserror = "2"
 tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time"] }
