@@ -18,6 +18,19 @@ pub struct ClientTls {
 	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
 	pub root: Vec<PathBuf>,
 
+	/// Present a client certificate during the TLS handshake (mTLS).
+	///
+	/// The path must point at a single PEM file containing both the
+	/// certificate chain and the matching private key (in any order). This
+	/// is the same bundle layout used by curl's `--cert` and many PKI tools.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "client-tls-identity",
+		long = "client-tls-identity",
+		env = "MOQ_CLIENT_TLS_IDENTITY"
+	)]
+	pub identity: Option<PathBuf>,
+
 	/// Danger: Disable TLS certificate verification.
 	///
 	/// Fine for local development and between relays, but should be used in caution in production.
@@ -85,6 +98,39 @@ pub struct ClientConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub websocket: super::ClientWebSocket,
+}
+
+impl ClientTls {
+	/// Parse the configured identity PEM (if any) and return the first DNS
+	/// SAN on its leaf certificate.
+	///
+	/// Useful for sanity-checking that a caller's own cluster node name
+	/// matches the identity they will present. Returns `Ok(None)` if no
+	/// identity is configured.
+	#[cfg(feature = "quinn")]
+	pub fn identity_dns_name(&self) -> anyhow::Result<Option<String>> {
+		use rustls::pki_types::CertificateDer;
+
+		let Some(path) = self.identity.as_ref() else {
+			return Ok(None);
+		};
+		let pem = std::fs::read(path).context("failed to read client identity")?;
+		let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut pem.as_slice())
+			.collect::<Result<_, _>>()
+			.context("failed to parse client identity certs")?;
+		let leaf = certs
+			.first()
+			.with_context(|| format!("no certificates found in {}", path.display()))?;
+		let (_, cert) = x509_parser::parse_x509_certificate(leaf.as_ref())
+			.map_err(|err| anyhow::anyhow!("failed to parse identity certificate: {err}"))?;
+		let san = cert.subject_alternative_name().ok().flatten().and_then(|san| {
+			san.value.general_names.iter().find_map(|name| match name {
+				x509_parser::extensions::GeneralName::DNSName(n) => Some((*n).to_string()),
+				_ => None,
+			})
+		});
+		Ok(san)
+	}
 }
 
 impl ClientConfig {
@@ -202,10 +248,28 @@ impl Client {
 		// Create the TLS configuration we'll use as a client.
 		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
 		// QUIC always negotiates TLS 1.3 regardless of this setting.
-		let mut tls = rustls::ClientConfig::builder_with_provider(provider.clone())
+		let tls_builder = rustls::ClientConfig::builder_with_provider(provider.clone())
 			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
-			.with_root_certificates(roots)
-			.with_no_client_auth();
+			.with_root_certificates(roots);
+
+		let mut tls = match &config.tls.identity {
+			Some(path) => {
+				let pem = std::fs::read(path).context("failed to read client identity")?;
+				let chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut pem.as_slice())
+					.collect::<Result<_, _>>()
+					.context("failed to parse client identity certs")?;
+				anyhow::ensure!(!chain.is_empty(), "no certificates found in {}", path.display());
+
+				let key = rustls_pemfile::private_key(&mut pem.as_slice())
+					.context("failed to parse client identity key")?
+					.with_context(|| format!("no private key found in {}", path.display()))?;
+
+				tls_builder
+					.with_client_auth_cert(chain, key)
+					.context("failed to configure client certificate")?
+			}
+			None => tls_builder.with_no_client_auth(),
+		};
 
 		// Allow disabling TLS verification altogether.
 		if config.tls.disable_verify.unwrap_or_default() {
@@ -270,6 +334,15 @@ impl Client {
 	pub fn with_iroh_addrs(mut self, addrs: Vec<std::net::SocketAddr>) -> Self {
 		self.iroh_addrs = addrs;
 		self
+	}
+
+	/// Returns the [`rustls::ClientConfig`] used for outbound TLS connections.
+	///
+	/// Callers can clone this into other TLS-consuming libraries (e.g. reqwest
+	/// via `ClientBuilder::use_preconfigured_tls`) to share the same cert
+	/// chain, root CAs, and identity without reparsing the PEMs.
+	pub fn tls(&self) -> &rustls::ClientConfig {
+		&self.tls
 	}
 
 	pub fn with_publish(mut self, publish: impl Into<Option<moq_lite::OriginConsumer>>) -> Self {

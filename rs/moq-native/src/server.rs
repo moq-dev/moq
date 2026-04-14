@@ -33,6 +33,21 @@ pub struct ServerTlsConfig {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub key: Vec<PathBuf>,
 
+	/// Or load certificate + private key from a single bundled PEM file.
+	///
+	/// Each entry is one PEM containing both the cert chain and its matching
+	/// key (same layout as `curl --cert`). Use this when you want the cluster
+	/// client identity to double as the server cert; use `cert`/`key` when
+	/// they live in separate files.
+	#[arg(
+		long = "server-tls-identity",
+		id = "server-tls-identity",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_IDENTITY"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub identity: Vec<PathBuf>,
+
 	/// Or generate a new certificate and key with the given hostnames.
 	/// This won't be valid unless the client uses the fingerprint or disables verification.
 	#[arg(
@@ -53,7 +68,7 @@ pub struct ServerTlsConfig {
 	///
 	/// Only supported by the Quinn backend.
 	#[arg(
-		long = "tls-root",
+		long = "server-tls-root",
 		id = "server-tls-root",
 		value_delimiter = ',',
 		env = "MOQ_SERVER_TLS_ROOT"
@@ -180,10 +195,7 @@ impl Server {
 			let quinn_backend = matches!(backend, QuicBackend::Quinn);
 			#[cfg(not(feature = "quinn"))]
 			let quinn_backend = false;
-			anyhow::ensure!(
-				quinn_backend,
-				"tls.root (mTLS) is only supported by the quinn backend"
-			);
+			anyhow::ensure!(quinn_backend, "tls.root (mTLS) is only supported by the quinn backend");
 		}
 
 		#[cfg(feature = "noq")]
@@ -651,6 +663,42 @@ pub struct ServerTlsInfo {
 	#[cfg(any(feature = "noq", feature = "quinn"))]
 	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
 	pub fingerprints: Vec<String>,
+}
+
+impl ServerTlsInfo {
+	/// Returns the first DNS SAN on each configured end-entity (leaf) certificate.
+	///
+	/// Errors if any certificate exposes zero or more than one DNS SAN —
+	/// cluster peers are expected to advertise exactly one, matching the
+	/// cluster node name.
+	#[cfg(feature = "quinn")]
+	pub fn single_dns_sans(&self) -> anyhow::Result<Vec<String>> {
+		use anyhow::Context;
+
+		self.certs
+			.iter()
+			.map(|ck| {
+				let leaf = ck.end_entity_cert().context("certificate missing leaf")?;
+				let (_, cert) = x509_parser::parse_x509_certificate(leaf.as_ref())
+					.map_err(|err| anyhow::anyhow!("failed to parse server certificate: {err}"))?;
+				let mut dns_sans = Vec::new();
+				if let Some(san) = cert.subject_alternative_name().ok().flatten() {
+					for name in &san.value.general_names {
+						if let x509_parser::extensions::GeneralName::DNSName(n) = name {
+							dns_sans.push((*n).to_string());
+						}
+					}
+				}
+				anyhow::ensure!(!dns_sans.is_empty(), "server certificate is missing a DNS SAN");
+				anyhow::ensure!(
+					dns_sans.len() == 1,
+					"server certificate {:?} has more than one DNS SAN",
+					dns_sans[0],
+				);
+				Ok(dns_sans.into_iter().next().unwrap())
+			})
+			.collect()
+	}
 }
 
 /// Server ID for QUIC-LB support.

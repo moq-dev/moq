@@ -1,7 +1,30 @@
 use crate::{Auth, AuthParams, AuthToken, Cluster};
 
+use anyhow::Context;
 use axum::http;
 use moq_native::Request;
+
+/// Pick the cluster node name for an mTLS-authenticated peer.
+///
+/// The SAN is required on the client certificate, and it is authoritative:
+/// the query param may only add a `:port` suffix, so a peer can't register
+/// under another SAN's identity.
+fn resolve_peer_node(san: Option<&str>, register: Option<&str>) -> anyhow::Result<String> {
+	let san = san.context("client certificate is missing a DNS SAN")?;
+	let node = match register {
+		None => san.to_owned(),
+		Some(reg) if reg == san => reg.to_owned(),
+		Some(reg) => {
+			let ok = reg
+				.strip_prefix(san)
+				.and_then(|s| s.strip_prefix(':'))
+				.is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+			anyhow::ensure!(ok, "register param {reg:?} does not match cert SAN {san:?}");
+			reg.to_owned()
+		}
+	};
+	Ok(node)
+}
 
 /// An incoming connection that has not yet been authenticated.
 ///
@@ -22,18 +45,28 @@ impl Connection {
 	/// Authenticates and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		// If the client presented a valid mTLS client certificate, skip JWT
-		// entirely and grant full (cluster) access. The node name comes from
-		// the cert's first DNS SAN so peers cannot spoof each other.
-		let token = if let Some(peer) = self.request.peer_identity() {
-			tracing::debug!(node = ?peer.dns_name, "mTLS peer authenticated");
-			AuthToken::from_peer(peer.dns_name)
-		} else {
-			let params = match self.request.url() {
-				Some(url) => AuthParams::from_url(url),
-				None => AuthParams::default(),
-			};
+		let params = match self.request.url() {
+			Some(url) => AuthParams::from_url(url),
+			None => AuthParams::default(),
+		};
 
+		// If the client presented a valid mTLS client certificate, skip JWT
+		// entirely and grant full (cluster) access. The node name comes
+		// from the cert's first DNS SAN. Since DNS SANs cannot carry a
+		// port, a `?register=` query param is accepted only if it extends
+		// the SAN with a `:port` suffix (e.g. SAN `leaf0` + `?register=leaf0:4444`).
+		let token = if let Some(peer) = self.request.peer_identity() {
+			match resolve_peer_node(peer.dns_name.as_deref(), params.register.as_deref()) {
+				Ok(node) => {
+					tracing::debug!(?node, "mTLS peer authenticated");
+					AuthToken::from_peer(node)
+				}
+				Err(err) => {
+					let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
+					return Err(err);
+				}
+			}
+		} else {
 			// Verify the URL before accepting the connection.
 			match self.auth.verify(&params).await {
 				Ok(token) => token,

@@ -21,9 +21,11 @@ async fn main() -> anyhow::Result<()> {
 	config.client.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 	config.server.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 
+	let mtls_enabled = !config.server.tls.root.is_empty();
+
 	#[allow(unused_mut)]
 	let mut server = config.server.init()?;
-	let client = config.client.init()?;
+	let client = config.client.clone().init()?;
 
 	#[cfg(feature = "iroh")]
 	let (server, client) = {
@@ -31,7 +33,52 @@ async fn main() -> anyhow::Result<()> {
 		(server.with_iroh(iroh.clone()), client.with_iroh(iroh))
 	};
 
-	let auth = config.auth.init().await?;
+	let auth = config.auth.init(client.tls(), mtls_enabled).await?;
+
+	// If we're dialing a remote cluster with an mTLS identity, verify locally
+	// that:
+	//   1. The cert has a DNS SAN (otherwise the root will reject us);
+	//   2. If `cluster.node` is set, it either equals the SAN or extends it
+	//      with a `:port` suffix (DNS SANs cannot carry ports).
+	// When `cluster.node` is unset we default it to the SAN.
+	if config.cluster.root.is_some() && config.client.tls.identity.is_some() {
+		let san = config
+			.client
+			.tls
+			.identity_dns_name()?
+			.context("client.tls.identity has no DNS SAN; cluster peers cannot authenticate")?;
+		match config.cluster.node.as_deref() {
+			None => {
+				tracing::info!(%san, "deriving cluster.node from client.tls.identity SAN");
+				config.cluster.node = Some(san);
+			}
+			Some(node) => {
+				let ok = node == san
+					|| node
+						.strip_prefix(&san)
+						.and_then(|s| s.strip_prefix(':'))
+						.is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+				anyhow::ensure!(
+					ok,
+					"cluster.node {node:?} does not match client.tls.identity SAN {san:?}",
+				);
+			}
+		}
+	}
+
+	// Every server cert must carry exactly one DNS SAN, and (if cluster.node
+	// is set) that SAN must equal the hostname portion of the node name —
+	// the same rule we apply to peers that connect in via mTLS.
+	let server_sans = server.tls_info().read().unwrap().single_dns_sans()?;
+	if let Some(node) = config.cluster.node.as_deref() {
+		let expected = node.rsplit_once(':').map(|(host, _)| host).unwrap_or(node);
+		for san in &server_sans {
+			anyhow::ensure!(
+				san == expected,
+				"server TLS certificate SAN {san:?} does not match cluster.node {node:?}",
+			);
+		}
+	}
 
 	let cluster = Cluster::new(config.cluster, client);
 

@@ -142,12 +142,6 @@ pub struct AuthConfig {
 	#[arg(long = "auth-public-api", env = "MOQ_AUTH_PUBLIC_API")]
 	#[serde(skip)]
 	pub public_api: Option<String>,
-
-	/// Path to a PEM file containing a client certificate and private key used for
-	/// mTLS when fetching keys (`--auth-key-dir`) or public access rules
-	/// (`--auth-public-api`).
-	#[arg(long = "auth-http-identity", env = "MOQ_AUTH_HTTP_IDENTITY")]
-	pub identity: Option<String>,
 }
 
 /// Public access configuration.
@@ -295,8 +289,18 @@ impl PublicAccess {
 
 impl AuthConfig {
 	/// Initializes an [`Auth`] instance from this configuration.
-	pub async fn init(self) -> anyhow::Result<Auth> {
-		Auth::new(self).await
+	///
+	/// `tls` is an already-built [`rustls::ClientConfig`] — typically the
+	/// one from the relay's cluster [`moq_native::Client`] — reused for
+	/// the HTTP client that fetches keys and public-access rules. Sharing
+	/// the config means cert chains and root CAs are loaded exactly once.
+	///
+	/// `mtls_enabled` tells Auth whether the server accepts mTLS peers
+	/// (i.e. `server.tls.root` is non-empty). When true, missing JWT/public
+	/// config is a warning (mTLS peers still authenticate); when false, it
+	/// is fatal because no one can authenticate.
+	pub async fn init(self, tls: &rustls::ClientConfig, mtls_enabled: bool) -> anyhow::Result<Auth> {
+		Auth::new(self, tls, mtls_enabled).await
 	}
 }
 
@@ -321,15 +325,16 @@ impl AuthToken {
 	/// via mTLS. These peers are granted full (root-scoped) publish and
 	/// subscribe access plus cluster privileges.
 	///
-	/// `node` is the peer's cluster node name, typically derived from the
-	/// first DNS SAN on its leaf certificate.
-	pub fn from_peer(node: Option<String>) -> Self {
+	/// `node` is the peer's cluster node name. It is bound to the cert —
+	/// either the first DNS SAN directly, or the SAN with a `:port` suffix
+	/// supplied at connect time (DNS SANs cannot carry ports).
+	pub fn from_peer(node: String) -> Self {
 		Self {
 			root: PathOwned::default(),
 			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			cluster: true,
-			register: node,
+			register: Some(node),
 		}
 	}
 }
@@ -419,19 +424,17 @@ pub struct Auth {
 }
 
 impl Auth {
-	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
+	pub async fn new(config: AuthConfig, tls: &rustls::ClientConfig, mtls_enabled: bool) -> anyhow::Result<Self> {
 		anyhow::ensure!(
 			config.key.is_none() || config.key_dir.is_none(),
 			"cannot specify both --auth-key and --auth-key-dir"
 		);
 
-		let identity = config.identity.as_deref().map(Self::load_identity).transpose()?;
-
 		let source = if let Some(key) = config.key {
 			let source = if let Ok(url) = Url::parse(&key) {
 				KeySource::Url {
 					url,
-					client: Self::build_client(identity.as_ref())?,
+					client: Self::build_client(tls)?,
 				}
 			} else {
 				let path = PathBuf::from(&key);
@@ -447,7 +450,7 @@ impl Auth {
 				}
 				KeySource::UrlDir {
 					base: url,
-					client: Self::build_client(identity.as_ref())?,
+					client: Self::build_client(tls)?,
 				}
 			} else {
 				let path = PathBuf::from(&key_dir);
@@ -475,7 +478,7 @@ impl Auth {
 				if !url.path().ends_with('/') {
 					url.set_path(&format!("{}/", url.path()));
 				}
-				api = Some((url, Self::build_client(identity.as_ref())?));
+				api = Some((url, Self::build_client(tls)?));
 			}
 		}
 
@@ -498,7 +501,7 @@ impl Auth {
 			if !url.path().ends_with('/') {
 				url.set_path(&format!("{}/", url.path()));
 			}
-			api = Some((url, Self::build_client(identity.as_ref())?));
+			api = Some((url, Self::build_client(tls)?));
 		}
 
 		let public = PublicAccess {
@@ -508,7 +511,13 @@ impl Auth {
 		};
 
 		if resolver.is_none() && public.is_empty() {
-			anyhow::bail!("no auth-key, auth-key-dir, or public path configured");
+			anyhow::ensure!(
+				mtls_enabled,
+				"no auth-key, auth-key-dir, public path, or server tls.root configured; \
+				 nobody can authenticate"
+			);
+			// mTLS peers bypass Auth entirely and will still be accepted.
+			tracing::warn!("no auth-key, auth-key-dir, or public path configured; only mTLS peers will be accepted");
 		}
 
 		Ok(Self { resolver, public })
@@ -648,12 +657,12 @@ impl Auth {
 		})
 	}
 
-	fn build_client(identity: Option<&reqwest::Identity>) -> anyhow::Result<ClientWithMiddleware> {
-		let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
-		if let Some(identity) = identity {
-			builder = builder.identity(identity.clone()).use_rustls_tls();
-		}
-		let client = builder.build().context("failed to build HTTP client")?;
+	fn build_client(tls: &rustls::ClientConfig) -> anyhow::Result<ClientWithMiddleware> {
+		let client = reqwest::Client::builder()
+			.timeout(std::time::Duration::from_secs(10))
+			.use_preconfigured_tls(tls.clone())
+			.build()
+			.context("failed to build HTTP client")?;
 
 		Ok(reqwest_middleware::ClientBuilder::new(client)
 			.with(Cache(HttpCache {
@@ -662,12 +671,6 @@ impl Auth {
 				options: HttpCacheOptions::default(),
 			}))
 			.build())
-	}
-
-	fn load_identity(path: &str) -> anyhow::Result<reqwest::Identity> {
-		let pem = std::fs::read(path).with_context(|| format!("failed to read auth-http-identity at {path}"))?;
-		reqwest::Identity::from_pem(&pem)
-			.context("failed to parse auth-http-identity PEM (expected concatenated cert + private key)")
 	}
 }
 
@@ -690,6 +693,14 @@ mod tests {
 		dir
 	}
 
+	fn test_client() -> rustls::ClientConfig {
+		moq_native::ClientConfig::default()
+			.init()
+			.expect("client init")
+			.tls()
+			.clone()
+	}
+
 	fn simple_public(prefix: &str) -> Option<PublicConfig> {
 		#[allow(deprecated)]
 		Some(PublicConfig::Simple(vec![prefix.to_string()]))
@@ -705,10 +716,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_anonymous_access_with_public_path() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
-			public: simple_public("anon"),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				public: simple_public("anon"),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let token = auth.verify(&AuthParams::new("/anon")).await?;
@@ -726,10 +741,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_anonymous_access_fully_public() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
-			public: simple_public(""),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				public: simple_public(""),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let token = auth.verify(&AuthParams::new("/any/path")).await?;
@@ -742,10 +761,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_anonymous_access_denied_wrong_prefix() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
-			public: simple_public("anon"),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				public: simple_public("anon"),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let result = auth.verify(&AuthParams::new("/secret")).await;
@@ -759,10 +782,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let result = auth.verify(&AuthParams::new("/any/path")).await;
@@ -773,10 +800,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_token_provided_but_no_key_configured() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
-			public: simple_public("anon"),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				public: simple_public("anon"),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let result = auth
@@ -796,10 +827,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -829,10 +864,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -860,10 +899,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -893,10 +936,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -925,10 +972,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -957,10 +1008,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -991,10 +1046,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -1025,10 +1084,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -1059,10 +1122,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -1105,10 +1172,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -1151,10 +1222,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -1201,10 +1276,14 @@ mod tests {
 	#[tokio::test]
 	async fn test_key_resolver_file_missing_key() -> anyhow::Result<()> {
 		let dir = TempDir::new()?;
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let key = create_test_key_with_kid("nonexistent");
@@ -1229,10 +1308,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_public_subscribe_only() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
-			public: detailed_public(&["demo"], &[]),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				public: detailed_public(&["demo"], &[]),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// Anonymous access to / — can subscribe under demo/
@@ -1266,10 +1349,14 @@ mod tests {
 		let key2 = create_test_key_with_kid("key-2");
 		let dir = setup_key_dir(&[("key-1", &key1), ("key-2", &key2)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// Sign with key-1
@@ -1311,10 +1398,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_public_publish_only() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
-			public: detailed_public(&[], &["demo"]),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				public: detailed_public(&[], &["demo"]),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// Anonymous access to / — can publish under demo/
@@ -1340,10 +1431,14 @@ mod tests {
 		let key = Key::generate(Algorithm::HS256, None)?;
 		let dir = TempDir::new()?;
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let claims = moq_token::Claims {
@@ -1367,10 +1462,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_public_detailed_both() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
-			public: detailed_public(&["demo"], &["demo"]),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				public: detailed_public(&["demo"], &["demo"]),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		let token = auth.verify(&AuthParams::new("/")).await?;
@@ -1387,10 +1486,14 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_public_empty_string_allows_everything() -> anyhow::Result<()> {
-		let auth = Auth::new(AuthConfig {
-			public: simple_public(""),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				public: simple_public(""),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// Anonymous access to any path gets full pub/sub
@@ -1407,11 +1510,15 @@ mod tests {
 		let key_file = tempfile::NamedTempFile::new()?;
 		key.to_file(key_file.path())?;
 
-		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
-			public: detailed_public(&["demo"], &[]),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key: Some(key_file.path().to_string_lossy().to_string()),
+				public: detailed_public(&["demo"], &[]),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// JWT tokens should still work normally
@@ -1442,10 +1549,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// Token with root="demo", connecting to "/"
@@ -1478,10 +1589,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// Token with root="room/123", connecting to "/room"
@@ -1514,10 +1629,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// Token with root="demo", connecting to "/other"
@@ -1546,10 +1665,14 @@ mod tests {
 		let key = create_test_key_with_kid("test-key");
 		let dir = setup_key_dir(&[("test-key", &key)]);
 
-		let auth = Auth::new(AuthConfig {
-			key_dir: Some(dir.path().to_string_lossy().to_string()),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				key_dir: Some(dir.path().to_string_lossy().to_string()),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// Token with root="", subscribe=["demo"] — only demo/ is accessible
@@ -1715,11 +1838,15 @@ api = "https://api.example.com/access"
 	#[tokio::test]
 	async fn test_public_subscribe_flag_merged() -> anyhow::Result<()> {
 		// Simulates: --auth-public anon --auth-public-subscribe demo
-		let auth = Auth::new(AuthConfig {
-			public: simple_public("anon"),
-			public_subscribe: simple_public("demo"),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				public: simple_public("anon"),
+				public_subscribe: simple_public("demo"),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// /anon gets full pub+sub from --auth-public
@@ -1742,11 +1869,15 @@ api = "https://api.example.com/access"
 	#[tokio::test]
 	async fn test_public_publish_flag_merged() -> anyhow::Result<()> {
 		// Simulates: --auth-public anon --auth-public-publish uploads
-		let auth = Auth::new(AuthConfig {
-			public: simple_public("anon"),
-			public_publish: simple_public("uploads"),
-			..Default::default()
-		})
+		let auth = Auth::new(
+			AuthConfig {
+				public: simple_public("anon"),
+				public_publish: simple_public("uploads"),
+				..Default::default()
+			},
+			&test_client(),
+			true,
+		)
 		.await?;
 
 		// /uploads gets publish-only from --auth-public-publish
