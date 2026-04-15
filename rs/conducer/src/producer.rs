@@ -42,7 +42,7 @@ impl<T> Producer<T> {
 
 		// Wake waiters (e.g. `used()`) when the first consumer appears.
 		if prev == 0 {
-			let waiters = self.state.lock().waiters.take();
+			let mut waiters = self.state.lock().waiters.take();
 			waiters.wake();
 		}
 
@@ -104,7 +104,7 @@ impl<T> Producer<T> {
 		// Release the lock before waking consumers.
 		drop(state);
 
-		if let Some(waiters) = waiters {
+		if let Some(mut waiters) = waiters {
 			waiters.wake();
 		}
 
@@ -241,7 +241,7 @@ impl<T> Drop for Producer<T> {
 		}
 
 		// We were the last producer, need to close
-		let waiters = {
+		let mut waiters = {
 			let mut state = self.state.lock();
 			if state.closed {
 				return;
@@ -308,7 +308,7 @@ impl<T> Drop for Mut<'_, T> {
 		}
 
 		// Drain wakers while holding lock, then wake after releasing
-		let waiters = state.waiters.take();
+		let mut waiters = state.waiters.take();
 		drop(state); // Release Mutex BEFORE waking
 
 		waiters.wake();

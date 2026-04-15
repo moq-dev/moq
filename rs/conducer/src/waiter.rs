@@ -97,8 +97,9 @@ impl WaiterList {
 		}
 	}
 
-	/// Wake all live waiters, consuming the list.
-	pub fn wake(mut self) {
+	/// Wake all live waiters, draining the list.
+	pub fn wake(&mut self) {
+		self.cursor = 0;
 		for waker in self.entries.drain(..).filter_map(|w| w.upgrade()) {
 			waker.wake_by_ref();
 		}
