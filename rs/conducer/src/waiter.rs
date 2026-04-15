@@ -98,8 +98,8 @@ impl WaiterList {
 	}
 
 	/// Wake all live waiters, consuming the list.
-	pub fn wake(self) {
-		for waker in self.entries.into_iter().filter_map(|w| w.upgrade()) {
+	pub fn wake(mut self) {
+		for waker in self.entries.drain(..).filter_map(|w| w.upgrade()) {
 			waker.wake_by_ref();
 		}
 	}
