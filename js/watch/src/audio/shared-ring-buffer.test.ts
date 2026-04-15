@@ -525,3 +525,48 @@ describe("i32 wrapping", () => {
 		}
 	});
 });
+
+describe("SharedRingBuffer.migrateInto", () => {
+	it("preserves the unread window when growing capacity", () => {
+		const src = create({ rate: 1000, channels: 2, capacity: 50, latency: 30 });
+		insert(src, 0, 30, { value: 3.5 });
+		expect(src.stalled).toBe(false);
+
+		const dst = new SharedRingBuffer(allocSharedRingBuffer(2, 200, 1000));
+		src.migrateInto(dst);
+
+		// The 30 unread samples should be readable from the new buffer.
+		const out = read(dst, 30);
+		expect(out[0].length).toBe(30);
+		for (let i = 0; i < 30; i++) {
+			expect(out[0][i]).toBe(3.5);
+			expect(out[1][i]).toBe(3.5);
+		}
+		// Unstalled state carried across.
+		expect(dst.stalled).toBe(false);
+	});
+
+	it("truncates to the newest samples when destination is smaller", () => {
+		const src = create({ rate: 1000, channels: 1, capacity: 50, latency: 40 });
+		// Fill [0, 40) with value 1, then overwrite [30, 40) with value 2 via a fresh insert.
+		insert(src, 0, 30, { channels: 1, value: 1.0 });
+		insert(src, 30, 10, { channels: 1, value: 2.0 });
+
+		const dst = new SharedRingBuffer(allocSharedRingBuffer(1, 10, 1000));
+		src.migrateInto(dst);
+
+		// Only the most recent 10 samples fit.
+		const out = read(dst, 10, 1);
+		for (let i = 0; i < 10; i++) {
+			expect(out[0][i]).toBe(2.0);
+		}
+	});
+
+	it("rejects a destination with mismatched channels or rate", () => {
+		const src = create({ rate: 1000, channels: 2, capacity: 50 });
+		const wrongChannels = new SharedRingBuffer(allocSharedRingBuffer(1, 50, 1000));
+		const wrongRate = new SharedRingBuffer(allocSharedRingBuffer(2, 50, 2000));
+		expect(() => src.migrateInto(wrongChannels)).toThrow();
+		expect(() => src.migrateInto(wrongRate)).toThrow();
+	});
+});
