@@ -5,6 +5,7 @@
 	"description": "Reactive and safe signals",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
+	"sideEffects": false,
 	"exports": {
 		".": "./src/index.ts",
 		"./solid": "./src/solid.ts",
@@ -28,6 +29,9 @@
 		"solid-js": "^1.9.7"
 	},
 	"peerDependenciesMeta": {
+		"@types/react": {
+			"optional": true
+		},
 		"react": {
 			"optional": true
 		},
