@@ -83,7 +83,9 @@ async function videoEncoderSupported(codec: keyof typeof CODECS): Promise<Codec>
 
 export async function isSupported(): Promise<Full> {
 	return {
-		webtransport: typeof WebTransport !== "undefined" ? "full" : "partial",
+		// Firefox's WebTransport drops server-initiated bidi streams, so we force the
+		// WebSocket fallback. Report "partial" to surface the degraded path in UI.
+		webtransport: typeof WebTransport !== "undefined" ? (isFirefox ? "partial" : "full") : "partial",
 		audio: {
 			capture: typeof AudioWorkletNode !== "undefined",
 			encoding: {
