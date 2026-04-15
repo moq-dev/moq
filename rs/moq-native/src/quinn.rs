@@ -1,7 +1,8 @@
 use crate::client::ClientConfig;
-use crate::server::{ServerConfig, ServerId, ServerTlsInfo};
+use crate::server::{PeerIdentity, ServerConfig, ServerId, ServerTlsInfo};
 use crate::tls::{FingerprintVerifier, ServeCerts};
 use anyhow::Context;
+use rustls::pki_types::CertificateDer;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::{net, time};
@@ -137,6 +138,31 @@ impl QuinnClient {
 	}
 }
 
+// ── Peer identity extraction ───────────────────────────────────────
+
+fn extract_peer_identity(conn: &quinn::Connection) -> anyhow::Result<Option<PeerIdentity>> {
+	let Some(any) = conn.peer_identity() else {
+		return Ok(None);
+	};
+	let certs = any
+		.downcast::<Vec<CertificateDer<'static>>>()
+		.map_err(|_| anyhow::anyhow!("peer identity is not a rustls certificate chain"))?;
+	let leaf = certs.first().context("peer certificate chain is empty")?;
+
+	let (_, cert) = x509_parser::parse_x509_certificate(leaf.as_ref()).context("failed to parse peer certificate")?;
+	let dns_name = cert
+		.subject_alternative_name()
+		.context("failed to read subject alternative name extension")?
+		.and_then(|san| {
+			san.value.general_names.iter().find_map(|name| match name {
+				x509_parser::extensions::GeneralName::DNSName(n) => Some((*n).to_string()),
+				_ => None,
+			})
+		});
+
+	Ok(Some(PeerIdentity { dns_name }))
+}
+
 // ── Server ──────────────────────────────────────────────────────────
 
 pub(crate) struct QuinnServer {
@@ -166,10 +192,21 @@ impl QuinnServer {
 		certs.load_certs(&config.tls)?;
 		let certs = Arc::new(certs);
 
-		let mut tls = rustls::ServerConfig::builder_with_provider(provider)
-			.with_protocol_versions(&[&rustls::version::TLS13])?
-			.with_no_client_auth()
-			.with_cert_resolver(certs.clone());
+		let tls_builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+			.with_protocol_versions(&[&rustls::version::TLS13])?;
+
+		let mut tls = if config.tls.root.is_empty() {
+			tls_builder.with_no_client_auth().with_cert_resolver(certs.clone())
+		} else {
+			let roots = config.tls.load_roots()?;
+			let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+				.allow_unauthenticated()
+				.build()
+				.context("failed to build client certificate verifier")?;
+			tls_builder
+				.with_client_cert_verifier(verifier)
+				.with_cert_resolver(certs.clone())
+		};
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
 		let mut alpns: Vec<Vec<u8>> = config
@@ -336,6 +373,15 @@ impl QuinnRequest {
 			QuinnRequest::Raw { .. } => None,
 			QuinnRequest::WebTransport { request, .. } => Some(&request.url),
 		}
+	}
+
+	/// Returns the peer's validated client certificate identity, if any.
+	pub fn peer_identity(&self) -> anyhow::Result<Option<PeerIdentity>> {
+		let conn = match self {
+			QuinnRequest::Raw { connection, .. } => connection,
+			QuinnRequest::WebTransport { request, .. } => request.conn(),
+		};
+		extract_peer_identity(conn)
 	}
 
 	/// Reject the session with a status code.

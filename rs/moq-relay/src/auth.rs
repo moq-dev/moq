@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{OneOrMany, formats::PreferMany, serde_as};
 use std::path::PathBuf;
 use std::sync::Arc;
+use url::Url;
 
 /// Parameters extracted from an incoming connection URL for authentication.
 #[derive(Default, Debug)]
@@ -93,6 +94,54 @@ impl axum::response::IntoResponse for AuthError {
 	}
 }
 
+/// TLS configuration for HTTP requests made by the auth client (JWK fetches
+/// and public-API lookups).
+///
+/// Mirrors [`moq_native::ClientTls`] so the auth client can be configured
+/// independently of the cluster client. Defaults to system roots with no
+/// client identity, which is what most external auth endpoints expect.
+#[derive(Clone, Default, Debug, clap::Args, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct AuthTls {
+	/// PEM file(s) of root CAs. If empty, the platform's native roots are used.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT")]
+	pub root: Vec<PathBuf>,
+
+	/// Present a client certificate during the TLS handshake (mTLS).
+	///
+	/// Bundled PEM containing both the cert chain and the private key.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "auth-tls-identity", long = "auth-tls-identity", env = "MOQ_AUTH_TLS_IDENTITY")]
+	pub identity: Option<PathBuf>,
+
+	/// Danger: Disable TLS certificate verification on auth requests.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "auth-tls-disable-verify",
+		long = "auth-tls-disable-verify",
+		env = "MOQ_AUTH_TLS_DISABLE_VERIFY",
+		default_missing_value = "true",
+		num_args = 0..=1,
+		require_equals = true,
+		value_parser = clap::value_parser!(bool),
+	)]
+	pub disable_verify: Option<bool>,
+}
+
+impl AuthTls {
+	/// Convert into a [`moq_native::ClientTls`] so we can reuse its
+	/// rustls-building logic. The fields map one-to-one.
+	fn to_client_tls(&self) -> moq_native::ClientTls {
+		let mut tls = moq_native::ClientTls::default();
+		tls.root = self.root.clone();
+		tls.identity = self.identity.clone();
+		tls.disable_verify = self.disable_verify;
+		tls
+	}
+}
+
 /// Configuration for JWT-based authentication.
 #[derive(clap::Args, Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -109,6 +158,11 @@ pub struct AuthConfig {
 	/// URL: fetches `{url}/{kid}.jwk` with HTTP caching.
 	#[arg(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR")]
 	pub key_dir: Option<String>,
+
+	/// TLS configuration for outbound HTTP auth requests (JWK + public-API).
+	#[command(flatten)]
+	#[serde(default)]
+	pub tls: AuthTls,
 
 	/// Public (unauthenticated) access configuration.
 	///
@@ -134,6 +188,13 @@ pub struct AuthConfig {
 	#[arg(long = "auth-public-publish", env = "MOQ_AUTH_PUBLIC_PUBLISH")]
 	#[serde(skip)]
 	pub public_publish: Option<PublicConfig>,
+
+	/// CLI-only shorthand: `--auth-public-api <url>` sets a URL endpoint that returns
+	/// `{ subscribe: [...], publish: [...] }` per namespace. The connection namespace is
+	/// appended to the URL. For TOML, use `[auth.public]` with an `api` field instead.
+	#[arg(long = "auth-public-api", env = "MOQ_AUTH_PUBLIC_API")]
+	#[serde(skip)]
+	pub public_api: Option<String>,
 }
 
 /// Public access configuration.
@@ -148,6 +209,7 @@ pub struct AuthConfig {
 #[derive(Clone, Debug)]
 pub enum PublicConfig {
 	/// One or more prefixes granting both subscribe and publish.
+	#[deprecated = "Use the detailed config; this is for backwards compatibility only"]
 	Simple(Vec<String>),
 	/// Separate subscribe/publish prefixes and/or an API URL.
 	Detailed(PublicDetailed),
@@ -173,6 +235,7 @@ impl PublicConfig {
 	/// Normalize into the detailed form.
 	pub fn into_detailed(self) -> PublicDetailed {
 		match self {
+			#[allow(deprecated)]
 			PublicConfig::Simple(prefixes) => PublicDetailed {
 				subscribe: prefixes.clone(),
 				publish: prefixes,
@@ -193,6 +256,7 @@ impl PublicConfig {
 		};
 
 		match value {
+			#[allow(deprecated)]
 			toml::Value::String(s) => Ok(Some(PublicConfig::Simple(vec![s]))),
 			toml::Value::Array(arr) => {
 				let strings: Vec<String> = arr
@@ -202,6 +266,7 @@ impl PublicConfig {
 				if strings.is_empty() {
 					Ok(None)
 				} else {
+					#[allow(deprecated)]
 					Ok(Some(PublicConfig::Simple(strings)))
 				}
 			}
@@ -224,6 +289,7 @@ impl PublicConfig {
 impl std::str::FromStr for PublicConfig {
 	type Err = std::convert::Infallible;
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		#[allow(deprecated)]
 		Ok(PublicConfig::Simple(vec![s.to_string()]))
 	}
 }
@@ -234,7 +300,9 @@ impl Serialize for PublicConfig {
 		S: serde::Serializer,
 	{
 		match self {
+			#[allow(deprecated)]
 			PublicConfig::Simple(v) if v.len() == 1 => v[0].serialize(serializer),
+			#[allow(deprecated)]
 			PublicConfig::Simple(v) => v.serialize(serializer),
 			PublicConfig::Detailed(d) => d.serialize(serializer),
 		}
@@ -277,6 +345,19 @@ impl AuthConfig {
 	pub async fn init(self) -> anyhow::Result<Auth> {
 		Auth::new(self).await
 	}
+
+	/// True when no JWT key, public access rules, or public API are configured.
+	///
+	/// An empty config is invalid on its own — callers should reject it unless
+	/// some other authentication mechanism (e.g. mTLS peer auth) is enabled.
+	pub fn is_empty(&self) -> bool {
+		self.key.is_none()
+			&& self.key_dir.is_none()
+			&& self.public.is_none()
+			&& self.public_subscribe.is_none()
+			&& self.public_publish.is_none()
+			&& self.public_api.is_none()
+	}
 }
 
 /// The result of a successful authentication, containing the resolved
@@ -293,6 +374,25 @@ pub struct AuthToken {
 	pub cluster: bool,
 	/// The cluster node name to register, if this is a cluster connection.
 	pub register: Option<String>,
+}
+
+impl AuthToken {
+	/// Construct a token for a peer that was authenticated at the TLS layer
+	/// via mTLS. These peers are granted full (root-scoped) publish and
+	/// subscribe access plus cluster privileges.
+	///
+	/// `node` is the peer's cluster node name. It is bound to the cert —
+	/// either the first DNS SAN directly, or the SAN with a `:port` suffix
+	/// supplied at connect time (DNS SANs cannot carry ports).
+	pub fn from_peer(node: String) -> Self {
+		Self {
+			root: PathOwned::default(),
+			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
+			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
+			cluster: true,
+			register: Some(node),
+		}
+	}
 }
 
 enum KeySource {
@@ -372,34 +472,14 @@ impl KeyResolver {
 /// Verifies JWT tokens and resolves connection permissions.
 ///
 /// Clone this freely — the underlying state is shared via [`Arc`].
-#[derive(Clone)]
+///
+/// The default value rejects every JWT/anonymous request — useful as a
+/// no-op stub when authentication is delegated entirely to mTLS peer certs.
+#[derive(Clone, Default)]
 pub struct Auth {
 	resolver: Option<Arc<KeyResolver>>,
 	/// Public (unauthenticated) access with static prefixes and/or an API.
 	public: PublicAccess,
-}
-
-fn build_http_client() -> anyhow::Result<ClientWithMiddleware> {
-	let client = reqwest::Client::builder()
-		.timeout(std::time::Duration::from_secs(10))
-		.build()
-		.context("failed to build HTTP client")?;
-
-	Ok(reqwest_middleware::ClientBuilder::new(client)
-		.with(Cache(HttpCache {
-			mode: CacheMode::Default,
-			manager: MokaManager::default(),
-			options: HttpCacheOptions::default(),
-		}))
-		.build())
-}
-
-fn parse_url(s: &str) -> Option<url::Url> {
-	let url = url::Url::parse(s).ok()?;
-	match url.scheme() {
-		"http" | "https" => Some(url),
-		_ => None,
-	}
 }
 
 impl Auth {
@@ -409,11 +489,13 @@ impl Auth {
 			"cannot specify both --auth-key and --auth-key-dir"
 		);
 
+		let tls = config.tls.to_client_tls().build()?;
+
 		let source = if let Some(key) = config.key {
-			let source = if let Some(url) = parse_url(&key) {
+			let source = if let Ok(url) = Url::parse(&key) {
 				KeySource::Url {
 					url,
-					client: build_http_client()?,
+					client: Self::build_client(&tls)?,
 				}
 			} else {
 				let path = PathBuf::from(&key);
@@ -422,14 +504,14 @@ impl Auth {
 			};
 			Some(source)
 		} else if let Some(key_dir) = config.key_dir {
-			let source = if let Some(mut url) = parse_url(&key_dir) {
+			let source = if let Ok(mut url) = Url::parse(&key_dir) {
 				// Ensure trailing slash so Url::join appends rather than replaces the last segment
 				if !url.path().ends_with('/') {
 					url.set_path(&format!("{}/", url.path()));
 				}
 				KeySource::UrlDir {
 					base: url,
-					client: build_http_client()?,
+					client: Self::build_client(&tls)?,
 				}
 			} else {
 				let path = PathBuf::from(&key_dir);
@@ -453,11 +535,11 @@ impl Auth {
 			subscribe.extend(d.subscribe.iter().map(|s| Path::new(s).to_owned()));
 			publish.extend(d.publish.iter().map(|s| Path::new(s).to_owned()));
 			if let Some(url_str) = d.api {
-				let mut url = parse_url(&url_str).context("invalid public API URL")?;
+				let mut url = Url::parse(&url_str).context("invalid public API URL")?;
 				if !url.path().ends_with('/') {
 					url.set_path(&format!("{}/", url.path()));
 				}
-				api = Some((url, build_http_client()?));
+				api = Some((url, Self::build_client(&tls)?));
 			}
 		}
 
@@ -469,6 +551,18 @@ impl Auth {
 		if let Some(config) = config.public_publish {
 			let d = config.into_detailed();
 			publish.extend(d.publish.iter().map(|s| Path::new(s).to_owned()));
+		}
+
+		if let Some(url_str) = config.public_api {
+			anyhow::ensure!(
+				api.is_none(),
+				"cannot specify --auth-public-api alongside [auth.public] api"
+			);
+			let mut url = Url::parse(&url_str).context("invalid --auth-public-api URL")?;
+			if !url.path().ends_with('/') {
+				url.set_path(&format!("{}/", url.path()));
+			}
+			api = Some((url, Self::build_client(&tls)?));
 		}
 
 		let public = PublicAccess {
@@ -617,6 +711,22 @@ impl Auth {
 			register,
 		})
 	}
+
+	fn build_client(tls: &rustls::ClientConfig) -> anyhow::Result<ClientWithMiddleware> {
+		let client = reqwest::Client::builder()
+			.timeout(std::time::Duration::from_secs(10))
+			.use_preconfigured_tls(tls.clone())
+			.build()
+			.context("failed to build HTTP client")?;
+
+		Ok(reqwest_middleware::ClientBuilder::new(client)
+			.with(Cache(HttpCache {
+				mode: CacheMode::Default,
+				manager: MokaManager::default(),
+				options: HttpCacheOptions::default(),
+			}))
+			.build())
+	}
 }
 
 #[cfg(test)]
@@ -639,6 +749,7 @@ mod tests {
 	}
 
 	fn simple_public(prefix: &str) -> Option<PublicConfig> {
+		#[allow(deprecated)]
 		Some(PublicConfig::Simple(vec![prefix.to_string()]))
 	}
 

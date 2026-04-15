@@ -2,67 +2,92 @@ set fallback
 
 # Run a localhost relay server without authentication.
 default:
-	TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- localhost.toml
+    TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- localhost.toml
 
 # Run a cluster of relay servers.
-cluster:
-	bun install
-	@just auth-token
+cluster: token
+    bun install
 
-	bun run concurrently --kill-others --names root,leaf0,leaf1,bbb,tos,web --prefix-colors auto \
-		"just root" \
-		"just wait && just leaf0" \
-		"just wait && just leaf1" \
-		"just wait && just pub bbb http://localhost:4444/demo?jwt=$(cat demo-cli.jwt)" \
-		"just wait && just pub tos http://localhost:4443/demo?jwt=$(cat demo-cli.jwt)" \
-		"just wait && VITE_RELAY_URL=http://localhost:4445/demo?jwt=$(cat demo-web.jwt) bun --cwd ../web --bun vite
-	--open"
+    bun run concurrently --kill-others --names root,leaf0,leaf1,bbb,tos,web --prefix-colors auto \
+    	"just root" \
+    	"just wait http://localhost:4443/certificate.sha256 && just leaf0" \
+    	"just wait http://localhost:4443/certificate.sha256 && just leaf1" \
+    	"just wait http://localhost:4444/certificate.sha256 && just pub bbb http://localhost:4444/demo?jwt=$(cat demo-cli.jwt)" \
+    	"just wait http://localhost:4443/certificate.sha256 && just pub tos http://localhost:4443/demo?jwt=$(cat demo-cli.jwt)" \
+    	"just wait http://localhost:4445/certificate.sha256 && VITE_RELAY_URL=http://localhost:4445/demo?jwt=$(cat demo-web.jwt) bun --cwd ../web --bun vite --open"
 
 # Run a localhost root server, accepting connections from leaf nodes.
-root: auth-key
-	cargo run --bin moq-relay -- root.toml
+root: (cert "root")
+    cargo run --bin moq-relay -- root.toml
 
 # Run a localhost leaf, connecting to the root server.
-leaf0: auth-token
-	cargo run --bin moq-relay -- leaf0.toml
+leaf0: (cert "leaf0")
+    cargo run --bin moq-relay -- leaf0.toml
 
 # Run a second localhost leaf, connecting to the root server.
-leaf1: auth-token
-	cargo run --bin moq-relay -- leaf1.toml
+leaf1: (cert "leaf1")
+    cargo run --bin moq-relay -- leaf1.toml
+
+# Generate a self-signed CA
+ca:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    umask 077
+
+    [ -f ca.pem ] && [ -f ca.key ] && exit 0
+    rm -f ca.pem ca.key
+    printf '[req]\ndistinguished_name = req_dn\n[req_dn]\n' > ca.cnf
+    export OPENSSL_CONF="ca.cnf"
+    openssl req -x509 -sha256 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    	-days 365 -subj "/CN=moq cluster CA" \
+    	-keyout ca.key -out ca.pem
+
+# Generate a self-signed certificate using the root CA
+cert name: ca
+    #!/usr/bin/env bash
+    set -euo pipefail
+    umask 077
+
+    [ -f "{{ name }}.pem" ] && exit 0
+    export OPENSSL_CONF="ca.cnf"
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    	-subj "/CN={{ name }}" \
+    	-keyout "{{ name }}.key" -out "{{ name }}.csr"
+    openssl x509 -req -sha256 -in "{{ name }}.csr" \
+    	-CA ca.pem -CAkey ca.key -CAcreateserial \
+    	-days 365 -extfile <(printf "subjectAltName=DNS:localhost\n") \
+    	-out "{{ name }}.crt"
+    cat "{{ name }}.crt" "{{ name }}.key" > "{{ name }}.pem"
+    rm "{{ name }}.csr" "{{ name }}.crt" "{{ name }}.key"
 
 # Generate a random secret key for authentication.
-auth-key:
-	@if [ ! -f "dev.jwk" ]; then \
-		rm -f *.jwt; \
-		cargo run --bin moq-token-cli -- generate --out "dev.jwk"; \
-	fi
+key:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    umask 077
+
+    [ -f root.jwk ] && exit 0
+    rm -f *.jwt
+    cargo run --bin moq-token-cli -- generate --out root.jwk
 
 # Generate authentication tokens for local development.
-auth-token: auth-key
-	@if [ ! -f "demo-web.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- sign --key "dev.jwk" \
-			--root "demo" \
-			--subscribe "" \
-			--publish "me" \
-			> demo-web.jwt ; \
-	fi
+token: key
+    #!/usr/bin/env bash
+    set -euo pipefail
+    umask 077
 
-	@if [ ! -f "demo-cli.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- sign --key "dev.jwk" \
-			--root "demo" \
-			--publish "" \
-			> demo-cli.jwt ; \
-	fi
+    if [ ! -f demo-web.jwt ]; then
+    	cargo run --quiet --bin moq-token-cli -- sign --key root.jwk \
+    		--root demo --subscribe "" --publish me \
+    		> demo-web.jwt
+    fi
 
-	@if [ ! -f "root.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- sign --key "dev.jwk" \
-			--root "" \
-			--subscribe "" \
-			--publish "" \
-			--cluster \
-			> root.jwt ; \
-	fi
+    if [ ! -f demo-cli.jwt ]; then
+    	cargo run --quiet --bin moq-token-cli -- sign --key root.jwk \
+    		--root demo --publish "" \
+    		> demo-cli.jwt
+    fi
 
 # Connect tokio-console to the relay server (port 6680).
 console:
-	tokio-console http://127.0.0.1:6680
+    tokio-console http://127.0.0.1:6680

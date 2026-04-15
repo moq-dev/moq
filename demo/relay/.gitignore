@@ -1,3 +1,7 @@
 *.jwk
 *.jwt
-iroh-secret.key
+*.key
+*.pem
+*.csr
+*.cnf
+*.srl

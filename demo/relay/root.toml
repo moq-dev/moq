@@ -8,30 +8,27 @@ level = "debug"
 # Sometimes IPv6 causes issues; try 127.0.0.1:4443 instead.
 listen = "[::]:4443"
 
-# Generate a self-signed certificate for the given hostnames.
-# This is used for local development, in conjunction with a fingerprint, or with TLS verification disabled.
-tls.generate = ["localhost"]
+# Server identity (cert chain + key) signed by the cluster CA so leaves
+# can verify via `tls.root`. `just cert root` generates this bundle.
+# For a standalone dev setup, use `tls.generate = ["localhost"]` instead.
+tls.identity = ["root.pem"]
+
+# Trust client certificates signed by this CA for mTLS peer auth.
+# Any connection presenting such a cert is granted full access (publish/
+# subscribe/cluster), which is how leaves join without a `cluster.token`
+# JWT. `just ca` generates the CA.
+tls.root = ["ca.pem"]
 
 [web.http]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
 # Defaults to disabled if not provided.
 listen = "[::]:4443"
 
-# In production, we would use a real certificate from something like Let's Encrypt.
-# Multiple certificates are supported; the first one that matches the SNI will be used.
-# [[server.tls.cert]]
-# chain = "dev/moq.dev.pem"
-# key = "dev/moq.dev.key"
-
-# Authentication is rather crude because it's GOOD ENOUGH for now.
-# see docs/auth.md for more information.
 [auth]
-# `just auth-key` will generate a root key.
-# If you want to disable authentication, don't specify a key.
-key = "dev.jwk"
+# Allow JWT tokens that are signed by this root key.
+key = "root.jwk"
 
-# Allow anonymous subscribing for anon/** and demo/**
-# Allow anonymous publishing for anon/** only
 [auth.public]
+# Allow anonymous clients to subscribe and publish to the prefixes below.
 subscribe = ["anon", "demo"]
 publish = ["anon", "demo/viewer"]
