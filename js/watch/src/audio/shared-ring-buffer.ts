@@ -40,6 +40,20 @@ function slot(idx: number, capacity: number): number {
 	return ((idx % capacity) + capacity) % capacity;
 }
 
+/**
+ * Atomically advance `arr[idx]` to `candidate` iff `candidate` is strictly ahead
+ * (in modular i32 ordering). Retries under contention so the slot only ever
+ * moves forward and concurrent writers/readers can't clobber each other.
+ */
+function casAdvance(arr: Int32Array, idx: number, candidate: number): number {
+	for (;;) {
+		const current = Atomics.load(arr, idx);
+		if (((candidate - current) | 0) <= 0) return current;
+		const witnessed = Atomics.compareExchange(arr, idx, current, candidate);
+		if (witnessed === current) return candidate;
+	}
+}
+
 export class SharedRingBuffer {
 	readonly channels: number;
 	readonly capacity: number;
@@ -89,9 +103,10 @@ export class SharedRingBuffer {
 
 		const samples = originalLength - offset;
 
-		// Overflow: if the write would exceed capacity from current READ, advance READ
+		// Overflow: if the write would exceed capacity from current READ, advance READ.
+		// Use CAS so a concurrent reader advance isn't clobbered backward.
 		if (((end - read) | 0) > this.capacity) {
-			Atomics.store(this.#control, READ, (end - this.capacity) | 0);
+			casAdvance(this.#control, READ, (end - this.capacity) | 0);
 		}
 
 		// Gap fill: zero-fill from current WRITE to start if there's a discontinuity
@@ -139,15 +154,12 @@ export class SharedRingBuffer {
 		const write = Atomics.load(this.#control, WRITE);
 		const latency = Atomics.load(this.#control, LATENCY);
 
-		// Latency skip: if buffered data exceeds LATENCY, skip ahead
+		// Latency skip: if buffered data exceeds LATENCY, skip ahead.
+		// CAS ensures we never step backward relative to a concurrent writer advance.
 		const buffered = (write - read) | 0;
 		if (latency > 0 && buffered > latency) {
-			read = (write - latency) | 0;
-			// Store the skip — but don't go backwards if writer overflowed concurrently
-			const current = Atomics.load(this.#control, READ);
-			if (((read - current) | 0) > 0) {
-				Atomics.store(this.#control, READ, read);
-			}
+			const skipTo = (write - latency) | 0;
+			read = casAdvance(this.#control, READ, skipTo);
 		}
 
 		const available = (write - read) | 0;
@@ -163,12 +175,8 @@ export class SharedRingBuffer {
 			}
 		}
 
-		// Advance READ, but don't undo a concurrent writer overflow advance
-		const desired = (read + count) | 0;
-		const current = Atomics.load(this.#control, READ);
-		if (((desired - current) | 0) > 0) {
-			Atomics.store(this.#control, READ, desired);
-		}
+		// Advance READ via CAS so a concurrent writer overflow can't be undone.
+		casAdvance(this.#control, READ, (read + count) | 0);
 
 		return count;
 	}
@@ -176,6 +184,39 @@ export class SharedRingBuffer {
 	/** Update the target latency in samples. */
 	setLatency(samples: number): void {
 		Atomics.store(this.#control, LATENCY, samples);
+	}
+
+	/**
+	 * Copy the unread window [READ, WRITE) and control state into a freshly-allocated
+	 * destination buffer. Used when growing capacity so we don't drop buffered audio.
+	 */
+	migrateInto(dst: SharedRingBuffer): void {
+		if (dst.channels !== this.channels || dst.rate !== this.rate) {
+			throw new Error("incompatible ring buffer");
+		}
+
+		const read = Atomics.load(this.#control, READ);
+		const write = Atomics.load(this.#control, WRITE);
+		const latency = Atomics.load(this.#control, LATENCY);
+		const stalled = Atomics.load(this.#control, STALLED);
+
+		const available = (write - read) | 0;
+		const copyCount = Math.max(0, Math.min(available, dst.capacity));
+		const copyStart = (write - copyCount) | 0;
+
+		for (let channel = 0; channel < this.channels; channel++) {
+			const src = this.#samples[channel];
+			const out = dst.#samples[channel];
+			for (let i = 0; i < copyCount; i++) {
+				const idx = (copyStart + i) | 0;
+				out[slot(idx, dst.capacity)] = src[slot(idx, this.capacity)];
+			}
+		}
+
+		Atomics.store(dst.#control, READ, copyStart);
+		Atomics.store(dst.#control, WRITE, write);
+		Atomics.store(dst.#control, LATENCY, latency);
+		Atomics.store(dst.#control, STALLED, stalled);
 	}
 
 	/** Current playback timestamp derived from READ position. */

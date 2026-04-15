@@ -104,8 +104,11 @@ class SharedAudioBuffer implements AudioBuffer {
 		if (this.#ring.capacity < samples * 1.5) {
 			const newCapacity = Math.max(this.rate, samples * 2);
 			const init = allocSharedRingBuffer(this.channels, newCapacity, this.rate);
-			this.#ring = new SharedRingBuffer(init);
-			this.#ring.setLatency(samples);
+			const next = new SharedRingBuffer(init);
+			// Preserve the unread window so growing the ring doesn't gap audio.
+			this.#ring.migrateInto(next);
+			next.setLatency(samples);
+			this.#ring = next;
 
 			const msg: InitShared = { type: "init-shared", ...init };
 			this.#worklet.port.postMessage(msg);
