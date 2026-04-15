@@ -1,11 +1,11 @@
 use crate::client::ClientConfig;
-use crate::server::{PeerIdentity, ServerConfig, ServerId, ServerTlsConfig, ServerTlsInfo};
+use crate::server::{PeerIdentity, ServerConfig, ServerId, ServerTlsInfo};
 use crate::tls::{FingerprintVerifier, ServeCerts};
 use anyhow::Context;
 use rustls::pki_types::CertificateDer;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use std::{fs, io, net, time};
+use std::{net, time};
 use url::Url;
 
 // ── Client ──────────────────────────────────────────────────────────
@@ -140,45 +140,27 @@ impl QuinnClient {
 
 // ── Peer identity extraction ───────────────────────────────────────
 
-fn extract_peer_identity(conn: &quinn::Connection) -> Option<PeerIdentity> {
-	let any = conn.peer_identity()?;
-	let certs = any.downcast::<Vec<CertificateDer<'static>>>().ok()?;
-	let leaf = certs.first()?;
+fn extract_peer_identity(conn: &quinn::Connection) -> anyhow::Result<Option<PeerIdentity>> {
+	let Some(any) = conn.peer_identity() else {
+		return Ok(None);
+	};
+	let certs = any
+		.downcast::<Vec<CertificateDer<'static>>>()
+		.map_err(|_| anyhow::anyhow!("peer identity is not a rustls certificate chain"))?;
+	let leaf = certs.first().context("peer certificate chain is empty")?;
 
-	let dns_name = match x509_parser::parse_x509_certificate(leaf.as_ref()) {
-		Ok((_, cert)) => cert.subject_alternative_name().ok().flatten().and_then(|san| {
+	let (_, cert) = x509_parser::parse_x509_certificate(leaf.as_ref()).context("failed to parse peer certificate")?;
+	let dns_name = cert
+		.subject_alternative_name()
+		.context("failed to read subject alternative name extension")?
+		.and_then(|san| {
 			san.value.general_names.iter().find_map(|name| match name {
 				x509_parser::extensions::GeneralName::DNSName(n) => Some((*n).to_string()),
 				_ => None,
 			})
-		}),
-		Err(err) => {
-			tracing::warn!(%err, "failed to parse peer certificate");
-			None
-		}
-	};
+		});
 
-	Some(PeerIdentity { dns_name })
-}
-
-// ── Root CA loading ────────────────────────────────────────────────
-
-fn load_root_ca(config: &ServerTlsConfig) -> anyhow::Result<rustls::RootCertStore> {
-	let mut roots = rustls::RootCertStore::empty();
-	for path in &config.root {
-		let file = fs::File::open(path).with_context(|| format!("failed to open root CA {}", path.display()))?;
-		let mut reader = io::BufReader::new(file);
-		let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
-			.collect::<Result<_, _>>()
-			.with_context(|| format!("failed to parse root CA PEM {}", path.display()))?;
-		anyhow::ensure!(!certs.is_empty(), "no certificates found in {}", path.display());
-		for cert in certs {
-			roots
-				.add(cert)
-				.with_context(|| format!("failed to add root CA from {}", path.display()))?;
-		}
-	}
-	Ok(roots)
+	Ok(Some(PeerIdentity { dns_name }))
 }
 
 // ── Server ──────────────────────────────────────────────────────────
@@ -216,7 +198,7 @@ impl QuinnServer {
 		let mut tls = if config.tls.root.is_empty() {
 			tls_builder.with_no_client_auth().with_cert_resolver(certs.clone())
 		} else {
-			let roots = load_root_ca(&config.tls)?;
+			let roots = config.tls.load_roots()?;
 			let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
 				.allow_unauthenticated()
 				.build()
@@ -394,7 +376,7 @@ impl QuinnRequest {
 	}
 
 	/// Returns the peer's validated client certificate identity, if any.
-	pub fn peer_identity(&self) -> Option<PeerIdentity> {
+	pub fn peer_identity(&self) -> anyhow::Result<Option<PeerIdentity>> {
 		let conn = match self {
 			QuinnRequest::Raw { connection, .. } => connection,
 			QuinnRequest::WebTransport { request, .. } => request.conn(),

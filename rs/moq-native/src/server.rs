@@ -77,6 +77,27 @@ pub struct ServerTlsConfig {
 	pub root: Vec<PathBuf>,
 }
 
+impl ServerTlsConfig {
+	/// Load all configured root CAs into a [`rustls::RootCertStore`].
+	pub fn load_roots(&self) -> anyhow::Result<rustls::RootCertStore> {
+		use rustls::pki_types::CertificateDer;
+
+		let mut roots = rustls::RootCertStore::empty();
+		for path in &self.root {
+			let file = std::fs::File::open(path).context("failed to open root CA")?;
+			let mut reader = std::io::BufReader::new(file);
+			let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+				.collect::<Result<_, _>>()
+				.context("failed to parse root CA PEM")?;
+			anyhow::ensure!(!certs.is_empty(), "no certificates found in root CA");
+			for cert in certs {
+				roots.add(cert).context("failed to add root CA")?;
+			}
+		}
+		Ok(roots)
+	}
+}
+
 /// Configuration for the MoQ server.
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -632,19 +653,19 @@ impl Request {
 	/// certificate during the handshake that chained to a configured
 	/// [`ServerTlsConfig::root`].
 	///
-	/// Only the Quinn backend supports mTLS; other backends always return `None`.
-	pub fn peer_identity(&self) -> Option<PeerIdentity> {
+	/// Only the Quinn backend supports mTLS; other backends always return `Ok(None)`.
+	pub fn peer_identity(&self) -> anyhow::Result<Option<PeerIdentity>> {
 		match self.kind {
 			#[cfg(feature = "quinn")]
 			RequestKind::Quinn(ref request) => request.peer_identity(),
 			#[cfg(feature = "noq")]
-			RequestKind::Noq(_) => None,
+			RequestKind::Noq(_) => Ok(None),
 			#[cfg(feature = "quiche")]
-			RequestKind::Quiche(_) => None,
+			RequestKind::Quiche(_) => Ok(None),
 			#[cfg(feature = "iroh")]
-			RequestKind::Iroh(_) => None,
+			RequestKind::Iroh(_) => Ok(None),
 			#[cfg(feature = "websocket")]
-			RequestKind::WebSocket(_) => None,
+			RequestKind::WebSocket(_) => Ok(None),
 			#[cfg(not(any(
 				feature = "noq",
 				feature = "quinn",
@@ -652,7 +673,7 @@ impl Request {
 				feature = "iroh",
 				feature = "websocket"
 			)))]
-			_ => None,
+			_ => Ok(None),
 		}
 	}
 }
@@ -663,42 +684,6 @@ pub struct ServerTlsInfo {
 	#[cfg(any(feature = "noq", feature = "quinn"))]
 	pub(crate) certs: Vec<Arc<rustls::sign::CertifiedKey>>,
 	pub fingerprints: Vec<String>,
-}
-
-impl ServerTlsInfo {
-	/// Returns the first DNS SAN on each configured end-entity (leaf) certificate.
-	///
-	/// Errors if any certificate exposes zero or more than one DNS SAN —
-	/// cluster peers are expected to advertise exactly one, matching the
-	/// cluster node name.
-	#[cfg(feature = "quinn")]
-	pub fn single_dns_sans(&self) -> anyhow::Result<Vec<String>> {
-		use anyhow::Context;
-
-		self.certs
-			.iter()
-			.map(|ck| {
-				let leaf = ck.end_entity_cert().context("certificate missing leaf")?;
-				let (_, cert) = x509_parser::parse_x509_certificate(leaf.as_ref())
-					.map_err(|err| anyhow::anyhow!("failed to parse server certificate: {err}"))?;
-				let mut dns_sans = Vec::new();
-				if let Some(san) = cert.subject_alternative_name().ok().flatten() {
-					for name in &san.value.general_names {
-						if let x509_parser::extensions::GeneralName::DNSName(n) = name {
-							dns_sans.push((*n).to_string());
-						}
-					}
-				}
-				anyhow::ensure!(!dns_sans.is_empty(), "server certificate is missing a DNS SAN");
-				anyhow::ensure!(
-					dns_sans.len() == 1,
-					"server certificate {:?} has more than one DNS SAN",
-					dns_sans[0],
-				);
-				Ok(dns_sans.into_iter().next().unwrap())
-			})
-			.collect()
-	}
 }
 
 /// Server ID for QUIC-LB support.

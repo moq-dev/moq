@@ -23,7 +23,6 @@ quinn = [
     "dep:rcgen",
     "dep:reqwest",
     "dep:rustls-webpki",
-    "dep:x509-parser",
 ]
 noq = ["dep:web-transport-noq", "dep:rcgen", "dep:reqwest", "dep:rustls-webpki"]
 quiche = ["dep:web-transport-quiche", "dep:rcgen"]
@@ -69,7 +68,7 @@ web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
-x509-parser = { version = "0.18", optional = true }
+x509-parser = "0.18"
 
 [dev-dependencies]
 bytes = "1"
