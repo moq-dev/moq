@@ -489,7 +489,7 @@ impl TrackConsumer {
 	/// Upgrade this consumer back to a [TrackProducer] sharing the same state.
 	///
 	/// This enables zero-copy track sharing between broadcasts: subscribe to a
-	/// track, then [`BroadcastProducer::insert_track`] the producer into another
+	/// track, then [`crate::BroadcastProducer::insert_track`] the producer into another
 	/// broadcast. Both broadcasts serve the same underlying track data with no
 	/// forwarding overhead.
 	///
