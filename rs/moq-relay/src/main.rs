@@ -33,46 +33,33 @@ async fn main() -> anyhow::Result<()> {
 		(server.with_iroh(iroh.clone()), client.with_iroh(iroh))
 	};
 
-	let auth = config.auth.init(client.tls(), mtls_enabled).await?;
+	// Reject configs where neither JWT nor mTLS can authenticate anyone.
+	if config.auth.is_empty() {
+		anyhow::ensure!(
+			mtls_enabled,
+			"no auth-key, auth-key-dir, public path, or server tls.root configured; \
+			 nobody can authenticate"
+		);
+		tracing::warn!("no JWT/public auth configured; only mTLS peers will be accepted");
+	}
 
-	// If we're dialing a remote cluster with an mTLS identity, verify locally
-	// that:
-	//   1. The cert has a DNS SAN (otherwise the root will reject us);
-	//   2. If `cluster.node` is set, it either equals the SAN or extends it
-	//      with a `:port` suffix (DNS SANs cannot carry ports).
-	// When `cluster.node` is unset we default it to the SAN.
+	let auth = if config.auth.is_empty() {
+		Auth::default()
+	} else {
+		config.auth.init().await?
+	};
+
+	// If we're dialing a remote cluster with an mTLS identity, derive or validate
+	// `cluster.node` against the identity's DNS SAN — the cert is what cluster
+	// peers will use to authenticate us. The SAN is authoritative; `cluster.node`
+	// may only extend it with a `:port` suffix (DNS SANs cannot carry ports).
 	if config.cluster.root.is_some() && config.client.tls.identity.is_some() {
 		let san = config
 			.client
 			.tls
 			.identity_dns_name()?
 			.context("client.tls.identity has no DNS SAN; cluster peers cannot authenticate")?;
-		match config.cluster.node.as_deref() {
-			None => {
-				tracing::info!(%san, "deriving cluster.node from client.tls.identity SAN");
-				config.cluster.node = Some(san);
-			}
-			Some(node) => {
-				anyhow::ensure!(
-					node == san || is_san_with_port(&san, node),
-					"cluster.node {node:?} does not match client.tls.identity SAN {san:?}",
-				);
-			}
-		}
-	}
-
-	// Every server cert must carry exactly one DNS SAN, and (if cluster.node
-	// is set) that SAN must equal the hostname portion of the node name —
-	// the same rule we apply to peers that connect in via mTLS.
-	let server_sans = server.tls_info().read().unwrap().single_dns_sans()?;
-	if let Some(node) = config.cluster.node.as_deref() {
-		let expected = node.rsplit_once(':').map(|(host, _)| host).unwrap_or(node);
-		for san in &server_sans {
-			anyhow::ensure!(
-				san == expected,
-				"server TLS certificate SAN {san:?} does not match cluster.node {node:?}",
-			);
-		}
+		config.cluster.node = Some(validate_peer(Some(&san), config.cluster.node.as_deref())?);
 	}
 
 	let cluster = Cluster::new(config.cluster, client);
