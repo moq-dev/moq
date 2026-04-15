@@ -1,4 +1,5 @@
 import { Time } from "@moq/lite";
+import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Data, InitPost, InitShared, Latency, State } from "./render";
 import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 
@@ -22,12 +23,12 @@ export interface AudioBuffer {
 	setLatency(samples: number): void;
 
 	/** Current playback timestamp (derived from reader position). */
-	readonly timestamp: Time.Micro;
+	readonly timestamp: Getter<Time.Micro>;
 
 	/** Whether the buffer is stalled (waiting to fill). */
-	readonly stalled: boolean;
+	readonly stalled: Getter<boolean>;
 
-	/** Release any resources (event listeners, etc.). */
+	/** Release any resources (event listeners, intervals, etc.). */
 	close(): void;
 }
 
@@ -63,7 +64,15 @@ class SharedAudioBuffer implements AudioBuffer {
 	readonly rate: number;
 	readonly channels: number;
 	#worklet: AudioWorkletNode;
-	#buffer: SharedRingBuffer;
+	#ring: SharedRingBuffer;
+
+	readonly #timestamp = new Signal<Time.Micro>(0 as Time.Micro);
+	readonly timestamp: Getter<Time.Micro> = this.#timestamp;
+
+	readonly #stalled = new Signal<boolean>(true);
+	readonly stalled: Getter<boolean> = this.#stalled;
+
+	#signals = new Effect();
 
 	constructor(worklet: AudioWorkletNode, channels: number, rate: number, latencySamples: number) {
 		this.#worklet = worklet;
@@ -73,42 +82,40 @@ class SharedAudioBuffer implements AudioBuffer {
 		// Capacity needs headroom above LATENCY for overflow protection.
 		const capacity = Math.max(rate, latencySamples * 2);
 		const init = allocSharedRingBuffer(channels, capacity, rate);
-		this.#buffer = new SharedRingBuffer(init);
-		this.#buffer.setLatency(latencySamples);
+		this.#ring = new SharedRingBuffer(init);
+		this.#ring.setLatency(latencySamples);
 
 		const msg: InitShared = { type: "init-shared", ...init };
 		worklet.port.postMessage(msg);
-	}
 
-	get timestamp(): Time.Micro {
-		return this.#buffer.timestamp;
-	}
-
-	get stalled(): boolean {
-		return this.#buffer.stalled;
+		// Poll the shared control array and reflect it into signals.
+		this.#signals.interval(() => {
+			this.#timestamp.set(this.#ring.timestamp);
+			this.#stalled.set(this.#ring.stalled);
+		}, 50);
 	}
 
 	insert(timestamp: Time.Micro, data: Float32Array[]): void {
-		this.#buffer.insert(timestamp, data);
+		this.#ring.insert(timestamp, data);
 	}
 
 	setLatency(samples: number): void {
 		// Re-allocate if the current buffer is too small for the new target latency.
-		if (this.#buffer.capacity < samples * 1.5) {
+		if (this.#ring.capacity < samples * 1.5) {
 			const newCapacity = Math.max(this.rate, samples * 2);
 			const init = allocSharedRingBuffer(this.channels, newCapacity, this.rate);
-			this.#buffer = new SharedRingBuffer(init);
-			this.#buffer.setLatency(samples);
+			this.#ring = new SharedRingBuffer(init);
+			this.#ring.setLatency(samples);
 
 			const msg: InitShared = { type: "init-shared", ...init };
 			this.#worklet.port.postMessage(msg);
 		} else {
-			this.#buffer.setLatency(samples);
+			this.#ring.setLatency(samples);
 		}
 	}
 
 	close(): void {
-		// Nothing to clean up — SABs are garbage collected.
+		this.#signals.close();
 	}
 }
 
@@ -117,8 +124,13 @@ class PostAudioBuffer implements AudioBuffer {
 	readonly rate: number;
 	readonly channels: number;
 	#worklet: AudioWorkletNode;
-	#timestamp: Time.Micro = 0 as Time.Micro;
-	#stalled = true;
+
+	readonly #timestamp = new Signal<Time.Micro>(0 as Time.Micro);
+	readonly timestamp: Getter<Time.Micro> = this.#timestamp;
+
+	readonly #stalled = new Signal<boolean>(true);
+	readonly stalled: Getter<boolean> = this.#stalled;
+
 	#onMessage: (ev: MessageEvent<State>) => void;
 
 	constructor(worklet: AudioWorkletNode, channels: number, rate: number, latencySamples: number) {
@@ -133,20 +145,12 @@ class PostAudioBuffer implements AudioBuffer {
 		// Listen for state updates from the worklet.
 		this.#onMessage = (ev) => {
 			if (ev.data?.type === "state") {
-				this.#timestamp = ev.data.timestamp;
-				this.#stalled = ev.data.stalled;
+				this.#timestamp.set(ev.data.timestamp);
+				this.#stalled.set(ev.data.stalled);
 			}
 		};
 		worklet.port.addEventListener("message", this.#onMessage as EventListener);
 		worklet.port.start();
-	}
-
-	get timestamp(): Time.Micro {
-		return this.#timestamp;
-	}
-
-	get stalled(): boolean {
-		return this.#stalled;
 	}
 
 	insert(timestamp: Time.Micro, data: Float32Array[]): void {

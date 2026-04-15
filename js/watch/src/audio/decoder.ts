@@ -54,8 +54,8 @@ export class Decoder {
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
-	// Audio buffer bridging main thread and worklet (shared memory or postMessage transport).
-	#buffer: AudioBuffer | undefined;
+	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
+	#ring: AudioBuffer | undefined;
 
 	#signals = new Effect();
 
@@ -114,21 +114,22 @@ export class Decoder {
 			const latencySamples = Math.ceil(sampleRate * Time.Second.fromMilli(latency));
 
 			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
-			this.#buffer = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples);
+			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples);
+			this.#ring = ring;
 			effect.cleanup(() => {
-				this.#buffer?.close();
-				this.#buffer = undefined;
+				ring.close();
+				this.#ring = undefined;
 			});
 
-			// Poll buffer state for both transports. The shared path reads it from shared
-			// memory; the post path reads values cached from state messages.
-			effect.interval(() => {
-				if (!this.#buffer) return;
-				const ts = Time.Milli.fromMicro(this.#buffer.timestamp);
+			// Mirror ring state (timestamp/stalled) onto our public signals.
+			effect.run((inner) => {
+				const ts = Time.Milli.fromMicro(inner.get(ring.timestamp));
 				this.#timestamp.set(ts);
-				this.#stalled.set(this.#buffer.stalled);
 				this.#trimDecodeBuffered(ts);
-			}, 50);
+			});
+			effect.run((inner) => {
+				this.#stalled.set(inner.get(ring.stalled));
+			});
 
 			effect.set(this.#worklet, worklet);
 		});
@@ -145,16 +146,16 @@ export class Decoder {
 	}
 
 	#runLatency(effect: Effect): void {
-		// Gate on the worklet signal so this effect re-runs once the buffer is created.
+		// Gate on the worklet signal so this effect re-runs once the ring is created.
 		const worklet = effect.get(this.#worklet);
 		if (!worklet) return;
 
-		const buffer = this.#buffer;
-		if (!buffer) return;
+		const ring = this.#ring;
+		if (!ring) return;
 
 		const latency = effect.get(this.source.sync.buffer);
-		const latencySamples = Math.ceil(buffer.rate * Time.Second.fromMilli(latency));
-		buffer.setLatency(latencySamples);
+		const latencySamples = Math.ceil(ring.rate * Time.Second.fromMilli(latency));
+		ring.setLatency(latencySamples);
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -329,8 +330,8 @@ export class Decoder {
 		const timestamp = sample.timestamp as Time.Micro;
 		const timestampMilli = Time.Milli.fromMicro(timestamp);
 
-		const buffer = this.#buffer;
-		if (!buffer) {
+		const ring = this.#ring;
+		if (!ring) {
 			// We're probably in the process of closing.
 			sample.close();
 			return;
@@ -351,9 +352,9 @@ export class Decoder {
 			channelData.push(data);
 		}
 
-		// Hand off to the buffer. Shared transport writes directly; post transport
+		// Hand off to the ring. Shared transport writes directly; post transport
 		// transfers the ArrayBuffers.
-		buffer.insert(timestamp, channelData);
+		ring.insert(timestamp, channelData);
 
 		sample.close();
 	}
