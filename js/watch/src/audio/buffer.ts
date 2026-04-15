@@ -100,17 +100,13 @@ class SharedAudioBuffer implements AudioBuffer {
 	}
 
 	setLatency(samples: number): void {
-		// Re-allocate if the current buffer is too small for the new target latency.
+		// Grow the ring (preserving the unread window) if it's too small for the new latency.
 		if (this.#ring.capacity < samples * 1.5) {
 			const newCapacity = Math.max(this.rate, samples * 2);
-			const init = allocSharedRingBuffer(this.channels, newCapacity, this.rate);
-			const next = new SharedRingBuffer(init);
-			// Preserve the unread window so growing the ring doesn't gap audio.
-			this.#ring.migrateInto(next);
-			next.setLatency(samples);
-			this.#ring = next;
+			this.#ring = this.#ring.resize(newCapacity);
+			this.#ring.setLatency(samples);
 
-			const msg: InitShared = { type: "init-shared", ...init };
+			const msg: InitShared = { type: "init-shared", ...this.#ring.init };
 			this.#worklet.port.postMessage(msg);
 		} else {
 			this.#ring.setLatency(samples);

@@ -58,6 +58,7 @@ export class SharedRingBuffer {
 	readonly channels: number;
 	readonly capacity: number;
 	readonly rate: number;
+	readonly init: SharedRingBufferInit;
 
 	#control: Int32Array;
 	#samples: Float32Array[];
@@ -66,6 +67,7 @@ export class SharedRingBuffer {
 		this.channels = init.channels;
 		this.capacity = init.capacity;
 		this.rate = init.rate;
+		this.init = init;
 
 		this.#control = new Int32Array(init.control);
 		this.#samples = [];
@@ -187,13 +189,14 @@ export class SharedRingBuffer {
 	}
 
 	/**
-	 * Copy the unread window [READ, WRITE) and control state into a freshly-allocated
-	 * destination buffer. Used when growing capacity so we don't drop buffered audio.
+	 * Allocate a new ring with `newCapacity` samples and copy the unread window
+	 * [READ, WRITE) plus control state into it. Used when growing capacity so
+	 * we don't drop buffered audio. If `newCapacity` is smaller than the unread
+	 * span, the oldest samples are truncated.
 	 */
-	migrateInto(dst: SharedRingBuffer): void {
-		if (dst.channels !== this.channels || dst.rate !== this.rate) {
-			throw new Error("incompatible ring buffer");
-		}
+	resize(newCapacity: number): SharedRingBuffer {
+		const init = allocSharedRingBuffer(this.channels, newCapacity, this.rate);
+		const dst = new SharedRingBuffer(init);
 
 		const read = Atomics.load(this.#control, READ);
 		const write = Atomics.load(this.#control, WRITE);
@@ -217,6 +220,8 @@ export class SharedRingBuffer {
 		Atomics.store(dst.#control, WRITE, write);
 		Atomics.store(dst.#control, LATENCY, latency);
 		Atomics.store(dst.#control, STALLED, stalled);
+
+		return dst;
 	}
 
 	/** Current playback timestamp derived from READ position. */
