@@ -1,5 +1,3 @@
-set fallback := true
-
 # Run a localhost relay server without authentication.
 default:
     TOKIO_CONSOLE_BIND=127.0.0.1:6680 cargo run --bin moq-relay -- localhost.toml
