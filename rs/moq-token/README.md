@@ -3,7 +3,7 @@
 A simple JWT and JWK based authentication scheme for moq-relay.
 
 For comprehensive documentation including token structure, authorization rules, and examples, see:
-**[Authentication Documentation](../../doc/app/relay/auth.md)**
+**[Authentication Documentation](https://github.com/moq-dev/moq/blob/main/doc/app/relay/auth.md)**
 
 ## Quick Usage (symmetric keys)
 

@@ -4,11 +4,11 @@
 
 [![Documentation](https://docs.rs/moq-native/badge.svg)](https://docs.rs/moq-native/)
 [![Crates.io](https://img.shields.io/crates/v/moq-native.svg)](https://crates.io/crates/moq-native)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE-MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
 
 # moq-native
 
-Helper library for native [Media over QUIC](https://moq.dev) applications, on top of [moq-lite](../moq-lite).
+Helper library for native [Media over QUIC](https://moq.dev) applications, on top of [moq-lite](https://github.com/moq-dev/moq/tree/main/rs/moq-lite).
 
 Establishes MoQ connections over a few different transports, selectable via cargo features:
 
