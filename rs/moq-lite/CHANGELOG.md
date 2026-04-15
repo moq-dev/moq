@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.13](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.12...moq-lite-v0.15.13) - 2026-04-15
+
+### Added
+
+- add TrackConsumer::produce() for zero-copy track sharing ([#1300](https://github.com/moq-dev/moq/pull/1300))
+
 ## [0.15.12](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.11...moq-lite-v0.15.12) - 2026-04-15
 
 ### Other

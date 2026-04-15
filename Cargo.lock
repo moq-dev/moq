@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "conducer"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "smallvec",
 ]
@@ -3543,7 +3543,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -3583,7 +3583,7 @@ dependencies = [
 
 [[package]]
 name = "moq-clock"
-version = "0.10.14"
+version = "0.10.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3601,7 +3601,7 @@ version = "0.0.2"
 
 [[package]]
 name = "moq-ffi"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bytes",
  "hang",
@@ -3636,7 +3636,7 @@ dependencies = [
 
 [[package]]
 name = "moq-lite"
-version = "0.15.12"
+version = "0.15.13"
 dependencies = [
  "bytes",
  "conducer",
@@ -3783,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "anyhow",
  "clap",

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/moq-dev/moq/compare/conducer-v0.3.3...conducer-v0.3.4) - 2026-04-15
+
+### Other
+
+- replace Weak<Waker> waker list with atomic-flag slots ([#1301](https://github.com/moq-dev/moq/pull/1301))
+
 ## [0.3.3](https://github.com/moq-dev/moq/compare/conducer-v0.3.2...conducer-v0.3.3) - 2026-04-03
 
 ### Other
