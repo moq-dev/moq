@@ -48,7 +48,7 @@ impl<T> Weak<T> {
 
 		// Wake waiters (e.g. `used()`) when the first consumer appears.
 		if prev == 0 {
-			let waiters = self.state.lock().waiters.take();
+			let mut waiters = self.state.lock().waiters.take();
 			waiters.wake();
 		}
 

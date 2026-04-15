@@ -18,6 +18,34 @@ bun add @moq/publish
 npm add @moq/publish
 ```
 
+### No-build CDN usage
+
+For quick demos or single-page embeds where a bundler is overkill, load the
+package straight from jsDelivr with the `+esm` endpoint. jsDelivr transforms
+the published file and rewrites bare imports (like `@moq/hang`, `@moq/lite`)
+to other `+esm` URLs, so it loads in the browser with no import map or local
+build step:
+
+```html
+<script type="module">
+    import "https://cdn.jsdelivr.net/npm/@moq/publish/element.js/+esm";
+    import "https://cdn.jsdelivr.net/npm/@moq/publish/ui/index.js/+esm";
+</script>
+
+<moq-publish-ui>
+    <moq-publish url="https://relay.example.com/anon" name="room/alice" source="camera">
+        <video muted autoplay></video>
+    </moq-publish>
+</moq-publish-ui>
+```
+
+Pin a version range in the URL for production — e.g.
+`https://cdn.jsdelivr.net/npm/@moq/publish@0.2/element.js/+esm`. [esm.sh](https://esm.sh)
+(`https://esm.sh/@moq/publish/element`) works the same way if you prefer it.
+
+For anything beyond embedding on a static page, install the package and use
+a real bundler (the examples below).
+
 ## Web Component
 
 ```html

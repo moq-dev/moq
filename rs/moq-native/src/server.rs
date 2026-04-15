@@ -33,6 +33,21 @@ pub struct ServerTlsConfig {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub key: Vec<PathBuf>,
 
+	/// Or load certificate + private key from a single bundled PEM file.
+	///
+	/// Each entry is one PEM containing both the cert chain and its matching
+	/// key (same layout as `curl --cert`). Use this when you want the cluster
+	/// client identity to double as the server cert; use `cert`/`key` when
+	/// they live in separate files.
+	#[arg(
+		long = "server-tls-identity",
+		id = "server-tls-identity",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_IDENTITY"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub identity: Vec<PathBuf>,
+
 	/// Or generate a new certificate and key with the given hostnames.
 	/// This won't be valid unless the client uses the fingerprint or disables verification.
 	#[arg(
@@ -43,6 +58,44 @@ pub struct ServerTlsConfig {
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub generate: Vec<String>,
+
+	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
+	///
+	/// When set, clients *may* present a certificate during the TLS handshake.
+	/// Valid presentations are exposed via [`Request::peer_identity`] and can be
+	/// used by the application to grant elevated access. Clients that do not
+	/// present a certificate are unaffected.
+	///
+	/// Only supported by the Quinn backend.
+	#[arg(
+		long = "server-tls-root",
+		id = "server-tls-root",
+		value_delimiter = ',',
+		env = "MOQ_SERVER_TLS_ROOT"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub root: Vec<PathBuf>,
+}
+
+impl ServerTlsConfig {
+	/// Load all configured root CAs into a [`rustls::RootCertStore`].
+	pub fn load_roots(&self) -> anyhow::Result<rustls::RootCertStore> {
+		use rustls::pki_types::CertificateDer;
+
+		let mut roots = rustls::RootCertStore::empty();
+		for path in &self.root {
+			let file = std::fs::File::open(path).context("failed to open root CA")?;
+			let mut reader = std::io::BufReader::new(file);
+			let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+				.collect::<Result<_, _>>()
+				.context("failed to parse root CA PEM")?;
+			anyhow::ensure!(!certs.is_empty(), "no certificates found in root CA");
+			for cert in certs {
+				roots.add(cert).context("failed to add root CA")?;
+			}
+		}
+		Ok(roots)
+	}
 }
 
 /// Configuration for the MoQ server.
@@ -157,6 +210,14 @@ impl Server {
 		});
 
 		let versions = config.versions();
+
+		if !config.tls.root.is_empty() {
+			#[cfg(feature = "quinn")]
+			let quinn_backend = matches!(backend, QuicBackend::Quinn);
+			#[cfg(not(feature = "quinn"))]
+			let quinn_backend = false;
+			anyhow::ensure!(quinn_backend, "tls.root (mTLS) is only supported by the quinn backend");
+		}
 
 		#[cfg(feature = "noq")]
 		#[allow(unreachable_patterns)]
@@ -445,6 +506,18 @@ impl Server {
 	}
 }
 
+/// The identity of a peer that presented a client certificate during the TLS
+/// handshake, as validated against the configured [`ServerTlsConfig::root`].
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct PeerIdentity {
+	/// The first DNS SAN on the leaf certificate, if any.
+	///
+	/// This is cryptographically bound to the cert and is suitable as a
+	/// stable node name.
+	pub dns_name: Option<String>,
+}
+
 /// An incoming connection that can be accepted or rejected.
 pub(crate) enum RequestKind {
 	#[cfg(feature = "noq")]
@@ -573,6 +646,34 @@ impl Request {
 			RequestKind::Iroh(ref request) => request.url(),
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(_) => None,
+		}
+	}
+
+	/// Returns the peer's TLS-validated identity, if it presented a client
+	/// certificate during the handshake that chained to a configured
+	/// [`ServerTlsConfig::root`].
+	///
+	/// Only the Quinn backend supports mTLS; other backends always return `Ok(None)`.
+	pub fn peer_identity(&self) -> anyhow::Result<Option<PeerIdentity>> {
+		match self.kind {
+			#[cfg(feature = "quinn")]
+			RequestKind::Quinn(ref request) => request.peer_identity(),
+			#[cfg(feature = "noq")]
+			RequestKind::Noq(_) => Ok(None),
+			#[cfg(feature = "quiche")]
+			RequestKind::Quiche(_) => Ok(None),
+			#[cfg(feature = "iroh")]
+			RequestKind::Iroh(_) => Ok(None),
+			#[cfg(feature = "websocket")]
+			RequestKind::WebSocket(_) => Ok(None),
+			#[cfg(not(any(
+				feature = "noq",
+				feature = "quinn",
+				feature = "quiche",
+				feature = "iroh",
+				feature = "websocket"
+			)))]
+			_ => Ok(None),
 		}
 	}
 }

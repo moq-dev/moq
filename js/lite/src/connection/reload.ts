@@ -153,15 +153,11 @@ export class Reload {
 
 		effect.cleanup(() => this.#announced.set(new Set()));
 
-		// Warn if the relay doesn't support announcements (e.g. Cloudflare)
+		// Cloudflare's relay does not yet support SUBSCRIBE_NAMESPACE, so
+		// skip announce subscriptions entirely for those hosts.
 		if (conn.url.hostname.endsWith("mediaoverquic.com")) {
-			effect.timer(() => {
-				if (this.#announced.peek().size === 0) {
-					console.warn(
-						"Cloudflare relay does not support the reload feature yet. Remove the `reload` attribute to connect without waiting for announcements.",
-					);
-				}
-			}, 1000);
+			console.warn("Cloudflare relay does not support broadcast discovery yet; skipping subscribe_namespace.");
+			return;
 		}
 
 		const announced = conn.announced(emptyPath());

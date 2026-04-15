@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.11](https://github.com/moq-dev/moq/compare/moq-native-v0.13.10...moq-native-v0.13.11) - 2026-04-15
+
+### Other
+
+- Add mTLS support for moq-relay ([#1299](https://github.com/moq-dev/moq/pull/1299))
+
 ## [0.13.10](https://github.com/moq-dev/moq/compare/moq-native-v0.13.9...moq-native-v0.13.10) - 2026-04-09
 
 ### Other

@@ -121,7 +121,7 @@ impl<T> Drop for Consumer<T> {
 		}
 
 		// We were the last consumer, need to wake waiters
-		let waiters = {
+		let mut waiters = {
 			let mut state = self.state.lock();
 			state.waiters.take()
 		};

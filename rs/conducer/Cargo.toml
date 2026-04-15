@@ -15,3 +15,6 @@ categories = ["asynchronous", "concurrency"]
 [lib]
 test = false
 doctest = false
+
+[dependencies]
+smallvec = "1.15"

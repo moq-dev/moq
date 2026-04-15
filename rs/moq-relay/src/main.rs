@@ -21,9 +21,11 @@ async fn main() -> anyhow::Result<()> {
 	config.client.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 	config.server.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 
+	let mtls_enabled = !config.server.tls.root.is_empty();
+
 	#[allow(unused_mut)]
 	let mut server = config.server.init()?;
-	let client = config.client.init()?;
+	let client = config.client.clone().init()?;
 
 	#[cfg(feature = "iroh")]
 	let (server, client) = {
@@ -31,7 +33,34 @@ async fn main() -> anyhow::Result<()> {
 		(server.with_iroh(iroh.clone()), client.with_iroh(iroh))
 	};
 
-	let auth = config.auth.init().await?;
+	// Reject configs where neither JWT nor mTLS can authenticate anyone.
+	if config.auth.is_empty() {
+		anyhow::ensure!(
+			mtls_enabled,
+			"no auth-key, auth-key-dir, public path, or server tls.root configured; \
+			 nobody can authenticate"
+		);
+		tracing::warn!("no JWT/public auth configured; only mTLS peers will be accepted");
+	}
+
+	let auth = if config.auth.is_empty() {
+		Auth::default()
+	} else {
+		config.auth.init().await?
+	};
+
+	// If we're dialing a remote cluster with an mTLS identity, derive or validate
+	// `cluster.node` against the identity's DNS SAN — the cert is what cluster
+	// peers will use to authenticate us. The SAN is authoritative; `cluster.node`
+	// may only extend it with a `:port` suffix (DNS SANs cannot carry ports).
+	if config.cluster.root.is_some() && config.client.tls.identity.is_some() {
+		let san = config
+			.client
+			.tls
+			.identity_dns_name()?
+			.context("client.tls.identity has no DNS SAN; cluster peers cannot authenticate")?;
+		config.cluster.node = Some(validate_peer(Some(&san), config.cluster.node.as_deref())?);
+	}
 
 	let cluster = Cluster::new(config.cluster, client);
 

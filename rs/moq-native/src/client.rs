@@ -18,6 +18,19 @@ pub struct ClientTls {
 	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
 	pub root: Vec<PathBuf>,
 
+	/// Present a client certificate during the TLS handshake (mTLS).
+	///
+	/// The path must point at a single PEM file containing both the
+	/// certificate chain and the matching private key (in any order). This
+	/// is the same bundle layout used by curl's `--cert` and many PKI tools.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(
+		id = "client-tls-identity",
+		long = "client-tls-identity",
+		env = "MOQ_CLIENT_TLS_IDENTITY"
+	)]
+	pub identity: Option<PathBuf>,
+
 	/// Danger: Disable TLS certificate verification.
 	///
 	/// Fine for local development and between relays, but should be used in caution in production.
@@ -85,6 +98,102 @@ pub struct ClientConfig {
 	#[command(flatten)]
 	#[serde(default)]
 	pub websocket: super::ClientWebSocket,
+}
+
+impl ClientTls {
+	/// Build a [`rustls::ClientConfig`] from this configuration.
+	///
+	/// Loads the configured roots (or the platform's native roots if none),
+	/// optionally attaches a client identity for mTLS, and disables server
+	/// certificate verification when `disable_verify` is set.
+	pub fn build(&self) -> anyhow::Result<rustls::ClientConfig> {
+		use rustls::pki_types::CertificateDer;
+
+		let provider = crypto::provider();
+
+		let mut roots = rustls::RootCertStore::empty();
+		if self.root.is_empty() {
+			let native = rustls_native_certs::load_native_certs();
+			for err in native.errors {
+				tracing::warn!(%err, "failed to load root cert");
+			}
+			for cert in native.certs {
+				roots.add(cert).context("failed to add root cert")?;
+			}
+		} else {
+			for root in &self.root {
+				let file = std::fs::File::open(root).context("failed to open root cert file")?;
+				let mut reader = std::io::BufReader::new(file);
+				let cert = rustls_pemfile::certs(&mut reader)
+					.next()
+					.context("no roots found")?
+					.context("failed to read root cert")?;
+				roots.add(cert).context("failed to add root cert")?;
+			}
+		}
+
+		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
+		// QUIC always negotiates TLS 1.3 regardless of this setting.
+		let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
+			.with_root_certificates(roots);
+
+		let mut tls = match &self.identity {
+			Some(path) => {
+				let pem = std::fs::read(path).context("failed to read client identity")?;
+				let chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut pem.as_slice())
+					.collect::<Result<_, _>>()
+					.context("failed to parse client identity certs")?;
+				anyhow::ensure!(!chain.is_empty(), "no certificates found in client identity");
+				let key = rustls_pemfile::private_key(&mut pem.as_slice())
+					.context("failed to parse client identity key")?
+					.context("no private key found in client identity")?;
+				builder
+					.with_client_auth_cert(chain, key)
+					.context("failed to configure client certificate")?
+			}
+			None => builder.with_no_client_auth(),
+		};
+
+		if self.disable_verify.unwrap_or_default() {
+			tracing::warn!("TLS server certificate verification is disabled; A man-in-the-middle attack is possible.");
+			let noop = NoCertificateVerification(provider);
+			tls.dangerous().set_certificate_verifier(Arc::new(noop));
+		}
+
+		Ok(tls)
+	}
+
+	/// Parse the configured identity PEM (if any) and return the first DNS
+	/// SAN on its leaf certificate.
+	///
+	/// Useful for sanity-checking that a caller's own cluster node name
+	/// matches the identity they will present. Returns `Ok(None)` if no
+	/// identity is configured.
+	pub fn identity_dns_name(&self) -> anyhow::Result<Option<String>> {
+		use rustls::pki_types::CertificateDer;
+
+		let Some(path) = self.identity.as_ref() else {
+			return Ok(None);
+		};
+		let pem = std::fs::read(path).context("failed to read client identity")?;
+		let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut pem.as_slice())
+			.collect::<Result<_, _>>()
+			.context("failed to parse client identity certs")?;
+		let leaf = certs.first().context("no certificates found")?;
+		let (_, cert) =
+			x509_parser::parse_x509_certificate(leaf.as_ref()).context("failed to parse identity certificate")?;
+		let san = cert
+			.subject_alternative_name()
+			.context("failed to read subject alternative name extension")?
+			.and_then(|san| {
+				san.value.general_names.iter().find_map(|name| match name {
+					x509_parser::extensions::GeneralName::DNSName(n) => Some((*n).to_string()),
+					_ => None,
+				})
+			});
+		Ok(san)
+	}
 }
 
 impl ClientConfig {
@@ -167,53 +276,7 @@ impl Client {
 			panic!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
 		});
 
-		let provider = crypto::provider();
-
-		// Create a list of acceptable root certificates.
-		let mut roots = rustls::RootCertStore::empty();
-
-		if config.tls.root.is_empty() {
-			let native = rustls_native_certs::load_native_certs();
-
-			// Log any errors that occurred while loading the native root certificates.
-			for err in native.errors {
-				tracing::warn!(%err, "failed to load root cert");
-			}
-
-			// Add the platform's native root certificates.
-			for cert in native.certs {
-				roots.add(cert).context("failed to add root cert")?;
-			}
-		} else {
-			// Add the specified root certificates.
-			for root in &config.tls.root {
-				let root = std::fs::File::open(root).context("failed to open root cert file")?;
-				let mut root = std::io::BufReader::new(root);
-
-				let root = rustls_pemfile::certs(&mut root)
-					.next()
-					.context("no roots found")?
-					.context("failed to read root cert")?;
-
-				roots.add(root).context("failed to add root cert")?;
-			}
-		}
-
-		// Create the TLS configuration we'll use as a client.
-		// Allow TLS 1.2 in addition to 1.3 for WebSocket compatibility.
-		// QUIC always negotiates TLS 1.3 regardless of this setting.
-		let mut tls = rustls::ClientConfig::builder_with_provider(provider.clone())
-			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
-			.with_root_certificates(roots)
-			.with_no_client_auth();
-
-		// Allow disabling TLS verification altogether.
-		if config.tls.disable_verify.unwrap_or_default() {
-			tracing::warn!("TLS server certificate verification is disabled; A man-in-the-middle attack is possible.");
-
-			let noop = NoCertificateVerification(provider.clone());
-			tls.dangerous().set_certificate_verifier(Arc::new(noop));
-		}
+		let tls = config.tls.build()?;
 
 		#[cfg(feature = "noq")]
 		#[allow(unreachable_patterns)]

@@ -4,7 +4,7 @@ import { Effect, Signal } from "@moq/signals";
 /** Latency: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */
 export type Latency = "real-time" | Time.Milli;
 
-const MIN_JITTER = 10 as Time.Milli;
+const MIN_JITTER = 20 as Time.Milli;
 const FALLBACK_JITTER = 100 as Time.Milli;
 
 export interface SyncProps {
@@ -149,6 +149,14 @@ export class Sync {
 		this.#reference.set(ref);
 		this.#update.resolve();
 		this.#update = Promise.withResolvers();
+	}
+
+	// The PTS that should be rendering right now, derived from the reference + buffer.
+	// Returns undefined if no frames have been received yet.
+	now(): Time.Milli | undefined {
+		const reference = this.#reference.peek();
+		if (reference === undefined) return undefined;
+		return Time.Milli.sub(Time.Milli.sub(Time.Milli.now(), reference), this.#buffer.peek());
 	}
 
 	// Sleep until it's time to render this frame.

@@ -1,54 +1,62 @@
 import type { Message, State } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
+import { SharedRingBuffer } from "./shared-ring-buffer";
 
 class Render extends AudioWorkletProcessor {
-	#buffer?: AudioRingBuffer;
+	// Set after init, depending on which path the main thread chose.
+	#backend?: SharedRingBuffer | AudioRingBuffer;
 	#underflow = 0;
 	#stateCounter = 0;
 
 	constructor() {
 		super();
 
-		// Listen for audio data from main thread
 		this.port.onmessage = (event: MessageEvent<Message>) => {
-			const { type } = event.data;
-			if (type === "init") {
-				this.#buffer = new AudioRingBuffer(event.data);
+			const msg = event.data;
+			if (msg.type === "init-shared") {
+				console.log("[audio-worklet] init-shared: using SharedArrayBuffer path");
+				this.#backend = new SharedRingBuffer(msg);
 				this.#underflow = 0;
-			} else if (type === "data") {
-				if (!this.#buffer) throw new Error("buffer not initialized");
-				this.#buffer.write(event.data.timestamp, event.data.data);
-			} else if (type === "latency") {
-				if (!this.#buffer) throw new Error("buffer not initialized");
-				this.#buffer.resize(event.data.latency);
-			} else {
-				const exhaustive: never = type;
-				throw new Error(`unknown message type: ${exhaustive}`);
+			} else if (msg.type === "init-post") {
+				console.log("[audio-worklet] init-post: using postMessage path");
+				this.#backend = new AudioRingBuffer(msg);
+				this.#underflow = 0;
+			} else if (msg.type === "data") {
+				// Only meaningful in post mode.
+				if (this.#backend instanceof AudioRingBuffer) this.#backend.write(msg.timestamp, msg.data);
+			} else if (msg.type === "latency") {
+				// Only meaningful in post mode.
+				if (this.#backend instanceof AudioRingBuffer) this.#backend.resize(msg.latency);
 			}
 		};
 	}
 
 	process(_inputs: Float32Array[][], outputs: Float32Array[][], _parameters: Record<string, Float32Array>) {
 		const output = outputs[0];
-		const samplesRead = this.#buffer?.read(output) ?? 0;
+		const backend = this.#backend;
+		const samplesRead = backend?.read(output) ?? 0;
 
 		if (samplesRead < output[0].length) {
 			this.#underflow += output[0].length - samplesRead;
-		} else if (this.#underflow > 0 && this.#buffer) {
-			console.warn(`audio underflow: ${Math.round((1000 * this.#underflow) / this.#buffer.rate)}ms`);
+		} else if (this.#underflow > 0 && backend) {
+			console.debug(`audio underflow: ${Math.round((1000 * this.#underflow) / backend.rate)}ms`);
 			this.#underflow = 0;
 		}
 
-		// Send state update every ~5 frames (~60/sec) to avoid excessive DOM updates
-		this.#stateCounter++;
-		if (this.#buffer && this.#stateCounter >= 5) {
-			this.#stateCounter = 0;
-			const state: State = {
-				type: "state",
-				timestamp: this.#buffer.timestamp,
-				stalled: this.#buffer.stalled,
-			};
-			this.port.postMessage(state);
+		// In post mode the main thread can't read worklet state directly, so we
+		// periodically ship it across via postMessage. In shared mode the main
+		// thread reads the shared control array directly.
+		if (backend instanceof AudioRingBuffer) {
+			this.#stateCounter++;
+			if (this.#stateCounter >= 5) {
+				this.#stateCounter = 0;
+				const state: State = {
+					type: "state",
+					timestamp: backend.timestamp,
+					stalled: backend.stalled,
+				};
+				this.port.postMessage(state);
+			}
 		}
 
 		return true;
