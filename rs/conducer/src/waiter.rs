@@ -66,27 +66,23 @@ impl WaiterList {
 
 	/// Register a waiter.
 	///
-	/// Performs a small, bounded amount of garbage collection: probes up
-	/// to two slots starting at the rotating cursor, replacing the first
-	/// dead one in place. If both probed slots are alive, appends a new
-	/// slot. The cursor advances on misses so the scan window covers the
+	/// Performs a small, bounded amount of garbage collection: probes the
+	/// slot at the rotating cursor, replacing it in place if dead. The
+	/// cursor advances on each append so the probe window covers the
 	/// whole list over time.
 	pub fn register(&mut self, waiter: &Waiter) {
 		let new_weak = Arc::downgrade(&waiter.waker);
 
-		if !self.entries.is_empty() {
-			for _ in 0..2 {
-				let i = self.cursor % self.entries.len();
-				if self.entries[i].strong_count() == 0 {
-					// Reuse the dead slot in place. Each Waiter owns a
-					// unique Arc<Waker>, so strong_count == 0 uniquely
-					// identifies a slot whose owner has been dropped —
-					// no will_wake / pointer comparison needed.
-					self.entries[i] = new_weak;
-					return;
-				}
-				self.cursor = self.cursor.wrapping_add(1);
+		for _ in 0..self.entries.len().min(2) {
+			if self.entries[self.cursor].strong_count() == 0 {
+				// Reuse the dead slot in place. Each Waiter owns a
+				// unique Arc<Waker>, so strong_count == 0 uniquely
+				// identifies a slot whose owner has been dropped —
+				// no will_wake / pointer comparison needed.
+				self.entries[self.cursor] = new_weak;
+				return;
 			}
+			self.cursor = (self.cursor + 1) % self.entries.len();
 		}
 
 		self.entries.push(new_weak);
@@ -94,6 +90,7 @@ impl WaiterList {
 
 	/// Drain all entries into a new [`WaiterList`], leaving this one empty.
 	pub fn take(&mut self) -> Self {
+		self.cursor = 0;
 		Self {
 			entries: std::mem::take(&mut self.entries),
 			cursor: 0,
