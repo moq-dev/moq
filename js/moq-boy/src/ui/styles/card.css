@@ -5,8 +5,9 @@
 	border-radius: var(--spacing-8);
 	overflow: hidden;
 	cursor: pointer;
-	transition: all 0.3s ease;
+	transition: border-color 0.3s ease;
 	width: 320px;
+	height: auto;
 	aspect-ratio: 10 / 9;
 }
 
