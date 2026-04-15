@@ -13,6 +13,12 @@ listen = "[::]:4444"
 # both the cert chain and the private key.
 tls.identity = ["leaf0.pem"]
 
+# Trust client certificates signed by this CA for mTLS peer auth, so
+# other leaves dialing in as cluster peers can authenticate without a
+# JWT. Without this, inbound leaf-to-leaf connections fall through to
+# the JWT path and are rejected.
+tls.root = ["ca.pem"]
+
 [client]
 # Present this identity (cert chain + private key in one PEM) on outbound
 # cluster connections. The root maps a valid cert to full access.

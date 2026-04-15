@@ -238,10 +238,11 @@ impl Cluster {
 			let this = self.clone();
 			let token = token.clone();
 			let node2 = node.clone();
+			let local = self.config.node.clone();
 
 			let handle = tokio::spawn(
 				async move {
-					match this.run_remote(node2.as_str(), None, token, origin).await {
+					match this.run_remote(node2.as_str(), local.as_deref(), token, origin).await {
 						Ok(()) => tracing::info!(%node2, "origin closed"),
 						Err(err) => tracing::warn!(%err, %node2, "origin error"),
 					}
