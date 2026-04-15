@@ -179,12 +179,20 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	const client = new Ietf.ClientSetup({
 		// NOTE: draft 15 onwards does not use CLIENT_SETUP to negotiate the version.
 		// We still echo it just to make sure we're not accidentally trying to negotiate the version.
+		// For the Draft14 fallback (ALPN_LITE or no ALPN, e.g. Firefox WebTransport),
+		// advertise every moq-lite version we support so we can negotiate Lite03+ without ALPN.
 		versions:
 			setupVersion === Ietf.Version.DRAFT_16
 				? [Ietf.Version.DRAFT_16]
 				: setupVersion === Ietf.Version.DRAFT_15
 					? [Ietf.Version.DRAFT_15]
-					: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
+					: [
+							Lite.Version.DRAFT_04,
+							Lite.Version.DRAFT_03,
+							Lite.Version.DRAFT_02,
+							Lite.Version.DRAFT_01,
+							Ietf.Version.DRAFT_14,
+						],
 		parameters: params,
 	});
 	console.debug(url.toString(), "sending client setup", client);
@@ -201,7 +209,14 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	console.debug(url.toString(), "received server setup", server);
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
-		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
+		// Lite03+ has no SessionInfo protocol; close the SETUP stream we borrowed
+		// for the bootstrap exchange and treat the session as if it had been
+		// ALPN-negotiated directly.
+		const sessionStream = isLiteLegacy(server.version as Lite.Version) ? stream : undefined;
+		if (sessionStream === undefined) {
+			stream.writer.close();
+		}
+		return new Lite.Connection(url, session, server.version as Lite.Version, sessionStream);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
@@ -214,6 +229,10 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	} else {
 		throw new Error(`unsupported server version: ${server.version.toString()}`);
 	}
+}
+
+function isLiteLegacy(v: Lite.Version): boolean {
+	return v === Lite.Version.DRAFT_01 || v === Lite.Version.DRAFT_02;
 }
 
 async function connectTransport(url: URL, session: WebTransport): Promise<Established> {
@@ -301,7 +320,13 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 				? [Ietf.Version.DRAFT_16]
 				: setupVersion === Ietf.Version.DRAFT_15
 					? [Ietf.Version.DRAFT_15]
-					: [Lite.Version.DRAFT_02, Lite.Version.DRAFT_01, Ietf.Version.DRAFT_14],
+					: [
+							Lite.Version.DRAFT_04,
+							Lite.Version.DRAFT_03,
+							Lite.Version.DRAFT_02,
+							Lite.Version.DRAFT_01,
+							Ietf.Version.DRAFT_14,
+						],
 		parameters: params,
 	});
 	await client.encode(stream.writer, setupVersion);
@@ -314,7 +339,11 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
 
 	if (Object.values(Lite.Version).includes(server.version as Lite.Version)) {
-		return new Lite.Connection(url, session, server.version as Lite.Version, stream);
+		const sessionStream = isLiteLegacy(server.version as Lite.Version) ? stream : undefined;
+		if (sessionStream === undefined) {
+			stream.writer.close();
+		}
+		return new Lite.Connection(url, session, server.version as Lite.Version, sessionStream);
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({

@@ -6,9 +6,18 @@ use crate::{coding, ietf, lite};
 /// The versions of MoQ that are negotiated via SETUP.
 ///
 /// Ordered by preference, with the client's preference taking priority.
-/// This intentionally includes only SETUP-negotiated versions (Lite02, Lite01, Draft14);
-/// Lite03 and newer IETF drafts negotiate via dedicated ALPNs instead.
-pub(crate) const NEGOTIATED: [Version; 3] = [
+///
+/// This path is used when ALPN-based selection is unavailable (e.g. a bare
+/// `"moql"` ALPN, or no ALPN at all — as with Firefox's WebTransport, which
+/// doesn't expose an ALPN selection API). It still lets us negotiate modern
+/// moq-lite versions by advertising them in the legacy SETUP versions list.
+///
+/// Lite03+ uses the draft-14 SETUP framing *only* for this bootstrap exchange;
+/// once negotiated, the SETUP stream is closed and the rest of the session
+/// follows the dedicated-ALPN semantics (no SessionInfo messages).
+pub(crate) const NEGOTIATED: [Version; 5] = [
+	Version::Lite(lite::Version::Lite04),
+	Version::Lite(lite::Version::Lite03),
 	Version::Lite(lite::Version::Lite02),
 	Version::Lite(lite::Version::Lite01),
 	Version::Ietf(ietf::Version::Draft14),

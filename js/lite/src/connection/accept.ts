@@ -160,7 +160,16 @@ async function acceptNegotiated(transport: WebTransport, url: URL, props?: Accep
 	await server.encode(stream.writer, setupVersion);
 
 	if (Object.values(Lite.Version).includes(selectedVersion as Lite.Version)) {
-		return new Lite.Connection(url, transport, selectedVersion as Lite.Version, stream);
+		// Lite03+ has no SessionInfo protocol on the control stream. When it's
+		// negotiated via this legacy SETUP fallback (e.g. Firefox WebTransport,
+		// which doesn't let us pick an ALPN), close the bootstrap stream after
+		// the exchange and run the session as if it had been ALPN-negotiated.
+		const isLegacy = selectedVersion === Lite.Version.DRAFT_01 || selectedVersion === Lite.Version.DRAFT_02;
+		const sessionStream = isLegacy ? stream : undefined;
+		if (sessionStream === undefined) {
+			stream.writer.close();
+		}
+		return new Lite.Connection(url, transport, selectedVersion as Lite.Version, sessionStream);
 	} else if (Object.values(Ietf.Version).includes(selectedVersion as Ietf.Version)) {
 		const maxRequestId = client.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 		return new Ietf.Connection({
