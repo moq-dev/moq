@@ -102,10 +102,13 @@ export class Decoder {
 			// Ensure the context is running before creating the worklet
 			if (context.state === "closed") return;
 
-			// Create the worklet node
+			// Create the worklet node. outputChannelCount must be set explicitly
+			// so the process() callback receives a matching channel layout —
+			// Firefox defaults differently than Chrome otherwise.
 			const worklet = new AudioWorkletNode(context, "render", {
 				channelCount,
 				channelCountMode: "explicit",
+				outputChannelCount: [channelCount],
 			});
 			effect.cleanup(() => worklet.disconnect());
 
