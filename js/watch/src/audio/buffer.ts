@@ -51,8 +51,10 @@ export function createAudioBuffer(
 	latencySamples: number,
 ): AudioBuffer {
 	if (supportsSharedArrayBuffer()) {
+		console.log("[audio] using SharedArrayBuffer audio buffer");
 		return new SharedAudioBuffer(worklet, channels, rate, latencySamples);
 	}
+	console.log("[audio] using postMessage audio buffer (SharedArrayBuffer unavailable)");
 	return new PostAudioBuffer(worklet, channels, rate, latencySamples);
 }
 
