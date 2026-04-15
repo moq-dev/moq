@@ -9,10 +9,16 @@ on:
 
 jobs:
   cache:
-    name: Build and push to Cachix
-    runs-on: ubuntu-latest
+    name: Build and push to Cachix (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
 
     steps:
       - uses: actions/checkout@v6
