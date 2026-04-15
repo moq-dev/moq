@@ -46,7 +46,7 @@ impl Waiter {
 
 /// A list of weak wakers waiting for notification.
 ///
-/// Slots live inline (up to [`INLINE_WAITERS`]) and only spill to the heap
+/// Slots live inline (up to `INLINE_WAITERS`) and only spill to the heap
 /// for unusually high concurrency. A rotating cursor amortizes garbage
 /// collection across many `register` calls so the list doesn't grow
 /// unboundedly while keeping per-call cost O(1).
