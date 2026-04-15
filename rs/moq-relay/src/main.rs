@@ -53,13 +53,8 @@ async fn main() -> anyhow::Result<()> {
 				config.cluster.node = Some(san);
 			}
 			Some(node) => {
-				let ok = node == san
-					|| node
-						.strip_prefix(&san)
-						.and_then(|s| s.strip_prefix(':'))
-						.is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
 				anyhow::ensure!(
-					ok,
+					node == san || is_san_with_port(&san, node),
 					"cluster.node {node:?} does not match client.tls.identity SAN {san:?}",
 				);
 			}

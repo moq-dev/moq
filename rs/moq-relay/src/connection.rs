@@ -4,6 +4,16 @@ use anyhow::Context;
 use axum::http;
 use moq_native::Request;
 
+/// True when `candidate` is `base` followed by `:<digits>` (a non-empty,
+/// all-ASCII-digit port). DNS SANs cannot carry ports, so a node name
+/// matching its SAN may only differ by such a suffix.
+pub fn is_san_with_port(base: &str, candidate: &str) -> bool {
+	candidate
+		.strip_prefix(base)
+		.and_then(|s| s.strip_prefix(':'))
+		.is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Pick the cluster node name for an mTLS-authenticated peer.
 ///
 /// The SAN is required on the client certificate, and it is authoritative:
@@ -15,11 +25,10 @@ fn resolve_peer_node(san: Option<&str>, register: Option<&str>) -> anyhow::Resul
 		None => san.to_owned(),
 		Some(reg) if reg == san => reg.to_owned(),
 		Some(reg) => {
-			let ok = reg
-				.strip_prefix(san)
-				.and_then(|s| s.strip_prefix(':'))
-				.is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
-			anyhow::ensure!(ok, "register param {reg:?} does not match cert SAN {san:?}");
+			anyhow::ensure!(
+				is_san_with_port(san, reg),
+				"register param {reg:?} does not match cert SAN {san:?}"
+			);
 			reg.to_owned()
 		}
 	};
