@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.17](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.16...moq-cli-v0.7.17) - 2026-04-15
+
+### Other
+
+- Refactor publish stats logging to use structured logging ([#1290](https://github.com/moq-dev/moq/pull/1290))
+
 ## [0.7.16](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.15...moq-cli-v0.7.16) - 2026-04-11
 
 ### Other
