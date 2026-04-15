@@ -1,32 +1,47 @@
 use std::{
-	collections::VecDeque,
 	fmt,
 	future::Future,
 	marker::PhantomData,
 	pin::Pin,
-	sync::{Arc, Weak},
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 	task::{Context, Poll, Waker},
 };
 
-/// Handle passed to poll functions for registering with WaiterLists
+use smallvec::SmallVec;
+
+/// Number of slots stored inline before spilling to the heap.
+const INLINE_WAITERS: usize = 32;
+
+/// Handle passed to poll functions for registering with [`WaiterList`]s.
+///
+/// Each waiter holds an `Arc<AtomicBool>` "active" flag that is shared with
+/// every list slot it has been registered into. Dropping the [`Waiter`]
+/// flips the flag to `false`, marking those slots as garbage so the next
+/// [`WaiterList::register`] call can reclaim them in place — no list
+/// traversal or removal needed.
 pub struct Waiter {
-	waker: Arc<Waker>,
+	waker: Waker,
+	active: Arc<AtomicBool>,
 }
 
 impl Waiter {
 	/// Create a new waiter from an async [`Waker`].
 	pub fn new(waker: Waker) -> Self {
-		Self { waker: Arc::new(waker) }
+		Self {
+			waker,
+			active: Arc::new(AtomicBool::new(true)),
+		}
 	}
 
 	/// Create a no-op waiter that discards registrations.
 	///
-	/// Registrations are stored as `Weak<Waker>` refs, so a noop waiter's
-	/// weak ref will just be cleaned up on the next register call.
+	/// The waiter goes out of scope immediately after registering, so its
+	/// slot is marked inactive and will be reclaimed on the next register.
 	pub fn noop() -> Self {
-		Self {
-			waker: Arc::new(std::task::Waker::noop().clone()),
-		}
+		Self::new(std::task::Waker::noop().clone())
 	}
 
 	/// Register this waiter with a [`WaiterList`] for future notification.
@@ -35,35 +50,65 @@ impl Waiter {
 	}
 }
 
-/// A list of weak wakers waiting for notification
+impl Drop for Waiter {
+	fn drop(&mut self) {
+		// Mark any slots registered by this waiter as inactive so the next
+		// register call can reclaim them without further bookkeeping.
+		self.active.store(false, Ordering::Release);
+	}
+}
+
+struct Slot {
+	waker: Waker,
+	active: Arc<AtomicBool>,
+}
+
+impl Slot {
+	fn from_waiter(waiter: &Waiter) -> Self {
+		Self {
+			waker: waiter.waker.clone(),
+			active: waiter.active.clone(),
+		}
+	}
+
+	fn is_active(&self) -> bool {
+		self.active.load(Ordering::Acquire)
+	}
+}
+
+/// A list of wakers waiting for notification.
 ///
-/// Uses a ring buffer that self-cleans dead entries on register.
+/// Slots live inline (up to [`INLINE_WAITERS`]) and only spill to the heap
+/// for unusually high concurrency. Each slot shares an `AtomicBool` with
+/// its [`Waiter`], so a slot can be detected as dead in O(1) without
+/// walking the list — the previous `Weak<Waker>` upgrade dance is gone.
 pub struct WaiterList {
-	entries: VecDeque<Weak<Waker>>,
+	entries: SmallVec<[Slot; INLINE_WAITERS]>,
 }
 
 impl WaiterList {
 	pub fn new() -> Self {
 		Self {
-			entries: VecDeque::new(),
+			entries: SmallVec::new(),
 		}
 	}
 
-	/// Register a waiter. Cleans up dead entries from the front first.
+	/// Register a waiter.
+	///
+	/// Performs opportunistic garbage collection: scans up to two existing
+	/// slots and reuses the first inactive one for the new registration.
+	/// Otherwise appends a new slot. This keeps the per-call cost O(1)
+	/// while preventing unbounded growth in the common single- or
+	/// few-waiter case.
 	pub fn register(&mut self, waiter: &Waiter) {
-		// Clean up dead entries at front that fail to upgrade
-		while let Some(front) = self.entries.pop_front() {
-			if front.strong_count() == 0 {
-				// Dead entry, skip
-				continue;
+		for slot in self.entries.iter_mut().take(2) {
+			if !slot.is_active() {
+				*slot = Slot::from_waiter(waiter);
+				return;
 			}
-
-			// Add it to the back so we'll start at a different entry next time.
-			self.entries.push_back(front);
-			break;
 		}
 
-		self.entries.push_back(Arc::downgrade(&waiter.waker));
+		self.entries.push(Slot::from_waiter(waiter));
 	}
 
 	/// Drain all entries into a new [`WaiterList`], leaving this one empty.
@@ -74,9 +119,12 @@ impl WaiterList {
 	}
 
 	/// Wake all live waiters, consuming the list.
-	pub fn wake(mut self) {
-		for waker in self.entries.drain(..).filter_map(|w| w.upgrade()) {
-			waker.wake_by_ref();
+	pub fn wake(self) {
+		for slot in self.entries {
+			// Skip slots whose owning Waiter has already been dropped.
+			if slot.is_active() {
+				slot.waker.wake();
+			}
 		}
 	}
 }
@@ -125,6 +173,8 @@ where
 
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<R> {
 		let this = &mut *self;
+		// Replacing drops the previous waiter, marking its slot inactive so
+		// the inner poll function's register call can recycle that slot.
 		this.waiter = Some(Waiter::new(cx.waker().clone()));
 		(this.poll)(this.waiter.as_ref().unwrap())
 	}

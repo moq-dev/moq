@@ -991,6 +991,9 @@ dependencies = [
 [[package]]
 name = "conducer"
 version = "0.3.3"
+dependencies = [
+ "smallvec",
+]
 
 [[package]]
 name = "console-api"

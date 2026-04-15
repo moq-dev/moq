@@ -12,6 +12,9 @@ rust-version.workspace = true
 keywords = ["async", "producer", "consumer", "state", "sync"]
 categories = ["asynchronous", "concurrency"]
 
+[dependencies]
+smallvec = "1.15"
+
 [lib]
 test = false
 doctest = false
