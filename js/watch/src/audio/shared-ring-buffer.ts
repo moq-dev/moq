@@ -193,6 +193,12 @@ export class SharedRingBuffer {
 	 * [READ, WRITE) plus control state into it. Used when growing capacity so
 	 * we don't drop buffered audio. If `newCapacity` is smaller than the unread
 	 * span, the oldest samples are truncated.
+	 *
+	 * Main thread only. `resize()` reads from the source `SharedRingBuffer` and
+	 * writes into a freshly allocated buffer from `allocSharedRingBuffer`, so it
+	 * relies on the same invariant as `insert()`: no concurrent main-thread
+	 * writers. The AudioWorklet reader is tolerated via the CAS discipline used
+	 * by READ/WRITE elsewhere.
 	 */
 	resize(newCapacity: number): SharedRingBuffer {
 		const init = allocSharedRingBuffer(this.channels, newCapacity, this.rate);
@@ -235,7 +241,13 @@ export class SharedRingBuffer {
 		return Atomics.load(this.#control, STALLED) === 1;
 	}
 
-	/** Number of buffered samples (WRITE - READ). */
+	/**
+	 * Number of buffered samples (WRITE - READ).
+	 *
+	 * Non-atomic: WRITE and READ are loaded separately, so a concurrent
+	 * writer/reader can make the two loads inconsistent. Intended for
+	 * tests and diagnostics, not control-flow decisions.
+	 */
 	get length(): number {
 		return (Atomics.load(this.#control, WRITE) - Atomics.load(this.#control, READ)) | 0;
 	}

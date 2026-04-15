@@ -130,7 +130,7 @@ class PostAudioBuffer implements AudioBuffer {
 	readonly #stalled = new Signal<boolean>(true);
 	readonly stalled: Getter<boolean> = this.#stalled;
 
-	#onMessage: (ev: MessageEvent<State>) => void;
+	#signals = new Effect();
 
 	constructor(worklet: AudioWorkletNode, channels: number, rate: number, latencySamples: number) {
 		this.#worklet = worklet;
@@ -142,13 +142,14 @@ class PostAudioBuffer implements AudioBuffer {
 		worklet.port.postMessage(msg);
 
 		// Listen for state updates from the worklet.
-		this.#onMessage = (ev) => {
-			if (ev.data?.type === "state") {
-				this.#timestamp.set(ev.data.timestamp);
-				this.#stalled.set(ev.data.stalled);
+		this.#signals.event(worklet.port, "message", (ev: Event) => {
+			const data = (ev as MessageEvent<State>).data;
+			if (data?.type === "state") {
+				this.#timestamp.set(data.timestamp);
+				this.#stalled.set(data.stalled);
 			}
-		};
-		worklet.port.addEventListener("message", this.#onMessage as EventListener);
+		});
+		// addEventListener on a MessagePort requires start() to begin delivery.
 		worklet.port.start();
 	}
 
@@ -169,6 +170,6 @@ class PostAudioBuffer implements AudioBuffer {
 	}
 
 	close(): void {
-		this.#worklet.port.removeEventListener("message", this.#onMessage as EventListener);
+		this.#signals.close();
 	}
 }
