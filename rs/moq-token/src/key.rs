@@ -238,21 +238,15 @@ impl Key {
 		}
 	}
 
+	/// Encode the key as base64url-encoded JSON.
 	pub fn to_str(&self) -> crate::Result<String> {
-		Ok(serde_json::to_string(self)?)
-	}
-
-	/// Write the key to a file as JSON.
-	pub fn to_file<P: AsRef<StdPath>>(&self, path: P) -> crate::Result<()> {
-		let json = serde_json::to_string_pretty(self)?;
-		std::fs::write(path, json)?;
-		Ok(())
+		let json = serde_json::to_string(self)?;
+		Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes()))
 	}
 
 	/// Write the key to a file as base64url-encoded JSON.
-	pub fn to_file_base64url<P: AsRef<StdPath>>(&self, path: P) -> crate::Result<()> {
-		let json = serde_json::to_string(self)?;
-		let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
+	pub fn to_file<P: AsRef<StdPath>>(&self, path: P) -> crate::Result<()> {
+		let encoded = self.to_str()?;
 		std::fs::write(path, encoded)?;
 		Ok(())
 	}
@@ -1416,7 +1410,7 @@ mod tests {
 		let temp_path = temp_dir.join("test_jwk.key");
 
 		// Write key to file as base64url
-		key.to_file_base64url(&temp_path).unwrap();
+		key.to_file(&temp_path).unwrap();
 
 		// Read file contents
 		let contents = std::fs::read_to_string(&temp_path).unwrap();
