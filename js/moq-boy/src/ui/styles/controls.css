@@ -168,6 +168,27 @@
 	border-color: var(--color-red);
 }
 
+/* Volume slider */
+.boy__volume {
+	width: 100%;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.3rem;
+}
+
+.boy__volume-label {
+	font-family: monospace;
+	font-size: 0.65rem;
+	color: var(--boy-text-muted);
+}
+
+.boy__volume-slider {
+	width: 100%;
+	accent-color: var(--boy-accent);
+	cursor: pointer;
+}
+
 /* Jitter/buffer slider */
 .boy__jitter {
 	width: 100%;
