@@ -167,7 +167,16 @@ async fn reload_certs(config: axum_server::tls_rustls::RustlsConfig, cert: PathB
 /// regular browser isn't something we can service. Rather than exposing an
 /// internal error (e.g. the "Request method must be `CONNECT`" rejection
 /// from axum's WebSocket extractor), we render a short informational page.
-pub(crate) const LANDING_PAGE: &str = include_str!("landing.html");
+pub(crate) const LANDING_PAGE: &str = "<!doctype html>
+<html lang=\"en\">
+<head><meta charset=\"utf-8\"><title>moq-relay</title></head>
+<body>
+<h1>moq-relay</h1>
+<p>This is a moq-relay instance, and you're not a MoQ client.</p>
+<p>See <a href=\"https://moq.dev\">https://moq.dev</a> for more info.</p>
+</body>
+</html>
+";
 
 pub(crate) fn landing_response() -> Response {
 	(StatusCode::NOT_FOUND, Html(LANDING_PAGE)).into_response()
