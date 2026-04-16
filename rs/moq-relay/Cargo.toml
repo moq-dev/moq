@@ -64,4 +64,6 @@ url = { version = "2", features = ["serde"] }
 sd-notify = "0.5"
 
 [dev-dependencies]
+rcgen = "0.13"
 tempfile = "3"
+wiremock = "0.6"

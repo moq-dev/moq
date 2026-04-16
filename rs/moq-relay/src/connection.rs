@@ -83,7 +83,7 @@ impl Connection {
 			match self.auth.verify(&params).await {
 				Ok(token) => token,
 				Err(err) => {
-					let status: http::StatusCode = err.clone().into();
+					let status: http::StatusCode = (&err).into();
 					let _ = self.request.close(status.as_u16()).await;
 					return Err(err.into());
 				}
