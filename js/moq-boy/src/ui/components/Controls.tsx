@@ -2,16 +2,23 @@ import { createPair } from "@moq/signals/solid";
 import { For } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
 
-/** All game controls: D-pad, A/B, Start/Select, Mute, Reset, Key hints. */
+/** All game controls: D-pad, A/B, Start/Select, Mute, Volume, Reset, Key hints. */
 export default function Controls() {
 	const ctx = useGameUI();
 	const game = ctx.game;
 
 	const [userMuted, setUserMuted] = createPair(game.userMuted);
+	const [volume, setVolume] = createPair(game.volume);
 
 	const toggleMute = (e: MouseEvent) => {
 		e.stopPropagation();
 		setUserMuted((prev) => !prev);
+	};
+
+	const onVolumeInput = (e: InputEvent) => {
+		e.stopPropagation();
+		const el = e.currentTarget as HTMLInputElement;
+		setVolume(Number.parseFloat(el.value) / 100);
 	};
 
 	const onReset = (e: MouseEvent) => {
@@ -24,6 +31,20 @@ export default function Controls() {
 			<Dpad />
 			<ABButtons />
 			<MetaButtons />
+
+			<div class="boy__volume">
+				<span class="boy__volume-label">Vol {Math.round(volume() * 100)}</span>
+				<input
+					type="range"
+					class="boy__volume-slider"
+					aria-label="Volume"
+					min="0"
+					max="100"
+					value={Math.round(volume() * 100)}
+					onInput={onVolumeInput}
+					onClick={(e) => e.stopPropagation()}
+				/>
+			</div>
 
 			<div class="boy__util-buttons">
 				<button

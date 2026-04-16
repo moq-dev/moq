@@ -71,6 +71,7 @@ export class Game {
 	readonly active = new Moq.Signals.Signal(false);
 	readonly latency = new Moq.Signals.Signal<Watch.Latency>("real-time");
 	readonly userMuted = new Moq.Signals.Signal(false);
+	readonly volume = new Moq.Signals.Signal(0.25);
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
 	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
 
@@ -147,7 +148,7 @@ export class Game {
 		this.#signals.run(this.#runAudioPaused.bind(this, audioPaused));
 
 		this.audioEmitter = new Watch.Audio.Emitter(this.audioDecoder, {
-			volume: 0.5,
+			volume: this.volume,
 			muted: this.userMuted,
 			paused: audioPaused,
 		});
