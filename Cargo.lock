@@ -3688,7 +3688,7 @@ dependencies = [
 
 [[package]]
 name = "moq-native"
-version = "0.13.12"
+version = "0.13.11"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3728,7 +3728,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.10.21"
+version = "0.10.20"
 dependencies = [
  "anyhow",
  "axum",
