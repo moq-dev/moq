@@ -97,21 +97,27 @@ impl From<reqwest::Error> for AuthError {
 	}
 }
 
-impl From<AuthError> for http::StatusCode {
-	fn from(_: AuthError) -> Self {
-		http::StatusCode::UNAUTHORIZED
+impl From<&AuthError> for http::StatusCode {
+	fn from(err: &AuthError) -> Self {
+		match err {
+			// Upstream auth API unreachable or misconfigured — this is a server-side
+			// problem, not a credential problem.
+			AuthError::ApiUnavailable(_) => http::StatusCode::BAD_GATEWAY,
+			AuthError::InvalidUrl(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
+			_ => http::StatusCode::UNAUTHORIZED,
+		}
 	}
 }
 
-impl From<&AuthError> for http::StatusCode {
-	fn from(_: &AuthError) -> Self {
-		http::StatusCode::UNAUTHORIZED
+impl From<AuthError> for http::StatusCode {
+	fn from(err: AuthError) -> Self {
+		Self::from(&err)
 	}
 }
 
 impl axum::response::IntoResponse for AuthError {
 	fn into_response(self) -> axum::response::Response {
-		http::StatusCode::UNAUTHORIZED.into_response()
+		http::StatusCode::from(self).into_response()
 	}
 }
 
@@ -2229,16 +2235,19 @@ api = "https://api.example.com/access"
 		listener.set_nonblocking(true).unwrap();
 		let addr = listener.local_addr().unwrap();
 		let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(StdArc::new(server_config));
+		let handle = axum_server::Handle::new();
+		let serve_handle = handle.clone();
 		tokio::spawn(async move {
 			axum_server::from_tcp_rustls(listener, tls_config)
 				.unwrap()
+				.handle(serve_handle)
 				.serve(app.into_make_service())
 				.await
 				.unwrap();
 		});
 
-		// Give the server a brief moment to start listening.
-		tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+		// Wait for the server to be ready to accept connections.
+		handle.listening().await;
 
 		MtlsFixture {
 			_dir: dir,
