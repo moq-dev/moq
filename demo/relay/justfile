@@ -48,7 +48,7 @@ cert name: ca
     set -euo pipefail
     umask 077
 
-    [ -f "{{ name }}.pem" ] && exit 0
+    [ -f "{{ name }}.crt" ] && [ -f "{{ name }}.key" ] && exit 0
     export OPENSSL_CONF="ca.cnf"
     openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
     	-subj "/CN={{ name }}" \
@@ -57,8 +57,7 @@ cert name: ca
     	-CA ca.pem -CAkey ca.key -CAcreateserial \
     	-days 365 -extfile <(printf "subjectAltName=DNS:localhost\n") \
     	-out "{{ name }}.crt"
-    cat "{{ name }}.crt" "{{ name }}.key" > "{{ name }}.pem"
-    rm "{{ name }}.csr" "{{ name }}.crt" "{{ name }}.key"
+    rm "{{ name }}.csr"
 
 # Generate a random secret key for authentication.
 key:

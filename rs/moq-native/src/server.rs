@@ -33,21 +33,6 @@ pub struct ServerTlsConfig {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub key: Vec<PathBuf>,
 
-	/// Or load certificate + private key from a single bundled PEM file.
-	///
-	/// Each entry is one PEM containing both the cert chain and its matching
-	/// key (same layout as `curl --cert`). Use this when you want the cluster
-	/// client identity to double as the server cert; use `cert`/`key` when
-	/// they live in separate files.
-	#[arg(
-		long = "server-tls-identity",
-		id = "server-tls-identity",
-		value_delimiter = ',',
-		env = "MOQ_SERVER_TLS_IDENTITY"
-	)]
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub identity: Vec<PathBuf>,
-
 	/// Or generate a new certificate and key with the given hostnames.
 	/// This won't be valid unless the client uses the fingerprint or disables verification.
 	#[arg(

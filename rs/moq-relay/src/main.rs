@@ -53,12 +53,12 @@ async fn main() -> anyhow::Result<()> {
 	// `cluster.node` against the identity's DNS SAN — the cert is what cluster
 	// peers will use to authenticate us. The SAN is authoritative; `cluster.node`
 	// may only extend it with a `:port` suffix (DNS SANs cannot carry ports).
-	if config.cluster.root.is_some() && config.client.tls.identity.is_some() {
+	if config.cluster.root.is_some() && config.client.tls.cert.is_some() {
 		let san = config
 			.client
 			.tls
-			.identity_dns_name()?
-			.context("client.tls.identity has no DNS SAN; cluster peers cannot authenticate")?;
+			.cert_dns_name()?
+			.context("client.tls.cert has no DNS SAN; cluster peers cannot authenticate")?;
 		config.cluster.node = Some(validate_peer(Some(&san), config.cluster.node.as_deref())?);
 	}
 

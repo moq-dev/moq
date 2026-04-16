@@ -83,8 +83,8 @@ impl ServeCerts {
 	pub fn load_certs(&self, config: &ServerTlsConfig) -> anyhow::Result<()> {
 		anyhow::ensure!(config.cert.len() == config.key.len(), "must provide both cert and key");
 		anyhow::ensure!(
-			!config.cert.is_empty() || !config.identity.is_empty() || !config.generate.is_empty(),
-			"must provide at least one cert/key pair, identity bundle, or generate entry"
+			!config.cert.is_empty() || !config.generate.is_empty(),
+			"must provide at least one cert/key pair or generate entry"
 		);
 
 		let mut certs = Vec::new();
@@ -94,11 +94,6 @@ impl ServeCerts {
 			certs.push(Arc::new(self.load(cert, key)?));
 		}
 
-		// Load single-file identity bundles (cert chain + key in one PEM).
-		for identity in &config.identity {
-			certs.push(Arc::new(self.load_identity(identity)?));
-		}
-
 		// Generate a new certificate if requested.
 		if !config.generate.is_empty() {
 			certs.push(Arc::new(self.generate(&config.generate)?));
@@ -106,26 +101,6 @@ impl ServeCerts {
 
 		self.set_certs(certs);
 		Ok(())
-	}
-
-	fn load_identity(&self, path: &PathBuf) -> anyhow::Result<rustls::sign::CertifiedKey> {
-		let pem = fs::read(path).with_context(|| format!("failed to read identity {}", path.display()))?;
-
-		let chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut pem.as_slice())
-			.collect::<Result<_, _>>()
-			.with_context(|| format!("failed to parse certs in {}", path.display()))?;
-		anyhow::ensure!(!chain.is_empty(), "no certificates found in {}", path.display());
-
-		let key = rustls_pemfile::private_key(&mut pem.as_slice())
-			.with_context(|| format!("failed to parse key in {}", path.display()))?
-			.with_context(|| format!("no private key found in {}", path.display()))?;
-		let key = self.provider.key_provider.load_private_key(key)?;
-
-		let certified_key = rustls::sign::CertifiedKey::new(chain, key);
-		certified_key
-			.keys_match()
-			.with_context(|| format!("private key in {} doesn't match certificate", path.display()))?;
-		Ok(certified_key)
 	}
 
 	// Load a certificate and corresponding key from a file, but don't add it to the certs

@@ -8,10 +8,10 @@ level = "debug"
 # Sometimes IPv6 causes issues; try 127.0.0.1:4445 instead.
 listen = "[::]:4445"
 
-# Serve the same cluster-signed identity that we present as a client, so
-# other leaves can verify us against `ca.pem`. The bundle contains
-# both the cert chain and the private key.
-tls.identity = ["leaf1.pem"]
+# Serve the same cluster-signed certificate that we present as a client,
+# so other leaves can verify us against `ca.pem`.
+tls.cert = ["leaf1.crt"]
+tls.key = ["leaf1.key"]
 
 # Trust client certificates signed by this CA for mTLS peer auth, so
 # other leaves dialing in as cluster peers can authenticate without a
@@ -20,9 +20,10 @@ tls.identity = ["leaf1.pem"]
 tls.root = ["ca.pem"]
 
 [client]
-# Present this identity (cert chain + private key in one PEM) on outbound
-# cluster connections. The root maps a valid cert to full access.
-tls.identity = "leaf1.pem"
+# Present this certificate and key on outbound cluster connections.
+# The root maps a valid cert to full access.
+tls.cert = "leaf1.crt"
+tls.key = "leaf1.key"
 
 # Verify the remote's server cert against the cluster CA. All cluster
 # nodes' server certs are signed by `ca.pem`, so no custom trust

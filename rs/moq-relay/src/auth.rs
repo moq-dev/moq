@@ -54,7 +54,7 @@ impl AuthParams {
 }
 
 /// Errors returned when authentication or authorization fails.
-#[derive(thiserror::Error, Debug, Clone)]
+#[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum AuthError {
 	#[error("authentication is disabled")]
@@ -78,19 +78,46 @@ pub enum AuthError {
 	#[error("missing key ID in token")]
 	MissingKeyId,
 
+	#[error("auth API request failed: {0}")]
+	ApiUnavailable(#[from] reqwest_middleware::Error),
+
+	#[error("invalid URL: {0}")]
+	InvalidUrl(#[from] url::ParseError),
+
 	#[error(transparent)]
 	InvalidKeyId(#[from] moq_token::KeyIdError),
 }
 
+// reqwest::Error → AuthError flows through reqwest_middleware::Error so callers can use `?`
+// on both .send() (returns reqwest_middleware::Error) and .error_for_status() / .text()
+// (return reqwest::Error) without a manual map_err.
+impl From<reqwest::Error> for AuthError {
+	fn from(e: reqwest::Error) -> Self {
+		Self::ApiUnavailable(e.into())
+	}
+}
+
+impl From<&AuthError> for http::StatusCode {
+	fn from(err: &AuthError) -> Self {
+		match err {
+			// Upstream auth API unreachable or misconfigured — this is a server-side
+			// problem, not a credential problem.
+			AuthError::ApiUnavailable(_) => http::StatusCode::BAD_GATEWAY,
+			AuthError::InvalidUrl(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
+			_ => http::StatusCode::UNAUTHORIZED,
+		}
+	}
+}
+
 impl From<AuthError> for http::StatusCode {
-	fn from(_: AuthError) -> Self {
-		http::StatusCode::UNAUTHORIZED
+	fn from(err: AuthError) -> Self {
+		Self::from(&err)
 	}
 }
 
 impl axum::response::IntoResponse for AuthError {
 	fn into_response(self) -> axum::response::Response {
-		http::StatusCode::UNAUTHORIZED.into_response()
+		http::StatusCode::from(self).into_response()
 	}
 }
 
@@ -109,12 +136,15 @@ pub struct AuthTls {
 	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT")]
 	pub root: Vec<PathBuf>,
 
-	/// Present a client certificate during the TLS handshake (mTLS).
-	///
-	/// Bundled PEM containing both the cert chain and the private key.
+	/// PEM file containing the client certificate chain for mTLS.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(id = "auth-tls-identity", long = "auth-tls-identity", env = "MOQ_AUTH_TLS_IDENTITY")]
-	pub identity: Option<PathBuf>,
+	#[arg(id = "auth-tls-cert", long = "auth-tls-cert", env = "MOQ_AUTH_TLS_CERT")]
+	pub cert: Option<PathBuf>,
+
+	/// PEM file containing the private key for mTLS.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY")]
+	pub key: Option<PathBuf>,
 
 	/// Danger: Disable TLS certificate verification on auth requests.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -133,12 +163,19 @@ pub struct AuthTls {
 impl AuthTls {
 	/// Convert into a [`moq_native::ClientTls`] so we can reuse its
 	/// rustls-building logic. The fields map one-to-one.
-	fn to_client_tls(&self) -> moq_native::ClientTls {
+	fn to_client_tls(&self) -> anyhow::Result<moq_native::ClientTls> {
+		match (&self.cert, &self.key) {
+			(Some(_), None) => anyhow::bail!("--auth-tls-cert requires --auth-tls-key"),
+			(None, Some(_)) => anyhow::bail!("--auth-tls-key requires --auth-tls-cert"),
+			_ => {}
+		}
+
 		let mut tls = moq_native::ClientTls::default();
 		tls.root = self.root.clone();
-		tls.identity = self.identity.clone();
+		tls.cert = self.cert.clone();
+		tls.key = self.key.clone();
 		tls.disable_verify = self.disable_verify;
-		tls
+		Ok(tls)
 	}
 }
 
@@ -331,13 +368,6 @@ impl PublicAccess {
 	fn is_empty(&self) -> bool {
 		self.subscribe.is_empty() && self.publish.is_empty() && self.api.is_none()
 	}
-
-	/// Check if the given path is already fully covered by static prefixes for both directions.
-	fn static_covers(&self, path: &Path) -> bool {
-		let sub_covered = self.subscribe.iter().any(|p| path.has_prefix(p));
-		let pub_covered = self.publish.iter().any(|p| path.has_prefix(p));
-		sub_covered && pub_covered
-	}
 }
 
 impl AuthConfig {
@@ -445,26 +475,14 @@ impl KeyResolver {
 	}
 
 	async fn fetch_key(client: &ClientWithMiddleware, url: url::Url) -> Result<Arc<Key>, AuthError> {
-		let response = client.get(url.clone()).send().await.map_err(|e| {
-			tracing::warn!(%url, %e, "failed to fetch key");
-			AuthError::KeyNotFound
-		})?;
+		let response = client.get(url).send().await?;
 
-		let response = response.error_for_status().map_err(|e| {
-			tracing::warn!(%url, %e, "key endpoint returned error");
-			AuthError::KeyNotFound
-		})?;
+		if response.status() == http::StatusCode::NOT_FOUND {
+			return Err(AuthError::KeyNotFound);
+		}
 
-		let body = response.text().await.map_err(|e| {
-			tracing::warn!(%url, %e, "failed to read key response body");
-			AuthError::KeyNotFound
-		})?;
-
-		let key = Key::from_str(&body).map_err(|e| {
-			tracing::warn!(%url, %e, "failed to parse key");
-			AuthError::DecodeFailed
-		})?;
-
+		let body = response.error_for_status()?.text().await?;
+		let key = Key::from_str(&body).map_err(|_| AuthError::DecodeFailed)?;
 		Ok(Arc::new(key))
 	}
 }
@@ -489,7 +507,7 @@ impl Auth {
 			"cannot specify both --auth-key and --auth-key-dir"
 		);
 
-		let tls = config.tls.to_client_tls().build()?;
+		let tls = config.tls.to_client_tls()?.build()?;
 
 		let source = if let Some(key) = config.key {
 			let source = if let Ok(url) = Url::parse(&key) {
@@ -579,22 +597,8 @@ impl Auth {
 	}
 
 	async fn fetch_public_response(client: &ClientWithMiddleware, url: &url::Url) -> Result<PublicResponse, AuthError> {
-		let response = client.get(url.clone()).send().await.map_err(|e| {
-			tracing::warn!(%url, %e, "failed to fetch public access");
-			AuthError::ExpectedToken
-		})?;
-
-		let response = response.error_for_status().map_err(|_| AuthError::ExpectedToken)?;
-
-		let body = response.text().await.map_err(|e| {
-			tracing::warn!(%url, %e, "failed to read public access response");
-			AuthError::ExpectedToken
-		})?;
-
-		serde_json::from_str(&body).map_err(|e| {
-			tracing::warn!(%url, %e, "failed to parse public access response");
-			AuthError::DecodeFailed
-		})
+		let body = client.get(url.clone()).send().await?.error_for_status()?.text().await?;
+		serde_json::from_str(&body).map_err(|_| AuthError::DecodeFailed)
 	}
 
 	/// Parse the token from the user provided URL, returning the claims if successful.
@@ -616,40 +620,30 @@ impl Auth {
 		} else if !self.public.is_empty() {
 			// No JWT — use public access (static prefixes + optional API).
 			let root = Path::new(&params.path);
-			let mut subscribe: Vec<String> = self.public.subscribe.iter().map(|p| p.to_string()).collect();
-			let mut publish: Vec<String> = self.public.publish.iter().map(|p| p.to_string()).collect();
 
-			// If an API is configured and static prefixes don't already cover this path,
-			// fetch additional permissions for this namespace.
-			if let Some((base, client)) = &self.public.api {
-				if !self.public.static_covers(&root) {
-					let namespace = root.to_string();
-					match base.join(&namespace) {
-						Ok(url) => match Self::fetch_public_response(client, &url).await {
-							Ok(response) => {
-								subscribe.extend(response.subscribe);
-								publish.extend(response.publish);
-							}
-							Err(e) => {
-								tracing::debug!(%url, %e, "public access API denied or failed");
-							}
-						},
-						Err(e) => {
-							tracing::warn!(%base, %e, "failed to construct public access URL");
-						}
-					}
+			// Use static config if any static prefix overlaps the request path in either
+			// direction (request is under a public prefix, or request is a parent of one).
+			let overlaps = |p: &Path| root.has_prefix(p) || p.has_prefix(&root);
+			if self.public.subscribe.iter().any(&overlaps) || self.public.publish.iter().any(overlaps) {
+				moq_token::Claims {
+					root: "".to_string(),
+					subscribe: self.public.subscribe.iter().map(|p| p.to_string()).collect(),
+					publish: self.public.publish.iter().map(|p| p.to_string()).collect(),
+					..Default::default()
 				}
-			}
-
-			if subscribe.is_empty() && publish.is_empty() {
+			} else if let Some((base, client)) = &self.public.api {
+				// No static overlap — fetch from API. Response paths are relative to the namespace.
+				let namespace = root.to_string();
+				let url = base.join(&namespace)?;
+				let response = Self::fetch_public_response(client, &url).await?;
+				moq_token::Claims {
+					root: namespace,
+					subscribe: response.subscribe,
+					publish: response.publish,
+					..Default::default()
+				}
+			} else {
 				return Err(AuthError::ExpectedToken);
-			}
-
-			moq_token::Claims {
-				root: "".to_string(),
-				subscribe,
-				publish,
-				..Default::default()
 			}
 		} else {
 			return Err(AuthError::ExpectedToken);
@@ -1811,6 +1805,522 @@ api = "https://api.example.com/access"
 		let token = auth.verify(&AuthParams::new("/uploads")).await?;
 		assert_eq!(token.subscribe, vec![]);
 		assert_eq!(token.publish, vec!["".as_path()]);
+
+		Ok(())
+	}
+
+	// ---------------------------------------------------------------------
+	// HTTP-based tests (URL key-dir + public API) using wiremock.
+	// ---------------------------------------------------------------------
+
+	use wiremock::matchers::{method, path as path_matcher};
+	use wiremock::{Mock, MockServer, ResponseTemplate};
+
+	/// Serialize a key as JSON for serving from a mock URL endpoint.
+	fn jwk_body(key: &Key) -> String {
+		serde_json::to_string(key).unwrap()
+	}
+
+	/// Build an Auth wired to a wiremock server's `/keys/` URL key-dir.
+	async fn auth_with_url_key_dir(server: &MockServer) -> Auth {
+		Auth::new(AuthConfig {
+			key_dir: Some(format!("{}/keys/", server.uri())),
+			..Default::default()
+		})
+		.await
+		.unwrap()
+	}
+
+	/// Build an Auth wired to a wiremock server's `/public/` URL with optional static prefixes.
+	async fn auth_with_public_api(server: &MockServer, static_subscribe: &[&str], static_publish: &[&str]) -> Auth {
+		Auth::new(AuthConfig {
+			public: Some(PublicConfig::Detailed(PublicDetailed {
+				subscribe: static_subscribe.iter().map(|s| s.to_string()).collect(),
+				publish: static_publish.iter().map(|s| s.to_string()).collect(),
+				api: Some(format!("{}/public/", server.uri())),
+			})),
+			..Default::default()
+		})
+		.await
+		.unwrap()
+	}
+
+	#[tokio::test]
+	async fn test_url_key_resolves_via_http() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+
+		Mock::given(method("GET"))
+			.and(path_matcher("/keys/test-key.jwk"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(jwk_body(&key)))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_url_key_dir(&server).await;
+
+		let claims = moq_token::Claims {
+			root: "room/1".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/room/1".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
+		assert_eq!(verified.root, "room/1".as_path());
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_url_key_dir_404_returns_key_not_found() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("missing");
+
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(404))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_url_key_dir(&server).await;
+
+		let claims = moq_token::Claims {
+			root: "room/1".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+		let result = auth
+			.verify(&AuthParams {
+				path: "/room/1".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await;
+		assert!(matches!(result, Err(AuthError::KeyNotFound)));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_url_key_dir_500_returns_api_unavailable() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_url_key_dir(&server).await;
+
+		let claims = moq_token::Claims {
+			root: "room/1".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+		let result = auth
+			.verify(&AuthParams {
+				path: "/room/1".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await;
+		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_url_key_dir_network_error_returns_api_unavailable() -> anyhow::Result<()> {
+		// Unreachable port — TCP connect refused.
+		let auth = Auth::new(AuthConfig {
+			key_dir: Some("http://127.0.0.1:1/keys/".to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		let key = create_test_key_with_kid("test-key");
+		let claims = moq_token::Claims {
+			root: "room/1".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+		let result = auth
+			.verify(&AuthParams {
+				path: "/room/1".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await;
+		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_url_key_dir_invalid_body_returns_decode_failed() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+
+		Mock::given(method("GET"))
+			.and(path_matcher("/keys/test-key.jwk"))
+			.respond_with(ResponseTemplate::new(200).set_body_string("not a jwk"))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_url_key_dir(&server).await;
+
+		let claims = moq_token::Claims {
+			root: "room/1".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+		let result = auth
+			.verify(&AuthParams {
+				path: "/room/1".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await;
+		assert!(matches!(result, Err(AuthError::DecodeFailed)));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_url_key_caching_dedups_requests() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		let key = create_test_key_with_kid("test-key");
+
+		// expect(1): the cache should serve the second request from memory.
+		Mock::given(method("GET"))
+			.and(path_matcher("/keys/test-key.jwk"))
+			.respond_with(
+				ResponseTemplate::new(200)
+					.insert_header("Cache-Control", "public, max-age=300")
+					.set_body_string(jwk_body(&key)),
+			)
+			.expect(1)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_url_key_dir(&server).await;
+
+		let claims = moq_token::Claims {
+			root: "room/1".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		for _ in 0..2 {
+			auth.verify(&AuthParams {
+				path: "/room/1".into(),
+				jwt: Some(token.clone()),
+				..Default::default()
+			})
+			.await?;
+		}
+		// Mock::expect(1) is asserted on drop of the server.
+		Ok(())
+	}
+
+	// ---------------------------------------------------------------------
+	// Public-access API tests
+	// ---------------------------------------------------------------------
+
+	#[tokio::test]
+	async fn test_public_api_returns_relative_paths() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+
+		Mock::given(method("GET"))
+			.and(path_matcher("/public/foo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"subscribe":[""],"publish":[""]}"#))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_public_api(&server, &[], &[]).await;
+		let token = auth.verify(&AuthParams::new("/foo")).await?;
+		assert_eq!(token.root, "foo".as_path());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["".as_path()]);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_public_api_with_subpath_prefixes() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+
+		Mock::given(method("GET"))
+			.and(path_matcher("/public/demo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"subscribe":["viewer"],"publish":[]}"#))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_public_api(&server, &[], &[]).await;
+		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		assert_eq!(token.root, "demo".as_path());
+		assert_eq!(token.subscribe, vec!["viewer".as_path()]);
+		assert!(token.publish.is_empty());
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_public_api_skipped_when_static_overlaps() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+
+		// expect(0): the static prefix already covers /demo, so the API must NOT be called.
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.expect(0)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_public_api(&server, &["demo"], &[]).await;
+		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_public_api_called_when_no_static_overlap() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+
+		// expect(1): the static prefix "other" doesn't overlap with /demo, so the API IS called.
+		Mock::given(method("GET"))
+			.and(path_matcher("/public/demo"))
+			.respond_with(ResponseTemplate::new(200).set_body_string(r#"{"subscribe":[""],"publish":[]}"#))
+			.expect(1)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_public_api(&server, &["other"], &[]).await;
+		auth.verify(&AuthParams::new("/demo")).await?;
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_public_api_skipped_for_parent_of_static_prefix() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+
+		// Static "demo" overlaps with connection root "/" via the bidirectional check
+		// (p.has_prefix(&root) where p="demo", root=""). API must NOT be called.
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(500))
+			.expect(0)
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_public_api(&server, &["demo"], &[]).await;
+		let token = auth.verify(&AuthParams::new("/")).await?;
+		// Connecting to root with static "demo" → subscribe scoped under demo/.
+		assert_eq!(token.subscribe, vec!["demo".as_path()]);
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_public_api_unreachable_returns_api_unavailable() -> anyhow::Result<()> {
+		let auth = Auth::new(AuthConfig {
+			public: Some(PublicConfig::Detailed(PublicDetailed {
+				subscribe: vec![],
+				publish: vec![],
+				api: Some("http://127.0.0.1:1/public/".to_string()),
+			})),
+			..Default::default()
+		})
+		.await?;
+
+		let result = auth.verify(&AuthParams::new("/demo")).await;
+		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_public_api_404_returns_api_unavailable() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(404))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_public_api(&server, &[], &[]).await;
+		let result = auth.verify(&AuthParams::new("/demo")).await;
+		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_public_api_invalid_json_returns_decode_failed() -> anyhow::Result<()> {
+		let server = MockServer::start().await;
+		Mock::given(method("GET"))
+			.respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+			.mount(&server)
+			.await;
+
+		let auth = auth_with_public_api(&server, &[], &[]).await;
+		let result = auth.verify(&AuthParams::new("/demo")).await;
+		assert!(matches!(result, Err(AuthError::DecodeFailed)));
+		Ok(())
+	}
+
+	// ---------------------------------------------------------------------
+	// mTLS test: stand up a real HTTPS server requiring + verifying client
+	// certs, and assert that --auth-tls-identity actually presents the cert.
+	// ---------------------------------------------------------------------
+
+	use rcgen::{CertificateParams, KeyPair};
+	use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+	use rustls::server::WebPkiClientVerifier;
+	use std::sync::Arc as StdArc;
+
+	struct MtlsFixture {
+		_dir: TempDir,
+		ca_pem_path: PathBuf,
+		client_identity_path: PathBuf,
+		base_url: String,
+		key: Key,
+	}
+
+	/// Spin up an HTTPS server on 127.0.0.1 that requires a client cert signed
+	/// by our test CA and serves `/keys/test-key.jwk`. Returns paths to the CA
+	/// PEM and the client identity bundle so callers can configure `Auth`.
+	async fn mtls_fixture() -> MtlsFixture {
+		// Install a default crypto provider for rustls. Idempotent across tests.
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+		// 1. Generate a CA.
+		let ca_kp = KeyPair::generate().unwrap();
+		let mut ca_params = CertificateParams::new(vec![]).unwrap();
+		ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
+		ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+		let ca_cert = ca_params.self_signed(&ca_kp).unwrap();
+
+		// 2. Server cert (SAN: 127.0.0.1) signed by the CA.
+		let server_kp = KeyPair::generate().unwrap();
+		let mut server_params = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+		server_params
+			.distinguished_name
+			.push(rcgen::DnType::CommonName, "test-server");
+		let server_cert = server_params.signed_by(&server_kp, &ca_cert, &ca_kp).unwrap();
+
+		// 3. Client cert signed by the CA.
+		let client_kp = KeyPair::generate().unwrap();
+		let mut client_params = CertificateParams::new(vec![]).unwrap();
+		client_params
+			.distinguished_name
+			.push(rcgen::DnType::CommonName, "test-client");
+		let client_cert = client_params.signed_by(&client_kp, &ca_cert, &ca_kp).unwrap();
+
+		// 4. Write CA + client identity (cert chain + private key bundle) to temp files.
+		let dir = TempDir::new().unwrap();
+		let ca_pem_path = dir.path().join("ca.pem");
+		let client_identity_path = dir.path().join("client.pem");
+		std::fs::write(&ca_pem_path, ca_cert.pem()).unwrap();
+		std::fs::write(
+			&client_identity_path,
+			format!("{}{}", client_cert.pem(), client_kp.serialize_pem()),
+		)
+		.unwrap();
+
+		// 5. Build a rustls ServerConfig requiring + verifying client certs against the CA.
+		let mut roots = rustls::RootCertStore::empty();
+		roots.add(CertificateDer::from(ca_cert.der().to_vec())).unwrap();
+		let verifier = WebPkiClientVerifier::builder(StdArc::new(roots)).build().unwrap();
+		let server_cert_der = CertificateDer::from(server_cert.der().to_vec());
+		let server_key_der = PrivatePkcs8KeyDer::from(server_kp.serialize_der());
+		let server_config = rustls::ServerConfig::builder()
+			.with_client_cert_verifier(verifier)
+			.with_single_cert(vec![server_cert_der], PrivateKeyDer::Pkcs8(server_key_der))
+			.unwrap();
+
+		// 6. Spawn an axum server on a random port.
+		let key = create_test_key_with_kid("test-key");
+		let body = jwk_body(&key);
+		let app = axum::Router::new().route("/keys/test-key.jwk", axum::routing::get(move || async move { body }));
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		listener.set_nonblocking(true).unwrap();
+		let addr = listener.local_addr().unwrap();
+		let tls_config = axum_server::tls_rustls::RustlsConfig::from_config(StdArc::new(server_config));
+		let handle = axum_server::Handle::new();
+		let serve_handle = handle.clone();
+		tokio::spawn(async move {
+			axum_server::from_tcp_rustls(listener, tls_config)
+				.unwrap()
+				.handle(serve_handle)
+				.serve(app.into_make_service())
+				.await
+				.unwrap();
+		});
+
+		// Wait for the server to be ready to accept connections.
+		handle.listening().await;
+
+		MtlsFixture {
+			_dir: dir,
+			ca_pem_path,
+			client_identity_path,
+			base_url: format!("https://{addr}"),
+			key,
+		}
+	}
+
+	#[tokio::test]
+	async fn test_mtls_identity_is_presented() -> anyhow::Result<()> {
+		let fx = mtls_fixture().await;
+
+		// With identity: the server accepts the connection and returns the JWK.
+		let auth_with_identity = Auth::new(AuthConfig {
+			key_dir: Some(format!("{}/keys/", fx.base_url)),
+			tls: AuthTls {
+				root: vec![fx.ca_pem_path.clone()],
+				identity: Some(fx.client_identity_path.clone()),
+				disable_verify: None,
+			},
+			..Default::default()
+		})
+		.await?;
+
+		let claims = moq_token::Claims {
+			root: "room/1".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = fx.key.encode(&claims)?;
+		let verified = auth_with_identity
+			.verify(&AuthParams {
+				path: "/room/1".into(),
+				jwt: Some(token.clone()),
+				..Default::default()
+			})
+			.await?;
+		assert_eq!(verified.root, "room/1".as_path());
+
+		// Without identity: the server should reject the TLS handshake → ApiUnavailable.
+		let auth_no_identity = Auth::new(AuthConfig {
+			key_dir: Some(format!("{}/keys/", fx.base_url)),
+			tls: AuthTls {
+				root: vec![fx.ca_pem_path.clone()],
+				identity: None,
+				disable_verify: None,
+			},
+			..Default::default()
+		})
+		.await?;
+		let result = auth_no_identity
+			.verify(&AuthParams {
+				path: "/room/1".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await;
+		assert!(
+			matches!(result, Err(AuthError::ApiUnavailable(_))),
+			"expected ApiUnavailable when client cert missing, got {result:?}"
+		);
 
 		Ok(())
 	}
