@@ -608,9 +608,7 @@ impl Auth {
 			// Use static config if any static prefix overlaps the request path in either
 			// direction (request is under a public prefix, or request is a parent of one).
 			let overlaps = |p: &Path| root.has_prefix(p) || p.has_prefix(&root);
-			if self.public.subscribe.iter().any(|p| overlaps(p))
-				|| self.public.publish.iter().any(|p| overlaps(p))
-			{
+			if self.public.subscribe.iter().any(&overlaps) || self.public.publish.iter().any(overlaps) {
 				moq_token::Claims {
 					root: "".to_string(),
 					subscribe: self.public.subscribe.iter().map(|p| p.to_string()).collect(),
@@ -2226,8 +2224,7 @@ api = "https://api.example.com/access"
 		// 6. Spawn an axum server on a random port.
 		let key = create_test_key_with_kid("test-key");
 		let body = jwk_body(&key);
-		let app = axum::Router::new()
-			.route("/keys/test-key.jwk", axum::routing::get(move || async move { body }));
+		let app = axum::Router::new().route("/keys/test-key.jwk", axum::routing::get(move || async move { body }));
 		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
 		listener.set_nonblocking(true).unwrap();
 		let addr = listener.local_addr().unwrap();
