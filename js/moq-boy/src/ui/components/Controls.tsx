@@ -37,6 +37,7 @@ export default function Controls() {
 				<input
 					type="range"
 					class="boy__volume-slider"
+					aria-label="Volume"
 					min="0"
 					max="100"
 					value={Math.round(volume() * 100)}
