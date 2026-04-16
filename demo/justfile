@@ -5,6 +5,10 @@ mod pub
 mod relay
 mod web
 
+# Run Vite for the web demo only. Default relay is local; pass e.g. https://usw.cdn.moq.dev/anon for public CDN.
+serve url='http://localhost:4443/anon':
+	just web serve "{{url}}"
+
 # Run the web demo (default).
 default:
 	bun install

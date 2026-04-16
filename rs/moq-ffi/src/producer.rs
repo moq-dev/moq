@@ -68,12 +68,58 @@ impl MoqBroadcastProducer {
 		}))
 	}
 
+	/// Create a raw track for arbitrary byte payloads — no codec or container.
+	///
+	/// Same pattern as moq-boy's `status` and `command` tracks: raw UTF-8/JSON
+	/// bytes written directly to moq-lite groups with no media framing.
+	pub fn publish_raw(&self, name: String) -> Result<Arc<MoqRawProducer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let guard = self.state.lock().unwrap();
+		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		let track = moq_lite::Track { name, priority: 0 };
+		// Clone the broadcast handle (shared Arc internally) to get &mut access.
+		let mut broadcast = state.broadcast.clone();
+		let producer = broadcast.create_track(track)?;
+		Ok(Arc::new(MoqRawProducer {
+			inner: std::sync::Mutex::new(Some(producer)),
+		}))
+	}
+
 	/// Finish this publisher, finalizing the catalog stream.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.state.lock().unwrap();
 		let mut state = guard.take().ok_or_else(|| MoqError::Closed)?;
 		state.catalog.finish()?;
+		Ok(())
+	}
+}
+
+// ---- Raw Producer ----
+
+#[derive(uniffi::Object)]
+pub struct MoqRawProducer {
+	inner: std::sync::Mutex<Option<moq_lite::TrackProducer>>,
+}
+
+#[uniffi::export]
+impl MoqRawProducer {
+	/// Write a raw frame. Each call is one MoQ group with one frame — the same
+	/// pattern used by moq-boy's status/command tracks.
+	pub fn write_frame(&self, payload: Vec<u8>) -> Result<(), MoqError> {
+		let mut guard = self.inner.lock().unwrap();
+		let track = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+		let mut group = track.append_group()?;
+		group.write_frame(payload)?;
+		group.finish()?;
+		Ok(())
+	}
+
+	pub fn finish(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let mut track = guard.take().ok_or_else(|| MoqError::Closed)?;
+		track.finish()?;
 		Ok(())
 	}
 }

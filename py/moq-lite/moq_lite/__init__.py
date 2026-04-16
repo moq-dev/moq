@@ -2,8 +2,8 @@
 
 from .client import Client
 from .origin import Announced, AnnouncedBroadcast, Announcement, OriginConsumer, OriginProducer
-from .publish import BroadcastProducer, MediaProducer
-from .subscribe import BroadcastConsumer, CatalogConsumer, Container, MediaConsumer
+from .publish import BroadcastProducer, MediaProducer, RawProducer
+from .subscribe import BroadcastConsumer, CatalogConsumer, Container, MediaConsumer, RawConsumer
 from .types import Audio, Catalog, Dimensions, Frame, Video
 
 __all__ = [
@@ -23,5 +23,7 @@ __all__ = [
     "MediaProducer",
     "OriginConsumer",
     "OriginProducer",
+    "RawConsumer",
+    "RawProducer",
     "Video",
 ]

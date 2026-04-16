@@ -84,6 +84,17 @@ impl MoqBroadcastConsumer {
 		}))
 	}
 
+	/// Subscribe to a raw track by name — same pattern as moq-boy's command/status tracks.
+	///
+	/// Frames are returned as plain byte payloads with no codec or container parsing.
+	pub fn subscribe_raw(&self, name: String) -> Result<Arc<MoqRawConsumer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
+		Ok(Arc::new(MoqRawConsumer {
+			task: Task::new(RawInner { track }),
+		}))
+	}
+
 	/// Subscribe to a track by name, delivering frames in decode order.
 	///
 	/// `container` is the track container from the catalog.
@@ -102,6 +113,43 @@ impl MoqBroadcastConsumer {
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))
+	}
+}
+
+// ---- Raw Consumer ----
+
+struct RawInner {
+	track: moq_lite::TrackConsumer,
+}
+
+impl RawInner {
+	async fn next(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
+		loop {
+			let Some(mut group) = self.track.next_group().await? else {
+				return Ok(None);
+			};
+			let Some(frame) = group.read_frame().await? else {
+				continue;
+			};
+			return Ok(Some(frame.to_vec()));
+		}
+	}
+}
+
+#[derive(uniffi::Object)]
+pub struct MoqRawConsumer {
+	task: Task<RawInner>,
+}
+
+#[uniffi::export]
+impl MoqRawConsumer {
+	/// Get the next raw frame payload. Returns `None` when the track ends.
+	pub async fn next(&self) -> Result<Option<Vec<u8>>, MoqError> {
+		self.task.run(|mut state| async move { state.next().await }).await
+	}
+
+	pub fn cancel(&self) {
+		self.task.cancel();
 	}
 }
 

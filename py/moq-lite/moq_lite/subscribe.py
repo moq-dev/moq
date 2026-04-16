@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from moq_ffi import Container, MoqBroadcastConsumer, MoqCatalogConsumer, MoqMediaConsumer
+from moq_ffi import Container, MoqBroadcastConsumer, MoqCatalogConsumer, MoqMediaConsumer, MoqRawConsumer
 
 from .types import Catalog, Frame
 
@@ -21,6 +21,28 @@ class MediaConsumer:
         if frame is None:
             raise StopAsyncIteration
         return frame
+
+    def cancel(self) -> None:
+        self._inner.cancel()
+
+
+class RawConsumer:
+    """Async iterator of raw byte payloads from a track.
+
+    Same pattern as moq-boy's status/command tracks.
+    """
+
+    def __init__(self, inner: MoqRawConsumer) -> None:
+        self._inner = inner
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        frame = await self._inner.next()
+        if frame is None:
+            raise StopAsyncIteration
+        return bytes(frame)
 
     def cancel(self) -> None:
         self._inner.cancel()
@@ -53,6 +75,10 @@ class BroadcastConsumer:
 
     def subscribe_catalog(self) -> CatalogConsumer:
         return CatalogConsumer(self._inner.subscribe_catalog())
+
+    def subscribe_raw(self, name: str) -> RawConsumer:
+        """Subscribe to a raw track — receive arbitrary byte payloads."""
+        return RawConsumer(self._inner.subscribe_raw(name))
 
     def subscribe_media(self, name: str, container: Container, max_latency_ms: int) -> MediaConsumer:
         return MediaConsumer(self._inner.subscribe_media(name, container, max_latency_ms))

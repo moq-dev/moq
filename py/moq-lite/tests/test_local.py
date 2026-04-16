@@ -228,3 +228,63 @@ async def test_announced_broadcast():
         assert announcement.path == "test/broadcast"
         _catalog = announcement.broadcast.subscribe_catalog()
         break
+
+
+def test_publish_raw_lifecycle():
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_raw("status")
+    track.write_frame(b'{"cmd": "ready"}')
+    track.finish()
+    broadcast.finish()
+
+
+async def test_raw_publish_consume():
+    origin = moq.OriginProducer()
+    broadcast = moq.BroadcastProducer()
+    raw = broadcast.publish_raw("events")
+    origin.publish("robot/arm", broadcast)
+
+    consumer = origin.consume()
+
+    async for announcement in consumer.announced():
+        assert announcement.path == "robot/arm"
+
+        raw_consumer = announcement.broadcast.subscribe_raw("events")
+
+        payload = b'{"cmd": "button_changed", "arm": "left", "button": "THUMB", "state": "PRESSED"}'
+        raw.write_frame(payload)
+
+        async for frame in raw_consumer:
+            assert frame == payload
+            break
+
+        break
+
+
+async def test_raw_multiple_frames():
+    origin = moq.OriginProducer()
+    broadcast = moq.BroadcastProducer()
+    raw = broadcast.publish_raw("commands")
+    origin.publish("robot/io", broadcast)
+
+    consumer = origin.consume()
+
+    async for announcement in consumer.announced():
+        raw_consumer = announcement.broadcast.subscribe_raw("commands")
+
+        messages = [
+            b'{"cmd": "led", "arm": "left", "led": "THUMB", "state": 1}',
+            b'{"cmd": "tone", "arm": "right", "freq": 440}',
+            b'{"cmd": "tone_stop", "arm": "right"}',
+        ]
+        for msg in messages:
+            raw.write_frame(msg)
+
+        received = []
+        async for frame in raw_consumer:
+            received.append(frame)
+            if len(received) == len(messages):
+                break
+
+        assert received == messages
+        break
