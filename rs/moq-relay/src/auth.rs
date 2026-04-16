@@ -2169,7 +2169,7 @@ api = "https://api.example.com/access"
 
 	// ---------------------------------------------------------------------
 	// mTLS test: stand up a real HTTPS server requiring + verifying client
-	// certs, and assert that --auth-tls-identity actually presents the cert.
+	// certs, and assert that --auth-tls-cert/--auth-tls-key present the cert.
 	// ---------------------------------------------------------------------
 
 	use rcgen::{CertificateParams, KeyPair};
@@ -2180,14 +2180,15 @@ api = "https://api.example.com/access"
 	struct MtlsFixture {
 		_dir: TempDir,
 		ca_pem_path: PathBuf,
-		client_identity_path: PathBuf,
+		client_cert_path: PathBuf,
+		client_key_path: PathBuf,
 		base_url: String,
 		key: Key,
 	}
 
 	/// Spin up an HTTPS server on 127.0.0.1 that requires a client cert signed
 	/// by our test CA and serves `/keys/test-key.jwk`. Returns paths to the CA
-	/// PEM and the client identity bundle so callers can configure `Auth`.
+	/// PEM and the client cert/key files so callers can configure `Auth`.
 	async fn mtls_fixture() -> MtlsFixture {
 		// Install a default crypto provider for rustls. Idempotent across tests.
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -2215,16 +2216,14 @@ api = "https://api.example.com/access"
 			.push(rcgen::DnType::CommonName, "test-client");
 		let client_cert = client_params.signed_by(&client_kp, &ca_cert, &ca_kp).unwrap();
 
-		// 4. Write CA + client identity (cert chain + private key bundle) to temp files.
+		// 4. Write CA + client cert/key to temp files.
 		let dir = TempDir::new().unwrap();
 		let ca_pem_path = dir.path().join("ca.pem");
-		let client_identity_path = dir.path().join("client.pem");
+		let client_cert_path = dir.path().join("client.cert.pem");
+		let client_key_path = dir.path().join("client.key.pem");
 		std::fs::write(&ca_pem_path, ca_cert.pem()).unwrap();
-		std::fs::write(
-			&client_identity_path,
-			format!("{}{}", client_cert.pem(), client_kp.serialize_pem()),
-		)
-		.unwrap();
+		std::fs::write(&client_cert_path, client_cert.pem()).unwrap();
+		std::fs::write(&client_key_path, client_kp.serialize_pem()).unwrap();
 
 		// 5. Build a rustls ServerConfig requiring + verifying client certs against the CA.
 		let mut roots = rustls::RootCertStore::empty();
@@ -2262,7 +2261,8 @@ api = "https://api.example.com/access"
 		MtlsFixture {
 			_dir: dir,
 			ca_pem_path,
-			client_identity_path,
+			client_cert_path,
+			client_key_path,
 			base_url: format!("https://{addr}"),
 			key,
 		}
@@ -2277,7 +2277,8 @@ api = "https://api.example.com/access"
 			key_dir: Some(format!("{}/keys/", fx.base_url)),
 			tls: AuthTls {
 				root: vec![fx.ca_pem_path.clone()],
-				identity: Some(fx.client_identity_path.clone()),
+				cert: Some(fx.client_cert_path.clone()),
+				key: Some(fx.client_key_path.clone()),
 				disable_verify: None,
 			},
 			..Default::default()
@@ -2304,7 +2305,8 @@ api = "https://api.example.com/access"
 			key_dir: Some(format!("{}/keys/", fx.base_url)),
 			tls: AuthTls {
 				root: vec![fx.ca_pem_path.clone()],
-				identity: None,
+				cert: None,
+				key: None,
 				disable_verify: None,
 			},
 			..Default::default()
