@@ -48,7 +48,7 @@ cert name: ca
     set -euo pipefail
     umask 077
 
-    [ -f "{{ name }}.crt" ] && exit 0
+    [ -f "{{ name }}.crt" ] && [ -f "{{ name }}.key" ] && exit 0
     export OPENSSL_CONF="ca.cnf"
     openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
     	-subj "/CN={{ name }}" \

@@ -136,13 +136,19 @@ pub struct AuthTls {
 impl AuthTls {
 	/// Convert into a [`moq_native::ClientTls`] so we can reuse its
 	/// rustls-building logic. The fields map one-to-one.
-	fn to_client_tls(&self) -> moq_native::ClientTls {
+	fn to_client_tls(&self) -> anyhow::Result<moq_native::ClientTls> {
+		match (&self.cert, &self.key) {
+			(Some(_), None) => anyhow::bail!("--auth-tls-cert requires --auth-tls-key"),
+			(None, Some(_)) => anyhow::bail!("--auth-tls-key requires --auth-tls-cert"),
+			_ => {}
+		}
+
 		let mut tls = moq_native::ClientTls::default();
 		tls.root = self.root.clone();
 		tls.cert = self.cert.clone();
 		tls.key = self.key.clone();
 		tls.disable_verify = self.disable_verify;
-		tls
+		Ok(tls)
 	}
 }
 
@@ -493,7 +499,7 @@ impl Auth {
 			"cannot specify both --auth-key and --auth-key-dir"
 		);
 
-		let tls = config.tls.to_client_tls().build()?;
+		let tls = config.tls.to_client_tls()?.build()?;
 
 		let source = if let Some(key) = config.key {
 			let source = if let Ok(url) = Url::parse(&key) {
