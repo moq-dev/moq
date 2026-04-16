@@ -8,10 +8,11 @@ level = "debug"
 # Sometimes IPv6 causes issues; try 127.0.0.1:4443 instead.
 listen = "[::]:4443"
 
-# Server identity (cert chain + key) signed by the cluster CA so leaves
-# can verify via `tls.root`. `just cert root` generates this bundle.
+# Server certificate and key signed by the cluster CA so leaves can
+# verify via `tls.root`. `just cert root` generates these files.
 # For a standalone dev setup, use `tls.generate = ["localhost"]` instead.
-tls.identity = ["root.pem"]
+tls.cert = ["root.crt"]
+tls.key = ["root.key"]
 
 # Trust client certificates signed by this CA for mTLS peer auth.
 # Any connection presenting such a cert is granted full access (publish/

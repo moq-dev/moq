@@ -2,6 +2,7 @@
 *.jwt
 *.key
 *.pem
+*.crt
 *.csr
 *.cnf
 *.srl

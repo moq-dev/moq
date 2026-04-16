@@ -18,18 +18,21 @@ pub struct ClientTls {
 	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
 	pub root: Vec<PathBuf>,
 
-	/// Present a client certificate during the TLS handshake (mTLS).
+	/// PEM file containing the client certificate chain for mTLS.
 	///
-	/// The path must point at a single PEM file containing both the
-	/// certificate chain and the matching private key (in any order). This
-	/// is the same bundle layout used by curl's `--cert` and many PKI tools.
+	/// Only certificates are extracted; any private keys in the file are ignored.
+	/// Must be paired with `--client-tls-key`.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[arg(
-		id = "client-tls-identity",
-		long = "client-tls-identity",
-		env = "MOQ_CLIENT_TLS_IDENTITY"
-	)]
-	pub identity: Option<PathBuf>,
+	#[arg(id = "client-tls-cert", long = "client-tls-cert", env = "MOQ_CLIENT_TLS_CERT")]
+	pub cert: Option<PathBuf>,
+
+	/// PEM file containing the private key for mTLS.
+	///
+	/// Only the private key is extracted; any certificates in the file are ignored.
+	/// Must be paired with `--client-tls-cert`.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[arg(id = "client-tls-key", long = "client-tls-key", env = "MOQ_CLIENT_TLS_KEY")]
+	pub key: Option<PathBuf>,
 
 	/// Danger: Disable TLS certificate verification.
 	///
@@ -138,21 +141,23 @@ impl ClientTls {
 			.with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
 			.with_root_certificates(roots);
 
-		let mut tls = match &self.identity {
-			Some(path) => {
-				let pem = std::fs::read(path).context("failed to read client identity")?;
-				let chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut pem.as_slice())
+		let mut tls = match (&self.cert, &self.key) {
+			(Some(cert_path), Some(key_path)) => {
+				let cert_pem = std::fs::read(cert_path).context("failed to read client certificate")?;
+				let chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
 					.collect::<Result<_, _>>()
-					.context("failed to parse client identity certs")?;
-				anyhow::ensure!(!chain.is_empty(), "no certificates found in client identity");
-				let key = rustls_pemfile::private_key(&mut pem.as_slice())
-					.context("failed to parse client identity key")?
-					.context("no private key found in client identity")?;
+					.context("failed to parse client certificate")?;
+				anyhow::ensure!(!chain.is_empty(), "no certificates found in client certificate");
+				let key_pem = std::fs::read(key_path).context("failed to read client key")?;
+				let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+					.context("failed to parse client key")?
+					.context("no private key found in client key")?;
 				builder
 					.with_client_auth_cert(chain, key)
 					.context("failed to configure client certificate")?
 			}
-			None => builder.with_no_client_auth(),
+			(None, None) => builder.with_no_client_auth(),
+			_ => anyhow::bail!("both --client-tls-cert and --client-tls-key must be provided"),
 		};
 
 		if self.disable_verify.unwrap_or_default() {
@@ -164,25 +169,25 @@ impl ClientTls {
 		Ok(tls)
 	}
 
-	/// Parse the configured identity PEM (if any) and return the first DNS
+	/// Parse the configured certificate PEM (if any) and return the first DNS
 	/// SAN on its leaf certificate.
 	///
 	/// Useful for sanity-checking that a caller's own cluster node name
-	/// matches the identity they will present. Returns `Ok(None)` if no
-	/// identity is configured.
-	pub fn identity_dns_name(&self) -> anyhow::Result<Option<String>> {
+	/// matches the certificate they will present. Returns `Ok(None)` if no
+	/// certificate is configured.
+	pub fn cert_dns_name(&self) -> anyhow::Result<Option<String>> {
 		use rustls::pki_types::CertificateDer;
 
-		let Some(path) = self.identity.as_ref() else {
+		let Some(path) = self.cert.as_ref() else {
 			return Ok(None);
 		};
-		let pem = std::fs::read(path).context("failed to read client identity")?;
+		let pem = std::fs::read(path).context("failed to read client certificate")?;
 		let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut pem.as_slice())
 			.collect::<Result<_, _>>()
-			.context("failed to parse client identity certs")?;
+			.context("failed to parse client certificate")?;
 		let leaf = certs.first().context("no certificates found")?;
 		let (_, cert) =
-			x509_parser::parse_x509_certificate(leaf.as_ref()).context("failed to parse identity certificate")?;
+			x509_parser::parse_x509_certificate(leaf.as_ref()).context("failed to parse client certificate")?;
 		let san = cert
 			.subject_alternative_name()
 			.context("failed to read subject alternative name extension")?
