@@ -34,15 +34,15 @@ opossum:
 	just download OpossumCountry.gbc
 	just start rom/OpossumCountry.gbc
 
-# Capybara (cozy): https://playinstinct.itch.io/capybara-village
-capybara:
-	just download Capybara-Village.gb
-	just start rom/Capybara-Village.gb
+# Swordbird Song - Iron Owl Tower
+songbird:
+	just download Swordbird.gb
+	just start rom/Swordbird.gb
 
-# Forest of Fallen Knights (adventure): https://felrasyr.itch.io/forest-of-fallen-knights
-fofk:
-	just download FoFK.gb
-	just start rom/FoFK.gb
+# RunieStory
+runiestory:
+	just download RunieStory.gb
+	just start rom/RunieStory.gb
 
 # GB Run (racing): https://biscuitlocker.itch.io/gb-run
 gb-run:
