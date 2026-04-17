@@ -144,12 +144,17 @@ impl OriginNode {
 			// Not using entry to avoid allocating a string most of the time.
 			self.entry(dir).lock().publish(&full, broadcast, &relative);
 		} else if let Some(existing) = &mut self.broadcast {
-			// This node is a leaf with an existing broadcast.
-			let old = existing.active.clone();
-			existing.active = broadcast.clone();
-			existing.backup.push(old);
+			// This node is a leaf with an existing broadcast. Prefer the shorter hop path.
+			if broadcast.info.hops.len() < existing.active.info.hops.len() {
+				let old = existing.active.clone();
+				existing.active = broadcast.clone();
+				existing.backup.push(old);
 
-			self.notify.lock().reannounce(full, broadcast);
+				self.notify.lock().reannounce(full, broadcast);
+			} else {
+				// Same or longer: keep as a backup in case the active one drops.
+				existing.backup.push(broadcast.clone());
+			}
 		} else {
 			// This node is a leaf with no existing broadcast.
 			self.broadcast = Some(OriginBroadcast {
@@ -227,8 +232,15 @@ impl OriginNode {
 			// Okay so it must be the active broadcast or else we fucked up.
 			assert!(entry.active.is_clone(&broadcast));
 
-			// If there's a backup broadcast, then announce it.
-			if let Some(active) = entry.backup.pop() {
+			// Promote the backup with the shortest hop chain so we keep preferring short paths.
+			let best = entry
+				.backup
+				.iter()
+				.enumerate()
+				.min_by_key(|(_, b)| b.info.hops.len())
+				.map(|(i, _)| i);
+			if let Some(idx) = best {
+				let active = entry.backup.swap_remove(idx);
 				entry.active = active;
 				self.notify.lock().reannounce(full, &entry.active);
 			} else {
@@ -401,6 +413,11 @@ impl OriginProducer {
 	/// Returns false if the broadcast is not allowed to be published.
 	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
 		let path = path.as_path();
+
+		// Loop detection: refuse broadcasts whose hop chain already contains our id.
+		if broadcast.info.hops.iter().any(|id| *id == self.id) {
+			return false;
+		}
 
 		let (root, rest) = match self.nodes.get(&path) {
 			Some(root) => root,
