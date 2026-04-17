@@ -1,6 +1,6 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Path, coding::*};
+use crate::{OriginId, Path, coding::*};
 
 use super::{Message, Version};
 
@@ -12,14 +12,19 @@ pub enum Announce<'a> {
 	Active {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: Vec<u64>,
+		hops: Vec<OriginId>,
 	},
 	Ended {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: Vec<u64>,
+		hops: Vec<OriginId>,
 	},
 }
+
+/// Maximum number of hops carried in an Announce message.
+/// Rejects pathological or loop-induced announcements beyond a reasonable
+/// cluster diameter.
+const MAX_HOPS: usize = 32;
 
 impl Message for Announce<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
@@ -28,20 +33,22 @@ impl Message for Announce<'_> {
 		let hops = match version {
 			Version::Lite01 | Version::Lite02 => Vec::new(),
 			Version::Lite03 => {
+				// Lite03 sends only a hop count, not individual IDs — placeholder UNKNOWN entries.
 				let count = u64::decode(r, version)? as usize;
-				if count > 256 {
+				if count > MAX_HOPS {
 					return Err(DecodeError::BoundsExceeded);
 				}
-				vec![0; count]
+				vec![OriginId::UNKNOWN; count]
 			}
 			_ => {
+				// Lite04+: count followed by that many OriginId varints.
 				let count = u64::decode(r, version)? as usize;
-				if count > 256 {
+				if count > MAX_HOPS {
 					return Err(DecodeError::BoundsExceeded);
 				}
 				let mut ids = Vec::with_capacity(count);
 				for _ in 0..count {
-					ids.push(u64::decode(r, version)?);
+					ids.push(OriginId::decode(r, version)?);
 				}
 				ids
 			}
@@ -71,7 +78,10 @@ impl Message for Announce<'_> {
 	}
 }
 
-fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &[u64]) -> Result<(), EncodeError> {
+fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &[OriginId]) -> Result<(), EncodeError> {
+	if hops.len() > MAX_HOPS {
+		return Err(EncodeError::TooMany);
+	}
 	match version {
 		Version::Lite01 | Version::Lite02 => {}
 		Version::Lite03 => {

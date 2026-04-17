@@ -1,23 +1,43 @@
 use std::{
 	collections::{HashMap, hash_map},
+	ops::Deref,
 	task::{Poll, ready},
 };
 
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
-use super::Track;
+use super::{OriginId, Track};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`Broadcast::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Broadcast {
-	// NOTE: Broadcasts have no names because they're often relative.
+	/// The chain of origins the broadcast has traversed. Each relay appends its own
+	/// [`OriginId`] when forwarding, so the list is used for loop detection and
+	/// shortest-path preference.
+	pub hops: Vec<OriginId>,
 }
 
 impl Broadcast {
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	pub fn with_hops(mut self, hops: Vec<OriginId>) -> Self {
+		self.hops = hops;
+		self
+	}
+
+	/// Create an empty producer without any [Broadcast] metadata.
 	pub fn produce() -> BroadcastProducer {
 		BroadcastProducer::new()
+	}
+
+	/// Create a producer that carries this [Broadcast] (including its hops).
+	pub fn produce_with_info(self) -> BroadcastProducer {
+		BroadcastProducer::with_info(self)
 	}
 }
 
@@ -50,6 +70,7 @@ fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>,
 /// or handle on-demand requests via [Self::dynamic].
 #[derive(Clone)]
 pub struct BroadcastProducer {
+	pub info: Broadcast,
 	state: conducer::Producer<State>,
 }
 
@@ -59,9 +80,22 @@ impl Default for BroadcastProducer {
 	}
 }
 
+impl Deref for BroadcastProducer {
+	type Target = Broadcast;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 impl BroadcastProducer {
 	pub fn new() -> Self {
+		Self::with_info(Broadcast::default())
+	}
+
+	pub fn with_info(info: Broadcast) -> Self {
 		Self {
+			info,
 			state: Default::default(),
 		}
 	}
@@ -115,12 +149,13 @@ impl BroadcastProducer {
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
 	pub fn dynamic(&self) -> BroadcastDynamic {
-		BroadcastDynamic::new(self.state.clone())
+		BroadcastDynamic::new(self.info.clone(), self.state.clone())
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
+			info: self.info.clone(),
 			state: self.state.consume(),
 		}
 	}
@@ -168,17 +203,26 @@ impl BroadcastProducer {
 /// Dropped when no longer needed; pending requests are automatically aborted.
 #[derive(Clone)]
 pub struct BroadcastDynamic {
+	pub info: Broadcast,
 	state: conducer::Producer<State>,
 }
 
+impl Deref for BroadcastDynamic {
+	type Target = Broadcast;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 impl BroadcastDynamic {
-	fn new(state: conducer::Producer<State>) -> Self {
+	fn new(info: Broadcast, state: conducer::Producer<State>) -> Self {
 		if let Ok(mut state) = state.write() {
 			// If the broadcast is already closed, we can't handle any new requests.
 			state.dynamic += 1;
 		}
 
-		Self { state }
+		Self { info, state }
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -207,6 +251,7 @@ impl BroadcastDynamic {
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> BroadcastConsumer {
 		BroadcastConsumer {
+			info: self.info.clone(),
 			state: self.state.consume(),
 		}
 	}
@@ -273,7 +318,16 @@ impl BroadcastDynamic {
 /// Subscribe to arbitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
+	pub info: Broadcast,
 	state: conducer::Consumer<State>,
+}
+
+impl Deref for BroadcastConsumer {
+	type Target = Broadcast;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
 }
 
 impl BroadcastConsumer {

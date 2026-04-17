@@ -120,7 +120,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
-					self.start_announce(path, &mut producers)?;
+					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
+					self.start_announce(path, Vec::new(), &mut producers)?;
 				}
 			}
 			_ => {
@@ -130,9 +131,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {
-				lite::Announce::Active { suffix, .. } => {
+				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
-					self.start_announce(path, &mut producers)?;
+					self.start_announce(path, hops, &mut producers)?;
 				}
 				lite::Announce::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
@@ -198,11 +199,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
+		hops: Vec<crate::OriginId>,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<(), Error> {
-		tracing::debug!(broadcast = %self.log_path(&path), "announce");
+		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().with_hops(hops).produce_with_info();
 
 		// Make sure the peer doesn't double announce.
 		match producers.entry(path.to_owned()) {

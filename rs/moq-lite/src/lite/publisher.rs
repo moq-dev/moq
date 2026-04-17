@@ -194,12 +194,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						Some((path, active)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 
-							if active.is_some() {
+							if let Some(active) = active {
 								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-								let msg = lite::Announce::Active { suffix, hops: Vec::new() };
+								// Append our origin ID to the hops so the next relay can detect loops.
+								let mut hops = active.info.hops.clone();
+								hops.push(origin.origin_id());
+								let msg = lite::Announce::Active { suffix, hops };
 								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+								// An ended announce doesn't need hops — the receiver matches on path only.
 								let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
 								stream.writer.encode(&msg).await?;
 							}

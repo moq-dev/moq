@@ -5,7 +5,7 @@ use std::{
 use tokio::sync::mpsc;
 use web_async::Lock;
 
-use super::BroadcastConsumer;
+use super::{BroadcastConsumer, OriginId};
 use crate::{AsPath, Broadcast, BroadcastProducer, Path, PathOwned, PathPrefixes};
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
@@ -340,8 +340,13 @@ impl Origin {
 }
 
 /// Announces broadcasts to consumers over the network.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct OriginProducer {
+	/// A unique identifier for this origin. Appended to broadcast hops when
+	/// re-announcing so downstream relays can detect loops and prefer the
+	/// shortest path.
+	id: OriginId,
+
 	// The roots of the tree that we are allowed to publish.
 	// A path of "" means we can publish anything.
 	nodes: OriginNodes,
@@ -350,9 +355,31 @@ pub struct OriginProducer {
 	root: PathOwned,
 }
 
+impl Default for OriginProducer {
+	fn default() -> Self {
+		Self {
+			id: OriginId::random(),
+			nodes: OriginNodes::default(),
+			root: PathOwned::default(),
+		}
+	}
+}
+
 impl OriginProducer {
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Set the origin ID, used to tag announcements with a stable identifier
+	/// across restarts.
+	pub fn with_id(mut self, id: OriginId) -> Self {
+		self.id = id;
+		self
+	}
+
+	/// Get the origin ID.
+	pub fn id(&self) -> OriginId {
+		self.id
 	}
 
 	/// Create and publish a new broadcast, returning the producer.
@@ -400,6 +427,7 @@ impl OriginProducer {
 	pub fn publish_only(&self, prefixes: &[Path]) -> Option<OriginProducer> {
 		let prefixes = PathPrefixes::new(prefixes);
 		Some(OriginProducer {
+			id: self.id,
 			nodes: self.nodes.select(&prefixes)?,
 			root: self.root.clone(),
 		})
@@ -407,7 +435,7 @@ impl OriginProducer {
 
 	/// Subscribe to all announced broadcasts.
 	pub fn consume(&self) -> OriginConsumer {
-		OriginConsumer::new(self.root.clone(), self.nodes.clone())
+		OriginConsumer::new(self.id, self.root.clone(), self.nodes.clone())
 	}
 
 	/// Subscribe to all announced broadcasts matching the prefix.
@@ -416,7 +444,7 @@ impl OriginProducer {
 	// TODO accept PathPrefixes instead of &[Path]
 	pub fn consume_only(&self, prefixes: &[Path]) -> Option<OriginConsumer> {
 		let prefixes = PathPrefixes::new(prefixes);
-		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(&prefixes)?))
+		Some(OriginConsumer::new(self.id, self.root.clone(), self.nodes.select(&prefixes)?))
 	}
 
 	/// Subscribe to a specific broadcast.
@@ -436,6 +464,7 @@ impl OriginProducer {
 		let prefix = prefix.as_path();
 
 		Some(Self {
+			id: self.id,
 			root: self.root.join(&prefix).to_owned(),
 			nodes: self.nodes.root(&prefix)?,
 		})
@@ -462,6 +491,7 @@ impl OriginProducer {
 /// NOTE: Clone is expensive, try to avoid it.
 pub struct OriginConsumer {
 	id: ConsumerId,
+	origin_id: OriginId,
 	nodes: OriginNodes,
 	updates: mpsc::UnboundedReceiver<OriginAnnounce>,
 
@@ -470,7 +500,7 @@ pub struct OriginConsumer {
 }
 
 impl OriginConsumer {
-	fn new(root: PathOwned, nodes: OriginNodes) -> Self {
+	fn new(origin_id: OriginId, root: PathOwned, nodes: OriginNodes) -> Self {
 		let (tx, rx) = mpsc::unbounded_channel();
 
 		let id = ConsumerId::new();
@@ -485,10 +515,16 @@ impl OriginConsumer {
 
 		Self {
 			id,
+			origin_id,
 			nodes,
 			updates: rx,
 			root,
 		}
+	}
+
+	/// The id of the origin this consumer was derived from.
+	pub fn origin_id(&self) -> OriginId {
+		self.origin_id
 	}
 
 	/// Returns the next (un)announced broadcast and the absolute path.
@@ -532,7 +568,11 @@ impl OriginConsumer {
 	// TODO accept PathPrefixes instead of &[Path]
 	pub fn consume_only(&self, prefixes: &[Path]) -> Option<OriginConsumer> {
 		let prefixes = PathPrefixes::new(prefixes);
-		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(&prefixes)?))
+		Some(OriginConsumer::new(
+			self.origin_id,
+			self.root.clone(),
+			self.nodes.select(&prefixes)?,
+		))
 	}
 
 	/// Returns a new OriginConsumer that automatically strips out the provided prefix.
@@ -541,7 +581,11 @@ impl OriginConsumer {
 	pub fn with_root(&self, prefix: impl AsPath) -> Option<Self> {
 		let prefix = prefix.as_path();
 
-		Some(Self::new(self.root.join(&prefix).to_owned(), self.nodes.root(&prefix)?))
+		Some(Self::new(
+			self.origin_id,
+			self.root.join(&prefix).to_owned(),
+			self.nodes.root(&prefix)?,
+		))
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
@@ -570,7 +614,7 @@ impl Drop for OriginConsumer {
 
 impl Clone for OriginConsumer {
 	fn clone(&self) -> Self {
-		OriginConsumer::new(self.root.clone(), self.nodes.clone())
+		OriginConsumer::new(self.origin_id, self.root.clone(), self.nodes.clone())
 	}
 }
 
