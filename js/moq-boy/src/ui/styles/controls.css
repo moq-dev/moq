@@ -5,6 +5,28 @@
 	gap: 1.5rem;
 }
 
+/* Back button */
+.boy__back-btn {
+	width: 100%;
+	background: var(--color-white-alpha-05);
+	color: var(--boy-text-muted);
+	border: 1px solid var(--boy-border);
+	padding: 0.5rem;
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 0.75rem;
+	transition: all 0.15s;
+}
+
+.boy__back-btn:hover {
+	border-color: var(--boy-accent);
+	color: var(--boy-text);
+}
+
+.boy__back-btn:active {
+	transform: scale(0.98);
+}
+
 /* D-pad grid */
 .boy__dpad {
 	display: grid;
