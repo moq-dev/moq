@@ -462,12 +462,7 @@ impl TrackConsumer {
 		self.recv_group().await
 	}
 
-	/// Poll for the next group with a strictly-greater sequence number than the last returned, without blocking.
-	///
-	/// Implemented as a thin wrapper over [`Self::poll_recv_group`] that discards
-	/// late arrivals (sequence at or below the last returned by this method).
-	/// Shares the arrival-order cursor with [`Self::poll_recv_group`], so a discarded
-	/// group is also consumed from its perspective.
+	/// A helper that calls [`Self::poll_recv_group`] but only returns groups with a sequence number higher than any previously returned.
 	///
 	/// NOTE: This will be renamed to `poll_next_group` in the next major version.
 	pub fn poll_next_group_ordered(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
