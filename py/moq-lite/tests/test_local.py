@@ -230,9 +230,9 @@ async def test_announced_broadcast():
         break
 
 
-def test_publish_raw_lifecycle():
+def test_publish_lifecycle():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_raw("status")
+    track = broadcast.publish("status")
     track.write_frame(b'{"cmd": "ready"}')
     track.finish()
     broadcast.finish()
@@ -241,7 +241,7 @@ def test_publish_raw_lifecycle():
 def test_raw_append_group_sequence_increments():
     """append_group hands out monotonically increasing sequence numbers."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_raw("seq")
+    track = broadcast.publish("seq")
 
     sequences = []
     for _ in range(5):
@@ -255,7 +255,7 @@ def test_raw_append_group_sequence_increments():
 def test_raw_group_write_multiple_frames():
     """A single group accepts multiple write_frame calls before finish."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_raw("chunks")
+    track = broadcast.publish("chunks")
 
     group = track.append_group()
     for i in range(10):
@@ -266,7 +266,7 @@ def test_raw_group_write_multiple_frames():
 def test_raw_group_empty_payload():
     """Empty frames are a valid payload."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_raw("empty")
+    track = broadcast.publish("empty")
 
     group = track.append_group()
     group.write_frame(b"")
@@ -275,7 +275,7 @@ def test_raw_group_empty_payload():
 
 def test_raw_group_write_after_finish_fails():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_raw("t")
+    track = broadcast.publish("t")
     group = track.append_group()
     group.finish()
 
@@ -285,7 +285,7 @@ def test_raw_group_write_after_finish_fails():
 
 def test_raw_group_finish_twice_fails():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_raw("t")
+    track = broadcast.publish("t")
     group = track.append_group()
     group.finish()
 
@@ -295,7 +295,7 @@ def test_raw_group_finish_twice_fails():
 
 def test_raw_track_write_after_finish_fails():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_raw("t")
+    track = broadcast.publish("t")
     track.finish()
 
     with pytest.raises(Exception):
@@ -309,7 +309,7 @@ def test_raw_parallel_groups():
     """Appending a new group before finishing the previous is allowed;
     both groups carry distinct sequences and can be written independently."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_raw("parallel")
+    track = broadcast.publish("parallel")
 
     g0 = track.append_group()
     g1 = track.append_group()
@@ -326,7 +326,7 @@ def test_raw_parallel_groups():
 async def test_raw_publish_consume():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
-    raw = broadcast.publish_raw("events")
+    raw = broadcast.publish("events")
     origin.publish("robot/arm", broadcast)
 
     consumer = origin.consume()
@@ -334,7 +334,7 @@ async def test_raw_publish_consume():
     async for announcement in consumer.announced():
         assert announcement.path == "robot/arm"
 
-        raw_consumer = announcement.broadcast.subscribe_raw("events")
+        raw_consumer = announcement.broadcast.subscribe("events")
 
         payload = b'{"cmd": "button_changed", "arm": "left", "button": "THUMB", "state": "PRESSED"}'
         raw.write_frame(payload)
@@ -351,13 +351,13 @@ async def test_raw_publish_consume():
 async def test_raw_multiple_frames():
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
-    raw = broadcast.publish_raw("commands")
+    raw = broadcast.publish("commands")
     origin.publish("robot/io", broadcast)
 
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = announcement.broadcast.subscribe_raw("commands")
+        raw_consumer = announcement.broadcast.subscribe("commands")
 
         messages = [
             b'{"cmd": "led", "arm": "left", "led": "THUMB", "state": 1}',
@@ -381,7 +381,7 @@ async def test_raw_multiple_frames():
 async def test_raw_producer_consume_direct():
     """Consume a raw track directly from the producer, no origin/broadcast plumbing."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_raw("direct")
+    track = broadcast.publish("direct")
     consumer = track.consume()
 
     track.write_frame(b"hello")
@@ -400,7 +400,7 @@ async def test_raw_producer_consume_direct():
 async def test_raw_group_producer_consume_direct():
     """Consume a single group directly from the group producer."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_raw("group-direct")
+    track = broadcast.publish("group-direct")
     group = track.append_group()
     group_consumer = group.consume()
     assert group_consumer.sequence == group.sequence
@@ -416,10 +416,10 @@ async def test_raw_group_producer_consume_direct():
 async def test_broadcast_producer_consume_direct():
     """Consume a broadcast directly from the producer — catalog + raw track."""
     broadcast = moq.BroadcastProducer()
-    raw = broadcast.publish_raw("events")
+    raw = broadcast.publish("events")
     consumer = broadcast.consume()
 
-    raw_consumer = consumer.subscribe_raw("events")
+    raw_consumer = consumer.subscribe("events")
     raw.write_frame(b"event-0")
 
     async for group in raw_consumer:
@@ -433,13 +433,13 @@ async def test_raw_group_sequence():
     """Consumer sees the same sequence numbers the producer assigned."""
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
-    raw = broadcast.publish_raw("seq")
+    raw = broadcast.publish("seq")
     origin.publish("track/seq", broadcast)
 
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = announcement.broadcast.subscribe_raw("seq")
+        raw_consumer = announcement.broadcast.subscribe("seq")
 
         sent_sequences = []
         for i in range(3):
@@ -464,13 +464,13 @@ async def test_raw_multi_frame_group():
     """A single group can carry multiple frames — not just one-per-group."""
     origin = moq.OriginProducer()
     broadcast = moq.BroadcastProducer()
-    raw = broadcast.publish_raw("chunks")
+    raw = broadcast.publish("chunks")
     origin.publish("stream/chunks", broadcast)
 
     consumer = origin.consume()
 
     async for announcement in consumer.announced():
-        raw_consumer = announcement.broadcast.subscribe_raw("chunks")
+        raw_consumer = announcement.broadcast.subscribe("chunks")
 
         group_producer = raw.append_group()
         chunks = [b"chunk-0", b"chunk-1", b"chunk-2"]

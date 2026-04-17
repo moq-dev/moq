@@ -6,9 +6,9 @@ from moq_ffi import (
     Container,
     MoqBroadcastConsumer,
     MoqCatalogConsumer,
+    MoqGroupConsumer,
     MoqMediaConsumer,
-    MoqRawConsumer,
-    MoqRawGroupConsumer,
+    MoqTrackConsumer,
 )
 
 from .types import Catalog, Frame
@@ -33,10 +33,10 @@ class MediaConsumer:
         self._inner.cancel()
 
 
-class RawGroupConsumer:
+class GroupConsumer:
     """Async iterator of byte payloads within a single group."""
 
-    def __init__(self, inner: MoqRawGroupConsumer) -> None:
+    def __init__(self, inner: MoqGroupConsumer) -> None:
         self._inner = inner
 
     @property
@@ -57,25 +57,25 @@ class RawGroupConsumer:
         self._inner.cancel()
 
 
-class RawConsumer:
-    """Async iterator of groups from a raw track.
+class TrackConsumer:
+    """Async iterator of groups from a track.
 
     Each group is itself an async iterator of byte payloads. Same pattern as
     moq-boy's status/command tracks (one frame per group), but multi-frame
     groups are also supported.
     """
 
-    def __init__(self, inner: MoqRawConsumer) -> None:
+    def __init__(self, inner: MoqTrackConsumer) -> None:
         self._inner = inner
 
     def __aiter__(self):
         return self
 
-    async def __anext__(self) -> RawGroupConsumer:
+    async def __anext__(self) -> GroupConsumer:
         group = await self._inner.next_group()
         if group is None:
             raise StopAsyncIteration
-        return RawGroupConsumer(group)
+        return GroupConsumer(group)
 
     def cancel(self) -> None:
         self._inner.cancel()
@@ -109,9 +109,9 @@ class BroadcastConsumer:
     def subscribe_catalog(self) -> CatalogConsumer:
         return CatalogConsumer(self._inner.subscribe_catalog())
 
-    def subscribe_raw(self, name: str) -> RawConsumer:
-        """Subscribe to a raw track — receive arbitrary byte payloads."""
-        return RawConsumer(self._inner.subscribe_raw(name))
+    def subscribe(self, name: str) -> TrackConsumer:
+        """Subscribe to a track — receive arbitrary byte payloads."""
+        return TrackConsumer(self._inner.subscribe(name))
 
     def subscribe_media(self, name: str, container: Container, max_latency_ms: int) -> MediaConsumer:
         return MediaConsumer(self._inner.subscribe_media(name, container, max_latency_ms))

@@ -84,13 +84,13 @@ impl MoqBroadcastConsumer {
 		}))
 	}
 
-	/// Subscribe to a raw track by name — same pattern as moq-boy's command/status tracks.
+	/// Subscribe to a track by name — same pattern as moq-boy's command/status tracks.
 	///
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
-	pub fn subscribe_raw(&self, name: String) -> Result<Arc<MoqRawConsumer>, MoqError> {
+	pub fn subscribe(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
-		Ok(Arc::new(MoqRawConsumer::new(track)))
+		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
 
 	/// Subscribe to a track by name, delivering frames in decode order.
@@ -114,43 +114,43 @@ impl MoqBroadcastConsumer {
 	}
 }
 
-// ---- Raw Consumer ----
+// ---- Track Consumer ----
 
-struct RawInner {
+struct TrackInner {
 	track: moq_lite::TrackConsumer,
 }
 
-impl RawInner {
+impl TrackInner {
 	async fn next_group(&mut self) -> Result<Option<moq_lite::GroupConsumer>, MoqError> {
 		Ok(self.track.next_group().await?)
 	}
 }
 
 #[derive(uniffi::Object)]
-pub struct MoqRawConsumer {
-	task: Task<RawInner>,
+pub struct MoqTrackConsumer {
+	task: Task<TrackInner>,
 }
 
-impl MoqRawConsumer {
+impl MoqTrackConsumer {
 	pub(crate) fn new(track: moq_lite::TrackConsumer) -> Self {
 		Self {
-			task: Task::new(RawInner { track }),
+			task: Task::new(TrackInner { track }),
 		}
 	}
 }
 
 #[uniffi::export]
-impl MoqRawConsumer {
+impl MoqTrackConsumer {
 	/// Return the next group in order. Returns `None` when the track ends.
 	///
 	/// NOTE: Groups may be skipped if the reader falls behind or groups expire.
-	pub async fn next_group(&self) -> Result<Option<Arc<MoqRawGroupConsumer>>, MoqError> {
+	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		self.task
 			.run(|mut state| async move {
 				Ok(state.next_group().await?.map(|group| {
-					Arc::new(MoqRawGroupConsumer {
+					Arc::new(MoqGroupConsumer {
 						sequence: group.info.sequence,
-						task: Task::new(RawGroupInner { group }),
+						task: Task::new(GroupInner { group }),
 					})
 				}))
 			})
@@ -162,33 +162,33 @@ impl MoqRawConsumer {
 	}
 }
 
-struct RawGroupInner {
+struct GroupInner {
 	group: moq_lite::GroupConsumer,
 }
 
-impl RawGroupInner {
+impl GroupInner {
 	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
 		Ok(self.group.read_frame().await?.map(|b| b.to_vec()))
 	}
 }
 
 #[derive(uniffi::Object)]
-pub struct MoqRawGroupConsumer {
+pub struct MoqGroupConsumer {
 	sequence: u64,
-	task: Task<RawGroupInner>,
+	task: Task<GroupInner>,
 }
 
-impl MoqRawGroupConsumer {
+impl MoqGroupConsumer {
 	pub(crate) fn new(group: moq_lite::GroupConsumer) -> Self {
 		Self {
 			sequence: group.info.sequence,
-			task: Task::new(RawGroupInner { group }),
+			task: Task::new(GroupInner { group }),
 		}
 	}
 }
 
 #[uniffi::export]
-impl MoqRawGroupConsumer {
+impl MoqGroupConsumer {
 	/// The sequence number of this group within the track.
 	pub fn sequence(&self) -> u64 {
 		self.sequence

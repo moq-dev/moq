@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use bytes::Buf;
 
-use crate::consumer::{MoqBroadcastConsumer, MoqRawConsumer, MoqRawGroupConsumer};
+use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqTrackConsumer};
 use crate::error::MoqError;
 
 // ---- UniFFI Objects ----
@@ -75,11 +75,11 @@ impl MoqBroadcastProducer {
 		}))
 	}
 
-	/// Create a raw track for arbitrary byte payloads — no codec or container.
+	/// Create a track for arbitrary byte payloads — no codec or container.
 	///
 	/// Same pattern as moq-boy's `status` and `command` tracks: raw UTF-8/JSON
 	/// bytes written directly to moq-lite groups with no media framing.
-	pub fn publish_raw(&self, name: String) -> Result<Arc<MoqRawProducer>, MoqError> {
+	pub fn publish(&self, name: String) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
@@ -87,7 +87,7 @@ impl MoqBroadcastProducer {
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
 		let mut broadcast = state.broadcast.clone();
 		let producer = broadcast.create_track(track)?;
-		Ok(Arc::new(MoqRawProducer {
+		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
 		}))
 	}
@@ -102,32 +102,32 @@ impl MoqBroadcastProducer {
 	}
 }
 
-// ---- Raw Producer ----
+// ---- Track Producer ----
 
 #[derive(uniffi::Object)]
-pub struct MoqRawProducer {
+pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_lite::TrackProducer>>,
 }
 
 #[uniffi::export]
-impl MoqRawProducer {
+impl MoqTrackProducer {
 	/// Create a consumer that reads from this producer's track.
 	///
 	/// Useful for local pub/sub without going through an origin/broadcast.
-	pub fn consume(&self) -> Result<Arc<MoqRawConsumer>, MoqError> {
+	pub fn consume(&self) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(Arc::new(MoqRawConsumer::new(track.consume())))
+		Ok(Arc::new(MoqTrackConsumer::new(track.consume())))
 	}
 
 	/// Append a new group to the track, returning a producer for writing frames into it.
-	pub fn append_group(&self) -> Result<Arc<MoqRawGroupProducer>, MoqError> {
+	pub fn append_group(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 		let group = track.append_group()?;
-		Ok(Arc::new(MoqRawGroupProducer {
+		Ok(Arc::new(MoqGroupProducer {
 			sequence: group.info.sequence,
 			inner: std::sync::Mutex::new(Some(group)),
 		}))
@@ -153,24 +153,24 @@ impl MoqRawProducer {
 }
 
 #[derive(uniffi::Object)]
-pub struct MoqRawGroupProducer {
+pub struct MoqGroupProducer {
 	sequence: u64,
 	inner: std::sync::Mutex<Option<moq_lite::GroupProducer>>,
 }
 
 #[uniffi::export]
-impl MoqRawGroupProducer {
+impl MoqGroupProducer {
 	/// The sequence number of this group within the track.
 	pub fn sequence(&self) -> u64 {
 		self.sequence
 	}
 
 	/// Create a consumer that reads frames from this group.
-	pub fn consume(&self) -> Result<Arc<MoqRawGroupConsumer>, MoqError> {
+	pub fn consume(&self) -> Result<Arc<MoqGroupConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let group = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(Arc::new(MoqRawGroupConsumer::new(group.consume())))
+		Ok(Arc::new(MoqGroupConsumer::new(group.consume())))
 	}
 
 	/// Write a frame into this group.
