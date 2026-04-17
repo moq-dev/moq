@@ -11,13 +11,20 @@ use serde::Serialize;
 use crate::emulator::Button;
 use crate::stats::StatsReport;
 
+/// A single latency component measurement.
+#[derive(Serialize, Clone)]
+pub struct LatencyEntry {
+	pub label: String,
+	pub ms: u32,
+}
+
 /// Per-frame status broadcast to all viewers on the "status" track.
 #[derive(Serialize)]
 pub struct Status {
 	/// Currently pressed buttons (union across all viewers).
 	pub buttons: Vec<Button>,
-	/// Per-viewer round-trip latency in milliseconds.
-	pub latency: BTreeMap<String, u32>,
+	/// Per-viewer latency breakdown: viewer_id → ordered list of components.
+	pub latency: BTreeMap<String, Vec<LatencyEntry>>,
 	/// Encoding and emulation performance stats.
 	pub stats: StatsReport,
 	/// Optional server location label (e.g. "Dallas, TX").

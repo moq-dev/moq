@@ -17,6 +17,33 @@ bun add @moq/publish
 npm add @moq/publish
 ```
 
+### No-build CDN usage
+
+For quick demos or embeds where a bundler is overkill, jsDelivr's `+esm`
+endpoint will transform the published npm package into a browser-ready ESM
+module — bare imports like `@moq/hang` are automatically rewritten to
+other `+esm` URLs. No build step or import map required:
+
+```html
+<script type="module">
+    import "https://cdn.jsdelivr.net/npm/@moq/publish/element.js/+esm";
+    import "https://cdn.jsdelivr.net/npm/@moq/publish/ui/index.js/+esm";
+</script>
+
+<moq-publish-ui>
+    <moq-publish url="https://relay.example.com/anon" name="room/alice" source="camera">
+        <video muted autoplay></video>
+    </moq-publish>
+</moq-publish-ui>
+```
+
+Pin a version range in the URL for production — e.g.
+`https://cdn.jsdelivr.net/npm/@moq/publish@0.2/element.js/+esm`. esm.sh
+(`https://esm.sh/@moq/publish/element`) works the same way if you prefer it.
+
+For anything beyond embedding on a static page you should install the
+package and use a real bundler (the examples below).
+
 ## Web Component
 
 The simplest way to publish a stream:

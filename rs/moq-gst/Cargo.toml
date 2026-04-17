@@ -24,7 +24,7 @@ gst = { package = "gstreamer", version = "0.23" }
 hang = { workspace = true }
 moq-lite = { workspace = true }
 moq-mux = { workspace = true }
-moq-native = { workspace = true }
+moq-native = { workspace = true, default-features = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"

@@ -116,21 +116,21 @@ export class MultiBackend implements Backend {
 	#audioSource: Audio.Source;
 
 	// Used to sync audio and video playback at a target delay.
-	#sync: Sync;
+	sync: Sync;
 
 	signals = new Effect();
 
 	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
-		this.#sync = new Sync({ latency: props?.latency, rtt: props?.rtt });
-		this.latency = this.#sync.latency;
-		this.jitter = this.#sync.jitter;
+		this.sync = new Sync({ latency: props?.latency, rtt: props?.rtt });
+		this.latency = this.sync.latency;
+		this.jitter = this.sync.jitter;
 
-		this.#videoSource = new Video.Source(this.#sync, {
+		this.#videoSource = new Video.Source(this.sync, {
 			broadcast: this.broadcast,
 		});
-		this.#audioSource = new Audio.Source(this.#sync, {
+		this.#audioSource = new Audio.Source(this.sync, {
 			broadcast: this.broadcast,
 		});
 
@@ -183,7 +183,7 @@ export class MultiBackend implements Backend {
 	}
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
-		const mse = new Muxer(this.#sync, {
+		const mse = new Muxer(this.sync, {
 			paused: this.paused,
 			element,
 		});

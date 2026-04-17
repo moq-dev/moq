@@ -9,7 +9,7 @@ if (boy) boy.url = url;
 const about = document.getElementById("about");
 if (boy && about) {
 	const effect = new Effect();
-	effect.run(() => {
-		about.hidden = effect.get(boy.expanded) !== undefined;
+	effect.run((inner) => {
+		about.hidden = inner.get(boy.expanded) !== undefined;
 	});
 }

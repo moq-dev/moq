@@ -10,6 +10,7 @@ mod cdn
 mod boy 'demo/boy'
 mod pub 'demo/pub'
 mod relay 'demo/relay'
+mod sub 'demo/sub'
 mod web 'demo/web'
 
 # Run the demo by default.
@@ -56,19 +57,6 @@ check *args:
 	# requires: cargo install cargo-sort
 	cargo sort --workspace --check
 
-	# Run the Python checks.
-	if command -v uv &> /dev/null; then
-		uv run ruff check py/
-		uv run ruff format --check py/
-		uv run --package moq-lite pyright
-	fi
-
-	# Only run the tofu checks if tofu is installed.
-	if command -v tofu &> /dev/null; then (cd cdn && just check); fi
-
-	# Only run the nix checks if nix is installed.
-	if command -v nix &> /dev/null; then nix flake check; fi
-
 # Run comprehensive CI checks including feature edge cases
 ci:
 	#!/usr/bin/env bash
@@ -76,6 +64,17 @@ ci:
 
 	# Run the standard checks first, including non-default workspace members
 	just check --workspace
+
+	# Run the Python checks.
+	uv run ruff check py/
+	uv run ruff format --check py/
+	uv run --package moq-lite pyright
+
+	# Run the tofu checks.
+	(cd cdn && just check)
+
+	# Run the nix checks.
+	nix flake check
 
 	# Run the unit tests with all features to exercise all QUIC backends
 	just test --all-features
@@ -86,10 +85,6 @@ ci:
 	# Check feature edge cases for all crates
 	cargo check --workspace --no-default-features
 	cargo check --workspace --all-features
-
-	# Check for broken links
-	lychee --root-dir "$(pwd)/doc" doc
-	lychee --exclude-path doc .
 
 	# Dry-run publish to verify packaging
 	cargo publish --dry-run

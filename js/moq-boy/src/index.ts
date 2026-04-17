@@ -23,6 +23,12 @@ export interface GameConfig {
 	viewerPrefix: string;
 }
 
+/** A command with captured timestamps, published via the command signal. */
+interface Command {
+	cmd: Record<string, unknown>;
+	timestamps: { label: string; ts: number }[];
+}
+
 // Stop publishing feedback after 60s of no input.
 const FEEDBACK_IDLE_MS = 60_000;
 
@@ -30,9 +36,6 @@ const FEEDBACK_IDLE_MS = 60_000;
 const GB_WIDTH = 160;
 const GB_HEIGHT = 144;
 const GB_PIXELS = GB_WIDTH * GB_HEIGHT;
-
-// Default jitter buffer in milliseconds.
-const DEFAULT_JITTER = 50 as Moq.Time.Milli;
 
 /** Key mapping from keyboard keys to Game Boy buttons. */
 export const KEY_MAP: Record<string, string> = {
@@ -66,8 +69,9 @@ export class Game {
 	// Reactive state exposed to UI.
 	readonly hovered = new Moq.Signals.Signal(false);
 	readonly active = new Moq.Signals.Signal(false);
-	readonly jitter = new Moq.Signals.Signal<Watch.Latency>(DEFAULT_JITTER);
+	readonly latency = new Moq.Signals.Signal<Watch.Latency>("real-time");
 	readonly userMuted = new Moq.Signals.Signal(false);
+	readonly volume = new Moq.Signals.Signal(0.25);
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
 	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
 
@@ -85,8 +89,7 @@ export class Game {
 	readonly heldButtons = new Set<string>();
 
 	// Internal command publishing state.
-	#commandTrack: Moq.Track | undefined;
-	#pendingCommand: Record<string, unknown> | undefined;
+	#command = new Moq.Signals.Signal<Command | undefined>(undefined);
 	#feedbackActive = new Moq.Signals.Signal(false);
 	#feedbackTimeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -107,7 +110,15 @@ export class Game {
 		});
 		this.#signals.cleanup(() => this.broadcast.close());
 
-		this.sync = new Watch.Sync({ latency: this.jitter });
+		// Flatten the RTT signal from the connection for real-time jitter.
+		const rtt = new Moq.Signals.Signal<number | undefined>(undefined);
+		this.#signals.run((effect) => {
+			const conn = effect.get(connection.established);
+			const rttSignal = conn?.rtt;
+			rtt.set(rttSignal ? effect.get(rttSignal) : undefined);
+		});
+
+		this.sync = new Watch.Sync({ latency: this.latency, rtt });
 		this.#signals.cleanup(() => this.sync.close());
 
 		this.videoSource = new Watch.Video.Source(this.sync, { broadcast: this.broadcast });
@@ -126,17 +137,21 @@ export class Game {
 		this.videoRenderer = new Watch.Video.Renderer(this.videoDecoder);
 		this.#signals.cleanup(() => this.videoRenderer.close());
 
-		// Audio pipeline — only download audio when active AND unmuted.
+		// Audio pipeline — the emitter controls muted (volume) and paused (download).
 		this.audioSource = new Watch.Audio.Source(this.sync, { broadcast: this.broadcast });
 		this.#signals.cleanup(() => this.audioSource.close());
 
-		const audioEnabled = new Moq.Signals.Signal(false);
-		this.#signals.run(this.#runAudioEnabled.bind(this, audioEnabled));
-
-		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource, { enabled: audioEnabled });
+		this.audioDecoder = new Watch.Audio.Decoder(this.audioSource);
 		this.#signals.cleanup(() => this.audioDecoder.close());
 
-		this.audioEmitter = new Watch.Audio.Emitter(this.audioDecoder, { volume: 0.5 });
+		const audioPaused = new Moq.Signals.Signal(true);
+		this.#signals.run(this.#runAudioPaused.bind(this, audioPaused));
+
+		this.audioEmitter = new Watch.Audio.Emitter(this.audioDecoder, {
+			volume: this.volume,
+			muted: this.userMuted,
+			paused: audioPaused,
+		});
 		this.#signals.cleanup(() => this.audioEmitter.close());
 
 		// Resume AudioContext on first user interaction (browser autoplay policy).
@@ -166,13 +181,19 @@ export class Game {
 		clearTimeout(this.#feedbackTimeout);
 		this.#feedbackTimeout = setTimeout(() => this.#feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
-		if (!this.#commandTrack) {
-			this.#pendingCommand = cmd;
-			return;
-		}
+		this.#command.set({ cmd, timestamps: this.#timestamps() }, true);
+	}
 
-		const ts = this.videoRenderer.timestamp.peek();
-		this.#commandTrack.writeJson({ ...cmd, ts: ts ?? 0 });
+	/** Collect media timestamps at each pipeline stage for latency measurement. */
+	#timestamps(): { label: string; ts: number }[] {
+		const entries: { label: string; ts: number }[] = [];
+		const received = this.sync.timestamp.peek();
+		if (received != null) entries.push({ label: "received", ts: received });
+		const decoded = this.videoDecoder.timestamp.peek();
+		if (decoded != null) entries.push({ label: "decoded", ts: decoded });
+		const rendered = this.videoRenderer.timestamp.peek();
+		if (rendered != null) entries.push({ label: "rendered", ts: rendered });
+		return entries;
 	}
 
 	close() {
@@ -200,10 +221,9 @@ export class Game {
 		videoEnabled.set(exp === undefined || exp === this.sessionId);
 	}
 
-	#runAudioEnabled(audioEnabled: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
+	#runAudioPaused(audioPaused: Moq.Signals.Signal<boolean>, effect: Moq.Signals.Effect) {
 		const active = effect.get(this.active);
-		const userMuted = effect.get(this.userMuted);
-		audioEnabled.set(active && !userMuted);
+		audioPaused.set(!active);
 	}
 
 	#runStatus(effect: Moq.Signals.Effect) {
@@ -237,7 +257,7 @@ export class Game {
 			// Clear feedback state when deactivating.
 			this.#feedbackActive.set(false);
 			clearTimeout(this.#feedbackTimeout);
-			this.#pendingCommand = undefined;
+			this.#command.set(undefined);
 			return;
 		}
 
@@ -251,7 +271,6 @@ export class Game {
 		conn.publish(Moq.Path.from(`${this.#viewerPrefix}/${this.sessionId}/${viewerId}`), viewerBroadcast);
 		effect.cleanup(() => {
 			viewerBroadcast.close();
-			this.#commandTrack = undefined;
 			this.viewerId.set(undefined);
 		});
 
@@ -259,16 +278,20 @@ export class Game {
 			for (;;) {
 				const req = await Promise.race([effect.cancel, viewerBroadcast.requested()]);
 				if (!req) break;
+
 				if (req.track.name === "command") {
-					this.#commandTrack = req.track;
-					// Flush any pending command that triggered activation.
-					if (this.#pendingCommand) {
-						const ts = this.videoRenderer.timestamp.peek();
-						this.#commandTrack.writeJson({ ...this.#pendingCommand, ts: ts ?? 0 });
-						this.#pendingCommand = undefined;
-					}
+					effect.run(this.#runCommandTrack.bind(this, req.track));
 				}
 			}
 		});
+	}
+
+	#runCommandTrack(track: Moq.Track, effect: Moq.Signals.Effect) {
+		if (effect.get(track.state.closed)) return;
+
+		const command = effect.get(this.#command);
+		if (!command) return;
+
+		track.writeJson({ ...command.cmd, timestamps: command.timestamps });
 	}
 }

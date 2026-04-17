@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.7...moq-mux-v0.3.8) - 2026-04-09
+
+### Other
+
+- Add import statistics tracking and reporting ([#1242](https://github.com/moq-dev/moq/pull/1242))
+- Add bandwidth estimation for adaptive bitrate control ([#1208](https://github.com/moq-dev/moq/pull/1208))
+
 ## [0.3.7](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.6...moq-mux-v0.3.7) - 2026-04-07
 
 ### Other

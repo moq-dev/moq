@@ -1,16 +1,28 @@
+import { createAccessor } from "@moq/signals/solid";
 import { For, Show } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
 
-/** Right-side panel showing location, encoding stats, and per-viewer latency. */
+/** Right-side panel showing location, encoding stats, buffer slider, and per-viewer latency. */
 export default function StatsPanel() {
 	const ctx = useGameUI();
+	const game = ctx.game;
+
+	const jitter = createAccessor(game.sync.jitter);
+
+	const onJitterInput = (e: Event) => {
+		const el = e.currentTarget as HTMLInputElement;
+		game.latency.set(Number.parseInt(el.value, 10) as import("@moq/lite").Time.Milli);
+	};
 
 	const location = () => ctx.status()?.location;
 	const stats = () => ctx.status()?.stats;
 
+	const playerCount = () => Object.keys(ctx.status()?.latency ?? {}).length;
+
 	const latencyEntries = () => {
-		const lat = ctx.status()?.latency ?? {};
-		return Object.entries(lat);
+		const id = ctx.viewerId();
+		if (!id) return [];
+		return ctx.status()?.latency?.[id] ?? [];
 	};
 
 	const pct = (value: number) => {
@@ -37,6 +49,19 @@ export default function StatsPanel() {
 				</div>
 			</Show>
 
+			<label class="boy__jitter">
+				<span class="boy__jitter-label">Buffer: {jitter()}ms</span>
+				<input
+					type="range"
+					class="boy__jitter-slider"
+					min="0"
+					max="500"
+					value={jitter()}
+					onInput={onJitterInput}
+					onClick={(e) => e.stopPropagation()}
+				/>
+			</label>
+
 			<Show when={stats()}>
 				<div class="boy__stats-list">
 					<div class="boy__stats-header">Uptime ({stats()?.wall_secs}s)</div>
@@ -57,22 +82,21 @@ export default function StatsPanel() {
 				Emulation and encoding are paused when there are no viewers. Try muting or tabbing away!
 			</div>
 
-			<Show when={latencyEntries().length > 0}>
+			<Show when={playerCount() > 0}>
 				<div class="boy__latency-list">
-					<div class="boy__latency-header">Players ({latencyEntries().length})</div>
+					<div class="boy__latency-header">Latency ({playerCount()} players)</div>
 					<For each={latencyEntries()}>
-						{([id, ms]) => (
-							<div
-								class="boy__latency-entry"
-								classList={{ "boy__latency-entry--self": id === ctx.viewerId() }}
-							>
-								<span>{id === ctx.viewerId() ? `${id} (you)` : id}</span>
-								<span>{ms}ms</span>
+						{(entry) => (
+							<div class="boy__latency-entry">
+								<span>{entry.label}</span>
+								<span>{entry.ms}ms</span>
 							</div>
 						)}
 					</For>
+					<Show when={latencyEntries().length === 0}>
+						<div class="boy__stats-note">Press a button to see your latency breakdown.</div>
+					</Show>
 				</div>
-				<div class="boy__stats-note">Includes both the render delay AND the input delay.</div>
 			</Show>
 		</div>
 	);

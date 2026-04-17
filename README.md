@@ -21,7 +21,7 @@ The core networking is delegated to a QUIC library but the rest is in applicatio
 - 🎯 **Multi-language** with both Rust (native) and TypeScript (web) libraries.
 - 🔧 **Generic** for any live data, not just media. Includes text chat as both an example and a core feature.
 
-> **Note:** This project implements [moq-lite](https://doc.moq.dev/concept/layer/moq-lite), a forwards-compatible subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite works with any moq-transport CDN (ex. [Cloudflare](https://doc.moq.dev/blog/first-cdn)). The focus is narrower, prioritizing simplicity and deployability.
+> **Note:** This project implements [moq-lite](https://doc.moq.dev/concept/layer/moq-lite), a forwards-compatible subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). The focus is narrower, prioritizing simplicity and deployability.
 
 ## Demo
 
@@ -107,7 +107,7 @@ Think of `hang` as like HLS/DASH, while `moq-lite` is like HTTP.
 
 ## Libraries
 
-This repository provides both [Rust](/rs) and [TypeScript](/js) libraries with similar APIs but language-specific optimizations.
+This repository provides both [Rust](rs) and [TypeScript](js) libraries with similar APIs but language-specific optimizations.
 
 ### Rust
 
@@ -128,7 +128,7 @@ This repository provides both [Rust](/rs) and [TypeScript](/js) libraries with s
 | Package                                  | Description                                                                                                        | NPM                                                                                                   |
 |------------------------------------------|--------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
 | **[@moq/lite](js/lite)**             | The core pub/sub transport protocol. Intended for browsers, but can be run server-side with a WebTransport polyfill.                                   | [![npm](https://img.shields.io/npm/v/@moq/lite)](https://www.npmjs.com/package/@moq/lite)   |
-| **[@moq/token](js/token)**             |  Authentication library & CLI for JS/TS environments (see [Authentication](doc/concept/authentication.md))                               | [![npm](https://img.shields.io/npm/v/@moq/token)](https://www.npmjs.com/package/@moq/token)   |
+| **[@moq/token](js/token)**             |  Authentication library & CLI for JS/TS environments (see [Authentication](doc/app/relay/auth.md))                               | [![npm](https://img.shields.io/npm/v/@moq/token)](https://www.npmjs.com/package/@moq/token)   |
 | **[@moq/hang](js/hang)**           | Core media library: catalog, container, and support. Shared by `@moq/watch` and `@moq/publish`. | [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang) |
 | **[@moq/demo](demo/web)** | Examples using `@moq/hang`.                                                                                  |                                                                                                       |
 | **[@moq/watch](js/watch)**         | Subscribe to and render MoQ broadcasts (Web Component + JS API).                                                        | [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)     |
@@ -139,7 +139,7 @@ This repository provides both [Rust](/rs) and [TypeScript](/js) libraries with s
 
 Additional documentation and implementation details:
 
-- **[Authentication](doc/concept/authentication.md)** - JWT tokens, authorization, and security
+- **[Authentication](doc/app/relay/auth.md)** - JWT tokens, authorization, and security
 
 ## Protocol
 
@@ -170,7 +170,7 @@ just pub tos  # Terminal 2: Publish a demo video using ffmpeg
 just web      # Terminal 3: Start web server
 ```
 
-There are more commands: check out the [justfile](justfile), [rs/justfile](rs/justfile), and [js/justfile](js/justfile).
+There are more commands: check out the [justfile](justfile).
 
 ## Iroh support
 

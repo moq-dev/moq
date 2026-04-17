@@ -500,5 +500,23 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 		optimizeForLatency: config.optimizeForLatency ?? true,
 	});
 
-	return supported ?? false;
+	if (supported) return true;
+
+	// Safari rejects `avc3.*` codec strings even though its H.264 decoder handles
+	// inline SPS/PPS. Rewrite to `avc1.*` and retry; mutate config.codec so the
+	// later `decoder.configure()` call uses the accepted string too.
+	if (config.codec.startsWith("avc3.")) {
+		const avc1 = `avc1.${config.codec.slice("avc3.".length)}`;
+		const retry = await VideoDecoder.isConfigSupported({
+			codec: avc1,
+			description,
+			optimizeForLatency: config.optimizeForLatency ?? true,
+		});
+		if (retry.supported) {
+			config.codec = avc1;
+			return true;
+		}
+	}
+
+	return false;
 }

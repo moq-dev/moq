@@ -1,18 +1,24 @@
-import { createAccessor, createPair } from "@moq/signals/solid";
+import { createPair } from "@moq/signals/solid";
 import { For } from "solid-js";
 import { useGameUI } from "../hooks/use-boy-ui";
 
-/** All game controls: D-pad, A/B, Start/Select, Mute, Reset, Jitter slider, Key hints. */
+/** All game controls: D-pad, A/B, Start/Select, Mute, Volume, Reset, Key hints. */
 export default function Controls() {
 	const ctx = useGameUI();
 	const game = ctx.game;
 
-	const jitter = createAccessor(game.sync.jitter);
 	const [userMuted, setUserMuted] = createPair(game.userMuted);
+	const [volume, setVolume] = createPair(game.volume);
 
 	const toggleMute = (e: MouseEvent) => {
 		e.stopPropagation();
 		setUserMuted((prev) => !prev);
+	};
+
+	const onVolumeInput = (e: InputEvent) => {
+		e.stopPropagation();
+		const el = e.currentTarget as HTMLInputElement;
+		setVolume(Number.parseFloat(el.value) / 100);
 	};
 
 	const onReset = (e: MouseEvent) => {
@@ -20,16 +26,25 @@ export default function Controls() {
 		game.sendCommand({ type: "reset" });
 	};
 
-	const onJitterInput = (e: Event) => {
-		const el = e.currentTarget as HTMLInputElement;
-		game.jitter.set(Number.parseInt(el.value, 10) as import("@moq/lite").Time.Milli);
-	};
-
 	return (
 		<div class="boy__controls">
 			<Dpad />
 			<ABButtons />
 			<MetaButtons />
+
+			<div class="boy__volume">
+				<span class="boy__volume-label">Vol {Math.round(volume() * 100)}</span>
+				<input
+					type="range"
+					class="boy__volume-slider"
+					aria-label="Volume"
+					min="0"
+					max="100"
+					value={Math.round(volume() * 100)}
+					onInput={onVolumeInput}
+					onClick={(e) => e.stopPropagation()}
+				/>
+			</div>
 
 			<div class="boy__util-buttons">
 				<button
@@ -44,19 +59,6 @@ export default function Controls() {
 					Reset
 				</button>
 			</div>
-
-			<label class="boy__jitter">
-				<span class="boy__jitter-label">Buffer: {jitter()}ms</span>
-				<input
-					type="range"
-					class="boy__jitter-slider"
-					min="0"
-					max="500"
-					value={jitter()}
-					onInput={onJitterInput}
-					onClick={(e) => e.stopPropagation()}
-				/>
-			</label>
 
 			<div class="boy__key-hints">
 				<div>Arrows: D-pad</div>

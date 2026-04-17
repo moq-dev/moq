@@ -56,7 +56,7 @@ Cluster arguments:
 The relay supports JWT-based authentication and authorization with path-based access control.
 
 For detailed authentication setup, including token generation and configuration examples, see:
-**[Authentication Documentation](../../docs/auth.md)**
+**[Authentication Documentation](../../doc/app/relay/auth.md)**
 
 Key features:
 

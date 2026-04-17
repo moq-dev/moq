@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.4...moq-ffi-v0.2.5) - 2026-04-15
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [0.2.4](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.3...moq-ffi-v0.2.4) - 2026-04-11
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [0.2.3](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.2...moq-ffi-v0.2.3) - 2026-04-09
+
+### Other
+
+- Add bandwidth estimation for adaptive bitrate control ([#1208](https://github.com/moq-dev/moq/pull/1208))
+
 ## [0.2.2](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.1...moq-ffi-v0.2.2) - 2026-04-07
 
 ### Other

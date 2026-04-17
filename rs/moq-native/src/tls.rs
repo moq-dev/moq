@@ -84,7 +84,7 @@ impl ServeCerts {
 		anyhow::ensure!(config.cert.len() == config.key.len(), "must provide both cert and key");
 		anyhow::ensure!(
 			!config.cert.is_empty() || !config.generate.is_empty(),
-			"must provide at least one cert/key pair or a generate entry"
+			"must provide at least one cert/key pair or generate entry"
 		);
 
 		let mut certs = Vec::new();

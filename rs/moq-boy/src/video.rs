@@ -5,7 +5,8 @@
 //! falls behind, frames are dropped with a warning (to keep latency low).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -22,6 +23,8 @@ pub struct VideoEncoder {
 	/// Clone of the video track producer, for monitoring used/unused.
 	pub track: moq_lite::TrackProducer,
 	force_keyframe: Arc<AtomicBool>,
+	/// Latest encode duration in microseconds.
+	encode_duration: Arc<AtomicU64>,
 	_thread: std::thread::JoinHandle<()>,
 }
 
@@ -35,18 +38,21 @@ impl VideoEncoder {
 		let (tx, rx) = tokio::sync::mpsc::channel(4);
 		let avc3 = moq_mux::import::Avc3::new(broadcast, catalog);
 		let force_keyframe = Arc::new(AtomicBool::new(false));
+		let encode_duration = Arc::new(AtomicU64::new(0));
 		let track = avc3.track().clone();
 
 		let fk = force_keyframe.clone();
+		let ed = encode_duration.clone();
 		let thread = std::thread::Builder::new()
 			.name("video-encoder".into())
-			.spawn(move || encoder_thread(rx, avc3, fk))
+			.spawn(move || encoder_thread(rx, avc3, fk, ed))
 			.expect("failed to spawn video encoder thread");
 
 		Self {
 			tx,
 			track,
 			force_keyframe,
+			encode_duration,
 			_thread: thread,
 		}
 	}
@@ -64,12 +70,18 @@ impl VideoEncoder {
 	pub fn force_keyframe(&self) {
 		self.force_keyframe.store(true, Ordering::Release);
 	}
+
+	/// Latest per-frame encode duration (RGBA→YUV→H.264).
+	pub fn encode_duration(&self) -> Duration {
+		Duration::from_micros(self.encode_duration.load(Ordering::Relaxed))
+	}
 }
 
 fn encoder_thread(
 	mut rx: tokio::sync::mpsc::Receiver<EncoderMsg>,
 	mut avc3: moq_mux::import::Avc3,
 	force_keyframe: Arc<AtomicBool>,
+	encode_duration: Arc<AtomicU64>,
 ) {
 	let mut encoder: Option<Encoder> = None;
 	let mut scaler: Option<ffmpeg_next::software::scaling::Context> = None;
@@ -98,6 +110,8 @@ fn encoder_thread(
 			return;
 		};
 
+		let start = Instant::now();
+
 		let mut yuv = match rgba_to_yuv(&msg.rgba, color_scaler, enc.frame_count) {
 			Ok(f) => f,
 			Err(e) => {
@@ -113,6 +127,8 @@ fn encoder_thread(
 		if let Err(e) = enc.encode_yuv(&yuv, msg.ts, &mut avc3) {
 			tracing::error!(error = %e, "H.264 encode error");
 		}
+
+		encode_duration.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
 	}
 }
 

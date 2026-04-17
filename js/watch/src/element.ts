@@ -3,7 +3,7 @@ import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
 import { Broadcast } from "./broadcast";
-import { type Latency, Sync } from "./sync";
+import type { Latency } from "./sync";
 
 const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter"] as const;
 type Observed = (typeof OBSERVED)[number];
@@ -22,9 +22,6 @@ export default class MoqWatch extends HTMLElement {
 
 	// The broadcast being watched.
 	broadcast: Broadcast;
-
-	// Used to sync audio and video playback at a target latency.
-	sync = new Sync();
 
 	// The backend that powers this element.
 	backend: MultiBackend;

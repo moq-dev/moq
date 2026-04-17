@@ -32,13 +32,13 @@ function GameCardInner() {
 
 	const onKeyDown = (e: KeyboardEvent) => {
 		if (!isActive()) return;
-		if (e.repeat) return;
 
 		const button = KEY_MAP[e.key];
 		if (button) {
+			e.preventDefault();
+			if (e.repeat) return;
 			game.heldButtons.add(button);
 			game.sendButtons();
-			e.preventDefault();
 		} else if (e.key === "Escape" && ctx.expanded()) {
 			game.expanded.set(undefined);
 			e.preventDefault();

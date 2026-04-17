@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.10.17"
+version = "0.10.22"
 edition = "2024"
 rust-version.workspace = true
 
@@ -64,4 +64,6 @@ url = { version = "2", features = ["serde"] }
 sd-notify = "0.5"
 
 [dev-dependencies]
+rcgen = "0.13"
 tempfile = "3"
+wiremock = "0.6"

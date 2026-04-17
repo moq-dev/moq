@@ -17,15 +17,16 @@
 //!   audio_active ─┘
 //!                    either true → resumed (condvar notified)
 //!
-//!   While paused:
-//!     - After `timeout` seconds → auto-reset emulator
-//!     - On resume → force video keyframe, re-anchor audio epoch
+//!   On resume → force video keyframe, re-anchor audio epoch
 //! ```
+//!
+//! Emulator state is preserved across pauses: a new viewer joining after a
+//! break picks up mid-playthrough rather than seeing a fresh boot.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -65,10 +66,6 @@ pub struct Config {
 	#[arg(long)]
 	pub prefix_viewer: Option<String>,
 
-	/// Inactivity timeout in seconds before auto-reset.
-	#[arg(long, default_value_t = 300)]
-	pub timeout: u64,
-
 	/// Location label shown in viewer stats (e.g. "Dallas, TX").
 	#[arg(long)]
 	pub location: Option<String>,
@@ -101,8 +98,6 @@ struct Session {
 	/// Condvar to wake the emulator thread on resume.
 	resume: (Mutex<()>, Condvar),
 
-	/// Auto-reset timeout when paused.
-	timeout: Duration,
 	/// Location label for status reporting.
 	location: Option<String>,
 }
@@ -156,51 +151,30 @@ impl Session {
 	}
 
 	/// Block the emulator thread until viewers connect.
-	/// Auto-resets the emulator if paused longer than `timeout`.
-	fn wait_for_resume(&self, emu: &mut emulator::Emulator, game_stats: &mut stats::Stats) -> Result<()> {
+	///
+	/// Emulator state is preserved across pauses so that a new viewer
+	/// joins mid-playthrough rather than a fresh boot.
+	fn wait_for_resume(&self) {
 		tracing::info!("pausing encoding");
 		let (lock, cvar) = &self.resume;
 		let mut guard = lock.lock().unwrap();
-		let pause_start = Instant::now();
-
-		let mut reset_done = false;
 		while self.paused.load(Ordering::Acquire) {
-			if !reset_done && pause_start.elapsed() >= self.timeout {
-				tracing::info!("resetting emulator (paused too long)");
-				emu.reset()?;
-				*game_stats = stats::Stats::new();
-				reset_done = true;
-			}
-
-			if reset_done {
-				guard = cvar.wait(guard).unwrap();
-			} else {
-				let remaining = self.timeout.saturating_sub(pause_start.elapsed());
-				let (g, _) = cvar.wait_timeout(guard, remaining).unwrap();
-				guard = g;
-			}
+			guard = cvar.wait(guard).unwrap();
 		}
-
 		tracing::info!("resuming encoding");
-		Ok(())
 	}
 
 	/// Publish status if it changed since last frame.
 	fn publish_status(
 		&self,
 		emu: &emulator::Emulator,
-		viewer_latency: &std::collections::HashMap<String, Duration>,
+		viewer_latency: &HashMap<String, Vec<status::LatencyEntry>>,
 		game_stats: &stats::Stats,
 		publisher: &mut status::StatusPublisher,
 	) {
 		let held: Vec<_> = emu.pressed_buttons().iter().copied().collect();
-		let latency_map: BTreeMap<String, u32> = viewer_latency
-			.iter()
-			.map(|(k, d)| {
-				let ms = u32::try_from(d.as_millis()).unwrap_or(u32::MAX);
-				(k.clone(), ms)
-			})
-			.collect();
+		let latency_map: BTreeMap<String, Vec<status::LatencyEntry>> =
+			viewer_latency.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
 		let status = status::Status {
 			buttons: held,
@@ -279,7 +253,6 @@ async fn run(config: &Config) -> Result<()> {
 		audio_active: AtomicBool::new(false),
 		paused: AtomicBool::new(true), // Start paused until first viewer.
 		resume: (Mutex::new(()), Condvar::new()),
-		timeout: Duration::from_secs(config.timeout),
 		location: config.location.clone(),
 	});
 
@@ -336,14 +309,14 @@ fn run_emulator(
 	// 1/59.727 ≈ 16742 microseconds per frame.
 	let frame_duration = Duration::from_micros(16_742);
 	let mut next_frame = Instant::now();
-	let mut viewer_latency: std::collections::HashMap<String, Duration> = std::collections::HashMap::new();
+	let mut viewer_latency: HashMap<String, Vec<status::LatencyEntry>> = HashMap::new();
 	let mut game_stats = stats::Stats::new();
 	let mut was_audio_active = false;
 
 	loop {
 		// Block when no viewers are watching. See state diagram in module docs.
 		if session.paused.load(Ordering::Acquire) {
-			session.wait_for_resume(&mut emu, &mut game_stats)?;
+			session.wait_for_resume();
 
 			// Don't try to catch up after a pause.
 			next_frame = Instant::now();
@@ -359,13 +332,42 @@ fn run_emulator(
 		// arrived during the previous frame's work is applied immediately.
 		{
 			let elapsed = start.elapsed();
+			let encode_ms = u32::try_from(session.video_encoder.encode_duration().as_millis()).unwrap_or(u32::MAX);
+
 			while let Ok(cmd) = cmd_rx.try_recv() {
 				match cmd {
-					input::Command::Buttons { buttons, viewer_id, ts } => {
+					input::Command::Buttons {
+						buttons,
+						viewer_id,
+						timestamps,
+					} => {
 						emu.set_buttons(&viewer_id, buttons.into_iter().collect());
-						if let Some(latency) = elapsed.checked_sub(ts) {
-							viewer_latency.insert(viewer_id, latency);
+
+						let mut breakdown = Vec::new();
+						let entry = |label: &str, ms: u32| status::LatencyEntry {
+							label: label.to_string(),
+							ms,
+						};
+
+						breakdown.push(entry("encode", encode_ms));
+
+						let ms_saturating = |d: Duration| u32::try_from(d.as_millis()).unwrap_or(u32::MAX);
+
+						// Compute latency for each viewer-reported timestamp.
+						for t in &timestamps {
+							let latency = elapsed.saturating_sub(t.ts);
+							breakdown.push(entry(&t.label, ms_saturating(latency)));
 						}
+
+						// Input: gap between what the viewer sees and what the server
+						// is currently emulating. Uses the oldest viewer timestamp
+						// (the rendered frame the user reacted to).
+						if let Some(min_ts) = timestamps.iter().map(|t| t.ts).min() {
+							let latency = elapsed.saturating_sub(min_ts);
+							breakdown.push(entry("input", ms_saturating(latency)));
+						}
+
+						viewer_latency.insert(viewer_id, breakdown);
 					}
 					input::Command::ViewerLeft { viewer_id } => {
 						emu.viewer_left(&viewer_id);

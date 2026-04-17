@@ -7,20 +7,30 @@ use std::{
 };
 
 use axum::{
-	extract::{Path, Query, State, WebSocketUpgrade},
+	extract::{
+		Path, Query, State, WebSocketUpgrade,
+		rejection::{PathRejection, QueryRejection},
+		ws::rejection::WebSocketUpgradeRejection,
+	},
 	http::StatusCode,
 	response::Response,
 };
 use moq_lite::{OriginConsumer, OriginProducer};
 
-use crate::{AuthParams, WebState, web::AuthQuery};
+use crate::{AuthParams, WebState, web::AuthQuery, web::landing_response};
 
 pub(crate) async fn serve_ws(
-	ws: WebSocketUpgrade,
-	Path(path): Path<String>,
-	Query(query): Query<AuthQuery>,
+	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+	path: Result<Path<String>, PathRejection>,
+	query: Result<Query<AuthQuery>, QueryRejection>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
+	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
+	// the informational landing page instead of an error response.
+	let (Ok(ws), Ok(Path(path)), Ok(Query(query))) = (ws, path, query) else {
+		return Ok(landing_response());
+	};
+
 	let ws = ws.protocols(["webtransport"]);
 
 	let params = AuthParams {

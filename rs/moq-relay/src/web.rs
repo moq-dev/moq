@@ -11,7 +11,7 @@ use axum::{
 	body::Body,
 	extract::{Path, Query, State},
 	http::{Method, StatusCode},
-	response::{IntoResponse, Response},
+	response::{Html, IntoResponse, Response},
 	routing::get,
 };
 use bytes::Bytes;
@@ -109,6 +109,7 @@ impl Web {
 		};
 
 		let app = app
+			.fallback(serve_landing)
 			.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]))
 			.with_state(Arc::new(self.state))
 			.into_make_service();
@@ -158,6 +159,32 @@ async fn reload_certs(config: axum_server::tls_rustls::RustlsConfig, cert: PathB
 			tracing::warn!(%err, "failed to reload web certificate");
 		}
 	}
+}
+
+/// HTML landing page served when a plain browser hits the relay directly.
+///
+/// MoQ clients speak WebTransport or WebSocket, so a GET request from a
+/// regular browser isn't something we can service. Rather than exposing an
+/// internal error (e.g. the "Request method must be `CONNECT`" rejection
+/// from axum's WebSocket extractor), we render a short informational page.
+pub(crate) const LANDING_PAGE: &str = "<!doctype html>
+<html lang=\"en\">
+<head><meta charset=\"utf-8\"><title>moq-relay</title></head>
+<body>
+<h1>moq-relay</h1>
+<p>This is a moq-relay instance, and you're not a MoQ client.</p>
+<p>See <a href=\"https://moq.dev\">https://moq.dev</a> for more info.</p>
+</body>
+</html>
+";
+
+pub(crate) fn landing_response() -> Response {
+	(StatusCode::NOT_FOUND, Html(LANDING_PAGE)).into_response()
+}
+
+/// Axum fallback handler for any unmatched route.
+async fn serve_landing() -> Response {
+	landing_response()
 }
 
 async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {

@@ -12,7 +12,7 @@ The `@moq/lite` client specifically implements the networking layer called [moq-
 
 Check out [hang](../hang) for a higher-level media library that uses this package.
 
-> **Note:** moq-lite is a subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite is forwards compatible with moq-transport, so it works with any moq-transport CDN (ex. [Cloudflare](https://doc.moq.dev/blog/first-cdn)). See the [compatibility docs](https://doc.moq.dev/concept/layer/moq-lite#compatibility) for details.
+> **Note:** moq-lite is a subset of the IETF [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) draft. moq-lite is forwards compatible with moq-transport, so it works with any moq-transport CDN (ex. [Cloudflare](https://moq.dev/blog/first-cdn/)). See the [compatibility docs](https://doc.moq.dev/concept/layer/moq-lite#compatibility) for details.
 
 ## Quick Start
 
@@ -66,5 +66,5 @@ await quicheLoaded; //This is a promise, connect after it resolves
 
 Licensed under either:
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0 ([LICENSE-APACHE](../../LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](../../LICENSE-MIT) or http://opensource.org/licenses/MIT)

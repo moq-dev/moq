@@ -33,6 +33,11 @@ export interface ConnectProps {
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
 const websocketWon = new Set<string>();
 
+// Firefox's WebTransport implementation drops server-initiated bidi streams,
+// breaking publish (the relay opens a subscribe bidi back to us). Force WebSocket.
+// TODO: remove once Firefox fixes incoming bidi delivery.
+const isFirefox = typeof navigator !== "undefined" && navigator.userAgent.toLowerCase().includes("firefox");
+
 /**
  * Establishes a connection to a MOQ server.
  *
@@ -50,7 +55,8 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		done = resolve;
 	});
 
-	const webtransport = globalThis.WebTransport ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
+	const webtransport =
+		globalThis.WebTransport && !isFirefox ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
 
 	// Give QUIC a 200ms head start to connect before trying WebSocket, unless WebSocket has won in the past.
 	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.

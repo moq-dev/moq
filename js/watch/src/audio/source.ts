@@ -4,6 +4,9 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import type { Sync } from "../sync";
 
+// AudioWorklet always renders in 128-sample quanta.
+const WORKLET_QUANTUM = 128;
+
 export type Target = {
 	// Optional manual override for the selected rendition name.
 	name?: string;
@@ -115,8 +118,11 @@ export class Source {
 		effect.set(this.#config, selected.config);
 
 		// Use catalog jitter if available, otherwise estimate from codec frame duration.
-		const jitter = selected.config.jitter ?? defaultAudioJitter(selected.config);
-		effect.set(this.sync.audio, jitter as Moq.Time.Milli | undefined);
+		// Add the worklet render quantum so the ring buffer has margin between frame arrivals.
+		const codecJitter = selected.config.jitter ?? defaultAudioJitter(selected.config) ?? 0;
+		const overhead = Math.ceil((WORKLET_QUANTUM / selected.config.sampleRate) * 1000);
+		const jitter = codecJitter + overhead;
+		effect.set(this.sync.audio, jitter as Moq.Time.Milli);
 	}
 
 	/**

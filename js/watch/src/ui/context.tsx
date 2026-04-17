@@ -91,7 +91,9 @@ export default function WatchUIContextProvider(props: WatchUIContextProviderProp
 		}));
 	};
 
-	const timestamp = createAccessor(props.moqWatch.backend.video.timestamp);
+	// Current render PTS derived from Sync (reference + buffer). Works even when
+	// video is disabled/absent, unlike reading video.timestamp directly.
+	const timestamp = () => props.moqWatch.backend.sync.now();
 	const videoBuffered = createAccessor(props.moqWatch.backend.video.buffered);
 	const audioBuffered = createAccessor(props.moqWatch.backend.audio.buffered);
 

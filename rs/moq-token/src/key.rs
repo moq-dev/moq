@@ -208,51 +208,41 @@ impl fmt::Debug for Key {
 }
 
 impl Key {
+	/// Parse a key from a string, auto-detecting JSON or base64url encoding.
 	#[allow(clippy::should_implement_trait)]
 	pub fn from_str(s: &str) -> crate::Result<Self> {
-		Ok(serde_json::from_str(s)?)
+		let s = s.trim();
+		if s.starts_with('{') {
+			Ok(serde_json::from_str(s)?)
+		} else {
+			let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s)?;
+			let json = String::from_utf8(decoded)?;
+			Ok(serde_json::from_str(&json)?)
+		}
 	}
 
 	/// Load a key from a file, auto-detecting JSON or base64url encoding.
 	pub fn from_file<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
 		let contents = std::fs::read_to_string(&path)?;
-		Self::from_encoded(&contents)
+		Self::from_str(&contents)
 	}
 
 	/// Async version of [`from_file`](Self::from_file), using `tokio::fs`.
 	#[cfg(feature = "tokio")]
 	pub async fn from_file_async<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
 		let contents = tokio::fs::read_to_string(path).await?;
-		Self::from_encoded(&contents)
+		Self::from_str(&contents)
 	}
 
-	/// Parse a key from a string, auto-detecting JSON or base64url encoding.
-	fn from_encoded(contents: &str) -> crate::Result<Self> {
-		let contents = contents.trim();
-		if contents.starts_with('{') {
-			Ok(serde_json::from_str(contents)?)
-		} else {
-			let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(contents)?;
-			let json = String::from_utf8(decoded)?;
-			Ok(serde_json::from_str(&json)?)
-		}
-	}
-
+	/// Encode the key as base64url-encoded JSON.
 	pub fn to_str(&self) -> crate::Result<String> {
-		Ok(serde_json::to_string(self)?)
-	}
-
-	/// Write the key to a file as JSON.
-	pub fn to_file<P: AsRef<StdPath>>(&self, path: P) -> crate::Result<()> {
-		let json = serde_json::to_string_pretty(self)?;
-		std::fs::write(path, json)?;
-		Ok(())
+		let json = serde_json::to_string(self)?;
+		Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes()))
 	}
 
 	/// Write the key to a file as base64url-encoded JSON.
-	pub fn to_file_base64url<P: AsRef<StdPath>>(&self, path: P) -> crate::Result<()> {
-		let json = serde_json::to_string(self)?;
-		let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
+	pub fn to_file<P: AsRef<StdPath>>(&self, path: P) -> crate::Result<()> {
+		let encoded = self.to_str()?;
 		std::fs::write(path, encoded)?;
 		Ok(())
 	}
@@ -583,16 +573,14 @@ mod tests {
 			panic!("Expected OCT key");
 		}
 
-		let key_str = key.to_str();
-		assert!(key_str.is_ok());
-		let key_str = key_str.unwrap();
+		let key_str = key.to_str().unwrap();
 
-		// After serializing again it must contain the kty
-		assert!(key_str.contains("\"alg\":\"HS256\""));
-		assert!(key_str.contains("\"key_ops\""));
-		assert!(key_str.contains("\"sign\""));
-		assert!(key_str.contains("\"verify\""));
-		assert!(key_str.contains("\"kty\":\"oct\""));
+		// Round-trip through from_str and verify fields
+		let loaded = Key::from_str(&key_str).unwrap();
+		assert_eq!(loaded.algorithm, Algorithm::HS256);
+		assert!(loaded.operations.contains(&KeyOperation::Sign));
+		assert!(loaded.operations.contains(&KeyOperation::Verify));
+		assert!(matches!(loaded.key, KeyType::OCT { .. }));
 	}
 
 	#[test]
@@ -604,13 +592,17 @@ mod tests {
 	#[test]
 	fn test_key_to_str() {
 		let key = create_test_key();
-		let json = key.to_str().unwrap();
-		assert!(json.contains("\"alg\":\"HS256\""));
-		assert!(json.contains("\"key_ops\""));
-		assert!(json.contains("\"sign\""));
-		assert!(json.contains("\"verify\""));
-		assert!(json.contains("\"kid\":\"test-key-1\""));
-		assert!(json.contains("\"kty\":\"oct\""));
+		let encoded = key.to_str().unwrap();
+
+		// Should be base64url, not raw JSON
+		assert!(!encoded.contains('{'));
+
+		// Round-trip through from_str
+		let loaded = Key::from_str(&encoded).unwrap();
+		assert_eq!(loaded.algorithm, Algorithm::HS256);
+		assert_eq!(loaded.kid, key.kid);
+		assert!(loaded.operations.contains(&KeyOperation::Sign));
+		assert!(loaded.operations.contains(&KeyOperation::Verify));
 	}
 
 	#[test]
@@ -1416,7 +1408,7 @@ mod tests {
 		let temp_path = temp_dir.join("test_jwk.key");
 
 		// Write key to file as base64url
-		key.to_file_base64url(&temp_path).unwrap();
+		key.to_file(&temp_path).unwrap();
 
 		// Read file contents
 		let contents = std::fs::read_to_string(&temp_path).unwrap();
@@ -1434,6 +1426,41 @@ mod tests {
 		let _: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
 		// Read key back from file
+		let loaded_key = Key::from_file(&temp_path).unwrap();
+		assert_eq!(loaded_key.algorithm, key.algorithm);
+		assert_eq!(loaded_key.operations, key.operations);
+		assert_eq!(loaded_key.kid, key.kid);
+
+		if let (
+			KeyType::OCT {
+				secret: original_secret,
+			},
+			KeyType::OCT { secret: loaded_secret },
+		) = (&key.key, &loaded_key.key)
+		{
+			assert_eq!(loaded_secret, original_secret);
+		} else {
+			panic!("Expected both keys to be OCT variant");
+		}
+
+		// Clean up
+		std::fs::remove_file(temp_path).ok();
+	}
+
+	#[test]
+	fn test_file_io_raw_json() {
+		let key = create_test_key();
+		let temp_dir = std::env::temp_dir();
+		let temp_path = temp_dir.join("test_jwk_raw_json.key");
+
+		// Write key as raw JSON (backwards compat format)
+		let json = serde_json::to_string(&key).unwrap();
+		std::fs::write(&temp_path, &json).unwrap();
+
+		// Verify it looks like JSON
+		assert!(json.starts_with('{'));
+
+		// Load via from_file (should auto-detect JSON)
 		let loaded_key = Key::from_file(&temp_path).unwrap();
 		assert_eq!(loaded_key.algorithm, key.algorithm);
 		assert_eq!(loaded_key.operations, key.operations);

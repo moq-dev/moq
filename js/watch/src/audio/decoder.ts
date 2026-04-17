@@ -5,8 +5,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
-import type * as Render from "./render";
-import type { ToMain } from "./render";
+import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -55,6 +54,9 @@ export class Decoder {
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
+	// Audio ring bridging main thread and worklet (shared memory or postMessage transport).
+	#ring: AudioBuffer | undefined;
+
 	#signals = new Effect();
 
 	constructor(source: Source, props?: DecoderProps) {
@@ -100,30 +102,37 @@ export class Decoder {
 			// Ensure the context is running before creating the worklet
 			if (context.state === "closed") return;
 
-			// Create the worklet node
+			// Create the worklet node. outputChannelCount must be set explicitly
+			// so the process() callback receives a matching channel layout —
+			// Firefox defaults differently than Chrome otherwise.
 			const worklet = new AudioWorkletNode(context, "render", {
 				channelCount,
 				channelCountMode: "explicit",
+				outputChannelCount: [channelCount],
 			});
 			effect.cleanup(() => worklet.disconnect());
 
-			const init: Render.Init = {
-				type: "init",
-				rate: sampleRate,
-				channels: channelCount,
-				latency: this.source.sync.buffer.peek(), // Updated reactively via #runLatency
-			};
-			worklet.port.postMessage(init);
+			// Initial target latency in samples.
+			const latency = this.source.sync.buffer.peek();
+			const latencySamples = Math.ceil(sampleRate * Time.Second.fromMilli(latency));
 
-			// Listen for state updates from worklet
-			worklet.port.onmessage = (event: MessageEvent<ToMain>) => {
-				if (event.data.type === "state") {
-					const timestamp = Time.Milli.fromMicro(event.data.timestamp);
-					this.#timestamp.set(timestamp);
-					this.#stalled.set(event.data.stalled);
-					this.#trimDecodeBuffered(timestamp);
-				}
-			};
+			// Let the factory pick the best transport (SharedArrayBuffer or postMessage).
+			const ring = createAudioBuffer(worklet, channelCount, sampleRate, latencySamples);
+			this.#ring = ring;
+			effect.cleanup(() => {
+				ring.close();
+				this.#ring = undefined;
+			});
+
+			// Mirror ring state (timestamp/stalled) onto our public signals.
+			effect.run((inner) => {
+				const ts = Time.Milli.fromMicro(inner.get(ring.timestamp));
+				this.#timestamp.set(ts);
+				this.#trimDecodeBuffered(ts);
+			});
+			effect.run((inner) => {
+				this.#stalled.set(inner.get(ring.stalled));
+			});
 
 			effect.set(this.#worklet, worklet);
 		});
@@ -140,16 +149,16 @@ export class Decoder {
 	}
 
 	#runLatency(effect: Effect): void {
+		// Gate on the worklet signal so this effect re-runs once the ring is created.
 		const worklet = effect.get(this.#worklet);
 		if (!worklet) return;
 
-		const latency = effect.get(this.source.sync.buffer);
+		const ring = this.#ring;
+		if (!ring) return;
 
-		const msg: Render.Latency = {
-			type: "latency",
-			latency,
-		};
-		worklet.port.postMessage(msg);
+		const latency = effect.get(this.source.sync.buffer);
+		const latencySamples = Math.ceil(ring.rate * Time.Second.fromMilli(latency));
+		ring.setLatency(latencySamples);
 	}
 
 	#runDecoder(effect: Effect): void {
@@ -324,8 +333,8 @@ export class Decoder {
 		const timestamp = sample.timestamp as Time.Micro;
 		const timestampMilli = Time.Milli.fromMicro(timestamp);
 
-		const worklet = this.#worklet.peek();
-		if (!worklet) {
+		const ring = this.#ring;
+		if (!ring) {
 			// We're probably in the process of closing.
 			sample.close();
 			return;
@@ -339,25 +348,19 @@ export class Decoder {
 		// Add to decode buffer
 		this.#addDecodeBuffered(timestampMilli, end);
 
+		// Firefox's Opus decoder sometimes outputs more channels than requested
+		// (e.g. 6 for stereo). Clamp to the ring's channel count.
+		const channels = Math.min(sample.numberOfChannels, ring.channels);
 		const channelData: Float32Array[] = [];
-		for (let channel = 0; channel < sample.numberOfChannels; channel++) {
+		for (let channel = 0; channel < channels; channel++) {
 			const data = new Float32Array(sample.numberOfFrames);
 			sample.copyTo(data, { format: "f32-planar", planeIndex: channel });
 			channelData.push(data);
 		}
 
-		const msg: Render.Data = {
-			type: "data",
-			data: channelData,
-			timestamp,
-		};
-
-		// Send audio data to worklet via postMessage
-		// TODO: At some point, use SharedArrayBuffer to avoid dropping samples.
-		worklet.port.postMessage(
-			msg,
-			msg.data.map((data) => data.buffer),
-		);
+		// Hand off to the ring. Shared transport writes directly; post transport
+		// transfers the ArrayBuffers.
+		ring.insert(timestamp, channelData);
 
 		sample.close();
 	}

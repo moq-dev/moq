@@ -217,6 +217,19 @@ clock action url="http://localhost:4443/anon" *args:
 console:
 	tokio-console http://127.0.0.1:6681
 
+# --- GStreamer ---
+
+# Publish a video using GStreamer to a relay server.
+gst name url='http://localhost:4443/anon' *args:
+	just download "{{name}}"
+	cargo build -p moq-gst
+
+	GST_PLUGIN_PATH_1_0="${PWD}/../../target/debug${GST_PLUGIN_PATH_1_0:+:$GST_PLUGIN_PATH_1_0}" \
+	gst-launch-1.0 -v -e multifilesrc location="media/{{name}}.mp4" loop=true ! parsebin name=parse \
+		parse. ! queue ! identity sync=true ! mux.sink_0 \
+		parse. ! queue ! identity sync=true ! mux.sink_1 \
+		moqsink name=mux url="{{url}}" broadcast="{{name}}" {{args}}
+
 # --- Private helpers ---
 
 # Download a test video (already fragmented on vid.moq.dev).

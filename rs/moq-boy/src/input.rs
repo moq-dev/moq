@@ -11,6 +11,21 @@ use std::time::Duration;
 
 use crate::emulator::Button;
 
+/// A single timestamp entry from the viewer.
+#[derive(serde::Deserialize, Debug)]
+struct RawTimestamp {
+	label: String,
+	/// Media timestamp in milliseconds.
+	ts: f64,
+}
+
+/// A parsed timestamp entry with Duration.
+#[derive(Debug)]
+pub struct TimestampEntry {
+	pub label: String,
+	pub ts: Duration,
+}
+
 /// A command sent by a viewer.
 #[derive(serde::Deserialize, Debug)]
 #[serde(tag = "type")]
@@ -19,9 +34,9 @@ enum RawCommand {
 	Buttons {
 		#[serde(default)]
 		buttons: Vec<Button>,
-		/// The viewer's current media timestamp in milliseconds (from JSON).
+		/// Ordered media timestamps at each pipeline stage.
 		#[serde(default)]
-		ts: f64,
+		timestamps: Vec<RawTimestamp>,
 	},
 	#[serde(rename = "reset")]
 	Reset {},
@@ -34,8 +49,8 @@ pub enum Command {
 	Buttons {
 		buttons: Vec<Button>,
 		viewer_id: String,
-		/// The viewer's current media timestamp.
-		ts: Duration,
+		/// Ordered media timestamps at each pipeline stage.
+		timestamps: Vec<TimestampEntry>,
 	},
 	Reset,
 	/// A viewer disconnected or went offline.
@@ -95,12 +110,19 @@ async fn handle_viewer_commands(
 		while let Some(frame) = group.read_frame().await? {
 			let text = std::str::from_utf8(&frame).context("invalid UTF-8 in command")?;
 			match serde_json::from_str::<RawCommand>(text) {
-				Ok(RawCommand::Buttons { buttons, ts }) => {
+				Ok(RawCommand::Buttons { buttons, timestamps }) => {
+					let timestamps: Vec<_> = timestamps
+						.into_iter()
+						.filter_map(|t| {
+							let ts = Duration::try_from_secs_f64(t.ts / 1000.0).ok()?;
+							Some(TimestampEntry { label: t.label, ts })
+						})
+						.collect();
 					let _ = cmd_tx
 						.send(Command::Buttons {
 							buttons,
 							viewer_id: viewer_id.to_string(),
-							ts: Duration::from_secs_f64(ts / 1000.0),
+							timestamps,
 						})
 						.await;
 				}

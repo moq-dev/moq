@@ -4,7 +4,7 @@ import { Effect, Signal } from "@moq/signals";
 /** Latency: `"real-time"` auto-computes jitter from RTT; a `Time.Milli` sets a fixed jitter. */
 export type Latency = "real-time" | Time.Milli;
 
-const MIN_JITTER = 10 as Time.Milli;
+const MIN_JITTER = 20 as Time.Milli;
 const FALLBACK_JITTER = 100 as Time.Milli;
 
 export interface SyncProps {
@@ -40,11 +40,14 @@ export class Sync {
 	// There's probably a way to use Effect, but lets keep it simple for now.
 	#update: PromiseWithResolvers<void>;
 
+	// The media timestamp of the most recently received frame.
+	readonly timestamp = new Signal<Time.Milli | undefined>(undefined);
+
 	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
 	#late = new Map<string, { count: number; maxMs: number }>();
 
 	// RTT signal from the connection (PROBE or getStats).
-	#rtt?: Signal<number | undefined>;
+	rtt?: Signal<number | undefined>;
 
 	// Minimum RTT seen, used as the baseline for jitter calculation.
 	// Avoids inflating jitter due to bufferbloat.
@@ -55,7 +58,7 @@ export class Sync {
 	constructor(props?: SyncProps) {
 		this.latency = Signal.from(props?.latency ?? ("real-time" as Latency));
 		this.jitter = new Signal<Time.Milli>(FALLBACK_JITTER);
-		this.#rtt = props?.rtt;
+		this.rtt = props?.rtt;
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
 
@@ -76,8 +79,8 @@ export class Sync {
 		}
 
 		// "real-time" mode: compute jitter from RTT.
-		if (this.#rtt) {
-			const rtt = effect.get(this.#rtt);
+		if (this.rtt) {
+			const rtt = effect.get(this.rtt);
 			if (rtt !== undefined) {
 				// Track minimum RTT as baseline, ignoring bufferbloat.
 				this.#minRtt = this.#minRtt !== undefined ? Math.min(this.#minRtt, rtt) : rtt;
@@ -109,6 +112,7 @@ export class Sync {
 
 	// Update the reference if this is the earliest frame we've seen, relative to its timestamp.
 	received(timestamp: Time.Milli, label = ""): void {
+		this.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
 		const now = Time.Milli.now();
 		const ref = Time.Milli.sub(now, timestamp);
 		const currentRef = this.#reference.peek();
@@ -131,7 +135,7 @@ export class Sync {
 				if (entry) {
 					const prefix = label ? `sync[${label}]` : "sync";
 					const behind = Sync.#formatDuration(entry.maxMs);
-					console.warn(`${prefix}: ${entry.count} late frame(s), max ${behind} behind`);
+					console.debug(`${prefix}: ${entry.count} late frame(s), max ${behind} behind`);
 					this.#late.delete(label);
 				}
 			}
@@ -145,6 +149,14 @@ export class Sync {
 		this.#reference.set(ref);
 		this.#update.resolve();
 		this.#update = Promise.withResolvers();
+	}
+
+	// The PTS that should be rendering right now, derived from the reference + buffer.
+	// Returns undefined if no frames have been received yet.
+	now(): Time.Milli | undefined {
+		const reference = this.#reference.peek();
+		if (reference === undefined) return undefined;
+		return Time.Milli.sub(Time.Milli.sub(Time.Milli.now(), reference), this.#buffer.peek());
 	}
 
 	// Sleep until it's time to render this frame.

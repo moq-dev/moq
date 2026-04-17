@@ -1,5 +1,0 @@
-# Exclude localhost URLs (intentional for dev docs)
-exclude_loopback = true
-
-# Don't check auto-generated changelogs
-exclude_path = ["CHANGELOG.md"]

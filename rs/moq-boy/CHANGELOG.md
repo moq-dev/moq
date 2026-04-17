@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.4...moq-boy-v0.2.5) - 2026-04-15
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [0.2.4](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.3...moq-boy-v0.2.4) - 2026-04-11
+
+### Other
+
+- Remove auto-reset timeout, preserve emulator state across pauses ([#1279](https://github.com/moq-dev/moq/pull/1279))
+
+## [0.2.3](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.2...moq-boy-v0.2.3) - 2026-04-09
+
+### Other
+
+- Add per-component latency breakdown for moq-boy ([#1268](https://github.com/moq-dev/moq/pull/1268))
+- Add automatic reconnection with exponential backoff ([#1246](https://github.com/moq-dev/moq/pull/1246))
+- Reduce moq-boy input latency ([#1253](https://github.com/moq-dev/moq/pull/1253))
+
 ## [0.2.1](https://github.com/moq-dev/moq/compare/moq-boy-v0.2.0...moq-boy-v0.2.1) - 2026-04-07
 
 ### Other
