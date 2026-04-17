@@ -91,14 +91,9 @@ async fn main() -> anyhow::Result<()> {
 	Ok(())
 }
 
-async fn pump(
-	track: &mut TrackProducer,
-	interval: &mut tokio::time::Interval,
-) -> anyhow::Result<()> {
+async fn pump(track: &mut TrackProducer, interval: &mut tokio::time::Interval) -> anyhow::Result<()> {
 	loop {
 		interval.tick().await;
-		track
-			.write_frame(JOINT_PAYLOAD.clone())
-			.context("write_frame")?;
+		track.write_frame(JOINT_PAYLOAD.clone()).context("write_frame")?;
 	}
 }
