@@ -525,13 +525,9 @@ impl TrackConsumer {
 		conducer::wait(|waiter| self.poll_next_group_ordered(waiter)).await
 	}
 
-	/// Poll for a single full frame from the next group in sequence order, without blocking.
-	///
-	/// The inverse of [`TrackProducer::write_frame`]: scans all candidate groups at or after the
-	/// ordered cursor, returning the first fully-buffered frame found. A stalled earlier group
-	/// does not block the call — newer groups are still considered. The returned frame's group
-	/// (and any earlier pending/empty groups) is consumed from the cursor's perspective; their
-	/// remaining frames would be late and are not returned.
+	/// A helper that calls [`Self::poll_next_group_ordered`] and returns its first frame,
+	/// skipping the rest of the group. Intended for single-frame groups (see
+	/// [`TrackProducer::write_frame`]).
 	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
 		let Some((frame, found_index, sequence)) = ready!(self.poll(waiter, |state| {
 			state.poll_read_frame(self.index, self.next_sequence, waiter)
