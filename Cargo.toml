@@ -5,7 +5,6 @@ members = [
     "rs/libmoq",
     "rs/moq-boy",
     "rs/moq-cli",
-    "rs/moq-dummy-raw",
     "rs/moq-clock",
     "rs/moq-codec",
     "rs/moq-ffi",

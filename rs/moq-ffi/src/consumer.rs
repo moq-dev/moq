@@ -90,9 +90,7 @@ impl MoqBroadcastConsumer {
 	pub fn subscribe_raw(&self, name: String) -> Result<Arc<MoqRawConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
-		Ok(Arc::new(MoqRawConsumer {
-			task: Task::new(RawInner { track }),
-		}))
+		Ok(Arc::new(MoqRawConsumer::new(track)))
 	}
 
 	/// Subscribe to a track by name, delivering frames in decode order.
@@ -123,16 +121,8 @@ struct RawInner {
 }
 
 impl RawInner {
-	async fn next(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
-		loop {
-			let Some(mut group) = self.track.next_group().await? else {
-				return Ok(None);
-			};
-			let Some(frame) = group.read_frame().await? else {
-				continue;
-			};
-			return Ok(Some(frame.to_vec()));
-		}
+	async fn next_group(&mut self) -> Result<Option<moq_lite::GroupConsumer>, MoqError> {
+		Ok(self.track.next_group().await?)
 	}
 }
 
@@ -141,11 +131,72 @@ pub struct MoqRawConsumer {
 	task: Task<RawInner>,
 }
 
+impl MoqRawConsumer {
+	pub(crate) fn new(track: moq_lite::TrackConsumer) -> Self {
+		Self {
+			task: Task::new(RawInner { track }),
+		}
+	}
+}
+
 #[uniffi::export]
 impl MoqRawConsumer {
-	/// Get the next raw frame payload. Returns `None` when the track ends.
-	pub async fn next(&self) -> Result<Option<Vec<u8>>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
+	/// Return the next group in order. Returns `None` when the track ends.
+	///
+	/// NOTE: Groups may be skipped if the reader falls behind or groups expire.
+	pub async fn next_group(&self) -> Result<Option<Arc<MoqRawGroupConsumer>>, MoqError> {
+		self.task
+			.run(|mut state| async move {
+				Ok(state.next_group().await?.map(|group| {
+					Arc::new(MoqRawGroupConsumer {
+						sequence: group.info.sequence,
+						task: Task::new(RawGroupInner { group }),
+					})
+				}))
+			})
+			.await
+	}
+
+	pub fn cancel(&self) {
+		self.task.cancel();
+	}
+}
+
+struct RawGroupInner {
+	group: moq_lite::GroupConsumer,
+}
+
+impl RawGroupInner {
+	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
+		Ok(self.group.read_frame().await?.map(|b| b.to_vec()))
+	}
+}
+
+#[derive(uniffi::Object)]
+pub struct MoqRawGroupConsumer {
+	sequence: u64,
+	task: Task<RawGroupInner>,
+}
+
+impl MoqRawGroupConsumer {
+	pub(crate) fn new(group: moq_lite::GroupConsumer) -> Self {
+		Self {
+			sequence: group.info.sequence,
+			task: Task::new(RawGroupInner { group }),
+		}
+	}
+}
+
+#[uniffi::export]
+impl MoqRawGroupConsumer {
+	/// The sequence number of this group within the track.
+	pub fn sequence(&self) -> u64 {
+		self.sequence
+	}
+
+	/// Read the next frame in this group. Returns `None` when the group ends.
+	pub async fn read_frame(&self) -> Result<Option<Vec<u8>>, MoqError> {
+		self.task.run(|mut state| async move { state.read_frame().await }).await
 	}
 
 	pub fn cancel(&self) {

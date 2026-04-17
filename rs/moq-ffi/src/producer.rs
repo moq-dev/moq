@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use bytes::Buf;
 
+use crate::consumer::{MoqBroadcastConsumer, MoqRawConsumer, MoqRawGroupConsumer};
 use crate::error::MoqError;
 
 // ---- UniFFI Objects ----
@@ -18,7 +19,7 @@ pub struct MoqBroadcastProducer {
 }
 
 impl MoqBroadcastProducer {
-	pub(crate) fn consume(&self) -> Result<moq_lite::BroadcastConsumer, MoqError> {
+	pub(crate) fn consume_inner(&self) -> Result<moq_lite::BroadcastConsumer, MoqError> {
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 		Ok(state.broadcast.consume())
@@ -32,6 +33,12 @@ pub struct MoqMediaProducer {
 
 #[uniffi::export]
 impl MoqBroadcastProducer {
+	/// Create a consumer that reads from this broadcast's tracks.
+	pub fn consume(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		Ok(Arc::new(MoqBroadcastConsumer::new(self.consume_inner()?)))
+	}
+
 	/// Create a new broadcast for publishing media tracks.
 	///
 	/// NOTE: This will do nothing until published to an origin.
@@ -104,14 +111,35 @@ pub struct MoqRawProducer {
 
 #[uniffi::export]
 impl MoqRawProducer {
-	/// Write a raw frame. Each call is one MoQ group with one frame — the same
-	/// pattern used by moq-boy's status/command tracks.
-	pub fn write_frame(&self, payload: Vec<u8>) -> Result<(), MoqError> {
+	/// Create a consumer that reads from this producer's track.
+	///
+	/// Useful for local pub/sub without going through an origin/broadcast.
+	pub fn consume(&self) -> Result<Arc<MoqRawConsumer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let guard = self.inner.lock().unwrap();
+		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		Ok(Arc::new(MoqRawConsumer::new(track.consume())))
+	}
+
+	/// Append a new group to the track, returning a producer for writing frames into it.
+	pub fn append_group(&self) -> Result<Arc<MoqRawGroupProducer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
-		let mut group = track.append_group()?;
-		group.write_frame(payload)?;
-		group.finish()?;
+		let group = track.append_group()?;
+		Ok(Arc::new(MoqRawGroupProducer {
+			sequence: group.info.sequence,
+			inner: std::sync::Mutex::new(Some(group)),
+		}))
+	}
+
+	/// Convenience: write a single-frame group in one call — the same pattern
+	/// used by moq-boy's status/command tracks.
+	pub fn write_frame(&self, payload: Vec<u8>) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let track = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+		track.write_frame(payload)?;
 		Ok(())
 	}
 
@@ -120,6 +148,46 @@ impl MoqRawProducer {
 		let mut guard = self.inner.lock().unwrap();
 		let mut track = guard.take().ok_or_else(|| MoqError::Closed)?;
 		track.finish()?;
+		Ok(())
+	}
+}
+
+#[derive(uniffi::Object)]
+pub struct MoqRawGroupProducer {
+	sequence: u64,
+	inner: std::sync::Mutex<Option<moq_lite::GroupProducer>>,
+}
+
+#[uniffi::export]
+impl MoqRawGroupProducer {
+	/// The sequence number of this group within the track.
+	pub fn sequence(&self) -> u64 {
+		self.sequence
+	}
+
+	/// Create a consumer that reads frames from this group.
+	pub fn consume(&self) -> Result<Arc<MoqRawGroupConsumer>, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let guard = self.inner.lock().unwrap();
+		let group = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		Ok(Arc::new(MoqRawGroupConsumer::new(group.consume())))
+	}
+
+	/// Write a frame into this group.
+	pub fn write_frame(&self, payload: Vec<u8>) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let group = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+		group.write_frame(payload)?;
+		Ok(())
+	}
+
+	/// Mark the group as complete. No more frames can be written.
+	pub fn finish(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let mut guard = self.inner.lock().unwrap();
+		let mut group = guard.take().ok_or_else(|| MoqError::Closed)?;
+		group.finish()?;
 		Ok(())
 	}
 }

@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from moq_ffi import Container, MoqBroadcastConsumer, MoqCatalogConsumer, MoqMediaConsumer, MoqRawConsumer
+from moq_ffi import (
+    Container,
+    MoqBroadcastConsumer,
+    MoqCatalogConsumer,
+    MoqMediaConsumer,
+    MoqRawConsumer,
+    MoqRawGroupConsumer,
+)
 
 from .types import Catalog, Frame
 
@@ -26,10 +33,36 @@ class MediaConsumer:
         self._inner.cancel()
 
 
-class RawConsumer:
-    """Async iterator of raw byte payloads from a track.
+class RawGroupConsumer:
+    """Async iterator of byte payloads within a single group."""
 
-    Same pattern as moq-boy's status/command tracks.
+    def __init__(self, inner: MoqRawGroupConsumer) -> None:
+        self._inner = inner
+
+    @property
+    def sequence(self) -> int:
+        """The sequence number of this group within the track."""
+        return self._inner.sequence()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        frame = await self._inner.read_frame()
+        if frame is None:
+            raise StopAsyncIteration
+        return frame
+
+    def cancel(self) -> None:
+        self._inner.cancel()
+
+
+class RawConsumer:
+    """Async iterator of groups from a raw track.
+
+    Each group is itself an async iterator of byte payloads. Same pattern as
+    moq-boy's status/command tracks (one frame per group), but multi-frame
+    groups are also supported.
     """
 
     def __init__(self, inner: MoqRawConsumer) -> None:
@@ -38,11 +71,11 @@ class RawConsumer:
     def __aiter__(self):
         return self
 
-    async def __anext__(self) -> bytes:
-        frame = await self._inner.next()
-        if frame is None:
+    async def __anext__(self) -> RawGroupConsumer:
+        group = await self._inner.next_group()
+        if group is None:
             raise StopAsyncIteration
-        return bytes(frame)
+        return RawGroupConsumer(group)
 
     def cancel(self) -> None:
         self._inner.cancel()
