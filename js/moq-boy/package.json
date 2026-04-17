@@ -1,7 +1,7 @@
 {
 	"name": "@moq/boy",
 	"type": "module",
-	"version": "0.2.6",
+	"version": "0.2.7",
 	"description": "MoQ Boy - Crowd-controlled Game Boy streaming via MoQ",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": {

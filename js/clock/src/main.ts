@@ -147,7 +147,7 @@ async function subscribe(config: Config) {
 
 	// Handle groups and frames like the Rust implementation
 	for (;;) {
-		const group = await track.nextGroup();
+		const group = await track.recvGroup();
 		if (!group) {
 			console.log("❌ Connection ended");
 			break;
