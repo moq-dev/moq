@@ -603,6 +603,7 @@ impl Auth {
 
 	/// Parse the token from the user provided URL, returning the claims if successful.
 	/// If no token is provided, then the claims will use the public access configuration.
+	#[allow(deprecated)] // `claims.cluster` is deprecated but still accepted for backwards compat
 	pub async fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
 		let claims = if let Some(token) = params.jwt.as_deref() {
 			let Some(resolver) = &self.resolver else {

@@ -21,11 +21,11 @@ pub struct Claims {
 	#[serde_as(as = "OneOrMany<_, PreferMany>")]
 	pub publish: Vec<String>,
 
-	/// If true, then this client is considered a cluster node.
-	/// Both the client and server will only announce broadcasts from non-cluster clients.
-	/// This avoids convoluted routing, as only the primary origin will announce.
-	//
-	// TODO This shouldn't be part of the token.
+	/// Deprecated: previously used to mark cluster nodes in a 3-tier origin setup.
+	/// The relay now uses hop-based routing (`OriginId` lists on each broadcast)
+	/// to prevent loops, so this flag has no effect. Retained for backwards
+	/// compatibility with existing signed tokens.
+	#[deprecated(note = "hop-based routing supersedes the cluster flag; field is ignored by the relay")]
 	#[serde(default, rename = "cluster", skip_serializing_if = "is_false")]
 	pub cluster: bool,
 
@@ -58,6 +58,7 @@ impl Claims {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
 	use super::*;
 

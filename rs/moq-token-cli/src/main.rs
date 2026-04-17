@@ -136,6 +136,7 @@ fn main() -> anyhow::Result<()> {
 		} => {
 			let key = moq_token::Key::from_file(key)?;
 
+			#[allow(deprecated)] // `cluster` flag is deprecated; kept for issuing legacy tokens
 			let payload = moq_token::Claims {
 				root,
 				publish,
