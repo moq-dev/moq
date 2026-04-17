@@ -498,7 +498,7 @@ impl TrackConsumer {
 	/// its first frame, skipping groups that finish without any frames.
 	/// Returns `None` when the track ends.
 	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
-		while let Some(mut group) = self.next_group().await? {
+		while let Some(mut group) = self.recv_group().await? {
 			if let Some(frame) = group.read_frame().await? {
 				return Ok(Some(frame));
 			}

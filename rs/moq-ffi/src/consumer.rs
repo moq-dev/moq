@@ -122,14 +122,11 @@ struct TrackInner {
 
 impl TrackInner {
 	async fn recv_group(&mut self) -> Result<Option<moq_lite::GroupConsumer>, MoqError> {
-		Ok(self.track.next_group().await?)
+		Ok(self.track.recv_group().await?)
 	}
 
 	async fn next_group(&mut self) -> Result<Option<moq_lite::GroupConsumer>, MoqError> {
-		// TODO: wire up to moq-lite's sequence-ordered method once it lands (currently
-		// named next_group_ordered on a separate branch, eventually renamed to next_group).
-		// For now this returns arrival order, same as recv_group.
-		Ok(self.track.next_group().await?)
+		Ok(self.track.next_group_ordered().await?)
 	}
 
 	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
