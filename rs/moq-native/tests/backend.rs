@@ -73,10 +73,10 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.subscribe_track(&Track::new("video"))
 		.expect("subscribe_track failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
-		.expect("next_group timed out")
-		.expect("next_group failed")
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
 	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
@@ -225,10 +225,10 @@ async fn iroh_connect() {
 		.subscribe_track(&Track::new("video"))
 		.expect("subscribe_track failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.next_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
 		.await
-		.expect("next_group timed out")
-		.expect("next_group failed")
+		.expect("recv_group timed out")
+		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
 	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())

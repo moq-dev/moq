@@ -189,7 +189,7 @@ impl<F: Container> Consumer<F> {
 	// Returns Pending until all groups have been consumed.
 	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), F::Error>> {
 		loop {
-			let Some(group) = ready!(self.track.poll_next_group(waiter)?) else {
+			let Some(group) = ready!(self.track.poll_recv_group(waiter)?) else {
 				// Track is finished.
 				return Poll::Ready(Ok(()));
 			};

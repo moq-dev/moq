@@ -106,7 +106,7 @@ async fn handle_viewer_commands(
 
 	let mut track = broadcast.subscribe_track(&command_track)?;
 
-	while let Some(mut group) = track.next_group().await? {
+	while let Some(mut group) = track.recv_group().await? {
 		while let Some(frame) = group.read_frame().await? {
 			let text = std::str::from_utf8(&frame).context("invalid UTF-8 in command")?;
 			match serde_json::from_str::<RawCommand>(text) {
