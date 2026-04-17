@@ -3530,7 +3530,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -3715,7 +3715,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.10.22"
+version = "0.10.23"
 dependencies = [
  "anyhow",
  "axum",
@@ -3772,7 +3772,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.21"
+version = "0.5.22"
 dependencies = [
  "anyhow",
  "clap",
