@@ -145,11 +145,9 @@ impl OriginNode {
 			self.entry(dir).lock().publish(&full, broadcast, &relative);
 		} else if let Some(existing) = &mut self.broadcast {
 			// This node is a leaf with an existing broadcast.
-			let old = existing.active.clone();
-			existing.active = broadcast.clone();
-			existing.backup.push(old);
-
-			self.notify.lock().reannounce(full, broadcast);
+			// Keep the older broadcast active; queue the new one as a backup.
+			// This avoids reannouncing and potentially disrupting subscribers.
+			existing.backup.push(broadcast.clone());
 		} else {
 			// This node is a leaf with no existing broadcast.
 			self.broadcast = Some(OriginBroadcast {
@@ -227,9 +225,9 @@ impl OriginNode {
 			// Okay so it must be the active broadcast or else we fucked up.
 			assert!(entry.active.is_clone(&broadcast));
 
-			// If there's a backup broadcast, then announce it.
-			if let Some(active) = entry.backup.pop() {
-				entry.active = active;
+			// If there's a backup broadcast, promote the oldest one.
+			if !entry.backup.is_empty() {
+				entry.active = entry.backup.remove(0);
 				self.notify.lock().reannounce(full, &entry.active);
 			} else {
 				// No more backups, so remove the entry.
@@ -367,9 +365,9 @@ impl OriginProducer {
 	/// Publish a broadcast, announcing it to all consumers.
 	///
 	/// The broadcast will be unannounced when it is closed.
-	/// If there is already a broadcast with the same path, then it will be replaced and reannounced.
-	/// If the old broadcast is closed before the new one, then nothing will happen.
-	/// If the new broadcast is closed before the old one, then the old broadcast will be reannounced.
+	/// If there is already a broadcast with the same path, then the older broadcast remains active
+	/// and the new one is queued as a backup (no reannounce is triggered).
+	/// When the active broadcast closes, the oldest queued backup is promoted and reannounced.
 	///
 	/// Returns false if the broadcast is not allowed to be published.
 	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
@@ -705,13 +703,11 @@ mod tests {
 		origin.publish_broadcast("test", consumer3.clone());
 		assert!(consumer.consume_broadcast("test").is_some());
 
+		// Only the oldest broadcast is announced; later publishes go to the backup queue.
 		consumer.assert_next("test", &consumer1);
-		consumer.assert_next_none("test");
-		consumer.assert_next("test", &consumer2);
-		consumer.assert_next_none("test");
-		consumer.assert_next("test", &consumer3);
+		consumer.assert_next_wait();
 
-		// Drop the backup, nothing should change.
+		// Drop a backup, nothing should change.
 		drop(broadcast2);
 
 		// Wait for the async task to run.
@@ -720,18 +716,18 @@ mod tests {
 		assert!(consumer.consume_broadcast("test").is_some());
 		consumer.assert_next_wait();
 
-		// Drop the active, we should reannounce.
-		drop(broadcast3);
+		// Drop the active, we should reannounce with the oldest remaining backup.
+		drop(broadcast1);
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
 		assert!(consumer.consume_broadcast("test").is_some());
 		consumer.assert_next_none("test");
-		consumer.assert_next("test", &consumer1);
+		consumer.assert_next("test", &consumer3);
 
 		// Drop the final broadcast, we should unannounce.
-		drop(broadcast1);
+		drop(broadcast3);
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
