@@ -12,8 +12,6 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use bytes::Bytes;
-
 use crate::{Error, Result, coding};
 
 use super::{Group, GroupConsumer, GroupProducer};
@@ -75,6 +73,42 @@ impl State {
 		}
 
 		// TODO once we have drop notifications, check if index == final_sequence.
+		if self.final_sequence.is_some() {
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
+
+	/// Scan groups at or after `index` in arrival order, looking for the first with sequence
+	/// `>= next_sequence` that has a fully-buffered next frame. Returns the frame plus the
+	/// winning slot's absolute index and sequence so the consumer can advance past it.
+	fn poll_read_frame(
+		&self,
+		index: usize,
+		next_sequence: u64,
+		waiter: &conducer::Waiter,
+	) -> Poll<Result<Option<(bytes::Bytes, usize, u64)>>> {
+		let start = index.saturating_sub(self.offset);
+		for (i, slot) in self.groups.iter().enumerate().skip(start) {
+			let Some((group, _)) = slot else { continue };
+			if group.info.sequence < next_sequence {
+				continue;
+			}
+
+			let mut consumer = group.consume();
+			match consumer.poll_read_frame(waiter) {
+				Poll::Ready(Ok(Some(frame))) => {
+					return Poll::Ready(Ok(Some((frame, self.offset + i, group.info.sequence))));
+				}
+				Poll::Ready(Ok(None)) => continue,
+				Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+				Poll::Pending => continue,
+			}
+		}
+
 		if self.final_sequence.is_some() {
 			Poll::Ready(Ok(None))
 		} else if let Some(err) = &self.abort {
@@ -491,19 +525,26 @@ impl TrackConsumer {
 		conducer::wait(|waiter| self.poll_next_group_ordered(waiter)).await
 	}
 
-	/// Read the first frame of the next group.
+	/// A helper that calls [`Self::poll_next_group_ordered`] and returns its first frame,
+	/// skipping the rest of the group. Intended for single-frame groups (see
+	/// [`TrackProducer::write_frame`]).
+	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
+		let Some((frame, found_index, sequence)) = ready!(self.poll(waiter, |state| {
+			state.poll_read_frame(self.index, self.next_sequence, waiter)
+		})?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		self.index = found_index + 1;
+		self.next_sequence = sequence.saturating_add(1);
+		Poll::Ready(Ok(Some(frame)))
+	}
+
+	/// Read a single full frame from the next group in sequence order.
 	///
-	/// Convenience for tracks that follow a one-frame-per-group pattern (e.g.
-	/// moq-boy's status/command tracks). Advances to the next group and reads
-	/// its first frame, skipping groups that finish without any frames.
-	/// Returns `None` when the track ends.
-	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
-		while let Some(mut group) = self.recv_group().await? {
-			if let Some(frame) = group.read_frame().await? {
-				return Ok(Some(frame));
-			}
-		}
-		Ok(None)
+	/// See [`Self::poll_read_frame`] for semantics.
+	pub async fn read_frame(&mut self) -> Result<Option<bytes::Bytes>> {
+		conducer::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
 	/// Poll for the group with the given sequence, without blocking.
@@ -953,6 +994,109 @@ mod test {
 		// Intermixing: recv_group on the same consumer still returns the late seq 3.
 		// The ordered cursor is separate from the recv_group filter.
 		assert_eq!(consumer.assert_group().info.sequence, 3);
+	}
+
+	#[tokio::test]
+	async fn read_frame_returns_single_frame_per_group() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		producer.write_frame(b"hello".as_slice()).unwrap();
+		producer.write_frame(b"world".as_slice()).unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"hello");
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"world");
+	}
+
+	#[tokio::test]
+	async fn read_frame_skips_stalled_group_for_newer_ready_frame() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		// Seq 3: group open, no frame yet (stalled).
+		let _stalled = producer.create_group(Group { sequence: 3 }).unwrap();
+		// Seq 5: fully-written group with a frame.
+		let mut g5 = producer.create_group(Group { sequence: 5 }).unwrap();
+		g5.write_frame(bytes::Bytes::from_static(b"later")).unwrap();
+		g5.finish().unwrap();
+
+		// read_frame should not block on the stalled seq 3 — it returns seq 5's frame.
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block on stalled earlier group")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"later");
+	}
+
+	#[tokio::test]
+	async fn read_frame_discards_rest_of_multi_frame_group() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		// Group 0 has two frames; only the first is returned.
+		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
+		g0.write_frame(bytes::Bytes::from_static(b"one")).unwrap();
+		g0.write_frame(bytes::Bytes::from_static(b"two")).unwrap();
+		g0.finish().unwrap();
+
+		// Group 1 is a normal single-frame group.
+		producer.write_frame(b"next".as_slice()).unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"one");
+
+		// The second frame of group 0 is discarded; the next read jumps to group 1.
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"next");
+	}
+
+	#[tokio::test]
+	async fn read_frame_returns_none_when_finished() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		producer.write_frame(b"only".as_slice()).unwrap();
+		producer.finish().unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"only");
+
+		let done = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored");
+		assert!(done.is_none());
 	}
 
 	#[tokio::test]
