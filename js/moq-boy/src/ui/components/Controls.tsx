@@ -34,7 +34,7 @@ export default function Controls() {
 	return (
 		<div class="boy__controls">
 			<button type="button" class="boy__back-btn" onClick={onBack}>
-				← Back
+				<span aria-hidden="true">←</span> Back
 			</button>
 			<Dpad />
 			<ABButtons />
