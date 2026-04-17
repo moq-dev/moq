@@ -1044,6 +1044,38 @@ mod test {
 	}
 
 	#[tokio::test]
+	async fn read_frame_discards_rest_of_multi_frame_group() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		// Group 0 has two frames; only the first is returned.
+		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
+		g0.write_frame(bytes::Bytes::from_static(b"one")).unwrap();
+		g0.write_frame(bytes::Bytes::from_static(b"two")).unwrap();
+		g0.finish().unwrap();
+
+		// Group 1 is a normal single-frame group.
+		producer.write_frame(b"next".as_slice()).unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"one");
+
+		// The second frame of group 0 is discarded; the next read jumps to group 1.
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"next");
+	}
+
+	#[tokio::test]
 	async fn read_frame_returns_none_when_finished() {
 		let mut producer = Track::new("test").produce();
 		let mut consumer = producer.consume();
