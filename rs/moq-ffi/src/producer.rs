@@ -79,7 +79,7 @@ impl MoqBroadcastProducer {
 	///
 	/// Same pattern as moq-boy's `status` and `command` tracks: raw UTF-8/JSON
 	/// bytes written directly to moq-lite groups with no media framing.
-	pub fn publish(&self, name: String) -> Result<Arc<MoqTrackProducer>, MoqError> {
+	pub fn publish_track(&self, name: String) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;

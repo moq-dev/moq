@@ -83,9 +83,9 @@ class BroadcastProducer:
     def publish_media(self, format: str, init: bytes) -> MediaProducer:
         return MediaProducer(self._inner.publish_media(format, init))
 
-    def publish(self, name: str) -> TrackProducer:
+    def publish_track(self, name: str) -> TrackProducer:
         """Create a track — send any bytes, no codec validation."""
-        return TrackProducer(self._inner.publish(name))
+        return TrackProducer(self._inner.publish_track(name))
 
     def consume(self) -> BroadcastConsumer:
         """Create a consumer that reads from this broadcast's tracks."""

@@ -12,6 +12,8 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
+use bytes::Bytes;
+
 use crate::{Error, Result, coding};
 
 use super::{Group, GroupConsumer, GroupProducer};
@@ -436,6 +438,21 @@ impl TrackConsumer {
 	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
 		conducer::wait(|waiter| self.poll_next_group(waiter)).await
+	}
+
+	/// Read the first frame of the next group.
+	///
+	/// Convenience for tracks that follow a one-frame-per-group pattern (e.g.
+	/// moq-boy's status/command tracks). Advances to the next group and reads
+	/// its first frame, skipping groups that finish without any frames.
+	/// Returns `None` when the track ends.
+	pub async fn read_frame(&mut self) -> Result<Option<Bytes>> {
+		while let Some(mut group) = self.next_group().await? {
+			if let Some(frame) = group.read_frame().await? {
+				return Ok(Some(frame));
+			}
+		}
+		Ok(None)
 	}
 
 	/// Poll for the group with the given sequence, without blocking.

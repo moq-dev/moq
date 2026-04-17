@@ -87,7 +87,7 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to a track by name — same pattern as moq-boy's command/status tracks.
 	///
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
-	pub fn subscribe(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
+	pub fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
@@ -121,8 +121,12 @@ struct TrackInner {
 }
 
 impl TrackInner {
-	async fn next_group(&mut self) -> Result<Option<moq_lite::GroupConsumer>, MoqError> {
+	async fn recv_group(&mut self) -> Result<Option<moq_lite::GroupConsumer>, MoqError> {
 		Ok(self.track.next_group().await?)
+	}
+
+	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
+		Ok(self.track.read_frame().await?.map(|b| b.to_vec()))
 	}
 }
 
@@ -141,13 +145,14 @@ impl MoqTrackConsumer {
 
 #[uniffi::export]
 impl MoqTrackConsumer {
-	/// Return the next group in order. Returns `None` when the track ends.
+	/// Return the next group in arrival order. Returns `None` when the track ends.
 	///
-	/// NOTE: Groups may be skipped if the reader falls behind or groups expire.
-	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
+	/// Groups are returned as they arrive on the wire, which may be out of sequence
+	/// order (e.g. if a later group lands before an earlier one on a separate stream).
+	pub async fn recv_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
 		self.task
 			.run(|mut state| async move {
-				Ok(state.next_group().await?.map(|group| {
+				Ok(state.recv_group().await?.map(|group| {
 					Arc::new(MoqGroupConsumer {
 						sequence: group.info.sequence,
 						task: Task::new(GroupInner { group }),
@@ -155,6 +160,14 @@ impl MoqTrackConsumer {
 				}))
 			})
 			.await
+	}
+
+	/// Read the first frame of the next group.
+	///
+	/// Convenience for tracks using one-frame-per-group (like moq-boy's
+	/// status/command tracks). Returns `None` when the track ends.
+	pub async fn read_frame(&self) -> Result<Option<Vec<u8>>, MoqError> {
+		self.task.run(|mut state| async move { state.read_frame().await }).await
 	}
 
 	pub fn cancel(&self) {
