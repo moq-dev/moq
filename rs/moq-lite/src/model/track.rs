@@ -82,6 +82,42 @@ impl State {
 		}
 	}
 
+	/// Scan groups at or after `index` in arrival order, looking for the first with sequence
+	/// `>= next_sequence` that has a fully-buffered next frame. Returns the frame plus the
+	/// winning slot's absolute index and sequence so the consumer can advance past it.
+	fn poll_read_frame(
+		&self,
+		index: usize,
+		next_sequence: u64,
+		waiter: &conducer::Waiter,
+	) -> Poll<Result<Option<(bytes::Bytes, usize, u64)>>> {
+		let start = index.saturating_sub(self.offset);
+		for (i, slot) in self.groups.iter().enumerate().skip(start) {
+			let Some((group, _)) = slot else { continue };
+			if group.info.sequence < next_sequence {
+				continue;
+			}
+
+			let mut consumer = group.consume();
+			match consumer.poll_read_frame(waiter) {
+				Poll::Ready(Ok(Some(frame))) => {
+					return Poll::Ready(Ok(Some((frame, self.offset + i, group.info.sequence))));
+				}
+				Poll::Ready(Ok(None)) => continue,
+				Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+				Poll::Pending => continue,
+			}
+		}
+
+		if self.final_sequence.is_some() {
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
+
 	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
 		// Search for the group with the matching sequence, skipping tombstones.
 		for (group, _) in self.groups.iter().flatten() {
@@ -487,6 +523,32 @@ impl TrackConsumer {
 	/// NOTE: This will be renamed to `next_group` in the next major version.
 	pub async fn next_group_ordered(&mut self) -> Result<Option<GroupConsumer>> {
 		conducer::wait(|waiter| self.poll_next_group_ordered(waiter)).await
+	}
+
+	/// Poll for a single full frame from the next group in sequence order, without blocking.
+	///
+	/// The inverse of [`TrackProducer::write_frame`]: scans all candidate groups at or after the
+	/// ordered cursor, returning the first fully-buffered frame found. A stalled earlier group
+	/// does not block the call — newer groups are still considered. The returned frame's group
+	/// (and any earlier pending/empty groups) is consumed from the cursor's perspective; their
+	/// remaining frames would be late and are not returned.
+	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
+		let Some((frame, found_index, sequence)) = ready!(self.poll(waiter, |state| {
+			state.poll_read_frame(self.index, self.next_sequence, waiter)
+		})?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		self.index = found_index + 1;
+		self.next_sequence = sequence.saturating_add(1);
+		Poll::Ready(Ok(Some(frame)))
+	}
+
+	/// Read a single full frame from the next group in sequence order.
+	///
+	/// See [`Self::poll_read_frame`] for semantics.
+	pub async fn read_frame(&mut self) -> Result<Option<bytes::Bytes>> {
+		conducer::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
 	/// Poll for the group with the given sequence, without blocking.
@@ -936,6 +998,77 @@ mod test {
 		// Intermixing: recv_group on the same consumer still returns the late seq 3.
 		// The ordered cursor is separate from the recv_group filter.
 		assert_eq!(consumer.assert_group().info.sequence, 3);
+	}
+
+	#[tokio::test]
+	async fn read_frame_returns_single_frame_per_group() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		producer.write_frame(b"hello".as_slice()).unwrap();
+		producer.write_frame(b"world".as_slice()).unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"hello");
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"world");
+	}
+
+	#[tokio::test]
+	async fn read_frame_skips_stalled_group_for_newer_ready_frame() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		// Seq 3: group open, no frame yet (stalled).
+		let _stalled = producer.create_group(Group { sequence: 3 }).unwrap();
+		// Seq 5: fully-written group with a frame.
+		let mut g5 = producer.create_group(Group { sequence: 5 }).unwrap();
+		g5.write_frame(bytes::Bytes::from_static(b"later")).unwrap();
+		g5.finish().unwrap();
+
+		// read_frame should not block on the stalled seq 3 — it returns seq 5's frame.
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block on stalled earlier group")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"later");
+	}
+
+	#[tokio::test]
+	async fn read_frame_returns_none_when_finished() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		producer.write_frame(b"only".as_slice()).unwrap();
+		producer.finish().unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"only");
+
+		let done = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored");
+		assert!(done.is_none());
 	}
 
 	#[tokio::test]
