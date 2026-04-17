@@ -92,7 +92,6 @@ impl Connection {
 
 		let publish = self.cluster.publisher(&token);
 		let subscribe = self.cluster.subscriber(&token);
-		let registration = self.cluster.register(&token);
 		let transport = self.request.transport();
 
 		match (&publish, &subscribe) {
@@ -124,9 +123,7 @@ impl Connection {
 		tracing::info!(version = %session.version(), transport, "negotiated");
 
 		// Wait until the session is closed.
-		// Keep registration alive so the cluster node stays announced.
 		session.closed().await?;
-		drop(registration);
 		Ok(())
 	}
 }
