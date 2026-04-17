@@ -286,7 +286,6 @@ impl TrackProducer {
 			info: self.info.clone(),
 			state: self.state.consume(),
 			index: 0,
-			ordered_sequence: None,
 			min_sequence: 0,
 		}
 	}
@@ -376,7 +375,6 @@ impl TrackWeak {
 			info: self.info.clone(),
 			state: self.state.consume(),
 			index: 0,
-			ordered_sequence: None,
 			min_sequence: 0,
 		}
 	}
@@ -400,9 +398,8 @@ pub struct TrackConsumer {
 	state: conducer::Consumer<State>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
-	/// Highest sequence returned by [`Self::next_group_ordered`], or None if not yet called.
-	ordered_sequence: Option<u64>,
-
+	/// Minimum sequence to return. Advanced by [`Self::next_group_ordered`]
+	/// past each returned group, and set directly by [`Self::start_at`].
 	min_sequence: u64,
 }
 
@@ -463,23 +460,16 @@ impl TrackConsumer {
 
 	/// Poll for the next group with a strictly-greater sequence number than the last returned, without blocking.
 	///
-	/// Walks arriving groups in order of receipt (like [`Self::poll_recv_group`]) but silently
-	/// skips any whose sequence is not greater than the last one returned by this method.
+	/// Advances [`Self::start_at`] past each returned group, so late arrivals with a lower
+	/// sequence are filtered out by [`Self::poll_recv_group`] on subsequent calls.
 	///
 	/// NOTE: This will be renamed to `poll_next_group` in the next major version.
 	pub fn poll_next_group_ordered(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
-		loop {
-			let Some(group) = ready!(self.poll_recv_group(waiter)?) else {
-				return Poll::Ready(Ok(None));
-			};
-			if let Some(last) = self.ordered_sequence
-				&& group.info.sequence <= last
-			{
-				continue;
-			}
-			self.ordered_sequence = Some(group.info.sequence);
-			return Poll::Ready(Ok(Some(group)));
-		}
+		let Some(group) = ready!(self.poll_recv_group(waiter)?) else {
+			return Poll::Ready(Ok(None));
+		};
+		self.min_sequence = group.info.sequence.saturating_add(1);
+		Poll::Ready(Ok(Some(group)))
 	}
 
 	/// Return the next group with a strictly-greater sequence number than the last returned.
