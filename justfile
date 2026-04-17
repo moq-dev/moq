@@ -68,8 +68,9 @@ ci:
 	# Run the Python checks.
 	uv run ruff check py/
 	uv run ruff format --check py/
-	# Build moq-ffi from source so pyright sees the current FFI surface; --no-sync keeps uv
-	# from reinstalling the older registry version.
+	# Sync moq-lite's dev group (pytest) first, then override moq-ffi with a source build;
+	# --no-sync on the pyright invocation keeps uv from reinstalling the registry moq-ffi.
+	uv sync --package moq-lite
 	uv run maturin develop -m rs/moq-ffi/Cargo.toml --uv
 	uv run --package moq-lite --no-sync pyright
 
@@ -123,6 +124,7 @@ test *args:
 
 	# Run the Python tests.
 	if command -v uv &> /dev/null; then
+		uv sync --package moq-lite
 		uv run maturin develop -m rs/moq-ffi/Cargo.toml --uv
 		uv run --package moq-lite --no-sync pytest py/moq-lite/tests/
 	fi
