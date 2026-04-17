@@ -92,6 +92,7 @@ impl State {
 		waiter: &conducer::Waiter,
 	) -> Poll<Result<Option<(bytes::Bytes, usize, u64)>>> {
 		let start = index.saturating_sub(self.offset);
+		let mut pending_seen = false;
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
 			let Some((group, _)) = slot else { continue };
 			if group.info.sequence < next_sequence {
@@ -105,11 +106,18 @@ impl State {
 				}
 				Poll::Ready(Ok(None)) => continue,
 				Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-				Poll::Pending => continue,
+				Poll::Pending => {
+					pending_seen = true;
+					continue;
+				}
 			}
 		}
 
-		if self.final_sequence.is_some() {
+		// A pending group can still produce a frame even after finish() — finish only
+		// blocks new groups at/above final_sequence, not frames on existing groups.
+		if pending_seen {
+			Poll::Pending
+		} else if self.final_sequence.is_some() {
 			Poll::Ready(Ok(None))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
@@ -529,9 +537,10 @@ impl TrackConsumer {
 	/// skipping the rest of the group. Intended for single-frame groups (see
 	/// [`TrackProducer::write_frame`]).
 	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
-		let Some((frame, found_index, sequence)) = ready!(self.poll(waiter, |state| {
-			state.poll_read_frame(self.index, self.next_sequence, waiter)
-		})?) else {
+		let lower = self.min_sequence.max(self.next_sequence);
+		let Some((frame, found_index, sequence)) =
+			ready!(self.poll(waiter, |state| { state.poll_read_frame(self.index, lower, waiter) })?)
+		else {
 			return Poll::Ready(Ok(None));
 		};
 
@@ -1073,6 +1082,59 @@ mod test {
 			.expect("would have errored")
 			.expect("track should not be closed");
 		assert_eq!(&frame[..], b"next");
+	}
+
+	#[tokio::test]
+	async fn read_frame_waits_for_pending_group_after_finish() {
+		// finish() sets final_sequence, but groups already created with lower sequences
+		// can still produce frames. read_frame must not return None prematurely.
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
+		producer.finish().unwrap();
+
+		// Track is finished but group 0 has no frame yet — must block, not return None.
+		assert!(
+			consumer.read_frame().now_or_never().is_none(),
+			"read_frame must block on a pending group even after finish()"
+		);
+
+		// A late frame on the pending group is still delivered.
+		g0.write_frame(bytes::Bytes::from_static(b"late")).unwrap();
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block once a frame is written")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"late");
+	}
+
+	#[tokio::test]
+	async fn read_frame_respects_start_at() {
+		// start_at sets min_sequence; read_frame must skip groups below it even though
+		// next_sequence is still 0.
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+		consumer.start_at(5);
+
+		// Seq 3 has a frame but is below min_sequence — must be skipped.
+		let mut g3 = producer.create_group(Group { sequence: 3 }).unwrap();
+		g3.write_frame(bytes::Bytes::from_static(b"skip-me")).unwrap();
+		g3.finish().unwrap();
+
+		let mut g5 = producer.create_group(Group { sequence: 5 }).unwrap();
+		g5.write_frame(bytes::Bytes::from_static(b"keep")).unwrap();
+		g5.finish().unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"keep");
 	}
 
 	#[tokio::test]
