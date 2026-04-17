@@ -144,15 +144,16 @@ impl OriginNode {
 			// Not using entry to avoid allocating a string most of the time.
 			self.entry(dir).lock().publish(&full, broadcast, &relative);
 		} else if let Some(existing) = &mut self.broadcast {
-			// This node is a leaf with an existing broadcast. Prefer the shorter hop path.
-			if broadcast.info.hops.len() < existing.active.info.hops.len() {
+			// This node is a leaf with an existing broadcast. Prefer the shorter or equal hop path;
+			// on ties, the newer broadcast wins, since the previous one may be about to close.
+			if broadcast.info.hops.len() <= existing.active.info.hops.len() {
 				let old = existing.active.clone();
 				existing.active = broadcast.clone();
 				existing.backup.push(old);
 
 				self.notify.lock().reannounce(full, broadcast);
 			} else {
-				// Same or longer: keep as a backup in case the active one drops.
+				// Longer path: keep as a backup in case the active one drops.
 				existing.backup.push(broadcast.clone());
 			}
 		} else {
