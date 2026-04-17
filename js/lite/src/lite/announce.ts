@@ -3,7 +3,10 @@ import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
 
-const MAX_HOPS = 256;
+// Must match the MAX_HOPS in the Rust announce.rs. Broadcasts with longer hop
+// chains are rejected; this keeps loop-detection bounded and rejects pathological
+// announcements across clusters with unbounded forwarding.
+const MAX_HOPS = 32;
 
 export class Announce {
 	suffix: Path.Valid;

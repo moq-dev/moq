@@ -11,6 +11,7 @@ fn main() -> anyhow::Result<()> {
 	println!("Generated key:\n{key_str}\n");
 
 	// Create claims for the token.
+	#[allow(deprecated)] // `cluster` is deprecated; shown here for back-compat demonstration
 	let claims = moq_token::Claims {
 		root: "demo".to_string(),
 		publish: vec!["my-stream".to_string()], // Can publish to demo/my-stream

@@ -415,7 +415,7 @@ impl OriginProducer {
 		let path = path.as_path();
 
 		// Loop detection: refuse broadcasts whose hop chain already contains our id.
-		if broadcast.info.hops.iter().any(|id| *id == self.id) {
+		if broadcast.info.hops.contains(&self.id) {
 			return false;
 		}
 
@@ -461,7 +461,11 @@ impl OriginProducer {
 	// TODO accept PathPrefixes instead of &[Path]
 	pub fn consume_only(&self, prefixes: &[Path]) -> Option<OriginConsumer> {
 		let prefixes = PathPrefixes::new(prefixes);
-		Some(OriginConsumer::new(self.id, self.root.clone(), self.nodes.select(&prefixes)?))
+		Some(OriginConsumer::new(
+			self.id,
+			self.root.clone(),
+			self.nodes.select(&prefixes)?,
+		))
 	}
 
 	/// Subscribe to a specific broadcast.
