@@ -11,7 +11,7 @@ export class Track {
 
 	state = new TrackState();
 	#next?: number;
-	#orderedSequence?: number;
+	#nextSequence = 0;
 
 	readonly closed: Promise<Error | undefined>;
 
@@ -132,11 +132,11 @@ export class Track {
 		for (;;) {
 			const group = await this.recvGroup();
 			if (!group) return undefined;
-			if (this.#orderedSequence !== undefined && group.sequence <= this.#orderedSequence) {
+			if (group.sequence < this.#nextSequence) {
 				group.close();
 				continue;
 			}
-			this.#orderedSequence = group.sequence;
+			this.#nextSequence = group.sequence + 1;
 			return group;
 		}
 	}

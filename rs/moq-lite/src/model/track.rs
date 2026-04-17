@@ -287,6 +287,7 @@ impl TrackProducer {
 			state: self.state.consume(),
 			index: 0,
 			min_sequence: 0,
+			next_sequence: 0,
 		}
 	}
 
@@ -376,6 +377,7 @@ impl TrackWeak {
 			state: self.state.consume(),
 			index: 0,
 			min_sequence: 0,
+			next_sequence: 0,
 		}
 	}
 
@@ -398,9 +400,11 @@ pub struct TrackConsumer {
 	state: conducer::Consumer<State>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
-	/// Minimum sequence to return. Advanced by [`Self::next_group_ordered`]
-	/// past each returned group, and set directly by [`Self::start_at`].
+	/// Minimum sequence to return from any `recv` method. Set by [`Self::start_at`].
 	min_sequence: u64,
+	/// One past the highest sequence returned by [`Self::next_group_ordered`].
+	/// Used only by that method to skip late arrivals; does not affect [`Self::recv_group`].
+	next_sequence: u64,
 }
 
 impl TrackConsumer {
@@ -460,16 +464,24 @@ impl TrackConsumer {
 
 	/// Poll for the next group with a strictly-greater sequence number than the last returned, without blocking.
 	///
-	/// Advances [`Self::start_at`] past each returned group, so late arrivals with a lower
-	/// sequence are filtered out by [`Self::poll_recv_group`] on subsequent calls.
+	/// Implemented as a thin wrapper over [`Self::poll_recv_group`] that discards
+	/// late arrivals (sequence at or below the last returned by this method).
+	/// Shares the arrival-order cursor with [`Self::poll_recv_group`], so a discarded
+	/// group is also consumed from its perspective.
 	///
 	/// NOTE: This will be renamed to `poll_next_group` in the next major version.
 	pub fn poll_next_group_ordered(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
-		let Some(group) = ready!(self.poll_recv_group(waiter)?) else {
-			return Poll::Ready(Ok(None));
-		};
-		self.min_sequence = group.info.sequence.saturating_add(1);
-		Poll::Ready(Ok(Some(group)))
+		loop {
+			let Some(group) = ready!(self.poll_recv_group(waiter)?) else {
+				return Poll::Ready(Ok(None));
+			};
+			if group.info.sequence < self.next_sequence {
+				// Late arrival; discard and keep looking.
+				continue;
+			}
+			self.next_sequence = group.info.sequence.saturating_add(1);
+			return Poll::Ready(Ok(Some(group)));
+		}
 	}
 
 	/// Return the next group with a strictly-greater sequence number than the last returned.
@@ -907,6 +919,28 @@ mod test {
 			.expect("would have errored")
 			.expect("track should not be closed");
 		assert_eq!(group.info.sequence, 5);
+	}
+
+	#[tokio::test]
+	async fn recv_group_after_next_group_ordered_sees_late_arrivals() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		producer.create_group(Group { sequence: 5 }).unwrap();
+		producer.create_group(Group { sequence: 3 }).unwrap();
+
+		// Ordered returns seq 5 and advances its internal cursor past it.
+		let group = consumer
+			.next_group_ordered()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(group.info.sequence, 5);
+
+		// Intermixing: recv_group on the same consumer still returns the late seq 3.
+		// The ordered cursor is separate from the recv_group filter.
+		assert_eq!(consumer.assert_group().info.sequence, 3);
 	}
 
 	#[tokio::test]
