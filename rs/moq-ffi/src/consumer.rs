@@ -125,6 +125,13 @@ impl TrackInner {
 		Ok(self.track.next_group().await?)
 	}
 
+	async fn next_group(&mut self) -> Result<Option<moq_lite::GroupConsumer>, MoqError> {
+		// TODO: wire up to moq-lite's sequence-ordered method once it lands (currently
+		// named next_group_ordered on a separate branch, eventually renamed to next_group).
+		// For now this returns arrival order, same as recv_group.
+		Ok(self.track.next_group().await?)
+	}
+
 	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
 		Ok(self.track.read_frame().await?.map(|b| b.to_vec()))
 	}
@@ -153,6 +160,21 @@ impl MoqTrackConsumer {
 		self.task
 			.run(|mut state| async move {
 				Ok(state.recv_group().await?.map(|group| {
+					Arc::new(MoqGroupConsumer {
+						sequence: group.info.sequence,
+						task: Task::new(GroupInner { group }),
+					})
+				}))
+			})
+			.await
+	}
+
+	/// Return the next group in sequence order, skipping forward if the reader
+	/// has fallen behind. Returns `None` when the track ends.
+	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
+		self.task
+			.run(|mut state| async move {
+				Ok(state.next_group().await?.map(|group| {
 					Arc::new(MoqGroupConsumer {
 						sequence: group.info.sequence,
 						task: Task::new(GroupInner { group }),

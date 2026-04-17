@@ -88,6 +88,17 @@ class TrackConsumer:
             return None
         return GroupConsumer(group)
 
+    async def next_group(self) -> GroupConsumer | None:
+        """Return the next group in sequence order, skipping forward if behind.
+
+        Returns `None` when the track ends. Use this when order matters more than
+        latency; `recv_group` is preferred for live consumption.
+        """
+        group = await self._inner.next_group()
+        if group is None:
+            return None
+        return GroupConsumer(group)
+
     async def read_frame(self) -> bytes | None:
         """Read the first frame of the next group.
 
