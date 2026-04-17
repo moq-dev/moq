@@ -34,17 +34,17 @@ tls.root = ["ca.pem"]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
 listen = "[::]:4444"
 
-# This clustering scheme is very very simple for now.
-#
-# There is a root node that is used to discover other leaf nodes.
-# The root accept incoming connections, while the leaf nodes dial outgoing connections.
-# This forms a crude NxN mesh network that won't scale, but is good enough.
+# Full-mesh clustering. List every peer you want this node to keep an
+# outbound connection to. Hop-based loop detection (OriginId chains on
+# each broadcast) ensures announcements don't ping-pong between peers,
+# so there's no notion of "root" vs "leaf" anymore.
 [cluster]
-# Connect to this hostname in order to discover other nodes.
-connect = "localhost:4443"
+connect = ["localhost:4443", "localhost:4445"]
 
-# My hostname, which must be accessible from other nodes.
-node = "localhost:4444"
+# Deterministic origin ID for this node. Optional — omit for a random
+# 62-bit id at startup. Pinning it in dev makes logs and loop-detection
+# diagnostics easier to correlate.
+origin_id = 10
 
 [auth]
 # Allow JWT tokens that are signed by this root key.
