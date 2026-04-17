@@ -24,7 +24,7 @@ dev:
 # Install any dependencies.
 install:
 	bun install
-	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-sweep cargo-semver-checks release-plz
+	cargo install --locked cargo-shear cargo-sort cargo-upgrades cargo-edit cargo-sweep release-plz
 
 # Run the CI checks
 check *args:
@@ -88,11 +88,6 @@ ci:
 
 	# Dry-run publish to verify packaging
 	cargo publish --dry-run
-
-# Check semver compatibility against crates.io (default-members only)
-# requires: cargo install cargo-semver-checks
-semver:
-	cargo semver-checks check-release
 
 # Update versions and changelogs via release-plz
 bump:

@@ -125,7 +125,6 @@ match version {
 - **`main`**: Stable branch for patch releases. Only non-breaking fixes and additions.
 - **`dev`**: Development branch for breaking API changes. PRs with major API changes should target `dev`.
 - When ready for a new minor/major release, merge `dev` into `main`.
-- `cargo-semver-checks` enforces this on PRs to `main`.
 
 ## Workflow
 
