@@ -1,0 +1,22 @@
+[package]
+name = "moq-dummy-raw"
+description = "Minimal raw-track publisher to moq-relay (memory / transport repro)"
+authors = ["MoQ contributors"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+moq-lite = { workspace = true }
+moq-mux = { workspace = true }
+moq-native = { workspace = true, default-features = false, features = ["quinn", "aws-lc-rs"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false }
+tokio = { workspace = true, features = ["full"] }
+tracing = "0.1"
+url = "2"
