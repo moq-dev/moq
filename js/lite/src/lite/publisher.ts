@@ -7,6 +7,7 @@ import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
+import { randomOriginId } from "./origin-id.ts";
 import { Probe } from "./probe.ts";
 import { encodeSubscribeResponse, type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { Version } from "./version.ts";
@@ -24,6 +25,11 @@ export class Publisher {
 	// The version of the connection.
 	readonly version: Version;
 
+	// Random per-connection origin ID appended to outbound Announce hops, so
+	// the peer can detect loops and prefer shorter paths. Stable for the life
+	// of this Publisher.
+	readonly originId: number;
+
 	#quic: WebTransport;
 
 	// Our published broadcasts.
@@ -39,6 +45,7 @@ export class Publisher {
 	constructor(quic: WebTransport, version: Version) {
 		this.#quic = quic;
 		this.version = version;
+		this.originId = randomOriginId();
 	}
 
 	/**
@@ -92,7 +99,7 @@ export class Publisher {
 			default:
 				// Draft03+: send individual Announce messages for initial state.
 				for (const suffix of active) {
-					const wire = new Announce({ suffix, active: true });
+					const wire = new Announce({ suffix, active: true, hops: [this.originId] });
 					await wire.encode(stream.writer, this.version);
 				}
 				break;
@@ -123,11 +130,12 @@ export class Publisher {
 			// Announce any new broadcasts.
 			for (const added of newActive.difference(active)) {
 				console.debug(`announce: broadcast=${added} active=true`);
-				const wire = new Announce({ suffix: added, active: true });
+				const wire = new Announce({ suffix: added, active: true, hops: [this.originId] });
 				await wire.encode(stream.writer, this.version);
 			}
 
 			// Announce any removed broadcasts.
+			// Ended announces don't need hops — the peer matches on path only.
 			for (const removed of active.difference(newActive)) {
 				console.debug(`announce: broadcast=${removed} active=false`);
 				const wire = new Announce({ suffix: removed, active: false });
