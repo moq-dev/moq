@@ -340,7 +340,7 @@ async fn serve_fetch(
 		let group = match params.group {
 			FetchGroup::Latest => match track.latest() {
 				Some(sequence) => track.get_group(sequence).await,
-				None => track.next_group().await,
+				None => track.recv_group().await,
 			},
 			FetchGroup::Num(sequence) => track.get_group(sequence).await,
 		};

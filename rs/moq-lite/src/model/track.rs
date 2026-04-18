@@ -59,10 +59,10 @@ struct State {
 }
 
 impl State {
-	/// Find the next non-tombstoned group at or after `index`.
+	/// Find the next non-tombstoned group at or after `index` in arrival order.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
-	fn poll_next_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
+	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(GroupConsumer, usize)>>> {
 		let start = index.saturating_sub(self.offset);
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
 			if let Some((group, _)) = slot
@@ -73,6 +73,42 @@ impl State {
 		}
 
 		// TODO once we have drop notifications, check if index == final_sequence.
+		if self.final_sequence.is_some() {
+			Poll::Ready(Ok(None))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			Poll::Pending
+		}
+	}
+
+	/// Scan groups at or after `index` in arrival order, looking for the first with sequence
+	/// `>= next_sequence` that has a fully-buffered next frame. Returns the frame plus the
+	/// winning slot's absolute index and sequence so the consumer can advance past it.
+	fn poll_read_frame(
+		&self,
+		index: usize,
+		next_sequence: u64,
+		waiter: &conducer::Waiter,
+	) -> Poll<Result<Option<(bytes::Bytes, usize, u64)>>> {
+		let start = index.saturating_sub(self.offset);
+		for (i, slot) in self.groups.iter().enumerate().skip(start) {
+			let Some((group, _)) = slot else { continue };
+			if group.info.sequence < next_sequence {
+				continue;
+			}
+
+			let mut consumer = group.consume();
+			match consumer.poll_read_frame(waiter) {
+				Poll::Ready(Ok(Some(frame))) => {
+					return Poll::Ready(Ok(Some((frame, self.offset + i, group.info.sequence))));
+				}
+				Poll::Ready(Ok(None)) => continue,
+				Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+				Poll::Pending => continue,
+			}
+		}
+
 		if self.final_sequence.is_some() {
 			Poll::Ready(Ok(None))
 		} else if let Some(err) = &self.abort {
@@ -287,6 +323,7 @@ impl TrackProducer {
 			state: self.state.consume(),
 			index: 0,
 			min_sequence: 0,
+			next_sequence: 0,
 		}
 	}
 
@@ -376,6 +413,7 @@ impl TrackWeak {
 			state: self.state.consume(),
 			index: 0,
 			min_sequence: 0,
+			next_sequence: 0,
 		}
 	}
 
@@ -396,9 +434,13 @@ impl TrackWeak {
 pub struct TrackConsumer {
 	pub info: Track,
 	state: conducer::Consumer<State>,
+	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
-
+	/// Minimum sequence to return from any `recv` method. Set by [`Self::start_at`].
 	min_sequence: u64,
+	/// One past the highest sequence returned by [`Self::next_group_ordered`].
+	/// Used only by that method to skip late arrivals; does not affect [`Self::recv_group`].
+	next_sequence: u64,
 }
 
 impl TrackConsumer {
@@ -414,15 +456,19 @@ impl TrackConsumer {
 		})
 	}
 
-	/// Poll for the next group without blocking.
+	/// Poll for the next group received over the network, in arrival order, without blocking.
+	///
+	/// Groups may arrive out of order or with gaps due to network conditions.
+	/// Use [`Self::next_group_ordered`] if you need groups in sequence order,
+	/// skipping those that arrive too late.
 	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished,
 	/// `Poll::Ready(Err(e))` when the track has been aborted, or
 	/// `Poll::Pending` when no group is available yet.
-	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+	pub fn poll_recv_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
 		let Some((consumer, found_index)) =
-			ready!(self.poll(waiter, |state| state.poll_next_group(self.index, self.min_sequence))?)
+			ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
 		else {
 			return Poll::Ready(Ok(None));
 		};
@@ -431,11 +477,74 @@ impl TrackConsumer {
 		Poll::Ready(Ok(Some(consumer)))
 	}
 
-	/// Return the next group in order.
+	/// Receive the next group available on this track, in arrival order.
 	///
-	/// NOTE: This can have gaps if the reader is too slow or there were network slowdowns.
+	/// Groups may arrive out of order or with gaps due to network conditions.
+	/// Use [`Self::next_group_ordered`] if you need groups in sequence order,
+	/// skipping those that arrive too late.
+	pub async fn recv_group(&mut self) -> Result<Option<GroupConsumer>> {
+		conducer::wait(|waiter| self.poll_recv_group(waiter)).await
+	}
+
+	/// Deprecated alias for [`Self::poll_recv_group`].
+	#[deprecated(note = "use poll_recv_group for arrival order, or poll_next_group_ordered for sequence order")]
+	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+		self.poll_recv_group(waiter)
+	}
+
+	/// Deprecated alias for [`Self::recv_group`].
+	#[deprecated(note = "use recv_group for arrival order, or next_group_ordered for sequence order")]
 	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
-		conducer::wait(|waiter| self.poll_next_group(waiter)).await
+		self.recv_group().await
+	}
+
+	/// A helper that calls [`Self::poll_recv_group`] but only returns groups with a sequence number higher than any previously returned.
+	///
+	/// NOTE: This will be renamed to `poll_next_group` in the next major version.
+	pub fn poll_next_group_ordered(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+		loop {
+			let Some(group) = ready!(self.poll_recv_group(waiter)?) else {
+				return Poll::Ready(Ok(None));
+			};
+			if group.info.sequence < self.next_sequence {
+				// Late arrival; discard and keep looking.
+				continue;
+			}
+			self.next_sequence = group.info.sequence.saturating_add(1);
+			return Poll::Ready(Ok(Some(group)));
+		}
+	}
+
+	/// Return the next group with a strictly-greater sequence number than the last returned.
+	///
+	/// Groups that arrive late (with a sequence number at or below the last one returned)
+	/// are silently skipped.
+	///
+	/// NOTE: This will be renamed to `next_group` in the next major version.
+	pub async fn next_group_ordered(&mut self) -> Result<Option<GroupConsumer>> {
+		conducer::wait(|waiter| self.poll_next_group_ordered(waiter)).await
+	}
+
+	/// A helper that calls [`Self::poll_next_group_ordered`] and returns its first frame,
+	/// skipping the rest of the group. Intended for single-frame groups (see
+	/// [`TrackProducer::write_frame`]).
+	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
+		let Some((frame, found_index, sequence)) = ready!(self.poll(waiter, |state| {
+			state.poll_read_frame(self.index, self.next_sequence, waiter)
+		})?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		self.index = found_index + 1;
+		self.next_sequence = sequence.saturating_add(1);
+		Poll::Ready(Ok(Some(frame)))
+	}
+
+	/// Read a single full frame from the next group in sequence order.
+	///
+	/// See [`Self::poll_read_frame`] for semantics.
+	pub async fn read_frame(&mut self) -> Result<Option<bytes::Bytes>> {
+		conducer::wait(|waiter| self.poll_read_frame(waiter)).await
 	}
 
 	/// Poll for the group with the given sequence, without blocking.
@@ -518,7 +627,7 @@ use futures::FutureExt;
 #[cfg(test)]
 impl TrackConsumer {
 	pub fn assert_group(&mut self) -> GroupConsumer {
-		self.next_group()
+		self.recv_group()
 			.now_or_never()
 			.expect("group would have blocked")
 			.expect("would have errored")
@@ -527,8 +636,8 @@ impl TrackConsumer {
 
 	pub fn assert_no_group(&mut self) {
 		assert!(
-			self.next_group().now_or_never().is_none(),
-			"next group would not have blocked"
+			self.recv_group().now_or_never().is_none(),
+			"recv_group would not have blocked"
 		);
 	}
 
@@ -786,7 +895,7 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn next_group_finishes_without_waiting_for_gaps() {
+	async fn recv_group_finishes_without_waiting_for_gaps() {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 1 }).unwrap();
 		producer.finish_at(1).unwrap();
@@ -795,11 +904,199 @@ mod test {
 		assert_eq!(consumer.assert_group().info.sequence, 1);
 
 		let done = consumer
-			.next_group()
+			.recv_group()
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored");
 		assert!(done.is_none(), "track should finish without waiting for gaps");
+	}
+
+	#[tokio::test]
+	async fn next_group_ordered_skips_late_arrivals() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		// Seq 5 arrives first.
+		producer.create_group(Group { sequence: 5 }).unwrap();
+		let group = consumer
+			.next_group_ordered()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(group.info.sequence, 5);
+
+		// Seq 3 arrives late — skipped because 3 <= 5.
+		producer.create_group(Group { sequence: 3 }).unwrap();
+		// Seq 4 arrives late — also skipped.
+		producer.create_group(Group { sequence: 4 }).unwrap();
+		// Seq 7 arrives — returned.
+		producer.create_group(Group { sequence: 7 }).unwrap();
+
+		let group = consumer
+			.next_group_ordered()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(group.info.sequence, 7);
+
+		// No more groups — would block.
+		assert!(
+			consumer.next_group_ordered().now_or_never().is_none(),
+			"should block waiting for a higher sequence"
+		);
+	}
+
+	#[tokio::test]
+	async fn next_group_ordered_returns_arrivals_in_order() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		// Seq 3 arrives first, then seq 5 — both should be returned in arrival order.
+		producer.create_group(Group { sequence: 3 }).unwrap();
+		producer.create_group(Group { sequence: 5 }).unwrap();
+
+		let group = consumer
+			.next_group_ordered()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(group.info.sequence, 3);
+
+		let group = consumer
+			.next_group_ordered()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(group.info.sequence, 5);
+	}
+
+	#[tokio::test]
+	async fn recv_group_after_next_group_ordered_sees_late_arrivals() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		producer.create_group(Group { sequence: 5 }).unwrap();
+		producer.create_group(Group { sequence: 3 }).unwrap();
+
+		// Ordered returns seq 5 and advances its internal cursor past it.
+		let group = consumer
+			.next_group_ordered()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(group.info.sequence, 5);
+
+		// Intermixing: recv_group on the same consumer still returns the late seq 3.
+		// The ordered cursor is separate from the recv_group filter.
+		assert_eq!(consumer.assert_group().info.sequence, 3);
+	}
+
+	#[tokio::test]
+	async fn read_frame_returns_single_frame_per_group() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		producer.write_frame(b"hello".as_slice()).unwrap();
+		producer.write_frame(b"world".as_slice()).unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"hello");
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"world");
+	}
+
+	#[tokio::test]
+	async fn read_frame_skips_stalled_group_for_newer_ready_frame() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		// Seq 3: group open, no frame yet (stalled).
+		let _stalled = producer.create_group(Group { sequence: 3 }).unwrap();
+		// Seq 5: fully-written group with a frame.
+		let mut g5 = producer.create_group(Group { sequence: 5 }).unwrap();
+		g5.write_frame(bytes::Bytes::from_static(b"later")).unwrap();
+		g5.finish().unwrap();
+
+		// read_frame should not block on the stalled seq 3 — it returns seq 5's frame.
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block on stalled earlier group")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"later");
+	}
+
+	#[tokio::test]
+	async fn read_frame_discards_rest_of_multi_frame_group() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		// Group 0 has two frames; only the first is returned.
+		let mut g0 = producer.create_group(Group { sequence: 0 }).unwrap();
+		g0.write_frame(bytes::Bytes::from_static(b"one")).unwrap();
+		g0.write_frame(bytes::Bytes::from_static(b"two")).unwrap();
+		g0.finish().unwrap();
+
+		// Group 1 is a normal single-frame group.
+		producer.write_frame(b"next".as_slice()).unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"one");
+
+		// The second frame of group 0 is discarded; the next read jumps to group 1.
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"next");
+	}
+
+	#[tokio::test]
+	async fn read_frame_returns_none_when_finished() {
+		let mut producer = Track::new("test").produce();
+		let mut consumer = producer.consume();
+
+		producer.write_frame(b"only".as_slice()).unwrap();
+		producer.finish().unwrap();
+
+		let frame = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored")
+			.expect("track should not be closed");
+		assert_eq!(&frame[..], b"only");
+
+		let done = consumer
+			.read_frame()
+			.now_or_never()
+			.expect("should not block")
+			.expect("would have errored");
+		assert!(done.is_none());
 	}
 
 	#[tokio::test]

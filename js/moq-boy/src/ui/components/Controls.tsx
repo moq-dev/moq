@@ -26,8 +26,16 @@ export default function Controls() {
 		game.sendCommand({ type: "reset" });
 	};
 
+	const onBack = (e: MouseEvent) => {
+		e.stopPropagation();
+		game.expanded.set(undefined);
+	};
+
 	return (
 		<div class="boy__controls">
+			<button type="button" class="boy__back-btn" onClick={onBack}>
+				<span aria-hidden="true">←</span> Back
+			</button>
 			<Dpad />
 			<ABButtons />
 			<MetaButtons />
@@ -64,7 +72,7 @@ export default function Controls() {
 				<div>Arrows: D-pad</div>
 				<div>Z: B &nbsp; X: A</div>
 				<div>Enter: Start &nbsp; Shift: Select</div>
-				<div>Esc: Collapse</div>
+				<div>Esc: Back</div>
 			</div>
 		</div>
 	);

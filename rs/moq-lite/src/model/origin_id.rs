@@ -15,8 +15,9 @@ pub struct OriginId(u64);
 const ORIGIN_ID_MAX: u64 = (1u64 << 62) - 1;
 
 impl OriginId {
-	/// A placeholder value used when the actual OriginId is unknown (e.g., Lite03 hop placeholders).
-	pub const UNKNOWN: Self = Self(0);
+	/// Placeholder for hop entries whose actual id is not on the wire (Lite03).
+	/// Never encoded for Lite04+: violates the non-zero invariant and would fail to round-trip.
+	pub(crate) const UNKNOWN: Self = Self(0);
 
 	/// Generate a random non-zero 62-bit origin ID.
 	pub fn random() -> Self {

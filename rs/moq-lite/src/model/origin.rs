@@ -1,5 +1,5 @@
 use std::{
-	collections::HashMap,
+	collections::{HashMap, VecDeque},
 	sync::atomic::{AtomicU64, Ordering},
 };
 use tokio::sync::mpsc;
@@ -19,11 +19,11 @@ impl ConsumerId {
 	}
 }
 
-// If there are multiple broadcasts with the same path, we use the most recent one but keep the others around.
+// If there are multiple broadcasts with the same path, we keep the oldest active and queue the others.
 struct OriginBroadcast {
 	path: PathOwned,
 	active: BroadcastConsumer,
-	backup: Vec<BroadcastConsumer>,
+	backup: VecDeque<BroadcastConsumer>,
 }
 
 #[derive(Clone)]
@@ -149,19 +149,19 @@ impl OriginNode {
 			if broadcast.info.hops.len() <= existing.active.info.hops.len() {
 				let old = existing.active.clone();
 				existing.active = broadcast.clone();
-				existing.backup.push(old);
+				existing.backup.push_back(old);
 
 				self.notify.lock().reannounce(full, broadcast);
 			} else {
 				// Longer path: keep as a backup in case the active one drops.
-				existing.backup.push(broadcast.clone());
+				existing.backup.push_back(broadcast.clone());
 			}
 		} else {
 			// This node is a leaf with no existing broadcast.
 			self.broadcast = Some(OriginBroadcast {
 				path: full.to_owned(),
 				active: broadcast.clone(),
-				backup: Vec::new(),
+				backup: VecDeque::new(),
 			});
 			self.notify.lock().announce(full, broadcast);
 		}
@@ -234,6 +234,7 @@ impl OriginNode {
 			assert!(entry.active.is_clone(&broadcast));
 
 			// Promote the backup with the shortest hop chain so we keep preferring short paths.
+			// Ties break toward the oldest (FIFO) since min_by_key returns the first minimum.
 			let best = entry
 				.backup
 				.iter()
@@ -241,7 +242,7 @@ impl OriginNode {
 				.min_by_key(|(_, b)| b.info.hops.len())
 				.map(|(i, _)| i);
 			if let Some(idx) = best {
-				let active = entry.backup.swap_remove(idx);
+				let active = entry.backup.remove(idx).expect("index in range");
 				entry.active = active;
 				self.notify.lock().reannounce(full, &entry.active);
 			} else {
@@ -407,9 +408,10 @@ impl OriginProducer {
 	/// Publish a broadcast, announcing it to all consumers.
 	///
 	/// The broadcast will be unannounced when it is closed.
-	/// If there is already a broadcast with the same path, then it will be replaced and reannounced.
-	/// If the old broadcast is closed before the new one, then nothing will happen.
-	/// If the new broadcast is closed before the old one, then the old broadcast will be reannounced.
+	/// If there is already a broadcast with the same path, then the older broadcast remains active
+	/// and the new one is queued as a backup (no reannounce is triggered).
+	/// When the active broadcast closes, the oldest queued backup is promoted and reannounced.
+	/// A queued backup that closes before it is promoted is silently dropped with no announcement.
 	///
 	/// Returns false if the broadcast is not allowed to be published.
 	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
@@ -690,6 +692,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_announce() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 		let broadcast1 = Broadcast::produce();
 		let broadcast2 = Broadcast::produce();
@@ -754,6 +758,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_duplicate() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 
 		let broadcast1 = Broadcast::produce();
@@ -771,13 +777,14 @@ mod tests {
 		origin.publish_broadcast("test", consumer3.clone());
 		assert!(consumer.consume_broadcast("test").is_some());
 
+		// On equal hop lengths, each new publish replaces the active and reannounces.
 		consumer.assert_next("test", &consumer1);
 		consumer.assert_next_none("test");
 		consumer.assert_next("test", &consumer2);
 		consumer.assert_next_none("test");
 		consumer.assert_next("test", &consumer3);
 
-		// Drop the backup, nothing should change.
+		// Drop a backup, nothing should change.
 		drop(broadcast2);
 
 		// Wait for the async task to run.
@@ -786,7 +793,7 @@ mod tests {
 		assert!(consumer.consume_broadcast("test").is_some());
 		consumer.assert_next_wait();
 
-		// Drop the active, we should reannounce.
+		// Drop the active, we should reannounce with the remaining backup.
 		drop(broadcast3);
 
 		// Wait for the async task to run.
@@ -809,6 +816,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_duplicate_reverse() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 		let broadcast1 = Broadcast::produce();
 		let broadcast2 = Broadcast::produce();
@@ -833,6 +842,8 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_double_publish() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 		let broadcast = Broadcast::produce();
 
@@ -1388,6 +1399,8 @@ mod tests {
 	// Verify unannounce also doesn't panic with trailing slash
 	#[tokio::test]
 	async fn test_with_root_trailing_slash_unannounce() {
+		tokio::time::pause();
+
 		let origin = Origin::produce();
 
 		let prefix = "some_prefix/".to_string();
