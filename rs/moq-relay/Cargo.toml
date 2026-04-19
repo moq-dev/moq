@@ -5,7 +5,7 @@ authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.10.23"
+version = "0.10.24"
 edition = "2024"
 rust-version.workspace = true
 

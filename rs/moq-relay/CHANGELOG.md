@@ -64,6 +64,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.24](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.23...moq-relay-v0.10.24) - 2026-04-19
+
+### Other
+
+- resolve DNS hostnames in --server-bind ([#1332](https://github.com/moq-dev/moq/pull/1332))
+- Update fly.toml to use the hosted docker image ([#1331](https://github.com/moq-dev/moq/pull/1331))
+- Add README files for Rust crates ([#1284](https://github.com/moq-dev/moq/pull/1284))
+- Clarify group delivery semantics with recv_group and next_group_ordered ([#1324](https://github.com/moq-dev/moq/pull/1324))
+
 ## [0.10.23](https://github.com/moq-dev/moq/compare/moq-relay-v0.10.22...moq-relay-v0.10.23) - 2026-04-17
 
 ### Other

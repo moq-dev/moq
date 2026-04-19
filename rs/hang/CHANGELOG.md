@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.8](https://github.com/moq-dev/moq/compare/hang-v0.15.7...hang-v0.15.8) - 2026-04-19
+
+### Other
+
+- Add README files for Rust crates ([#1284](https://github.com/moq-dev/moq/pull/1284))
+- Clarify group delivery semantics with recv_group and next_group_ordered ([#1324](https://github.com/moq-dev/moq/pull/1324))
+
 ## [0.15.7](https://github.com/moq-dev/moq/compare/hang-v0.15.6...hang-v0.15.7) - 2026-04-09
 
 ### Other

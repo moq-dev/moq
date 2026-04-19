@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.17](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.16...moq-clock-v0.10.17) - 2026-04-19
+
+### Other
+
+- Add README files for Rust crates ([#1284](https://github.com/moq-dev/moq/pull/1284))
+- Clarify group delivery semantics with recv_group and next_group_ordered ([#1324](https://github.com/moq-dev/moq/pull/1324))
+- release ([#1320](https://github.com/moq-dev/moq/pull/1320))
+
 ## [0.10.16](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.15...moq-clock-v0.10.16) - 2026-04-17
 
 ### Other

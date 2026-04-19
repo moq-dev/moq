@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.15](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.14...moq-lite-v0.15.15) - 2026-04-19
+
+### Other
+
+- Add README files for Rust crates ([#1284](https://github.com/moq-dev/moq/pull/1284))
+- Fix TrackConsumer::read_frame: respect start_at, avoid premature EOF ([#1327](https://github.com/moq-dev/moq/pull/1327))
+- Add TrackConsumer::read_frame as inverse of write_frame ([#1326](https://github.com/moq-dev/moq/pull/1326))
+- Clarify group delivery semantics with recv_group and next_group_ordered ([#1324](https://github.com/moq-dev/moq/pull/1324))
+
 ## [0.15.14](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.13...moq-lite-v0.15.14) - 2026-04-17
 
 ### Other

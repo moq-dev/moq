@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.17](https://github.com/moq-dev/moq/compare/moq-token-v0.5.16...moq-token-v0.5.17) - 2026-04-19
+
+### Other
+
+- Add README files for Rust crates ([#1284](https://github.com/moq-dev/moq/pull/1284))
+
 ## [0.5.15](https://github.com/moq-dev/moq/compare/moq-token-v0.5.14...moq-token-v0.5.15) - 2026-04-09
 
 ### Other
