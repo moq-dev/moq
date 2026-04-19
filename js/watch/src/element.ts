@@ -2,14 +2,11 @@ import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
-import { Broadcast, type CatalogAttr, type CatalogFormat, catalogAttrSchema } from "./broadcast";
+import { Broadcast, type CatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
 
-function parseCatalogAttr(value: string | null): CatalogFormat[] {
-	const parsed = catalogAttrSchema.safeParse(value);
-	if (!parsed.success) return ["hang"];
-	if (parsed.data === "auto") return ["hang", "msf"];
-	return [parsed.data];
+function parseCatalog(value: string | null): CatalogFormat {
+	return value === "msf" ? "msf" : "hang";
 }
 
 const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog"] as const;
@@ -183,7 +180,7 @@ export default class MoqWatch extends HTMLElement {
 			// Deprecated: use latency="<number>" instead.
 			this.#setLatencyNumber(newValue);
 		} else if (name === "catalog") {
-			this.broadcast.catalogFormats.set(parseCatalogAttr(newValue));
+			this.broadcast.catalogFormat.set(parseCatalog(newValue));
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -256,16 +253,12 @@ export default class MoqWatch extends HTMLElement {
 		this.backend.latency.set(value as Time.Milli);
 	}
 
-	get catalog(): CatalogFormat[] {
-		return this.broadcast.catalogFormats.peek();
+	get catalog(): CatalogFormat {
+		return this.broadcast.catalogFormat.peek();
 	}
 
-	set catalog(value: CatalogAttr | CatalogFormat[]) {
-		if (typeof value === "string") {
-			this.broadcast.catalogFormats.set(parseCatalogAttr(value));
-		} else {
-			this.broadcast.catalogFormats.set(value);
-		}
+	set catalog(value: CatalogFormat) {
+		this.broadcast.catalogFormat.set(value);
 	}
 }
 

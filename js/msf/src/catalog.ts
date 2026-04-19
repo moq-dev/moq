@@ -1,13 +1,17 @@
 import type * as Moq from "@moq/lite";
-import { z } from "zod";
+import * as z from "zod/mini";
 
-export const PackagingSchema = z.enum(["loc", "cmaf", "legacy", "mediatimeline", "eventtimeline"]).or(z.string());
+export const PackagingSchema = z.union([
+	z.enum(["loc", "cmaf", "legacy", "mediatimeline", "eventtimeline"]),
+	z.string(),
+]);
 
 export type Packaging = z.infer<typeof PackagingSchema>;
 
-export const RoleSchema = z
-	.enum(["video", "audio", "audiodescription", "caption", "subtitle", "signlanguage"])
-	.or(z.string());
+export const RoleSchema = z.union([
+	z.enum(["video", "audio", "audiodescription", "caption", "subtitle", "signlanguage"]),
+	z.string(),
+]);
 
 export type Role = z.infer<typeof RoleSchema>;
 
@@ -15,17 +19,17 @@ export const TrackSchema = z.object({
 	name: z.string(),
 	packaging: PackagingSchema,
 	isLive: z.boolean(),
-	role: RoleSchema.optional(),
-	codec: z.string().optional(),
-	width: z.number().optional(),
-	height: z.number().optional(),
-	framerate: z.number().optional(),
-	samplerate: z.number().optional(),
-	channelConfig: z.string().optional(),
-	bitrate: z.number().optional(),
-	initData: z.string().optional(),
-	renderGroup: z.number().optional(),
-	altGroup: z.number().optional(),
+	role: z.optional(RoleSchema),
+	codec: z.optional(z.string()),
+	width: z.optional(z.number()),
+	height: z.optional(z.number()),
+	framerate: z.optional(z.number()),
+	samplerate: z.optional(z.number()),
+	channelConfig: z.optional(z.string()),
+	bitrate: z.optional(z.number()),
+	initData: z.optional(z.string()),
+	renderGroup: z.optional(z.number()),
+	altGroup: z.optional(z.number()),
 });
 
 export type Track = z.infer<typeof TrackSchema>;
