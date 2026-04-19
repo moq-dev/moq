@@ -13,7 +13,7 @@ export interface WebSocketOptions {
 	// By default, `https` => `wss` and `http` => `ws`.
 	url?: URL;
 
-	// The delay in milliseconds before attempting the WebSocket fallback. (default: 200)
+	// The delay in milliseconds before attempting the WebSocket fallback. (default: 500)
 	// If WebSocket won the previous race for a given URL, this will be 0.
 	delay?: DOMHighResTimeStamp;
 }
@@ -50,20 +50,26 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	}
 
 	// Create a cancel promise to kill whichever is still connecting.
+	// `cancelled` lets us synchronously check if the race is already decided,
+	// so the WebSocket fallback can bail before opening a socket.
+	let cancelled = false;
 	let done: (() => void) | undefined;
 	const cancel = new Promise<void>((resolve) => {
-		done = resolve;
+		done = () => {
+			cancelled = true;
+			resolve();
+		};
 	});
 
 	const webtransport =
 		globalThis.WebTransport && !isFirefox ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
 
-	// Give QUIC a 200ms head start to connect before trying WebSocket, unless WebSocket has won in the past.
+	// Give QUIC a 500ms head start to connect before trying WebSocket, unless WebSocket has won in the past.
 	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
-	const headstart = !webtransport || websocketWon.has(url.toString()) ? 0 : (props?.websocket?.delay ?? 200);
+	const headstart = !webtransport || websocketWon.has(url.toString()) ? 0 : (props?.websocket?.delay ?? 500);
 	const websocket =
 		props?.websocket?.enabled !== false
-			? connectWebSocket(props?.websocket?.url ?? url, headstart, cancel)
+			? connectWebSocket(props?.websocket?.url ?? url, headstart, cancel, () => cancelled)
 			: undefined;
 
 	if (!websocket && !webtransport) {
@@ -393,11 +399,21 @@ async function connectWebTransport(
 }
 
 // TODO accept arguments to control the port/path used.
-async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>): Promise<Session | undefined> {
+async function connectWebSocket(
+	url: URL,
+	delay: number,
+	cancel: Promise<void>,
+	isCancelled: () => boolean,
+): Promise<Session | undefined> {
 	const timer = new Promise<void>((resolve) => setTimeout(resolve, delay));
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
+
+	// Yield a microtask so a concurrently-resolving WebTransport has a chance
+	// to flip the cancelled flag before we open a socket.
+	await Promise.resolve();
+	if (isCancelled()) return undefined;
 
 	const quic = new Session(url);
 
