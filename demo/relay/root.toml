@@ -33,9 +33,3 @@ key = "root.jwk"
 # Allow anonymous clients to subscribe and publish to the prefixes below.
 subscribe = ["anon", "demo"]
 publish = ["anon", "demo/viewer"]
-
-# The "root" name is historical — with hop-based routing this node is just
-# another mesh peer. It can either dial the leaves (set `connect` below) or
-# sit passive and wait for them to dial in.
-[cluster]
-# connect = ["localhost:4444", "localhost:4445"]

@@ -1,4 +1,4 @@
-set fallback
+set fallback := true
 
 # Run a localhost relay server without authentication.
 default:
@@ -43,8 +43,8 @@ ca:
     	-keyout ca.key -out ca.pem
 
 # Generate a self-signed certificate using the root CA.
-# Regenerated on every invocation so Chrome's WebTransport hash pinning,
-# which requires <=14 day validity, never trips over a stale cert.
+
+# Chrome requires a <=14 day validity for self-signed certs.
 cert name: ca
     #!/usr/bin/env bash
     set -euo pipefail
