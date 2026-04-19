@@ -1,6 +1,6 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{MAX_HOPS, Origin, OriginList, Path, coding::*};
+use crate::{Origin, OriginList, Path, coding::*};
 
 use super::{Message, Version};
 
@@ -29,14 +29,11 @@ impl Message for Announce<'_> {
 			Version::Lite01 | Version::Lite02 => OriginList::new(),
 			Version::Lite03 => {
 				// Lite03 sends only a hop count, not individual ids — fill with UNKNOWN placeholders.
+				// push() enforces MAX_HOPS and `?` lifts the overflow to DecodeError::BoundsExceeded.
 				let count = u64::decode(r, version)? as usize;
-				if count > MAX_HOPS {
-					return Err(DecodeError::BoundsExceeded);
-				}
 				let mut list = OriginList::new();
 				for _ in 0..count {
-					// Invariant: count <= MAX_HOPS, so push can't fail.
-					list.push(Origin::UNKNOWN).expect("bounded by MAX_HOPS");
+					list.push(Origin::UNKNOWN)?;
 				}
 				list
 			}

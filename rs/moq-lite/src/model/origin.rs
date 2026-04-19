@@ -114,6 +114,12 @@ impl fmt::Display for TooManyOrigins {
 
 impl std::error::Error for TooManyOrigins {}
 
+impl From<TooManyOrigins> for DecodeError {
+	fn from(_: TooManyOrigins) -> Self {
+		DecodeError::BoundsExceeded
+	}
+}
+
 impl OriginList {
 	/// Create an empty list.
 	pub fn new() -> Self {
@@ -341,6 +347,14 @@ impl OriginNode {
 		} else if let Some(existing) = &mut self.broadcast {
 			// This node is a leaf with an existing broadcast. Prefer the shorter or equal hop path;
 			// on ties, the newer broadcast wins, since the previous one may be about to close.
+			//
+			// Drop duplicates (same underlying broadcast delivered via multiple links) so the
+			// backup queue can't accumulate clones of the active entry and trigger redundant
+			// reannouncements when a peer churns.
+			if existing.active.is_clone(broadcast) || existing.backup.iter().any(|b| b.is_clone(broadcast)) {
+				return;
+			}
+
 			if broadcast.hops.len() <= existing.active.hops.len() {
 				let old = existing.active.clone();
 				existing.active = broadcast.clone();
