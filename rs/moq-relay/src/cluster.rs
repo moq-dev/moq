@@ -115,12 +115,26 @@ impl Cluster {
 			url.query_pairs_mut().append_pair("jwt", &token);
 		}
 
-		let mut backoff = tokio::time::Duration::from_secs(1);
+		let base_backoff = tokio::time::Duration::from_secs(1);
 		let max_backoff = tokio::time::Duration::from_secs(300);
+		// Sessions shorter than this are treated as churn: we keep backing off
+		// instead of resetting, otherwise a peer that rejects us instantly would
+		// turn into a tight reconnect loop.
+		let stable_threshold = tokio::time::Duration::from_secs(10);
+
+		let mut backoff = base_backoff;
 
 		loop {
-			match self.run_remote_once(&url).await {
-				Ok(()) => backoff = tokio::time::Duration::from_secs(1),
+			let started = tokio::time::Instant::now();
+			let result = self.run_remote_once(&url).await;
+			let elapsed = started.elapsed();
+
+			match result {
+				Ok(()) if elapsed >= stable_threshold => backoff = base_backoff,
+				Ok(()) => {
+					tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off");
+					backoff = (backoff * 2).min(max_backoff);
+				}
 				Err(err) => {
 					tracing::warn!(%err, "cluster peer error; will retry");
 					backoff = (backoff * 2).min(max_backoff);
