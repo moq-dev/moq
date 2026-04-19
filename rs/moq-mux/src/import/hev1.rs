@@ -93,9 +93,9 @@ impl Hev1 {
 		catalog
 			.video
 			.renditions
-			.insert(self.track.info.name.clone(), config.clone());
+			.insert(self.track.name.clone(), config.clone());
 
-		tracing::debug!(name = ?self.track.info.name, ?config, "updated catalog");
+		tracing::debug!(name = ?self.track.name, ?config, "updated catalog");
 
 		self.config = Some(config);
 
@@ -319,7 +319,7 @@ impl Hev1 {
 				self.jitter = Some(duration);
 
 				if let Ok(jitter) = duration.convert() {
-					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.info.name) {
+					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.name) {
 						c.jitter = Some(jitter);
 					}
 				}
@@ -366,8 +366,8 @@ impl Hev1 {
 
 impl Drop for Hev1 {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.info.name, "ending track");
-		self.catalog.lock().video.remove(&self.track.info.name);
+		tracing::debug!(name = ?self.track.name, "ending track");
+		self.catalog.lock().video.remove(&self.track.name);
 	}
 }
 

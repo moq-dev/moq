@@ -86,6 +86,123 @@ where
 	}
 }
 
+/// Maximum number of origins (hops) an [`OriginList`] can hold.
+///
+/// Caps pathological or loop-induced announcements at a reasonable cluster
+/// diameter; appending past this limit returns [`TooManyOrigins`] rather than
+/// silently truncating.
+pub const MAX_HOPS: usize = 32;
+
+/// Bounded list of [`Origin`] entries, typically the hop chain of a broadcast.
+///
+/// Guarantees `len() <= MAX_HOPS`. Construct via [`OriginList::new`] +
+/// [`OriginList::push`], or fall back to the fallible [`TryFrom<Vec<Origin>>`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct OriginList(Vec<Origin>);
+
+/// Returned when an operation would grow an [`OriginList`] past [`MAX_HOPS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TooManyOrigins;
+
+impl fmt::Display for TooManyOrigins {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "too many origins (max {MAX_HOPS})")
+	}
+}
+
+impl std::error::Error for TooManyOrigins {}
+
+impl OriginList {
+	/// Create an empty list.
+	pub fn new() -> Self {
+		Self(Vec::new())
+	}
+
+	/// Append an [`Origin`]. Returns [`TooManyOrigins`] if the list is full.
+	pub fn push(&mut self, origin: Origin) -> Result<(), TooManyOrigins> {
+		if self.0.len() >= MAX_HOPS {
+			return Err(TooManyOrigins);
+		}
+		self.0.push(origin);
+		Ok(())
+	}
+
+	/// Returns true if any entry matches `origin`.
+	pub fn contains(&self, origin: &Origin) -> bool {
+		self.0.contains(origin)
+	}
+
+	pub fn len(&self) -> usize {
+		self.0.len()
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.0.is_empty()
+	}
+
+	pub fn iter(&self) -> std::slice::Iter<'_, Origin> {
+		self.0.iter()
+	}
+
+	pub fn as_slice(&self) -> &[Origin] {
+		&self.0
+	}
+}
+
+impl TryFrom<Vec<Origin>> for OriginList {
+	type Error = TooManyOrigins;
+
+	fn try_from(v: Vec<Origin>) -> Result<Self, Self::Error> {
+		if v.len() > MAX_HOPS {
+			return Err(TooManyOrigins);
+		}
+		Ok(Self(v))
+	}
+}
+
+impl<'a> IntoIterator for &'a OriginList {
+	type Item = &'a Origin;
+	type IntoIter = std::slice::Iter<'a, Origin>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.iter()
+	}
+}
+
+impl<V: Copy> Encode<V> for OriginList
+where
+	u64: Encode<V>,
+	Origin: Encode<V>,
+{
+	fn encode<W: bytes::BufMut>(&self, w: &mut W, version: V) -> Result<(), EncodeError> {
+		(self.0.len() as u64).encode(w, version)?;
+		for origin in &self.0 {
+			origin.encode(w, version)?;
+		}
+		Ok(())
+	}
+}
+
+impl<V: Copy> Decode<V> for OriginList
+where
+	u64: Decode<V>,
+	Origin: Decode<V>,
+{
+	fn decode<R: bytes::Buf>(r: &mut R, version: V) -> Result<Self, DecodeError> {
+		let count = u64::decode(r, version)? as usize;
+		if count > MAX_HOPS {
+			return Err(DecodeError::BoundsExceeded);
+		}
+		let mut list = Vec::with_capacity(count);
+		for _ in 0..count {
+			list.push(Origin::decode(r, version)?);
+		}
+		Ok(Self(list))
+	}
+}
+
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -224,7 +341,7 @@ impl OriginNode {
 		} else if let Some(existing) = &mut self.broadcast {
 			// This node is a leaf with an existing broadcast. Prefer the shorter or equal hop path;
 			// on ties, the newer broadcast wins, since the previous one may be about to close.
-			if broadcast.info.hops.len() <= existing.active.info.hops.len() {
+			if broadcast.hops.len() <= existing.active.hops.len() {
 				let old = existing.active.clone();
 				existing.active = broadcast.clone();
 				existing.backup.push_back(old);
@@ -317,7 +434,7 @@ impl OriginNode {
 				.backup
 				.iter()
 				.enumerate()
-				.min_by_key(|(_, b)| b.info.hops.len())
+				.min_by_key(|(_, b)| b.hops.len())
 				.map(|(i, _)| i);
 			if let Some(idx) = best {
 				let active = entry.backup.remove(idx).expect("index in range");
@@ -425,17 +542,25 @@ pub type OriginAnnounce = (PathOwned, Option<BroadcastConsumer>);
 /// Announces broadcasts to consumers over the network.
 #[derive(Clone)]
 pub struct OriginProducer {
-	/// Identity for this origin. Appended to broadcast hops when
-	/// re-announcing so downstream relays can detect loops and prefer the
-	/// shortest path.
-	pub info: Origin,
+	// Identity for this origin. Appended to broadcast hops when
+	// re-announcing so downstream relays can detect loops and prefer the
+	// shortest path.
+	info: Origin,
 
 	// The roots of the tree that we are allowed to publish.
 	// A path of "" means we can publish anything.
 	nodes: OriginNodes,
 
-	/// The prefix that is automatically stripped from all paths.
+	// The prefix that is automatically stripped from all paths.
 	root: PathOwned,
+}
+
+impl std::ops::Deref for OriginProducer {
+	type Target = Origin;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
 }
 
 impl OriginProducer {
@@ -469,7 +594,7 @@ impl OriginProducer {
 		let path = path.as_path();
 
 		// Loop detection: refuse broadcasts whose hop chain already contains our id.
-		if broadcast.info.hops.contains(&self.info) {
+		if broadcast.hops.contains(&self.info) {
 			return false;
 		}
 
@@ -566,13 +691,21 @@ impl OriginProducer {
 /// NOTE: Clone is expensive, try to avoid it.
 pub struct OriginConsumer {
 	id: ConsumerId,
-	/// Identity of the origin this consumer was derived from.
-	pub info: Origin,
+	// Identity of the origin this consumer was derived from.
+	info: Origin,
 	nodes: OriginNodes,
 	updates: mpsc::UnboundedReceiver<OriginAnnounce>,
 
-	/// A prefix that is automatically stripped from all paths.
+	// A prefix that is automatically stripped from all paths.
 	root: PathOwned,
+}
+
+impl std::ops::Deref for OriginConsumer {
+	type Target = Origin;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
 }
 
 impl OriginConsumer {
@@ -736,6 +869,25 @@ mod tests {
 	use crate::Broadcast;
 
 	use super::*;
+
+	#[test]
+	fn origin_list_push_fails_at_limit() {
+		let mut list = OriginList::new();
+		for _ in 0..MAX_HOPS {
+			list.push(Origin::new()).unwrap();
+		}
+		assert_eq!(list.len(), MAX_HOPS);
+		assert_eq!(list.push(Origin::new()), Err(TooManyOrigins));
+	}
+
+	#[test]
+	fn origin_list_try_from_vec_enforces_limit() {
+		let under: Vec<Origin> = (0..MAX_HOPS).map(|_| Origin::new()).collect();
+		assert!(OriginList::try_from(under).is_ok());
+
+		let over: Vec<Origin> = (0..MAX_HOPS + 1).map(|_| Origin::new()).collect();
+		assert_eq!(OriginList::try_from(over), Err(TooManyOrigins));
+	}
 
 	#[tokio::test]
 	async fn test_announce() {

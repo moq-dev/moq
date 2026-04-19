@@ -69,8 +69,8 @@ impl Opus {
 			jitter: Some(moq_lite::Time::new(20)),
 		};
 
-		catalog.lock().audio.insert(&track.info.name, audio_config.clone())?;
-		tracing::debug!(name = ?track.info.name, config = ?audio_config, "starting track");
+		catalog.lock().audio.insert(&track.name, audio_config.clone())?;
+		tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
 
 		Ok(Self {
 			catalog,
@@ -123,7 +123,7 @@ impl Opus {
 
 impl Drop for Opus {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.info.name, "ending track");
-		self.catalog.lock().audio.remove(&self.track.info.name);
+		tracing::debug!(name = ?self.track.name, "ending track");
+		self.catalog.lock().audio.remove(&self.track.name);
 	}
 }

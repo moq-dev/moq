@@ -1,6 +1,6 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Origin, Path, coding::*};
+use crate::{MAX_HOPS, Origin, OriginList, Path, coding::*};
 
 use super::{Message, Version};
 
@@ -12,46 +12,35 @@ pub enum Announce<'a> {
 	Active {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: Vec<Origin>,
+		hops: OriginList,
 	},
 	Ended {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: Vec<Origin>,
+		hops: OriginList,
 	},
 }
-
-/// Maximum number of hops carried in an Announce message.
-/// Rejects pathological or loop-induced announcements beyond a reasonable
-/// cluster diameter.
-const MAX_HOPS: usize = 32;
 
 impl Message for Announce<'_> {
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		let status = AnnounceStatus::decode(r, version)?;
 		let suffix = Path::decode(r, version)?;
 		let hops = match version {
-			Version::Lite01 | Version::Lite02 => Vec::new(),
+			Version::Lite01 | Version::Lite02 => OriginList::new(),
 			Version::Lite03 => {
-				// Lite03 sends only a hop count, not individual IDs — placeholder UNKNOWN entries.
+				// Lite03 sends only a hop count, not individual ids — fill with UNKNOWN placeholders.
 				let count = u64::decode(r, version)? as usize;
 				if count > MAX_HOPS {
 					return Err(DecodeError::BoundsExceeded);
 				}
-				vec![Origin::UNKNOWN; count]
-			}
-			_ => {
-				// Lite04+: count followed by that many Origin varints.
-				let count = u64::decode(r, version)? as usize;
-				if count > MAX_HOPS {
-					return Err(DecodeError::BoundsExceeded);
-				}
-				let mut ids = Vec::with_capacity(count);
+				let mut list = OriginList::new();
 				for _ in 0..count {
-					ids.push(Origin::decode(r, version)?);
+					// Invariant: count <= MAX_HOPS, so push can't fail.
+					list.push(Origin::UNKNOWN).expect("bounded by MAX_HOPS");
 				}
-				ids
+				list
 			}
+			_ => OriginList::decode(r, version)?,
 		};
 
 		Ok(match status {
@@ -78,29 +67,12 @@ impl Message for Announce<'_> {
 	}
 }
 
-fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &[Origin]) -> Result<(), EncodeError> {
-	// Silently truncate to the most recent MAX_HOPS so callers don't have to
-	// think about the limit. Keeping the tail preserves our own ID (which was
-	// just pushed on) and the closest upstream origins, which are the ones
-	// most useful for near-term loop detection.
-	let hops = if hops.len() > MAX_HOPS {
-		&hops[hops.len() - MAX_HOPS..]
-	} else {
-		hops
-	};
+fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &OriginList) -> Result<(), EncodeError> {
 	match version {
-		Version::Lite01 | Version::Lite02 => {}
-		Version::Lite03 => {
-			(hops.len() as u64).encode(w, version)?;
-		}
-		_ => {
-			(hops.len() as u64).encode(w, version)?;
-			for id in hops {
-				id.encode(w, version)?;
-			}
-		}
+		Version::Lite01 | Version::Lite02 => Ok(()),
+		Version::Lite03 => (hops.len() as u64).encode(w, version),
+		_ => hops.encode(w, version),
 	}
-	Ok(())
 }
 
 /// Sent by the subscriber to request ANNOUNCE messages.

@@ -121,7 +121,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
 					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
-					self.start_announce(path, Vec::new(), &mut producers)?;
+					self.start_announce(path, crate::OriginList::new(), &mut producers)?;
 				}
 			}
 			_ => {
@@ -199,7 +199,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
-		hops: Vec<crate::Origin>,
+		hops: crate::OriginList,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<(), Error> {
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
@@ -262,15 +262,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let msg = lite::Subscribe {
 			id,
 			broadcast: broadcast.to_owned(),
-			track: (&track.info.name).into(),
-			priority: track.info.priority,
+			track: (&track.name).into(),
+			priority: track.priority,
 			ordered: true,
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,
 			end_group: None,
 		};
 
-		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe started");
+		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe started");
 
 		let res = tokio::select! {
 			_ = track.unused() => Err(Error::Cancel),
@@ -279,15 +279,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe cancelled");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
 			Err(err) => {
-				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, %err, "subscribe error");
+				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.name, %err, "subscribe error");
 				let _ = track.abort(err);
 			}
 			_ => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe complete");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe complete");
 				let _ = track.finish();
 			}
 		}
@@ -346,7 +346,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let _ = group.abort(Error::Cancel);
 			}
 			Err(err) => {
-				tracing::debug!(%err, group = %group.info.sequence, "group error");
+				tracing::debug!(%err, group = %group.sequence, "group error");
 				let _ = group.abort(err);
 			}
 			_ => {
@@ -381,7 +381,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut FrameProducer,
 	) -> Result<(), Error> {
-		let mut remain = frame.info.size;
+		let mut remain = frame.size;
 
 		const MAX_CHUNK: usize = 1024 * 1024; // 1 MiB
 		while remain > 0 {

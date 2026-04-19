@@ -6,7 +6,7 @@ use std::{
 
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
-use super::{Origin, Track};
+use super::{OriginList, Track};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -14,9 +14,9 @@ use super::{Origin, Track};
 #[derive(Clone, Debug, Default)]
 pub struct Broadcast {
 	/// The chain of origins the broadcast has traversed. Each relay appends its own
-	/// [`Origin`] when forwarding, so the list is used for loop detection and
+	/// [`crate::Origin`] when forwarding, so the list is used for loop detection and
 	/// shortest-path preference.
-	pub hops: Vec<Origin>,
+	pub hops: OriginList,
 }
 
 impl Broadcast {
@@ -60,7 +60,7 @@ fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>,
 /// or handle on-demand requests via [Self::dynamic].
 #[derive(Clone)]
 pub struct BroadcastProducer {
-	pub info: Broadcast,
+	info: Broadcast,
 	state: conducer::Producer<State>,
 }
 
@@ -86,7 +86,7 @@ impl BroadcastProducer {
 	pub fn insert_track(&mut self, track: &TrackProducer) -> Result<(), Error> {
 		let mut state = modify(&self.state)?;
 
-		let hash_map::Entry::Vacant(entry) = state.tracks.entry(track.info.name.clone()) else {
+		let hash_map::Entry::Vacant(entry) = state.tracks.entry(track.name.clone()) else {
 			return Err(Error::Duplicate);
 		};
 
@@ -183,7 +183,7 @@ impl BroadcastProducer {
 /// Dropped when no longer needed; pending requests are automatically aborted.
 #[derive(Clone)]
 pub struct BroadcastDynamic {
-	pub info: Broadcast,
+	info: Broadcast,
 	state: conducer::Producer<State>,
 }
 
@@ -298,7 +298,7 @@ impl BroadcastDynamic {
 /// Subscribe to arbitrary broadcast/tracks.
 #[derive(Clone)]
 pub struct BroadcastConsumer {
-	pub info: Broadcast,
+	info: Broadcast,
 	state: conducer::Consumer<State>,
 }
 
@@ -337,7 +337,7 @@ impl BroadcastConsumer {
 
 		// Insert a weak reference for deduplication.
 		let weak = producer.weak();
-		state.tracks.insert(producer.info.name.clone(), weak.clone());
+		state.tracks.insert(producer.name.clone(), weak.clone());
 		state.requests.push(producer);
 
 		// Remove the track from the lookup when it's unused.
@@ -429,7 +429,7 @@ mod test {
 
 		// Create a new track and insert it into the broadcast.
 		let track1 = producer.assert_create_track(&Track::new("track1"));
-		let track1c = consumer.assert_subscribe_track(&track1.info);
+		let track1c = consumer.assert_subscribe_track(&*track1);
 		let track2 = consumer.assert_subscribe_track(&Track::new("track2"));
 
 		// Explicitly aborting the broadcast should cascade to child tracks.
