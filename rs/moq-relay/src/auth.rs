@@ -19,12 +19,10 @@ pub struct AuthParams {
 	pub path: String,
 	/// A JWT token, if provided via the `jwt` query parameter.
 	pub jwt: Option<String>,
-	/// A cluster registration identifier, if provided via the `register` query parameter.
-	pub register: Option<String>,
 }
 
 impl AuthParams {
-	/// Creates params with just a path and no token or registration.
+	/// Creates params with just a path and no token.
 	pub fn new(path: impl Into<String>) -> Self {
 		Self {
 			path: path.into(),
@@ -36,20 +34,17 @@ impl AuthParams {
 	pub fn from_url(url: &url::Url) -> Self {
 		let path = url.path().to_string();
 		let mut jwt = None;
-		let mut register = None;
 
 		for (k, v) in url.query_pairs() {
 			if v.is_empty() {
 				continue;
 			}
-			match k.as_ref() {
-				"jwt" => jwt = Some(v.into_owned()),
-				"register" => register = Some(v.into_owned()),
-				_ => {}
+			if k.as_ref() == "jwt" {
+				jwt = Some(v.into_owned());
 			}
 		}
 
-		Self { path, jwt, register }
+		Self { path, jwt }
 	}
 }
 
@@ -68,9 +63,6 @@ pub enum AuthError {
 
 	#[error("the path does not match the root")]
 	IncorrectRoot,
-
-	#[error("a cluster token was expected")]
-	ExpectedCluster,
 
 	#[error("key not found")]
 	KeyNotFound,
@@ -400,27 +392,19 @@ pub struct AuthToken {
 	pub subscribe: PathPrefixes,
 	/// Paths the holder is allowed to publish to, relative to `root`.
 	pub publish: PathPrefixes,
-	/// Whether this token grants cluster-level privileges.
-	pub cluster: bool,
-	/// The cluster node name to register, if this is a cluster connection.
-	pub register: Option<String>,
 }
 
 impl AuthToken {
 	/// Construct a token for a peer that was authenticated at the TLS layer
 	/// via mTLS. These peers are granted full (root-scoped) publish and
-	/// subscribe access plus cluster privileges.
-	///
-	/// `node` is the peer's cluster node name. It is bound to the cert —
-	/// either the first DNS SAN directly, or the SAN with a `:port` suffix
-	/// supplied at connect time (DNS SANs cannot carry ports).
-	pub fn from_peer(node: String) -> Self {
+	/// subscribe access. The cert's trust chain (verified against the
+	/// configured CA) is the only credential we require — DNS SANs and the
+	/// `?register=` name are no longer consulted.
+	pub fn unrestricted() -> Self {
 		Self {
 			root: PathOwned::default(),
 			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
-			cluster: true,
-			register: Some(node),
 		}
 	}
 }
@@ -687,14 +671,8 @@ impl Auth {
 		let subscribe = scope(claims.subscribe);
 		let publish = scope(claims.publish);
 
-		let register = match (params.register.as_deref(), claims.cluster) {
-			(Some(node), true) => Some(node.to_owned()),
-			(Some(_), false) => return Err(AuthError::ExpectedCluster),
-			_ => None,
-		};
-
-		// Reject connections that end up with no permissions after reduction
-		if subscribe.is_empty() && publish.is_empty() && !claims.cluster {
+		// Reject connections that end up with no permissions after reduction.
+		if subscribe.is_empty() && publish.is_empty() {
 			return Err(AuthError::IncorrectRoot);
 		}
 
@@ -702,8 +680,6 @@ impl Auth {
 			root: root.to_owned(),
 			subscribe,
 			publish,
-			cluster: claims.cluster,
-			register,
 		})
 	}
 

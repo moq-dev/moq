@@ -141,26 +141,15 @@ impl QuinnClient {
 // ── Peer identity extraction ───────────────────────────────────────
 
 fn extract_peer_identity(conn: &quinn::Connection) -> anyhow::Result<Option<PeerIdentity>> {
+	// rustls already validated the client cert chain against our configured
+	// `tls.root` during the handshake, so we just need to report whether one
+	// was presented. The caller uses that as the gate for cluster-level trust.
 	let Some(any) = conn.peer_identity() else {
 		return Ok(None);
 	};
-	let certs = any
-		.downcast::<Vec<CertificateDer<'static>>>()
+	any.downcast::<Vec<CertificateDer<'static>>>()
 		.map_err(|_| anyhow::anyhow!("peer identity is not a rustls certificate chain"))?;
-	let leaf = certs.first().context("peer certificate chain is empty")?;
-
-	let (_, cert) = x509_parser::parse_x509_certificate(leaf.as_ref()).context("failed to parse peer certificate")?;
-	let dns_name = cert
-		.subject_alternative_name()
-		.context("failed to read subject alternative name extension")?
-		.and_then(|san| {
-			san.value.general_names.iter().find_map(|name| match name {
-				x509_parser::extensions::GeneralName::DNSName(n) => Some((*n).to_string()),
-				_ => None,
-			})
-		});
-
-	Ok(Some(PeerIdentity { dns_name }))
+	Ok(Some(PeerIdentity::default()))
 }
 
 // ── Server ──────────────────────────────────────────────────────────

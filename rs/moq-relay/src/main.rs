@@ -49,18 +49,6 @@ async fn main() -> anyhow::Result<()> {
 		config.auth.init().await?
 	};
 
-	// If we're dialing a remote cluster with an mTLS identity, validate the client
-	// cert has a DNS SAN (cluster peers will use it to authenticate us). In the
-	// hop-based mesh every peer is identified by its cert SAN, not by a separate
-	// node name, so we only sanity-check that the identity exists.
-	if !config.cluster.connect.is_empty() && config.client.tls.cert.is_some() {
-		config
-			.client
-			.tls
-			.cert_dns_name()?
-			.context("client.tls.cert has no DNS SAN; cluster peers cannot authenticate")?;
-	}
-
 	let cluster = Cluster::new(config.cluster, client);
 
 	// Create a web server too.

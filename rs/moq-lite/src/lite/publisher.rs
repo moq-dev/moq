@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::time::Duration;
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -200,7 +201,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								// If the chain is already at MAX_HOPS, skip the announce — this link is
 								// effectively unreachable and the peer will eventually prune the loop.
 								let mut hops = active.hops.clone();
-								if hops.push(Origin::from(origin.id)).is_err() {
+								if hops.push(*(*origin).deref()).is_err() {
 									tracing::warn!(
 										broadcast = %origin.absolute(&path),
 										"dropping announce; hop chain at MAX_HOPS (possible loop)",

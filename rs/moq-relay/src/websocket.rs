@@ -36,7 +36,6 @@ pub(crate) async fn serve_ws(
 	let params = AuthParams {
 		path,
 		jwt: query.jwt,
-		register: query.register,
 	};
 	let token = state.auth.verify(&params).await?;
 	let publish = state.cluster.publisher(&token);
