@@ -3,7 +3,6 @@ use axum::handler::HandlerWithoutStateExt;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{Router, http::Method, routing::get};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
@@ -11,15 +10,15 @@ use tower_http::services::ServeDir;
 
 // Initialize the HTTP server (but don't serve yet).
 pub async fn run_web(
-	bind: SocketAddr,
+	bind: &str,
 	tls_info: Arc<RwLock<moq_native::ServerTlsInfo>>,
 	public: Option<PathBuf>,
 ) -> anyhow::Result<()> {
 	let listen = tokio::net::lookup_host(bind)
 		.await
-		.context("invalid listen address")?
+		.with_context(|| format!("invalid listen address '{bind}'"))?
 		.next()
-		.context("invalid listen address")?;
+		.with_context(|| format!("no addresses resolved for listen '{bind}'"))?;
 
 	async fn handle_404() -> impl IntoResponse {
 		(StatusCode::NOT_FOUND, "Not found")

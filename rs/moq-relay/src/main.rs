@@ -16,8 +16,6 @@ async fn main() -> anyhow::Result<()> {
 
 	let mut config = Config::load()?;
 
-	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
-
 	config.client.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 	config.server.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 
@@ -26,6 +24,8 @@ async fn main() -> anyhow::Result<()> {
 	#[allow(unused_mut)]
 	let mut server = config.server.init()?;
 	let client = config.client.clone().init()?;
+
+	let addr = server.local_addr()?;
 
 	#[cfg(feature = "iroh")]
 	let (server, client) = {

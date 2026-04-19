@@ -114,7 +114,7 @@ impl QuicheServer {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
 		}
 
-		let listen = config.bind.unwrap_or("[::]:443".parse().unwrap());
+		let listen = config.resolve_bind()?;
 
 		let (chain, key) = if !config.tls.generate.is_empty() {
 			generate_quiche_cert(&config.tls.generate)?

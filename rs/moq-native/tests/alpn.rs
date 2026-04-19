@@ -15,7 +15,7 @@ async fn connect_with_version(version: &str) {
 
 	// ── server ──────────────────────────────────────────────────────
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.version = vec![version];
 
@@ -64,7 +64,7 @@ async fn connect_with_webtransport(version: Option<&str>) {
 
 	// ── server ──────────────────────────────────────────────────────
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	if let Some(v) = version {
 		server_config.version = vec![v];
