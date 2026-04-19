@@ -114,7 +114,7 @@ impl QuicheServer {
 			tracing::warn!("QUIC-LB is not supported with the quiche backend; ignoring server ID");
 		}
 
-		let listen = crate::resolve_addr(config.bind.as_deref().unwrap_or(crate::server::DEFAULT_BIND))
+		let listen = crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND)
 			.context("failed to resolve bind address")?;
 
 		let (chain, key) = if !config.tls.generate.is_empty() {

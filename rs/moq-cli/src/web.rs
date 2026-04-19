@@ -14,7 +14,11 @@ pub async fn run_web(
 	tls_info: Arc<RwLock<moq_native::ServerTlsInfo>>,
 	public: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-	let listen = moq_native::resolve_addr(bind).context("invalid listen address")?;
+	let listen = tokio::net::lookup_host(bind)
+		.await
+		.context("invalid listen address")?
+		.next()
+		.context("invalid listen address")?;
 
 	async fn handle_404() -> impl IntoResponse {
 		(StatusCode::NOT_FOUND, "Not found")
