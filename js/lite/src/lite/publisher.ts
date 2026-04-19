@@ -27,8 +27,8 @@ export class Publisher {
 
 	// Random per-connection origin ID appended to outbound Announce hops, so
 	// the peer can detect loops and prefer shorter paths. Stable for the life
-	// of this Publisher.
-	readonly originId: number;
+	// of this Publisher. 62-bit on the wire, hence `bigint`.
+	readonly originId: bigint;
 
 	#quic: WebTransport;
 

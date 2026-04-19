@@ -11,9 +11,11 @@ const MAX_HOPS = 32;
 export class Announce {
 	suffix: Path.Valid;
 	active: boolean;
-	hops: number[];
+	// OriginIds are 62-bit varints on the wire; `bigint` because the full range
+	// exceeds JS's 53-bit safe integer limit.
+	hops: bigint[];
 
-	constructor(props: { suffix: Path.Valid; active: boolean; hops?: number[] }) {
+	constructor(props: { suffix: Path.Valid; active: boolean; hops?: bigint[] }) {
 		this.suffix = props.suffix;
 		this.active = props.active;
 		this.hops = props.hops ?? [];
@@ -34,7 +36,7 @@ export class Announce {
 				// Lite04+: hop count + individual hop IDs
 				await w.u53(this.hops.length);
 				for (const id of this.hops) {
-					await w.u53(id);
+					await w.u62(id);
 				}
 				break;
 		}
@@ -44,7 +46,7 @@ export class Announce {
 		const active = await r.bool();
 		const suffix = Path.from(await r.string());
 
-		let hops: number[] = [];
+		let hops: bigint[] = [];
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
@@ -52,7 +54,7 @@ export class Announce {
 			case Version.DRAFT_03: {
 				const count = await r.u53();
 				if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
-				hops = new Array(count).fill(0);
+				hops = new Array<bigint>(count).fill(0n);
 				break;
 			}
 			default: {
@@ -61,7 +63,7 @@ export class Announce {
 				if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
 				hops = [];
 				for (let i = 0; i < count; i++) {
-					hops.push(await r.u53());
+					hops.push(await r.u62());
 				}
 				break;
 			}
