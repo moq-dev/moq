@@ -5,11 +5,11 @@ import { MultiBackend } from "./backend";
 import { Broadcast, type CatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
 
-function parseCatalog(value: string | null): CatalogFormat {
+function parseCatalogFormat(value: string | null): CatalogFormat {
 	return value === "msf" ? "msf" : "hang";
 }
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog"] as const;
+const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -179,8 +179,8 @@ export default class MoqWatch extends HTMLElement {
 		} else if (name === "jitter") {
 			// Deprecated: use latency="<number>" instead.
 			this.#setLatencyNumber(newValue);
-		} else if (name === "catalog") {
-			this.broadcast.catalogFormat.set(parseCatalog(newValue));
+		} else if (name === "catalog-format") {
+			this.broadcast.catalogFormat.set(parseCatalogFormat(newValue));
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -253,11 +253,11 @@ export default class MoqWatch extends HTMLElement {
 		this.backend.latency.set(value as Time.Milli);
 	}
 
-	get catalog(): CatalogFormat {
+	get catalogFormat(): CatalogFormat {
 		return this.broadcast.catalogFormat.peek();
 	}
 
-	set catalog(value: CatalogFormat) {
+	set catalogFormat(value: CatalogFormat) {
 		this.broadcast.catalogFormat.set(value);
 	}
 }

@@ -26,7 +26,7 @@ export interface BroadcastProps {
 	reload?: boolean | Signal<boolean>;
 
 	// Which catalog format to use. Default: "hang"
-	catalog?: CatalogFormat | Signal<CatalogFormat>;
+	catalogFormat?: CatalogFormat | Signal<CatalogFormat>;
 }
 
 // A catalog source that (optionally) reloads automatically when live/offline.
@@ -56,7 +56,7 @@ export class Broadcast {
 		this.name = Signal.from(props?.name ?? Path.empty());
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? false);
-		this.catalogFormat = Signal.from(props?.catalog ?? "hang");
+		this.catalogFormat = Signal.from(props?.catalogFormat ?? "hang");
 
 		this.#announced = props?.announced ?? new Signal(new Set());
 
