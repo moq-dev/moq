@@ -53,7 +53,7 @@ pub struct Cluster {
 impl Cluster {
 	/// Creates a new cluster with the given configuration and QUIC client.
 	pub fn new(config: ClusterConfig, client: moq_native::Client) -> Self {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		tracing::info!(origin_id = %origin.info, "cluster initialized");
 		Cluster { config, client, origin }
 	}

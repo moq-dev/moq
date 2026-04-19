@@ -19,8 +19,8 @@ use crate::{
 /// `id` must be non-zero for a real origin; `id == 0` is reserved as a
 /// placeholder for Lite03-style hops where the actual value isn't carried.
 /// Encoding a value outside the 62-bit range (>= 2^62) will fail at the
-/// varint layer; [`Origin::random`] picks a valid nonzero id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+/// varint layer; [`Origin::new`] picks a valid random nonzero id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Origin {
 	pub id: u64,
@@ -31,8 +31,10 @@ impl Origin {
 	/// Never encoded for Lite04+: violates the non-zero invariant and would fail to round-trip.
 	pub(crate) const UNKNOWN: Self = Self { id: 0 };
 
-	/// Generate a random non-zero 62-bit origin id.
-	pub fn random() -> Self {
+	/// Generate a fresh origin with a random non-zero 62-bit id. Callers
+	/// that need a specific id can build one via [`From<u64>`] instead,
+	/// but this is rarely what you want.
+	pub fn new() -> Self {
 		let mut rng = rand::rng();
 		let id = rng.random_range(1..(1u64 << 62));
 		Self { id }
@@ -41,6 +43,12 @@ impl Origin {
 	/// Consume this [Origin] to create a producer that carries its id.
 	pub fn produce(self) -> OriginProducer {
 		OriginProducer::new(self)
+	}
+}
+
+impl Default for Origin {
+	fn default() -> Self {
+		Self::new()
 	}
 }
 
@@ -733,7 +741,7 @@ mod tests {
 	async fn test_announce() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 
@@ -799,7 +807,7 @@ mod tests {
 	async fn test_duplicate() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
@@ -857,7 +865,7 @@ mod tests {
 	async fn test_duplicate_reverse() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 
@@ -883,7 +891,7 @@ mod tests {
 	async fn test_double_publish() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// Ensure it doesn't crash.
@@ -902,7 +910,7 @@ mod tests {
 	#[tokio::test]
 	#[should_panic]
 	async fn test_128() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		let mut consumer = origin.consume();
@@ -917,7 +925,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_128_fix() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		let mut consumer = origin.consume();
@@ -933,7 +941,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_with_root_basic() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// Create a producer with root "/foo"
@@ -954,7 +962,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_with_root_nested() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// Create nested roots
@@ -976,7 +984,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_publish_only_allows() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// Create a producer that can only publish to "allowed" paths
@@ -997,7 +1005,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_publish_only_empty() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 
 		// Creating a producer with no allowed paths should return None
 		assert!(origin.publish_only(&[]).is_none());
@@ -1005,7 +1013,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_consume_only_filters() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 		let broadcast3 = Broadcast::new().produce();
@@ -1035,7 +1043,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_consume_only_multiple_prefixes() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 		let broadcast3 = Broadcast::new().produce();
@@ -1057,7 +1065,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_with_root_and_publish_only() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// User connects to /foo root
@@ -1090,7 +1098,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_with_root_and_consume_only() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 		let broadcast3 = Broadcast::new().produce();
@@ -1116,7 +1124,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_with_root_unauthorized() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 
 		// First limit the producer to specific paths
 		let limited_producer = origin
@@ -1135,7 +1143,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_wildcard_permission() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// Producer with root access (empty string means wildcard)
@@ -1152,7 +1160,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_consume_broadcast_with_permissions() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 
@@ -1180,7 +1188,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_nested_paths_with_permissions() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// Create producer limited to "a/b/c"
@@ -1201,7 +1209,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_multiple_consumers_with_different_permissions() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 		let broadcast3 = Broadcast::new().produce();
@@ -1238,7 +1246,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_with_empty_prefix() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 
@@ -1269,7 +1277,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_narrowing_scope() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 		let broadcast3 = Broadcast::new().produce();
@@ -1306,7 +1314,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_multiple_roots_with_empty_prefix() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 		let broadcast3 = Broadcast::new().produce();
@@ -1335,7 +1343,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_publish_only_with_empty_prefix() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// Producer with specific allowed paths
@@ -1357,7 +1365,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_narrowing_to_deeper_path() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 		let broadcast3 = Broadcast::new().produce();
@@ -1392,7 +1400,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_with_non_matching_prefix() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 
 		// Producer with specific allowed paths
 		let limited_producer = origin
@@ -1410,7 +1418,7 @@ mod tests {
 	// with_root panics when String has trailing slash (AsPath for String skips normalization)
 	#[tokio::test]
 	async fn test_with_root_trailing_slash_consumer() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 
 		// Use an owned String so the trailing slash is NOT normalized away.
 		let prefix = "some_prefix/".to_string();
@@ -1423,7 +1431,7 @@ mod tests {
 	// Same issue but for the producer side of with_root
 	#[tokio::test]
 	async fn test_with_root_trailing_slash_producer() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 
 		// Use an owned String so the trailing slash is NOT normalized away.
 		let prefix = "some_prefix/".to_string();
@@ -1440,7 +1448,7 @@ mod tests {
 	async fn test_with_root_trailing_slash_unannounce() {
 		tokio::time::pause();
 
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 
 		let prefix = "some_prefix/".to_string();
 		let mut consumer = origin.consume().with_root(prefix).unwrap();
@@ -1458,7 +1466,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_select_maintains_access_with_wider_prefix() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 
@@ -1497,7 +1505,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_duplicate_prefixes_deduped() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// publish_only with duplicate prefixes should work (deduped internally)
@@ -1514,7 +1522,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_overlapping_prefixes_deduped() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// "demo" and "demo/foo" — "demo/foo" is redundant, only "demo" should remain
@@ -1532,7 +1540,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_overlapping_prefixes_no_duplicate_announcements() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 		let broadcast = Broadcast::new().produce();
 
 		// Both "demo" and "demo/foo" are requested — should only have one node
@@ -1550,7 +1558,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_allowed_returns_deduped_prefixes() {
-		let origin = Origin::random().produce();
+		let origin = Origin::new().produce();
 
 		let producer = origin
 			.publish_only(&["demo".into(), "demo/foo".into(), "anon".into()])
