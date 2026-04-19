@@ -57,7 +57,6 @@ program
 	.option("--root <root>", "Root path for the token", "")
 	.option("--publish <path...>", "Publish permission patterns (can be specified multiple times)")
 	.option("--subscribe <path...>", "Subscribe permission patterns (can be specified multiple times)")
-	.option("--cluster", "Whether this is a cluster node", false)
 	.option("--expires <timestamp>", "Expiration time as unix timestamp", parseUnixTimestamp)
 	.option("--issued <timestamp>", "Issued time as unix timestamp", parseUnixTimestamp)
 	.action(async (options) => {
@@ -69,7 +68,6 @@ program
 				root: options.root,
 				...(options.publish && { put: options.publish }),
 				...(options.subscribe && { get: options.subscribe }),
-				...(options.cluster && { cluster: true }),
 				...(options.expires && { exp: options.expires }),
 				...(options.issued && { iat: options.issued }),
 			};
