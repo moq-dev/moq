@@ -1,7 +1,20 @@
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/lite";
 import { Path } from "@moq/lite";
+import * as Msf from "@moq/msf";
 import { Effect, type Getter, Signal } from "@moq/signals";
+import { z } from "zod";
+
+import { toHang } from "./msf";
+
+export const catalogFormatSchema = z.enum(["hang", "msf"]);
+export type CatalogFormat = z.infer<typeof catalogFormatSchema>;
+
+export const catalogAttrSchema = z.enum(["hang", "msf", "auto"]);
+export type CatalogAttr = z.infer<typeof catalogAttrSchema>;
+
+/** Delay (ms) before attempting MSF catalog fetch, giving hang format a headstart. */
+const HANG_HEADSTART_MS = 100;
 
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
@@ -19,6 +32,9 @@ export interface BroadcastProps {
 	// Whether to reload the broadcast when it goes offline.
 	// Defaults to false; pass true to wait for an announcement before subscribing.
 	reload?: boolean | Signal<boolean>;
+
+	// Which catalog formats to try. Default: ["hang"]
+	catalog?: CatalogFormat[] | Signal<CatalogFormat[]>;
 }
 
 // A catalog source that (optionally) reloads automatically when live/offline.
@@ -29,6 +45,8 @@ export class Broadcast {
 	name: Signal<Moq.Path.Valid>;
 	status = new Signal<"offline" | "loading" | "live">("offline");
 	reload: Signal<boolean>;
+
+	catalogFormats: Signal<CatalogFormat[]>;
 
 	#active = new Signal<Moq.Broadcast | undefined>(undefined);
 	readonly active: Getter<Moq.Broadcast | undefined> = this.#active;
@@ -46,6 +64,7 @@ export class Broadcast {
 		this.name = Signal.from(props?.name ?? Path.empty());
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? false);
+		this.catalogFormats = Signal.from(props?.catalog ?? (["hang"] as CatalogFormat[]));
 
 		this.#announced = props?.announced ?? new Signal(new Set());
 
@@ -84,21 +103,75 @@ export class Broadcast {
 		if (!values) return;
 		const [_, broadcast] = values;
 
+		const formats = effect.get(this.catalogFormats);
 		this.status.set("loading");
 
-		const catalog = broadcast.subscribe("catalog.json", Catalog.PRIORITY.catalog);
-		effect.cleanup(() => catalog.close());
+		const hangTrack = formats.includes("hang")
+			? broadcast.subscribe("catalog.json", Catalog.PRIORITY.catalog)
+			: undefined;
+		const msfTrack = formats.includes("msf") ? broadcast.subscribe("catalog", Catalog.PRIORITY.catalog) : undefined;
+
+		if (hangTrack) effect.cleanup(() => hangTrack.close());
+		if (msfTrack) effect.cleanup(() => msfTrack.close());
 
 		effect.spawn(async () => {
 			try {
+				// Race the first catalog fetch, giving hang a headstart.
+				// Wrap each fetch so undefined results reject, ensuring only
+				// successful fetches compete (via Promise.any).
+				const hangFetch = hangTrack
+					? Catalog.fetch(hangTrack).then((r) => {
+							if (r) return { kind: "hang" as const, root: r };
+							throw new Error("hang catalog empty");
+						})
+					: undefined;
+
+				const msfFetch = msfTrack
+					? new Promise((r) => setTimeout(r, HANG_HEADSTART_MS))
+							.then(() => Msf.fetch(msfTrack))
+							.then((c) => {
+								if (c) return { kind: "msf" as const, root: toHang(c) };
+								throw new Error("msf catalog empty");
+							})
+					: undefined;
+
+				const candidates = [hangFetch, msfFetch].filter((c): c is NonNullable<typeof c> => c != null);
+				if (candidates.length === 0) return;
+
+				const first = await Promise.race([effect.cancel.then(() => undefined), Promise.any(candidates)]);
+				if (!first) return;
+
+				// Close the loser
+				if (first.kind === "hang") {
+					msfTrack?.close();
+				} else {
+					hangTrack?.close();
+				}
+
+				console.debug("received catalog", first.kind, this.name.peek(), first.root);
+				this.#catalog.set(first.root);
+				this.status.set("live");
+
+				// Continue reading updates from the winner
+				const fetchNext =
+					first.kind === "hang"
+						? async () => {
+								const update = await Promise.race([
+									effect.cancel,
+									Catalog.fetch(hangTrack as Moq.Track),
+								]);
+								return update;
+							}
+						: async () => {
+								const update = await Promise.race([effect.cancel, Msf.fetch(msfTrack as Moq.Track)]);
+								return update ? toHang(update) : undefined;
+							};
+
 				for (;;) {
-					const update = await Promise.race([effect.cancel, Catalog.fetch(catalog)]);
-					if (!update) break;
-
-					console.debug("received catalog", this.name.peek(), update);
-
-					this.#catalog.set(update);
-					this.status.set("live");
+					const root = await fetchNext();
+					if (!root) break;
+					console.debug("received catalog", first.kind, this.name.peek(), root);
+					this.#catalog.set(root);
 				}
 			} catch (err) {
 				console.warn("error fetching catalog", this.name.peek(), err);

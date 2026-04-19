@@ -2,10 +2,17 @@ import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
-import { Broadcast } from "./broadcast";
+import { Broadcast, type CatalogAttr, type CatalogFormat, catalogAttrSchema } from "./broadcast";
 import type { Latency } from "./sync";
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter"] as const;
+function parseCatalogAttr(value: string | null): CatalogFormat[] {
+	const parsed = catalogAttrSchema.safeParse(value);
+	if (!parsed.success) return ["hang"];
+	if (parsed.data === "auto") return ["hang", "msf"];
+	return [parsed.data];
+}
+
+const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -175,6 +182,8 @@ export default class MoqWatch extends HTMLElement {
 		} else if (name === "jitter") {
 			// Deprecated: use latency="<number>" instead.
 			this.#setLatencyNumber(newValue);
+		} else if (name === "catalog") {
+			this.broadcast.catalogFormats.set(parseCatalogAttr(newValue));
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -245,6 +254,18 @@ export default class MoqWatch extends HTMLElement {
 	/** @deprecated Use `latency = <number>` instead. */
 	set jitter(value: number) {
 		this.backend.latency.set(value as Time.Milli);
+	}
+
+	get catalog(): CatalogFormat[] {
+		return this.broadcast.catalogFormats.peek();
+	}
+
+	set catalog(value: CatalogAttr | CatalogFormat[]) {
+		if (typeof value === "string") {
+			this.broadcast.catalogFormats.set(parseCatalogAttr(value));
+		} else {
+			this.broadcast.catalogFormats.set(value);
+		}
 	}
 }
 
