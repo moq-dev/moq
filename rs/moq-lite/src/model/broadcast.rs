@@ -6,7 +6,7 @@ use std::{
 
 use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
 
-use super::{OriginId, Track};
+use super::{Origin, Track};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -14,9 +14,9 @@ use super::{OriginId, Track};
 #[derive(Clone, Debug, Default)]
 pub struct Broadcast {
 	/// The chain of origins the broadcast has traversed. Each relay appends its own
-	/// [`OriginId`] when forwarding, so the list is used for loop detection and
+	/// [`Origin`] when forwarding, so the list is used for loop detection and
 	/// shortest-path preference.
-	pub hops: Vec<OriginId>,
+	pub hops: Vec<Origin>,
 }
 
 impl Broadcast {

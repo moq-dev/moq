@@ -22,7 +22,7 @@ pub struct Claims {
 	pub publish: Vec<String>,
 
 	/// Deprecated: previously used to mark cluster nodes in a 3-tier origin setup.
-	/// The relay now uses hop-based routing (`OriginId` lists on each broadcast)
+	/// The relay now uses hop-based routing (`Origin` lists on each broadcast)
 	/// to prevent loops, so this flag has no effect. Retained for backwards
 	/// compatibility with existing signed tokens.
 	#[deprecated(note = "hop-based routing supersedes the cluster flag; field is ignored by the relay")]

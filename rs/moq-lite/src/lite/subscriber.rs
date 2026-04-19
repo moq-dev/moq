@@ -199,7 +199,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
-		hops: Vec<crate::OriginId>,
+		hops: Vec<crate::Origin>,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<(), Error> {
 		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");

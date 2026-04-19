@@ -1,6 +1,6 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{OriginId, Path, coding::*};
+use crate::{Origin, Path, coding::*};
 
 use super::{Message, Version};
 
@@ -12,12 +12,12 @@ pub enum Announce<'a> {
 	Active {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: Vec<OriginId>,
+		hops: Vec<Origin>,
 	},
 	Ended {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: Vec<OriginId>,
+		hops: Vec<Origin>,
 	},
 }
 
@@ -38,17 +38,17 @@ impl Message for Announce<'_> {
 				if count > MAX_HOPS {
 					return Err(DecodeError::BoundsExceeded);
 				}
-				vec![OriginId::UNKNOWN; count]
+				vec![Origin::UNKNOWN; count]
 			}
 			_ => {
-				// Lite04+: count followed by that many OriginId varints.
+				// Lite04+: count followed by that many Origin varints.
 				let count = u64::decode(r, version)? as usize;
 				if count > MAX_HOPS {
 					return Err(DecodeError::BoundsExceeded);
 				}
 				let mut ids = Vec::with_capacity(count);
 				for _ in 0..count {
-					ids.push(OriginId::decode(r, version)?);
+					ids.push(Origin::decode(r, version)?);
 				}
 				ids
 			}
@@ -78,7 +78,7 @@ impl Message for Announce<'_> {
 	}
 }
 
-fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &[OriginId]) -> Result<(), EncodeError> {
+fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &[Origin]) -> Result<(), EncodeError> {
 	// Silently truncate to the most recent MAX_HOPS so callers don't have to
 	// think about the limit. Keeping the tail preserves our own ID (which was
 	// just pushed on) and the closest upstream origins, which are the ones

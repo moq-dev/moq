@@ -81,7 +81,7 @@ impl MoqOriginProducer {
 	pub fn new() -> Arc<Self> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		Arc::new(Self {
-			inner: moq_lite::OriginProducer::default(),
+			inner: moq_lite::Origin::random().produce(),
 		})
 	}
 

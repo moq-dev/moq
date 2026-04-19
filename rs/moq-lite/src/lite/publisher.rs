@@ -26,7 +26,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn new(session: S, origin: Option<OriginConsumer>, version: Version) -> Self {
 		// Default to a dummy origin that is immediately closed.
-		let origin = origin.unwrap_or_else(|| Origin::produce().consume());
+		let origin = origin.unwrap_or_else(|| Origin::random().produce().consume());
 		Self {
 			session,
 			origin,
@@ -199,7 +199,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								// Append our origin ID to the hops so the next relay can detect loops.
 								// Overflow is silently truncated in the encoder.
 								let mut hops = active.info.hops.clone();
-								hops.push(origin.origin_id());
+								hops.push(origin.info);
 								let msg = lite::Announce::Active { suffix, hops };
 								stream.writer.encode(&msg).await?;
 							} else {

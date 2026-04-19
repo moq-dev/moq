@@ -6,7 +6,7 @@ async fn main() -> anyhow::Result<()> {
 	moq_native::Log::new(tracing::Level::DEBUG).init();
 
 	// Create an origin that we can publish to and the session can consume from.
-	let origin = moq_lite::Origin::produce();
+	let origin = moq_lite::Origin::random().produce();
 
 	// Run the broadcast production and the session in parallel.
 	// This is a simple example of how you can concurrently run multiple tasks.

@@ -39,7 +39,7 @@ async fn run_session(
 	consumer: moq_lite::BroadcastConsumer,
 ) -> anyhow::Result<()> {
 	// Create an origin producer to publish to the broadcast.
-	let origin = moq_lite::Origin::produce();
+	let origin = moq_lite::Origin::random().produce();
 	origin.publish_broadcast(&name, consumer);
 
 	// Blindly accept the session (WebTransport or QUIC), regardless of the URL.

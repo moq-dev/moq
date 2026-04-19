@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 		priority: 0,
 	};
 
-	let origin = moq_lite::Origin::produce();
+	let origin = moq_lite::Origin::random().produce();
 
 	match config.role {
 		Command::Publish => {
