@@ -159,32 +159,10 @@ impl ServerConfig {
 			moq_lite::Versions::from(self.version.clone())
 		}
 	}
-
-	/// Resolve [`Self::bind`] to a single [`net::SocketAddr`], performing DNS
-	/// lookup when the value is a `host:port` pair.
-	///
-	/// Defaults to `[::]:443` if no bind address was configured. Only the first
-	/// resolved address is returned; Quinn does not support binding to multiple
-	/// addresses.
-	pub(crate) fn resolve_bind(&self) -> anyhow::Result<net::SocketAddr> {
-		let bind = self.bind.as_deref().unwrap_or("[::]:443");
-		resolve_host_port(bind).with_context(|| format!("failed to resolve bind address '{bind}'"))
-	}
 }
 
-/// Resolve a `host:port` string to a single [`net::SocketAddr`].
-///
-/// Accepts both literal socket addresses (e.g. `[::]:443`) and DNS hostnames
-/// paired with a port (e.g. `fly-global-services:443`). Only the first
-/// resolved address is returned, matching the client-side resolver, since
-/// Quinn only supports binding/connecting to a single IP.
-pub(crate) fn resolve_host_port(addr: &str) -> anyhow::Result<net::SocketAddr> {
-	use std::net::ToSocketAddrs;
-	addr.to_socket_addrs()
-		.context("DNS lookup failed")?
-		.next()
-		.context("no addresses resolved")
-}
+/// Default bind address used when [`ServerConfig::bind`] is not set.
+pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 
 /// Server for accepting MoQ connections over QUIC.
 ///

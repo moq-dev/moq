@@ -11,6 +11,21 @@
 /// Default maximum number of concurrent QUIC streams (bidi and uni) per connection.
 pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
+/// Resolve a `host:port` string to a single [`std::net::SocketAddr`].
+///
+/// Accepts both literal socket addresses (e.g. `[::]:443`) and DNS hostnames
+/// paired with a port (e.g. `fly-global-services:443`). Only the first
+/// resolved address is returned; Quinn only supports a single IP when
+/// binding/connecting.
+pub fn resolve_addr(addr: &str) -> anyhow::Result<std::net::SocketAddr> {
+	use anyhow::Context;
+	use std::net::ToSocketAddrs;
+	addr.to_socket_addrs()
+		.context("invalid address")?
+		.next()
+		.context("no addresses resolved")
+}
+
 mod client;
 mod crypto;
 mod log;
