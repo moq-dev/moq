@@ -27,7 +27,7 @@ impl Broadcast {
 	/// Consume this [Broadcast] to create a producer that carries its metadata
 	/// (including the hop chain).
 	pub fn produce(self) -> BroadcastProducer {
-		BroadcastProducer::with_info(self)
+		BroadcastProducer::new(self)
 	}
 }
 
@@ -64,12 +64,6 @@ pub struct BroadcastProducer {
 	state: conducer::Producer<State>,
 }
 
-impl Default for BroadcastProducer {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
 impl Deref for BroadcastProducer {
 	type Target = Broadcast;
 
@@ -79,11 +73,7 @@ impl Deref for BroadcastProducer {
 }
 
 impl BroadcastProducer {
-	pub fn new() -> Self {
-		Self::with_info(Broadcast::default())
-	}
-
-	pub fn with_info(info: Broadcast) -> Self {
+	pub fn new(info: Broadcast) -> Self {
 		Self {
 			info,
 			state: Default::default(),
@@ -405,7 +395,7 @@ mod test {
 
 	#[tokio::test]
 	async fn insert() {
-		let mut producer = BroadcastProducer::new();
+		let mut producer = Broadcast::new().produce();
 		let mut track1 = Track::new("track1").produce();
 
 		// Make sure we can insert before a consumer is created.
@@ -431,7 +421,7 @@ mod test {
 
 	#[tokio::test]
 	async fn closed() {
-		let mut producer = BroadcastProducer::new();
+		let mut producer = Broadcast::new().produce();
 		let _dynamic = producer.dynamic();
 
 		let consumer = producer.consume();
@@ -457,7 +447,7 @@ mod test {
 
 	#[tokio::test]
 	async fn requests() {
-		let mut producer = BroadcastProducer::new().dynamic();
+		let mut producer = Broadcast::new().produce().dynamic();
 
 		let consumer = producer.consume();
 		let consumer2 = consumer.clone();
