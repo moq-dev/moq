@@ -69,7 +69,7 @@ let session = client
     .with_publish(origin.consume())
     .connect(url).await?;
 
-let mut broadcast = moq_lite::Broadcast::produce();
+let mut broadcast = moq_lite::Broadcast::new().produce();
 // ... add catalog and tracks to the broadcast ...
 origin.publish_broadcast("", broadcast.consume());
 ```

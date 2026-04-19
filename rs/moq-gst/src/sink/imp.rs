@@ -352,7 +352,7 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver
 	let client = client_config.init()?;
 
 	let origin = moq_lite::Origin::produce();
-	let mut broadcast = moq_lite::Broadcast::produce();
+	let mut broadcast = moq_lite::Broadcast::new().produce();
 	let broadcast_consumer = broadcast.consume();
 
 	let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
