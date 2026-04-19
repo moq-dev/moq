@@ -408,10 +408,10 @@ impl OriginProducer {
 	/// Publish a broadcast, announcing it to all consumers.
 	///
 	/// The broadcast will be unannounced when it is closed.
-	/// If there is already a broadcast with the same path, then the older broadcast remains active
-	/// and the new one is queued as a backup (no reannounce is triggered).
-	/// When the active broadcast closes, the oldest queued backup is promoted and reannounced.
-	/// A queued backup that closes before it is promoted is silently dropped with no announcement.
+	/// If there is already a broadcast with the same path, the new one replaces the active only
+	/// if its hop path is shorter or equal; otherwise it is queued as a backup.
+	/// When the active broadcast closes, the backup with the shortest hop path is promoted and
+	/// reannounced. Backups that close before being promoted are silently dropped.
 	///
 	/// Returns false if the broadcast is not allowed to be published.
 	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
