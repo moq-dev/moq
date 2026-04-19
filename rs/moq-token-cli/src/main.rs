@@ -59,10 +59,6 @@ enum Commands {
 		#[arg(long)]
 		publish: Vec<String>,
 
-		/// Mark this token as a cluster node.
-		#[arg(long)]
-		cluster: bool,
-
 		/// Paths the user can subscribe to (repeatable).
 		#[arg(long)]
 		subscribe: Vec<String>,
@@ -129,18 +125,15 @@ fn main() -> anyhow::Result<()> {
 			key,
 			root,
 			publish,
-			cluster,
 			subscribe,
 			expires,
 			issued,
 		} => {
 			let key = moq_token::Key::from_file(key)?;
 
-			#[allow(deprecated)] // `cluster` flag is deprecated; kept for issuing legacy tokens
 			let payload = moq_token::Claims {
 				root,
 				publish,
-				cluster,
 				subscribe,
 				expires,
 				issued,
