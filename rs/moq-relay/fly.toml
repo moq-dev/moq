@@ -3,7 +3,7 @@ primary_region = 'sjc'
 
 # Built with `nix build .#moq-relay-docker`
 [build]
-image = "moq-relay:latest"
+image = "moqdev/moq-relay:latest"
 
 # Enable multiple regions for global edge deployment
 [[services]]
