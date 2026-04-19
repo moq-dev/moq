@@ -197,6 +197,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							if let Some(active) = active {
 								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 								// Append our origin ID to the hops so the next relay can detect loops.
+								// Overflow is silently truncated in the encoder.
 								let mut hops = active.info.hops.clone();
 								hops.push(origin.origin_id());
 								let msg = lite::Announce::Active { suffix, hops };

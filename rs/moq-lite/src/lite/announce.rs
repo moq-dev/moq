@@ -79,9 +79,15 @@ impl Message for Announce<'_> {
 }
 
 fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &[OriginId]) -> Result<(), EncodeError> {
-	if hops.len() > MAX_HOPS {
-		return Err(EncodeError::TooMany);
-	}
+	// Silently truncate to the most recent MAX_HOPS so callers don't have to
+	// think about the limit. Keeping the tail preserves our own ID (which was
+	// just pushed on) and the closest upstream origins, which are the ones
+	// most useful for near-term loop detection.
+	let hops = if hops.len() > MAX_HOPS {
+		&hops[hops.len() - MAX_HOPS..]
+	} else {
+		hops
+	};
 	match version {
 		Version::Lite01 | Version::Lite02 => {}
 		Version::Lite03 => {
