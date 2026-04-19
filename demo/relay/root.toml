@@ -39,6 +39,3 @@ publish = ["anon", "demo/viewer"]
 # sit passive and wait for them to dial in.
 [cluster]
 # connect = ["localhost:4444", "localhost:4445"]
-
-# Deterministic origin ID for this node. Optional.
-origin_id = 1

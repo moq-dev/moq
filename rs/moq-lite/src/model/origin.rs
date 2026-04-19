@@ -384,13 +384,6 @@ impl OriginProducer {
 		Self::default()
 	}
 
-	/// Set the origin ID, used to tag announcements with a stable identifier
-	/// across restarts.
-	pub fn with_id(mut self, id: OriginId) -> Self {
-		self.id = id;
-		self
-	}
-
 	/// Get the origin ID.
 	pub fn id(&self) -> OriginId {
 		self.id

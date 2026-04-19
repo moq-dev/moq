@@ -41,10 +41,6 @@ listen = "[::]:4445"
 [cluster]
 connect = ["localhost:4443", "localhost:4444"]
 
-# Deterministic origin ID for this node. Optional — omit for a random
-# 62-bit id at startup.
-origin_id = 11
-
 [auth]
 # Allow JWT tokens that are signed by this root key.
 # `just key` will populate this file.

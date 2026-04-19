@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 			.context("client.tls.cert has no DNS SAN; cluster peers cannot authenticate")?;
 	}
 
-	let cluster = Cluster::new(config.cluster, client)?;
+	let cluster = Cluster::new(config.cluster, client);
 
 	// Create a web server too.
 	let web = Web::new(

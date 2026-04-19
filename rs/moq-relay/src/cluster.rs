@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use moq_lite::{BroadcastConsumer, Origin, OriginConsumer, OriginId, OriginProducer};
+use moq_lite::{BroadcastConsumer, Origin, OriginConsumer, OriginProducer};
 use url::Url;
 
 use crate::AuthToken;
@@ -33,12 +33,6 @@ pub struct ClusterConfig {
 	/// Use the token in this file when connecting to other nodes.
 	#[arg(id = "cluster-token", long = "cluster-token", env = "MOQ_CLUSTER_TOKEN")]
 	pub token: Option<PathBuf>,
-
-	/// Optional explicit origin ID for this node. If unset, a random non-zero
-	/// 62-bit ID is generated at startup. Setting a stable ID makes logs and
-	/// loop-detection diagnostics easier to read.
-	#[arg(long = "cluster-origin-id", env = "MOQ_CLUSTER_ORIGIN_ID")]
-	pub origin_id: Option<u64>,
 }
 
 /// A relay cluster built around a single [`OriginProducer`].
@@ -58,18 +52,10 @@ pub struct Cluster {
 
 impl Cluster {
 	/// Creates a new cluster with the given configuration and QUIC client.
-	pub fn new(config: ClusterConfig, client: moq_native::Client) -> anyhow::Result<Self> {
-		let origin = match config.origin_id {
-			Some(id) => {
-				let id = OriginId::try_from(id).context("invalid cluster-origin-id: must be 1 <= value < 2^62")?;
-				Origin::produce().with_id(id)
-			}
-			None => Origin::produce(),
-		};
-
+	pub fn new(config: ClusterConfig, client: moq_native::Client) -> Self {
+		let origin = Origin::produce();
 		tracing::info!(origin_id = %origin.id(), "cluster initialized");
-
-		Ok(Cluster { config, client, origin })
+		Cluster { config, client, origin }
 	}
 
 	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
