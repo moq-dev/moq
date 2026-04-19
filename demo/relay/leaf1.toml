@@ -34,12 +34,11 @@ tls.root = ["ca.pem"]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
 listen = "[::]:4445"
 
-# Full-mesh clustering. List every peer you want this node to keep an
-# outbound connection to. Hop-based loop detection (OriginId chains on
-# each broadcast) ensures announcements don't ping-pong between peers,
-# so there's no notion of "root" vs "leaf" anymore.
 [cluster]
-connect = ["localhost:4443", "localhost:4444"]
+# Connect to the "root" node, which will proxy any broadcasts from the other leaf.
+# NOTE: We could absolutely connect to the other leaf directly too, but this helps test proper cluster.
+# ex. imagine us-east connects directly to us-central, but not us-west.
+connect = ["localhost:4443"]
 
 [auth]
 # Allow JWT tokens that are signed by this root key.
