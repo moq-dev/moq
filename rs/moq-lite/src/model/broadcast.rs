@@ -12,7 +12,6 @@ use super::{OriginId, Track};
 ///
 /// Create via [`Broadcast::produce`] to obtain both [`BroadcastProducer`] and [`BroadcastConsumer`] pair.
 #[derive(Clone, Debug, Default)]
-#[non_exhaustive]
 pub struct Broadcast {
 	/// The chain of origins the broadcast has traversed. Each relay appends its own
 	/// [`OriginId`] when forwarding, so the list is used for loop detection and
@@ -23,11 +22,6 @@ pub struct Broadcast {
 impl Broadcast {
 	pub fn new() -> Self {
 		Self::default()
-	}
-
-	pub fn with_hops(mut self, hops: Vec<OriginId>) -> Self {
-		self.hops = hops;
-		self
 	}
 
 	/// Consume this [Broadcast] to create a producer that carries its metadata
