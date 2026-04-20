@@ -16,8 +16,7 @@ export interface WebSocketOptions {
 	// By default, `https` => `wss` and `http` => `ws`.
 	url?: URL;
 
-	// The delay in milliseconds before attempting the WebSocket fallback.
-	// Defaults to DEFAULT_WEBSOCKET_DELAY_MS.
+	// The delay in milliseconds before attempting the WebSocket fallback. (default: 500)
 	// If WebSocket won the previous race for a given URL, this will be 0.
 	delay?: DOMHighResTimeStamp;
 }
