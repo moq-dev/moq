@@ -54,10 +54,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	}
 
 	// Create a cancel promise to kill whichever is still connecting.
-	let done: (() => void) | undefined;
-	const cancel = new Promise<void>((resolve) => {
-		done = resolve;
-	});
+	const { promise: cancel, resolve: done } = Promise.withResolvers<void>();
 
 	const webtransport =
 		globalThis.WebTransport && !isFirefox ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
@@ -65,9 +62,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket has won in the past.
 	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
 	const headstart =
-		!webtransport || websocketWon.has(url.toString())
-			? 0
-			: (props?.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
+		!webtransport || websocketWon.has(url.toString()) ? 0 : (props?.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
 	const websocket =
 		props?.websocket?.enabled !== false
 			? connectWebSocket(props?.websocket?.url ?? url, headstart, cancel)
@@ -81,7 +76,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	const session = await Promise.any(
 		webtransport ? (websocket ? [websocket, webtransport] : [webtransport]) : [websocket],
 	);
-	if (done) done();
+	done();
 
 	if (!session) throw new Error("no transport available");
 
