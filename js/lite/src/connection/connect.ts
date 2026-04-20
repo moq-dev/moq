@@ -5,6 +5,9 @@ import { Reader, Stream, Writer } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
 import type { Established } from "./established.ts";
 
+// Default head start for WebTransport before attempting the WebSocket fallback.
+const DEFAULT_WEBSOCKET_DELAY_MS = 500;
+
 export interface WebSocketOptions {
 	// If true (default), enable the WebSocket fallback.
 	enabled?: boolean;
@@ -13,7 +16,8 @@ export interface WebSocketOptions {
 	// By default, `https` => `wss` and `http` => `ws`.
 	url?: URL;
 
-	// The delay in milliseconds before attempting the WebSocket fallback. (default: 500)
+	// The delay in milliseconds before attempting the WebSocket fallback.
+	// Defaults to DEFAULT_WEBSOCKET_DELAY_MS.
 	// If WebSocket won the previous race for a given URL, this will be 0.
 	delay?: DOMHighResTimeStamp;
 }
@@ -58,9 +62,12 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	const webtransport =
 		globalThis.WebTransport && !isFirefox ? connectWebTransport(url, cancel, props?.webtransport) : undefined;
 
-	// Give QUIC a 500ms head start to connect before trying WebSocket, unless WebSocket has won in the past.
+	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket has won in the past.
 	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
-	const headstart = !webtransport || websocketWon.has(url.toString()) ? 0 : (props?.websocket?.delay ?? 500);
+	const headstart =
+		!webtransport || websocketWon.has(url.toString())
+			? 0
+			: (props?.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
 	const websocket =
 		props?.websocket?.enabled !== false
 			? connectWebSocket(props?.websocket?.url ?? url, headstart, cancel)
