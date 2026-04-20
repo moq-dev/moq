@@ -50,15 +50,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	}
 
 	// Create a cancel promise to kill whichever is still connecting.
-	// `cancelled` lets us synchronously check if the race is already decided,
-	// so the WebSocket fallback can bail before opening a socket.
-	let cancelled = false;
 	let done: (() => void) | undefined;
 	const cancel = new Promise<void>((resolve) => {
-		done = () => {
-			cancelled = true;
-			resolve();
-		};
+		done = resolve;
 	});
 
 	const webtransport =
@@ -69,7 +63,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 	const headstart = !webtransport || websocketWon.has(url.toString()) ? 0 : (props?.websocket?.delay ?? 500);
 	const websocket =
 		props?.websocket?.enabled !== false
-			? connectWebSocket(props?.websocket?.url ?? url, headstart, cancel, () => cancelled)
+			? connectWebSocket(props?.websocket?.url ?? url, headstart, cancel)
 			: undefined;
 
 	if (!websocket && !webtransport) {
@@ -399,17 +393,11 @@ async function connectWebTransport(
 }
 
 // TODO accept arguments to control the port/path used.
-async function connectWebSocket(
-	url: URL,
-	delay: number,
-	cancel: Promise<void>,
-	isCancelled: () => boolean,
-): Promise<Session | undefined> {
+async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>): Promise<Session | undefined> {
 	const timer = new Promise<void>((resolve) => setTimeout(resolve, delay));
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
-	if (isCancelled()) return undefined;
 
 	const quic = new Session(url);
 
