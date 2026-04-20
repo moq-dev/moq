@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/moq-dev/moq/compare/conducer-v0.3.4...conducer-v0.3.5) - 2026-04-19
+
+### Other
+
+- Add README files for Rust crates ([#1284](https://github.com/moq-dev/moq/pull/1284))
+
 ## [0.3.4](https://github.com/moq-dev/moq/compare/conducer-v0.3.3...conducer-v0.3.4) - 2026-04-15
 
 ### Other

@@ -4,7 +4,7 @@
 It's designed to be run in a datacenter, relaying media across multiple hops to deduplicate and improve QoS.
 
 The only argument is the path to a TOML configuration file.
-See [localhost.toml](../../demo/relay/localhost.toml) for an example configuration.
+See [localhost.toml](https://github.com/moq-dev/moq/blob/main/demo/relay/localhost.toml) for an example configuration.
 
 ## Install
 
@@ -56,7 +56,7 @@ Cluster arguments:
 The relay supports JWT-based authentication and authorization with path-based access control.
 
 For detailed authentication setup, including token generation and configuration examples, see:
-**[Authentication Documentation](../../doc/app/relay/auth.md)**
+**[Authentication Documentation](https://github.com/moq-dev/moq/blob/main/doc/app/relay/auth.md)**
 
 Key features:
 

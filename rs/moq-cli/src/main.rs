@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
 
 	match cli.command {
 		Command::Serve { config, dir, name, .. } => {
-			let web_bind = config.bind.unwrap_or("[::]:443".parse().unwrap());
+			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
 
 			let server = config.init()?;
 			#[cfg(feature = "iroh")]
@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
 
 			tokio::select! {
 				res = run_server(server, name, publish.consume()) => res,
-				res = run_web(web_bind, web_tls, dir) => res,
+				res = run_web(&web_bind, web_tls, dir) => res,
 				res = publish.run(stats_interval) => res,
 			}
 		}

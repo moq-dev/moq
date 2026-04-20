@@ -79,7 +79,7 @@
     },
     "js/hang": {
       "name": "@moq/hang",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
         "@libav.js/variant-opus-af": "^6.8.8",
@@ -99,7 +99,7 @@
     },
     "js/lite": {
       "name": "@moq/lite",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
         "@moq/qmux": "^0.0.6",
         "@moq/signals": "workspace:*",
@@ -119,7 +119,7 @@
     },
     "js/moq-boy": {
       "name": "@moq/boy",
-      "version": "0.2.4",
+      "version": "0.2.7",
       "dependencies": {
         "@moq/lite": "workspace:^",
         "@moq/signals": "workspace:^",
@@ -137,9 +137,21 @@
         "vite-plugin-solid": "^2.11.10",
       },
     },
+    "js/msf": {
+      "name": "@moq/msf",
+      "version": "0.1.0",
+      "dependencies": {
+        "@moq/lite": "workspace:^",
+        "zod": "^4.1.5",
+      },
+      "devDependencies": {
+        "rimraf": "^6.0.1",
+        "typescript": "^6.0.0",
+      },
+    },
     "js/publish": {
       "name": "@moq/publish",
-      "version": "0.2.4",
+      "version": "0.2.5",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/lite": "workspace:^",
@@ -160,7 +172,7 @@
     },
     "js/signals": {
       "name": "@moq/signals",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "devDependencies": {
         "@types/react": "^19.1.8",
         "rimraf": "^6.0.1",
@@ -180,7 +192,7 @@
     },
     "js/token": {
       "name": "@moq/token",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "bin": {
         "moq-token": "./src/cli.ts",
       },
@@ -215,10 +227,11 @@
     },
     "js/watch": {
       "name": "@moq/watch",
-      "version": "0.2.6",
+      "version": "0.2.9",
       "dependencies": {
         "@moq/hang": "workspace:^",
         "@moq/lite": "workspace:^",
+        "@moq/msf": "workspace:^",
         "@moq/signals": "workspace:^",
         "@moq/ui-core": "workspace:^",
       },
@@ -501,6 +514,8 @@
     "@moq/hang": ["@moq/hang@workspace:js/hang"],
 
     "@moq/lite": ["@moq/lite@workspace:js/lite"],
+
+    "@moq/msf": ["@moq/msf@workspace:js/msf"],
 
     "@moq/publish": ["@moq/publish@workspace:js/publish"],
 

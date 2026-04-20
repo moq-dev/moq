@@ -68,7 +68,11 @@ ci:
 	# Run the Python checks.
 	uv run ruff check py/
 	uv run ruff format --check py/
-	uv run --package moq-lite pyright
+	# Sync moq-lite's dev group (pytest) first, then override moq-ffi with a source build;
+	# --no-sync on the pyright invocation keeps uv from reinstalling the registry moq-ffi.
+	uv sync --package moq-lite
+	uv run maturin develop -m rs/moq-ffi/Cargo.toml --uv
+	uv run --package moq-lite --no-sync pyright
 
 	# Run the tofu checks.
 	(cd cdn && just check)
@@ -120,8 +124,9 @@ test *args:
 
 	# Run the Python tests.
 	if command -v uv &> /dev/null; then
+		uv sync --package moq-lite
 		uv run maturin develop -m rs/moq-ffi/Cargo.toml --uv
-		uv run --package moq-lite pytest py/moq-lite/tests/
+		uv run --package moq-lite --no-sync pytest py/moq-lite/tests/
 	fi
 
 # Automatically fix some issues.

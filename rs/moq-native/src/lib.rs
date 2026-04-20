@@ -22,6 +22,7 @@ mod reconnect;
 mod server;
 #[cfg(any(feature = "noq", feature = "quinn"))]
 mod tls;
+mod util;
 #[cfg(feature = "websocket")]
 mod websocket;
 

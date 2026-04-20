@@ -96,7 +96,7 @@ impl MoqOriginProducer {
 	/// Publish a broadcast to this origin under the given path.
 	pub fn publish(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let consumer = broadcast.consume()?;
+		let consumer = broadcast.consume_inner()?;
 		if !self.inner.publish_broadcast(path.as_str(), consumer) {
 			return Err(MoqError::Unauthorized);
 		}

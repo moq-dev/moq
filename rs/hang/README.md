@@ -1,6 +1,6 @@
 [![Documentation](https://docs.rs/hang/badge.svg)](https://docs.rs/hang/)
 [![Crates.io](https://img.shields.io/crates/v/hang.svg)](https://crates.io/crates/hang)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE-MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/moq-dev/moq/blob/main/LICENSE-MIT)
 
 # hang
 

@@ -189,6 +189,9 @@ impl NoqServer {
 		// There's a bit more boilerplate to make a generic endpoint.
 		let runtime = noq::default_runtime().context("no async runtime")?;
 
+		let listen = crate::util::resolve(config.bind.as_deref(), crate::server::DEFAULT_BIND)
+			.context("failed to resolve bind address")?;
+
 		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = noq::EndpointConfig::default();
 		if let Some(server_id) = config.quic_lb_id {
@@ -206,7 +209,6 @@ impl NoqServer {
 			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
 		}
 
-		let listen = config.bind.unwrap_or("[::]:443".parse().unwrap());
 		let socket = std::net::UdpSocket::bind(listen).context("failed to bind UDP socket")?;
 
 		// Create the generic QUIC endpoint.

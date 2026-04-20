@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.6...moq-ffi-v0.2.7) - 2026-04-19
+
+### Other
+
+- Adding  data (aka json) to the py_lib ([#1318](https://github.com/moq-dev/moq/pull/1318))
+
 ## [0.2.6](https://github.com/moq-dev/moq/compare/moq-ffi-v0.2.5...moq-ffi-v0.2.6) - 2026-04-17
 
 ### Other

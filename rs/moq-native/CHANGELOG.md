@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.13](https://github.com/moq-dev/moq/compare/moq-native-v0.13.12...moq-native-v0.13.13) - 2026-04-19
+
+### Other
+
+- resolve DNS hostnames in --server-bind ([#1332](https://github.com/moq-dev/moq/pull/1332))
+- Add README files for Rust crates ([#1284](https://github.com/moq-dev/moq/pull/1284))
+- Clarify group delivery semantics with recv_group and next_group_ordered ([#1324](https://github.com/moq-dev/moq/pull/1324))
+
 ## [0.13.11](https://github.com/moq-dev/moq/compare/moq-native-v0.13.10...moq-native-v0.13.11) - 2026-04-15
 
 ### Other

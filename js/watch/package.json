@@ -1,7 +1,7 @@
 {
 	"name": "@moq/watch",
 	"type": "module",
-	"version": "0.2.8",
+	"version": "0.2.9",
 	"description": "Watch Media over QUIC broadcasts",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",
@@ -26,6 +26,7 @@
 	"dependencies": {
 		"@moq/hang": "workspace:^",
 		"@moq/lite": "workspace:^",
+		"@moq/msf": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"@moq/ui-core": "workspace:^"
 	},

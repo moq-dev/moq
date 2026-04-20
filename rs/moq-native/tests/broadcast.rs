@@ -35,7 +35,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	if let Some(v) = server_version {
 		server_config.version = vec![v];
@@ -373,7 +373,7 @@ async fn broadcast_websocket() {
 
 	// Server with both QUIC (required) and WebSocket listeners.
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())
@@ -477,7 +477,7 @@ async fn broadcast_websocket_fallback() {
 
 	// QUIC binds on its own port; WebSocket on a different port.
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let ws_listener = moq_native::WebSocketListener::bind("[::]:0".parse().unwrap())

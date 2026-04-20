@@ -90,9 +90,14 @@ impl ServerTlsConfig {
 pub struct ServerConfig {
 	/// Listen for UDP packets on the given address.
 	/// Defaults to `[::]:443` if not provided.
+	///
+	/// Accepts standard socket address syntax (e.g. `[::]:443`) or a DNS
+	/// `host:port` pair (e.g. `fly-global-services:443`), which is resolved
+	/// at bind time. Only the first resolved address is used; Quinn does not
+	/// support binding to multiple addresses.
 	#[serde(alias = "listen")]
 	#[arg(id = "server-bind", long = "server-bind", alias = "listen", env = "MOQ_SERVER_BIND")]
-	pub bind: Option<net::SocketAddr>,
+	pub bind: Option<String>,
 
 	/// The QUIC backend to use.
 	/// Auto-detected from compiled features if not specified.
@@ -155,6 +160,9 @@ impl ServerConfig {
 		}
 	}
 }
+
+/// Default bind address used when [`ServerConfig::bind`] is not set.
+pub(crate) const DEFAULT_BIND: &str = "[::]:443";
 
 /// Server for accepting MoQ connections over QUIC.
 ///

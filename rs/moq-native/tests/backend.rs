@@ -25,7 +25,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 	server_config.backend = Some(backend.clone());
 
@@ -163,7 +163,7 @@ async fn iroh_connect() {
 
 	// Server still needs a QUIC bind for init, but we'll connect via iroh
 	let mut server_config = moq_native::ServerConfig::default();
-	server_config.bind = Some("[::]:0".parse().unwrap());
+	server_config.bind = Some("[::]:0".to_string());
 	server_config.tls.generate = vec!["localhost".into()];
 
 	let mut server = server_config

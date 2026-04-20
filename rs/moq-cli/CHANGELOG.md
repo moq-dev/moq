@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.20](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.19...moq-cli-v0.7.20) - 2026-04-20
+
+### Other
+
+- update Cargo.lock dependencies
+
+## [0.7.19](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.18...moq-cli-v0.7.19) - 2026-04-19
+
+### Other
+
+- resolve DNS hostnames in --server-bind ([#1332](https://github.com/moq-dev/moq/pull/1332))
+
 ## [0.7.18](https://github.com/moq-dev/moq/compare/moq-cli-v0.7.17...moq-cli-v0.7.18) - 2026-04-17
 
 ### Other
