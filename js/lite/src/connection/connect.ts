@@ -409,10 +409,6 @@ async function connectWebSocket(
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;
-
-	// Yield a microtask so a concurrently-resolving WebTransport has a chance
-	// to flip the cancelled flag before we open a socket.
-	await Promise.resolve();
 	if (isCancelled()) return undefined;
 
 	const quic = new Session(url);
