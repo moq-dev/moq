@@ -1041,9 +1041,9 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "constant_time_eq"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+checksum = "7dab3fe76c1571ecd5cfe878b61bce3fedf4adbde5d8a8653b2a7956ffd14628"
 
 [[package]]
 name = "convert_case"
@@ -3550,7 +3550,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.7.19"
+version = "0.7.20"
 dependencies = [
  "anyhow",
  "axum",
@@ -3715,7 +3715,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.10.24"
+version = "0.10.25"
 dependencies = [
  "anyhow",
  "axum",
@@ -3772,7 +3772,7 @@ dependencies = [
 
 [[package]]
 name = "moq-token-cli"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "clap",
