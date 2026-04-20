@@ -2,7 +2,11 @@
 { crane }:
 final: prev:
 let
-  craneLib = crane.mkLib final;
+  # Pin crane to rust-overlay's latest stable so `nix build` uses the same
+  # toolchain as `nix develop`. Without this, crane falls back to
+  # `final.rustc`/`final.cargo`, which nixpkgs resolves to its default Rust
+  # (currently 1.94) while the devShell pulls 1.95 from rust-overlay.
+  craneLib = (crane.mkLib final).overrideToolchain final.rust-bin.stable.latest.default;
 
   # Helper function to get crate info from Cargo.toml
   crateInfo = cargoTomlPath: craneLib.crateNameFromCargoToml { cargoToml = cargoTomlPath; };
