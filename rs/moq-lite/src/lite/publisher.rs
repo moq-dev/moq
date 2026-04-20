@@ -1,4 +1,3 @@
-use std::ops::Deref;
 use std::time::Duration;
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -20,17 +19,21 @@ use super::Version;
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
+	// The session-level origin id stamped onto outbound hop chains. Shared
+	// with the Subscriber so it can optionally filter out reflected announces.
+	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: Option<OriginConsumer>, version: Version) -> Self {
+	pub fn new(session: S, origin: Option<OriginConsumer>, self_origin: Origin, version: Version) -> Self {
 		// Default to a dummy origin that is immediately closed.
 		let origin = origin.unwrap_or_else(|| Origin::new().produce().consume());
 		Self {
 			session,
 			origin,
+			self_origin,
 			priority: Default::default(),
 			version,
 		}
@@ -132,8 +135,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.ok_or(Error::Unauthorized)?;
 
 		let version = self.version;
+		let self_origin = self.self_origin;
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version).await {
+			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, self_origin, version).await {
 				match &err {
 					Error::Cancel | Error::Transport(_) => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
@@ -154,6 +158,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
+		self_origin: Origin,
 		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
@@ -201,7 +206,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 								// If the chain is already at MAX_HOPS, skip the announce — this link is
 								// effectively unreachable and the peer will eventually prune the loop.
 								let mut hops = active.hops.clone();
-								if hops.push(*(*origin).deref()).is_err() {
+								if hops.push(self_origin).is_err() {
 									tracing::warn!(
 										broadcast = %origin.absolute(&path),
 										"dropping announce; hop chain at MAX_HOPS (possible loop)",

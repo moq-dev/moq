@@ -23,6 +23,12 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 	origin: Option<OriginProducer>,
 	recv_bandwidth: Option<BandwidthProducer>,
+	// Session-level origin id shared with the Publisher. Kept so callers that
+	// want to filter reflected announces can reuse the same id; for now only
+	// plumbed through, not applied automatically (see hang.live's dependency
+	// on seeing its own publishes as a confirmation signal).
+	#[allow(dead_code)]
+	self_origin: crate::Origin,
 	subscribes: Lock<HashMap<u64, TrackProducer>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
@@ -33,12 +39,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		session: S,
 		origin: Option<OriginProducer>,
 		recv_bandwidth: Option<BandwidthProducer>,
+		self_origin: crate::Origin,
 		version: Version,
 	) -> Self {
 		Self {
 			session,
 			origin,
 			recv_bandwidth,
+			self_origin,
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version,

@@ -7,7 +7,7 @@ import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
 import { Group as GroupMessage } from "./group.ts";
-import { type Origin, randomOrigin } from "./origin.ts";
+import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
 import { encodeSubscribeResponse, type Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { Version } from "./version.ts";
@@ -25,9 +25,10 @@ export class Publisher {
 	// The version of the connection.
 	readonly version: Version;
 
-	// Random per-connection origin appended to outbound Announce hops, so the
-	// peer can detect loops and prefer shorter paths. Stable for the life of
-	// this Publisher.
+	// Per-connection origin appended to outbound Announce hops, so the peer
+	// can detect loops and prefer shorter paths. Created by Connection and
+	// shared with Subscriber, which can optionally use it to filter out its
+	// own announcements.
 	readonly origin: Origin;
 
 	#quic: WebTransport;
@@ -39,13 +40,15 @@ export class Publisher {
 	/**
 	 * Creates a new Publisher instance.
 	 * @param quic - The WebTransport session to use
+	 * @param version - Negotiated protocol version
+	 * @param origin - Origin id shared with the Subscriber
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version) {
+	constructor(quic: WebTransport, version: Version, origin: Origin) {
 		this.#quic = quic;
 		this.version = version;
-		this.origin = randomOrigin();
+		this.origin = origin;
 	}
 
 	/**

@@ -9,6 +9,7 @@ import type * as Time from "../time.ts";
 import { AnnounceInterest } from "./announce.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
+import { type Origin, randomOrigin } from "./origin.ts";
 import { Publisher } from "./publisher.ts";
 import { SessionInfo } from "./session.ts";
 import { StreamId } from "./stream.ts";
@@ -54,6 +55,10 @@ export class Connection implements Established {
 	/** RTT in milliseconds from PROBE (moq-lite-04+ only). */
 	readonly rtt?: Signal<Time.Milli | undefined>;
 
+	/** Random per-connection origin id. Shared by Publisher (for outbound hop
+	 * chains) and Subscriber (available for optional self-filtering on announces). */
+	readonly origin: Origin;
+
 	/**
 	 * Creates a new Connection instance.
 	 * @param url - The URL of the connection
@@ -84,8 +89,9 @@ export class Connection implements Established {
 		// TODO prefer getStats() when both are available.
 		this.rtt = new Signal<Time.Milli | undefined>(undefined);
 
-		this.#publisher = new Publisher(this.#quic, this.#version);
-		this.#subscriber = new Subscriber(this.#quic, this.#version, this.recvBandwidth, this.rtt);
+		this.origin = randomOrigin();
+		this.#publisher = new Publisher(this.#quic, this.#version, this.origin);
+		this.#subscriber = new Subscriber(this.#quic, this.#version, this.origin, this.recvBandwidth, this.rtt);
 
 		this.#run();
 	}
