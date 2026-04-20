@@ -30,6 +30,11 @@ export const TrackSchema = z.object({
 	initData: z.optional(z.string()),
 	renderGroup: z.optional(z.number()),
 	altGroup: z.optional(z.number()),
+
+	// Non-standard: maximum delay (ms) between consecutive frames on this track.
+	// The player's buffer must be at least this large to avoid underruns.
+	// Mirrors the `jitter` field in the hang catalog.
+	jitter: z.optional(z.number()),
 });
 
 export type Track = z.infer<typeof TrackSchema>;
