@@ -423,8 +423,7 @@ impl OriginProducer {
 	/// Returns None if the broadcast is not found.
 	#[deprecated(
 		note = "synchronous lookup is a footgun: over-the-wire origins need time to gossip announcements. \
-			Prefer looping over announcements via `consume()` or `consume_only(..).announced()`, or use \
-			`OriginConsumer::announced_broadcast` which blocks until a specific path is announced."
+			Use [OriginConsumer::announced_broadcast] which blocks until the given path is announced."
 	)]
 	pub fn consume_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
