@@ -328,7 +328,7 @@ async fn serve_fetch(
 	};
 
 	// NOTE: The auth token is already scoped to the broadcast.
-	// TODO: switch to `wait_for_broadcast` (bounded by the fetch deadline) so freshly-connected
+	// TODO: switch to `announced_broadcast` (bounded by the fetch deadline) so freshly-connected
 	// subscribers don't get a spurious 404 before the broadcast has gossiped.
 	#[allow(deprecated)]
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;

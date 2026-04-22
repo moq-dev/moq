@@ -424,7 +424,7 @@ impl OriginProducer {
 	#[deprecated(
 		note = "synchronous lookup is a footgun: over-the-wire origins need time to gossip announcements. \
 			Prefer looping over announcements via `consume()` or `consume_only(..).announced()`, or use \
-			`OriginConsumer::wait_for_broadcast` which blocks until a specific path is announced."
+			`OriginConsumer::announced_broadcast` which blocks until a specific path is announced."
 	)]
 	pub fn consume_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
@@ -524,7 +524,7 @@ impl OriginConsumer {
 	#[deprecated(
 		note = "synchronous lookup is a footgun: freshly-connected origins have not yet received any \
 			announcements, so this will return None even when the broadcast is about to arrive. \
-			Prefer `wait_for_broadcast` (blocks until announced) or loop over `announced()`."
+			Prefer `announced_broadcast` (blocks until announced) or loop over `announced()`."
 	)]
 	pub fn consume_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
@@ -541,7 +541,7 @@ impl OriginConsumer {
 	///
 	/// Prefer this over the deprecated [`Self::consume_broadcast`] when you know the exact path
 	/// you want but cannot guarantee the announcement has already been received.
-	pub async fn wait_for_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
+	pub async fn announced_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
 
 		// Scope a fresh consumer down to this path so we only wake up for relevant announcements.
@@ -649,7 +649,6 @@ impl OriginConsumer {
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // Existing tests exercise `consume_broadcast`; keep them running.
 mod tests {
 	use crate::Broadcast;
 
@@ -722,6 +721,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_duplicate() {
 		tokio::time::pause();
 
@@ -822,6 +822,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_duplicate_reverse() {
 		tokio::time::pause();
 
@@ -848,6 +849,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_double_publish() {
 		tokio::time::pause();
 
@@ -1119,6 +1121,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_consume_broadcast_with_permissions() {
 		let origin = Origin::produce();
 		let broadcast1 = Broadcast::produce();
@@ -1529,19 +1532,19 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_wait_for_broadcast_already_announced() {
+	async fn test_announced_broadcast_already_announced() {
 		let origin = Origin::produce();
 		let broadcast = Broadcast::produce();
 
 		origin.publish_broadcast("test", broadcast.consume());
 
 		let consumer = origin.consume();
-		let result = consumer.wait_for_broadcast("test").await.expect("should find it");
+		let result = consumer.announced_broadcast("test").await.expect("should find it");
 		assert!(result.is_clone(&broadcast.consume()));
 	}
 
 	#[tokio::test]
-	async fn test_wait_for_broadcast_delayed() {
+	async fn test_announced_broadcast_delayed() {
 		tokio::time::pause();
 
 		let origin = Origin::produce();
@@ -1552,7 +1555,7 @@ mod tests {
 		// Start waiting before it's announced.
 		let wait = tokio::spawn({
 			let consumer = consumer.clone();
-			async move { consumer.wait_for_broadcast("test").await }
+			async move { consumer.announced_broadcast("test").await }
 		});
 
 		// Give the spawned task a chance to subscribe.
@@ -1565,7 +1568,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_wait_for_broadcast_ignores_unrelated_paths() {
+	async fn test_announced_broadcast_ignores_unrelated_paths() {
 		tokio::time::pause();
 
 		let origin = Origin::produce();
@@ -1576,12 +1579,12 @@ mod tests {
 
 		let wait = tokio::spawn({
 			let consumer = consumer.clone();
-			async move { consumer.wait_for_broadcast("target").await }
+			async move { consumer.announced_broadcast("target").await }
 		});
 
 		tokio::task::yield_now().await;
 
-		// Publish an unrelated broadcast first — wait_for_broadcast should skip it.
+		// Publish an unrelated broadcast first — announced_broadcast should skip it.
 		origin.publish_broadcast("other", other.consume());
 		tokio::task::yield_now().await;
 		assert!(!wait.is_finished(), "must not resolve on unrelated path");
@@ -1592,7 +1595,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_wait_for_broadcast_skips_nested_paths() {
+	async fn test_announced_broadcast_skips_nested_paths() {
 		tokio::time::pause();
 
 		let origin = Origin::produce();
@@ -1603,7 +1606,7 @@ mod tests {
 
 		let wait = tokio::spawn({
 			let consumer = consumer.clone();
-			async move { consumer.wait_for_broadcast("foo").await }
+			async move { consumer.announced_broadcast("foo").await }
 		});
 
 		tokio::task::yield_now().await;
@@ -1619,11 +1622,11 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_wait_for_broadcast_disallowed() {
+	async fn test_announced_broadcast_disallowed() {
 		let origin = Origin::produce();
 		let limited = origin.consume_only(&["allowed".into()]).expect("should create limited");
 
 		// Path is outside allowed prefixes — should return None immediately.
-		assert!(limited.wait_for_broadcast("notallowed").await.is_none());
+		assert!(limited.announced_broadcast("notallowed").await.is_none());
 	}
 }
