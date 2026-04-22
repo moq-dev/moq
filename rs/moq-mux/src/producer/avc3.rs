@@ -1,5 +1,4 @@
 use super::annexb::{NalIterator, START_CODE};
-use super::stats::{DriftTracker, Stats};
 
 use anyhow::Context;
 use buf_list::BufList;
@@ -8,11 +7,14 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// A decoder for H.264 with inline SPS/PPS.
 pub struct Avc3 {
+	// The broadcast being produced.
+	broadcast: moq_lite::BroadcastProducer,
+
 	// The catalog being produced.
 	catalog: crate::CatalogProducer,
 
 	// The track being produced.
-	track: hang::container::OrderedProducer,
+	track: Option<hang::container::OrderedProducer>,
 
 	// Whether the track has been initialized.
 	// If it changes, then we'll reinitialize with a new track.
@@ -27,37 +29,19 @@ pub struct Avc3 {
 	// Cached parameter set NALs for re-insertion before keyframes.
 	cached_sps: Option<Bytes>,
 	cached_pps: Option<Bytes>,
-
-	// Jitter tracking: minimum duration between consecutive frames.
-	last_timestamp: Option<hang::container::Timestamp>,
-	min_duration: Option<hang::container::Timestamp>,
-	jitter: Option<hang::container::Timestamp>,
-
-	// Import statistics.
-	stats: Stats,
-	drift: DriftTracker,
 }
 
 impl Avc3 {
-	// TODO: Make this fallible (return Result) instead of panicking — breaking change, do on `dev` branch.
-	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
-		// Create the track eagerly so callers can monitor used/unused before any frames arrive.
-		// The catalog entry is added later in init() when the codec config is known.
-		let track = broadcast.unique_track(".avc3").expect("failed to create avc3 track");
-
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
 		Self {
+			broadcast,
 			catalog,
-			track: track.into(),
+			track: None,
 			config: None,
 			current: Default::default(),
 			zero: None,
 			cached_sps: None,
 			cached_pps: None,
-			last_timestamp: None,
-			min_duration: None,
-			jitter: None,
-			stats: Stats::default(),
-			drift: DriftTracker::default(),
 		}
 	}
 
@@ -96,16 +80,20 @@ impl Avc3 {
 			return Ok(());
 		}
 
-		// Insert/update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-		// Use insert directly since we may reinitialize with updated config.
-		catalog
-			.video
-			.renditions
-			.insert(self.track.info.name.clone(), config.clone());
-		tracing::debug!(name = ?self.track.info.name, ?config, "updated catalog");
+
+		if let Some(track) = &self.track.take() {
+			tracing::debug!(name = ?track.info.name, "reinitializing track");
+			catalog.video.remove_track(&track.info);
+		}
+
+		let track = catalog.video.create_track("avc3", config.clone());
+		tracing::debug!(name = ?track.name, ?config, "starting track");
+
+		let track = self.broadcast.create_track(track)?;
 
 		self.config = Some(config);
+		self.track = Some(track.into());
 
 		Ok(())
 	}
@@ -276,20 +264,13 @@ impl Avc3 {
 			return Ok(());
 		}
 
-		// Don't emit frames before the codec config is known (no catalog entry yet).
-		if self.config.is_none() {
-			self.current = Frame::default();
-			return Ok(());
-		}
-
+		let track = self.track.as_mut().context("expected SPS before any frames")?;
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
-		let payload_bytes = payload.remaining() as u64;
-		let is_keyframe = self.current.contains_idr;
 
-		if is_keyframe {
-			self.track.keyframe()?;
+		if self.current.contains_idr {
+			track.keyframe()?;
 		}
 
 		let frame = hang::container::Frame {
@@ -297,31 +278,7 @@ impl Avc3 {
 			payload,
 		};
 
-		self.track.write(frame)?;
-
-		// Record import stats for this frame.
-		let drift = self.drift.track(pts.into());
-		self.stats.record_frame(payload_bytes, is_keyframe, drift);
-
-		// Track the minimum frame duration and update catalog jitter.
-		if let Some(last) = self.last_timestamp
-			&& let Ok(duration) = pts.checked_sub(last)
-			&& duration < self.min_duration.unwrap_or(hang::container::Timestamp::MAX)
-		{
-			self.min_duration = Some(duration);
-
-			// Jitter for individually-flushed frames is just the frame duration.
-			if duration < self.jitter.unwrap_or(hang::container::Timestamp::MAX) {
-				self.jitter = Some(duration);
-
-				if let Ok(jitter) = duration.convert() {
-					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.info.name) {
-						c.jitter = Some(jitter);
-					}
-				}
-			}
-		}
-		self.last_timestamp = Some(pts);
+		track.write(frame)?;
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
@@ -331,25 +288,15 @@ impl Avc3 {
 		Ok(())
 	}
 
-	/// Return a snapshot of cumulative import statistics.
-	pub fn stats(&self) -> Stats {
-		self.stats.clone()
-	}
-
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
-		self.track.finish()?;
+		let track = self.track.as_mut().context("not initialized")?;
+		track.finish()?;
 		Ok(())
 	}
 
-	/// Returns true if the codec config has been detected and inserted into the catalog.
 	pub fn is_initialized(&self) -> bool {
-		self.config.is_some()
-	}
-
-	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> &moq_lite::TrackProducer {
-		&self.track
+		self.track.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
@@ -366,8 +313,10 @@ impl Avc3 {
 
 impl Drop for Avc3 {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.info.name, "ending track");
-		self.catalog.lock().video.remove(&self.track.info.name);
+		if let Some(track) = self.track.take() {
+			tracing::debug!(name = ?track.info.name, "ending track");
+			self.catalog.lock().video.remove_track(&track.info);
+		}
 	}
 }
 

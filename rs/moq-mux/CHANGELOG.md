@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-22
+
+### Breaking
+
+- Renamed `moq_mux::import` module to `moq_mux::producer`.
+- Renamed `Decoder` to `Framed` and `DecoderFormat` to `FramedFormat`.
+- Removed cargo feature flags (`mp4`, `h264`, `h265`, `hls`, `av1`, `aac`, `opus`); all codecs are always compiled in.
+- Removed the `Stats` / `StatsDrift` / `DriftTracker` types and the `.stats()` methods on decoders; the stats tracking feature is no longer part of the library.
+- `hang::catalog::Container::Cmaf` variant changed from `{ timescale, track_id }` to `{ init_data }` (base64 ftyp+moov).
+- Removed `Fmp4Config` and the `passthrough` option from the fMP4 producer; fMP4 fragments are always transported directly.
+- `HlsConfig` simplified: removed `client` and `passthrough` fields.
+
+### Changed
+
+- Added `parse_timescale` helper and `PtsOverflow` handling in CMAF decoding.
+- `hang::container::Media` enum replaces the old `Container` trait impl on `hang::catalog::Container`, parsing init_data upfront.
+- Added fMP4 fixture-based producer tests (`bbb.mp4`, `av1.mp4`, `vp9.mp4`).
+- `ordered::Consumer::track` is now public.
+
 ## [0.3.9](https://github.com/moq-dev/moq/compare/moq-mux-v0.3.8...moq-mux-v0.3.9) - 2026-04-19
 
 ### Other

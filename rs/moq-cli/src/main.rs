@@ -10,7 +10,6 @@ use web::*;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use std::time::Duration;
 use url::Url;
 
 #[derive(Parser, Clone)]
@@ -23,10 +22,6 @@ pub struct Cli {
 	#[command(flatten)]
 	#[cfg(feature = "iroh")]
 	iroh: moq_native::IrohEndpointConfig,
-
-	/// Print import statistics to stderr at the given interval.
-	#[arg(long, default_missing_value = "1", num_args = 0..=1, require_equals = true, value_name = "SECS")]
-	stats: Option<f64>,
 
 	#[command(subcommand)]
 	command: Command,
@@ -94,17 +89,6 @@ async fn main() -> anyhow::Result<()> {
 		Command::Publish { format, .. } => format,
 	})?;
 
-	let stats_interval = cli
-		.stats
-		.map(|secs| {
-			anyhow::ensure!(
-				secs.is_finite() && secs > 0.0,
-				"--stats interval must be a positive number"
-			);
-			Ok(Duration::from_secs_f64(secs))
-		})
-		.transpose()?;
-
 	#[cfg(feature = "iroh")]
 	let iroh = cli.iroh.bind().await?;
 
@@ -121,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
 			tokio::select! {
 				res = run_server(server, name, publish.consume()) => res,
 				res = run_web(&web_bind, web_tls, dir) => res,
-				res = publish.run(stats_interval) => res,
+				res = publish.run() => res,
 			}
 		}
 		Command::Publish { config, url, name, .. } => {
@@ -130,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 			#[cfg(feature = "iroh")]
 			let client = client.with_iroh(iroh);
 
-			run_client(client, url, name, publish, stats_interval).await
+			run_client(client, url, name, publish).await
 		}
 	}
 }

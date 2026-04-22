@@ -16,11 +16,17 @@ pub enum Error {
 	#[error("no tfdt in traf")]
 	NoTfdt,
 
+	#[error("PTS overflow")]
+	PtsOverflow,
+
 	#[error("no moof found in CMAF frame data")]
 	NoMoof,
 
 	#[error("no mdat found in CMAF frame data")]
 	NoMdat,
+
+	#[error("no moov found in init data")]
+	NoMoov,
 
 	#[error("no tracks in moov")]
 	NoTracks,

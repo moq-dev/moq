@@ -15,7 +15,7 @@ use crate::container::{Container, Frame, Timestamp};
 /// The consumer can skip groups that are too far behind to maintain low latency.
 /// Configure the maximum acceptable delay through the consumer's latency settings.
 pub struct Consumer<F: Container> {
-	track: moq_lite::TrackConsumer,
+	pub track: moq_lite::TrackConsumer,
 
 	format: F,
 
@@ -1224,7 +1224,6 @@ mod tests {
 
 	// ---- VideoConfig Container ----
 
-	#[cfg(feature = "mp4")]
 	#[tokio::test]
 	async fn video_container_legacy() {
 		tokio::time::pause();
@@ -1232,7 +1231,7 @@ mod tests {
 		let mut track = moq_lite::Track::new("video").produce();
 		let consumer_track = track.consume();
 		let mut consumer =
-			Consumer::new(consumer_track, hang::catalog::Container::Legacy).with_latency(Duration::from_millis(500));
+			Consumer::new(consumer_track, crate::hang::Media::Legacy).with_latency(Duration::from_millis(500));
 
 		// Write frames using Legacy encoding
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();

@@ -8,11 +8,14 @@ use scuffle_h265::{NALUnitType, SpsNALUnit};
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
 pub struct Hev1 {
+	// The broadcast being produced.
+	broadcast: moq_lite::BroadcastProducer,
+
 	// The catalog being produced.
 	catalog: crate::CatalogProducer,
 
 	// The track being produced.
-	track: hang::container::OrderedProducer,
+	track: Option<hang::container::OrderedProducer>,
 
 	// Whether the track has been initialized.
 	// If it changes, then we'll reinitialize with a new track.
@@ -28,30 +31,20 @@ pub struct Hev1 {
 	cached_vps: Option<Bytes>,
 	cached_sps: Option<Bytes>,
 	cached_pps: Option<Bytes>,
-
-	// Jitter tracking: minimum duration between consecutive frames.
-	last_timestamp: Option<hang::container::Timestamp>,
-	min_duration: Option<hang::container::Timestamp>,
-	jitter: Option<hang::container::Timestamp>,
 }
 
 impl Hev1 {
-	// TODO: Make this fallible (return Result) instead of panicking — breaking change, do on `dev` branch.
-	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
-		let track = broadcast.unique_track(".hev1").expect("failed to create hev1 track");
-
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
 		Self {
+			broadcast,
 			catalog,
-			track: track.into(),
+			track: None,
 			config: None,
 			current: Default::default(),
 			zero: None,
 			cached_vps: None,
 			cached_sps: None,
 			cached_pps: None,
-			last_timestamp: None,
-			min_duration: None,
-			jitter: None,
 		}
 	}
 
@@ -88,16 +81,20 @@ impl Hev1 {
 			return Ok(());
 		}
 
-		// Update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-		catalog
-			.video
-			.renditions
-			.insert(self.track.info.name.clone(), config.clone());
 
-		tracing::debug!(name = ?self.track.info.name, ?config, "updated catalog");
+		if let Some(track) = &self.track.take() {
+			tracing::debug!(name = ?track.info.name, "reinitializing track");
+			catalog.video.remove_track(&track.info);
+		}
+
+		let track = catalog.video.create_track("hev1", config.clone());
+		tracing::debug!(name = ?track.name, ?config, "starting track");
+
+		let track = self.broadcast.create_track(track)?;
 
 		self.config = Some(config);
+		self.track = Some(track.into());
 
 		Ok(())
 	}
@@ -286,13 +283,7 @@ impl Hev1 {
 			return Ok(());
 		}
 
-		// Don't emit frames before the codec config is known (no catalog entry yet).
-		if self.config.is_none() {
-			self.current = Frame::default();
-			return Ok(());
-		}
-
-		let track = &mut self.track;
+		let track = self.track.as_mut().context("expected SPS before any frames")?;
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
@@ -308,25 +299,6 @@ impl Hev1 {
 
 		track.write(frame)?;
 
-		// Track the minimum frame duration and update catalog jitter.
-		if let Some(last) = self.last_timestamp
-			&& let Ok(duration) = pts.checked_sub(last)
-			&& duration < self.min_duration.unwrap_or(hang::container::Timestamp::MAX)
-		{
-			self.min_duration = Some(duration);
-
-			if duration < self.jitter.unwrap_or(hang::container::Timestamp::MAX) {
-				self.jitter = Some(duration);
-
-				if let Ok(jitter) = duration.convert() {
-					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.info.name) {
-						c.jitter = Some(jitter);
-					}
-				}
-			}
-		}
-		self.last_timestamp = Some(pts);
-
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
 		self.current.contains_vps = false;
@@ -338,18 +310,13 @@ impl Hev1 {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
-		self.track.finish()?;
+		let track = self.track.as_mut().context("not initialized")?;
+		track.finish()?;
 		Ok(())
 	}
 
-	/// Returns true if the codec config has been detected and inserted into the catalog.
 	pub fn is_initialized(&self) -> bool {
-		self.config.is_some()
-	}
-
-	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> &moq_lite::TrackProducer {
-		&self.track
+		self.track.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
@@ -366,8 +333,10 @@ impl Hev1 {
 
 impl Drop for Hev1 {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.info.name, "ending track");
-		self.catalog.lock().video.remove(&self.track.info.name);
+		if let Some(track) = &self.track {
+			tracing::debug!(name = ?track.info.name, "ending track");
+			self.catalog.lock().video.remove_track(&track.info);
+		}
 	}
 }
 

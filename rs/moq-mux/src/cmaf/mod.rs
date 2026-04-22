@@ -1,7 +1,6 @@
 mod container;
 mod error;
 
-pub(crate) use container::{decode, encode};
 pub use error::Error;
 
 pub type Consumer = crate::ordered::Consumer<mp4_atom::Moov>;

@@ -1,3 +1,4 @@
+use anyhow::Context;
 use bytes::Bytes;
 
 /// A decoder for H.264 in AVCC format (length-prefixed NALUs with out-of-band SPS/PPS).
@@ -6,8 +7,9 @@ use bytes::Bytes;
 /// is provided out-of-band via the catalog, and frames contain length-prefixed NAL units
 /// without inline parameter sets.
 pub struct Avc1 {
+	broadcast: moq_lite::BroadcastProducer,
 	catalog: crate::CatalogProducer,
-	track: hang::container::OrderedProducer,
+	track: Option<hang::container::OrderedProducer>,
 	config: Option<hang::catalog::VideoConfig>,
 
 	/// NALU length size from the AVCDecoderConfigurationRecord (typically 4).
@@ -15,27 +17,17 @@ pub struct Avc1 {
 
 	/// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
-
-	// Jitter tracking: minimum duration between consecutive frames.
-	last_timestamp: Option<hang::container::Timestamp>,
-	min_duration: Option<hang::container::Timestamp>,
-	jitter: Option<hang::container::Timestamp>,
 }
 
 impl Avc1 {
-	// TODO: Make this fallible (return Result) instead of panicking — breaking change, do on `dev` branch.
-	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
-		let track = broadcast.unique_track(".avc1").expect("failed to create avc1 track");
-
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
 		Self {
+			broadcast,
 			catalog,
-			track: track.into(),
+			track: None,
 			config: None,
 			length_size: 4,
 			zero: None,
-			last_timestamp: None,
-			min_duration: None,
-			jitter: None,
 		}
 	}
 
@@ -98,16 +90,20 @@ impl Avc1 {
 			return Ok(());
 		}
 
-		// Update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-		catalog
-			.video
-			.renditions
-			.insert(self.track.info.name.clone(), config.clone());
 
-		tracing::debug!(name = ?self.track.info.name, ?config, "updated catalog");
+		if let Some(track) = &self.track.take() {
+			tracing::debug!(name = ?track.info.name, "reinitializing avc1 track");
+			catalog.video.remove_track(&track.info);
+		}
+
+		let track = catalog.video.create_track("avc1", config.clone());
+		tracing::debug!(name = ?track.name, ?config, "starting avc1 track");
+
+		let track = self.broadcast.create_track(track)?;
 
 		self.config = Some(config);
+		self.track = Some(track.into());
 
 		buf.advance(buf.remaining());
 
@@ -127,7 +123,7 @@ impl Avc1 {
 		let data = buf.as_ref();
 		let pts = self.pts(pts)?;
 		let keyframe = self.is_keyframe(data);
-		let track = &mut self.track;
+		let track = self.track.as_mut().context("not initialized; call init() first")?;
 
 		if keyframe {
 			track.keyframe()?;
@@ -137,25 +133,6 @@ impl Avc1 {
 			timestamp: pts,
 			payload: data.to_vec().into(),
 		})?;
-
-		// Track the minimum frame duration and update catalog jitter.
-		if let Some(last) = self.last_timestamp
-			&& let Ok(duration) = pts.checked_sub(last)
-			&& duration < self.min_duration.unwrap_or(hang::container::Timestamp::MAX)
-		{
-			self.min_duration = Some(duration);
-
-			if duration < self.jitter.unwrap_or(hang::container::Timestamp::MAX) {
-				self.jitter = Some(duration);
-
-				if let Ok(jitter) = duration.convert() {
-					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.info.name) {
-						c.jitter = Some(jitter);
-					}
-				}
-			}
-		}
-		self.last_timestamp = Some(pts);
 
 		buf.advance(buf.remaining());
 
@@ -195,18 +172,13 @@ impl Avc1 {
 
 	/// Finish the track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
-		self.track.finish()?;
+		let track = self.track.as_mut().context("not initialized")?;
+		track.finish()?;
 		Ok(())
 	}
 
-	/// Returns true if the codec config has been detected and inserted into the catalog.
 	pub fn is_initialized(&self) -> bool {
-		self.config.is_some()
-	}
-
-	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> &moq_lite::TrackProducer {
-		&self.track
+		self.track.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
@@ -223,7 +195,9 @@ impl Avc1 {
 
 impl Drop for Avc1 {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.info.name, "ending avc1 track");
-		self.catalog.lock().video.remove(&self.track.info.name);
+		if let Some(track) = self.track.take() {
+			tracing::debug!(name = ?track.info.name, "ending avc1 track");
+			self.catalog.lock().video.remove_track(&track.info);
+		}
 	}
 }

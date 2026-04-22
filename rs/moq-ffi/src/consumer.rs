@@ -42,7 +42,7 @@ pub struct MoqMediaConsumer {
 }
 
 struct Media {
-	inner: moq_mux::ordered::Consumer<hang::catalog::Container>,
+	inner: moq_mux::ordered::Consumer<moq_mux::hang::Media>,
 }
 
 impl Media {
@@ -106,8 +106,11 @@ impl MoqBroadcastConsumer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
 		let container: hang::catalog::Container = container.into();
+		let media: moq_mux::hang::Media = (&container)
+			.try_into()
+			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
-		let consumer = moq_mux::ordered::Consumer::new(track, container).with_latency(latency);
+		let consumer = moq_mux::ordered::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))

@@ -1041,9 +1041,9 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "constant_time_eq"
-version = "0.4.3"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dab3fe76c1571ecd5cfe878b61bce3fedf4adbde5d8a8653b2a7956ffd14628"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "convert_case"
@@ -2364,7 +2364,7 @@ checksum = "253b313319f7109de64e480ffb606f89475cd758bae82e096e00c5d95341d30e"
 
 [[package]]
 name = "hang"
-version = "0.15.8"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "buf-list",
@@ -3649,7 +3649,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.3.9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
