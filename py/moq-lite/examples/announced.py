@@ -1,7 +1,7 @@
 """List broadcasts announced on a relay under a given prefix.
 
-    python py/moq-lite/examples/announced.py --url https://relay.example.com
-    python py/moq-lite/examples/announced.py --url https://relay.example.com --prefix live/
+python py/moq-lite/examples/announced.py --url https://relay.example.com
+python py/moq-lite/examples/announced.py --url https://relay.example.com --prefix live/
 """
 
 import argparse
