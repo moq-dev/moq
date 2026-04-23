@@ -3710,7 +3710,6 @@ dependencies = [
  "web-transport-proto",
  "web-transport-quiche",
  "web-transport-quinn",
- "x509-parser",
 ]
 
 [[package]]

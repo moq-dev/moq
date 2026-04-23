@@ -100,10 +100,7 @@ impl Av01 {
 
 		// Update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-		catalog
-			.video
-			.renditions
-			.insert(self.track.name.clone(), config.clone());
+		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
 
 		tracing::debug!(name = ?self.track.name, ?config, "updated catalog");
 
@@ -144,10 +141,7 @@ impl Av01 {
 
 		// Update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-		catalog
-			.video
-			.renditions
-			.insert(self.track.name.clone(), config.clone());
+		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
 
 		tracing::debug!(name = ?self.track.name, "updated catalog with minimal config");
 
@@ -230,10 +224,7 @@ impl Av01 {
 
 		// Update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-		catalog
-			.video
-			.renditions
-			.insert(self.track.name.clone(), config.clone());
+		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
 
 		tracing::debug!(name = ?self.track.name, ?config, "updated catalog from av1c");
 

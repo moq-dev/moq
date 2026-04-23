@@ -351,7 +351,7 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver
 
 	let client = client_config.init()?;
 
-	let origin = moq_lite::Origin::new().produce();
+	let origin = moq_lite::Origin::random().produce();
 	let mut broadcast = moq_lite::Broadcast::new().produce();
 	let broadcast_consumer = broadcast.consume();
 

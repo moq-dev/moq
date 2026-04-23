@@ -31,7 +31,7 @@ pub fn start<S: web_transport_trait::Session>(
 	// Shared per-session origin: the publisher stamps it onto outbound
 	// announce hops, and the subscriber carries it so callers can opt into
 	// filtering out their own reflected announces.
-	let origin = Origin::new();
+	let origin = Origin::random();
 	let publisher = Publisher::new(session.clone(), publish, origin, version);
 	let subscriber = Subscriber::new(session.clone(), subscribe, recv_bw_for_sub, origin, version);
 

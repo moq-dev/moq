@@ -23,7 +23,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn new(session: S, origin: Option<OriginConsumer>, control: Control, version: Version) -> Self {
-		let origin = origin.unwrap_or_else(|| Origin::new().produce().consume());
+		let origin = origin.unwrap_or_else(|| Origin::random().produce().consume());
 		Self {
 			session,
 			origin,
@@ -240,8 +240,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				flags: Default::default(),
 			};
 
-			tasks
-				.push(Self::run_group(self.session.clone(), msg, track.priority, group, self.version).map(|_| ()));
+			tasks.push(Self::run_group(self.session.clone(), msg, track.priority, group, self.version).map(|_| ()));
 		}
 	}
 

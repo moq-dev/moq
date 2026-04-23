@@ -168,7 +168,6 @@ impl ClientTls {
 
 		Ok(tls)
 	}
-
 }
 
 impl ClientConfig {

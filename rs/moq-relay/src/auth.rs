@@ -812,7 +812,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/any/path".into(),
 				jwt: Some("fake-token".into()),
-				..Default::default()
 			})
 			.await;
 		assert!(result.is_err());
@@ -843,7 +842,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "room/123".as_path());
@@ -876,7 +874,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/secret".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(result.is_err());
@@ -907,7 +904,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "room/123".as_path());
@@ -940,7 +936,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
@@ -972,7 +967,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.subscribe, vec![]);
@@ -1004,7 +998,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1038,7 +1031,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1072,7 +1064,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/bob".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1106,7 +1097,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 
@@ -1118,7 +1108,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/bob".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1152,7 +1141,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/users".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 
@@ -1164,7 +1152,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/users/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1198,7 +1185,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1217,7 +1203,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1248,7 +1233,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/test".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::KeyNotFound)));
@@ -1313,7 +1297,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token1),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -1330,7 +1313,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/2".into(),
 				jwt: Some(token2),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/2".as_path());
@@ -1386,7 +1368,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/test".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::MissingKeyId)));
@@ -1456,7 +1437,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/secret".into(),
 				jwt: Some(jwt),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "secret".as_path());
@@ -1490,7 +1470,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1526,7 +1505,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1562,7 +1540,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/other".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
@@ -1595,7 +1572,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/other".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
@@ -1846,7 +1822,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -1875,7 +1850,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::KeyNotFound)));
@@ -1904,7 +1878,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
@@ -1931,7 +1904,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
@@ -1961,7 +1933,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::DecodeFailed)));
@@ -1998,7 +1969,6 @@ api = "https://api.example.com/access"
 			auth.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 		}
@@ -2272,7 +2242,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -2293,7 +2262,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(

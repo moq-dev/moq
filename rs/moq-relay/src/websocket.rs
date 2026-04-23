@@ -33,10 +33,7 @@ pub(crate) async fn serve_ws(
 
 	let ws = ws.protocols(["webtransport"]);
 
-	let params = AuthParams {
-		path,
-		jwt: query.jwt,
-	};
+	let params = AuthParams { path, jwt: query.jwt };
 	let token = state.auth.verify(&params).await?;
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
