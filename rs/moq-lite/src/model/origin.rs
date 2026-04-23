@@ -546,6 +546,13 @@ impl OriginConsumer {
 		// Scope a fresh consumer down to this path so we only wake up for relevant announcements.
 		let mut consumer = self.consume_only(std::slice::from_ref(&path))?;
 
+		// consume_only keeps narrower permissions intact: if we ask for `foo` on a consumer limited
+		// to `foo/specific`, consume_only returns a consumer scoped to `foo/specific` — no
+		// announcement at the exact path `foo` can ever arrive. Bail rather than loop forever.
+		if !consumer.allowed().any(|allowed| path.has_prefix(allowed)) {
+			return None;
+		}
+
 		loop {
 			let (announced, broadcast) = consumer.announced().await?;
 			// consume_only narrows by prefix, but we only want an exact-path match.
@@ -1627,5 +1634,22 @@ mod tests {
 
 		// Path is outside allowed prefixes — should return None immediately.
 		assert!(limited.announced_broadcast("notallowed").await.is_none());
+	}
+
+	#[tokio::test]
+	async fn test_announced_broadcast_scope_too_narrow() {
+		// Consumer's scope is narrower than the requested path: asking for `foo` on a consumer
+		// limited to `foo/specific` can never resolve. Must return None, not loop forever.
+		let origin = Origin::produce();
+		let limited = origin
+			.consume_only(&["foo/specific".into()])
+			.expect("should create limited");
+
+		// now_or_never so we fail fast instead of hanging if the guard regresses.
+		let result = limited
+			.announced_broadcast("foo")
+			.now_or_never()
+			.expect("must not block");
+		assert!(result.is_none());
 	}
 }
