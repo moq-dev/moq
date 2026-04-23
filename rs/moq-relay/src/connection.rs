@@ -58,7 +58,14 @@ impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
 		let params = match self.request.url() {
-			Some(url) => AuthParams::from_url(url),
+			Some(url) => match self.auth.params_from_url(url) {
+				Ok(params) => params,
+				Err(err) => {
+					let status: http::StatusCode = (&err).into();
+					let _ = self.request.close(status.as_u16()).await;
+					return Err(err.into());
+				}
+			},
 			None => AuthParams::default(),
 		};
 
