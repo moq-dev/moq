@@ -1,8 +1,26 @@
-use crate::{Auth, AuthParams, AuthToken, Cluster};
+use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
 
 use anyhow::Context;
 use axum::http;
-use moq_native::Request;
+use moq_native::{PeerIdentity, Request};
+
+/// An error carrying the HTTP status to send when closing the request.
+///
+/// Used only on the pre-accept auth path so the caller can close once with
+/// the right code instead of sprinkling close/return at each failure site.
+struct StatusError {
+	status: http::StatusCode,
+	source: anyhow::Error,
+}
+
+impl From<AuthError> for StatusError {
+	fn from(err: AuthError) -> Self {
+		Self {
+			status: (&err).into(),
+			source: err.into(),
+		}
+	}
+}
 
 /// True when `candidate` is `base` followed by `:<digits>` (a non-empty,
 /// all-ASCII-digit port). DNS SANs cannot carry ports, so a node name
@@ -57,43 +75,12 @@ impl Connection {
 	/// Authenticates and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let params = match self.request.url() {
-			Some(url) => match self.auth.params_from_url(url) {
-				Ok(params) => params,
-				Err(err) => {
-					let status: http::StatusCode = (&err).into();
-					let _ = self.request.close(status.as_u16()).await;
-					return Err(err.into());
-				}
-			},
-			None => AuthParams::default(),
-		};
-
-		// If the client presented a valid mTLS client certificate, skip JWT
-		// entirely and grant full (cluster) access. The node name comes
-		// from the cert's first DNS SAN. Since DNS SANs cannot carry a
-		// port, a `?register=` query param is accepted only if it extends
-		// the SAN with a `:port` suffix (e.g. SAN `leaf0` + `?register=leaf0:4444`).
-		let token = if let Some(peer) = self.request.peer_identity()? {
-			match validate_peer(peer.dns_name.as_deref(), params.register.as_deref()) {
-				Ok(node) => {
-					tracing::debug!(?node, "mTLS peer authenticated");
-					AuthToken::from_peer(node)
-				}
-				Err(err) => {
-					let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
-					return Err(err);
-				}
-			}
-		} else {
-			// Verify the URL before accepting the connection.
-			match self.auth.verify(&params).await {
-				Ok(token) => token,
-				Err(err) => {
-					let status: http::StatusCode = (&err).into();
-					let _ = self.request.close(status.as_u16()).await;
-					return Err(err.into());
-				}
+		let peer = self.request.peer_identity()?;
+		let token = match self.authenticate(peer).await {
+			Ok(token) => token,
+			Err(err) => {
+				let _ = self.request.close(err.status.as_u16()).await;
+				return Err(err.source);
 			}
 		};
 
@@ -135,5 +122,34 @@ impl Connection {
 		session.closed().await?;
 		drop(registration);
 		Ok(())
+	}
+
+	/// Resolve an [`AuthToken`] from the request's URL and (optional) mTLS peer
+	/// identity. Any failure is returned as a [`StatusError`] so [`run`] can
+	/// close the request with the mapped HTTP status exactly once.
+	///
+	/// If the client presented a valid mTLS client certificate, JWT is skipped
+	/// and full (cluster) access is granted. The node name comes from the
+	/// cert's first DNS SAN; since DNS SANs cannot carry a port, a `?register=`
+	/// query param is accepted only if it extends the SAN with a `:port`
+	/// suffix (e.g. SAN `leaf0` + `?register=leaf0:4444`).
+	async fn authenticate(&self, peer: Option<PeerIdentity>) -> Result<AuthToken, StatusError> {
+		let params = match self.request.url() {
+			Some(url) => self.auth.params_from_url(url)?,
+			None => AuthParams::default(),
+		};
+
+		if let Some(peer) = peer {
+			let node = validate_peer(peer.dns_name.as_deref(), params.register.as_deref()).map_err(|source| {
+				StatusError {
+					status: http::StatusCode::FORBIDDEN,
+					source,
+				}
+			})?;
+			tracing::debug!(?node, "mTLS peer authenticated");
+			Ok(AuthToken::from_peer(node))
+		} else {
+			Ok(self.auth.verify(&params).await?)
+		}
 	}
 }
