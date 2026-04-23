@@ -99,7 +99,10 @@ impl Connection {
 			(None, Some(subscribe)) => {
 				tracing::info!(transport, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
 			}
-			_ => anyhow::bail!("invalid session; no allowed paths"),
+			_ => {
+				let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
+				anyhow::bail!("invalid session; no allowed paths");
+			}
 		}
 
 		// Accept the connection.
