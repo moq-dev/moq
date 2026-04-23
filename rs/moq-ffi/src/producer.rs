@@ -128,7 +128,7 @@ impl MoqTrackProducer {
 		let track = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 		let group = track.append_group()?;
 		Ok(Arc::new(MoqGroupProducer {
-			sequence: group.info.sequence,
+			sequence: group.sequence,
 			inner: std::sync::Mutex::new(Some(group)),
 		}))
 	}

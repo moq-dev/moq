@@ -429,7 +429,7 @@ mod test {
 
 		// Create a new track and insert it into the broadcast.
 		let track1 = producer.assert_create_track(&Track::new("track1"));
-		let track1c = consumer.assert_subscribe_track(&*track1);
+		let track1c = consumer.assert_subscribe_track(&track1);
 		let track2 = consumer.assert_subscribe_track(&Track::new("track2"));
 
 		// Explicitly aborting the broadcast should cascade to child tracks.

@@ -158,7 +158,7 @@ impl MoqTrackConsumer {
 			.run(|mut state| async move {
 				Ok(state.recv_group().await?.map(|group| {
 					Arc::new(MoqGroupConsumer {
-						sequence: group.info.sequence,
+						sequence: group.sequence,
 						task: Task::new(GroupInner { group }),
 					})
 				}))
@@ -173,7 +173,7 @@ impl MoqTrackConsumer {
 			.run(|mut state| async move {
 				Ok(state.next_group().await?.map(|group| {
 					Arc::new(MoqGroupConsumer {
-						sequence: group.info.sequence,
+						sequence: group.sequence,
 						task: Task::new(GroupInner { group }),
 					})
 				}))
@@ -213,7 +213,7 @@ pub struct MoqGroupConsumer {
 impl MoqGroupConsumer {
 	pub(crate) fn new(group: moq_lite::GroupConsumer) -> Self {
 		Self {
-			sequence: group.info.sequence,
+			sequence: group.sequence,
 			task: Task::new(GroupInner { group }),
 		}
 	}
