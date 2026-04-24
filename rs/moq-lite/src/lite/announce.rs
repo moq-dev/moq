@@ -1,6 +1,6 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Path, coding::*};
+use crate::{Origin, OriginList, Path, coding::*};
 
 use super::{Message, Version};
 
@@ -12,12 +12,12 @@ pub enum Announce<'a> {
 	Active {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: Vec<u64>,
+		hops: OriginList,
 	},
 	Ended {
 		#[cfg_attr(feature = "serde", serde(borrow))]
 		suffix: Path<'a>,
-		hops: Vec<u64>,
+		hops: OriginList,
 	},
 }
 
@@ -26,25 +26,18 @@ impl Message for Announce<'_> {
 		let status = AnnounceStatus::decode(r, version)?;
 		let suffix = Path::decode(r, version)?;
 		let hops = match version {
-			Version::Lite01 | Version::Lite02 => Vec::new(),
+			Version::Lite01 | Version::Lite02 => OriginList::new(),
 			Version::Lite03 => {
+				// Lite03 sends only a hop count, not individual ids — fill with UNKNOWN placeholders.
+				// push() enforces MAX_HOPS and `?` lifts the overflow to DecodeError::BoundsExceeded.
 				let count = u64::decode(r, version)? as usize;
-				if count > 256 {
-					return Err(DecodeError::BoundsExceeded);
-				}
-				vec![0; count]
-			}
-			_ => {
-				let count = u64::decode(r, version)? as usize;
-				if count > 256 {
-					return Err(DecodeError::BoundsExceeded);
-				}
-				let mut ids = Vec::with_capacity(count);
+				let mut list = OriginList::new();
 				for _ in 0..count {
-					ids.push(u64::decode(r, version)?);
+					list.push(Origin::UNKNOWN)?;
 				}
-				ids
+				list
 			}
+			_ => OriginList::decode(r, version)?,
 		};
 
 		Ok(match status {
@@ -71,20 +64,12 @@ impl Message for Announce<'_> {
 	}
 }
 
-fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &[u64]) -> Result<(), EncodeError> {
+fn encode_hops<W: bytes::BufMut>(w: &mut W, version: Version, hops: &OriginList) -> Result<(), EncodeError> {
 	match version {
-		Version::Lite01 | Version::Lite02 => {}
-		Version::Lite03 => {
-			(hops.len() as u64).encode(w, version)?;
-		}
-		_ => {
-			(hops.len() as u64).encode(w, version)?;
-			for id in hops {
-				id.encode(w, version)?;
-			}
-		}
+		Version::Lite01 | Version::Lite02 => Ok(()),
+		Version::Lite03 => (hops.len() as u64).encode(w, version),
+		_ => hops.encode(w, version),
 	}
-	Ok(())
 }
 
 /// Sent by the subscriber to request ANNOUNCE messages.

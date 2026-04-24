@@ -33,15 +33,10 @@ pub(crate) async fn serve_ws(
 
 	let ws = ws.protocols(["webtransport"]);
 
-	let params = AuthParams {
-		path,
-		jwt: query.jwt,
-		register: query.register,
-	};
+	let params = AuthParams { path, jwt: query.jwt };
 	let token = state.auth.verify(&params).await?;
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
-	let registration = state.cluster.register(&token);
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
@@ -62,7 +57,6 @@ pub(crate) async fn serve_ws(
 			})
 			.with(tungstenite_to_axum);
 		let _ = handle_socket(id, socket, publish, subscribe).await;
-		drop(registration);
 	}))
 }
 

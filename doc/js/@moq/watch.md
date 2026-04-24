@@ -69,6 +69,37 @@ a real bundler (the examples below).
 - `paused` — Pause playback (boolean)
 - `muted` — Mute audio (boolean)
 - `volume` — Audio volume (0–1, default: 1)
+- `catalog-format` — Catalog format: `"hang"` (default) or `"msf"` (see [MSF](/concept/standard/msf))
+
+## Catalog Formats
+
+`@moq/watch` can consume either the default [hang](/concept/layer/hang) catalog
+or [MSF](/concept/standard/msf) (MoQ Streaming Format). Set `catalog-format="msf"`
+on the element, or assign the `catalogFormat` signal on the `Broadcast` to
+switch formats at runtime:
+
+```html
+<moq-watch
+    url="https://relay.example.com/anon"
+    name="room/alice"
+    catalog-format="msf">
+    <canvas></canvas>
+</moq-watch>
+```
+
+```typescript
+import * as Watch from "@moq/watch";
+
+const broadcast = new Watch.Broadcast({
+    connection,
+    enabled: true,
+    name: "alice",
+    catalogFormat: "msf",
+});
+
+// or toggle at runtime
+broadcast.catalogFormat.set("msf");
+```
 
 ## UI Overlay
 

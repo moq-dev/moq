@@ -14,7 +14,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(any(feature = "quinn", feature = "quiche", feature = "noq"))]
 async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = Origin::produce();
+	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
@@ -33,7 +33,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::produce();
+	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume();
 
 	let mut client_config = moq_native::ClientConfig::default();
@@ -136,7 +136,7 @@ async fn iroh_connect() {
 	use moq_native::IrohEndpointConfig;
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = Origin::produce();
+	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
@@ -172,7 +172,7 @@ async fn iroh_connect() {
 		.with_iroh(Some(server_endpoint));
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::produce();
+	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume();
 
 	// Create client iroh endpoint

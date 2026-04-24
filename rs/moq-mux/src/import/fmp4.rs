@@ -83,8 +83,8 @@ enum Fmp4Producer {
 impl Fmp4Producer {
 	fn info(&self) -> &moq_lite::Track {
 		match self {
-			Self::Manual { track, .. } => &track.info,
-			Self::Ordered(ordered) => &ordered.track.info,
+			Self::Manual { track, .. } => track,
+			Self::Ordered(ordered) => &ordered.track,
 		}
 	}
 }
@@ -198,12 +198,12 @@ impl Fmp4 {
 			let kind = match handler.as_ref() {
 				b"vide" => {
 					let config = self.init_video(trak)?;
-					catalog.video.insert(&track.info.name, config)?;
+					catalog.video.insert(&track.name, config)?;
 					TrackKind::Video
 				}
 				b"soun" => {
 					let config = self.init_audio(trak)?;
-					catalog.audio.insert(&track.info.name, config)?;
+					catalog.audio.insert(&track.name, config)?;
 					TrackKind::Audio
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),

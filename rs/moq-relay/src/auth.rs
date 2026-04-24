@@ -19,12 +19,10 @@ pub struct AuthParams {
 	pub path: String,
 	/// A JWT token, if provided via the `jwt` query parameter.
 	pub jwt: Option<String>,
-	/// A cluster registration identifier, if provided via the `register` query parameter.
-	pub register: Option<String>,
 }
 
 impl AuthParams {
-	/// Creates params with just a path and no token or registration.
+	/// Creates params with just a path and no token.
 	pub fn new(path: impl Into<String>) -> Self {
 		Self {
 			path: path.into(),
@@ -45,20 +43,17 @@ impl AuthParams {
 		};
 
 		let mut jwt = None;
-		let mut register = None;
 
 		for (k, v) in url.query_pairs() {
 			if v.is_empty() {
 				continue;
 			}
-			match k.as_ref() {
-				"jwt" => jwt = Some(v.into_owned()),
-				"register" => register = Some(v.into_owned()),
-				_ => {}
+			if k.as_ref() == "jwt" {
+				jwt = Some(v.into_owned());
 			}
 		}
 
-		Ok(Self { path, jwt, register })
+		Ok(Self { path, jwt })
 	}
 }
 
@@ -106,9 +101,6 @@ pub enum AuthError {
 
 	#[error("the URL host is not a valid customer under a configured domain")]
 	InvalidHost,
-
-	#[error("a cluster token was expected")]
-	ExpectedCluster,
 
 	#[error("key not found")]
 	KeyNotFound,
@@ -279,6 +271,11 @@ pub struct AuthConfig {
 	/// so `customer.cdn.moq.dev/foo` is equivalent to `cdn.moq.dev/customer/foo`.
 	/// A host that exactly matches a suffix contributes no slug. Hosts that
 	/// don't match any suffix fall back to plain path-based routing.
+	///
+	/// Overlapping suffixes are resolved longest-first, so
+	/// `["moq.dev", "cdn.moq.dev"]` accepts `customer.cdn.moq.dev` under
+	/// `cdn.moq.dev` rather than rejecting it as a multi-label slug under
+	/// `moq.dev`.
 	///
 	/// Pass `--auth-domain` multiple times to configure more than one suffix.
 	#[arg(long = "auth-domain", env = "MOQ_AUTH_DOMAIN")]
@@ -452,27 +449,19 @@ pub struct AuthToken {
 	pub subscribe: PathPrefixes,
 	/// Paths the holder is allowed to publish to, relative to `root`.
 	pub publish: PathPrefixes,
-	/// Whether this token grants cluster-level privileges.
-	pub cluster: bool,
-	/// The cluster node name to register, if this is a cluster connection.
-	pub register: Option<String>,
 }
 
 impl AuthToken {
 	/// Construct a token for a peer that was authenticated at the TLS layer
 	/// via mTLS. These peers are granted full (root-scoped) publish and
-	/// subscribe access plus cluster privileges.
-	///
-	/// `node` is the peer's cluster node name. It is bound to the cert —
-	/// either the first DNS SAN directly, or the SAN with a `:port` suffix
-	/// supplied at connect time (DNS SANs cannot carry ports).
-	pub fn from_peer(node: String) -> Self {
+	/// subscribe access. The cert's trust chain (verified against the
+	/// configured CA) is the only credential we require — DNS SANs and the
+	/// `?register=` name are no longer consulted.
+	pub fn unrestricted() -> Self {
 		Self {
 			root: PathOwned::default(),
 			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
-			cluster: true,
-			register: Some(node),
 		}
 	}
 }
@@ -647,10 +636,16 @@ impl Auth {
 			anyhow::bail!("no auth-key, auth-key-dir, or public path configured");
 		}
 
+		// Sort domain suffixes longest-first so overlapping configurations
+		// (e.g. ["moq.dev", "cdn.moq.dev"]) match the most specific suffix,
+		// rather than letting the configured order silently decide.
+		let mut domains = config.domains;
+		domains.sort_by_key(|d| std::cmp::Reverse(d.len()));
+
 		Ok(Self {
 			resolver,
 			public,
-			domains: Arc::from(config.domains.into_boxed_slice()),
+			domains: Arc::from(domains.into_boxed_slice()),
 		})
 	}
 
@@ -667,6 +662,7 @@ impl Auth {
 
 	/// Parse the token from the user provided URL, returning the claims if successful.
 	/// If no token is provided, then the claims will use the public access configuration.
+	#[allow(deprecated)] // `claims.cluster` is deprecated but still accepted for backwards compat
 	pub async fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
 		let claims = if let Some(token) = params.jwt.as_deref() {
 			let Some(resolver) = &self.resolver else {
@@ -750,14 +746,8 @@ impl Auth {
 		let subscribe = scope(claims.subscribe);
 		let publish = scope(claims.publish);
 
-		let register = match (params.register.as_deref(), claims.cluster) {
-			(Some(node), true) => Some(node.to_owned()),
-			(Some(_), false) => return Err(AuthError::ExpectedCluster),
-			_ => None,
-		};
-
-		// Reject connections that end up with no permissions after reduction
-		if subscribe.is_empty() && publish.is_empty() && !claims.cluster {
+		// Reject connections that end up with no permissions after reduction.
+		if subscribe.is_empty() && publish.is_empty() {
 			return Err(AuthError::IncorrectRoot);
 		}
 
@@ -765,8 +755,6 @@ impl Auth {
 			root: root.to_owned(),
 			subscribe,
 			publish,
-			cluster: claims.cluster,
-			register,
 		})
 	}
 
@@ -899,7 +887,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/any/path".into(),
 				jwt: Some("fake-token".into()),
-				..Default::default()
 			})
 			.await;
 		assert!(result.is_err());
@@ -930,7 +917,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "room/123".as_path());
@@ -963,7 +949,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/secret".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(result.is_err());
@@ -994,7 +979,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "room/123".as_path());
@@ -1027,7 +1011,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
@@ -1059,7 +1042,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.subscribe, vec![]);
@@ -1091,7 +1073,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1125,7 +1106,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1159,7 +1139,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/bob".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1193,7 +1172,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 
@@ -1205,7 +1183,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/bob".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1239,7 +1216,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/users".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 
@@ -1251,7 +1227,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/users/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1285,7 +1260,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1304,7 +1278,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1335,7 +1308,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/test".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::KeyNotFound)));
@@ -1400,7 +1372,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token1),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -1417,7 +1388,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/2".into(),
 				jwt: Some(token2),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/2".as_path());
@@ -1473,7 +1443,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/test".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::MissingKeyId)));
@@ -1543,7 +1512,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/secret".into(),
 				jwt: Some(jwt),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "secret".as_path());
@@ -1577,7 +1545,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1613,7 +1580,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1649,7 +1615,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/other".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
@@ -1682,7 +1647,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/other".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
@@ -1933,7 +1897,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -1962,7 +1925,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::KeyNotFound)));
@@ -1991,7 +1953,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
@@ -2018,7 +1979,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
@@ -2048,7 +2008,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::DecodeFailed)));
@@ -2085,7 +2044,6 @@ api = "https://api.example.com/access"
 			auth.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 		}
@@ -2359,7 +2317,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -2380,7 +2337,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(
@@ -2453,15 +2409,32 @@ api = "https://api.example.com/access"
 	}
 
 	#[test]
-	fn test_match_domain_preserves_jwt_and_register() {
-		let p = parse(
-			"https://customer.cdn.moq.dev/foo?jwt=abc&register=leaf0",
-			&["cdn.moq.dev"],
-		)
-		.unwrap();
+	fn test_match_domain_preserves_jwt() {
+		let p = parse("https://customer.cdn.moq.dev/foo?jwt=abc", &["cdn.moq.dev"]).unwrap();
 		assert_eq!(p.path, "/customer/foo");
 		assert_eq!(p.jwt.as_deref(), Some("abc"));
-		assert_eq!(p.register.as_deref(), Some("leaf0"));
+	}
+
+	#[tokio::test]
+	async fn test_match_domain_overlapping_suffixes_longest_first() -> anyhow::Result<()> {
+		// `Auth::new` sorts configured domains longest-first so that a nested
+		// suffix like "cdn.moq.dev" wins over its parent "moq.dev". Without
+		// this, `customer.cdn.moq.dev` would be rejected as a multi-label slug
+		// under "moq.dev" depending on the configured order.
+		for order in [
+			vec!["moq.dev".to_string(), "cdn.moq.dev".to_string()],
+			vec!["cdn.moq.dev".to_string(), "moq.dev".to_string()],
+		] {
+			let auth = Auth::new(AuthConfig {
+				public: detailed_public(&["customer"], &[]),
+				domains: order,
+				..Default::default()
+			})
+			.await?;
+			let params = auth.params_from_url(&url::Url::parse("https://customer.cdn.moq.dev/foo")?)?;
+			assert_eq!(params.path, "/customer/foo");
+		}
+		Ok(())
 	}
 
 	#[tokio::test]

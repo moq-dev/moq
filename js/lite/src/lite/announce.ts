@@ -1,19 +1,26 @@
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
+import { type Origin, OriginSchema } from "./origin.ts";
 import { Version } from "./version.ts";
 
-const MAX_HOPS = 256;
+// Must match the MAX_HOPS in Rust's model/origin.rs. Broadcasts with longer
+// hop chains are rejected; this keeps loop-detection bounded and rejects
+// pathological announcements across clusters with unbounded forwarding.
+export const MAX_HOPS = 32;
 
 export class Announce {
 	suffix: Path.Valid;
 	active: boolean;
-	hops: number[];
+	hops: Origin[];
 
-	constructor(props: { suffix: Path.Valid; active: boolean; hops?: number[] }) {
+	constructor(props: { suffix: Path.Valid; active: boolean; hops?: Origin[] }) {
 		this.suffix = props.suffix;
 		this.active = props.active;
 		this.hops = props.hops ?? [];
+		if (this.hops.length > MAX_HOPS) {
+			throw new Error(`hop count ${this.hops.length} exceeds maximum ${MAX_HOPS}`);
+		}
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -28,10 +35,10 @@ export class Announce {
 				await w.u53(this.hops.length);
 				break;
 			default:
-				// Lite04+: hop count + individual hop IDs
+				// Lite04+: hop count + individual Origin varints.
 				await w.u53(this.hops.length);
-				for (const id of this.hops) {
-					await w.u53(id);
+				for (const origin of this.hops) {
+					await w.u62(origin);
 				}
 				break;
 		}
@@ -41,7 +48,7 @@ export class Announce {
 		const active = await r.bool();
 		const suffix = Path.from(await r.string());
 
-		let hops: number[] = [];
+		let hops: Origin[] = [];
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
@@ -49,16 +56,19 @@ export class Announce {
 			case Version.DRAFT_03: {
 				const count = await r.u53();
 				if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
-				hops = new Array(count).fill(0);
+				// Lite03 carries only a hop count, not individual ids. Fill with
+				// the zero placeholder (OriginSchema accepts 0 as valid on-wire).
+				const placeholder = OriginSchema.parse(0n);
+				hops = new Array<Origin>(count).fill(placeholder);
 				break;
 			}
 			default: {
-				// Lite04+: hop count + individual hop IDs
+				// Lite04+: hop count + individual Origin varints.
 				const count = await r.u53();
 				if (count > MAX_HOPS) throw new Error(`hop count ${count} exceeds maximum ${MAX_HOPS}`);
 				hops = [];
 				for (let i = 0; i < count; i++) {
-					hops.push(await r.u53());
+					hops.push(OriginSchema.parse(await r.u62()));
 				}
 				break;
 			}

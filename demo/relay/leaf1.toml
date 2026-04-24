@@ -34,17 +34,11 @@ tls.root = ["ca.pem"]
 # Listen for HTTP and WebSocket (TCP) connections on the given address.
 listen = "[::]:4445"
 
-# This clustering scheme is very very simple for now.
-#
-# There is a root node that is used to discover other leaf nodes.
-# The root accept incoming connections, while the leaf nodes dial outgoing connections.
-# This forms a crude NxN mesh network that won't scale, but is good enough.
 [cluster]
-# Connect to this hostname in order to discover other nodes.
-connect = "localhost:4443"
-
-# My hostname, which must be accessible from other nodes.
-node = "localhost:4445"
+# Connect to the "root" node, which will proxy any broadcasts from the other leaf.
+# NOTE: We could absolutely connect to the other leaf directly too, but this helps test proper cluster.
+# ex. imagine us-east connects directly to us-central, but not us-west.
+connect = ["localhost:4443"]
 
 [auth]
 # Allow JWT tokens that are signed by this root key.

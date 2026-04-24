@@ -168,37 +168,6 @@ impl ClientTls {
 
 		Ok(tls)
 	}
-
-	/// Parse the configured certificate PEM (if any) and return the first DNS
-	/// SAN on its leaf certificate.
-	///
-	/// Useful for sanity-checking that a caller's own cluster node name
-	/// matches the certificate they will present. Returns `Ok(None)` if no
-	/// certificate is configured.
-	pub fn cert_dns_name(&self) -> anyhow::Result<Option<String>> {
-		use rustls::pki_types::CertificateDer;
-
-		let Some(path) = self.cert.as_ref() else {
-			return Ok(None);
-		};
-		let pem = std::fs::read(path).context("failed to read client certificate")?;
-		let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut pem.as_slice())
-			.collect::<Result<_, _>>()
-			.context("failed to parse client certificate")?;
-		let leaf = certs.first().context("no certificates found")?;
-		let (_, cert) =
-			x509_parser::parse_x509_certificate(leaf.as_ref()).context("failed to parse client certificate")?;
-		let san = cert
-			.subject_alternative_name()
-			.context("failed to read subject alternative name extension")?
-			.and_then(|san| {
-				san.value.general_names.iter().find_map(|name| match name {
-					x509_parser::extensions::GeneralName::DNSName(n) => Some((*n).to_string()),
-					_ => None,
-				})
-			});
-		Ok(san)
-	}
 }
 
 impl ClientConfig {

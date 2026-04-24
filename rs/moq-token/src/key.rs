@@ -533,7 +533,6 @@ mod tests {
 		Claims {
 			root: "test-path".to_string(),
 			publish: vec!["test-pub".into()],
-			cluster: false,
 			subscribe: vec!["test-sub".into()],
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
@@ -633,7 +632,6 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: vec![],
 			subscribe: vec![],
-			cluster: false,
 			expires: None,
 			issued: None,
 		};
@@ -658,7 +656,6 @@ mod tests {
 		assert_eq!(verified_claims.root, claims.root);
 		assert_eq!(verified_claims.publish, claims.publish);
 		assert_eq!(verified_claims.subscribe, claims.subscribe);
-		assert_eq!(verified_claims.cluster, claims.cluster);
 	}
 
 	#[test]
@@ -712,7 +709,6 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: vec!["".to_string()],
 			subscribe: vec!["".to_string()],
-			cluster: false,
 			expires: None,
 			issued: None,
 		};
@@ -732,7 +728,6 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: vec!["test-pub".into()],
 			subscribe: vec!["test-sub".into()],
-			cluster: true,
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
 		};
@@ -743,7 +738,6 @@ mod tests {
 		assert_eq!(verified_claims.root, original_claims.root);
 		assert_eq!(verified_claims.publish, original_claims.publish);
 		assert_eq!(verified_claims.subscribe, original_claims.subscribe);
-		assert_eq!(verified_claims.cluster, original_claims.cluster);
 	}
 
 	#[test]
@@ -967,7 +961,6 @@ mod tests {
 		assert_eq!(verified_claims.root, claims.root);
 		assert_eq!(verified_claims.publish, claims.publish);
 		assert_eq!(verified_claims.subscribe, claims.subscribe);
-		assert_eq!(verified_claims.cluster, claims.cluster);
 	}
 
 	#[test]

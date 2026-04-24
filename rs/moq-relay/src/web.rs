@@ -203,7 +203,6 @@ async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct AuthQuery {
 	pub(crate) jwt: Option<String>,
-	pub(crate) register: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -275,7 +274,6 @@ async fn serve_announced(
 	let params = AuthParams {
 		path: prefix,
 		jwt: query.jwt,
-		register: query.register,
 	};
 	let token = state.auth.verify(&params).await?;
 	let Some(mut origin) = state.cluster.subscriber(&token) else {
@@ -312,7 +310,6 @@ async fn serve_fetch(
 	let auth = AuthParams {
 		path: broadcast.clone(),
 		jwt: params.auth.jwt,
-		register: params.auth.register,
 	};
 	let token = state.auth.verify(&auth).await?;
 
@@ -351,7 +348,7 @@ async fn serve_fetch(
 			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
-		tracing::info!(track = %track.info.name, group = %group.info.sequence, "serving group");
+		tracing::info!(track = %track.name, group = %group.sequence, "serving group");
 
 		match params.frame {
 			FetchFrame::Num(index) => match group.get_frame(index).await {

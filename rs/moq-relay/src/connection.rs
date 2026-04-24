@@ -1,8 +1,7 @@
 use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
 
-use anyhow::Context;
 use axum::http;
-use moq_native::{PeerIdentity, Request};
+use moq_native::Request;
 
 /// An error carrying the HTTP status to send when closing the request.
 ///
@@ -20,40 +19,6 @@ impl From<AuthError> for StatusError {
 			source: err.into(),
 		}
 	}
-}
-
-/// True when `candidate` is `base` followed by `:<digits>` (a non-empty,
-/// all-ASCII-digit port). DNS SANs cannot carry ports, so a node name
-/// matching its SAN may only differ by such a suffix.
-pub fn is_san_with_port(base: &str, candidate: &str) -> bool {
-	candidate
-		.strip_prefix(base)
-		.and_then(|s| s.strip_prefix(':'))
-		.is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// Pick the cluster node name for a peer authenticated by a DNS-SAN cert.
-///
-/// The SAN is required and authoritative: `claimed` may match it directly or
-/// extend it with a `:port` suffix (DNS SANs cannot carry ports), but cannot
-/// substitute a different name. When `claimed` is `None`, the SAN is used.
-///
-/// Used both for our own outbound identity (cluster.node vs client.tls SAN)
-/// and for inbound mTLS peers (?register= vs peer cert SAN).
-pub fn validate_peer(san: Option<&str>, claimed: Option<&str>) -> anyhow::Result<String> {
-	let san = san.context("certificate is missing a DNS SAN")?;
-	let node = match claimed {
-		None => san.to_owned(),
-		Some(reg) if reg == san => reg.to_owned(),
-		Some(reg) => {
-			anyhow::ensure!(
-				is_san_with_port(san, reg),
-				"node name {reg:?} does not match cert SAN {san:?}"
-			);
-			reg.to_owned()
-		}
-	};
-	Ok(node)
 }
 
 /// An incoming connection that has not yet been authenticated.
@@ -75,8 +40,7 @@ impl Connection {
 	/// Authenticates and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let peer = self.request.peer_identity()?;
-		let token = match self.authenticate(peer).await {
+		let token = match self.authenticate().await {
 			Ok(token) => token,
 			Err(err) => {
 				let _ = self.request.close(err.status.as_u16()).await;
@@ -86,7 +50,6 @@ impl Connection {
 
 		let publish = self.cluster.publisher(&token);
 		let subscribe = self.cluster.subscriber(&token);
-		let registration = self.cluster.register(&token);
 		let transport = self.request.transport();
 
 		match (&publish, &subscribe) {
@@ -121,9 +84,7 @@ impl Connection {
 		tracing::info!(version = %session.version(), transport, "negotiated");
 
 		// Wait until the session is closed.
-		// Keep registration alive so the cluster node stays announced.
 		session.closed().await?;
-		drop(registration);
 		Ok(())
 	}
 
@@ -132,27 +93,23 @@ impl Connection {
 	/// close the request with the mapped HTTP status exactly once.
 	///
 	/// If the client presented a valid mTLS client certificate, JWT is skipped
-	/// and full (cluster) access is granted. The node name comes from the
-	/// cert's first DNS SAN; since DNS SANs cannot carry a port, a `?register=`
-	/// query param is accepted only if it extends the SAN with a `:port`
-	/// suffix (e.g. SAN `leaf0` + `?register=leaf0:4444`).
-	async fn authenticate(&self, peer: Option<PeerIdentity>) -> Result<AuthToken, StatusError> {
+	/// and full (cluster) access is granted. The cert's chain to the configured
+	/// CA is the only credential we require.
+	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
+		let peer = self.request.peer_identity().map_err(|source| StatusError {
+			status: http::StatusCode::FORBIDDEN,
+			source,
+		})?;
+
+		if peer.is_some() {
+			tracing::debug!("mTLS peer authenticated");
+			return Ok(AuthToken::unrestricted());
+		}
+
 		let params = match self.request.url() {
 			Some(url) => self.auth.params_from_url(url)?,
 			None => AuthParams::default(),
 		};
-
-		if let Some(peer) = peer {
-			let node = validate_peer(peer.dns_name.as_deref(), params.register.as_deref()).map_err(|source| {
-				StatusError {
-					status: http::StatusCode::FORBIDDEN,
-					source,
-				}
-			})?;
-			tracing::debug!(?node, "mTLS peer authenticated");
-			Ok(AuthToken::from_peer(node))
-		} else {
-			Ok(self.auth.verify(&params).await?)
-		}
+		Ok(self.auth.verify(&params).await?)
 	}
 }

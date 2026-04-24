@@ -1,5 +1,6 @@
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo,
+	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, coding::Stream,
+	lite::SessionInfo,
 };
 
 use super::{Publisher, Subscriber, Version};
@@ -27,8 +28,12 @@ pub fn start<S: web_transport_trait::Session>(
 		_ => Some(recv_bw),
 	};
 
-	let publisher = Publisher::new(session.clone(), publish, version);
-	let subscriber = Subscriber::new(session.clone(), subscribe, recv_bw_for_sub, version);
+	// Shared per-session origin: the publisher stamps it onto outbound
+	// announce hops, and the subscriber carries it so callers can opt into
+	// filtering out their own reflected announces.
+	let origin = Origin::random();
+	let publisher = Publisher::new(session.clone(), publish, origin, version);
+	let subscriber = Subscriber::new(session.clone(), subscribe, recv_bw_for_sub, origin, version);
 
 	web_async::spawn(async move {
 		let res = tokio::select! {
