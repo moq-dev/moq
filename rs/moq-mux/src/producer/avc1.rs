@@ -93,8 +93,8 @@ impl Avc1 {
 		let mut catalog = self.catalog.lock();
 
 		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.info.name, "reinitializing avc1 track");
-			catalog.video.remove_track(&track.info);
+			tracing::debug!(name = ?track.name, "reinitializing avc1 track");
+			catalog.video.remove_track(track);
 		}
 
 		let track = catalog.video.create_track("avc1", config.clone());
@@ -196,8 +196,8 @@ impl Avc1 {
 impl Drop for Avc1 {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.info.name, "ending avc1 track");
-			self.catalog.lock().video.remove_track(&track.info);
+			tracing::debug!(name = ?track.name, "ending avc1 track");
+			self.catalog.lock().video.remove_track(&track);
 		}
 	}
 }

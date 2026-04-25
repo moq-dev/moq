@@ -179,8 +179,8 @@ impl Aac {
 
 impl Drop for Aac {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.info.name, "ending track");
-		self.catalog.lock().audio.remove_track(&self.track.info);
+		tracing::debug!(name = ?self.track.name, "ending track");
+		self.catalog.lock().audio.remove_track(&self.track);
 	}
 }
 

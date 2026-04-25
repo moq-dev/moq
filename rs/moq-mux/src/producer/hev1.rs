@@ -84,8 +84,8 @@ impl Hev1 {
 		let mut catalog = self.catalog.lock();
 
 		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.info.name, "reinitializing track");
-			catalog.video.remove_track(&track.info);
+			tracing::debug!(name = ?track.name, "reinitializing track");
+			catalog.video.remove_track(track);
 		}
 
 		let track = catalog.video.create_track("hev1", config.clone());
@@ -334,8 +334,8 @@ impl Hev1 {
 impl Drop for Hev1 {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
-			tracing::debug!(name = ?track.info.name, "ending track");
-			self.catalog.lock().video.remove_track(&track.info);
+			tracing::debug!(name = ?track.name, "ending track");
+			self.catalog.lock().video.remove_track(track);
 		}
 	}
 }

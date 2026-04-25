@@ -81,6 +81,12 @@ impl Opus {
 		})
 	}
 
+	/// Returns a reference to the underlying track producer, e.g. for
+	/// monitoring subscriber state via `used()`/`unused()`.
+	pub fn track(&self) -> &moq_lite::TrackProducer {
+		&self.track.track
+	}
+
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		self.track.finish()?;
@@ -120,7 +126,7 @@ impl Opus {
 
 impl Drop for Opus {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.info.name, "ending track");
-		self.catalog.lock().audio.remove_track(&self.track.info);
+		tracing::debug!(name = ?self.track.name, "ending track");
+		self.catalog.lock().audio.remove_track(&self.track);
 	}
 }

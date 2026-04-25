@@ -92,8 +92,8 @@ impl Av01 {
 		}
 
 		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.info.name, "reinitializing track");
-			self.catalog.lock().video.remove_track(&track.info);
+			tracing::debug!(name = ?track.name, "reinitializing track");
+			self.catalog.lock().video.remove_track(track);
 		}
 
 		let mut catalog = self.catalog.lock();
@@ -225,7 +225,7 @@ impl Av01 {
 		}
 
 		if let Some(track) = &self.track.take() {
-			self.catalog.lock().video.remove_track(&track.info);
+			self.catalog.lock().video.remove_track(track);
 		}
 
 		let mut catalog = self.catalog.lock();
@@ -417,8 +417,8 @@ impl Av01 {
 impl Drop for Av01 {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.info.name, "ending track");
-			self.catalog.lock().video.remove_track(&track.info);
+			tracing::debug!(name = ?track.name, "ending track");
+			self.catalog.lock().video.remove_track(&track);
 		}
 	}
 }

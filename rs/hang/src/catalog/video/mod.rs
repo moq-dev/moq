@@ -65,7 +65,7 @@ impl Video {
 		unreachable!("no available video track name");
 	}
 
-	// Remove the track from the catalog and return the configuration if found.
+	/// Remove the track from the catalog and return the configuration if found.
 	pub fn remove_track(&mut self, track: &moq_lite::Track) -> Option<VideoConfig> {
 		self.renditions.remove(track.name.as_str())
 	}

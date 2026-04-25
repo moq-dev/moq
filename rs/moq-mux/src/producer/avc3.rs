@@ -7,17 +7,18 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// A decoder for H.264 with inline SPS/PPS.
 pub struct Avc3 {
-	// The broadcast being produced.
-	broadcast: moq_lite::BroadcastProducer,
-
 	// The catalog being produced.
 	catalog: crate::CatalogProducer,
 
 	// The track being produced.
-	track: Option<hang::container::OrderedProducer>,
+	//
+	// Created eagerly in `new()` so callers can monitor `used()`/`unused()`
+	// before any frames arrive. The catalog rendition is added/updated lazily
+	// in `init()` once the codec config is known from the SPS.
+	track: hang::container::OrderedProducer,
 
 	// Whether the track has been initialized.
-	// If it changes, then we'll reinitialize with a new track.
+	// If it changes, then we'll reinitialize with a new config.
 	config: Option<hang::catalog::VideoConfig>,
 
 	// The current frame being built.
@@ -32,17 +33,26 @@ pub struct Avc3 {
 }
 
 impl Avc3 {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
+	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
+		// Create the track eagerly so callers can monitor used/unused before any frames arrive.
+		// The catalog entry is added later in init() once the codec config is known.
+		let track = broadcast.unique_track(".avc3").expect("failed to create avc3 track");
+
 		Self {
-			broadcast,
 			catalog,
-			track: None,
+			track: track.into(),
 			config: None,
 			current: Default::default(),
 			zero: None,
 			cached_sps: None,
 			cached_pps: None,
 		}
+	}
+
+	/// Returns a reference to the underlying track producer, e.g. for
+	/// monitoring subscriber state via `used()`/`unused()`.
+	pub fn track(&self) -> &moq_lite::TrackProducer {
+		&self.track.track
 	}
 
 	fn init(&mut self, sps: &h264_parser::Sps) -> anyhow::Result<()> {
@@ -80,20 +90,12 @@ impl Avc3 {
 			return Ok(());
 		}
 
+		// Insert/update the catalog rendition (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-
-		if let Some(track) = &self.track.take() {
-			tracing::debug!(name = ?track.info.name, "reinitializing track");
-			catalog.video.remove_track(&track.info);
-		}
-
-		let track = catalog.video.create_track("avc3", config.clone());
-		tracing::debug!(name = ?track.name, ?config, "starting track");
-
-		let track = self.broadcast.create_track(track)?;
+		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
+		tracing::debug!(name = ?self.track.name, ?config, "updated catalog");
 
 		self.config = Some(config);
-		self.track = Some(track.into());
 
 		Ok(())
 	}
@@ -264,13 +266,12 @@ impl Avc3 {
 			return Ok(());
 		}
 
-		let track = self.track.as_mut().context("expected SPS before any frames")?;
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
 
 		if self.current.contains_idr {
-			track.keyframe()?;
+			self.track.keyframe()?;
 		}
 
 		let frame = hang::container::Frame {
@@ -278,7 +279,7 @@ impl Avc3 {
 			payload,
 		};
 
-		track.write(frame)?;
+		self.track.write(frame)?;
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
@@ -290,13 +291,12 @@ impl Avc3 {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
-		let track = self.track.as_mut().context("not initialized")?;
-		track.finish()?;
+		self.track.finish()?;
 		Ok(())
 	}
 
 	pub fn is_initialized(&self) -> bool {
-		self.track.is_some()
+		self.config.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
@@ -313,10 +313,8 @@ impl Avc3 {
 
 impl Drop for Avc3 {
 	fn drop(&mut self) {
-		if let Some(track) = self.track.take() {
-			tracing::debug!(name = ?track.info.name, "ending track");
-			self.catalog.lock().video.remove_track(&track.info);
-		}
+		tracing::debug!(name = ?self.track.name, "ending track");
+		self.catalog.lock().video.remove_track(&self.track);
 	}
 }
 

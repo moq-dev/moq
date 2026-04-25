@@ -645,7 +645,7 @@ impl Fmp4 {
 							let config = catalog
 								.video
 								.renditions
-								.get_mut(&track.track.info.name)
+								.get_mut(&track.track.name)
 								.context("missing video config")?;
 							config.jitter = Some(jitter.convert()?);
 						}
@@ -653,7 +653,7 @@ impl Fmp4 {
 							let config = catalog
 								.audio
 								.renditions
-								.get_mut(&track.track.info.name)
+								.get_mut(&track.track.name)
 								.context("missing audio config")?;
 							config.jitter = Some(jitter.convert()?);
 						}
@@ -685,8 +685,8 @@ impl Drop for Fmp4 {
 
 		for track in self.tracks.values() {
 			match track.kind {
-				TrackKind::Video => catalog.video.remove_track(&track.track.info).is_some(),
-				TrackKind::Audio => catalog.audio.remove_track(&track.track.info).is_some(),
+				TrackKind::Video => catalog.video.remove_track(&track.track).is_some(),
+				TrackKind::Audio => catalog.audio.remove_track(&track.track).is_some(),
 			};
 		}
 	}
