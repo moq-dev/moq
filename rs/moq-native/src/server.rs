@@ -501,15 +501,9 @@ impl Server {
 
 /// The identity of a peer that presented a client certificate during the TLS
 /// handshake, as validated against the configured [`ServerTlsConfig::root`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub struct PeerIdentity {
-	/// The first DNS SAN on the leaf certificate, if any.
-	///
-	/// This is cryptographically bound to the cert and is suitable as a
-	/// stable node name.
-	pub dns_name: Option<String>,
-}
+pub struct PeerIdentity {}
 
 /// An incoming connection that can be accepted or rejected.
 pub(crate) enum RequestKind {

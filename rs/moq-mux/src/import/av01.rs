@@ -100,12 +100,9 @@ impl Av01 {
 
 		// Update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-		catalog
-			.video
-			.renditions
-			.insert(self.track.info.name.clone(), config.clone());
+		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
 
-		tracing::debug!(name = ?self.track.info.name, ?config, "updated catalog");
+		tracing::debug!(name = ?self.track.name, ?config, "updated catalog");
 
 		self.config = Some(config);
 
@@ -144,12 +141,9 @@ impl Av01 {
 
 		// Update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-		catalog
-			.video
-			.renditions
-			.insert(self.track.info.name.clone(), config.clone());
+		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
 
-		tracing::debug!(name = ?self.track.info.name, "updated catalog with minimal config");
+		tracing::debug!(name = ?self.track.name, "updated catalog with minimal config");
 
 		self.config = Some(config);
 
@@ -230,12 +224,9 @@ impl Av01 {
 
 		// Update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-		catalog
-			.video
-			.renditions
-			.insert(self.track.info.name.clone(), config.clone());
+		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
 
-		tracing::debug!(name = ?self.track.info.name, ?config, "updated catalog from av1c");
+		tracing::debug!(name = ?self.track.name, ?config, "updated catalog from av1c");
 
 		self.config = Some(config);
 
@@ -396,7 +387,7 @@ impl Av01 {
 				self.jitter = Some(duration);
 
 				if let Ok(jitter) = duration.convert() {
-					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.info.name) {
+					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.name) {
 						c.jitter = Some(jitter);
 					}
 				}
@@ -440,8 +431,8 @@ impl Av01 {
 
 impl Drop for Av01 {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.info.name, "ending track");
-		self.catalog.lock().video.remove(&self.track.info.name);
+		tracing::debug!(name = ?self.track.name, "ending track");
+		self.catalog.lock().video.remove(&self.track.name);
 	}
 }
 

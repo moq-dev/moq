@@ -23,7 +23,7 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 
 impl<S: web_transport_trait::Session> Publisher<S> {
 	pub fn new(session: S, origin: Option<OriginConsumer>, control: Control, version: Version) -> Self {
-		let origin = origin.unwrap_or_else(|| Origin::produce().consume());
+		let origin = origin.unwrap_or_else(|| Origin::random().produce().consume());
 		Self {
 			session,
 			origin,
@@ -229,8 +229,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				else => return Ok(()),
 			}?;
 
-			let sequence = group.info.sequence;
-			tracing::debug!(subscribe = %request_id, track = %track.info.name, sequence, "serving group");
+			let sequence = group.sequence;
+			tracing::debug!(subscribe = %request_id, track = %track.name, sequence, "serving group");
 
 			let msg = ietf::GroupHeader {
 				track_alias: request_id.0,
@@ -240,8 +240,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				flags: Default::default(),
 			};
 
-			tasks
-				.push(Self::run_group(self.session.clone(), msg, track.info.priority, group, self.version).map(|_| ()));
+			tasks.push(Self::run_group(self.session.clone(), msg, track.priority, group, self.version).map(|_| ()));
 		}
 	}
 
@@ -280,9 +279,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 
 			// Write the size of the frame.
-			stream.encode(&frame.info.size).await?;
+			stream.encode(&frame.size).await?;
 
-			if frame.info.size == 0 {
+			if frame.size == 0 {
 				// Have to write the object status too.
 				stream.encode(&0u8).await?;
 			} else {

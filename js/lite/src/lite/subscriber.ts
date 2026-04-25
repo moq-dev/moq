@@ -10,10 +10,25 @@ import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
+import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
 import { Version } from "./version.ts";
+
+/**
+ * Options accepted by {@link Subscriber.announced}.
+ */
+export interface AnnouncedOptions {
+	/**
+	 * If true, skip announcements whose hop chain contains this connection's
+	 * own origin id — useful for meshes that reflect announces back. Defaults
+	 * to false for backwards compatibility: existing code (notably hang.live)
+	 * relies on seeing its own publishes as the signal that a namespace
+	 * published successfully.
+	 */
+	ignoreSelf?: boolean;
+}
 
 /**
  * Handles subscribing to broadcasts and managing their lifecycle.
@@ -25,6 +40,10 @@ export class Subscriber {
 
 	// The version of the connection.
 	readonly version: Version;
+
+	// Shared with the Publisher so callers can optionally filter out their
+	// own announcements on a per-call basis (see {@link AnnouncedOptions}).
+	readonly origin: Origin;
 
 	// Our subscribed tracks.
 	#subscribes = new Map<bigint, Track>();
@@ -40,27 +59,39 @@ export class Subscriber {
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
 	 * @param version - The protocol version
+	 * @param origin - Origin id shared with the Publisher
 	 * @param recvBandwidth - Optional bandwidth producer for PROBE
 	 * @param rtt - Optional RTT signal for PROBE
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, recvBandwidth?: Bandwidth, rtt?: Signal<Time.Milli | undefined>) {
+	constructor(
+		quic: WebTransport,
+		version: Version,
+		origin: Origin,
+		recvBandwidth?: Bandwidth,
+		rtt?: Signal<Time.Milli | undefined>,
+	) {
 		this.#quic = quic;
 		this.version = version;
+		this.origin = origin;
 		this.#recvBandwidth = recvBandwidth;
 		this.#rtt = rtt;
 	}
 
 	/**
+	 * Subscribe to broadcast announcements under `prefix`.
+	 *
+	 * Pass `{ ignoreSelf: true }` to skip announces that have already traversed
+	 * this connection's {@link origin}.
 	 */
-	announced(prefix = Path.empty()): Announced {
+	announced(prefix = Path.empty(), options: AnnouncedOptions = {}): Announced {
 		const announced = new Announced();
-		void this.#runAnnounced(announced, prefix);
+		void this.#runAnnounced(announced, prefix, options);
 		return announced;
 	}
 
-	async #runAnnounced(announced: Announced, prefix: Path.Valid): Promise<void> {
+	async #runAnnounced(announced: Announced, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		const msg = new AnnounceInterest(prefix);
 
@@ -97,6 +128,12 @@ export class Subscriber {
 				]);
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
+
+				// Optionally drop reflected announces so callers asking for
+				// "someone else's broadcasts" don't re-see their own publishes.
+				if (options.ignoreSelf && announce.hops.includes(this.origin)) {
+					continue;
+				}
 
 				const path = Path.join(prefix, announce.suffix);
 

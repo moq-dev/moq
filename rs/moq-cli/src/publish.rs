@@ -56,7 +56,7 @@ pub struct Publish {
 
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
-		let mut broadcast = moq_lite::BroadcastProducer::default();
+		let mut broadcast = moq_lite::Broadcast::new().produce();
 		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 
 		let decoder = match format {

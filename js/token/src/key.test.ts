@@ -24,7 +24,6 @@ const testClaims: Claims = {
 	root: "test-path",
 	put: "test-pub",
 	get: "test-sub",
-	cluster: false,
 	exp: Math.floor((Date.now() + 60 * 1000) / 1000), // 1 minute from now in seconds
 	iat: Math.floor(Date.now() / 1000), // now in seconds
 };
@@ -161,7 +160,6 @@ test("verify - successful verification", async () => {
 	expect(claims.root).toBe(testClaims.root);
 	expect(claims.put).toBe(testClaims.put);
 	expect(claims.get).toBe(testClaims.get);
-	expect(claims.cluster).toBe(testClaims.cluster);
 });
 
 test("verify - key doesn't support verification", async () => {
@@ -222,7 +220,6 @@ test("verify - token without exp field", async () => {
 test("claims validation - must have pub or sub", async () => {
 	const invalidClaims = {
 		root: "test-path",
-		cluster: false,
 		// missing both pub and sub
 	};
 
@@ -241,7 +238,6 @@ test("round-trip - sign and verify", async () => {
 		root: "test-path",
 		put: "test-pub",
 		get: "test-sub",
-		cluster: true,
 		exp: Math.floor((Date.now() + 60 * 1000) / 1000),
 		iat: Math.floor(Date.now() / 1000),
 	};
@@ -252,7 +248,6 @@ test("round-trip - sign and verify", async () => {
 	expect(verifiedClaims.root).toBe(originalClaims.root);
 	expect(verifiedClaims.put).toBe(originalClaims.put);
 	expect(verifiedClaims.get).toBe(originalClaims.get);
-	expect(verifiedClaims.cluster).toBe(originalClaims.cluster);
 	expect(verifiedClaims.exp).toBe(originalClaims.exp);
 	expect(verifiedClaims.iat).toBe(originalClaims.iat);
 });
@@ -272,7 +267,6 @@ test("sign - invalid claims without pub or sub", async () => {
 	const key = load(encodeJwk(testKey));
 	const invalidClaims = {
 		root: "test-path",
-		cluster: false,
 	};
 
 	await expect(
