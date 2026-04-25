@@ -132,7 +132,6 @@ mod tests {
 		Claims {
 			root: "test-path".to_string(),
 			publish: vec!["test-pub".into()],
-			cluster: false,
 			subscribe: vec!["test-sub".into()],
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),

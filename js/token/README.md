@@ -130,7 +130,6 @@ interface Claims {
 	root?: string;           // Root path for publish/subscribe (optional)
 	publish?: string;        // Publish permission pattern
 	subscribe?: string;      // Subscribe permission pattern
-	cluster?: boolean;       // Whether this is a cluster node
 	expires?: Date;          // Token expiration time
 	issued?: Date;           // Token issued time
 }

@@ -22,7 +22,6 @@ fn main() -> anyhow::Result<()> {
 		subscribe: vec!["".to_string()],
 		expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 		issued: Some(SystemTime::now()),
-		..Default::default()
 	};
 
 	let token = private_key.encode(&claims)?;

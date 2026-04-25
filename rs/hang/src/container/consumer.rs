@@ -110,7 +110,7 @@ impl OrderedConsumer {
 				}
 
 				// Start reading from this group and skip any previous groups.
-				self.current = group.info.sequence;
+				self.current = group.sequence;
 				self.startup = false;
 				self.pending.drain(0..i);
 				break;
@@ -121,7 +121,7 @@ impl OrderedConsumer {
 			// Return the next frame from the current group if possible.
 			// If the current group is finished or errored, advance to the next group.
 			while let Some(group) = self.pending.front_mut()
-				&& group.info.sequence <= self.current
+				&& group.sequence <= self.current
 			{
 				match group.poll_read(waiter) {
 					Poll::Ready(Ok(Some(frame))) => return Poll::Ready(Ok(Some(frame))),
@@ -143,7 +143,7 @@ impl OrderedConsumer {
 			let mut min_idx = None;
 
 			for (i, group) in self.pending.iter_mut().enumerate() {
-				if group.info.sequence <= self.current {
+				if group.sequence <= self.current {
 					continue;
 				}
 
@@ -157,7 +157,7 @@ impl OrderedConsumer {
 			// Loop in descending order to get the max, avoiding spurious wakeups.
 			let mut max_timestamp = std::time::Duration::ZERO;
 			for group in self.pending.iter_mut().rev() {
-				if group.info.sequence <= self.current {
+				if group.sequence <= self.current {
 					break;
 				}
 
@@ -171,7 +171,7 @@ impl OrderedConsumer {
 				&& max_timestamp.saturating_sub(min_timestamp) >= self.max_latency
 			{
 				self.pending.drain(0..new_idx);
-				let new_current = self.pending.front().map(|g| g.info.sequence).unwrap();
+				let new_current = self.pending.front().map(|g| g.sequence).unwrap();
 
 				tracing::debug!(old = self.current, new = new_current, "skipping slow groups");
 
@@ -198,9 +198,9 @@ impl OrderedConsumer {
 			};
 
 			let reader = GroupBuffer::new(group);
-			if reader.group.info.sequence < self.current {
+			if reader.group.sequence < self.current {
 				tracing::debug!(
-					old = ?reader.group.info.sequence,
+					old = ?reader.group.sequence,
 					current = ?self.current,
 					"skipping old group"
 				);
@@ -209,7 +209,7 @@ impl OrderedConsumer {
 
 			let idx = self
 				.pending
-				.partition_point(|g| g.group.info.sequence < reader.group.info.sequence);
+				.partition_point(|g| g.group.sequence < reader.group.sequence);
 			self.pending.insert(idx, reader);
 		}
 	}
@@ -311,7 +311,7 @@ impl GroupBuffer {
 		self.buffered.push_back(OrderedFrame {
 			timestamp,
 			payload,
-			group: self.group.info.sequence,
+			group: self.group.sequence,
 			index,
 		});
 

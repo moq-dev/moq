@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
 	moq_native::Log::new(tracing::Level::DEBUG).init();
 
 	// Create an origin that the session can publish incoming broadcasts to.
-	let origin = moq_lite::Origin::produce();
+	let origin = moq_lite::Origin::random().produce();
 	let consumer = origin.consume();
 
 	// Run the subscription and the session in parallel.

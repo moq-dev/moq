@@ -19,12 +19,10 @@ pub struct AuthParams {
 	pub path: String,
 	/// A JWT token, if provided via the `jwt` query parameter.
 	pub jwt: Option<String>,
-	/// A cluster registration identifier, if provided via the `register` query parameter.
-	pub register: Option<String>,
 }
 
 impl AuthParams {
-	/// Creates params with just a path and no token or registration.
+	/// Creates params with just a path and no token.
 	pub fn new(path: impl Into<String>) -> Self {
 		Self {
 			path: path.into(),
@@ -36,20 +34,17 @@ impl AuthParams {
 	pub fn from_url(url: &url::Url) -> Self {
 		let path = url.path().to_string();
 		let mut jwt = None;
-		let mut register = None;
 
 		for (k, v) in url.query_pairs() {
 			if v.is_empty() {
 				continue;
 			}
-			match k.as_ref() {
-				"jwt" => jwt = Some(v.into_owned()),
-				"register" => register = Some(v.into_owned()),
-				_ => {}
+			if k.as_ref() == "jwt" {
+				jwt = Some(v.into_owned());
 			}
 		}
 
-		Self { path, jwt, register }
+		Self { path, jwt }
 	}
 }
 
@@ -68,9 +63,6 @@ pub enum AuthError {
 
 	#[error("the path does not match the root")]
 	IncorrectRoot,
-
-	#[error("a cluster token was expected")]
-	ExpectedCluster,
 
 	#[error("key not found")]
 	KeyNotFound,
@@ -400,27 +392,19 @@ pub struct AuthToken {
 	pub subscribe: PathPrefixes,
 	/// Paths the holder is allowed to publish to, relative to `root`.
 	pub publish: PathPrefixes,
-	/// Whether this token grants cluster-level privileges.
-	pub cluster: bool,
-	/// The cluster node name to register, if this is a cluster connection.
-	pub register: Option<String>,
 }
 
 impl AuthToken {
 	/// Construct a token for a peer that was authenticated at the TLS layer
 	/// via mTLS. These peers are granted full (root-scoped) publish and
-	/// subscribe access plus cluster privileges.
-	///
-	/// `node` is the peer's cluster node name. It is bound to the cert —
-	/// either the first DNS SAN directly, or the SAN with a `:port` suffix
-	/// supplied at connect time (DNS SANs cannot carry ports).
-	pub fn from_peer(node: String) -> Self {
+	/// subscribe access. The cert's trust chain (verified against the
+	/// configured CA) is the only credential we require — DNS SANs and the
+	/// `?register=` name are no longer consulted.
+	pub fn unrestricted() -> Self {
 		Self {
 			root: PathOwned::default(),
 			subscribe: PathPrefixes::from(vec![Path::new("").to_owned()]),
 			publish: PathPrefixes::from(vec![Path::new("").to_owned()]),
-			cluster: true,
-			register: Some(node),
 		}
 	}
 }
@@ -603,6 +587,7 @@ impl Auth {
 
 	/// Parse the token from the user provided URL, returning the claims if successful.
 	/// If no token is provided, then the claims will use the public access configuration.
+	#[allow(deprecated)] // `claims.cluster` is deprecated but still accepted for backwards compat
 	pub async fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
 		let claims = if let Some(token) = params.jwt.as_deref() {
 			let Some(resolver) = &self.resolver else {
@@ -686,14 +671,8 @@ impl Auth {
 		let subscribe = scope(claims.subscribe);
 		let publish = scope(claims.publish);
 
-		let register = match (params.register.as_deref(), claims.cluster) {
-			(Some(node), true) => Some(node.to_owned()),
-			(Some(_), false) => return Err(AuthError::ExpectedCluster),
-			_ => None,
-		};
-
-		// Reject connections that end up with no permissions after reduction
-		if subscribe.is_empty() && publish.is_empty() && !claims.cluster {
+		// Reject connections that end up with no permissions after reduction.
+		if subscribe.is_empty() && publish.is_empty() {
 			return Err(AuthError::IncorrectRoot);
 		}
 
@@ -701,8 +680,6 @@ impl Auth {
 			root: root.to_owned(),
 			subscribe,
 			publish,
-			cluster: claims.cluster,
-			register,
 		})
 	}
 
@@ -835,7 +812,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/any/path".into(),
 				jwt: Some("fake-token".into()),
-				..Default::default()
 			})
 			.await;
 		assert!(result.is_err());
@@ -866,7 +842,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "room/123".as_path());
@@ -899,7 +874,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/secret".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(result.is_err());
@@ -930,7 +904,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "room/123".as_path());
@@ -963,7 +936,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
@@ -995,7 +967,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.subscribe, vec![]);
@@ -1027,7 +998,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1061,7 +1031,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1095,7 +1064,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/bob".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1129,7 +1097,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 
@@ -1141,7 +1108,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/bob".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1175,7 +1141,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/users".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 
@@ -1187,7 +1152,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/users/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1221,7 +1185,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1240,7 +1203,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/123/alice".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1271,7 +1233,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/test".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::KeyNotFound)));
@@ -1336,7 +1297,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token1),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -1353,7 +1313,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room/2".into(),
 				jwt: Some(token2),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/2".as_path());
@@ -1409,7 +1368,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/test".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::MissingKeyId)));
@@ -1479,7 +1437,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/secret".into(),
 				jwt: Some(jwt),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(token.root, "secret".as_path());
@@ -1513,7 +1470,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1549,7 +1505,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/room".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 
@@ -1585,7 +1540,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/other".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
@@ -1618,7 +1572,6 @@ mod tests {
 			.verify(&AuthParams {
 				path: "/other".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::IncorrectRoot)));
@@ -1869,7 +1822,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -1898,7 +1850,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::KeyNotFound)));
@@ -1927,7 +1878,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
@@ -1954,7 +1904,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::ApiUnavailable(_))));
@@ -1984,7 +1933,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(matches!(result, Err(AuthError::DecodeFailed)));
@@ -2021,7 +1969,6 @@ api = "https://api.example.com/access"
 			auth.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 		}
@@ -2295,7 +2242,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token.clone()),
-				..Default::default()
 			})
 			.await?;
 		assert_eq!(verified.root, "room/1".as_path());
@@ -2316,7 +2262,6 @@ api = "https://api.example.com/access"
 			.verify(&AuthParams {
 				path: "/room/1".into(),
 				jwt: Some(token),
-				..Default::default()
 			})
 			.await;
 		assert!(

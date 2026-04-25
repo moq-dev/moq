@@ -23,6 +23,12 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 
 	origin: Option<OriginProducer>,
 	recv_bandwidth: Option<BandwidthProducer>,
+	// Session-level origin id shared with the Publisher. Kept so callers that
+	// want to filter reflected announces can reuse the same id; for now only
+	// plumbed through, not applied automatically (see hang.live's dependency
+	// on seeing its own publishes as a confirmation signal).
+	#[allow(dead_code)]
+	self_origin: crate::Origin,
 	subscribes: Lock<HashMap<u64, TrackProducer>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
@@ -33,12 +39,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		session: S,
 		origin: Option<OriginProducer>,
 		recv_bandwidth: Option<BandwidthProducer>,
+		self_origin: crate::Origin,
 		version: Version,
 	) -> Self {
 		Self {
 			session,
 			origin,
 			recv_bandwidth,
+			self_origin,
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version,
@@ -120,7 +128,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
-					self.start_announce(path, &mut producers)?;
+					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
+					self.start_announce(path, crate::OriginList::new(), &mut producers)?;
 				}
 			}
 			_ => {
@@ -130,9 +139,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {
-				lite::Announce::Active { suffix, .. } => {
+				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
-					self.start_announce(path, &mut producers)?;
+					self.start_announce(path, hops, &mut producers)?;
 				}
 				lite::Announce::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
@@ -198,11 +207,12 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
+		hops: crate::OriginList,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<(), Error> {
-		tracing::debug!(broadcast = %self.log_path(&path), "announce");
+		tracing::debug!(broadcast = %self.log_path(&path), hops = hops.len(), "announce");
 
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast { hops }.produce();
 
 		// Make sure the peer doesn't double announce.
 		match producers.entry(path.to_owned()) {
@@ -260,15 +270,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let msg = lite::Subscribe {
 			id,
 			broadcast: broadcast.to_owned(),
-			track: (&track.info.name).into(),
-			priority: track.info.priority,
+			track: (&track.name).into(),
+			priority: track.priority,
 			ordered: true,
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,
 			end_group: None,
 		};
 
-		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe started");
+		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe started");
 
 		let res = tokio::select! {
 			_ = track.unused() => Err(Error::Cancel),
@@ -277,15 +287,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		match res {
 			Err(Error::Cancel) => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe cancelled");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
 			Err(err) => {
-				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, %err, "subscribe error");
+				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.name, %err, "subscribe error");
 				let _ = track.abort(err);
 			}
 			_ => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.info.name, "subscribe complete");
+				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe complete");
 				let _ = track.finish();
 			}
 		}
@@ -344,7 +354,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let _ = group.abort(Error::Cancel);
 			}
 			Err(err) => {
-				tracing::debug!(%err, group = %group.info.sequence, "group error");
+				tracing::debug!(%err, group = %group.sequence, "group error");
 				let _ = group.abort(err);
 			}
 			_ => {
@@ -379,7 +389,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut FrameProducer,
 	) -> Result<(), Error> {
-		let mut remain = frame.info.size;
+		let mut remain = frame.size;
 
 		const MAX_CHUNK: usize = 1024 * 1024; // 1 MiB
 		while remain > 0 {

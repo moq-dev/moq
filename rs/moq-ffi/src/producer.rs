@@ -45,7 +45,7 @@ impl MoqBroadcastProducer {
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let mut broadcast = moq_lite::BroadcastProducer::new();
+		let mut broadcast = moq_lite::Broadcast::new().produce();
 		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
@@ -128,7 +128,7 @@ impl MoqTrackProducer {
 		let track = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 		let group = track.append_group()?;
 		Ok(Arc::new(MoqGroupProducer {
-			sequence: group.info.sequence,
+			sequence: group.sequence,
 			inner: std::sync::Mutex::new(Some(group)),
 		}))
 	}

@@ -49,19 +49,6 @@ async fn main() -> anyhow::Result<()> {
 		config.auth.init().await?
 	};
 
-	// If we're dialing a remote cluster with an mTLS identity, derive or validate
-	// `cluster.node` against the identity's DNS SAN — the cert is what cluster
-	// peers will use to authenticate us. The SAN is authoritative; `cluster.node`
-	// may only extend it with a `:port` suffix (DNS SANs cannot carry ports).
-	if config.cluster.root.is_some() && config.client.tls.cert.is_some() {
-		let san = config
-			.client
-			.tls
-			.cert_dns_name()?
-			.context("client.tls.cert has no DNS SAN; cluster peers cannot authenticate")?;
-		config.cluster.node = Some(validate_peer(Some(&san), config.cluster.node.as_deref())?);
-	}
-
 	let cluster = Cluster::new(config.cluster, client);
 
 	// Create a web server too.

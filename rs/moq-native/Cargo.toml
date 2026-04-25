@@ -68,7 +68,6 @@ web-transport-noq = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-quiche = { workspace = true, optional = true }
 web-transport-quinn = { workspace = true, optional = true }
-x509-parser = "0.18"
 
 [dev-dependencies]
 bytes = "1"

@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -19,17 +19,21 @@ use super::Version;
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
+	// The session-level origin id stamped onto outbound hop chains. Shared
+	// with the Subscriber so it can optionally filter out reflected announces.
+	self_origin: Origin,
 	priority: PriorityQueue,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: Option<OriginConsumer>, version: Version) -> Self {
+	pub fn new(session: S, origin: Option<OriginConsumer>, self_origin: Origin, version: Version) -> Self {
 		// Default to a dummy origin that is immediately closed.
-		let origin = origin.unwrap_or_else(|| Origin::produce().consume());
+		let origin = origin.unwrap_or_else(|| Origin::random().produce().consume());
 		Self {
 			session,
 			origin,
+			self_origin,
 			priority: Default::default(),
 			version,
 		}
@@ -131,8 +135,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.ok_or(Error::Unauthorized)?;
 
 		let version = self.version;
+		let self_origin = self.self_origin;
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version).await {
+			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, self_origin, version).await {
 				match &err {
 					Error::Cancel | Error::Transport(_) => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
@@ -153,6 +158,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
+		self_origin: Origin,
 		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
@@ -194,13 +200,28 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						Some((path, active)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 
-							if active.is_some() {
+							if let Some(active) = active {
 								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-								let msg = lite::Announce::Active { suffix, hops: Vec::new() };
+								// Append our origin id to the hops so the next relay can detect loops.
+								// If the chain is already at MAX_HOPS, skip the announce — this link is
+								// effectively unreachable and the peer will eventually prune the loop.
+								let mut hops = active.hops.clone();
+								if hops.push(self_origin).is_err() {
+									tracing::warn!(
+										broadcast = %origin.absolute(&path),
+										"dropping announce; hop chain at MAX_HOPS (possible loop)",
+									);
+									continue;
+								}
+								let msg = lite::Announce::Active { suffix, hops };
 								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-								let msg = lite::Announce::Ended { suffix, hops: Vec::new() };
+								// An ended announce doesn't need hops — the receiver matches on path only.
+								let msg = lite::Announce::Ended {
+									suffix,
+									hops: OriginList::new(),
+								};
 								stream.writer.encode(&msg).await?;
 							}
 						},
@@ -268,7 +289,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// TODO wait until track.info() to get the *real* priority
 
 		let info = lite::SubscribeOk {
-			priority: track.info.priority,
+			priority: track.priority,
 			ordered: false,
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,
@@ -311,15 +332,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				else => return Ok(()),
 			}?;
 
-			let sequence = group.info.sequence;
-			tracing::debug!(subscribe = %subscribe.id, track = %track.info.name, sequence, "serving group");
+			let sequence = group.sequence;
+			tracing::debug!(subscribe = %subscribe.id, track = %track.name, sequence, "serving group");
 
 			let msg = lite::Group {
 				subscribe: subscribe.id,
 				sequence,
 			};
 
-			let priority = priority.insert(track.info.priority, sequence);
+			let priority = priority.insert(track.priority, sequence);
 			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
 		}
 	}
@@ -356,7 +377,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				None => break,
 			};
 
-			stream.encode(&frame.info.size).await?;
+			stream.encode(&frame.size).await?;
 
 			loop {
 				let chunk = tokio::select! {
