@@ -117,7 +117,7 @@ impl GroupState {
 			let Some(frame) = self.frames.pop_front() else {
 				break;
 			};
-			self.cache -= frame.info.size;
+			self.cache -= frame.size;
 			self.offset += 1;
 		}
 	}
@@ -136,8 +136,16 @@ pub struct GroupProducer {
 	// Mutable stream state.
 	state: conducer::Producer<GroupState>,
 
-	/// The group header containing the sequence number.
-	pub info: Group,
+	// The group header containing the sequence number.
+	info: Group,
+}
+
+impl std::ops::Deref for GroupProducer {
+	type Target = Group;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
 }
 
 impl GroupProducer {
@@ -177,7 +185,7 @@ impl GroupProducer {
 		if state.fin {
 			return Err(Error::Closed);
 		}
-		state.cache += frame.info.size;
+		state.cache += frame.size;
 		state.frames.push_back(frame);
 		state.evict();
 		Ok(())
@@ -259,11 +267,19 @@ pub struct GroupConsumer {
 	state: conducer::Consumer<GroupState>,
 
 	// Immutable stream state.
-	pub info: Group,
+	info: Group,
 
 	// The number of frames we've read.
 	// NOTE: Cloned readers inherit this offset, but then run in parallel.
 	index: usize,
+}
+
+impl std::ops::Deref for GroupConsumer {
+	type Target = Group;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
 }
 
 impl GroupConsumer {
@@ -369,9 +385,9 @@ mod test {
 
 		let mut consumer = producer.consume();
 		let f0 = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(f0.info.size, 6);
+		assert_eq!(f0.size, 6);
 		let f1 = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(f1.info.size, 6);
+		assert_eq!(f1.size, 6);
 		let end = consumer.next_frame().now_or_never().unwrap().unwrap();
 		assert!(end.is_none());
 	}
@@ -412,9 +428,9 @@ mod test {
 
 		let consumer = producer.consume();
 		let f0 = consumer.get_frame(0).now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(f0.info.size, 1);
+		assert_eq!(f0.size, 1);
 		let f1 = consumer.get_frame(1).now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(f1.info.size, 2);
+		assert_eq!(f1.size, 2);
 		let f2 = consumer.get_frame(2).now_or_never().unwrap().unwrap();
 		assert!(f2.is_none());
 	}
@@ -451,7 +467,7 @@ mod test {
 		producer.finish().unwrap();
 
 		let frame = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.info.size, 4);
+		assert_eq!(frame.size, 4);
 	}
 
 	#[test]
@@ -470,7 +486,7 @@ mod test {
 
 		// The second frame should still be available.
 		let f1 = consumer.get_frame(1).now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(f1.info.size, MAX_GROUP_CACHE);
+		assert_eq!(f1.size, MAX_GROUP_CACHE);
 	}
 
 	#[test]
@@ -482,9 +498,9 @@ mod test {
 
 		let consumer = producer.consume();
 		let f0 = consumer.get_frame(0).now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(f0.info.size, 5);
+		assert_eq!(f0.size, 5);
 		let f1 = consumer.get_frame(1).now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(f1.info.size, 6);
+		assert_eq!(f1.size, 6);
 	}
 
 	#[test]
@@ -508,7 +524,7 @@ mod test {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(f.info.size, 1);
+		assert_eq!(f.size, 1);
 	}
 
 	#[test]
@@ -542,7 +558,7 @@ mod test {
 
 		// c2 should get the second frame (inherited index)
 		let f = c2.next_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(f.info.size, 1); // "b"
+		assert_eq!(f.size, 1); // "b"
 
 		let end = c2.next_frame().now_or_never().unwrap().unwrap();
 		assert!(end.is_none());

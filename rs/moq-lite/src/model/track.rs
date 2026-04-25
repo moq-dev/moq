@@ -66,7 +66,7 @@ impl State {
 		let start = index.saturating_sub(self.offset);
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
 			if let Some((group, _)) = slot
-				&& group.info.sequence >= min_sequence
+				&& group.sequence >= min_sequence
 			{
 				return Poll::Ready(Ok(Some((group.consume(), self.offset + i))));
 			}
@@ -95,14 +95,14 @@ impl State {
 		let mut pending_seen = false;
 		for (i, slot) in self.groups.iter().enumerate().skip(start) {
 			let Some((group, _)) = slot else { continue };
-			if group.info.sequence < next_sequence {
+			if group.sequence < next_sequence {
 				continue;
 			}
 
 			let mut consumer = group.consume();
 			match consumer.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
-					return Poll::Ready(Ok(Some((frame, self.offset + i, group.info.sequence))));
+					return Poll::Ready(Ok(Some((frame, self.offset + i, group.sequence))));
 				}
 				Poll::Ready(Ok(None)) => continue,
 				Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
@@ -129,7 +129,7 @@ impl State {
 	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
 		// Search for the group with the matching sequence, skipping tombstones.
 		for (group, _) in self.groups.iter().flatten() {
-			if group.info.sequence == sequence {
+			if group.sequence == sequence {
 				return Poll::Ready(Ok(Some(group.consume())));
 			}
 		}
@@ -168,7 +168,7 @@ impl State {
 		for slot in self.groups.iter_mut() {
 			let Some((group, created_at)) = slot else { continue };
 
-			if Some(group.info.sequence) == self.max_sequence {
+			if Some(group.sequence) == self.max_sequence {
 				continue;
 			}
 
@@ -176,7 +176,7 @@ impl State {
 				break;
 			}
 
-			self.duplicates.remove(&group.info.sequence);
+			self.duplicates.remove(&group.sequence);
 			*slot = None;
 		}
 
@@ -200,8 +200,16 @@ impl State {
 
 /// A producer for a track, used to create new groups.
 pub struct TrackProducer {
-	pub info: Track,
+	info: Track,
 	state: conducer::Producer<State>,
+}
+
+impl std::ops::Deref for TrackProducer {
+	type Target = Track;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
 }
 
 impl TrackProducer {
@@ -218,17 +226,17 @@ impl TrackProducer {
 
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence
-			&& group.info.sequence >= fin
+			&& group.sequence >= fin
 		{
 			return Err(Error::Closed);
 		}
 
-		if !state.duplicates.insert(group.info.sequence) {
+		if !state.duplicates.insert(group.sequence) {
 			return Err(Error::Duplicate);
 		}
 
 		let now = tokio::time::Instant::now();
-		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.info.sequence));
+		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(group.sequence));
 		state.groups.push_back(Some((group.clone(), now)));
 		state.evict_expired(now);
 
@@ -394,7 +402,7 @@ impl From<Track> for TrackProducer {
 /// A weak reference to a track that doesn't prevent auto-close.
 #[derive(Clone)]
 pub(crate) struct TrackWeak {
-	pub info: Track,
+	pub(crate) info: Track,
 	state: conducer::Weak<State>,
 }
 
@@ -440,7 +448,7 @@ impl TrackWeak {
 /// A consumer for a track, used to read groups.
 #[derive(Clone)]
 pub struct TrackConsumer {
-	pub info: Track,
+	info: Track,
 	state: conducer::Consumer<State>,
 	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
@@ -449,6 +457,14 @@ pub struct TrackConsumer {
 	/// One past the highest sequence returned by [`Self::next_group_ordered`].
 	/// Used only by that method to skip late arrivals; does not affect [`Self::recv_group`].
 	next_sequence: u64,
+}
+
+impl std::ops::Deref for TrackConsumer {
+	type Target = Track;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
 }
 
 impl TrackConsumer {
@@ -514,11 +530,11 @@ impl TrackConsumer {
 			let Some(group) = ready!(self.poll_recv_group(waiter)?) else {
 				return Poll::Ready(Ok(None));
 			};
-			if group.info.sequence < self.next_sequence {
+			if group.sequence < self.next_sequence {
 				// Late arrival; discard and keep looking.
 				continue;
 			}
-			self.next_sequence = group.info.sequence.saturating_add(1);
+			self.next_sequence = group.sequence.saturating_add(1);
 			return Poll::Ready(Ok(Some(group)));
 		}
 	}
@@ -686,7 +702,7 @@ mod test {
 
 	/// Helper: get the sequence number of the first live group.
 	fn first_live_sequence(state: &State) -> u64 {
-		state.groups.iter().flatten().next().unwrap().0.info.sequence
+		state.groups.iter().flatten().next().unwrap().0.sequence
 	}
 
 	#[tokio::test]
@@ -777,7 +793,7 @@ mod test {
 
 		// Group 0 was evicted. Consumer should get group 1.
 		let group = consumer.assert_group();
-		assert_eq!(group.info.sequence, 1);
+		assert_eq!(group.sequence, 1);
 	}
 
 	#[tokio::test]
@@ -861,7 +877,7 @@ mod test {
 		let mut consumer = producer.consume();
 		let group = consumer.assert_group();
 		// consume() starts at index 0, first non-tombstoned group is seq 5.
-		assert_eq!(group.info.sequence, 5);
+		assert_eq!(group.sequence, 5);
 	}
 
 	#[test]
@@ -910,7 +926,7 @@ mod test {
 		producer.finish_at(1).unwrap();
 
 		let mut consumer = producer.consume();
-		assert_eq!(consumer.assert_group().info.sequence, 1);
+		assert_eq!(consumer.assert_group().sequence, 1);
 
 		let done = consumer
 			.recv_group()
@@ -933,7 +949,7 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(group.info.sequence, 5);
+		assert_eq!(group.sequence, 5);
 
 		// Seq 3 arrives late — skipped because 3 <= 5.
 		producer.create_group(Group { sequence: 3 }).unwrap();
@@ -948,7 +964,7 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(group.info.sequence, 7);
+		assert_eq!(group.sequence, 7);
 
 		// No more groups — would block.
 		assert!(
@@ -972,7 +988,7 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(group.info.sequence, 3);
+		assert_eq!(group.sequence, 3);
 
 		let group = consumer
 			.next_group_ordered()
@@ -980,7 +996,7 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(group.info.sequence, 5);
+		assert_eq!(group.sequence, 5);
 	}
 
 	#[tokio::test]
@@ -998,11 +1014,11 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored")
 			.expect("track should not be closed");
-		assert_eq!(group.info.sequence, 5);
+		assert_eq!(group.sequence, 5);
 
 		// Intermixing: recv_group on the same consumer still returns the late seq 3.
 		// The ordered cursor is separate from the recv_group filter.
-		assert_eq!(consumer.assert_group().info.sequence, 3);
+		assert_eq!(consumer.assert_group().sequence, 3);
 	}
 
 	#[tokio::test]

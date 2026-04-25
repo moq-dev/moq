@@ -1,4 +1,4 @@
-set fallback
+set fallback := true
 
 # Run a localhost relay server without authentication.
 default:
@@ -42,20 +42,21 @@ ca:
     	-days 365 -subj "/CN=moq cluster CA" \
     	-keyout ca.key -out ca.pem
 
-# Generate a self-signed certificate using the root CA
+# Generate a self-signed certificate using the root CA.
+
+# Chrome requires a <=14 day validity for self-signed certs.
 cert name: ca
     #!/usr/bin/env bash
     set -euo pipefail
     umask 077
 
-    [ -f "{{ name }}.crt" ] && [ -f "{{ name }}.key" ] && exit 0
     export OPENSSL_CONF="ca.cnf"
     openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
     	-subj "/CN={{ name }}" \
     	-keyout "{{ name }}.key" -out "{{ name }}.csr"
     openssl x509 -req -sha256 -in "{{ name }}.csr" \
     	-CA ca.pem -CAkey ca.key -CAcreateserial \
-    	-days 365 -extfile <(printf "subjectAltName=DNS:localhost\n") \
+    	-days 14 -extfile <(printf "subjectAltName=DNS:localhost\n") \
     	-out "{{ name }}.crt"
     rm "{{ name }}.csr"
 

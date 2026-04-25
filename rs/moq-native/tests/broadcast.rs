@@ -23,7 +23,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	let server_version: Option<moq_lite::Version> = server_version.map(|v| v.parse().expect("invalid server version"));
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = Origin::produce();
+	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
@@ -45,7 +45,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	let addr = server.local_addr().expect("failed to get local addr");
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::produce();
+	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume();
 
 	let mut client_config = moq_native::ClientConfig::default();
@@ -361,7 +361,7 @@ async fn broadcast_websocket() {
 	use moq_native::moq_lite::{Origin, Track};
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = Origin::produce();
+	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
@@ -387,7 +387,7 @@ async fn broadcast_websocket() {
 		.with_websocket(Some(ws_listener));
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::produce();
+	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume();
 
 	let mut client_config = moq_native::ClientConfig::default();
@@ -465,7 +465,7 @@ async fn broadcast_websocket_fallback() {
 	use moq_native::moq_lite::{Origin, Track};
 
 	// ── publisher (server) ──────────────────────────────────────────
-	let pub_origin = Origin::produce();
+	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
@@ -491,7 +491,7 @@ async fn broadcast_websocket_fallback() {
 		.with_websocket(Some(ws_listener));
 
 	// ── subscriber (client) ─────────────────────────────────────────
-	let sub_origin = Origin::produce();
+	let sub_origin = Origin::random().produce();
 	let mut announcements = sub_origin.consume();
 
 	let mut client_config = moq_native::ClientConfig::default();

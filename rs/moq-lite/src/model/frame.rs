@@ -127,11 +127,19 @@ impl FrameState {
 /// The total bytes written must exactly match [Frame::size].
 /// Call [Self::finish] after writing all bytes to verify correctness.
 pub struct FrameProducer {
-	/// The frame header containing the expected size.
-	pub info: Frame,
+	// The frame header containing the expected size.
+	info: Frame,
 
 	// Mutable stream state.
 	state: conducer::Producer<FrameState>,
+}
+
+impl std::ops::Deref for FrameProducer {
+	type Target = Frame;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
 }
 
 impl FrameProducer {
@@ -223,11 +231,19 @@ impl From<Frame> for FrameProducer {
 	}
 }
 
+impl std::ops::Deref for FrameConsumer {
+	type Target = Frame;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
 /// Used to consume a frame's worth of data in chunks.
 #[derive(Clone)]
 pub struct FrameConsumer {
 	// Immutable stream state.
-	pub info: Frame,
+	info: Frame,
 
 	// Shared state with the producer.
 	state: conducer::Consumer<FrameState>,

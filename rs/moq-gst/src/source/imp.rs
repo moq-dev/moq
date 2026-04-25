@@ -417,7 +417,7 @@ async fn run_session(
 	let mut config = moq_native::ClientConfig::default();
 	config.tls.disable_verify = Some(settings.tls_disable_verify);
 
-	let origin = moq_lite::Origin::produce();
+	let origin = moq_lite::Origin::random().produce();
 	let origin_consumer = origin.consume();
 	let client = config.init()?.with_consume(origin);
 

@@ -4,7 +4,6 @@ export const ClaimsSchema = z
 	.object({
 		root: z.string(),
 		put: z.optional(z.union([z.string(), z.array(z.string())])),
-		cluster: z.optional(z.boolean()),
 		get: z.optional(z.union([z.string(), z.array(z.string())])),
 		exp: z.optional(z.number()),
 		iat: z.optional(z.number()),

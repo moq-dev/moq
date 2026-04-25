@@ -413,7 +413,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				return Ok(entry.get().producer.clone());
 			}
 			Entry::Vacant(entry) => {
-				let broadcast = Broadcast::produce();
+				let broadcast = Broadcast::new().produce();
 				origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
@@ -561,7 +561,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return;
 		}
 
-		tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.info.name, "subscribe started");
+		tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.name, "subscribe started");
 
 		// Read the response and register the alias mapping
 		let track_alias = match self.read_subscribe_response(&mut stream).await {
@@ -586,13 +586,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Wait for track unused or PublishDone (stream reader close)
 		tokio::select! {
 			_ = track.unused() => {
-				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.info.name, "subscribe cancelled");
+				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
 			res = stream.reader.closed() => {
 				match res {
 					Ok(()) => {
-						tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.info.name, "subscribe complete");
+						tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.name, "subscribe complete");
 						let _ = track.finish();
 					}
 					Err(err) => {
@@ -625,8 +625,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			.encode(&ietf::Subscribe {
 				request_id,
 				track_namespace: broadcast.to_owned(),
-				track_name: (&track.info.name).into(),
-				subscriber_priority: track.info.priority,
+				track_name: (&track.name).into(),
+				subscriber_priority: track.priority,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})
@@ -695,7 +695,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let _ = producer.abort(Error::Cancel);
 			}
 			Err(err) => {
-				tracing::debug!(%err, group = %producer.info.sequence, "group error");
+				tracing::debug!(%err, group = %producer.sequence, "group error");
 				let _ = producer.abort(err);
 			}
 			_ => {
@@ -754,7 +754,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut frame: FrameProducer,
 	) -> Result<(), Error> {
-		let mut remain = frame.info.size;
+		let mut remain = frame.size;
 
 		while remain > 0 {
 			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;

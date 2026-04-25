@@ -15,7 +15,6 @@ fn main() -> anyhow::Result<()> {
 		root: "demo".to_string(),
 		publish: vec!["my-stream".to_string()], // Can publish to demo/my-stream
 		subscribe: vec!["".to_string()],        // Can subscribe to anything under demo/
-		cluster: false,
 		expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 		issued: Some(SystemTime::now()),
 	};

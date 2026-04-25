@@ -64,12 +64,12 @@ The [video example](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/vi
 The key pattern is: create an [`Origin`](https://docs.rs/moq-lite/latest/moq_lite/struct.Origin.html), connect a session to it, then publish broadcasts:
 
 ```rust
-let origin = moq_lite::Origin::produce();
+let origin = moq_lite::Origin::new().produce();
 let session = client
     .with_publish(origin.consume())
     .connect(url).await?;
 
-let mut broadcast = moq_lite::Broadcast::produce();
+let mut broadcast = moq_lite::Broadcast::new().produce();
 // ... add catalog and tracks to the broadcast ...
 origin.publish_broadcast("", broadcast.consume());
 ```
@@ -83,7 +83,7 @@ The [subscribe example](https://github.com/moq-dev/moq/blob/main/rs/hang/example
 To consume a broadcast, use `with_consume()` and listen for announcements:
 
 ```rust
-let origin = moq_lite::Origin::produce();
+let origin = moq_lite::Origin::new().produce();
 let mut consumer = origin.consume();
 let session = client
     .with_consume(origin)
