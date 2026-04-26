@@ -429,7 +429,7 @@ async fn run_session(
 
 	let catalog_track = broadcast.subscribe_track(
 		&hang::catalog::Catalog::default_track(),
-		hang::catalog::Catalog::default_subscription(),
+		hang::catalog::Catalog::SUBSCRIPTION,
 	)?;
 	let mut catalog = hang::catalog::CatalogConsumer::new(catalog_track);
 	let catalog = catalog.next().await?.context("catalog missing")?.clone();

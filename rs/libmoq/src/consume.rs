@@ -50,7 +50,7 @@ impl Consume {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
 		let catalog = broadcast.subscribe_track(
 			&hang::catalog::Catalog::default_track(),
-			hang::catalog::Catalog::default_subscription(),
+			hang::catalog::Catalog::SUBSCRIPTION,
 		)?;
 
 		let channel = oneshot::channel();

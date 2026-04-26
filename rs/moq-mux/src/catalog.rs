@@ -53,7 +53,7 @@ impl CatalogProducer {
 		let subscriber = self
 			.hang_track
 			.consume()
-			.subscribe(hang::Catalog::default_subscription())
+			.subscribe(hang::Catalog::SUBSCRIPTION)
 			.expect("hang_track producer is alive");
 		hang::CatalogConsumer::new(subscriber)
 	}

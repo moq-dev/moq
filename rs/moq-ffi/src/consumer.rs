@@ -79,7 +79,7 @@ impl MoqBroadcastConsumer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(
 			&hang::catalog::Catalog::default_track(),
-			hang::catalog::Catalog::default_subscription(),
+			hang::catalog::Catalog::SUBSCRIPTION,
 		)?;
 		let consumer = hang::CatalogConsumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
