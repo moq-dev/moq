@@ -319,17 +319,16 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let track = moq_lite::Track {
-		name: track,
-		priority: 0,
-	};
+	let track = moq_lite::Track::new(track);
 
 	// NOTE: The auth token is already scoped to the broadcast.
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
-	let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
-		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
-		_ => StatusCode::INTERNAL_SERVER_ERROR,
-	})?;
+	let mut track = broadcast
+		.subscribe_track(&track, moq_lite::Subscription::default())
+		.map_err(|err| match err {
+			moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
+			_ => StatusCode::INTERNAL_SERVER_ERROR,
+		})?;
 
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 

@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, Error, Origin, OriginConsumer, Subscription, Track, TrackSubscriber,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	model::GroupConsumer,
@@ -111,13 +111,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			return Ok(());
 		};
 
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: msg.subscriber_priority,
-		};
+		let track = Track::new(msg.track_name.to_string());
 
-		let track = match broadcast.subscribe_track(&track) {
-			Ok(track) => track,
+		let subscriber = match broadcast.subscribe_track(
+			&track,
+			Subscription {
+				priority: msg.subscriber_priority,
+				..Default::default()
+			},
+		) {
+			Ok(subscriber) => subscriber,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
 					.await?;
@@ -139,8 +142,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			.await?;
 
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
+		let priority = msg.subscriber_priority;
 		let res = tokio::select! {
-			res = self.run_track(track, request_id) => res,
+			res = self.run_track(subscriber, request_id, priority) => res,
 			_ = stream.reader.closed() => Ok(()),
 			_ = self.session.closed() => Ok(()),
 		};
@@ -215,7 +219,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
-	async fn run_track(&self, mut track: TrackConsumer, request_id: RequestId) -> Result<(), Error> {
+	async fn run_track(
+		&self,
+		mut subscriber: TrackSubscriber,
+		request_id: RequestId,
+		priority: u8,
+	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
 		loop {
@@ -225,12 +234,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					while tasks.next().await.is_some() {}
 					false
 				} => unreachable!(),
-				Some(group) = track.recv_group().transpose() => group,
+				Some(group) = subscriber.recv_group().transpose() => group,
 				else => return Ok(()),
 			}?;
 
 			let sequence = group.sequence;
-			tracing::debug!(subscribe = %request_id, track = %track.name, sequence, "serving group");
+			tracing::debug!(subscribe = %request_id, track = %subscriber.name, sequence, "serving group");
 
 			let msg = ietf::GroupHeader {
 				track_alias: request_id.0,
@@ -240,7 +249,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				flags: Default::default(),
 			};
 
-			tasks.push(Self::run_group(self.session.clone(), msg, track.priority, group, self.version).map(|_| ()));
+			tasks.push(Self::run_group(self.session.clone(), msg, priority, group, self.version).map(|_| ()));
 		}
 	}
 

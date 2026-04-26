@@ -50,7 +50,8 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	tracing::info!(%path, "broadcast announced");
 
 	// Read the catalog to discover available tracks.
-	let catalog_track = broadcast.subscribe_track(&hang::Catalog::default_track())?;
+	let catalog_track =
+		broadcast.subscribe_track(&hang::Catalog::default_track(), moq_lite::Subscription::default())?;
 	let mut catalog = hang::CatalogConsumer::new(catalog_track);
 
 	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
@@ -72,12 +73,9 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	);
 
 	// Subscribe to the video track.
-	let track = moq_lite::Track {
-		name: name.clone(),
-		priority: 1,
-	};
+	let track = moq_lite::Track::new(name.clone());
 
-	let track_consumer = broadcast.subscribe_track(&track)?;
+	let track_consumer = broadcast.subscribe_track(&track, moq_lite::Subscription::default())?;
 	let mut ordered = hang::container::OrderedConsumer::new(track_consumer, Duration::from_millis(500));
 
 	// Read frames in presentation order.

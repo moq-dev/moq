@@ -462,11 +462,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: 0,
-		}
-		.produce();
+		let track = Track::new(msg.track_name.to_string()).produce();
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
@@ -626,7 +622,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				track_namespace: broadcast.to_owned(),
 				track_name: (&track.name).into(),
-				subscriber_priority: track.priority,
+				// TODO surface the producer's aggregate subscription priority instead.
+				subscriber_priority: 0,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})

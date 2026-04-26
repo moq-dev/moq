@@ -271,7 +271,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			id,
 			broadcast: broadcast.to_owned(),
 			track: (&track.name).into(),
-			priority: track.priority,
+			// TODO surface the producer's aggregate subscription preferences instead.
+			priority: 0,
 			ordered: true,
 			max_latency: std::time::Duration::ZERO,
 			start_group: None,

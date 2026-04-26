@@ -2,18 +2,17 @@ use crate::{Catalog, Result};
 
 /// A catalog consumer, used to receive catalog updates and discover tracks.
 ///
-/// This wraps a `moq_lite::TrackConsumer` and automatically deserializes JSON
+/// This wraps a `moq_lite::TrackSubscriber` and automatically deserializes JSON
 /// catalog data to discover available audio and video tracks in a broadcast.
-#[derive(Clone)]
 pub struct CatalogConsumer {
-	/// Access to the underlying track consumer.
-	pub track: moq_lite::TrackConsumer,
+	/// Access to the underlying track subscriber.
+	pub track: moq_lite::TrackSubscriber,
 	group: Option<moq_lite::GroupConsumer>,
 }
 
 impl CatalogConsumer {
-	/// Create a new catalog consumer from a MoQ track consumer.
-	pub fn new(track: moq_lite::TrackConsumer) -> Self {
+	/// Create a new catalog consumer from a MoQ track subscriber.
+	pub fn new(track: moq_lite::TrackSubscriber) -> Self {
 		Self { track, group: None }
 	}
 
@@ -49,8 +48,8 @@ impl CatalogConsumer {
 	}
 }
 
-impl From<moq_lite::TrackConsumer> for CatalogConsumer {
-	fn from(inner: moq_lite::TrackConsumer) -> Self {
+impl From<moq_lite::TrackSubscriber> for CatalogConsumer {
+	fn from(inner: moq_lite::TrackSubscriber) -> Self {
 		Self::new(inner)
 	}
 }
