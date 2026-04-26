@@ -107,7 +107,7 @@ impl Connection {
 		}
 
 		let params = match self.request.url() {
-			Some(url) => self.auth.params_from_url(url)?,
+			Some(url) => self.auth.params_from_url(url),
 			None => AuthParams::default(),
 		};
 		Ok(self.auth.verify(&params).await?)

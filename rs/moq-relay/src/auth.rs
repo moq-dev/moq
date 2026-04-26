@@ -32,12 +32,17 @@ impl AuthParams {
 
 	/// Extracts authentication parameters from a URL's path and query string.
 	///
-	/// When the URL host matches one of `domains` as `<slug>.<domain>`, the slug
-	/// is prepended to the URL path. An exact-suffix or non-matching host is
-	/// left as-is (plain path-based routing).
-	pub fn from_url(url: &url::Url, domains: &[String]) -> Result<Self, AuthError> {
+	/// When the URL host matches one of `domains` as `<labels>.<suffix>`, the
+	/// labels are prepended to the URL path in DNS-reverse order (broadest
+	/// scope first), so `customer.usw.cdn.moq.dev/foo` with suffix
+	/// `cdn.moq.dev` routes to `/usw/customer/foo`. An exact-suffix or
+	/// non-matching host is left as-is (plain path-based routing).
+	///
+	/// `domains` must be pre-canonicalized by [`Auth::new`] (lowercased and
+	/// prefixed with `.`).
+	pub(crate) fn from_url(url: &url::Url, domains: &[String]) -> Self {
 		// url.path() always starts with '/' for http/https/wss URLs.
-		let path = match match_domain(url.host_str(), domains)? {
+		let path = match match_domain(url.host_str(), domains) {
 			Some(slug) => format!("/{slug}{}", url.path()),
 			None => url.path().to_string(),
 		};
@@ -53,34 +58,45 @@ impl AuthParams {
 			}
 		}
 
-		Ok(Self { path, jwt })
+		Self { path, jwt }
 	}
 }
 
-/// If `host` is `<slug>.<suffix>` for any configured suffix, returns the slug.
-/// An exact match against a suffix, or a host that matches no suffix, returns
-/// `None` (plain path-based routing). A multi-label slug (e.g. `a.b.<suffix>`)
-/// is rejected to keep customer isolation unambiguous — operators who want
-/// nested customers can add the inner domain to the list.
-fn match_domain(host: Option<&str>, domains: &[String]) -> Result<Option<String>, AuthError> {
-	let Some(host) = host else {
-		return Ok(None);
-	};
-	// URL hosts are case-insensitive; match that way.
-	let host_lc = host.to_ascii_lowercase();
+/// If `host` matches any configured suffix as `<labels>.<suffix>`, returns
+/// the labels joined with `/` in DNS-reverse order so the broadest scope
+/// becomes the outermost path segment. With suffix `cdn.moq.dev`:
+///
+/// - `customer.cdn.moq.dev`     → `Some("customer")`
+/// - `customer.usw.cdn.moq.dev` → `Some("usw/customer")`
+///
+/// An exact match against a suffix or a host that matches no suffix returns
+/// `None` (plain path-based routing).
+///
+/// `domains` must be pre-validated, ASCII-lowercased, and `.`-prefixed (e.g.
+/// `".cdn.moq.dev"`); [`Auth::new`] does this once at startup so a single
+/// `strip_suffix` covers both exact (slug = `""`) and slug match.
+fn match_domain(host: Option<&str>, domains: &[String]) -> Option<String> {
+	let host = host?;
+	// Most relays don't configure --auth-domain; skip the lowercase alloc
+	// when there's nothing to match against.
+	if domains.is_empty() {
+		return None;
+	}
+	// Pre-pend '.' to the host so the dot-prefixed suffixes match exact and
+	// slug hosts identically.
+	let host_lc = format!(".{}", host.to_ascii_lowercase());
 	for suffix in domains {
-		let suffix_lc = suffix.to_ascii_lowercase();
-		if host_lc == suffix_lc {
-			return Ok(None);
-		}
-		if let Some(slug) = host_lc.strip_suffix(&suffix_lc).and_then(|s| s.strip_suffix('.')) {
-			if slug.is_empty() || slug.contains('.') {
-				return Err(AuthError::InvalidHost);
+		if let Some(slug) = host_lc.strip_suffix(suffix) {
+			if slug.is_empty() {
+				return None;
 			}
-			return Ok(Some(slug.to_owned()));
+			// Drop the leading '.' left by strip_suffix, then reverse the
+			// labels and join with '/' — DNS nests broader scopes rightward,
+			// so reversing puts the broadest label first in the path.
+			return Some(slug.trim_start_matches('.').rsplit('.').collect::<Vec<_>>().join("/"));
 		}
 	}
-	Ok(None)
+	None
 }
 
 /// Errors returned when authentication or authorization fails.
@@ -98,9 +114,6 @@ pub enum AuthError {
 
 	#[error("the path does not match the root")]
 	IncorrectRoot,
-
-	#[error("the URL host is not a valid customer under a configured domain")]
-	InvalidHost,
 
 	#[error("key not found")]
 	KeyNotFound,
@@ -134,7 +147,6 @@ impl From<&AuthError> for http::StatusCode {
 			// problem, not a credential problem.
 			AuthError::ApiUnavailable(_) => http::StatusCode::BAD_GATEWAY,
 			AuthError::InvalidUrl(_) => http::StatusCode::INTERNAL_SERVER_ERROR,
-			AuthError::InvalidHost => http::StatusCode::BAD_REQUEST,
 			_ => http::StatusCode::UNAUTHORIZED,
 		}
 	}
@@ -266,16 +278,23 @@ pub struct AuthConfig {
 
 	/// Domain suffixes for subdomain-based (SNI) slug routing.
 	///
-	/// When an incoming connection's URL host is `<slug>.<suffix>` for one of
-	/// these suffixes, `<slug>` is prepended to the URL path before auth runs,
-	/// so `customer.cdn.moq.dev/foo` is equivalent to `cdn.moq.dev/customer/foo`.
+	/// When an incoming connection's URL host is `<labels>.<suffix>` for one
+	/// of these suffixes, the labels are reversed and prepended to the URL
+	/// path before auth runs (DNS nests broader scopes rightward, so
+	/// reversing puts the broadest label first in the path). With suffix
+	/// `cdn.moq.dev`:
+	///
+	/// - `customer.cdn.moq.dev/foo`     → `cdn.moq.dev/customer/foo`
+	/// - `customer.usw.cdn.moq.dev/foo` → `cdn.moq.dev/usw/customer/foo`
+	///
 	/// A host that exactly matches a suffix contributes no slug. Hosts that
 	/// don't match any suffix fall back to plain path-based routing.
 	///
-	/// Overlapping suffixes are resolved longest-first, so
-	/// `["moq.dev", "cdn.moq.dev"]` accepts `customer.cdn.moq.dev` under
-	/// `cdn.moq.dev` rather than rejecting it as a multi-label slug under
-	/// `moq.dev`.
+	/// Overlapping suffixes are resolved longest-first. With
+	/// `["cdn.moq.dev", "usw.cdn.moq.dev"]`, `customer.usw.cdn.moq.dev/foo`
+	/// matches the more specific `usw.cdn.moq.dev` (slug `customer`,
+	/// path `/customer/foo`) rather than `cdn.moq.dev` (slug `usw/customer`,
+	/// path `/usw/customer/foo`).
 	///
 	/// Pass `--auth-domain` multiple times to configure more than one suffix.
 	#[arg(long = "auth-domain", env = "MOQ_AUTH_DOMAIN")]
@@ -636,10 +655,18 @@ impl Auth {
 			anyhow::bail!("no auth-key, auth-key-dir, or public path configured");
 		}
 
-		// Sort domain suffixes longest-first so overlapping configurations
-		// (e.g. ["moq.dev", "cdn.moq.dev"]) match the most specific suffix,
-		// rather than letting the configured order silently decide.
-		let mut domains = config.domains;
+		// Canonicalize domain suffixes once at startup: lowercase and prefix
+		// with '.' so `match_domain` can do plain dot-prefixed strip_suffix
+		// per request without per-call allocations. Sort longest-first so
+		// overlapping configurations (e.g. ["moq.dev", "cdn.moq.dev"]) match
+		// the most specific suffix rather than letting the configured order
+		// silently decide.
+		let mut domains: Vec<String> = Vec::with_capacity(config.domains.len());
+		for d in config.domains {
+			let d = d.trim_start_matches('.').to_ascii_lowercase();
+			anyhow::ensure!(!d.is_empty(), "auth-domain suffix must not be empty");
+			domains.push(format!(".{d}"));
+		}
 		domains.sort_by_key(|d| std::cmp::Reverse(d.len()));
 
 		Ok(Self {
@@ -651,7 +678,7 @@ impl Auth {
 
 	/// Build [`AuthParams`] from an incoming connection URL, applying any
 	/// configured subdomain-based slug routing.
-	pub fn params_from_url(&self, url: &url::Url) -> Result<AuthParams, AuthError> {
+	pub(crate) fn params_from_url(&self, url: &url::Url) -> AuthParams {
 		AuthParams::from_url(url, &self.domains)
 	}
 
@@ -2347,26 +2374,31 @@ api = "https://api.example.com/access"
 		Ok(())
 	}
 
-	fn parse(url: &str, domains: &[&str]) -> Result<AuthParams, AuthError> {
-		let domains: Vec<String> = domains.iter().map(|s| s.to_string()).collect();
+	fn parse(url: &str, domains: &[&str]) -> AuthParams {
+		// Mirror the canonicalization Auth::new does so unit tests of from_url
+		// take suffixes in the same form callers would.
+		let domains: Vec<String> = domains
+			.iter()
+			.map(|s| format!(".{}", s.trim_start_matches('.').to_ascii_lowercase()))
+			.collect();
 		AuthParams::from_url(&url::Url::parse(url).unwrap(), &domains)
 	}
 
 	#[test]
 	fn test_match_domain_slug_prepended() {
-		let p = parse("https://customer.cdn.moq.dev/foo", &["cdn.moq.dev"]).unwrap();
+		let p = parse("https://customer.cdn.moq.dev/foo", &["cdn.moq.dev"]);
 		assert_eq!(p.path, "/customer/foo");
 	}
 
 	#[test]
 	fn test_match_domain_exact_suffix_no_slug() {
-		let p = parse("https://cdn.moq.dev/foo", &["cdn.moq.dev"]).unwrap();
+		let p = parse("https://cdn.moq.dev/foo", &["cdn.moq.dev"]);
 		assert_eq!(p.path, "/foo");
 	}
 
 	#[test]
 	fn test_match_domain_non_matching_host() {
-		let p = parse("https://something.else.com/foo", &["cdn.moq.dev"]).unwrap();
+		let p = parse("https://something.else.com/foo", &["cdn.moq.dev"]);
 		assert_eq!(p.path, "/foo");
 	}
 
@@ -2375,14 +2407,18 @@ api = "https://api.example.com/access"
 		// url::Url canonicalizes an empty path to "/", so the output is
 		// "/customer/" rather than "/customer" — the trailing slash is harmless
 		// since Path strips it.
-		let p = parse("https://customer.cdn.moq.dev/", &["cdn.moq.dev"]).unwrap();
+		let p = parse("https://customer.cdn.moq.dev/", &["cdn.moq.dev"]);
 		assert_eq!(p.path, "/customer/");
 	}
 
 	#[test]
-	fn test_match_domain_multi_label_rejected() {
-		let err = parse("https://a.b.cdn.moq.dev/foo", &["cdn.moq.dev"]).unwrap_err();
-		assert!(matches!(err, AuthError::InvalidHost));
+	fn test_match_domain_multi_label_to_path() {
+		// Multi-label slugs reverse so the DNS label closest to the suffix
+		// (broadest scope) becomes the outermost path segment. With suffix
+		// `cdn.moq.dev`, `customer.usw.cdn.moq.dev/foo` routes to
+		// `/usw/customer/foo`.
+		let p = parse("https://customer.usw.cdn.moq.dev/foo", &["cdn.moq.dev"]);
+		assert_eq!(p.path, "/usw/customer/foo");
 	}
 
 	#[test]
@@ -2390,27 +2426,26 @@ api = "https://api.example.com/access"
 		let p = parse(
 			"https://customer.staging.moq.dev/foo",
 			&["cdn.moq.dev", "staging.moq.dev"],
-		)
-		.unwrap();
+		);
 		assert_eq!(p.path, "/customer/foo");
 	}
 
 	#[test]
 	fn test_match_domain_case_insensitive() {
-		let p = parse("https://CUSTOMER.CDN.moq.dev/Foo", &["cdn.moq.dev"]).unwrap();
+		let p = parse("https://CUSTOMER.CDN.moq.dev/Foo", &["cdn.moq.dev"]);
 		// The URL crate lowercases the host but preserves the path case.
 		assert_eq!(p.path, "/customer/Foo");
 	}
 
 	#[test]
 	fn test_match_domain_no_domains_configured() {
-		let p = parse("https://customer.cdn.moq.dev/foo", &[]).unwrap();
+		let p = parse("https://customer.cdn.moq.dev/foo", &[]);
 		assert_eq!(p.path, "/foo");
 	}
 
 	#[test]
 	fn test_match_domain_preserves_jwt() {
-		let p = parse("https://customer.cdn.moq.dev/foo?jwt=abc", &["cdn.moq.dev"]).unwrap();
+		let p = parse("https://customer.cdn.moq.dev/foo?jwt=abc", &["cdn.moq.dev"]);
 		assert_eq!(p.path, "/customer/foo");
 		assert_eq!(p.jwt.as_deref(), Some("abc"));
 	}
@@ -2418,12 +2453,13 @@ api = "https://api.example.com/access"
 	#[tokio::test]
 	async fn test_match_domain_overlapping_suffixes_longest_first() -> anyhow::Result<()> {
 		// `Auth::new` sorts configured domains longest-first so that a nested
-		// suffix like "cdn.moq.dev" wins over its parent "moq.dev". Without
-		// this, `customer.cdn.moq.dev` would be rejected as a multi-label slug
-		// under "moq.dev" depending on the configured order.
+		// suffix like "usw.cdn.moq.dev" wins over its parent "cdn.moq.dev".
+		// Without this, `customer.usw.cdn.moq.dev` would route under
+		// "cdn.moq.dev" as `/usw/customer/foo` depending on the configured
+		// order, instead of `/customer/foo` under "usw.cdn.moq.dev".
 		for order in [
-			vec!["moq.dev".to_string(), "cdn.moq.dev".to_string()],
-			vec!["cdn.moq.dev".to_string(), "moq.dev".to_string()],
+			vec!["cdn.moq.dev".to_string(), "usw.cdn.moq.dev".to_string()],
+			vec!["usw.cdn.moq.dev".to_string(), "cdn.moq.dev".to_string()],
 		] {
 			let auth = Auth::new(AuthConfig {
 				public: detailed_public(&["customer"], &[]),
@@ -2431,7 +2467,7 @@ api = "https://api.example.com/access"
 				..Default::default()
 			})
 			.await?;
-			let params = auth.params_from_url(&url::Url::parse("https://customer.cdn.moq.dev/foo")?)?;
+			let params = auth.params_from_url(&url::Url::parse("https://customer.usw.cdn.moq.dev/foo")?);
 			assert_eq!(params.path, "/customer/foo");
 		}
 		Ok(())
@@ -2448,7 +2484,7 @@ api = "https://api.example.com/access"
 		})
 		.await?;
 
-		let params = auth.params_from_url(&url::Url::parse("https://customer.cdn.moq.dev/anon/room")?)?;
+		let params = auth.params_from_url(&url::Url::parse("https://customer.cdn.moq.dev/anon/room")?);
 		assert_eq!(params.path, "/customer/anon/room");
 
 		let token = auth.verify(&params).await?;
@@ -2456,7 +2492,7 @@ api = "https://api.example.com/access"
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 
 		// A different customer under the same suffix is rejected by the prefix check.
-		let params = auth.params_from_url(&url::Url::parse("https://other.cdn.moq.dev/anon/room")?)?;
+		let params = auth.params_from_url(&url::Url::parse("https://other.cdn.moq.dev/anon/room")?);
 		assert_eq!(params.path, "/other/anon/room");
 		assert!(auth.verify(&params).await.is_err());
 
