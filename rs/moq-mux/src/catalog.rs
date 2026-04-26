@@ -53,8 +53,8 @@ impl CatalogProducer {
 		let subscriber = self
 			.hang_track
 			.consume()
-			.subscribe(moq_lite::Subscription::default())
-			.expect("track was just produced");
+			.subscribe(hang::Catalog::default_subscription())
+			.expect("hang_track producer is alive");
 		hang::CatalogConsumer::new(subscriber)
 	}
 

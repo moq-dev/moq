@@ -51,7 +51,7 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 
 	// Read the catalog to discover available tracks.
 	let catalog_track =
-		broadcast.subscribe_track(&hang::Catalog::default_track(), moq_lite::Subscription::default())?;
+		broadcast.subscribe_track(&hang::Catalog::default_track(), hang::Catalog::default_subscription())?;
 	let mut catalog = hang::CatalogConsumer::new(catalog_track);
 
 	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;

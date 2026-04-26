@@ -138,7 +138,7 @@ impl OrderedProducer {
 			.track
 			.consume()
 			.subscribe(moq_lite::Subscription::default())
-			.expect("track was just produced");
+			.expect("producer alive");
 		OrderedConsumer::new(subscriber, max_latency)
 	}
 }

@@ -550,7 +550,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		// Write Subscribe message
-		if let Err(err) = self.write_subscribe(&mut stream, request_id, &broadcast, &track).await {
+		if let Err(err) = self
+			.write_subscribe(&mut stream, request_id, &broadcast, &mut track)
+			.await
+		{
 			tracing::debug!(%err, "failed to write subscribe");
 			self.state.lock().subscribes.remove(&request_id);
 			let _ = track.abort(err);
@@ -613,8 +616,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
 		broadcast: &Path<'_>,
-		track: &TrackProducer,
+		track: &mut TrackProducer,
 	) -> Result<(), Error> {
+		// Wait for the first interested subscriber so the relayed SUBSCRIBE
+		// reflects the union of downstream subscribers' preferences.
+		// TODO follow `track.subscription()` and emit SUBSCRIBE_UPDATE upstream
+		// as the aggregate changes.
+		let initial = match track.subscription().await {
+			Some(sub) => sub,
+			None => return Err(Error::Cancel),
+		};
+
 		stream.writer.encode(&ietf::Subscribe::ID).await?;
 		stream
 			.writer
@@ -622,8 +634,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				track_namespace: broadcast.to_owned(),
 				track_name: (&track.name).into(),
-				// TODO surface the producer's aggregate subscription priority instead.
-				subscriber_priority: 0,
+				subscriber_priority: initial.priority,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})

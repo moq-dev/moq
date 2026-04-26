@@ -113,13 +113,30 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let track = Track::new(msg.track_name.to_string());
 
-		let subscriber = match broadcast.subscribe_track(
-			&track,
-			Subscription {
-				priority: msg.subscriber_priority,
-				..Default::default()
-			},
-		) {
+		let consumer = match broadcast.consume_track(&track) {
+			Ok(consumer) => consumer,
+			Err(err) => {
+				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
+					.await?;
+				return Ok(());
+			}
+		};
+
+		// LargestObject means "start from the latest cached group". Other filter
+		// types are still ignored (see the warn above) — TODO: full FilterType
+		// support along with FETCH wiring.
+		let start = matches!(msg.filter_type, FilterType::LargestObject)
+			.then(|| consumer.latest())
+			.flatten();
+
+		let subscription = Subscription {
+			priority: msg.subscriber_priority,
+			ordered: matches!(msg.group_order, GroupOrder::Ascending),
+			start,
+			..Default::default()
+		};
+
+		let subscriber = match consumer.subscribe(subscription) {
 			Ok(subscriber) => subscriber,
 			Err(err) => {
 				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())

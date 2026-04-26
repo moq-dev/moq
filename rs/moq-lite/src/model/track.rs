@@ -57,9 +57,12 @@ pub struct Subscription {
 	pub ordered: bool,
 	/// Maximum cache/latency. `Duration::ZERO` means unlimited.
 	pub max_latency: Duration,
-	/// First group sequence to deliver. `None` means no preference.
+	/// First group sequence to deliver. `None` is treated as 0 — i.e. deliver
+	/// all cached history plus future groups. For "live from now" semantics,
+	/// pass `Some(latest + 1)` (or `Some(latest)` to include the in-flight
+	/// group). `Subscription::default()` therefore yields full history.
 	pub start: Option<u64>,
-	/// Last group sequence to deliver. `None` means no preference (live).
+	/// Last group sequence to deliver. `None` means no end (live).
 	pub end: Option<u64>,
 }
 

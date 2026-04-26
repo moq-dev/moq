@@ -293,7 +293,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			end: subscribe.end_group,
 		})?;
 
-		// TODO surface the producer's aggregate subscription back to the wire.
 		let info = lite::SubscribeOk {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
@@ -304,10 +303,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
-		tokio::select! {
-			res = Self::run_track(session, subscriber, subscribe, priority, version) => res?,
-			res = stream.reader.closed() => res?,
-		}
+		Self::run_track(session, subscriber, stream, subscribe.id, priority, version).await?;
 
 		stream.writer.finish()?;
 		stream.writer.closed().await
@@ -316,33 +312,49 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	async fn run_track(
 		session: S,
 		mut subscriber: TrackSubscriber,
-		subscribe: &lite::Subscribe<'_>,
+		stream: &mut Stream<S, Version>,
+		subscribe_id: u64,
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
 		loop {
-			let group = tokio::select! {
+			tokio::select! {
 				// Poll all active group futures; never matches but keeps them running.
 				true = async {
 					while tasks.next().await.is_some() {}
 					false
 				} => unreachable!(),
-				Some(group) = subscriber.recv_group().transpose() => group,
-				else => return Ok(()),
-			}?;
+				group = subscriber.recv_group().transpose() => match group {
+					Some(group) => {
+						let group = group?;
+						let sequence = group.sequence;
+						tracing::debug!(subscribe = %subscribe_id, track = %subscriber.name, sequence, "serving group");
 
-			let sequence = group.sequence;
-			tracing::debug!(subscribe = %subscribe.id, track = %subscriber.name, sequence, "serving group");
+						let msg = lite::Group {
+							subscribe: subscribe_id,
+							sequence,
+						};
 
-			let msg = lite::Group {
-				subscribe: subscribe.id,
-				sequence,
-			};
-
-			let priority = priority.insert(subscribe.priority, sequence);
-			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
+						let p = priority.insert(subscriber.subscription().priority, sequence);
+						tasks.push(Self::serve_group(session.clone(), msg, p, group, version).map(|_| ()));
+					}
+					None => return Ok(()),
+				},
+				upd = stream.reader.decode_maybe::<lite::SubscribeUpdate>() => match upd? {
+					Some(upd) => {
+						subscriber.update(Subscription {
+							priority: upd.priority,
+							ordered: upd.ordered,
+							max_latency: upd.max_latency,
+							start: upd.start_group,
+							end: upd.end_group,
+						});
+					}
+					None => return Ok(()),
+				},
+			}
 		}
 	}
 
