@@ -2422,7 +2422,7 @@ api = "https://api.example.com/access"
 	}
 
 	#[test]
-	fn test_match_domain_multiple_suffixes_first_match() {
+	fn test_match_domain_multiple_non_overlapping_suffixes() {
 		let p = parse(
 			"https://customer.staging.moq.dev/foo",
 			&["cdn.moq.dev", "staging.moq.dev"],
