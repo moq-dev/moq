@@ -34,8 +34,8 @@ impl AuthParams {
 	///
 	/// When the URL host matches one of `domains` as `<labels>.<suffix>`, the
 	/// labels are prepended to the URL path in DNS-reverse order (broadest
-	/// scope first), so `customer.usw.cdn.moq.dev/foo` with suffix
-	/// `cdn.moq.dev` routes to `/usw/customer/foo`. An exact-suffix or
+	/// scope first), so `team.customer.cdn.moq.dev/foo` with suffix
+	/// `cdn.moq.dev` routes to `/customer/team/foo`. An exact-suffix or
 	/// non-matching host is left as-is (plain path-based routing).
 	///
 	/// `domains` must be pre-canonicalized by [`Auth::new`] (lowercased and
@@ -66,8 +66,8 @@ impl AuthParams {
 /// the labels joined with `/` in DNS-reverse order so the broadest scope
 /// becomes the outermost path segment. With suffix `cdn.moq.dev`:
 ///
-/// - `customer.cdn.moq.dev`     → `Some("customer")`
-/// - `customer.usw.cdn.moq.dev` → `Some("usw/customer")`
+/// - `customer.cdn.moq.dev`      → `Some("customer")`
+/// - `team.customer.cdn.moq.dev` → `Some("customer/team")`
 ///
 /// An exact match against a suffix or a host that matches no suffix returns
 /// `None` (plain path-based routing).
@@ -284,19 +284,19 @@ pub struct AuthConfig {
 	/// reversing puts the broadest label first in the path). With suffix
 	/// `cdn.moq.dev`:
 	///
-	/// - `customer.cdn.moq.dev/foo`     → `cdn.moq.dev/customer/foo`
-	/// - `customer.usw.cdn.moq.dev/foo` → `cdn.moq.dev/usw/customer/foo`
+	/// - `customer.cdn.moq.dev/foo`      → `cdn.moq.dev/customer/foo`
+	/// - `team.customer.cdn.moq.dev/foo` → `cdn.moq.dev/customer/team/foo`
 	///
 	/// A host that exactly matches a suffix contributes no slug. Hosts that
 	/// don't match any suffix fall back to plain path-based routing.
 	///
-	/// Overlapping suffixes are resolved longest-first. With
-	/// `["cdn.moq.dev", "usw.cdn.moq.dev"]`, `customer.usw.cdn.moq.dev/foo`
+	/// Pass `--auth-domain` multiple times to configure more than one suffix
+	/// — useful for serving multiple regions or product domains from one
+	/// relay. Overlapping suffixes are resolved longest-first. For example,
+	/// with `["cdn.moq.dev", "usw.cdn.moq.dev"]`, `customer.usw.cdn.moq.dev`
 	/// matches the more specific `usw.cdn.moq.dev` (slug `customer`,
 	/// path `/customer/foo`) rather than `cdn.moq.dev` (slug `usw/customer`,
 	/// path `/usw/customer/foo`).
-	///
-	/// Pass `--auth-domain` multiple times to configure more than one suffix.
 	#[arg(long = "auth-domain", env = "MOQ_AUTH_DOMAIN")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub domains: Vec<String>,
@@ -2415,10 +2415,10 @@ api = "https://api.example.com/access"
 	fn test_match_domain_multi_label_to_path() {
 		// Multi-label slugs reverse so the DNS label closest to the suffix
 		// (broadest scope) becomes the outermost path segment. With suffix
-		// `cdn.moq.dev`, `customer.usw.cdn.moq.dev/foo` routes to
-		// `/usw/customer/foo`.
-		let p = parse("https://customer.usw.cdn.moq.dev/foo", &["cdn.moq.dev"]);
-		assert_eq!(p.path, "/usw/customer/foo");
+		// `cdn.moq.dev`, `team.customer.cdn.moq.dev/foo` routes to
+		// `/customer/team/foo` — the customer is the broader scope.
+		let p = parse("https://team.customer.cdn.moq.dev/foo", &["cdn.moq.dev"]);
+		assert_eq!(p.path, "/customer/team/foo");
 	}
 
 	#[test]
