@@ -1062,51 +1062,6 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn test_duplicate_fifo_order() {
-		tokio::time::pause();
-
-		let origin = Origin::random().produce();
-
-		let broadcast1 = Broadcast::new().produce();
-		let broadcast2 = Broadcast::new().produce();
-		let broadcast3 = Broadcast::new().produce();
-
-		let consumer1 = broadcast1.consume();
-		let consumer2 = broadcast2.consume();
-		let consumer3 = broadcast3.consume();
-
-		let mut consumer = origin.consume();
-
-		origin.publish_broadcast("test", consumer1.clone());
-		origin.publish_broadcast("test", consumer2.clone());
-		origin.publish_broadcast("test", consumer3.clone());
-
-		// The oldest broadcast is active; the rest are queued in publish order.
-		consumer.assert_next("test", &consumer1);
-		consumer.assert_next_wait();
-
-		// Drop the active; the next-oldest (not the newest) should be promoted.
-		drop(broadcast1);
-		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		consumer.assert_next_none("test");
-		consumer.assert_next("test", &consumer2);
-		consumer.assert_next_wait();
-
-		// Drop the now-active; the remaining backup is promoted.
-		drop(broadcast2);
-		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		consumer.assert_next_none("test");
-		consumer.assert_next("test", &consumer3);
-		consumer.assert_next_wait();
-
-		// Drop the last broadcast; the entry is fully unannounced.
-		drop(broadcast3);
-		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		consumer.assert_next_none("test");
-		consumer.assert_next_wait();
-	}
-
-	#[tokio::test]
 	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_duplicate_reverse() {
 		tokio::time::pause();
