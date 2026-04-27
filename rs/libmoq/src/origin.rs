@@ -106,6 +106,9 @@ impl Origin {
 
 	pub fn consume<P: moq_lite::AsPath>(&mut self, origin: Id, path: P) -> Result<moq_lite::BroadcastConsumer, Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
+		// TODO: expose an async variant backed by `announced_broadcast` so FFI callers can wait
+		// for gossip instead of racing it.
+		#[allow(deprecated)]
 		origin.consume().consume_broadcast(path).ok_or(Error::BroadcastNotFound)
 	}
 

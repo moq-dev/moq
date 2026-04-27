@@ -423,9 +423,14 @@ async fn run_session(
 
 	let _session = client.connect(settings.url.clone()).await?;
 
-	let broadcast = origin_consumer
-		.consume_broadcast(&settings.broadcast)
-		.ok_or_else(|| anyhow::anyhow!("Broadcast '{}' not found", settings.broadcast))?;
+	// Wait for the broadcast to be announced. Synchronous lookup would race the gossip of
+	// announcements that happens after the session is established.
+	tracing::info!(broadcast = %settings.broadcast, "waiting for broadcast to be announced");
+	let broadcast = tokio::select! {
+		broadcast = origin_consumer.announced_broadcast(&settings.broadcast) => broadcast
+			.context("broadcast not allowed or origin closed")?,
+		_ = shutdown.changed() => return Ok(()),
+	};
 
 	let catalog_track = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
 	let mut catalog = hang::catalog::CatalogConsumer::new(catalog_track);

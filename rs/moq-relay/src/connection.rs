@@ -1,7 +1,25 @@
-use crate::{Auth, AuthParams, AuthToken, Cluster};
+use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
 
 use axum::http;
 use moq_native::Request;
+
+/// An error carrying the HTTP status to send when closing the request.
+///
+/// Used only on the pre-accept auth path so the caller can close once with
+/// the right code instead of sprinkling close/return at each failure site.
+struct StatusError {
+	status: http::StatusCode,
+	source: anyhow::Error,
+}
+
+impl From<AuthError> for StatusError {
+	fn from(err: AuthError) -> Self {
+		Self {
+			status: (&err).into(),
+			source: err.into(),
+		}
+	}
+}
 
 /// An incoming connection that has not yet been authenticated.
 ///
@@ -22,27 +40,11 @@ impl Connection {
 	/// Authenticates and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let params = match self.request.url() {
-			Some(url) => AuthParams::from_url(url),
-			None => AuthParams::default(),
-		};
-
-		// If the client presented a valid mTLS client certificate, skip JWT
-		// entirely and grant full (cluster) access. The cert's chain to the
-		// configured CA is the only credential we require — DNS SANs and the
-		// `?register=` name are no longer consulted.
-		let token = if self.request.peer_identity()?.is_some() {
-			tracing::debug!("mTLS peer authenticated");
-			AuthToken::unrestricted()
-		} else {
-			// Verify the URL before accepting the connection.
-			match self.auth.verify(&params).await {
-				Ok(token) => token,
-				Err(err) => {
-					let status: http::StatusCode = (&err).into();
-					let _ = self.request.close(status.as_u16()).await;
-					return Err(err.into());
-				}
+		let token = match self.authenticate().await {
+			Ok(token) => token,
+			Err(err) => {
+				let _ = self.request.close(err.status.as_u16()).await;
+				return Err(err.source);
 			}
 		};
 
@@ -60,7 +62,10 @@ impl Connection {
 			(None, Some(subscribe)) => {
 				tracing::info!(transport, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
 			}
-			_ => anyhow::bail!("invalid session; no allowed paths"),
+			_ => {
+				let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
+				anyhow::bail!("invalid session; no allowed paths");
+			}
 		}
 
 		// Accept the connection.
@@ -81,5 +86,30 @@ impl Connection {
 		// Wait until the session is closed.
 		session.closed().await?;
 		Ok(())
+	}
+
+	/// Resolve an [`AuthToken`] from the request's URL and (optional) mTLS peer
+	/// identity. Any failure is returned as a [`StatusError`] so [`run`] can
+	/// close the request with the mapped HTTP status exactly once.
+	///
+	/// If the client presented a valid mTLS client certificate, JWT is skipped
+	/// and full (cluster) access is granted. The cert's chain to the configured
+	/// CA is the only credential we require.
+	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
+		let peer = self.request.peer_identity().map_err(|source| StatusError {
+			status: http::StatusCode::FORBIDDEN,
+			source,
+		})?;
+
+		if peer.is_some() {
+			tracing::debug!("mTLS peer authenticated");
+			return Ok(AuthToken::unrestricted());
+		}
+
+		let params = match self.request.url() {
+			Some(url) => self.auth.params_from_url(url),
+			None => AuthParams::default(),
+		};
+		Ok(self.auth.verify(&params).await?)
 	}
 }
