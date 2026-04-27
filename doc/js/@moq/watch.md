@@ -69,7 +69,7 @@ a real bundler (the examples below).
 - `paused` — Pause playback (boolean)
 - `muted` — Mute audio (boolean)
 - `volume` — Audio volume (0–1, default: 1)
-- `catalog-format` — Catalog format: `"hang"` (default) or `"msf"` (see [MSF](/concept/standard/msf))
+- `catalog-format` — Catalog format: `"hang"` (default), `"msf"` (see [MSF](/concept/standard/msf)), or `"static"` (supply the catalog yourself)
 
 ## Catalog Formats
 
@@ -99,6 +99,39 @@ const broadcast = new Watch.Broadcast({
 
 // or toggle at runtime
 broadcast.catalogFormat.set("msf");
+```
+
+### Static catalogs
+
+Use `catalog-format="static"` (or `catalogFormat: "static"`) to skip the catalog
+track entirely and supply a `Catalog.Root` directly. The connection and
+broadcast name are still required — they're used to subscribe to the media
+tracks named by the catalog. Update the catalog at any time by writing to
+the signal:
+
+```typescript
+import * as Watch from "@moq/watch";
+
+const broadcast = new Watch.Broadcast({
+    connection,
+    enabled: true,
+    name: "alice",
+    catalogFormat: "static",
+    catalog: {
+        video: { renditions: { hd: { codec: "vp09.00.10.08", container: { kind: "legacy" } } } },
+    },
+});
+
+// Replace at runtime
+broadcast.catalog.set(nextCatalog);
+```
+
+The web component exposes the same field as a JS property:
+
+```typescript
+const el = document.querySelector("moq-watch")!;
+el.catalogFormat = "static";
+el.catalog = myCatalog;
 ```
 
 ## UI Overlay

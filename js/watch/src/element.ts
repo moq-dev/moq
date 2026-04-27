@@ -1,3 +1,4 @@
+import type * as Catalog from "@moq/hang/catalog";
 import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
@@ -6,7 +7,8 @@ import { Broadcast, type CatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
 
 function parseCatalogFormat(value: string | null): CatalogFormat {
-	return value === "msf" ? "msf" : "hang";
+	if (value === "msf" || value === "static") return value;
+	return "hang";
 }
 
 const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
@@ -259,6 +261,18 @@ export default class MoqWatch extends HTMLElement {
 
 	set catalogFormat(value: CatalogFormat) {
 		this.broadcast.catalogFormat.set(value);
+	}
+
+	/**
+	 * The active catalog. Assign directly when `catalogFormat` is `"static"`;
+	 * for `"hang"` and `"msf"` this is overwritten by the fetch loop.
+	 */
+	get catalog(): Catalog.Root | undefined {
+		return this.broadcast.catalog.peek();
+	}
+
+	set catalog(value: Catalog.Root | undefined) {
+		this.broadcast.catalog.set(value);
 	}
 }
 
