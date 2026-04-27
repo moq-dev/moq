@@ -27,7 +27,7 @@ use tokio_rustls::server::TlsStream;
 use tower_http::cors::{Any, CorsLayer};
 use tower_service::Service;
 
-use crate::{Auth, AuthError, AuthParams, AuthToken, Cluster};
+use crate::{Auth, AuthParams, AuthToken, Cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
@@ -76,6 +76,21 @@ pub struct HttpsConfig {
 	/// Load the given key from disk.
 	#[arg(long = "web-https-key", id = "web-https-key", env = "MOQ_WEB_HTTPS_KEY")]
 	pub key: Option<PathBuf>,
+
+	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
+	///
+	/// When set, clients *may* present a certificate during the TLS handshake.
+	/// A verified peer is granted an unrestricted [`AuthToken`] without a JWT,
+	/// mirroring the QUIC server's `--server-tls-root` behavior. Clients that
+	/// don't present a cert continue through the normal JWT path.
+	#[arg(
+		long = "web-https-client-ca",
+		id = "web-https-client-ca",
+		value_delimiter = ',',
+		env = "MOQ_WEB_HTTPS_CLIENT_CA"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub client_ca: Vec<PathBuf>,
 }
 
 /// Shared state passed to all web handler routes.
@@ -90,43 +105,17 @@ pub struct WebState {
 	pub conn_id: AtomicU64,
 }
 
-impl WebState {
-	/// Resolve the auth token for an incoming request. Returns
-	/// [`AuthToken::unrestricted`] when an mTLS-verified client cert is
-	/// present (mirrors `Connection::authenticate` on the QUIC side); falls
-	/// back to JWT verification otherwise.
-	pub(crate) async fn resolve_token(
-		&self,
-		params: AuthParams,
-		mtls: Option<&MtlsPeer>,
-	) -> Result<AuthToken, AuthError> {
-		if mtls.is_some() {
-			tracing::debug!("mTLS peer authenticated");
-			return Ok(AuthToken::unrestricted());
-		}
-		self.auth.verify(&params).await
-	}
-}
-
 /// Run a HTTP server using Axum
 pub struct Web {
 	state: WebState,
 	config: WebConfig,
-	/// Optional CA roots used to authenticate HTTPS clients via mTLS. When
-	/// non-empty, a verified client cert short-circuits to an unrestricted
-	/// [`AuthToken`], mirroring the QUIC server's behavior.
-	tls_roots: Vec<PathBuf>,
 }
 
 impl Web {
-	/// Creates a new web server with the given state, configuration, and mTLS
-	/// CA roots. Pass an empty `tls_roots` to disable HTTPS client cert auth.
-	pub fn new(state: WebState, config: WebConfig, tls_roots: Vec<PathBuf>) -> Self {
-		Self {
-			state,
-			config,
-			tls_roots,
-		}
+	/// Creates a new web server with the given state and configuration. mTLS
+	/// for HTTPS is enabled when [`HttpsConfig::client_ca`] is non-empty.
+	pub fn new(state: WebState, config: WebConfig) -> Self {
+		Self { state, config }
 	}
 
 	/// Runs the HTTP and/or HTTPS listeners until they shut down.
@@ -157,44 +146,26 @@ impl Web {
 			None
 		};
 
-		// `https` is boxed because the two TLS branches return acceptors of
-		// different concrete types (RustlsAcceptor vs MtlsAcceptor) and thus
-		// different concrete `Server::serve` futures.
-		type BoxedServe = Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>;
-		let https: Option<BoxedServe> = if let Some(listen) = self.config.https.listen {
+		let https = if let Some(listen) = self.config.https.listen {
 			let cert = self.config.https.cert.expect("missing https.cert");
 			let key = self.config.https.key.expect("missing https.key");
+			let client_ca = self.config.https.client_ca.clone();
 
-			if self.tls_roots.is_empty() {
-				// No mTLS — single-direction TLS, JWT only.
-				let config = RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
+			let config = build_https_config(&cert, &key, &client_ca).await?;
+			let rustls_config = RustlsConfig::from_config(Arc::new(config));
 
-				#[cfg(unix)]
-				tokio::spawn(reload_certs_pem(config.clone(), cert, key));
+			#[cfg(unix)]
+			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, client_ca));
 
-				let server = axum_server::bind_rustls(listen, config);
-				Some(Box::pin(server.serve(app)))
-			} else {
-				// mTLS — build a hand-rolled rustls config so we can install a
-				// client cert verifier, and wrap the rustls acceptor so verified
-				// peer certs surface as a request extension.
-				let config = build_mtls_config(&cert, &key, &self.tls_roots).await?;
-				let rustls_config = RustlsConfig::from_config(Arc::new(config));
-
-				#[cfg(unix)]
-				tokio::spawn(reload_certs_mtls(
-					rustls_config.clone(),
-					cert,
-					key,
-					self.tls_roots.clone(),
-				));
-
-				let acceptor = MtlsAcceptor {
-					inner: RustlsAcceptor::new(rustls_config),
-				};
-				let server = axum_server::bind(listen).acceptor(acceptor);
-				Some(Box::pin(server.serve(app)))
-			}
+			// MtlsAcceptor surfaces a verified peer cert as a request extension.
+			// When no client CA is configured, the inner verifier is `NoClientAuth`
+			// and `peer_certificates()` always returns None — the wrapper is then
+			// a near-no-op, but keeping a single path simplifies reload + serve.
+			let acceptor = MtlsAcceptor {
+				inner: RustlsAcceptor::new(rustls_config),
+			};
+			let server = axum_server::bind(listen).acceptor(acceptor);
+			Some(server.serve(app))
 		} else {
 			None
 		};
@@ -209,37 +180,24 @@ impl Web {
 	}
 }
 
-/// Build a [`rustls::ServerConfig`] for the HTTPS listener that includes a
-/// client cert verifier. Mirrors the construction in
-/// `moq-native/src/quinn.rs:184-198`. `.allow_unauthenticated()` keeps the
-/// JWT-only path working: clients without a cert still complete the handshake
-/// but won't have an mTLS extension attached.
+/// Build a [`rustls::ServerConfig`] for the HTTPS listener.
 ///
-/// TLS version is left at the rustls default (1.2 + 1.3) — unlike the QUIC
-/// server which forces 1.3 — so older clients can still hit the HTTPS API.
-async fn build_mtls_config(
+/// When `client_ca` is non-empty, installs a [`WebPkiClientVerifier`] with
+/// `.allow_unauthenticated()` so JWT-only callers still complete the
+/// handshake without presenting a cert. When empty, falls back to
+/// [`with_no_client_auth`]. ALPN is set to `h2`, `http/1.1` to match
+/// axum-server's defaults.
+///
+/// TLS version is left at the rustls default (1.2 + 1.3) so older clients
+/// can still hit the HTTPS API; the QUIC server separately forces 1.3.
+async fn build_https_config(
 	cert: &std::path::Path,
 	key: &std::path::Path,
-	roots: &[PathBuf],
+	client_ca: &[PathBuf],
 ) -> anyhow::Result<rustls::ServerConfig> {
 	use anyhow::Context;
 	use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 	use rustls::server::WebPkiClientVerifier;
-
-	// Build the CA root store inline (moq_native::ServerTlsConfig is
-	// `non_exhaustive`, so we can't construct one from outside the crate).
-	// Same PEM parsing rustls uses everywhere else.
-	let mut root_store = rustls::RootCertStore::empty();
-	for path in roots {
-		let mut found = false;
-		for cert in CertificateDer::pem_file_iter(path).context("failed to open mTLS root CA")? {
-			let cert = cert.context("failed to parse mTLS root CA PEM")?;
-			root_store.add(cert).context("failed to add mTLS root CA")?;
-			found = true;
-		}
-		anyhow::ensure!(found, "no certificates found in mTLS root CA: {}", path.display());
-	}
-	let root_store = Arc::new(root_store);
 
 	let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
 		.context("failed to open https cert")?
@@ -251,53 +209,57 @@ async fn build_mtls_config(
 		.cloned()
 		.expect("no default crypto provider installed");
 
-	let verifier = WebPkiClientVerifier::builder_with_provider(root_store, provider.clone())
-		.allow_unauthenticated()
-		.build()
-		.context("failed to build https client cert verifier")?;
+	let builder =
+		rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
 
-	let mut config = rustls::ServerConfig::builder_with_provider(provider)
-		.with_safe_default_protocol_versions()?
-		.with_client_cert_verifier(verifier)
-		.with_single_cert(cert_chain, key_der)
-		.context("invalid https cert/key pair")?;
+	let mut config = if client_ca.is_empty() {
+		builder
+			.with_no_client_auth()
+			.with_single_cert(cert_chain, key_der)
+			.context("invalid https cert/key pair")?
+	} else {
+		// Build the CA root store inline; `moq_native::ServerTlsConfig` is
+		// `non_exhaustive`, so we can't construct one to call its `load_roots`.
+		let mut root_store = rustls::RootCertStore::empty();
+		for path in client_ca {
+			let mut found = false;
+			for cert in CertificateDer::pem_file_iter(path).context("failed to open mTLS client CA")? {
+				let cert = cert.context("failed to parse mTLS client CA PEM")?;
+				root_store.add(cert).context("failed to add mTLS client CA")?;
+				found = true;
+			}
+			anyhow::ensure!(found, "no certificates found in mTLS client CA: {}", path.display());
+		}
+		let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), provider)
+			.allow_unauthenticated()
+			.build()
+			.context("failed to build https client cert verifier")?;
 
-	// axum_server's default config sets these; without them h2 negotiation breaks.
+		builder
+			.with_client_cert_verifier(verifier)
+			.with_single_cert(cert_chain, key_der)
+			.context("invalid https cert/key pair")?
+	};
+
 	config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-
 	Ok(config)
 }
 
+/// Reload the HTTPS cert/key on SIGUSR1.
+///
+/// `RustlsConfig::reload_from_pem_file` would rebuild with `with_no_client_auth`
+/// — silently stripping mTLS when configured — so we always rebuild via the
+/// full [`build_https_config`] path.
 #[cfg(unix)]
-async fn reload_certs_pem(config: RustlsConfig, cert: PathBuf, key: PathBuf) {
+async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, client_ca: Vec<PathBuf>) {
 	use tokio::signal::unix::{SignalKind, signal};
 
-	// Dunno why we wouldn't be allowed to listen for signals, but just in case.
 	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
 
 	while listener.recv().await.is_some() {
 		tracing::info!("reloading web certificate");
 
-		if let Err(err) = config.reload_from_pem_file(cert.clone(), key.clone()).await {
-			tracing::warn!(%err, "failed to reload web certificate");
-		}
-	}
-}
-
-/// Reload the HTTPS cert/key on SIGUSR1, preserving the mTLS verifier.
-///
-/// `RustlsConfig::reload_from_pem_file` would silently rebuild with
-/// `with_no_client_auth`, stripping mTLS. Re-run the full builder instead.
-#[cfg(unix)]
-async fn reload_certs_mtls(config: RustlsConfig, cert: PathBuf, key: PathBuf, roots: Vec<PathBuf>) {
-	use tokio::signal::unix::{SignalKind, signal};
-
-	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
-
-	while listener.recv().await.is_some() {
-		tracing::info!("reloading web certificate (mTLS)");
-
-		match build_mtls_config(&cert, &key, &roots).await {
+		match build_https_config(&cert, &key, &client_ca).await {
 			Ok(new) => config.reload_from_config(Arc::new(new)),
 			Err(err) => tracing::warn!(%err, "failed to reload web certificate"),
 		}
@@ -489,7 +451,11 @@ async fn serve_announced(
 		path: prefix,
 		jwt: query.jwt,
 	};
-	let token = state.resolve_token(params, mtls.as_deref()).await?;
+	let token = if mtls.is_some() {
+		AuthToken::unrestricted()
+	} else {
+		state.auth.verify(&params).await?
+	};
 	let Some(mut origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
@@ -526,7 +492,11 @@ async fn serve_fetch(
 		path: broadcast.clone(),
 		jwt: params.auth.jwt,
 	};
-	let token = state.resolve_token(auth, mtls.as_deref()).await?;
+	let token = if mtls.is_some() {
+		AuthToken::unrestricted()
+	} else {
+		state.auth.verify(&auth).await?
+	};
 
 	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
@@ -703,13 +673,13 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn build_mtls_config_round_trips() {
+	async fn build_https_config_round_trips() {
 		let dir = TempDir::new().unwrap();
 		let (ca_path, cert_path, key_path) = make_certs(&dir);
 
-		let config = build_mtls_config(&cert_path, &key_path, &[ca_path])
+		let config = build_https_config(&cert_path, &key_path, &[ca_path])
 			.await
-			.expect("build_mtls_config should succeed");
+			.expect("build_https_config should succeed");
 
 		// ALPN must include h2 + http/1.1; otherwise reqwest's h2 attempt
 		// would silently downgrade or fail. Mirrors axum_server's default.
@@ -721,17 +691,31 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn build_mtls_config_rejects_missing_ca() {
+	async fn build_https_config_no_client_auth_when_ca_empty() {
+		let dir = TempDir::new().unwrap();
+		let (_ca_path, cert_path, key_path) = make_certs(&dir);
+
+		// Empty client_ca is the JWT-only path; should still produce a valid
+		// config with ALPN set so axum-server's hyper layer can negotiate h2.
+		let config = build_https_config(&cert_path, &key_path, &[])
+			.await
+			.expect("no-CA path should still build a usable config");
+
+		assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()],);
+	}
+
+	#[tokio::test]
+	async fn build_https_config_rejects_missing_ca() {
 		let dir = TempDir::new().unwrap();
 		let (_ca_path, cert_path, key_path) = make_certs(&dir);
 
 		let bogus = dir.path().join("does-not-exist.pem");
-		let res = build_mtls_config(&cert_path, &key_path, &[bogus]).await;
+		let res = build_https_config(&cert_path, &key_path, &[bogus]).await;
 		assert!(res.is_err(), "missing CA file should be a hard error");
 	}
 
 	#[tokio::test]
-	async fn build_mtls_config_rejects_empty_pem() {
+	async fn build_https_config_rejects_empty_pem() {
 		let dir = TempDir::new().unwrap();
 		let (_ca_path, cert_path, key_path) = make_certs(&dir);
 
@@ -739,7 +723,7 @@ mod tests {
 		let mut f = std::fs::File::create(&empty).unwrap();
 		writeln!(f, "# no certs here").unwrap();
 
-		let res = build_mtls_config(&cert_path, &key_path, &[empty]).await;
+		let res = build_https_config(&cert_path, &key_path, &[empty]).await;
 		assert!(
 			res.is_err(),
 			"empty PEM must be rejected to avoid a silently disabled verifier"

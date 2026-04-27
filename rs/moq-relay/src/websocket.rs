@@ -17,7 +17,7 @@ use axum::{
 };
 use moq_lite::{OriginConsumer, OriginProducer};
 
-use crate::{AuthParams, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
+use crate::{AuthParams, AuthToken, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
 
 pub(crate) async fn serve_ws(
 	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
@@ -35,7 +35,11 @@ pub(crate) async fn serve_ws(
 	let ws = ws.protocols(["webtransport"]);
 
 	let params = AuthParams { path, jwt: query.jwt };
-	let token = state.resolve_token(params, mtls.as_deref()).await?;
+	let token = if mtls.is_some() {
+		AuthToken::unrestricted()
+	} else {
+		state.auth.verify(&params).await?
+	};
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
 
