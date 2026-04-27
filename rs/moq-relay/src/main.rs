@@ -20,6 +20,8 @@ async fn main() -> anyhow::Result<()> {
 	config.server.max_streams.get_or_insert(DEFAULT_MAX_STREAMS);
 
 	let mtls_enabled = !config.server.tls.root.is_empty();
+	// Capture before `config.server.init()` moves the field.
+	let tls_roots = config.server.tls.root.clone();
 
 	#[allow(unused_mut)]
 	let mut server = config.server.init()?;
@@ -51,7 +53,8 @@ async fn main() -> anyhow::Result<()> {
 
 	let cluster = Cluster::new(config.cluster, client);
 
-	// Create a web server too.
+	// Create a web server too. Pass the mTLS CA roots so the HTTPS listener can
+	// authenticate cluster peers via client certs (same path as the QUIC server).
 	let web = Web::new(
 		WebState {
 			auth: auth.clone(),
@@ -60,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
 			conn_id: Default::default(),
 		},
 		config.web,
+		tls_roots,
 	);
 
 	tracing::info!(%addr, "listening");
