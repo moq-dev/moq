@@ -14,6 +14,11 @@ export interface BroadcastProps {
 	// All actively announced broadcast paths from the connection.
 	announced?: Getter<Set<Moq.Path.Valid>>;
 
+	// Whether the relay supports announcement subscriptions. When false, the
+	// `reload` flag is ignored and the broadcast subscribes immediately, since
+	// announcements will never arrive.
+	announceSupported?: Getter<boolean>;
+
 	// Whether to start downloading the broadcast.
 	// Defaults to false so you can make sure everything is ready before starting.
 	enabled?: boolean | Signal<boolean>;
@@ -49,6 +54,9 @@ export class Broadcast {
 	// All actively announced broadcast paths from the connection.
 	#announced: Getter<Set<Moq.Path.Valid>>;
 
+	// Whether the connection supports announcement subscriptions.
+	#announceSupported: Getter<boolean>;
+
 	signals = new Effect();
 
 	constructor(props?: BroadcastProps) {
@@ -59,6 +67,7 @@ export class Broadcast {
 		this.catalogFormat = Signal.from(props?.catalogFormat ?? "hang");
 
 		this.#announced = props?.announced ?? new Signal(new Set());
+		this.#announceSupported = props?.announceSupported ?? new Signal(true);
 
 		this.signals.run(this.#runBroadcast.bind(this));
 		this.signals.run(this.#runCatalog.bind(this));
@@ -67,6 +76,11 @@ export class Broadcast {
 	#isAnnounced(effect: Effect): boolean {
 		const reload = effect.get(this.reload);
 		if (!reload) return true;
+
+		// If the relay can't tell us about announcements, behave like reload=false
+		// rather than waiting forever for an announcement that will never arrive.
+		const announceSupported = effect.get(this.#announceSupported);
+		if (!announceSupported) return true;
 
 		const name = effect.get(this.name);
 		const announced = effect.get(this.#announced);

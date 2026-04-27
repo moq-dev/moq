@@ -49,6 +49,7 @@ export default class MoqWatch extends HTMLElement {
 		this.broadcast = new Broadcast({
 			connection: this.connection.established,
 			announced: this.connection.announced,
+			announceSupported: this.connection.announceSupported,
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.broadcast.close());

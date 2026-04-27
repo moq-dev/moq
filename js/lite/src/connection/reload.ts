@@ -47,6 +47,12 @@ export class Reload {
 	#announced = new Signal<Set<Path.Valid>>(new Set());
 	readonly announced: Getter<Set<Path.Valid>> = this.#announced;
 
+	// Whether the relay supports SUBSCRIBE_NAMESPACE. False for relays known
+	// to lack support (e.g. Cloudflare); consumers should treat `announced`
+	// as unknown rather than empty in that case.
+	#announceSupported = new Signal<boolean>(true);
+	readonly announceSupported: Getter<boolean> = this.#announceSupported;
+
 	// WebTransport options (not reactive).
 	webtransport?: WebTransportOptions;
 
@@ -147,6 +153,7 @@ export class Reload {
 
 	#runAnnounced(effect: Effect): void {
 		this.#announced.set(new Set());
+		this.#announceSupported.set(true);
 
 		const conn = effect.get(this.established);
 		if (!conn) return;
@@ -157,6 +164,7 @@ export class Reload {
 		// skip announce subscriptions entirely for those hosts.
 		if (conn.url.hostname.endsWith("mediaoverquic.com")) {
 			console.warn("Cloudflare relay does not support broadcast discovery yet; skipping subscribe_namespace.");
+			this.#announceSupported.set(false);
 			return;
 		}
 
