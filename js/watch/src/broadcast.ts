@@ -6,7 +6,8 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
 
-export type CatalogFormat = "hang" | "msf" | "static";
+export const CATALOG_FORMATS = ["hang", "msf", "static"] as const;
+export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;

@@ -3,12 +3,13 @@ import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
-import { Broadcast, type CatalogFormat } from "./broadcast";
+import { Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
 
+const DEFAULT_CATALOG_FORMAT: CatalogFormat = "hang";
+
 function parseCatalogFormat(value: string | null): CatalogFormat {
-	if (value === "msf" || value === "static") return value;
-	return "hang";
+	return CATALOG_FORMATS.find((f) => f === value) ?? DEFAULT_CATALOG_FORMAT;
 }
 
 const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
