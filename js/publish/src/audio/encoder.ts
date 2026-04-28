@@ -163,6 +163,7 @@ export class Encoder {
 			// We're using an async polyfill temporarily for Safari support.
 			await Util.Libav.polyfill();
 
+			let closed = false;
 			const encoder = new AudioEncoder({
 				output: (frame) => {
 					if (frame.type !== "key") {
@@ -179,30 +180,39 @@ export class Encoder {
 				},
 				error: (err) => {
 					console.error("encoder error", err);
+					closed = true;
 					producer.close(err);
 					worklet.port.onmessage = null;
 				},
 			});
-			effect.cleanup(() => encoder.close());
+			effect.cleanup(() => {
+				closed = true;
+				if (encoder.state !== "closed") encoder.close();
+			});
 
 			console.debug("encoding audio", config);
 			encoder.configure(config);
 
 			worklet.port.onmessage = ({ data }: { data: Capture.AudioFrame }) => {
-				const channels = data.channels.slice(0, worklet.channelCount);
-				const joinedLength = channels.reduce((a, b) => a + b.length, 0);
-				const joined = new Float32Array(joinedLength);
+				if (closed || encoder.state !== "configured") return;
 
-				channels.reduce((offset: number, channel: Float32Array): number => {
-					joined.set(channel, offset);
-					return offset + channel.length;
-				}, 0);
+				const frames = data.channels[0]?.length;
+				if (!frames) return;
+
+				const channels = config.numberOfChannels;
+				const joined = new Float32Array(frames * channels);
+
+				for (let i = 0; i < channels; i += 1) {
+					const channel = data.channels[i] ?? (data.channels.length === 1 ? data.channels[0] : undefined);
+					if (!channel) continue;
+					joined.set(channel.subarray(0, frames), i * frames);
+				}
 
 				const frame = new AudioData({
 					format: "f32-planar",
-					sampleRate: worklet.context.sampleRate,
-					numberOfFrames: channels[0].length,
-					numberOfChannels: channels.length,
+					sampleRate: config.sampleRate,
+					numberOfFrames: frames,
+					numberOfChannels: channels,
 					timestamp: data.timestamp,
 					data: joined,
 					transfer: [joined.buffer],
