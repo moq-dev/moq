@@ -11,11 +11,8 @@ export type CatalogFormat = "hang" | "msf";
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
 
-	// All actively announced broadcast paths from the connection, or
-	// `undefined` if the relay does not support announcement subscriptions.
-	// When undefined, the `reload` flag is ignored (we'd wait forever) and the
-	// broadcast subscribes immediately, behaving like reload=false.
-	announced?: Getter<Set<Moq.Path.Valid> | undefined>;
+	// All actively announced broadcast paths from the connection.
+	announced?: Getter<Set<Moq.Path.Valid>>;
 
 	// Whether to start downloading the broadcast.
 	// Defaults to false so you can make sure everything is ready before starting.
@@ -50,8 +47,7 @@ export class Broadcast {
 	readonly catalog: Getter<Catalog.Root | undefined> = this.#catalog;
 
 	// All actively announced broadcast paths from the connection.
-	// `undefined` means the relay does not support announcement subscriptions.
-	#announced: Getter<Set<Moq.Path.Valid> | undefined>;
+	#announced: Getter<Set<Moq.Path.Valid>>;
 
 	signals = new Effect();
 
@@ -72,12 +68,14 @@ export class Broadcast {
 		const reload = effect.get(this.reload);
 		if (!reload) return true;
 
-		const announced = effect.get(this.#announced);
-		// If the relay can't tell us about announcements, behave like reload=false
-		// rather than waiting forever for an announcement that will never arrive.
-		if (!announced) return true;
+		// Cloudflare's relay does not yet support announcement subscriptions,
+		// so an announcement will never arrive. Fall back to subscribing
+		// immediately (reload=false behaviour) instead of waiting forever.
+		const conn = effect.get(this.connection);
+		if (conn?.url.hostname.endsWith("mediaoverquic.com")) return true;
 
 		const name = effect.get(this.name);
+		const announced = effect.get(this.#announced);
 		return announced.has(name);
 	}
 

@@ -44,10 +44,8 @@ export class Reload {
 	established = new Signal<Established | undefined>(undefined);
 
 	// All actively announced broadcast paths, updated reactively.
-	// `undefined` means the relay does not support announcement subscriptions,
-	// distinct from an empty set (supported, nothing currently announced).
-	#announced = new Signal<Set<Path.Valid> | undefined>(new Set());
-	readonly announced: Getter<Set<Path.Valid> | undefined> = this.#announced;
+	#announced = new Signal<Set<Path.Valid>>(new Set());
+	readonly announced: Getter<Set<Path.Valid>> = this.#announced;
 
 	// WebTransport options (not reactive).
 	webtransport?: WebTransportOptions;
@@ -156,11 +154,9 @@ export class Reload {
 		effect.cleanup(() => this.#announced.set(new Set()));
 
 		// Cloudflare's relay does not yet support SUBSCRIBE_NAMESPACE, so
-		// skip announce subscriptions entirely for those hosts. Signal
-		// "unsupported" with `undefined` so consumers don't wait forever.
+		// skip announce subscriptions entirely for those hosts.
 		if (conn.url.hostname.endsWith("mediaoverquic.com")) {
 			console.warn("Cloudflare relay does not support broadcast discovery yet; skipping subscribe_namespace.");
-			this.#announced.set(undefined);
 			return;
 		}
 
@@ -174,7 +170,6 @@ export class Reload {
 					if (!entry) break;
 
 					this.#announced.mutate((active) => {
-						if (!active) return;
 						if (entry.active) {
 							active.add(entry.path);
 						} else {
