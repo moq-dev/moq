@@ -375,6 +375,11 @@ impl BroadcastConsumer {
 		self.consume_track(track)?.subscribe(sub)
 	}
 
+	/// Convenience: [`Self::subscribe_track`] with [`Subscription::default`].
+	pub fn subscribe_track_default(&self, track: &Track) -> Result<TrackSubscriber, Error> {
+		self.consume_track(track)?.subscribe_default()
+	}
+
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)

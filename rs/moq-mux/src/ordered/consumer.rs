@@ -384,10 +384,7 @@ mod tests {
 
 	/// Subscribe to a track with default preferences (test helper).
 	fn subscribe_default(track: &moq_lite::TrackProducer) -> moq_lite::TrackSubscriber {
-		track
-			.consume()
-			.subscribe(moq_lite::Subscription::default())
-			.expect("producer alive")
+		track.consume().subscribe_default().expect("producer alive")
 	}
 
 	/// Write a finished group with explicit sequence and timestamps (Legacy format).

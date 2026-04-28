@@ -237,7 +237,12 @@ impl State {
 	/// - `priority`: max across all subscribers (highest-priority wins).
 	/// - `ordered`: AND of all subscribers (true only if every subscriber requests ordered).
 	/// - `max_latency`: max across subscribers, with `Duration::ZERO` meaning unlimited (ZERO wins).
-	/// - `start`/`end`: min/max of concrete values; `None` means no preference.
+	/// - `start`: `None` is the maximally-permissive bound (deliver from the
+	///   beginning); any subscriber with `None` yields `None`. Otherwise pick
+	///   the minimum numeric start.
+	/// - `end`: `None` is the maximally-permissive bound (no end); any
+	///   subscriber with `None` yields `None`. Otherwise pick the maximum
+	///   numeric end.
 	///
 	/// Returns `None` if there are no active subscriptions.
 	fn subscription(&self) -> Option<Subscription> {
@@ -278,8 +283,7 @@ impl State {
 			.map(|s| s.start)
 			.reduce(|a, b| match (a, b) {
 				(Some(a), Some(b)) => Some(a.min(b)),
-				(Some(a), None) | (None, Some(a)) => Some(a),
-				(None, None) => None,
+				_ => None,
 			})
 			.unwrap();
 
@@ -288,8 +292,7 @@ impl State {
 			.map(|s| s.end)
 			.reduce(|a, b| match (a, b) {
 				(Some(a), Some(b)) => Some(a.max(b)),
-				(Some(a), None) | (None, Some(a)) => Some(a),
-				(None, None) => None,
+				_ => None,
 			})
 			.unwrap();
 
@@ -649,6 +652,11 @@ impl TrackConsumer {
 		})
 	}
 
+	/// Convenience: [`Self::subscribe`] with [`Subscription::default`].
+	pub fn subscribe_default(&self) -> Result<TrackSubscriber> {
+		self.subscribe(Subscription::default())
+	}
+
 	/// Poll for the group with the given sequence, without blocking.
 	pub fn poll_get_group(&self, waiter: &conducer::Waiter, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
 		self.poll(waiter, |state| state.poll_get_group(sequence))
@@ -726,7 +734,7 @@ impl TrackConsumer {
 /// producer's aggregate reflects this subscriber's preferences as long as the
 /// subscriber is alive.
 pub struct TrackSubscriber {
-	pub info: Track,
+	info: Track,
 	state: conducer::Consumer<State>,
 	sub: conducer::Producer<Subscription>,
 	/// Arrival-order cursor used by [`Self::recv_group`] / [`Self::next_group`].
@@ -772,6 +780,10 @@ impl TrackSubscriber {
 	/// Respects this subscriber's [`Subscription::start`] / `end` bounds.
 	/// Groups may arrive out of order or with gaps. Use [`Self::next_group`]
 	/// if you need monotonic delivery (skipping late arrivals).
+	///
+	/// Returns `Ok(None)` once the track is finished or the first group past
+	/// `end` is observed; the subscription is considered complete and further
+	/// polls will keep returning `Ok(None)`.
 	pub fn poll_recv_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
 		let sub = self.sub.read();
 		let min_sequence = sub.start.unwrap_or(0);
@@ -984,8 +996,7 @@ impl TrackSubscriber {
 #[cfg(test)]
 impl TrackConsumer {
 	pub fn assert_subscribe(&self) -> TrackSubscriber {
-		self.subscribe(Subscription::default())
-			.expect("subscribe should not have errored")
+		self.subscribe_default().expect("subscribe should not have errored")
 	}
 
 	pub fn assert_is_clone(&self, other: &Self) {
@@ -1641,6 +1652,31 @@ mod test {
 			.expect("aggregate should exist");
 		assert_eq!(agg.start, Some(3));
 		assert_eq!(agg.end, Some(20));
+	}
+
+	#[tokio::test]
+	async fn aggregate_subscription_none_wins_over_some() {
+		let mut producer = Track::new("test").produce();
+		let consumer = producer.consume();
+
+		// One concrete bound, one unbounded — the unbounded subscriber wants the full range,
+		// so the aggregate must be unbounded too.
+		let _a = consumer
+			.subscribe(Subscription {
+				start: Some(5),
+				end: Some(20),
+				..Default::default()
+			})
+			.unwrap();
+		let _b = consumer.subscribe(Subscription::default()).unwrap();
+
+		let agg = producer
+			.subscription()
+			.now_or_never()
+			.expect("should not block")
+			.expect("aggregate should exist");
+		assert_eq!(agg.start, None, "None subscriber wants from the beginning");
+		assert_eq!(agg.end, None, "None subscriber wants no end");
 	}
 
 	#[tokio::test]

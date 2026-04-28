@@ -340,7 +340,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						let p = priority.insert(subscriber.subscription().priority, sequence);
 						tasks.push(Self::serve_group(session.clone(), msg, p, group, version).map(|_| ()));
 					}
-					None => return Ok(()),
+					None => break,
 				},
 				upd = stream.reader.decode_maybe::<lite::SubscribeUpdate>() => match upd? {
 					Some(upd) => {
@@ -352,10 +352,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							end: upd.end_group,
 						});
 					}
-					None => return Ok(()),
+					None => break,
 				},
 			}
 		}
+
+		// Drain in-flight group futures so they finish writing before we close the stream.
+		while tasks.next().await.is_some() {}
+
+		Ok(())
 	}
 
 	async fn serve_group(
