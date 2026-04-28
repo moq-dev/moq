@@ -4,7 +4,7 @@
 <head>
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>MoQ Demo (Static Catalog)</title>
+	<title>MoQ Demo (Manual Catalog)</title>
 
 	<link rel="stylesheet" href="index.css">
 	<link rel="icon" type="image/svg+xml" href="/favicon.svg">
@@ -14,12 +14,12 @@
 	<moq-watch-support show="warning"></moq-watch-support>
 
 	<!--
-		`catalog-format="static"` skips the catalog.json subscription. The element
+		`catalog-format="manual"` skips the catalog.json subscription. The element
 		does nothing media-wise until you assign `watch.catalog = <Catalog.Root>`.
-		See static.ts for the textarea/apply wiring.
+		See manual.ts for the textarea/apply wiring.
 	-->
 	<moq-watch-ui>
-		<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" catalog-format="static" muted latency="real-time" reload>
+		<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" catalog-format="manual" muted latency="real-time" reload>
 			<canvas style="width: 100%; height: auto;"></canvas>
 		</moq-watch>
 	</moq-watch-ui>
@@ -28,7 +28,7 @@
 		<h3>Catalog JSON</h3>
 		<p>
 			Paste a <code>Catalog.Root</code> blob and click <strong>Apply</strong>.
-			The element won't fetch a catalog track in static mode — media tracks are
+			The element won't fetch a catalog track in manual mode — media tracks are
 			subscribed off whatever you provide here.
 		</p>
 		<p>
@@ -60,6 +60,6 @@
 	</ul>
 </body>
 
-<script type="module" src="static.ts"></script>
+<script type="module" src="manual.ts"></script>
 
 </html>

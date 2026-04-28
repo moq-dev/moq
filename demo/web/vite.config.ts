@@ -16,7 +16,7 @@ export default defineConfig({
 				watch: resolve(__dirname, "src/index.html"),
 				publish: resolve(__dirname, "src/publish.html"),
 				mse: resolve(__dirname, "src/mse.html"),
-				static: resolve(__dirname, "src/static.html"),
+				manual: resolve(__dirname, "src/manual.html"),
 			},
 		},
 	},

@@ -6,7 +6,7 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
 
-export const CATALOG_FORMATS = ["hang", "msf", "static"] as const;
+export const CATALOG_FORMATS = ["hang", "msf", "manual"] as const;
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
 export interface BroadcastProps {
@@ -29,8 +29,11 @@ export interface BroadcastProps {
 	// Which catalog format to use. Default: "hang"
 	catalogFormat?: CatalogFormat | Signal<CatalogFormat>;
 
-	// Initial catalog. Used directly when catalogFormat is "static"; otherwise it's
-	// overwritten by whatever the fetched catalog track produces.
+	// Initial catalog. Used directly when catalogFormat is "manual"; otherwise it's
+	// overwritten by whatever the fetched catalog track produces. Note: switching
+	// catalogFormat between "manual" and a fetched format will reset this signal
+	// to undefined when the fetched-format spawn tears down — set the catalog
+	// after switching formats, not before.
 	catalog?: Catalog.Root | Signal<Catalog.Root | undefined>;
 }
 
@@ -49,7 +52,7 @@ export class Broadcast {
 	readonly active: Getter<Moq.Broadcast | undefined> = this.#active;
 
 	// The active catalog. Writable so users can supply it directly when
-	// catalogFormat is "static"; otherwise the fetch loop owns writes.
+	// catalogFormat is "manual"; otherwise the fetch loop owns writes.
 	catalog: Signal<Catalog.Root | undefined>;
 
 	// All actively announced broadcast paths from the connection.
@@ -103,7 +106,7 @@ export class Broadcast {
 
 		const format = effect.get(this.catalogFormat);
 
-		if (format === "static") {
+		if (format === "manual") {
 			// User-supplied catalog; no track to fetch.
 			const catalog = effect.get(this.catalog);
 			this.status.set(catalog ? "live" : "loading");

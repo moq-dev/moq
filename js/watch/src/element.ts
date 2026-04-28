@@ -265,7 +265,7 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	/**
-	 * The active catalog. Assign directly when `catalogFormat` is `"static"`;
+	 * The active catalog. Assign directly when `catalogFormat` is `"manual"`;
 	 * for `"hang"` and `"msf"` this is overwritten by the fetch loop.
 	 */
 	get catalog(): Catalog.Root | undefined {

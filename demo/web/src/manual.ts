@@ -33,7 +33,7 @@ apply.addEventListener("click", () => {
 	}
 	try {
 		const parsed = JSON.parse(text) as Catalog.Root;
-		watch.catalogFormat = "static";
+		watch.catalogFormat = "manual";
 		watch.catalog = parsed;
 		setStatus("applied");
 	} catch (err) {
