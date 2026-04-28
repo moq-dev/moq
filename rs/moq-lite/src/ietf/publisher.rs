@@ -129,7 +129,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// types are still ignored (see the warn above) — TODO: full FilterType
 		// support along with FETCH wiring.
 		let start = matches!(msg.filter_type, FilterType::LargestObject)
-			.then(|| consumer.latest())
+			.then(|| consumer.latest_group().map(|g| g.sequence))
 			.flatten();
 
 		let subscription = Subscription {

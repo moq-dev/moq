@@ -78,6 +78,15 @@ struct State {
 
 	/// Per-subscriber subscription values, read by the producer for aggregation.
 	subscriptions: Vec<conducer::Consumer<Subscription>>,
+
+	/// Pending fetch requests waiting for a [`TrackDynamic`] to fulfill them.
+	/// Each entry is a freshly-minted [`GroupProducer`] for the requested
+	/// sequence; the dynamic handler pops it and fills frames.
+	fetch_requests: VecDeque<GroupProducer>,
+
+	/// Number of live [`TrackDynamic`] instances. When 0, fetch requests for
+	/// uncached groups fail with [`Error::NotFound`].
+	dynamic_groups: usize,
 }
 
 impl State {
@@ -451,6 +460,16 @@ impl TrackProducer {
 		}
 	}
 
+	/// Opt in to handling FETCH requests for groups not in the cache.
+	///
+	/// While at least one [`TrackDynamic`] is held, [`TrackConsumer::fetch_group`]
+	/// can route uncached requests to the publisher. When all dynamics are
+	/// dropped, pending requests are aborted and future uncached fetches return
+	/// [`Error::NotFound`].
+	pub fn dynamic(&self) -> TrackDynamic {
+		TrackDynamic::new(self.info.clone(), self.state.clone())
+	}
+
 	/// Block until there are no active consumers.
 	pub async fn unused(&self) -> Result<()> {
 		self.state
@@ -548,6 +567,98 @@ impl Clone for TrackProducer {
 impl From<Track> for TrackProducer {
 	fn from(info: Track) -> Self {
 		TrackProducer::new(info)
+	}
+}
+
+/// Handles on-demand group fetches for a track.
+///
+/// Created via [`TrackProducer::dynamic`]. While alive, [`TrackConsumer::fetch_group`]
+/// requests for uncached groups are queued for the dynamic handler to fulfill
+/// via [`Self::requested_group`]. Dropping the last dynamic aborts any pending
+/// requests with [`Error::Cancel`].
+#[derive(Clone)]
+pub struct TrackDynamic {
+	info: Track,
+	state: conducer::Producer<State>,
+}
+
+impl std::ops::Deref for TrackDynamic {
+	type Target = Track;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
+impl TrackDynamic {
+	fn new(info: Track, state: conducer::Producer<State>) -> Self {
+		if let Ok(mut state) = state.write() {
+			state.dynamic_groups += 1;
+		}
+		Self { info, state }
+	}
+
+	fn poll<F, R>(&self, waiter: &conducer::Waiter, f: F) -> Poll<Result<R>>
+	where
+		F: FnMut(&mut conducer::Mut<'_, State>) -> Poll<R>,
+	{
+		Poll::Ready(match ready!(self.state.poll(waiter, f)) {
+			Ok(r) => Ok(r),
+			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		})
+	}
+
+	/// Poll for the next pending fetch request.
+	///
+	/// Yields a [`GroupProducer`] the publisher fills in. The producer's
+	/// `sequence` is the requested group number.
+	pub fn poll_requested_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<GroupProducer>> {
+		self.poll(waiter, |state| match state.fetch_requests.pop_front() {
+			Some(producer) => Poll::Ready(producer),
+			None => Poll::Pending,
+		})
+	}
+
+	/// Block until a consumer requests a group, returning its producer.
+	pub async fn requested_group(&mut self) -> Result<GroupProducer> {
+		conducer::wait(|waiter| self.poll_requested_group(waiter)).await
+	}
+
+	/// Return true if this is the same dynamic instance.
+	pub fn is_clone(&self, other: &Self) -> bool {
+		self.state.same_channel(&other.state)
+	}
+}
+
+impl Drop for TrackDynamic {
+	fn drop(&mut self) {
+		if let Ok(mut state) = self.state.write() {
+			state.dynamic_groups = state.dynamic_groups.saturating_sub(1);
+			if state.dynamic_groups != 0 {
+				return;
+			}
+
+			// No remaining handler; cancel any pending requests.
+			for mut request in state.fetch_requests.drain(..) {
+				request.abort(Error::Cancel).ok();
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+impl TrackDynamic {
+	pub fn assert_request(&mut self) -> GroupProducer {
+		use futures::FutureExt;
+		self.requested_group()
+			.now_or_never()
+			.expect("should not have blocked")
+			.expect("should not have errored")
+	}
+
+	pub fn assert_no_request(&mut self) {
+		use futures::FutureExt;
+		assert!(self.requested_group().now_or_never().is_none(), "should have blocked");
 	}
 }
 
@@ -695,9 +806,57 @@ impl TrackConsumer {
 		conducer::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
-	/// Return the latest sequence number in the track.
-	pub fn latest(&self) -> Option<u64> {
-		self.state.read().max_sequence
+	/// Return the latest cached group, if any.
+	pub fn latest_group(&self) -> Option<GroupConsumer> {
+		let state = self.state.read();
+		let max = state.max_sequence?;
+		state
+			.groups
+			.iter()
+			.flatten()
+			.find_map(|(g, _)| (g.sequence == max).then(|| g.consume()))
+	}
+
+	/// Fetch a specific group by sequence.
+	///
+	/// - Cache hit → returns the cached consumer (a fetch handler is not required).
+	/// - Cache miss + no [`TrackDynamic`] handler → returns [`Error::NotFound`].
+	/// - Cache miss + handler present → routes a request to the producer; returns
+	///   a [`GroupConsumer`] that fills in as the publisher writes frames. Errors
+	///   later if the publisher aborts/declines (e.g. group is past final).
+	pub fn fetch_group(&self, sequence: u64) -> Result<GroupConsumer> {
+		// Upgrade to a temporary producer so we can mutate the state.
+		let producer = self
+			.state
+			.produce()
+			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
+
+		let mut state = producer
+			.write()
+			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))?;
+
+		// Cache hit: always return, regardless of dynamic handler state.
+		for (group, _) in state.groups.iter().flatten() {
+			if group.sequence == sequence {
+				return Ok(group.consume());
+			}
+		}
+
+		if state.dynamic_groups == 0 {
+			return Err(Error::NotFound);
+		}
+
+		// Queue a request for the dynamic handler; cache the producer so
+		// concurrent fetches for the same sequence share frames.
+		let group = Group { sequence }.produce();
+		let consumer = group.consume();
+		let now = tokio::time::Instant::now();
+		state.duplicates.insert(sequence);
+		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(sequence));
+		state.groups.push_back(Some((group.clone(), now)));
+		state.fetch_requests.push_back(group);
+
+		Ok(consumer)
 	}
 
 	/// Upgrade this consumer back to a [TrackProducer] sharing the same state.
@@ -901,9 +1060,15 @@ impl TrackSubscriber {
 		self.sub.read().clone()
 	}
 
-	/// Return the latest sequence number in the track.
-	pub fn latest(&self) -> Option<u64> {
-		self.state.read().max_sequence
+	/// Return the latest cached group, if any.
+	pub fn latest_group(&self) -> Option<GroupConsumer> {
+		let state = self.state.read();
+		let max = state.max_sequence?;
+		state
+			.groups
+			.iter()
+			.flatten()
+			.find_map(|(g, _)| (g.sequence == max).then(|| g.consume()))
 	}
 
 	/// Poll for the group with the given sequence, without blocking.
@@ -1762,5 +1927,128 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored");
 		assert!(done.is_none(), "groups past end should yield None");
+	}
+
+	#[tokio::test]
+	async fn fetch_group_cache_hit() {
+		let mut producer = Track::new("test").produce();
+		producer.create_group(Group { sequence: 5 }).unwrap();
+		let consumer = producer.consume();
+
+		// No TrackDynamic registered, but cache hits still succeed.
+		let group = consumer.fetch_group(5).expect("cache hit");
+		assert_eq!(group.sequence, 5);
+	}
+
+	#[tokio::test]
+	async fn fetch_group_no_handler_returns_not_found() {
+		let producer = Track::new("test").produce();
+		let consumer = producer.consume();
+
+		match consumer.fetch_group(0) {
+			Err(Error::NotFound) => {}
+			Err(err) => panic!("expected NotFound, got {err:?}"),
+			Ok(_) => panic!("expected NotFound, got Ok"),
+		}
+	}
+
+	#[tokio::test]
+	async fn fetch_group_via_dynamic_handler() {
+		let producer = Track::new("test").produce();
+		let consumer = producer.consume();
+		let mut dynamic = producer.dynamic();
+
+		// Issue a fetch; the handler should pop a producer for the same sequence.
+		let mut group_consumer = consumer.fetch_group(7).expect("queued");
+		assert_eq!(group_consumer.sequence, 7);
+
+		let mut group_producer = dynamic.assert_request();
+		assert_eq!(group_producer.sequence, 7);
+
+		// Publisher fills frames; consumer reads them.
+		group_producer.write_frame(bytes::Bytes::from_static(b"hello")).unwrap();
+		group_producer.finish().unwrap();
+
+		let frame = group_consumer.read_frame().await.unwrap();
+		assert_eq!(frame.as_deref(), Some(&b"hello"[..]));
+		assert!(group_consumer.read_frame().await.unwrap().is_none());
+	}
+
+	#[tokio::test]
+	async fn fetch_group_shares_in_flight() {
+		let producer = Track::new("test").produce();
+		let consumer = producer.consume();
+		let mut dynamic = producer.dynamic();
+
+		let mut a = consumer.fetch_group(3).expect("queued");
+		let mut b = consumer.fetch_group(3).expect("cache hit second time");
+
+		// Only one request should be queued; both consumers share the same group.
+		let mut group_producer = dynamic.assert_request();
+		dynamic.assert_no_request();
+
+		group_producer
+			.write_frame(bytes::Bytes::from_static(b"shared"))
+			.unwrap();
+		group_producer.finish().unwrap();
+
+		assert_eq!(a.read_frame().await.unwrap().as_deref(), Some(&b"shared"[..]));
+		assert_eq!(b.read_frame().await.unwrap().as_deref(), Some(&b"shared"[..]));
+	}
+
+	#[tokio::test]
+	async fn fetch_group_aborted_by_publisher() {
+		let producer = Track::new("test").produce();
+		let consumer = producer.consume();
+		let mut dynamic = producer.dynamic();
+
+		let mut group_consumer = consumer.fetch_group(2).expect("queued");
+		let mut group_producer = dynamic.assert_request();
+
+		// Publisher decides the group can't be served.
+		group_producer.abort(Error::NotFound).unwrap();
+
+		match group_consumer.read_frame().await {
+			Err(Error::NotFound) => {}
+			other => panic!("expected NotFound, got {other:?}"),
+		}
+	}
+
+	#[tokio::test]
+	async fn fetch_pending_aborted_when_dynamic_dropped() {
+		let producer = Track::new("test").produce();
+		let consumer = producer.consume();
+		let dynamic = producer.dynamic();
+
+		let mut group_consumer = consumer.fetch_group(9).expect("queued");
+
+		// Dropping the only TrackDynamic aborts the pending request.
+		drop(dynamic);
+
+		match group_consumer.read_frame().await {
+			Err(Error::Cancel) => {}
+			other => panic!("expected Cancel, got {other:?}"),
+		}
+
+		// And subsequent fetches for uncached sequences fail with NotFound.
+		assert!(matches!(consumer.fetch_group(10), Err(Error::NotFound)));
+	}
+
+	#[tokio::test]
+	async fn latest_group_returns_max_sequence_consumer() {
+		let mut producer = Track::new("test").produce();
+		producer.create_group(Group { sequence: 1 }).unwrap();
+		producer.create_group(Group { sequence: 5 }).unwrap();
+		producer.create_group(Group { sequence: 3 }).unwrap();
+
+		let consumer = producer.consume();
+		let latest = consumer.latest_group().expect("has groups");
+		assert_eq!(latest.sequence, 5);
+	}
+
+	#[tokio::test]
+	async fn latest_group_none_on_empty_track() {
+		let producer = Track::new("test").produce();
+		assert!(producer.consume().latest_group().is_none());
 	}
 }

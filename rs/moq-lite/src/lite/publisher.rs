@@ -287,7 +287,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let consumer = broadcast.consume_track(&track)?;
 
 		// Pick the start group: explicit, else the latest cached group.
-		let start = subscribe.start_group.or_else(|| consumer.latest());
+		let start = subscribe
+			.start_group
+			.or_else(|| consumer.latest_group().map(|g| g.sequence));
 		let subscriber = consumer.subscribe(Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
