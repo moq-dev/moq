@@ -1,6 +1,6 @@
 import "./highlight";
 import "@moq/watch/ui";
-import type * as Catalog from "@moq/hang/catalog";
+import * as Catalog from "@moq/hang/catalog";
 import MoqWatch from "@moq/watch/element";
 import MoqWatchSupport from "@moq/watch/support/element";
 
@@ -31,12 +31,21 @@ apply.addEventListener("click", () => {
 		setStatus("cleared");
 		return;
 	}
+	let parsed: unknown;
 	try {
-		const parsed = JSON.parse(text) as Catalog.Root;
-		watch.catalogFormat = "manual";
-		watch.catalog = parsed;
-		setStatus("applied");
+		parsed = JSON.parse(text);
 	} catch (err) {
 		setStatus(`parse error: ${(err as Error).message}`, false);
+		return;
 	}
+
+	const result = Catalog.RootSchema.safeParse(parsed);
+	if (!result.success) {
+		setStatus(`invalid catalog: ${result.error.message}`, false);
+		return;
+	}
+
+	watch.catalogFormat = "manual";
+	watch.catalog = result.data;
+	setStatus("applied");
 });
