@@ -54,6 +54,17 @@ fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>,
 	}
 }
 
+impl State {
+	/// Insert a track weak handle into the lookup, returning an error on duplicate.
+	fn insert_track(&mut self, weak: TrackWeak) -> Result<(), Error> {
+		let hash_map::Entry::Vacant(entry) = self.tracks.entry(weak.info.name.clone()) else {
+			return Err(Error::Duplicate);
+		};
+		entry.insert(weak);
+		Ok(())
+	}
+}
+
 /// Manages tracks within a broadcast.
 ///
 /// Insert tracks statically with [Self::insert_track] / [Self::create_track],
@@ -82,17 +93,13 @@ impl BroadcastProducer {
 
 	/// Insert a track into the lookup, returning an error on duplicate.
 	///
-	/// NOTE: You probably want to [TrackProducer::clone] first to keep publishing to the track.
-	pub fn insert_track(&mut self, track: &TrackProducer) -> Result<(), Error> {
+	/// Stores a weak handle to the track. The caller (or the owner of the
+	/// track's [`TrackProducer`]) is responsible for keeping the track alive;
+	/// when all producers are dropped, the entry becomes closed and is
+	/// eventually evicted.
+	pub fn insert_track(&mut self, track: TrackConsumer) -> Result<(), Error> {
 		let mut state = modify(&self.state)?;
-
-		let hash_map::Entry::Vacant(entry) = state.tracks.entry(track.name.clone()) else {
-			return Err(Error::Duplicate);
-		};
-
-		entry.insert(track.weak());
-
-		Ok(())
+		state.insert_track(track.weak())
 	}
 
 	/// Remove a track from the lookup.
@@ -105,7 +112,9 @@ impl BroadcastProducer {
 	/// Produce a new track and insert it into the broadcast.
 	pub fn create_track(&mut self, track: Track) -> Result<TrackProducer, Error> {
 		let track = TrackProducer::new(track);
-		self.insert_track(&track)?;
+		let mut state = modify(&self.state)?;
+		state.insert_track(track.weak())?;
+		drop(state);
 		Ok(track)
 	}
 
@@ -172,7 +181,7 @@ impl BroadcastProducer {
 	}
 
 	pub fn assert_insert_track(&mut self, track: &TrackProducer) {
-		self.insert_track(track).expect("should not have errored")
+		self.insert_track(track.consume()).expect("should not have errored")
 	}
 }
 
