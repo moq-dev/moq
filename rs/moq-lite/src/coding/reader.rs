@@ -88,6 +88,23 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		self.stream.read_chunk(max).await.map_err(Error::from_transport)
 	}
 
+	/// Read into the provided buffer, draining the reader's internal buffer first.
+	///
+	/// Returns the number of bytes written, or `None` if the stream is closed
+	/// (and the internal buffer was empty).
+	pub async fn read_buf<B: BufMut + web_transport_trait::MaybeSend>(
+		&mut self,
+		dst: &mut B,
+	) -> Result<Option<usize>, Error> {
+		if !self.buffer.is_empty() && dst.has_remaining_mut() {
+			let n = cmp::min(self.buffer.len(), dst.remaining_mut());
+			let chunk = self.buffer.split_to(n);
+			dst.put_slice(&chunk);
+			return Ok(Some(n));
+		}
+		self.stream.read_buf(dst).await.map_err(Error::from_transport)
+	}
+
 	/// Read exactly the given number of bytes from the stream.
 	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
 		// An optimization to avoid a copy if we have enough data in the buffer
