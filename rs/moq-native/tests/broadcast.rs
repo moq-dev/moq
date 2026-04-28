@@ -24,7 +24,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin.create("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -78,13 +78,17 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-
-	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = match update {
+		moq_lite::OriginUpdate::Active(path, bc) => {
+			assert_eq!(path.as_str(), "test");
+			bc
+		}
+		moq_lite::OriginUpdate::Ended(path) => panic!("expected announce, got Ended({path})"),
+	};
 
 	// Subscribe to the track.
 	let mut track_sub = bc
@@ -362,7 +366,7 @@ async fn broadcast_websocket() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin.create("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -418,13 +422,17 @@ async fn broadcast_websocket() {
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-
-	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = match update {
+		moq_lite::OriginUpdate::Active(path, bc) => {
+			assert_eq!(path.as_str(), "test");
+			bc
+		}
+		moq_lite::OriginUpdate::Ended(path) => panic!("expected announce, got Ended({path})"),
+	};
 
 	// Subscribe to the track.
 	let mut track_sub = bc
@@ -466,7 +474,7 @@ async fn broadcast_websocket_fallback() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin.create("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -525,13 +533,17 @@ async fn broadcast_websocket_fallback() {
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-
-	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = match update {
+		moq_lite::OriginUpdate::Active(path, bc) => {
+			assert_eq!(path.as_str(), "test");
+			bc
+		}
+		moq_lite::OriginUpdate::Ended(path) => panic!("expected announce, got Ended({path})"),
+	};
 
 	// Subscribe to the track.
 	let mut track_sub = bc

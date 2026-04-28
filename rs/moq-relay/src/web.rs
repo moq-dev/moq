@@ -16,6 +16,7 @@ use axum::{
 };
 use bytes::Bytes;
 use clap::Parser;
+use futures::FutureExt;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{Auth, AuthParams, Cluster};
@@ -282,8 +283,8 @@ async fn serve_announced(
 
 	let mut broadcasts = Vec::new();
 
-	while let Some((suffix, active)) = origin.try_announced() {
-		if active.is_some() {
+	while let Some(update) = origin.try_next() {
+		if let moq_lite::OriginUpdate::Active(suffix, _) = update {
 			broadcasts.push(suffix);
 		}
 	}
@@ -325,10 +326,13 @@ async fn serve_fetch(
 	};
 
 	// NOTE: The auth token is already scoped to the broadcast.
-	// TODO: switch to `announced_broadcast` (bounded by the fetch deadline) so freshly-connected
-	// subscribers don't get a spurious 404 before the broadcast has gossiped.
-	#[allow(deprecated)]
-	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
+	// TODO: bound `wait_for_broadcast` by the fetch deadline so freshly-connected subscribers
+	// don't get a spurious 404 before the broadcast has gossiped.
+	let broadcast = origin
+		.wait_for_broadcast("")
+		.now_or_never()
+		.flatten()
+		.ok_or(StatusCode::NOT_FOUND)?;
 	let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
 		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,

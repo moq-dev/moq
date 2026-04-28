@@ -60,18 +60,28 @@ impl Cluster {
 
 	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
 	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginConsumer> {
-		self.origin.with_root(&token.root)?.consume_only(&token.subscribe)
+		self.origin
+			.with_root(&token.root)?
+			.scope(&token.subscribe)
+			.map(|p| p.consume())
 	}
 
 	/// Returns an [`OriginProducer`] scoped to this session's publish permissions.
 	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
-		self.origin.with_root(&token.root)?.publish_only(&token.publish)
+		self.origin.with_root(&token.root)?.scope(&token.publish)
 	}
 
-	/// Looks up a broadcast by name.
-	#[allow(deprecated)] // Synchronous cluster lookup by design; callers know the broadcast is local.
+	/// Synchronously look up a broadcast by name. Callers must know the
+	/// broadcast is already announced (e.g. came in on a SUBSCRIBE for this
+	/// exact path); for general use prefer
+	/// [`OriginConsumer::wait_for_broadcast`].
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
-		self.origin.consume_broadcast(broadcast)
+		use futures::FutureExt;
+		self.origin
+			.consume()
+			.wait_for_broadcast(broadcast)
+			.now_or_never()
+			.flatten()
 	}
 
 	/// Runs the cluster event loop, dialing the configured peers and keeping

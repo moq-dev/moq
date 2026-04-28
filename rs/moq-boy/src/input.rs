@@ -65,8 +65,13 @@ pub async fn handle_viewers(
 	cmd_tx: &tokio::sync::mpsc::Sender<Command>,
 ) -> anyhow::Result<()> {
 	loop {
-		let Some((path, broadcast)) = viewer_origin.announced().await else {
+		let Some(update) = viewer_origin.next().await else {
 			break;
+		};
+
+		let (path, broadcast) = match update {
+			moq_lite::OriginUpdate::Active(p, b) => (p, Some(b)),
+			moq_lite::OriginUpdate::Ended(p) => (p, None),
 		};
 
 		let viewer_id = path.to_string();

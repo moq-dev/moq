@@ -65,7 +65,12 @@ impl Origin {
 	}
 
 	async fn run_announced(task_id: Id, mut consumer: moq_lite::OriginConsumer) -> Result<(), Error> {
-		while let Some((path, broadcast)) = consumer.announced().await {
+		while let Some(update) = consumer.next().await {
+			let (path, active) = match update {
+				moq_lite::OriginUpdate::Active(p, _) => (p, true),
+				moq_lite::OriginUpdate::Ended(p) => (p, false),
+			};
+
 			let mut state = State::lock();
 
 			// Stop if the callback was revoked by close.
@@ -74,7 +79,7 @@ impl Origin {
 			};
 			let callback = entry.callback;
 
-			let announced_id = state.origin.announced.insert((path.to_string(), broadcast.is_some()))?;
+			let announced_id = state.origin.announced.insert((path.to_string(), active))?;
 			drop(state);
 
 			// The lock is dropped before the callback is invoked.
@@ -105,11 +110,20 @@ impl Origin {
 	}
 
 	pub fn consume<P: moq_lite::AsPath>(&mut self, origin: Id, path: P) -> Result<moq_lite::BroadcastConsumer, Error> {
+		use moq_lite::AsPath;
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		// TODO: expose an async variant backed by `announced_broadcast` so FFI callers can wait
-		// for gossip instead of racing it.
-		#[allow(deprecated)]
-		origin.consume().consume_broadcast(path).ok_or(Error::BroadcastNotFound)
+		// TODO: expose an async variant so FFI callers can wait for gossip instead of racing it.
+		// Scope a fresh consumer to the requested path; the constructor's replay puts the
+		// currently-active broadcast (if any) at the head of the queue.
+		let path = path.as_path();
+		let mut consumer = origin
+			.consume()
+			.scope(&[path.as_path()])
+			.ok_or(Error::BroadcastNotFound)?;
+		match consumer.try_next() {
+			Some(moq_lite::OriginUpdate::Active(p, b)) if p.as_path() == path => Ok(b),
+			_ => Err(Error::BroadcastNotFound),
+		}
 	}
 
 	pub fn publish<P: moq_lite::AsPath>(
@@ -119,7 +133,7 @@ impl Origin {
 		broadcast: moq_lite::BroadcastConsumer,
 	) -> Result<(), Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		origin.publish_broadcast(path, broadcast);
+		origin.publish(path, broadcast);
 		Ok(())
 	}
 

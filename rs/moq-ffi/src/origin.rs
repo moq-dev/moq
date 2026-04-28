@@ -27,15 +27,15 @@ struct Announced {
 impl Announced {
 	async fn next(&mut self) -> Result<Option<Arc<MoqAnnouncement>>, MoqError> {
 		loop {
-			match self.inner.announced().await {
-				Some((path, Some(broadcast))) => {
+			match self.inner.next().await {
+				Some(moq_lite::OriginUpdate::Active(path, broadcast)) => {
 					return Ok(Some(Arc::new(MoqAnnouncement {
 						path: path.to_string(),
 						broadcast: Arc::new(MoqBroadcastConsumer::new(broadcast)),
 					})));
 				}
-				// TODO moq-lite will change to not emit None (unannounce) events here.
-				Some((_path, None)) => continue,
+				// FFI consumers learn about unannounce via broadcast.closed().
+				Some(moq_lite::OriginUpdate::Ended(_)) => continue,
 				None => return Ok(None),
 			}
 		}
@@ -43,12 +43,11 @@ impl Announced {
 
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		loop {
-			match self.inner.announced().await {
-				Some((_path, Some(broadcast))) => {
+			match self.inner.next().await {
+				Some(moq_lite::OriginUpdate::Active(_, broadcast)) => {
 					return Ok(Arc::new(MoqBroadcastConsumer::new(broadcast)));
 				}
-				// TODO moq-lite will change to not emit None (unannounce) events here.
-				Some((_path, None)) => continue,
+				Some(moq_lite::OriginUpdate::Ended(_)) => continue,
 				None => return Err(MoqError::Closed),
 			}
 		}
@@ -97,7 +96,7 @@ impl MoqOriginProducer {
 	pub fn publish(&self, path: String, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let consumer = broadcast.consume_inner()?;
-		if !self.inner.publish_broadcast(path.as_str(), consumer) {
+		if !self.inner.publish(path.as_str(), consumer) {
 			return Err(MoqError::Unauthorized);
 		}
 		Ok(())

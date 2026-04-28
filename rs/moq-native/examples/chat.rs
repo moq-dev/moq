@@ -49,7 +49,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	// NOTE: The path is empty because we're using the URL to scope the broadcast.
 	// If you put "alice" here, it would be published as "anon/chat-example/alice".
 	// OPTIONAL: We publish after inserting the track just to avoid a nearly impossible race condition.
-	origin.publish_broadcast("", broadcast.consume());
+	origin.publish("", broadcast.consume());
 
 	// Create a group.
 	// Each group is independent and the newest group(s) will be prioritized.

@@ -97,7 +97,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			None => return Ok(()),
 		};
 
-		let prefixes: Vec<PathOwned> = origin.allowed().map(|p| p.to_owned()).collect();
+		let prefixes: Vec<PathOwned> = origin.allowed().iter().map(|p| p.to_owned()).collect();
 
 		let mut tasks = FuturesUnordered::new();
 		for prefix in prefixes {
@@ -227,10 +227,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		let dynamic = broadcast.dynamic();
 
 		// Run the broadcast in the background until all consumers are dropped.
-		self.origin
-			.as_mut()
-			.unwrap()
-			.publish_broadcast(path.clone(), broadcast.consume());
+		self.origin.as_mut().unwrap().publish(path.clone(), broadcast.consume());
 
 		web_async::spawn(self.clone().run_broadcast(path, dynamic));
 

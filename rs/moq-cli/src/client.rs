@@ -14,7 +14,7 @@ pub async fn run_client(
 ) -> anyhow::Result<()> {
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_lite::Origin::random().produce();
-	origin.publish_broadcast(&name, publish.consume());
+	origin.publish(&name, publish.consume());
 
 	tracing::info!(%url, %name, "connecting");
 

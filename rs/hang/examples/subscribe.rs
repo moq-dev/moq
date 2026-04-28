@@ -40,12 +40,13 @@ async fn run_session(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 // Subscribe to a broadcast and read media frames.
 async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 	// Wait for a broadcast to be announced.
-	let (path, broadcast) = consumer
-		.announced()
-		.await
-		.ok_or_else(|| anyhow::anyhow!("origin closed"))?;
-
-	let broadcast = broadcast.ok_or_else(|| anyhow::anyhow!("broadcast unannounced: {path}"))?;
+	let (path, broadcast) = loop {
+		match consumer.next().await {
+			Some(moq_lite::OriginUpdate::Active(p, b)) => break (p, b),
+			Some(moq_lite::OriginUpdate::Ended(_)) => continue,
+			None => return Err(anyhow::anyhow!("origin closed")),
+		}
+	};
 
 	tracing::info!(%path, "broadcast announced");
 

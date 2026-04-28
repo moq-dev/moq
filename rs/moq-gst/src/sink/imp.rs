@@ -358,7 +358,7 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver
 	let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
 
 	anyhow::ensure!(
-		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),
+		origin.publish(&settings.broadcast, broadcast_consumer),
 		"failed to publish broadcast {}",
 		settings.broadcast
 	);

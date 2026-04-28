@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
 			let track = broadcast.create_track(track)?;
 			let clock = clock::Publisher::new(track);
 
-			origin.publish_broadcast(&config.broadcast, broadcast.consume());
+			origin.publish(&config.broadcast, broadcast.consume());
 
 			let reconnect = client.with_publish(origin.consume()).reconnect(config.url);
 
@@ -87,7 +87,8 @@ async fn main() -> anyhow::Result<()> {
 
 			let path: moq_lite::Path<'_> = config.broadcast.into();
 			let mut origin = origin
-				.consume_only(&[path])
+				.consume()
+				.scope(&[path])
 				.context("not allowed to consume broadcast")?;
 
 			// The current subscriber if any, dropped after each announce.
@@ -95,13 +96,13 @@ async fn main() -> anyhow::Result<()> {
 
 			loop {
 				tokio::select! {
-					Some(announce) = origin.announced() => match announce {
-						(path, Some(broadcast)) => {
+					Some(announce) = origin.next() => match announce {
+						moq_lite::OriginUpdate::Active(path, broadcast) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast.subscribe_track(&track)?;
 							clock = Some(clock::Subscriber::new(track));
 						}
-						(path, None) => {
+						moq_lite::OriginUpdate::Ended(path) => {
 							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
 						}
 					},

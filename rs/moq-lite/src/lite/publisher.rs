@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, OriginUpdate, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -129,10 +129,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let interest = stream.reader.decode::<lite::AnnounceInterest>().await?;
 		let prefix = interest.prefix.to_owned();
 
-		let mut origin = self
-			.origin
-			.consume_only(&[prefix.as_path()])
-			.ok_or(Error::Unauthorized)?;
+		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
 
 		let version = self.version;
 		let self_origin = self.self_origin;
@@ -167,18 +164,25 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			Version::Lite01 | Version::Lite02 => {
 				let mut init = Vec::new();
 
-				// Send ANNOUNCE_INIT as the first message with all currently active paths
-				// We use `try_next()` to synchronously get the initial updates.
-				while let Some((path, active)) = origin.try_announced() {
-					let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
+				// Send ANNOUNCE_INIT as the first message with all currently active paths.
+				// `try_next()` is synchronous so we can drain the initial replay in order.
+				while let Some(update) = origin.try_next() {
+					let suffix = update
+						.path()
+						.strip_prefix(&prefix)
+						.expect("origin returned invalid path")
+						.to_owned();
 
-					if active.is_some() {
-						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-						init.push(suffix.to_owned());
-					} else {
-						// A potential race.
-						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-						init.retain(|path| path != &suffix);
+					match update {
+						OriginUpdate::Active(path, _) => {
+							tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+							init.push(suffix);
+						}
+						OriginUpdate::Ended(path) => {
+							// A potential race.
+							tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+							init.retain(|p| p != &suffix);
+						}
 					}
 				}
 
@@ -195,36 +199,35 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			tokio::select! {
 				biased;
 				res = stream.reader.closed() => return res,
-				announced = origin.announced() => {
+				announced = origin.next() => {
 					match announced {
-						Some((path, active)) => {
+						Some(OriginUpdate::Active(path, active)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
-
-							if let Some(active) = active {
-								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-								// Append our origin id to the hops so the next relay can detect loops.
-								// If the chain is already at MAX_HOPS, skip the announce — this link is
-								// effectively unreachable and the peer will eventually prune the loop.
-								let mut hops = active.hops.clone();
-								if hops.push(self_origin).is_err() {
-									tracing::warn!(
-										broadcast = %origin.absolute(&path),
-										"dropping announce; hop chain at MAX_HOPS (possible loop)",
-									);
-									continue;
-								}
-								let msg = lite::Announce::Active { suffix, hops };
-								stream.writer.encode(&msg).await?;
-							} else {
-								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-								// An ended announce doesn't need hops — the receiver matches on path only.
-								let msg = lite::Announce::Ended {
-									suffix,
-									hops: OriginList::new(),
-								};
-								stream.writer.encode(&msg).await?;
+							tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+							// Append our origin id to the hops so the next relay can detect loops.
+							// If the chain is already at MAX_HOPS, skip the announce — this link is
+							// effectively unreachable and the peer will eventually prune the loop.
+							let mut hops = active.hops.clone();
+							if hops.push(self_origin).is_err() {
+								tracing::warn!(
+									broadcast = %origin.absolute(&path),
+									"dropping announce; hop chain at MAX_HOPS (possible loop)",
+								);
+								continue;
 							}
-						},
+							let msg = lite::Announce::Active { suffix, hops };
+							stream.writer.encode(&msg).await?;
+						}
+						Some(OriginUpdate::Ended(path)) => {
+							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
+							tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+							// An ended announce doesn't need hops — the receiver matches on path only.
+							let msg = lite::Announce::Ended {
+								suffix,
+								hops: OriginList::new(),
+							};
+							stream.writer.encode(&msg).await?;
+						}
 						None => {
 							stream.writer.finish()?;
 							return stream.writer.closed().await;
@@ -245,9 +248,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		tracing::info!(%id, broadcast = %absolute, %track, "subscribed started");
 
 		// We just received a subscribe for this exact path, so by definition the peer has
-		// already seen an announcement for it — synchronous lookup is appropriate here.
-		#[allow(deprecated)]
-		let broadcast = self.origin.consume_broadcast(&subscribe.broadcast);
+		// already seen an announcement for it — `now_or_never` keeps the fail-fast semantics
+		// of the previous synchronous lookup.
+		let broadcast = self
+			.origin
+			.wait_for_broadcast(&subscribe.broadcast)
+			.now_or_never()
+			.flatten();
 		let priority = self.priority.clone();
 		let version = self.version;
 

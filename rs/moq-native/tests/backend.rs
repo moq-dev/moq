@@ -15,7 +15,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin.create("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -61,13 +61,17 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-
-	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = match update {
+		moq_lite::OriginUpdate::Active(path, bc) => {
+			assert_eq!(path.as_str(), "test");
+			bc
+		}
+		moq_lite::OriginUpdate::Ended(path) => panic!("expected announce, got Ended({path})"),
+	};
 
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))
@@ -137,7 +141,7 @@ async fn iroh_connect() {
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
-	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
+	let mut broadcast = pub_origin.create("test").expect("failed to create broadcast");
 	let mut track = broadcast
 		.create_track(Track::new("video"))
 		.expect("failed to create track");
@@ -213,13 +217,17 @@ async fn iroh_connect() {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (path, bc) = tokio::time::timeout(TIMEOUT, announcements.announced())
+	let update = tokio::time::timeout(TIMEOUT, announcements.next())
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-
-	assert_eq!(path.as_str(), "test");
-	let bc = bc.expect("expected announce, got unannounce");
+	let bc = match update {
+		moq_lite::OriginUpdate::Active(path, bc) => {
+			assert_eq!(path.as_str(), "test");
+			bc
+		}
+		moq_lite::OriginUpdate::Ended(path) => panic!("expected announce, got Ended({path})"),
+	};
 
 	let mut track_sub = bc
 		.subscribe_track(&Track::new("video"))

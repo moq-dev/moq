@@ -427,7 +427,7 @@ async fn run_session(
 	// announcements that happens after the session is established.
 	tracing::info!(broadcast = %settings.broadcast, "waiting for broadcast to be announced");
 	let broadcast = tokio::select! {
-		broadcast = origin_consumer.announced_broadcast(&settings.broadcast) => broadcast
+		broadcast = origin_consumer.wait_for_broadcast(&settings.broadcast) => broadcast
 			.context("broadcast not allowed or origin closed")?,
 		_ = shutdown.changed() => return Ok(()),
 	};

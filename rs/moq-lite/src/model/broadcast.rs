@@ -368,6 +368,21 @@ impl BroadcastConsumer {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 
+	/// Returns true if all producers for this broadcast have been dropped.
+	pub fn is_closed(&self) -> bool {
+		self.state.read().is_closed()
+	}
+
+	/// Register a [`conducer::Waiter`] that fires when the broadcast closes.
+	///
+	/// `Ready(())` means the broadcast is already closed; `Pending` means the
+	/// waiter is registered and will fire on close. Useful for composing
+	/// close-detection into a larger poll function (e.g. [`crate::OriginConsumer`])
+	/// without having to spawn a task per broadcast.
+	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<()> {
+		self.state.poll_closed(waiter)
+	}
+
 	/// Check if this is the exact same instance of a broadcast.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
