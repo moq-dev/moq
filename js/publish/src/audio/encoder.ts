@@ -5,7 +5,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Capture from "./capture";
-import type { Source } from "./types";
+import { type Source } from "./types";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
@@ -20,6 +20,7 @@ export type EncoderProps = {
 
 	muted?: boolean | Signal<boolean>;
 	volume?: number | Signal<number>;
+	sampleRate?: number | Signal<number | undefined>;
 
 	// The maximum duration of each group. Larger groups mean fewer drops but the viewer can fall further behind.
 	// NOTE: Each frame is always flushed to the network immediately.
@@ -36,6 +37,7 @@ export class Encoder {
 
 	muted: Signal<boolean>;
 	volume: Signal<number>;
+	sampleRate: Signal<number | undefined>;
 	groupDuration: Time.Milli;
 
 	source: Signal<Source | undefined>;
@@ -60,6 +62,7 @@ export class Encoder {
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.muted = Signal.from(props?.muted ?? false);
 		this.volume = Signal.from(props?.volume ?? 1);
+		this.sampleRate = Signal.from<number | undefined>(props?.sampleRate);
 		this.groupDuration = props?.groupDuration ?? (100 as Time.Milli); // Default is a group every 100ms
 
 		this.#signals.run(this.#runSource.bind(this));
@@ -74,10 +77,12 @@ export class Encoder {
 		const [_, source] = values;
 
 		const settings = source.getSettings();
+		const overrideSampleRate = effect.get(this.sampleRate);
+		const sampleRate = overrideSampleRate ?? settings.sampleRate;
 
 		const context = new AudioContext({
 			latencyHint: "interactive",
-			sampleRate: settings.sampleRate,
+			sampleRate,
 		});
 		effect.cleanup(() => context.close());
 
