@@ -13,6 +13,8 @@ pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
 mod client;
 mod crypto;
+#[cfg(feature = "jemalloc")]
+pub mod jemalloc;
 mod log;
 #[cfg(feature = "noq")]
 mod noq;
@@ -36,6 +38,8 @@ pub use websocket::*;
 // Re-export these crates.
 pub use moq_lite;
 pub use rustls;
+#[cfg(feature = "jemalloc")]
+pub use tikv_jemallocator;
 
 #[cfg(feature = "noq")]
 pub use web_transport_noq;
