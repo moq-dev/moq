@@ -335,7 +335,7 @@ async fn serve_fetch(
 
 	let result = tokio::time::timeout_at(deadline, async {
 		let group = match params.group {
-			FetchGroup::Num(sequence) => track.fetch_group(sequence).map_err(|err| match err {
+			FetchGroup::Num(sequence) => track.get_group(sequence.into()).map_err(|err| match err {
 				moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
 				_ => StatusCode::INTERNAL_SERVER_ERROR,
 			})?,

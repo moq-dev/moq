@@ -310,8 +310,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			priority: initial.priority,
 			ordered: initial.ordered,
 			max_latency: initial.max_latency,
-			start_group: initial.start,
-			end_group: initial.end,
+			start_group: initial.start_group,
+			end_group: initial.end_group,
 		};
 
 		if let Err(err) = self.run_track_stream(&mut stream, msg, track).await {
@@ -349,8 +349,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 							priority: sub.priority,
 							ordered: sub.ordered,
 							max_latency: sub.max_latency,
-							start_group: sub.start,
-							end_group: sub.end,
+							start_group: sub.start_group,
+							end_group: sub.end_group,
 						}).await?;
 					}
 					None => return Ok(()),

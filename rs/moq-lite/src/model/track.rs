@@ -61,9 +61,9 @@ pub struct Subscription {
 	/// all cached history plus future groups. For "live from now" semantics,
 	/// pass `Some(latest + 1)` (or `Some(latest)` to include the in-flight
 	/// group). `Subscription::default()` therefore yields full history.
-	pub start: Option<u64>,
+	pub start_group: Option<u64>,
 	/// Last group sequence to deliver. `None` means no end (live).
-	pub end: Option<u64>,
+	pub end_group: Option<u64>,
 }
 
 #[derive(Default)]
@@ -155,28 +155,6 @@ impl State {
 		} else {
 			Poll::Pending
 		}
-	}
-
-	fn poll_get_group(&self, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
-		// Search for the group with the matching sequence, skipping tombstones.
-		for (group, _) in self.groups.iter().flatten() {
-			if group.sequence == sequence {
-				return Poll::Ready(Ok(Some(group.consume())));
-			}
-		}
-
-		// Once final_sequence is set, groups at or past it can never exist.
-		if let Some(fin) = self.final_sequence
-			&& sequence >= fin
-		{
-			return Poll::Ready(Ok(None));
-		}
-
-		if let Some(err) = &self.abort {
-			return Poll::Ready(Err(err.clone()));
-		}
-
-		Poll::Pending
 	}
 
 	fn poll_closed(&self) -> Poll<Result<()>> {
@@ -287,18 +265,18 @@ impl State {
 			})
 			.unwrap();
 
-		let start = subs
+		let start_group = subs
 			.iter()
-			.map(|s| s.start)
+			.map(|s| s.start_group)
 			.reduce(|a, b| match (a, b) {
 				(Some(a), Some(b)) => Some(a.min(b)),
 				_ => None,
 			})
 			.unwrap();
 
-		let end = subs
+		let end_group = subs
 			.iter()
-			.map(|s| s.end)
+			.map(|s| s.end_group)
 			.reduce(|a, b| match (a, b) {
 				(Some(a), Some(b)) => Some(a.max(b)),
 				_ => None,
@@ -309,8 +287,8 @@ impl State {
 			priority,
 			ordered,
 			max_latency,
-			start,
-			end,
+			start_group,
+			end_group,
 		})
 	}
 }
@@ -462,7 +440,7 @@ impl TrackProducer {
 
 	/// Opt in to handling FETCH requests for groups not in the cache.
 	///
-	/// While at least one [`TrackDynamic`] is held, [`TrackConsumer::fetch_group`]
+	/// While at least one [`TrackDynamic`] is held, [`TrackConsumer::get_group`]
 	/// can route uncached requests to the publisher. When all dynamics are
 	/// dropped, pending requests are aborted and future uncached fetches return
 	/// [`Error::NotFound`].
@@ -572,7 +550,7 @@ impl From<Track> for TrackProducer {
 
 /// Handles on-demand group fetches for a track.
 ///
-/// Created via [`TrackProducer::dynamic`]. While alive, [`TrackConsumer::fetch_group`]
+/// Created via [`TrackProducer::dynamic`]. While alive, [`TrackConsumer::get_group`]
 /// requests for uncached groups are queued for the dynamic handler to fulfill
 /// via [`Self::requested_group`]. Dropping the last dynamic aborts any pending
 /// requests with [`Error::Cancel`].
@@ -773,18 +751,6 @@ impl TrackConsumer {
 		self.subscribe(Subscription::default())
 	}
 
-	/// Poll for the group with the given sequence, without blocking.
-	pub fn poll_get_group(&self, waiter: &conducer::Waiter, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
-		self.poll(waiter, |state| state.poll_get_group(sequence))
-	}
-
-	/// Block until the group with the given sequence is available.
-	///
-	/// Returns None if the group is not in the cache and a newer group exists.
-	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
-		conducer::wait(|waiter| self.poll_get_group(waiter, sequence)).await
-	}
-
 	/// Poll for track closure, without blocking.
 	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<Result<()>> {
 		self.poll(waiter, |state| state.poll_closed())
@@ -822,14 +788,16 @@ impl TrackConsumer {
 			.find_map(|(g, _)| (g.sequence == max).then(|| g.consume()))
 	}
 
-	/// Fetch a specific group by sequence.
+	/// Get a specific group.
 	///
-	/// - Cache hit → returns the cached consumer (a fetch handler is not required).
+	/// - Cache hit → returns the cached consumer (a [`TrackDynamic`] handler is not required).
 	/// - Cache miss + no [`TrackDynamic`] handler → returns [`Error::NotFound`].
 	/// - Cache miss + handler present → routes a request to the producer; returns
 	///   a [`GroupConsumer`] that fills in as the publisher writes frames. Errors
 	///   later if the publisher aborts/declines (e.g. group is past final).
-	pub fn fetch_group(&self, sequence: u64) -> Result<GroupConsumer> {
+	pub fn get_group(&self, info: Group) -> Result<GroupConsumer> {
+		let sequence = info.sequence;
+
 		// Upgrade to a temporary producer so we can mutate the state.
 		let producer = self
 			.state
@@ -861,7 +829,7 @@ impl TrackConsumer {
 
 		// Queue a request for the dynamic handler; cache the producer so
 		// concurrent fetches for the same sequence share frames.
-		let group = Group { sequence }.produce();
+		let group = info.produce();
 		let consumer = group.consume();
 		let now = tokio::time::Instant::now();
 		state.duplicates.insert(sequence);
@@ -949,7 +917,7 @@ impl TrackSubscriber {
 
 	/// Poll for the next group received over the network, in arrival order.
 	///
-	/// Respects this subscriber's [`Subscription::start`] / `end` bounds.
+	/// Respects this subscriber's [`Subscription::start_group`] / `end_group` bounds.
 	/// Groups may arrive out of order or with gaps. Use [`Self::next_group`]
 	/// if you need monotonic delivery (skipping late arrivals).
 	///
@@ -958,8 +926,8 @@ impl TrackSubscriber {
 	/// polls will keep returning `Ok(None)`.
 	pub fn poll_recv_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
 		let sub = self.sub.read();
-		let min_sequence = sub.start.unwrap_or(0);
-		let end = sub.end;
+		let min_sequence = sub.start_group.unwrap_or(0);
+		let end = sub.end_group;
 		drop(sub);
 
 		let Some((consumer, found_index)) =
@@ -986,11 +954,11 @@ impl TrackSubscriber {
 	/// Return the next group with a strictly-greater sequence number than the last returned.
 	///
 	/// Groups that arrive late (sequence at or below the last one returned) are
-	/// silently skipped. Respects [`Subscription::start`] / `end`.
+	/// silently skipped. Respects [`Subscription::start_group`] / `end_group`.
 	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
 		let sub = self.sub.read();
-		let min_sequence = self.next.max(sub.start.unwrap_or(0));
-		let end = sub.end;
+		let min_sequence = self.next.max(sub.start_group.unwrap_or(0));
+		let end = sub.end_group;
 		drop(sub);
 
 		let Some((consumer, found_index)) =
@@ -1031,11 +999,11 @@ impl TrackSubscriber {
 	/// skipping the rest of the group. Intended for single-frame groups (see
 	/// [`TrackProducer::write_frame`]).
 	///
-	/// Respects [`Subscription::start`] / `end`.
+	/// Respects [`Subscription::start_group`] / `end_group`.
 	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
 		let sub = self.sub.read();
-		let lower = self.next.max(sub.start.unwrap_or(0));
-		let end = sub.end;
+		let lower = self.next.max(sub.start_group.unwrap_or(0));
+		let end = sub.end_group;
 		drop(sub);
 
 		let Some((frame, found_index, sequence)) =
@@ -1082,16 +1050,6 @@ impl TrackSubscriber {
 			.iter()
 			.flatten()
 			.find_map(|(g, _)| (g.sequence == max).then(|| g.consume()))
-	}
-
-	/// Poll for the group with the given sequence, without blocking.
-	pub fn poll_get_group(&self, waiter: &conducer::Waiter, sequence: u64) -> Poll<Result<Option<GroupConsumer>>> {
-		self.poll(waiter, |state| state.poll_get_group(sequence))
-	}
-
-	/// Block until the group with the given sequence is available.
-	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
-		conducer::wait(|waiter| self.poll_get_group(waiter, sequence)).await
 	}
 
 	/// Poll for track closure, without blocking.
@@ -1595,7 +1553,7 @@ mod test {
 		let consumer = producer.consume();
 		let mut subscriber = consumer
 			.subscribe(Subscription {
-				start: Some(5),
+				start_group: Some(5),
 				..Default::default()
 			})
 			.unwrap();
@@ -1639,28 +1597,6 @@ mod test {
 			.expect("should not block")
 			.expect("would have errored");
 		assert!(done.is_none());
-	}
-
-	#[tokio::test]
-	async fn get_group_finishes_without_waiting_for_gaps() {
-		let mut producer = Track::new("test").produce();
-		producer.create_group(Group { sequence: 1 }).unwrap();
-		producer.finish_at(1).unwrap();
-
-		let consumer = producer.consume();
-		assert!(
-			consumer.get_group(0).now_or_never().is_none(),
-			"sequence below fin should block (group could still arrive)"
-		);
-		assert!(
-			consumer
-				.get_group(2)
-				.now_or_never()
-				.expect("sequence at-or-after fin should resolve")
-				.expect("should not error")
-				.is_none(),
-			"sequence at-or-after fin should not exist"
-		);
 	}
 
 	#[test]
@@ -1810,15 +1746,15 @@ mod test {
 
 		let _a = consumer
 			.subscribe(Subscription {
-				start: Some(5),
-				end: Some(20),
+				start_group: Some(5),
+				end_group: Some(20),
 				..Default::default()
 			})
 			.unwrap();
 		let _b = consumer
 			.subscribe(Subscription {
-				start: Some(3),
-				end: Some(10),
+				start_group: Some(3),
+				end_group: Some(10),
 				..Default::default()
 			})
 			.unwrap();
@@ -1828,8 +1764,8 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.expect("aggregate should exist");
-		assert_eq!(agg.start, Some(3));
-		assert_eq!(agg.end, Some(20));
+		assert_eq!(agg.start_group, Some(3));
+		assert_eq!(agg.end_group, Some(20));
 	}
 
 	#[tokio::test]
@@ -1841,8 +1777,8 @@ mod test {
 		// so the aggregate must be unbounded too.
 		let _a = consumer
 			.subscribe(Subscription {
-				start: Some(5),
-				end: Some(20),
+				start_group: Some(5),
+				end_group: Some(20),
 				..Default::default()
 			})
 			.unwrap();
@@ -1853,8 +1789,8 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.expect("aggregate should exist");
-		assert_eq!(agg.start, None, "None subscriber wants from the beginning");
-		assert_eq!(agg.end, None, "None subscriber wants no end");
+		assert_eq!(agg.start_group, None, "None subscriber wants from the beginning");
+		assert_eq!(agg.end_group, None, "None subscriber wants no end");
 	}
 
 	#[tokio::test]
@@ -1922,7 +1858,7 @@ mod test {
 		let consumer = producer.consume();
 		let mut subscriber = consumer
 			.subscribe(Subscription {
-				end: Some(2),
+				end_group: Some(2),
 				..Default::default()
 			})
 			.unwrap();
@@ -1943,22 +1879,22 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn fetch_group_cache_hit() {
+	async fn get_group_cache_hit() {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 5 }).unwrap();
 		let consumer = producer.consume();
 
 		// No TrackDynamic registered, but cache hits still succeed.
-		let group = consumer.fetch_group(5).expect("cache hit");
+		let group = consumer.get_group(Group { sequence: 5 }).expect("cache hit");
 		assert_eq!(group.sequence, 5);
 	}
 
 	#[tokio::test]
-	async fn fetch_group_no_handler_returns_not_found() {
+	async fn get_group_no_handler_returns_not_found() {
 		let producer = Track::new("test").produce();
 		let consumer = producer.consume();
 
-		match consumer.fetch_group(0) {
+		match consumer.get_group(Group { sequence: 0 }) {
 			Err(Error::NotFound) => {}
 			Err(err) => panic!("expected NotFound, got {err:?}"),
 			Ok(_) => panic!("expected NotFound, got Ok"),
@@ -1966,7 +1902,7 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn fetch_group_past_final_returns_not_found() {
+	async fn get_group_past_final_returns_not_found() {
 		let mut producer = Track::new("test").produce();
 		producer.create_group(Group { sequence: 3 }).unwrap();
 		producer.finish().unwrap();
@@ -1974,10 +1910,10 @@ mod test {
 		let _dynamic = producer.dynamic();
 
 		// Cached group below the final boundary still works.
-		assert_eq!(consumer.fetch_group(3).unwrap().sequence, 3);
+		assert_eq!(consumer.get_group(Group { sequence: 3 }).unwrap().sequence, 3);
 
 		// Sequences at/past the final boundary fail fast even with a handler attached.
-		match consumer.fetch_group(4) {
+		match consumer.get_group(Group { sequence: 4 }) {
 			Err(Error::NotFound) => {}
 			Err(err) => panic!("expected NotFound, got {err:?}"),
 			Ok(_) => panic!("expected NotFound, got Ok"),
@@ -1985,13 +1921,13 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn fetch_group_via_dynamic_handler() {
+	async fn get_group_via_dynamic_handler() {
 		let producer = Track::new("test").produce();
 		let consumer = producer.consume();
 		let mut dynamic = producer.dynamic();
 
 		// Issue a fetch; the handler should pop a producer for the same sequence.
-		let mut group_consumer = consumer.fetch_group(7).expect("queued");
+		let mut group_consumer = consumer.get_group(Group { sequence: 7 }).expect("queued");
 		assert_eq!(group_consumer.sequence, 7);
 
 		let mut group_producer = dynamic.assert_request();
@@ -2007,13 +1943,15 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn fetch_group_shares_in_flight() {
+	async fn get_group_shares_in_flight() {
 		let producer = Track::new("test").produce();
 		let consumer = producer.consume();
 		let mut dynamic = producer.dynamic();
 
-		let mut a = consumer.fetch_group(3).expect("queued");
-		let mut b = consumer.fetch_group(3).expect("cache hit second time");
+		let mut a = consumer.get_group(Group { sequence: 3 }).expect("queued");
+		let mut b = consumer
+			.get_group(Group { sequence: 3 })
+			.expect("cache hit second time");
 
 		// Only one request should be queued; both consumers share the same group.
 		let mut group_producer = dynamic.assert_request();
@@ -2029,12 +1967,12 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn fetch_group_aborted_by_publisher() {
+	async fn get_group_aborted_by_publisher() {
 		let producer = Track::new("test").produce();
 		let consumer = producer.consume();
 		let mut dynamic = producer.dynamic();
 
-		let mut group_consumer = consumer.fetch_group(2).expect("queued");
+		let mut group_consumer = consumer.get_group(Group { sequence: 2 }).expect("queued");
 		let mut group_producer = dynamic.assert_request();
 
 		// Publisher decides the group can't be served.
@@ -2047,12 +1985,12 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn fetch_pending_aborted_when_dynamic_dropped() {
+	async fn get_group_pending_aborted_when_dynamic_dropped() {
 		let producer = Track::new("test").produce();
 		let consumer = producer.consume();
 		let dynamic = producer.dynamic();
 
-		let mut group_consumer = consumer.fetch_group(9).expect("queued");
+		let mut group_consumer = consumer.get_group(Group { sequence: 9 }).expect("queued");
 
 		// Dropping the only TrackDynamic aborts the pending request.
 		drop(dynamic);
@@ -2063,17 +2001,20 @@ mod test {
 		}
 
 		// And subsequent fetches for uncached sequences fail with NotFound.
-		assert!(matches!(consumer.fetch_group(10), Err(Error::NotFound)));
+		assert!(matches!(
+			consumer.get_group(Group { sequence: 10 }),
+			Err(Error::NotFound)
+		));
 	}
 
 	#[tokio::test]
-	async fn fetch_dynamic_clone_keeps_handler_alive() {
+	async fn get_group_dynamic_clone_keeps_handler_alive() {
 		let producer = Track::new("test").produce();
 		let consumer = producer.consume();
 		let dynamic = producer.dynamic();
 		let mut dynamic_clone = dynamic.clone();
 
-		let mut group_consumer = consumer.fetch_group(9).expect("queued");
+		let mut group_consumer = consumer.get_group(Group { sequence: 9 }).expect("queued");
 
 		// Dropping one handle must NOT abort the pending request: the clone
 		// still represents a live handler, so the counter must stay positive.
