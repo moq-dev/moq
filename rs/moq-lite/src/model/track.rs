@@ -576,10 +576,15 @@ impl From<Track> for TrackProducer {
 /// requests for uncached groups are queued for the dynamic handler to fulfill
 /// via [`Self::requested_group`]. Dropping the last dynamic aborts any pending
 /// requests with [`Error::Cancel`].
-#[derive(Clone)]
 pub struct TrackDynamic {
 	info: Track,
 	state: conducer::Producer<State>,
+}
+
+impl Clone for TrackDynamic {
+	fn clone(&self) -> Self {
+		Self::new(self.info.clone(), self.state.clone())
+	}
 }
 
 impl std::ops::Deref for TrackDynamic {
@@ -2032,6 +2037,28 @@ mod test {
 
 		// And subsequent fetches for uncached sequences fail with NotFound.
 		assert!(matches!(consumer.fetch_group(10), Err(Error::NotFound)));
+	}
+
+	#[tokio::test]
+	async fn fetch_dynamic_clone_keeps_handler_alive() {
+		let producer = Track::new("test").produce();
+		let consumer = producer.consume();
+		let dynamic = producer.dynamic();
+		let mut dynamic_clone = dynamic.clone();
+
+		let mut group_consumer = consumer.fetch_group(9).expect("queued");
+
+		// Dropping one handle must NOT abort the pending request: the clone
+		// still represents a live handler, so the counter must stay positive.
+		drop(dynamic);
+
+		let mut group_producer = dynamic_clone.assert_request();
+		assert_eq!(group_producer.sequence, 9);
+
+		group_producer.write_frame(bytes::Bytes::from_static(b"clone")).unwrap();
+		group_producer.finish().unwrap();
+
+		assert_eq!(group_consumer.read_frame().await.unwrap().as_deref(), Some(&b"clone"[..]));
 	}
 
 	#[tokio::test]
