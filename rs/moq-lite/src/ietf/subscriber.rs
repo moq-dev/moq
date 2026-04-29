@@ -462,11 +462,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		let track = Track {
-			name: msg.track_name.to_string(),
-			priority: 0,
-		}
-		.produce();
+		let track = Track::new(msg.track_name.to_string()).produce();
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
@@ -554,7 +550,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		// Write Subscribe message
-		if let Err(err) = self.write_subscribe(&mut stream, request_id, &broadcast, &track).await {
+		if let Err(err) = self
+			.write_subscribe(&mut stream, request_id, &broadcast, &mut track)
+			.await
+		{
 			tracing::debug!(%err, "failed to write subscribe");
 			self.state.lock().subscribes.remove(&request_id);
 			let _ = track.abort(err);
@@ -617,8 +616,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
 		broadcast: &Path<'_>,
-		track: &TrackProducer,
+		track: &mut TrackProducer,
 	) -> Result<(), Error> {
+		// Wait for the first interested subscriber so the relayed SUBSCRIBE
+		// reflects the union of downstream subscribers' preferences.
+		// TODO follow `track.subscription()` and emit SUBSCRIBE_UPDATE upstream
+		// as the aggregate changes.
+		let initial = match track.subscription().await {
+			Some(sub) => sub,
+			None => return Err(Error::Cancel),
+		};
+
 		stream.writer.encode(&ietf::Subscribe::ID).await?;
 		stream
 			.writer
@@ -626,7 +634,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				track_namespace: broadcast.to_owned(),
 				track_name: (&track.name).into(),
-				subscriber_priority: track.priority,
+				subscriber_priority: initial.priority,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})
@@ -754,14 +762,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut frame: FrameProducer,
 	) -> Result<(), Error> {
-		let mut remain = frame.size;
-
-		while remain > 0 {
-			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;
-			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
-			frame.write(chunk)?;
+		// FrameProducer impls BufMut; read_buf writes stream bytes directly into
+		// the per-frame buffer (see lite/subscriber.rs run_frame for rationale).
+		while bytes::BufMut::has_remaining_mut(&frame) {
+			match stream.read_buf(&mut frame).await? {
+				Some(n) if n > 0 => {}
+				_ => return Err(Error::WrongSize),
+			}
 		}
-
 		Ok(())
 	}
 }

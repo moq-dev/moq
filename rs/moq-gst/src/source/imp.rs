@@ -432,7 +432,10 @@ async fn run_session(
 		_ = shutdown.changed() => return Ok(()),
 	};
 
-	let catalog_track = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
+	let catalog_track = broadcast.subscribe_track(
+		&hang::catalog::Catalog::default_track(),
+		hang::catalog::Catalog::SUBSCRIPTION,
+	)?;
 	let mut catalog = hang::catalog::CatalogConsumer::new(catalog_track);
 	let catalog = catalog.next().await?.context("catalog missing")?.clone();
 
@@ -446,7 +449,7 @@ async fn run_session(
 		let caps = video_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_lite::Track::new(&track_name);
-		let track_consumer = broadcast.subscribe_track(&track_ref)?;
+		let track_consumer = broadcast.subscribe_track(&track_ref, moq_lite::Subscription::default())?;
 		let track = hang::container::OrderedConsumer::new(track_consumer, Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
@@ -459,7 +462,7 @@ async fn run_session(
 		let caps = audio_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_lite::Track::new(&track_name);
-		let track_consumer = broadcast.subscribe_track(&track_ref)?;
+		let track_consumer = broadcast.subscribe_track(&track_ref, moq_lite::Subscription::default())?;
 		let track = hang::container::OrderedConsumer::new(track_consumer, Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
