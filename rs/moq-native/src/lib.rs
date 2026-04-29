@@ -38,8 +38,6 @@ pub use websocket::*;
 // Re-export these crates.
 pub use moq_lite;
 pub use rustls;
-#[cfg(feature = "jemalloc")]
-pub use tikv_jemallocator;
 
 #[cfg(feature = "noq")]
 pub use web_transport_noq;

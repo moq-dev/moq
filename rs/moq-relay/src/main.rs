@@ -4,7 +4,7 @@ use anyhow::Context;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
-static ALLOC: moq_native::tikv_jemallocator::Jemalloc = moq_native::tikv_jemallocator::Jemalloc;
+static ALLOC: moq_native::jemalloc::tikv_jemallocator::Jemalloc = moq_native::jemalloc::tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
