@@ -8,7 +8,7 @@
 //! This covers raw QUIC (moqt://) and WebTransport (https://) transports,
 //! exercising every protocol version the library supports.
 
-use moq_native::moq_lite::{self, Origin, Track};
+use moq_native::moq_lite::{self, Origin, Subscription, Track};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -88,7 +88,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+		.subscribe_track(&Track::new("video"), Subscription::default())
 		.expect("subscribe_track failed");
 
 	// Read one group.
@@ -358,8 +358,6 @@ async fn broadcast_webtransport_negotiate_client_all_server_transport_16() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket() {
-	use moq_native::moq_lite::{Origin, Track};
-
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
@@ -428,7 +426,7 @@ async fn broadcast_websocket() {
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+		.subscribe_track(&Track::new("video"), Subscription::default())
 		.expect("subscribe_track failed");
 
 	// Read one group.
@@ -462,8 +460,6 @@ async fn broadcast_websocket() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket_fallback() {
-	use moq_native::moq_lite::{Origin, Track};
-
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
 	let mut broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
@@ -535,7 +531,7 @@ async fn broadcast_websocket_fallback() {
 
 	// Subscribe to the track.
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"))
+		.subscribe_track(&Track::new("video"), Subscription::default())
 		.expect("subscribe_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())

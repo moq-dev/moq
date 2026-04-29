@@ -71,11 +71,11 @@ impl Publisher {
 	}
 }
 pub struct Subscriber {
-	track: TrackConsumer,
+	track: TrackSubscriber,
 }
 
 impl Subscriber {
-	pub fn new(track: TrackConsumer) -> Self {
+	pub fn new(track: TrackSubscriber) -> Self {
 		Self { track }
 	}
 
