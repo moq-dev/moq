@@ -373,7 +373,7 @@ impl std::ops::Deref for GroupBuffer {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::container::hang::Legacy;
+	use crate::container::Hang;
 	use std::time::Duration;
 
 	use bytes::Bytes;
@@ -387,7 +387,7 @@ mod tests {
 		track.consume().subscribe_default().expect("producer alive")
 	}
 
-	/// Write a finished group with explicit sequence and timestamps (Legacy format).
+	/// Write a finished group with explicit sequence and timestamps (Hang::Legacy format).
 	fn write_group(track: &mut moq_lite::TrackProducer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_lite::Group { sequence }).unwrap();
 		for &timestamp in timestamps {
@@ -396,13 +396,13 @@ mod tests {
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 				keyframe: false,
 			};
-			Legacy.write(&mut group, &[frame]).unwrap();
+			Hang::Legacy.write(&mut group, &[frame]).unwrap();
 		}
 		group.finish().unwrap();
 	}
 
 	/// Drain all available frames with a per-read timeout.
-	async fn read_all(consumer: &mut Consumer<Legacy>) -> Result<Vec<Frame>, hang::Error> {
+	async fn read_all(consumer: &mut Consumer<Hang>) -> Result<Vec<Frame>, crate::Error> {
 		let mut frames = Vec::new();
 		loop {
 			match tokio::time::timeout(Duration::from_millis(200), consumer.read()).await {
@@ -424,7 +424,7 @@ mod tests {
 	async fn read_single_group() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		track.finish().unwrap();
@@ -442,7 +442,7 @@ mod tests {
 	async fn read_multiple_frames_single_group() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0), ts(33_000), ts(66_000)]);
 		track.finish().unwrap();
@@ -460,7 +460,7 @@ mod tests {
 	async fn read_multiple_groups_within_latency() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		// 5 groups, 20ms spacing. Total span = 80ms, well within 500ms latency.
 		for i in 0..5u64 {
@@ -479,12 +479,12 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(100));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
 		// Group 0: 5 frames, NOT finished (blocks consumer)
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for f in 0..5u64 {
-			Legacy
+			Hang::Legacy
 				.write(
 					&mut group0,
 					&[Frame {
@@ -520,10 +520,10 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::ZERO);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::ZERO);
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Legacy
+		Hang::Legacy
 			.write(
 				&mut group0,
 				&[Frame {
@@ -556,10 +556,10 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(100));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Legacy
+		Hang::Legacy
 			.write(
 				&mut group0,
 				&[Frame {
@@ -598,10 +598,10 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Legacy
+		Hang::Legacy
 			.write(
 				&mut group0,
 				&[Frame {
@@ -633,7 +633,7 @@ mod tests {
 	async fn adjacent_group_flushed_immediately() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 1, &[ts(30_000)]);
@@ -651,7 +651,7 @@ mod tests {
 	async fn bframes_within_group() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0), ts(66_000), ts(33_000)]);
 		track.finish().unwrap();
@@ -670,7 +670,7 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		track.finish().unwrap();
 
@@ -688,7 +688,7 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		track.abort(moq_lite::Error::Cancel).unwrap();
@@ -710,7 +710,7 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		assert!(
 			tokio::time::timeout(Duration::from_millis(50), consumer.closed())
@@ -733,7 +733,7 @@ mod tests {
 	async fn gap_in_group_sequence_recovery() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(100));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
 		write_group(&mut track, 1, &[ts(40_000), ts(60_000)]);
@@ -751,7 +751,7 @@ mod tests {
 	async fn gap_at_start_of_sequence() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(80));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(80));
 
 		write_group(&mut track, 5, &[ts(0), ts(20_000)]);
 		write_group(&mut track, 7, &[ts(80_000), ts(100_000)]);
@@ -769,7 +769,7 @@ mod tests {
 	async fn frame_timestamp_and_index_decoding() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0), ts(33_333), ts(66_666)]);
 		track.finish().unwrap();
@@ -789,11 +789,11 @@ mod tests {
 	async fn frame_payload_preserved() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		let payload_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05];
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Legacy
+		Hang::Legacy
 			.write(
 				&mut group,
 				&[Frame {
@@ -826,10 +826,10 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_secs(10));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_secs(10));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Legacy
+		Hang::Legacy
 			.write(
 				&mut group0,
 				&[Frame {
@@ -871,7 +871,7 @@ mod tests {
 	async fn large_timestamps() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_secs(3700));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_secs(3700));
 
 		let one_hour = 3_600_000_000u64;
 		write_group(&mut track, 0, &[ts(one_hour)]);
@@ -887,7 +887,7 @@ mod tests {
 	async fn set_latency_changes_behavior() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_secs(10));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_secs(10));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		track.finish().unwrap();
@@ -907,11 +907,11 @@ mod tests {
 		let consumer_track = subscribe_default(&track);
 		// latency must exceed (group1_max - group0_min) = 100ms - 0ms = 100ms
 		// to avoid the latency skip and test B-frame timestamp tracking.
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(110));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(110));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for &timestamp in &[ts(0), ts(66_000), ts(33_000)] {
-			Legacy
+			Hang::Legacy
 				.write(
 					&mut group0,
 					&[Frame {
@@ -956,13 +956,13 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(100));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
 		write_group(&mut track, 3, &[ts(0)]);
 		write_group(&mut track, 5, &[ts(150_000)]);
 
 		let mut group7 = track.create_group(moq_lite::Group { sequence: 7 }).unwrap();
-		Legacy
+		Hang::Legacy
 			.write(
 				&mut group7,
 				&[Frame {
@@ -975,7 +975,7 @@ mod tests {
 
 		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(50)).await;
-			Legacy
+			Hang::Legacy
 				.write(
 					&mut group7,
 					&[Frame {
@@ -1007,7 +1007,7 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		let _group5 = track.create_group(moq_lite::Group { sequence: 5 }).unwrap();
 		write_group(&mut track, 7, &[ts(210_000)]);
@@ -1030,7 +1030,7 @@ mod tests {
 	async fn startup_single_group_mid_stream() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 100, &[ts(3_000_000)]);
 		track.finish().unwrap();
@@ -1044,10 +1044,10 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(50));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(50));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Legacy
+		Hang::Legacy
 			.write(
 				&mut group0,
 				&[Frame {
@@ -1079,10 +1079,10 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(100));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Legacy
+		Hang::Legacy
 			.write(
 				&mut group0,
 				&[Frame {
@@ -1116,11 +1116,11 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(100));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
 		// Group 0: stalled at ts=0, NOT finished
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Legacy
+		Hang::Legacy
 			.write(
 				&mut group0,
 				&[Frame {
@@ -1153,7 +1153,7 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(100));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
 		// Group 0: finished normally
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
@@ -1169,7 +1169,7 @@ mod tests {
 	async fn group_error_skips_to_next() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		group0.abort(moq_lite::Error::Cancel).unwrap();
@@ -1186,7 +1186,7 @@ mod tests {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
 
@@ -1215,7 +1215,7 @@ mod tests {
 	async fn empty_group_advances() {
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		group0.finish().unwrap();
@@ -1235,10 +1235,10 @@ mod tests {
 
 		let mut track = moq_lite::Track::new("video").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer = Consumer::new(consumer_track, crate::container::hang::Media::Legacy)
-			.with_latency(Duration::from_millis(500));
+		let mut consumer =
+			Consumer::new(consumer_track, crate::container::Hang::Legacy).with_latency(Duration::from_millis(500));
 
-		// Write frames using Legacy encoding
+		// Write frames using Hang::Legacy encoding
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for i in 0..3u64 {
 			let frame = Frame {
@@ -1246,7 +1246,7 @@ mod tests {
 				payload: Bytes::from_static(&[0xDE, 0xAD]),
 				keyframe: false,
 			};
-			Legacy.write(&mut group, &[frame]).unwrap();
+			Hang::Legacy.write(&mut group, &[frame]).unwrap();
 		}
 		group.finish().unwrap();
 		track.finish().unwrap();

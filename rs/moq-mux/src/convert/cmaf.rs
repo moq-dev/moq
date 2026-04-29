@@ -818,7 +818,7 @@ pub(crate) mod test {
 	pub(crate) async fn read_legacy_frames(track: moq_lite::TrackConsumer) -> Vec<(Timestamp, Vec<u8>, bool)> {
 		let subscriber = track.subscribe(moq_lite::Subscription::default()).unwrap();
 		let mut ordered =
-			crate::export::Consumer::new(subscriber, crate::container::hang::Legacy).with_latency(Duration::MAX);
+			crate::export::Consumer::new(subscriber, crate::container::Hang::Legacy).with_latency(Duration::MAX);
 
 		let mut result = Vec::new();
 		while let Some(frame) = tokio::time::timeout(Duration::from_millis(500), ordered.read())

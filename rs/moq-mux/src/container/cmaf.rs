@@ -41,6 +41,70 @@ pub enum Error {
 	MultipleTracks,
 }
 
+/// CMAF container: encodes/decodes a single track's moof+mdat fragments.
+///
+/// Build from a CMAF init segment with [`Cmaf::from_init`], or wrap a
+/// pre-extracted [`mp4_atom::Trak`] directly with [`Cmaf::new`].
+///
+/// The [`mp4_atom::Trak`] is heap-allocated so that embedding `Cmaf` in
+/// other enums (e.g. [`super::Hang`]) doesn't bloat unrelated variants.
+pub struct Cmaf {
+	trak: Box<mp4_atom::Trak>,
+}
+
+impl Cmaf {
+	/// Wrap an already-parsed track.
+	pub fn new(trak: mp4_atom::Trak) -> Self {
+		Self { trak: Box::new(trak) }
+	}
+
+	/// Parse a CMAF init segment (ftyp+moov), extracting the single track.
+	pub fn from_init(init_data: &[u8]) -> Result<Self, Error> {
+		use mp4_atom::DecodeMaybe;
+
+		let mut cursor = std::io::Cursor::new(init_data);
+		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
+			if let mp4_atom::Any::Moov(mut moov) = atom {
+				return match moov.trak.len() {
+					1 => Ok(Self::new(moov.trak.remove(0))),
+					0 => Err(Error::NoTracks),
+					_ => Err(Error::MultipleTracks),
+				};
+			}
+		}
+		Err(Error::NoMoov)
+	}
+
+	pub fn trak(&self) -> &mp4_atom::Trak {
+		&self.trak
+	}
+}
+
+impl Container for Cmaf {
+	type Error = Error;
+
+	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+		let timescale = self.trak.mdia.mdhd.timescale as u64;
+		let track_id = self.trak.tkhd.track_id;
+		encode(group, frames, timescale, track_id)
+	}
+
+	fn poll_read(
+		&self,
+		group: &mut moq_lite::GroupConsumer,
+		waiter: &conducer::Waiter,
+	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		use std::task::ready;
+
+		let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
+			return Poll::Ready(Ok(None));
+		};
+
+		let timescale = self.trak.mdia.mdhd.timescale as u64;
+		Poll::Ready(Ok(Some(decode(data, timescale)?)))
+	}
+}
+
 /// Parse the timescale from a CMAF init segment (ftyp+moov).
 pub(crate) fn parse_timescale(init_data: &[u8]) -> Result<u64, Error> {
 	use mp4_atom::DecodeMaybe;
@@ -178,55 +242,4 @@ pub(crate) fn encode(
 	writer.finish()?;
 
 	Ok(())
-}
-
-impl Container for mp4_atom::Trak {
-	type Error = Error;
-
-	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
-		let timescale = self.mdia.mdhd.timescale as u64;
-		let track_id = self.tkhd.track_id;
-		encode(group, frames, timescale, track_id)
-	}
-
-	fn poll_read(
-		&self,
-		group: &mut moq_lite::GroupConsumer,
-		waiter: &conducer::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
-		use std::task::ready;
-
-		let Some(data) = ready!(group.poll_read_frame(waiter)?) else {
-			return Poll::Ready(Ok(None));
-		};
-
-		let timescale = self.mdia.mdhd.timescale as u64;
-		Poll::Ready(Ok(Some(decode(data, timescale)?)))
-	}
-}
-
-impl Container for mp4_atom::Moov {
-	type Error = Error;
-
-	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
-		let trak = match self.trak.as_slice() {
-			[trak] => trak,
-			[] => return Err(Error::NoTracks),
-			_ => return Err(Error::MultipleTracks),
-		};
-		trak.write(group, frames)
-	}
-
-	fn poll_read(
-		&self,
-		group: &mut moq_lite::GroupConsumer,
-		waiter: &conducer::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
-		let trak = match self.trak.as_slice() {
-			[trak] => trak,
-			[] => return Poll::Ready(Err(Error::NoTracks)),
-			_ => return Poll::Ready(Err(Error::MultipleTracks)),
-		};
-		trak.poll_read(group, waiter)
-	}
 }

@@ -2,8 +2,11 @@ use std::task::Poll;
 
 use bytes::Bytes;
 
-pub mod cmaf;
-pub mod hang;
+pub(crate) mod cmaf;
+mod hang;
+
+pub use cmaf::{Cmaf, Error as CmafError};
+pub use hang::Hang;
 
 pub type Timestamp = moq_lite::Timescale<1_000_000>;
 
