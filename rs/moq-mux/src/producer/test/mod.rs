@@ -1,4 +1,4 @@
-use base64::Engine;
+use bytes::Bytes;
 use hang::catalog::Container;
 use mp4_atom::{Decode, Encode};
 
@@ -15,11 +15,8 @@ fn run_fmp4(data: &[u8]) -> hang::Catalog {
 	catalog.snapshot()
 }
 
-fn decode_init_data(init_data: &str) -> (mp4_atom::Ftyp, mp4_atom::Moov) {
-	let bytes = base64::engine::general_purpose::STANDARD
-		.decode(init_data)
-		.expect("invalid base64");
-	let mut cursor = std::io::Cursor::new(&bytes);
+fn decode_init(init: &Bytes) -> (mp4_atom::Ftyp, mp4_atom::Moov) {
+	let mut cursor = std::io::Cursor::new(init.as_ref());
 	let ftyp = mp4_atom::Ftyp::decode(&mut cursor).expect("invalid ftyp");
 	let moov = mp4_atom::Moov::decode(&mut cursor).expect("invalid moov");
 	(ftyp, moov)
@@ -47,16 +44,15 @@ fn test_bbb_catalog() {
 }
 
 #[test]
-fn test_bbb_init_data_roundtrip() {
+fn test_bbb_init_roundtrip() {
 	let data = include_bytes!("bbb.mp4");
 	let catalog = run_fmp4(data);
 
-	// Check video init data
 	let video = catalog.video.renditions.values().next().unwrap();
-	let Container::Cmaf { init_data } = &video.container else {
+	let Container::Cmaf { init } = &video.container else {
 		panic!("expected Cmaf container");
 	};
-	let (ftyp, moov) = decode_init_data(init_data);
+	let (ftyp, moov) = decode_init(init);
 	assert_eq!(ftyp.major_brand, mp4_atom::FourCC::new(b"isom"));
 	assert_eq!(moov.trak.len(), 1);
 	assert_eq!(moov.trak[0].tkhd.track_id, 1);
@@ -69,16 +65,15 @@ fn test_bbb_init_data_roundtrip() {
 	let mut buf = Vec::new();
 	ftyp.encode(&mut buf).unwrap();
 	moov.encode(&mut buf).unwrap();
-	let (ftyp2, moov2) = decode_init_data(&base64::engine::general_purpose::STANDARD.encode(&buf));
+	let (ftyp2, moov2) = decode_init(&Bytes::from(buf));
 	assert_eq!(ftyp2.major_brand, mp4_atom::FourCC::new(b"isom"));
 	assert_eq!(moov2.trak.len(), 1);
 
-	// Check audio init data
 	let audio = catalog.audio.renditions.values().next().unwrap();
-	let Container::Cmaf { init_data } = &audio.container else {
+	let Container::Cmaf { init } = &audio.container else {
 		panic!("expected Cmaf container");
 	};
-	let (ftyp, moov) = decode_init_data(init_data);
+	let (ftyp, moov) = decode_init(init);
 	assert_eq!(ftyp.major_brand, mp4_atom::FourCC::new(b"isom"));
 	assert_eq!(moov.trak.len(), 1);
 	assert_eq!(moov.trak[0].tkhd.track_id, 2);
@@ -100,10 +95,10 @@ fn test_av1_catalog() {
 	assert!(video.codec.to_string().starts_with("av01."), "codec: {}", video.codec);
 	assert!(matches!(video.container, Container::Cmaf { .. }));
 
-	let Container::Cmaf { init_data } = &video.container else {
+	let Container::Cmaf { init } = &video.container else {
 		panic!("expected Cmaf container");
 	};
-	let (ftyp, moov) = decode_init_data(init_data);
+	let (ftyp, moov) = decode_init(init);
 	assert_eq!(ftyp.major_brand, mp4_atom::FourCC::new(b"isom"));
 	assert_eq!(moov.trak.len(), 1);
 	let mvex = moov.mvex.as_ref().unwrap();
@@ -123,10 +118,10 @@ fn test_vp9_catalog() {
 	assert!(video.codec.to_string().starts_with("vp09."), "codec: {}", video.codec);
 	assert!(matches!(video.container, Container::Cmaf { .. }));
 
-	let Container::Cmaf { init_data } = &video.container else {
+	let Container::Cmaf { init } = &video.container else {
 		panic!("expected Cmaf container");
 	};
-	let (ftyp, moov) = decode_init_data(init_data);
+	let (ftyp, moov) = decode_init(init);
 	assert_eq!(ftyp.major_brand, mp4_atom::FourCC::new(b"isom"));
 	assert_eq!(moov.trak.len(), 1);
 	let mvex = moov.mvex.as_ref().unwrap();

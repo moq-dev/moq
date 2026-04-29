@@ -1,3 +1,5 @@
+use super::jitter::MinFrameDuration;
+
 use anyhow::Context;
 use bytes::Bytes;
 
@@ -17,6 +19,9 @@ pub struct Avc1 {
 
 	/// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
+
+	/// Tracks the minimum frame duration and updates the catalog `jitter` field.
+	jitter: MinFrameDuration,
 }
 
 impl Avc1 {
@@ -28,6 +33,7 @@ impl Avc1 {
 			config: None,
 			length_size: 4,
 			zero: None,
+			jitter: MinFrameDuration::new(),
 		}
 	}
 
@@ -94,13 +100,12 @@ impl Avc1 {
 
 		if let Some(track) = &self.track.take() {
 			tracing::debug!(name = ?track.name, "reinitializing avc1 track");
-			catalog.video.remove_track(track);
+			catalog.video.renditions.remove(&track.name);
 		}
 
-		let track = catalog.video.create_track("avc1", config.clone());
+		let track = self.broadcast.unique_track(".avc1")?;
 		tracing::debug!(name = ?track.name, ?config, "starting avc1 track");
-
-		let track = self.broadcast.create_track(track)?;
+		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(track.into());
@@ -133,6 +138,12 @@ impl Avc1 {
 			timestamp: pts,
 			payload: data.to_vec().into(),
 		})?;
+
+		if let Some(jitter) = self.jitter.observe(pts)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
+		{
+			c.jitter = Some(jitter);
+		}
 
 		buf.advance(buf.remaining());
 
@@ -197,7 +208,7 @@ impl Drop for Avc1 {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.name, "ending avc1 track");
-			self.catalog.lock().video.remove_track(&track);
+			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 	}
 }

@@ -1,5 +1,4 @@
 use anyhow::Context;
-use base64::Engine;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AV1, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use hang::container::Timestamp;
@@ -40,9 +39,6 @@ pub struct Fmp4 {
 	// The latest moof header
 	moof: Option<Moof>,
 	moof_size: usize,
-
-	// The raw moof bytes for passthrough
-	moof_raw: Option<Bytes>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -79,7 +75,6 @@ impl Fmp4 {
 			moof: None,
 			moof_size: 0,
 			broadcast,
-			moof_raw: None,
 		}
 	}
 
@@ -114,7 +109,6 @@ impl Fmp4 {
 					anyhow::ensure!(self.moof.is_none(), "duplicate moof box");
 					self.moof.replace(moof);
 					self.moof_size = size;
-					self.moof_raw.replace(Bytes::copy_from_slice(raw));
 				}
 				Any::Mdat(mdat) => {
 					self.extract(mdat, raw)?;
@@ -146,24 +140,24 @@ impl Fmp4 {
 		for trak in &moov.trak {
 			let track_id = trak.tkhd.track_id;
 			let handler = &trak.mdia.hdlr.handler;
-			let ext = "m4s";
+			let suffix = ".m4s";
 
-			let (kind, track) = match handler.as_ref() {
+			let track = self.broadcast.unique_track(suffix)?;
+
+			let kind = match handler.as_ref() {
 				b"vide" => {
 					let config = self.init_video(trak, &moov)?;
-					let track = catalog.video.create_track(ext, config.clone());
-					(TrackKind::Video, track)
+					catalog.video.renditions.insert(track.name.clone(), config);
+					TrackKind::Video
 				}
 				b"soun" => {
 					let config = self.init_audio(trak, &moov)?;
-					let track = catalog.audio.create_track(ext, config.clone());
-					(TrackKind::Audio, track)
+					catalog.audio.renditions.insert(track.name.clone(), config);
+					TrackKind::Audio
 				}
 				b"sbtl" => anyhow::bail!("subtitle tracks are not supported"),
 				handler => anyhow::bail!("unknown track type: {:?}", handler),
 			};
-
-			let track = self.broadcast.create_track(track)?;
 
 			self.tracks.insert(
 				track_id,
@@ -222,8 +216,7 @@ impl Fmp4 {
 			ftyp.encode(&mut buf)?;
 			single_moov.encode(&mut buf)?;
 
-			let init_data = base64::engine::general_purpose::STANDARD.encode(&buf);
-			Ok(Container::Cmaf { init_data })
+			Ok(Container::Cmaf { init: buf.into() })
 		}
 	}
 
@@ -569,28 +562,42 @@ impl Fmp4 {
 			let track_data_start = track_data_start.unwrap_or(0);
 			let track_data_end = offset; // offset was advanced past all samples above
 
-			// Adjust the trun data_offset to point into the new per-track mdat.
+			// The per-track sample range must be in bounds of the original mdat.
+			// If not, the parsed sample sizes/offsets disagree with the actual data
+			// and we cannot safely emit a passthrough fragment with rewritten offsets.
+			anyhow::ensure!(
+				track_data_start <= track_data_end && track_data_end <= mdat.data.len(),
+				"track sample range {}..{} is out of bounds of mdat (len {})",
+				track_data_start,
+				track_data_end,
+				mdat.data.len()
+			);
+			let track_mdat_data = &mdat.data[track_data_start..track_data_end];
+
 			let mut adjusted_moof = single_traf_moof;
+
+			// Apply structural (flag-presence) changes BEFORE measuring the encoded
+			// size, otherwise the rewritten data_offset values are computed from a
+			// stale size and the resulting fragment misaddresses sample data.
+			// In particular: clearing tfhd.base_data_offset removes 8 bytes per traf,
+			// and ensuring trun.data_offset is Some(...) reserves 4 bytes per trun.
+			for traf_mut in &mut adjusted_moof.traf {
+				traf_mut.tfhd.base_data_offset = None;
+				for trun_mut in &mut traf_mut.trun {
+					// Reserve the data_offset field; the real value is filled in below.
+					trun_mut.data_offset = Some(0);
+				}
+			}
+
 			let mut moof_buf = Vec::new();
 			adjusted_moof.encode(&mut moof_buf)?;
 			let new_moof_size = moof_buf.len();
-
-			// Slice out this track's data from the full mdat
-			let track_mdat_data = if track_data_start < mdat.data.len() && track_data_end <= mdat.data.len() {
-				&mdat.data[track_data_start..track_data_end]
-			} else {
-				// Fallback: use the full mdat data (single-track case)
-				&mdat.data[..]
-			};
 
 			// Re-encode moof with corrected per-trun data_offset for the per-track fragment.
 			// Each trun's data_offset points to the start of that run's data within the new mdat.
 			let mdat_header_size_new = 8u64; // 4 bytes size + 4 bytes 'mdat'
 			let mut cumulative_offset = 0u64;
 			for traf_mut in &mut adjusted_moof.traf {
-				// Clear base_data_offset since data_offset is now relative to moof start
-				traf_mut.tfhd.base_data_offset = None;
-
 				for trun_mut in &mut traf_mut.trun {
 					trun_mut.data_offset =
 						Some((new_moof_size as u64 + mdat_header_size_new + cumulative_offset) as i32);
@@ -685,9 +692,13 @@ impl Drop for Fmp4 {
 
 		for track in self.tracks.values() {
 			match track.kind {
-				TrackKind::Video => catalog.video.remove_track(&track.track).is_some(),
-				TrackKind::Audio => catalog.audio.remove_track(&track.track).is_some(),
-			};
+				TrackKind::Video => {
+					catalog.video.renditions.remove(&track.track.name);
+				}
+				TrackKind::Audio => {
+					catalog.audio.renditions.remove(&track.track.name);
+				}
+			}
 		}
 	}
 }

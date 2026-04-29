@@ -1,4 +1,5 @@
 use super::annexb::{NalIterator, START_CODE};
+use super::jitter::MinFrameDuration;
 
 use anyhow::Context;
 use buf_list::BufList;
@@ -31,6 +32,9 @@ pub struct Hev1 {
 	cached_vps: Option<Bytes>,
 	cached_sps: Option<Bytes>,
 	cached_pps: Option<Bytes>,
+
+	// Tracks the minimum frame duration and updates the catalog `jitter` field.
+	jitter: MinFrameDuration,
 }
 
 impl Hev1 {
@@ -45,6 +49,7 @@ impl Hev1 {
 			cached_vps: None,
 			cached_sps: None,
 			cached_pps: None,
+			jitter: MinFrameDuration::new(),
 		}
 	}
 
@@ -85,13 +90,12 @@ impl Hev1 {
 
 		if let Some(track) = &self.track.take() {
 			tracing::debug!(name = ?track.name, "reinitializing track");
-			catalog.video.remove_track(track);
+			catalog.video.renditions.remove(&track.name);
 		}
 
-		let track = catalog.video.create_track("hev1", config.clone());
+		let track = self.broadcast.unique_track(".hev1")?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
-
-		let track = self.broadcast.create_track(track)?;
+		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(track.into());
@@ -299,6 +303,12 @@ impl Hev1 {
 
 		track.write(frame)?;
 
+		if let Some(jitter) = self.jitter.observe(pts)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
+		{
+			c.jitter = Some(jitter);
+		}
+
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
 		self.current.contains_vps = false;
@@ -335,7 +345,7 @@ impl Drop for Hev1 {
 	fn drop(&mut self) {
 		if let Some(track) = &self.track {
 			tracing::debug!(name = ?track.name, "ending track");
-			self.catalog.lock().video.remove_track(track);
+			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 	}
 }

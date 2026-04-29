@@ -47,7 +47,7 @@ impl Container for Legacy {
 
 /// A container that dispatches between Legacy and CMAF based on the catalog config.
 ///
-/// Constructed from a `VideoConfig` or `AudioConfig`, parsing init_data once upfront.
+/// Constructed from a `VideoConfig` or `AudioConfig`, parsing the init segment once upfront.
 pub enum Media {
 	Legacy,
 	Cmaf(Box<mp4_atom::Moov>),
@@ -57,17 +57,14 @@ impl TryFrom<&hang::catalog::Container> for Media {
 	type Error = crate::Error;
 
 	fn try_from(container: &hang::catalog::Container) -> Result<Self, Self::Error> {
-		use base64::Engine;
 		use mp4_atom::DecodeMaybe;
 
 		match container {
 			hang::catalog::Container::Legacy => Ok(Self::Legacy),
-			hang::catalog::Container::Cmaf { init_data } => {
-				let init_bytes = base64::engine::general_purpose::STANDARD
-					.decode(init_data)
-					.map_err(|e| crate::cmaf::Error::Mp4(mp4_atom::Error::Io(std::io::Error::other(e))))?;
-
-				let mut cursor = std::io::Cursor::new(&init_bytes);
+			hang::catalog::Container::Cmaf { init } => {
+				// We only need the moov atom to dispatch reads/writes; ftyp is consumed by clients
+				// that need to reconstruct the full init segment from `init`.
+				let mut cursor = std::io::Cursor::new(init.as_ref());
 				while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).map_err(crate::cmaf::Error::from)? {
 					if let mp4_atom::Any::Moov(moov) = atom {
 						return Ok(Self::Cmaf(Box::new(moov)));

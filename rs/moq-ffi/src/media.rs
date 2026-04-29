@@ -9,14 +9,14 @@ pub struct MoqDimensions {
 #[derive(Clone, uniffi::Enum)]
 pub enum Container {
 	Legacy,
-	Cmaf { init_data: String },
+	Cmaf { init: Vec<u8> },
 }
 
 impl From<hang::catalog::Container> for Container {
 	fn from(container: hang::catalog::Container) -> Self {
 		match container {
 			hang::catalog::Container::Legacy => Self::Legacy,
-			hang::catalog::Container::Cmaf { init_data } => Self::Cmaf { init_data },
+			hang::catalog::Container::Cmaf { init } => Self::Cmaf { init: init.into() },
 		}
 	}
 }
@@ -25,7 +25,7 @@ impl From<Container> for hang::catalog::Container {
 	fn from(container: Container) -> Self {
 		match container {
 			Container::Legacy => Self::Legacy,
-			Container::Cmaf { init_data } => Self::Cmaf { init_data },
+			Container::Cmaf { init } => Self::Cmaf { init: init.into() },
 		}
 	}
 }

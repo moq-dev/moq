@@ -1,3 +1,5 @@
+use super::jitter::MinFrameDuration;
+
 use anyhow::Context;
 use buf_list::BufList;
 use bytes::{Buf, Bytes};
@@ -22,6 +24,9 @@ pub struct Av01 {
 
 	// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
+
+	// Tracks the minimum frame duration and updates the catalog `jitter` field.
+	jitter: MinFrameDuration,
 }
 
 #[derive(Default)]
@@ -40,6 +45,7 @@ impl Av01 {
 			config: None,
 			current: Default::default(),
 			zero: None,
+			jitter: MinFrameDuration::new(),
 		}
 	}
 
@@ -93,15 +99,16 @@ impl Av01 {
 
 		if let Some(track) = &self.track.take() {
 			tracing::debug!(name = ?track.name, "reinitializing track");
-			self.catalog.lock().video.remove_track(track);
+			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 
-		let mut catalog = self.catalog.lock();
-		let track = catalog.video.create_track("av01", config.clone());
+		let track = self.broadcast.unique_track(".av01")?;
 		tracing::debug!(name = ?track.name, ?config, "starting track");
-		drop(catalog);
-
-		let track = self.broadcast.create_track(track)?;
+		self.catalog
+			.lock()
+			.video
+			.renditions
+			.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(track.into());
@@ -139,12 +146,13 @@ impl Av01 {
 			jitter: None,
 		};
 
-		let mut catalog = self.catalog.lock();
-		let track = catalog.video.create_track("av01", config.clone());
+		let track = self.broadcast.unique_track(".av01")?;
 		tracing::debug!(name = ?track.name, "starting track with minimal config");
-		drop(catalog);
-
-		let track = self.broadcast.create_track(track)?;
+		self.catalog
+			.lock()
+			.video
+			.renditions
+			.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
 		self.track = Some(track.into());
@@ -225,14 +233,16 @@ impl Av01 {
 		}
 
 		if let Some(track) = &self.track.take() {
-			self.catalog.lock().video.remove_track(track);
+			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 
-		let mut catalog = self.catalog.lock();
-		let track = catalog.video.create_track("av01", config.clone());
-		drop(catalog);
+		let track = self.broadcast.unique_track(".av01")?;
+		self.catalog
+			.lock()
+			.video
+			.renditions
+			.insert(track.name.clone(), config.clone());
 
-		let track = self.broadcast.create_track(track)?;
 		self.config = Some(config);
 		self.track = Some(track.into());
 
@@ -385,6 +395,12 @@ impl Av01 {
 
 		track.write(frame)?;
 
+		if let Some(jitter) = self.jitter.observe(pts)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
+		{
+			c.jitter = Some(jitter);
+		}
+
 		self.current.contains_keyframe = false;
 		self.current.contains_frame = false;
 
@@ -418,7 +434,7 @@ impl Drop for Av01 {
 	fn drop(&mut self) {
 		if let Some(track) = self.track.take() {
 			tracing::debug!(name = ?track.name, "ending track");
-			self.catalog.lock().video.remove_track(&track);
+			self.catalog.lock().video.renditions.remove(&track.name);
 		}
 	}
 }

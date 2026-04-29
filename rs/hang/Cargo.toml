@@ -5,7 +5,7 @@ authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.16.0"
+version = "0.15.8"
 edition = "2024"
 rust-version.workspace = true
 
@@ -26,7 +26,7 @@ moq-lite = { workspace = true, features = ["serde"] }
 regex = "1"
 serde = { workspace = true }
 serde_json = "1"
-serde_with = { version = "3", features = ["hex"] }
+serde_with = { version = "3", features = ["base64", "hex"] }
 thiserror = "2"
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = "0.1"

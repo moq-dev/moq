@@ -7,15 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.16.0] - 2026-04-22
-
-### Breaking
-
-- `catalog::Container::Cmaf` variant changed from `{ timescale, track_id }` to `{ init_data }` (base64-encoded ftyp+moov init segment).
-- Removed `Error::Duplicate` variant.
-- Removed `Audio::insert` / `Audio::remove` and `Video::insert` / `Video::remove` helper methods; use `renditions` directly. `remove_track` inlines the name lookup.
-- Removed the `#[deprecated]` markers on `Audio::create_track` / `Video::create_track`.
-
 ## [0.15.8](https://github.com/moq-dev/moq/compare/hang-v0.15.7...hang-v0.15.8) - 2026-04-19
 
 ### Other

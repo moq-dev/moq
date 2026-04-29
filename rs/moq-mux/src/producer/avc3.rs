@@ -1,4 +1,5 @@
 use super::annexb::{NalIterator, START_CODE};
+use super::jitter::MinFrameDuration;
 
 use anyhow::Context;
 use buf_list::BufList;
@@ -30,6 +31,9 @@ pub struct Avc3 {
 	// Cached parameter set NALs for re-insertion before keyframes.
 	cached_sps: Option<Bytes>,
 	cached_pps: Option<Bytes>,
+
+	// Tracks the minimum frame duration and updates the catalog `jitter` field.
+	jitter: MinFrameDuration,
 }
 
 impl Avc3 {
@@ -46,6 +50,7 @@ impl Avc3 {
 			zero: None,
 			cached_sps: None,
 			cached_pps: None,
+			jitter: MinFrameDuration::new(),
 		}
 	}
 
@@ -281,6 +286,12 @@ impl Avc3 {
 
 		self.track.write(frame)?;
 
+		if let Some(jitter) = self.jitter.observe(pts)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.name)
+		{
+			c.jitter = Some(jitter);
+		}
+
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
 		self.current.contains_sps = false;
@@ -314,7 +325,7 @@ impl Avc3 {
 impl Drop for Avc3 {
 	fn drop(&mut self) {
 		tracing::debug!(name = ?self.track.name, "ending track");
-		self.catalog.lock().video.remove_track(&self.track);
+		self.catalog.lock().video.renditions.remove(&self.track.name);
 	}
 }
 

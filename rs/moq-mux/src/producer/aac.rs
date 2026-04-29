@@ -112,26 +112,23 @@ impl Aac {
 		mut catalog: crate::CatalogProducer,
 		config: AacConfig,
 	) -> anyhow::Result<Self> {
-		let track = {
-			let mut cat = catalog.lock();
+		let track = broadcast.unique_track(".aac")?;
 
-			let audio_config = hang::catalog::AudioConfig {
-				codec: hang::catalog::AAC {
-					profile: config.profile,
-				}
-				.into(),
-				sample_rate: config.sample_rate,
-				channel_count: config.channel_count,
-				bitrate: None,
-				description: None,
-				container: hang::catalog::Container::Legacy,
-				jitter: None,
-			};
-			let track = cat.audio.create_track("aac", audio_config.clone());
-			tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
-
-			broadcast.create_track(track)?
+		let audio_config = hang::catalog::AudioConfig {
+			codec: hang::catalog::AAC {
+				profile: config.profile,
+			}
+			.into(),
+			sample_rate: config.sample_rate,
+			channel_count: config.channel_count,
+			bitrate: None,
+			description: None,
+			container: hang::catalog::Container::Legacy,
+			jitter: None,
 		};
+
+		tracing::debug!(name = ?track.name, config = ?audio_config, "starting track");
+		catalog.lock().audio.renditions.insert(track.name.clone(), audio_config);
 
 		Ok(Self {
 			catalog,
@@ -180,7 +177,7 @@ impl Aac {
 impl Drop for Aac {
 	fn drop(&mut self) {
 		tracing::debug!(name = ?self.track.name, "ending track");
-		self.catalog.lock().audio.remove_track(&self.track);
+		self.catalog.lock().audio.renditions.remove(&self.track.name);
 	}
 }
 
