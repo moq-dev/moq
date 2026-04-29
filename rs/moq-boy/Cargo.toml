@@ -13,6 +13,7 @@ rust-version.workspace = true
 
 [features]
 default = ["quinn", "websocket"]
+jemalloc = ["moq-native/jemalloc"]
 quinn = ["moq-native/quinn"]
 websocket = ["moq-native/websocket"]
 

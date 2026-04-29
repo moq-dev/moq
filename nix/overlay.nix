@@ -55,10 +55,15 @@ in
     crateInfo ../rs/moq-boy/Cargo.toml
     // {
       src = craneLib.cleanCargoSource ../.;
-      cargoExtraArgs = "-p moq-boy";
+      cargoExtraArgs = "-p moq-boy --features jemalloc";
       nativeBuildInputs = with final; [ pkg-config clang ];
       buildInputs = with final; [ ffmpeg ];
       LIBCLANG_PATH = "${final.libclang.lib}/lib";
+      # Enable frame pointers for profiling support (negligible overhead on x86_64).
+      RUSTFLAGS = "-C force-frame-pointers=yes";
+      # jemalloc's configure uses -O0 test builds, which conflict with
+      # Nix's _FORTIFY_SOURCE hardening (requires -O).
+      hardeningDisable = [ "fortify" ];
     }
   );
 }
