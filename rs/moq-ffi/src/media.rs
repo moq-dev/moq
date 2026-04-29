@@ -14,18 +14,26 @@ pub enum Container {
 
 impl From<hang::catalog::Container> for Container {
 	fn from(container: hang::catalog::Container) -> Self {
+		use base64::Engine;
 		match container {
 			hang::catalog::Container::Legacy => Self::Legacy,
-			hang::catalog::Container::Cmaf { init } => Self::Cmaf { init: init.into() },
+			hang::catalog::Container::Cmaf { init_data } => Self::Cmaf {
+				init: base64::engine::general_purpose::STANDARD
+					.decode(&init_data)
+					.unwrap_or_default(),
+			},
 		}
 	}
 }
 
 impl From<Container> for hang::catalog::Container {
 	fn from(container: Container) -> Self {
+		use base64::Engine;
 		match container {
 			Container::Legacy => Self::Legacy,
-			Container::Cmaf { init } => Self::Cmaf { init: init.into() },
+			Container::Cmaf { init } => Self::Cmaf {
+				init_data: base64::engine::general_purpose::STANDARD.encode(&init),
+			},
 		}
 	}
 }

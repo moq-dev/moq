@@ -2,8 +2,58 @@ use std::task::Poll;
 
 use bytes::Bytes;
 
-use super::Error;
 use crate::container::{Container, Frame, Timestamp};
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+	#[error("mp4: {0}")]
+	Mp4(#[from] mp4_atom::Error),
+
+	#[error("moq: {0}")]
+	Moq(#[from] moq_lite::Error),
+
+	#[error("timestamp overflow")]
+	TimestampOverflow(#[from] moq_lite::TimeOverflow),
+
+	#[error("no traf in moof")]
+	NoTraf,
+
+	#[error("no tfdt in traf")]
+	NoTfdt,
+
+	#[error("PTS overflow")]
+	PtsOverflow,
+
+	#[error("no moof found in CMAF frame data")]
+	NoMoof,
+
+	#[error("no mdat found in CMAF frame data")]
+	NoMdat,
+
+	#[error("no moov found in init data")]
+	NoMoov,
+
+	#[error("no tracks in moov")]
+	NoTracks,
+
+	#[error("multiple tracks in moov, use Trak instead")]
+	MultipleTracks,
+}
+
+/// Parse the timescale from a CMAF init segment (ftyp+moov).
+pub(crate) fn parse_timescale(init_data: &[u8]) -> Result<u64, Error> {
+	use mp4_atom::DecodeMaybe;
+
+	let mut cursor = std::io::Cursor::new(init_data);
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			let trak = moov.trak.first().ok_or(Error::NoTracks)?;
+			return Ok(trak.mdia.mdhd.timescale as u64);
+		}
+	}
+	Err(Error::NoMoov)
+}
 
 pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 	use mp4_atom::DecodeMaybe;

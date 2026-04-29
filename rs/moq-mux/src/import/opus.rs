@@ -44,7 +44,7 @@ impl OpusConfig {
 
 /// Opus decoder, initialized via a OpusHead. Does not support Ogg.
 pub struct Opus {
-	catalog: crate::CatalogProducer,
+	catalog: crate::import::CatalogProducer,
 	track: hang::container::OrderedProducer,
 	zero: Option<tokio::time::Instant>,
 }
@@ -52,7 +52,7 @@ pub struct Opus {
 impl Opus {
 	pub fn new(
 		mut broadcast: moq_lite::BroadcastProducer,
-		mut catalog: crate::CatalogProducer,
+		mut catalog: crate::import::CatalogProducer,
 		config: OpusConfig,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".opus")?;

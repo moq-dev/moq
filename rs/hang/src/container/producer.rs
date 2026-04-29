@@ -1,4 +1,4 @@
-use super::{Frame, OrderedConsumer, Timestamp};
+use super::{Frame, Timestamp};
 use crate::Error;
 
 /// A producer for media tracks with group management.
@@ -127,15 +127,6 @@ impl OrderedProducer {
 		}
 		self.track.finish()?;
 		Ok(())
-	}
-
-	/// Create a consumer for this track.
-	///
-	/// Multiple consumers can be created from the same producer, each receiving
-	/// a copy of all data written to the track.
-	pub fn consume(&self, max_latency: std::time::Duration) -> OrderedConsumer {
-		let subscriber = self.track.consume().subscribe_default().expect("producer alive");
-		OrderedConsumer::new(subscriber, max_latency)
 	}
 }
 

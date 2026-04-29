@@ -1,6 +1,6 @@
 use clap::Subcommand;
 use hang::moq_lite;
-use moq_mux::producer;
+use moq_mux::import;
 
 #[derive(Subcommand, Clone)]
 pub enum PublishFormat {
@@ -15,9 +15,9 @@ pub enum PublishFormat {
 }
 
 enum PublishDecoder {
-	Avc3(Box<producer::Avc3>),
-	Fmp4(Box<producer::Fmp4>),
-	Hls(Box<producer::Hls>),
+	Avc3(Box<import::Avc3>),
+	Fmp4(Box<import::Fmp4>),
+	Hls(Box<import::Hls>),
 }
 
 impl PublishDecoder {
@@ -39,22 +39,22 @@ pub struct Publish {
 impl Publish {
 	pub fn new(format: &PublishFormat) -> anyhow::Result<Self> {
 		let mut broadcast = moq_lite::Broadcast::new().produce();
-		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
+		let catalog = moq_mux::import::CatalogProducer::new(&mut broadcast)?;
 
 		let decoder = match format {
 			PublishFormat::Avc3 => {
-				let avc3 = producer::Avc3::new(broadcast.clone(), catalog.clone());
+				let avc3 = import::Avc3::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Avc3(Box::new(avc3))
 			}
 			PublishFormat::Fmp4 => {
-				let fmp4 = producer::Fmp4::new(broadcast.clone(), catalog.clone());
+				let fmp4 = import::Fmp4::new(broadcast.clone(), catalog.clone());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Hls { playlist } => {
-				let hls = producer::Hls::new(
+				let hls = import::Hls::new(
 					broadcast.clone(),
 					catalog.clone(),
-					producer::HlsConfig::new(playlist.clone()),
+					import::HlsConfig::new(playlist.clone()),
 				)?;
 				PublishDecoder::Hls(Box::new(hls))
 			}

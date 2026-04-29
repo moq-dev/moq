@@ -434,7 +434,7 @@ async fn run_session(
 
 	let catalog_track = broadcast.subscribe_track(
 		&hang::catalog::Catalog::default_track(),
-		hang::catalog::Catalog::SUBSCRIPTION,
+		moq_lite::Subscription::default(),
 	)?;
 	let mut catalog = hang::catalog::CatalogConsumer::new(catalog_track);
 	let catalog = catalog.next().await?.context("catalog missing")?.clone();
@@ -450,7 +450,8 @@ async fn run_session(
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_lite::Track::new(&track_name);
 		let track_consumer = broadcast.subscribe_track(&track_ref, moq_lite::Subscription::default())?;
-		let track = hang::container::OrderedConsumer::new(track_consumer, Duration::from_secs(1));
+		let track =
+			moq_mux::export::OrderedConsumer::new(track_consumer, moq_mux::export::Legacy, Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
 
@@ -463,7 +464,8 @@ async fn run_session(
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_lite::Track::new(&track_name);
 		let track_consumer = broadcast.subscribe_track(&track_ref, moq_lite::Subscription::default())?;
-		let track = hang::container::OrderedConsumer::new(track_consumer, Duration::from_secs(1));
+		let track =
+			moq_mux::export::OrderedConsumer::new(track_consumer, moq_mux::export::Legacy, Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
 
@@ -495,7 +497,7 @@ async fn request_pad(
 }
 
 fn spawn_track_pump(
-	track: hang::container::OrderedConsumer,
+	track: moq_mux::export::OrderedConsumer<moq_mux::export::Legacy>,
 	descriptor: TrackDescriptor,
 	pad_endpoint: PadEndpoint,
 	shutdown: watch::Receiver<bool>,
@@ -504,7 +506,7 @@ fn spawn_track_pump(
 }
 
 async fn run_track_pump(
-	mut track: hang::container::OrderedConsumer,
+	mut track: moq_mux::export::OrderedConsumer<moq_mux::export::Legacy>,
 	descriptor: TrackDescriptor,
 	pad_endpoint: PadEndpoint,
 	mut shutdown: watch::Receiver<bool>,

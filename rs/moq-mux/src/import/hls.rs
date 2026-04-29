@@ -72,7 +72,7 @@ pub struct Hls {
 	broadcast: moq_lite::BroadcastProducer,
 
 	/// The catalog being produced.
-	catalog: crate::CatalogProducer,
+	catalog: crate::import::CatalogProducer,
 
 	/// fMP4 importers for each discovered video rendition.
 	/// Each importer feeds a separate MoQ track but shares the same catalog.
@@ -116,7 +116,7 @@ impl Hls {
 	/// Create a new HLS ingest that will write into the given broadcast.
 	pub fn new(
 		broadcast: moq_lite::BroadcastProducer,
-		catalog: crate::CatalogProducer,
+		catalog: crate::import::CatalogProducer,
 		cfg: HlsConfig,
 	) -> anyhow::Result<Self> {
 		let base_url = cfg.parse_playlist()?;
@@ -616,7 +616,7 @@ mod tests {
 	#[test]
 	fn hls_ingest_starts_without_importers() {
 		let mut broadcast = moq_lite::Broadcast::new().produce();
-		let catalog = crate::CatalogProducer::new(&mut broadcast).unwrap();
+		let catalog = crate::import::CatalogProducer::new(&mut broadcast).unwrap();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);
 		let hls = Hls::new(broadcast, catalog, cfg).unwrap();

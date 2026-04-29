@@ -1,6 +1,4 @@
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_with::base64::Base64;
 
 /// Container format for frame timestamp encoding and frame payload structure.
 ///
@@ -11,9 +9,8 @@ use serde_with::base64::Base64;
 ///
 /// JSON example:
 /// ```json
-/// { "kind": "cmaf", "init": "<base64-encoded ftyp+moov>" }
+/// { "kind": "cmaf", "initData": "<base64-encoded ftyp+moov>" }
 /// ```
-#[serde_with::serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 #[serde(tag = "kind")]
@@ -22,8 +19,8 @@ pub enum Container {
 	#[default]
 	Legacy,
 	Cmaf {
-		/// The init segment (ftyp+moov), base64-encoded over the wire.
-		#[serde_as(as = "Base64")]
-		init: Bytes,
+		/// Base64-encoded init segment (ftyp+moov)
+		#[serde(rename = "initData")]
+		init_data: String,
 	},
 }

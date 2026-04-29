@@ -1,4 +1,5 @@
 use anyhow::Context;
+use base64::Engine;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AV1, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use hang::container::Timestamp;
@@ -28,7 +29,7 @@ pub struct Fmp4 {
 	broadcast: moq_lite::BroadcastProducer,
 
 	/// The catalog being produced
-	catalog: crate::CatalogProducer,
+	catalog: crate::import::CatalogProducer,
 
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track>,
@@ -67,7 +68,7 @@ impl Fmp4 {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::import::CatalogProducer) -> Self {
 		Self {
 			catalog,
 			tracks: HashMap::default(),
@@ -216,7 +217,9 @@ impl Fmp4 {
 			ftyp.encode(&mut buf)?;
 			single_moov.encode(&mut buf)?;
 
-			Ok(Container::Cmaf { init: buf.into() })
+			Ok(Container::Cmaf {
+				init_data: base64::engine::general_purpose::STANDARD.encode(&buf),
+			})
 		}
 	}
 

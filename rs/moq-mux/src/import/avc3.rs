@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 /// A decoder for H.264 with inline SPS/PPS.
 pub struct Avc3 {
 	// The catalog being produced.
-	catalog: crate::CatalogProducer,
+	catalog: crate::import::CatalogProducer,
 
 	// The track being produced.
 	//
@@ -37,7 +37,7 @@ pub struct Avc3 {
 }
 
 impl Avc3 {
-	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
+	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::import::CatalogProducer) -> Self {
 		// Create the track eagerly so callers can monitor used/unused before any frames arrive.
 		// The catalog entry is added later in init() once the codec config is known.
 		let track = broadcast.unique_track(".avc3").expect("failed to create avc3 track");

@@ -115,6 +115,10 @@ pub enum Error {
 	#[error("hang error: {0}")]
 	Hang(#[from] hang::Error),
 
+	/// Error from the moq-mux consumer layer.
+	#[error("mux error: {0}")]
+	Mux(Arc<moq_mux::export::Error>),
+
 	/// Index out of bounds.
 	#[error("no index")]
 	NoIndex,
@@ -127,6 +131,15 @@ pub enum Error {
 impl From<tracing::metadata::ParseLevelError> for Error {
 	fn from(err: tracing::metadata::ParseLevelError) -> Self {
 		Error::Level(Arc::new(err))
+	}
+}
+
+impl From<moq_mux::export::Error> for Error {
+	fn from(err: moq_mux::export::Error) -> Self {
+		match err {
+			moq_mux::export::Error::Moq(e) => Error::Moq(e),
+			e => Error::Mux(Arc::new(e)),
+		}
 	}
 }
 
@@ -161,6 +174,7 @@ impl ffi::ReturnCode for Error {
 			Error::MediaNotFound => -26,
 			Error::TrackNotFound => -27,
 			Error::FrameNotFound => -28,
+			Error::Mux(_) => -29,
 		}
 	}
 }

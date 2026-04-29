@@ -101,7 +101,7 @@ impl AacConfig {
 
 /// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
 pub struct Aac {
-	catalog: crate::CatalogProducer,
+	catalog: crate::import::CatalogProducer,
 	track: hang::container::OrderedProducer,
 	zero: Option<tokio::time::Instant>,
 }
@@ -109,7 +109,7 @@ pub struct Aac {
 impl Aac {
 	pub fn new(
 		mut broadcast: moq_lite::BroadcastProducer,
-		mut catalog: crate::CatalogProducer,
+		mut catalog: crate::import::CatalogProducer,
 		config: AacConfig,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".aac")?;

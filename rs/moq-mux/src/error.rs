@@ -9,5 +9,5 @@ pub enum Error {
 	Hang(#[from] hang::Error),
 
 	#[error("cmaf: {0}")]
-	Cmaf(#[from] crate::cmaf::Error),
+	Cmaf(#[from] crate::container::cmaf::Error),
 }

@@ -373,7 +373,7 @@ impl std::ops::Deref for GroupBuffer {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::hang::Legacy;
+	use crate::container::hang::Legacy;
 	use std::time::Duration;
 
 	use bytes::Bytes;
@@ -1235,8 +1235,8 @@ mod tests {
 
 		let mut track = moq_lite::Track::new("video").produce();
 		let consumer_track = subscribe_default(&track);
-		let mut consumer =
-			Consumer::new(consumer_track, crate::hang::Media::Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, crate::container::hang::Media::Legacy)
+			.with_latency(Duration::from_millis(500));
 
 		// Write frames using Legacy encoding
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();

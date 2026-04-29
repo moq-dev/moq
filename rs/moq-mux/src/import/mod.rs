@@ -12,23 +12,27 @@ mod annexb;
 mod av01;
 mod avc1;
 mod avc3;
+mod catalog;
 mod fmp4;
 mod framed;
 mod hev1;
 mod hls;
 mod jitter;
 mod opus;
+mod producer;
 mod stream;
 
 pub use aac::*;
 pub use av01::*;
 pub use avc1::*;
 pub use avc3::*;
+pub use catalog::*;
 pub use fmp4::*;
 pub use framed::*;
 pub use hev1::*;
 pub use hls::*;
 pub use opus::*;
+pub use producer::*;
 pub use stream::*;
 
 #[cfg(test)]

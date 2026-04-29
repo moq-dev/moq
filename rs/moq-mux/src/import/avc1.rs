@@ -10,7 +10,7 @@ use bytes::Bytes;
 /// without inline parameter sets.
 pub struct Avc1 {
 	broadcast: moq_lite::BroadcastProducer,
-	catalog: crate::CatalogProducer,
+	catalog: crate::import::CatalogProducer,
 	track: Option<hang::container::OrderedProducer>,
 	config: Option<hang::catalog::VideoConfig>,
 
@@ -25,7 +25,7 @@ pub struct Avc1 {
 }
 
 impl Avc1 {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::import::CatalogProducer) -> Self {
 		Self {
 			broadcast,
 			catalog,

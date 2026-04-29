@@ -38,7 +38,7 @@ pub struct Consume {
 	track_task: NonZeroSlab<Option<TaskEntry>>,
 
 	/// Buffered frames ready for consumption.
-	frame: NonZeroSlab<hang::container::OrderedFrame>,
+	frame: NonZeroSlab<moq_mux::export::OrderedFrame>,
 }
 
 impl Consume {
@@ -50,7 +50,7 @@ impl Consume {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
 		let catalog = broadcast.subscribe_track(
 			&hang::catalog::Catalog::default_track(),
-			hang::catalog::Catalog::SUBSCRIPTION,
+			moq_lite::Subscription::default(),
 		)?;
 
 		let channel = oneshot::channel();
@@ -227,7 +227,7 @@ impl Consume {
 				..Default::default()
 			},
 		)?;
-		let track = hang::container::OrderedConsumer::new(track, latency);
+		let track = moq_mux::export::OrderedConsumer::new(track, moq_mux::export::Legacy, latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -274,7 +274,7 @@ impl Consume {
 				..Default::default()
 			},
 		)?;
-		let track = hang::container::OrderedConsumer::new(track, latency);
+		let track = moq_mux::export::OrderedConsumer::new(track, moq_mux::export::Legacy, latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -298,7 +298,10 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_track(task_id: Id, mut track: hang::container::OrderedConsumer) -> Result<(), Error> {
+	async fn run_track(
+		task_id: Id,
+		mut track: moq_mux::export::OrderedConsumer<moq_mux::export::Legacy>,
+	) -> Result<(), Error> {
 		while let Some(mut ordered) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::container::BufList::new();
@@ -310,7 +313,7 @@ impl Consume {
 				ordered.payload.copy_to_bytes(ordered.payload.num_bytes())
 			});
 
-			let new_frame = hang::container::OrderedFrame {
+			let new_frame = moq_mux::export::OrderedFrame {
 				timestamp: ordered.timestamp,
 				payload: new_payload,
 				group: ordered.group,

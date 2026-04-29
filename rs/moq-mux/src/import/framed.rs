@@ -105,7 +105,7 @@ impl Framed {
 	/// The buffer will be fully consumed, or an error will be returned.
 	pub fn new<T: Buf + AsRef<[u8]>>(
 		broadcast: moq_lite::BroadcastProducer,
-		catalog: crate::CatalogProducer,
+		catalog: crate::import::CatalogProducer,
 		format: FramedFormat,
 		buf: &mut T,
 	) -> anyhow::Result<Self> {
