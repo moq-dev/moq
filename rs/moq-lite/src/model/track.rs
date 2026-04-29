@@ -836,6 +836,7 @@ impl TrackConsumer {
 		state.max_sequence = Some(state.max_sequence.unwrap_or(0).max(sequence));
 		state.groups.push_back(Some((group.clone(), now)));
 		state.fetch_requests.push_back(group);
+		state.evict_expired(now);
 
 		Ok(consumer)
 	}
