@@ -847,6 +847,14 @@ impl TrackConsumer {
 			}
 		}
 
+		// Track is finalized: groups at/after the final boundary can never exist,
+		// so fail fast instead of queueing an impossible request.
+		if let Some(fin) = state.final_sequence
+			&& sequence >= fin
+		{
+			return Err(Error::NotFound);
+		}
+
 		if state.dynamic_groups == 0 {
 			return Err(Error::NotFound);
 		}
@@ -1958,6 +1966,25 @@ mod test {
 	}
 
 	#[tokio::test]
+	async fn fetch_group_past_final_returns_not_found() {
+		let mut producer = Track::new("test").produce();
+		producer.create_group(Group { sequence: 3 }).unwrap();
+		producer.finish().unwrap();
+		let consumer = producer.consume();
+		let _dynamic = producer.dynamic();
+
+		// Cached group below the final boundary still works.
+		assert_eq!(consumer.fetch_group(3).unwrap().sequence, 3);
+
+		// Sequences at/past the final boundary fail fast even with a handler attached.
+		match consumer.fetch_group(4) {
+			Err(Error::NotFound) => {}
+			Err(err) => panic!("expected NotFound, got {err:?}"),
+			Ok(_) => panic!("expected NotFound, got Ok"),
+		}
+	}
+
+	#[tokio::test]
 	async fn fetch_group_via_dynamic_handler() {
 		let producer = Track::new("test").produce();
 		let consumer = producer.consume();
@@ -2058,7 +2085,10 @@ mod test {
 		group_producer.write_frame(bytes::Bytes::from_static(b"clone")).unwrap();
 		group_producer.finish().unwrap();
 
-		assert_eq!(group_consumer.read_frame().await.unwrap().as_deref(), Some(&b"clone"[..]));
+		assert_eq!(
+			group_consumer.read_frame().await.unwrap().as_deref(),
+			Some(&b"clone"[..])
+		);
 	}
 
 	#[tokio::test]
