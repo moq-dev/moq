@@ -5,7 +5,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Capture from "./capture";
-import { type Source } from "./types";
+import type { Source } from "./types";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;

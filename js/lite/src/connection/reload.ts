@@ -156,7 +156,6 @@ export class Reload {
 		// Cloudflare's relay does not yet support SUBSCRIBE_NAMESPACE, so
 		// skip announce subscriptions entirely for those hosts.
 		if (conn.url.hostname.endsWith("mediaoverquic.com")) {
-			console.warn("Cloudflare relay does not support broadcast discovery yet; skipping subscribe_namespace.");
 			return;
 		}
 
