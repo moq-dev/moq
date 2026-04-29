@@ -66,7 +66,6 @@ export class Encoder {
 		this.groupDuration = props?.groupDuration ?? (100 as Time.Milli); // Default is a group every 100ms
 
 		this.#signals.run(this.#runSource.bind(this));
-		this.#signals.run(this.#runConfig.bind(this));
 		this.#signals.run(this.#runGain.bind(this));
 		this.#signals.run(this.#runCatalog.bind(this));
 	}
@@ -102,13 +101,28 @@ export class Encoder {
 			await context.audioWorklet.addModule(CaptureWorklet);
 			if (context.state === "closed") return;
 
+			const channelCount = settings.channelCount ?? root.channelCount;
 			const worklet = new AudioWorkletNode(context, "capture", {
 				numberOfInputs: 1,
 				numberOfOutputs: 0,
-				channelCount: settings.channelCount ?? root.channelCount,
+				channelCount,
 			});
 
 			effect.set(this.#worklet, worklet);
+
+			// The information about channels count can be unreliable on different platforms (Apple's safari).
+			// Try to get the first audio frame and only then create the configuration.
+			worklet.port.onmessage = ({ data }: { data: Capture.AudioFrame }) => {
+				const channelCount = data.channels.length;
+				if (!channelCount) return;
+
+				this.#config.set(this.#createConfig(worklet, channelCount));
+				worklet.port.onmessage = null;
+			};
+			effect.cleanup(() => {
+				worklet.port.onmessage = null;
+				this.#config.set(undefined);
+			});
 
 			gain.connect(worklet);
 			effect.cleanup(() => worklet.disconnect());
@@ -118,23 +132,17 @@ export class Encoder {
 		});
 	}
 
-	#runConfig(effect: Effect): void {
-		const values = effect.getAll([this.source, this.#worklet]);
-		if (!values) return;
-		const [_source, worklet] = values;
-
-		const config = {
+	#createConfig(worklet: AudioWorkletNode, channelCount: number): Catalog.AudioConfig {
+		return {
 			codec: "opus",
 			sampleRate: Catalog.u53(worklet.context.sampleRate),
-			numberOfChannels: Catalog.u53(worklet.channelCount),
-			bitrate: Catalog.u53(worklet.channelCount * 32_000),
+			numberOfChannels: Catalog.u53(channelCount),
+			bitrate: Catalog.u53(channelCount * 32_000),
 			container: { kind: "legacy" } as const,
 			// TODO parse the actual frame duration instead of assuming 20ms.
 			// Opus supports 2.5–60ms but 20ms is the real-time default.
 			jitter: Catalog.u53(20),
 		};
-
-		effect.set(this.#config, config);
 	}
 
 	#runGain(effect: Effect): void {
@@ -153,9 +161,9 @@ export class Encoder {
 	}
 
 	serve(track: Moq.Track, effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.#worklet, this.#config]);
+		const values = effect.getAll([this.enabled, this.#worklet]);
 		if (!values) return;
-		const [_, worklet, config] = values;
+		const [_, worklet] = values;
 
 		effect.set(this.active, true, false);
 
@@ -190,11 +198,26 @@ export class Encoder {
 			});
 			effect.cleanup(() => encoder.close());
 
-			console.debug("encoding audio", config);
-			encoder.configure(config);
+			let config = this.#config.peek();
+			if (config) {
+				console.debug("encoding audio", config);
+				encoder.configure(config);
+			}
 
 			worklet.port.onmessage = ({ data }: { data: Capture.AudioFrame }) => {
-				const channels = data.channels.slice(0, worklet.channelCount);
+				const channelCount = data.channels.length;
+				if (!channelCount) return;
+
+				if (!config || channelCount !== config.numberOfChannels) {
+					config = this.#createConfig(worklet, channelCount);
+					this.#config.set(config);
+					lastKeyframe = undefined;
+
+					console.debug("encoding audio", config);
+					encoder.configure(config);
+				}
+
+				const channels = data.channels;
 				const joinedLength = channels.reduce((a, b) => a + b.length, 0);
 				const joined = new Float32Array(joinedLength);
 
