@@ -77,11 +77,20 @@ impl Catalog {
 	}
 
 	pub fn default_track() -> moq_lite::Track {
-		moq_lite::Track {
-			name: Catalog::DEFAULT_NAME.to_string(),
-			priority: 100,
-		}
+		moq_lite::Track::new(Catalog::DEFAULT_NAME)
 	}
+
+	/// The recommended subscription for the catalog track.
+	///
+	/// The catalog should be high priority since downstream players block on
+	/// it before they can subscribe to anything else.
+	pub const SUBSCRIPTION: moq_lite::Subscription = moq_lite::Subscription {
+		priority: 100,
+		ordered: false,
+		max_latency: std::time::Duration::ZERO,
+		start: None,
+		end: None,
+	};
 }
 
 #[cfg(test)]

@@ -68,6 +68,15 @@ export class Broadcast {
 		const reload = effect.get(this.reload);
 		if (!reload) return true;
 
+		// Cloudflare's relay does not yet support announcement subscriptions,
+		// so an announcement will never arrive. Fall back to subscribing
+		// immediately (reload=false behaviour) instead of waiting forever.
+		const conn = effect.get(this.connection);
+		if (conn?.url.hostname.endsWith("mediaoverquic.com")) {
+			console.warn("Cloudflare relay does not support broadcast discovery yet; ignoring reload signal.");
+			return true;
+		}
+
 		const name = effect.get(this.name);
 		const announced = effect.get(this.#announced);
 		return announced.has(name);

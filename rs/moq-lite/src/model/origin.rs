@@ -658,6 +658,10 @@ impl OriginProducer {
 	/// Subscribe to a specific broadcast.
 	///
 	/// Returns None if the broadcast is not found.
+	#[deprecated(
+		note = "synchronous lookup is a footgun: over-the-wire origins need time to gossip announcements. \
+			Use [OriginConsumer::announced_broadcast] which blocks until the given path is announced."
+	)]
 	pub fn consume_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
 		let (root, rest) = self.nodes.get(&path)?;
@@ -764,14 +768,49 @@ impl OriginConsumer {
 
 	/// Get a specific broadcast by path.
 	///
-	/// TODO This should include announcement support.
-	///
 	/// Returns None if the path hasn't been announced yet.
+	#[deprecated(
+		note = "synchronous lookup is a footgun: freshly-connected origins have not yet received any \
+			announcements, so this will return None even when the broadcast is about to arrive. \
+			Prefer `announced_broadcast` (blocks until announced) or loop over `announced()`."
+	)]
 	pub fn consume_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
 		let (root, rest) = self.nodes.get(&path)?;
 		let state = root.lock();
 		state.consume_broadcast(&rest)
+	}
+
+	/// Block until a broadcast with the given path is announced and return it.
+	///
+	/// Returns `None` if the path is outside this consumer's allowed prefixes or if the consumer
+	/// is closed before the broadcast is announced. The returned broadcast may itself be closed
+	/// later — subscribers should watch [`BroadcastConsumer::closed`] to react to that.
+	///
+	/// Prefer this over the deprecated [`Self::consume_broadcast`] when you know the exact path
+	/// you want but cannot guarantee the announcement has already been received.
+	pub async fn announced_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
+		let path = path.as_path();
+
+		// Scope a fresh consumer down to this path so we only wake up for relevant announcements.
+		let mut consumer = self.consume_only(std::slice::from_ref(&path))?;
+
+		// consume_only keeps narrower permissions intact: if we ask for `foo` on a consumer limited
+		// to `foo/specific`, consume_only returns a consumer scoped to `foo/specific` — no
+		// announcement at the exact path `foo` can ever arrive. Bail rather than loop forever.
+		if !consumer.allowed().any(|allowed| path.has_prefix(allowed)) {
+			return None;
+		}
+
+		loop {
+			let (announced, broadcast) = consumer.announced().await?;
+			// consume_only narrows by prefix, but we only want an exact-path match.
+			if announced.as_path() == path {
+				if let Some(broadcast) = broadcast {
+					return Some(broadcast);
+				}
+			}
+		}
 	}
 
 	/// Returns a new OriginConsumer that only consumes broadcasts matching one of the prefixes.
@@ -964,6 +1003,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_duplicate() {
 		tokio::time::pause();
 
@@ -1022,6 +1062,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_duplicate_reverse() {
 		tokio::time::pause();
 
@@ -1048,6 +1089,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_double_publish() {
 		tokio::time::pause();
 
@@ -1319,6 +1361,7 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_consume_broadcast_with_permissions() {
 		let origin = Origin::random().produce();
 		let broadcast1 = Broadcast::new().produce();
@@ -1726,5 +1769,121 @@ mod tests {
 
 		let allowed: Vec<_> = producer.allowed().collect();
 		assert_eq!(allowed.len(), 2, "demo/foo should be subsumed by demo");
+	}
+
+	#[tokio::test]
+	async fn test_announced_broadcast_already_announced() {
+		let origin = Origin::random().produce();
+		let broadcast = Broadcast::new().produce();
+
+		origin.publish_broadcast("test", broadcast.consume());
+
+		let consumer = origin.consume();
+		let result = consumer.announced_broadcast("test").await.expect("should find it");
+		assert!(result.is_clone(&broadcast.consume()));
+	}
+
+	#[tokio::test]
+	async fn test_announced_broadcast_delayed() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let broadcast = Broadcast::new().produce();
+
+		let consumer = origin.consume();
+
+		// Start waiting before it's announced.
+		let wait = tokio::spawn({
+			let consumer = consumer.clone();
+			async move { consumer.announced_broadcast("test").await }
+		});
+
+		// Give the spawned task a chance to subscribe.
+		tokio::task::yield_now().await;
+
+		origin.publish_broadcast("test", broadcast.consume());
+
+		let result = wait.await.unwrap().expect("should find it");
+		assert!(result.is_clone(&broadcast.consume()));
+	}
+
+	#[tokio::test]
+	async fn test_announced_broadcast_ignores_unrelated_paths() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let other = Broadcast::new().produce();
+		let target = Broadcast::new().produce();
+
+		let consumer = origin.consume();
+
+		let wait = tokio::spawn({
+			let consumer = consumer.clone();
+			async move { consumer.announced_broadcast("target").await }
+		});
+
+		tokio::task::yield_now().await;
+
+		// Publish an unrelated broadcast first — announced_broadcast should skip it.
+		origin.publish_broadcast("other", other.consume());
+		tokio::task::yield_now().await;
+		assert!(!wait.is_finished(), "must not resolve on unrelated path");
+
+		origin.publish_broadcast("target", target.consume());
+		let result = wait.await.unwrap().expect("should find target");
+		assert!(result.is_clone(&target.consume()));
+	}
+
+	#[tokio::test]
+	async fn test_announced_broadcast_skips_nested_paths() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let nested = Broadcast::new().produce();
+		let exact = Broadcast::new().produce();
+
+		let consumer = origin.consume();
+
+		let wait = tokio::spawn({
+			let consumer = consumer.clone();
+			async move { consumer.announced_broadcast("foo").await }
+		});
+
+		tokio::task::yield_now().await;
+
+		// "foo/bar" is under the prefix scope, but it's not the exact path — skip it.
+		origin.publish_broadcast("foo/bar", nested.consume());
+		tokio::task::yield_now().await;
+		assert!(!wait.is_finished(), "must not resolve on a nested path");
+
+		origin.publish_broadcast("foo", exact.consume());
+		let result = wait.await.unwrap().expect("should find foo exactly");
+		assert!(result.is_clone(&exact.consume()));
+	}
+
+	#[tokio::test]
+	async fn test_announced_broadcast_disallowed() {
+		let origin = Origin::random().produce();
+		let limited = origin.consume_only(&["allowed".into()]).expect("should create limited");
+
+		// Path is outside allowed prefixes — should return None immediately.
+		assert!(limited.announced_broadcast("notallowed").await.is_none());
+	}
+
+	#[tokio::test]
+	async fn test_announced_broadcast_scope_too_narrow() {
+		// Consumer's scope is narrower than the requested path: asking for `foo` on a consumer
+		// limited to `foo/specific` can never resolve. Must return None, not loop forever.
+		let origin = Origin::random().produce();
+		let limited = origin
+			.consume_only(&["foo/specific".into()])
+			.expect("should create limited");
+
+		// now_or_never so we fail fast instead of hanging if the guard regresses.
+		let result = limited
+			.announced_broadcast("foo")
+			.now_or_never()
+			.expect("must not block");
+		assert!(result.is_none());
 	}
 }

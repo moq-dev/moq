@@ -4,7 +4,7 @@ use std::{
 	task::{Poll, ready},
 };
 
-use crate::{Error, TrackConsumer, TrackProducer, model::track::TrackWeak};
+use crate::{Error, Subscription, TrackConsumer, TrackProducer, TrackSubscriber, model::track::TrackWeak};
 
 use super::{OriginList, Track};
 
@@ -124,7 +124,7 @@ impl BroadcastProducer {
 		}
 		drop(state);
 
-		self.create_track(Track { name, priority: 0 })
+		self.create_track(Track::new(name))
 	}
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
@@ -311,7 +311,12 @@ impl Deref for BroadcastConsumer {
 }
 
 impl BroadcastConsumer {
-	pub fn subscribe_track(&self, track: &Track) -> Result<TrackConsumer, Error> {
+	/// Returns a fanout consumer for the given track.
+	///
+	/// Returns the cached track if it exists, otherwise routes a new request via
+	/// [`BroadcastDynamic`]. Errors with [`Error::NotFound`] when no dynamic
+	/// producer is attached.
+	pub fn consume_track(&self, track: &Track) -> Result<TrackConsumer, Error> {
 		// Upgrade to a temporary producer so we can modify the state.
 		let producer = self
 			.state
@@ -363,6 +368,18 @@ impl BroadcastConsumer {
 		Ok(consumer)
 	}
 
+	/// Subscribe to a track with the given preferences.
+	///
+	/// Convenience: calls [`Self::consume_track`] then [`TrackConsumer::subscribe`].
+	pub fn subscribe_track(&self, track: &Track, sub: Subscription) -> Result<TrackSubscriber, Error> {
+		self.consume_track(track)?.subscribe(sub)
+	}
+
+	/// Convenience: [`Self::subscribe_track`] with [`Subscription::default`].
+	pub fn subscribe_track_default(&self, track: &Track) -> Result<TrackSubscriber, Error> {
+		self.consume_track(track)?.subscribe_default()
+	}
+
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
@@ -376,8 +393,13 @@ impl BroadcastConsumer {
 
 #[cfg(test)]
 impl BroadcastConsumer {
-	pub fn assert_subscribe_track(&self, track: &Track) -> TrackConsumer {
-		self.subscribe_track(track).expect("should not have errored")
+	pub fn assert_consume_track(&self, track: &Track) -> TrackConsumer {
+		self.consume_track(track).expect("should not have errored")
+	}
+
+	pub fn assert_subscribe_track(&self, track: &Track) -> TrackSubscriber {
+		self.subscribe_track(track, Subscription::default())
+			.expect("should not have errored")
 	}
 
 	pub fn assert_not_closed(&self) {
@@ -464,9 +486,6 @@ mod test {
 		let mut track3 = producer.assert_request();
 		producer.assert_no_request();
 
-		// Make sure the consumer is the same.
-		track3.consume().assert_is_clone(&track1);
-
 		// Append a group and make sure they all get it.
 		track3.append_group().unwrap();
 		track1.assert_group();
@@ -479,7 +498,7 @@ mod test {
 		// Make sure the track is errored, not closed.
 		track4.assert_error();
 
-		let track5 = consumer2.subscribe_track(&Track::new("track3"));
+		let track5 = consumer2.subscribe_track(&Track::new("track3"), Subscription::default());
 		assert!(track5.is_err(), "should have errored");
 	}
 
@@ -557,7 +576,9 @@ mod test {
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 
 		// Now the cleanup task should have run and we can subscribe again to the unknown track.
-		let consumer3 = broadcast.consume().subscribe_track(&Track::new("unknown_track"));
+		let consumer3 = broadcast
+			.consume()
+			.subscribe_track(&Track::new("unknown_track"), Subscription::default());
 		let producer2 = broadcast.assert_request();
 
 		// Drop the consumer, now the producer should be unused

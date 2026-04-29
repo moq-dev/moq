@@ -423,11 +423,19 @@ async fn run_session(
 
 	let _session = client.connect(settings.url.clone()).await?;
 
-	let broadcast = origin_consumer
-		.consume_broadcast(&settings.broadcast)
-		.ok_or_else(|| anyhow::anyhow!("Broadcast '{}' not found", settings.broadcast))?;
+	// Wait for the broadcast to be announced. Synchronous lookup would race the gossip of
+	// announcements that happens after the session is established.
+	tracing::info!(broadcast = %settings.broadcast, "waiting for broadcast to be announced");
+	let broadcast = tokio::select! {
+		broadcast = origin_consumer.announced_broadcast(&settings.broadcast) => broadcast
+			.context("broadcast not allowed or origin closed")?,
+		_ = shutdown.changed() => return Ok(()),
+	};
 
-	let catalog_track = broadcast.subscribe_track(&hang::catalog::Catalog::default_track())?;
+	let catalog_track = broadcast.subscribe_track(
+		&hang::catalog::Catalog::default_track(),
+		hang::catalog::Catalog::SUBSCRIPTION,
+	)?;
 	let mut catalog = hang::catalog::CatalogConsumer::new(catalog_track);
 	let catalog = catalog.next().await?.context("catalog missing")?.clone();
 
@@ -441,7 +449,7 @@ async fn run_session(
 		let caps = video_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_lite::Track::new(&track_name);
-		let track_consumer = broadcast.subscribe_track(&track_ref)?;
+		let track_consumer = broadcast.subscribe_track(&track_ref, moq_lite::Subscription::default())?;
 		let track = hang::container::OrderedConsumer::new(track_consumer, Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
@@ -454,7 +462,7 @@ async fn run_session(
 		let caps = audio_caps(&config)?;
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_lite::Track::new(&track_name);
-		let track_consumer = broadcast.subscribe_track(&track_ref)?;
+		let track_consumer = broadcast.subscribe_track(&track_ref, moq_lite::Subscription::default())?;
 		let track = hang::container::OrderedConsumer::new(track_consumer, Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
