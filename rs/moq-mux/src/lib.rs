@@ -5,6 +5,5 @@ pub mod convert;
 mod error;
 pub mod export;
 pub mod import;
-pub mod msf;
 
 pub use error::*;

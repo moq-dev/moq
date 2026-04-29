@@ -25,9 +25,6 @@ pub enum FramedFormat {
 	Opus,
 }
 
-#[deprecated(note = "use FramedFormat instead")]
-pub type DecoderFormat = FramedFormat;
-
 impl FromStr for FramedFormat {
 	type Err = Error;
 
@@ -95,9 +92,6 @@ enum FramedKind {
 pub struct Framed {
 	decoder: FramedKind,
 }
-
-#[deprecated(note = "use Framed instead")]
-pub type Decoder = Framed;
 
 impl Framed {
 	/// Create a new framed importer with the given format and initialization data.

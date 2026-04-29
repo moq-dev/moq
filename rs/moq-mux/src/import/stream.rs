@@ -65,9 +65,6 @@ pub struct Stream {
 	decoder: StreamKind,
 }
 
-#[deprecated(note = "use Stream instead")]
-pub type StreamDecoder = Stream;
-
 impl Stream {
 	/// Create a new stream importer with the given format.
 	pub fn new(
