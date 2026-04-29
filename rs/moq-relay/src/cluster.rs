@@ -69,6 +69,7 @@ impl Cluster {
 	}
 
 	/// Looks up a broadcast by name.
+	#[allow(deprecated)] // Synchronous cluster lookup by design; callers know the broadcast is local.
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
 		self.origin.consume_broadcast(broadcast)
 	}

@@ -29,10 +29,7 @@ impl CatalogProducer {
 		catalog: hang::Catalog,
 	) -> Result<Self, moq_lite::Error> {
 		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
-		let msf_track = broadcast.create_track(moq_lite::Track {
-			name: moq_msf::DEFAULT_NAME.to_string(),
-			priority: 100,
-		})?;
+		let msf_track = broadcast.create_track(moq_lite::Track::new(moq_msf::DEFAULT_NAME))?;
 
 		Ok(Self {
 			hang_track,
@@ -53,7 +50,12 @@ impl CatalogProducer {
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> hang::CatalogConsumer {
-		hang::CatalogConsumer::new(self.hang_track.consume())
+		let subscriber = self
+			.hang_track
+			.consume()
+			.subscribe(hang::Catalog::SUBSCRIPTION)
+			.expect("hang_track producer is alive");
+		hang::CatalogConsumer::new(subscriber)
 	}
 
 	/// Finish publishing to this catalog.
