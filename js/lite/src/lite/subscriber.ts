@@ -13,7 +13,7 @@ import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
-import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
+import { decodeSubscribeResponse, Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { Version } from "./version.ts";
 
 /**
@@ -189,7 +189,27 @@ export class Subscriber {
 			}
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.track.name}`);
 
-			await Promise.race([stream.reader.closed, request.track.closed]);
+			// Watch for priority changes and send SUBSCRIBE_UPDATE.
+			const priorityWatch = (async () => {
+				for (;;) {
+					let dispose!: () => void;
+					try {
+						const priority = await new Promise<number | undefined>((resolve) => {
+							dispose = request.track.state.priority.changed(resolve);
+						});
+						if (priority === undefined) continue;
+						const update = new SubscribeUpdate({ priority });
+						await update.encode(stream.writer, this.version);
+						console.debug(
+							`subscribe update: id=${id} broadcast=${broadcast} track=${request.track.name} priority=${priority}`,
+						);
+					} finally {
+						dispose();
+					}
+				}
+			})();
+
+			await Promise.race([stream.reader.closed, request.track.closed, priorityWatch]);
 
 			request.track.close();
 			stream.close();
