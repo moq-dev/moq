@@ -84,13 +84,13 @@ pub struct HttpsConfig {
 	/// mirroring the QUIC server's `--server-tls-root` behavior. Clients that
 	/// don't present a cert continue through the normal JWT path.
 	#[arg(
-		long = "web-https-client-ca",
-		id = "web-https-client-ca",
+		long = "web-https-root",
+		id = "web-https-root",
 		value_delimiter = ',',
-		env = "MOQ_WEB_HTTPS_CLIENT_CA"
+		env = "MOQ_WEB_HTTPS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub client_ca: Vec<PathBuf>,
+	pub root: Vec<PathBuf>,
 }
 
 /// Shared state passed to all web handler routes.
@@ -112,8 +112,6 @@ pub struct Web {
 }
 
 impl Web {
-	/// Creates a new web server with the given state and configuration. mTLS
-	/// for HTTPS is enabled when [`HttpsConfig::client_ca`] is non-empty.
 	pub fn new(state: WebState, config: WebConfig) -> Self {
 		Self { state, config }
 	}
@@ -149,13 +147,13 @@ impl Web {
 		let https = if let Some(listen) = self.config.https.listen {
 			let cert = self.config.https.cert.expect("missing https.cert");
 			let key = self.config.https.key.expect("missing https.key");
-			let client_ca = self.config.https.client_ca.clone();
+			let root = self.config.https.root.clone();
 
-			let config = build_https_config(&cert, &key, &client_ca).await?;
+			let config = build_https_config(&cert, &key, &root).await?;
 			let rustls_config = RustlsConfig::from_config(Arc::new(config));
 
 			#[cfg(unix)]
-			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, client_ca));
+			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, root));
 
 			// MtlsAcceptor surfaces a verified peer cert as a request extension.
 			// When no client CA is configured, the inner verifier is `NoClientAuth`
@@ -182,7 +180,7 @@ impl Web {
 
 /// Build a [`rustls::ServerConfig`] for the HTTPS listener.
 ///
-/// When `client_ca` is non-empty, installs a [`WebPkiClientVerifier`] with
+/// When `root` is non-empty, installs a [`WebPkiClientVerifier`] with
 /// `.allow_unauthenticated()` so JWT-only callers still complete the
 /// handshake without presenting a cert. When empty, falls back to
 /// [`with_no_client_auth`]. ALPN is set to `h2`, `http/1.1` to match
@@ -193,7 +191,7 @@ impl Web {
 async fn build_https_config(
 	cert: &std::path::Path,
 	key: &std::path::Path,
-	client_ca: &[PathBuf],
+	root: &[PathBuf],
 ) -> anyhow::Result<rustls::ServerConfig> {
 	use anyhow::Context;
 	use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
@@ -212,7 +210,7 @@ async fn build_https_config(
 	let builder =
 		rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
 
-	let mut config = if client_ca.is_empty() {
+	let mut config = if root.is_empty() {
 		builder
 			.with_no_client_auth()
 			.with_single_cert(cert_chain, key_der)
@@ -221,7 +219,7 @@ async fn build_https_config(
 		// Build the CA root store inline; `moq_native::ServerTlsConfig` is
 		// `non_exhaustive`, so we can't construct one to call its `load_roots`.
 		let mut root_store = rustls::RootCertStore::empty();
-		for path in client_ca {
+		for path in root {
 			let mut found = false;
 			for cert in CertificateDer::pem_file_iter(path).context("failed to open mTLS client CA")? {
 				let cert = cert.context("failed to parse mTLS client CA PEM")?;
@@ -251,7 +249,7 @@ async fn build_https_config(
 /// — silently stripping mTLS when configured — so we always rebuild via the
 /// full [`build_https_config`] path.
 #[cfg(unix)]
-async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, client_ca: Vec<PathBuf>) {
+async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, root: Vec<PathBuf>) {
 	use tokio::signal::unix::{SignalKind, signal};
 
 	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
@@ -259,7 +257,7 @@ async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, 
 	while listener.recv().await.is_some() {
 		tracing::info!("reloading web certificate");
 
-		match build_https_config(&cert, &key, &client_ca).await {
+		match build_https_config(&cert, &key, &root).await {
 			Ok(new) => config.reload_from_config(Arc::new(new)),
 			Err(err) => tracing::warn!(%err, "failed to reload web certificate"),
 		}
@@ -697,7 +695,7 @@ mod tests {
 		let dir = TempDir::new().unwrap();
 		let (_ca_path, cert_path, key_path) = make_certs(&dir);
 
-		// Empty client_ca is the JWT-only path; should still produce a valid
+		// Empty root is the JWT-only path; should still produce a valid
 		// config with ALPN set so axum-server's hyper layer can negotiate h2.
 		let config = build_https_config(&cert_path, &key_path, &[])
 			.await
