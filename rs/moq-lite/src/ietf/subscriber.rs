@@ -762,14 +762,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut frame: FrameProducer,
 	) -> Result<(), Error> {
-		let mut remain = frame.size;
-
-		while remain > 0 {
-			let chunk = stream.read(remain as usize).await?.ok_or(Error::WrongSize)?;
-			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
-			frame.write(chunk)?;
+		// FrameProducer impls BufMut; read_buf writes stream bytes directly into
+		// the per-frame buffer (see lite/subscriber.rs run_frame for rationale).
+		while bytes::BufMut::has_remaining_mut(&frame) {
+			match stream.read_buf(&mut frame).await? {
+				Some(n) if n > 0 => {}
+				_ => return Err(Error::WrongSize),
+			}
 		}
-
 		Ok(())
 	}
 }

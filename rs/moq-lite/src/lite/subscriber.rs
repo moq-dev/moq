@@ -416,18 +416,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut FrameProducer,
 	) -> Result<(), Error> {
-		let mut remain = frame.size;
-
-		const MAX_CHUNK: usize = 1024 * 1024; // 1 MiB
-		while remain > 0 {
-			let chunk = stream
-				.read(MAX_CHUNK.min(remain as usize))
-				.await?
-				.ok_or(Error::WrongSize)?;
-			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
-			frame.write(chunk)?;
+		// FrameProducer impls BufMut over its pre-allocated per-frame buffer, so
+		// read_buf writes QUIC stream bytes directly into the frame — no
+		// intermediate Bytes allocations, and quinn's reassembly arena is freed
+		// as we drain it.
+		while bytes::BufMut::has_remaining_mut(frame) {
+			match stream.read_buf(frame).await? {
+				Some(n) if n > 0 => {}
+				_ => return Err(Error::WrongSize),
+			}
 		}
-
 		Ok(())
 	}
 

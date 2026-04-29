@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en" class="dark">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MoQ Demo (Manual Catalog)</title>
+
+	<link rel="stylesheet" href="index.css">
+	<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+</head>
+
+<body class="dark:bg-black p-4">
+	<moq-watch-support show="warning"></moq-watch-support>
+
+	<!--
+		`catalog-format="manual"` skips the catalog.json subscription. The element
+		does nothing media-wise until you assign `watch.catalog = <Catalog.Root>`.
+		See manual.ts for the textarea/apply wiring.
+	-->
+	<moq-watch-ui>
+		<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" catalog-format="manual" muted latency="real-time" reload>
+			<canvas style="width: 100%; height: auto;"></canvas>
+		</moq-watch>
+	</moq-watch-ui>
+
+	<section class="mt-4">
+		<h3>Catalog JSON</h3>
+		<p>
+			Paste a <code>Catalog.Root</code> blob and click <strong>Apply</strong>.
+			The element won't fetch a catalog track in manual mode — media tracks are
+			subscribed off whatever you provide here.
+		</p>
+		<p>
+			To grab a real one, open <a href="index.html">the WebCodecs demo</a>,
+			let it play, then run <code>JSON.stringify(document.getElementById("watch").catalog)</code>
+			in the dev console and paste the result here.
+		</p>
+
+		<textarea id="catalog-input"
+			rows="14"
+			spellcheck="false"
+			class="w-full font-mono text-xs bg-neutral-900 border border-neutral-700 rounded p-2 text-white"
+			placeholder='{ "video": { "renditions": { ... } }, "audio": { "renditions": { ... } } }'></textarea>
+
+		<div class="flex gap-2 mt-2 items-center flex-wrap">
+			<button id="apply" type="button"
+				class="px-3 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white border border-blue-500">
+				Apply
+			</button>
+			<span id="status" class="ml-2 opacity-80 text-sm"></span>
+		</div>
+	</section>
+
+	<h3 class="mt-4">Other demos:</h3>
+	<ul>
+		<li><a href="index.html">Watch a broadcast (WebCodecs).</a></li>
+		<li><a href="mse.html">Watch a broadcast (MSE).</a></li>
+		<li><a href="publish.html">Publish a broadcast.</a></li>
+	</ul>
+</body>
+
+<script type="module" src="manual.ts"></script>
+
+</html>

@@ -412,11 +412,12 @@ mod test {
 		frame.finish().unwrap();
 		producer.finish().unwrap();
 
+		// Frame data is held in a single per-frame buffer; consumers see the full
+		// contents in one chunk rather than the individual write boundaries.
 		let mut consumer = producer.consume();
 		let chunks = consumer.read_frame_chunks().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(chunks.len(), 2);
-		assert_eq!(chunks[0], Bytes::from_static(b"hello"));
-		assert_eq!(chunks[1], Bytes::from_static(b"world"));
+		assert_eq!(chunks.len(), 1);
+		assert_eq!(chunks[0], Bytes::from_static(b"helloworld"));
 	}
 
 	#[test]
