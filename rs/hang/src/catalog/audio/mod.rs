@@ -28,26 +28,18 @@ pub struct Audio {
 }
 
 impl Audio {
-	/// Create a new audio track with the given extension and configuration.
-	pub fn create_track(&mut self, extension: &str, config: AudioConfig) -> moq_lite::Track {
-		for i in 0.. {
-			let name = match extension {
-				"" => format!("audio{}", i),
-				extension => format!("audio{}.{}", i, extension),
-			};
-
-			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
-				entry.insert(config.clone());
-				return moq_lite::Track::new(name);
-			}
-		}
-
-		unreachable!("no available audio track name");
+	/// Insert a track config, returning an error if the name already exists.
+	pub fn insert(&mut self, name: &str, config: AudioConfig) -> crate::Result<()> {
+		let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.to_string()) else {
+			return Err(crate::Error::Duplicate(name.to_string()));
+		};
+		entry.insert(config);
+		Ok(())
 	}
 
-	// Remove the track from the catalog and return the configuration if found.
-	pub fn remove_track(&mut self, track: &moq_lite::Track) -> Option<AudioConfig> {
-		self.renditions.remove(track.name.as_str())
+	/// Remove the track from the catalog and return the configuration if found.
+	pub fn remove(&mut self, name: &str) -> Option<AudioConfig> {
+		self.renditions.remove(name)
 	}
 }
 
