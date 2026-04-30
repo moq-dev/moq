@@ -3,6 +3,7 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { type BufferedRanges, timeRangesToArray } from "../backend";
+import { base64ToBytes } from "../base64";
 import type { Muxer } from "../mse";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
@@ -107,11 +108,13 @@ export class Mse implements Backend {
 		const data = active.subscribe(track, Catalog.PRIORITY.video);
 		effect.cleanup(() => data.close());
 
-		const timescale = config.container.timescale;
+		// Decode the catalog's authoritative init segment once and read the
+		// timescale out of it. The catalog also gives us the bytes to feed
+		// directly into MSE — no need to regenerate.
+		const initSegment = base64ToBytes(config.container.init);
+		const { timescale } = Container.Cmaf.decodeInitSegment(initSegment);
 
 		effect.spawn(async () => {
-			// Generate init segment from catalog config (uses track_id from container)
-			const initSegment = Container.Cmaf.createVideoInitSegment(config);
 			await this.#appendBuffer(sourceBuffer, initSegment);
 
 			for (;;) {

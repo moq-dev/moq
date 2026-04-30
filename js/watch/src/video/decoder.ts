@@ -5,6 +5,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
+import { base64ToBytes } from "../base64";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 
@@ -358,7 +359,8 @@ class DecoderTrack {
 	#runCmaf(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
 		if (this.config.container.kind !== "cmaf") return;
 
-		const { timescale } = this.config.container;
+		const initSegment = base64ToBytes(this.config.container.init);
+		const { timescale } = Container.Cmaf.decodeInitSegment(initSegment);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
 
 		// Configure decoder with description from catalog

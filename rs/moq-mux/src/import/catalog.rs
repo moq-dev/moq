@@ -131,7 +131,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		};
 
 		let init_data = match &config.container {
-			hang::catalog::Container::Cmaf { init_data } => Some(init_data.clone()),
+			hang::catalog::Container::Cmaf { init } => Some(base64::engine::general_purpose::STANDARD.encode(init)),
 			_ => config
 				.description
 				.as_ref()
@@ -164,7 +164,7 @@ fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		};
 
 		let init_data = match &config.container {
-			hang::catalog::Container::Cmaf { init_data } => Some(init_data.clone()),
+			hang::catalog::Container::Cmaf { init } => Some(base64::engine::general_purpose::STANDARD.encode(init)),
 			_ => config
 				.description
 				.as_ref()
@@ -351,7 +351,10 @@ mod test {
 				framerate: None,
 				optimize_for_latency: None,
 				container: Container::Cmaf {
-					init_data: "AAAYZ2Z0eXA=".to_string(),
+					init: base64::engine::general_purpose::STANDARD
+						.decode("AAAYZ2Z0eXA=")
+						.unwrap()
+						.into(),
 				},
 				jitter: None,
 			},

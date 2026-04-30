@@ -278,11 +278,6 @@ export function decodeDataSegment(segment: Uint8Array, timescale: number): Sampl
 			throw new Error(`Invalid sample size ${sampleSize} for sample ${i} in trun`);
 		}
 
-		// Validate sample duration - must be positive for proper timing
-		if (sampleDuration <= 0) {
-			throw new Error(`Invalid sample duration ${sampleDuration} for sample ${i} in trun`);
-		}
-
 		// Bounds check before slicing to prevent reading past mdat data
 		if (dataOffset + sampleSize > mdatData.length) {
 			throw new Error(

@@ -1,5 +1,4 @@
 use anyhow::Context;
-use base64::Engine;
 use bytes::{Buf, Bytes, BytesMut};
 use hang::catalog::{AAC, AV1, AudioCodec, AudioConfig, Container, H264, H265, VP9, VideoCodec, VideoConfig};
 use hang::container::Timestamp;
@@ -217,9 +216,7 @@ impl Fmp4 {
 			ftyp.encode(&mut buf)?;
 			single_moov.encode(&mut buf)?;
 
-			Ok(Container::Cmaf {
-				init_data: base64::engine::general_purpose::STANDARD.encode(&buf),
-			})
+			Ok(Container::Cmaf { init: buf.into() })
 		}
 	}
 

@@ -20,16 +20,9 @@ impl TryFrom<&hang::catalog::Container> for Hang {
 	type Error = crate::Error;
 
 	fn try_from(container: &hang::catalog::Container) -> Result<Self, Self::Error> {
-		use base64::Engine;
-
 		match container {
 			hang::catalog::Container::Legacy => Ok(Self::Legacy),
-			hang::catalog::Container::Cmaf { init_data } => {
-				let init_bytes = base64::engine::general_purpose::STANDARD
-					.decode(init_data)
-					.map_err(|e| super::CmafError::Mp4(mp4_atom::Error::Io(std::io::Error::other(e))))?;
-				Ok(Self::Cmaf(Cmaf::from_init(&init_bytes)?))
-			}
+			hang::catalog::Container::Cmaf { init } => Ok(Self::Cmaf(Cmaf::from_init(init)?)),
 		}
 	}
 }

@@ -1,5 +1,4 @@
 use anyhow::Context;
-use base64::Engine;
 use bytes::Bytes;
 use hang::catalog::{Catalog, Container, VideoConfig};
 use mp4_atom::{DecodeMaybe, Encode};
@@ -28,7 +27,7 @@ impl Fmp4 {
 
 		for (name, config) in &catalog.video.renditions {
 			let timescale = match &config.container {
-				Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
+				Container::Cmaf { init } => parse_timescale_from_init(init)?,
 				Container::Legacy => guess_video_timescale(config),
 			};
 
@@ -43,7 +42,7 @@ impl Fmp4 {
 
 		for (name, config) in &catalog.audio.renditions {
 			let timescale = match &config.container {
-				Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
+				Container::Cmaf { init } => parse_timescale_from_init(init)?,
 				Container::Legacy => config.sample_rate as u64,
 			};
 
@@ -69,26 +68,22 @@ impl Fmp4 {
 		let mut ftyp_data = None;
 
 		// Collect all track init data
-		let mut track_inits: Vec<&str> = Vec::new();
+		let mut track_inits: Vec<&Bytes> = Vec::new();
 		for config in catalog.video.renditions.values() {
 			match &config.container {
-				Container::Cmaf { init_data } => track_inits.push(init_data),
+				Container::Cmaf { init } => track_inits.push(init),
 				Container::Legacy => anyhow::bail!("track is not CMAF"),
 			}
 		}
 		for config in catalog.audio.renditions.values() {
 			match &config.container {
-				Container::Cmaf { init_data } => track_inits.push(init_data),
+				Container::Cmaf { init } => track_inits.push(init),
 				Container::Legacy => anyhow::bail!("track is not CMAF"),
 			}
 		}
 
-		for init_data_b64 in &track_inits {
-			let data = base64::engine::general_purpose::STANDARD
-				.decode(init_data_b64)
-				.context("invalid base64 init_data")?;
-
-			let mut cursor = std::io::Cursor::new(&data);
+		for init in &track_inits {
+			let mut cursor = std::io::Cursor::new(init.as_ref());
 			while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
 				match atom {
 					mp4_atom::Any::Ftyp(f) if ftyp_data.is_none() => {
@@ -198,11 +193,8 @@ fn build_moof(seq: u32, track_id: u32, dts: u64, size: u32, flags: u32, data_off
 	}
 }
 
-fn parse_timescale_from_init(init_data_b64: &str) -> anyhow::Result<u64> {
-	let data = base64::engine::general_purpose::STANDARD
-		.decode(init_data_b64)
-		.context("invalid base64")?;
-	let mut cursor = std::io::Cursor::new(&data);
+fn parse_timescale_from_init(init: &[u8]) -> anyhow::Result<u64> {
+	let mut cursor = std::io::Cursor::new(init);
 	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
 		if let mp4_atom::Any::Moov(moov) = atom {
 			let trak = moov.trak.first().context("no tracks in moov")?;

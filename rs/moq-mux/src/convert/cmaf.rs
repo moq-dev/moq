@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::task::Poll;
 
 use anyhow::Context;
-use base64::Engine;
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig};
 use mp4_atom::{Atom, Encode};
@@ -120,9 +119,7 @@ impl Convert {
 						.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
 
 					let mut cmaf_config = config.clone();
-					cmaf_config.container = Container::Cmaf {
-						init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
-					};
+					cmaf_config.container = Container::Cmaf { init: init_data.into() };
 					guard.video.renditions.insert(name.clone(), cmaf_config);
 
 					let output_track = self.output.create_track(moq_lite::Track::new(name.clone()))?;
@@ -161,9 +158,7 @@ impl Convert {
 						.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
 
 					let mut cmaf_config = config.clone();
-					cmaf_config.container = Container::Cmaf {
-						init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
-					};
+					cmaf_config.container = Container::Cmaf { init: init_data.into() };
 					guard.audio.renditions.insert(name.clone(), cmaf_config);
 
 					let output_track = self.output.create_track(moq_lite::Track::new(name.clone()))?;
@@ -686,7 +681,6 @@ fn guess_video_timescale(config: &VideoConfig) -> u64 {
 pub(crate) mod test {
 	use std::time::Duration;
 
-	use base64::Engine;
 	use bytes::{Bytes, BytesMut};
 	use hang::catalog::{Container, H264, VideoCodec, VideoConfig};
 	use hang::container::{Frame, Timestamp};
@@ -942,9 +936,7 @@ pub(crate) mod test {
 		];
 
 		let mut cmaf_config = config.clone();
-		cmaf_config.container = Container::Cmaf {
-			init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
-		};
+		cmaf_config.container = Container::Cmaf { init: init_data.into() };
 
 		let (consumer, mut video_track, _broadcast, mut catalog_track) = setup_input(&cmaf_config);
 		let output = moq_lite::Broadcast::new().produce();

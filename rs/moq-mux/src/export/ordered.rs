@@ -18,7 +18,7 @@ use super::{ContainerFormat, OrderedFrame, Timestamp};
 /// The consumer can skip groups that are too far behind to maintain low latency.
 /// Configure the maximum acceptable delay through the consumer's latency settings.
 pub struct OrderedConsumer<F: ContainerFormat> {
-	pub track: moq_lite::TrackSubscriber,
+	track: moq_lite::TrackSubscriber,
 
 	format: F,
 

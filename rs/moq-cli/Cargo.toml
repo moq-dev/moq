@@ -23,7 +23,6 @@ websocket = ["moq-native/websocket"]
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.8", features = ["tokio"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
-base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 hang = { workspace = true }

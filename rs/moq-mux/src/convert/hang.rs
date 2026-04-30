@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::task::Poll;
 
-use anyhow::Context;
-use base64::Engine;
 use hang::catalog::Container;
 use hang::container::Frame;
 
@@ -109,11 +107,8 @@ impl Convert {
 					);
 					guard.video.renditions.insert(name.clone(), config.clone());
 				}
-				Container::Cmaf { init_data } => {
-					let init_bytes = base64::engine::general_purpose::STANDARD
-						.decode(init_data)
-						.context("invalid base64 init_data")?;
-					let timescale = crate::container::cmaf::parse_timescale(&init_bytes)?;
+				Container::Cmaf { init } => {
+					let timescale = crate::container::cmaf::parse_timescale(init)?;
 
 					let input_track = self
 						.input
@@ -151,11 +146,8 @@ impl Convert {
 					);
 					guard.audio.renditions.insert(name.clone(), config.clone());
 				}
-				Container::Cmaf { init_data } => {
-					let init_bytes = base64::engine::general_purpose::STANDARD
-						.decode(init_data)
-						.context("invalid base64 init_data")?;
-					let timescale = crate::container::cmaf::parse_timescale(&init_bytes)?;
+				Container::Cmaf { init } => {
+					let timescale = crate::container::cmaf::parse_timescale(init)?;
 
 					let input_track = self
 						.input
@@ -362,7 +354,7 @@ mod test {
 	#[tokio::test]
 	async fn cmaf_to_legacy_video() {
 		tokio::time::pause();
-		use base64::Engine;
+
 		use hang::catalog::Container;
 
 		let config = test_video_config();
@@ -376,9 +368,7 @@ mod test {
 		];
 
 		let mut cmaf_config = config.clone();
-		cmaf_config.container = Container::Cmaf {
-			init_data: base64::engine::general_purpose::STANDARD.encode(&init_data),
-		};
+		cmaf_config.container = Container::Cmaf { init: init_data.into() };
 
 		let (consumer, mut video_track, _broadcast, mut catalog_track) = setup_input(&cmaf_config);
 		let output = moq_lite::Broadcast::new().produce();

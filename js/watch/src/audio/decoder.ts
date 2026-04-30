@@ -5,6 +5,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
+import { base64ToBytes } from "../base64";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
@@ -259,7 +260,8 @@ export class Decoder {
 	#runCmafDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
-		const { timescale } = config.container;
+		const initSegment = base64ToBytes(config.container.init);
+		const { timescale } = Container.Cmaf.decodeInitSegment(initSegment);
 		const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 
 		// For CMAF, just use decode buffer (no network jitter buffer yet)

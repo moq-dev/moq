@@ -81,7 +81,7 @@ async fn mux_fmp4(
 			cmaf_consumer.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
 
 		let timescale = match &config.container {
-			hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
+			hang::catalog::Container::Cmaf { init } => parse_timescale_from_init(init)?,
 			hang::catalog::Container::Legacy => {
 				anyhow::bail!("unexpected Legacy track after conversion")
 			}
@@ -96,7 +96,7 @@ async fn mux_fmp4(
 			cmaf_consumer.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
 
 		let timescale = match &config.container {
-			hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
+			hang::catalog::Container::Cmaf { init } => parse_timescale_from_init(init)?,
 			hang::catalog::Container::Legacy => {
 				anyhow::bail!("unexpected Legacy track after conversion")
 			}
@@ -120,14 +120,10 @@ async fn mux_fmp4(
 	Ok(())
 }
 
-fn parse_timescale_from_init(init_data_b64: &str) -> anyhow::Result<u64> {
-	use base64::Engine;
+fn parse_timescale_from_init(init: &[u8]) -> anyhow::Result<u64> {
 	use mp4_atom::DecodeMaybe;
 
-	let data = base64::engine::general_purpose::STANDARD
-		.decode(init_data_b64)
-		.context("invalid base64")?;
-	let mut cursor = std::io::Cursor::new(&data);
+	let mut cursor = std::io::Cursor::new(init);
 	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
 		if let mp4_atom::Any::Moov(moov) = atom {
 			let trak = moov.trak.first().context("no tracks in moov")?;

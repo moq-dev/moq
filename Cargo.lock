@@ -3556,7 +3556,6 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-server",
- "base64 0.22.1",
  "bytes",
  "clap",
  "hang",
@@ -3593,7 +3592,6 @@ version = "0.0.2"
 name = "moq-ffi"
 version = "0.2.7"
 dependencies = [
- "base64 0.22.1",
  "bytes",
  "hang",
  "moq-lite",
