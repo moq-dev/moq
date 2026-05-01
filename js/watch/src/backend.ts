@@ -7,6 +7,7 @@ import { Muxer } from "./mse";
 import { type Latency, Sync } from "./sync";
 import { Thumbnail } from "./thumbnail";
 import * as Video from "./video";
+import { Visibility } from "./visibility";
 
 // Serializable representation of TimeRanges
 export interface BufferedRange {
@@ -56,10 +57,6 @@ export interface MultiBackendProps {
 	rtt?: Signal<number | undefined>;
 
 	paused?: boolean | Signal<boolean>;
-
-	// Whether to subscribe to the publisher's thumbnail track and use it as a
-	// paused-state placeholder, instead of pulling an i-frame from video.
-	thumbnail?: boolean | Signal<boolean>;
 }
 
 // We have to proxy some of these signals because we support both the MSE and WebCodecs.
@@ -127,6 +124,9 @@ export class MultiBackend implements Backend {
 	// Subscribes to the thumbnail track and exposes a bitmap for the renderer.
 	thumbnail: Thumbnail;
 
+	// Tracks whether the rendering element is on-screen and tab is focused.
+	visibility: Visibility;
+
 	// Used to sync audio and video playback at a target delay.
 	sync: Sync;
 
@@ -151,6 +151,9 @@ export class MultiBackend implements Backend {
 
 		this.paused = Signal.from(props?.paused ?? false);
 
+		this.visibility = new Visibility(this.element);
+		this.signals.cleanup(() => this.visibility.close());
+
 		// Flatten the broadcast → (active, catalog) signals so Thumbnail can
 		// observe them without holding a reference to the watch-level Broadcast.
 		const moqBroadcast = new Signal<Moq.Broadcast | undefined>(undefined);
@@ -161,7 +164,14 @@ export class MultiBackend implements Backend {
 			catalog.set(wb ? effect.get(wb.catalog) : undefined);
 		});
 
-		this.thumbnail = new Thumbnail(moqBroadcast, catalog, { enabled: props?.thumbnail });
+		// Subscribe to thumbnails only when the player is paused and the canvas
+		// is visible — i.e. exactly when a thumbnail would be displayed.
+		const thumbnailEnabled = new Signal<boolean>(false);
+		this.signals.run((effect) => {
+			thumbnailEnabled.set(effect.get(this.paused) && effect.get(this.visibility.visible));
+		});
+
+		this.thumbnail = new Thumbnail(moqBroadcast, catalog, { enabled: thumbnailEnabled });
 		this.signals.cleanup(() => this.thumbnail.close());
 
 		this.signals.run(this.#runElement.bind(this));
@@ -191,6 +201,7 @@ export class MultiBackend implements Backend {
 		const videoRenderer = new Video.Renderer(videoSource, {
 			canvas: element,
 			paused: this.paused,
+			visible: this.visibility.visible,
 			thumbnail: this.thumbnail.bitmap,
 		});
 

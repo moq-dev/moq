@@ -48,7 +48,7 @@ export class Thumbnail {
 	#signals = new Effect();
 
 	constructor(props: ThumbnailProps) {
-		this.enabled = Signal.from(props.enabled ?? false);
+		this.enabled = Signal.from(props.enabled ?? true);
 		this.interval = Signal.from(props.interval ?? 5000);
 		this.format = Signal.from(props.format ?? ("image/jpeg" as ThumbnailFormat));
 		this.quality = Signal.from(props.quality ?? 0.7);
