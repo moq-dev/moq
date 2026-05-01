@@ -1,6 +1,6 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
-use crate::catalog::{Audio, Chat, User, Video};
+use crate::catalog::{Audio, Chat, Detection, User, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -34,6 +34,13 @@ pub struct Catalog {
 	/// Preview information about the broadcast
 	#[serde(default)]
 	pub preview: Option<moq_lite::Track>,
+
+	/// Detection track describing bounding boxes for objects in the video.
+	///
+	/// Typically populated by an AI worker subscribing to the broadcast and
+	/// publishing JSON [`crate::catalog::Detections`] frames.
+	#[serde(default)]
+	pub detection: Option<Detection>,
 }
 
 impl Catalog {
@@ -180,6 +187,35 @@ mod test {
 			audio: Audio {
 				renditions: audio_renditions,
 			},
+			..Default::default()
+		};
+
+		let output = Catalog::from_str(&encoded).expect("failed to decode");
+		assert_eq!(decoded, output, "wrong decoded output");
+
+		let output = decoded.to_string().expect("failed to encode");
+		assert_eq!(encoded, output, "wrong encoded output");
+	}
+
+	#[test]
+	fn detection() {
+		use crate::catalog::Detection;
+
+		let mut encoded = r#"{
+			"video": {"renditions": {}},
+			"audio": {"renditions": {}},
+			"detection": {
+				"track": {"name": "detection.json"}
+			}
+		}"#
+		.to_string();
+
+		encoded.retain(|c| !c.is_whitespace());
+
+		let decoded = Catalog {
+			detection: Some(Detection {
+				track: Some(moq_lite::Track::new("detection.json")),
+			}),
 			..Default::default()
 		};
 

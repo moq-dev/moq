@@ -6,6 +6,7 @@ export const PRIORITY = {
 	audio: 80,
 	video: 60,
 	typing: 40,
+	detection: 30,
 	location: 20,
 	preview: 10,
 } as const;

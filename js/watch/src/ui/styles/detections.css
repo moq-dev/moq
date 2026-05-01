@@ -1,0 +1,27 @@
+.watch-ui__detections {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	overflow: visible;
+	z-index: 2;
+}
+
+.watch-ui__detections-box {
+	fill: none;
+	stroke: var(--color-orange-400, #fb923c);
+	stroke-width: 0.004;
+	vector-effect: non-scaling-stroke;
+	filter: drop-shadow(0 0 var(--spacing-4, 4px) var(--color-black-alpha-40, rgba(0, 0, 0, 0.4)));
+}
+
+.watch-ui__detections-label {
+	fill: var(--color-white, #fff);
+	font-size: 0.04px;
+	font-weight: 600;
+	paint-order: stroke;
+	stroke: var(--color-black-alpha-40, rgba(0, 0, 0, 0.6));
+	stroke-width: 0.012;
+	stroke-linejoin: round;
+}

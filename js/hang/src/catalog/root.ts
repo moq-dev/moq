@@ -4,6 +4,7 @@ import * as z from "zod/mini";
 import { AudioSchema } from "./audio";
 import { CapabilitiesSchema } from "./capabilities";
 import { ChatSchema } from "./chat";
+import { DetectionSchema } from "./detection";
 import { LocationSchema } from "./location";
 import { TrackSchema } from "./track";
 import { UserSchema } from "./user";
@@ -17,6 +18,7 @@ export const RootSchema = z.object({
 	chat: z.optional(ChatSchema),
 	capabilities: z.optional(CapabilitiesSchema),
 	preview: z.optional(TrackSchema),
+	detection: z.optional(DetectionSchema),
 });
 
 export type Root = z.infer<typeof RootSchema>;

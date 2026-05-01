@@ -3,6 +3,7 @@ import { useContext } from "solid-js";
 import { Show } from "solid-js/web";
 import type MoqWatch from "../element";
 
+import BoundingBoxes from "./components/BoundingBoxes";
 import BufferingIndicator from "./components/BufferingIndicator";
 import WatchControls from "./components/WatchControls";
 import WatchUIContextProvider, { WatchUIContext } from "./context";
@@ -28,6 +29,7 @@ export function WatchUI(props: { watch: MoqWatch }) {
 						</Show>
 					);
 				})()}
+				<BoundingBoxes />
 				<BufferingIndicator />
 			</div>
 			<WatchControls />
