@@ -6,6 +6,7 @@ export * as Chat from "./chat";
 export * as Location from "./location";
 export * from "./preview";
 export * as Source from "./source";
+export * from "./thumbnail";
 export * as User from "./user";
 export * as Video from "./video";
 

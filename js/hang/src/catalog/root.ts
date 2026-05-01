@@ -5,6 +5,7 @@ import { AudioSchema } from "./audio";
 import { CapabilitiesSchema } from "./capabilities";
 import { ChatSchema } from "./chat";
 import { LocationSchema } from "./location";
+import { ThumbnailSchema } from "./thumbnail";
 import { TrackSchema } from "./track";
 import { UserSchema } from "./user";
 import { VideoSchema } from "./video";
@@ -17,6 +18,7 @@ export const RootSchema = z.object({
 	chat: z.optional(ChatSchema),
 	capabilities: z.optional(CapabilitiesSchema),
 	preview: z.optional(TrackSchema),
+	thumbnail: z.optional(ThumbnailSchema),
 });
 
 export type Root = z.infer<typeof RootSchema>;

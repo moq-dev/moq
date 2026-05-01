@@ -7,5 +7,6 @@ export const PRIORITY = {
 	video: 60,
 	typing: 40,
 	location: 20,
+	thumbnail: 15,
 	preview: 10,
 } as const;

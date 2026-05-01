@@ -7,6 +7,7 @@ export * from "./location";
 export * from "./preview";
 export * from "./priority";
 export * from "./root";
+export * from "./thumbnail";
 export * from "./track";
 export * from "./user";
 export * from "./video";

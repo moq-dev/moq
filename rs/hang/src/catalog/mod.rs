@@ -10,6 +10,7 @@ mod consumer;
 mod container;
 mod preview;
 mod root;
+mod thumbnail;
 mod user;
 mod video;
 
@@ -19,5 +20,6 @@ pub use consumer::*;
 pub use container::*;
 pub use preview::*;
 pub use root::*;
+pub use thumbnail::*;
 pub use user::*;
 pub use video::*;

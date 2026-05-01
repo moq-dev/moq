@@ -1,6 +1,6 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
-use crate::catalog::{Audio, Chat, User, Video};
+use crate::catalog::{Audio, Chat, Thumbnail, User, Video};
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -34,6 +34,11 @@ pub struct Catalog {
 	/// Preview information about the broadcast
 	#[serde(default)]
 	pub preview: Option<moq_lite::Track>,
+
+	/// Thumbnail tracks: stand-alone still images (JPEG/PNG/WebP) published
+	/// infrequently for use as paused-player previews.
+	#[serde(default, skip_serializing_if = "Thumbnail::is_empty")]
+	pub thumbnail: Thumbnail,
 }
 
 impl Catalog {
@@ -97,7 +102,7 @@ impl Catalog {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{AudioCodec::Opus, AudioConfig, Container, H264, VideoConfig};
+	use crate::catalog::{AudioCodec::Opus, AudioConfig, Container, H264, ThumbnailConfig, VideoConfig};
 
 	use super::*;
 
@@ -188,5 +193,51 @@ mod test {
 
 		let output = decoded.to_string().expect("failed to encode");
 		assert_eq!(encoded, output, "wrong encoded output");
+	}
+
+	#[test]
+	fn thumbnail_roundtrip() {
+		let input = r#"{
+			"thumbnail": {
+				"renditions": {
+					"thumbnail/lg": {
+						"codec": "image/jpeg",
+						"container": {"kind": "legacy"},
+						"codedWidth": 320,
+						"codedHeight": 180,
+						"interval": 5000,
+						"quality": 0.7
+					}
+				}
+			}
+		}"#;
+
+		let mut renditions = BTreeMap::new();
+		renditions.insert(
+			"thumbnail/lg".to_string(),
+			ThumbnailConfig {
+				codec: "image/jpeg".to_string(),
+				container: Container::Legacy,
+				coded_width: 320,
+				coded_height: 180,
+				interval: Some(5000),
+				quality: Some(0.7),
+			},
+		);
+
+		let expected = Catalog {
+			thumbnail: Thumbnail { renditions },
+			..Default::default()
+		};
+
+		// Round-trip via serde: parse, re-serialize, re-parse — the second parse
+		// must match the original. We don't compare encoded bytes because the
+		// (always-serialized) empty video/audio sections aren't part of the input.
+		let decoded = Catalog::from_str(input).expect("failed to decode thumbnail");
+		assert_eq!(expected, decoded, "wrong decoded output");
+
+		let reencoded = decoded.to_string().expect("failed to encode thumbnail");
+		let redecoded = Catalog::from_str(&reencoded).expect("failed to decode reencoded");
+		assert_eq!(expected, redecoded, "round-trip mismatch");
 	}
 }

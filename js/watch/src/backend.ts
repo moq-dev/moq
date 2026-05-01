@@ -1,9 +1,11 @@
+import type * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
 import { Muxer } from "./mse";
 import { type Latency, Sync } from "./sync";
+import { Thumbnail } from "./thumbnail";
 import * as Video from "./video";
 
 // Serializable representation of TimeRanges
@@ -54,6 +56,10 @@ export interface MultiBackendProps {
 	rtt?: Signal<number | undefined>;
 
 	paused?: boolean | Signal<boolean>;
+
+	// Whether to subscribe to the publisher's thumbnail track and use it as a
+	// paused-state placeholder, instead of pulling an i-frame from video.
+	thumbnail?: boolean | Signal<boolean>;
 }
 
 // We have to proxy some of these signals because we support both the MSE and WebCodecs.
@@ -118,6 +124,9 @@ export class MultiBackend implements Backend {
 	audio: AudioBackend;
 	#audioSource: Audio.Source;
 
+	// Subscribes to the thumbnail track and exposes a bitmap for the renderer.
+	thumbnail: Thumbnail;
+
 	// Used to sync audio and video playback at a target delay.
 	sync: Sync;
 
@@ -141,6 +150,19 @@ export class MultiBackend implements Backend {
 		this.audio = new AudioBackend(this.#audioSource);
 
 		this.paused = Signal.from(props?.paused ?? false);
+
+		// Flatten the broadcast → (active, catalog) signals so Thumbnail can
+		// observe them without holding a reference to the watch-level Broadcast.
+		const moqBroadcast = new Signal<Moq.Broadcast | undefined>(undefined);
+		const catalog = new Signal<Catalog.Root | undefined>(undefined);
+		this.signals.run((effect) => {
+			const wb = effect.get(this.broadcast);
+			moqBroadcast.set(wb ? effect.get(wb.active) : undefined);
+			catalog.set(wb ? effect.get(wb.catalog) : undefined);
+		});
+
+		this.thumbnail = new Thumbnail(moqBroadcast, catalog, { enabled: props?.thumbnail });
+		this.signals.cleanup(() => this.thumbnail.close());
 
 		this.signals.run(this.#runElement.bind(this));
 	}
@@ -166,7 +188,11 @@ export class MultiBackend implements Backend {
 			paused: this.paused,
 		});
 
-		const videoRenderer = new Video.Renderer(videoSource, { canvas: element, paused: this.paused });
+		const videoRenderer = new Video.Renderer(videoSource, {
+			canvas: element,
+			paused: this.paused,
+			thumbnail: this.thumbnail.bitmap,
+		});
 
 		effect.cleanup(() => {
 			videoSource.close();

@@ -5,6 +5,7 @@ import * as Audio from "./audio";
 import * as Chat from "./chat";
 import * as Location from "./location";
 import { Preview, type PreviewProps } from "./preview";
+import { Thumbnail, type ThumbnailProps } from "./thumbnail";
 import * as User from "./user";
 import * as Video from "./video";
 
@@ -18,6 +19,7 @@ export type BroadcastProps = {
 	user?: User.Props;
 	chat?: Chat.Props;
 	preview?: PreviewProps;
+	thumbnail?: Omit<ThumbnailProps, "frame">;
 };
 
 export class Broadcast {
@@ -33,6 +35,7 @@ export class Broadcast {
 	location: Location.Root;
 	chat: Chat.Root;
 	preview: Preview;
+	thumbnail: Thumbnail;
 	user: User.Info;
 
 	signals = new Effect();
@@ -47,6 +50,7 @@ export class Broadcast {
 		this.location = new Location.Root(props?.location);
 		this.chat = new Chat.Root(props?.chat);
 		this.preview = new Preview(props?.preview);
+		this.thumbnail = new Thumbnail({ ...props?.thumbnail, frame: this.video.frame });
 		this.user = new User.Info(props?.user);
 
 		this.signals.run(this.#run.bind(this));
@@ -90,6 +94,9 @@ export class Broadcast {
 					case Preview.TRACK:
 						this.preview.serve(request.track, effect);
 						break;
+					case Thumbnail.TRACK:
+						this.thumbnail.serve(request.track, effect);
+						break;
 					case Chat.Typing.TRACK:
 						this.chat.typing.serve(request.track, effect);
 						break;
@@ -129,6 +136,7 @@ export class Broadcast {
 			user: effect.get(this.user.catalog),
 			chat: effect.get(this.chat.catalog),
 			preview: effect.get(this.preview.catalog),
+			thumbnail: effect.get(this.thumbnail.catalog),
 		};
 
 		const encoded = Catalog.encode(catalog);
@@ -142,6 +150,7 @@ export class Broadcast {
 		this.location.close();
 		this.chat.close();
 		this.preview.close();
+		this.thumbnail.close();
 		this.user.close();
 	}
 }

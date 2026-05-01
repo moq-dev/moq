@@ -5,6 +5,10 @@ import type { Decoder } from "./decoder";
 export type RendererProps = {
 	canvas?: HTMLCanvasElement | Signal<HTMLCanvasElement | undefined>;
 	paused?: boolean | Signal<boolean>;
+	// Optional still-image fallback. When set and the player is paused without
+	// a decoded frame, the renderer draws this ImageBitmap instead of pulling
+	// an i-frame from the video track.
+	thumbnail?: Signal<ImageBitmap | undefined>;
 };
 
 // An component to render a video to a canvas.
@@ -16,6 +20,9 @@ export class Renderer {
 
 	// Whether the video is paused.
 	paused: Signal<boolean>;
+
+	// Optional thumbnail bitmap, used as a paused-state placeholder.
+	thumbnail?: Signal<ImageBitmap | undefined>;
 
 	// The most recently rendered frame, updated after each rAF paint.
 	readonly frame = new Signal<VideoFrame | undefined>(undefined);
@@ -31,6 +38,7 @@ export class Renderer {
 		this.decoder = decoder;
 		this.canvas = Signal.from(props?.canvas);
 		this.paused = Signal.from(props?.paused ?? false);
+		this.thumbnail = props?.thumbnail;
 
 		this.#signals.run((effect) => {
 			const canvas = effect.get(this.canvas);
@@ -99,9 +107,23 @@ export class Renderer {
 			return;
 		}
 
-		// When paused, fetch a single preview frame then disable.
+		// Already have something rendered — no need to pull anything.
 		const frame = effect.get(this.frame);
-		this.decoder.enabled.set(!frame);
+		if (frame) {
+			this.decoder.enabled.set(false);
+			return;
+		}
+
+		// If a thumbnail is being supplied, prefer it over pulling an i-frame
+		// from the video track, which is much heavier.
+		const thumb = this.thumbnail ? effect.get(this.thumbnail) : undefined;
+		if (thumb) {
+			this.decoder.enabled.set(false);
+			return;
+		}
+
+		// Fall back to fetching a single preview frame from video.
+		this.decoder.enabled.set(true);
 	}
 
 	#runRender(effect: Effect) {
@@ -116,11 +138,14 @@ export class Renderer {
 			decoded = effect.get(this.decoder.frame);
 		}
 
+		// Track thumbnail so the canvas re-renders when a new one arrives.
+		const thumbnail = this.thumbnail ? effect.get(this.thumbnail) : undefined;
+
 		// Request a callback to render the frame based on the monitor's refresh rate.
 		// Always render, even when paused (to show last frame)
 		let animate: number | undefined = requestAnimationFrame(() => {
 			const frame = decoded ?? this.frame.peek();
-			this.#render(ctx, frame);
+			this.#render(ctx, frame, thumbnail);
 
 			// Update signals to reflect what's actually on screen.
 			if (decoded) {
@@ -141,8 +166,11 @@ export class Renderer {
 		});
 	}
 
-	#render(ctx: CanvasRenderingContext2D, frame?: VideoFrame) {
-		if (!frame) {
+	#render(ctx: CanvasRenderingContext2D, frame?: VideoFrame, thumbnail?: ImageBitmap) {
+		// Decoded frame wins if we have one; otherwise fall back to the
+		// thumbnail (typed differently — ImageBitmap, not VideoFrame).
+		const source: VideoFrame | ImageBitmap | undefined = frame ?? thumbnail;
+		if (!source) {
 			// Clear canvas when no frame
 			ctx.fillStyle = "#000";
 			ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -161,7 +189,7 @@ export class Renderer {
 			ctx.translate(-ctx.canvas.width, 0);
 		}
 
-		ctx.drawImage(frame, 0, 0, ctx.canvas.width, ctx.canvas.height);
+		ctx.drawImage(source, 0, 0, ctx.canvas.width, ctx.canvas.height);
 		ctx.restore();
 	}
 

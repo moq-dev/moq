@@ -12,7 +12,18 @@ function parseCatalogFormat(value: string | null): CatalogFormat {
 	return CATALOG_FORMATS.find((f) => f === value) ?? DEFAULT_CATALOG_FORMAT;
 }
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
+const OBSERVED = [
+	"url",
+	"name",
+	"paused",
+	"volume",
+	"muted",
+	"reload",
+	"latency",
+	"jitter",
+	"catalog-format",
+	"thumbnail",
+] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -127,6 +138,15 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
+			const enabled = effect.get(this.backend.thumbnail.enabled);
+			if (enabled) {
+				this.setAttribute("thumbnail", "");
+			} else {
+				this.removeAttribute("thumbnail");
+			}
+		});
+
+		this.signals.run((effect) => {
 			const latency = effect.get(this.backend.latency);
 			if (latency === "real-time") {
 				this.setAttribute("latency", "real-time");
@@ -184,6 +204,8 @@ export default class MoqWatch extends HTMLElement {
 			this.#setLatencyNumber(newValue);
 		} else if (name === "catalog-format") {
 			this.broadcast.catalogFormat.set(parseCatalogFormat(newValue));
+		} else if (name === "thumbnail") {
+			this.backend.thumbnail.enabled.set(newValue !== null);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -262,6 +284,19 @@ export default class MoqWatch extends HTMLElement {
 
 	set catalogFormat(value: CatalogFormat) {
 		this.broadcast.catalogFormat.set(value);
+	}
+
+	/**
+	 * When true, subscribe to the publisher's thumbnail track and use the latest
+	 * still image as the paused-state placeholder, instead of pulling an i-frame
+	 * from video. No-op if the publisher does not advertise a thumbnail track.
+	 */
+	get thumbnail(): boolean {
+		return this.backend.thumbnail.enabled.peek();
+	}
+
+	set thumbnail(value: boolean) {
+		this.backend.thumbnail.enabled.set(value);
 	}
 
 	/**
