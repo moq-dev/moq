@@ -112,7 +112,7 @@ export class Mse implements Backend {
 		// timescale out of it. The catalog also gives us the bytes to feed
 		// directly into MSE — no need to regenerate.
 		const initSegment = base64ToBytes(config.container.init);
-		const { timescale } = Container.Cmaf.decodeInitSegment(initSegment);
+		const init = Container.Cmaf.decodeInitSegment(initSegment);
 
 		effect.spawn(async () => {
 			await this.#appendBuffer(sourceBuffer, initSegment);
@@ -124,7 +124,7 @@ export class Mse implements Backend {
 				if (!frame) return;
 
 				// Extract the timestamp from the CMAF segment and mark when we received it.
-				const timestamp = Container.Cmaf.decodeTimestamp(frame, timescale);
+				const timestamp = Container.Cmaf.decodeTimestamp(frame, init);
 				this.source.sync.received(Moq.Time.Milli.fromMicro(timestamp), "video");
 
 				await this.#appendBuffer(sourceBuffer, frame);

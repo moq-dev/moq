@@ -360,7 +360,7 @@ class DecoderTrack {
 		if (this.config.container.kind !== "cmaf") return;
 
 		const initSegment = base64ToBytes(this.config.container.init);
-		const { timescale } = Container.Cmaf.decodeInitSegment(initSegment);
+		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
 
 		// Configure decoder with description from catalog
@@ -393,7 +393,7 @@ class DecoderTrack {
 							const segment = await Promise.race([group.readFrame(), effect.cancel]);
 							if (!segment) break;
 
-							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
+							const samples = Container.Cmaf.decodeDataSegment(segment, init);
 
 							for (const sample of samples) {
 								const chunk = new EncodedVideoChunk({

@@ -261,7 +261,7 @@ export class Decoder {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
 		const initSegment = base64ToBytes(config.container.init);
-		const { timescale } = Container.Cmaf.decodeInitSegment(initSegment);
+		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 
 		// For CMAF, just use decode buffer (no network jitter buffer yet)
@@ -303,7 +303,7 @@ export class Decoder {
 							const segment = await group.readFrame();
 							if (!segment) break;
 
-							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
+							const samples = Container.Cmaf.decodeDataSegment(segment, init);
 
 							for (const sample of samples) {
 								// Mark that we received this frame right now.
