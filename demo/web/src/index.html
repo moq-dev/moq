@@ -28,7 +28,7 @@
 				- `latency`: The target jitter buffer size in milliseconds, or "real-time" to use the RTT.
 				- `reload`: Whether to automatically reconnect when the broadcast goes offline/online.
 
-				NOTE: Cloudflare doesn't support reload yet.
+				NOTE: Cloudflare doesn't support reload yet or latency=real-time.
 			-->
 			<moq-watch id="watch" url="%VITE_RELAY_URL%" name="bbb" muted latency="real-time" reload>
 				<!-- Provide a canvas element to render the video via WebCodecs. -->
