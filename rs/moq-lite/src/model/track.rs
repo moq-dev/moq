@@ -1,14 +1,14 @@
 //! A track is a collection of semi-reliable and semi-ordered streams, split into a [TrackProducer] and [TrackConsumer] handle.
 //!
 //! A [TrackProducer] creates streams with a sequence number and priority.
-//! The sequest number is used to determine the order of streams, while the priority is used to determine which stream to transmit first.
+//! The sequence number is used to determine the order of streams, while the priority is used to determine which stream to transmit first.
 //! This may seem counter-intuitive, but is designed for live streaming where the newest streams may be higher priority.
 //! A cloned [TrackProducer] can be used to create streams in parallel, but will error if a duplicate sequence number is used.
 //!
 //! A [TrackConsumer] may not receive all streams in order or at all.
-//! These streams are meant to be transmitted over congested networks and the key to MoQ Tranport is to not block on them.
-//! streams will be cached for a potentially limited duration added to the unreliable nature.
-//! A cloned [TrackConsumer] will receive a copy of all new stream going forward (fanout).
+//! These streams are meant to be transmitted over congested networks and the key to MoQ Transport is to not block on them.
+//! Streams will be cached for a potentially limited duration added to the unreliable nature.
+//! A cloned [TrackConsumer] will receive a copy of all new streams going forward (fanout).
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
@@ -577,9 +577,13 @@ impl TrackConsumer {
 		self.poll(waiter, |state| state.poll_get_group(sequence))
 	}
 
-	/// Block until the group with the given sequence is available.
+	/// Wait until the group with the given sequence becomes available.
 	///
-	/// Returns None if the group is not in the cache and a newer group exists.
+	/// Resolves to `Some(GroupConsumer)` once the group is in the cache.
+	/// Resolves to `None` only when `sequence` is at or past the track's
+	/// `final_sequence` (set by `finish()` / `finish_at()`), since such a
+	/// group can never be produced. Sequences below `final_sequence` still
+	/// wait, since older groups may still arrive out of order.
 	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
 		conducer::wait(|waiter| self.poll_get_group(waiter, sequence)).await
 	}
