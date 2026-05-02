@@ -4,7 +4,7 @@
 //! Each test is gated with `#[cfg(feature = "...")]` so it only compiles when the
 //! corresponding backend is enabled. Running `cargo test --all-features` exercises all.
 
-use moq_native::moq_lite::{Origin, Subscription, Track};
+use moq_native::moq_lite::{Origin, Track};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,7 +70,7 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	let bc = bc.expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"), Subscription::default())
+		.subscribe_track(&Track::new("video"))
 		.expect("subscribe_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
@@ -222,7 +222,7 @@ async fn iroh_connect() {
 	let bc = bc.expect("expected announce, got unannounce");
 
 	let mut track_sub = bc
-		.subscribe_track(&Track::new("video"), Subscription::default())
+		.subscribe_track(&Track::new("video"))
 		.expect("subscribe_track failed");
 
 	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())

@@ -134,8 +134,7 @@ impl OrderedProducer {
 	/// Multiple consumers can be created from the same producer, each receiving
 	/// a copy of all data written to the track.
 	pub fn consume(&self, max_latency: std::time::Duration) -> OrderedConsumer {
-		let subscriber = self.track.consume().subscribe_default().expect("producer alive");
-		OrderedConsumer::new(subscriber, max_latency)
+		OrderedConsumer::new(self.track.consume(), max_latency)
 	}
 }
 
