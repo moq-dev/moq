@@ -128,14 +128,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// LargestObject means "start from the latest cached group". Other filter
 		// types are still ignored (see the warn above) — TODO: full FilterType
 		// support along with FETCH wiring.
-		let start_group = matches!(msg.filter_type, FilterType::LargestObject)
-			.then(|| consumer.latest_group().map(|g| g.sequence))
+		let start = matches!(msg.filter_type, FilterType::LargestObject)
+			.then(|| consumer.latest())
 			.flatten();
 
 		let subscription = Subscription {
 			priority: msg.subscriber_priority,
 			ordered: matches!(msg.group_order, GroupOrder::Ascending),
-			start_group,
+			start,
 			..Default::default()
 		};
 

@@ -4,7 +4,7 @@
 //! This is a simplified subset of the *official* Media over QUIC (MoQ) transport, focusing on the practical features.
 //!
 //! **NOTE**: While compatible with a subset of the IETF MoQ specification, many features are not supported on purpose.
-//! I highly highly highly recommend using `moq-lite` instead of the IETF standard.
+//! I highly highly highly recommend using `moq-lite` instead of the IETF standard until at least draft-30.
 //!
 //! ## API
 //!

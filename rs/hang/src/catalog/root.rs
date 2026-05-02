@@ -88,8 +88,8 @@ impl Catalog {
 		priority: 100,
 		ordered: false,
 		max_latency: std::time::Duration::ZERO,
-		start_group: None,
-		end_group: None,
+		start: None,
+		end: None,
 	};
 }
 

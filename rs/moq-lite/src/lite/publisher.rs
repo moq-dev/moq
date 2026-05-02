@@ -287,22 +287,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let consumer = broadcast.consume_track(&track)?;
 
 		// Pick the start group: explicit, else the latest cached group.
-		let start_group = subscribe
-			.start_group
-			.or_else(|| consumer.latest_group().map(|g| g.sequence));
+		let start = subscribe.start_group.or_else(|| consumer.latest());
 		let subscriber = consumer.subscribe(Subscription {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
 			max_latency: subscribe.max_latency,
-			start_group,
-			end_group: subscribe.end_group,
+			start,
+			end: subscribe.end_group,
 		})?;
 
 		let info = lite::SubscribeOk {
 			priority: subscribe.priority,
 			ordered: subscribe.ordered,
 			max_latency: subscribe.max_latency,
-			start_group,
+			start_group: start,
 			end_group: subscribe.end_group,
 		};
 
@@ -353,8 +351,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							priority: upd.priority,
 							ordered: upd.ordered,
 							max_latency: upd.max_latency,
-							start_group: upd.start_group,
-							end_group: upd.end_group,
+							start: upd.start_group,
+							end: upd.end_group,
 						});
 					}
 					None => break,

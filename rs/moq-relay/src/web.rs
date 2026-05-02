@@ -509,33 +509,28 @@ async fn serve_fetch(
 	// subscribers don't get a spurious 404 before the broadcast has gossiped.
 	#[allow(deprecated)]
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
-	let track = broadcast.consume_track(&track).map_err(|err| match err {
-		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
-		_ => StatusCode::INTERNAL_SERVER_ERROR,
-	})?;
+	let mut track = broadcast
+		.subscribe_track(&track, moq_lite::Subscription::default())
+		.map_err(|err| match err {
+			moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
+			_ => StatusCode::INTERNAL_SERVER_ERROR,
+		})?;
 
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
 	let result = tokio::time::timeout_at(deadline, async {
 		let group = match params.group {
-			FetchGroup::Num(sequence) => track.get_group(sequence.into()).map_err(|err| match err {
-				moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
-				_ => StatusCode::INTERNAL_SERVER_ERROR,
-			})?,
-			FetchGroup::Latest => match track.latest_group() {
-				Some(group) => group,
-				None => {
-					// No cached group yet — wait for the first one via subscribe.
-					let mut sub = track
-						.subscribe_default()
-						.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-					match sub.next_group().await {
-						Ok(Some(group)) => group,
-						Ok(None) => return Err(StatusCode::NOT_FOUND),
-						Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-					}
-				}
+			FetchGroup::Latest => match track.latest() {
+				Some(sequence) => track.get_group(sequence).await,
+				None => track.recv_group().await,
 			},
+			FetchGroup::Num(sequence) => track.get_group(sequence).await,
+		};
+
+		let group = match group {
+			Ok(Some(group)) => group,
+			Ok(None) => return Err(StatusCode::NOT_FOUND),
+			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
 		tracing::info!(track = %track.name, group = %group.sequence, "serving group");
