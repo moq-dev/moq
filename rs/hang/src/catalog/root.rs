@@ -136,6 +136,7 @@ mod test {
 		video_renditions.insert(
 			"video".to_string(),
 			VideoConfig {
+				broadcast: None,
 				codec: H264 {
 					profile: 0x64,
 					constraints: 0x00,
@@ -160,6 +161,7 @@ mod test {
 		audio_renditions.insert(
 			"audio".to_string(),
 			AudioConfig {
+				broadcast: None,
 				codec: Opus,
 				sample_rate: 48_000,
 				channel_count: 2,
@@ -188,5 +190,39 @@ mod test {
 
 		let output = decoded.to_string().expect("failed to encode");
 		assert_eq!(encoded, output, "wrong encoded output");
+	}
+
+	#[test]
+	fn rendition_with_broadcast_override() {
+		// Decode a catalog where one rendition references a track in a sibling broadcast,
+		// and verify the `broadcast` field round-trips through serde.
+		let encoded = r#"{
+			"video": {
+				"renditions": {
+					"video": {
+						"broadcast": "../source",
+						"codec": "avc1.64001f",
+						"codedWidth": 1280,
+						"codedHeight": 720,
+						"container": {"kind": "legacy"}
+					}
+				}
+			}
+		}"#;
+
+		let parsed = Catalog::from_str(encoded).expect("failed to decode");
+		let rendition = parsed.video.renditions.get("video").expect("missing rendition");
+		assert_eq!(
+			rendition.broadcast.as_ref().map(|p| p.as_str()),
+			Some("../source"),
+			"broadcast field did not deserialize"
+		);
+
+		// Re-encoding preserves the broadcast field.
+		let output = parsed.to_string().expect("failed to encode");
+		assert!(
+			output.contains(r#""broadcast":"../source""#),
+			"broadcast field missing from re-encoded JSON: {output}"
+		);
 	}
 }

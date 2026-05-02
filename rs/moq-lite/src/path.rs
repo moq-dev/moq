@@ -232,6 +232,39 @@ impl<'a> Path<'a> {
 			Path(Cow::Owned(format!("{}/{}", self.0, other.as_str())))
 		}
 	}
+
+	/// Resolve a [`PathRelative`] against this path.
+	///
+	/// `..` segments in `rel` pop the last segment of the base; named segments are appended.
+	/// Excess `..` clamps at the root, returning an empty path. An empty `rel` returns this
+	/// path unchanged (as an owned copy).
+	///
+	/// # Examples
+	/// ```
+	/// use moq_lite::{Path, PathRelative};
+	///
+	/// let base = Path::new("a/b/c");
+	/// assert_eq!(base.resolve(&PathRelative::new("../d")).as_str(), "a/b/d");
+	/// assert_eq!(base.resolve(&PathRelative::new("d")).as_str(), "a/b/c/d");
+	/// assert_eq!(base.resolve(&PathRelative::new("../../../../x")).as_str(), "x");
+	/// ```
+	pub fn resolve(&self, rel: &PathRelative<'_>) -> PathOwned {
+		let mut segments: Vec<&str> = if self.0.is_empty() {
+			Vec::new()
+		} else {
+			self.0.split('/').collect()
+		};
+
+		for seg in rel.as_str().split('/').filter(|s| !s.is_empty()) {
+			if seg == ".." {
+				segments.pop();
+			} else {
+				segments.push(seg);
+			}
+		}
+
+		Path(Cow::Owned(segments.join("/")))
+	}
 }
 
 impl<'a> From<&'a str> for Path<'a> {
@@ -317,6 +350,145 @@ impl<'de: 'a, 'a> serde::Deserialize<'de> for Path<'a> {
 	{
 		let s = <&'a str as serde::Deserialize<'de>>::deserialize(deserializer)?;
 		Ok(Path::new(s))
+	}
+}
+
+/// An owned version of [`PathRelative`] with a `'static` lifetime.
+pub type PathRelativeOwned = PathRelative<'static>;
+
+/// A relative broadcast path, used to reference broadcasts from another broadcast's catalog.
+///
+/// Unlike [`Path`] (which represents an absolute reference within the broadcast namespace),
+/// `PathRelative` may contain `..` segments to walk up the namespace and is meaningful only
+/// when resolved against a base [`Path`] via [`Path::resolve`].
+///
+/// `PathRelative` is intended for off-wire use (e.g. catalog references). It does not implement
+/// `Encode`/`Decode` and should not appear in announce/subscribe messages.
+///
+/// Leading and trailing slashes are trimmed on creation; consecutive internal slashes collapse
+/// to a single slash, mirroring [`Path`].
+///
+/// # Examples
+/// ```
+/// use moq_lite::{Path, PathRelative};
+///
+/// let rel = PathRelative::new("../source");
+/// assert_eq!(Path::new("a/b").resolve(&rel).as_str(), "a/source");
+/// ```
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct PathRelative<'a>(Cow<'a, str>);
+
+impl<'a> PathRelative<'a> {
+	/// Create a new `PathRelative` from a string slice.
+	///
+	/// Leading and trailing slashes are trimmed. Multiple consecutive internal slashes collapse
+	/// to single slashes.
+	pub fn new(s: &'a str) -> Self {
+		let trimmed = s.trim_start_matches('/').trim_end_matches('/');
+
+		if trimmed.contains("//") {
+			let normalized = trimmed
+				.split('/')
+				.filter(|s| !s.is_empty())
+				.collect::<Vec<_>>()
+				.join("/");
+			Self(Cow::Owned(normalized))
+		} else {
+			Self(Cow::Borrowed(trimmed))
+		}
+	}
+
+	pub fn as_str(&self) -> &str {
+		&self.0
+	}
+
+	pub fn empty() -> PathRelative<'static> {
+		PathRelative(Cow::Borrowed(""))
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.0.is_empty()
+	}
+
+	pub fn len(&self) -> usize {
+		self.0.len()
+	}
+
+	pub fn to_owned(&self) -> PathRelativeOwned {
+		PathRelative(Cow::Owned(self.0.to_string()))
+	}
+
+	pub fn into_owned(self) -> PathRelativeOwned {
+		PathRelative(Cow::Owned(self.0.into_owned()))
+	}
+
+	pub fn borrow(&'a self) -> PathRelative<'a> {
+		PathRelative(Cow::Borrowed(&self.0))
+	}
+}
+
+impl<'a> From<&'a str> for PathRelative<'a> {
+	fn from(s: &'a str) -> Self {
+		Self::new(s)
+	}
+}
+
+impl<'a> From<&'a String> for PathRelative<'a> {
+	fn from(s: &'a String) -> Self {
+		Self::new(s)
+	}
+}
+
+impl From<String> for PathRelative<'_> {
+	fn from(s: String) -> Self {
+		// Owned variant: avoid round-tripping through &str when no normalization is needed.
+		let trimmed = s.trim_start_matches('/').trim_end_matches('/');
+
+		if trimmed.contains("//") {
+			let normalized = trimmed
+				.split('/')
+				.filter(|s| !s.is_empty())
+				.collect::<Vec<_>>()
+				.join("/");
+			Self(Cow::Owned(normalized))
+		} else if trimmed == s {
+			Self(Cow::Owned(s))
+		} else {
+			Self(Cow::Owned(trimmed.to_string()))
+		}
+	}
+}
+
+impl Default for PathRelative<'_> {
+	fn default() -> Self {
+		Self(Cow::Borrowed(""))
+	}
+}
+
+impl AsRef<str> for PathRelative<'_> {
+	fn as_ref(&self) -> &str {
+		&self.0
+	}
+}
+
+impl Display for PathRelative<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.0)
+	}
+}
+
+// Owned-only deserialization. We use `String::deserialize` so that owned deserializers
+// (e.g. `serde_json::from_slice`) work — the borrowed form `<&str>::deserialize` requires
+// `'de: 'a`, which is unsatisfiable when `'a = 'static`.
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for PathRelative<'static> {
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		D: serde::Deserializer<'de>,
+	{
+		let s = String::deserialize(deserializer)?;
+		Ok(PathRelative::from(s))
 	}
 }
 
@@ -962,5 +1134,57 @@ mod tests {
 		let a = PathPrefixes::new(["foo", "bar"]);
 		let b = PathPrefixes::new(["bar", "foo"]);
 		assert_eq!(a, b);
+	}
+
+	#[test]
+	fn test_path_relative_normalize() {
+		assert_eq!(PathRelative::new("foo").as_str(), "foo");
+		assert_eq!(PathRelative::new("/foo/").as_str(), "foo");
+		assert_eq!(PathRelative::new("foo//bar").as_str(), "foo/bar");
+		assert_eq!(PathRelative::new("../foo").as_str(), "../foo");
+		assert_eq!(PathRelative::new("../../a/b").as_str(), "../../a/b");
+		assert!(PathRelative::new("").is_empty());
+	}
+
+	#[test]
+	fn test_resolve_no_dotdot() {
+		let base = Path::new("a/b");
+		assert_eq!(base.resolve(&PathRelative::new("c")).as_str(), "a/b/c");
+		assert_eq!(base.resolve(&PathRelative::new("c/d")).as_str(), "a/b/c/d");
+	}
+
+	#[test]
+	fn test_resolve_empty_rel_returns_base() {
+		let base = Path::new("a/b");
+		assert_eq!(base.resolve(&PathRelative::new("")).as_str(), "a/b");
+	}
+
+	#[test]
+	fn test_resolve_single_dotdot() {
+		let base = Path::new("a/b/c");
+		assert_eq!(base.resolve(&PathRelative::new("../d")).as_str(), "a/b/d");
+		assert_eq!(base.resolve(&PathRelative::new("..")).as_str(), "a/b");
+	}
+
+	#[test]
+	fn test_resolve_multiple_dotdot() {
+		let base = Path::new("a/b/c");
+		assert_eq!(base.resolve(&PathRelative::new("../../x")).as_str(), "a/x");
+		assert_eq!(base.resolve(&PathRelative::new("../../../x")).as_str(), "x");
+	}
+
+	#[test]
+	fn test_resolve_dotdot_clamps_at_root() {
+		let base = Path::new("a");
+		// Excess `..` clamps at the root, returning an empty / single-segment path.
+		assert_eq!(base.resolve(&PathRelative::new("../../../foo")).as_str(), "foo");
+		assert_eq!(base.resolve(&PathRelative::new("..")).as_str(), "");
+	}
+
+	#[test]
+	fn test_resolve_empty_base() {
+		let base = Path::empty();
+		assert_eq!(base.resolve(&PathRelative::new("foo")).as_str(), "foo");
+		assert_eq!(base.resolve(&PathRelative::new("..")).as_str(), "");
 	}
 }

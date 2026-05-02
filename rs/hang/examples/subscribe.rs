@@ -68,13 +68,28 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 		codec = %config.codec,
 		width = ?config.coded_width,
 		height = ?config.coded_height,
+		broadcast_override = ?config.broadcast.as_ref().map(|p| p.as_str()),
 		"subscribing to video track"
 	);
+
+	// If the rendition references a different broadcast (e.g. a source feed that this
+	// catalog only sidecars), resolve it relative to the catalog's broadcast path and
+	// wait for the announcement. Otherwise subscribe on the catalog's broadcast.
+	let track_broadcast = match config.broadcast.as_ref() {
+		Some(rel) => {
+			let resolved = path.resolve(rel);
+			consumer
+				.announced_broadcast(&resolved)
+				.await
+				.ok_or_else(|| anyhow::anyhow!("source broadcast unavailable: {resolved}"))?
+		}
+		None => broadcast.clone(),
+	};
 
 	// Subscribe to the video track.
 	let track = moq_lite::Track::new(name.clone());
 
-	let track_consumer = broadcast.subscribe_track(
+	let track_consumer = track_broadcast.subscribe_track(
 		&track,
 		moq_lite::Subscription {
 			priority: 1,

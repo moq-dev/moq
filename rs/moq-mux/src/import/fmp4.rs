@@ -267,6 +267,7 @@ impl Fmp4 {
 				avcc.encode_body(&mut description)?;
 
 				VideoConfig {
+					broadcast: None,
 					coded_width: Some(avc1.visual.width as _),
 					coded_height: Some(avc1.visual.height as _),
 					codec: H264 {
@@ -290,6 +291,7 @@ impl Fmp4 {
 			mp4_atom::Codec::Hev1(hev1) => self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
 			mp4_atom::Codec::Hvc1(hvc1) => self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
 			mp4_atom::Codec::Vp08(vp08) => VideoConfig {
+				broadcast: None,
 				codec: VideoCodec::VP8,
 				description: Default::default(),
 				coded_width: Some(vp08.visual.width as _),
@@ -308,6 +310,7 @@ impl Fmp4 {
 				let vpcc = &vp09.vpcc;
 
 				VideoConfig {
+					broadcast: None,
 					codec: VP9 {
 						profile: vpcc.profile,
 						level: vpcc.level,
@@ -336,6 +339,7 @@ impl Fmp4 {
 				let av1c = &av01.av1c;
 
 				VideoConfig {
+					broadcast: None,
 					codec: AV1 {
 						profile: av1c.seq_profile,
 						level: av1c.seq_level_idx_0,
@@ -385,6 +389,7 @@ impl Fmp4 {
 		hvcc.encode_body(&mut description)?;
 
 		Ok(VideoConfig {
+			broadcast: None,
 			codec: H265 {
 				in_band,
 				profile_space: hvcc.general_profile_space,
@@ -438,6 +443,7 @@ impl Fmp4 {
 				let description = build_aac_audio_specific_config(profile, sample_rate, channel_count);
 
 				AudioConfig {
+					broadcast: None,
 					codec: AAC { profile }.into(),
 					sample_rate,
 					channel_count,
@@ -449,6 +455,7 @@ impl Fmp4 {
 			}
 			mp4_atom::Codec::Opus(opus) => {
 				AudioConfig {
+					broadcast: None,
 					codec: AudioCodec::Opus,
 					sample_rate: opus.audio.sample_rate.integer() as _,
 					channel_count: opus.audio.channel_count as _,

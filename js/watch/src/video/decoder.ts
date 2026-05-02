@@ -74,7 +74,9 @@ export class Decoder implements Backend {
 		}
 		const [_, source, track, config] = values;
 
-		const broadcast = effect.get(source.active);
+		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
+		// broadcast instead of the catalog's broadcast. Falls back to the catalog's broadcast.
+		const broadcast = source.trackBroadcast(effect, config.broadcast);
 		if (!broadcast) return;
 
 		// Start a new pending effect.

@@ -159,6 +159,30 @@ export class Broadcast {
 		});
 	}
 
+	/**
+	 * Resolve the `Moq.Broadcast` that publishes a given track.
+	 *
+	 * If `configBroadcast` is set, treat it as a path relative to this broadcast's name and
+	 * subscribe to the resolved broadcast on the same connection. Otherwise return the catalog's
+	 * own active broadcast.
+	 *
+	 * The lifetime of any newly-opened broadcast is tied to the provided `Effect`.
+	 */
+	trackBroadcast(effect: Effect, configBroadcast: string | undefined): Moq.Broadcast | undefined {
+		const active = effect.get(this.active);
+		if (!active) return undefined;
+		if (!configBroadcast) return active;
+
+		const conn = effect.get(this.connection);
+		if (!conn) return undefined;
+
+		const basePath = effect.get(this.name);
+		const resolved = Catalog.resolveBroadcast(basePath, configBroadcast);
+		const remote = conn.consume(resolved);
+		effect.cleanup(() => remote.close());
+		return remote;
+	}
+
 	close() {
 		this.signals.close();
 	}

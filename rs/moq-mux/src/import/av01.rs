@@ -52,6 +52,7 @@ impl Av01 {
 
 	fn init(&mut self, seq_header: &SequenceHeaderObu) -> anyhow::Result<()> {
 		let config = hang::catalog::VideoConfig {
+			broadcast: None,
 			coded_width: Some(seq_header.max_frame_width as u32),
 			coded_height: Some(seq_header.max_frame_height as u32),
 			codec: hang::catalog::AV1 {
@@ -112,6 +113,7 @@ impl Av01 {
 	/// Initialize with minimal config if sequence header parsing fails
 	fn init_minimal(&mut self) -> anyhow::Result<()> {
 		let config = hang::catalog::VideoConfig {
+			broadcast: None,
 			coded_width: None,
 			coded_height: None,
 			codec: hang::catalog::AV1 {
@@ -184,6 +186,7 @@ impl Av01 {
 		let twelve_bit = ((data[2] >> 5) & 0x01) == 1;
 
 		let config = hang::catalog::VideoConfig {
+			broadcast: None,
 			// Resolution unknown from av1C - will be updated when first sequence header arrives
 			coded_width: None,
 			coded_height: None,

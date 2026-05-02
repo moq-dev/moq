@@ -73,6 +73,7 @@ impl Avc1 {
 		}
 
 		let config = hang::catalog::VideoConfig {
+			broadcast: None,
 			coded_width: if width > 0 { Some(width) } else { None },
 			coded_height: if height > 0 { Some(height) } else { None },
 			codec: hang::catalog::H264 {

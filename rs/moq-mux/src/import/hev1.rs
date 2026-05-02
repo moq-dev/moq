@@ -60,6 +60,7 @@ impl Hev1 {
 		let vui_data = sps.rbsp.vui_parameters.as_ref().map(VuiData::new).unwrap_or_default();
 
 		let config = hang::catalog::VideoConfig {
+			broadcast: None,
 			coded_width: Some(sps.rbsp.cropped_width() as u32),
 			coded_height: Some(sps.rbsp.cropped_height() as u32),
 			codec: hang::catalog::H265 {

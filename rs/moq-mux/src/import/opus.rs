@@ -58,6 +58,7 @@ impl Opus {
 		let track = broadcast.unique_track(".opus")?;
 
 		let audio_config = hang::catalog::AudioConfig {
+			broadcast: None,
 			codec: hang::catalog::AudioCodec::Opus,
 			sample_rate: config.sample_rate,
 			channel_count: config.channel_count,

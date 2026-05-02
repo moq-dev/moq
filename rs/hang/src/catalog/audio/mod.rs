@@ -79,6 +79,12 @@ impl Audio {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioConfig {
+	/// Optional reference to another broadcast that publishes this track, expressed
+	/// relative to the broadcast that served this catalog. If unset, the track lives
+	/// in the same broadcast as the catalog.
+	#[serde(default)]
+	pub broadcast: Option<moq_lite::PathRelativeOwned>,
+
 	// The codec, see the registry for details:
 	// https://w3c.github.io/webcodecs/codec_registry.html
 	#[serde_as(as = "DisplayFromStr")]

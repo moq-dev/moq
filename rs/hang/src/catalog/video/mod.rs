@@ -107,6 +107,15 @@ pub struct Display {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoConfig {
+	/// Optional reference to another broadcast that publishes this track, expressed
+	/// relative to the broadcast that served this catalog. If unset, the track lives
+	/// in the same broadcast as the catalog.
+	///
+	/// This allows a worker to author a downstream catalog that points unchanged
+	/// renditions at the source broadcast without re-publishing the bytes.
+	#[serde(default)]
+	pub broadcast: Option<moq_lite::PathRelativeOwned>,
+
 	/// The codec, see the registry for details:
 	/// <https://w3c.github.io/webcodecs/codec_registry.html>
 	#[serde_as(as = "DisplayFromStr")]

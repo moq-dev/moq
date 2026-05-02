@@ -98,6 +98,7 @@ mod test {
 		video_renditions.insert(
 			"video0.avc3".to_string(),
 			VideoConfig {
+				broadcast: None,
 				codec: H264 {
 					profile: 0x64,
 					constraints: 0x00,
@@ -122,6 +123,7 @@ mod test {
 		audio_renditions.insert(
 			"audio0".to_string(),
 			AudioConfig {
+				broadcast: None,
 				codec: AudioCodec::Opus,
 				sample_rate: 48_000,
 				channel_count: 2,
@@ -177,6 +179,7 @@ mod test {
 		video_renditions.insert(
 			"video0.m4s".to_string(),
 			VideoConfig {
+				broadcast: None,
 				codec: H264 {
 					profile: 0x64,
 					constraints: 0x00,
@@ -226,6 +229,7 @@ mod test {
 		video_renditions.insert(
 			"video0.m4s".to_string(),
 			VideoConfig {
+				broadcast: None,
 				codec: H264 {
 					profile: 0x64,
 					constraints: 0x00,

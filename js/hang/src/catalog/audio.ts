@@ -10,6 +10,11 @@ const TrackSchema = z.object({
 // Mirrors AudioDecoderConfig
 // https://w3c.github.io/webcodecs/#audio-decoder-config
 export const AudioConfigSchema = z.object({
+	// Optional reference to another broadcast that publishes this track, expressed
+	// relative to the broadcast that served this catalog (e.g. "../source").
+	// If unset, the track lives in the same broadcast as the catalog.
+	broadcast: z.optional(z.string()),
+
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
 	codec: z.string(),
 

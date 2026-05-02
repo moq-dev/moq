@@ -46,6 +46,7 @@ fn create_track(broadcast: &mut moq_lite::BroadcastProducer) -> anyhow::Result<m
 	// Example video configuration
 	// In a real application, you would get this from the encoder
 	let video_config = hang::catalog::VideoConfig {
+		broadcast: None,
 		codec: hang::catalog::H264 {
 			profile: 0x4D, // Main profile
 			constraints: 0,

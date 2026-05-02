@@ -4,6 +4,7 @@ export * from "./chat";
 export * from "./container";
 export * from "./integers";
 export * from "./location";
+export * from "./path";
 export * from "./preview";
 export * from "./priority";
 export * from "./root";

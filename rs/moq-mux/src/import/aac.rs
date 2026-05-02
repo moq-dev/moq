@@ -120,6 +120,7 @@ impl Aac {
 		let jitter = moq_lite::Time::from_micros(frame_duration_us).ok();
 
 		let audio_config = hang::catalog::AudioConfig {
+			broadcast: None,
 			codec: hang::catalog::AAC {
 				profile: config.profile,
 			}

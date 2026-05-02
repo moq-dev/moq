@@ -70,6 +70,7 @@ impl Avc3 {
 			| ((sps.constraint_set5_flag as u8) << 2);
 
 		let config = hang::catalog::VideoConfig {
+			broadcast: None,
 			coded_width: Some(sps.width),
 			coded_height: Some(sps.height),
 			codec: hang::catalog::H264 {
