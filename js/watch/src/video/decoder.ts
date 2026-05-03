@@ -29,11 +29,7 @@ export class Decoder implements Backend {
 	// The current track running, held so we can cancel it when the new track is ready.
 	#active = new Signal<DecoderTrack | undefined>(undefined);
 
-	// Expose the current frame to render as a signal
-	#frame = new Signal<VideoFrame | undefined>(undefined);
-	readonly frame: Getter<VideoFrame | undefined> = this.#frame;
-
-	// The timestamp of the current frame.
+	// The timestamp of the most recently consumed frame.
 	#timestamp = new Signal<Time.Milli | undefined>(undefined);
 	readonly timestamp: Getter<Time.Milli | undefined> = this.#timestamp;
 
@@ -53,12 +49,17 @@ export class Decoder implements Backend {
 
 	#signals = new Effect();
 
-	#clearCurrentFrame(): void {
-		this.#frame.update((prev) => {
-			prev?.close();
-			return undefined;
-		});
-		this.#timestamp.set(undefined);
+	// Pop the newest decoded frame whose PTS is at or before sync.now(), closing
+	// any older queued frames. The caller takes ownership of the returned frame
+	// and is responsible for closing it. Returns undefined if no frame is ready.
+	consume(): VideoFrame | undefined {
+		const active = this.#active.peek();
+		if (!active) return undefined;
+
+		const now = this.source.sync.now();
+		if (now === undefined) return undefined;
+
+		return active.consume(now);
 	}
 
 	constructor(source: Source, props?: DecoderProps) {
@@ -85,9 +86,10 @@ export class Decoder implements Backend {
 
 		const broadcast: Moq.Broadcast | undefined = effect.get(source.active);
 		if (!broadcast) {
-			// Going offline should clear the last rendered frame.
+			// Going offline should clear the last rendered timestamp so the
+			// buffering overlay logic in #runBuffering treats us as stalled.
 			this.#active.set(undefined);
-			this.#clearCurrentFrame();
+			this.#timestamp.set(undefined);
 			this.#buffered.set([]);
 			return;
 		}
@@ -136,15 +138,6 @@ export class Decoder implements Backend {
 
 		effect.cleanup(() => active.close());
 
-		// Clone the frame so we own it independently of the DecoderTrack.
-		// proxy() would share the same reference, allowing the source to close our frame.
-		effect.run((inner) => {
-			const frame = inner.get(active.frame);
-			this.#frame.update((prev) => {
-				prev?.close();
-				return frame?.clone();
-			});
-		});
 		effect.proxy(this.#timestamp, active.timestamp);
 		effect.proxy(this.#buffered, active.buffered);
 	}
@@ -162,21 +155,21 @@ export class Decoder implements Backend {
 			return;
 		}
 
-		const frame = effect.get(this.frame);
-		if (!frame) return;
+		const active = effect.get(this.#active);
+		if (!active) return;
 
-		effect.set(this.#display, {
-			width: frame.displayWidth,
-			height: frame.displayHeight,
-		});
+		const dims = effect.get(active.display);
+		if (!dims) return;
+
+		effect.set(this.#display, dims);
 	}
 
 	#runBuffering(effect: Effect): void {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
-		const frame = effect.get(this.frame);
-		if (!frame) {
+		const timestamp = effect.get(this.#timestamp);
+		if (timestamp === undefined) {
 			this.#stalled.set(true);
 			return;
 		}
@@ -189,8 +182,6 @@ export class Decoder implements Backend {
 	}
 
 	close() {
-		this.#clearCurrentFrame();
-
 		this.#signals.close();
 	}
 }
@@ -212,13 +203,20 @@ class DecoderTrack {
 	stats: Signal<Stats | undefined>;
 
 	timestamp = new Signal<Time.Milli | undefined>(undefined);
-	frame = new Signal<VideoFrame | undefined>(undefined);
+
+	// Display dimensions taken from the first decoded frame, used as a fallback
+	// when the catalog doesn't carry display metadata.
+	display = new Signal<{ width: number; height: number } | undefined>(undefined);
 
 	// Network jitter + decode buffer.
 	buffered = new Signal<BufferedRanges>([]);
 
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<BufferedRanges>([]);
+
+	// Decoded frames awaiting paint, in PTS-ascending order. VideoDecoder
+	// emits in display order, so push order is already monotonic.
+	#queue: VideoFrame[] = [];
 
 	signals = new Effect();
 
@@ -240,41 +238,24 @@ class DecoderTrack {
 		effect.cleanup(() => sub.close());
 
 		const decoder = new VideoDecoder({
-			output: async (frame: VideoFrame) => {
-				try {
-					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-					if (timestamp < (this.timestamp.peek() ?? 0)) {
-						// Late frame, don't render it.
-						return;
-					}
+			output: (frame: VideoFrame) => {
+				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 
-					if (this.frame.peek() === undefined) {
-						// Render something while we wait for the sync to catch up.
-						this.frame.set(frame.clone());
-					}
-
-					const wait = this.source.sync.wait(timestamp).then(() => true);
-					const ok = await Promise.race([wait, effect.cancel]);
-					if (!ok) return;
-
-					if (timestamp < (this.timestamp.peek() ?? 0)) {
-						// Late frame, don't render it.
-						// NOTE: This can happen when the ref is updated, such as on playback start.
-						return;
-					}
-
-					this.timestamp.set(timestamp);
-
-					// Trim the decode buffer as frames are rendered
-					this.#trimBuffered(timestamp);
-
-					this.frame.update((prev) => {
-						prev?.close();
-						return frame.clone(); // avoid closing the frame here
-					});
-				} finally {
+				// Drop frames that have already been displayed (can happen if the
+				// reference resets, e.g. on playback start).
+				if (timestamp < (this.timestamp.peek() ?? 0)) {
 					frame.close();
+					return;
 				}
+
+				// Capture display dimensions from the first frame so #runDisplay
+				// can fall back to them when the catalog has no display metadata.
+				if (this.display.peek() === undefined) {
+					this.display.set({ width: frame.displayWidth, height: frame.displayHeight });
+				}
+
+				// Queue for the renderer to pick up on its next vsync.
+				this.#queue.push(frame);
 			},
 			// TODO bubble up error
 			error: (error) => {
@@ -284,6 +265,9 @@ class DecoderTrack {
 		});
 		effect.cleanup(() => {
 			if (decoder.state !== "closed") decoder.close();
+			// Drain any frames the renderer never got to.
+			for (const frame of this.#queue) frame.close();
+			this.#queue.length = 0;
 		});
 
 		// Input processing - depends on container type
@@ -484,13 +468,36 @@ class DecoderTrack {
 		});
 	}
 
+	// Pop the newest queued frame whose PTS is ≤ now, closing any older ones.
+	// Caller takes ownership of the returned frame and must close it.
+	consume(now: Time.Milli): VideoFrame | undefined {
+		let pickIdx = -1;
+		for (let i = this.#queue.length - 1; i >= 0; i--) {
+			const ts = Time.Milli.fromMicro(this.#queue[i].timestamp as Time.Micro);
+			if (ts <= now) {
+				pickIdx = i;
+				break;
+			}
+		}
+		if (pickIdx < 0) return undefined;
+
+		// Close older frames — they would render in the past.
+		for (let i = 0; i < pickIdx; i++) {
+			this.#queue[i].close();
+		}
+
+		const frame = this.#queue[pickIdx];
+		this.#queue.splice(0, pickIdx + 1);
+
+		const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
+		this.timestamp.set(timestamp);
+		this.#trimBuffered(timestamp);
+
+		return frame;
+	}
+
 	close(): void {
 		this.signals.close();
-
-		this.frame.update((prev) => {
-			prev?.close();
-			return undefined;
-		});
 	}
 }
 
