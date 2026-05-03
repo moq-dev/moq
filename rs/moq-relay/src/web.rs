@@ -502,14 +502,17 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let track = moq_lite::Track::new(track);
+	let track = moq_lite::Track {
+		name: track,
+		priority: 0,
+	};
 
 	// NOTE: The auth token is already scoped to the broadcast.
 	// TODO: switch to `announced_broadcast` (bounded by the fetch deadline) so freshly-connected
 	// subscribers don't get a spurious 404 before the broadcast has gossiped.
 	#[allow(deprecated)]
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
-	let track = broadcast.consume_track(&track).map_err(|err| match err {
+	let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
 		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
 	})?;
@@ -518,24 +521,17 @@ async fn serve_fetch(
 
 	let result = tokio::time::timeout_at(deadline, async {
 		let group = match params.group {
-			FetchGroup::Num(sequence) => track.get_group(sequence.into()).map_err(|err| match err {
-				moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
-				_ => StatusCode::INTERNAL_SERVER_ERROR,
-			})?,
-			FetchGroup::Latest => match track.latest_group() {
-				Some(group) => group,
-				None => {
-					// No cached group yet — wait for the first one via subscribe.
-					let mut sub = track
-						.subscribe_default()
-						.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-					match sub.next_group().await {
-						Ok(Some(group)) => group,
-						Ok(None) => return Err(StatusCode::NOT_FOUND),
-						Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-					}
-				}
+			FetchGroup::Latest => match track.latest() {
+				Some(sequence) => track.get_group(sequence).await,
+				None => track.recv_group().await,
 			},
+			FetchGroup::Num(sequence) => track.get_group(sequence).await,
+		};
+
+		let group = match group {
+			Ok(Some(group)) => group,
+			Ok(None) => return Err(StatusCode::NOT_FOUND),
+			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
 		};
 
 		tracing::info!(track = %track.name, group = %group.sequence, "serving group");

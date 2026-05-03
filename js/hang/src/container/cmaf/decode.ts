@@ -335,8 +335,9 @@ export function decodeDataSegment(segment: Uint8Array, timescale: number): Sampl
 			throw new Error(`Invalid sample size ${sampleSize} for sample ${i} in trun`);
 		}
 
-		// Validate sample duration - must be positive for proper timing
-		if (sampleDuration <= 0) {
+		// Duration 0 is valid for single-sample CMAF fragments where duration
+		// is implicit. Negative duration would indicate corrupt data.
+		if (sampleDuration < 0) {
 			throw new Error(`Invalid sample duration ${sampleDuration} for sample ${i} in trun`);
 		}
 

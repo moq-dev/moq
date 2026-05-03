@@ -54,7 +54,10 @@ async fn main() -> anyhow::Result<()> {
 
 	tracing::info!(url = ?config.url, "connecting to server");
 
-	let track = Track::new(config.track);
+	let track = Track {
+		name: config.track,
+		priority: 0,
+	};
 
 	let origin = moq_lite::Origin::random().produce();
 
@@ -95,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
 					Some(announce) = origin.announced() => match announce {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
-							let track = broadcast.subscribe_track(&track, moq_lite::Subscription::default())?;
+							let track = broadcast.subscribe_track(&track)?;
 							clock = Some(clock::Subscriber::new(track));
 						}
 						(path, None) => {

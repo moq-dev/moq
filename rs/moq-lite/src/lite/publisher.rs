@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Subscription, Track, TrackSubscriber,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -281,34 +281,30 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
-		let track = Track::new(subscribe.track.to_string());
+		let track = Track {
+			name: subscribe.track.to_string(),
+			priority: subscribe.priority,
+		};
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
-		let consumer = broadcast.consume_track(&track)?;
+		let track = broadcast.subscribe_track(&track)?;
 
-		// Pick the start group: explicit, else the latest cached group.
-		let start_group = subscribe
-			.start_group
-			.or_else(|| consumer.latest_group().map(|g| g.sequence));
-		let subscriber = consumer.subscribe(Subscription {
-			priority: subscribe.priority,
-			ordered: subscribe.ordered,
-			max_latency: subscribe.max_latency,
-			start_group,
-			end_group: subscribe.end_group,
-		})?;
+		// TODO wait until track.info() to get the *real* priority
 
 		let info = lite::SubscribeOk {
-			priority: subscribe.priority,
-			ordered: subscribe.ordered,
-			max_latency: subscribe.max_latency,
-			start_group,
-			end_group: subscribe.end_group,
+			priority: track.priority,
+			ordered: false,
+			max_latency: std::time::Duration::ZERO,
+			start_group: None,
+			end_group: None,
 		};
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
-		Self::run_track(session, subscriber, stream, subscribe.id, priority, version).await?;
+		tokio::select! {
+			res = Self::run_track(session, track, subscribe, priority, version) => res?,
+			res = stream.reader.closed() => res?,
+		}
 
 		stream.writer.finish()?;
 		stream.writer.closed().await
@@ -316,56 +312,40 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	async fn run_track(
 		session: S,
-		mut subscriber: TrackSubscriber,
-		stream: &mut Stream<S, Version>,
-		subscribe_id: u64,
+		mut track: TrackConsumer,
+		subscribe: &lite::Subscribe<'_>,
 		priority: PriorityQueue,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
+		// Start the consumer at the specified sequence, otherwise start at the latest group.
+		if let Some(start_group) = subscribe.start_group.or_else(|| track.latest()) {
+			track.start_at(start_group);
+		}
+
 		loop {
-			tokio::select! {
+			let group = tokio::select! {
 				// Poll all active group futures; never matches but keeps them running.
 				true = async {
 					while tasks.next().await.is_some() {}
 					false
 				} => unreachable!(),
-				group = subscriber.recv_group().transpose() => match group {
-					Some(group) => {
-						let group = group?;
-						let sequence = group.sequence;
-						tracing::debug!(subscribe = %subscribe_id, track = %subscriber.name, sequence, "serving group");
+				Some(group) = track.recv_group().transpose() => group,
+				else => return Ok(()),
+			}?;
 
-						let msg = lite::Group {
-							subscribe: subscribe_id,
-							sequence,
-						};
+			let sequence = group.sequence;
+			tracing::debug!(subscribe = %subscribe.id, track = %track.name, sequence, "serving group");
 
-						let p = priority.insert(subscriber.subscription().priority, sequence);
-						tasks.push(Self::serve_group(session.clone(), msg, p, group, version).map(|_| ()));
-					}
-					None => break,
-				},
-				upd = stream.reader.decode_maybe::<lite::SubscribeUpdate>() => match upd? {
-					Some(upd) => {
-						subscriber.update(Subscription {
-							priority: upd.priority,
-							ordered: upd.ordered,
-							max_latency: upd.max_latency,
-							start_group: upd.start_group,
-							end_group: upd.end_group,
-						});
-					}
-					None => break,
-				},
-			}
+			let msg = lite::Group {
+				subscribe: subscribe.id,
+				sequence,
+			};
+
+			let priority = priority.insert(track.priority, sequence);
+			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
 		}
-
-		// Drain in-flight group futures so they finish writing before we close the stream.
-		while tasks.next().await.is_some() {}
-
-		Ok(())
 	}
 
 	async fn serve_group(

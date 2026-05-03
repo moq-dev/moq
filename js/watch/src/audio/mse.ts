@@ -25,6 +25,9 @@ export class Mse implements Backend {
 	#buffered = new Signal<BufferedRanges>([]);
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
+	// MSE plays through the <video> element, not WebAudio.
+	readonly context: Getter<AudioContext | undefined> = new Signal<AudioContext | undefined>(undefined);
+
 	#signals = new Effect();
 
 	constructor(muxer: Muxer, source: Source, props?: MseProps) {

@@ -18,6 +18,9 @@ export interface Backend {
 
 	// Buffered time ranges (for MSE backend).
 	buffered: Getter<BufferedRanges>;
+
+	// The AudioContext used for playback (WebCodecs backend only).
+	context: Getter<AudioContext | undefined>;
 }
 
 export interface Stats {
