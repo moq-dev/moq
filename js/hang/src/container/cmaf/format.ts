@@ -1,5 +1,6 @@
 import type { Time } from "@moq/lite";
-import type { ContainerFormat, DecodedFrame } from "../format";
+import type { ContainerFormat } from "../format";
+import type { Frame } from "../types";
 import { decodeDataSegment } from "./decode";
 
 export class CmafFormat implements ContainerFormat {
@@ -9,7 +10,7 @@ export class CmafFormat implements ContainerFormat {
 		this.#timescale = timescale;
 	}
 
-	decode(frame: Uint8Array): DecodedFrame[] {
+	decode(frame: Uint8Array): Frame[] {
 		return decodeDataSegment(frame, this.#timescale).map((s) => ({
 			data: s.data,
 			timestamp: s.timestamp as Time.Micro,

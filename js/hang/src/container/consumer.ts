@@ -7,30 +7,25 @@ import type { BufferedRanges, Frame } from "./types";
 
 export interface ConsumerProps {
 	format: ContainerFormat;
+	// Target latency in milliseconds (default: 0)
 	latency?: Signal<Time.Milli> | Time.Milli;
-	/** Returns the PTS that should be rendering right now, or undefined if unknown. */
-	now?: () => Time.Milli | undefined;
-	/** When false, frames are delivered from any group as soon as available (no inter-group serialization).
-	 *  Useful for audio where every frame is independently decodable. Default: true. */
-	sequential?: boolean;
 }
 
 interface Group {
 	consumer: Moq.Group;
-	frames: Frame[];
-	latest?: Time.Micro;
-	done?: boolean;
+	frames: Frame[]; // decode order
+	latest?: Time.Micro; // The timestamp of the latest known frame
+	done?: boolean; // Set when #runGroup finishes reading all frames
 }
 
 export class Consumer {
 	#track: Moq.Track;
 	#format: ContainerFormat;
 	#latency: Signal<Time.Milli>;
-	#now?: () => Time.Milli | undefined;
-	#sequential: boolean;
 	#groups: Group[] = [];
-	#active?: number;
+	#active?: number; // the active group sequence number
 
+	// Wake up the consumer when a new frame is available.
 	#notify?: () => void;
 
 	#buffered = new Signal<BufferedRanges>([]);
@@ -42,8 +37,6 @@ export class Consumer {
 		this.#track = track;
 		this.#format = props.format;
 		this.#latency = Signal.from(props.latency ?? Moq.Time.Milli.zero);
-		this.#now = props.now;
-		this.#sequential = props.sequential ?? true;
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -56,16 +49,20 @@ export class Consumer {
 	}
 
 	async #run() {
+		// Start fetching groups in the background
 		for (;;) {
 			const consumer = await this.#track.recvGroup();
 			if (!consumer) break;
 
+			// To improve TTV, we always start with the first group.
+			// For higher latencies we might need to figure something else out, as its racey.
 			if (this.#active === undefined) {
 				this.#active = consumer.sequence;
 			}
 
 			if (consumer.sequence < this.#active) {
 				console.warn(`skipping old group: ${consumer.sequence} < ${this.#active}`);
+				// Skip old groups.
 				consumer.close();
 				continue;
 			}
@@ -75,9 +72,12 @@ export class Consumer {
 				frames: [],
 			};
 
+			// Insert into #groups based on the group sequence number (ascending).
+			// This is used to cancel old groups.
 			this.#groups.push(group);
 			this.#groups.sort((a, b) => a.consumer.sequence - b.consumer.sequence);
 
+			// Start buffering frames from this group
 			this.#signals.spawn(this.#runGroup.bind(this, group));
 		}
 	}
@@ -87,10 +87,10 @@ export class Consumer {
 			let index = 0;
 
 			for (;;) {
-				const raw = await group.consumer.readFrame();
-				if (!raw) break;
+				const next = await group.consumer.readFrame();
+				if (!next) break;
 
-				const decoded = this.#format.decode(raw);
+				const decoded = this.#format.decode(next);
 
 				for (const sample of decoded) {
 					const frame: Frame = {
@@ -112,10 +112,11 @@ export class Consumer {
 
 					this.#updateBuffered();
 
-					if (!this.#sequential || group.consumer.sequence === this.#active) {
+					if (group.consumer.sequence === this.#active) {
 						this.#notify?.();
 						this.#notify = undefined;
 					} else {
+						// Check for latency violations if this is a newer group.
 						this.#checkLatency();
 					}
 				}
@@ -128,11 +129,16 @@ export class Consumer {
 			group.done = true;
 
 			if (group.consumer.sequence === this.#active) {
+				// Advance to the next group.
 				this.#active += 1;
 			}
 
+			// Recompute buffered ranges now that this group is done,
+			// so consecutive done groups can merge into a single range.
 			this.#updateBuffered();
 
+			// Always notify - the consumer may need to advance past this group
+			// even if it wasn't active when this task finished.
 			this.#notify?.();
 			this.#notify = undefined;
 
@@ -145,104 +151,77 @@ export class Consumer {
 
 		let skipped = false;
 
-		while (this.#groups.length > 0) {
-			const first = this.#groups[0];
-			const firstPts = first.frames.at(0)?.timestamp;
-			if (firstPts === undefined) break;
+		// Keep skipping the oldest group while the buffered span exceeds the latency target.
+		// This also handles gaps in group sequence numbers: if #active points to a missing
+		// group, the latency span proves the missing content is too old to wait for.
+		while (this.#groups.length >= 2) {
+			const threshold = Moq.Time.Micro.fromMilli(this.#latency.peek());
 
-			const threshold = this.#latency.peek();
+			// Check the difference between the earliest and latest known frames.
+			let min: number | undefined;
+			let max: number | undefined;
 
-			// Use wall-clock playback position when available.
-			// This avoids false skips when frames arrive faster than real-time
-			// (e.g. CMAF groups that dump all frames synchronously).
-			const now = this.#now?.();
-			if (now !== undefined) {
-				const ptsMilli = Moq.Time.Milli.fromMicro(firstPts);
-				if (Moq.Time.Milli.sub(now, ptsMilli) <= threshold) break;
-			} else {
-				// PTS-span fallback needs at least two groups to establish span.
-				if (this.#groups.length < 2) break;
+			for (const group of this.#groups) {
+				if (group.latest === undefined) continue;
 
-				const thresholdMicro = Moq.Time.Micro.fromMilli(threshold);
-
-				let max: number | undefined;
-				for (const group of this.#groups) {
-					if (group.latest !== undefined && (max === undefined || group.latest > max)) {
-						max = group.latest;
-					}
-				}
-
-				if (max === undefined) break;
-				if (max - firstPts <= thresholdMicro) break;
+				const frame = group.frames.at(0)?.timestamp ?? group.latest;
+				if (min === undefined || frame < min) min = frame;
+				if (max === undefined || group.latest > max) max = group.latest;
 			}
 
-			const removed = this.#groups.shift();
-			if (!removed) break;
-			this.#active = this.#groups[0]?.consumer.sequence;
-			console.warn(`skipping slow group: ${removed.consumer.sequence} -> ${this.#active}`);
+			if (min === undefined || max === undefined) break;
 
-			removed.consumer.close();
-			removed.frames.length = 0;
+			const latency = max - min;
+			if (latency <= threshold) break;
+
+			const first = this.#groups.shift();
+			if (!first) break;
+			this.#active = this.#groups[0]?.consumer.sequence;
+			console.warn(`skipping slow group: ${first.consumer.sequence} -> ${this.#active}`);
+
+			first.consumer.close();
+			first.frames.length = 0;
 			skipped = true;
 		}
 
 		if (skipped) {
 			this.#updateBuffered();
 
+			// Wake up any consumers waiting for a new frame.
 			this.#notify?.();
 			this.#notify = undefined;
 		}
 	}
 
+	// Returns the next frame in order, along with the group number.
+	// If frame is undefined, the group is done.
 	async next(): Promise<{ frame: Frame | undefined; group: number } | undefined> {
 		for (;;) {
-			if (this.#sequential) {
-				if (
-					this.#groups.length > 0 &&
-					this.#active !== undefined &&
-					this.#groups[0].consumer.sequence <= this.#active
-				) {
-					const frame = this.#groups[0].frames.shift();
-					if (frame) {
+			if (
+				this.#groups.length > 0 &&
+				this.#active !== undefined &&
+				this.#groups[0].consumer.sequence <= this.#active
+			) {
+				const frame = this.#groups[0].frames.shift();
+				if (frame) {
+					this.#updateBuffered();
+					return { frame, group: this.#groups[0].consumer.sequence };
+				}
+
+				// Check if the group is done and then remove it.
+				// A group is removable when #active has advanced past it, OR when
+				// its #runGroup task has finished (done) and all frames are consumed.
+				// The latter handles the case where #runGroup finished before
+				// #active reached this group (e.g. after a latency skip).
+				if (this.#active > this.#groups[0].consumer.sequence || this.#groups[0].done) {
+					if (this.#groups[0].consumer.sequence === this.#active) {
+						this.#active += 1;
+					}
+
+					const group = this.#groups.shift();
+					if (group) {
 						this.#updateBuffered();
-						return { frame, group: this.#groups[0].consumer.sequence };
-					}
-
-					if (this.#active > this.#groups[0].consumer.sequence || this.#groups[0].done) {
-						if (this.#groups[0].consumer.sequence === this.#active) {
-							this.#active += 1;
-						}
-
-						const group = this.#groups.shift();
-						if (group) {
-							this.#updateBuffered();
-							return { frame: undefined, group: group.consumer.sequence };
-						}
-					}
-				}
-			} else {
-				// Unordered: return the lowest-PTS frame from any group.
-				// Clean up done+empty groups first.
-				while (this.#groups.length > 0 && this.#groups[0].done && this.#groups[0].frames.length === 0) {
-					this.#groups.shift();
-					this.#active = this.#groups[0]?.consumer.sequence;
-				}
-
-				// Find the group with the lowest-PTS next frame.
-				let best: Group | undefined;
-				for (const group of this.#groups) {
-					const f = group.frames[0];
-					if (!f) continue;
-					if (!best || f.timestamp < best.frames[0].timestamp) {
-						best = group;
-					}
-				}
-
-				if (best) {
-					const frame = best.frames.shift();
-					if (frame) {
-						this.#updateBuffered();
-						return { frame, group: best.consumer.sequence };
+						return { frame: undefined, group: group.consumer.sequence };
 					}
 				}
 			}
@@ -257,6 +236,7 @@ export class Consumer {
 
 			if (!(await Promise.race([wait, this.#signals.closed]))) {
 				this.#notify = undefined;
+				// Consumer was closed while waiting for a new frame.
 				return undefined;
 			}
 		}

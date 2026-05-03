@@ -3,8 +3,9 @@ import { Group, type Time, Track, Varint } from "@moq/lite";
 import { encodeDataSegment } from "./cmaf/encode.ts";
 import { CmafFormat } from "./cmaf/format.ts";
 import { Consumer } from "./consumer.ts";
-import type { ContainerFormat, DecodedFrame } from "./format.ts";
-import { LegacyFormat } from "./legacy.ts";
+import type { ContainerFormat } from "./format.ts";
+import { Format as LegacyFormat } from "./legacy.ts";
+import type { Frame } from "./types.ts";
 
 const TIMESCALE = 90_000;
 
@@ -183,7 +184,7 @@ test("Consumer forces keyframe true at index 0", async () => {
 test("Consumer index spans MoQ frames for keyframe detection", async () => {
 	// Custom format that returns 3 samples per MoQ frame, all keyframe: false
 	const multiFormat: ContainerFormat = {
-		decode(_frame: Uint8Array): DecodedFrame[] {
+		decode(_frame: Uint8Array): Frame[] {
 			return [
 				{ data: new Uint8Array([1]), timestamp: 0 as Time.Micro, keyframe: false },
 				{ data: new Uint8Array([2]), timestamp: 33_000 as Time.Micro, keyframe: false },
@@ -212,7 +213,7 @@ test("Consumer index spans MoQ frames for keyframe detection", async () => {
 test("Consumer drops group on decode error", async () => {
 	let callCount = 0;
 	const failingFormat: ContainerFormat = {
-		decode(_frame: Uint8Array): DecodedFrame[] {
+		decode(_frame: Uint8Array): Frame[] {
 			callCount++;
 			if (callCount === 1) throw new Error("corrupt");
 			return [{ data: new Uint8Array([1]), timestamp: 0 as Time.Micro, keyframe: false }];
@@ -281,26 +282,6 @@ test("Consumer skips groups via PTS-span when over latency", async () => {
 	// With zero latency, the consumer should skip to the latest group
 	const groups = [...new Set(frames.map((f) => f.group))];
 	expect(groups.at(-1)).toBe(2);
-	consumer.close();
-});
-
-test("Consumer wall-clock prevents false skips", async () => {
-	const track = new Track("test");
-	// now() returns 0ms — both groups are "current" from wall-clock perspective
-	const consumer = new Consumer(track, {
-		format: new LegacyFormat(),
-		latency: 50 as Time.Milli,
-		now: () => 0 as Time.Milli,
-	});
-
-	// Large PTS span but now() says we're at time 0
-	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
-	writeGroupWithLegacyFrames(track, 1, [200_000 as Time.Micro]);
-	track.close();
-
-	const frames = await drainFrames(consumer, 200);
-	// Both groups should be delivered — wall-clock says group 0 is still current
-	expect(frames[0].group).toBe(0);
 	consumer.close();
 });
 
@@ -427,7 +408,7 @@ test("Consumer recovers from gap in group sequence numbers", async () => {
 test("Consumer handles empty decode result without deadlock", async () => {
 	let callCount = 0;
 	const emptyThenValid: ContainerFormat = {
-		decode(_frame: Uint8Array): DecodedFrame[] {
+		decode(_frame: Uint8Array): Frame[] {
 			callCount++;
 			if (callCount === 1) return []; // empty result
 			return [{ data: new Uint8Array([1]), timestamp: 33_000 as Time.Micro, keyframe: false }];
@@ -451,36 +432,6 @@ test("Consumer handles empty decode result without deadlock", async () => {
 	// So the next frame's first sample gets index=0 → keyframe=true.
 	expect(frames).toHaveLength(1);
 	expect(frames[0].keyframe).toBe(true);
-	consumer.close();
-});
-
-test("Consumer now() transition from undefined to value", async () => {
-	let nowValue: Time.Milli | undefined;
-
-	const track = new Track("test");
-	const consumer = new Consumer(track, {
-		format: new LegacyFormat(),
-		latency: 50 as Time.Milli,
-		now: () => nowValue,
-	});
-
-	// Write groups spanning 200ms
-	writeGroupWithLegacyFrames(track, 0, [0 as Time.Micro]);
-	writeGroupWithLegacyFrames(track, 1, [100_000 as Time.Micro]);
-	writeGroupWithLegacyFrames(track, 2, [200_000 as Time.Micro]);
-
-	await new Promise((resolve) => setTimeout(resolve, 100));
-
-	// now() is undefined → PTS-span fallback should skip (span 200ms > 50ms threshold)
-	// Set now to a value that makes group 1 current
-	nowValue = 100 as Time.Milli;
-
-	writeGroupWithLegacyFrames(track, 3, [300_000 as Time.Micro]);
-	track.close();
-
-	const frames = await drainFrames(consumer, 500);
-	// Should not deadlock, and should deliver some frames
-	expect(frames.length >= 1).toBeTruthy();
 	consumer.close();
 });
 

@@ -3,10 +3,11 @@ import * as Moq from "@moq/lite";
 
 export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
-import type { ContainerFormat, DecodedFrame } from "./format";
+import type { ContainerFormat } from "./format";
+import type { Frame } from "./types";
 
-export class LegacyFormat implements ContainerFormat {
-	decode(frame: Uint8Array): DecodedFrame[] {
+export class Format implements ContainerFormat {
+	decode(frame: Uint8Array): Frame[] {
 		const [timestamp, data] = Moq.Varint.decode(frame);
 		return [{ data, timestamp: timestamp as Time.Micro, keyframe: false }];
 	}

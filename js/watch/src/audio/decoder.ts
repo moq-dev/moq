@@ -191,10 +191,8 @@ export class Decoder {
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
-			format: new Container.Legacy.LegacyFormat(),
+			format: new Container.Legacy.Format(),
 			latency: this.source.sync.buffer,
-			now: () => this.source.sync.now(),
-			sequential: false,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -277,8 +275,6 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.CmafFormat(timescale),
 			latency: this.source.sync.buffer,
-			now: () => this.source.sync.now(),
-			sequential: false,
 		});
 		effect.cleanup(() => consumer.close());
 
