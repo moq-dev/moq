@@ -142,7 +142,8 @@ export class Mse implements Backend {
 	): void {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		// Legacy container uses microsecond timescale implicitly.
-		const consumer = new Container.Legacy.Consumer(sub, {
+		const consumer = new Container.Consumer(sub, {
+			format: new Container.Legacy.Format(),
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
@@ -156,7 +157,7 @@ export class Mse implements Backend {
 			let duration: Moq.Time.Micro | undefined;
 
 			// Buffer one frame so we can compute accurate duration from the next frame's timestamp
-			let pending: Container.Legacy.Frame;
+			let pending: Container.Frame;
 			for (;;) {
 				const next = await consumer.next();
 				if (!next) return;

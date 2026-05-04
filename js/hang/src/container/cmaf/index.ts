@@ -4,3 +4,4 @@
 
 export * from "./decode";
 export * from "./encode";
+export { Format } from "./format";
