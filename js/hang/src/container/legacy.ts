@@ -3,7 +3,7 @@ import * as Moq from "@moq/lite";
 
 export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
-import type { ContainerFormat } from "./format";
+import type { Format as ContainerFormat } from "./format";
 import type { Frame } from "./types";
 
 export class Format implements ContainerFormat {

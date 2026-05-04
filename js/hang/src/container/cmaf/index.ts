@@ -4,4 +4,4 @@
 
 export * from "./decode";
 export * from "./encode";
-export { CmafFormat } from "./format";
+export { Format } from "./format";

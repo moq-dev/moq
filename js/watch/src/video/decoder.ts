@@ -363,7 +363,7 @@ class DecoderTrack {
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
 
 		const consumer = new Container.Consumer(sub, {
-			format: new Container.Cmaf.CmafFormat(timescale),
+			format: new Container.Cmaf.Format(timescale),
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
@@ -477,7 +477,6 @@ class DecoderTrack {
 	}
 }
 
-// Merge two sets of buffered ranges into one sorted list
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 	const { supported } = await VideoDecoder.isConfigSupported({

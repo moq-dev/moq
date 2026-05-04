@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { Group, type Time, Track, Varint } from "@moq/lite";
 import { encodeDataSegment } from "./cmaf/encode.ts";
-import { CmafFormat } from "./cmaf/format.ts";
+import { Format as CmafFormat } from "./cmaf/format.ts";
 import { Consumer } from "./consumer.ts";
-import type { ContainerFormat } from "./format.ts";
+import type { Format as ContainerFormat } from "./format.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
 import type { Frame } from "./types.ts";
 
@@ -210,37 +210,40 @@ test("Consumer index spans MoQ frames for keyframe detection", async () => {
 	consumer.close();
 });
 
-test("Consumer drops group on decode error", async () => {
-	let callCount = 0;
-	const failingFormat: ContainerFormat = {
-		decode(_frame: Uint8Array): Frame[] {
-			callCount++;
-			if (callCount === 1) throw new Error("corrupt");
-			return [{ data: new Uint8Array([1]), timestamp: 0 as Time.Micro, keyframe: false }];
+test("Consumer keeps frames decoded before an error (truncated GoP)", async () => {
+	// 0xFF in the first byte signals the format to throw, simulating a stream
+	// RESET or corrupt frame mid-group. Encoding the trigger in the frame bytes
+	// keeps this deterministic when groups decode in parallel.
+	const truncatingFormat: ContainerFormat = {
+		decode(frame: Uint8Array): Frame[] {
+			if (frame[0] === 0xff) throw new Error("truncated");
+			return [{ data: frame, timestamp: frame[0] as Time.Micro, keyframe: false }];
 		},
 	};
 
 	const track = new Track("test");
-	const consumer = new Consumer(track, { format: failingFormat, latency: 500 as Time.Milli });
+	const consumer = new Consumer(track, { format: truncatingFormat, latency: 500 as Time.Milli });
 
-	// Group 0 will fail on decode
+	// Group 0: 2 valid frames then a tail-truncating error.
 	const g0 = new Group(0);
 	g0.writeFrame(new Uint8Array([0x01]));
+	g0.writeFrame(new Uint8Array([0x02]));
+	g0.writeFrame(new Uint8Array([0xff]));
 	g0.close();
 	track.writeGroup(g0);
 
-	// Group 1 will succeed
+	// Group 1 decodes cleanly.
 	const g1 = new Group(1);
-	g1.writeFrame(new Uint8Array([0x02]));
+	g1.writeFrame(new Uint8Array([0x04]));
 	g1.close();
 	track.writeGroup(g1);
 
 	track.close();
 
 	const frames = await drainFrames(consumer, 200);
-	// Group 0 dropped (no frames), group 1 delivers
-	expect(frames).toHaveLength(1);
-	expect(frames[0].group).toBe(1);
+	// First 2 frames of group 0 survive; group 1 follows.
+	expect(frames.map((f) => f.group)).toEqual([0, 0, 1]);
+	expect(frames.map((f) => f.timestamp as number)).toEqual([1, 2, 4]);
 	consumer.close();
 });
 

@@ -273,7 +273,7 @@ export class Decoder {
 			config.codec === "opus" ? undefined : config.description ? Util.Hex.toBytes(config.description) : undefined;
 
 		const consumer = new Container.Consumer(sub, {
-			format: new Container.Cmaf.CmafFormat(timescale),
+			format: new Container.Cmaf.Format(timescale),
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
@@ -412,5 +412,3 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 	});
 	return res.supported ?? false;
 }
-
-// Merge two sets of buffered ranges into one sorted list

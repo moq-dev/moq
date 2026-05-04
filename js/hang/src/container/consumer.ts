@@ -2,11 +2,11 @@ import type { Time } from "@moq/lite";
 import * as Moq from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
-import type { ContainerFormat } from "./format";
+import type { Format } from "./format";
 import type { BufferedRanges, Frame } from "./types";
 
 export interface ConsumerProps {
-	format: ContainerFormat;
+	format: Format;
 	// Target latency in milliseconds (default: 0)
 	latency?: Signal<Time.Milli> | Time.Milli;
 }
@@ -20,7 +20,7 @@ interface Group {
 
 export class Consumer {
 	#track: Moq.Track;
-	#format: ContainerFormat;
+	#format: Format;
 	#latency: Signal<Time.Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
@@ -122,9 +122,9 @@ export class Consumer {
 				}
 			}
 		} catch (_err) {
-			// Drop the entire group on any decode error.
-			group.frames.length = 0;
-			group.latest = undefined;
+			// Stop reading the group but keep already-decoded frames.
+			// A decode error or stream RESET truncates the tail of the GoP;
+			// frames decoded before the error are still valid and playable.
 		} finally {
 			group.done = true;
 
