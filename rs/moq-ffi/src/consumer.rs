@@ -77,10 +77,7 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to the catalog for this broadcast.
 	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self.inner.subscribe_track(
-			&hang::catalog::Catalog::default_track(),
-			moq_lite::Subscription::default(),
-		)?;
+		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
 		let consumer = hang::CatalogConsumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
@@ -92,9 +89,7 @@ impl MoqBroadcastConsumer {
 	/// Frames are returned as plain byte payloads with no codec or container parsing.
 	pub fn subscribe_track(&self, name: String) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self
-			.inner
-			.subscribe_track(&moq_lite::Track::new(name), moq_lite::Subscription::default())?;
+		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
 		Ok(Arc::new(MoqTrackConsumer::new(track)))
 	}
 
@@ -115,9 +110,7 @@ impl MoqBroadcastConsumer {
 		let media: moq_mux::container::Hang = (&container)
 			.try_into()
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
-		let track = self
-			.inner
-			.subscribe_track(&moq_lite::Track::new(name), moq_lite::Subscription::default())?;
+		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
 		let consumer = moq_mux::export::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {
@@ -129,7 +122,7 @@ impl MoqBroadcastConsumer {
 // ---- Track Consumer ----
 
 struct TrackInner {
-	track: moq_lite::TrackSubscriber,
+	track: moq_lite::TrackConsumer,
 }
 
 impl TrackInner {
@@ -138,7 +131,7 @@ impl TrackInner {
 	}
 
 	async fn next_group(&mut self) -> Result<Option<moq_lite::GroupConsumer>, MoqError> {
-		Ok(self.track.next_group().await?)
+		Ok(self.track.next_group_ordered().await?)
 	}
 
 	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {
@@ -152,7 +145,7 @@ pub struct MoqTrackConsumer {
 }
 
 impl MoqTrackConsumer {
-	pub(crate) fn new(track: moq_lite::TrackSubscriber) -> Self {
+	pub(crate) fn new(track: moq_lite::TrackConsumer) -> Self {
 		Self {
 			task: Task::new(TrackInner { track }),
 		}

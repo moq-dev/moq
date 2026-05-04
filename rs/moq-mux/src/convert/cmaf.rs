@@ -29,8 +29,7 @@ impl Convert {
 	pub fn new(input: moq_lite::BroadcastConsumer, mut output: moq_lite::BroadcastProducer) -> anyhow::Result<Self> {
 		let catalog_producer = crate::import::CatalogProducer::new(&mut output)?;
 
-		let catalog_track =
-			input.subscribe_track(&hang::Catalog::default_track(), moq_lite::Subscription::default())?;
+		let catalog_track = input.subscribe_track(&hang::Catalog::default_track())?;
 		let catalog_consumer = hang::CatalogConsumer::new(catalog_track);
 
 		Ok(Self {
@@ -100,9 +99,7 @@ impl Convert {
 
 			match &config.container {
 				Container::Cmaf { .. } => {
-					let input_track = self
-						.input
-						.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
+					let input_track = self.input.subscribe_track(&moq_lite::Track::new(name.clone()))?;
 					let output_track = self.output.create_track(moq_lite::Track::new(name.clone()))?;
 					self.tracks.insert(
 						name.clone(),
@@ -114,9 +111,7 @@ impl Convert {
 					let init_data = build_video_init(config)?;
 					let timescale = guess_video_timescale(config);
 
-					let input_track = self
-						.input
-						.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
+					let input_track = self.input.subscribe_track(&moq_lite::Track::new(name.clone()))?;
 
 					let mut cmaf_config = config.clone();
 					cmaf_config.container = Container::Cmaf { init: init_data.into() };
@@ -140,9 +135,7 @@ impl Convert {
 
 			match &config.container {
 				Container::Cmaf { .. } => {
-					let input_track = self
-						.input
-						.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
+					let input_track = self.input.subscribe_track(&moq_lite::Track::new(name.clone()))?;
 					let output_track = self.output.create_track(moq_lite::Track::new(name.clone()))?;
 					self.tracks.insert(
 						name.clone(),
@@ -153,9 +146,7 @@ impl Convert {
 				Container::Legacy => {
 					let init_data = build_audio_init(config)?;
 
-					let input_track = self
-						.input
-						.subscribe_track(&moq_lite::Track::new(name.clone()), moq_lite::Subscription::default())?;
+					let input_track = self.input.subscribe_track(&moq_lite::Track::new(name.clone()))?;
 
 					let mut cmaf_config = config.clone();
 					cmaf_config.container = Container::Cmaf { init: init_data.into() };
@@ -202,14 +193,14 @@ impl Convert {
 ///
 /// Pumps groups + frames from input → output without re-encoding.
 struct PassthroughTrack {
-	input: moq_lite::TrackSubscriber,
+	input: moq_lite::TrackConsumer,
 	output: moq_lite::TrackProducer,
 	groups: Vec<(moq_lite::GroupConsumer, moq_lite::GroupProducer)>,
 	finished: bool,
 }
 
 impl PassthroughTrack {
-	fn new(input: moq_lite::TrackSubscriber, output: moq_lite::TrackProducer) -> Self {
+	fn new(input: moq_lite::TrackConsumer, output: moq_lite::TrackProducer) -> Self {
 		Self {
 			input,
 			output,
@@ -266,7 +257,7 @@ impl PassthroughTrack {
 ///
 /// Receives groups independently and converts each one without ordering across groups.
 struct ConvertTrack {
-	input: moq_lite::TrackSubscriber,
+	input: moq_lite::TrackConsumer,
 	output: moq_lite::TrackProducer,
 	timescale: u64,
 	seq: u32,
@@ -276,7 +267,7 @@ struct ConvertTrack {
 }
 
 impl ConvertTrack {
-	fn new(input: moq_lite::TrackSubscriber, output: moq_lite::TrackProducer, timescale: u64) -> Self {
+	fn new(input: moq_lite::TrackConsumer, output: moq_lite::TrackProducer, timescale: u64) -> Self {
 		Self {
 			input,
 			output,
@@ -810,7 +801,7 @@ pub(crate) mod test {
 	}
 
 	pub(crate) async fn read_legacy_frames(track: moq_lite::TrackConsumer) -> Vec<(Timestamp, Vec<u8>, bool)> {
-		let subscriber = track.subscribe(moq_lite::Subscription::default()).unwrap();
+		let subscriber = track;
 		let mut ordered =
 			crate::export::Consumer::new(subscriber, crate::container::Hang::Legacy).with_latency(Duration::MAX);
 
@@ -829,7 +820,7 @@ pub(crate) mod test {
 	}
 
 	pub(crate) async fn read_cmaf_raw_frames(track: moq_lite::TrackConsumer) -> Vec<Bytes> {
-		let mut subscriber = track.subscribe(moq_lite::Subscription::default()).unwrap();
+		let mut subscriber = track;
 		let mut result = Vec::new();
 		while let Some(group) = tokio::time::timeout(Duration::from_millis(500), subscriber.recv_group())
 			.await
@@ -875,7 +866,7 @@ pub(crate) mod test {
 	pub(crate) async fn subscribe_video(consumer: &moq_lite::BroadcastConsumer) -> moq_lite::TrackConsumer {
 		let track = moq_lite::Track::new("video");
 		loop {
-			match consumer.consume_track(&track) {
+			match consumer.subscribe_track(&track) {
 				Ok(t) => return t,
 				Err(moq_lite::Error::NotFound) => tokio::task::yield_now().await,
 				Err(e) => panic!("subscribe_video failed: {e}"),

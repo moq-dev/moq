@@ -6,7 +6,8 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
 
-export type CatalogFormat = "hang" | "msf";
+export const CATALOG_FORMATS = ["hang", "msf", "manual"] as const;
+export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
@@ -27,6 +28,13 @@ export interface BroadcastProps {
 
 	// Which catalog format to use. Default: "hang"
 	catalogFormat?: CatalogFormat | Signal<CatalogFormat>;
+
+	// Initial catalog. Used directly when catalogFormat is "manual"; otherwise it's
+	// overwritten by whatever the fetched catalog track produces. Note: switching
+	// catalogFormat between "manual" and a fetched format will reset this signal
+	// to undefined when the fetched-format spawn tears down — set the catalog
+	// after switching formats, not before.
+	catalog?: Catalog.Root | Signal<Catalog.Root | undefined>;
 }
 
 // A catalog source that (optionally) reloads automatically when live/offline.
@@ -43,8 +51,9 @@ export class Broadcast {
 	#active = new Signal<Moq.Broadcast | undefined>(undefined);
 	readonly active: Getter<Moq.Broadcast | undefined> = this.#active;
 
-	#catalog = new Signal<Catalog.Root | undefined>(undefined);
-	readonly catalog: Getter<Catalog.Root | undefined> = this.#catalog;
+	// The active catalog. Writable so users can supply it directly when
+	// catalogFormat is "manual"; otherwise the fetch loop owns writes.
+	catalog: Signal<Catalog.Root | undefined>;
 
 	// All actively announced broadcast paths from the connection.
 	#announced: Getter<Set<Moq.Path.Valid>>;
@@ -57,6 +66,7 @@ export class Broadcast {
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? false);
 		this.catalogFormat = Signal.from(props?.catalogFormat ?? "hang");
+		this.catalog = Signal.from(props?.catalog);
 
 		this.#announced = props?.announced ?? new Signal(new Set());
 
@@ -100,11 +110,21 @@ export class Broadcast {
 	}
 
 	#runCatalog(effect: Effect): void {
-		const values = effect.getAll([this.enabled, this.active]);
-		if (!values) return;
-		const [_, broadcast] = values;
+		const enabled = effect.get(this.enabled);
+		if (!enabled) return;
 
 		const format = effect.get(this.catalogFormat);
+
+		if (format === "manual") {
+			// User-supplied catalog; no track to fetch.
+			const catalog = effect.get(this.catalog);
+			this.status.set(catalog ? "live" : "loading");
+			return;
+		}
+
+		const broadcast = effect.get(this.active);
+		if (!broadcast) return;
+
 		this.status.set("loading");
 
 		const trackName = format === "hang" ? "catalog.json" : "catalog";
@@ -127,13 +147,13 @@ export class Broadcast {
 
 					console.debug("received catalog", format, this.name.peek(), update);
 
-					this.#catalog.set(update);
+					this.catalog.set(update);
 					this.status.set("live");
 				}
 			} catch (err) {
 				console.warn("error fetching catalog", this.name.peek(), err);
 			} finally {
-				this.#catalog.set(undefined);
+				this.catalog.set(undefined);
 				this.status.set("offline");
 			}
 		});

@@ -1,5 +1,7 @@
 use tikv_jemalloc_ctl::raw;
 
+pub use tikv_jemallocator;
+
 /// Activate jemalloc heap profiling and listen for SIGUSR1 to dump profiles.
 ///
 /// The dump path is controlled by `MALLOC_CONF=prof_prefix:<path>`.

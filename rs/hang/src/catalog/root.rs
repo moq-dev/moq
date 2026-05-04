@@ -77,7 +77,10 @@ impl Catalog {
 	}
 
 	pub fn default_track() -> moq_lite::Track {
-		moq_lite::Track::new(Catalog::DEFAULT_NAME)
+		moq_lite::Track {
+			name: Catalog::DEFAULT_NAME.to_string(),
+			priority: 100,
+		}
 	}
 }
 

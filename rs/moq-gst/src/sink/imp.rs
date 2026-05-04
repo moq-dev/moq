@@ -106,6 +106,7 @@ enum ControlMessage {
 	DropPad {
 		pad_name: String,
 	},
+	Eos,
 	Shutdown,
 }
 
@@ -162,6 +163,11 @@ impl ObjectImpl for MoqSink {
 			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
 			_ => unreachable!(),
 		}
+	}
+
+	fn constructed(&self) {
+		self.parent_constructed();
+		self.obj().set_element_flags(gst::ElementFlags::SINK);
 	}
 }
 
@@ -274,8 +280,11 @@ impl MoqSink {
 		};
 
 		let (tx, rx) = mpsc::unbounded_channel::<ControlMessage>();
+
+		let element_weak = self.obj().downgrade();
+
 		let join = RUNTIME.spawn(async move {
-			if let Err(err) = run_session(settings, rx).await {
+			if let Err(err) = run_session(settings, rx, element_weak).await {
 				gst::error!(CAT, "session error: {err:#}");
 			}
 		});
@@ -340,12 +349,27 @@ impl MoqSink {
 
 				true
 			}
+			gst::EventView::Eos(_) => {
+				let sender = match self.session.lock().unwrap().as_ref() {
+					Some(handle) => handle.sender.clone(),
+					None => return false,
+				};
+
+				if sender.send(ControlMessage::Eos).is_err() {
+					return false;
+				}
+				true
+			}
 			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
 		}
 	}
 }
 
-async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver<ControlMessage>) -> Result<()> {
+async fn run_session(
+	settings: ResolvedSettings,
+	mut rx: mpsc::UnboundedReceiver<ControlMessage>,
+	element_weak: gst::glib::WeakRef<super::MoqSink>,
+) -> Result<()> {
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(settings.tls_disable_verify);
 
@@ -373,6 +397,8 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver
 		pads: HashMap::new(),
 	};
 
+	let mut eos_received_count = 0;
+
 	while let Some(msg) = rx.recv().await {
 		match msg {
 			ControlMessage::SetCaps { pad_name, caps } => {
@@ -387,6 +413,17 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver
 			}
 			ControlMessage::DropPad { pad_name } => {
 				runtime.pads.remove(&pad_name);
+			}
+			ControlMessage::Eos => {
+				eos_received_count += 1;
+
+				if eos_received_count == runtime.pads.len() {
+					if let Some(element) = element_weak.upgrade() {
+						let eos_message = gst::message::Eos::builder().src(&element).build();
+
+						let _ = element.post_message(eos_message);
+					}
+				}
 			}
 			ControlMessage::Shutdown => break,
 		}

@@ -58,7 +58,7 @@ impl CatalogProducer {
 	/// Create a consumer for this catalog, receiving updates as they're published.
 	pub fn consume(&self) -> Result<hang::CatalogConsumer, moq_lite::Error> {
 		let track = self.hang_track.consume();
-		let subscriber = track.subscribe(moq_lite::Subscription::default())?;
+		let subscriber = track;
 		Ok(hang::CatalogConsumer::new(subscriber))
 	}
 

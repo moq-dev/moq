@@ -94,6 +94,9 @@ class AudioBackend implements Audio.Backend {
 	// Buffered time ranges
 	buffered = new Signal<BufferedRanges>([]);
 
+	// The AudioContext used for playback (set by the WebCodecs backend; undefined under MSE).
+	context = new Signal<AudioContext | undefined>(undefined);
+
 	constructor(source: Audio.Source) {
 		this.source = source;
 	}
@@ -180,6 +183,7 @@ export class MultiBackend implements Backend {
 
 		effect.proxy(this.audio.stats, audioSource.stats);
 		effect.proxy(this.audio.buffered, audioSource.buffered);
+		effect.proxy(this.audio.context, audioSource.context);
 	}
 
 	#runMse(effect: Effect, element: HTMLVideoElement): void {
@@ -208,6 +212,7 @@ export class MultiBackend implements Backend {
 
 		effect.proxy(this.audio.stats, audio.stats);
 		effect.proxy(this.audio.buffered, audio.buffered);
+		effect.proxy(this.audio.context, audio.context);
 	}
 
 	close(): void {

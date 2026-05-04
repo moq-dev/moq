@@ -33,6 +33,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use url::Url;
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static ALLOC: moq_native::jemalloc::tikv_jemallocator::Jemalloc = moq_native::jemalloc::tikv_jemallocator::Jemalloc;
+
 mod audio;
 mod emulator;
 mod input;
@@ -437,8 +441,14 @@ async fn main() -> Result<()> {
 	let config = Config::parse();
 	config.log.init();
 
+	#[cfg(feature = "jemalloc")]
+	let jemalloc = moq_native::jemalloc::run();
+	#[cfg(not(feature = "jemalloc"))]
+	let jemalloc = std::future::pending::<anyhow::Result<()>>();
+
 	tokio::select! {
 		res = run(&config) => res,
+		Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
 		_ = tokio::signal::ctrl_c() => std::process::exit(0),
 	}
 }

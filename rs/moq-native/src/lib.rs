@@ -13,6 +13,8 @@ pub(crate) const DEFAULT_MAX_STREAMS: u64 = 1024;
 
 mod client;
 mod crypto;
+#[cfg(feature = "jemalloc")]
+pub mod jemalloc;
 mod log;
 #[cfg(feature = "noq")]
 mod noq;

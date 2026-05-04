@@ -5,7 +5,7 @@ use crate::container::{Container, Frame, Timestamp};
 
 /// A consumer for media tracks with timestamp reordering.
 ///
-/// This wraps a `moq_lite::TrackSubscriber` and adds functionality
+/// This wraps a `moq_lite::TrackConsumer` and adds functionality
 /// like timestamp decoding, latency management, and frame buffering.
 ///
 /// Generic over `F: Container` to support different container encodings.
@@ -15,7 +15,7 @@ use crate::container::{Container, Frame, Timestamp};
 /// The consumer can skip groups that are too far behind to maintain low latency.
 /// Configure the maximum acceptable delay through the consumer's latency settings.
 pub struct Consumer<F: Container> {
-	track: moq_lite::TrackSubscriber,
+	track: moq_lite::TrackConsumer,
 
 	format: F,
 
@@ -34,8 +34,8 @@ pub struct Consumer<F: Container> {
 }
 
 impl<F: Container> Consumer<F> {
-	/// Create a new Consumer wrapping the given moq-lite subscriber.
-	pub fn new(track: moq_lite::TrackSubscriber, format: F) -> Self {
+	/// Create a new Consumer wrapping the given moq-lite consumer.
+	pub fn new(track: moq_lite::TrackConsumer, format: F) -> Self {
 		Self {
 			track,
 			format,
@@ -221,8 +221,8 @@ impl<F: Container> Consumer<F> {
 		Ok(self.track.closed().await?)
 	}
 
-	/// Unwrap into the inner TrackSubscriber.
-	pub fn into_inner(self) -> moq_lite::TrackSubscriber {
+	/// Unwrap into the inner TrackConsumer.
+	pub fn into_inner(self) -> moq_lite::TrackConsumer {
 		self.track
 	}
 }
@@ -383,8 +383,8 @@ mod tests {
 	}
 
 	/// Subscribe to a track with default preferences (test helper).
-	fn subscribe_default(track: &moq_lite::TrackProducer) -> moq_lite::TrackSubscriber {
-		track.consume().subscribe_default().expect("producer alive")
+	fn subscribe_default(track: &moq_lite::TrackProducer) -> moq_lite::TrackConsumer {
+		track.consume()
 	}
 
 	/// Write a finished group with explicit sequence and timestamps (Hang::Legacy format).
@@ -904,7 +904,7 @@ mod tests {
 	async fn max_timestamp_tracks_through_bframes() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.consume();
 		// latency must exceed (group1_max - group0_min) = 100ms - 0ms = 100ms
 		// to avoid the latency skip and test B-frame timestamp tracking.
 		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(110));
@@ -1234,7 +1234,7 @@ mod tests {
 		tokio::time::pause();
 
 		let mut track = moq_lite::Track::new("video").produce();
-		let consumer_track = subscribe_default(&track);
+		let consumer_track = track.consume();
 		let mut consumer =
 			Consumer::new(consumer_track, crate::container::Hang::Legacy).with_latency(Duration::from_millis(500));
 
