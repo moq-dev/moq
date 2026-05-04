@@ -6,13 +6,14 @@ use web_transport_trait::Stats;
 
 use crate::{
 	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Track, TrackConsumer,
-	coding::{Stream, Writer},
+	coding::{Encode, Stream, Writer},
 	lite::{
 		self,
 		priority::{PriorityHandle, PriorityQueue},
 	},
-	model::GroupConsumer,
+	model::{DatagramsSubscription, GroupConsumer},
 };
+use bytes::BytesMut;
 
 use super::Version;
 
@@ -58,6 +59,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					tracing::info!("received goaway stream");
 					Ok(())
 				}
+				lite::ControlType::Datagrams => self.recv_datagrams(stream).await,
 				lite::ControlType::Session | lite::ControlType::Fetch => Err(Error::UnexpectedStream),
 			} {
 				tracing::warn!(%err, "control stream error");
@@ -345,6 +347,109 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			let priority = priority.insert(track.priority, sequence);
 			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
+		}
+	}
+
+	pub async fn recv_datagrams(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		// Datagrams are a Lite05+ feature. Reject the control stream on older versions.
+		if matches!(
+			self.version,
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
+		) {
+			return Err(Error::UnexpectedStream);
+		}
+
+		let datagrams = stream.reader.decode::<lite::Datagrams>().await?;
+		let id = datagrams.id;
+		let track_name = datagrams.track.clone();
+		let absolute = self.origin.absolute(&datagrams.broadcast).to_owned();
+
+		tracing::info!(%id, broadcast = %absolute, track = %track_name, "datagrams subscribed started");
+
+		#[allow(deprecated)]
+		let broadcast = self.origin.consume_broadcast(&datagrams.broadcast);
+		let session = self.session.clone();
+		let version = self.version;
+
+		web_async::spawn(async move {
+			if let Err(err) = Self::run_datagrams(session, &mut stream, &datagrams, broadcast, version).await {
+				match &err {
+					Error::Cancel | Error::Transport(_) => {
+						tracing::info!(%id, broadcast = %absolute, track = %track_name, "datagrams subscribed cancelled")
+					}
+					err => {
+						tracing::warn!(%id, broadcast = %absolute, track = %track_name, %err, "datagrams subscribed error")
+					}
+				}
+				stream.writer.abort(&err);
+			} else {
+				tracing::info!(%id, broadcast = %absolute, track = %track_name, "datagrams subscribed complete")
+			}
+		});
+
+		Ok(())
+	}
+
+	async fn run_datagrams(
+		session: S,
+		stream: &mut Stream<S, Version>,
+		msg: &lite::Datagrams<'_>,
+		consumer: Option<BroadcastConsumer>,
+		version: Version,
+	) -> Result<(), Error> {
+		let track = Track {
+			name: msg.track.to_string(),
+			priority: 0,
+		};
+
+		let broadcast = consumer.ok_or(Error::NotFound)?;
+		let track = broadcast.subscribe_track(&track)?;
+
+		let mut max_latency = msg.max_latency;
+		let mut datagrams = track.subscribe_datagrams(DatagramsSubscription { max_latency });
+		if max_latency.is_zero() {
+			datagrams.skip_to_latest();
+		}
+
+		stream.writer.encode(&lite::DatagramsOk { max_latency }).await?;
+
+		let max_size = session.max_datagram_size();
+
+		loop {
+			tokio::select! {
+				biased;
+				upd = stream.reader.decode_maybe::<lite::DatagramsUpdate>() => match upd? {
+					Some(upd) => {
+						let was_strict = max_latency.is_zero();
+						max_latency = upd.max_latency;
+						if max_latency.is_zero() && !was_strict {
+							datagrams.skip_to_latest();
+						}
+					}
+					// Subscriber closed the stream — clean shutdown.
+					None => return Ok(()),
+				},
+				datagram = datagrams.recv(max_latency) => match datagram? {
+					Some(datagram) => {
+						let wire = lite::Datagram {
+							subscribe: msg.id,
+							sequence: datagram.sequence,
+							payload: datagram.payload,
+						};
+						let mut buf = BytesMut::with_capacity(max_size.min(1300));
+						wire.encode(&mut buf, version)?;
+						if buf.len() > max_size {
+							tracing::debug!(size = buf.len(), max = max_size, "skipping oversized datagram");
+							continue;
+						}
+						// Best-effort: an Err here means the local congestion controller
+						// or QUIC stack rejected the datagram. We treat that as the
+						// fire-and-forget contract — no retry, no logging spam.
+						let _ = session.send_datagram(buf.freeze());
+					}
+					None => return Ok(()),
+				},
+			}
 		}
 	}
 

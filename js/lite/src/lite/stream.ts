@@ -14,6 +14,7 @@ export const StreamId = {
 	Fetch: 3,
 	Probe: 4,
 	Goaway: 5,
+	Datagrams: 6,
 	ClientCompat: 0x20,
 	ServerCompat: 0x21,
 } as const;

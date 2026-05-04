@@ -8,7 +8,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use crate::{
 	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
 	OriginProducer, Path, PathOwned, TrackProducer,
-	coding::{Reader, Stream},
+	coding::{Decode, Reader, Stream},
 	lite,
 	model::BroadcastProducer,
 };
@@ -55,10 +55,55 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	pub async fn run(self) -> Result<(), Error> {
 		let bw = self.clone();
+		let dg = self.clone();
 		tokio::select! {
 			Err(err) = self.clone().run_announce() => Err(err),
 			res = self.run_uni() => res,
 			Err(err) = bw.run_recv_bandwidth() => Err(err),
+			Err(err) = dg.run_datagrams() => Err(err),
+		}
+	}
+
+	/// Loop receiving QUIC datagrams (Lite05+) and routing each to the appropriate
+	/// [`TrackProducer`] in `subscribes` by subscribe id.
+	async fn run_datagrams(self) -> Result<(), Error> {
+		// Datagrams are a Lite05+ feature; older peers should never send them.
+		if matches!(
+			self.version,
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
+		) {
+			return Ok(());
+		}
+
+		loop {
+			let bytes = match self.session.recv_datagram().await {
+				Ok(bytes) => bytes,
+				Err(err) => return Err(Error::from_transport(err)),
+			};
+
+			let mut buf = bytes;
+			let datagram = match lite::Datagram::decode(&mut buf, self.version) {
+				Ok(d) => d,
+				Err(err) => {
+					tracing::debug!(%err, "malformed datagram");
+					continue;
+				}
+			};
+
+			let mut subs = self.subscribes.lock();
+			if let Some(track) = subs.get_mut(&datagram.subscribe) {
+				if let Err(err) = track.write_datagram(crate::Datagram {
+					sequence: datagram.sequence,
+					payload: datagram.payload,
+				}) {
+					tracing::debug!(subscribe = datagram.subscribe, %err, "datagram write failed");
+				}
+			} else {
+				tracing::trace!(
+					subscribe = datagram.subscribe,
+					"datagram for unknown subscription; dropped"
+				);
+			}
 		}
 	}
 
@@ -280,9 +325,31 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe started");
 
+		// On Lite05+, also open a DATAGRAMS control stream so any datagrams the upstream
+		// peer publishes for this track are routed to the same TrackProducer. The two
+		// streams run concurrently; either error short-circuits the subscription.
+		let datagrams_msg = lite::Datagrams {
+			id,
+			broadcast: msg.broadcast.clone(),
+			track: msg.track.clone(),
+			max_latency: crate::model::MAX_DATAGRAM_AGE,
+		};
+		let lite05_or_later = !matches!(
+			self.version,
+			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
+		);
+		let dg = self.clone();
+
 		let res = tokio::select! {
 			_ = track.unused() => Err(Error::Cancel),
 			res = self.run_track(msg) => res,
+			res = async move {
+				if lite05_or_later {
+					dg.run_datagrams_stream(datagrams_msg).await
+				} else {
+					std::future::pending().await
+				}
+			} => res,
 		};
 
 		match res {
@@ -331,6 +398,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream.reader.closed().await?;
 
 		Ok(())
+	}
+
+	/// Open the upstream DATAGRAMS control stream for a single subscription and keep
+	/// it alive until the peer closes it (or the subscription is cancelled).
+	async fn run_datagrams_stream(self, msg: lite::Datagrams<'_>) -> Result<(), Error> {
+		let mut stream = Stream::open(&self.session, self.version).await?;
+		stream.writer.encode(&lite::ControlType::Datagrams).await?;
+		stream.writer.encode(&msg).await?;
+
+		// The first response MUST be a DatagramsOk.
+		let _ok = stream.reader.decode::<lite::DatagramsOk>().await?;
+
+		// Stream stays open for lifecycle events (DatagramsUpdate from us, or stream
+		// close from the peer). For now the subscriber doesn't issue updates, so just
+		// wait until the peer closes.
+		stream.reader.closed().await?;
+		stream.writer.finish()?;
+		stream.writer.closed().await
 	}
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {

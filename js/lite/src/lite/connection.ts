@@ -7,6 +7,7 @@ import * as Path from "../path.ts";
 import { type Reader, Readers, Stream } from "../stream.ts";
 import type * as Time from "../time.ts";
 import { AnnounceInterest } from "./announce.ts";
+import { Datagrams } from "./datagram.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { type Origin, randomOrigin } from "./origin.ts";
@@ -122,6 +123,10 @@ export class Connection implements Established {
 			tasks.push(this.#subscriber.runProbe());
 		}
 
+		if (this.#version === Version.DRAFT_05) {
+			tasks.push(this.#runDatagrams());
+		}
+
 		try {
 			await Promise.all(tasks);
 		} catch (err) {
@@ -184,6 +189,9 @@ export class Connection implements Established {
 		} else if (typ === StreamId.Subscribe) {
 			const msg = await Subscribe.decode(stream.reader, this.#version);
 			await this.#publisher.runSubscribe(msg, stream);
+		} else if (typ === StreamId.Datagrams) {
+			const msg = await Datagrams.decode(stream.reader, this.#version);
+			await this.#publisher.runDatagrams(msg, stream);
 		} else if (typ === StreamId.Probe) {
 			await this.#publisher.runProbe(stream);
 		} else if (typ === StreamId.Goaway) {
@@ -191,6 +199,25 @@ export class Connection implements Established {
 			console.info("received goaway:", msg.uri);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
+		}
+	}
+
+	async #runDatagrams() {
+		const datagrams = (this.#quic as unknown as { datagrams: { readable: ReadableStream<Uint8Array> } }).datagrams;
+		const reader = datagrams.readable.getReader();
+		try {
+			for (;;) {
+				const { value, done } = await reader.read();
+				if (done) break;
+				if (!value) continue;
+				try {
+					await this.#subscriber.routeDatagram(value);
+				} catch (err: unknown) {
+					console.debug("malformed datagram:", err);
+				}
+			}
+		} finally {
+			reader.releaseLock();
 		}
 	}
 
