@@ -57,12 +57,15 @@ impl QuinnClient {
 		let port = url.port().unwrap_or(443);
 
 		// Look up the DNS entry.
-		// Quinn doesn't support happy eyeballs, so we use the first address.
-		let ip = tokio::net::lookup_host((host.clone(), port))
+		// Quinn doesn't support happy eyeballs, so we pick a single address,
+		// preferring one whose family matches the local socket so the OS
+		// doesn't reject it (notably on Windows, where IPv6 sockets aren't
+		// dual-stack by default).
+		let local = self.quic.local_addr().context("failed to get local address")?;
+		let addrs = tokio::net::lookup_host((host.clone(), port))
 			.await
-			.context("failed DNS lookup")?
-			.next()
-			.context("no DNS entries")?;
+			.context("failed DNS lookup")?;
+		let ip = crate::util::pick_addr(addrs, local).context("no DNS entries")?;
 
 		if url.scheme() == "http" {
 			// Perform a HTTP request to fetch the certificate fingerprint.
