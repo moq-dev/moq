@@ -10,6 +10,20 @@
 //! - [Group]: A collection of [Frame]s, delivered in order until cancelled.
 //! - [Frame]: Chunks of data with an upfront size.
 //!
+//! ## Compatibility
+//! `moq-lite` purposely implements a subset of the IETF `moq-transport` specification.
+//! Many features are unsupported on purpose to keep the API and implementation clean,
+//! rather than pollute them with half-baked features.
+//!
+//! That said, the library is forwards-compatible with the full specification and
+//! supports moq-transport drafts 14+ via version negotiation. Everything will work
+//! perfectly, so long as your application uses the API as defined above.
+//!
+//! For example, there's no concept of "sub-group" in `moq-lite`. When connecting to
+//! a moq-transport implementation, we use `sub-group=0` for all frames and silently
+//! drop any received frames not in `sub-group=0`. If your application genuinely needs
+//! multiple sub-groups, tell me *why* and we can figure something out.
+//!
 //! ## Producers and Consumers
 //! Each level of the hierarchy is split into a Producer / Consumer pair:
 //! - The **Producer** is the writer: it appends new state (publishes a broadcast,
@@ -23,22 +37,14 @@
 //! last producer signals consumers that no more updates are coming.
 //!
 //! ## Async
-//! Many methods (but not all yet) expose `poll_xxx` variants built on
-//! [`conducer`] so you can drive them from custom executors without a tokio
-//! runtime. Any plain `async` method should be awaited from inside an active
-//! tokio runtime — this requirement is being phased out as more methods grow
-//! `poll_xxx` counterparts.
+//! This library is async-first, using [tokio] for async I/O and task management.
+//! Any plain `async` method should be awaited from inside an active tokio runtime.
+//! Otherwise you risk a panic.
 //!
-//! ## Compatibility
-//! **NOTE**: We purposely implement a subset of the IETF `moq-transport` specification.
-//! This is meant to simplify both the API and the implementation, as there's a lot of nonsense possible in the full specification.
-//!
-//! The library is forwards compatible with the full specification and supports moq-transport drafts 14+.
-//! Everything will work perfectly, so long as your application uses the API as defined above.
-//!
-//! For example, there's no concept of "sub-group" in `moq-lite`.
-//! When connecting to a moq-transport implementation, we'll use `sub-group=0` for all frames.
-//! If your application depends on multiple sub-groups... you might want to reconsider anyway.
+//! This requirement is being phased out as more methods grow `poll_xxx` counterparts
+//! built on [`conducer`], so you can drive them from custom executors without a tokio
+//! runtime. You can also call them synchronously, since [`conducer`] is built on the
+//! standard [`std::task::Waker`] API and any [`std::task::Waker`] is a valid driver.
 
 mod client;
 mod coding;
