@@ -88,7 +88,7 @@ struct RuntimeState {
 	#[allow(dead_code)]
 	session: moq_lite::Session,
 	broadcast: moq_lite::BroadcastProducer,
-	catalog: moq_mux::import::CatalogProducer,
+	catalog: moq_mux::catalog::Producer,
 	pads: HashMap<String, PadState>,
 }
 
@@ -379,7 +379,7 @@ async fn run_session(
 	let mut broadcast = moq_lite::Broadcast::new().produce();
 	let broadcast_consumer = broadcast.consume();
 
-	let catalog = moq_mux::import::CatalogProducer::new(&mut broadcast)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 	anyhow::ensure!(
 		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),

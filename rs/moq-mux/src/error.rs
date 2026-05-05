@@ -18,3 +18,6 @@ pub enum Error {
 	#[error("cmaf: {0}")]
 	Cmaf(#[from] crate::container::CmafError),
 }
+
+/// A Result type alias for moq-mux operations.
+pub type Result<T> = std::result::Result<T, Error>;

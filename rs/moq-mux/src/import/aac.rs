@@ -1,9 +1,9 @@
 use anyhow::Context;
 use bytes::{Buf, BytesMut};
 
-// Make a new audio group every 100ms.
-// NOTE: We could do this per-frame, but there's not much benefit to it.
-const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestamp::from_millis_unchecked(100);
+// Pack ~100ms of audio per group. AAC frames are typically ~21ms (1024 samples at 48kHz),
+// so 5 frames is a good fit. Any value works — this is just a knob for relay efficiency.
+const GROUP_FRAMES: usize = 5;
 
 /// Typed AAC configuration for initialization without binary blobs.
 pub struct AacConfig {
@@ -104,15 +104,16 @@ impl AacConfig {
 /// an MP4 ESDS atom). Each input buffer passed to [`decode`](Self::decode) is published as
 /// one hang frame; group boundaries are managed automatically every ~100 ms.
 pub struct Aac {
-	catalog: crate::import::CatalogProducer,
-	track: hang::container::OrderedProducer,
+	catalog: crate::catalog::Producer,
+	track: crate::container::Producer<crate::container::Hang>,
 	zero: Option<tokio::time::Instant>,
+	frames: usize,
 }
 
 impl Aac {
 	pub fn new(
 		mut broadcast: moq_lite::BroadcastProducer,
-		mut catalog: crate::import::CatalogProducer,
+		mut catalog: crate::catalog::Producer,
 		config: AacConfig,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".aac")?;
@@ -135,8 +136,9 @@ impl Aac {
 
 		Ok(Self {
 			catalog,
-			track: hang::container::OrderedProducer::new(track).with_max_group_duration(MAX_GROUP_DURATION),
+			track: crate::container::Producer::new(track, crate::container::Hang::Legacy),
 			zero: None,
+			frames: 0,
 		})
 	}
 
@@ -158,12 +160,21 @@ impl Aac {
 			buf.advance(len);
 		}
 
-		let frame = hang::container::Frame {
+		// Start a new group every GROUP_FRAMES frames.
+		let frame = crate::container::Frame {
 			timestamp: pts,
 			payload: payload.freeze(),
+			keyframe: self.frames % GROUP_FRAMES == 0,
 		};
+		self.frames += 1;
 
 		self.track.write(frame)?;
+
+		// Close the group immediately after the Nth frame so the relay can forward it
+		// without waiting for the next keyframe to arrive.
+		if self.frames % GROUP_FRAMES == 0 {
+			self.track.finish_group()?;
+		}
 
 		Ok(())
 	}

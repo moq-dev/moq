@@ -12,10 +12,10 @@ pub struct Hev1 {
 	broadcast: moq_lite::BroadcastProducer,
 
 	// The catalog being produced.
-	catalog: crate::import::CatalogProducer,
+	catalog: crate::catalog::Producer,
 
 	// The track being produced.
-	track: Option<hang::container::OrderedProducer>,
+	track: Option<crate::container::Producer<crate::container::Hang>>,
 
 	// Whether the track has been initialized.
 	// If it changes, then we'll reinitialize with a new track.
@@ -37,7 +37,7 @@ pub struct Hev1 {
 }
 
 impl Hev1 {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::import::CatalogProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -97,7 +97,7 @@ impl Hev1 {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(track.into());
+		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 
 		Ok(())
 	}
@@ -290,13 +290,10 @@ impl Hev1 {
 
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
 
-		if self.current.contains_idr {
-			track.keyframe()?;
-		}
-
-		let frame = hang::container::Frame {
+		let frame = crate::container::Frame {
 			timestamp: pts,
 			payload,
+			keyframe: self.current.contains_idr,
 		};
 
 		track.write(frame)?;

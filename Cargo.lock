@@ -2359,7 +2359,6 @@ version = "0.15.8"
 dependencies = [
  "anyhow",
  "bytes",
- "conducer",
  "derive_more",
  "hex",
  "lazy_static",

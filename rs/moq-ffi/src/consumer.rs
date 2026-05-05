@@ -23,7 +23,7 @@ pub struct MoqCatalogConsumer {
 }
 
 struct Catalog {
-	inner: hang::CatalogConsumer,
+	inner: moq_mux::catalog::Consumer,
 }
 
 impl Catalog {
@@ -42,7 +42,7 @@ pub struct MoqMediaConsumer {
 }
 
 struct Media {
-	inner: moq_mux::export::Consumer<moq_mux::container::Hang>,
+	inner: moq_mux::container::Consumer<moq_mux::container::Hang>,
 }
 
 impl Media {
@@ -78,7 +78,7 @@ impl MoqBroadcastConsumer {
 	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let track = self.inner.subscribe_track(&hang::catalog::Catalog::default_track())?;
-		let consumer = hang::CatalogConsumer::from(track);
+		let consumer = moq_mux::catalog::Consumer::from(track);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
 		}))
@@ -112,7 +112,7 @@ impl MoqBroadcastConsumer {
 			.map_err(|e| MoqError::Codec(format!("invalid container: {e}")))?;
 		let track = self.inner.subscribe_track(&moq_lite::Track { name, priority: 0 })?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
-		let consumer = moq_mux::export::Consumer::new(track, media).with_latency(latency);
+		let consumer = moq_mux::container::Consumer::new(track, media).with_latency(latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))

@@ -42,7 +42,7 @@ impl Subscribe {
 		// Read the first catalog snapshot up-front so we can write the init segment.
 		// We re-subscribe a fresh CatalogConsumer for the muxer, so it sees catalog updates too.
 		let catalog_track = self.broadcast.subscribe_track(&hang::Catalog::default_track())?;
-		let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
+		let mut catalog_consumer = moq_mux::catalog::Consumer::new(catalog_track);
 		let catalog = catalog_consumer.next().await?.context("empty catalog")?;
 
 		// Build the merged init segment (ftyp + multi-track moov) from the catalog.
@@ -54,7 +54,7 @@ impl Subscribe {
 		// The muxer decodes both Legacy and CMAF tracks via Consumer<Hang> and yields
 		// frames in timestamp order across tracks. We re-encode each frame as moof+mdat.
 		let muxer_catalog_track = self.broadcast.subscribe_track(&hang::Catalog::default_track())?;
-		let muxer_catalog = hang::CatalogConsumer::new(muxer_catalog_track);
+		let muxer_catalog = moq_mux::catalog::Consumer::new(muxer_catalog_track);
 		let mut muxer = moq_mux::export::Muxed::new(self.broadcast.clone(), muxer_catalog).with_latency(max_latency);
 
 		while let Some(muxed) = muxer.read().await? {

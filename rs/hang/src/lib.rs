@@ -23,5 +23,5 @@ pub mod container;
 /// Export the moq-lite version we use.
 pub use moq_lite;
 
-pub use catalog::{Catalog, CatalogConsumer};
+pub use catalog::Catalog;
 pub use error::*;

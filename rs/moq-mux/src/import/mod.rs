@@ -10,8 +10,9 @@
 //! - If you only know the wrapping container, use [`Framed`] (frame boundaries known —
 //!   e.g. fMP4) or [`Stream`] (raw byte stream, no framing — e.g. piped Annex B H.264).
 //!
-//! [`CatalogProducer`] manages the catalog tracks (both hang and MSF) used by every
-//! producer above; [`Producer<C>`] is the generic per-track producer that dispatches to a
+//! Codec producers publish through [`catalog::Producer`](crate::catalog::Producer), which
+//! manages the hang and MSF catalog tracks; per-track encoding goes through
+//! [`Producer<C>`](crate::container::Producer), which dispatches to a
 //! [`Container`](crate::container::Container) implementation.
 
 mod aac;
@@ -19,27 +20,23 @@ mod annexb;
 mod av01;
 mod avc1;
 mod avc3;
-mod catalog;
 mod fmp4;
 mod framed;
 mod hev1;
 mod hls;
 mod jitter;
 mod opus;
-mod producer;
 mod stream;
 
 pub use aac::*;
 pub use av01::*;
 pub use avc1::*;
 pub use avc3::*;
-pub use catalog::*;
 pub use fmp4::*;
 pub use framed::*;
 pub use hev1::*;
 pub use hls::*;
 pub use opus::*;
-pub use producer::*;
 pub use stream::*;
 
 #[cfg(test)]

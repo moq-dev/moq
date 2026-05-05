@@ -10,8 +10,8 @@ use bytes::Bytes;
 /// without inline parameter sets.
 pub struct Avc1 {
 	broadcast: moq_lite::BroadcastProducer,
-	catalog: crate::import::CatalogProducer,
-	track: Option<hang::container::OrderedProducer>,
+	catalog: crate::catalog::Producer,
+	track: Option<crate::container::Producer<crate::container::Hang>>,
 	config: Option<hang::catalog::VideoConfig>,
 
 	/// NALU length size from the AVCDecoderConfigurationRecord (typically 4).
@@ -25,7 +25,7 @@ pub struct Avc1 {
 }
 
 impl Avc1 {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::import::CatalogProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -108,7 +108,7 @@ impl Avc1 {
 		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
-		self.track = Some(track.into());
+		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 
 		buf.advance(buf.remaining());
 
@@ -130,13 +130,10 @@ impl Avc1 {
 		let keyframe = self.is_keyframe(data);
 		let track = self.track.as_mut().context("not initialized; call init() first")?;
 
-		if keyframe {
-			track.keyframe()?;
-		}
-
-		track.write(hang::container::Frame {
+		track.write(crate::container::Frame {
 			timestamp: pts,
 			payload: data.to_vec().into(),
+			keyframe,
 		})?;
 
 		if let Some(jitter) = self.jitter.observe(pts)

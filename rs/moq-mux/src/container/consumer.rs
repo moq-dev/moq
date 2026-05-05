@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::task::{Poll, ready};
 
-use crate::container::{Container, Frame, Timestamp};
+use super::{Container, Frame, Timestamp};
 
 /// Decode a moq-lite track into a stream of media [`Frame`]s in latency-bounded
 /// presentation order.
@@ -1242,8 +1242,7 @@ mod tests {
 
 		let mut track = moq_lite::Track::new("video").produce();
 		let consumer_track = track.consume();
-		let mut consumer =
-			Consumer::new(consumer_track, crate::container::Hang::Legacy).with_latency(Duration::from_millis(500));
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		// Write frames using Hang::Legacy encoding
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();

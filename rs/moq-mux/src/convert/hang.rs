@@ -15,8 +15,8 @@ use hang::container::Frame;
 pub struct Convert {
 	input: moq_lite::BroadcastConsumer,
 	output: moq_lite::BroadcastProducer,
-	catalog_consumer: Option<hang::CatalogConsumer>,
-	catalog_producer: crate::import::CatalogProducer,
+	catalog_consumer: Option<crate::catalog::Consumer>,
+	catalog_producer: crate::catalog::Producer,
 	tracks: HashMap<String, TrackState>,
 }
 
@@ -29,10 +29,10 @@ enum TrackState {
 
 impl Convert {
 	pub fn new(input: moq_lite::BroadcastConsumer, mut output: moq_lite::BroadcastProducer) -> anyhow::Result<Self> {
-		let catalog_producer = crate::import::CatalogProducer::new(&mut output)?;
+		let catalog_producer = crate::catalog::Producer::new(&mut output)?;
 
 		let catalog_track = input.subscribe_track(&hang::Catalog::default_track())?;
-		let catalog_consumer = hang::CatalogConsumer::new(catalog_track);
+		let catalog_consumer = crate::catalog::Consumer::new(catalog_track);
 
 		Ok(Self {
 			input,

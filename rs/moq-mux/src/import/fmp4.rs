@@ -28,7 +28,7 @@ pub struct Fmp4 {
 	broadcast: moq_lite::BroadcastProducer,
 
 	/// The catalog being produced
-	catalog: crate::import::CatalogProducer,
+	catalog: crate::catalog::Producer,
 
 	// A lookup to tracks in the broadcast
 	tracks: HashMap<u32, Fmp4Track>,
@@ -67,7 +67,7 @@ impl Fmp4 {
 	/// Create a new CMAF importer that will write to the given broadcast.
 	///
 	/// The broadcast will be populated with tracks as they're discovered in the fMP4 file.
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::import::CatalogProducer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			catalog,
 			tracks: HashMap::default(),

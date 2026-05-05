@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::task::Poll;
 use std::time::Duration;
 
-use crate::container::{Frame, Hang};
-use crate::export::Consumer;
+use crate::container::{Consumer, Frame, Hang};
 
 /// A frame returned by [`Muxed::read`] tagged with its source track.
 #[derive(Clone, Debug)]
@@ -29,7 +28,7 @@ pub struct MuxedFrame {
 /// stalled groups are skipped to keep playback moving.
 pub struct Muxed {
 	broadcast: moq_lite::BroadcastConsumer,
-	catalog: Option<hang::CatalogConsumer>,
+	catalog: Option<crate::catalog::Consumer>,
 	latency: Duration,
 
 	/// Per-track state, keyed by rendition name.
@@ -51,7 +50,7 @@ impl Muxed {
 	///
 	/// The catalog drives subscription: as renditions appear in the catalog, their tracks
 	/// are subscribed; as they disappear, their consumers are dropped.
-	pub fn new(broadcast: moq_lite::BroadcastConsumer, catalog: hang::CatalogConsumer) -> Self {
+	pub fn new(broadcast: moq_lite::BroadcastConsumer, catalog: crate::catalog::Consumer) -> Self {
 		Self {
 			broadcast,
 			catalog: Some(catalog),
@@ -80,7 +79,7 @@ impl Muxed {
 	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<MuxedFrame>, crate::Error>> {
 		// 1. Drain catalog updates and (un)subscribe tracks accordingly.
 		while let Some(catalog) = self.catalog.as_mut() {
-			match catalog.poll_next(waiter).map_err(crate::Error::Hang)? {
+			match catalog.poll_next(waiter)? {
 				Poll::Ready(Some(snapshot)) => self.update_catalog(&snapshot)?,
 				Poll::Ready(None) => {
 					self.catalog = None;

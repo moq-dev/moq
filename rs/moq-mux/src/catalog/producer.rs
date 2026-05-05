@@ -9,7 +9,7 @@ use base64::Engine;
 /// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
 /// Both the hang (`catalog.json`) and MSF (`catalog`) tracks are published on drop of the guard.
 #[derive(Clone)]
-pub struct CatalogProducer {
+pub struct Producer {
 	/// Access to the underlying hang catalog track producer.
 	pub hang_track: moq_lite::TrackProducer,
 
@@ -19,7 +19,7 @@ pub struct CatalogProducer {
 	current: Arc<Mutex<hang::Catalog>>,
 }
 
-impl CatalogProducer {
+impl Producer {
 	/// Create a new catalog producer, inserting both catalog tracks into the broadcast.
 	pub fn new(broadcast: &mut moq_lite::BroadcastProducer) -> Result<Self, moq_lite::Error> {
 		Self::with_catalog(broadcast, hang::Catalog::default())
@@ -41,8 +41,8 @@ impl CatalogProducer {
 	}
 
 	/// Get mutable access to the catalog, publishing it after any changes.
-	pub fn lock(&mut self) -> CatalogGuard<'_> {
-		CatalogGuard {
+	pub fn lock(&mut self) -> Guard<'_> {
+		Guard {
 			catalog: self.current.lock().unwrap(),
 			hang_track: &mut self.hang_track,
 			msf_track: &mut self.msf_track,
@@ -56,10 +56,10 @@ impl CatalogProducer {
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
-	pub fn consume(&self) -> Result<hang::CatalogConsumer, moq_lite::Error> {
+	pub fn consume(&self) -> Result<super::Consumer, moq_lite::Error> {
 		let track = self.hang_track.consume();
 		let subscriber = track;
-		Ok(hang::CatalogConsumer::new(subscriber))
+		Ok(super::Consumer::new(subscriber))
 	}
 
 	/// Finish publishing to this catalog.
@@ -72,17 +72,17 @@ impl CatalogProducer {
 
 /// RAII guard for modifying a catalog with automatic publishing on drop.
 ///
-/// Obtained via [`CatalogProducer::lock`].
+/// Obtained via [`Producer::lock`].
 ///
 /// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
-pub struct CatalogGuard<'a> {
+pub struct Guard<'a> {
 	catalog: MutexGuard<'a, hang::Catalog>,
 	hang_track: &'a mut moq_lite::TrackProducer,
 	msf_track: &'a mut moq_lite::TrackProducer,
 	updated: bool,
 }
 
-impl<'a> Deref for CatalogGuard<'a> {
+impl<'a> Deref for Guard<'a> {
 	type Target = hang::Catalog;
 
 	fn deref(&self) -> &Self::Target {
@@ -90,14 +90,14 @@ impl<'a> Deref for CatalogGuard<'a> {
 	}
 }
 
-impl<'a> DerefMut for CatalogGuard<'a> {
+impl<'a> DerefMut for Guard<'a> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		self.updated = true;
 		&mut self.catalog
 	}
 }
 
-impl Drop for CatalogGuard<'_> {
+impl Drop for Guard<'_> {
 	fn drop(&mut self) {
 		if !self.updated {
 			return;

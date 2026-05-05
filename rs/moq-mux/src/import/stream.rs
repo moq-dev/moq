@@ -69,7 +69,7 @@ impl Stream {
 	/// Create a new stream importer with the given format.
 	pub fn new(
 		broadcast: moq_lite::BroadcastProducer,
-		catalog: crate::import::CatalogProducer,
+		catalog: crate::catalog::Producer,
 		format: StreamFormat,
 	) -> Self {
 		let decoder = match format {

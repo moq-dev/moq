@@ -2,7 +2,8 @@ use bytes::{Buf, BytesMut};
 
 // Make a new audio group every 100ms.
 // NOTE: We could do this per-frame, but there's not much benefit to it.
-const MAX_GROUP_DURATION: hang::container::Timestamp = hang::container::Timestamp::from_millis_unchecked(100);
+// Pack ~100ms of audio per group. Opus frames are typically 20ms, so 5 is a good fit.
+const GROUP_FRAMES: usize = 5;
 
 /// Typed Opus configuration for initialization without binary blobs.
 pub struct OpusConfig {
@@ -47,15 +48,16 @@ impl OpusConfig {
 /// is published as one hang frame. Group boundaries are managed automatically every ~100 ms.
 /// Ogg framing is not supported — feed raw Opus packets.
 pub struct Opus {
-	catalog: crate::import::CatalogProducer,
-	track: hang::container::OrderedProducer,
+	catalog: crate::catalog::Producer,
+	track: crate::container::Producer<crate::container::Hang>,
 	zero: Option<tokio::time::Instant>,
+	frames: usize,
 }
 
 impl Opus {
 	pub fn new(
 		mut broadcast: moq_lite::BroadcastProducer,
-		mut catalog: crate::import::CatalogProducer,
+		mut catalog: crate::catalog::Producer,
 		config: OpusConfig,
 	) -> anyhow::Result<Self> {
 		let track = broadcast.unique_track(".opus")?;
@@ -75,8 +77,9 @@ impl Opus {
 
 		Ok(Self {
 			catalog,
-			track: hang::container::OrderedProducer::new(track).with_max_group_duration(MAX_GROUP_DURATION),
+			track: crate::container::Producer::new(track, crate::container::Hang::Legacy),
 			zero: None,
+			frames: 0,
 		})
 	}
 
@@ -104,12 +107,21 @@ impl Opus {
 			buf.advance(len);
 		}
 
-		let frame = hang::container::Frame {
+		// Start a new group every GROUP_FRAMES frames.
+		let frame = crate::container::Frame {
 			timestamp: pts,
 			payload: payload.freeze(),
+			keyframe: self.frames % GROUP_FRAMES == 0,
 		};
+		self.frames += 1;
 
 		self.track.write(frame)?;
+
+		// Close the group immediately after the Nth frame so the relay can forward it
+		// without waiting for the next keyframe to arrive.
+		if self.frames % GROUP_FRAMES == 0 {
+			self.track.finish_group()?;
+		}
 
 		Ok(())
 	}

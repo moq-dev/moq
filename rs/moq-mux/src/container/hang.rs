@@ -8,7 +8,7 @@ use crate::container::{Cmaf, Container, Frame};
 ///
 /// `Hang` is a runtime-dispatched [`Container`] that selects the wire format based on a
 /// hang [`catalog::Container`](hang::catalog::Container). This lets callers carry a
-/// single concrete type through their pipeline (e.g. [`Consumer<Hang>`](crate::export::Consumer))
+/// single concrete type through their pipeline (e.g. [`Consumer<Hang>`](crate::container::Consumer))
 /// instead of threading a generic parameter through user code.
 ///
 /// - [`Hang::Legacy`]: VarInt timestamp prefix + raw codec bitstream, one media frame

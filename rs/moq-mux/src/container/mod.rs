@@ -17,10 +17,14 @@ use std::task::Poll;
 use bytes::Bytes;
 
 pub(crate) mod cmaf;
+mod consumer;
 mod hang;
+mod producer;
 
 pub use cmaf::{Cmaf, Error as CmafError};
+pub use consumer::Consumer;
 pub use hang::Hang;
+pub use producer::Producer;
 
 /// Microsecond presentation timestamp, the canonical timebase for media frames in moq-mux.
 pub type Timestamp = moq_lite::Timescale<1_000_000>;

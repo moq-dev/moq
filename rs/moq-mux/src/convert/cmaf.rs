@@ -19,8 +19,8 @@ use mp4_atom::{Atom, Encode};
 pub struct Convert {
 	input: moq_lite::BroadcastConsumer,
 	output: moq_lite::BroadcastProducer,
-	catalog_consumer: Option<hang::CatalogConsumer>,
-	catalog_producer: crate::import::CatalogProducer,
+	catalog_consumer: Option<crate::catalog::Consumer>,
+	catalog_producer: crate::catalog::Producer,
 	tracks: HashMap<String, TrackState>,
 }
 
@@ -33,10 +33,10 @@ enum TrackState {
 
 impl Convert {
 	pub fn new(input: moq_lite::BroadcastConsumer, mut output: moq_lite::BroadcastProducer) -> anyhow::Result<Self> {
-		let catalog_producer = crate::import::CatalogProducer::new(&mut output)?;
+		let catalog_producer = crate::catalog::Producer::new(&mut output)?;
 
 		let catalog_track = input.subscribe_track(&hang::Catalog::default_track())?;
-		let catalog_consumer = hang::CatalogConsumer::new(catalog_track);
+		let catalog_consumer = crate::catalog::Consumer::new(catalog_track);
 
 		Ok(Self {
 			input,
@@ -807,7 +807,7 @@ pub(crate) mod test {
 	pub(crate) async fn read_legacy_frames(track: moq_lite::TrackConsumer) -> Vec<(Timestamp, Vec<u8>, bool)> {
 		let subscriber = track;
 		let mut ordered =
-			crate::export::Consumer::new(subscriber, crate::container::Hang::Legacy).with_latency(Duration::MAX);
+			crate::container::Consumer::new(subscriber, crate::container::Hang::Legacy).with_latency(Duration::MAX);
 
 		let mut result = Vec::new();
 		while let Some(frame) = tokio::time::timeout(Duration::from_millis(500), ordered.read())

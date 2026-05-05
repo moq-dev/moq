@@ -10,7 +10,7 @@ use crate::error::MoqError;
 
 struct BroadcastProducer {
 	broadcast: moq_lite::BroadcastProducer,
-	catalog: moq_mux::import::CatalogProducer,
+	catalog: moq_mux::catalog::Producer,
 }
 
 #[derive(uniffi::Object)]
@@ -46,7 +46,7 @@ impl MoqBroadcastProducer {
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut broadcast = moq_lite::Broadcast::new().produce();
-		let catalog = moq_mux::import::CatalogProducer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		}))
