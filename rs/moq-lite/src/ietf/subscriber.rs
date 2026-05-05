@@ -587,8 +587,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		// Wait for cancellation: downstream consumers gone, broadcast aborted
-		// (no longer cascades), or the publisher closed the stream.
 		tokio::select! {
 			_ = track.unused() => {
 				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe cancelled");
@@ -695,8 +693,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			(producer, track.producer.clone())
 		};
 
-		// `track.abort` no longer cascades, so listen for it here and propagate
-		// the cancellation to this in-flight group (and any frame inside).
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = producer.closed() => Err(err),

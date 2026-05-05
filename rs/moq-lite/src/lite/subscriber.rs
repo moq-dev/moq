@@ -281,8 +281,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe started");
 
-		// Cancel the subscription if the broadcast itself goes away — its abort
-		// no longer cascades, so we propagate the signal to the track here.
 		let res = tokio::select! {
 			_ = track.unused() => Err(Error::Cancel),
 			err = broadcast.closed() => Err(err),
@@ -349,8 +347,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			(group, track.clone())
 		};
 
-		// `track.abort` no longer cascades, so listen for it here and propagate
-		// the cancellation to this in-flight group (and any frame inside).
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
