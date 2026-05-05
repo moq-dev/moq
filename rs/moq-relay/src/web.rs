@@ -61,6 +61,7 @@ pub struct HttpConfig {
 }
 
 /// HTTPS listener configuration with TLS certificate and key.
+#[serde_with::serde_as]
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -83,6 +84,8 @@ pub struct HttpsConfig {
 	/// A verified peer is granted an unrestricted [`AuthToken`] without a JWT,
 	/// mirroring the QUIC server's `--server-tls-root` behavior. Clients that
 	/// don't present a cert continue through the normal JWT path.
+	///
+	/// In config files, accepts either a single string or a TOML array.
 	#[arg(
 		long = "web-https-root",
 		id = "web-https-root",
@@ -90,6 +93,7 @@ pub struct HttpsConfig {
 		env = "MOQ_WEB_HTTPS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 }
 

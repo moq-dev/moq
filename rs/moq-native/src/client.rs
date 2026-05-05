@@ -6,6 +6,7 @@ use std::{net, sync::Arc};
 use url::Url;
 
 /// TLS configuration for the client.
+#[serde_with::serde_as]
 #[derive(Clone, Default, Debug, clap::Args, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -13,9 +14,11 @@ pub struct ClientTls {
 	/// Use the TLS root at this path, encoded as PEM.
 	///
 	/// This value can be provided multiple times for multiple roots.
-	/// If this is empty, system roots will be used instead
+	/// If this is empty, system roots will be used instead.
+	/// In config files, accepts either a single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
 	/// PEM file containing the client certificate chain for mTLS.
