@@ -382,6 +382,20 @@ impl BroadcastConsumer {
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 
+	/// Returns true if every [`BroadcastProducer`] has been dropped.
+	pub fn is_closed(&self) -> bool {
+		self.state.read().is_closed()
+	}
+
+	/// Register a [`conducer::Waiter`] that fires when the broadcast closes.
+	///
+	/// Returns [`Poll::Ready`] if already closed, otherwise [`Poll::Pending`] after
+	/// arming the waiter. Useful for composing close-detection into a larger poll
+	/// without spawning a task per broadcast.
+	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<()> {
+		self.state.poll_closed(waiter)
+	}
+
 	/// Check if this is the exact same instance of a broadcast.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
