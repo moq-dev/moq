@@ -98,6 +98,10 @@ match version {
 }
 ```
 
+## Writing Style
+
+- **No em dashes (—)** in code, comments, doc comments, commit messages, or any prose. Use a period and start a new sentence, or use a comma/parenthesis if the clauses are tightly bound.
+
 ## Rust Conventions
 
 - **Error handling**: Use `thiserror` with `#[from]` for library crates, `anyhow` for binaries. Always add `#[non_exhaustive]` to public `thiserror` enums.
