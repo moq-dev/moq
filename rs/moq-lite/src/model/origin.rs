@@ -656,6 +656,18 @@ impl OriginProducer {
 		OriginConsumer::new(self.info, self.root.clone(), self.nodes.clone())
 	}
 
+	/// Get a broadcast by path if it has *already* been published.
+	///
+	/// Equivalent to `self.consume().get_broadcast(path)` but skips the
+	/// announcement-cursor allocation, which is currently relatively expensive.
+	#[deprecated(note = "use `consume().get_broadcast(path)` once `consume()` is cheap")]
+	pub fn get_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
+		let path = path.as_path();
+		let (root, rest) = self.nodes.get(&path)?;
+		let state = root.lock();
+		state.consume_broadcast(&rest)
+	}
+
 	/// Returns a new OriginProducer that automatically strips out the provided prefix.
 	///
 	/// Returns None if the provided root is not authorized; when [`Self::scope`]

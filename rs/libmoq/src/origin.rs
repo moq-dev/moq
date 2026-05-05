@@ -108,7 +108,9 @@ impl Origin {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
 		// TODO: expose an async variant backed by `announced_broadcast` so FFI callers can wait
 		// for gossip instead of racing it.
-		origin.consume().get_broadcast(path).ok_or(Error::BroadcastNotFound)
+		// Uses the deprecated direct lookup to avoid the per-call cost of OriginProducer::consume().
+		#[allow(deprecated)]
+		origin.get_broadcast(path).ok_or(Error::BroadcastNotFound)
 	}
 
 	pub fn publish<P: moq_lite::AsPath>(
