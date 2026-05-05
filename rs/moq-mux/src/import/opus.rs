@@ -1,5 +1,4 @@
-use buf_list::BufList;
-use bytes::Buf;
+use bytes::{Buf, BytesMut};
 
 // Make a new audio group every 100ms.
 // NOTE: We could do this per-frame, but there's not much benefit to it.
@@ -42,7 +41,11 @@ impl OpusConfig {
 	}
 }
 
-/// Opus decoder, initialized via a OpusHead. Does not support Ogg.
+/// Opus importer.
+///
+/// Initialized from an OpusHead packet. Each input buffer passed to [`decode`](Self::decode)
+/// is published as one hang frame. Group boundaries are managed automatically every ~100 ms.
+/// Ogg framing is not supported — feed raw Opus packets.
 pub struct Opus {
 	catalog: crate::import::CatalogProducer,
 	track: hang::container::OrderedProducer,
@@ -92,15 +95,18 @@ impl Opus {
 	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 
-		// Create a BufList at chunk boundaries, potentially avoiding allocations.
-		let mut payload = BufList::new();
-		while !buf.chunk().is_empty() {
-			payload.push_chunk(buf.copy_to_bytes(buf.chunk().len()));
+		// Collect the input into a contiguous Bytes payload.
+		let mut payload = BytesMut::with_capacity(buf.remaining());
+		while buf.has_remaining() {
+			let chunk = buf.chunk();
+			payload.extend_from_slice(chunk);
+			let len = chunk.len();
+			buf.advance(len);
 		}
 
 		let frame = hang::container::Frame {
 			timestamp: pts,
-			payload,
+			payload: payload.freeze(),
 		};
 
 		self.track.write(frame)?;

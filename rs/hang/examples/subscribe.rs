@@ -78,16 +78,15 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	};
 
 	let track_consumer = broadcast.subscribe_track(&track)?;
-	let mut ordered =
-		moq_mux::export::OrderedConsumer::new(track_consumer, moq_mux::export::Legacy, Duration::from_millis(500));
+	let mut ordered = moq_mux::export::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
+		.with_latency(Duration::from_millis(500));
 
-	// Read frames in presentation order.
+	// Read frames in latency-bounded presentation order.
 	while let Some(frame) = ordered.read().await? {
 		tracing::info!(
 			timestamp = ?frame.timestamp,
-			keyframe = frame.is_keyframe(),
-			group = frame.group,
-			bytes = frame.payload.num_bytes(),
+			keyframe = frame.keyframe,
+			bytes = frame.payload.len(),
 			"received frame"
 		);
 	}

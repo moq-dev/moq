@@ -1,6 +1,5 @@
 use anyhow::Context;
-use buf_list::BufList;
-use bytes::Buf;
+use bytes::{Buf, BytesMut};
 
 // Make a new audio group every 100ms.
 // NOTE: We could do this per-frame, but there's not much benefit to it.
@@ -99,7 +98,11 @@ impl AacConfig {
 	}
 }
 
-/// AAC decoder, initialized via AudioSpecificConfig (variable length from ESDS box).
+/// AAC importer.
+///
+/// Initialized from an AudioSpecificConfig blob (variable-length, typically extracted from
+/// an MP4 ESDS atom). Each input buffer passed to [`decode`](Self::decode) is published as
+/// one hang frame; group boundaries are managed automatically every ~100 ms.
 pub struct Aac {
 	catalog: crate::import::CatalogProducer,
 	track: hang::container::OrderedProducer,
@@ -146,15 +149,18 @@ impl Aac {
 	pub fn decode<T: Buf>(&mut self, buf: &mut T, pts: Option<hang::container::Timestamp>) -> anyhow::Result<()> {
 		let pts = self.pts(pts)?;
 
-		// Create a BufList at chunk boundaries, potentially avoiding allocations.
-		let mut payload = BufList::new();
-		while !buf.chunk().is_empty() {
-			payload.push_chunk(buf.copy_to_bytes(buf.chunk().len()));
+		// Collect the input into a contiguous Bytes payload.
+		let mut payload = BytesMut::with_capacity(buf.remaining());
+		while buf.has_remaining() {
+			let chunk = buf.chunk();
+			payload.extend_from_slice(chunk);
+			let len = chunk.len();
+			buf.advance(len);
 		}
 
 		let frame = hang::container::Frame {
 			timestamp: pts,
-			payload,
+			payload: payload.freeze(),
 		};
 
 		self.track.write(frame)?;

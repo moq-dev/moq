@@ -19,7 +19,6 @@ doctest = false
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-buf-list = "1"
 bytes = "1"
 conducer = { workspace = true }
 h264-parser = { version = "0.4.0" }

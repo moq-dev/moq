@@ -4,15 +4,25 @@ use bytes::Buf;
 
 use crate::container::{Cmaf, Container, Frame};
 
-/// Container for the hang protocol.
+/// Catalog-driven [`Container`] for the hang protocol.
 ///
-/// `Hang::Legacy` is the original wire format: VarInt timestamp prefix + raw codec bitstream,
-/// one media frame per moq-lite frame.
+/// `Hang` is a runtime-dispatched [`Container`] that selects the wire format based on a
+/// hang [`catalog::Container`](hang::catalog::Container). This lets callers carry a
+/// single concrete type through their pipeline (e.g. [`Consumer<Hang>`](crate::export::Consumer))
+/// instead of threading a generic parameter through user code.
 ///
-/// `Hang::Cmaf` carries CMAF moof+mdat fragments. The contained [`Cmaf`] is parsed once
-/// upfront from the catalog's init segment.
+/// - [`Hang::Legacy`]: VarInt timestamp prefix + raw codec bitstream, one media frame
+///   per moq-lite frame. The original hang wire format.
+/// - [`Hang::Cmaf`]: ISO-BMFF moof+mdat fragments, potentially multiple samples per
+///   moq-lite frame. The contained [`Cmaf`] is parsed once from the catalog's init
+///   segment via [`Cmaf::from_init`].
+///
+/// Build from a catalog entry with `Hang::try_from(&container)`.
 pub enum Hang {
+	/// VarInt timestamp prefix + raw codec bitstream. One media frame per moq-lite frame.
 	Legacy,
+	/// CMAF moof+mdat fragments. Wraps a parsed [`Cmaf`] (the track's `trak` box from the
+	/// init segment) so per-frame writes/reads have the timescale and track id available.
 	Cmaf(Cmaf),
 }
 
@@ -36,7 +46,7 @@ impl Container for Hang {
 				for frame in frames {
 					let hang_frame = hang::container::Frame {
 						timestamp: frame.timestamp,
-						payload: frame.payload.clone().into(),
+						payload: frame.payload.clone(),
 					};
 					hang_frame.encode(group)?;
 				}

@@ -3,17 +3,24 @@ use std::task::{Poll, ready};
 
 use crate::container::{Container, Frame, Timestamp};
 
-/// A consumer for media tracks with timestamp reordering.
+/// Decode a moq-lite track into a stream of media [`Frame`]s in latency-bounded
+/// presentation order.
 ///
-/// This wraps a `moq_lite::TrackConsumer` and adds functionality
-/// like timestamp decoding, latency management, and frame buffering.
+/// `Consumer` wraps a [`moq_lite::TrackConsumer`] and a [`Container`] format implementation
+/// (typically [`Hang`](crate::container::Hang)) and yields decoded frames via [`read`](Self::read).
 ///
-/// Generic over `F: Container` to support different container encodings.
+/// ## Ordering & latency skipping
 ///
-/// ## Latency Management
+/// Groups can arrive on the wire out of order. The consumer always reads frames *within*
+/// a group in arrival order, but across groups it advances by sequence number, skipping
+/// stalled or missing groups when the difference between the oldest pending timestamp
+/// and the newest available timestamp exceeds the configured latency. With the default
+/// latency of zero, the consumer skips aggressively — any group that has a newer
+/// alternative is dropped. With a non-zero latency, slow groups are tolerated up to that
+/// budget before being skipped.
 ///
-/// The consumer can skip groups that are too far behind to maintain low latency.
-/// Configure the maximum acceptable delay through the consumer's latency settings.
+/// Set the latency with [`with_latency`](Self::with_latency) (builder) or
+/// [`set_latency`](Self::set_latency) (mid-stream).
 pub struct Consumer<F: Container> {
 	track: moq_lite::TrackConsumer,
 

@@ -1,7 +1,7 @@
 use super::jitter::MinFrameDuration;
 
 use anyhow::Context;
-use buf_list::BufList;
+use bytes::BytesMut;
 use bytes::{Buf, Bytes};
 use scuffle_av1::seq::SequenceHeaderObu;
 
@@ -31,7 +31,7 @@ pub struct Av01 {
 
 #[derive(Default)]
 struct Frame {
-	chunks: BufList,
+	chunks: BytesMut,
 	contains_keyframe: bool,
 	contains_frame: bool,
 }
@@ -366,7 +366,7 @@ impl Av01 {
 
 		tracing::trace!(?header.obu_type, "parsed OBU");
 
-		self.current.chunks.push_chunk(obu_data);
+		self.current.chunks.extend_from_slice(&obu_data);
 
 		Ok(())
 	}
@@ -382,7 +382,7 @@ impl Av01 {
 			.context("expected sequence header before any frames")?;
 		let pts = pts.context("missing timestamp")?;
 
-		let payload = std::mem::take(&mut self.current.chunks);
+		let payload = std::mem::take(&mut self.current.chunks).freeze();
 
 		if self.current.contains_keyframe {
 			track.keyframe()?;

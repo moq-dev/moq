@@ -447,8 +447,8 @@ async fn run_session(
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_lite::Track::new(&track_name);
 		let track_consumer = broadcast.subscribe_track(&track_ref)?;
-		let track =
-			moq_mux::export::OrderedConsumer::new(track_consumer, moq_mux::export::Legacy, Duration::from_secs(1));
+		let track = moq_mux::export::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
+			.with_latency(Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
 
@@ -461,8 +461,8 @@ async fn run_session(
 		let endpoint = request_pad(&control_tx, descriptor.clone(), caps).await?;
 		let track_ref = moq_lite::Track::new(&track_name);
 		let track_consumer = broadcast.subscribe_track(&track_ref)?;
-		let track =
-			moq_mux::export::OrderedConsumer::new(track_consumer, moq_mux::export::Legacy, Duration::from_secs(1));
+		let track = moq_mux::export::Consumer::new(track_consumer, moq_mux::container::Hang::Legacy)
+			.with_latency(Duration::from_secs(1));
 		tasks.push(spawn_track_pump(track, descriptor, endpoint, shutdown.clone()));
 	}
 
@@ -494,7 +494,7 @@ async fn request_pad(
 }
 
 fn spawn_track_pump(
-	track: moq_mux::export::OrderedConsumer<moq_mux::export::Legacy>,
+	track: moq_mux::export::Consumer<moq_mux::container::Hang>,
 	descriptor: TrackDescriptor,
 	pad_endpoint: PadEndpoint,
 	shutdown: watch::Receiver<bool>,
@@ -503,7 +503,7 @@ fn spawn_track_pump(
 }
 
 async fn run_track_pump(
-	mut track: moq_mux::export::OrderedConsumer<moq_mux::export::Legacy>,
+	mut track: moq_mux::export::Consumer<moq_mux::container::Hang>,
 	descriptor: TrackDescriptor,
 	pad_endpoint: PadEndpoint,
 	mut shutdown: watch::Receiver<bool>,
@@ -519,9 +519,9 @@ async fn run_track_pump(
 				match frame {
 					Ok(Some(frame)) => {
 						let timestamp = frame.timestamp;
-						let is_keyframe = frame.is_keyframe();
+						let is_keyframe = frame.keyframe;
 						let payload = frame.payload;
-						let mut buffer = gst::Buffer::from_slice(payload.into_iter().flatten().collect::<Vec<_>>());
+						let mut buffer = gst::Buffer::from_slice(payload.to_vec());
 						let buffer_mut = buffer.get_mut().unwrap();
 
 						let pts = match reference_ts {

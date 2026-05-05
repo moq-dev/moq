@@ -2,7 +2,6 @@ use super::annexb::{NalIterator, START_CODE};
 use super::jitter::MinFrameDuration;
 
 use anyhow::Context;
-use buf_list::BufList;
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -225,15 +224,15 @@ impl Avc3 {
 				if !self.current.contains_sps
 					&& let Some(sps) = &self.cached_sps
 				{
-					self.current.chunks.push_chunk(START_CODE.clone());
-					self.current.chunks.push_chunk(sps.clone());
+					self.current.chunks.extend_from_slice(&START_CODE);
+					self.current.chunks.extend_from_slice(sps);
 					self.current.contains_sps = true;
 				}
 				if !self.current.contains_pps
 					&& let Some(pps) = &self.cached_pps
 				{
-					self.current.chunks.push_chunk(START_CODE.clone());
-					self.current.chunks.push_chunk(pps.clone());
+					self.current.chunks.extend_from_slice(&START_CODE);
+					self.current.chunks.extend_from_slice(pps);
 					self.current.contains_pps = true;
 				}
 
@@ -256,11 +255,10 @@ impl Avc3 {
 
 		tracing::trace!(kind = ?nal_type, "parsed NAL");
 
-		// Rather than keeping the original size of the start code, we replace it with a 4 byte start code.
-		// It's just marginally easier and potentially more efficient down the line (JS player with MSE).
-		// NOTE: This is ref-counted and static, so it's extremely cheap to clone.
-		self.current.chunks.push_chunk(START_CODE.clone());
-		self.current.chunks.push_chunk(nal);
+		// Replace the original start code with a canonical 4-byte start code (marginally easier
+		// for downstream players, e.g. MSE).
+		self.current.chunks.extend_from_slice(&START_CODE);
+		self.current.chunks.extend_from_slice(&nal);
 
 		Ok(())
 	}
@@ -273,7 +271,7 @@ impl Avc3 {
 
 		let pts = pts.context("missing timestamp")?;
 
-		let payload = std::mem::take(&mut self.current.chunks);
+		let payload = std::mem::take(&mut self.current.chunks).freeze();
 
 		if self.current.contains_idr {
 			self.track.keyframe()?;
@@ -353,7 +351,7 @@ enum NalType {
 
 #[derive(Default)]
 struct Frame {
-	chunks: BufList,
+	chunks: BytesMut,
 	contains_idr: bool,
 	contains_slice: bool,
 	contains_sps: bool,

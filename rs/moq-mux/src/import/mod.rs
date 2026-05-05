@@ -1,11 +1,18 @@
-//! Media demuxers for MoQ.
+//! Pull external media into a moq broadcast.
 //!
-//! This crate provides modules for converting existing media formats into MoQ broadcasts.
-//! It supports various container and codec formats.
+//! Submodules expose codec-specific producers that take raw bitstreams (or container-wrapped
+//! streams) and publish them as hang-protocol tracks alongside a catalog.
 //!
-//! The [Framed] and [Stream] types provide generic interfaces for importing media.
-//! [Framed] is for formats with known frame boundaries, [Stream] for unknown boundaries.
-//! If you know the format in advance, use the specific codec module instead.
+//! ## Choosing an entry point
+//!
+//! - If you know the codec/container in advance, use the dedicated producer
+//!   ([`Aac`], [`Avc1`], [`Avc3`], [`Av01`], [`Hev1`], [`Opus`], [`Fmp4`], [`Hls`]).
+//! - If you only know the wrapping container, use [`Framed`] (frame boundaries known —
+//!   e.g. fMP4) or [`Stream`] (raw byte stream, no framing — e.g. piped Annex B H.264).
+//!
+//! [`CatalogProducer`] manages the catalog tracks (both hang and MSF) used by every
+//! producer above; [`Producer<C>`] is the generic per-track producer that dispatches to a
+//! [`Container`](crate::container::Container) implementation.
 
 mod aac;
 mod annexb;

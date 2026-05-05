@@ -4,10 +4,14 @@ use std::task::Poll;
 use hang::catalog::Container;
 use hang::container::Frame;
 
-/// Converts a broadcast from any format to hang/Legacy format.
+/// Republishes a broadcast with every track in hang Legacy format.
 ///
-/// If tracks are already Legacy, they are inserted directly (no copy).
-/// If tracks are CMAF, parses moof+mdat and converts to hang frames.
+/// Reads the input catalog and creates a matching output broadcast. For each rendition:
+/// - **Legacy source** → bytes are passthrough'd group-for-group, frame-for-frame (no decode/encode).
+/// - **CMAF source** → each moof+mdat is parsed; per-sample timestamp + payload pairs are
+///   re-emitted as Legacy hang frames. The catalog rendition's `container` is rewritten to
+///   `Legacy` (the init segment is dropped — codec params should already be in the catalog
+///   rendition's `description`).
 pub struct Convert {
 	input: moq_lite::BroadcastConsumer,
 	output: moq_lite::BroadcastProducer,
@@ -304,7 +308,7 @@ impl ConvertTrack {
 						for decoded in frames {
 							let frame = Frame {
 								timestamp: decoded.timestamp,
-								payload: decoded.payload.into(),
+								payload: decoded.payload,
 							};
 							if let Err(e) = frame.encode(writer) {
 								tracing::error!(%e, "legacy encode failed");

@@ -117,7 +117,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	producer.keyframe()?;
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(1).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data").into(),
+		payload: Bytes::from_static(b"keyframe NAL data"),
 	};
 	producer.write(frame)?;
 
@@ -125,7 +125,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(2).unwrap(),
-		payload: Bytes::from_static(b"delta NAL data").into(),
+		payload: Bytes::from_static(b"delta NAL data"),
 	};
 	producer.write(frame)?;
 
@@ -135,7 +135,7 @@ async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
 	producer.keyframe()?;
 	let frame = hang::container::Frame {
 		timestamp: hang::container::Timestamp::from_secs(3).unwrap(),
-		payload: Bytes::from_static(b"keyframe NAL data").into(),
+		payload: Bytes::from_static(b"keyframe NAL data"),
 	};
 	producer.write(frame)?;
 

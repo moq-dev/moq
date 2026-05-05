@@ -36,97 +36,33 @@ impl Subscribe {
 	}
 
 	async fn run_fmp4(self) -> anyhow::Result<()> {
-		// Always convert to CMAF — this is a no-op for tracks already in CMAF.
-		let cmaf_output = moq_lite::Broadcast::new().produce();
-		let cmaf_consumer = cmaf_output.consume();
-		let converter = moq_mux::convert::cmaf::Convert::new(self.broadcast, cmaf_output)?;
-
-		// Consume the catalog track before the converter starts, so we don't miss it.
-		let catalog_track = cmaf_consumer.subscribe_track(&hang::Catalog::default_track())?;
-
+		let mut stdout = tokio::io::stdout();
 		let max_latency = std::time::Duration::from_millis(self.args.max_latency);
 
-		// Run the converter concurrently — it blocks until all tracks finish,
-		// so we must read from the output broadcast in parallel.
-		tokio::try_join!(converter.run(), mux_fmp4(catalog_track, cmaf_consumer, max_latency))?;
+		// Read the first catalog snapshot up-front so we can write the init segment.
+		// We re-subscribe a fresh CatalogConsumer for the muxer, so it sees catalog updates too.
+		let catalog_track = self.broadcast.subscribe_track(&hang::Catalog::default_track())?;
+		let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
+		let catalog = catalog_consumer.next().await?.context("empty catalog")?;
+
+		// Build the merged init segment (ftyp + multi-track moov) from the catalog.
+		let mut exporter = moq_mux::export::Fmp4::new(&catalog)?;
+		let init = exporter.init(&catalog)?;
+		stdout.write_all(&init).await?;
+		stdout.flush().await?;
+
+		// The muxer decodes both Legacy and CMAF tracks via Consumer<Hang> and yields
+		// frames in timestamp order across tracks. We re-encode each frame as moof+mdat.
+		let muxer_catalog_track = self.broadcast.subscribe_track(&hang::Catalog::default_track())?;
+		let muxer_catalog = hang::CatalogConsumer::new(muxer_catalog_track);
+		let mut muxer = moq_mux::export::Muxed::new(self.broadcast.clone(), muxer_catalog).with_latency(max_latency);
+
+		while let Some(muxed) = muxer.read().await? {
+			let fragment = exporter.frame(&muxed.track, &muxed.frame)?;
+			stdout.write_all(&fragment).await?;
+			stdout.flush().await?;
+		}
 
 		Ok(())
 	}
-}
-
-async fn mux_fmp4(
-	catalog_track: moq_lite::TrackConsumer,
-	cmaf_consumer: moq_lite::BroadcastConsumer,
-	max_latency: std::time::Duration,
-) -> anyhow::Result<()> {
-	let mut stdout = tokio::io::stdout();
-
-	let catalog_sub = catalog_track;
-	let mut catalog_consumer = hang::CatalogConsumer::new(catalog_sub);
-	let catalog = catalog_consumer.next().await?.context("empty catalog")?;
-
-	// Build exporter from catalog (for init segment)
-	let exporter = moq_mux::export::Fmp4::new(&catalog)?;
-
-	// Write init segment (merged multi-track moov)
-	let init = exporter.init(&catalog)?;
-	stdout.write_all(&init).await?;
-	stdout.flush().await?;
-
-	// Build OrderedMuxer from all track consumers (all CMAF after conversion)
-	let mut muxer_tracks = Vec::new();
-
-	for (name, config) in &catalog.video.renditions {
-		let track = cmaf_consumer.subscribe_track(&moq_lite::Track::new(name.clone()))?;
-
-		let timescale = match &config.container {
-			hang::catalog::Container::Cmaf { init } => parse_timescale_from_init(init)?,
-			hang::catalog::Container::Legacy => {
-				anyhow::bail!("unexpected Legacy track after conversion")
-			}
-		};
-
-		let consumer = moq_mux::export::OrderedConsumer::new(track, moq_mux::export::Cmaf { timescale }, max_latency);
-		muxer_tracks.push((name.clone(), consumer));
-	}
-
-	for (name, config) in &catalog.audio.renditions {
-		let track = cmaf_consumer.subscribe_track(&moq_lite::Track::new(name.clone()))?;
-
-		let timescale = match &config.container {
-			hang::catalog::Container::Cmaf { init } => parse_timescale_from_init(init)?,
-			hang::catalog::Container::Legacy => {
-				anyhow::bail!("unexpected Legacy track after conversion")
-			}
-		};
-
-		let consumer = moq_mux::export::OrderedConsumer::new(track, moq_mux::export::Cmaf { timescale }, max_latency);
-		muxer_tracks.push((name.clone(), consumer));
-	}
-
-	// Use OrderedMuxer for timestamp-ordered multi-track merge
-	let mut muxer = moq_mux::export::OrderedMuxer::new(muxer_tracks);
-
-	while let Some(muxed) = muxer.read().await? {
-		// CMAF passthrough: payload is already moof+mdat
-		for chunk in &muxed.frame.payload {
-			stdout.write_all(chunk).await?;
-		}
-		stdout.flush().await?;
-	}
-
-	Ok(())
-}
-
-fn parse_timescale_from_init(init: &[u8]) -> anyhow::Result<u64> {
-	use mp4_atom::DecodeMaybe;
-
-	let mut cursor = std::io::Cursor::new(init);
-	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
-		if let mp4_atom::Any::Moov(moov) = atom {
-			let trak = moov.trak.first().context("no tracks in moov")?;
-			return Ok(trak.mdia.mdhd.timescale as u64);
-		}
-	}
-	anyhow::bail!("no moov in init data")
 }

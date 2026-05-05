@@ -6,10 +6,16 @@ use bytes::Bytes;
 use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig};
 use mp4_atom::{Atom, Encode};
 
-/// Converts a broadcast from any format to CMAF format.
+/// Republishes a broadcast with every track in CMAF format.
 ///
-/// If tracks are already CMAF, they are inserted directly (no copy).
-/// If tracks are hang/Legacy, each frame is individually wrapped in moof+mdat.
+/// Reads the input catalog and creates a matching output broadcast. For each rendition:
+/// - **CMAF source** → bytes are passthrough'd group-for-group, frame-for-frame (no decode/encode).
+/// - **Legacy source** → each hang frame is rewrapped as a one-sample moof+mdat fragment, and
+///   the catalog rendition's `container` is rewritten to `Cmaf { init }` with a synthesized
+///   init segment (built from the codec configuration).
+///
+/// Use this when a downstream consumer (e.g. fMP4 stdout, MSE) requires CMAF wire format
+/// and the producer is publishing Legacy.
 pub struct Convert {
 	input: moq_lite::BroadcastConsumer,
 	output: moq_lite::BroadcastProducer,
@@ -309,7 +315,7 @@ impl ConvertTrack {
 							}
 						};
 
-						let payload: Vec<u8> = frame.payload.into_iter().flat_map(|c| c.into_iter()).collect();
+						let payload = frame.payload.to_vec();
 						let dts = frame.timestamp.as_micros() as u64 * timescale / 1_000_000;
 						// The first frame of each Legacy group is a keyframe.
 						let keyframe = std::mem::replace(is_first_frame, false);
@@ -677,8 +683,6 @@ pub(crate) mod test {
 	use hang::container::{Frame, Timestamp};
 	use mp4_atom::{Atom, DecodeMaybe};
 
-	use buf_list::BufList;
-
 	fn ts(micros: u64) -> Timestamp {
 		Timestamp::from_micros(micros).unwrap()
 	}
@@ -767,7 +771,7 @@ pub(crate) mod test {
 
 			let frame = Frame {
 				timestamp: *timestamp,
-				payload: BufList::from_iter(vec![Bytes::from(payload.clone())]),
+				payload: Bytes::from(payload.clone()),
 			};
 			frame.encode(current_group.as_mut().unwrap()).unwrap();
 		}

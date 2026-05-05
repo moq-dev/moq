@@ -117,7 +117,7 @@ pub enum Error {
 
 	/// Error from the moq-mux consumer layer.
 	#[error("mux error: {0}")]
-	Mux(Arc<moq_mux::export::Error>),
+	Mux(Arc<moq_mux::Error>),
 
 	/// Index out of bounds.
 	#[error("no index")]
@@ -134,10 +134,11 @@ impl From<tracing::metadata::ParseLevelError> for Error {
 	}
 }
 
-impl From<moq_mux::export::Error> for Error {
-	fn from(err: moq_mux::export::Error) -> Self {
+impl From<moq_mux::Error> for Error {
+	fn from(err: moq_mux::Error) -> Self {
 		match err {
-			moq_mux::export::Error::Moq(e) => Error::Moq(e),
+			moq_mux::Error::Moq(e) => Error::Moq(e),
+			moq_mux::Error::Hang(e) => Error::Hang(e),
 			e => Error::Mux(Arc::new(e)),
 		}
 	}

@@ -3,11 +3,18 @@ use bytes::Bytes;
 use hang::catalog::{Catalog, Container, VideoConfig};
 use mp4_atom::{DecodeMaybe, Encode};
 
-use super::OrderedFrame;
+use crate::container::Frame;
 
-/// Produces fMP4 init segments and per-frame moof+mdat fragments from catalog info.
+/// Builds fMP4 / CMAF wire output: a merged init segment plus per-frame moof+mdat fragments.
 ///
-/// Used for exporting a broadcast to stdout as a playable fMP4 stream.
+/// `Fmp4` is a stateful encoder over the tracks in a hang catalog. [`Fmp4::init`] produces the
+/// merged ftyp + moov (one trak per rendition, brands `isom`/`iso6`/`mp41`); [`Fmp4::frame`]
+/// re-encodes a decoded [`Frame`] as a moof+mdat fragment for a named track. Per-track timescale
+/// and sequence-number state lives inside `Fmp4`, so successive `frame()` calls on the same
+/// track produce a valid fragment sequence.
+///
+/// Combine with [`Muxed`](crate::export::Muxed) to convert a moq broadcast (any container) into
+/// a single fMP4 byte stream — typically for piping to a player like `ffplay` or for MSE.
 pub struct Fmp4 {
 	tracks: Vec<Fmp4ExportTrack>,
 }
@@ -133,8 +140,12 @@ impl Fmp4 {
 		Ok(Bytes::from(buf))
 	}
 
-	/// Encode a single frame as a moof+mdat fragment.
-	pub fn frame(&mut self, track_name: &str, frame: &OrderedFrame) -> anyhow::Result<Bytes> {
+	/// Re-encode a decoded media frame as a CMAF moof+mdat fragment for the named track.
+	///
+	/// `track_name` must match a rendition in the catalog passed to [`Self::new`]. The frame's
+	/// timestamp is rescaled to the track's timescale, and `frame.keyframe` controls the trun
+	/// sample-flags (sync vs depends-on).
+	pub fn frame(&mut self, track_name: &str, frame: &Frame) -> anyhow::Result<Bytes> {
 		let track = self
 			.tracks
 			.iter_mut()
@@ -142,27 +153,27 @@ impl Fmp4 {
 			.context("unknown track")?;
 
 		let dts = frame.timestamp.as_micros() as u64 * track.timescale / 1_000_000;
-		let payload: Vec<u8> = frame.payload.clone().into_iter().flat_map(|c| c.into_iter()).collect();
-		let keyframe = frame.is_keyframe();
-
-		let flags = if keyframe { 0x0200_0000 } else { 0x0001_0000 };
+		let size = frame.payload.len() as u32;
+		let flags = if frame.keyframe { 0x0200_0000 } else { 0x0001_0000 };
 
 		let seq = track.sequence_number;
 		track.sequence_number += 1;
 
-		// First pass to get moof size (use Some(0) so trun includes the data_offset field)
-		let moof = build_moof(seq, track.track_id, dts, payload.len() as u32, flags, Some(0));
+		// First pass to get moof size (use Some(0) so trun includes the data_offset field).
+		let moof = build_moof(seq, track.track_id, dts, size, flags, Some(0));
 		let mut buf = Vec::new();
 		moof.encode(&mut buf)?;
 		let moof_size = buf.len();
 
-		// Second pass with data_offset
+		// Second pass with data_offset pointing past moof + mdat header (8 bytes).
 		let data_offset = (moof_size + 8) as i32;
-		let moof = build_moof(seq, track.track_id, dts, payload.len() as u32, flags, Some(data_offset));
+		let moof = build_moof(seq, track.track_id, dts, size, flags, Some(data_offset));
 		buf.clear();
 		moof.encode(&mut buf)?;
 
-		let mdat = mp4_atom::Mdat { data: payload };
+		let mdat = mp4_atom::Mdat {
+			data: frame.payload.to_vec(),
+		};
 		mdat.encode(&mut buf)?;
 
 		Ok(Bytes::from(buf))
