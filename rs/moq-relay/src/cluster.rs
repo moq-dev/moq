@@ -60,12 +60,12 @@ impl Cluster {
 
 	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
 	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginConsumer> {
-		self.origin.with_root(&token.root)?.consume_only(&token.subscribe)
+		Some(self.origin.with_root(&token.root)?.scope(&token.subscribe)?.consume())
 	}
 
 	/// Returns an [`OriginProducer`] scoped to this session's publish permissions.
 	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
-		self.origin.with_root(&token.root)?.publish_only(&token.publish)
+		self.origin.with_root(&token.root)?.scope(&token.publish)
 	}
 
 	/// Runs the cluster event loop, dialing the configured peers and keeping

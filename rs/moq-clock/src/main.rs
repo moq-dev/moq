@@ -87,8 +87,9 @@ async fn main() -> anyhow::Result<()> {
 
 			let path: moq_lite::Path<'_> = config.broadcast.into();
 			let mut origin = origin
-				.consume_only(&[path])
-				.context("not allowed to consume broadcast")?;
+				.scope(&[path])
+				.context("not allowed to consume broadcast")?
+				.consume();
 
 			// The current subscriber if any, dropped after each announce.
 			let mut clock: Option<clock::Subscriber> = None;
