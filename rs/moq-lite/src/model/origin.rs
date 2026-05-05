@@ -32,13 +32,6 @@ impl Origin {
 	/// Never encoded for Lite04+: violates the non-zero invariant and would fail to round-trip.
 	pub(crate) const UNKNOWN: Self = Self { id: 0 };
 
-	/// Build an origin with a specific id. The id must be non-zero and fit in 62 bits;
-	/// values outside that range will fail to encode on the wire. Prefer [`Self::random`]
-	/// unless you genuinely need a stable, well-known id (e.g. tests or named cluster nodes).
-	pub const fn new(id: u64) -> Self {
-		Self { id }
-	}
-
 	/// Generate a fresh origin with a random non-zero 62-bit id. Use this for any
 	/// origin that does not need a stable identity across restarts.
 	pub fn random() -> Self {
@@ -55,7 +48,7 @@ impl Origin {
 
 impl From<u64> for Origin {
 	fn from(id: u64) -> Self {
-		Self::new(id)
+		Self { id }
 	}
 }
 
