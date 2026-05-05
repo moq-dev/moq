@@ -344,7 +344,7 @@ impl GroupBuffer {
 		}
 
 		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			return Poll::Ready(Err(moq_lite::Error::Decode(moq_lite::coding::DecodeError::Short).into()));
+			return Poll::Ready(Err(moq_lite::Error::Decode(moq_lite::DecodeError::Short).into()));
 		}
 
 		Poll::Pending
@@ -362,7 +362,7 @@ impl GroupBuffer {
 		}
 
 		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			return Poll::Ready(Err(moq_lite::Error::Decode(moq_lite::coding::DecodeError::Short).into()));
+			return Poll::Ready(Err(moq_lite::Error::Decode(moq_lite::DecodeError::Short).into()));
 		}
 
 		Poll::Pending

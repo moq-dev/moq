@@ -77,17 +77,6 @@ impl<S: web_transport_trait::RecvStream, V> Reader<S, V> {
 		}
 	}
 
-	/// Returns a non-zero chunk of data, or None if the stream is closed
-	pub async fn read(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
-		if !self.buffer.is_empty() {
-			let size = cmp::min(max, self.buffer.len());
-			let data = self.buffer.split_to(size).freeze();
-			return Ok(Some(data));
-		}
-
-		self.stream.read_chunk(max).await.map_err(Error::from_transport)
-	}
-
 	/// Read into the provided buffer, draining the reader's internal buffer first.
 	///
 	/// Returns the number of bytes written, or `None` if the stream is closed

@@ -107,8 +107,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// We just received a subscribe for this exact namespace, so the peer must have already
 		// seen the announcement — synchronous lookup is appropriate here.
-		#[allow(deprecated)]
-		let Some(broadcast) = self.origin.consume_broadcast(&msg.track_namespace) else {
+		let Some(broadcast) = self.origin.get_broadcast(&msg.track_namespace) else {
 			self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
 				.await?;
 			return Ok(());
@@ -549,10 +548,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
 
-		let mut origin = self
-			.origin
-			.consume_only(&[prefix.as_path()])
-			.ok_or(Error::Unauthorized)?;
+		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
 
 		// Send OK response
 		match self.version {
