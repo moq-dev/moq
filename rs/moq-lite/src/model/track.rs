@@ -318,15 +318,12 @@ impl TrackProducer {
 	}
 
 	/// Abort the track with the given error.
+	///
+	/// Child groups are independent and must be aborted separately if desired;
+	/// existing group consumers can still finish reading any groups that were
+	/// already created.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = self.modify()?;
-
-		// Abort all groups still in progress.
-		for (group, _) in guard.groups.iter_mut().flatten() {
-			// Ignore errors, we don't care if the group was already closed.
-			group.abort(err.clone()).ok();
-		}
-
 		guard.abort = Some(err);
 		guard.close();
 		Ok(())
@@ -357,6 +354,12 @@ impl TrackProducer {
 			.used()
 			.await
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// Block until the track is closed or aborted, returning the cause.
+	pub async fn closed(&self) -> Error {
+		self.state.closed().await;
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 
 	/// Return true if the track has been closed.
@@ -407,18 +410,6 @@ pub(crate) struct TrackWeak {
 }
 
 impl TrackWeak {
-	pub fn abort(&self, err: Error) {
-		let Ok(mut guard) = self.state.write() else { return };
-
-		// Cascade abort to all groups.
-		for (group, _) in guard.groups.iter_mut().flatten() {
-			group.abort(err.clone()).ok();
-		}
-
-		guard.abort = Some(err);
-		guard.close();
-	}
-
 	pub fn is_closed(&self) -> bool {
 		self.state.is_closed()
 	}
