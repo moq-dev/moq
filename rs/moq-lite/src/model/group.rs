@@ -28,10 +28,13 @@ const MAX_GROUP_FRAMES: usize = 1024;
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Group {
+	/// Per-track sequence number used to detect ordering and gaps. Higher numbers
+	/// supersede lower ones; consumers may skip late arrivals.
 	pub sequence: u64,
 }
 
 impl Group {
+	/// Consume this [`Group`] to create a producer that owns its sequence number.
 	pub fn produce(self) -> GroupProducer {
 		GroupProducer::new(self)
 	}

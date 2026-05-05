@@ -392,7 +392,6 @@ impl<T: Param> Param for Option<T> {
 ///     0x20 => self.subscriber_priority,
 /// );
 /// ```
-#[macro_export]
 macro_rules! encode_params {
 	($w:expr, $version:expr, $($key:expr => $val:expr),* $(,)?) => {{
 		#[allow(unused_imports)]
@@ -456,7 +455,6 @@ macro_rules! encode_params {
 /// // forward: Option<bool> and subscriber_priority: Option<u8> are now in scope
 /// let subscriber_priority = subscriber_priority.unwrap_or(128);
 /// ```
-#[macro_export]
 macro_rules! decode_params {
 	($r:expr, $version:expr, $($key:expr => $name:ident: $ty:ty),* $(,)?) => {
 		#[allow(unused)]

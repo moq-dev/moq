@@ -23,6 +23,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Origin {
+	/// Non-zero 62-bit identifier. Encoded as a QUIC varint on the wire.
 	pub id: u64,
 }
 
@@ -31,9 +32,15 @@ impl Origin {
 	/// Never encoded for Lite04+: violates the non-zero invariant and would fail to round-trip.
 	pub(crate) const UNKNOWN: Self = Self { id: 0 };
 
-	/// Generate a fresh origin with a random non-zero 62-bit id. Callers
-	/// that need a specific id can build one via [`From<u64>`] instead,
-	/// but this is rarely what you want.
+	/// Build an origin with a specific id. The id must be non-zero and fit in 62 bits;
+	/// values outside that range will fail to encode on the wire. Prefer [`Self::random`]
+	/// unless you genuinely need a stable, well-known id (e.g. tests or named cluster nodes).
+	pub const fn new(id: u64) -> Self {
+		Self { id }
+	}
+
+	/// Generate a fresh origin with a random non-zero 62-bit id. Use this for any
+	/// origin that does not need a stable identity across restarts.
 	pub fn random() -> Self {
 		let mut rng = rand::rng();
 		let id = rng.random_range(1..(1u64 << 62));
@@ -48,7 +55,7 @@ impl Origin {
 
 impl From<u64> for Origin {
 	fn from(id: u64) -> Self {
-		Self { id }
+		Self::new(id)
 	}
 }
 
@@ -85,7 +92,7 @@ where
 /// Caps pathological or loop-induced announcements at a reasonable cluster
 /// diameter; appending past this limit returns [`TooManyOrigins`] rather than
 /// silently truncating.
-pub const MAX_HOPS: usize = 32;
+pub(crate) const MAX_HOPS: usize = 32;
 
 /// Bounded list of [`Origin`] entries, typically the hop chain of a broadcast.
 ///
@@ -134,18 +141,22 @@ impl OriginList {
 		self.0.contains(origin)
 	}
 
+	/// Number of entries currently in the list (always `<= MAX_HOPS`).
 	pub fn len(&self) -> usize {
 		self.0.len()
 	}
 
+	/// Whether the list contains no entries.
 	pub fn is_empty(&self) -> bool {
 		self.0.is_empty()
 	}
 
+	/// Iterate over the entries in hop order (oldest first).
 	pub fn iter(&self) -> std::slice::Iter<'_, Origin> {
 		self.0.iter()
 	}
 
+	/// Borrow the entries as a slice.
 	pub fn as_slice(&self) -> &[Origin] {
 		&self.0
 	}
@@ -572,6 +583,8 @@ impl std::ops::Deref for OriginProducer {
 }
 
 impl OriginProducer {
+	/// Build a producer for the given origin id with no scoped prefix and no
+	/// pre-existing broadcasts. Prefer [`Origin::produce`].
 	pub fn new(info: Origin) -> Self {
 		Self {
 			info,
@@ -655,14 +668,12 @@ impl OriginProducer {
 		))
 	}
 
-	/// Subscribe to a specific broadcast.
+	/// Get a broadcast by path if it has *already* been published.
 	///
-	/// Returns None if the broadcast is not found.
-	#[deprecated(
-		note = "synchronous lookup is a footgun: over-the-wire origins need time to gossip announcements. \
-			Use [OriginConsumer::announced_broadcast] which blocks until the given path is announced."
-	)]
-	pub fn consume_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
+	/// Returns `None` when the path is unknown right now. For producers that aggregate
+	/// announcements from remote origins (e.g. clusters), this races gossip — see
+	/// [`OriginConsumer::announced_broadcast`] for an async alternative.
+	pub fn try_consume_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
 		let (root, rest) = self.nodes.get(&path)?;
 		let state = root.lock();
@@ -687,6 +698,7 @@ impl OriginProducer {
 		&self.root
 	}
 
+	/// Iterate over the path prefixes this handle is permitted to publish or subscribe under.
 	// TODO return PathPrefixes
 	pub fn allowed(&self) -> impl Iterator<Item = &Path<'_>> {
 		self.nodes.nodes.iter().map(|(root, _)| root)
@@ -762,19 +774,19 @@ impl OriginConsumer {
 		self.updates.try_recv().ok()
 	}
 
+	/// Create another consumer with its own announcement cursor over the same origin.
 	pub fn consume(&self) -> Self {
 		self.clone()
 	}
 
-	/// Get a specific broadcast by path.
+	/// Get a broadcast by path if it has *already* been announced.
 	///
-	/// Returns None if the path hasn't been announced yet.
-	#[deprecated(
-		note = "synchronous lookup is a footgun: freshly-connected origins have not yet received any \
-			announcements, so this will return None even when the broadcast is about to arrive. \
-			Prefer `announced_broadcast` (blocks until announced) or loop over `announced()`."
-	)]
-	pub fn consume_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
+	/// Returns `None` when the path is unknown to this consumer right now. Synchronous
+	/// lookup races announcement gossip — freshly-connected consumers will see `None`
+	/// even when the broadcast is about to arrive. Prefer [`Self::announced_broadcast`]
+	/// (blocks until announced) unless you can guarantee the announcement has already
+	/// landed (e.g. you're responding to an `announced()` callback).
+	pub fn try_consume_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
 		let (root, rest) = self.nodes.get(&path)?;
 		let state = root.lock();
@@ -787,8 +799,8 @@ impl OriginConsumer {
 	/// is closed before the broadcast is announced. The returned broadcast may itself be closed
 	/// later — subscribers should watch [`BroadcastConsumer::closed`] to react to that.
 	///
-	/// Prefer this over the deprecated [`Self::consume_broadcast`] when you know the exact path
-	/// you want but cannot guarantee the announcement has already been received.
+	/// Prefer this over [`Self::try_consume_broadcast`] when you know the exact path you want
+	/// but cannot guarantee the announcement has already been received.
 	pub async fn announced_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
 
@@ -844,6 +856,7 @@ impl OriginConsumer {
 		&self.root
 	}
 
+	/// Iterate over the path prefixes this handle is permitted to publish or subscribe under.
 	// TODO return PathPrefixes
 	pub fn allowed(&self) -> impl Iterator<Item = &Path<'_>> {
 		self.nodes.nodes.iter().map(|(root, _)| root)
@@ -1003,7 +1016,6 @@ mod tests {
 	}
 
 	#[tokio::test]
-	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_duplicate() {
 		tokio::time::pause();
 
@@ -1022,7 +1034,7 @@ mod tests {
 		origin.publish_broadcast("test", consumer1.clone());
 		origin.publish_broadcast("test", consumer2.clone());
 		origin.publish_broadcast("test", consumer3.clone());
-		assert!(consumer.consume_broadcast("test").is_some());
+		assert!(consumer.try_consume_broadcast("test").is_some());
 
 		// On equal hop lengths, each new publish replaces the active and reannounces.
 		consumer.assert_next("test", &consumer1);
@@ -1037,7 +1049,7 @@ mod tests {
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
-		assert!(consumer.consume_broadcast("test").is_some());
+		assert!(consumer.try_consume_broadcast("test").is_some());
 		consumer.assert_next_wait();
 
 		// Drop the active, we should reannounce with the remaining backup.
@@ -1046,7 +1058,7 @@ mod tests {
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
 
-		assert!(consumer.consume_broadcast("test").is_some());
+		assert!(consumer.try_consume_broadcast("test").is_some());
 		consumer.assert_next_none("test");
 		consumer.assert_next("test", &consumer1);
 
@@ -1055,14 +1067,13 @@ mod tests {
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		assert!(consumer.consume_broadcast("test").is_none());
+		assert!(consumer.try_consume_broadcast("test").is_none());
 
 		consumer.assert_next_none("test");
 		consumer.assert_next_wait();
 	}
 
 	#[tokio::test]
-	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_duplicate_reverse() {
 		tokio::time::pause();
 
@@ -1072,24 +1083,23 @@ mod tests {
 
 		origin.publish_broadcast("test", broadcast1.consume());
 		origin.publish_broadcast("test", broadcast2.consume());
-		assert!(origin.consume_broadcast("test").is_some());
+		assert!(origin.try_consume_broadcast("test").is_some());
 
 		// This is harder, dropping the new broadcast first.
 		drop(broadcast2);
 
 		// Wait for the cleanup async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		assert!(origin.consume_broadcast("test").is_some());
+		assert!(origin.try_consume_broadcast("test").is_some());
 
 		drop(broadcast1);
 
 		// Wait for the cleanup async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		assert!(origin.consume_broadcast("test").is_none());
+		assert!(origin.try_consume_broadcast("test").is_none());
 	}
 
 	#[tokio::test]
-	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_double_publish() {
 		tokio::time::pause();
 
@@ -1100,13 +1110,13 @@ mod tests {
 		origin.publish_broadcast("test", broadcast.consume());
 		origin.publish_broadcast("test", broadcast.consume());
 
-		assert!(origin.consume_broadcast("test").is_some());
+		assert!(origin.try_consume_broadcast("test").is_some());
 
 		drop(broadcast);
 
 		// Wait for the async task to run.
 		tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-		assert!(origin.consume_broadcast("test").is_none());
+		assert!(origin.try_consume_broadcast("test").is_none());
 	}
 	// There was a tokio bug where only the first 127 broadcasts would be received instantly.
 	#[tokio::test]
@@ -1361,7 +1371,6 @@ mod tests {
 	}
 
 	#[tokio::test]
-	#[allow(deprecated)] // exercises consume_broadcast
 	async fn test_consume_broadcast_with_permissions() {
 		let origin = Origin::random().produce();
 		let broadcast1 = Broadcast::new().produce();
@@ -1376,17 +1385,17 @@ mod tests {
 			.expect("should create limited consumer");
 
 		// Should be able to get allowed broadcast
-		let result = limited_consumer.consume_broadcast("allowed/test");
+		let result = limited_consumer.try_consume_broadcast("allowed/test");
 		assert!(result.is_some());
 		assert!(result.unwrap().is_clone(&broadcast1.consume()));
 
 		// Should not be able to get disallowed broadcast
-		assert!(limited_consumer.consume_broadcast("notallowed/test").is_none());
+		assert!(limited_consumer.try_consume_broadcast("notallowed/test").is_none());
 
 		// Original consumer can get both
 		let consumer = origin.consume();
-		assert!(consumer.consume_broadcast("allowed/test").is_some());
-		assert!(consumer.consume_broadcast("notallowed/test").is_some());
+		assert!(consumer.try_consume_broadcast("allowed/test").is_some());
+		assert!(consumer.try_consume_broadcast("notallowed/test").is_some());
 	}
 
 	#[tokio::test]

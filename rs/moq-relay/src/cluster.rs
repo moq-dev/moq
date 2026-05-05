@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use moq_lite::{BroadcastConsumer, Origin, OriginConsumer, OriginProducer};
+use moq_lite::{Origin, OriginConsumer, OriginProducer};
 use url::Url;
 
 use crate::AuthToken;
@@ -66,12 +66,6 @@ impl Cluster {
 	/// Returns an [`OriginProducer`] scoped to this session's publish permissions.
 	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
 		self.origin.with_root(&token.root)?.publish_only(&token.publish)
-	}
-
-	/// Looks up a broadcast by name.
-	#[allow(deprecated)] // Synchronous cluster lookup by design; callers know the broadcast is local.
-	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
-		self.origin.consume_broadcast(broadcast)
 	}
 
 	/// Runs the cluster event loop, dialing the configured peers and keeping

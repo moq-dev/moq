@@ -246,8 +246,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// We just received a subscribe for this exact path, so by definition the peer has
 		// already seen an announcement for it — synchronous lookup is appropriate here.
-		#[allow(deprecated)]
-		let broadcast = self.origin.consume_broadcast(&subscribe.broadcast);
+		let broadcast = self.origin.try_consume_broadcast(&subscribe.broadcast);
 		let priority = self.priority.clone();
 		let version = self.version;
 

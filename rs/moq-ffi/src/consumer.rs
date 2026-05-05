@@ -126,7 +126,7 @@ impl TrackInner {
 	}
 
 	async fn next_group(&mut self) -> Result<Option<moq_lite::GroupConsumer>, MoqError> {
-		Ok(self.track.next_group_ordered().await?)
+		Ok(self.track.next_group().await?)
 	}
 
 	async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, MoqError> {

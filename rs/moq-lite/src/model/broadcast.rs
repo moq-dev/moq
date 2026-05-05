@@ -20,6 +20,7 @@ pub struct Broadcast {
 }
 
 impl Broadcast {
+	/// Create a new broadcast with an empty hop chain.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -73,6 +74,7 @@ impl Deref for BroadcastProducer {
 }
 
 impl BroadcastProducer {
+	/// Create a producer for the given broadcast metadata. Prefer [`Broadcast::produce`].
 	pub fn new(info: Broadcast) -> Self {
 		Self {
 			info,
@@ -216,6 +218,8 @@ impl BroadcastDynamic {
 		})
 	}
 
+	/// Poll for the next consumer-requested track, without blocking. The returned producer
+	/// is preconfigured with the requested track's name and priority.
 	pub fn poll_requested_track(&mut self, waiter: &conducer::Waiter) -> Poll<Result<TrackProducer, Error>> {
 		self.poll(waiter, |state| match state.requests.pop() {
 			Some(producer) => Poll::Ready(producer),
@@ -311,6 +315,12 @@ impl Deref for BroadcastConsumer {
 }
 
 impl BroadcastConsumer {
+	/// Subscribe to a track on this broadcast.
+	///
+	/// Reuses an existing producer if one is already publishing the track; otherwise
+	/// queues a new dynamic request that the broadcast's producer will service via
+	/// [`BroadcastDynamic::requested_track`]. Returns [`Error::NotFound`] if the
+	/// broadcast has no dynamic producer to handle requests.
 	pub fn subscribe_track(&self, track: &Track) -> Result<TrackConsumer, Error> {
 		// Upgrade to a temporary producer so we can modify the state.
 		let producer = self
@@ -363,6 +373,10 @@ impl BroadcastConsumer {
 		Ok(consumer)
 	}
 
+	/// Block until the broadcast is closed and return the cause.
+	///
+	/// Returns [`Error::Dropped`] if every producer was dropped without an
+	/// explicit abort, or the abort error supplied by [`BroadcastProducer::abort`].
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
