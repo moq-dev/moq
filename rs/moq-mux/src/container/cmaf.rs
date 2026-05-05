@@ -105,20 +105,6 @@ impl Container for Cmaf {
 	}
 }
 
-/// Parse the timescale from a CMAF init segment (ftyp+moov).
-pub(crate) fn parse_timescale(init_data: &[u8]) -> Result<u64, Error> {
-	use mp4_atom::DecodeMaybe;
-
-	let mut cursor = std::io::Cursor::new(init_data);
-	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor)? {
-		if let mp4_atom::Any::Moov(moov) = atom {
-			let trak = moov.trak.first().ok_or(Error::NoTracks)?;
-			return Ok(trak.mdia.mdhd.timescale as u64);
-		}
-	}
-	Err(Error::NoMoov)
-}
-
 pub(crate) fn decode(data: Bytes, timescale: u64) -> Result<Vec<Frame>, Error> {
 	use mp4_atom::DecodeMaybe;
 

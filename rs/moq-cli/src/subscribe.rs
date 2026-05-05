@@ -1,4 +1,3 @@
-use anyhow::Context;
 use clap::ValueEnum;
 use hang::moq_lite;
 use tokio::io::AsyncWriteExt;
@@ -39,27 +38,13 @@ impl Subscribe {
 		let mut stdout = tokio::io::stdout();
 		let max_latency = std::time::Duration::from_millis(self.args.max_latency);
 
-		// Read the first catalog snapshot up-front so we can write the init segment.
-		// We re-subscribe a fresh CatalogConsumer for the muxer, so it sees catalog updates too.
-		let catalog_track = self.broadcast.subscribe_track(&hang::Catalog::default_track())?;
-		let mut catalog_consumer = moq_mux::catalog::Consumer::new(catalog_track);
-		let catalog = catalog_consumer.next().await?.context("empty catalog")?;
+		// Fmp4 subscribes to the catalog internally, builds the merged init segment
+		// from the first catalog snapshot, then yields moof+mdat fragments in
+		// timestamp order across tracks.
+		let mut fmp4 = moq_mux::export::Fmp4::new(self.broadcast)?.with_latency(max_latency);
 
-		// Build the merged init segment (ftyp + multi-track moov) from the catalog.
-		let mut exporter = moq_mux::export::Fmp4::new(&catalog)?;
-		let init = exporter.init(&catalog)?;
-		stdout.write_all(&init).await?;
-		stdout.flush().await?;
-
-		// The muxer decodes both Legacy and CMAF tracks via Consumer<Hang> and yields
-		// frames in timestamp order across tracks. We re-encode each frame as moof+mdat.
-		let muxer_catalog_track = self.broadcast.subscribe_track(&hang::Catalog::default_track())?;
-		let muxer_catalog = moq_mux::catalog::Consumer::new(muxer_catalog_track);
-		let mut muxer = moq_mux::export::Muxed::new(self.broadcast.clone(), muxer_catalog).with_latency(max_latency);
-
-		while let Some(muxed) = muxer.read().await? {
-			let fragment = exporter.frame(&muxed.track, &muxed.frame)?;
-			stdout.write_all(&fragment).await?;
+		while let Some(chunk) = fmp4.next().await? {
+			stdout.write_all(&chunk).await?;
 			stdout.flush().await?;
 		}
 
