@@ -93,7 +93,7 @@ pub struct HttpsConfig {
 		env = "MOQ_WEB_HTTPS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_, serde_with::formats::PreferMany>")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 }
 

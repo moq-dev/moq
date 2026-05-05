@@ -18,7 +18,7 @@ pub struct ClientTls {
 	/// In config files, accepts either a single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "tls-root", long = "tls-root", env = "MOQ_CLIENT_TLS_ROOT")]
-	#[serde_as(as = "serde_with::OneOrMany<_, serde_with::formats::PreferMany>")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
 	/// PEM file containing the client certificate chain for mTLS.

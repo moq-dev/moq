@@ -29,13 +29,13 @@ pub struct ServerTlsConfig {
 	/// Load the given certificate from disk.
 	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_, serde_with::formats::PreferMany>")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub cert: Vec<PathBuf>,
 
 	/// Load the given key from disk.
 	#[arg(long = "tls-key", id = "tls-key", env = "MOQ_SERVER_TLS_KEY")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_, serde_with::formats::PreferMany>")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub key: Vec<PathBuf>,
 
 	/// Or generate a new certificate and key with the given hostnames.
@@ -47,7 +47,7 @@ pub struct ServerTlsConfig {
 		env = "MOQ_SERVER_TLS_GENERATE"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_, serde_with::formats::PreferMany>")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub generate: Vec<String>,
 
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
@@ -65,7 +65,7 @@ pub struct ServerTlsConfig {
 		env = "MOQ_SERVER_TLS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "serde_with::OneOrMany<_, serde_with::formats::PreferMany>")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 }
 

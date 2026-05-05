@@ -179,7 +179,7 @@ pub struct AuthTls {
 	/// In config files, accepts either a single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT")]
-	#[serde_as(as = "OneOrMany<_, PreferMany>")]
+	#[serde_as(as = "OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
 	/// PEM file containing the client certificate chain for mTLS.
@@ -305,7 +305,7 @@ pub struct AuthConfig {
 	/// In config files, accepts either a single string or a TOML array.
 	#[arg(long = "auth-domain", env = "MOQ_AUTH_DOMAIN")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	#[serde_as(as = "OneOrMany<_, PreferMany>")]
+	#[serde_as(as = "OneOrMany<_>")]
 	pub domains: Vec<String>,
 }
 
