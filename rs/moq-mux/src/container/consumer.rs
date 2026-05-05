@@ -76,8 +76,9 @@ impl<F: Container> Consumer<F> {
 	/// Poll-based implementation of the read loop.
 	///
 	/// Uses a single waiter that gets registered on all relevant conducer channels,
-	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
+	/// avoiding the need for `tokio::select!` or `FuturesUnordered`. Crate-private:
+	/// callers should use [`read`](Self::read) instead.
+	pub(crate) fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
