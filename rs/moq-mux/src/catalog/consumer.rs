@@ -24,7 +24,7 @@ impl Consumer {
 	/// Poll for the next catalog update.
 	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Catalog>>> {
 		// Get the newest group from the track.
-		while let Poll::Ready(group) = self.track.poll_next_group_ordered(waiter)? {
+		while let Poll::Ready(group) = self.track.poll_next_group(waiter)? {
 			self.group = group;
 
 			// We got a None, meaning the track is done.
