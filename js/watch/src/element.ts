@@ -56,17 +56,24 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
-		// Flatten the RTT signal from the connection for the backend.
+		// Flatten the network signals from the connection for the backend.
+		// These follow the underlying signals on the established connection,
+		// resetting to undefined while disconnected or reconnecting.
 		const rtt = new Signal<number | undefined>(undefined);
+		const recvBandwidth = new Signal<number | undefined>(undefined);
+		const sendBandwidth = new Signal<number | undefined>(undefined);
 		this.signals.run((effect) => {
 			const conn = effect.get(this.connection.established);
-			const rttSignal = conn?.rtt;
-			rtt.set(rttSignal ? effect.get(rttSignal) : undefined);
+			rtt.set(conn?.rtt ? effect.get(conn.rtt) : undefined);
+			recvBandwidth.set(conn?.recvBandwidth ? effect.get(conn.recvBandwidth) : undefined);
+			sendBandwidth.set(conn?.sendBandwidth ? effect.get(conn.sendBandwidth) : undefined);
 		});
 
 		this.backend = new MultiBackend({
 			broadcast: this.broadcast,
 			rtt,
+			recvBandwidth,
+			sendBandwidth,
 		});
 		this.signals.cleanup(() => this.backend.close());
 

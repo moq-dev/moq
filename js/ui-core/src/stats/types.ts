@@ -36,7 +36,19 @@ export interface VideoBackend {
 	stats: Peekable<{ frameCount: number; bytesReceived: number } | undefined>;
 }
 
+/**
+ * Structural interface for connection-level network signals.
+ * Each value is a Peekable yielding bits-per-second for bandwidth and
+ * milliseconds for rtt, or undefined when the metric isn't available.
+ */
+export interface NetworkBackend {
+	rtt: Peekable<number | undefined>;
+	recvBandwidth: Peekable<number | undefined>;
+	sendBandwidth: Peekable<number | undefined>;
+}
+
 export type ProviderProps = {
 	audio: AudioBackend;
 	video: VideoBackend;
+	network?: NetworkBackend;
 };

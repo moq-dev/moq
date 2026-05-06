@@ -26,6 +26,18 @@ export function timeRangesToArray(ranges: TimeRanges): BufferedRanges {
 	return result;
 }
 
+// Network signals derived from the underlying connection.
+export interface NetworkBackend {
+	// Round-trip time in milliseconds, from PROBE or QUIC stats.
+	rtt: Signal<number | undefined>;
+
+	// Receive bitrate in bits per second, from PROBE.
+	recvBandwidth: Signal<number | undefined>;
+
+	// Send bitrate in bits per second, from the local congestion controller.
+	sendBandwidth: Signal<number | undefined>;
+}
+
 export interface Backend {
 	// Whether audio/video playback is paused.
 	paused: Signal<boolean>;
@@ -35,6 +47,9 @@ export interface Backend {
 
 	// Audio specific signals.
 	audio?: Audio.Backend;
+
+	// Connection-level network signals.
+	network: NetworkBackend;
 
 	// The latency setting: "real-time" auto-computes jitter, a number sets a fixed jitter.
 	latency: Signal<Latency>;
@@ -52,6 +67,12 @@ export interface MultiBackendProps {
 
 	// RTT signal from the connection (PROBE), used for dynamic jitter in "real-time" mode.
 	rtt?: Signal<number | undefined>;
+
+	// Receive bitrate signal from the connection (PROBE).
+	recvBandwidth?: Signal<number | undefined>;
+
+	// Send bitrate signal from the connection (QUIC stats).
+	sendBandwidth?: Signal<number | undefined>;
 
 	paused?: boolean | Signal<boolean>;
 }
@@ -118,6 +139,8 @@ export class MultiBackend implements Backend {
 	audio: AudioBackend;
 	#audioSource: Audio.Source;
 
+	network: NetworkBackend;
+
 	// Used to sync audio and video playback at a target delay.
 	sync: Sync;
 
@@ -129,6 +152,12 @@ export class MultiBackend implements Backend {
 		this.sync = new Sync({ latency: props?.latency, rtt: props?.rtt });
 		this.latency = this.sync.latency;
 		this.jitter = this.sync.jitter;
+
+		this.network = {
+			rtt: props?.rtt ?? new Signal<number | undefined>(undefined),
+			recvBandwidth: props?.recvBandwidth ?? new Signal<number | undefined>(undefined),
+			sendBandwidth: props?.sendBandwidth ?? new Signal<number | undefined>(undefined),
+		};
 
 		this.#videoSource = new Video.Source(this.sync, {
 			broadcast: this.broadcast,
