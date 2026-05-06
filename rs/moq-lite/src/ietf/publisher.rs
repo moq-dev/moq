@@ -508,7 +508,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					let suffix = path.to_owned();
 					tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
 					if let Some((request_id, mut stream)) = namespace_streams.remove(&suffix) {
-						// For v14-16, send PublishNamespaceDone. For v17, just close the stream.
+						// For v14-16, send PublishNamespaceDone. v17+ just closes the stream.
 						match self.version {
 							Version::Draft14 | Version::Draft15 | Version::Draft16 => {
 								let _ = stream
@@ -519,7 +519,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									})
 									.await;
 							}
-							Version::Draft17 => {}
+							_ => {}
 						}
 						stream.writer.finish().ok();
 					}
@@ -539,7 +539,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						})
 						.await;
 				}
-				Version::Draft17 => {}
+				_ => {}
 			}
 			stream.writer.finish().ok();
 		}

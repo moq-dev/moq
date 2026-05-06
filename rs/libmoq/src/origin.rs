@@ -120,10 +120,10 @@ impl Origin {
 			.scope(&[path.as_path()])
 			.ok_or(Error::BroadcastNotFound)?;
 		while let Some(update) = consumer.try_announced() {
-			if let moq_lite::OriginAnnounce::Active(p, b) = update
-				&& p.as_path() == path
-			{
-				return Ok(b);
+			if let moq_lite::OriginAnnounce::Active(p, b) = update {
+				if p.as_path() == path {
+					return Ok(b);
+				}
 			}
 		}
 		Err(Error::BroadcastNotFound)

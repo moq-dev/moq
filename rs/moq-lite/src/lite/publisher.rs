@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_async::FuturesExt;
@@ -194,6 +194,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		}
 
+		// Paths whose Active was suppressed (hop chain at MAX_HOPS). The matching
+		// Ended must also be suppressed; the subscriber treats Ended for an unknown
+		// path as a protocol error.
+		let mut suppressed: HashSet<crate::PathOwned> = HashSet::new();
+
 		// Send updates as they arrive.
 		loop {
 			tokio::select! {
@@ -205,7 +210,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 							tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 							// Append our origin id to the hops so the next relay can detect loops.
-							// If the chain is already at MAX_HOPS, skip the announce — this link is
+							// If the chain is already at MAX_HOPS, skip the announce: this link is
 							// effectively unreachable and the peer will eventually prune the loop.
 							let mut hops = active.hops.clone();
 							if hops.push(self_origin).is_err() {
@@ -213,15 +218,19 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									broadcast = %origin.absolute(&path),
 									"dropping announce; hop chain at MAX_HOPS (possible loop)",
 								);
+								suppressed.insert(path);
 								continue;
 							}
 							let msg = lite::Announce::Active { suffix, hops };
 							stream.writer.encode(&msg).await?;
 						}
 						Some(OriginAnnounce::Ended(path)) => {
+							if suppressed.remove(&path) {
+								continue;
+							}
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 							tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
-							// An ended announce doesn't need hops — the receiver matches on path only.
+							// An ended announce doesn't need hops; the receiver matches on path only.
 							let msg = lite::Announce::Ended {
 								suffix,
 								hops: OriginList::new(),
