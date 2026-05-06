@@ -189,10 +189,14 @@ export class Decoder {
 	}
 
 	#runLegacyDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
+		const format =
+			config.container.kind === "loc"
+				? new Container.Loc.Format({ timescale: config.container.timescale })
+				: new Container.Legacy.Format();
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
-			format: new Container.Legacy.Format(),
+			format,
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());

@@ -3629,6 +3629,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-loc"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "moq-lite",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "moq-msf"
 version = "0.1.3"
 dependencies = [
@@ -3650,6 +3659,7 @@ dependencies = [
  "hang",
  "m3u8-rs",
  "moq-lite",
+ "moq-loc",
  "moq-msf",
  "mp4-atom",
  "num_enum",

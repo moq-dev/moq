@@ -140,10 +140,14 @@ export class Mse implements Backend {
 		sourceBuffer: SourceBuffer,
 		element: HTMLMediaElement,
 	): void {
+		const format =
+			config.container.kind === "loc"
+				? new Container.Loc.Format({ timescale: config.container.timescale })
+				: new Container.Legacy.Format();
 		// Create consumer that reorders groups/frames up to the provided latency.
 		// Legacy container uses microsecond timescale implicitly.
 		const consumer = new Container.Consumer(sub, {
-			format: new Container.Legacy.Format(),
+			format,
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());

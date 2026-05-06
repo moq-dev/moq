@@ -17,6 +17,10 @@ pub enum Error {
 	/// Error parsing or building CMAF moof+mdat fragments.
 	#[error("cmaf: {0}")]
 	Cmaf(#[from] crate::container::CmafError),
+
+	/// Error parsing or building LOC frames.
+	#[error("loc: {0}")]
+	Loc(#[from] moq_loc::Error),
 }
 
 /// A Result type alias for moq-mux operations.
