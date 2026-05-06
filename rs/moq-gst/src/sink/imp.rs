@@ -382,7 +382,7 @@ async fn run_session(
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 	anyhow::ensure!(
-		origin.publish(&settings.broadcast, broadcast_consumer),
+		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),
 		"failed to publish broadcast {}",
 		settings.broadcast
 	);

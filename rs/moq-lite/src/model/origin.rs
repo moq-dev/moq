@@ -207,34 +207,34 @@ where
 
 // === Origin tree ===
 
-/// A single update emitted by [`OriginConsumer::next`].
+/// A single update emitted by [`OriginConsumer::announced`].
 ///
 /// Mirrors the wire-level `Announce::Active`/`Announce::Ended` distinction.
 #[derive(Clone)]
-pub enum OriginUpdate {
+pub enum OriginAnnounce {
 	/// `path` now resolves to `broadcast`. If a previous broadcast was active
-	/// at this path, an [`OriginUpdate::Ended`] for the same path is emitted
+	/// at this path, an [`OriginAnnounce::Ended`] for the same path is emitted
 	/// immediately before this update.
 	Active(PathOwned, BroadcastConsumer),
 	/// `path` no longer has an active broadcast (either because the active
 	/// closed and no backup was available, or because a new broadcast is about
-	/// to take over — see [`OriginUpdate::Active`]).
+	/// to take over — see [`OriginAnnounce::Active`]).
 	Ended(PathOwned),
 }
 
-impl OriginUpdate {
+impl OriginAnnounce {
 	pub fn path(&self) -> &Path<'static> {
 		match self {
-			OriginUpdate::Active(p, _) | OriginUpdate::Ended(p) => p,
+			OriginAnnounce::Active(p, _) | OriginAnnounce::Ended(p) => p,
 		}
 	}
 }
 
-impl fmt::Debug for OriginUpdate {
+impl fmt::Debug for OriginAnnounce {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			OriginUpdate::Active(p, _) => f.debug_tuple("Active").field(p).finish(),
-			OriginUpdate::Ended(p) => f.debug_tuple("Ended").field(p).finish(),
+			OriginAnnounce::Active(p, _) => f.debug_tuple("Active").field(p).finish(),
+			OriginAnnounce::Ended(p) => f.debug_tuple("Ended").field(p).finish(),
 		}
 	}
 }
@@ -260,7 +260,7 @@ struct Entry {
 
 /// Per-consumer state stored in [`State::consumers`].
 struct ConsumerQueue {
-	pending: VecDeque<OriginUpdate>,
+	pending: VecDeque<OriginAnnounce>,
 	scope: Scope,
 }
 
@@ -366,7 +366,7 @@ struct State {
 	paths: HashMap<PathOwned, Entry>,
 	consumers: HashMap<ConsumerId, ConsumerQueue>,
 	/// Number of live [`OriginProducer`]s. When this hits zero we mark
-	/// `closed` and wake everyone so [`OriginConsumer::next`] returns `None`.
+	/// `closed` and wake everyone so [`OriginConsumer::announced`] returns `None`.
 	producers: usize,
 	closed: bool,
 	waiters: conducer::WaiterList,
@@ -384,7 +384,7 @@ impl Inner {
 
 /// Distribute `events` (absolute paths) to every consumer queue, translating
 /// each event's path to that consumer's scope-relative form.
-fn distribute(state: &mut State, events: &[OriginUpdate]) {
+fn distribute(state: &mut State, events: &[OriginAnnounce]) {
 	for queue in state.consumers.values_mut() {
 		for event in events {
 			let abs = event.path();
@@ -392,8 +392,8 @@ fn distribute(state: &mut State, events: &[OriginUpdate]) {
 				continue;
 			};
 			let translated = match event {
-				OriginUpdate::Active(_, b) => OriginUpdate::Active(rel, b.clone()),
-				OriginUpdate::Ended(_) => OriginUpdate::Ended(rel),
+				OriginAnnounce::Active(_, b) => OriginAnnounce::Active(rel, b.clone()),
+				OriginAnnounce::Ended(_) => OriginAnnounce::Ended(rel),
 			};
 			queue.pending.push_back(translated);
 		}
@@ -406,7 +406,7 @@ fn distribute(state: &mut State, events: &[OriginUpdate]) {
 ///
 /// Returns true if any events were emitted (caller needs to wake waiters).
 fn gc_pass(state: &mut State) -> bool {
-	let mut events: Vec<OriginUpdate> = Vec::new();
+	let mut events: Vec<OriginAnnounce> = Vec::new();
 
 	state.paths.retain(|path, entry| {
 		if !entry.active.is_closed() {
@@ -426,12 +426,12 @@ fn gc_pass(state: &mut State) -> bool {
 			Some(idx) => {
 				let new_active = entry.backup.remove(idx).expect("index in range");
 				entry.active = new_active.clone();
-				events.push(OriginUpdate::Ended(path.clone()));
-				events.push(OriginUpdate::Active(path.clone(), new_active));
+				events.push(OriginAnnounce::Ended(path.clone()));
+				events.push(OriginAnnounce::Active(path.clone(), new_active));
 				true
 			}
 			None => {
-				events.push(OriginUpdate::Ended(path.clone()));
+				events.push(OriginAnnounce::Ended(path.clone()));
 				false
 			}
 		}
@@ -450,7 +450,7 @@ fn gc_pass(state: &mut State) -> bool {
 ///
 /// Cheap to clone (each clone shares state and acts as an additional handle
 /// keeping the channel open). Drop the last clone to close the channel —
-/// every [`OriginConsumer`] derived from it will see [`OriginConsumer::next`]
+/// every [`OriginConsumer`] derived from it will see [`OriginConsumer::announced`]
 /// return `None`.
 pub struct OriginProducer {
 	info: Origin,
@@ -489,7 +489,7 @@ impl OriginProducer {
 	/// the current active, it replaces the active (the previous one is queued
 	/// as a backup); strictly longer hops join the backup queue. When the
 	/// active later closes, the shortest-hop backup is promoted automatically.
-	pub fn publish(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
+	pub fn publish_broadcast(&self, path: impl AsPath, broadcast: BroadcastConsumer) -> bool {
 		// Loop check: refuse broadcasts whose hop chain already contains us.
 		if broadcast.hops.contains(&self.info) {
 			return false;
@@ -500,7 +500,7 @@ impl OriginProducer {
 		};
 
 		let mut state = self.inner.lock();
-		let mut events: Vec<OriginUpdate> = Vec::new();
+		let mut events: Vec<OriginAnnounce> = Vec::new();
 
 		match state.paths.entry(full.clone()) {
 			std::collections::hash_map::Entry::Vacant(slot) => {
@@ -508,7 +508,7 @@ impl OriginProducer {
 					active: broadcast.clone(),
 					backup: VecDeque::new(),
 				});
-				events.push(OriginUpdate::Active(full, broadcast));
+				events.push(OriginAnnounce::Active(full, broadcast));
 			}
 			std::collections::hash_map::Entry::Occupied(mut slot) => {
 				let entry = slot.get_mut();
@@ -520,8 +520,8 @@ impl OriginProducer {
 					// New is at least as good; demote old to backup, announce new.
 					let old = std::mem::replace(&mut entry.active, broadcast.clone());
 					entry.backup.push_back(old);
-					events.push(OriginUpdate::Ended(full.clone()));
-					events.push(OriginUpdate::Active(full, broadcast));
+					events.push(OriginAnnounce::Ended(full.clone()));
+					events.push(OriginAnnounce::Active(full, broadcast));
 				} else {
 					// Strictly longer; just stash as a backup.
 					entry.backup.push_back(broadcast);
@@ -542,9 +542,9 @@ impl OriginProducer {
 
 	/// Produce a fresh broadcast and publish it at `path`. Returns `None` if
 	/// the path is outside this producer's scope.
-	pub fn create(&self, path: impl AsPath) -> Option<BroadcastProducer> {
+	pub fn create_broadcast(&self, path: impl AsPath) -> Option<BroadcastProducer> {
 		let producer = Broadcast::new().produce();
-		if self.publish(path, producer.consume()) {
+		if self.publish_broadcast(path, producer.consume()) {
 			Some(producer)
 		} else {
 			None
@@ -655,7 +655,9 @@ impl OriginConsumer {
 		};
 		for (path, entry) in &state.paths {
 			if let Some(rel) = scope.relativize(path) {
-				queue.pending.push_back(OriginUpdate::Active(rel, entry.active.clone()));
+				queue
+					.pending
+					.push_back(OriginAnnounce::Active(rel, entry.active.clone()));
 			}
 		}
 		state.consumers.insert(id, queue);
@@ -667,23 +669,23 @@ impl OriginConsumer {
 		Self { info, inner, id, scope }
 	}
 
-	/// Block until the next [`OriginUpdate`]. Returns `None` once every
+	/// Block until the next [`OriginAnnounce`]. Returns `None` once every
 	/// [`OriginProducer`] has been dropped and the queue is drained.
-	pub async fn next(&mut self) -> Option<OriginUpdate> {
-		conducer::wait(|waiter| self.poll_next(waiter)).await
+	pub async fn announced(&mut self) -> Option<OriginAnnounce> {
+		conducer::wait(|waiter| self.poll_announced(waiter)).await
 	}
 
-	/// Synchronous variant of [`Self::next`]. Returns `None` if no update is
-	/// pending — use [`Self::is_closed`] to distinguish from channel closure.
-	pub fn try_next(&mut self) -> Option<OriginUpdate> {
+	/// Synchronous variant of [`Self::announced`]. Returns `None` if no update is
+	/// pending. Use [`Self::is_closed`] to distinguish from channel closure.
+	pub fn try_announced(&mut self) -> Option<OriginAnnounce> {
 		let waiter = conducer::Waiter::noop();
-		match self.poll_next(&waiter) {
+		match self.poll_announced(&waiter) {
 			Poll::Ready(opt) => opt,
 			Poll::Pending => None,
 		}
 	}
 
-	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<Option<OriginUpdate>> {
+	pub fn poll_announced(&mut self, waiter: &conducer::Waiter) -> Poll<Option<OriginAnnounce>> {
 		let mut state = self.inner.lock();
 		let mut to_wake: Vec<conducer::WaiterList> = Vec::new();
 
@@ -743,7 +745,7 @@ impl OriginConsumer {
 	/// Block until a broadcast at exactly `path` is announced. Returns `None`
 	/// if the path is outside this consumer's scope or the channel closes
 	/// before the broadcast arrives.
-	pub async fn wait_for_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
+	pub async fn announced_broadcast(&self, path: impl AsPath) -> Option<BroadcastConsumer> {
 		let path = path.as_path();
 
 		// Scope down to this exact path so we only wake on relevant changes.
@@ -758,8 +760,8 @@ impl OriginConsumer {
 		}
 
 		loop {
-			match consumer.next().await? {
-				OriginUpdate::Active(p, b) if p.as_path() == path => return Some(b),
+			match consumer.announced().await? {
+				OriginAnnounce::Active(p, b) if p.as_path() == path => return Some(b),
 				_ => continue,
 			}
 		}
@@ -829,39 +831,49 @@ use futures::FutureExt;
 
 #[cfg(test)]
 impl OriginConsumer {
-	pub fn assert_next(&mut self, expected: impl AsPath, broadcast: &BroadcastConsumer) {
+	pub fn assert_announced(&mut self, expected: impl AsPath, broadcast: &BroadcastConsumer) {
 		let expected = expected.as_path();
-		match self.next().now_or_never().expect("next blocked").expect("no next") {
-			OriginUpdate::Active(p, b) => {
+		match self
+			.announced()
+			.now_or_never()
+			.expect("announced blocked")
+			.expect("no announce")
+		{
+			OriginAnnounce::Active(p, b) => {
 				assert_eq!(p, expected, "wrong path");
 				assert!(b.is_clone(broadcast), "should be the same broadcast");
 			}
-			OriginUpdate::Ended(p) => panic!("expected Active({expected}), got Ended({p})"),
+			OriginAnnounce::Ended(p) => panic!("expected Active({expected}), got Ended({p})"),
 		}
 	}
 
-	pub fn assert_try_next(&mut self, expected: impl AsPath, broadcast: &BroadcastConsumer) {
+	pub fn assert_try_announced(&mut self, expected: impl AsPath, broadcast: &BroadcastConsumer) {
 		let expected = expected.as_path();
-		match self.try_next().expect("no next") {
-			OriginUpdate::Active(p, b) => {
+		match self.try_announced().expect("no announce") {
+			OriginAnnounce::Active(p, b) => {
 				assert_eq!(p, expected, "wrong path");
 				assert!(b.is_clone(broadcast), "should be the same broadcast");
 			}
-			OriginUpdate::Ended(p) => panic!("expected Active({expected}), got Ended({p})"),
+			OriginAnnounce::Ended(p) => panic!("expected Active({expected}), got Ended({p})"),
 		}
 	}
 
-	pub fn assert_next_ended(&mut self, expected: impl AsPath) {
+	pub fn assert_announced_ended(&mut self, expected: impl AsPath) {
 		let expected = expected.as_path();
-		match self.next().now_or_never().expect("next blocked").expect("no next") {
-			OriginUpdate::Ended(p) => assert_eq!(p, expected, "wrong path"),
-			OriginUpdate::Active(p, _) => panic!("expected Ended({expected}), got Active({p})"),
+		match self
+			.announced()
+			.now_or_never()
+			.expect("announced blocked")
+			.expect("no announce")
+		{
+			OriginAnnounce::Ended(p) => assert_eq!(p, expected, "wrong path"),
+			OriginAnnounce::Active(p, _) => panic!("expected Ended({expected}), got Active({p})"),
 		}
 	}
 
-	pub fn assert_next_wait(&mut self) {
-		if let Some(res) = self.next().now_or_never() {
-			panic!("next should block: got {res:?}");
+	pub fn assert_announced_wait(&mut self) {
+		if let Some(res) = self.announced().now_or_never() {
+			panic!("announced should block: got {res:?}");
 		}
 	}
 }
@@ -898,38 +910,38 @@ mod tests {
 		let broadcast2 = Broadcast::new().produce();
 
 		let mut consumer1 = origin.consume();
-		consumer1.assert_next_wait();
+		consumer1.assert_announced_wait();
 
-		assert!(origin.publish("test1", broadcast1.consume()));
-		consumer1.assert_next("test1", &broadcast1.consume());
-		consumer1.assert_next_wait();
+		assert!(origin.publish_broadcast("test1", broadcast1.consume()));
+		consumer1.assert_announced("test1", &broadcast1.consume());
+		consumer1.assert_announced_wait();
 
 		// Make a new consumer that should replay the existing broadcast.
 		let mut consumer2 = origin.consume();
 
-		assert!(origin.publish("test2", broadcast2.consume()));
-		consumer1.assert_next("test2", &broadcast2.consume());
-		consumer1.assert_next_wait();
-		consumer2.assert_next("test1", &broadcast1.consume());
-		consumer2.assert_next("test2", &broadcast2.consume());
-		consumer2.assert_next_wait();
+		assert!(origin.publish_broadcast("test2", broadcast2.consume()));
+		consumer1.assert_announced("test2", &broadcast2.consume());
+		consumer1.assert_announced_wait();
+		consumer2.assert_announced("test1", &broadcast1.consume());
+		consumer2.assert_announced("test2", &broadcast2.consume());
+		consumer2.assert_announced_wait();
 
 		// Closing the broadcast emits Ended on next poll (no spawn / no sleep).
 		drop(broadcast1);
-		consumer1.assert_next_ended("test1");
-		consumer2.assert_next_ended("test1");
-		consumer1.assert_next_wait();
-		consumer2.assert_next_wait();
+		consumer1.assert_announced_ended("test1");
+		consumer2.assert_announced_ended("test1");
+		consumer1.assert_announced_wait();
+		consumer2.assert_announced_wait();
 
 		// A fresh consumer only replays what's currently active.
 		let mut consumer3 = origin.consume();
-		consumer3.assert_next("test2", &broadcast2.consume());
-		consumer3.assert_next_wait();
+		consumer3.assert_announced("test2", &broadcast2.consume());
+		consumer3.assert_announced_wait();
 
 		drop(broadcast2);
-		consumer1.assert_next_ended("test2");
-		consumer2.assert_next_ended("test2");
-		consumer3.assert_next_ended("test2");
+		consumer1.assert_announced_ended("test2");
+		consumer2.assert_announced_ended("test2");
+		consumer3.assert_announced_ended("test2");
 	}
 
 	#[tokio::test]
@@ -946,30 +958,30 @@ mod tests {
 
 		let mut consumer = origin.consume();
 
-		assert!(origin.publish("test", consumer1.clone()));
-		assert!(origin.publish("test", consumer2.clone()));
-		assert!(origin.publish("test", consumer3.clone()));
+		assert!(origin.publish_broadcast("test", consumer1.clone()));
+		assert!(origin.publish_broadcast("test", consumer2.clone()));
+		assert!(origin.publish_broadcast("test", consumer3.clone()));
 
 		// Equal hop length: each new publish replaces the active (newer wins ties)
 		// and emits Ended/Active for downstream subscribers.
-		consumer.assert_next("test", &consumer1);
-		consumer.assert_next_ended("test");
-		consumer.assert_next("test", &consumer2);
-		consumer.assert_next_ended("test");
-		consumer.assert_next("test", &consumer3);
+		consumer.assert_announced("test", &consumer1);
+		consumer.assert_announced_ended("test");
+		consumer.assert_announced("test", &consumer2);
+		consumer.assert_announced_ended("test");
+		consumer.assert_announced("test", &consumer3);
 
 		// Dropping a backup is invisible to consumers (no event).
 		drop(broadcast2);
-		consumer.assert_next_wait();
+		consumer.assert_announced_wait();
 
 		// Active closes: shortest-hop backup is promoted (only broadcast1 left).
 		drop(broadcast3);
-		consumer.assert_next_ended("test");
-		consumer.assert_next("test", &consumer1);
+		consumer.assert_announced_ended("test");
+		consumer.assert_announced("test", &consumer1);
 
 		drop(broadcast1);
-		consumer.assert_next_ended("test");
-		consumer.assert_next_wait();
+		consumer.assert_announced_ended("test");
+		consumer.assert_announced_wait();
 	}
 
 	#[tokio::test]
@@ -978,18 +990,18 @@ mod tests {
 		let broadcast1 = Broadcast::new().produce();
 		let broadcast2 = Broadcast::new().produce();
 
-		assert!(origin.publish("test", broadcast1.consume()));
-		assert!(origin.publish("test", broadcast2.consume()));
+		assert!(origin.publish_broadcast("test", broadcast1.consume()));
+		assert!(origin.publish_broadcast("test", broadcast2.consume()));
 
 		// Drop the most-recent (active) first; backup is promoted.
 		drop(broadcast2);
 		// A fresh consumer should still see test as active via broadcast1.
 		let mut consumer = origin.consume();
-		consumer.assert_next("test", &broadcast1.consume());
-		consumer.assert_next_wait();
+		consumer.assert_announced("test", &broadcast1.consume());
+		consumer.assert_announced_wait();
 
 		drop(broadcast1);
-		consumer.assert_next_ended("test");
+		consumer.assert_announced_ended("test");
 	}
 
 	#[tokio::test]
@@ -999,15 +1011,15 @@ mod tests {
 
 		// Publishing the *same* BroadcastConsumer twice is a no-op the second
 		// time (is_clone match).
-		assert!(origin.publish("test", broadcast.consume()));
-		assert!(origin.publish("test", broadcast.consume()));
+		assert!(origin.publish_broadcast("test", broadcast.consume()));
+		assert!(origin.publish_broadcast("test", broadcast.consume()));
 
 		let mut consumer = origin.consume();
-		consumer.assert_next("test", &broadcast.consume());
-		consumer.assert_next_wait();
+		consumer.assert_announced("test", &broadcast.consume());
+		consumer.assert_announced_wait();
 
 		drop(broadcast);
-		consumer.assert_next_ended("test");
+		consumer.assert_announced_ended("test");
 	}
 
 	// Regression: the original mpsc-based consumer hit a tokio bug where only
@@ -1020,11 +1032,11 @@ mod tests {
 
 		let mut consumer = origin.consume();
 		for i in 0..256 {
-			assert!(origin.publish(format!("test{i}"), broadcast.consume()));
+			assert!(origin.publish_broadcast(format!("test{i}"), broadcast.consume()));
 		}
 
 		for i in 0..256 {
-			consumer.assert_next(format!("test{i}"), &broadcast.consume());
+			consumer.assert_announced(format!("test{i}"), &broadcast.consume());
 		}
 	}
 
@@ -1038,11 +1050,11 @@ mod tests {
 
 		let mut consumer = origin.consume();
 
-		assert!(foo_producer.publish("bar/baz", broadcast.consume()));
-		consumer.assert_next("foo/bar/baz", &broadcast.consume());
+		assert!(foo_producer.publish_broadcast("bar/baz", broadcast.consume()));
+		consumer.assert_announced("foo/bar/baz", &broadcast.consume());
 
 		let mut foo_consumer = foo_producer.consume();
-		foo_consumer.assert_next("bar/baz", &broadcast.consume());
+		foo_consumer.assert_announced("bar/baz", &broadcast.consume());
 	}
 
 	#[tokio::test]
@@ -1056,11 +1068,11 @@ mod tests {
 
 		let mut consumer = origin.consume();
 
-		assert!(foo_bar_producer.publish("baz", broadcast.consume()));
-		consumer.assert_next("foo/bar/baz", &broadcast.consume());
+		assert!(foo_bar_producer.publish_broadcast("baz", broadcast.consume()));
+		consumer.assert_announced("foo/bar/baz", &broadcast.consume());
 
 		let mut foo_bar_consumer = foo_bar_producer.consume();
-		foo_bar_consumer.assert_next("baz", &broadcast.consume());
+		foo_bar_consumer.assert_announced("baz", &broadcast.consume());
 	}
 
 	#[tokio::test]
@@ -1072,13 +1084,13 @@ mod tests {
 			.scope(&["allowed/path1".into(), "allowed/path2".into()])
 			.expect("should create limited producer");
 
-		assert!(limited.publish("allowed/path1", broadcast.consume()));
-		assert!(limited.publish("allowed/path1/nested", broadcast.consume()));
-		assert!(limited.publish("allowed/path2", broadcast.consume()));
+		assert!(limited.publish_broadcast("allowed/path1", broadcast.consume()));
+		assert!(limited.publish_broadcast("allowed/path1/nested", broadcast.consume()));
+		assert!(limited.publish_broadcast("allowed/path2", broadcast.consume()));
 
-		assert!(!limited.publish("notallowed", broadcast.consume()));
-		assert!(!limited.publish("allowed", broadcast.consume()));
-		assert!(!limited.publish("other/path", broadcast.consume()));
+		assert!(!limited.publish_broadcast("notallowed", broadcast.consume()));
+		assert!(!limited.publish_broadcast("allowed", broadcast.consume()));
+		assert!(!limited.publish_broadcast("other/path", broadcast.consume()));
 	}
 
 	#[tokio::test]
@@ -1098,9 +1110,9 @@ mod tests {
 		// order rather than (non-deterministic) HashMap-replay order.
 		let mut all = origin.consume();
 
-		assert!(origin.publish("allowed", broadcast1.consume()));
-		assert!(origin.publish("allowed/nested", broadcast2.consume()));
-		assert!(origin.publish("notallowed", broadcast3.consume()));
+		assert!(origin.publish_broadcast("allowed", broadcast1.consume()));
+		assert!(origin.publish_broadcast("allowed/nested", broadcast2.consume()));
+		assert!(origin.publish_broadcast("notallowed", broadcast3.consume()));
 
 		let mut limited = origin
 			.consume()
@@ -1109,16 +1121,16 @@ mod tests {
 
 		// `limited` was created after the publishes, so ordering is HashMap-based; just
 		// check membership.
-		let a = limited.try_next().expect("first");
-		let b = limited.try_next().expect("second");
-		limited.assert_next_wait();
+		let a = limited.try_announced().expect("first");
+		let b = limited.try_announced().expect("second");
+		limited.assert_announced_wait();
 		let mut paths: Vec<String> = [&a, &b].iter().map(|u| u.path().to_string()).collect();
 		paths.sort();
 		assert_eq!(paths, ["allowed", "allowed/nested"]);
 
-		all.assert_next("allowed", &broadcast1.consume());
-		all.assert_next("allowed/nested", &broadcast2.consume());
-		all.assert_next("notallowed", &broadcast3.consume());
+		all.assert_announced("allowed", &broadcast1.consume());
+		all.assert_announced("allowed/nested", &broadcast2.consume());
+		all.assert_announced("notallowed", &broadcast3.consume());
 	}
 
 	#[tokio::test]
@@ -1128,9 +1140,9 @@ mod tests {
 		let broadcast2 = Broadcast::new().produce();
 		let broadcast3 = Broadcast::new().produce();
 
-		assert!(origin.publish("foo/test", broadcast1.consume()));
-		assert!(origin.publish("bar/test", broadcast2.consume()));
-		assert!(origin.publish("baz/test", broadcast3.consume()));
+		assert!(origin.publish_broadcast("foo/test", broadcast1.consume()));
+		assert!(origin.publish_broadcast("bar/test", broadcast2.consume()));
+		assert!(origin.publish_broadcast("baz/test", broadcast3.consume()));
 
 		let mut limited = origin
 			.consume()
@@ -1139,9 +1151,9 @@ mod tests {
 
 		// Initial replay is HashMap-iteration order (not guaranteed); we just
 		// check that we see exactly these two and nothing else.
-		let a = limited.try_next().expect("first");
-		let b = limited.try_next().expect("second");
-		limited.assert_next_wait();
+		let a = limited.try_announced().expect("first");
+		let b = limited.try_announced().expect("second");
+		limited.assert_announced_wait();
 
 		let mut paths: Vec<String> = [&a, &b].iter().map(|u| u.path().to_string()).collect();
 		paths.sort();
@@ -1160,19 +1172,19 @@ mod tests {
 
 		let mut consumer = origin.consume();
 
-		assert!(limited.publish("bar", broadcast.consume()));
-		assert!(limited.publish("bar/nested", broadcast.consume()));
-		assert!(limited.publish("goop/pee", broadcast.consume()));
-		assert!(limited.publish("goop/pee/nested", broadcast.consume()));
+		assert!(limited.publish_broadcast("bar", broadcast.consume()));
+		assert!(limited.publish_broadcast("bar/nested", broadcast.consume()));
+		assert!(limited.publish_broadcast("goop/pee", broadcast.consume()));
+		assert!(limited.publish_broadcast("goop/pee/nested", broadcast.consume()));
 
-		assert!(!limited.publish("baz", broadcast.consume()));
-		assert!(!limited.publish("goop", broadcast.consume()));
-		assert!(!limited.publish("goop/other", broadcast.consume()));
+		assert!(!limited.publish_broadcast("baz", broadcast.consume()));
+		assert!(!limited.publish_broadcast("goop", broadcast.consume()));
+		assert!(!limited.publish_broadcast("goop/other", broadcast.consume()));
 
-		consumer.assert_next("foo/bar", &broadcast.consume());
-		consumer.assert_next("foo/bar/nested", &broadcast.consume());
-		consumer.assert_next("foo/goop/pee", &broadcast.consume());
-		consumer.assert_next("foo/goop/pee/nested", &broadcast.consume());
+		consumer.assert_announced("foo/bar", &broadcast.consume());
+		consumer.assert_announced("foo/bar/nested", &broadcast.consume());
+		consumer.assert_announced("foo/goop/pee", &broadcast.consume());
+		consumer.assert_announced("foo/goop/pee/nested", &broadcast.consume());
 	}
 
 	#[tokio::test]
@@ -1192,8 +1204,8 @@ mod tests {
 		let origin = Origin::random().produce();
 		let broadcast = Broadcast::new().produce();
 
-		assert!(origin.publish("any/path", broadcast.consume()));
-		assert!(origin.publish("other/path", broadcast.consume()));
+		assert!(origin.publish_broadcast("any/path", broadcast.consume()));
+		assert!(origin.publish_broadcast("other/path", broadcast.consume()));
 
 		let foo_producer = origin.with_root("foo").expect("should create any root");
 		assert_eq!(foo_producer.root().as_str(), "foo");
@@ -1210,17 +1222,17 @@ mod tests {
 			.scope(&["worm-node".into(), "foobar".into()])
 			.expect("should create limited producer");
 
-		assert!(limited.publish("worm-node/test", broadcast1.consume()));
-		assert!(limited.publish("foobar/test", broadcast2.consume()));
+		assert!(limited.publish_broadcast("worm-node/test", broadcast1.consume()));
+		assert!(limited.publish_broadcast("foobar/test", broadcast2.consume()));
 
 		let mut consumer = limited
 			.consume()
 			.scope(&["".into()])
 			.expect("should create consumer with empty prefix");
 
-		let a1 = consumer.try_next().expect("expected first announcement");
-		let a2 = consumer.try_next().expect("expected second announcement");
-		consumer.assert_next_wait();
+		let a1 = consumer.try_announced().expect("expected first announcement");
+		let a2 = consumer.try_announced().expect("expected second announcement");
+		consumer.assert_announced_wait();
 
 		let mut paths: Vec<String> = [&a1, &a2].iter().map(|u| u.path().to_string()).collect();
 		paths.sort();
@@ -1239,9 +1251,9 @@ mod tests {
 			.scope(&["worm-node".into(), "foobar".into()])
 			.expect("should create limited producer");
 
-		assert!(limited.publish("worm-node", broadcast1.consume()));
-		assert!(limited.publish("worm-node/foo", broadcast2.consume()));
-		assert!(limited.publish("foobar/bar", broadcast3.consume()));
+		assert!(limited.publish_broadcast("worm-node", broadcast1.consume()));
+		assert!(limited.publish_broadcast("worm-node/foo", broadcast2.consume()));
+		assert!(limited.publish_broadcast("foobar/bar", broadcast3.consume()));
 
 		let mut worm = limited
 			.consume()
@@ -1250,9 +1262,9 @@ mod tests {
 
 		// Replay order isn't deterministic across HashMap; both events should
 		// be present and only those.
-		let a = worm.try_next().expect("first");
-		let b = worm.try_next().expect("second");
-		worm.assert_next_wait();
+		let a = worm.try_announced().expect("first");
+		let b = worm.try_announced().expect("second");
+		worm.assert_announced_wait();
 		let mut paths: Vec<String> = [&a, &b].iter().map(|u| u.path().to_string()).collect();
 		paths.sort();
 		assert_eq!(paths, ["worm-node", "worm-node/foo"]);
@@ -1262,8 +1274,8 @@ mod tests {
 			.scope(&["worm-node/foo".into()])
 			.expect("should create worm-node/foo consumer");
 
-		foo.assert_next("worm-node/foo", &broadcast2.consume());
-		foo.assert_next_wait();
+		foo.assert_announced("worm-node/foo", &broadcast2.consume());
+		foo.assert_announced_wait();
 	}
 
 	#[tokio::test]
@@ -1273,13 +1285,13 @@ mod tests {
 
 		let limited = origin.scope(&["a/b/c".into()]).expect("should create limited producer");
 
-		assert!(limited.publish("a/b/c", broadcast.consume()));
-		assert!(limited.publish("a/b/c/d", broadcast.consume()));
-		assert!(limited.publish("a/b/c/d/e", broadcast.consume()));
+		assert!(limited.publish_broadcast("a/b/c", broadcast.consume()));
+		assert!(limited.publish_broadcast("a/b/c/d", broadcast.consume()));
+		assert!(limited.publish_broadcast("a/b/c/d/e", broadcast.consume()));
 
-		assert!(!limited.publish("a", broadcast.consume()));
-		assert!(!limited.publish("a/b", broadcast.consume()));
-		assert!(!limited.publish("a/b/other", broadcast.consume()));
+		assert!(!limited.publish_broadcast("a", broadcast.consume()));
+		assert!(!limited.publish_broadcast("a/b", broadcast.consume()));
+		assert!(!limited.publish_broadcast("a/b/other", broadcast.consume()));
 	}
 
 	#[tokio::test]
@@ -1302,8 +1314,8 @@ mod tests {
 		let prefix = "some_prefix/".to_string();
 		let mut consumer = origin.consume().with_root(prefix).unwrap();
 
-		let b = origin.create("some_prefix/test").unwrap();
-		consumer.assert_next("test", &b.consume());
+		let b = origin.create_broadcast("some_prefix/test").unwrap();
+		consumer.assert_announced("test", &b.consume());
 	}
 
 	#[tokio::test]
@@ -1313,10 +1325,10 @@ mod tests {
 		let prefix = "some_prefix/".to_string();
 		let rooted = origin.with_root(prefix).unwrap();
 
-		let b = rooted.create("test").unwrap();
+		let b = rooted.create_broadcast("test").unwrap();
 
 		let mut consumer = rooted.consume();
-		consumer.assert_next("test", &b.consume());
+		consumer.assert_announced("test", &b.consume());
 	}
 
 	#[tokio::test]
@@ -1326,11 +1338,11 @@ mod tests {
 		let prefix = "some_prefix/".to_string();
 		let mut consumer = origin.consume().with_root(prefix).unwrap();
 
-		let b = origin.create("some_prefix/test").unwrap();
-		consumer.assert_next("test", &b.consume());
+		let b = origin.create_broadcast("some_prefix/test").unwrap();
+		consumer.assert_announced("test", &b.consume());
 
 		drop(b);
-		consumer.assert_next_ended("test");
+		consumer.assert_announced_ended("test");
 	}
 
 	#[tokio::test]
@@ -1342,11 +1354,11 @@ mod tests {
 			.scope(&["demo".into(), "demo".into()])
 			.expect("should create producer");
 
-		assert!(producer.publish("demo/stream", broadcast.consume()));
+		assert!(producer.publish_broadcast("demo/stream", broadcast.consume()));
 
 		let mut consumer = producer.consume();
-		consumer.assert_next("demo/stream", &broadcast.consume());
-		consumer.assert_next_wait();
+		consumer.assert_announced("demo/stream", &broadcast.consume());
+		consumer.assert_announced_wait();
 	}
 
 	#[tokio::test]
@@ -1358,11 +1370,11 @@ mod tests {
 			.scope(&["demo".into(), "demo/foo".into()])
 			.expect("should create producer");
 
-		assert!(producer.publish("demo/bar/stream", broadcast.consume()));
+		assert!(producer.publish_broadcast("demo/bar/stream", broadcast.consume()));
 
 		let mut consumer = producer.consume();
-		consumer.assert_next("demo/bar/stream", &broadcast.consume());
-		consumer.assert_next_wait();
+		consumer.assert_announced("demo/bar/stream", &broadcast.consume());
+		consumer.assert_announced_wait();
 	}
 
 	#[tokio::test]
@@ -1377,19 +1389,19 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn wait_for_broadcast_already_announced() {
+	async fn announced_broadcast_already_announced() {
 		let origin = Origin::random().produce();
 		let broadcast = Broadcast::new().produce();
 
-		assert!(origin.publish("test", broadcast.consume()));
+		assert!(origin.publish_broadcast("test", broadcast.consume()));
 
 		let consumer = origin.consume();
-		let result = consumer.wait_for_broadcast("test").await.expect("should find it");
+		let result = consumer.announced_broadcast("test").await.expect("should find it");
 		assert!(result.is_clone(&broadcast.consume()));
 	}
 
 	#[tokio::test]
-	async fn wait_for_broadcast_delayed() {
+	async fn announced_broadcast_delayed() {
 		let origin = Origin::random().produce();
 		let broadcast = Broadcast::new().produce();
 
@@ -1397,19 +1409,19 @@ mod tests {
 
 		let wait = tokio::spawn({
 			let consumer = consumer.clone();
-			async move { consumer.wait_for_broadcast("test").await }
+			async move { consumer.announced_broadcast("test").await }
 		});
 
 		tokio::task::yield_now().await;
 
-		assert!(origin.publish("test", broadcast.consume()));
+		assert!(origin.publish_broadcast("test", broadcast.consume()));
 
 		let result = wait.await.unwrap().expect("should find it");
 		assert!(result.is_clone(&broadcast.consume()));
 	}
 
 	#[tokio::test]
-	async fn wait_for_broadcast_ignores_unrelated_paths() {
+	async fn announced_broadcast_ignores_unrelated_paths() {
 		let origin = Origin::random().produce();
 		let other = Broadcast::new().produce();
 		let target = Broadcast::new().produce();
@@ -1418,22 +1430,22 @@ mod tests {
 
 		let wait = tokio::spawn({
 			let consumer = consumer.clone();
-			async move { consumer.wait_for_broadcast("target").await }
+			async move { consumer.announced_broadcast("target").await }
 		});
 
 		tokio::task::yield_now().await;
 
-		assert!(origin.publish("other", other.consume()));
+		assert!(origin.publish_broadcast("other", other.consume()));
 		tokio::task::yield_now().await;
 		assert!(!wait.is_finished(), "must not resolve on unrelated path");
 
-		assert!(origin.publish("target", target.consume()));
+		assert!(origin.publish_broadcast("target", target.consume()));
 		let result = wait.await.unwrap().expect("should find target");
 		assert!(result.is_clone(&target.consume()));
 	}
 
 	#[tokio::test]
-	async fn wait_for_broadcast_skips_nested_paths() {
+	async fn announced_broadcast_skips_nested_paths() {
 		let origin = Origin::random().produce();
 		let nested = Broadcast::new().produce();
 		let exact = Broadcast::new().produce();
@@ -1442,33 +1454,33 @@ mod tests {
 
 		let wait = tokio::spawn({
 			let consumer = consumer.clone();
-			async move { consumer.wait_for_broadcast("foo").await }
+			async move { consumer.announced_broadcast("foo").await }
 		});
 
 		tokio::task::yield_now().await;
 
-		assert!(origin.publish("foo/bar", nested.consume()));
+		assert!(origin.publish_broadcast("foo/bar", nested.consume()));
 		tokio::task::yield_now().await;
 		assert!(!wait.is_finished(), "must not resolve on a nested path");
 
-		assert!(origin.publish("foo", exact.consume()));
+		assert!(origin.publish_broadcast("foo", exact.consume()));
 		let result = wait.await.unwrap().expect("should find foo exactly");
 		assert!(result.is_clone(&exact.consume()));
 	}
 
 	#[tokio::test]
-	async fn wait_for_broadcast_disallowed() {
+	async fn announced_broadcast_disallowed() {
 		let origin = Origin::random().produce();
 		let limited = origin
 			.consume()
 			.scope(&["allowed".into()])
 			.expect("should create limited");
 
-		assert!(limited.wait_for_broadcast("notallowed").await.is_none());
+		assert!(limited.announced_broadcast("notallowed").await.is_none());
 	}
 
 	#[tokio::test]
-	async fn wait_for_broadcast_scope_too_narrow() {
+	async fn announced_broadcast_scope_too_narrow() {
 		let origin = Origin::random().produce();
 		let limited = origin
 			.consume()
@@ -1476,7 +1488,7 @@ mod tests {
 			.expect("should create limited");
 
 		let result = limited
-			.wait_for_broadcast("foo")
+			.announced_broadcast("foo")
 			.now_or_never()
 			.expect("must not block");
 		assert!(result.is_none());
@@ -1488,12 +1500,12 @@ mod tests {
 		let mut consumer = origin.consume();
 
 		assert!(!consumer.is_closed());
-		consumer.assert_next_wait();
+		consumer.assert_announced_wait();
 
 		drop(origin);
 
 		assert!(consumer.is_closed());
-		assert!(consumer.next().now_or_never().expect("not blocked").is_none());
+		assert!(consumer.announced().now_or_never().expect("not blocked").is_none());
 	}
 
 	#[tokio::test]
@@ -1502,15 +1514,15 @@ mod tests {
 		let broadcast = Broadcast::new().produce();
 
 		let mut consumer = origin.consume();
-		assert!(origin.publish("test", broadcast.consume()));
+		assert!(origin.publish_broadcast("test", broadcast.consume()));
 
 		drop(origin);
 
 		// Pending events should still be drainable after close.
-		consumer.assert_next("test", &broadcast.consume());
+		consumer.assert_announced("test", &broadcast.consume());
 		// Then the broadcast is reachable, and dropping it generates Ended too.
 		drop(broadcast);
-		consumer.assert_next_ended("test");
-		assert!(consumer.next().await.is_none());
+		consumer.assert_announced_ended("test");
+		assert!(consumer.announced().await.is_none());
 	}
 }

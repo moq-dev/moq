@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, OriginUpdate, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginAnnounce, OriginConsumer, OriginList, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -165,8 +165,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				let mut init = Vec::new();
 
 				// Send ANNOUNCE_INIT as the first message with all currently active paths.
-				// `try_next()` is synchronous so we can drain the initial replay in order.
-				while let Some(update) = origin.try_next() {
+				// `try_announced()` is synchronous so we can drain the initial replay in order.
+				while let Some(update) = origin.try_announced() {
 					let suffix = update
 						.path()
 						.strip_prefix(&prefix)
@@ -174,11 +174,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						.to_owned();
 
 					match update {
-						OriginUpdate::Active(path, _) => {
+						OriginAnnounce::Active(path, _) => {
 							tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 							init.push(suffix);
 						}
-						OriginUpdate::Ended(path) => {
+						OriginAnnounce::Ended(path) => {
 							// A potential race.
 							tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
 							init.retain(|p| p != &suffix);
@@ -199,9 +199,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			tokio::select! {
 				biased;
 				res = stream.reader.closed() => return res,
-				announced = origin.next() => {
+				announced = origin.announced() => {
 					match announced {
-						Some(OriginUpdate::Active(path, active)) => {
+						Some(OriginAnnounce::Active(path, active)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 							tracing::debug!(broadcast = %origin.absolute(&path), "announce");
 							// Append our origin id to the hops so the next relay can detect loops.
@@ -218,7 +218,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 							let msg = lite::Announce::Active { suffix, hops };
 							stream.writer.encode(&msg).await?;
 						}
-						Some(OriginUpdate::Ended(path)) => {
+						Some(OriginAnnounce::Ended(path)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 							tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
 							// An ended announce doesn't need hops — the receiver matches on path only.
@@ -252,7 +252,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// of the previous synchronous lookup.
 		let broadcast = self
 			.origin
-			.wait_for_broadcast(&subscribe.broadcast)
+			.announced_broadcast(&subscribe.broadcast)
 			.now_or_never()
 			.flatten();
 		let priority = self.priority.clone();

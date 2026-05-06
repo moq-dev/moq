@@ -6,7 +6,7 @@ use url::Url;
 pub async fn run_client(client: moq_native::Client, url: Url, name: String, publish: Publish) -> anyhow::Result<()> {
 	// Create an origin producer to publish to the broadcast.
 	let origin = moq_lite::Origin::random().produce();
-	origin.publish(&name, publish.consume());
+	origin.publish_broadcast(&name, publish.consume());
 
 	tracing::info!(%url, %name, "connecting");
 

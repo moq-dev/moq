@@ -65,10 +65,10 @@ impl Origin {
 	}
 
 	async fn run_announced(task_id: Id, mut consumer: moq_lite::OriginConsumer) -> Result<(), Error> {
-		while let Some(update) = consumer.next().await {
+		while let Some(update) = consumer.announced().await {
 			let (path, active) = match update {
-				moq_lite::OriginUpdate::Active(p, _) => (p, true),
-				moq_lite::OriginUpdate::Ended(p) => (p, false),
+				moq_lite::OriginAnnounce::Active(p, _) => (p, true),
+				moq_lite::OriginAnnounce::Ended(p) => (p, false),
 			};
 
 			let mut state = State::lock();
@@ -119,8 +119,8 @@ impl Origin {
 			.consume()
 			.scope(&[path.as_path()])
 			.ok_or(Error::BroadcastNotFound)?;
-		while let Some(update) = consumer.try_next() {
-			if let moq_lite::OriginUpdate::Active(p, b) = update
+		while let Some(update) = consumer.try_announced() {
+			if let moq_lite::OriginAnnounce::Active(p, b) = update
 				&& p.as_path() == path
 			{
 				return Ok(b);
@@ -136,7 +136,7 @@ impl Origin {
 		broadcast: moq_lite::BroadcastConsumer,
 	) -> Result<(), Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		if !origin.publish(path, broadcast) {
+		if !origin.publish_broadcast(path, broadcast) {
 			return Err(Error::BroadcastRejected);
 		}
 		Ok(())

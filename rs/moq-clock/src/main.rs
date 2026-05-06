@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
 			let track = broadcast.create_track(track)?;
 			let clock = clock::Publisher::new(track);
 
-			origin.publish(&config.broadcast, broadcast.consume());
+			origin.publish_broadcast(&config.broadcast, broadcast.consume());
 
 			let reconnect = client.with_publish(origin.consume()).reconnect(config.url);
 
@@ -96,13 +96,13 @@ async fn main() -> anyhow::Result<()> {
 
 			loop {
 				tokio::select! {
-					Some(announce) = origin.next() => match announce {
-						moq_lite::OriginUpdate::Active(path, broadcast) => {
+					Some(announce) = origin.announced() => match announce {
+						moq_lite::OriginAnnounce::Active(path, broadcast) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast.subscribe_track(&track)?;
 							clock = Some(clock::Subscriber::new(track));
 						}
-						moq_lite::OriginUpdate::Ended(path) => {
+						moq_lite::OriginAnnounce::Ended(path) => {
 							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");
 						}
 					},

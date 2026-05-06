@@ -110,7 +110,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// synchronous lookup.
 		let Some(broadcast) = self
 			.origin
-			.wait_for_broadcast(&msg.track_namespace)
+			.announced_broadcast(&msg.track_namespace)
 			.now_or_never()
 			.flatten()
 		else {
@@ -450,7 +450,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let announced = tokio::select! {
 				biased;
 				_ = self.session.closed() => return Ok(()),
-				announced = self.origin.next() => announced,
+				announced = self.origin.announced() => announced,
 			};
 
 			let Some(update) = announced else {
@@ -458,7 +458,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			match update {
-				crate::OriginUpdate::Active(path, _) => {
+				crate::OriginAnnounce::Active(path, _) => {
 					let suffix = path.to_owned();
 					tracing::debug!(broadcast = %self.origin.absolute(&path), "announce");
 
@@ -504,7 +504,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						_ => return Err(Error::UnexpectedMessage),
 					}
 				}
-				crate::OriginUpdate::Ended(path) => {
+				crate::OriginAnnounce::Ended(path) => {
 					let suffix = path.to_owned();
 					tracing::debug!(broadcast = %self.origin.absolute(&path), "unannounce");
 					if let Some((request_id, mut stream)) = namespace_streams.remove(&suffix) {
@@ -595,8 +595,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// v16+: Send Namespace/NamespaceDone entries on this bidi stream.
 			_ => {
 				// Send initial NAMESPACE messages for currently active namespaces
-				while let Some(update) = origin.try_next() {
-					if let crate::OriginUpdate::Active(path, _) = update {
+				while let Some(update) = origin.try_announced() {
+					if let crate::OriginAnnounce::Active(path, _) = update {
 						let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path");
 						tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
 						stream.writer.encode(&ietf::Namespace::ID).await?;
@@ -614,15 +614,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					tokio::select! {
 						biased;
 						res = stream.reader.closed() => return res,
-						announced = origin.next() => {
+						announced = origin.announced() => {
 							match announced {
-								Some(crate::OriginUpdate::Active(path, _)) => {
+								Some(crate::OriginAnnounce::Active(path, _)) => {
 									let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 									tracing::debug!(broadcast = %origin.absolute(&path), "namespace");
 									stream.writer.encode(&ietf::Namespace::ID).await?;
 									stream.writer.encode(&ietf::Namespace { suffix }).await?;
 								}
-								Some(crate::OriginUpdate::Ended(path)) => {
+								Some(crate::OriginAnnounce::Ended(path)) => {
 									let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 									tracing::debug!(broadcast = %origin.absolute(&path), "namespace_done");
 									stream.writer.encode(&ietf::NamespaceDone::ID).await?;

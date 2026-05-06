@@ -171,7 +171,7 @@ async fn run_subscribe(client: moq_native::Client, url: Url, name: String, args:
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 	let broadcast = consumer
-		.wait_for_broadcast(&name)
+		.announced_broadcast(&name)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast was announced"))?;
 

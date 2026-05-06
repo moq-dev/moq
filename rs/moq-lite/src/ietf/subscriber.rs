@@ -414,7 +414,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 			Entry::Vacant(entry) => {
 				let broadcast = Broadcast::new().produce();
-				origin.publish(path.clone(), broadcast.consume());
+				origin.publish_broadcast(path.clone(), broadcast.consume());
 				entry.insert(BroadcastState {
 					producer: broadcast.clone(),
 					count: 1,
