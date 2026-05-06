@@ -28,10 +28,13 @@ const MAX_GROUP_FRAMES: usize = 1024;
 #[derive(Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Group {
+	/// Per-track sequence number used to detect ordering and gaps. Higher numbers
+	/// supersede lower ones; consumers may skip late arrivals.
 	pub sequence: u64,
 }
 
 impl Group {
+	/// Consume this [`Group`] to create a producer that owns its sequence number.
 	pub fn produce(self) -> GroupProducer {
 		GroupProducer::new(self)
 	}
@@ -206,16 +209,11 @@ impl GroupProducer {
 
 	/// Abort the group with the given error.
 	///
-	/// No updates can be made after this point.
+	/// No updates can be made after this point. Child frames are independent and
+	/// must be aborted separately if desired; existing frame consumers can still
+	/// finish reading any frames that were already created.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = modify(&self.state)?;
-
-		// Abort all frames still in progress.
-		for frame in guard.frames.iter_mut() {
-			// Ignore errors, we don't care if the frame was already closed.
-			frame.abort(err.clone()).ok();
-		}
-
 		guard.abort = Some(err);
 		guard.close();
 		Ok(())
@@ -412,11 +410,12 @@ mod test {
 		frame.finish().unwrap();
 		producer.finish().unwrap();
 
+		// Frame data is held in a single per-frame buffer; consumers see the full
+		// contents in one chunk rather than the individual write boundaries.
 		let mut consumer = producer.consume();
 		let chunks = consumer.read_frame_chunks().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(chunks.len(), 2);
-		assert_eq!(chunks[0], Bytes::from_static(b"hello"));
-		assert_eq!(chunks[1], Bytes::from_static(b"world"));
+		assert_eq!(chunks.len(), 1);
+		assert_eq!(chunks[0], Bytes::from_static(b"helloworld"));
 	}
 
 	#[test]

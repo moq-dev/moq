@@ -69,7 +69,7 @@ a real bundler (the examples below).
 - `paused` — Pause playback (boolean)
 - `muted` — Mute audio (boolean)
 - `volume` — Audio volume (0–1, default: 1)
-- `catalog-format` — Catalog format: `"hang"` (default) or `"msf"` (see [MSF](/concept/standard/msf))
+- `catalog-format` — Catalog format: `"hang"` (default), `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself)
 
 ## Catalog Formats
 
@@ -100,6 +100,43 @@ const broadcast = new Watch.Broadcast({
 // or toggle at runtime
 broadcast.catalogFormat.set("msf");
 ```
+
+### Manual catalogs
+
+Use `catalog-format="manual"` (or `catalogFormat: "manual"`) to skip the catalog
+track entirely and supply a `Catalog.Root` directly. The connection and
+broadcast name are still required — they're used to subscribe to the media
+tracks named by the catalog. Update the catalog at any time by writing to
+the signal:
+
+```typescript
+import * as Watch from "@moq/watch";
+
+const broadcast = new Watch.Broadcast({
+    connection,
+    enabled: true,
+    name: "alice",
+    catalogFormat: "manual",
+    catalog: {
+        video: { renditions: { hd: { codec: "vp09.00.10.08", container: { kind: "legacy" } } } },
+    },
+});
+
+// Replace at runtime
+broadcast.catalog.set(nextCatalog);
+```
+
+The web component exposes the same field as a JS property:
+
+```typescript
+const el = document.querySelector("moq-watch")!;
+el.catalogFormat = "manual";
+el.catalog = myCatalog;
+```
+
+> Switching `catalogFormat` between `"manual"` and a fetched format (`"hang"` /
+> `"msf"`) tears down the previous fetch loop, which clears `catalog`. Set the
+> catalog *after* switching to `"manual"`, not before.
 
 ## UI Overlay
 

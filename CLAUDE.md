@@ -98,10 +98,18 @@ match version {
 }
 ```
 
+## Writing Style
+
+- **No em dashes (—)** in code, comments, doc comments, commit messages, or any prose. Use a period and start a new sentence, or use a comma/parenthesis if the clauses are tightly bound.
+
 ## Rust Conventions
 
 - **Error handling**: Use `thiserror` with `#[from]` for library crates, `anyhow` for binaries. Always add `#[non_exhaustive]` to public `thiserror` enums.
 - Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
+
+## Comment Conventions
+
+- Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade" — describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
 
 ## Tooling
 

@@ -4,7 +4,7 @@ use anyhow::Context;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+static ALLOC: moq_native::jemalloc::tikv_jemallocator::Jemalloc = moq_native::jemalloc::tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
 	let cluster = Cluster::new(config.cluster, client);
 
-	// Create a web server too.
+	// Create a web server too. mTLS for HTTPS is opt-in via `--web-https-root`.
 	let web = Web::new(
 		WebState {
 			auth: auth.clone(),
@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
 	#[cfg(feature = "jemalloc")]
-	let jemalloc = jemalloc::run();
+	let jemalloc = moq_native::jemalloc::run();
 	#[cfg(not(feature = "jemalloc"))]
 	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 

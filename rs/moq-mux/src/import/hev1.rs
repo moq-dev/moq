@@ -1,18 +1,21 @@
 use super::annexb::{NalIterator, START_CODE};
+use super::jitter::MinFrameDuration;
 
 use anyhow::Context;
-use buf_list::BufList;
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
 
 /// A decoder for H.265 with inline SPS/PPS.
 /// Only supports single layer streams (VPS is cached but not parsed).
 pub struct Hev1 {
+	// The broadcast being produced.
+	broadcast: moq_lite::BroadcastProducer,
+
 	// The catalog being produced.
-	catalog: crate::CatalogProducer,
+	catalog: crate::catalog::Producer,
 
 	// The track being produced.
-	track: hang::container::OrderedProducer,
+	track: Option<crate::container::Producer<crate::container::Hang>>,
 
 	// Whether the track has been initialized.
 	// If it changes, then we'll reinitialize with a new track.
@@ -29,29 +32,23 @@ pub struct Hev1 {
 	cached_sps: Option<Bytes>,
 	cached_pps: Option<Bytes>,
 
-	// Jitter tracking: minimum duration between consecutive frames.
-	last_timestamp: Option<hang::container::Timestamp>,
-	min_duration: Option<hang::container::Timestamp>,
-	jitter: Option<hang::container::Timestamp>,
+	// Tracks the minimum frame duration and updates the catalog `jitter` field.
+	jitter: MinFrameDuration,
 }
 
 impl Hev1 {
-	// TODO: Make this fallible (return Result) instead of panicking — breaking change, do on `dev` branch.
-	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
-		let track = broadcast.unique_track(".hev1").expect("failed to create hev1 track");
-
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
+			broadcast,
 			catalog,
-			track: track.into(),
+			track: None,
 			config: None,
 			current: Default::default(),
 			zero: None,
 			cached_vps: None,
 			cached_sps: None,
 			cached_pps: None,
-			last_timestamp: None,
-			min_duration: None,
-			jitter: None,
+			jitter: MinFrameDuration::new(),
 		}
 	}
 
@@ -88,13 +85,19 @@ impl Hev1 {
 			return Ok(());
 		}
 
-		// Update the catalog entry (track was created eagerly in new()).
 		let mut catalog = self.catalog.lock();
-		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
 
-		tracing::debug!(name = ?self.track.name, ?config, "updated catalog");
+		if let Some(track) = &self.track.take() {
+			tracing::debug!(name = ?track.name, "reinitializing track");
+			catalog.video.renditions.remove(&track.name);
+		}
+
+		let track = self.broadcast.unique_track(".hev1")?;
+		tracing::debug!(name = ?track.name, ?config, "starting track");
+		catalog.video.renditions.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
+		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 
 		Ok(())
 	}
@@ -226,22 +229,22 @@ impl Hev1 {
 				if !self.current.contains_vps
 					&& let Some(vps) = &self.cached_vps
 				{
-					self.current.chunks.push_chunk(START_CODE.clone());
-					self.current.chunks.push_chunk(vps.clone());
+					self.current.chunks.extend_from_slice(&START_CODE);
+					self.current.chunks.extend_from_slice(vps);
 					self.current.contains_vps = true;
 				}
 				if !self.current.contains_sps
 					&& let Some(sps) = &self.cached_sps
 				{
-					self.current.chunks.push_chunk(START_CODE.clone());
-					self.current.chunks.push_chunk(sps.clone());
+					self.current.chunks.extend_from_slice(&START_CODE);
+					self.current.chunks.extend_from_slice(sps);
 					self.current.contains_sps = true;
 				}
 				if !self.current.contains_pps
 					&& let Some(pps) = &self.cached_pps
 				{
-					self.current.chunks.push_chunk(START_CODE.clone());
-					self.current.chunks.push_chunk(pps.clone());
+					self.current.chunks.extend_from_slice(&START_CODE);
+					self.current.chunks.extend_from_slice(pps);
 					self.current.contains_pps = true;
 				}
 
@@ -268,11 +271,10 @@ impl Hev1 {
 			_ => {}
 		}
 
-		// Rather than keeping the original size of the start code, we replace it with a 4 byte start code.
-		// It's just marginally easier and potentially more efficient down the line (JS player with MSE).
-		// NOTE: This is ref-counted and static, so it's extremely cheap to clone.
-		self.current.chunks.push_chunk(START_CODE.clone());
-		self.current.chunks.push_chunk(nal);
+		// Replace the original start code with a canonical 4-byte start code (marginally easier
+		// for downstream players, e.g. MSE).
+		self.current.chunks.extend_from_slice(&START_CODE);
+		self.current.chunks.extend_from_slice(&nal);
 
 		Ok(())
 	}
@@ -283,46 +285,24 @@ impl Hev1 {
 			return Ok(());
 		}
 
-		// Don't emit frames before the codec config is known (no catalog entry yet).
-		if self.config.is_none() {
-			self.current = Frame::default();
-			return Ok(());
-		}
-
-		let track = &mut self.track;
+		let track = self.track.as_mut().context("expected SPS before any frames")?;
 		let pts = pts.context("missing timestamp")?;
 
-		let payload = std::mem::take(&mut self.current.chunks);
+		let payload = std::mem::take(&mut self.current.chunks).freeze();
 
-		if self.current.contains_idr {
-			track.keyframe()?;
-		}
-
-		let frame = hang::container::Frame {
+		let frame = crate::container::Frame {
 			timestamp: pts,
 			payload,
+			keyframe: self.current.contains_idr,
 		};
 
 		track.write(frame)?;
 
-		// Track the minimum frame duration and update catalog jitter.
-		if let Some(last) = self.last_timestamp
-			&& let Ok(duration) = pts.checked_sub(last)
-			&& duration < self.min_duration.unwrap_or(hang::container::Timestamp::MAX)
+		if let Some(jitter) = self.jitter.observe(pts)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
 		{
-			self.min_duration = Some(duration);
-
-			if duration < self.jitter.unwrap_or(hang::container::Timestamp::MAX) {
-				self.jitter = Some(duration);
-
-				if let Ok(jitter) = duration.convert() {
-					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.name) {
-						c.jitter = Some(jitter);
-					}
-				}
-			}
+			c.jitter = Some(jitter);
 		}
-		self.last_timestamp = Some(pts);
 
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
@@ -335,18 +315,13 @@ impl Hev1 {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
-		self.track.finish()?;
+		let track = self.track.as_mut().context("not initialized")?;
+		track.finish()?;
 		Ok(())
 	}
 
-	/// Returns true if the codec config has been detected and inserted into the catalog.
 	pub fn is_initialized(&self) -> bool {
-		self.config.is_some()
-	}
-
-	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> &moq_lite::TrackProducer {
-		&self.track
+		self.track.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
@@ -363,8 +338,10 @@ impl Hev1 {
 
 impl Drop for Hev1 {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.name, "ending track");
-		self.catalog.lock().video.remove(&self.track.name);
+		if let Some(track) = &self.track {
+			tracing::debug!(name = ?track.name, "ending track");
+			self.catalog.lock().video.renditions.remove(&track.name);
+		}
 	}
 }
 
@@ -382,7 +359,7 @@ fn pack_constraint_flags(profile: &scuffle_h265::Profile) -> [u8; 6] {
 
 #[derive(Default)]
 struct Frame {
-	chunks: BufList,
+	chunks: BytesMut,
 	contains_idr: bool,
 	contains_slice: bool,
 	contains_vps: bool,

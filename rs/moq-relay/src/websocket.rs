@@ -8,7 +8,7 @@ use std::{
 
 use axum::{
 	extract::{
-		Path, Query, State, WebSocketUpgrade,
+		Extension, Path, Query, State, WebSocketUpgrade,
 		rejection::{PathRejection, QueryRejection},
 		ws::rejection::WebSocketUpgradeRejection,
 	},
@@ -17,12 +17,13 @@ use axum::{
 };
 use moq_lite::{OriginConsumer, OriginProducer};
 
-use crate::{AuthParams, WebState, web::AuthQuery, web::landing_response};
+use crate::{AuthParams, AuthToken, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
 
 pub(crate) async fn serve_ws(
 	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 	path: Result<Path<String>, PathRejection>,
 	query: Result<Query<AuthQuery>, QueryRejection>,
+	mtls: Option<Extension<MtlsPeer>>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
@@ -34,7 +35,11 @@ pub(crate) async fn serve_ws(
 	let ws = ws.protocols(["webtransport"]);
 
 	let params = AuthParams { path, jwt: query.jwt };
-	let token = state.auth.verify(&params).await?;
+	let token = if mtls.is_some() {
+		AuthToken::unrestricted()
+	} else {
+		state.auth.verify(&params).await?
+	};
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
 

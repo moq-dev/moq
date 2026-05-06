@@ -26,13 +26,13 @@ pub const ALPNS: &[&str] = &[
 ];
 
 // ALPN constants
-pub const ALPN_LITE: &str = "moql";
-pub const ALPN_LITE_03: &str = "moq-lite-03";
-pub const ALPN_LITE_04: &str = "moq-lite-04";
-pub const ALPN_14: &str = "moq-00";
-pub const ALPN_15: &str = "moqt-15";
-pub const ALPN_16: &str = "moqt-16";
-pub const ALPN_17: &str = "moqt-17";
+pub(crate) const ALPN_LITE: &str = "moql";
+pub(crate) const ALPN_LITE_03: &str = "moq-lite-03";
+pub(crate) const ALPN_LITE_04: &str = "moq-lite-04";
+pub(crate) const ALPN_14: &str = "moq-00";
+pub(crate) const ALPN_15: &str = "moqt-15";
+pub(crate) const ALPN_16: &str = "moqt-16";
+pub(crate) const ALPN_17: &str = "moqt-17";
 
 /// A MoQ protocol version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

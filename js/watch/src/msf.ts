@@ -1,21 +1,10 @@
 import type * as Catalog from "@moq/hang/catalog";
 import { u53 } from "@moq/hang/catalog";
-import { Cmaf } from "@moq/hang/container";
 import type * as Msf from "@moq/msf";
+import { base64ToBytes } from "./base64";
 
 const DEFAULT_SAMPLE_RATE = 48000;
 const DEFAULT_NUMBER_OF_CHANNELS = 2;
-
-function base64ToBytes(b64: string): Uint8Array | undefined {
-	try {
-		const raw = atob(b64);
-		const bytes = new Uint8Array(raw.length);
-		for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-		return bytes;
-	} catch {
-		return undefined;
-	}
-}
 
 function bytesToHex(bytes: Uint8Array): string {
 	let hex = "";
@@ -29,18 +18,20 @@ interface ContainerInfo {
 }
 
 function toContainer(track: Msf.Track): ContainerInfo {
-	const initBytes = track.initData ? base64ToBytes(track.initData) : undefined;
+	let initBytes: Uint8Array | undefined;
+	try {
+		initBytes = track.initData ? base64ToBytes(track.initData) : undefined;
+	} catch {
+		initBytes = undefined;
+	}
 
-	if (track.packaging === "cmaf" && initBytes) {
-		try {
-			const init = Cmaf.decodeInitSegment(initBytes);
-			return {
-				container: { kind: "cmaf", timescale: u53(init.timescale), trackId: u53(init.trackId) },
-				description: init.description ? bytesToHex(init.description) : undefined,
-			};
-		} catch (err) {
-			console.warn("failed to parse MSF cmaf initData, falling back to legacy", err);
-		}
+	if (track.packaging === "cmaf" && track.initData && initBytes) {
+		return {
+			container: { kind: "cmaf", init: track.initData },
+			// hang's CMAF path reads codec metadata from the init segment, so we
+			// don't need to surface a separate description here.
+			description: undefined,
+		};
 	}
 
 	return {

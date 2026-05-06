@@ -113,17 +113,20 @@ impl Origin {
 		use moq_lite::AsPath;
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
 		// TODO: expose an async variant so FFI callers can wait for gossip instead of racing it.
-		// Scope a fresh consumer to the requested path; the constructor's replay puts the
-		// currently-active broadcast (if any) at the head of the queue.
+		// Scope is prefix-based, so drain the replay queue until we find an exact path match.
 		let path = path.as_path();
 		let mut consumer = origin
 			.consume()
 			.scope(&[path.as_path()])
 			.ok_or(Error::BroadcastNotFound)?;
-		match consumer.try_next() {
-			Some(moq_lite::OriginUpdate::Active(p, b)) if p.as_path() == path => Ok(b),
-			_ => Err(Error::BroadcastNotFound),
+		while let Some(update) = consumer.try_next() {
+			if let moq_lite::OriginUpdate::Active(p, b) = update
+				&& p.as_path() == path
+			{
+				return Ok(b);
+			}
 		}
+		Err(Error::BroadcastNotFound)
 	}
 
 	pub fn publish<P: moq_lite::AsPath>(
@@ -133,7 +136,9 @@ impl Origin {
 		broadcast: moq_lite::BroadcastConsumer,
 	) -> Result<(), Error> {
 		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		origin.publish(path, broadcast);
+		if !origin.publish(path, broadcast) {
+			return Err(Error::BroadcastRejected);
+		}
 		Ok(())
 	}
 

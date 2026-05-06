@@ -528,20 +528,22 @@ pub extern "C" fn moq_consume_audio_close(track: u32) -> i32 {
 
 /// Get a chunk of a frame's payload.
 ///
-/// Frames may be split into multiple chunks. Call this multiple times with increasing
-/// index values to get all chunks. The destination is filled with the frame chunk information.
+/// Read the payload of a frame as a single contiguous slice.
+///
+/// Frames are not chunked; the entire payload is delivered through `dst.payload` /
+/// `dst.payload_size` in one call. The pointer is valid until [`moq_consume_frame_close`]
+/// is called for this frame.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that `dst` is a valid pointer to a [moq_frame] struct.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_frame_chunk(frame: u32, index: u32, dst: *mut moq_frame) -> i32 {
+pub unsafe extern "C" fn moq_consume_frame(frame: u32, dst: *mut moq_frame) -> i32 {
 	ffi::enter(move || {
 		let frame = ffi::parse_id(frame)?;
-		let index = index as usize;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().consume.frame_chunk(frame, index, dst)
+		State::lock().consume.frame(frame, dst)
 	})
 }
 

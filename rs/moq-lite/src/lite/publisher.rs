@@ -248,7 +248,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		tracing::info!(%id, broadcast = %absolute, %track, "subscribed started");
 
 		// We just received a subscribe for this exact path, so by definition the peer has
-		// already seen an announcement for it — `now_or_never` keeps the fail-fast semantics
+		// already seen an announcement for it. `now_or_never` keeps the fail-fast semantics
 		// of the previous synchronous lookup.
 		let broadcast = self
 			.origin

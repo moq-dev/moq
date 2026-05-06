@@ -106,7 +106,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		tracing::info!(id = %request_id, broadcast = %absolute, track = %track_name, "subscribe started");
 
 		// We just received a subscribe for this exact namespace, so the peer must have already
-		// seen the announcement — `now_or_never` keeps the fail-fast semantics of the previous
+		// seen the announcement, so `now_or_never` keeps the fail-fast semantics of the previous
 		// synchronous lookup.
 		let Some(broadcast) = self
 			.origin

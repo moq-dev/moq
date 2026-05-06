@@ -33,6 +33,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use url::Url;
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static ALLOC: moq_native::jemalloc::tikv_jemallocator::Jemalloc = moq_native::jemalloc::tikv_jemallocator::Jemalloc;
+
 mod audio;
 mod emulator;
 mod input;
@@ -234,7 +238,7 @@ async fn run(config: &Config) -> Result<()> {
 		.reconnect(config.url.clone());
 
 	// Set up catalog and encoders.
-	let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone());
 
 	ffmpeg_next::init().context("failed to init ffmpeg")?;
@@ -437,8 +441,14 @@ async fn main() -> Result<()> {
 	let config = Config::parse();
 	config.log.init();
 
+	#[cfg(feature = "jemalloc")]
+	let jemalloc = moq_native::jemalloc::run();
+	#[cfg(not(feature = "jemalloc"))]
+	let jemalloc = std::future::pending::<anyhow::Result<()>>();
+
 	tokio::select! {
 		res = run(&config) => res,
+		Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
 		_ = tokio::signal::ctrl_c() => std::process::exit(0),
 	}
 }

@@ -80,7 +80,7 @@ impl SessionHandle {
 }
 
 struct PadState {
-	decoder: moq_mux::import::Decoder,
+	decoder: moq_mux::import::Framed,
 	reference_pts: Option<gst::ClockTime>,
 }
 
@@ -88,7 +88,7 @@ struct RuntimeState {
 	#[allow(dead_code)]
 	session: moq_lite::Session,
 	broadcast: moq_lite::BroadcastProducer,
-	catalog: moq_mux::CatalogProducer,
+	catalog: moq_mux::catalog::Producer,
 	pads: HashMap<String, PadState>,
 }
 
@@ -106,6 +106,7 @@ enum ControlMessage {
 	DropPad {
 		pad_name: String,
 	},
+	Eos,
 	Shutdown,
 }
 
@@ -162,6 +163,11 @@ impl ObjectImpl for MoqSink {
 			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
 			_ => unreachable!(),
 		}
+	}
+
+	fn constructed(&self) {
+		self.parent_constructed();
+		self.obj().set_element_flags(gst::ElementFlags::SINK);
 	}
 }
 
@@ -274,8 +280,11 @@ impl MoqSink {
 		};
 
 		let (tx, rx) = mpsc::unbounded_channel::<ControlMessage>();
+
+		let element_weak = self.obj().downgrade();
+
 		let join = RUNTIME.spawn(async move {
-			if let Err(err) = run_session(settings, rx).await {
+			if let Err(err) = run_session(settings, rx, element_weak).await {
 				gst::error!(CAT, "session error: {err:#}");
 			}
 		});
@@ -340,12 +349,27 @@ impl MoqSink {
 
 				true
 			}
+			gst::EventView::Eos(_) => {
+				let sender = match self.session.lock().unwrap().as_ref() {
+					Some(handle) => handle.sender.clone(),
+					None => return false,
+				};
+
+				if sender.send(ControlMessage::Eos).is_err() {
+					return false;
+				}
+				true
+			}
 			_ => gst::Pad::event_default(pad, Some(&*self.obj()), event),
 		}
 	}
 }
 
-async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver<ControlMessage>) -> Result<()> {
+async fn run_session(
+	settings: ResolvedSettings,
+	mut rx: mpsc::UnboundedReceiver<ControlMessage>,
+	element_weak: gst::glib::WeakRef<super::MoqSink>,
+) -> Result<()> {
 	let mut client_config = moq_native::ClientConfig::default();
 	client_config.tls.disable_verify = Some(settings.tls_disable_verify);
 
@@ -355,7 +379,7 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver
 	let mut broadcast = moq_lite::Broadcast::new().produce();
 	let broadcast_consumer = broadcast.consume();
 
-	let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 	anyhow::ensure!(
 		origin.publish(&settings.broadcast, broadcast_consumer),
@@ -373,6 +397,8 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver
 		pads: HashMap::new(),
 	};
 
+	let mut eos_received_count = 0;
+
 	while let Some(msg) = rx.recv().await {
 		match msg {
 			ControlMessage::SetCaps { pad_name, caps } => {
@@ -388,6 +414,17 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver
 			ControlMessage::DropPad { pad_name } => {
 				runtime.pads.remove(&pad_name);
 			}
+			ControlMessage::Eos => {
+				eos_received_count += 1;
+
+				if eos_received_count == runtime.pads.len() {
+					if let Some(element) = element_weak.upgrade() {
+						let eos_message = gst::message::Eos::builder().src(&element).build();
+
+						let _ = element.post_message(eos_message);
+					}
+				}
+			}
 			ControlMessage::Shutdown => break,
 		}
 	}
@@ -397,18 +434,18 @@ async fn run_session(settings: ResolvedSettings, mut rx: mpsc::UnboundedReceiver
 
 fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) -> Result<()> {
 	let structure = caps.structure(0).context("empty caps")?;
-	let decoder: moq_mux::import::Decoder = match structure.name().as_str() {
+	let decoder: moq_mux::import::Framed = match structure.name().as_str() {
 		"video/x-h264" => {
 			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::DecoderFormat::Avc3, &mut bytes)?
+			new_decoder(runtime, moq_mux::import::FramedFormat::Avc3, &mut bytes)?
 		}
 		"video/x-h265" => {
 			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::DecoderFormat::Hev1, &mut bytes)?
+			new_decoder(runtime, moq_mux::import::FramedFormat::Hev1, &mut bytes)?
 		}
 		"video/x-av1" => {
 			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::DecoderFormat::Av01, &mut bytes)?
+			new_decoder(runtime, moq_mux::import::FramedFormat::Av01, &mut bytes)?
 		}
 		"audio/mpeg" => {
 			let codec_data = structure
@@ -416,7 +453,7 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 				.context("AAC caps missing codec_data")?;
 			let map = codec_data.map_readable().context("failed to map codec_data")?;
 			let mut data = Bytes::copy_from_slice(map.as_slice());
-			new_decoder(runtime, moq_mux::import::DecoderFormat::Aac, &mut data)?
+			new_decoder(runtime, moq_mux::import::FramedFormat::Aac, &mut data)?
 		}
 		"audio/x-opus" => {
 			let channels: i32 = structure.get("channels").unwrap_or(2);
@@ -442,10 +479,10 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 
 fn new_decoder(
 	runtime: &mut RuntimeState,
-	format: moq_mux::import::DecoderFormat,
+	format: moq_mux::import::FramedFormat,
 	buf: &mut Bytes,
-) -> Result<moq_mux::import::Decoder> {
-	let decoder = moq_mux::import::Decoder::new(runtime.broadcast.clone(), runtime.catalog.clone(), format, buf)?;
+) -> Result<moq_mux::import::Framed> {
+	let decoder = moq_mux::import::Framed::new(runtime.broadcast.clone(), runtime.catalog.clone(), format, buf)?;
 	Ok(decoder)
 }
 

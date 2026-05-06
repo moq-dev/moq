@@ -1,4 +1,5 @@
 use std::{
+	future::Future,
 	net,
 	path::PathBuf,
 	pin::Pin,
@@ -9,17 +10,24 @@ use std::{
 use axum::{
 	Router,
 	body::Body,
-	extract::{Path, Query, State},
-	http::{Method, StatusCode},
+	extract::{Extension, Path, Query, State},
+	http::{self, Method, StatusCode},
 	response::{Html, IntoResponse, Response},
 	routing::get,
 };
+use axum_server::{
+	accept::{Accept, DefaultAcceptor},
+	tls_rustls::{RustlsAcceptor, RustlsConfig},
+};
 use bytes::Bytes;
 use clap::Parser;
-use futures::FutureExt;
+use futures::{FutureExt, future::BoxFuture};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::server::TlsStream;
 use tower_http::cors::{Any, CorsLayer};
+use tower_service::Service;
 
-use crate::{Auth, AuthParams, Cluster};
+use crate::{Auth, AuthParams, AuthToken, Cluster};
 
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
@@ -53,6 +61,7 @@ pub struct HttpConfig {
 }
 
 /// HTTPS listener configuration with TLS certificate and key.
+#[serde_with::serde_as]
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -68,6 +77,24 @@ pub struct HttpsConfig {
 	/// Load the given key from disk.
 	#[arg(long = "web-https-key", id = "web-https-key", env = "MOQ_WEB_HTTPS_KEY")]
 	pub key: Option<PathBuf>,
+
+	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
+	///
+	/// When set, clients *may* present a certificate during the TLS handshake.
+	/// A verified peer is granted an unrestricted [`AuthToken`] without a JWT,
+	/// mirroring the QUIC server's `--server-tls-root` behavior. Clients that
+	/// don't present a cert continue through the normal JWT path.
+	///
+	/// In config files, accepts either a single string or a TOML array.
+	#[arg(
+		long = "web-https-root",
+		id = "web-https-root",
+		value_delimiter = ',',
+		env = "MOQ_WEB_HTTPS_ROOT"
+	)]
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
+	pub root: Vec<PathBuf>,
 }
 
 /// Shared state passed to all web handler routes.
@@ -89,7 +116,6 @@ pub struct Web {
 }
 
 impl Web {
-	/// Creates a new web server with the given state and configuration.
 	pub fn new(state: WebState, config: WebConfig) -> Self {
 		Self { state, config }
 	}
@@ -125,12 +151,22 @@ impl Web {
 		let https = if let Some(listen) = self.config.https.listen {
 			let cert = self.config.https.cert.expect("missing https.cert");
 			let key = self.config.https.key.expect("missing https.key");
-			let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
+			let root = self.config.https.root.clone();
+
+			let config = build_https_config(&cert, &key, &root).await?;
+			let rustls_config = RustlsConfig::from_config(Arc::new(config));
 
 			#[cfg(unix)]
-			tokio::spawn(reload_certs(config.clone(), cert, key));
+			tokio::spawn(reload_https_config(rustls_config.clone(), cert, key, root));
 
-			let server = axum_server::bind_rustls(listen, config);
+			// MtlsAcceptor surfaces a verified peer cert as a request extension.
+			// When no client CA is configured, the inner verifier is `NoClientAuth`
+			// and `peer_certificates()` always returns None — the wrapper is then
+			// a near-no-op, but keeping a single path simplifies reload + serve.
+			let acceptor = MtlsAcceptor {
+				inner: RustlsAcceptor::new(rustls_config),
+			};
+			let server = axum_server::bind(listen).acceptor(acceptor);
 			Some(server.serve(app))
 		} else {
 			None
@@ -146,19 +182,159 @@ impl Web {
 	}
 }
 
+/// Build a [`rustls::ServerConfig`] for the HTTPS listener.
+///
+/// When `root` is non-empty, installs a [`WebPkiClientVerifier`] with
+/// `.allow_unauthenticated()` so JWT-only callers still complete the
+/// handshake without presenting a cert. When empty, falls back to
+/// [`with_no_client_auth`]. ALPN is set to `h2`, `http/1.1` to match
+/// axum-server's defaults.
+///
+/// TLS version is left at the rustls default (1.2 + 1.3) so older clients
+/// can still hit the HTTPS API; the QUIC server separately forces 1.3.
+async fn build_https_config(
+	cert: &std::path::Path,
+	key: &std::path::Path,
+	root: &[PathBuf],
+) -> anyhow::Result<rustls::ServerConfig> {
+	use anyhow::Context;
+	use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+	use rustls::server::WebPkiClientVerifier;
+
+	let cert_chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+		.context("failed to open https cert")?
+		.collect::<Result<_, _>>()
+		.context("failed to parse https cert")?;
+	let key_der = PrivateKeyDer::from_pem_file(key).context("failed to parse https key")?;
+
+	let provider = rustls::crypto::CryptoProvider::get_default()
+		.cloned()
+		.expect("no default crypto provider installed");
+
+	let builder =
+		rustls::ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
+
+	let mut config = if root.is_empty() {
+		builder
+			.with_no_client_auth()
+			.with_single_cert(cert_chain, key_der)
+			.context("invalid https cert/key pair")?
+	} else {
+		// Build the CA root store inline; `moq_native::ServerTlsConfig` is
+		// `non_exhaustive`, so we can't construct one to call its `load_roots`.
+		let mut root_store = rustls::RootCertStore::empty();
+		for path in root {
+			let mut found = false;
+			for cert in CertificateDer::pem_file_iter(path).context("failed to open mTLS client CA")? {
+				let cert = cert.context("failed to parse mTLS client CA PEM")?;
+				root_store.add(cert).context("failed to add mTLS client CA")?;
+				found = true;
+			}
+			anyhow::ensure!(found, "no certificates found in mTLS client CA: {}", path.display());
+		}
+		let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), provider)
+			.allow_unauthenticated()
+			.build()
+			.context("failed to build https client cert verifier")?;
+
+		builder
+			.with_client_cert_verifier(verifier)
+			.with_single_cert(cert_chain, key_der)
+			.context("invalid https cert/key pair")?
+	};
+
+	config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+	Ok(config)
+}
+
+/// Reload the HTTPS cert/key on SIGUSR1.
+///
+/// `RustlsConfig::reload_from_pem_file` would rebuild with `with_no_client_auth`
+/// — silently stripping mTLS when configured — so we always rebuild via the
+/// full [`build_https_config`] path.
 #[cfg(unix)]
-async fn reload_certs(config: axum_server::tls_rustls::RustlsConfig, cert: PathBuf, key: PathBuf) {
+async fn reload_https_config(config: RustlsConfig, cert: PathBuf, key: PathBuf, root: Vec<PathBuf>) {
 	use tokio::signal::unix::{SignalKind, signal};
 
-	// Dunno why we wouldn't be allowed to listen for signals, but just in case.
 	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
 
 	while listener.recv().await.is_some() {
 		tracing::info!("reloading web certificate");
 
-		if let Err(err) = config.reload_from_pem_file(cert.clone(), key.clone()).await {
-			tracing::warn!(%err, "failed to reload web certificate");
+		match build_https_config(&cert, &key, &root).await {
+			Ok(new) => config.reload_from_config(Arc::new(new)),
+			Err(err) => tracing::warn!(%err, "failed to reload web certificate"),
 		}
+	}
+}
+
+/// Marker inserted as a request extension when rustls verified a client cert
+/// against the configured mTLS CA. We don't carry the cert bytes — "verified
+/// by our CA" is the entire signal we need (mirrors `PeerIdentity` on the QUIC
+/// side).
+#[derive(Clone, Debug)]
+pub(crate) struct MtlsPeer;
+
+/// Wraps [`RustlsAcceptor`] so that, after the TLS handshake, we extract the
+/// peer cert presence from rustls's `ServerConnection` and attach it to every
+/// request on this connection as `Extension<Option<MtlsPeer>>`.
+#[derive(Clone)]
+struct MtlsAcceptor {
+	inner: RustlsAcceptor<DefaultAcceptor>,
+}
+
+impl<I, S> Accept<I, S> for MtlsAcceptor
+where
+	I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+	S: Send + 'static,
+{
+	type Stream = TlsStream<I>;
+	type Service = SetMtlsExtension<S>;
+	type Future = BoxFuture<'static, std::io::Result<(Self::Stream, Self::Service)>>;
+
+	fn accept(&self, stream: I, service: S) -> Self::Future {
+		let inner = self.inner.accept(stream, service);
+		async move {
+			let (tls, service) = inner.await?;
+			let peer = tls
+				.get_ref()
+				.1
+				.peer_certificates()
+				.filter(|certs| !certs.is_empty())
+				.map(|_| MtlsPeer);
+			Ok((tls, SetMtlsExtension { inner: service, peer }))
+		}
+		.boxed()
+	}
+}
+
+/// Per-connection tower service that injects `Extension<Option<MtlsPeer>>` on
+/// every request before forwarding to the inner service.
+#[derive(Clone)]
+struct SetMtlsExtension<S> {
+	inner: S,
+	peer: Option<MtlsPeer>,
+}
+
+impl<S, B> Service<http::Request<B>> for SetMtlsExtension<S>
+where
+	S: Service<http::Request<B>>,
+{
+	type Response = S::Response;
+	type Error = S::Error;
+	type Future = S::Future;
+
+	fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		self.inner.poll_ready(cx)
+	}
+
+	fn call(&mut self, mut req: http::Request<B>) -> Self::Future {
+		// Only insert when a cert was presented; handlers extract via
+		// `Option<Extension<MtlsPeer>>` so absence is the no-cert case.
+		if let Some(peer) = self.peer.clone() {
+			req.extensions_mut().insert(peer);
+		}
+		self.inner.call(req)
 	}
 }
 
@@ -265,6 +441,7 @@ impl<'de> serde::Deserialize<'de> for FetchFrame {
 async fn serve_announced(
 	path: Option<Path<String>>,
 	Query(query): Query<AuthQuery>,
+	mtls: Option<Extension<MtlsPeer>>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<String> {
 	let prefix = match path {
@@ -276,7 +453,11 @@ async fn serve_announced(
 		path: prefix,
 		jwt: query.jwt,
 	};
-	let token = state.auth.verify(&params).await?;
+	let token = if mtls.is_some() {
+		AuthToken::unrestricted()
+	} else {
+		state.auth.verify(&params).await?
+	};
 	let Some(mut origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
@@ -296,6 +477,7 @@ async fn serve_announced(
 async fn serve_fetch(
 	Path(path): Path<String>,
 	Query(params): Query<FetchParams>,
+	mtls: Option<Extension<MtlsPeer>>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<ServeGroup> {
 	// The path containts a broadcast/track
@@ -312,7 +494,11 @@ async fn serve_fetch(
 		path: broadcast.clone(),
 		jwt: params.auth.jwt,
 	};
-	let token = state.auth.verify(&auth).await?;
+	let token = if mtls.is_some() {
+		AuthToken::unrestricted()
+	} else {
+		state.auth.verify(&auth).await?
+	};
 
 	let Some(origin) = state.cluster.subscriber(&token) else {
 		return Err(StatusCode::UNAUTHORIZED.into());
@@ -325,22 +511,17 @@ async fn serve_fetch(
 		priority: 0,
 	};
 
-	// NOTE: The auth token is already scoped to the broadcast.
-	// TODO: bound `wait_for_broadcast` by the fetch deadline so freshly-connected subscribers
-	// don't get a spurious 404 before the broadcast has gossiped.
-	let broadcast = origin
-		.wait_for_broadcast("")
-		.now_or_never()
-		.flatten()
-		.ok_or(StatusCode::NOT_FOUND)?;
-	let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
-		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
-		_ => StatusCode::INTERNAL_SERVER_ERROR,
-	})?;
-
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
 	let result = tokio::time::timeout_at(deadline, async {
+		// NOTE: The auth token is already scoped to the broadcast.
+		// Block until the broadcast has been announced (within the fetch deadline) so
+		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
+		let broadcast = origin.wait_for_broadcast("").await.ok_or(StatusCode::NOT_FOUND)?;
+		let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
+			moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
+			_ => StatusCode::INTERNAL_SERVER_ERROR,
+		})?;
 		let group = match params.group {
 			FetchGroup::Latest => match track.latest() {
 				Some(sequence) => track.get_group(sequence).await,
@@ -457,4 +638,143 @@ impl IntoResponse for ServeGroupError {
 
 fn default_true() -> bool {
 	true
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use rcgen::{CertificateParams, KeyPair};
+	use std::io::Write;
+	use tempfile::TempDir;
+
+	/// Generate a CA + server cert/key on disk and return the temp paths.
+	/// Modeled after `auth.rs::mtls_fixture`.
+	fn make_certs(dir: &TempDir) -> (PathBuf, PathBuf, PathBuf) {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+		let ca_kp = KeyPair::generate().unwrap();
+		let mut ca_params = CertificateParams::new(vec![]).unwrap();
+		ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
+		ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+		let ca_cert = ca_params.self_signed(&ca_kp).unwrap();
+
+		let server_kp = KeyPair::generate().unwrap();
+		let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+		server_params
+			.distinguished_name
+			.push(rcgen::DnType::CommonName, "test-server");
+		let server_cert = server_params.signed_by(&server_kp, &ca_cert, &ca_kp).unwrap();
+
+		let ca_path = dir.path().join("ca.pem");
+		let cert_path = dir.path().join("server.cert.pem");
+		let key_path = dir.path().join("server.key.pem");
+		std::fs::write(&ca_path, ca_cert.pem()).unwrap();
+		std::fs::write(&cert_path, server_cert.pem()).unwrap();
+		std::fs::write(&key_path, server_kp.serialize_pem()).unwrap();
+
+		(ca_path, cert_path, key_path)
+	}
+
+	#[tokio::test]
+	async fn build_https_config_round_trips() {
+		let dir = TempDir::new().unwrap();
+		let (ca_path, cert_path, key_path) = make_certs(&dir);
+
+		let config = build_https_config(&cert_path, &key_path, &[ca_path])
+			.await
+			.expect("build_https_config should succeed");
+
+		// ALPN must include h2 + http/1.1; otherwise reqwest's h2 attempt
+		// would silently downgrade or fail. Mirrors axum_server's default.
+		assert_eq!(
+			config.alpn_protocols,
+			vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+			"ALPN must advertise h2 and http/1.1",
+		);
+	}
+
+	#[tokio::test]
+	async fn build_https_config_no_client_auth_when_ca_empty() {
+		let dir = TempDir::new().unwrap();
+		let (_ca_path, cert_path, key_path) = make_certs(&dir);
+
+		// Empty root is the JWT-only path; should still produce a valid
+		// config with ALPN set so axum-server's hyper layer can negotiate h2.
+		let config = build_https_config(&cert_path, &key_path, &[])
+			.await
+			.expect("no-CA path should still build a usable config");
+
+		assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()],);
+	}
+
+	#[tokio::test]
+	async fn build_https_config_rejects_missing_ca() {
+		let dir = TempDir::new().unwrap();
+		let (_ca_path, cert_path, key_path) = make_certs(&dir);
+
+		let bogus = dir.path().join("does-not-exist.pem");
+		let res = build_https_config(&cert_path, &key_path, &[bogus]).await;
+		assert!(res.is_err(), "missing CA file should be a hard error");
+	}
+
+	#[tokio::test]
+	async fn build_https_config_rejects_empty_pem() {
+		let dir = TempDir::new().unwrap();
+		let (_ca_path, cert_path, key_path) = make_certs(&dir);
+
+		let empty = dir.path().join("empty.pem");
+		let mut f = std::fs::File::create(&empty).unwrap();
+		writeln!(f, "# no certs here").unwrap();
+
+		let res = build_https_config(&cert_path, &key_path, &[empty]).await;
+		assert!(
+			res.is_err(),
+			"empty PEM must be rejected to avoid a silently disabled verifier"
+		);
+	}
+
+	/// Confirm `SetMtlsExtension` injects the marker into request extensions
+	/// when a peer cert was presented, and leaves them untouched otherwise.
+	#[tokio::test]
+	async fn set_mtls_extension_injects_marker() {
+		use axum::http::Request;
+		use std::convert::Infallible;
+
+		// Inner service that just echoes back whether the extension was present.
+		#[derive(Clone)]
+		struct EchoExt;
+		impl Service<Request<()>> for EchoExt {
+			type Response = bool;
+			type Error = Infallible;
+			type Future = std::pin::Pin<Box<dyn Future<Output = Result<bool, Infallible>> + Send>>;
+			fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+				Poll::Ready(Ok(()))
+			}
+			fn call(&mut self, req: Request<()>) -> Self::Future {
+				let has = req.extensions().get::<MtlsPeer>().is_some();
+				Box::pin(async move { Ok(has) })
+			}
+		}
+
+		let mut with_peer = SetMtlsExtension {
+			inner: EchoExt,
+			peer: Some(MtlsPeer),
+		};
+		let mut no_peer = SetMtlsExtension {
+			inner: EchoExt,
+			peer: None,
+		};
+
+		let req = Request::builder().body(()).unwrap();
+		assert!(
+			with_peer.call(req).await.unwrap(),
+			"SetMtlsExtension(Some) must surface MtlsPeer"
+		);
+
+		let req = Request::builder().body(()).unwrap();
+		assert!(
+			!no_peer.call(req).await.unwrap(),
+			"SetMtlsExtension(None) must NOT surface MtlsPeer"
+		);
+	}
 }

@@ -254,19 +254,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut this = self.clone();
 
 			let path = path.clone();
+			let broadcast = broadcast.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(id, path, track).await;
+				this.run_subscribe(id, path, broadcast, track).await;
 				this.subscribes.lock().remove(&id);
 			});
 		}
 	}
 
-	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer) {
+	async fn run_subscribe(&mut self, id: u64, path: PathOwned, broadcast: BroadcastDynamic, mut track: TrackProducer) {
 		self.subscribes.lock().insert(id, track.clone());
 
 		let msg = lite::Subscribe {
 			id,
-			broadcast: broadcast.to_owned(),
+			broadcast: path.as_path(),
 			track: (&track.name).into(),
 			priority: track.priority,
 			ordered: true,
@@ -275,24 +276,25 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			end_group: None,
 		};
 
-		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe started");
+		tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe started");
 
 		let res = tokio::select! {
 			_ = track.unused() => Err(Error::Cancel),
+			err = broadcast.closed() => Err(err),
 			res = self.run_track(msg) => res,
 		};
 
 		match res {
 			Err(Error::Cancel) => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe cancelled");
+				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
 			}
 			Err(err) => {
-				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.name, %err, "subscribe error");
+				tracing::warn!(id, broadcast = %self.log_path(&path), track = %track.name, %err, "subscribe error");
 				let _ = track.abort(err);
 			}
 			_ => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe complete");
+				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe complete");
 				let _ = track.finish();
 			}
 		}
@@ -333,15 +335,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let mut group = {
+		let (mut group, track) = {
 			let mut subs = self.subscribes.lock();
 			let track = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
-			let group = Group { sequence: hdr.sequence };
-			track.create_group(group)?
+			let group_info = Group { sequence: hdr.sequence };
+			let group = track.create_group(group_info)?;
+			(group, track.clone())
 		};
 
 		let res = tokio::select! {
+			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
 			res = self.run_group(stream, group.clone()) => res,
 		};
@@ -386,18 +390,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut FrameProducer,
 	) -> Result<(), Error> {
-		let mut remain = frame.size;
-
-		const MAX_CHUNK: usize = 1024 * 1024; // 1 MiB
-		while remain > 0 {
-			let chunk = stream
-				.read(MAX_CHUNK.min(remain as usize))
-				.await?
-				.ok_or(Error::WrongSize)?;
-			remain = remain.checked_sub(chunk.len() as u64).ok_or(Error::WrongSize)?;
-			frame.write(chunk)?;
+		// FrameProducer impls BufMut over its pre-allocated per-frame buffer, so
+		// read_buf writes QUIC stream bytes directly into the frame — no
+		// intermediate Bytes allocations, and quinn's reassembly arena is freed
+		// as we drain it.
+		while bytes::BufMut::has_remaining_mut(frame) {
+			match stream.read_buf(frame).await? {
+				Some(n) if n > 0 => {}
+				_ => return Err(Error::WrongSize),
+			}
 		}
-
 		Ok(())
 	}
 

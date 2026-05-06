@@ -20,6 +20,7 @@ pub struct BandwidthProducer {
 }
 
 impl BandwidthProducer {
+	/// Create a fresh producer with no current estimate.
 	pub fn new() -> Self {
 		Self {
 			state: conducer::Producer::default(),

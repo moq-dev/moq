@@ -37,35 +37,9 @@ impl Audio {
 		Ok(())
 	}
 
-	/// Create a new audio track with the given extension and configuration.
-	#[deprecated(
-		note = "use BroadcastProducer::unique_track to create the track, then insert into the catalog when initialized"
-	)]
-	pub fn create_track(&mut self, extension: &str, config: AudioConfig) -> moq_lite::Track {
-		for i in 0.. {
-			let name = match extension {
-				"" => format!("audio{}", i),
-				extension => format!("audio{}.{}", i, extension),
-			};
-
-			if let btree_map::Entry::Vacant(entry) = self.renditions.entry(name.clone()) {
-				entry.insert(config.clone());
-				// TODO: Remove priority
-				return moq_lite::Track { name, priority: 2 };
-			}
-		}
-
-		unreachable!("no available audio track name");
-	}
-
-	/// Remove a track from the catalog by name.
+	/// Remove the track from the catalog and return the configuration if found.
 	pub fn remove(&mut self, name: &str) -> Option<AudioConfig> {
 		self.renditions.remove(name)
-	}
-
-	#[deprecated(note = "use remove() instead")]
-	pub fn remove_track(&mut self, track: &moq_lite::Track) -> Option<AudioConfig> {
-		self.remove(&track.name)
 	}
 }
 

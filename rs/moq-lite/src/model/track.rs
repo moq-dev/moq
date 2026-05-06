@@ -1,14 +1,14 @@
 //! A track is a collection of semi-reliable and semi-ordered streams, split into a [TrackProducer] and [TrackConsumer] handle.
 //!
 //! A [TrackProducer] creates streams with a sequence number and priority.
-//! The sequest number is used to determine the order of streams, while the priority is used to determine which stream to transmit first.
+//! The sequence number is used to determine the order of streams, while the priority is used to determine which stream to transmit first.
 //! This may seem counter-intuitive, but is designed for live streaming where the newest streams may be higher priority.
 //! A cloned [TrackProducer] can be used to create streams in parallel, but will error if a duplicate sequence number is used.
 //!
 //! A [TrackConsumer] may not receive all streams in order or at all.
-//! These streams are meant to be transmitted over congested networks and the key to MoQ Tranport is to not block on them.
-//! streams will be cached for a potentially limited duration added to the unreliable nature.
-//! A cloned [TrackConsumer] will receive a copy of all new stream going forward (fanout).
+//! These streams are meant to be transmitted over congested networks and the key to MoQ Transport is to not block on them.
+//! Streams will be cached for a potentially limited duration added to the unreliable nature.
+//! A cloned [TrackConsumer] will receive a copy of all new streams going forward (fanout).
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
@@ -30,11 +30,14 @@ const MAX_GROUP_AGE: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Track {
+	/// Identifier within a broadcast. Unique per [`crate::Broadcast`].
 	pub name: String,
+	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
 	pub priority: u8,
 }
 
 impl Track {
+	/// Create a track with the given name and default priority (`0`).
 	pub fn new<T: Into<String>>(name: T) -> Self {
 		Self {
 			name: name.into(),
@@ -42,6 +45,7 @@ impl Track {
 		}
 	}
 
+	/// Consume this [`Track`] to create a producer that owns its metadata.
 	pub fn produce(self) -> TrackProducer {
 		TrackProducer::new(self)
 	}
@@ -213,6 +217,7 @@ impl std::ops::Deref for TrackProducer {
 }
 
 impl TrackProducer {
+	/// Build a producer for the given track metadata. Prefer [`Track::produce`].
 	pub fn new(info: Track) -> Self {
 		Self {
 			info,
@@ -292,15 +297,6 @@ impl TrackProducer {
 		Ok(())
 	}
 
-	/// Mark the track as finished after the last appended group.
-	///
-	/// Deprecated: use [`Self::finish`] for this behavior, or
-	/// [`Self::finish_at`] to set an explicit final sequence.
-	#[deprecated(note = "use finish() or finish_at(sequence) instead")]
-	pub fn close(&mut self) -> Result<()> {
-		self.finish()
-	}
-
 	/// Mark the track as finished at an exact final sequence.
 	///
 	/// The caller must pass the current max_sequence exactly.
@@ -318,15 +314,12 @@ impl TrackProducer {
 	}
 
 	/// Abort the track with the given error.
+	///
+	/// Child groups are independent and must be aborted separately if desired;
+	/// existing group consumers can still finish reading any groups that were
+	/// already created.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = self.modify()?;
-
-		// Abort all groups still in progress.
-		for (group, _) in guard.groups.iter_mut().flatten() {
-			// Ignore errors, we don't care if the group was already closed.
-			group.abort(err.clone()).ok();
-		}
-
 		guard.abort = Some(err);
 		guard.close();
 		Ok(())
@@ -357,6 +350,12 @@ impl TrackProducer {
 			.used()
 			.await
 			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// Block until the track is closed or aborted, returning the cause.
+	pub async fn closed(&self) -> Error {
+		self.state.closed().await;
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 
 	/// Return true if the track has been closed.
@@ -407,18 +406,6 @@ pub(crate) struct TrackWeak {
 }
 
 impl TrackWeak {
-	pub fn abort(&self, err: Error) {
-		let Ok(mut guard) = self.state.write() else { return };
-
-		// Cascade abort to all groups.
-		for (group, _) in guard.groups.iter_mut().flatten() {
-			group.abort(err.clone()).ok();
-		}
-
-		guard.abort = Some(err);
-		guard.close();
-	}
-
 	pub fn is_closed(&self) -> bool {
 		self.state.is_closed()
 	}
@@ -454,7 +441,7 @@ pub struct TrackConsumer {
 	index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by [`Self::start_at`].
 	min_sequence: u64,
-	/// One past the highest sequence returned by [`Self::next_group_ordered`].
+	/// One past the highest sequence returned by [`Self::next_group`].
 	/// Used only by that method to skip late arrivals; does not affect [`Self::recv_group`].
 	next_sequence: u64,
 }
@@ -480,11 +467,11 @@ impl TrackConsumer {
 		})
 	}
 
-	/// Poll for the next group received over the network, in arrival order, without blocking.
+	/// Poll for the next group in arrival order, without blocking.
 	///
-	/// Groups may arrive out of order or with gaps due to network conditions.
-	/// Use [`Self::next_group_ordered`] if you need groups in sequence order,
-	/// skipping those that arrive too late.
+	/// Returns every group exactly once in the order it landed on the wire — which may be
+	/// out of sequence due to network reordering or loss. Use [`Self::poll_next_group`] if
+	/// you only want groups whose sequence number is higher than any previously returned.
 	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished,
@@ -501,31 +488,21 @@ impl TrackConsumer {
 		Poll::Ready(Ok(Some(consumer)))
 	}
 
-	/// Receive the next group available on this track, in arrival order.
+	/// Receive the next group in arrival order.
 	///
-	/// Groups may arrive out of order or with gaps due to network conditions.
-	/// Use [`Self::next_group_ordered`] if you need groups in sequence order,
-	/// skipping those that arrive too late.
+	/// Every group is returned exactly once, in the order it landed on the wire — which may
+	/// be out of sequence due to network reordering or loss. Use [`Self::next_group`] if you
+	/// only want groups whose sequence number is higher than any previously returned.
 	pub async fn recv_group(&mut self) -> Result<Option<GroupConsumer>> {
 		conducer::wait(|waiter| self.poll_recv_group(waiter)).await
 	}
 
-	/// Deprecated alias for [`Self::poll_recv_group`].
-	#[deprecated(note = "use poll_recv_group for arrival order, or poll_next_group_ordered for sequence order")]
-	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
-		self.poll_recv_group(waiter)
-	}
-
-	/// Deprecated alias for [`Self::recv_group`].
-	#[deprecated(note = "use recv_group for arrival order, or next_group_ordered for sequence order")]
-	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
-		self.recv_group().await
-	}
-
-	/// A helper that calls [`Self::poll_recv_group`] but only returns groups with a sequence number higher than any previously returned.
+	/// Poll for the next group with a higher sequence number than any previously returned.
 	///
-	/// NOTE: This will be renamed to `poll_next_group` in the next major version.
-	pub fn poll_next_group_ordered(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
+	/// Late arrivals (sequence at or below the last returned) are silently skipped, so this
+	/// produces a monotonically increasing sequence at the cost of dropping out-of-order
+	/// groups. Use [`Self::poll_recv_group`] to see every group in arrival order instead.
+	pub fn poll_next_group(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<GroupConsumer>>> {
 		loop {
 			let Some(group) = ready!(self.poll_recv_group(waiter)?) else {
 				return Poll::Ready(Ok(None));
@@ -539,17 +516,16 @@ impl TrackConsumer {
 		}
 	}
 
-	/// Return the next group with a strictly-greater sequence number than the last returned.
+	/// Return the next group with a higher sequence number than any previously returned.
 	///
-	/// Groups that arrive late (with a sequence number at or below the last one returned)
-	/// are silently skipped.
-	///
-	/// NOTE: This will be renamed to `next_group` in the next major version.
-	pub async fn next_group_ordered(&mut self) -> Result<Option<GroupConsumer>> {
-		conducer::wait(|waiter| self.poll_next_group_ordered(waiter)).await
+	/// Late arrivals (sequence at or below the last returned) are silently skipped, so this
+	/// produces a monotonically increasing sequence at the cost of dropping out-of-order
+	/// groups. Use [`Self::recv_group`] to see every group in arrival order instead.
+	pub async fn next_group(&mut self) -> Result<Option<GroupConsumer>> {
+		conducer::wait(|waiter| self.poll_next_group(waiter)).await
 	}
 
-	/// A helper that calls [`Self::poll_next_group_ordered`] and returns its first frame,
+	/// A helper that calls [`Self::poll_next_group`] and returns its first frame,
 	/// skipping the rest of the group. Intended for single-frame groups (see
 	/// [`TrackProducer::write_frame`]).
 	pub fn poll_read_frame(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<bytes::Bytes>>> {
@@ -577,9 +553,13 @@ impl TrackConsumer {
 		self.poll(waiter, |state| state.poll_get_group(sequence))
 	}
 
-	/// Block until the group with the given sequence is available.
+	/// Wait until the group with the given sequence becomes available.
 	///
-	/// Returns None if the group is not in the cache and a newer group exists.
+	/// Resolves to `Some(GroupConsumer)` once the group is in the cache.
+	/// Resolves to `None` only when `sequence` is at or past the track's
+	/// `final_sequence` (set by `finish()` / `finish_at()`), since such a
+	/// group can never be produced. Sequences below `final_sequence` still
+	/// wait, since older groups may still arrive out of order.
 	pub async fn get_group(&self, sequence: u64) -> Result<Option<GroupConsumer>> {
 		conducer::wait(|waiter| self.poll_get_group(waiter, sequence)).await
 	}
@@ -596,6 +576,7 @@ impl TrackConsumer {
 		conducer::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
+	/// Whether `other` was cloned from this consumer (shares the same underlying state).
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
@@ -620,29 +601,12 @@ impl TrackConsumer {
 		self.state.read().max_sequence
 	}
 
-	/// Upgrade this consumer back to a [TrackProducer] sharing the same state.
-	///
-	/// This enables zero-copy track sharing between broadcasts: subscribe to a
-	/// track, then [`crate::BroadcastProducer::insert_track`] the producer into another
-	/// broadcast. Both broadcasts serve the same underlying track data with no
-	/// forwarding overhead.
-	///
-	/// # Shared Ownership
-	///
-	/// The returned producer shares state with the original track. Mutations
-	/// (appending groups, finishing, aborting) through either producer affect
-	/// all consumers of the track. The returned producer keeps the track alive
-	/// (prevents auto-close) as long as it exists, even if the original producer
-	/// is dropped.
-	pub fn produce(&self) -> Result<TrackProducer> {
-		let state = self
-			.state
-			.produce()
-			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
-		Ok(TrackProducer {
+	/// Create a weak reference that doesn't prevent auto-close.
+	pub(crate) fn weak(&self) -> TrackWeak {
+		TrackWeak {
 			info: self.info.clone(),
-			state,
-		})
+			state: self.state.weak(),
+		}
 	}
 }
 
@@ -937,14 +901,14 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn next_group_ordered_skips_late_arrivals() {
+	async fn next_group_skips_late_arrivals() {
 		let mut producer = Track::new("test").produce();
 		let mut consumer = producer.consume();
 
 		// Seq 5 arrives first.
 		producer.create_group(Group { sequence: 5 }).unwrap();
 		let group = consumer
-			.next_group_ordered()
+			.next_group()
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
@@ -959,7 +923,7 @@ mod test {
 		producer.create_group(Group { sequence: 7 }).unwrap();
 
 		let group = consumer
-			.next_group_ordered()
+			.next_group()
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
@@ -968,13 +932,13 @@ mod test {
 
 		// No more groups — would block.
 		assert!(
-			consumer.next_group_ordered().now_or_never().is_none(),
+			consumer.next_group().now_or_never().is_none(),
 			"should block waiting for a higher sequence"
 		);
 	}
 
 	#[tokio::test]
-	async fn next_group_ordered_returns_arrivals_in_order() {
+	async fn next_group_returns_arrivals_in_order() {
 		let mut producer = Track::new("test").produce();
 		let mut consumer = producer.consume();
 
@@ -983,7 +947,7 @@ mod test {
 		producer.create_group(Group { sequence: 5 }).unwrap();
 
 		let group = consumer
-			.next_group_ordered()
+			.next_group()
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
@@ -991,7 +955,7 @@ mod test {
 		assert_eq!(group.sequence, 3);
 
 		let group = consumer
-			.next_group_ordered()
+			.next_group()
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
@@ -1000,7 +964,7 @@ mod test {
 	}
 
 	#[tokio::test]
-	async fn recv_group_after_next_group_ordered_sees_late_arrivals() {
+	async fn recv_group_after_next_group_sees_late_arrivals() {
 		let mut producer = Track::new("test").produce();
 		let mut consumer = producer.consume();
 
@@ -1009,7 +973,7 @@ mod test {
 
 		// Ordered returns seq 5 and advances its internal cursor past it.
 		let group = consumer
-			.next_group_ordered()
+			.next_group()
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
@@ -1209,62 +1173,5 @@ mod test {
 		}
 
 		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded(_))));
-	}
-
-	#[tokio::test]
-	async fn consumer_produce() {
-		let mut producer = Track::new("test").produce();
-		producer.append_group().unwrap();
-
-		let consumer = producer.consume();
-
-		// Upgrade consumer back to producer — shared state.
-		let got = consumer.produce().expect("should produce");
-		assert!(got.is_clone(&producer), "should be the same track");
-
-		// Writing through the upgraded producer is visible to new consumers.
-		got.clone().append_group().unwrap();
-		let mut sub = producer.consume();
-		sub.assert_group(); // group 0
-		sub.assert_group(); // group 1, written via upgraded producer
-	}
-
-	#[tokio::test]
-	async fn consumer_produce_after_drop() {
-		let producer = Track::new("test").produce();
-		let consumer = producer.consume();
-		drop(producer);
-
-		// Original producer dropped. Consumer's produce() should fail
-		// because there are no remaining producers.
-		let err = consumer.produce();
-		assert!(matches!(err, Err(Error::Dropped)), "expected Dropped");
-	}
-
-	#[tokio::test]
-	async fn consumer_produce_after_abort() {
-		let mut producer = Track::new("test").produce();
-		let consumer = producer.consume();
-		producer.abort(Error::Cancel).unwrap();
-		drop(producer);
-
-		// Track was aborted — produce() should return the abort error, not Dropped.
-		let err = consumer.produce();
-		assert!(matches!(err, Err(Error::Cancel)), "expected Cancel");
-	}
-
-	#[tokio::test]
-	async fn consumer_produce_keeps_alive() {
-		let producer = Track::new("test").produce();
-		let consumer = producer.consume();
-		let upgraded = consumer.produce().expect("should produce");
-		drop(producer);
-
-		// Channel still open because upgraded producer exists.
-		assert!(consumer.closed().now_or_never().is_none(), "should not be closed");
-		drop(upgraded);
-
-		// Now it should close.
-		assert!(consumer.closed().now_or_never().is_some(), "should be closed");
 	}
 }

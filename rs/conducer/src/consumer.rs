@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-	Counts, State,
+	Counts, State, Weak,
 	lock::*,
 	producer::{Producer, Ref},
 	waiter::*,
@@ -109,6 +109,17 @@ impl<T> Consumer<T> {
 	/// Returns `true` if both consumers share the same underlying state.
 	pub fn same_channel(&self, other: &Self) -> bool {
 		self.state.is_clone(&other.state)
+	}
+
+	/// Create a [`Weak`] reference to this state.
+	///
+	/// Does not affect ref counts, so it won't prevent auto-close when all
+	/// producers are dropped.
+	pub fn weak(&self) -> Weak<T> {
+		Weak {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		}
 	}
 }
 
