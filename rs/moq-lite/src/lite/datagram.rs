@@ -1,4 +1,4 @@
-//! Wire-level datagram messages for moq-lite-05+.
+//! Wire-level datagram messages for moq-lite-04-datagrams+.
 //!
 //! Contains both the per-datagram QUIC datagram body codec ([Datagram]) and
 //! the control-stream messages negotiated on the [`ControlType::Datagrams`]
@@ -23,7 +23,7 @@ use super::{Message, Version};
 /// The encoding is `subscribe_id (i) | sequence (i) | payload (b)`. The QUIC
 /// datagram boundary delimits the payload — there is no inner length prefix.
 ///
-/// moq-lite-05 ignores the sequence number in delivery semantics; the field is
+/// moq-lite-04-datagrams ignores the sequence number in delivery semantics; the field is
 /// preserved on the wire so the same encoding can be reused by an
 /// `moq-transport` adapter (deferred).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,9 +174,9 @@ mod test {
 			payload: Bytes::from_static(b"hello"),
 		};
 		let mut buf = BytesMut::new();
-		original.encode(&mut buf, Version::Lite05).unwrap();
+		original.encode(&mut buf, Version::Lite04Datagrams).unwrap();
 		let mut slice = &buf[..];
-		let decoded = Datagram::decode(&mut slice, Version::Lite05).unwrap();
+		let decoded = Datagram::decode(&mut slice, Version::Lite04Datagrams).unwrap();
 		assert_eq!(decoded, original);
 		assert!(!slice.has_remaining());
 	}
@@ -189,9 +189,9 @@ mod test {
 			payload: Bytes::new(),
 		};
 		let mut buf = BytesMut::new();
-		original.encode(&mut buf, Version::Lite05).unwrap();
+		original.encode(&mut buf, Version::Lite04Datagrams).unwrap();
 		let mut slice = &buf[..];
-		let decoded = Datagram::decode(&mut slice, Version::Lite05).unwrap();
+		let decoded = Datagram::decode(&mut slice, Version::Lite04Datagrams).unwrap();
 		assert_eq!(decoded, original);
 	}
 
@@ -218,8 +218,8 @@ mod test {
 			max_latency: Duration::from_millis(33),
 		};
 		let mut buf = BytesMut::new();
-		original.encode(&mut buf, Version::Lite05).unwrap();
-		let decoded = Datagrams::decode(&mut buf, Version::Lite05).unwrap();
+		original.encode(&mut buf, Version::Lite04Datagrams).unwrap();
+		let decoded = Datagrams::decode(&mut buf, Version::Lite04Datagrams).unwrap();
 		assert_eq!(decoded.id, original.id);
 		assert_eq!(decoded.track, original.track);
 		assert_eq!(decoded.max_latency, original.max_latency);
@@ -231,8 +231,8 @@ mod test {
 			max_latency: Duration::from_millis(33),
 		};
 		let mut buf = BytesMut::new();
-		original.encode(&mut buf, Version::Lite05).unwrap();
-		let decoded = DatagramsOk::decode(&mut buf, Version::Lite05).unwrap();
+		original.encode(&mut buf, Version::Lite04Datagrams).unwrap();
+		let decoded = DatagramsOk::decode(&mut buf, Version::Lite04Datagrams).unwrap();
 		assert_eq!(decoded.max_latency, original.max_latency);
 	}
 
@@ -242,8 +242,8 @@ mod test {
 			max_latency: Duration::from_millis(0),
 		};
 		let mut buf = BytesMut::new();
-		original.encode(&mut buf, Version::Lite05).unwrap();
-		let decoded = DatagramsUpdate::decode(&mut buf, Version::Lite05).unwrap();
+		original.encode(&mut buf, Version::Lite04Datagrams).unwrap();
+		let decoded = DatagramsUpdate::decode(&mut buf, Version::Lite04Datagrams).unwrap();
 		assert_eq!(decoded.max_latency, original.max_latency);
 	}
 

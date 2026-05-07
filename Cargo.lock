@@ -626,15 +626,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "buf-list"
-version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6b175f9cf8fffedd4c4b18bcfef092356e952b81f596e148f18e98280994593"
-dependencies = [
- "bytes",
-]
-
-[[package]]
 name = "buffer-pool"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2367,13 +2358,12 @@ name = "hang"
 version = "0.15.8"
 dependencies = [
  "anyhow",
- "buf-list",
  "bytes",
- "conducer",
  "derive_more",
  "hex",
  "lazy_static",
  "moq-lite",
+ "moq-mux",
  "moq-native",
  "regex",
  "serde",
@@ -3653,7 +3643,6 @@ version = "0.3.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "buf-list",
  "bytes",
  "conducer",
  "derive_more",

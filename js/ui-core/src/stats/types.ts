@@ -36,7 +36,19 @@ export interface VideoBackend {
 	stats: Peekable<{ frameCount: number; bytesReceived: number } | undefined>;
 }
 
+/**
+ * Structural interface for an established connection. Bandwidth values
+ * are bits per second; rtt is milliseconds. Each is undefined when the
+ * underlying transport doesn't expose it.
+ */
+export interface Connection {
+	rtt?: Peekable<number | undefined>;
+	recvBandwidth?: Peekable<number | undefined>;
+	sendBandwidth?: Peekable<number | undefined>;
+}
+
 export type ProviderProps = {
 	audio: AudioBackend;
 	video: VideoBackend;
+	connection?: Peekable<Connection | undefined>;
 };

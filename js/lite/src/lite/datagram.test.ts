@@ -30,8 +30,8 @@ async function buildBytes(write: (w: Writer) => Promise<void>): Promise<Uint8Arr
 
 test("Datagram body round-trip", async () => {
 	const original = new Datagram(7n, 42, new Uint8Array([1, 2, 3, 4, 5]));
-	const bytes = await buildBytes((w) => original.encode(w, Version.DRAFT_05));
-	const decoded = await Datagram.decode(new Reader(undefined, bytes), Version.DRAFT_05);
+	const bytes = await buildBytes((w) => original.encode(w, Version.DRAFT_04_DATAGRAMS));
+	const decoded = await Datagram.decode(new Reader(undefined, bytes), Version.DRAFT_04_DATAGRAMS);
 	expect(decoded.subscribe).toBe(original.subscribe);
 	expect(decoded.sequence).toBe(original.sequence);
 	expect(decoded.payload).toEqual(original.payload);
@@ -39,12 +39,12 @@ test("Datagram body round-trip", async () => {
 
 test("Datagram empty payload round-trip", async () => {
 	const original = new Datagram(0n, 0, new Uint8Array());
-	const bytes = await buildBytes((w) => original.encode(w, Version.DRAFT_05));
-	const decoded = await Datagram.decode(new Reader(undefined, bytes), Version.DRAFT_05);
+	const bytes = await buildBytes((w) => original.encode(w, Version.DRAFT_04_DATAGRAMS));
+	const decoded = await Datagram.decode(new Reader(undefined, bytes), Version.DRAFT_04_DATAGRAMS);
 	expect(decoded.payload.byteLength).toBe(0);
 });
 
-test("Datagram rejects pre-Lite05 versions", async () => {
+test("Datagram rejects pre-Lite04Datagrams versions", async () => {
 	const original = new Datagram(0n, 0, new Uint8Array([1]));
 	await expect(buildBytes((w) => original.encode(w, Version.DRAFT_04))).rejects.toThrow(/datagrams not supported/);
 });
@@ -56,8 +56,8 @@ test("Datagrams control message round-trip", async () => {
 		track: "video",
 		maxLatency: 33,
 	});
-	const bytes = await buildBytes((w) => original.encode(w, Version.DRAFT_05));
-	const decoded = await Datagrams.decode(new Reader(undefined, bytes), Version.DRAFT_05);
+	const bytes = await buildBytes((w) => original.encode(w, Version.DRAFT_04_DATAGRAMS));
+	const decoded = await Datagrams.decode(new Reader(undefined, bytes), Version.DRAFT_04_DATAGRAMS);
 	expect(decoded.id).toBe(original.id);
 	expect(decoded.track).toBe(original.track);
 	expect(decoded.maxLatency).toBe(original.maxLatency);
@@ -65,14 +65,14 @@ test("Datagrams control message round-trip", async () => {
 
 test("DatagramsOk round-trip", async () => {
 	const original = new DatagramsOk(33);
-	const bytes = await buildBytes((w) => original.encode(w, Version.DRAFT_05));
-	const decoded = await DatagramsOk.decode(new Reader(undefined, bytes), Version.DRAFT_05);
+	const bytes = await buildBytes((w) => original.encode(w, Version.DRAFT_04_DATAGRAMS));
+	const decoded = await DatagramsOk.decode(new Reader(undefined, bytes), Version.DRAFT_04_DATAGRAMS);
 	expect(decoded.maxLatency).toBe(33);
 });
 
 test("DatagramsUpdate round-trip", async () => {
 	const original = new DatagramsUpdate(0);
-	const bytes = await buildBytes((w) => original.encode(w, Version.DRAFT_05));
-	const decoded = await DatagramsUpdate.decode(new Reader(undefined, bytes), Version.DRAFT_05);
+	const bytes = await buildBytes((w) => original.encode(w, Version.DRAFT_04_DATAGRAMS));
+	const decoded = await DatagramsUpdate.decode(new Reader(undefined, bytes), Version.DRAFT_04_DATAGRAMS);
 	expect(decoded.maxLatency).toBe(0);
 });

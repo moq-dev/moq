@@ -123,7 +123,7 @@ export class Connection implements Established {
 			tasks.push(this.#subscriber.runProbe());
 		}
 
-		if (this.#version === Version.DRAFT_05) {
+		if (this.#version === Version.DRAFT_04_DATAGRAMS) {
 			tasks.push(this.#runDatagrams());
 		}
 

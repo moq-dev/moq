@@ -64,10 +64,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	/// Loop receiving QUIC datagrams (Lite05+) and routing each to the appropriate
+	/// Loop receiving QUIC datagrams (Lite04Datagrams) and routing each to the appropriate
 	/// [`TrackProducer`] in `subscribes` by subscribe id.
 	async fn run_datagrams(self) -> Result<(), Error> {
-		// Datagrams are a Lite05+ feature; older peers should never send them.
+		// Datagrams are a Lite04Datagrams feature; older peers should never send them.
 		if matches!(
 			self.version,
 			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
@@ -302,19 +302,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut this = self.clone();
 
 			let path = path.clone();
+			let broadcast = broadcast.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(id, path, track).await;
+				this.run_subscribe(id, path, broadcast, track).await;
 				this.subscribes.lock().remove(&id);
 			});
 		}
 	}
 
-	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer) {
+	async fn run_subscribe(&mut self, id: u64, path: PathOwned, broadcast: BroadcastDynamic, mut track: TrackProducer) {
 		self.subscribes.lock().insert(id, track.clone());
 
 		let msg = lite::Subscribe {
 			id,
-			broadcast: broadcast.to_owned(),
+			broadcast: path.as_path(),
 			track: (&track.name).into(),
 			priority: track.priority,
 			ordered: true,
@@ -323,9 +324,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			end_group: None,
 		};
 
-		tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe started");
+		tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe started");
 
-		// On Lite05+, also open a DATAGRAMS control stream so any datagrams the upstream
+		// On Lite04Datagrams, also open a DATAGRAMS control stream so any datagrams the upstream
 		// peer publishes for this track are routed to the same TrackProducer. The two
 		// streams run concurrently; either error short-circuits the subscription.
 		let datagrams_msg = lite::Datagrams {
@@ -334,37 +335,47 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			track: msg.track.clone(),
 			max_latency: crate::model::MAX_DATAGRAM_AGE,
 		};
-		let lite05_or_later = !matches!(
+		let lite04_datagrams_or_later = !matches!(
 			self.version,
 			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
 		);
 		let dg = self.clone();
 
-		let res = tokio::select! {
-			_ = track.unused() => Err(Error::Cancel),
-			res = self.run_track(msg) => res,
+		tokio::select! {
+			_ = track.unused() => {
+				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe cancelled");
+				let _ = track.abort(Error::Cancel);
+			}
+			err = broadcast.closed() => {
+				tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "broadcast closed");
+				let _ = track.abort(err);
+			}
+			res = self.run_track(msg) => match res {
+				Ok(()) => {
+					tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "subscribe complete");
+					let _ = track.finish();
+				}
+				Err(err) => {
+					tracing::warn!(id, broadcast = %self.log_path(&path), track = %track.name, %err, "subscribe error");
+					let _ = track.abort(err);
+				}
+			},
 			res = async move {
-				if lite05_or_later {
+				if lite04_datagrams_or_later {
 					dg.run_datagrams_stream(datagrams_msg).await
 				} else {
 					std::future::pending().await
 				}
-			} => res,
-		};
-
-		match res {
-			Err(Error::Cancel) => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe cancelled");
-				let _ = track.abort(Error::Cancel);
-			}
-			Err(err) => {
-				tracing::warn!(id, broadcast = %self.log_path(&broadcast), track = %track.name, %err, "subscribe error");
-				let _ = track.abort(err);
-			}
-			_ => {
-				tracing::info!(id, broadcast = %self.log_path(&broadcast), track = %track.name, "subscribe complete");
-				let _ = track.finish();
-			}
+			} => match res {
+				Ok(()) => {
+					tracing::info!(id, broadcast = %self.log_path(&path), track = %track.name, "datagrams stream closed");
+					let _ = track.finish();
+				}
+				Err(err) => {
+					tracing::warn!(id, broadcast = %self.log_path(&path), track = %track.name, %err, "datagrams stream error");
+					let _ = track.abort(err);
+				}
+			},
 		}
 	}
 
@@ -421,15 +432,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let mut group = {
+		let (mut group, track) = {
 			let mut subs = self.subscribes.lock();
 			let track = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
-			let group = Group { sequence: hdr.sequence };
-			track.create_group(group)?
+			let group_info = Group { sequence: hdr.sequence };
+			let group = track.create_group(group_info)?;
+			(group, track.clone())
 		};
 
 		let res = tokio::select! {
+			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
 			res = self.run_group(stream, group.clone()) => res,
 		};

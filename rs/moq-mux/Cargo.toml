@@ -16,33 +16,21 @@ categories = ["multimedia", "network-programming", "web-programming"]
 doctest = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[features]
-default = ["mp4", "h264", "h265", "hls", "av1", "aac", "opus"]
-mp4 = ["dep:mp4-atom"]
-h264 = ["dep:h264-parser"]
-h265 = ["dep:scuffle-h265"]
-hls = ["dep:m3u8-rs", "dep:reqwest", "mp4"]
-av1 = ["dep:scuffle-av1"]
-# Feature flags for codec support; no gated dependencies yet
-aac = []
-opus = []
-
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-buf-list = "1"
 bytes = "1"
 conducer = { workspace = true }
-h264-parser = { version = "0.4.0", optional = true }
+h264-parser = { version = "0.4.0" }
 hang = { workspace = true }
-m3u8-rs = { version = "6", optional = true }
+m3u8-rs = { version = "6" }
 moq-lite = { workspace = true, features = ["serde"] }
 moq-msf = { workspace = true }
-mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"], optional = true }
+mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"] }
 num_enum = "0.7"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"], optional = true }
-scuffle-av1 = { version = "0.1.4", optional = true }
-scuffle-h265 = { version = "0.2.2", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+scuffle-av1 = { version = "0.1.4" }
+scuffle-h265 = { version = "0.2.2" }
 thiserror = "2"
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = "0.1"

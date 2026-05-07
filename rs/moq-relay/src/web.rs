@@ -61,6 +61,7 @@ pub struct HttpConfig {
 }
 
 /// HTTPS listener configuration with TLS certificate and key.
+#[serde_with::serde_as]
 #[derive(clap::Args, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -83,6 +84,8 @@ pub struct HttpsConfig {
 	/// A verified peer is granted an unrestricted [`AuthToken`] without a JWT,
 	/// mirroring the QUIC server's `--server-tls-root` behavior. Clients that
 	/// don't present a cert continue through the normal JWT path.
+	///
+	/// In config files, accepts either a single string or a TOML array.
 	#[arg(
 		long = "web-https-root",
 		id = "web-https-root",
@@ -90,6 +93,7 @@ pub struct HttpsConfig {
 		env = "MOQ_WEB_HTTPS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 }
 
@@ -507,19 +511,17 @@ async fn serve_fetch(
 		priority: 0,
 	};
 
-	// NOTE: The auth token is already scoped to the broadcast.
-	// TODO: switch to `announced_broadcast` (bounded by the fetch deadline) so freshly-connected
-	// subscribers don't get a spurious 404 before the broadcast has gossiped.
-	#[allow(deprecated)]
-	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
-	let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
-		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
-		_ => StatusCode::INTERNAL_SERVER_ERROR,
-	})?;
-
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
 	let result = tokio::time::timeout_at(deadline, async {
+		// NOTE: The auth token is already scoped to the broadcast.
+		// Block until the broadcast has been announced (within the fetch deadline) so
+		// freshly-connected subscribers don't get a spurious 404 before gossip arrives.
+		let broadcast = origin.announced_broadcast("").await.ok_or(StatusCode::NOT_FOUND)?;
+		let mut track = broadcast.subscribe_track(&track).map_err(|err| match err {
+			moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
+			_ => StatusCode::INTERNAL_SERVER_ERROR,
+		})?;
 		let group = match params.group {
 			FetchGroup::Latest => match track.latest() {
 				Some(sequence) => track.get_group(sequence).await,

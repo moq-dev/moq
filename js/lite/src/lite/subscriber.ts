@@ -183,10 +183,10 @@ export class Subscriber {
 		await stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(stream.writer, this.version);
 
-		// On Lite05+, also open a DATAGRAMS upstream stream so any datagrams the peer
+		// On Lite04Datagrams, also open a DATAGRAMS upstream stream so any datagrams the peer
 		// publishes for this track land in the same Track via routeDatagram().
 		const datagramsTask =
-			this.version === Version.DRAFT_05
+			this.version === Version.DRAFT_04_DATAGRAMS
 				? this.#runDatagramsStream(id, broadcast, request.track.name).catch((err: unknown) => {
 						console.debug(
 							`datagrams upstream closed: id=${id} broadcast=${broadcast} track=${request.track.name} error=${error(err).message}`,

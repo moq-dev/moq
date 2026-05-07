@@ -1,15 +1,20 @@
+use super::jitter::MinFrameDuration;
+
 use anyhow::Context;
-use buf_list::BufList;
+use bytes::BytesMut;
 use bytes::{Buf, Bytes};
 use scuffle_av1::seq::SequenceHeaderObu;
 
 /// A decoder for AV1 with inline sequence headers.
 pub struct Av01 {
+	// The broadcast being produced.
+	broadcast: moq_lite::BroadcastProducer,
+
 	// The catalog being produced.
-	catalog: crate::CatalogProducer,
+	catalog: crate::catalog::Producer,
 
 	// The track being produced.
-	track: hang::container::OrderedProducer,
+	track: Option<crate::container::Producer<crate::container::Hang>>,
 
 	// Whether the track has been initialized.
 	config: Option<hang::catalog::VideoConfig>,
@@ -20,33 +25,27 @@ pub struct Av01 {
 	// Used to compute wall clock timestamps if needed.
 	zero: Option<tokio::time::Instant>,
 
-	// Jitter tracking: minimum duration between consecutive frames.
-	last_timestamp: Option<hang::container::Timestamp>,
-	min_duration: Option<hang::container::Timestamp>,
-	jitter: Option<hang::container::Timestamp>,
+	// Tracks the minimum frame duration and updates the catalog `jitter` field.
+	jitter: MinFrameDuration,
 }
 
 #[derive(Default)]
 struct Frame {
-	chunks: BufList,
+	chunks: BytesMut,
 	contains_keyframe: bool,
 	contains_frame: bool,
 }
 
 impl Av01 {
-	// TODO: Make this fallible (return Result) instead of panicking — breaking change, do on `dev` branch.
-	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::CatalogProducer) -> Self {
-		let track = broadcast.unique_track(".av01").expect("failed to create av01 track");
-
+	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
+			broadcast,
 			catalog,
-			track: track.into(),
+			track: None,
 			config: None,
 			current: Default::default(),
 			zero: None,
-			last_timestamp: None,
-			min_duration: None,
-			jitter: None,
+			jitter: MinFrameDuration::new(),
 		}
 	}
 
@@ -98,13 +97,21 @@ impl Av01 {
 			return Ok(());
 		}
 
-		// Update the catalog entry (track was created eagerly in new()).
-		let mut catalog = self.catalog.lock();
-		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
+		if let Some(track) = &self.track.take() {
+			tracing::debug!(name = ?track.name, "reinitializing track");
+			self.catalog.lock().video.renditions.remove(&track.name);
+		}
 
-		tracing::debug!(name = ?self.track.name, ?config, "updated catalog");
+		let track = self.broadcast.unique_track(".av01")?;
+		tracing::debug!(name = ?track.name, ?config, "starting track");
+		self.catalog
+			.lock()
+			.video
+			.renditions
+			.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
+		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 
 		Ok(())
 	}
@@ -139,13 +146,16 @@ impl Av01 {
 			jitter: None,
 		};
 
-		// Update the catalog entry (track was created eagerly in new()).
-		let mut catalog = self.catalog.lock();
-		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
-
-		tracing::debug!(name = ?self.track.name, "updated catalog with minimal config");
+		let track = self.broadcast.unique_track(".av01")?;
+		tracing::debug!(name = ?track.name, "starting track with minimal config");
+		self.catalog
+			.lock()
+			.video
+			.renditions
+			.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
+		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 
 		Ok(())
 	}
@@ -222,13 +232,19 @@ impl Av01 {
 			return Ok(());
 		}
 
-		// Update the catalog entry (track was created eagerly in new()).
-		let mut catalog = self.catalog.lock();
-		catalog.video.renditions.insert(self.track.name.clone(), config.clone());
+		if let Some(track) = &self.track.take() {
+			self.catalog.lock().video.renditions.remove(&track.name);
+		}
 
-		tracing::debug!(name = ?self.track.name, ?config, "updated catalog from av1c");
+		let track = self.broadcast.unique_track(".av01")?;
+		self.catalog
+			.lock()
+			.video
+			.renditions
+			.insert(track.name.clone(), config.clone());
 
 		self.config = Some(config);
+		self.track = Some(crate::container::Producer::new(track, crate::container::Hang::Legacy));
 
 		Ok(())
 	}
@@ -292,7 +308,7 @@ impl Av01 {
 					}
 					Err(_) => {
 						// Use minimal config so stream can work (catalog won't have full info)
-						if self.config.is_none() {
+						if self.track.is_none() {
 							tracing::debug!("Sequence header parsing failed, initializing with minimal config");
 							self.init_minimal()?;
 						}
@@ -350,7 +366,7 @@ impl Av01 {
 
 		tracing::trace!(?header.obu_type, "parsed OBU");
 
-		self.current.chunks.push_chunk(obu_data);
+		self.current.chunks.extend_from_slice(&obu_data);
 
 		Ok(())
 	}
@@ -360,40 +376,27 @@ impl Av01 {
 			return Ok(());
 		}
 
-		let track = &mut self.track;
+		let track = self
+			.track
+			.as_mut()
+			.context("expected sequence header before any frames")?;
 		let pts = pts.context("missing timestamp")?;
 
-		let payload = std::mem::take(&mut self.current.chunks);
+		let payload = std::mem::take(&mut self.current.chunks).freeze();
 
-		if self.current.contains_keyframe {
-			track.keyframe()?;
-		}
-
-		let frame = hang::container::Frame {
+		let frame = crate::container::Frame {
 			timestamp: pts,
 			payload,
+			keyframe: self.current.contains_keyframe,
 		};
 
 		track.write(frame)?;
 
-		// Track the minimum frame duration and update catalog jitter.
-		if let Some(last) = self.last_timestamp
-			&& let Ok(duration) = pts.checked_sub(last)
-			&& duration < self.min_duration.unwrap_or(hang::container::Timestamp::MAX)
+		if let Some(jitter) = self.jitter.observe(pts)
+			&& let Some(c) = self.catalog.lock().video.renditions.get_mut(&track.name)
 		{
-			self.min_duration = Some(duration);
-
-			if duration < self.jitter.unwrap_or(hang::container::Timestamp::MAX) {
-				self.jitter = Some(duration);
-
-				if let Ok(jitter) = duration.convert() {
-					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.name) {
-						c.jitter = Some(jitter);
-					}
-				}
-			}
+			c.jitter = Some(jitter);
 		}
-		self.last_timestamp = Some(pts);
 
 		self.current.contains_keyframe = false;
 		self.current.contains_frame = false;
@@ -403,18 +406,13 @@ impl Av01 {
 
 	/// Finish the track, flushing the current group.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
-		self.track.finish()?;
+		let track = self.track.as_mut().context("not initialized")?;
+		track.finish()?;
 		Ok(())
 	}
 
-	/// Returns true if the codec config has been detected and inserted into the catalog.
 	pub fn is_initialized(&self) -> bool {
-		self.config.is_some()
-	}
-
-	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> &moq_lite::TrackProducer {
-		&self.track
+		self.track.is_some()
 	}
 
 	fn pts(&mut self, hint: Option<hang::container::Timestamp>) -> anyhow::Result<hang::container::Timestamp> {
@@ -431,8 +429,10 @@ impl Av01 {
 
 impl Drop for Av01 {
 	fn drop(&mut self) {
-		tracing::debug!(name = ?self.track.name, "ending track");
-		self.catalog.lock().video.remove(&self.track.name);
+		if let Some(track) = self.track.take() {
+			tracing::debug!(name = ?track.name, "ending track");
+			self.catalog.lock().video.renditions.remove(&track.name);
+		}
 	}
 }
 

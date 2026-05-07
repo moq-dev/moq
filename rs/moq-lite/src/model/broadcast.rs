@@ -20,6 +20,7 @@ pub struct Broadcast {
 }
 
 impl Broadcast {
+	/// Create a new broadcast with an empty hop chain.
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -54,6 +55,17 @@ fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>,
 	}
 }
 
+impl State {
+	/// Insert a track weak handle into the lookup, returning an error on duplicate.
+	fn insert_track(&mut self, weak: TrackWeak) -> Result<(), Error> {
+		let hash_map::Entry::Vacant(entry) = self.tracks.entry(weak.info.name.clone()) else {
+			return Err(Error::Duplicate);
+		};
+		entry.insert(weak);
+		Ok(())
+	}
+}
+
 /// Manages tracks within a broadcast.
 ///
 /// Insert tracks statically with [Self::insert_track] / [Self::create_track],
@@ -73,6 +85,7 @@ impl Deref for BroadcastProducer {
 }
 
 impl BroadcastProducer {
+	/// Create a producer for the given broadcast metadata. Prefer [`Broadcast::produce`].
 	pub fn new(info: Broadcast) -> Self {
 		Self {
 			info,
@@ -82,17 +95,13 @@ impl BroadcastProducer {
 
 	/// Insert a track into the lookup, returning an error on duplicate.
 	///
-	/// NOTE: You probably want to [TrackProducer::clone] first to keep publishing to the track.
-	pub fn insert_track(&mut self, track: &TrackProducer) -> Result<(), Error> {
+	/// Stores a weak handle to the track. The caller (or the owner of the
+	/// track's [`TrackProducer`]) is responsible for keeping the track alive;
+	/// when all producers are dropped, the entry becomes closed and is
+	/// eventually evicted.
+	pub fn insert_track(&mut self, track: TrackConsumer) -> Result<(), Error> {
 		let mut state = modify(&self.state)?;
-
-		let hash_map::Entry::Vacant(entry) = state.tracks.entry(track.name.clone()) else {
-			return Err(Error::Duplicate);
-		};
-
-		entry.insert(track.weak());
-
-		Ok(())
+		state.insert_track(track.weak())
 	}
 
 	/// Remove a track from the lookup.
@@ -105,7 +114,9 @@ impl BroadcastProducer {
 	/// Produce a new track and insert it into the broadcast.
 	pub fn create_track(&mut self, track: Track) -> Result<TrackProducer, Error> {
 		let track = TrackProducer::new(track);
-		self.insert_track(&track)?;
+		let mut state = modify(&self.state)?;
+		state.insert_track(track.weak())?;
+		drop(state);
 		Ok(track)
 	}
 
@@ -140,16 +151,18 @@ impl BroadcastProducer {
 		}
 	}
 
-	/// Abort the broadcast and all child tracks with the given error.
+	/// Abort the broadcast with the given error.
+	///
+	/// Externally-owned tracks are independent and must be aborted separately;
+	/// inserted tracks are referenced via weak handles so that consumers can
+	/// finish reading them. Pending dynamic track requests, however, are owned
+	/// by the broadcast and have no other producer to fulfill them, so they are
+	/// aborted here.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
 		let mut guard = modify(&self.state)?;
 
-		// Cascade abort to all child tracks.
-		for weak in guard.tracks.values() {
-			weak.abort(err.clone());
-		}
-
-		// Abort any pending dynamic track requests.
+		// Abort any pending dynamic track requests; their producers are owned
+		// by the broadcast and would otherwise leave consumers stuck forever.
 		for mut request in guard.requests.drain(..) {
 			request.abort(err.clone()).ok();
 		}
@@ -172,7 +185,7 @@ impl BroadcastProducer {
 	}
 
 	pub fn assert_insert_track(&mut self, track: &TrackProducer) {
-		self.insert_track(track).expect("should not have errored")
+		self.insert_track(track.consume()).expect("should not have errored")
 	}
 }
 
@@ -181,10 +194,26 @@ impl BroadcastProducer {
 /// When a consumer requests a track that doesn't exist, a [TrackProducer] is created
 /// and queued for the dynamic producer to fulfill via [Self::requested_track].
 /// Dropped when no longer needed; pending requests are automatically aborted.
-#[derive(Clone)]
 pub struct BroadcastDynamic {
 	info: Broadcast,
 	state: conducer::Producer<State>,
+}
+
+impl Clone for BroadcastDynamic {
+	fn clone(&self) -> Self {
+		// Mirror `new`: bump `state.dynamic` so each live handle is counted.
+		// Without this, deriving Clone would let `Drop` decrement past `new`'s
+		// single increment and prematurely flip `dynamic` to zero, causing
+		// future `subscribe_track` calls to return `NotFound`.
+		if let Ok(mut state) = self.state.write() {
+			state.dynamic += 1;
+		}
+
+		Self {
+			info: self.info.clone(),
+			state: self.state.clone(),
+		}
+	}
 }
 
 impl Deref for BroadcastDynamic {
@@ -216,6 +245,8 @@ impl BroadcastDynamic {
 		})
 	}
 
+	/// Poll for the next consumer-requested track, without blocking. The returned producer
+	/// is preconfigured with the requested track's name and priority.
 	pub fn poll_requested_track(&mut self, waiter: &conducer::Waiter) -> Poll<Result<TrackProducer, Error>> {
 		self.poll(waiter, |state| match state.requests.pop() {
 			Some(producer) => Poll::Ready(producer),
@@ -236,16 +267,23 @@ impl BroadcastDynamic {
 		}
 	}
 
+	/// Block until the broadcast is closed or aborted, returning the cause.
+	pub async fn closed(&self) -> Error {
+		self.state.closed().await;
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+	}
+
 	/// Abort the broadcast with the given error.
+	///
+	/// Externally-owned tracks are independent and must be aborted separately;
+	/// inserted tracks are referenced via weak handles. Pending dynamic track
+	/// requests are owned by the broadcast and aborted here so consumers don't
+	/// stay stuck waiting on producers nobody will fulfill.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
 		let mut guard = modify(&self.state)?;
 
-		// Cascade abort to all child tracks.
-		for weak in guard.tracks.values() {
-			weak.abort(err.clone());
-		}
-
-		// Abort any pending dynamic track requests.
+		// Abort any pending dynamic track requests; their producers are owned
+		// by the broadcast and would otherwise leave consumers stuck forever.
 		for mut request in guard.requests.drain(..) {
 			request.abort(err.clone()).ok();
 		}
@@ -311,6 +349,12 @@ impl Deref for BroadcastConsumer {
 }
 
 impl BroadcastConsumer {
+	/// Subscribe to a track on this broadcast.
+	///
+	/// Reuses an existing producer if one is already publishing the track; otherwise
+	/// queues a new dynamic request that the broadcast's producer will service via
+	/// [`BroadcastDynamic::requested_track`]. Returns [`Error::NotFound`] if the
+	/// broadcast has no dynamic producer to handle requests.
 	pub fn subscribe_track(&self, track: &Track) -> Result<TrackConsumer, Error> {
 		// Upgrade to a temporary producer so we can modify the state.
 		let producer = self
@@ -363,9 +407,27 @@ impl BroadcastConsumer {
 		Ok(consumer)
 	}
 
+	/// Block until the broadcast is closed and return the cause.
+	///
+	/// Returns [`Error::Dropped`] if every producer was dropped without an
+	/// explicit abort, or the abort error supplied by [`BroadcastProducer::abort`].
 	pub async fn closed(&self) -> Error {
 		self.state.closed().await;
 		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+	}
+
+	/// Returns true if every [`BroadcastProducer`] has been dropped.
+	pub fn is_closed(&self) -> bool {
+		self.state.read().is_closed()
+	}
+
+	/// Register a [`conducer::Waiter`] that fires when the broadcast closes.
+	///
+	/// Returns [`Poll::Ready`] if already closed, otherwise [`Poll::Pending`] after
+	/// arming the waiter. Useful for composing close-detection into a larger poll
+	/// without spawning a task per broadcast.
+	pub fn poll_closed(&self, waiter: &conducer::Waiter) -> Poll<()> {
+		self.state.poll_closed(waiter)
 	}
 
 	/// Check if this is the exact same instance of a broadcast.
@@ -432,17 +494,16 @@ mod test {
 		let track1c = consumer.assert_subscribe_track(&track1);
 		let track2 = consumer.assert_subscribe_track(&Track::new("track2"));
 
-		// Explicitly aborting the broadcast should cascade to child tracks.
+		// Aborting the broadcast must NOT cascade to externally-owned tracks.
 		producer.abort(Error::Cancel).unwrap();
 
-		// The requested TrackProducer should have been aborted.
+		// track2's producer was owned by the broadcast (a pending dynamic
+		// request), so the consumer surfaces the abort.
 		track2.assert_error();
 
-		// track1 should also be closed because close() cascades.
-		track1c.assert_error();
-
-		// track1's producer should also be closed.
-		assert!(track1.is_closed());
+		// track1's producer is held outside the broadcast, so it survives.
+		assert!(!track1.is_closed());
+		track1c.assert_not_closed();
 	}
 
 	#[tokio::test]
@@ -566,5 +627,22 @@ mod test {
 			producer2.unused().now_or_never().is_some(),
 			"track producer should be unused after consumer is dropped"
 		);
+	}
+
+	// Cloning a `BroadcastDynamic` and dropping the clone must not flip
+	// `state.dynamic` to zero. The relay's lite subscriber clones the
+	// dynamic per spawned subscribe; if Clone skipped the increment, the
+	// first finished subscribe would tear down the broadcast and any
+	// follow-up `subscribe_track` would return `NotFound`.
+	#[tokio::test]
+	async fn dynamic_clone_keeps_alive() {
+		let broadcast = Broadcast::new().produce().dynamic();
+		let consumer = broadcast.consume();
+
+		let clone = broadcast.clone();
+		drop(clone);
+
+		// Original handle is still live, so requests must still be accepted.
+		consumer.assert_subscribe_track(&Track::new("track1"));
 	}
 }

@@ -23,7 +23,7 @@ pub const MAX_DATAGRAM_PAYLOAD: usize = 1200;
 
 /// A single datagram: opaque payload with a sequence number.
 ///
-/// moq-lite-05 ignores the sequence number for delivery semantics; the field is
+/// moq-lite-04-datagrams ignores the sequence number for delivery semantics; the field is
 /// preserved so the same model works under a future moq-transport adapter where
 /// sequence is meaningful.
 #[derive(Clone, Debug, PartialEq, Eq)]

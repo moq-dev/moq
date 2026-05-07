@@ -1,26 +1,142 @@
-//! MSF catalog conversion and helpers.
-//!
-//! Converts a [`hang::Catalog`] to an MSF [`moq_msf::Catalog`].
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use base64::Engine;
 
+/// Produces both a hang and MSF catalog track for a broadcast.
+///
+/// The JSON catalog is updated when tracks are added/removed but is *not* automatically published.
+/// You'll have to call [`lock`](Self::lock) to update and publish the catalog.
+/// Both the hang (`catalog.json`) and MSF (`catalog`) tracks are published on drop of the guard.
+#[derive(Clone)]
+pub struct Producer {
+	/// Access to the underlying hang catalog track producer.
+	pub hang_track: moq_lite::TrackProducer,
+
+	/// Access to the underlying MSF catalog track producer.
+	pub msf_track: moq_lite::TrackProducer,
+
+	current: Arc<Mutex<hang::Catalog>>,
+}
+
+impl Producer {
+	/// Create a new catalog producer, inserting both catalog tracks into the broadcast.
+	pub fn new(broadcast: &mut moq_lite::BroadcastProducer) -> Result<Self, moq_lite::Error> {
+		Self::with_catalog(broadcast, hang::Catalog::default())
+	}
+
+	/// Create a new catalog producer with the given initial catalog.
+	pub fn with_catalog(
+		broadcast: &mut moq_lite::BroadcastProducer,
+		catalog: hang::Catalog,
+	) -> Result<Self, moq_lite::Error> {
+		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
+		let msf_track = broadcast.create_track(moq_lite::Track::new(moq_msf::DEFAULT_NAME))?;
+
+		Ok(Self {
+			hang_track,
+			msf_track,
+			current: Arc::new(Mutex::new(catalog)),
+		})
+	}
+
+	/// Get mutable access to the catalog, publishing it after any changes.
+	pub fn lock(&mut self) -> Guard<'_> {
+		Guard {
+			catalog: self.current.lock().unwrap(),
+			hang_track: &mut self.hang_track,
+			msf_track: &mut self.msf_track,
+			updated: false,
+		}
+	}
+
+	/// Get a snapshot of the current catalog.
+	pub fn snapshot(&self) -> hang::Catalog {
+		self.current.lock().unwrap().clone()
+	}
+
+	/// Create a consumer for this catalog, receiving updates as they're published.
+	pub fn consume(&self) -> Result<super::Consumer, moq_lite::Error> {
+		let track = self.hang_track.consume();
+		let subscriber = track;
+		Ok(super::Consumer::new(subscriber))
+	}
+
+	/// Finish publishing to this catalog.
+	pub fn finish(&mut self) -> Result<(), moq_lite::Error> {
+		self.hang_track.finish()?;
+		self.msf_track.finish()?;
+		Ok(())
+	}
+}
+
+/// RAII guard for modifying a catalog with automatic publishing on drop.
+///
+/// Obtained via [`Producer::lock`].
+///
+/// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
+pub struct Guard<'a> {
+	catalog: MutexGuard<'a, hang::Catalog>,
+	hang_track: &'a mut moq_lite::TrackProducer,
+	msf_track: &'a mut moq_lite::TrackProducer,
+	updated: bool,
+}
+
+impl<'a> Deref for Guard<'a> {
+	type Target = hang::Catalog;
+
+	fn deref(&self) -> &Self::Target {
+		&self.catalog
+	}
+}
+
+impl<'a> DerefMut for Guard<'a> {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.updated = true;
+		&mut self.catalog
+	}
+}
+
+impl Drop for Guard<'_> {
+	fn drop(&mut self) {
+		if !self.updated {
+			return;
+		}
+
+		// Publish hang catalog
+		if let Ok(mut group) = self.hang_track.append_group() {
+			let frame = self.catalog.to_string().expect("invalid catalog");
+			let _ = group.write_frame(frame);
+			let _ = group.finish();
+		}
+
+		// Publish MSF catalog
+		let msf = to_msf(&self.catalog);
+		if let Ok(mut group) = self.msf_track.append_group() {
+			let _ = group.write_frame(msf.to_string().expect("invalid MSF catalog"));
+			let _ = group.finish();
+		}
+	}
+}
+
 /// Convert a hang catalog to an MSF catalog.
-pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
+fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 	let mut tracks = Vec::new();
 
 	let has_multiple_video = catalog.video.renditions.len() > 1;
 	for (name, config) in &catalog.video.renditions {
 		let packaging = match &config.container {
 			hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
-			// TODO: For CMAF packaging, build proper CMAF init segments (ftyp+moov).
-			// See draft-ietf-moq-cmsf-00 for the required structure.
 			_ => moq_msf::Packaging::Legacy,
 		};
 
-		let init_data = config
-			.description
-			.as_ref()
-			.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref()));
+		let init_data = match &config.container {
+			hang::catalog::Container::Cmaf { init } => Some(base64::engine::general_purpose::STANDARD.encode(init)),
+			_ => config
+				.description
+				.as_ref()
+				.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref())),
+		};
 
 		tracks.push(moq_msf::Track {
 			name: name.clone(),
@@ -47,10 +163,13 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 			_ => moq_msf::Packaging::Legacy,
 		};
 
-		let init_data = config
-			.description
-			.as_ref()
-			.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref()));
+		let init_data = match &config.container {
+			hang::catalog::Container::Cmaf { init } => Some(base64::engine::general_purpose::STANDARD.encode(init)),
+			_ => config
+				.description
+				.as_ref()
+				.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref())),
+		};
 
 		tracks.push(moq_msf::Track {
 			name: name.clone(),
@@ -71,16 +190,6 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 	}
 
 	moq_msf::Catalog { version: 1, tracks }
-}
-
-/// Publish the MSF catalog derived from a hang catalog to the given track.
-pub fn publish(catalog: &hang::Catalog, track: &mut moq_lite::TrackProducer) {
-	let msf = to_msf(catalog);
-	let Ok(mut group) = track.append_group() else {
-		return;
-	};
-	let _ = group.write_frame(msf.to_string().expect("invalid MSF catalog"));
-	let _ = group.finish();
 }
 
 #[cfg(test)]
@@ -242,8 +351,10 @@ mod test {
 				framerate: None,
 				optimize_for_latency: None,
 				container: Container::Cmaf {
-					timescale: 90000,
-					track_id: 1,
+					init: base64::engine::general_purpose::STANDARD
+						.decode("AAAYZ2Z0eXA=")
+						.unwrap()
+						.into(),
 				},
 				jitter: None,
 			},
@@ -262,5 +373,6 @@ mod test {
 		let msf = to_msf(&catalog);
 		let video = &msf.tracks[0];
 		assert_eq!(video.packaging, moq_msf::Packaging::Cmaf);
+		assert_eq!(video.init_data, Some("AAAYZ2Z0eXA=".to_string()));
 	}
 }

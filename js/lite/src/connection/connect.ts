@@ -159,9 +159,9 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
-	} else if (protocol === Lite.ALPN_05) {
+	} else if (protocol === Lite.ALPN_04_DATAGRAMS) {
 		// moq-lite draft-05 doesn't use a session stream, so we return immediately.
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_05, undefined);
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_04_DATAGRAMS, undefined);
 	} else if (protocol === Lite.ALPN_04) {
 		// moq-lite draft-04 doesn't use a session stream, so we return immediately.
 		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined);
@@ -286,8 +286,8 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
 		setupVersion = Ietf.Version.DRAFT_15;
-	} else if (protocol === Lite.ALPN_05) {
-		return new Lite.Connection(url, session, Lite.Version.DRAFT_05, undefined);
+	} else if (protocol === Lite.ALPN_04_DATAGRAMS) {
+		return new Lite.Connection(url, session, Lite.Version.DRAFT_04_DATAGRAMS, undefined);
 	} else if (protocol === Lite.ALPN_04) {
 		return new Lite.Connection(url, session, Lite.Version.DRAFT_04, undefined);
 	} else if (protocol === Lite.ALPN_03) {
@@ -352,7 +352,7 @@ async function connectWebTransport(
 		allowPooling: false,
 		congestionControl: "low-latency",
 		protocols: [
-			Lite.ALPN_05,
+			Lite.ALPN_04_DATAGRAMS,
 			Lite.ALPN_04,
 			Lite.ALPN_03,
 			Lite.ALPN,

@@ -271,11 +271,11 @@ export class Publisher {
 	}
 
 	/**
-	 * Handles a DATAGRAMS subscription (Lite05+).
+	 * Handles a DATAGRAMS subscription (Lite04Datagrams).
 	 * @internal
 	 */
 	async runDatagrams(msg: Datagrams, stream: Stream) {
-		if (this.version !== Version.DRAFT_05) {
+		if (this.version !== Version.DRAFT_04_DATAGRAMS) {
 			stream.writer.reset(new Error("datagrams not supported on this version"));
 			return;
 		}

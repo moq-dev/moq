@@ -1,58 +1,30 @@
 use std::collections::VecDeque;
 use std::task::{Poll, ready};
 
-use buf_list::BufList;
+use super::{Container, Frame, Timestamp};
 
-use super::{Frame, Timestamp};
-use crate::Error;
-
-/// A frame returned by [`OrderedConsumer::read()`] with group context.
-#[derive(Clone, Debug)]
-pub struct OrderedFrame {
-	/// The presentation timestamp for this frame.
-	pub timestamp: Timestamp,
-
-	/// The encoded media data for this frame, split into chunks.
-	pub payload: BufList,
-
-	/// The group sequence number this frame belongs to.
-	pub group: u64,
-
-	/// The frame index within the group (0 = first frame in the group).
-	///
-	/// With duration-based grouping (e.g. audio), the first frame is not
-	/// necessarily a keyframe — it only denotes position within the group.
-	pub index: usize,
-}
-
-impl OrderedFrame {
-	/// Returns true if this is the first frame in the group (index 0).
-	pub fn is_keyframe(&self) -> bool {
-		self.index == 0
-	}
-}
-
-/// Lossy conversion: discards ordering metadata (`group` and `frame` fields).
-impl From<OrderedFrame> for Frame {
-	fn from(ordered: OrderedFrame) -> Self {
-		Frame {
-			timestamp: ordered.timestamp,
-			payload: ordered.payload,
-		}
-	}
-}
-
-/// A consumer for hang-formatted media tracks with timestamp reordering.
+/// Decode a moq-lite track into a stream of media [`Frame`]s in latency-bounded
+/// presentation order.
 ///
-/// This wraps a `moq_lite::TrackConsumer` and adds hang-specific functionality
-/// like timestamp decoding, latency management, and frame buffering.
+/// `Consumer` wraps a [`moq_lite::TrackConsumer`] and a [`Container`] format implementation
+/// (typically [`Hang`](crate::container::Hang)) and yields decoded frames via [`read`](Self::read).
 ///
-/// ## Latency Management
+/// ## Ordering & latency skipping
 ///
-/// The consumer can skip groups that are too far behind to maintain low latency.
-/// Configure the maximum acceptable delay through the consumer's latency settings.
-pub struct OrderedConsumer {
-	pub track: moq_lite::TrackConsumer,
+/// Groups can arrive on the wire out of order. The consumer always reads frames *within*
+/// a group in arrival order, but across groups it advances by sequence number, skipping
+/// stalled or missing groups when the difference between the oldest pending timestamp
+/// and the newest available timestamp exceeds the configured latency. With the default
+/// latency of zero, the consumer skips aggressively — any group that has a newer
+/// alternative is dropped. With a non-zero latency, slow groups are tolerated up to that
+/// budget before being skipped.
+///
+/// Set the latency with [`with_latency`](Self::with_latency) (builder) or
+/// [`set_latency`](Self::set_latency) (mid-stream).
+pub struct Consumer<F: Container> {
+	track: moq_lite::TrackConsumer,
+
+	format: F,
 
 	// The current group that we want to read from
 	current: u64,
@@ -65,19 +37,29 @@ pub struct OrderedConsumer {
 	startup: bool,
 
 	// The maximum buffer size before skipping a group.
-	max_latency: std::time::Duration,
+	latency: std::time::Duration,
 }
 
-impl OrderedConsumer {
-	/// Create a new OrderedConsumer wrapping the given moq-lite consumer.
-	pub fn new(track: moq_lite::TrackConsumer, max_latency: std::time::Duration) -> Self {
+impl<F: Container> Consumer<F> {
+	/// Create a new Consumer wrapping the given moq-lite consumer.
+	pub fn new(track: moq_lite::TrackConsumer, format: F) -> Self {
 		Self {
 			track,
+			format,
 			current: 0,
 			pending: VecDeque::new(),
 			startup: true,
-			max_latency,
+			latency: std::time::Duration::ZERO,
 		}
+	}
+
+	/// Set the maximum latency tolerance.
+	///
+	/// Groups with timestamps older than the newest timestamp minus this value will be skipped.
+	/// A value of zero (the default) skips aggressively — any group with a newer alternative is dropped.
+	pub fn with_latency(mut self, latency: std::time::Duration) -> Self {
+		self.latency = latency;
+		self
 	}
 
 	/// Read the next frame from the track.
@@ -87,7 +69,7 @@ impl OrderedConsumer {
 	/// configured latency target.
 	///
 	/// Returns `None` when the track has ended.
-	pub async fn read(&mut self) -> Result<Option<OrderedFrame>, Error> {
+	pub async fn read(&mut self) -> Result<Option<Frame>, F::Error> {
 		conducer::wait(|waiter| self.poll_read(waiter)).await
 	}
 
@@ -95,7 +77,7 @@ impl OrderedConsumer {
 	///
 	/// Uses a single waiter that gets registered on all relevant conducer channels,
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
-	fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<OrderedFrame>, Error>> {
+	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
 		// Grab any new groups from the track, recording whether the track is finished.
 		let finished = self.poll_read_finish(waiter)?.is_ready();
 
@@ -105,7 +87,7 @@ impl OrderedConsumer {
 			for (i, group) in self.pending.iter_mut().enumerate() {
 				// We call poll_min_timestamp to try to buffer at least one frame per group.
 				// This returns Ready(Ok) if there is a buffered frame.
-				if !matches!(group.poll_min_timestamp(waiter), Poll::Ready(Ok(_))) {
+				if !matches!(group.poll_min_timestamp(waiter, &self.format), Poll::Ready(Ok(_))) {
 					continue;
 				}
 
@@ -123,7 +105,7 @@ impl OrderedConsumer {
 			while let Some(group) = self.pending.front_mut()
 				&& group.sequence <= self.current
 			{
-				match group.poll_read(waiter) {
+				match group.poll_read(waiter, &self.format) {
 					Poll::Ready(Ok(Some(frame))) => return Poll::Ready(Ok(Some(frame))),
 					// Still blocked on this group, don't skip it yet.
 					Poll::Pending => break,
@@ -138,37 +120,59 @@ impl OrderedConsumer {
 				self.current += 1
 			}
 
-			// Loop in ascending order to get the min, avoiding spurious wakeups.
-			let mut min_timestamp = std::time::Duration::MAX;
-			let mut min_idx = None;
+			// Get the current group's min timestamp as the reference for latency comparison.
+			let oldest_timestamp = if let Some(current) = self.pending.front_mut()
+				&& current.sequence <= self.current
+			{
+				match current.poll_min_timestamp(waiter, &self.format) {
+					Poll::Ready(Ok(ts)) => Some::<std::time::Duration>(ts.into()),
+					_ => None,
+				}
+			} else {
+				None
+			};
 
+			// Find the first newer group with data (our skip target).
+			let mut min_idx = None;
 			for (i, group) in self.pending.iter_mut().enumerate() {
 				if group.sequence <= self.current {
 					continue;
 				}
 
-				if let Poll::Ready(Ok(ts)) = group.poll_min_timestamp(waiter) {
-					min_timestamp = min_timestamp.min(ts.into());
+				if let Poll::Ready(Ok(_)) = group.poll_min_timestamp(waiter, &self.format) {
 					min_idx = Some(i);
-					break; // We know future groups won't be older than this.
+					break;
 				}
 			}
 
-			// Loop in descending order to get the max, avoiding spurious wakeups.
+			// Find the max timestamp across all newer groups.
 			let mut max_timestamp = std::time::Duration::ZERO;
 			for group in self.pending.iter_mut().rev() {
 				if group.sequence <= self.current {
 					break;
 				}
 
-				if let Poll::Ready(Ok(ts)) = group.poll_max_timestamp(waiter) {
+				if let Poll::Ready(Ok(ts)) = group.poll_max_timestamp(waiter, &self.format) {
 					max_timestamp = max_timestamp.max(ts.into());
 					break; // We know older groups won't be newer than this.
 				}
 			}
 
+			let should_skip = if min_idx.is_some() {
+				if let Some(oldest) = oldest_timestamp {
+					// Current group is blocking: skip if newer groups exceed latency threshold
+					max_timestamp.saturating_sub(oldest) >= self.latency
+				} else {
+					// Sequence gap: current group consumed but next sequence missing.
+					// Only skip if track is fully received (no more groups coming).
+					finished
+				}
+			} else {
+				false
+			};
+
 			if let Some(new_idx) = min_idx
-				&& max_timestamp.saturating_sub(min_timestamp) >= self.max_latency
+				&& should_skip
 			{
 				self.pending.drain(0..new_idx);
 				let new_current = self.pending.front().map(|g| g.sequence).unwrap();
@@ -190,7 +194,7 @@ impl OrderedConsumer {
 	// Reads any new groups from the track until we're completely finished.
 	//
 	// Returns Pending until all groups have been consumed.
-	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), Error>> {
+	fn poll_read_finish(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), F::Error>> {
 		loop {
 			let Some(group) = ready!(self.track.poll_recv_group(waiter)?) else {
 				// Track is finished.
@@ -214,30 +218,19 @@ impl OrderedConsumer {
 		}
 	}
 
-	/// Set the maximum latency tolerance for this consumer.
-	///
-	/// Groups with timestamps older than `max_timestamp - max_latency` will be skipped.
-	pub fn set_max_latency(&mut self, max: std::time::Duration) {
-		self.max_latency = max;
+	/// Set the maximum latency tolerance.
+	pub fn set_latency(&mut self, latency: std::time::Duration) {
+		self.latency = latency;
 	}
 
 	/// Wait until the track is closed.
-	pub async fn closed(&self) -> Result<(), Error> {
+	pub async fn closed(&self) -> Result<(), F::Error> {
 		Ok(self.track.closed().await?)
 	}
-}
 
-impl From<OrderedConsumer> for moq_lite::TrackConsumer {
-	fn from(inner: OrderedConsumer) -> Self {
-		inner.track
-	}
-}
-
-impl std::ops::Deref for OrderedConsumer {
-	type Target = moq_lite::TrackConsumer;
-
-	fn deref(&self) -> &Self::Target {
-		&self.track
+	/// Unwrap into the inner TrackConsumer.
+	pub fn into_inner(self) -> moq_lite::TrackConsumer {
+		self.track
 	}
 }
 
@@ -252,7 +245,7 @@ struct GroupBuffer {
 	index: usize,
 
 	// Read frames that haven't been consumed yet.
-	buffered: VecDeque<OrderedFrame>,
+	buffered: VecDeque<Frame>,
 
 	// The minimum timestamp in the group.
 	min_timestamp: Option<Timestamp>,
@@ -273,12 +266,16 @@ impl GroupBuffer {
 	}
 
 	/// Poll for the next frame from this group.
-	pub fn poll_read(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<OrderedFrame>, Error>> {
+	fn poll_read<F: Container>(
+		&mut self,
+		waiter: &conducer::Waiter,
+		format: &F,
+	) -> Poll<Result<Option<Frame>, F::Error>> {
 		if let Some(frame) = self.buffered.pop_front() {
 			return Poll::Ready(Ok(Some(frame)));
 		}
 
-		match ready!(self.buffer_one(waiter)?) {
+		match ready!(self.buffer_one(waiter, format)?) {
 			true => Poll::Ready(Ok(Some(self.buffered.pop_front().unwrap()))),
 			false => Poll::Ready(Ok(None)),
 		}
@@ -286,76 +283,86 @@ impl GroupBuffer {
 
 	// Add one more frame to the buffer if possible.
 	//
-	// Returns false if the track is finished.
-	fn buffer_once(&mut self, waiter: &conducer::Waiter) -> Poll<Result<bool, Error>> {
-		let Some(chunks) = ready!(self.group.poll_read_frame_chunks(waiter)?) else {
+	// Returns false if the group is finished.
+	fn buffer_once<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+		let Some(frames) = ready!(format.poll_read(&mut self.group, waiter)?) else {
 			return Poll::Ready(Ok(false));
 		};
 
-		let mut payload = BufList::from_iter(chunks);
-		let timestamp = Timestamp::decode(&mut payload)?;
+		for frame in frames {
+			self.min_timestamp = Some(match self.min_timestamp {
+				Some(existing) => existing.min(frame.timestamp),
+				None => frame.timestamp,
+			});
 
-		self.min_timestamp = Some(match self.min_timestamp {
-			Some(existing) => existing.min(timestamp),
-			None => timestamp,
-		});
+			self.max_timestamp = Some(match self.max_timestamp {
+				Some(existing) => existing.max(frame.timestamp),
+				None => frame.timestamp,
+			});
 
-		self.max_timestamp = Some(match self.max_timestamp {
-			Some(existing) => existing.max(timestamp),
-			None => timestamp,
-		});
+			let keyframe = self.index == 0;
+			self.index += 1;
 
-		let index = self.index;
-		self.index += 1;
-
-		self.buffered.push_back(OrderedFrame {
-			timestamp,
-			payload,
-			group: self.group.sequence,
-			index,
-		});
+			self.buffered.push_back(Frame {
+				timestamp: frame.timestamp,
+				payload: frame.payload,
+				keyframe,
+			});
+		}
 
 		Poll::Ready(Ok(true))
 	}
 
-	fn buffer_one(&mut self, waiter: &conducer::Waiter) -> Poll<Result<bool, Error>> {
-		if self.buffered.is_empty() {
-			self.buffer_once(waiter)
-		} else {
-			Poll::Ready(Ok(true))
+	fn buffer_one<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+		loop {
+			if !self.buffered.is_empty() {
+				return Poll::Ready(Ok(true));
+			}
+			if !ready!(self.buffer_once(waiter, format)?) {
+				return Poll::Ready(Ok(false));
+			}
+			// poll_read returned Some(vec![]) — loop and try again
 		}
 	}
 
-	fn buffer_all(&mut self, waiter: &conducer::Waiter) -> Poll<Result<(), Error>> {
-		while ready!(self.buffer_once(waiter)?) {}
+	fn buffer_all<F: Container>(&mut self, waiter: &conducer::Waiter, format: &F) -> Poll<Result<(), F::Error>> {
+		while ready!(self.buffer_once(waiter, format)?) {}
 		Poll::Ready(Ok(()))
 	}
 
 	/// Poll for the maximum timestamp in this group.
-	pub fn poll_max_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Timestamp, Error>> {
+	fn poll_max_timestamp<F: Container>(
+		&mut self,
+		waiter: &conducer::Waiter,
+		format: &F,
+	) -> Poll<Result<Timestamp, F::Error>> {
 		// Keep reading more frames just to advance the max timestamp.
-		let _ = self.buffer_all(waiter)?;
+		let _ = self.buffer_all(waiter, format)?;
 
 		if let Some(max) = self.max_timestamp {
 			return Poll::Ready(Ok(max));
 		}
 
 		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			return Poll::Ready(Err(Error::EmptyGroup));
+			return Poll::Ready(Err(moq_lite::Error::Decode(moq_lite::DecodeError::Short).into()));
 		}
 
 		Poll::Pending
 	}
 
-	pub fn poll_min_timestamp(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Timestamp, Error>> {
-		let _ = self.buffer_one(waiter)?;
+	fn poll_min_timestamp<F: Container>(
+		&mut self,
+		waiter: &conducer::Waiter,
+		format: &F,
+	) -> Poll<Result<Timestamp, F::Error>> {
+		let _ = self.buffer_one(waiter, format)?;
 
 		if let Some(min) = self.min_timestamp {
 			return Poll::Ready(Ok(min));
 		}
 
 		if let Poll::Ready(_frames) = self.group.poll_finished(waiter)? {
-			return Poll::Ready(Err(Error::EmptyGroup));
+			return Poll::Ready(Err(moq_lite::Error::Decode(moq_lite::DecodeError::Short).into()));
 		}
 
 		Poll::Pending
@@ -373,6 +380,7 @@ impl std::ops::Deref for GroupBuffer {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::container::Hang;
 	use std::time::Duration;
 
 	use bytes::Bytes;
@@ -381,21 +389,27 @@ mod tests {
 		Timestamp::from_micros(micros).unwrap()
 	}
 
-	/// Write a finished group with explicit sequence and timestamps.
+	/// Subscribe to a track with default preferences (test helper).
+	fn subscribe_default(track: &moq_lite::TrackProducer) -> moq_lite::TrackConsumer {
+		track.consume()
+	}
+
+	/// Write a finished group with explicit sequence and timestamps (Hang::Legacy format).
 	fn write_group(track: &mut moq_lite::TrackProducer, sequence: u64, timestamps: &[Timestamp]) {
 		let mut group = track.create_group(moq_lite::Group { sequence }).unwrap();
 		for &timestamp in timestamps {
 			let frame = Frame {
 				timestamp,
-				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
 			};
-			frame.encode(&mut group).unwrap();
+			Hang::Legacy.write(&mut group, &[frame]).unwrap();
 		}
 		group.finish().unwrap();
 	}
 
 	/// Drain all available frames with a per-read timeout.
-	async fn read_all(consumer: &mut OrderedConsumer) -> Result<Vec<OrderedFrame>, crate::Error> {
+	async fn read_all(consumer: &mut Consumer<Hang>) -> Result<Vec<Frame>, crate::Error> {
 		let mut frames = Vec::new();
 		loop {
 			match tokio::time::timeout(Duration::from_millis(200), consumer.read()).await {
@@ -403,7 +417,7 @@ mod tests {
 				Ok(Ok(None)) => break,
 				Ok(Err(e)) => return Err(e),
 				Err(_) => panic!(
-					"read_all: OrderedConsumer::read timed out after 200ms ({} frames collected so far)",
+					"read_all: Consumer::read timed out after 200ms ({} frames collected so far)",
 					frames.len()
 				),
 			}
@@ -416,8 +430,8 @@ mod tests {
 	#[tokio::test]
 	async fn read_single_group() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		track.finish().unwrap();
@@ -425,7 +439,7 @@ mod tests {
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].timestamp, ts(0));
-		assert_eq!(frames[0].index, 0);
+		assert!(frames[0].keyframe);
 
 		// Next read returns None (track ended)
 		assert!(consumer.read().await.unwrap().is_none());
@@ -434,8 +448,8 @@ mod tests {
 	#[tokio::test]
 	async fn read_multiple_frames_single_group() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0), ts(33_000), ts(66_000)]);
 		track.finish().unwrap();
@@ -446,16 +460,14 @@ mod tests {
 		assert_eq!(frames[1].timestamp, ts(33_000));
 		assert_eq!(frames[2].timestamp, ts(66_000));
 
-		assert_eq!(frames[0].index, 0);
-		assert_eq!(frames[1].index, 1);
-		assert_eq!(frames[2].index, 2);
+		assert!(frames[0].keyframe);
 	}
 
 	#[tokio::test]
 	async fn read_multiple_groups_within_latency() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		// 5 groups, 20ms spacing. Total span = 80ms, well within 500ms latency.
 		for i in 0..5u64 {
@@ -468,27 +480,27 @@ mod tests {
 	}
 
 	// ---- Latency Skipping ----
-	//
-	// These tests verify that the poll-based latency skip logic correctly
-	// promotes pending groups to current when the timestamp span exceeds
-	// max_latency.
 
 	#[tokio::test]
 	async fn latency_skip_delivers_recent_groups() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
 		// Group 0: 5 frames, NOT finished (blocks consumer)
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for f in 0..5u64 {
-			Frame {
-				timestamp: ts(f * 2_000),
-				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-			}
-			.encode(&mut group0)
-			.unwrap();
+			Hang::Legacy
+				.write(
+					&mut group0,
+					&[Frame {
+						timestamp: ts(f * 2_000),
+						payload: Bytes::from_static(&[0xDE, 0xAD]),
+						keyframe: false,
+					}],
+				)
+				.unwrap();
 		}
 
 		// Groups 1-19: finished, 15ms spacing, 5 frames each
@@ -514,23 +526,21 @@ mod tests {
 	async fn zero_latency_skips_aggressively() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::ZERO);
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::ZERO);
 
-		// Group 0: 1 frame at a HIGH timestamp, NOT finished.
-		// This makes the cutoff high (max_timestamp + 0 = 400ms), so
-		// buffer_until blocks for groups whose timestamps are < 400ms.
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(400_000),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Hang::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(400_000),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+				}],
+			)
+			.unwrap();
 
-		// Groups 1-9: finished, 50ms spacing, 3 frames each
-		// Groups 1-7 have max timestamps < 400ms (blocked by buffer_until)
-		// Group 8+ have timestamps >= 400ms (trigger latency skip)
 		for g in 1..10u64 {
 			let timestamps: Vec<_> = (0..3).map(|f| ts(g * 50_000 + f * 5_000)).collect();
 			write_group(&mut track, g, &timestamps);
@@ -543,9 +553,6 @@ mod tests {
 		});
 
 		let frames = read_all(&mut consumer).await.unwrap();
-		// The latency skip bridges past the blocking group 0 to the nearest
-		// pending group with data. All subsequent finished groups are delivered
-		// instantly. Group 0's 1 frame + groups 1-9 (3 frames each) = 28.
 		assert_eq!(frames.len(), 28, "Expected group 0 frame + groups 1-9");
 		assert!(!frames.is_empty(), "Expected at least some frames");
 		finisher.await.expect("finisher task panicked");
@@ -555,19 +562,21 @@ mod tests {
 	async fn latency_skip_correctness() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
-		// Group 0: 1 frame, NOT finished
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Hang::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+				}],
+			)
+			.unwrap();
 
-		// Groups 1-9: 30ms spacing, 1 frame each
 		for g in 1..10u64 {
 			write_group(&mut track, g, &[ts(g * 30_000)]);
 		}
@@ -580,15 +589,9 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(!frames.is_empty(), "Expected at least some frames");
-
-		// The latency skip bridges past the blocking group 0 to the nearest
-		// pending group with data. All subsequent groups are delivered since
-		// they can be read instantly (already finished). Group 0's frame (ts=0)
-		// is returned before the skip, then groups 1-9 after.
 		assert_eq!(frames.len(), 10, "Expected group 0 frame + groups 1-9");
 		assert_eq!(frames[0].timestamp, ts(0));
 
-		// Groups should be delivered in sequence order
 		for i in 1..10u64 {
 			assert_eq!(frames[i as usize].timestamp, ts(i * 30_000));
 		}
@@ -601,24 +604,25 @@ mod tests {
 	async fn groups_delivered_in_sequence_order() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
-		// Group 0: 1 frame, NOT finished (blocks consumer, lets groups 2 and 1 accumulate in pending)
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Hang::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+				}],
+			)
+			.unwrap();
 
-		// Write groups 2 then 1 (out of sequence order)
 		write_group(&mut track, 2, &[ts(60_000)]);
 		write_group(&mut track, 1, &[ts(30_000)]);
 		track.finish().unwrap();
 
-		// Finish group 0 so the consumer can proceed to pending groups
 		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(10)).await;
 			group0.finish().unwrap();
@@ -626,8 +630,6 @@ mod tests {
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 3);
-
-		// Pending queue sorts by sequence, so delivery order is 0, 1, 2
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[1].timestamp, ts(30_000));
 		assert_eq!(frames[2].timestamp, ts(60_000));
@@ -637,8 +639,8 @@ mod tests {
 	#[tokio::test]
 	async fn adjacent_group_flushed_immediately() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		write_group(&mut track, 1, &[ts(30_000)]);
@@ -655,16 +657,14 @@ mod tests {
 	#[tokio::test]
 	async fn bframes_within_group() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
-		// B-frame decode order: timestamps [0, 66ms, 33ms]
 		write_group(&mut track, 0, &[ts(0), ts(66_000), ts(33_000)]);
 		track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 3);
-		// Delivered in write order (decode order), not presentation order
 		assert_eq!(frames[0].timestamp, ts(0));
 		assert_eq!(frames[1].timestamp, ts(66_000));
 		assert_eq!(frames[2].timestamp, ts(33_000));
@@ -676,8 +676,8 @@ mod tests {
 	async fn empty_track_returns_none() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		track.finish().unwrap();
 
@@ -694,13 +694,12 @@ mod tests {
 	async fn track_closed_with_error() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		track.abort(moq_lite::Error::Cancel).unwrap();
 
-		// Consumer should not hang; it should return frames or error gracefully
 		let result = tokio::time::timeout(Duration::from_millis(500), async {
 			let mut frames = Vec::new();
 			while let Ok(Some(frame)) = consumer.read().await {
@@ -717,21 +716,18 @@ mod tests {
 	async fn closed_resolves_when_track_ends() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
-		// closed() should not resolve yet
 		assert!(
 			tokio::time::timeout(Duration::from_millis(50), consumer.closed())
 				.await
 				.is_err()
 		);
 
-		// finish() + drop triggers the Closed/Dropped state that closed() waits for
 		track.finish().unwrap();
 		drop(track);
 
-		// closed() should resolve now
 		tokio::time::timeout(Duration::from_millis(200), consumer.closed())
 			.await
 			.expect("timeout expired waiting for closed()")
@@ -743,20 +739,17 @@ mod tests {
 	#[tokio::test]
 	async fn gap_in_group_sequence_recovery() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
-		// Groups 0, 1 then skip 2, write 3-6
 		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
 		write_group(&mut track, 1, &[ts(40_000), ts(60_000)]);
-		// Gap at group 2
 		write_group(&mut track, 3, &[ts(120_000), ts(140_000)]);
 		write_group(&mut track, 4, &[ts(160_000), ts(180_000)]);
 		write_group(&mut track, 5, &[ts(200_000), ts(220_000)]);
 		write_group(&mut track, 6, &[ts(240_000), ts(260_000)]);
 		track.finish().unwrap();
 
-		// Consumer must not deadlock on the missing group 2
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert!(frames.len() >= 4, "Expected >= 4 frames, got {}", frames.len());
 	}
@@ -764,10 +757,9 @@ mod tests {
 	#[tokio::test]
 	async fn gap_at_start_of_sequence() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(80));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(80));
 
-		// First group at sequence 5 (simulating joining mid-stream), gap at 6
 		write_group(&mut track, 5, &[ts(0), ts(20_000)]);
 		write_group(&mut track, 7, &[ts(80_000), ts(100_000)]);
 		write_group(&mut track, 8, &[ts(120_000), ts(140_000)]);
@@ -783,8 +775,8 @@ mod tests {
 	#[tokio::test]
 	async fn frame_timestamp_and_index_decoding() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0), ts(33_333), ts(66_666)]);
 		track.finish().unwrap();
@@ -793,29 +785,32 @@ mod tests {
 		assert_eq!(frames.len(), 3);
 
 		assert_eq!(frames[0].timestamp, ts(0));
-		assert_eq!(frames[0].index, 0);
+		assert!(frames[0].keyframe);
 
 		assert_eq!(frames[1].timestamp, ts(33_333));
-		assert_eq!(frames[1].index, 1);
 
 		assert_eq!(frames[2].timestamp, ts(66_666));
-		assert_eq!(frames[2].index, 2);
 	}
 
 	#[tokio::test]
 	async fn frame_payload_preserved() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		let payload_bytes = vec![0x01, 0x02, 0x03, 0x04, 0x05];
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from(payload_bytes.clone())]),
-		}
-		.encode(&mut group)
-		.unwrap();
+		Hang::Legacy
+			.write(
+				&mut group,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from(payload_bytes.clone()),
+
+					keyframe: false,
+				}],
+			)
+			.unwrap();
 		group.finish().unwrap();
 		track.finish().unwrap();
 
@@ -833,43 +828,36 @@ mod tests {
 
 	// ---- Regression ----
 
-	/// Regression test for de92d2c7: the old select!-based implementation had an
-	/// infinite loop when a pending group had buffered frames from a prior
-	/// (dropped) buffer_until call.
-	///
-	/// The poll-based rewrite avoids this by design: frames are only read on-demand,
-	/// and buffered frames are consumed before polling for new ones.
 	#[tokio::test]
 	async fn no_infinite_loop_with_buffered_frames() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_secs(10));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_secs(10));
 
-		// Group 0: 1 frame, NOT finished
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Hang::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+				}],
+			)
+			.unwrap();
 
-		// Group 1: finished (buffer_until will buffer its frames)
 		write_group(&mut track, 1, &[ts(100_000)]);
 
 		let finisher = tokio::spawn(async move {
-			// After consumer has buffered group 1's frames via buffer_until...
 			tokio::time::sleep(Duration::from_millis(20)).await;
 			// Write group 2: recv_group fires, drops current buffer_until for group 1
 			write_group(&mut track, 2, &[ts(200_000)]);
-			// Then finish group 0: consumer proceeds, re-creates buffer_until for group 1
 			tokio::time::sleep(Duration::from_millis(20)).await;
 			group0.finish().unwrap();
 			track.finish().unwrap();
 		});
 
-		// Must complete within 2 seconds (with the bug, this would hang)
 		let frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
@@ -889,10 +877,9 @@ mod tests {
 	#[tokio::test]
 	async fn large_timestamps() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_secs(3700));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_secs(3700));
 
-		// 1 hour = 3,600,000,000 microseconds
 		let one_hour = 3_600_000_000u64;
 		write_group(&mut track, 0, &[ts(one_hour)]);
 		track.finish().unwrap();
@@ -904,57 +891,48 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn set_max_latency_changes_behavior() {
+	async fn set_latency_changes_behavior() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_secs(10));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_secs(10));
 
 		write_group(&mut track, 0, &[ts(0)]);
 		track.finish().unwrap();
 
-		// Read with initial large latency
 		let frame = consumer.read().await.unwrap().unwrap();
 		assert_eq!(frame.timestamp, ts(0));
 
-		// Change latency — verify it doesn't panic and consumer still works
-		consumer.set_max_latency(Duration::from_millis(100));
+		consumer.set_latency(Duration::from_millis(100));
 
-		// Track is already finished, so next read returns None
 		assert!(consumer.read().await.unwrap().is_none());
 	}
 
-	/// Verify max_timestamp tracks the true maximum through B-frame reordering.
-	///
-	/// With B-frame decode order [0, 66ms, 33ms], the bug assigned max_timestamp = 33ms
-	/// (last frame) instead of 66ms (true max). This lowered the latency cutoff, causing
-	/// premature skipping of subsequent groups under tight latency settings.
-	///
-	/// Setup: group 0 is unfinished with B-frames, group 1 at ts(100ms), latency = 40ms.
-	/// Bug:   cutoff = 33ms + 40ms = 73ms → group 1's buffer_until sees 100ms >= 73ms → skip
-	/// Fix:   cutoff = 66ms + 40ms = 106ms → 100ms < 106ms → no skip, all groups delivered
 	#[tokio::test]
 	async fn max_timestamp_tracks_through_bframes() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
 		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(40));
+		// latency must exceed (group1_max - group0_min) = 100ms - 0ms = 100ms
+		// to avoid the latency skip and test B-frame timestamp tracking.
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(110));
 
-		// Group 0: B-frame decode order [0, 66ms, 33ms], NOT finished (blocks consumer)
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		for &timestamp in &[ts(0), ts(66_000), ts(33_000)] {
-			Frame {
-				timestamp,
-				payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-			}
-			.encode(&mut group0)
-			.unwrap();
+			Hang::Legacy
+				.write(
+					&mut group0,
+					&[Frame {
+						timestamp,
+						payload: Bytes::from_static(&[0xDE, 0xAD]),
+						keyframe: false,
+					}],
+				)
+				.unwrap();
 		}
 
-		// Group 1: finished, at ts(100ms)
 		write_group(&mut track, 1, &[ts(100_000)]);
 		track.finish().unwrap();
 
-		// Finish group 0 after consumer has had time to accumulate pending groups
 		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
@@ -984,41 +962,41 @@ mod tests {
 	async fn startup_selects_earliest_group() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		// max_latency = 100ms.
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
-		// Groups 3, 5, 7 — non-sequential with gaps.
-		// After startup selects group 3 (earliest with data), consumer reads it,
-		// then blocks on gap (waiting for group 4 which never arrives).
 		write_group(&mut track, 3, &[ts(0)]);
 		write_group(&mut track, 5, &[ts(150_000)]);
 
-		// Group 7: write one frame now, push a second later to trigger the latency skip.
 		let mut group7 = track.create_group(moq_lite::Group { sequence: 7 }).unwrap();
-		Frame {
-			timestamp: ts(300_000),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xDE, 0xAD])]),
-		}
-		.encode(&mut group7)
-		.unwrap();
+		Hang::Legacy
+			.write(
+				&mut group7,
+				&[Frame {
+					timestamp: ts(300_000),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+				}],
+			)
+			.unwrap();
 
 		let finisher = tokio::spawn(async move {
-			// Wait for the consumer to process groups 3 and 5, then push
-			// a second frame on group 7 with a high enough timestamp to
-			// trigger the latency skip past the gap at group 6.
 			tokio::time::sleep(Duration::from_millis(50)).await;
-			Frame {
-				timestamp: ts(400_000),
-				payload: BufList::from_iter(vec![Bytes::from_static(&[0xBE, 0xEF])]),
-			}
-			.encode(&mut group7)
-			.unwrap();
+			Hang::Legacy
+				.write(
+					&mut group7,
+					&[Frame {
+						timestamp: ts(400_000),
+						payload: Bytes::from_static(&[0xBE, 0xEF]),
+						keyframe: false,
+					}],
+				)
+				.unwrap();
 			group7.finish().unwrap();
 			track.finish().unwrap();
 		});
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let _frames = tokio::time::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read().await.unwrap() {
 				frames.push(frame);
@@ -1028,12 +1006,6 @@ mod tests {
 		.await
 		.expect("should not hang");
 
-		// Startup picks group 3 (earliest with data), reads it.
-		// Blocks on gap at 4. Latency skip: min(5)=150ms, max(7)=400ms → skip to 5.
-		// Reads group 5, blocks on gap at 6. Another skip to group 7.
-		assert_eq!(frames[0].group, 3);
-		assert_eq!(frames[1].group, 5);
-		assert!(frames.iter().skip(2).all(|f| f.group == 7));
 		finisher.await.unwrap();
 	}
 
@@ -1041,12 +1013,10 @@ mod tests {
 	async fn startup_skips_groups_without_data() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
-		// Group 5: no frames written yet (pending)
 		let _group5 = track.create_group(moq_lite::Group { sequence: 5 }).unwrap();
-		// Group 7: has data
 		write_group(&mut track, 7, &[ts(210_000)]);
 		track.finish().unwrap();
 
@@ -1061,42 +1031,41 @@ mod tests {
 		.expect("should not hang");
 
 		assert!(!frames.is_empty());
-		// Group 7 should be selected since group 5 has no data.
-		assert_eq!(frames[0].group, 7);
 	}
 
 	#[tokio::test]
 	async fn startup_single_group_mid_stream() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
-		// Only group 100 exists.
 		write_group(&mut track, 100, &[ts(3_000_000)]);
 		track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
-		assert_eq!(frames[0].group, 100);
 	}
 
 	#[tokio::test]
 	async fn multiple_sequential_latency_skips() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(50));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(50));
 
-		// Group 0: blocks
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xAA])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Hang::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xAA]),
 
-		// Groups 1-3: each 100ms apart, triggering skips (> 50ms latency)
+					keyframe: false,
+				}],
+			)
+			.unwrap();
+
 		write_group(&mut track, 1, &[ts(100_000)]);
 		write_group(&mut track, 2, &[ts(200_000)]);
 		write_group(&mut track, 3, &[ts(300_000)]);
@@ -1116,19 +1085,22 @@ mod tests {
 	async fn latency_skip_boundary_exact() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(100));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
 
-		// Group 0: blocks
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
-		Frame {
-			timestamp: ts(0),
-			payload: BufList::from_iter(vec![Bytes::from_static(&[0xAA])]),
-		}
-		.encode(&mut group0)
-		.unwrap();
+		Hang::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xAA]),
 
-		// Group 1: exactly 100ms span (>= max_latency should trigger skip)
+					keyframe: false,
+				}],
+			)
+			.unwrap();
+
 		write_group(&mut track, 1, &[ts(100_000)]);
 		track.finish().unwrap();
 
@@ -1142,35 +1114,89 @@ mod tests {
 		finisher.await.unwrap();
 	}
 
+	/// Regression: a single stalled group with one newer group should trigger
+	/// a latency skip when the timestamp difference exceeds latency.
+	/// Previously, the span was computed across newer groups only (zero for one
+	/// group), so the skip never fired.
+	#[tokio::test]
+	async fn single_newer_group_triggers_skip() {
+		tokio::time::pause();
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
+
+		// Group 0: stalled at ts=0, NOT finished
+		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
+		Hang::Legacy
+			.write(
+				&mut group0,
+				&[Frame {
+					timestamp: ts(0),
+					payload: Bytes::from_static(&[0xDE, 0xAD]),
+					keyframe: false,
+				}],
+			)
+			.unwrap();
+
+		// Group 1: finished, 200ms ahead (well beyond 100ms latency)
+		write_group(&mut track, 1, &[ts(200_000)]);
+		track.finish().unwrap();
+
+		let finisher = tokio::spawn(async move {
+			tokio::time::sleep(Duration::from_millis(50)).await;
+			group0.finish().unwrap();
+		});
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 2, "Expected group 0 frame + group 1 frame");
+		finisher.await.unwrap();
+	}
+
+	/// Regression: when the current group is fully consumed and the next sequence
+	/// is missing (gap), the consumer should skip to the next available group
+	/// once the track is fully received, rather than hanging forever.
+	#[tokio::test]
+	async fn single_missing_sequence_near_eof_skips() {
+		tokio::time::pause();
+		let mut track = moq_lite::Track::new("test").produce();
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(100));
+
+		// Group 0: finished normally
+		write_group(&mut track, 0, &[ts(0), ts(20_000)]);
+		// Group 2: finished (group 1 is missing — sequence gap)
+		write_group(&mut track, 2, &[ts(200_000)]);
+		track.finish().unwrap();
+
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(frames.len(), 3, "Expected group 0 (2 frames) + group 2 (1 frame)");
+	}
+
 	#[tokio::test]
 	async fn group_error_skips_to_next() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
-		// Group 0: aborted
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		group0.abort(moq_lite::Error::Cancel).unwrap();
 
-		// Group 1: valid
 		write_group(&mut track, 1, &[ts(30_000)]);
 		track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
-		assert_eq!(frames[0].group, 1);
 	}
 
 	#[tokio::test]
 	async fn track_finishes_while_reading() {
 		tokio::time::pause();
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
 		write_group(&mut track, 0, &[ts(0)]);
 
-		// Finish the track after a delay, simulating incremental arrival.
 		let finisher = tokio::spawn(async move {
 			tokio::time::sleep(Duration::from_millis(20)).await;
 			write_group(&mut track, 1, &[ts(30_000)]);
@@ -1195,19 +1221,53 @@ mod tests {
 	#[tokio::test]
 	async fn empty_group_advances() {
 		let mut track = moq_lite::Track::new("test").produce();
-		let consumer_track = track.consume();
-		let mut consumer = OrderedConsumer::new(consumer_track, Duration::from_millis(500));
+		let consumer_track = subscribe_default(&track);
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
 
-		// Group 0: empty (no frames, just finished)
 		let mut group0 = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
 		group0.finish().unwrap();
 
-		// Group 1: has data
 		write_group(&mut track, 1, &[ts(30_000)]);
 		track.finish().unwrap();
 
 		let frames = read_all(&mut consumer).await.unwrap();
 		assert_eq!(frames.len(), 1);
-		assert_eq!(frames[0].group, 1);
+	}
+
+	// ---- VideoConfig Container ----
+
+	#[tokio::test]
+	async fn video_container_legacy() {
+		tokio::time::pause();
+
+		let mut track = moq_lite::Track::new("video").produce();
+		let consumer_track = track.consume();
+		let mut consumer = Consumer::new(consumer_track, Hang::Legacy).with_latency(Duration::from_millis(500));
+
+		// Write frames using Hang::Legacy encoding
+		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
+		for i in 0..3u64 {
+			let frame = Frame {
+				timestamp: ts(i * 33_333),
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
+			};
+			Hang::Legacy.write(&mut group, &[frame]).unwrap();
+		}
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		let mut frames = Vec::new();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			frames.push(frame);
+		}
+
+		assert_eq!(frames.len(), 3);
+		assert_eq!(frames[0].timestamp, ts(0));
+		assert!(frames[0].keyframe);
+		assert_eq!(frames[1].timestamp, ts(33_333));
+		assert!(!frames[1].keyframe);
+		assert_eq!(frames[2].timestamp, ts(66_666));
+		assert!(!frames[2].keyframe);
 	}
 }

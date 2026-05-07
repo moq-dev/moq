@@ -14,6 +14,7 @@ use crate::{Error, Result};
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {
+	/// Total payload size in bytes. Declared up front so consumers can preallocate.
 	pub size: u64,
 }
 
@@ -180,12 +181,6 @@ impl FrameProducer {
 		self.bail_if_aborted()?;
 		self.put_slice(&chunk);
 		Ok(())
-	}
-
-	/// Deprecated: use [`Self::write`] instead.
-	#[deprecated(note = "use write(chunk) instead")]
-	pub fn write_chunk<B: Into<Bytes>>(&mut self, chunk: B) -> Result<()> {
-		self.write(chunk)
 	}
 
 	/// Verify that all bytes have been written.

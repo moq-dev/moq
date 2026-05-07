@@ -11,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The underlying implementation supports any scale, but everything uses milliseconds by default.
 pub type Time = Timescale<1_000>;
 
+/// Returned when a [`Timescale`] operation would exceed the QUIC VarInt range
+/// (`2^62 - 1`) or overflow during scale conversion or arithmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("time overflow")]
 pub struct TimeOverflow;
@@ -32,10 +34,14 @@ impl<const SCALE: u64> Timescale<SCALE> {
 	/// The minimum representable instant.
 	pub const ZERO: Self = Self(VarInt::ZERO);
 
+	/// Construct a timestamp directly from a value in this scale's units. Infallible
+	/// because any `u32` fits within the 62-bit varint range.
 	pub const fn new(value: u32) -> Self {
 		Self(VarInt::from_u32(value))
 	}
 
+	/// Construct a timestamp directly from a value in this scale's units. Returns
+	/// [`TimeOverflow`] if `value` exceeds the 62-bit varint range.
 	pub const fn new_u64(value: u64) -> Result<Self, TimeOverflow> {
 		match VarInt::from_u64(value) {
 			Some(varint) => Ok(Self(varint)),
@@ -52,6 +58,8 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		}
 	}
 
+	/// Like [`Self::from_secs`] but panics on overflow. Intended for `const`
+	/// initializers where overflow indicates a bug, not a runtime condition.
 	pub const fn from_secs_unchecked(seconds: u64) -> Self {
 		match Self::from_secs(seconds) {
 			Ok(time) => time,
@@ -64,26 +72,33 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		Self::from_scale(millis, 1000)
 	}
 
+	/// Like [`Self::from_millis`] but panics on overflow.
 	pub const fn from_millis_unchecked(millis: u64) -> Self {
 		Self::from_scale_unchecked(millis, 1000)
 	}
 
+	/// Convert a number of microseconds to a timestamp, returning an error on overflow.
 	pub const fn from_micros(micros: u64) -> Result<Self, TimeOverflow> {
 		Self::from_scale(micros, 1_000_000)
 	}
 
+	/// Like [`Self::from_micros`] but panics on overflow.
 	pub const fn from_micros_unchecked(micros: u64) -> Self {
 		Self::from_scale_unchecked(micros, 1_000_000)
 	}
 
+	/// Convert a number of nanoseconds to a timestamp, returning an error on overflow.
 	pub const fn from_nanos(nanos: u64) -> Result<Self, TimeOverflow> {
 		Self::from_scale(nanos, 1_000_000_000)
 	}
 
+	/// Like [`Self::from_nanos`] but panics on overflow.
 	pub const fn from_nanos_unchecked(nanos: u64) -> Self {
 		Self::from_scale_unchecked(nanos, 1_000_000_000)
 	}
 
+	/// Construct from `value` measured at the given `scale` (units per second), rescaling
+	/// to `SCALE`. Returns [`TimeOverflow`] if the rescaled value exceeds 2^62.
 	pub const fn from_scale(value: u64, scale: u64) -> Result<Self, TimeOverflow> {
 		match VarInt::from_u128(value as u128 * SCALE as u128 / scale as u128) {
 			Some(varint) => Ok(Self(varint)),
@@ -91,6 +106,7 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		}
 	}
 
+	/// Like [`Self::from_scale`] but accepts a `u128` source value.
 	pub const fn from_scale_u128(value: u128, scale: u64) -> Result<Self, TimeOverflow> {
 		match value.checked_mul(SCALE as u128) {
 			Some(value) => match VarInt::from_u128(value / scale as u128) {
@@ -101,6 +117,7 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		}
 	}
 
+	/// Like [`Self::from_scale`] but panics on overflow.
 	pub const fn from_scale_unchecked(value: u64, scale: u64) -> Self {
 		match Self::from_scale(value, scale) {
 			Ok(time) => time,
@@ -130,6 +147,7 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		self.as_scale(1_000_000_000)
 	}
 
+	/// Convert this timestamp to the given `scale` (units per second).
 	pub const fn as_scale(self, scale: u64) -> u128 {
 		self.0.into_inner() as u128 * scale as u128 / SCALE as u128
 	}
@@ -143,6 +161,7 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		}
 	}
 
+	/// Add two timestamps, returning [`TimeOverflow`] if the sum exceeds 2^62.
 	pub const fn checked_add(self, rhs: Self) -> Result<Self, TimeOverflow> {
 		let lhs = self.0.into_inner();
 		let rhs = rhs.0.into_inner();
@@ -152,6 +171,7 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		}
 	}
 
+	/// Subtract `rhs` from `self`, returning [`TimeOverflow`] if `rhs > self`.
 	pub const fn checked_sub(self, rhs: Self) -> Result<Self, TimeOverflow> {
 		let lhs = self.0.into_inner();
 		let rhs = rhs.0.into_inner();
@@ -161,10 +181,13 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		}
 	}
 
+	/// Whether this timestamp is [`Self::ZERO`].
 	pub const fn is_zero(self) -> bool {
 		self.0.into_inner() == 0
 	}
 
+	/// Current time as a timestamp, derived from [`tokio::time::Instant::now`] so
+	/// it honors `tokio::time::pause` in tests.
 	pub fn now() -> Self {
 		// We use tokio so it can be stubbed for testing.
 		tokio::time::Instant::now().into()
@@ -189,12 +212,14 @@ impl<const SCALE: u64> Timescale<SCALE> {
 		}
 	}
 
+	/// Encode this timestamp as a QUIC varint. Version-independent.
 	pub fn encode<W: bytes::BufMut>(&self, w: &mut W) -> Result<(), EncodeError> {
 		// Version-independent: uses QUIC varint encoding.
 		self.0.encode(w, crate::lite::Version::Lite01)?;
 		Ok(())
 	}
 
+	/// Decode a timestamp from a QUIC varint. Version-independent.
 	pub fn decode<R: bytes::Buf>(r: &mut R) -> Result<Self, Error> {
 		// Version-independent: uses QUIC varint encoding.
 		let v = VarInt::decode(r, crate::lite::Version::Lite01)?;

@@ -1,4 +1,4 @@
-// Wire-level datagram messages for moq-lite-05+.
+// Wire-level datagram messages for moq-lite-04-datagrams.
 //
 // Contains both the per-datagram QUIC datagram body codec (`Datagram`) and
 // the control-stream messages (`Datagrams`, `DatagramsOk`, `DatagramsUpdate`).
@@ -8,9 +8,8 @@ import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { Version } from "./version.ts";
 
-function checkLite05Plus(version: Version) {
-	if (version !== Version.DRAFT_05) {
-		// More versions will be added in the future; for now Draft05 is the only one.
+function checkLite04Datagrams(version: Version) {
+	if (version !== Version.DRAFT_04_DATAGRAMS) {
 		throw new Error(`datagrams not supported on version: 0x${version.toString(16)}`);
 	}
 }
@@ -19,7 +18,7 @@ function checkLite05Plus(version: Version) {
  * A single QUIC datagram body: `subscribe_id (i) | sequence (i) | payload (b)`.
  *
  * The QUIC datagram boundary delimits the payload — there is no inner length
- * prefix. moq-lite-05 ignores the sequence number for delivery semantics; the
+ * prefix. moq-lite-04-datagrams ignores the sequence number for delivery semantics; the
  * field is preserved so the same encoding can be reused by an `moq-transport`
  * adapter (deferred).
  */
@@ -35,7 +34,7 @@ export class Datagram {
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
-		checkLite05Plus(version);
+		checkLite04Datagrams(version);
 		await w.u62(this.subscribe);
 		await w.u53(this.sequence);
 		if (this.payload.byteLength > 0) {
@@ -44,7 +43,7 @@ export class Datagram {
 	}
 
 	static async decode(r: Reader, version: Version): Promise<Datagram> {
-		checkLite05Plus(version);
+		checkLite04Datagrams(version);
 		const subscribe = await r.u62();
 		const sequence = await r.u53();
 		const payload = await r.readAll();
@@ -70,7 +69,7 @@ export class Datagrams {
 	}
 
 	async #encode(w: Writer, version: Version): Promise<void> {
-		checkLite05Plus(version);
+		checkLite04Datagrams(version);
 		await w.u62(this.id);
 		await w.string(this.broadcast);
 		await w.string(this.track);
@@ -78,7 +77,7 @@ export class Datagrams {
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Datagrams> {
-		checkLite05Plus(version);
+		checkLite04Datagrams(version);
 		const id = await r.u62();
 		const broadcast = Path.from(await r.string());
 		const track = await r.string();
@@ -106,12 +105,12 @@ export class DatagramsOk {
 	}
 
 	async #encode(w: Writer, version: Version): Promise<void> {
-		checkLite05Plus(version);
+		checkLite04Datagrams(version);
 		await w.u53(this.maxLatency);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<DatagramsOk> {
-		checkLite05Plus(version);
+		checkLite04Datagrams(version);
 		return new DatagramsOk(await r.u53());
 	}
 
@@ -135,12 +134,12 @@ export class DatagramsUpdate {
 	}
 
 	async #encode(w: Writer, version: Version): Promise<void> {
-		checkLite05Plus(version);
+		checkLite04Datagrams(version);
 		await w.u53(this.maxLatency);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<DatagramsUpdate> {
-		checkLite05Plus(version);
+		checkLite04Datagrams(version);
 		return new DatagramsUpdate(await r.u53());
 	}
 

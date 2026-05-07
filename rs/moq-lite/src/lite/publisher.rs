@@ -131,10 +131,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let interest = stream.reader.decode::<lite::AnnounceInterest>().await?;
 		let prefix = interest.prefix.to_owned();
 
-		let mut origin = self
-			.origin
-			.consume_only(&[prefix.as_path()])
-			.ok_or(Error::Unauthorized)?;
+		let mut origin = self.origin.scope(&[prefix.as_path()]).ok_or(Error::Unauthorized)?;
 
 		let version = self.version;
 		let self_origin = self.self_origin;
@@ -248,8 +245,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// We just received a subscribe for this exact path, so by definition the peer has
 		// already seen an announcement for it — synchronous lookup is appropriate here.
-		#[allow(deprecated)]
-		let broadcast = self.origin.consume_broadcast(&subscribe.broadcast);
+		let broadcast = self.origin.get_broadcast(&subscribe.broadcast);
 		let priority = self.priority.clone();
 		let version = self.version;
 
@@ -351,7 +347,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	pub async fn recv_datagrams(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
-		// Datagrams are a Lite05+ feature. Reject the control stream on older versions.
+		// Datagrams are a Lite04Datagrams feature. Reject the control stream on older versions.
 		if matches!(
 			self.version,
 			Version::Lite01 | Version::Lite02 | Version::Lite03 | Version::Lite04
@@ -366,8 +362,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::info!(%id, broadcast = %absolute, track = %track_name, "datagrams subscribed started");
 
-		#[allow(deprecated)]
-		let broadcast = self.origin.consume_broadcast(&datagrams.broadcast);
+		// We just received a Datagrams subscription for this exact path, so by
+		// definition the peer has already seen an announcement for it — synchronous
+		// lookup is appropriate here.
+		let broadcast = self.origin.get_broadcast(&datagrams.broadcast);
 		let session = self.session.clone();
 		let version = self.version;
 

@@ -80,7 +80,7 @@ impl SessionHandle {
 }
 
 struct PadState {
-	decoder: moq_mux::import::Decoder,
+	decoder: moq_mux::import::Framed,
 	reference_pts: Option<gst::ClockTime>,
 }
 
@@ -88,7 +88,7 @@ struct RuntimeState {
 	#[allow(dead_code)]
 	session: moq_lite::Session,
 	broadcast: moq_lite::BroadcastProducer,
-	catalog: moq_mux::CatalogProducer,
+	catalog: moq_mux::catalog::Producer,
 	pads: HashMap<String, PadState>,
 }
 
@@ -379,7 +379,7 @@ async fn run_session(
 	let mut broadcast = moq_lite::Broadcast::new().produce();
 	let broadcast_consumer = broadcast.consume();
 
-	let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 
 	anyhow::ensure!(
 		origin.publish_broadcast(&settings.broadcast, broadcast_consumer),
@@ -434,18 +434,18 @@ async fn run_session(
 
 fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) -> Result<()> {
 	let structure = caps.structure(0).context("empty caps")?;
-	let decoder: moq_mux::import::Decoder = match structure.name().as_str() {
+	let decoder: moq_mux::import::Framed = match structure.name().as_str() {
 		"video/x-h264" => {
 			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::DecoderFormat::Avc3, &mut bytes)?
+			new_decoder(runtime, moq_mux::import::FramedFormat::Avc3, &mut bytes)?
 		}
 		"video/x-h265" => {
 			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::DecoderFormat::Hev1, &mut bytes)?
+			new_decoder(runtime, moq_mux::import::FramedFormat::Hev1, &mut bytes)?
 		}
 		"video/x-av1" => {
 			let mut bytes = Bytes::new();
-			new_decoder(runtime, moq_mux::import::DecoderFormat::Av01, &mut bytes)?
+			new_decoder(runtime, moq_mux::import::FramedFormat::Av01, &mut bytes)?
 		}
 		"audio/mpeg" => {
 			let codec_data = structure
@@ -453,7 +453,7 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 				.context("AAC caps missing codec_data")?;
 			let map = codec_data.map_readable().context("failed to map codec_data")?;
 			let mut data = Bytes::copy_from_slice(map.as_slice());
-			new_decoder(runtime, moq_mux::import::DecoderFormat::Aac, &mut data)?
+			new_decoder(runtime, moq_mux::import::FramedFormat::Aac, &mut data)?
 		}
 		"audio/x-opus" => {
 			let channels: i32 = structure.get("channels").unwrap_or(2);
@@ -479,10 +479,10 @@ fn handle_caps(runtime: &mut RuntimeState, pad_name: String, caps: gst::Caps) ->
 
 fn new_decoder(
 	runtime: &mut RuntimeState,
-	format: moq_mux::import::DecoderFormat,
+	format: moq_mux::import::FramedFormat,
 	buf: &mut Bytes,
-) -> Result<moq_mux::import::Decoder> {
-	let decoder = moq_mux::import::Decoder::new(runtime.broadcast.clone(), runtime.catalog.clone(), format, buf)?;
+) -> Result<moq_mux::import::Framed> {
+	let decoder = moq_mux::import::Framed::new(runtime.broadcast.clone(), runtime.catalog.clone(), format, buf)?;
 	Ok(decoder)
 }
 

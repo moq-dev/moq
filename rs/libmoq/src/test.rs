@@ -375,14 +375,12 @@ fn local_publish_consume() {
 		timestamp_us: 0,
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_frame_chunk(frame_id, 0, &mut frame) }, 0);
+	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.payload_size, payload.len());
 	assert_eq!(frame.timestamp_us, timestamp_us);
 
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload, "frame payload should match");
-
-	assert!(unsafe { moq_consume_frame_chunk(frame_id, 999, &mut frame) } < 0);
 
 	assert_eq!(moq_consume_frame_close(frame_id), 0);
 	assert_eq!(moq_consume_audio_close(track), 0);
@@ -489,7 +487,7 @@ fn video_publish_consume() {
 		timestamp_us: 0,
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_frame_chunk(frame_id, 0, &mut frame) }, 0);
+	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.timestamp_us, 0);
 	assert!(frame.payload_size > 0, "frame should have payload data");
 
@@ -551,7 +549,7 @@ fn multiple_frames_ordering() {
 			timestamp_us: 0,
 			keyframe: false,
 		};
-		assert_eq!(unsafe { moq_consume_frame_chunk(frame_id, 0, &mut frame) }, 0);
+		assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
 		assert_eq!(frame.timestamp_us, expected_ts, "frame {i} has wrong timestamp");
 
 		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
@@ -639,7 +637,7 @@ fn catalog_update_on_new_track() {
 #[test]
 fn null_pointer_handling() {
 	assert_eq!(
-		unsafe { moq_consume_frame_chunk(9999, 0, std::ptr::null_mut()) },
+		unsafe { moq_consume_frame(9999, std::ptr::null_mut()) },
 		-6,
 		"null dst should return InvalidPointer (-6)"
 	);

@@ -1,7 +1,5 @@
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use derive_more::Debug;
-
-pub use buf_list::BufList;
 
 use crate::Error;
 
@@ -21,27 +19,26 @@ pub struct Frame {
 	/// This is NOT a wall clock time.
 	pub timestamp: Timestamp,
 
-	/// The encoded media data for this frame, split into chunks.
+	/// The encoded media data for this frame.
 	///
 	/// The format depends on the codec being used (H.264, AV1, Opus, etc.).
 	/// The debug implementation shows only the payload length for brevity.
-	#[debug("{} bytes", payload.num_bytes())]
-	pub payload: BufList,
+	#[debug("{} bytes", payload.len())]
+	pub payload: Bytes,
 }
 
 impl Frame {
-	/// Encode the frame to the given group.
+	/// Encode the frame to the given group as a single moq-lite frame:
+	/// VarInt timestamp prefix followed by the raw codec payload.
 	pub fn encode(&self, group: &mut moq_lite::GroupProducer) -> Result<(), Error> {
 		let mut header = BytesMut::new();
 		self.timestamp.encode(&mut header).map_err(moq_lite::Error::from)?;
 
-		let size = header.len() + self.payload.remaining();
+		let size = header.len() + self.payload.len();
 
 		let mut chunked = group.create_frame(size.into())?;
 		chunked.write(header.freeze())?;
-		for chunk in &self.payload {
-			chunked.write(chunk.clone())?;
-		}
+		chunked.write(self.payload.clone())?;
 		chunked.finish()?;
 
 		Ok(())
@@ -52,9 +49,6 @@ impl Frame {
 		let timestamp = Timestamp::decode(&mut buf)?;
 		let payload = buf.copy_to_bytes(buf.remaining());
 
-		Ok(Self {
-			timestamp,
-			payload: payload.into(),
-		})
+		Ok(Self { timestamp, payload })
 	}
 }

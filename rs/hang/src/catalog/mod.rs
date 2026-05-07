@@ -6,7 +6,6 @@
 
 mod audio;
 mod chat;
-mod consumer;
 mod container;
 mod preview;
 mod root;
@@ -15,7 +14,6 @@ mod video;
 
 pub use audio::*;
 pub use chat::*;
-pub use consumer::*;
 pub use container::*;
 pub use preview::*;
 pub use root::*;
