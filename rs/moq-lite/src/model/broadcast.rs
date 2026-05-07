@@ -55,17 +55,6 @@ fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>,
 	}
 }
 
-impl State {
-	/// Insert a track weak handle into the lookup, returning an error on duplicate.
-	fn insert_track(&mut self, weak: TrackWeak) -> Result<(), Error> {
-		let hash_map::Entry::Vacant(entry) = self.tracks.entry(weak.info.name.clone()) else {
-			return Err(Error::Duplicate);
-		};
-		entry.insert(weak);
-		Ok(())
-	}
-}
-
 /// Manages tracks within a broadcast.
 ///
 /// Insert tracks statically with [Self::insert_track] / [Self::create_track],
@@ -95,13 +84,17 @@ impl BroadcastProducer {
 
 	/// Insert a track into the lookup, returning an error on duplicate.
 	///
-	/// Stores a weak handle to the track. The caller (or the owner of the
-	/// track's [`TrackProducer`]) is responsible for keeping the track alive;
-	/// when all producers are dropped, the entry becomes closed and is
-	/// eventually evicted.
-	pub fn insert_track(&mut self, track: TrackConsumer) -> Result<(), Error> {
+	/// NOTE: You probably want to [TrackProducer::clone] first to keep publishing to the track.
+	pub fn insert_track(&mut self, track: &TrackProducer) -> Result<(), Error> {
 		let mut state = modify(&self.state)?;
-		state.insert_track(track.weak())
+
+		let hash_map::Entry::Vacant(entry) = state.tracks.entry(track.name.clone()) else {
+			return Err(Error::Duplicate);
+		};
+
+		entry.insert(track.weak());
+
+		Ok(())
 	}
 
 	/// Remove a track from the lookup.
@@ -114,9 +107,7 @@ impl BroadcastProducer {
 	/// Produce a new track and insert it into the broadcast.
 	pub fn create_track(&mut self, track: Track) -> Result<TrackProducer, Error> {
 		let track = TrackProducer::new(track);
-		let mut state = modify(&self.state)?;
-		state.insert_track(track.weak())?;
-		drop(state);
+		self.insert_track(&track)?;
 		Ok(track)
 	}
 
@@ -151,18 +142,16 @@ impl BroadcastProducer {
 		}
 	}
 
-	/// Abort the broadcast with the given error.
-	///
-	/// Externally-owned tracks are independent and must be aborted separately;
-	/// inserted tracks are referenced via weak handles so that consumers can
-	/// finish reading them. Pending dynamic track requests, however, are owned
-	/// by the broadcast and have no other producer to fulfill them, so they are
-	/// aborted here.
+	/// Abort the broadcast and all child tracks with the given error.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
 		let mut guard = modify(&self.state)?;
 
-		// Abort any pending dynamic track requests; their producers are owned
-		// by the broadcast and would otherwise leave consumers stuck forever.
+		// Cascade abort to all child tracks.
+		for weak in guard.tracks.values() {
+			weak.abort(err.clone());
+		}
+
+		// Abort any pending dynamic track requests.
 		for mut request in guard.requests.drain(..) {
 			request.abort(err.clone()).ok();
 		}
@@ -185,7 +174,7 @@ impl BroadcastProducer {
 	}
 
 	pub fn assert_insert_track(&mut self, track: &TrackProducer) {
-		self.insert_track(track.consume()).expect("should not have errored")
+		self.insert_track(track).expect("should not have errored")
 	}
 }
 
@@ -251,23 +240,16 @@ impl BroadcastDynamic {
 		}
 	}
 
-	/// Block until the broadcast is closed or aborted, returning the cause.
-	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
-	}
-
 	/// Abort the broadcast with the given error.
-	///
-	/// Externally-owned tracks are independent and must be aborted separately;
-	/// inserted tracks are referenced via weak handles. Pending dynamic track
-	/// requests are owned by the broadcast and aborted here so consumers don't
-	/// stay stuck waiting on producers nobody will fulfill.
 	pub fn abort(&mut self, err: Error) -> Result<(), Error> {
 		let mut guard = modify(&self.state)?;
 
-		// Abort any pending dynamic track requests; their producers are owned
-		// by the broadcast and would otherwise leave consumers stuck forever.
+		// Cascade abort to all child tracks.
+		for weak in guard.tracks.values() {
+			weak.abort(err.clone());
+		}
+
+		// Abort any pending dynamic track requests.
 		for mut request in guard.requests.drain(..) {
 			request.abort(err.clone()).ok();
 		}
@@ -478,16 +460,17 @@ mod test {
 		let track1c = consumer.assert_subscribe_track(&track1);
 		let track2 = consumer.assert_subscribe_track(&Track::new("track2"));
 
-		// Aborting the broadcast must NOT cascade to externally-owned tracks.
+		// Explicitly aborting the broadcast should cascade to child tracks.
 		producer.abort(Error::Cancel).unwrap();
 
-		// track2's producer was owned by the broadcast (a pending dynamic
-		// request), so the consumer surfaces the abort.
+		// The requested TrackProducer should have been aborted.
 		track2.assert_error();
 
-		// track1's producer is held outside the broadcast, so it survives.
-		assert!(!track1.is_closed());
-		track1c.assert_not_closed();
+		// track1 should also be closed because close() cascades.
+		track1c.assert_error();
+
+		// track1's producer should also be closed.
+		assert!(track1.is_closed());
 	}
 
 	#[tokio::test]
