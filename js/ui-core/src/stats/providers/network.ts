@@ -8,7 +8,6 @@ import { BaseProvider } from "./base";
 export class NetworkProvider extends BaseProvider {
 	private static readonly POLLING_INTERVAL_MS = 250;
 	private context: ProviderContext | undefined;
-	private updateInterval?: number;
 
 	setup(context: ProviderContext): void {
 		this.context = context;
@@ -18,18 +17,8 @@ export class NetworkProvider extends BaseProvider {
 			return;
 		}
 
-		this.updateInterval = window.setInterval(
-			this.updateDisplayData.bind(this),
-			NetworkProvider.POLLING_INTERVAL_MS,
-		);
+		this.signals.interval(this.updateDisplayData.bind(this), NetworkProvider.POLLING_INTERVAL_MS);
 		this.updateDisplayData();
-	}
-
-	override cleanup(): void {
-		if (this.updateInterval !== undefined) {
-			clearInterval(this.updateInterval);
-		}
-		super.cleanup();
 	}
 
 	private updateDisplayData(): void {
