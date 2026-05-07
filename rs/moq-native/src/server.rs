@@ -283,6 +283,12 @@ impl Server {
 		self
 	}
 
+	/// Attach a [`moq_lite::Stats`] aggregator to all sessions accepted by this server.
+	pub fn with_stats(mut self, stats: impl Into<Option<moq_lite::Stats>>) -> Self {
+		self.moq = self.moq.with_stats(stats);
+		self
+	}
+
 	// Return the SHA256 fingerprints of all our certificates.
 	pub fn tls_info(&self) -> Arc<RwLock<ServerTlsInfo>> {
 		#[cfg(feature = "noq")]
@@ -583,6 +589,12 @@ impl Request {
 	/// Consume the given origin from the session.
 	pub fn with_consume(mut self, consume: impl Into<Option<moq_lite::OriginProducer>>) -> Self {
 		self.server = self.server.with_consume(consume);
+		self
+	}
+
+	/// Attach a [`moq_lite::Stats`] aggregator to this session.
+	pub fn with_stats(mut self, stats: impl Into<Option<moq_lite::Stats>>) -> Self {
+		self.server = self.server.with_stats(stats);
 		self
 	}
 

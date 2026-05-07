@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, OriginList, Stats as MoqStats, Track, TrackConsumer,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -19,6 +19,7 @@ use super::Version;
 pub(super) struct Publisher<S: web_transport_trait::Session> {
 	session: S,
 	origin: OriginConsumer,
+	stats: Option<MoqStats>,
 	// The session-level origin id stamped onto outbound hop chains. Shared
 	// with the Subscriber so it can optionally filter out reflected announces.
 	self_origin: Origin,
@@ -27,12 +28,19 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: Option<OriginConsumer>, self_origin: Origin, version: Version) -> Self {
+	pub fn new(
+		session: S,
+		origin: Option<OriginConsumer>,
+		stats: Option<MoqStats>,
+		self_origin: Origin,
+		version: Version,
+	) -> Self {
 		// Default to a dummy origin that is immediately closed.
 		let origin = origin.unwrap_or_else(|| Origin::random().produce().consume());
 		Self {
 			session,
 			origin,
+			stats,
 			self_origin,
 			priority: Default::default(),
 			version,
@@ -133,8 +141,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let version = self.version;
 		let self_origin = self.self_origin;
+		let stats = self.stats.clone();
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, self_origin, version).await {
+			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, self_origin, stats, version).await {
 				match &err {
 					Error::Cancel | Error::Transport(_) => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
@@ -156,9 +165,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
 		self_origin: Origin,
+		stats: Option<MoqStats>,
 		version: Version,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
+
+		// Per-path stats guards: dropping the guard records `broadcasts_closed`.
+		// Using the absolute path keys means two different sessions handling the same
+		// broadcast each get their own guard scope (the bumps go to the same level).
+		let mut stats_guards: std::collections::HashMap<crate::PathOwned, crate::PublisherStats> =
+			std::collections::HashMap::new();
 
 		match version {
 			Version::Lite01 | Version::Lite02 => {
@@ -171,10 +187,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 					if active.is_some() {
 						tracing::debug!(broadcast = %origin.absolute(&path), "announce");
+						if let Some(stats) = stats.as_ref() {
+							let absolute = origin.absolute(&path).to_owned();
+							stats_guards
+								.entry(absolute.clone())
+								.or_insert_with(|| stats.broadcast(absolute.clone()).publisher());
+						}
 						init.push(suffix.to_owned());
 					} else {
 						// A potential race.
 						tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+						stats_guards.remove(&origin.absolute(&path).to_owned());
 						init.retain(|path| path != &suffix);
 					}
 				}
@@ -210,10 +233,17 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 									);
 									continue;
 								}
+								if let Some(stats) = stats.as_ref() {
+									let absolute = origin.absolute(&path).to_owned();
+									stats_guards
+										.entry(absolute.clone())
+										.or_insert_with(|| stats.broadcast(absolute.clone()).publisher());
+								}
 								let msg = lite::Announce::Active { suffix, hops };
 								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
+								stats_guards.remove(&origin.absolute(&path).to_owned());
 								// An ended announce doesn't need hops — the receiver matches on path only.
 								let msg = lite::Announce::Ended {
 									suffix,
@@ -247,9 +277,24 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let priority = self.priority.clone();
 		let version = self.version;
 
+		// Open a publisher-track stats guard tied to this subscription's lifetime.
+		let track_stats = self
+			.stats
+			.as_ref()
+			.map(|stats| stats.broadcast(&absolute).publisher().track(&track));
+
 		let session = self.session.clone();
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_subscribe(session, &mut stream, &subscribe, broadcast, priority, version).await
+			if let Err(err) = Self::run_subscribe(
+				session,
+				&mut stream,
+				&subscribe,
+				broadcast,
+				priority,
+				track_stats,
+				version,
+			)
+			.await
 			{
 				match &err {
 					// TODO better classify WebTransport errors.
@@ -275,6 +320,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		subscribe: &lite::Subscribe<'_>,
 		consumer: Option<BroadcastConsumer>,
 		priority: PriorityQueue,
+		track_stats: Option<crate::PublisherTrack>,
 		version: Version,
 	) -> Result<(), Error> {
 		let track = Track {
@@ -297,8 +343,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
+		let track_stats = track_stats.map(std::sync::Arc::new);
 		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, version) => res?,
+			res = Self::run_track(session, track, subscribe, priority, track_stats, version) => res?,
 			res = stream.reader.closed() => res?,
 		}
 
@@ -311,6 +358,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		mut track: TrackConsumer,
 		subscribe: &lite::Subscribe<'_>,
 		priority: PriorityQueue,
+		track_stats: Option<std::sync::Arc<crate::PublisherTrack>>,
 		version: Version,
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
@@ -340,7 +388,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = priority.insert(track.priority, sequence);
-			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
+			tasks.push(
+				Self::serve_group(session.clone(), msg, priority, group, track_stats.clone(), version).map(|_| ()),
+			);
 		}
 	}
 
@@ -349,6 +399,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		msg: lite::Group,
 		mut priority: PriorityHandle,
 		mut group: GroupConsumer,
+		track_stats: Option<std::sync::Arc<crate::PublisherTrack>>,
 		version: Version,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
@@ -358,6 +409,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.set_priority(priority.current());
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
+		if let Some(s) = track_stats.as_deref() {
+			s.group();
+		}
 
 		loop {
 			let frame = tokio::select! {
@@ -377,6 +431,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			stream.encode(&frame.size).await?;
+			if let Some(s) = track_stats.as_deref() {
+				s.frame();
+			}
 
 			loop {
 				let chunk = tokio::select! {
@@ -391,7 +448,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				};
 
 				match chunk? {
-					Some(mut chunk) => stream.write_all(&mut chunk).await?,
+					Some(mut chunk) => {
+						let n = chunk.len() as u64;
+						stream.write_all(&mut chunk).await?;
+						if let Some(s) = track_stats.as_deref() {
+							s.bytes(n);
+						}
+					}
 					None => break,
 				}
 			}

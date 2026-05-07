@@ -1,5 +1,5 @@
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, coding::Stream,
+	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, Stats, coding::Stream,
 	lite::SessionInfo,
 };
 
@@ -13,6 +13,8 @@ pub fn start<S: web_transport_trait::Session>(
 	publish: Option<OriginConsumer>,
 	// We will consume any remote broadcasts, inserting them into this origin.
 	subscribe: Option<OriginProducer>,
+	// Optional stats aggregator. None disables instrumentation for this session.
+	stats: Option<Stats>,
 	// The version of the protocol to use.
 	version: Version,
 ) -> Result<Option<BandwidthConsumer>, Error> {
@@ -32,8 +34,8 @@ pub fn start<S: web_transport_trait::Session>(
 	// announce hops, and the subscriber carries it so callers can opt into
 	// filtering out their own reflected announces.
 	let origin = Origin::random();
-	let publisher = Publisher::new(session.clone(), publish, origin, version);
-	let subscriber = Subscriber::new(session.clone(), subscribe, recv_bw_for_sub, origin, version);
+	let publisher = Publisher::new(session.clone(), publish, stats.clone(), origin, version);
+	let subscriber = Subscriber::new(session.clone(), subscribe, recv_bw_for_sub, stats, origin, version);
 
 	web_async::spawn(async move {
 		let res = tokio::select! {

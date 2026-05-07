@@ -15,7 +15,7 @@ use axum::{
 	http::StatusCode,
 	response::Response,
 };
-use moq_lite::{OriginConsumer, OriginProducer};
+use moq_lite::{OriginConsumer, OriginProducer, Stats};
 
 use crate::{AuthParams, AuthToken, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
 
@@ -42,6 +42,7 @@ pub(crate) async fn serve_ws(
 	};
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
+	let stats = state.cluster.stats.clone();
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.
@@ -61,7 +62,7 @@ pub(crate) async fn serve_ws(
 				tungstenite::Error::ConnectionClosed
 			})
 			.with(tungstenite_to_axum);
-		let _ = handle_socket(id, socket, publish, subscribe).await;
+		let _ = handle_socket(id, socket, publish, subscribe, stats).await;
 	}))
 }
 
@@ -71,6 +72,7 @@ async fn handle_socket<T>(
 	socket: T,
 	publish: Option<OriginProducer>,
 	subscribe: Option<OriginConsumer>,
+	stats: Option<Stats>,
 ) -> anyhow::Result<()>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
@@ -84,8 +86,7 @@ where
 	let session = moq_lite::Server::new()
 		.with_publish(subscribe)
 		.with_consume(publish)
-		// TODO: Uncomment when observability feature is merged
-		// .with_stats(stats)
+		.with_stats(stats)
 		.accept(ws)
 		.await?;
 	session.closed().await.map_err(Into::into)

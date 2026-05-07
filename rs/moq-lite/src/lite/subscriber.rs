@@ -7,7 +7,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
 	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
-	OriginProducer, Path, PathOwned, TrackProducer,
+	OriginProducer, Path, PathOwned, Stats, SubscriberStats, SubscriberTrack, TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -22,6 +22,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: Option<OriginProducer>,
+	stats: Option<Stats>,
 	recv_bandwidth: Option<BandwidthProducer>,
 	// Session-level origin id shared with the Publisher. Kept so callers that
 	// want to filter reflected announces can reuse the same id; for now only
@@ -29,9 +30,15 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	// on seeing its own publishes as a confirmation signal).
 	#[allow(dead_code)]
 	self_origin: crate::Origin,
-	subscribes: Lock<HashMap<u64, TrackProducer>>,
+	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
+}
+
+#[derive(Clone)]
+struct TrackEntry {
+	producer: TrackProducer,
+	stats: Option<Arc<SubscriberTrack>>,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
@@ -39,12 +46,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		session: S,
 		origin: Option<OriginProducer>,
 		recv_bandwidth: Option<BandwidthProducer>,
+		stats: Option<Stats>,
 		self_origin: crate::Origin,
 		version: Version,
 	) -> Self {
 		Self {
 			session,
 			origin,
+			stats,
 			recv_bandwidth,
 			self_origin,
 			subscribes: Default::default(),
@@ -122,6 +131,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream.writer.encode(&msg).await?;
 
 		let mut producers = HashMap::new();
+		// Per-broadcast subscriber-side stats guards. Dropping the guard records
+		// `subscriber.broadcasts_closed`. Removed alongside the BroadcastProducer
+		// when an Ended announcement arrives.
+		let mut stats_guards: HashMap<PathOwned, SubscriberStats> = HashMap::new();
 
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
@@ -129,7 +142,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
 					// Lite01/02 don't carry hop information; the broadcast starts with an empty chain.
-					self.start_announce(path, crate::OriginList::new(), &mut producers)?;
+					self.start_announce(path.clone(), crate::OriginList::new(), &mut producers)?;
+					if let Some(stats) = self.stats.as_ref() {
+						let guard = stats.broadcast(&path).subscriber();
+						stats_guards.insert(path, guard);
+					}
 				}
 			}
 			_ => {
@@ -141,7 +158,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			match announce {
 				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
-					self.start_announce(path, hops, &mut producers)?;
+					self.start_announce(path.clone(), hops, &mut producers)?;
+					if let Some(stats) = self.stats.as_ref() {
+						let guard = stats.broadcast(&path).subscriber();
+						stats_guards.insert(path, guard);
+					}
 				}
 				lite::Announce::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
@@ -150,6 +171,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					// Abort the producer.
 					let mut producer = producers.remove(&path).ok_or(Error::NotFound)?;
 					producer.abort(Error::Cancel).ok();
+					stats_guards.remove(&path);
 				}
 			}
 		}
@@ -266,7 +288,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_subscribe(&mut self, id: u64, path: PathOwned, broadcast: BroadcastDynamic, mut track: TrackProducer) {
-		self.subscribes.lock().insert(id, track.clone());
+		// Subscriber-side track stats; counters bump as frames/bytes/groups arrive.
+		// Drop on subscription end records `subscriber.subscriptions_closed`.
+		let track_stats = self
+			.stats
+			.as_ref()
+			.map(|stats| Arc::new(stats.broadcast(&path).subscriber().track(&track.name)));
+
+		self.subscribes.lock().insert(
+			id,
+			TrackEntry {
+				producer: track.clone(),
+				stats: track_stats.clone(),
+			},
+		);
 
 		let msg = lite::Subscribe {
 			id,
@@ -338,19 +373,24 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let (mut group, track) = {
+		let (mut group, track, track_stats) = {
 			let mut subs = self.subscribes.lock();
-			let track = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
+			let entry = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
 
 			let group_info = Group { sequence: hdr.sequence };
-			let group = track.create_group(group_info)?;
-			(group, track.clone())
+			let group = entry.producer.create_group(group_info)?;
+			(group, entry.producer.clone(), entry.stats.clone())
 		};
+
+		// Bump groups counter for this incoming group on the subscriber side.
+		if let Some(s) = track_stats.as_deref() {
+			s.group();
+		}
 
 		let res = tokio::select! {
 			err = track.closed() => Err(err),
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone()) => res,
+			res = self.run_group(stream, group.clone(), track_stats.clone()) => res,
 		};
 
 		match res {
@@ -373,11 +413,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
+		track_stats: Option<Arc<SubscriberTrack>>,
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
 			let mut frame = group.create_frame(Frame { size })?;
+			if let Some(s) = track_stats.as_deref() {
+				s.frame();
+			}
 
-			if let Err(err) = self.run_frame(stream, &mut frame).await {
+			if let Err(err) = self.run_frame(stream, &mut frame, track_stats.as_deref()).await {
 				let _ = frame.abort(err.clone());
 				return Err(err);
 			}
@@ -392,6 +436,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		frame: &mut FrameProducer,
+		track_stats: Option<&SubscriberTrack>,
 	) -> Result<(), Error> {
 		// FrameProducer impls BufMut over its pre-allocated per-frame buffer, so
 		// read_buf writes QUIC stream bytes directly into the frame — no
@@ -399,7 +444,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// as we drain it.
 		while bytes::BufMut::has_remaining_mut(frame) {
 			match stream.read_buf(frame).await? {
-				Some(n) if n > 0 => {}
+				Some(n) if n > 0 => {
+					if let Some(s) = track_stats {
+						s.bytes(n as u64);
+					}
+				}
 				_ => return Err(Error::WrongSize),
 			}
 		}

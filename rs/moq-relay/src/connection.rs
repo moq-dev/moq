@@ -76,8 +76,7 @@ impl Connection {
 			.request
 			.with_publish(subscribe)
 			.with_consume(publish)
-			// TODO: Uncomment when observability feature is merged
-			// .with_stats(stats)
+			.with_stats(self.cluster.stats.clone())
 			.ok()
 			.await?;
 

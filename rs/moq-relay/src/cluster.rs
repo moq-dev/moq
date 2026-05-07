@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use moq_lite::{Origin, OriginConsumer, OriginProducer};
+use moq_lite::{Origin, OriginConsumer, OriginProducer, Stats};
 use url::Url;
 
-use crate::AuthToken;
+use crate::{AuthToken, StatsConfig};
 
 /// Configuration for relay clustering.
 ///
@@ -48,14 +48,32 @@ pub struct Cluster {
 	/// All broadcasts, local and remote. Downstream sessions read from here
 	/// (filtered by their auth token) and remote dials both read and write here.
 	pub origin: OriginProducer,
+
+	/// Optional stats aggregator. When configured, every session attached via
+	/// [`Self::publisher`] / [`Self::subscriber`] (and the cluster's own outbound
+	/// dials) will route counter bumps through this handle, publishing per-level
+	/// `.stats/...` broadcasts on the same origin.
+	pub stats: Option<Stats>,
 }
 
 impl Cluster {
 	/// Creates a new cluster with the given configuration and QUIC client.
-	pub fn new(config: ClusterConfig, client: moq_native::Client) -> Self {
+	pub fn new(config: ClusterConfig, stats_config: StatsConfig, client: moq_native::Client) -> Self {
 		let origin = Origin::random().produce();
 		tracing::info!(origin_id = %origin.id, "cluster initialized");
-		Cluster { config, client, origin }
+		let stats = stats_config
+			.name
+			.as_ref()
+			.map(|name| Stats::new(name.clone(), stats_config.levels.max(1), origin.clone()));
+		if let Some(name) = stats_config.name.as_ref() {
+			tracing::info!(name, levels = stats_config.levels, "stats publishing enabled");
+		}
+		Cluster {
+			config,
+			client,
+			origin,
+			stats,
+		}
 	}
 
 	/// Returns an [`OriginConsumer`] scoped to this session's subscribe permissions.
@@ -150,6 +168,7 @@ impl Cluster {
 			.clone()
 			.with_publish(self.origin.consume())
 			.with_consume(self.origin.clone())
+			.with_stats(self.stats.clone())
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;

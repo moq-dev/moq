@@ -743,17 +743,53 @@ impl OriginConsumer {
 	/// The same path won't be announced/unannounced twice, instead it will toggle.
 	/// Returns None if the consumer is closed.
 	///
+	/// Skips paths where any segment starts with `.` (see [`Path::is_hidden`]).
+	/// Use [`Self::announced_hidden`] to receive those instead.
+	///
 	/// Note: The returned path is absolute and will always match this consumer's prefix.
 	pub async fn announced(&mut self) -> Option<OriginAnnounce> {
-		self.updates.recv().await
+		loop {
+			let next = self.updates.recv().await?;
+			if !next.0.is_hidden() {
+				return Some(next);
+			}
+		}
+	}
+
+	/// Like [`Self::announced`] but returns only paths where any segment starts with `.`.
+	pub async fn announced_hidden(&mut self) -> Option<OriginAnnounce> {
+		loop {
+			let next = self.updates.recv().await?;
+			if next.0.is_hidden() {
+				return Some(next);
+			}
+		}
 	}
 
 	/// Returns the next (un)announced broadcast and the absolute path without blocking.
 	///
 	/// Returns None if there is no update available; NOT because the consumer is closed.
 	/// You have to use `is_closed` to check if the consumer is closed.
+	///
+	/// Skips paths where any segment starts with `.` (see [`Path::is_hidden`]).
+	/// Use [`Self::try_announced_hidden`] to receive those instead.
 	pub fn try_announced(&mut self) -> Option<OriginAnnounce> {
-		self.updates.try_recv().ok()
+		loop {
+			let next = self.updates.try_recv().ok()?;
+			if !next.0.is_hidden() {
+				return Some(next);
+			}
+		}
+	}
+
+	/// Like [`Self::try_announced`] but returns only paths where any segment starts with `.`.
+	pub fn try_announced_hidden(&mut self) -> Option<OriginAnnounce> {
+		loop {
+			let next = self.updates.try_recv().ok()?;
+			if next.0.is_hidden() {
+				return Some(next);
+			}
+		}
 	}
 
 	/// Create another consumer with its own announcement cursor over the same origin.
@@ -796,8 +832,13 @@ impl OriginConsumer {
 			return None;
 		}
 
+		let hidden = path.is_hidden();
 		loop {
-			let (announced, broadcast) = consumer.announced().await?;
+			let (announced, broadcast) = if hidden {
+				consumer.announced_hidden().await?
+			} else {
+				consumer.announced().await?
+			};
 			// `scope` narrows by prefix, but we only want an exact-path match.
 			if announced.as_path() == path {
 				if let Some(broadcast) = broadcast {
@@ -1893,5 +1934,86 @@ mod tests {
 			.now_or_never()
 			.expect("must not block");
 		assert!(result.is_none());
+	}
+
+	#[tokio::test]
+	async fn test_announced_filters_hidden() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let visible = Broadcast::new().produce();
+		let hidden = Broadcast::new().produce();
+
+		origin.publish_broadcast("foo/bar", visible.consume());
+		origin.publish_broadcast(".stats/use", hidden.consume());
+
+		let mut consumer = origin.consume();
+
+		// announced() should only see the visible one.
+		consumer.assert_next("foo/bar", &visible.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_announced_hidden_returns_only_hidden() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let visible = Broadcast::new().produce();
+		let hidden = Broadcast::new().produce();
+
+		origin.publish_broadcast("foo/bar", visible.consume());
+		origin.publish_broadcast(".stats/use", hidden.consume());
+
+		let mut consumer = origin.consume();
+
+		// announced_hidden() should only see the hidden one.
+		let (path, broadcast) = consumer
+			.announced_hidden()
+			.now_or_never()
+			.expect("next blocked")
+			.expect("no next");
+		assert_eq!(path, Path::new(".stats/use"));
+		assert!(broadcast.unwrap().is_clone(&hidden.consume()));
+
+		// And nothing else.
+		assert!(consumer.announced_hidden().now_or_never().is_none());
+	}
+
+	#[tokio::test]
+	async fn test_try_announced_filters_hidden() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let visible = Broadcast::new().produce();
+		let hidden = Broadcast::new().produce();
+
+		origin.publish_broadcast(".stats/use", hidden.consume());
+		origin.publish_broadcast("foo/bar", visible.consume());
+
+		let mut consumer = origin.consume();
+
+		// try_announced() should skip the hidden one and return the visible one.
+		let (path, _) = consumer.try_announced().expect("expected announce");
+		assert_eq!(path, Path::new("foo/bar"));
+		assert!(consumer.try_announced().is_none());
+	}
+
+	#[tokio::test]
+	async fn test_announced_broadcast_hidden() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let hidden = Broadcast::new().produce();
+
+		origin.publish_broadcast(".stats/use", hidden.consume());
+
+		// announced_broadcast() must work for hidden paths too.
+		let consumer = origin.consume();
+		let result = consumer
+			.announced_broadcast(".stats/use")
+			.now_or_never()
+			.expect("next blocked");
+		assert!(result.is_some());
 	}
 }

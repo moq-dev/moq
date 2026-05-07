@@ -1,6 +1,6 @@
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, Error, NEGOTIATED, OriginConsumer,
-	OriginProducer, Session, Version, Versions,
+	OriginProducer, Session, Stats, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup,
 };
@@ -10,6 +10,7 @@ use crate::{
 pub struct Client {
 	publish: Option<OriginConsumer>,
 	consume: Option<OriginProducer>,
+	stats: Option<Stats>,
 	versions: Versions,
 }
 
@@ -25,6 +26,13 @@ impl Client {
 
 	pub fn with_consume(mut self, consume: impl Into<Option<OriginProducer>>) -> Self {
 		self.consume = consume.into();
+		self
+	}
+
+	/// Attach a [`Stats`] aggregator. Per-broadcast and per-subscription counters
+	/// will be bumped through this handle for the lifetime of the session.
+	pub fn with_stats(mut self, stats: impl Into<Option<Stats>>) -> Self {
+		self.stats = stats.into();
 		self
 	}
 
@@ -101,6 +109,7 @@ impl Client {
 					None,
 					self.publish.clone(),
 					self.consume.clone(),
+					self.stats.clone(),
 					lite::Version::Lite04,
 				)?;
 
@@ -117,6 +126,7 @@ impl Client {
 					None,
 					self.publish.clone(),
 					self.consume.clone(),
+					self.stats.clone(),
 					lite::Version::Lite03,
 				)?;
 
@@ -162,6 +172,7 @@ impl Client {
 					Some(stream),
 					self.publish.clone(),
 					self.consume.clone(),
+					self.stats.clone(),
 					v,
 				)?
 			}

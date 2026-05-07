@@ -190,6 +190,14 @@ impl<'a> Path<'a> {
 		self.0.is_empty()
 	}
 
+	/// True if any '/'-separated segment starts with '.'.
+	///
+	/// Hidden paths represent infrastructure broadcasts (e.g. `.stats/...`)
+	/// that should not appear in default discovery.
+	pub fn is_hidden(&self) -> bool {
+		self.0.split('/').any(|s| s.starts_with('.'))
+	}
+
 	pub fn len(&self) -> usize {
 		self.0.len()
 	}
@@ -871,6 +879,21 @@ mod tests {
 		assert_eq!(prefix.strip_prefix("foo/").unwrap().as_str(), "bar");
 		assert_eq!(prefix.strip_prefix("foo/bar").unwrap().as_str(), "");
 		assert_eq!(prefix.strip_prefix("foo/bar/").unwrap().as_str(), "");
+	}
+
+	#[test]
+	fn test_is_hidden() {
+		assert!(!Path::new("").is_hidden());
+		assert!(!Path::new("foo").is_hidden());
+		assert!(!Path::new("foo/bar").is_hidden());
+		assert!(!Path::new("foo/bar/baz").is_hidden());
+
+		assert!(Path::new(".foo").is_hidden());
+		assert!(Path::new(".stats").is_hidden());
+		assert!(Path::new(".stats/use").is_hidden());
+		assert!(Path::new(".stats/demo/use").is_hidden());
+		assert!(Path::new("foo/.bar").is_hidden());
+		assert!(Path::new("foo/bar/.baz").is_hidden());
 	}
 
 	#[test]
