@@ -209,16 +209,11 @@ impl GroupProducer {
 
 	/// Abort the group with the given error.
 	///
-	/// No updates can be made after this point.
+	/// No updates can be made after this point. Child frames are independent and
+	/// must be aborted separately if desired; existing frame consumers can still
+	/// finish reading any frames that were already created.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = modify(&self.state)?;
-
-		// Abort all frames still in progress.
-		for frame in guard.frames.iter_mut() {
-			// Ignore errors, we don't care if the frame was already closed.
-			frame.abort(err.clone()).ok();
-		}
-
 		guard.abort = Some(err);
 		guard.close();
 		Ok(())

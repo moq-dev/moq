@@ -107,6 +107,10 @@ match version {
 - **Error handling**: Use `thiserror` with `#[from]` for library crates, `anyhow` for binaries. Always add `#[non_exhaustive]` to public `thiserror` enums.
 - Use `anyhow::Context` (`.context("msg")`) instead of `.map_err(|_| anyhow::anyhow!("msg"))` for error conversion
 
+## Comment Conventions
+
+- Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade" — describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
+
 ## Tooling
 
 - **TypeScript**: Always use `bun` for all package management and script execution (not npm, yarn, or pnpm)
