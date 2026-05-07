@@ -45,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.18](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.17...moq-clock-v0.10.18) - 2026-05-07
+
+### Other
+
+- tighten public API surface and remove deprecated methods ([#1378](https://github.com/moq-dev/moq/pull/1378))
+- Revert moq-lite FETCH/Subscription API changes ([#1372](https://github.com/moq-dev/moq/pull/1372))
+- backport Subscription model API for FETCH readiness ([#1348](https://github.com/moq-dev/moq/pull/1348))
+- hop-based clustering ([#1322](https://github.com/moq-dev/moq/pull/1322))
+
 ## [0.10.17](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.16...moq-clock-v0.10.17) - 2026-04-19
 
 ### Other

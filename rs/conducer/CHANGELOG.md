@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6](https://github.com/moq-dev/moq/compare/conducer-v0.3.5...conducer-v0.3.6) - 2026-05-07
+
+### Other
+
+- Revert the revert ([#1387](https://github.com/moq-dev/moq/pull/1387))
+
 ## [0.3.5](https://github.com/moq-dev/moq/compare/conducer-v0.3.4...conducer-v0.3.5) - 2026-04-19
 
 ### Other
