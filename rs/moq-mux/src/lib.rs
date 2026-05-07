@@ -17,11 +17,16 @@
 //! - [`export`]: subscribe to a moq broadcast and produce media bytes —
 //!   [`Fmp4`](export::Fmp4) yields a single fMP4 / CMAF byte stream (init segment +
 //!   moof+mdat fragments) in timestamp order across tracks.
+//! - [`mod@format`]: filename-style extensions on broadcast names (`.hang`, `.msf`) to
+//!   advertise the catalog format. Producers call [`format::ensure`] before
+//!   publishing, consumers call [`format::detect`] to pick a catalog track.
 
 pub mod catalog;
 pub mod container;
 mod error;
 pub mod export;
+pub mod format;
 pub mod import;
 
 pub use error::*;
+pub use format::CatalogFormat;

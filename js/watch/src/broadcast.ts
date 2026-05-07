@@ -6,7 +6,9 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 
 import { toHang } from "./msf";
 
-export const CATALOG_FORMATS = ["hang", "msf", "manual"] as const;
+// Watch supports the two on-the-wire catalog formats from @moq/hang plus a
+// "manual" mode where the user supplies the catalog directly without fetching.
+export const CATALOG_FORMATS = [...Catalog.CATALOG_FORMATS, "manual"] as const;
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
 export interface BroadcastProps {
@@ -26,8 +28,11 @@ export interface BroadcastProps {
 	// Defaults to false; pass true to wait for an announcement before subscribing.
 	reload?: boolean | Signal<boolean>;
 
-	// Which catalog format to use. Default: "hang"
-	catalogFormat?: CatalogFormat | Signal<CatalogFormat>;
+	// Which catalog format to use. When `undefined` (the default), the format is
+	// auto-detected from the broadcast name extension (`.hang`, `.msf`), falling
+	// back to `"hang"` if the name has no recognized extension. Set to a
+	// specific value to override auto-detection.
+	catalogFormat?: CatalogFormat | Signal<CatalogFormat | undefined>;
 
 	// Initial catalog. Used directly when catalogFormat is "manual"; otherwise it's
 	// overwritten by whatever the fetched catalog track produces. Note: switching
@@ -46,7 +51,8 @@ export class Broadcast {
 	status = new Signal<"offline" | "loading" | "live">("offline");
 	reload: Signal<boolean>;
 
-	catalogFormat: Signal<CatalogFormat>;
+	// `undefined` means auto-detect from the broadcast name extension.
+	catalogFormat: Signal<CatalogFormat | undefined>;
 
 	#active = new Signal<Moq.Broadcast | undefined>(undefined);
 	readonly active: Getter<Moq.Broadcast | undefined> = this.#active;
@@ -70,7 +76,7 @@ export class Broadcast {
 		this.name = Signal.from(props?.name ?? Path.empty());
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.reload = Signal.from(props?.reload ?? false);
-		this.catalogFormat = Signal.from(props?.catalogFormat ?? "hang");
+		this.catalogFormat = Signal.from<CatalogFormat | undefined>(props?.catalogFormat);
 		this.catalog = Signal.from(props?.catalog);
 
 		this.#announced = props?.announced ?? new Signal(new Set());
@@ -78,6 +84,17 @@ export class Broadcast {
 		this.signals.run(this.#runAnnouncedNow.bind(this));
 		this.signals.run(this.#runBroadcast.bind(this));
 		this.signals.run(this.#runCatalog.bind(this));
+	}
+
+	// Append the catalog-format extension to `name` if it doesn't already have
+	// one, so consumers stay in sync with publishers that auto-append `.hang`.
+	// An explicit `catalogFormat` of `"msf"` chooses `.msf`; everything else
+	// (including `"manual"` and the `undefined` auto-detect default) chooses
+	// `.hang`.
+	#resolveName(name: Moq.Path.Valid, explicit: CatalogFormat | undefined): Moq.Path.Valid {
+		if (Catalog.detectFormat(name) !== undefined) return name;
+		const fallback: Catalog.CatalogFormat = explicit === "msf" ? "msf" : "hang";
+		return Path.from(Catalog.ensureExtension(name, fallback));
 	}
 
 	#runAnnouncedNow(effect: Effect): void {
@@ -97,7 +114,8 @@ export class Broadcast {
 			return;
 		}
 
-		const name = effect.get(this.name);
+		const explicit = effect.get(this.catalogFormat);
+		const name = this.#resolveName(effect.get(this.name), explicit);
 		const announced = effect.get(this.#announced);
 		this.#announcedNow.set(announced.has(name));
 	}
@@ -111,7 +129,8 @@ export class Broadcast {
 		const conn = effect.get(this.connection);
 		if (!conn) return;
 
-		const name = effect.get(this.name);
+		const explicit = effect.get(this.catalogFormat);
+		const name = this.#resolveName(effect.get(this.name), explicit);
 
 		const broadcast = conn.consume(name);
 		effect.cleanup(() => broadcast.close());
@@ -123,7 +142,12 @@ export class Broadcast {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
-		const format = effect.get(this.catalogFormat);
+		const explicit = effect.get(this.catalogFormat);
+		const name = effect.get(this.name);
+		// Explicit override beats name-derived auto-detection. When neither is
+		// set we fall back to the default ("hang"), keeping legacy names that
+		// have no extension working.
+		const format: CatalogFormat = explicit ?? Catalog.detectFormat(name) ?? Catalog.DEFAULT_CATALOG_FORMAT;
 
 		if (format === "manual") {
 			// User-supplied catalog; no track to fetch.

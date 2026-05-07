@@ -69,14 +69,14 @@ a real bundler (the examples below).
 - `paused` — Pause playback (boolean)
 - `muted` — Mute audio (boolean)
 - `volume` — Audio volume (0–1, default: 1)
-- `catalog-format` — Catalog format: `"hang"` (default), `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself)
+- `catalog-format` — Catalog format: `"hang"`, `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself). When omitted, the format is auto-detected from the broadcast `name` extension (`.hang` or `.msf`), falling back to `"hang"`.
 
 ## Catalog Formats
 
 `@moq/watch` can consume either the default [hang](/concept/layer/hang) catalog
-or [MSF](/concept/standard/msf) (MoQ Streaming Format). Set `catalog-format="msf"`
-on the element, or assign the `catalogFormat` signal on the `Broadcast` to
-switch formats at runtime:
+or [MSF](/concept/standard/msf) (MoQ Streaming Format). The format is detected
+from the broadcast name extension by default — `room/alice.hang` uses hang,
+`room/alice.msf` uses MSF. Set `catalog-format` explicitly to override:
 
 ```html
 <moq-watch

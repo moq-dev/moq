@@ -6,10 +6,9 @@ import { MultiBackend } from "./backend";
 import { Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
 import type { Latency } from "./sync";
 
-const DEFAULT_CATALOG_FORMAT: CatalogFormat = "hang";
-
-function parseCatalogFormat(value: string | null): CatalogFormat {
-	return CATALOG_FORMATS.find((f) => f === value) ?? DEFAULT_CATALOG_FORMAT;
+function parseCatalogFormat(value: string | null): CatalogFormat | undefined {
+	if (value === null) return undefined;
+	return CATALOG_FORMATS.find((f) => f === value);
 }
 
 const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
@@ -248,11 +247,11 @@ export default class MoqWatch extends HTMLElement {
 		this.backend.latency.set(value as Time.Milli);
 	}
 
-	get catalogFormat(): CatalogFormat {
+	get catalogFormat(): CatalogFormat | undefined {
 		return this.broadcast.catalogFormat.peek();
 	}
 
-	set catalogFormat(value: CatalogFormat) {
+	set catalogFormat(value: CatalogFormat | undefined) {
 		this.broadcast.catalogFormat.set(value);
 	}
 
