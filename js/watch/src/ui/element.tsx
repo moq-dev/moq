@@ -23,11 +23,10 @@ export function WatchUI(props: { watch: MoqWatch }) {
 								context={WatchUIContext}
 								getElement={(ctx) => {
 									if (!ctx) return undefined;
-									const backend = ctx.moqWatch.backend;
 									return {
-										audio: backend.audio,
-										video: backend.video,
-										network: backend.network,
+										audio: ctx.moqWatch.backend.audio,
+										video: ctx.moqWatch.backend.video,
+										connection: ctx.moqWatch.connection.established,
 									};
 								}}
 							/>

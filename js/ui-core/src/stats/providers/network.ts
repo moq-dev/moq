@@ -12,7 +12,7 @@ export class NetworkProvider extends BaseProvider {
 	setup(context: ProviderContext): void {
 		this.context = context;
 
-		if (!this.props.network) {
+		if (!this.props.connection) {
 			context.setDisplayData("N/A");
 			return;
 		}
@@ -22,15 +22,16 @@ export class NetworkProvider extends BaseProvider {
 	}
 
 	private updateDisplayData(): void {
-		if (!this.context || !this.props.network) {
-			return;
-		}
+		if (!this.context) return;
 
-		const parts = [
-			formatBandwidth(this.props.network.recvBandwidth.peek(), "down"),
-			formatBandwidth(this.props.network.sendBandwidth.peek(), "up"),
-			formatRtt(this.props.network.rtt.peek()),
-		].filter((part): part is string => part !== null);
+		const conn = this.props.connection?.peek();
+		const parts = conn
+			? [
+					formatBandwidth(conn.recvBandwidth?.peek(), "down"),
+					formatBandwidth(conn.sendBandwidth?.peek(), "up"),
+					formatRtt(conn.rtt?.peek()),
+				].filter((part): part is string => part !== null)
+			: [];
 
 		this.context.setDisplayData(parts.length > 0 ? parts.join("\n") : "N/A");
 	}

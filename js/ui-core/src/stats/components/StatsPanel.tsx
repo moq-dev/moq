@@ -45,7 +45,7 @@ export const StatsPanel = (props: StatsPanelProps) => {
 						svg={icon()}
 						audio={props.audio}
 						video={props.video}
-						network={props.network}
+						connection={props.connection}
 					/>
 				)}
 			</For>

@@ -1,3 +1,4 @@
+import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 
@@ -9,7 +10,7 @@ const FALLBACK_JITTER = 100 as Time.Milli;
 
 export interface SyncProps {
 	latency?: Latency | Signal<Latency>;
-	rtt?: Signal<number | undefined>;
+	connection?: Signal<Moq.Connection.Established | undefined>;
 	audio?: Time.Milli | Signal<Time.Milli | undefined>;
 	video?: Time.Milli | Signal<Time.Milli | undefined>;
 }
@@ -46,8 +47,8 @@ export class Sync {
 	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
 	#late = new Map<string, { count: number; maxMs: number }>();
 
-	// RTT signal from the connection (PROBE or getStats).
-	rtt?: Signal<number | undefined>;
+	// The connection used for "real-time" jitter: PROBE supplies RTT.
+	#connection?: Signal<Moq.Connection.Established | undefined>;
 
 	// Minimum RTT seen, used as the baseline for jitter calculation.
 	// Avoids inflating jitter due to bufferbloat.
@@ -58,7 +59,7 @@ export class Sync {
 	constructor(props?: SyncProps) {
 		this.latency = Signal.from(props?.latency ?? ("real-time" as Latency));
 		this.jitter = new Signal<Time.Milli>(FALLBACK_JITTER);
-		this.rtt = props?.rtt;
+		this.#connection = props?.connection;
 		this.audio = Signal.from(props?.audio);
 		this.video = Signal.from(props?.video);
 
@@ -78,19 +79,18 @@ export class Sync {
 			return;
 		}
 
-		// "real-time" mode: compute jitter from RTT.
-		if (this.rtt) {
-			const rtt = effect.get(this.rtt);
-			if (rtt !== undefined) {
-				// Track minimum RTT as baseline, ignoring bufferbloat.
-				this.#minRtt = this.#minRtt !== undefined ? Math.min(this.#minRtt, rtt) : rtt;
+		// "real-time" mode: compute jitter from RTT on the established connection.
+		const conn = this.#connection ? effect.get(this.#connection) : undefined;
+		const rttSignal = conn?.rtt;
+		const rtt = rttSignal ? effect.get(rttSignal) : undefined;
+		if (rtt !== undefined) {
+			// Track minimum RTT as baseline, ignoring bufferbloat.
+			this.#minRtt = this.#minRtt !== undefined ? Math.min(this.#minRtt, rtt) : rtt;
 
-				// Buffer enough for a retransmit (1 RTT for ACK + retransmit).
-				const jitter = Math.max(MIN_JITTER, this.#minRtt * 1.25) as Time.Milli;
-				this.jitter.set(jitter);
-
-				return;
-			}
+			// Buffer enough for a retransmit (1 RTT for ACK + retransmit).
+			const jitter = Math.max(MIN_JITTER, this.#minRtt * 1.25) as Time.Milli;
+			this.jitter.set(jitter);
+			return;
 		}
 
 		// No RTT available: fall back to static default.
