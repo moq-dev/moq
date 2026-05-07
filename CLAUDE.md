@@ -109,7 +109,7 @@ match version {
 
 ## Comment Conventions
 
-- Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade" — describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
+- Comments must reflect the **current** state of the code, not its history. Don't write "X no longer does Y" or "this used to cascade". Describe what the code does today, or delete the comment. Migration context belongs in commit messages and PR descriptions, where it ages with the change rather than rotting in the source.
 
 ## Tooling
 
