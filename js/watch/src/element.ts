@@ -12,8 +12,33 @@ function parseCatalogFormat(value: string | null): CatalogFormat {
 	return CATALOG_FORMATS.find((f) => f === value) ?? DEFAULT_CATALOG_FORMAT;
 }
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter", "catalog-format"] as const;
+function parsePixelsMode(value: string | null): PixelsMode {
+	if (value === null || value === "" || value === "auto") return "auto";
+	const parsed = Number.parseInt(value, 10);
+	if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+	return "auto";
+}
+
+const OBSERVED = [
+	"url",
+	"name",
+	"paused",
+	"volume",
+	"muted",
+	"reload",
+	"latency",
+	"jitter",
+	"catalog-format",
+	"pixels",
+] as const;
 type Observed = (typeof OBSERVED)[number];
+
+/**
+ * Pixel budget for video rendition selection.
+ * - `"auto"` tracks the rendered size of the element (default).
+ * - A non-negative number caps selection at that pixel count.
+ */
+export type PixelsMode = number | "auto";
 
 // Close everything when this element is garbage collected.
 // This is primarily to avoid a console.warn that we didn't close() before GC.
@@ -35,6 +60,10 @@ export default class MoqWatch extends HTMLElement {
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
+
+	// Controls the video pixel budget. "auto" derives it from the element's
+	// rendered size so we don't download a 1080p stream for a 360p slot.
+	#pixelsMode = new Signal<PixelsMode>("auto");
 
 	// Expose the Effect class, so users can easily create effects scoped to this element.
 	signals = new Effect();
@@ -127,6 +156,43 @@ export default class MoqWatch extends HTMLElement {
 				this.setAttribute("latency", jitter.toString());
 			}
 		});
+
+		this.signals.run(this.#runPixelBudget.bind(this));
+	}
+
+	#setPixels(pixels: number | undefined): void {
+		this.backend.video.source.target.update((prev) => ({ ...prev, pixels }));
+	}
+
+	#runPixelBudget(effect: Effect): void {
+		const mode = effect.get(this.#pixelsMode);
+
+		if (typeof mode === "number") {
+			this.#setPixels(mode);
+			return;
+		}
+
+		// Auto mode: track the element's rendered size, scaled by devicePixelRatio
+		// so high-DPI screens still get appropriately sharp renditions.
+		const update = (width: number, height: number) => {
+			if (width <= 0 || height <= 0) return;
+			const dpr = window.devicePixelRatio || 1;
+			this.#setPixels(Math.round(width * dpr * height * dpr));
+		};
+
+		const observer = new ResizeObserver((entries) => {
+			const entry = entries[0];
+			if (!entry) return;
+			update(entry.contentRect.width, entry.contentRect.height);
+		});
+
+		observer.observe(this);
+		effect.cleanup(() => observer.disconnect());
+
+		// Seed with the current size in case the observer doesn't fire immediately
+		// (e.g. the element is still 0x0 when we attach).
+		const rect = this.getBoundingClientRect();
+		update(rect.width, rect.height);
 	}
 
 	// Annoyingly, we have to use these callbacks to figure out when the element is connected to the DOM.
@@ -176,6 +242,8 @@ export default class MoqWatch extends HTMLElement {
 			this.#setLatencyNumber(newValue);
 		} else if (name === "catalog-format") {
 			this.broadcast.catalogFormat.set(parseCatalogFormat(newValue));
+		} else if (name === "pixels") {
+			this.#pixelsMode.set(parsePixelsMode(newValue));
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -254,6 +322,19 @@ export default class MoqWatch extends HTMLElement {
 
 	set catalogFormat(value: CatalogFormat) {
 		this.broadcast.catalogFormat.set(value);
+	}
+
+	/**
+	 * Maximum pixel count (width * height) used to cap rendition selection.
+	 * `"auto"` (the default) tracks the element's rendered size scaled by
+	 * `devicePixelRatio`, so a 360px slot won't pull a 1080p stream.
+	 */
+	get pixels(): PixelsMode {
+		return this.#pixelsMode.peek();
+	}
+
+	set pixels(value: PixelsMode | null | undefined) {
+		this.#pixelsMode.set(value == null ? "auto" : value);
 	}
 
 	/**
