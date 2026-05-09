@@ -24,7 +24,7 @@ use std::{
 
 /// Groups older than this are evicted from the track cache (unless they are the max_sequence group).
 // TODO: Replace with a configurable cache size.
-const MAX_GROUP_AGE: Duration = Duration::from_secs(30);
+const MAX_GROUP_AGE: Duration = Duration::from_secs(5);
 
 /// A track is a collection of groups, delivered out-of-order until expired.
 #[derive(Clone, Debug, PartialEq, Eq)]
