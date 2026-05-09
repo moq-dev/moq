@@ -8,8 +8,13 @@ import { toHang } from "./msf";
 
 // Watch supports the two on-the-wire catalog formats from @moq/hang plus a
 // "manual" mode where the user supplies the catalog directly without fetching.
-export const CATALOG_FORMATS = [...Catalog.CATALOG_FORMATS, "manual"] as const;
+export const CATALOG_FORMATS = [...Catalog.FORMATS, "manual"] as const;
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
+
+export function parseCatalogFormat(value: string | null): CatalogFormat | undefined {
+	if (value === null) return undefined;
+	return CATALOG_FORMATS.find((f) => f === value);
+}
 
 export interface BroadcastProps {
 	connection?: Moq.Connection.Established | Signal<Moq.Connection.Established | undefined>;
@@ -37,7 +42,7 @@ export interface BroadcastProps {
 	// Initial catalog. Used directly when catalogFormat is "manual"; otherwise it's
 	// overwritten by whatever the fetched catalog track produces. Note: switching
 	// catalogFormat between "manual" and a fetched format will reset this signal
-	// to undefined when the fetched-format spawn tears down — set the catalog
+	// to undefined when the fetched-format spawn tears down. Set the catalog
 	// after switching formats, not before.
 	catalog?: Catalog.Root | Signal<Catalog.Root | undefined>;
 }
@@ -86,17 +91,6 @@ export class Broadcast {
 		this.signals.run(this.#runCatalog.bind(this));
 	}
 
-	// Append the catalog-format extension to `name` if it doesn't already have
-	// one, so consumers stay in sync with publishers that auto-append `.hang`.
-	// An explicit `catalogFormat` of `"msf"` chooses `.msf`; everything else
-	// (including `"manual"` and the `undefined` auto-detect default) chooses
-	// `.hang`.
-	#resolveName(name: Moq.Path.Valid, explicit: CatalogFormat | undefined): Moq.Path.Valid {
-		if (Catalog.detectFormat(name) !== undefined) return name;
-		const fallback: Catalog.CatalogFormat = explicit === "msf" ? "msf" : "hang";
-		return Path.from(Catalog.ensureExtension(name, fallback));
-	}
-
 	#runAnnouncedNow(effect: Effect): void {
 		const reload = effect.get(this.reload);
 		if (!reload) {
@@ -114,8 +108,7 @@ export class Broadcast {
 			return;
 		}
 
-		const explicit = effect.get(this.catalogFormat);
-		const name = this.#resolveName(effect.get(this.name), explicit);
+		const name = effect.get(this.name);
 		const announced = effect.get(this.#announced);
 		this.#announcedNow.set(announced.has(name));
 	}
@@ -129,9 +122,7 @@ export class Broadcast {
 		const conn = effect.get(this.connection);
 		if (!conn) return;
 
-		const explicit = effect.get(this.catalogFormat);
-		const name = this.#resolveName(effect.get(this.name), explicit);
-
+		const name = effect.get(this.name);
 		const broadcast = conn.consume(name);
 		effect.cleanup(() => broadcast.close());
 
@@ -142,12 +133,12 @@ export class Broadcast {
 		const enabled = effect.get(this.enabled);
 		if (!enabled) return;
 
-		const explicit = effect.get(this.catalogFormat);
+		const catalogFormat = effect.get(this.catalogFormat);
 		const name = effect.get(this.name);
 		// Explicit override beats name-derived auto-detection. When neither is
-		// set we fall back to the default ("hang"), keeping legacy names that
-		// have no extension working.
-		const format: CatalogFormat = explicit ?? Catalog.detectFormat(name) ?? Catalog.DEFAULT_CATALOG_FORMAT;
+		// set we fall back to the default, keeping legacy names that have no
+		// extension working.
+		const format: CatalogFormat = catalogFormat ?? Catalog.detectFormat(name) ?? Catalog.DEFAULT_FORMAT;
 
 		if (format === "manual") {
 			// User-supplied catalog; no track to fetch.

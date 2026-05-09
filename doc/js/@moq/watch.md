@@ -39,7 +39,7 @@ build step:
 </moq-watch-ui>
 ```
 
-Pin a version range in the URL for production — e.g.
+Pin a version range in the URL for production, e.g.
 `https://cdn.jsdelivr.net/npm/@moq/watch@0.2/element.js/+esm`. [esm.sh](https://esm.sh)
 (`https://esm.sh/@moq/watch/element`) works the same way if you prefer it.
 
@@ -63,19 +63,19 @@ a real bundler (the examples below).
 
 **Attributes:**
 
-- `url` (required) — Relay server URL
-- `name` (required) — Broadcast name
-- `controls` — Show playback controls (boolean)
-- `paused` — Pause playback (boolean)
-- `muted` — Mute audio (boolean)
-- `volume` — Audio volume (0–1, default: 1)
-- `catalog-format` — Catalog format: `"hang"`, `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself). When omitted, the format is auto-detected from the broadcast `name` extension (`.hang` or `.msf`), falling back to `"hang"`.
+- `url` (required): Relay server URL
+- `name` (required): Broadcast name
+- `controls`: Show playback controls (boolean)
+- `paused`: Pause playback (boolean)
+- `muted`: Mute audio (boolean)
+- `volume`: Audio volume (0 to 1, default: 1)
+- `catalog-format`: Catalog format. One of `"hang"`, `"msf"` (see [MSF](/concept/standard/msf)), or `"manual"` (supply the catalog yourself). When omitted, the format is auto-detected from the broadcast `name` extension (`.hang` or `.msf`), falling back to `"hang"`.
 
 ## Catalog Formats
 
 `@moq/watch` can consume either the default [hang](/concept/layer/hang) catalog
 or [MSF](/concept/standard/msf) (MoQ Streaming Format). The format is detected
-from the broadcast name extension by default — `room/alice.hang` uses hang,
+from the broadcast name extension by default. `room/alice.hang` uses hang,
 `room/alice.msf` uses MSF. Set `catalog-format` explicitly to override:
 
 ```html
@@ -105,7 +105,7 @@ broadcast.catalogFormat.set("msf");
 
 Use `catalog-format="manual"` (or `catalogFormat: "manual"`) to skip the catalog
 track entirely and supply a `Catalog.Root` directly. The connection and
-broadcast name are still required — they're used to subscribe to the media
+broadcast name are still required, since they're used to subscribe to the media
 tracks named by the catalog. Update the catalog at any time by writing to
 the signal:
 
@@ -174,7 +174,7 @@ const broadcast = new Watch.Broadcast({
 
 ## Related Packages
 
-- **[@moq/publish](/js/@moq/publish)** — Publish media to MoQ broadcasts
-- **[@moq/hang](/js/@moq/hang/)** — Core media library (catalog, container, support)
-- **[@moq/ui-core](/js/@moq/ui-core)** — Shared UI primitives
-- **[@moq/lite](/js/@moq/lite)** — Core pub/sub transport protocol
+- **[@moq/publish](/js/@moq/publish)**: Publish media to MoQ broadcasts
+- **[@moq/hang](/js/@moq/hang/)**: Core media library (catalog, container, support)
+- **[@moq/ui-core](/js/@moq/ui-core)**: Shared UI primitives
+- **[@moq/lite](/js/@moq/lite)**: Core pub/sub transport protocol

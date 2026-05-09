@@ -1,33 +1,19 @@
 // Filename-style format extensions for broadcast names.
 //
 // Broadcast names use a filename-style suffix to advertise their catalog format,
-// e.g. `demo/bbb.hang` or `demo/bbb.msf`. Producers append the suffix when missing,
-// consumers parse it to pick a catalog track without explicit configuration.
+// e.g. `demo/bbb.hang` or `demo/bbb.msf`. Consumers parse the suffix to pick a
+// catalog track without explicit configuration; publishers should include the
+// suffix in the name they publish so consumers can detect it.
 
-export const CATALOG_FORMATS = ["hang", "msf"] as const;
-export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
+export const FORMATS = ["hang", "msf"] as const;
+export type Format = (typeof FORMATS)[number];
 
-export const DEFAULT_CATALOG_FORMAT: CatalogFormat = "hang";
-
-const EXTENSIONS: Record<CatalogFormat, string> = {
-	hang: ".hang",
-	msf: ".msf",
-};
-
-export function extensionFor(format: CatalogFormat): string {
-	return EXTENSIONS[format];
-}
+export const DEFAULT_FORMAT: Format = "hang";
 
 /** Detect the catalog format from a broadcast name suffix, or `undefined` if the name has no recognized extension. */
-export function detectFormat(name: string): CatalogFormat | undefined {
-	for (const format of CATALOG_FORMATS) {
-		if (name.endsWith(EXTENSIONS[format])) return format;
+export function detectFormat(name: string): Format | undefined {
+	for (const format of FORMATS) {
+		if (name.endsWith(`.${format}`)) return format;
 	}
 	return undefined;
-}
-
-/** Return `name` unchanged if it already has a recognized extension, otherwise append the fallback extension. */
-export function ensureExtension(name: string, fallback: CatalogFormat = DEFAULT_CATALOG_FORMAT): string {
-	if (detectFormat(name) !== undefined) return name;
-	return name + EXTENSIONS[fallback];
 }

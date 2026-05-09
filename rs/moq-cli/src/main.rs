@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 			name,
 			format,
 		} => {
-			let name = ensure_format_extension(name);
+			warn_if_missing_format(&name);
 			let publish = Publish::new(&format)?;
 			let web_bind = config.bind.clone().unwrap_or_else(|| "[::]:443".to_string());
 
@@ -136,7 +136,14 @@ async fn main() -> anyhow::Result<()> {
 			name,
 			format,
 		} => {
-			let name = ensure_format_extension(name);
+			if moq_mux::catalog::CatalogFormat::detect(&name).is_none() {
+				tracing::warn!(
+					name,
+					"broadcast name has no catalog format extension; consumers will fall back to {:?}. Append `{}` to make the format explicit.",
+					moq_mux::catalog::CatalogFormat::DEFAULT,
+					moq_mux::catalog::CatalogFormat::DEFAULT.extension(),
+				);
+			}
 			let publish = Publish::new(&format)?;
 			let client = config.init()?;
 
@@ -151,7 +158,6 @@ async fn main() -> anyhow::Result<()> {
 			name,
 			args,
 		} => {
-			let name = ensure_format_extension(name);
 			let client = config.init()?;
 
 			#[cfg(feature = "iroh")]
@@ -162,14 +168,14 @@ async fn main() -> anyhow::Result<()> {
 	}
 }
 
-/// Append a `.hang` extension to the broadcast name if no recognized format
-/// extension is already present. Logs the resolved name when it differs.
-fn ensure_format_extension(name: String) -> String {
-	let resolved = moq_mux::format::ensure(&name, moq_mux::CatalogFormat::DEFAULT);
-	if resolved != name {
-		tracing::info!(original = %name, resolved = %resolved, "appended catalog format extension to broadcast name");
+fn warn_if_missing_format(name: &str) {
+	if moq_mux::catalog::CatalogFormat::detect(name).is_none() {
+		tracing::warn!(
+			name,
+			"broadcast name has no catalog format extension. Append `{}` to make the format explicit.",
+			moq_mux::catalog::CatalogFormat::DEFAULT.extension(),
+		);
 	}
-	resolved
 }
 
 async fn run_subscribe(client: moq_native::Client, url: Url, name: String, args: SubscribeArgs) -> anyhow::Result<()> {

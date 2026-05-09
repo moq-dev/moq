@@ -58,14 +58,17 @@ export class Broadcast {
 		const [_enabled, connection] = values;
 
 		const name = effect.get(this.name);
-		// Auto-append `.hang` so consumers can detect the catalog format from the
-		// broadcast name. If the user already supplied an extension we leave it.
-		const resolvedName = Moq.Path.from(Catalog.ensureExtension(name));
+		if (Catalog.detectFormat(name) === undefined) {
+			console.warn(
+				`broadcast name ${JSON.stringify(name)} has no catalog format extension. ` +
+					`Append ".${Catalog.DEFAULT_FORMAT}" to make the format explicit.`,
+			);
+		}
 
 		const broadcast = new Moq.Broadcast();
 		effect.cleanup(() => broadcast.close());
 
-		connection.publish(resolvedName, broadcast);
+		connection.publish(name, broadcast);
 
 		effect.spawn(this.#runBroadcast.bind(this, broadcast, effect));
 	}
