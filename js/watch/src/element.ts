@@ -61,8 +61,9 @@ export default class MoqWatch extends HTMLElement {
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
-	// Controls the video pixel budget. "auto" derives it from the element's
-	// rendered size so we don't download a 1080p stream for a 360p slot.
+	// Controls the video selection cap. "auto" derives maxWidth/maxHeight from
+	// the element's rendered size so we don't download a 1080p stream for a
+	// 360p slot. A number pins a total-pixel-area budget instead.
 	#pixelsMode = new Signal<PixelsMode>("auto");
 
 	// Expose the Effect class, so users can easily create effects scoped to this element.
@@ -160,24 +161,27 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.run(this.#runPixelBudget.bind(this));
 	}
 
-	#setPixels(pixels: number | undefined): void {
-		this.backend.video.source.target.update((prev) => ({ ...prev, pixels }));
-	}
-
 	#runPixelBudget(effect: Effect): void {
+		const target = this.backend.video.source.target;
 		const mode = effect.get(this.#pixelsMode);
 
 		if (typeof mode === "number") {
-			this.#setPixels(mode);
+			// Numeric override: pin a total pixel-area budget and let the dimensions
+			// filter sit out so the two don't fight each other.
+			target.update((prev) => ({ ...prev, pixels: mode, maxWidth: undefined, maxHeight: undefined }));
 			return;
 		}
 
 		// Auto mode: track the element's rendered size, scaled by devicePixelRatio
-		// so high-DPI screens still get appropriately sharp renditions.
+		// so high-DPI screens still get appropriately sharp renditions. We set
+		// maxWidth/maxHeight (rather than pixels) so aspect-ratio mismatches don't
+		// pick a square rendition for a widescreen slot.
 		const update = (width: number, height: number) => {
 			if (width <= 0 || height <= 0) return;
 			const dpr = window.devicePixelRatio || 1;
-			this.#setPixels(Math.round(width * dpr * height * dpr));
+			const maxWidth = Math.round(width * dpr);
+			const maxHeight = Math.round(height * dpr);
+			target.update((prev) => ({ ...prev, pixels: undefined, maxWidth, maxHeight }));
 		};
 
 		const observer = new ResizeObserver((entries) => {
@@ -325,9 +329,11 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	/**
-	 * Maximum pixel count (width * height) used to cap rendition selection.
-	 * `"auto"` (the default) tracks the element's rendered size scaled by
-	 * `devicePixelRatio`, so a 360px slot won't pull a 1080p stream.
+	 * Caps rendition selection.
+	 * - `"auto"` (the default) tracks the element's rendered size and feeds
+	 *   `maxWidth`/`maxHeight` into the target, scaled by `devicePixelRatio`.
+	 * - A non-negative number pins `target.pixels` (total area) instead, useful
+	 *   when you want a bandwidth-style budget regardless of aspect ratio.
 	 */
 	get pixels(): PixelsMode {
 		return this.#pixelsMode.peek();

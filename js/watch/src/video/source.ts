@@ -19,8 +19,14 @@ export type Target = {
 	// Optional manual override for the selected rendition name.
 	name?: string;
 
-	// The desired size of the video in pixels.
+	// Maximum desired pixel area (codedWidth * codedHeight).
 	pixels?: number;
+
+	// Maximum desired coded width in pixels.
+	maxWidth?: number;
+
+	// Maximum desired coded height in pixels.
+	maxHeight?: number;
 
 	// Maximum desired bitrate in bits per second.
 	bitrate?: number;
@@ -62,6 +68,47 @@ function byPixels(target: number): RenditionFilter {
 		}
 
 		// Degrade to smallest over-budget resolution.
+		if (rest.length > 0) {
+			rest.sort((a, b) => a.size - b.size);
+			return [rest[0].name];
+		}
+
+		// No entries had resolution metadata — return all names unranked.
+		return entries.map(([name]) => name);
+	};
+}
+
+/**
+ * Filter and rank renditions by maximum coded dimensions.
+ * Returns renditions where codedWidth <= maxWidth AND codedHeight <= maxHeight
+ * (each cap is optional). Within-budget renditions rank by area (largest first).
+ * If nothing fits, falls back to the single smallest over-budget rendition.
+ */
+function byDimensions(maxWidth?: number, maxHeight?: number): RenditionFilter {
+	return (entries) => {
+		const within: { name: string; size: number }[] = [];
+		const rest: { name: string; size: number }[] = [];
+
+		for (const [name, config] of entries) {
+			if (!config.codedWidth || !config.codedHeight) continue;
+			const size = config.codedWidth * config.codedHeight;
+			const fitsWidth = maxWidth == null || config.codedWidth <= maxWidth;
+			const fitsHeight = maxHeight == null || config.codedHeight <= maxHeight;
+			if (fitsWidth && fitsHeight) {
+				within.push({ name, size });
+			} else {
+				rest.push({ name, size });
+			}
+		}
+
+		// Best quality within budget
+		within.sort((a, b) => b.size - a.size);
+
+		if (within.length > 0) {
+			return within.map((e) => e.name);
+		}
+
+		// Degrade to smallest over-budget rendition.
 		if (rest.length > 0) {
 			rest.sort((a, b) => a.size - b.size);
 			return [rest[0].name];
@@ -267,6 +314,9 @@ export class Source {
 
 		if (target?.pixels != null) {
 			filters.push(byPixels(target.pixels));
+		}
+		if (target?.maxWidth != null || target?.maxHeight != null) {
+			filters.push(byDimensions(target.maxWidth, target.maxHeight));
 		}
 		if (target?.bitrate != null) {
 			filters.push(byBitrate(target.bitrate));
