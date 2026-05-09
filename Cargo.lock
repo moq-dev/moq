@@ -3568,7 +3568,7 @@ version = "0.0.2"
 
 [[package]]
 name = "moq-ffi"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "bytes",
  "hang",
