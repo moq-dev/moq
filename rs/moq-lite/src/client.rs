@@ -156,10 +156,21 @@ impl Client {
 
 		let recv_bw = match version {
 			Version::Lite(v) => {
-				let stream = stream.with_version(v);
+				// Lite03+ has no SessionInfo protocol on the control stream.
+				// When it's negotiated via the legacy SETUP fallback path (because
+				// ALPN selection wasn't available, e.g. Firefox WebTransport), we
+				// gracefully close the SETUP stream after the exchange and run the
+				// session as if it had been ALPN-negotiated.
+				let setup_stream = match v {
+					lite::Version::Lite01 | lite::Version::Lite02 => Some(stream.with_version(v)),
+					_ => {
+						let _ = stream.writer.finish();
+						None
+					}
+				};
 				lite::start(
 					session.clone(),
-					Some(stream),
+					setup_stream,
 					self.publish.clone(),
 					self.consume.clone(),
 					v,
@@ -403,6 +414,7 @@ mod tests {
 		assert_eq!(
 			advertised,
 			vec![
+				Version::Lite(lite::Version::Lite03),
 				Version::Lite(lite::Version::Lite02),
 				Version::Lite(lite::Version::Lite01),
 				Version::Ietf(ietf::Version::Draft14),
@@ -415,9 +427,62 @@ mod tests {
 		assert_eq!(code, Error::Cancel.to_code());
 	}
 
+	async fn run_alpn_lite_fallback_lite03_case(protocol: Option<&'static str>) {
+		// Server negotiates Lite03 via the legacy SETUP versions list.
+		// No SessionInfo frame is appended — Lite03+ has no session stream protocol.
+		let mut server_bytes = Vec::new();
+		let server = setup::Server {
+			version: Version::Lite(lite::Version::Lite03).into(),
+			parameters: Bytes::new(),
+		};
+		server
+			.encode(&mut server_bytes, Version::Ietf(ietf::Version::Draft14))
+			.unwrap();
+
+		let fake = FakeSession::new(protocol, server_bytes);
+		let client = Client::new().with_versions(
+			[
+				Version::Lite(lite::Version::Lite04),
+				Version::Lite(lite::Version::Lite03),
+				Version::Lite(lite::Version::Lite02),
+				Version::Lite(lite::Version::Lite01),
+				Version::Ietf(ietf::Version::Draft14),
+			]
+			.into(),
+		);
+
+		let session = client.connect(fake.clone()).await.unwrap();
+		assert_eq!(session.version(), Version::Lite(lite::Version::Lite03));
+
+		// Client must advertise Lite04, Lite03 (the whole NEGOTIATED set intersection).
+		let mut setup_bytes = Bytes::from(fake.control_writes());
+		let setup = setup::Client::decode(&mut setup_bytes, Version::Ietf(ietf::Version::Draft14)).unwrap();
+		let advertised: Vec<Version> = setup.versions.iter().map(|v| Version::try_from(*v).unwrap()).collect();
+		assert_eq!(
+			advertised,
+			vec![
+				Version::Lite(lite::Version::Lite04),
+				Version::Lite(lite::Version::Lite03),
+				Version::Lite(lite::Version::Lite02),
+				Version::Lite(lite::Version::Lite01),
+				Version::Ietf(ietf::Version::Draft14),
+			]
+		);
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn alpn_lite_falls_back_to_draft14_and_switches_version_post_setup() {
 		run_alpn_lite_fallback_case(Some(ALPN_LITE)).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn alpn_lite_fallback_negotiates_lite03() {
+		run_alpn_lite_fallback_lite03_case(Some(ALPN_LITE)).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn no_alpn_fallback_negotiates_lite03() {
+		run_alpn_lite_fallback_lite03_case(None).await;
 	}
 
 	#[tokio::test(start_paused = true)]
