@@ -136,14 +136,7 @@ async fn main() -> anyhow::Result<()> {
 			name,
 			format,
 		} => {
-			if moq_mux::catalog::CatalogFormat::detect(&name).is_none() {
-				tracing::warn!(
-					name,
-					"broadcast name has no catalog format extension; consumers will fall back to {:?}. Append `{}` to make the format explicit.",
-					moq_mux::catalog::CatalogFormat::DEFAULT,
-					moq_mux::catalog::CatalogFormat::DEFAULT.extension(),
-				);
-			}
+			warn_if_missing_format(&name);
 			let publish = Publish::new(&format)?;
 			let client = config.init()?;
 
@@ -170,11 +163,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn warn_if_missing_format(name: &str) {
 	if moq_mux::catalog::CatalogFormat::detect(name).is_none() {
-		tracing::warn!(
-			name,
-			"broadcast name has no catalog format extension. Append `{}` to make the format explicit.",
-			moq_mux::catalog::CatalogFormat::DEFAULT.extension(),
-		);
+		tracing::warn!(name, "append .hang to your broadcast name to make the catalog format explicit");
 	}
 }
 

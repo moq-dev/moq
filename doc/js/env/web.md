@@ -28,7 +28,7 @@ URLs, so it loads in the browser without an import map:
     import "https://cdn.jsdelivr.net/npm/@moq/publish/element.js/+esm";
 </script>
 
-<moq-watch url="https://relay.example.com/anon" name="room/alice">
+<moq-watch url="https://relay.example.com/anon" name="room/alice.hang">
     <canvas></canvas>
 </moq-watch>
 ```
@@ -66,7 +66,7 @@ Publish camera/microphone or screen as a MoQ broadcast.
 
 <moq-publish
     url="https://relay.example.com/anon"
-    name="room/alice"
+    name="room/alice.hang"
     device="camera"
     audio video controls>
     <!-- Optional preview element -->
@@ -96,7 +96,7 @@ Subscribe to and render a MoQ broadcast.
 
 <moq-watch
     url="https://relay.example.com/anon"
-    name="room/alice"
+    name="room/alice.hang"
     volume="0.8"
     controls>
     <!-- Optional canvas for video rendering -->

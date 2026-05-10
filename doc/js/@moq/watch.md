@@ -33,7 +33,7 @@ build step:
 </script>
 
 <moq-watch-ui>
-    <moq-watch url="https://relay.example.com/anon" name="room/alice">
+    <moq-watch url="https://relay.example.com/anon" name="room/alice.hang">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>
@@ -55,7 +55,7 @@ a real bundler (the examples below).
 
 <moq-watch
     url="https://relay.example.com/anon"
-    name="room/alice"
+    name="room/alice.hang"
     controls>
     <canvas></canvas>
 </moq-watch>
@@ -81,7 +81,7 @@ from the broadcast name extension by default. `room/alice.hang` uses hang,
 ```html
 <moq-watch
     url="https://relay.example.com/anon"
-    name="room/alice"
+    name="room/alice.hang"
     catalog-format="msf">
     <canvas></canvas>
 </moq-watch>
@@ -93,7 +93,7 @@ import * as Watch from "@moq/watch";
 const broadcast = new Watch.Broadcast({
     connection,
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     catalogFormat: "msf",
 });
 
@@ -115,7 +115,7 @@ import * as Watch from "@moq/watch";
 const broadcast = new Watch.Broadcast({
     connection,
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     catalogFormat: "manual",
     catalog: {
         video: { renditions: { hd: { codec: "vp09.00.10.08", container: { kind: "legacy" } } } },
@@ -151,7 +151,7 @@ Import `@moq/watch/ui` for a SolidJS-powered overlay with buffering indicator, s
 <moq-watch-ui>
     <moq-watch
         url="https://relay.example.com/anon"
-        name="room/alice">
+        name="room/alice.hang">
         <canvas></canvas>
     </moq-watch>
 </moq-watch-ui>
@@ -167,7 +167,7 @@ import * as Watch from "@moq/watch";
 const broadcast = new Watch.Broadcast({
     connection,
     enabled: true,
-    name: "alice",
+    name: "alice.hang",
     reload: true,
 });
 ```
