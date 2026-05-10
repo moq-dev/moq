@@ -35,14 +35,16 @@ pub(crate) async fn serve_ws(
 	let ws = ws.protocols(["webtransport"]);
 
 	let params = AuthParams { path, jwt: query.jwt };
-	let token = if mtls.is_some() {
+	let internal = mtls.is_some();
+	let token = if internal {
 		AuthToken::unrestricted()
 	} else {
 		state.auth.verify(&params).await?
 	};
 	let publish = state.cluster.publisher(&token);
 	let subscribe = state.cluster.subscriber(&token);
-	let stats = state.cluster.stats.clone();
+	// Tier-tag the stats handle so mTLS sessions land on `_internal` tracks.
+	let stats = state.cluster.stats.as_ref().map(|s| s.tier(internal));
 
 	if publish.is_none() && subscribe.is_none() {
 		// Bad token, we can't publish or subscribe.

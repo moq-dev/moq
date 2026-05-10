@@ -2,21 +2,26 @@
 //!
 //! [`Stats`] aggregates per-broadcast counter bumps into per-prefix levels and
 //! publishes a `.stats/<level>/<name>` broadcast on a caller-provided
-//! [`OriginProducer`]. Each stats broadcast carries two tracks, `publisher`
-//! and `subscriber`, with disjoint counter sets for each role.
+//! [`OriginProducer`]. Each stats broadcast carries up to four tracks:
 //!
-//! The publisher tracks egress: bytes sent, frames sent, broadcasts published,
-//! subscriptions accepted. The subscriber tracks ingress: bytes received,
-//! frames received, broadcast announcements observed, subscriptions issued.
-//! For a relay both roles are active; a moq-cli publisher only populates
-//! the publisher side, a subscriber only the subscriber side.
+//! * `publisher`          - external egress (downstream non-mTLS clients)
+//! * `publisher_internal` - internal egress (cluster peers / mTLS sessions)
+//! * `subscriber`         - external ingress
+//! * `subscriber_internal`- internal ingress
+//!
+//! Internal vs external is a property of the session (typically determined by
+//! mTLS); a relay tags the [`Stats`] handle it hands to a session via
+//! [`Stats::external`] or [`Stats::internal`]. Counters from internal sessions
+//! land on the `_internal` tracks so a billing service can rate-differentiate
+//! between intra-cluster and customer traffic.
 //!
 //! # Lifecycle
 //!
 //! No background work runs while no role has an active subscription. The first
-//! `track()` call on a level (in either role) spawns a per-level snapshot task
-//! that ticks every second. The task exits the moment both roles report zero
-//! active subscriptions, dropping its [`BroadcastProducer`] and unannouncing.
+//! `track()` call on a level (in any of the four roles) spawns a per-level
+//! snapshot task that ticks every second. The task exits the moment all four
+//! roles report zero active subscriptions, dropping its [`BroadcastProducer`]
+//! and unannouncing.
 //!
 //! # Cycles
 //!
@@ -115,9 +120,14 @@ impl RoleCounters for SubscriberCounters {
 }
 
 /// Top-level stats handle. Cheap to clone (`Arc` inside).
+///
+/// A handle carries an internal-vs-external tier flag. Use [`Self::external`] or
+/// [`Self::internal`] to derive a clone for the appropriate tier; counter bumps
+/// go to the matching `_internal` track or the default external track.
 #[derive(Clone)]
 pub struct Stats {
 	inner: Arc<StatsInner>,
+	internal: bool,
 }
 
 struct StatsInner {
@@ -129,16 +139,35 @@ struct StatsInner {
 
 struct Level {
 	advertised: PathOwned,
-	publisher: PublisherCounters,
-	subscriber: SubscriberCounters,
+	publisher_external: PublisherCounters,
+	publisher_internal: PublisherCounters,
+	subscriber_external: SubscriberCounters,
+	subscriber_internal: SubscriberCounters,
 	task: Lock<Option<()>>, // unit: presence means a snapshot task is running
 	origin: OriginProducer,
 	name: String,
 	level_key: PathOwned,
 }
 
+impl Level {
+	fn publisher(&self, internal: bool) -> &PublisherCounters {
+		if internal {
+			&self.publisher_internal
+		} else {
+			&self.publisher_external
+		}
+	}
+	fn subscriber(&self, internal: bool) -> &SubscriberCounters {
+		if internal {
+			&self.subscriber_internal
+		} else {
+			&self.subscriber_external
+		}
+	}
+}
+
 impl Stats {
-	/// Build a new stats aggregator.
+	/// Build a new stats aggregator. The returned handle is `external` (default tier).
 	///
 	/// * `name` is baked into the advertised path of every published stats broadcast,
 	///   following the convention `.stats/<level>/<name>` (or `.stats/<name>` for the root).
@@ -156,12 +185,41 @@ impl Stats {
 				origin,
 				entries: Lock::default(),
 			}),
+			internal: false,
 		}
 	}
 
 	/// Returns the configured `name`.
 	pub fn name(&self) -> &str {
 		&self.inner.name
+	}
+
+	/// Returns true if this handle records bumps on the `_internal` counter set.
+	pub fn is_internal(&self) -> bool {
+		self.internal
+	}
+
+	/// Returns a clone of this handle tagged as internal traffic. Bumps land on
+	/// the `_internal` counter sets and surface on the `publisher_internal` /
+	/// `subscriber_internal` tracks of each level's stats broadcast.
+	pub fn internal(&self) -> Self {
+		Self {
+			inner: self.inner.clone(),
+			internal: true,
+		}
+	}
+
+	/// Returns a clone tagged as external traffic (the default).
+	pub fn external(&self) -> Self {
+		Self {
+			inner: self.inner.clone(),
+			internal: false,
+		}
+	}
+
+	/// Returns a clone tagged as `internal` if true, otherwise external.
+	pub fn tier(&self, internal: bool) -> Self {
+		if internal { self.internal() } else { self.external() }
 	}
 
 	/// Returns a per-broadcast handle. Cheap; level state is created lazily and cached.
@@ -171,7 +229,10 @@ impl Stats {
 	pub fn broadcast(&self, path: impl AsPath) -> BroadcastStats {
 		let path = path.as_path();
 		if path.is_hidden() {
-			return BroadcastStats { levels: Arc::from([]) };
+			return BroadcastStats {
+				levels: Arc::from([]),
+				internal: self.internal,
+			};
 		}
 
 		let keys = level_keys(&path, self.inner.levels);
@@ -185,8 +246,10 @@ impl Stats {
 						let advertised = advertised_path(&key, &self.inner.name);
 						Arc::new(Level {
 							advertised,
-							publisher: PublisherCounters::default(),
-							subscriber: SubscriberCounters::default(),
+							publisher_external: PublisherCounters::default(),
+							publisher_internal: PublisherCounters::default(),
+							subscriber_external: SubscriberCounters::default(),
+							subscriber_internal: SubscriberCounters::default(),
 							task: Lock::new(None),
 							origin: self.inner.origin.clone(),
 							name: self.inner.name.clone(),
@@ -197,7 +260,10 @@ impl Stats {
 			})
 			.collect();
 
-		BroadcastStats { levels: arcs.into() }
+		BroadcastStats {
+			levels: arcs.into(),
+			internal: self.internal,
+		}
 	}
 }
 
@@ -205,10 +271,12 @@ impl Stats {
 ///
 /// Open a role-scoped guard via [`Self::publisher`] or [`Self::subscriber`]; each
 /// returns a RAII handle whose creation bumps the matching `broadcasts` counter
-/// and whose drop bumps `broadcasts_closed`.
+/// and whose drop bumps `broadcasts_closed`. The tier (internal vs external) is
+/// inherited from the [`Stats`] this handle was derived from.
 #[derive(Clone)]
 pub struct BroadcastStats {
 	levels: Arc<[Arc<Level>]>,
+	internal: bool,
 }
 
 impl BroadcastStats {
@@ -217,25 +285,32 @@ impl BroadcastStats {
 		self.levels.is_empty()
 	}
 
-	/// Open the publisher (egress) role for this broadcast. Bumps
-	/// `publisher.broadcasts` on each level; drop bumps `publisher.broadcasts_closed`.
+	/// Open the publisher (egress) role for this broadcast. Bumps `broadcasts`
+	/// on each level (on the appropriate tier); drop bumps `broadcasts_closed`.
 	pub fn publisher(&self) -> PublisherStats {
 		for level in self.levels.iter() {
-			level.publisher.broadcasts.fetch_add(1, Ordering::Relaxed);
+			level
+				.publisher(self.internal)
+				.broadcasts
+				.fetch_add(1, Ordering::Relaxed);
 		}
 		PublisherStats {
 			levels: self.levels.clone(),
+			internal: self.internal,
 		}
 	}
 
-	/// Open the subscriber (ingress) role for this broadcast. Bumps
-	/// `subscriber.broadcasts` on each level; drop bumps `subscriber.broadcasts_closed`.
+	/// Open the subscriber (ingress) role for this broadcast.
 	pub fn subscriber(&self) -> SubscriberStats {
 		for level in self.levels.iter() {
-			level.subscriber.broadcasts.fetch_add(1, Ordering::Relaxed);
+			level
+				.subscriber(self.internal)
+				.broadcasts
+				.fetch_add(1, Ordering::Relaxed);
 		}
 		SubscriberStats {
 			levels: self.levels.clone(),
+			internal: self.internal,
 		}
 	}
 }
@@ -244,24 +319,29 @@ impl BroadcastStats {
 #[must_use = "drop the guard to record the broadcast as closed"]
 pub struct PublisherStats {
 	levels: Arc<[Arc<Level>]>,
+	internal: bool,
 }
 
 impl PublisherStats {
 	/// Open a track-subscription guard.
 	///
-	/// Bumps `publisher.subscriptions` on every level, and (on the 0->N transition
-	/// in either role) spawns the level's snapshot task. Drop bumps
-	/// `publisher.subscriptions_closed`.
+	/// Bumps `subscriptions` on every level for the tier and (on the 0->N
+	/// transition in any role) spawns the level's snapshot task. Drop bumps
+	/// `subscriptions_closed`.
 	///
-	/// `_name` is currently unused; counters are per-level only. Reserved for future
-	/// per-track granularity.
+	/// `_name` is currently unused; counters are per-level only. Reserved for
+	/// future per-track granularity.
 	pub fn track(&self, _name: &str) -> PublisherTrack {
 		for level in self.levels.iter() {
-			level.publisher.subscriptions.fetch_add(1, Ordering::Relaxed);
+			level
+				.publisher(self.internal)
+				.subscriptions
+				.fetch_add(1, Ordering::Relaxed);
 			ensure_task(level);
 		}
 		PublisherTrack {
 			levels: self.levels.clone(),
+			internal: self.internal,
 		}
 	}
 }
@@ -269,7 +349,10 @@ impl PublisherStats {
 impl Drop for PublisherStats {
 	fn drop(&mut self) {
 		for level in self.levels.iter() {
-			level.publisher.broadcasts_closed.fetch_add(1, Ordering::Relaxed);
+			level
+				.publisher(self.internal)
+				.broadcasts_closed
+				.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -278,17 +361,22 @@ impl Drop for PublisherStats {
 #[must_use = "drop the guard to record the broadcast as closed"]
 pub struct SubscriberStats {
 	levels: Arc<[Arc<Level>]>,
+	internal: bool,
 }
 
 impl SubscriberStats {
 	/// Open a track-subscription guard. Mirrors [`PublisherStats::track`].
 	pub fn track(&self, _name: &str) -> SubscriberTrack {
 		for level in self.levels.iter() {
-			level.subscriber.subscriptions.fetch_add(1, Ordering::Relaxed);
+			level
+				.subscriber(self.internal)
+				.subscriptions
+				.fetch_add(1, Ordering::Relaxed);
 			ensure_task(level);
 		}
 		SubscriberTrack {
 			levels: self.levels.clone(),
+			internal: self.internal,
 		}
 	}
 }
@@ -296,7 +384,10 @@ impl SubscriberStats {
 impl Drop for SubscriberStats {
 	fn drop(&mut self) {
 		for level in self.levels.iter() {
-			level.subscriber.broadcasts_closed.fetch_add(1, Ordering::Relaxed);
+			level
+				.subscriber(self.internal)
+				.broadcasts_closed
+				.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -305,27 +396,28 @@ impl Drop for SubscriberStats {
 #[must_use = "drop the guard to record the subscription as closed"]
 pub struct PublisherTrack {
 	levels: Arc<[Arc<Level>]>,
+	internal: bool,
 }
 
 impl PublisherTrack {
-	/// Bumps `publisher.frames` once.
+	/// Bumps `frames` once.
 	pub fn frame(&self) {
 		for level in self.levels.iter() {
-			level.publisher.frames.fetch_add(1, Ordering::Relaxed);
+			level.publisher(self.internal).frames.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 
-	/// Bumps `publisher.bytes` by `n`.
+	/// Bumps `bytes` by `n`.
 	pub fn bytes(&self, n: u64) {
 		for level in self.levels.iter() {
-			level.publisher.bytes.fetch_add(n, Ordering::Relaxed);
+			level.publisher(self.internal).bytes.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 
-	/// Bumps `publisher.groups` once.
+	/// Bumps `groups` once.
 	pub fn group(&self) {
 		for level in self.levels.iter() {
-			level.publisher.groups.fetch_add(1, Ordering::Relaxed);
+			level.publisher(self.internal).groups.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -333,7 +425,10 @@ impl PublisherTrack {
 impl Drop for PublisherTrack {
 	fn drop(&mut self) {
 		for level in self.levels.iter() {
-			level.publisher.subscriptions_closed.fetch_add(1, Ordering::Relaxed);
+			level
+				.publisher(self.internal)
+				.subscriptions_closed
+				.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -342,27 +437,28 @@ impl Drop for PublisherTrack {
 #[must_use = "drop the guard to record the subscription as closed"]
 pub struct SubscriberTrack {
 	levels: Arc<[Arc<Level>]>,
+	internal: bool,
 }
 
 impl SubscriberTrack {
-	/// Bumps `subscriber.frames` once.
+	/// Bumps `frames` once.
 	pub fn frame(&self) {
 		for level in self.levels.iter() {
-			level.subscriber.frames.fetch_add(1, Ordering::Relaxed);
+			level.subscriber(self.internal).frames.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 
-	/// Bumps `subscriber.bytes` by `n`.
+	/// Bumps `bytes` by `n`.
 	pub fn bytes(&self, n: u64) {
 		for level in self.levels.iter() {
-			level.subscriber.bytes.fetch_add(n, Ordering::Relaxed);
+			level.subscriber(self.internal).bytes.fetch_add(n, Ordering::Relaxed);
 		}
 	}
 
-	/// Bumps `subscriber.groups` once.
+	/// Bumps `groups` once.
 	pub fn group(&self) {
 		for level in self.levels.iter() {
-			level.subscriber.groups.fetch_add(1, Ordering::Relaxed);
+			level.subscriber(self.internal).groups.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -370,7 +466,10 @@ impl SubscriberTrack {
 impl Drop for SubscriberTrack {
 	fn drop(&mut self) {
 		for level in self.levels.iter() {
-			level.subscriber.subscriptions_closed.fetch_add(1, Ordering::Relaxed);
+			level
+				.subscriber(self.internal)
+				.subscriptions_closed
+				.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 }
@@ -385,13 +484,12 @@ fn ensure_task(level: &Arc<Level>) {
 }
 
 async fn run_publisher(weak: Weak<Level>) {
-	// Borrow the level briefly to set up the broadcast.
 	let setup = {
 		let Some(level) = weak.upgrade() else {
 			return;
 		};
 		let mut broadcast = Broadcast::new().produce();
-		let pub_track = match broadcast.create_track(Track {
+		let pub_ext = match broadcast.create_track(Track {
 			name: "publisher".into(),
 			priority: 0,
 		}) {
@@ -402,7 +500,18 @@ async fn run_publisher(weak: Weak<Level>) {
 				return;
 			}
 		};
-		let sub_track = match broadcast.create_track(Track {
+		let pub_int = match broadcast.create_track(Track {
+			name: "publisher_internal".into(),
+			priority: 0,
+		}) {
+			Ok(t) => t,
+			Err(err) => {
+				tracing::warn!(?err, "stats: failed to create publisher_internal track");
+				clear_task(&level);
+				return;
+			}
+		};
+		let sub_ext = match broadcast.create_track(Track {
 			name: "subscriber".into(),
 			priority: 0,
 		}) {
@@ -413,10 +522,21 @@ async fn run_publisher(weak: Weak<Level>) {
 				return;
 			}
 		};
+		let sub_int = match broadcast.create_track(Track {
+			name: "subscriber_internal".into(),
+			priority: 0,
+		}) {
+			Ok(t) => t,
+			Err(err) => {
+				tracing::warn!(?err, "stats: failed to create subscriber_internal track");
+				clear_task(&level);
+				return;
+			}
+		};
 		level.origin.publish_broadcast(&level.advertised, broadcast.consume());
-		(broadcast, pub_track, sub_track)
+		(broadcast, pub_ext, pub_int, sub_ext, sub_int)
 	};
-	let (broadcast, mut pub_track, mut sub_track) = setup;
+	let (broadcast, mut pub_ext, mut pub_int, mut sub_ext, mut sub_int) = setup;
 
 	let mut tick = tokio::time::interval(Duration::from_secs(1));
 	tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -428,15 +548,21 @@ async fn run_publisher(weak: Weak<Level>) {
 			return;
 		};
 
-		let pub_active = role_active(&level.publisher);
-		let sub_active = role_active(&level.subscriber);
+		let any_active = role_active(&level.publisher_external)
+			|| role_active(&level.publisher_internal)
+			|| role_active(&level.subscriber_external)
+			|| role_active(&level.subscriber_internal);
 
-		if !pub_active && !sub_active {
+		if !any_active {
 			// Take the task slot under the lock and re-check. Any subscribe that
 			// raced with us either landed before we set None (so it sees Some
 			// and won't respawn) or after, in which case it spawns a fresh task.
 			let mut slot = level.task.lock();
-			if !role_active(&level.publisher) && !role_active(&level.subscriber) {
+			let still_idle = !role_active(&level.publisher_external)
+				&& !role_active(&level.publisher_internal)
+				&& !role_active(&level.subscriber_external)
+				&& !role_active(&level.subscriber_internal);
+			if still_idle {
 				*slot = None;
 				drop(slot);
 				drop(level);
@@ -447,10 +573,22 @@ async fn run_publisher(weak: Weak<Level>) {
 			}
 		}
 
-		// Always emit a snapshot for both tracks. An idle role just sees its
-		// counters held steady; that itself is informative for a billing service.
-		write_snapshot(&mut pub_track, "publisher", &level, level.publisher.snapshot());
-		write_snapshot(&mut sub_track, "subscriber", &level, level.subscriber.snapshot());
+		// Always emit a snapshot for every track. Idle roles see their counters
+		// held steady; that itself is informative for a billing service.
+		write_snapshot(&mut pub_ext, "publisher", &level, level.publisher_external.snapshot());
+		write_snapshot(
+			&mut pub_int,
+			"publisher_internal",
+			&level,
+			level.publisher_internal.snapshot(),
+		);
+		write_snapshot(&mut sub_ext, "subscriber", &level, level.subscriber_external.snapshot());
+		write_snapshot(
+			&mut sub_int,
+			"subscriber_internal",
+			&level,
+			level.subscriber_internal.snapshot(),
+		);
 	}
 }
 
@@ -590,7 +728,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn publisher_bumps_only_publisher_counters() {
+	async fn external_publisher_bumps_only_external_publisher_counters() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
@@ -606,20 +744,53 @@ mod tests {
 
 		let entries = stats.inner.entries.lock();
 		let root = entries.get(&PathOwned::from("")).expect("root level");
-		assert_eq!(root.publisher.frames.load(Relaxed), 1);
-		assert_eq!(root.publisher.bytes.load(Relaxed), 100);
-		assert_eq!(root.publisher.groups.load(Relaxed), 1);
-		assert_eq!(root.publisher.subscriptions.load(Relaxed), 1);
-		assert_eq!(root.publisher.subscriptions_closed.load(Relaxed), 1);
-		assert_eq!(root.publisher.broadcasts.load(Relaxed), 1);
-		assert_eq!(root.publisher.broadcasts_closed.load(Relaxed), 1);
-		assert_eq!(root.subscriber.frames.load(Relaxed), 0);
-		assert_eq!(root.subscriber.bytes.load(Relaxed), 0);
-		assert_eq!(root.subscriber.broadcasts.load(Relaxed), 0);
+		assert_eq!(root.publisher_external.frames.load(Relaxed), 1);
+		assert_eq!(root.publisher_external.bytes.load(Relaxed), 100);
+		assert_eq!(root.publisher_external.groups.load(Relaxed), 1);
+		assert_eq!(root.publisher_external.subscriptions.load(Relaxed), 1);
+		assert_eq!(root.publisher_external.subscriptions_closed.load(Relaxed), 1);
+		assert_eq!(root.publisher_external.broadcasts.load(Relaxed), 1);
+		assert_eq!(root.publisher_external.broadcasts_closed.load(Relaxed), 1);
+		// Internal must remain untouched.
+		assert_eq!(root.publisher_internal.bytes.load(Relaxed), 0);
+		assert_eq!(root.publisher_internal.broadcasts.load(Relaxed), 0);
+		assert_eq!(root.subscriber_external.bytes.load(Relaxed), 0);
+		assert_eq!(root.subscriber_internal.bytes.load(Relaxed), 0);
 	}
 
 	#[tokio::test]
-	async fn subscriber_bumps_only_subscriber_counters() {
+	async fn internal_publisher_bumps_only_internal_publisher_counters() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let stats = Stats::new("use", 1, origin).internal();
+		assert!(stats.is_internal());
+
+		let bs = stats.broadcast("demo/bbb");
+		let p = bs.publisher();
+		let track = p.track("video");
+		track.frame();
+		track.bytes(100);
+		track.group();
+		drop(track);
+		drop(p);
+
+		let entries = stats.inner.entries.lock();
+		let root = entries.get(&PathOwned::from("")).expect("root level");
+		assert_eq!(root.publisher_internal.frames.load(Relaxed), 1);
+		assert_eq!(root.publisher_internal.bytes.load(Relaxed), 100);
+		assert_eq!(root.publisher_internal.groups.load(Relaxed), 1);
+		assert_eq!(root.publisher_internal.subscriptions.load(Relaxed), 1);
+		assert_eq!(root.publisher_internal.subscriptions_closed.load(Relaxed), 1);
+		assert_eq!(root.publisher_internal.broadcasts.load(Relaxed), 1);
+		assert_eq!(root.publisher_internal.broadcasts_closed.load(Relaxed), 1);
+		// External must remain untouched.
+		assert_eq!(root.publisher_external.bytes.load(Relaxed), 0);
+		assert_eq!(root.publisher_external.broadcasts.load(Relaxed), 0);
+	}
+
+	#[tokio::test]
+	async fn external_subscriber_bumps_only_external_subscriber_counters() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
@@ -632,12 +803,40 @@ mod tests {
 
 		let entries = stats.inner.entries.lock();
 		let root = entries.get(&PathOwned::from("")).expect("root level");
-		assert_eq!(root.subscriber.frames.load(Relaxed), 1);
-		assert_eq!(root.subscriber.bytes.load(Relaxed), 50);
-		assert_eq!(root.subscriber.broadcasts.load(Relaxed), 1);
-		assert_eq!(root.subscriber.subscriptions.load(Relaxed), 1);
-		assert_eq!(root.publisher.frames.load(Relaxed), 0);
-		assert_eq!(root.publisher.broadcasts.load(Relaxed), 0);
+		assert_eq!(root.subscriber_external.frames.load(Relaxed), 1);
+		assert_eq!(root.subscriber_external.bytes.load(Relaxed), 50);
+		assert_eq!(root.subscriber_external.broadcasts.load(Relaxed), 1);
+		assert_eq!(root.subscriber_external.subscriptions.load(Relaxed), 1);
+		assert_eq!(root.subscriber_internal.bytes.load(Relaxed), 0);
+		assert_eq!(root.publisher_external.bytes.load(Relaxed), 0);
+	}
+
+	#[tokio::test]
+	async fn internal_and_external_share_level_state() {
+		tokio::time::pause();
+
+		let origin = Origin::random().produce();
+		let stats = Stats::new("use", 1, origin);
+		let internal = stats.internal();
+
+		// Open a broadcast on each tier.
+		let _g1 = stats.broadcast("foo/bar").publisher();
+		let _g2 = internal.broadcast("foo/bar").publisher();
+
+		// Both should resolve to the same Level (only one entry).
+		let entries = stats.inner.entries.lock();
+		assert_eq!(entries.len(), 1);
+		let root = entries.get(&PathOwned::from("")).expect("root level");
+		assert_eq!(root.publisher_external.broadcasts.load(Relaxed), 1);
+		assert_eq!(root.publisher_internal.broadcasts.load(Relaxed), 1);
+	}
+
+	#[tokio::test]
+	async fn tier_bool_picks_the_right_clone() {
+		let origin = Origin::random().produce();
+		let stats = Stats::new("use", 1, origin);
+		assert!(!stats.tier(false).is_internal());
+		assert!(stats.tier(true).is_internal());
 	}
 
 	#[tokio::test]
@@ -654,8 +853,8 @@ mod tests {
 		let entries = stats.inner.entries.lock();
 		let root = entries.get(&PathOwned::from("")).expect("root level");
 		let demo = entries.get(&PathOwned::from("demo")).expect("demo level");
-		assert_eq!(root.publisher.bytes.load(Relaxed), 100);
-		assert_eq!(demo.publisher.bytes.load(Relaxed), 100);
+		assert_eq!(root.publisher_external.bytes.load(Relaxed), 100);
+		assert_eq!(demo.publisher_external.bytes.load(Relaxed), 100);
 	}
 
 	#[tokio::test]
@@ -675,7 +874,6 @@ mod tests {
 		drop(track);
 		drop(p);
 
-		// No level entry should have been created.
 		assert!(stats.inner.entries.lock().is_empty());
 	}
 
@@ -691,8 +889,6 @@ mod tests {
 		let p = bs.publisher();
 		let _track = p.track("video");
 
-		// The .stats/use broadcast should now be announced.
-		// Use announced_hidden because it's a hidden path.
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let (path, broadcast) = consumer.announced_hidden().await.expect("expected announce");
 		assert_eq!(path, Path::new(".stats/use"));
@@ -700,7 +896,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn task_exits_when_both_roles_idle_and_unannounces() {
+	async fn task_exits_when_all_roles_idle() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
@@ -711,55 +907,52 @@ mod tests {
 		let p = bs.publisher();
 		let track = p.track("video");
 
-		// Wait for announce.
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let (_, broadcast) = consumer.announced_hidden().await.expect("expected announce");
 		assert!(broadcast.is_some());
 
-		// Drop the only active subscription.
 		drop(track);
 		drop(p);
 		drop(bs);
 
-		// Advance past one tick so the snapshot task notices and tears down.
 		tokio::time::advance(Duration::from_secs(2)).await;
-
-		// We should now see an unannounce.
 		let (path, broadcast) = consumer.announced_hidden().await.expect("expected unannounce");
 		assert_eq!(path, Path::new(".stats/use"));
 		assert!(broadcast.is_none());
 	}
 
 	#[tokio::test]
-	async fn task_stays_alive_while_other_role_active() {
+	async fn task_stays_alive_while_internal_role_active() {
 		tokio::time::pause();
 
 		let origin = Origin::random().produce();
 		let stats = Stats::new("use", 1, origin.clone());
+		let internal = stats.internal();
 		let mut consumer = origin.consume();
 
-		let bs = stats.broadcast("foo/bar");
-		let p = bs.publisher();
-		let s = bs.subscriber();
-		let pub_track = p.track("video");
-		let sub_track = s.track("video");
+		let ext_bs = stats.broadcast("foo/bar");
+		let int_bs = internal.broadcast("foo/bar");
+		let ext_p = ext_bs.publisher();
+		let int_p = int_bs.publisher();
+		let ext_track = ext_p.track("video");
+		let int_track = int_p.track("video");
 
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let (_, broadcast) = consumer.announced_hidden().await.expect("expected announce");
 		assert!(broadcast.is_some());
 
-		// Drop only the publisher subscription. Subscriber side keeps the task alive.
-		drop(pub_track);
+		// Drop the external side. Internal keeps the task alive.
+		drop(ext_track);
+		drop(ext_p);
+		drop(ext_bs);
 
-		// Advance past several ticks; broadcast should remain announced.
 		tokio::time::advance(Duration::from_secs(3)).await;
 		assert!(consumer.try_announced_hidden().is_none());
 
-		// Now drop the other side too.
-		drop(sub_track);
-		drop(p);
-		drop(s);
-		drop(bs);
+		// Drop the internal side too -> task exits.
+		drop(int_track);
+		drop(int_p);
+		drop(int_bs);
 
 		tokio::time::advance(Duration::from_secs(2)).await;
 		let (_, broadcast) = consumer.announced_hidden().await.expect("expected unannounce");

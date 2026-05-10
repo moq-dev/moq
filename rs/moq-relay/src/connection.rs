@@ -40,8 +40,8 @@ impl Connection {
 	/// Authenticates and serves this connection until it closes.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
-		let token = match self.authenticate().await {
-			Ok(token) => token,
+		let (token, internal) = match self.authenticate().await {
+			Ok(out) => out,
 			Err(err) => {
 				let _ = self.request.close(err.status.as_u16()).await;
 				return Err(err.source);
@@ -54,19 +54,24 @@ impl Connection {
 
 		match (&publish, &subscribe) {
 			(Some(publish), Some(subscribe)) => {
-				tracing::info!(transport, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
+				tracing::info!(transport, internal, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "session accepted");
 			}
 			(Some(publish), None) => {
-				tracing::info!(transport, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
+				tracing::info!(transport, internal, root = %token.root, publish = %publish.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "publisher accepted");
 			}
 			(None, Some(subscribe)) => {
-				tracing::info!(transport, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
+				tracing::info!(transport, internal, root = %token.root, subscribe = %subscribe.allowed().map(|p| p.as_str()).collect::<Vec<_>>().join(","), "subscriber accepted")
 			}
 			_ => {
 				let _ = self.request.close(http::StatusCode::FORBIDDEN.as_u16()).await;
 				anyhow::bail!("invalid session; no allowed paths");
 			}
 		}
+
+		// Stats handle is tier-tagged: mTLS-authenticated peers (including
+		// other cluster nodes) record bumps on the `_internal` tracks so a
+		// billing service can rate-differentiate from external traffic.
+		let stats = self.cluster.stats.as_ref().map(|s| s.tier(internal));
 
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
@@ -76,7 +81,7 @@ impl Connection {
 			.request
 			.with_publish(subscribe)
 			.with_consume(publish)
-			.with_stats(self.cluster.stats.clone())
+			.with_stats(stats)
 			.ok()
 			.await?;
 
@@ -88,13 +93,14 @@ impl Connection {
 	}
 
 	/// Resolve an [`AuthToken`] from the request's URL and (optional) mTLS peer
-	/// identity. Any failure is returned as a [`StatusError`] so [`run`] can
-	/// close the request with the mapped HTTP status exactly once.
+	/// identity, plus an `internal` flag indicating whether the peer authenticated
+	/// via mTLS. Any failure is returned as a [`StatusError`] so [`run`] can close
+	/// the request with the mapped HTTP status exactly once.
 	///
 	/// If the client presented a valid mTLS client certificate, JWT is skipped
 	/// and full (cluster) access is granted. The cert's chain to the configured
 	/// CA is the only credential we require.
-	async fn authenticate(&self) -> Result<AuthToken, StatusError> {
+	async fn authenticate(&self) -> Result<(AuthToken, bool), StatusError> {
 		let peer = self.request.peer_identity().map_err(|source| StatusError {
 			status: http::StatusCode::FORBIDDEN,
 			source,
@@ -102,13 +108,13 @@ impl Connection {
 
 		if peer.is_some() {
 			tracing::debug!("mTLS peer authenticated");
-			return Ok(AuthToken::unrestricted());
+			return Ok((AuthToken::unrestricted(), true));
 		}
 
 		let params = match self.request.url() {
 			Some(url) => self.auth.params_from_url(url),
 			None => AuthParams::default(),
 		};
-		Ok(self.auth.verify(&params).await?)
+		Ok((self.auth.verify(&params).await?, false))
 	}
 }

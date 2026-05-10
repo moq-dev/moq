@@ -163,12 +163,15 @@ impl Cluster {
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "dialing cluster peer");
 
+		// Cluster-to-cluster traffic is internal by definition.
+		let stats = self.stats.as_ref().map(|s| s.internal());
+
 		let session = self
 			.client
 			.clone()
 			.with_publish(self.origin.consume())
 			.with_consume(self.origin.clone())
-			.with_stats(self.stats.clone())
+			.with_stats(stats)
 			.connect(url.clone())
 			.await
 			.context("failed to connect to cluster peer")?;
