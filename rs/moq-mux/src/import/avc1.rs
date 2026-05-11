@@ -115,6 +115,11 @@ impl Avc1 {
 		Ok(())
 	}
 
+	/// Returns a reference to the underlying track producer.
+	pub fn track(&self) -> anyhow::Result<&moq_lite::TrackProducer> {
+		Ok(&self.track.as_ref().context("not initialized")?.track)
+	}
+
 	/// Decode an AVCC-formatted H.264 packet (length-prefixed NALUs).
 	///
 	/// If `pts` is `None`, the wall clock time is used.

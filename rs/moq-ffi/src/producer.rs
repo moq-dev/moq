@@ -13,6 +13,11 @@ struct BroadcastProducer {
 	catalog: moq_mux::catalog::Producer,
 }
 
+struct MediaProducer {
+	decoder: moq_mux::import::Framed,
+	track: moq_lite::TrackProducer,
+}
+
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastProducer {
 	state: std::sync::Mutex<Option<BroadcastProducer>>,
@@ -28,7 +33,28 @@ impl MoqBroadcastProducer {
 
 #[derive(uniffi::Object)]
 pub struct MoqMediaProducer {
-	inner: std::sync::Mutex<Option<moq_mux::import::Framed>>,
+	inner: std::sync::Mutex<Option<MediaProducer>>,
+}
+
+enum TrackActivity {
+	Used,
+	Unused,
+}
+
+async fn wait_for_track_activity(track: moq_lite::TrackProducer, activity: TrackActivity) -> Result<(), MoqError> {
+	let handle = crate::ffi::RUNTIME.spawn(async move {
+		match activity {
+			TrackActivity::Used => track.used().await,
+			TrackActivity::Unused => track.unused().await,
+		}
+		.map_err(Into::into)
+	});
+
+	match handle.await {
+		Ok(result) => result,
+		Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
+		Err(e) => Err(MoqError::Task(e)),
+	}
 }
 
 #[uniffi::export]
@@ -70,8 +96,13 @@ impl MoqBroadcastProducer {
 			return Err(MoqError::Codec("init failed: trailing bytes".into()));
 		}
 
+		let track = decoder
+			.track()
+			.map_err(|err| MoqError::Codec(format!("track unavailable: {err}")))?
+			.clone();
+
 		Ok(Arc::new(MoqMediaProducer {
-			inner: std::sync::Mutex::new(Some(decoder)),
+			inner: std::sync::Mutex::new(Some(MediaProducer { decoder, track })),
 		}))
 	}
 
@@ -111,6 +142,36 @@ pub struct MoqTrackProducer {
 
 #[uniffi::export]
 impl MoqTrackProducer {
+	/// Return the name of this track.
+	pub fn name(&self) -> Result<String, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let guard = self.inner.lock().unwrap();
+		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		Ok(track.name.clone())
+	}
+
+	/// Wait until this track has at least one active consumer.
+	pub async fn used(&self) -> Result<(), MoqError> {
+		let track = {
+			let _guard = crate::ffi::RUNTIME.enter();
+			let guard = self.inner.lock().unwrap();
+			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
+		};
+
+		wait_for_track_activity(track, TrackActivity::Used).await
+	}
+
+	/// Wait until this track has no active consumers.
+	pub async fn unused(&self) -> Result<(), MoqError> {
+		let track = {
+			let _guard = crate::ffi::RUNTIME.enter();
+			let guard = self.inner.lock().unwrap();
+			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
+		};
+
+		wait_for_track_activity(track, TrackActivity::Unused).await
+	}
+
 	/// Create a consumer that reads from this producer's track.
 	///
 	/// Useful for local pub/sub without going through an origin/broadcast.
@@ -196,17 +257,48 @@ impl MoqGroupProducer {
 
 #[uniffi::export]
 impl MoqMediaProducer {
+	/// Return the name of the media track.
+	pub fn name(&self) -> Result<String, MoqError> {
+		let _guard = crate::ffi::RUNTIME.enter();
+		let guard = self.inner.lock().unwrap();
+		let media = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
+		Ok(media.track.name.clone())
+	}
+
+	/// Wait until this media track has at least one active consumer.
+	pub async fn used(&self) -> Result<(), MoqError> {
+		let track = {
+			let _guard = crate::ffi::RUNTIME.enter();
+			let guard = self.inner.lock().unwrap();
+			guard.as_ref().ok_or_else(|| MoqError::Closed)?.track.clone()
+		};
+
+		wait_for_track_activity(track, TrackActivity::Used).await
+	}
+
+	/// Wait until this media track has no active consumers.
+	pub async fn unused(&self) -> Result<(), MoqError> {
+		let track = {
+			let _guard = crate::ffi::RUNTIME.enter();
+			let guard = self.inner.lock().unwrap();
+			guard.as_ref().ok_or_else(|| MoqError::Closed)?.track.clone()
+		};
+
+		wait_for_track_activity(track, TrackActivity::Unused).await
+	}
+
 	/// Write a frame to this media track.
 	///
 	/// `timestamp_us` is the presentation timestamp in microseconds.
 	pub fn write_frame(&self, payload: Vec<u8>, timestamp_us: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
-		let decoder = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
+		let media = guard.as_mut().ok_or_else(|| MoqError::Closed)?;
 
 		let timestamp = hang::container::Timestamp::from_micros(timestamp_us)?;
 		let mut data = payload.as_slice();
-		decoder
+		media
+			.decoder
 			.decode_frame(&mut data, Some(timestamp))
 			.map_err(|err| MoqError::Codec(format!("decode failed: {err}")))?;
 
@@ -221,8 +313,9 @@ impl MoqMediaProducer {
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut guard = self.inner.lock().unwrap();
-		let mut decoder = guard.take().ok_or_else(|| MoqError::Closed)?;
-		decoder
+		let mut media = guard.take().ok_or_else(|| MoqError::Closed)?;
+		media
+			.decoder
 			.finish()
 			.map_err(|err| MoqError::Codec(format!("finish failed: {err}")))?;
 		Ok(())
