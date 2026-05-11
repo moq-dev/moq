@@ -9,6 +9,8 @@ import type { Source } from "./types";
 
 const GAIN_MIN = 0.001;
 const FADE_TIME = 0.2;
+const OPUS_BITRATE_PER_CHANNEL = 32_000;
+const OPUS_FRAME_DURATION = 20 as Time.Milli;
 
 // Compiled and inlined as a blob URL via vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
@@ -110,17 +112,22 @@ export class Encoder {
 
 			effect.set(this.#worklet, worklet);
 
-			// The information about channels count can be unreliable on different platforms (Apple's safari).
+			// The information about channels count can be unreliable on different platforms (Apple's Safari).
 			// Try to get the first audio frame and only then create the configuration.
-			worklet.port.onmessage = ({ data }: { data: Capture.AudioFrame }) => {
-				const channelCount = data.channels.length;
-				if (!channelCount) return;
+			effect.event(
+				worklet.port,
+				"message",
+				(event: Event) => {
+					const data = (event as MessageEvent<Capture.AudioFrame>).data;
+					const channelCount = data.channels.length;
+					if (!channelCount) return;
 
-				this.#config.set(this.#createConfig(worklet, channelCount));
-				worklet.port.onmessage = null;
-			};
+					this.#config.set(this.#createConfig(worklet, channelCount));
+				},
+				{ once: true },
+			);
+			worklet.port.start();
 			effect.cleanup(() => {
-				worklet.port.onmessage = null;
 				this.#config.set(undefined);
 			});
 
@@ -137,11 +144,11 @@ export class Encoder {
 			codec: "opus",
 			sampleRate: Catalog.u53(worklet.context.sampleRate),
 			numberOfChannels: Catalog.u53(channelCount),
-			bitrate: Catalog.u53(channelCount * 32_000),
+			bitrate: Catalog.u53(channelCount * OPUS_BITRATE_PER_CHANNEL),
 			container: { kind: "legacy" } as const,
 			// TODO parse the actual frame duration instead of assuming 20ms.
 			// Opus supports 2.5–60ms but 20ms is the real-time default.
-			jitter: Catalog.u53(20),
+			jitter: Catalog.u53(OPUS_FRAME_DURATION),
 		};
 	}
 
@@ -193,28 +200,28 @@ export class Encoder {
 				error: (err) => {
 					console.error("encoder error", err);
 					producer.close(err);
-					worklet.port.onmessage = null;
 				},
 			});
 			effect.cleanup(() => encoder.close());
 
-			let config = this.#config.peek();
-			if (config) {
+			let config: Catalog.AudioConfig | undefined;
+			effect.run((effect: Effect) => {
+				config = effect.get(this.#config);
+				if (!config) return;
+
+				lastKeyframe = undefined;
 				console.debug("encoding audio", config);
 				encoder.configure(config);
-			}
+			});
 
-			worklet.port.onmessage = ({ data }: { data: Capture.AudioFrame }) => {
+			effect.event(worklet.port, "message", (event: Event) => {
+				const data = (event as MessageEvent<Capture.AudioFrame>).data;
 				const channelCount = data.channels.length;
 				if (!channelCount) return;
 
 				if (!config || channelCount !== config.numberOfChannels) {
-					config = this.#createConfig(worklet, channelCount);
-					this.#config.set(config);
-					lastKeyframe = undefined;
-
-					console.debug("encoding audio", config);
-					encoder.configure(config);
+					this.#config.set(this.#createConfig(worklet, channelCount));
+					return;
 				}
 
 				const channels = data.channels;
@@ -238,16 +245,17 @@ export class Encoder {
 
 				encoder.encode(frame);
 				frame.close();
-			};
-			effect.cleanup(() => {
-				worklet.port.onmessage = null;
 			});
+			worklet.port.start();
 		});
 	}
 
 	#runCatalog(effect: Effect): void {
 		const config = effect.get(this.#config);
-		if (!config) return;
+		if (!config) {
+			effect.set(this.#catalog, undefined);
+			return;
+		}
 
 		const catalog: Catalog.Audio = {
 			renditions: { [Encoder.TRACK]: config },
