@@ -471,23 +471,8 @@ class DecoderTrack {
 	// Pop the newest queued frame whose PTS is ≤ now, closing any older ones.
 	// Caller takes ownership of the returned frame and must close it.
 	consume(now: Time.Milli): VideoFrame | undefined {
-		let pickIdx = -1;
-		for (let i = this.#queue.length - 1; i >= 0; i--) {
-			const ts = Time.Milli.fromMicro(this.#queue[i].timestamp as Time.Micro);
-			if (ts <= now) {
-				pickIdx = i;
-				break;
-			}
-		}
-		if (pickIdx < 0) return undefined;
-
-		// Close older frames — they would render in the past.
-		for (let i = 0; i < pickIdx; i++) {
-			this.#queue[i].close();
-		}
-
-		const frame = this.#queue[pickIdx];
-		this.#queue.splice(0, pickIdx + 1);
+		const frame = consumeFrame(this.#queue, now);
+		if (!frame) return undefined;
 
 		const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 		this.timestamp.set(timestamp);
@@ -499,6 +484,33 @@ class DecoderTrack {
 	close(): void {
 		this.signals.close();
 	}
+}
+
+export interface ConsumableFrame {
+	readonly timestamp: number; // microseconds
+	close(): void;
+}
+
+// Pop the newest frame in `queue` whose PTS is ≤ now, closing any older
+// entries. Mutates the queue.
+export function consumeFrame<F extends ConsumableFrame>(queue: F[], now: Time.Milli): F | undefined {
+	let pickIdx = -1;
+	for (let i = queue.length - 1; i >= 0; i--) {
+		const ts = Time.Milli.fromMicro(queue[i].timestamp as Time.Micro);
+		if (ts <= now) {
+			pickIdx = i;
+			break;
+		}
+	}
+	if (pickIdx < 0) return undefined;
+
+	for (let i = 0; i < pickIdx; i++) {
+		queue[i].close();
+	}
+
+	const frame = queue[pickIdx];
+	queue.splice(0, pickIdx + 1);
+	return frame;
 }
 
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
