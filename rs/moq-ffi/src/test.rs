@@ -50,6 +50,55 @@ fn publish_media_lifecycle() {
 	broadcast.finish().unwrap();
 }
 
+#[tokio::test]
+async fn raw_track_activity() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("status".into()).unwrap();
+	assert_eq!(track.name().unwrap(), "status");
+
+	let consumer = track.consume().unwrap();
+	tokio::time::timeout(TIMEOUT, track.used())
+		.await
+		.expect("timed out waiting for raw track to become used")
+		.unwrap();
+
+	drop(consumer);
+	tokio::time::timeout(TIMEOUT, track.unused())
+		.await
+		.expect("timed out waiting for raw track to become unused")
+		.unwrap();
+}
+
+#[tokio::test]
+async fn media_track_activity_and_name() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let init = opus_head();
+	let media = broadcast.publish_media("opus".into(), init).unwrap();
+	let track_name = media.name().unwrap();
+	assert_eq!(track_name, "0.opus");
+
+	let broadcast_consumer = broadcast.consume().unwrap();
+	let catalog_consumer = broadcast_consumer.subscribe_catalog().unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out waiting for catalog")
+		.unwrap()
+		.expect("expected a catalog");
+	assert!(catalog.audio.contains_key(&track_name));
+
+	let track_consumer = broadcast_consumer.subscribe_track(track_name).unwrap();
+	tokio::time::timeout(TIMEOUT, media.used())
+		.await
+		.expect("timed out waiting for media track to become used")
+		.unwrap();
+
+	drop(track_consumer);
+	tokio::time::timeout(TIMEOUT, media.unused())
+		.await
+		.expect("timed out waiting for media track to become unused")
+		.unwrap();
+}
+
 #[test]
 fn unknown_format() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

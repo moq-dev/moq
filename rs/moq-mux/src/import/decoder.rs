@@ -377,6 +377,29 @@ impl Decoder {
 		}
 	}
 
+	/// Return the single track produced by this decoder.
+	///
+	/// Container formats like fMP4 can produce multiple tracks, so callers that
+	/// need one concrete track must use a single-track format.
+	pub fn track(&self) -> anyhow::Result<&moq_lite::TrackProducer> {
+		match self.decoder {
+			#[cfg(feature = "h264")]
+			DecoderKind::Avc1(ref decoder) => Ok(decoder.track()),
+			#[cfg(feature = "h264")]
+			DecoderKind::Avc3(ref decoder) => Ok(decoder.track()),
+			#[cfg(feature = "mp4")]
+			DecoderKind::Fmp4(_) => anyhow::bail!("fmp4 can contain multiple tracks"),
+			#[cfg(feature = "h265")]
+			DecoderKind::Hev1(ref decoder) => Ok(decoder.track()),
+			#[cfg(feature = "av1")]
+			DecoderKind::Av01(ref decoder) => Ok(decoder.track()),
+			#[cfg(feature = "aac")]
+			DecoderKind::Aac(ref decoder) => Ok(decoder.track()),
+			#[cfg(feature = "opus")]
+			DecoderKind::Opus(ref decoder) => Ok(decoder.track()),
+		}
+	}
+
 	/// Decode a frame from the given buffer.
 	///
 	/// This method should be used when the caller knows the buffer consists of an entire frame.
