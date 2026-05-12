@@ -1,8 +1,9 @@
 //! Async-friendly MoqSink that keeps the original dynamic-pad Element
 //! behavior while pushing all network setup and CMAF publishing work into
 //! a Tokio task. The GLib state change thread never blocks, pads still get
-//! requested dynamically, and each pad simply forwards buffers/events to the
-//! background worker via an unbounded channel.
+//! requested dynamically, and each pad simply forwards buffers to the
+//! background worker via an unbounded channel. Events are handled on the
+//! sink pad, with EOS aggregated locally before posting element EOS.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
@@ -236,7 +237,7 @@ impl ElementImpl for MoqSink {
 				let Some(element) = parent.and_then(|p| p.downcast_ref::<super::MoqSink>()) else {
 					return false;
 				};
-				element.imp().forward_event(pad, event)
+				element.imp().handle_event(pad, event)
 			});
 
 		let pad = if let Some(name) = name {
@@ -324,18 +325,17 @@ impl MoqSink {
 		Ok(gst::FlowSuccess::Ok)
 	}
 
-	fn forward_event(&self, pad: &gst::Pad, event: gst::Event) -> bool {
+	fn handle_event(&self, pad: &gst::Pad, event: gst::Event) -> bool {
 		match event.view() {
 			gst::EventView::Caps(caps) => {
-				let sender = match self
+				let Some(sender) = self
 					.session
 					.lock()
 					.unwrap()
 					.as_ref()
 					.map(|handle| handle.sender.clone())
-				{
-					Some(sender) => sender,
-					None => return false,
+				else {
+					return false;
 				};
 
 				if sender
@@ -351,9 +351,14 @@ impl MoqSink {
 				gst::Pad::event_default(pad, Some(&*self.obj()), event)
 			}
 			gst::EventView::Eos(_) => {
-				let sender = match self.session.lock().unwrap().as_ref() {
-					Some(handle) => handle.sender.clone(),
-					None => return false,
+				let Some(sender) = self
+					.session
+					.lock()
+					.unwrap()
+					.as_ref()
+					.map(|handle| handle.sender.clone())
+				else {
+					return false;
 				};
 
 				if sender
