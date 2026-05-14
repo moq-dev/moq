@@ -13,51 +13,38 @@ pub struct Consumer {
 	/// Access to the underlying track consumer.
 	pub track: moq_lite::TrackConsumer,
 	group: Option<moq_lite::GroupConsumer>,
-	finished: bool,
 }
 
 impl Consumer {
 	/// Create a new catalog consumer from a MoQ track consumer.
 	pub fn new(track: moq_lite::TrackConsumer) -> Self {
-		Self {
-			track,
-			group: None,
-			finished: false,
-		}
+		Self { track, group: None }
 	}
 
 	/// Poll for the next catalog update.
 	pub fn poll_next(&mut self, waiter: &conducer::Waiter) -> Poll<Result<Option<Catalog>>> {
-		loop {
+		// Drain pending groups, keeping only the newest. Remember whether the track is done
+		// so we can distinguish "more groups may arrive" from "no more groups, ever".
+		let track_finished = loop {
 			match self.track.poll_next_group(waiter)? {
 				Poll::Ready(Some(group)) => self.group = Some(group),
-				Poll::Ready(None) => {
-					self.finished = true;
-					break;
-				}
-				Poll::Pending => break,
+				Poll::Ready(None) => break true,
+				Poll::Pending => break false,
 			}
-		}
-
-		let Some(group) = &mut self.group else {
-			return self.pending_or_end();
 		};
 
-		match group.poll_read_frame(waiter)? {
-			Poll::Ready(Some(frame)) => {
-				self.group = None;
-				Poll::Ready(Ok(Some(Catalog::from_slice(&frame)?)))
+		if let Some(group) = &mut self.group {
+			match group.poll_read_frame(waiter)? {
+				Poll::Ready(Some(frame)) => {
+					self.group = None;
+					return Poll::Ready(Ok(Some(Catalog::from_slice(&frame)?)));
+				}
+				Poll::Ready(None) => self.group = None,
+				Poll::Pending => return Poll::Pending,
 			}
-			Poll::Ready(None) => {
-				self.group = None;
-				self.pending_or_end()
-			}
-			Poll::Pending => Poll::Pending,
 		}
-	}
 
-	fn pending_or_end(&self) -> Poll<Result<Option<Catalog>>> {
-		if self.finished {
+		if track_finished {
 			Poll::Ready(Ok(None))
 		} else {
 			Poll::Pending
