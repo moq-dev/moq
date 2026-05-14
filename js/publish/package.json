@@ -28,6 +28,10 @@
 		"@moq/signals": "workspace:^",
 		"@moq/ui-core": "workspace:^"
 	},
+	"peerDependencies": {
+		"solid-element": "^1.9.1",
+		"solid-js": "^1.9.10"
+	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.77",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
