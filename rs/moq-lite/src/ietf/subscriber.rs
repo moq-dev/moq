@@ -462,7 +462,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_publish(&mut self, msg: &ietf::Publish<'_>) -> Result<(), Error> {
 		let request_id = msg.request_id;
 
-		let track = Track::new(msg.track_name.to_string()).produce();
+		let track = Track {
+			name: msg.track_name.to_string(),
+			priority: 0,
+		}
+		.produce();
 
 		let mut state = self.state.lock();
 		match state.subscribes.entry(request_id) {
@@ -488,7 +492,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		drop(state);
 
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
-		broadcast.insert_track(&track)?;
+		broadcast.insert_track(track.consume())?;
 
 		Ok(())
 	}
@@ -509,15 +513,16 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			let mut this = self.clone();
 
 			let path = path.to_owned();
+			let broadcast = broadcast.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(path, track).await;
+				this.run_subscribe(path, broadcast, track).await;
 			});
 		}
 
 		Ok(())
 	}
 
-	async fn run_subscribe(&mut self, broadcast: Path<'_>, mut track: TrackProducer) {
+	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, broadcast: BroadcastDynamic, mut track: TrackProducer) {
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,
 			Err(err) => {
@@ -551,7 +556,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		// Write Subscribe message
 		if let Err(err) = self
-			.write_subscribe(&mut stream, request_id, &broadcast, &mut track)
+			.write_subscribe(&mut stream, request_id, &broadcast_path, &track)
 			.await
 		{
 			tracing::debug!(%err, "failed to write subscribe");
@@ -560,7 +565,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return;
 		}
 
-		tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.name, "subscribe started");
+		tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe started");
 
 		// Read the response and register the alias mapping
 		let track_alias = match self.read_subscribe_response(&mut stream).await {
@@ -582,16 +587,19 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			}
 		};
 
-		// Wait for track unused or PublishDone (stream reader close)
 		tokio::select! {
 			_ = track.unused() => {
-				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.name, "subscribe cancelled");
+				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe cancelled");
 				let _ = track.abort(Error::Cancel);
+			}
+			err = broadcast.closed() => {
+				tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "broadcast closed");
+				let _ = track.abort(err);
 			}
 			res = stream.reader.closed() => {
 				match res {
 					Ok(()) => {
-						tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast), track = %track.name, "subscribe complete");
+						tracing::info!(broadcast = %self.origin.as_ref().expect("origin set by start_announce").absolute(&broadcast_path), track = %track.name, "subscribe complete");
 						let _ = track.finish();
 					}
 					Err(err) => {
@@ -616,17 +624,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		stream: &mut Stream<S, Version>,
 		request_id: RequestId,
 		broadcast: &Path<'_>,
-		track: &mut TrackProducer,
+		track: &TrackProducer,
 	) -> Result<(), Error> {
-		// Wait for the first interested subscriber so the relayed SUBSCRIBE
-		// reflects the union of downstream subscribers' preferences.
-		// TODO follow `track.subscription()` and emit SUBSCRIBE_UPDATE upstream
-		// as the aggregate changes.
-		let initial = match track.subscription().await {
-			Some(sub) => sub,
-			None => return Err(Error::Cancel),
-		};
-
 		stream.writer.encode(&ietf::Subscribe::ID).await?;
 		stream
 			.writer
@@ -634,7 +633,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				request_id,
 				track_namespace: broadcast.to_owned(),
 				track_name: (&track.name).into(),
-				subscriber_priority: initial.priority,
+				subscriber_priority: track.priority,
 				group_order: GroupOrder::Descending,
 				filter_type: FilterType::LargestObject,
 			})
@@ -676,7 +675,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::Unsupported);
 		}
 
-		let mut producer = {
+		let (mut producer, track) = {
 			let mut state = self.state.lock();
 			let request_id = match state.aliases.get(&group.track_alias) {
 				Some(request_id) => *request_id,
@@ -687,13 +686,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			};
 			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
 
-			let group = Group {
+			let group_info = Group {
 				sequence: group.group_id,
 			};
-			track.producer.create_group(group)?
+			let producer = track.producer.create_group(group_info)?;
+			(producer, track.producer.clone())
 		};
 
 		let res = tokio::select! {
+			err = track.closed() => Err(err),
 			err = producer.closed() => Err(err),
 			res = self.run_group(group, stream, producer.clone()) => res,
 		};

@@ -18,7 +18,7 @@ export const Stats = <T = unknown>(props: StatsProps<T>) => {
 		<Show when={props.getElement(contextValue)}>
 			{(_element) => (
 				<div class="stats">
-					<StatsPanel audio={_element().audio} video={_element().video} />
+					<StatsPanel audio={_element().audio} video={_element().video} connection={_element().connection} />
 				</div>
 			)}
 		</Show>

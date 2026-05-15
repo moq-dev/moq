@@ -5,6 +5,7 @@ import type * as Moq from "@moq/lite";
 import { Time } from "@moq/lite";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type { BufferedRanges } from "../backend";
+import { base64ToBytes } from "../base64";
 import type { Backend, Stats } from "./backend";
 import type { Source } from "./source";
 
@@ -284,7 +285,8 @@ class DecoderTrack {
 
 	#runLegacy(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
 		// Create consumer that reorders groups/frames up to the provided latency.
-		const consumer = new Container.Legacy.Consumer(sub, {
+		const consumer = new Container.Consumer(sub, {
+			format: new Container.Legacy.Format(),
 			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
@@ -293,7 +295,7 @@ class DecoderTrack {
 		effect.run((inner) => {
 			const network = inner.get(consumer.buffered);
 			const decode = inner.get(this.#buffered);
-			this.buffered.update(() => mergeBufferedRanges(network, decode));
+			this.buffered.update(() => Container.mergeBufferedRanges(network, decode));
 		});
 
 		decoder.configure({
@@ -308,7 +310,7 @@ class DecoderTrack {
 
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await Promise.race([consumer.next(), effect.cancel]);
+				const next = await consumer.next();
 				if (!next) break;
 
 				const { frame, group } = next;
@@ -358,8 +360,22 @@ class DecoderTrack {
 	#runCmaf(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
 		if (this.config.container.kind !== "cmaf") return;
 
-		const { timescale } = this.config.container;
+		const initSegment = base64ToBytes(this.config.container.init);
+		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
+
+		const consumer = new Container.Consumer(sub, {
+			format: new Container.Cmaf.Format(init),
+			latency: this.source.sync.buffer,
+		});
+		effect.cleanup(() => consumer.close());
+
+		// Combine network jitter buffer with decode buffer
+		effect.run((inner) => {
+			const network = inner.get(consumer.buffered);
+			const decode = inner.get(this.#buffered);
+			this.buffered.update(() => Container.mergeBufferedRanges(network, decode));
+		});
 
 		// Configure decoder with description from catalog
 		decoder.configure({
@@ -370,61 +386,53 @@ class DecoderTrack {
 			flip: false,
 		});
 
-		// Use decode buffer directly (no network jitter buffer for CMAF yet)
-		effect.run((inner) => {
-			const decode = inner.get(this.#buffered);
-			this.buffered.update(() => decode);
-		});
+		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
 
 		effect.spawn(async () => {
-			// Process data segments
-			// TODO: Use a consumer wrapper for CMAF to support latency control
 			for (;;) {
-				const group = await Promise.race([sub.recvGroup(), effect.cancel]);
-				if (!group) break;
+				const next = await consumer.next();
+				if (!next) break;
 
-				effect.spawn(async () => {
-					let previous: Time.Micro | undefined;
+				const { frame, group } = next;
 
-					try {
-						for (;;) {
-							const segment = await Promise.race([group.readFrame(), effect.cancel]);
-							if (!segment) break;
-
-							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
-
-							for (const sample of samples) {
-								const chunk = new EncodedVideoChunk({
-									type: sample.keyframe ? "key" : "delta",
-									data: sample.data,
-									timestamp: sample.timestamp,
-								});
-
-								// Mark that we received this frame right now.
-								const timestamp = Time.Milli.fromMicro(sample.timestamp as Time.Micro);
-								this.source.sync.received(timestamp, "video");
-
-								// Track stats
-								this.stats.update((current) => ({
-									frameCount: (current?.frameCount ?? 0) + 1,
-									bytesReceived: (current?.bytesReceived ?? 0) + sample.data.byteLength,
-								}));
-
-								// Track decode buffer
-								if (previous !== undefined) {
-									const start = Time.Milli.fromMicro(previous);
-									const end = Time.Milli.fromMicro(sample.timestamp as Time.Micro);
-									this.#addBuffered(start, end);
-								}
-								previous = sample.timestamp as Time.Micro;
-
-								decoder.decode(chunk);
-							}
-						}
-					} finally {
-						group.close();
+				if (!frame) {
+					if (previous) {
+						previous.final = true;
 					}
-				});
+					continue;
+				}
+
+				// Mark that we received this frame right now.
+				const timestamp = Time.Milli.fromMicro(frame.timestamp);
+				this.source.sync.received(timestamp, "video");
+
+				// Track stats
+				this.stats.update((current) => ({
+					frameCount: (current?.frameCount ?? 0) + 1,
+					bytesReceived: (current?.bytesReceived ?? 0) + frame.data.byteLength,
+				}));
+
+				// Track decode buffer
+				if (previous?.group === group || (previous?.final && previous.group + 1 === group)) {
+					const start = Time.Milli.fromMicro(previous.timestamp);
+					const end = Time.Milli.fromMicro(frame.timestamp);
+					this.#addBuffered(start, end);
+				}
+
+				previous = {
+					timestamp: frame.timestamp,
+					group,
+					final: false,
+				};
+
+				if (decoder.state === "closed") break;
+				decoder.decode(
+					new EncodedVideoChunk({
+						type: frame.keyframe ? "key" : "delta",
+						data: frame.data,
+						timestamp: frame.timestamp,
+					}),
+				);
 			}
 		});
 	}
@@ -469,27 +477,6 @@ class DecoderTrack {
 			return undefined;
 		});
 	}
-}
-
-// Merge two sets of buffered ranges into one sorted list
-function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges {
-	if (a.length === 0) return b;
-	if (b.length === 0) return a;
-
-	const result: BufferedRanges = [];
-	const all = [...a, ...b].sort((x, y) => x.start - y.start);
-
-	for (const range of all) {
-		const last = result.at(-1);
-		if (last && last.end >= range.start) {
-			// Merge overlapping ranges
-			last.end = Time.Milli.max(last.end, range.end);
-		} else {
-			result.push({ ...range });
-		}
-	}
-
-	return result;
 }
 
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {

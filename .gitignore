@@ -30,6 +30,9 @@ node_modules
 *.m3u8
 *.m4s
 
+# Except these test fixtures, which are committed.
+!rs/moq-mux/src/import/test/*.mp4
+
 # Cloudflare Wrangler
 .wrangler/
 

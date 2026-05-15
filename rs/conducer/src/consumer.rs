@@ -4,11 +4,10 @@ use std::{
 };
 
 use crate::{
-	Counts, State,
+	Counts, State, Weak,
 	lock::*,
 	producer::{Producer, Ref},
 	waiter::*,
-	weak::Weak,
 };
 
 /// The consuming side of a shared state channel.
@@ -112,7 +111,10 @@ impl<T> Consumer<T> {
 		self.state.is_clone(&other.state)
 	}
 
-	/// Create a [`Weak`] reference that doesn't affect the producer/consumer ref counts.
+	/// Create a [`Weak`] reference to this state.
+	///
+	/// Does not affect ref counts, so it won't prevent auto-close when all
+	/// producers are dropped.
 	pub fn weak(&self) -> Weak<T> {
 		Weak {
 			state: self.state.clone(),

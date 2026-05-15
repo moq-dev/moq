@@ -170,13 +170,16 @@ impl axum::response::IntoResponse for AuthError {
 /// Mirrors [`moq_native::ClientTls`] so the auth client can be configured
 /// independently of the cluster client. Defaults to system roots with no
 /// client identity, which is what most external auth endpoints expect.
+#[serde_as]
 #[derive(Clone, Default, Debug, clap::Args, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct AuthTls {
 	/// PEM file(s) of root CAs. If empty, the platform's native roots are used.
+	/// In config files, accepts either a single string or a TOML array.
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[arg(id = "auth-tls-root", long = "auth-tls-root", env = "MOQ_AUTH_TLS_ROOT")]
+	#[serde_as(as = "OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 
 	/// PEM file containing the client certificate chain for mTLS.
@@ -223,6 +226,7 @@ impl AuthTls {
 }
 
 /// Configuration for JWT-based authentication.
+#[serde_as]
 #[derive(clap::Args, Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 #[non_exhaustive]
@@ -297,8 +301,11 @@ pub struct AuthConfig {
 	/// matches the more specific `usw.cdn.moq.dev` (slug `customer`,
 	/// path `/customer/foo`) rather than `cdn.moq.dev` (slug `usw/customer`,
 	/// path `/usw/customer/foo`).
+	///
+	/// In config files, accepts either a single string or a TOML array.
 	#[arg(long = "auth-domain", env = "MOQ_AUTH_DOMAIN")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "OneOrMany<_>")]
 	pub domains: Vec<String>,
 }
 

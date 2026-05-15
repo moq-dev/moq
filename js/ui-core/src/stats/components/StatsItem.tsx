@@ -30,6 +30,7 @@ export const StatsItem = (props: StatsItemProps) => {
 		const provider = new StatsInformationProvider({
 			audio: props.audio,
 			video: props.video,
+			connection: props.connection,
 		});
 
 		provider.setup({ setDisplayData });

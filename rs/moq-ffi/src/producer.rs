@@ -10,11 +10,11 @@ use crate::error::MoqError;
 
 struct BroadcastProducer {
 	broadcast: moq_lite::BroadcastProducer,
-	catalog: moq_mux::CatalogProducer,
+	catalog: moq_mux::catalog::Producer,
 }
 
 struct MediaProducer {
-	decoder: moq_mux::import::Decoder,
+	decoder: moq_mux::import::Framed,
 	track: moq_lite::TrackProducer,
 }
 
@@ -72,7 +72,7 @@ impl MoqBroadcastProducer {
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let mut broadcast = moq_lite::Broadcast::new().produce();
-		let catalog = moq_mux::CatalogProducer::new(&mut broadcast)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
 		}))
@@ -85,11 +85,11 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		let format = moq_mux::import::DecoderFormat::from_str(&format)
+		let format = moq_mux::import::FramedFormat::from_str(&format)
 			.map_err(|_| MoqError::Codec(format!("unknown format: {format}")))?;
 
 		let mut buf = init.as_slice();
-		let decoder = moq_mux::import::Decoder::new(state.broadcast.clone(), state.catalog.clone(), format, &mut buf)
+		let decoder = moq_mux::import::Framed::new(state.broadcast.clone(), state.catalog.clone(), format, &mut buf)
 			.map_err(|err| MoqError::Codec(format!("init failed: {err}")))?;
 
 		if buf.has_remaining() {
@@ -152,23 +152,13 @@ impl MoqTrackProducer {
 
 	/// Wait until this track has at least one active consumer.
 	pub async fn used(&self) -> Result<(), MoqError> {
-		let track = {
-			let _guard = crate::ffi::RUNTIME.enter();
-			let guard = self.inner.lock().unwrap();
-			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
-		};
-
+		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
 		wait_for_track_activity(track, TrackActivity::Used).await
 	}
 
 	/// Wait until this track has no active consumers.
 	pub async fn unused(&self) -> Result<(), MoqError> {
-		let track = {
-			let _guard = crate::ffi::RUNTIME.enter();
-			let guard = self.inner.lock().unwrap();
-			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
-		};
-
+		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
 		wait_for_track_activity(track, TrackActivity::Unused).await
 	}
 
@@ -179,7 +169,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		Ok(Arc::new(MoqTrackConsumer::new(track.consume().subscribe_default()?)))
+		Ok(Arc::new(MoqTrackConsumer::new(track.consume())))
 	}
 
 	/// Append a new group to the track, returning a producer for writing frames into it.
@@ -267,23 +257,13 @@ impl MoqMediaProducer {
 
 	/// Wait until this media track has at least one active consumer.
 	pub async fn used(&self) -> Result<(), MoqError> {
-		let track = {
-			let _guard = crate::ffi::RUNTIME.enter();
-			let guard = self.inner.lock().unwrap();
-			guard.as_ref().ok_or_else(|| MoqError::Closed)?.track.clone()
-		};
-
+		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.track.clone();
 		wait_for_track_activity(track, TrackActivity::Used).await
 	}
 
 	/// Wait until this media track has no active consumers.
 	pub async fn unused(&self) -> Result<(), MoqError> {
-		let track = {
-			let _guard = crate::ffi::RUNTIME.enter();
-			let guard = self.inner.lock().unwrap();
-			guard.as_ref().ok_or_else(|| MoqError::Closed)?.track.clone()
-		};
-
+		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.track.clone();
 		wait_for_track_activity(track, TrackActivity::Unused).await
 	}
 

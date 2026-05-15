@@ -56,17 +56,9 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
-		// Flatten the RTT signal from the connection for the backend.
-		const rtt = new Signal<number | undefined>(undefined);
-		this.signals.run((effect) => {
-			const conn = effect.get(this.connection.established);
-			const rttSignal = conn?.rtt;
-			rtt.set(rttSignal ? effect.get(rttSignal) : undefined);
-		});
-
 		this.backend = new MultiBackend({
 			broadcast: this.broadcast,
-			rtt,
+			connection: this.connection.established,
 		});
 		this.signals.cleanup(() => this.backend.close());
 

@@ -19,6 +19,9 @@ use futures::stream::StreamExt;
 ///
 /// Certificate and keys must currently be files on disk.
 /// Alternatively, you can generate a self-signed certificate given a list of hostnames.
+///
+/// In config files, each list field accepts either a single string or a TOML array.
+#[serde_with::serde_as]
 #[derive(clap::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -26,11 +29,13 @@ pub struct ServerTlsConfig {
 	/// Load the given certificate from disk.
 	#[arg(long = "tls-cert", id = "tls-cert", env = "MOQ_SERVER_TLS_CERT")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub cert: Vec<PathBuf>,
 
 	/// Load the given key from disk.
 	#[arg(long = "tls-key", id = "tls-key", env = "MOQ_SERVER_TLS_KEY")]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub key: Vec<PathBuf>,
 
 	/// Or generate a new certificate and key with the given hostnames.
@@ -42,6 +47,7 @@ pub struct ServerTlsConfig {
 		env = "MOQ_SERVER_TLS_GENERATE"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub generate: Vec<String>,
 
 	/// PEM file(s) of root CAs for validating optional client certificates (mTLS).
@@ -59,6 +65,7 @@ pub struct ServerTlsConfig {
 		env = "MOQ_SERVER_TLS_ROOT"
 	)]
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 }
 
@@ -696,5 +703,35 @@ impl std::str::FromStr for ServerId {
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		hex::decode(s).map(Self)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_tls_string_or_array() {
+		// Single string should deserialize into a Vec with one entry.
+		let single = r#"
+			cert = "cert.pem"
+			key = "key.pem"
+		"#;
+		let config: ServerTlsConfig = toml::from_str(single).unwrap();
+		assert_eq!(config.cert, vec![PathBuf::from("cert.pem")]);
+		assert_eq!(config.key, vec![PathBuf::from("key.pem")]);
+
+		// TOML arrays should still work.
+		let array = r#"
+			cert = ["a.pem", "b.pem"]
+			key = ["a.key", "b.key"]
+			generate = ["localhost"]
+			root = ["ca.pem"]
+		"#;
+		let config: ServerTlsConfig = toml::from_str(array).unwrap();
+		assert_eq!(config.cert, vec![PathBuf::from("a.pem"), PathBuf::from("b.pem")]);
+		assert_eq!(config.key, vec![PathBuf::from("a.key"), PathBuf::from("b.key")]);
+		assert_eq!(config.generate, vec!["localhost".to_string()]);
+		assert_eq!(config.root, vec![PathBuf::from("ca.pem")]);
 	}
 }

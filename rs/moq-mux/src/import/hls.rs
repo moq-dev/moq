@@ -19,8 +19,7 @@ use reqwest::Client;
 use tracing::{debug, info, warn};
 use url::Url;
 
-use super::stats::Stats;
-use super::{Fmp4, Fmp4Config};
+use super::Fmp4;
 
 /// Configuration for the single-rendition HLS ingest loop.
 #[derive(Clone)]
@@ -31,20 +30,11 @@ pub struct HlsConfig {
 	/// An optional HTTP client to use for fetching the playlist and segments.
 	/// If not provided, a default client will be created.
 	pub client: Option<Client>,
-
-	/// Enable passthrough mode for CMAF fragment transport.
-	/// When enabled, complete fMP4 fragments (moof+mdat) are transported directly
-	/// instead of being decomposed into individual samples.
-	pub passthrough: bool,
 }
 
 impl HlsConfig {
 	pub fn new(playlist: String) -> Self {
-		Self {
-			playlist,
-			client: None,
-			passthrough: false,
-		}
+		Self { playlist, client: None }
 	}
 
 	/// Parse the playlist string into a URL.
@@ -82,7 +72,7 @@ pub struct Hls {
 	broadcast: moq_lite::BroadcastProducer,
 
 	/// The catalog being produced.
-	catalog: crate::CatalogProducer,
+	catalog: crate::catalog::Producer,
 
 	/// fMP4 importers for each discovered video rendition.
 	/// Each importer feeds a separate MoQ track but shares the same catalog.
@@ -98,7 +88,6 @@ pub struct Hls {
 	video: Vec<TrackState>,
 	/// Optional audio track shared across variants.
 	audio: Option<TrackState>,
-	passthrough: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,7 +116,7 @@ impl Hls {
 	/// Create a new HLS ingest that will write into the given broadcast.
 	pub fn new(
 		broadcast: moq_lite::BroadcastProducer,
-		catalog: crate::CatalogProducer,
+		catalog: crate::catalog::Producer,
 		cfg: HlsConfig,
 	) -> anyhow::Result<Self> {
 		let base_url = cfg.parse_playlist()?;
@@ -137,12 +126,10 @@ impl Hls {
 				.build()
 				.unwrap()
 		});
-		let passthrough = cfg.passthrough;
 		Ok(Self {
 			broadcast,
 			catalog,
 			video_importers: Vec::new(),
-			passthrough,
 			audio_importer: None,
 			client,
 			base_url,
@@ -167,7 +154,16 @@ impl Hls {
 	/// Run the ingest loop until cancelled.
 	pub async fn run(&mut self) -> anyhow::Result<()> {
 		loop {
-			let delay = self.step().await?;
+			let outcome = self.step().await?;
+			let delay = self.refresh_delay(outcome.target_duration, outcome.wrote_segments);
+
+			info!(
+				wrote_segments = outcome.wrote_segments,
+				target_duration = ?outcome.target_duration,
+				delay_secs = delay.as_secs_f32(),
+				"HLS ingest step complete"
+			);
+
 			tokio::time::sleep(delay).await;
 		}
 	}
@@ -206,24 +202,12 @@ impl Hls {
 		Ok(buffered)
 	}
 
-	/// Perform a single ingest step: fetch playlists, consume new segments.
+	/// Perform a single ingest step for all active tracks.
 	///
-	/// Returns the recommended delay before the next step.
-	pub async fn step(&mut self) -> anyhow::Result<Duration> {
-		let outcome = self.step_inner().await?;
-		let delay = self.refresh_delay(outcome.target_duration, outcome.wrote_segments);
-
-		info!(
-			wrote_segments = outcome.wrote_segments,
-			target_duration = ?outcome.target_duration,
-			delay_secs = delay.as_secs_f32(),
-			"HLS ingest step complete"
-		);
-
-		Ok(delay)
-	}
-
-	async fn step_inner(&mut self) -> anyhow::Result<StepOutcome> {
+	/// This fetches the current media playlists, consumes any fresh segments,
+	/// and returns how many segments were written along with the target
+	/// duration to guide scheduling of the next step.
+	async fn step(&mut self) -> anyhow::Result<StepOutcome> {
 		self.ensure_tracks().await?;
 
 		let mut wrote = 0usize;
@@ -261,28 +245,6 @@ impl Hls {
 			wrote_segments: wrote,
 			target_duration,
 		})
-	}
-
-	/// Return aggregated import statistics from all child fMP4 importers.
-	pub fn stats(&self) -> Stats {
-		let mut stats = Stats::default();
-		for importer in &self.video_importers {
-			let s = importer.stats();
-			stats.frames += s.frames;
-			stats.keyframes += s.keyframes;
-			stats.bytes += s.bytes;
-			stats.drift.count += s.drift.count;
-			stats.drift.sum += s.drift.sum;
-		}
-		if let Some(importer) = &self.audio_importer {
-			let s = importer.stats();
-			stats.frames += s.frames;
-			stats.keyframes += s.keyframes;
-			stats.bytes += s.bytes;
-			stats.drift.count += s.drift.count;
-			stats.drift.sum += s.drift.sum;
-		}
-		stats
 	}
 
 	/// Compute the delay before the next ingest step should run.
@@ -513,13 +475,7 @@ impl Hls {
 	/// independent while still contributing to the same shared catalog.
 	fn ensure_video_importer_for(&mut self, index: usize) -> &mut Fmp4 {
 		while self.video_importers.len() <= index {
-			let importer = Fmp4::new(
-				self.broadcast.clone(),
-				self.catalog.clone(),
-				Fmp4Config {
-					passthrough: self.passthrough,
-				},
-			);
+			let importer = Fmp4::new(self.broadcast.clone(), self.catalog.clone());
 			self.video_importers.push(importer);
 		}
 
@@ -528,9 +484,8 @@ impl Hls {
 
 	/// Create or retrieve the fMP4 importer for the audio rendition.
 	fn ensure_audio_importer(&mut self) -> &mut Fmp4 {
-		let passthrough = self.passthrough;
 		self.audio_importer
-			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), self.catalog.clone(), Fmp4Config { passthrough }))
+			.get_or_insert_with(|| Fmp4::new(self.broadcast.clone(), self.catalog.clone()))
 	}
 
 	#[cfg(test)]
@@ -661,7 +616,7 @@ mod tests {
 	#[test]
 	fn hls_ingest_starts_without_importers() {
 		let mut broadcast = moq_lite::Broadcast::new().produce();
-		let catalog = crate::CatalogProducer::new(&mut broadcast).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast).unwrap();
 		let url = "https://example.com/master.m3u8".to_string();
 		let cfg = HlsConfig::new(url);
 		let hls = Hls::new(broadcast, catalog, cfg).unwrap();
