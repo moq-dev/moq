@@ -152,23 +152,13 @@ impl MoqTrackProducer {
 
 	/// Wait until this track has at least one active consumer.
 	pub async fn used(&self) -> Result<(), MoqError> {
-		let track = {
-			let _guard = crate::ffi::RUNTIME.enter();
-			let guard = self.inner.lock().unwrap();
-			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
-		};
-
+		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
 		wait_for_track_activity(track, TrackActivity::Used).await
 	}
 
 	/// Wait until this track has no active consumers.
 	pub async fn unused(&self) -> Result<(), MoqError> {
-		let track = {
-			let _guard = crate::ffi::RUNTIME.enter();
-			let guard = self.inner.lock().unwrap();
-			guard.as_ref().ok_or_else(|| MoqError::Closed)?.clone()
-		};
-
+		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
 		wait_for_track_activity(track, TrackActivity::Unused).await
 	}
 
@@ -267,23 +257,27 @@ impl MoqMediaProducer {
 
 	/// Wait until this media track has at least one active consumer.
 	pub async fn used(&self) -> Result<(), MoqError> {
-		let track = {
-			let _guard = crate::ffi::RUNTIME.enter();
-			let guard = self.inner.lock().unwrap();
-			guard.as_ref().ok_or_else(|| MoqError::Closed)?.track.clone()
-		};
-
+		let track = self
+			.inner
+			.lock()
+			.unwrap()
+			.as_ref()
+			.ok_or(MoqError::Closed)?
+			.track
+			.clone();
 		wait_for_track_activity(track, TrackActivity::Used).await
 	}
 
 	/// Wait until this media track has no active consumers.
 	pub async fn unused(&self) -> Result<(), MoqError> {
-		let track = {
-			let _guard = crate::ffi::RUNTIME.enter();
-			let guard = self.inner.lock().unwrap();
-			guard.as_ref().ok_or_else(|| MoqError::Closed)?.track.clone()
-		};
-
+		let track = self
+			.inner
+			.lock()
+			.unwrap()
+			.as_ref()
+			.ok_or(MoqError::Closed)?
+			.track
+			.clone();
 		wait_for_track_activity(track, TrackActivity::Unused).await
 	}
 
