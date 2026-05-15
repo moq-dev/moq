@@ -25,7 +25,6 @@
 		"@moq/lite": "workspace:^",
 		"@moq/watch": "workspace:^",
 		"@moq/signals": "workspace:^",
-		"@moq/ui-core": "workspace:^",
 		"zod": "^4.3.6"
 	},
 	"//devDependencies": "These are only needed for local development with workspace packages. They are NOT needed when using the published npm packages.",

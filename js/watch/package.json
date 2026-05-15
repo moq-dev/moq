@@ -8,13 +8,13 @@
 	"exports": {
 		".": "./src/index.ts",
 		"./element": "./src/element.ts",
-		"./ui": "./src/ui/index.tsx",
+		"./ui": "./src/ui/element.ts",
 		"./support": "./src/support/index.ts",
 		"./support/element": "./src/support/element.ts"
 	},
 	"sideEffects": [
 		"./src/element.ts",
-		"./src/ui/index.tsx",
+		"./src/ui/element.ts",
 		"./src/support/element.ts"
 	],
 	"scripts": {
@@ -27,8 +27,7 @@
 		"@moq/hang": "workspace:^",
 		"@moq/lite": "workspace:^",
 		"@moq/msf": "workspace:^",
-		"@moq/signals": "workspace:^",
-		"@moq/ui-core": "workspace:^"
+		"@moq/signals": "workspace:^"
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.77",
@@ -36,10 +35,7 @@
 		"@typescript/lib-dom": "npm:@types/web@^0.0.241",
 		"esbuild": "^0.27.0",
 		"rimraf": "^6.0.1",
-		"solid-element": "^1.9.1",
-		"solid-js": "^1.9.10",
 		"typescript": "^6.0.0",
-		"vite": "^7.3.1",
-		"vite-plugin-solid": "^2.11.10"
+		"vite": "^7.3.1"
 	}
 }

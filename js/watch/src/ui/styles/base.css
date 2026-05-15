@@ -1,0 +1,84 @@
+:host {
+	--color-white: #ffffff;
+	--color-white-alpha-05: rgba(255, 255, 255, 0.05);
+	--color-white-alpha-10: rgba(255, 255, 255, 0.1);
+	--color-white-alpha-15: rgba(255, 255, 255, 0.15);
+	--color-white-alpha-20: rgba(255, 255, 255, 0.2);
+	--color-white-alpha-25: rgba(255, 255, 255, 0.25);
+	--color-white-alpha-30: rgba(255, 255, 255, 0.3);
+	--color-white-alpha-40: rgba(255, 255, 255, 0.4);
+	--color-white-alpha-70: rgba(255, 255, 255, 0.7);
+	--color-white-alpha-90: rgba(255, 255, 255, 0.9);
+	--color-gray-100: #9ca3af;
+	--color-gray-950: #1a1a1a;
+	--color-blue-400: #00dfff;
+	--color-blue-500: #52a1ff;
+	--color-blue-900: #1b3243;
+	--color-purple-400: #a855f7;
+	--color-purple-900: #31144a;
+	--color-green-400: #65ee2e;
+	--color-green-900: #3d4928;
+	--color-yellow-400: #facc15;
+	--color-orange-400: #ff9900;
+	--color-orange-450: #fb923c;
+	--color-orange-500: #f97316;
+	--color-orange-900: #4d301b;
+	--color-amber-600: #d97706;
+	--color-orange-500-alpha-60: rgba(249, 115, 22, 0.6);
+	--color-orange-500-alpha-80: rgba(249, 115, 22, 0.8);
+	--color-black-alpha-08: rgba(0, 0, 0, 0.08);
+	--color-black-alpha-10: rgba(0, 0, 0, 0.1);
+	--color-black-alpha-40: rgba(0, 0, 0, 0.4);
+	--color-black-alpha-85: rgba(0, 0, 0, 0.85);
+	--spacing-1: 0.0625rem;
+	--spacing-2: 0.125rem;
+	--spacing-4: 0.25rem;
+	--spacing-8: 0.5rem;
+	--spacing-12: 0.75rem;
+	--spacing-16: 1rem;
+	--spacing-24: 1.5rem;
+	--spacing-32: 2rem;
+	--spacing-48: 3rem;
+	--border-radius-sm: 0.5rem;
+	--border-radius-md: 0.75rem;
+	--border-radius-lg: 1rem;
+}
+
+.flex--center {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+}
+
+.flex--align-center {
+	align-items: center;
+}
+
+.button {
+	color: var(--color-white);
+	cursor: pointer;
+	background-color: var(--color-white-alpha-10);
+	border: var(--spacing-1) solid var(--color-white-alpha-20);
+	border-radius: 50%;
+	width: 2.25rem;
+	height: 2.25rem;
+	transform-origin: center;
+	transition: transform 100ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.button:hover:not(:disabled) {
+	transform: scale(1.02);
+	background-color: var(--color-white-alpha-20);
+	box-shadow: 0 var(--spacing-2) var(--spacing-8) var(--color-black-alpha-10);
+}
+
+.button:active:not(:disabled) {
+	transform: scale(0.98);
+	box-shadow: 0 var(--spacing-1) var(--spacing-4) var(--color-black-alpha-08);
+}
+
+.button:disabled {
+	opacity: 0.5;
+	cursor: default;
+	color: var(--color-gray-100);
+}

@@ -31,7 +31,6 @@
 		"js/token",
 		"js/hang",
 		"js/msf",
-		"js/ui-core",
 		"js/watch",
 		"js/publish",
 		"js/signals",

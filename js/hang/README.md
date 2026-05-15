@@ -54,7 +54,6 @@ import * as Publish from "@moq/publish";
 
 - **[@moq/watch](../watch)** — Subscribe to and render MoQ broadcasts
 - **[@moq/publish](../publish)** — Publish media to MoQ broadcasts
-- **[@moq/ui-core](../ui-core)** — Shared UI components
 - **[@moq/lite](../lite)** — Core pub/sub transport protocol
 - **[@moq/signals](../signals)** — Reactive signals library
 
