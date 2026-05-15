@@ -36,27 +36,6 @@ pub struct MoqMediaProducer {
 	inner: std::sync::Mutex<Option<MediaProducer>>,
 }
 
-enum TrackActivity {
-	Used,
-	Unused,
-}
-
-async fn wait_for_track_activity(track: moq_lite::TrackProducer, activity: TrackActivity) -> Result<(), MoqError> {
-	let handle = crate::ffi::RUNTIME.spawn(async move {
-		match activity {
-			TrackActivity::Used => track.used().await,
-			TrackActivity::Unused => track.unused().await,
-		}
-		.map_err(Into::into)
-	});
-
-	match handle.await {
-		Ok(result) => result,
-		Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
-		Err(e) => Err(MoqError::Task(e)),
-	}
-}
-
 #[uniffi::export]
 impl MoqBroadcastProducer {
 	/// Create a consumer that reads from this broadcast's tracks.
@@ -153,13 +132,21 @@ impl MoqTrackProducer {
 	/// Wait until this track has at least one active consumer.
 	pub async fn used(&self) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		wait_for_track_activity(track, TrackActivity::Used).await
+		match crate::ffi::RUNTIME.spawn(async move { track.used().await }).await {
+			Ok(result) => result.map_err(Into::into),
+			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
+			Err(e) => Err(MoqError::Task(e)),
+		}
 	}
 
 	/// Wait until this track has no active consumers.
 	pub async fn unused(&self) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		wait_for_track_activity(track, TrackActivity::Unused).await
+		match crate::ffi::RUNTIME.spawn(async move { track.unused().await }).await {
+			Ok(result) => result.map_err(Into::into),
+			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
+			Err(e) => Err(MoqError::Task(e)),
+		}
 	}
 
 	/// Create a consumer that reads from this producer's track.
@@ -265,7 +252,11 @@ impl MoqMediaProducer {
 			.ok_or(MoqError::Closed)?
 			.track
 			.clone();
-		wait_for_track_activity(track, TrackActivity::Used).await
+		match crate::ffi::RUNTIME.spawn(async move { track.used().await }).await {
+			Ok(result) => result.map_err(Into::into),
+			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
+			Err(e) => Err(MoqError::Task(e)),
+		}
 	}
 
 	/// Wait until this media track has no active consumers.
@@ -278,7 +269,11 @@ impl MoqMediaProducer {
 			.ok_or(MoqError::Closed)?
 			.track
 			.clone();
-		wait_for_track_activity(track, TrackActivity::Unused).await
+		match crate::ffi::RUNTIME.spawn(async move { track.unused().await }).await {
+			Ok(result) => result.map_err(Into::into),
+			Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
+			Err(e) => Err(MoqError::Task(e)),
+		}
 	}
 
 	/// Write a frame to this media track.
