@@ -1,7 +1,7 @@
 {
 	"name": "@moq/ui-core",
 	"type": "module",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Shared UI components for Media over QUIC",
 	"license": "(MIT OR Apache-2.0)",
 	"repository": "github:moq-dev/moq",

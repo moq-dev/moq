@@ -217,5 +217,8 @@ export class MultiBackend implements Backend {
 
 	close(): void {
 		this.signals.close();
+		this.#videoSource.close();
+		this.#audioSource.close();
+		this.sync.close();
 	}
 }
