@@ -12,7 +12,7 @@ const SUFFIX = "?worklet";
  * then inlined as a string. At runtime, a blob URL is created and exported.
  * Pass the URL to audioWorklet.addModule().
  */
-export function workletInline(alias: Record<string, string>): Plugin {
+export function workletInline(alias?: Record<string, string>): Plugin {
 	return {
 		name: "worklet-inline",
 		enforce: "pre",
