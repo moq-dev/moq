@@ -14,7 +14,8 @@
 
 use crate::{Error, Result, coding};
 
-use super::{Group, GroupConsumer, GroupProducer};
+use super::{Datagram, DatagramsConsumer, DatagramsProducer, Group, GroupConsumer, GroupProducer};
+use bytes::Bytes;
 
 use std::{
 	collections::{HashSet, VecDeque},
@@ -206,6 +207,7 @@ impl State {
 pub struct TrackProducer {
 	info: Track,
 	state: conducer::Producer<State>,
+	datagrams: DatagramsProducer,
 }
 
 impl std::ops::Deref for TrackProducer {
@@ -222,6 +224,7 @@ impl TrackProducer {
 		Self {
 			info,
 			state: conducer::Producer::default(),
+			datagrams: DatagramsProducer::new(),
 		}
 	}
 
@@ -280,6 +283,19 @@ impl TrackProducer {
 		Ok(())
 	}
 
+	/// Write a datagram with an explicit sequence number.
+	///
+	/// Payload must be `<= MAX_DATAGRAM_PAYLOAD` (1200 bytes); larger payloads
+	/// return [`Error::WrongSize`].
+	pub fn write_datagram(&mut self, datagram: Datagram) -> Result<()> {
+		self.datagrams.write(datagram)
+	}
+
+	/// Append a datagram with the next sequence number, returning the assigned sequence.
+	pub fn append_datagram<B: Into<Bytes>>(&mut self, payload: B) -> Result<u64> {
+		self.datagrams.append(payload)
+	}
+
 	/// Mark the track as finished after the last appended group.
 	///
 	/// Sets the final sequence to one past the current max_sequence.
@@ -294,6 +310,9 @@ impl TrackProducer {
 			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
 			None => 0,
 		});
+		drop(state);
+		// Cascade close to the parallel datagrams channel — best-effort.
+		let _ = self.datagrams.finish();
 		Ok(())
 	}
 
@@ -320,8 +339,10 @@ impl TrackProducer {
 	/// already created.
 	pub fn abort(&mut self, err: Error) -> Result<()> {
 		let mut guard = self.modify()?;
-		guard.abort = Some(err);
+		guard.abort = Some(err.clone());
 		guard.close();
+		// Cascade abort to the parallel datagrams channel — best-effort.
+		let _ = self.datagrams.abort(err);
 		Ok(())
 	}
 
@@ -330,6 +351,7 @@ impl TrackProducer {
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			datagrams: self.datagrams.consume(),
 			index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
@@ -373,6 +395,10 @@ impl TrackProducer {
 		TrackWeak {
 			info: self.info.clone(),
 			state: self.state.weak(),
+			// Cloning the consumer-side of the datagrams channel only bumps the
+			// consumer ref count; producer-side auto-close (the relevant lifecycle
+			// here) is unaffected.
+			datagrams: self.datagrams.consume(),
 		}
 	}
 
@@ -388,6 +414,7 @@ impl Clone for TrackProducer {
 		Self {
 			info: self.info.clone(),
 			state: self.state.clone(),
+			datagrams: self.datagrams.clone(),
 		}
 	}
 }
@@ -403,6 +430,7 @@ impl From<Track> for TrackProducer {
 pub(crate) struct TrackWeak {
 	pub(crate) info: Track,
 	state: conducer::Weak<State>,
+	datagrams: DatagramsConsumer,
 }
 
 impl TrackWeak {
@@ -414,6 +442,7 @@ impl TrackWeak {
 		TrackConsumer {
 			info: self.info.clone(),
 			state: self.state.consume(),
+			datagrams: self.datagrams.clone(),
 			index: 0,
 			min_sequence: 0,
 			next_sequence: 0,
@@ -437,6 +466,7 @@ impl TrackWeak {
 pub struct TrackConsumer {
 	info: Track,
 	state: conducer::Consumer<State>,
+	datagrams: DatagramsConsumer,
 	/// Arrival-order cursor used by [`Self::recv_group`].
 	index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by [`Self::start_at`].
@@ -601,12 +631,56 @@ impl TrackConsumer {
 		self.state.read().max_sequence
 	}
 
+	/// Upgrade this consumer back to a [TrackProducer] sharing the same state.
+	///
+	/// This enables zero-copy track sharing between broadcasts: subscribe to a
+	/// track, then [`crate::BroadcastProducer::insert_track`] the producer into another
+	/// broadcast. Both broadcasts serve the same underlying track data with no
+	/// forwarding overhead.
+	///
+	/// # Shared Ownership
+	///
+	/// The returned producer shares state with the original track. Mutations
+	/// (appending groups, finishing, aborting) through either producer affect
+	/// all consumers of the track. The returned producer keeps the track alive
+	/// (prevents auto-close) as long as it exists, even if the original producer
+	/// is dropped.
+	pub fn produce(&self) -> Result<TrackProducer> {
+		let state = self
+			.state
+			.produce()
+			.ok_or_else(|| self.state.read().abort.clone().unwrap_or(Error::Dropped))?;
+		// Upgrade the datagrams channel too so writes on the new producer
+		// reach the same consumers. If the datagrams channel is closed (e.g.
+		// the original producer was dropped), fall back to a fresh channel —
+		// rare since the group channel just succeeded.
+		let datagrams = self.datagrams.produce().unwrap_or_default();
+		Ok(TrackProducer {
+			info: self.info.clone(),
+			state,
+			datagrams,
+		})
+	}
+
 	/// Create a weak reference that doesn't prevent auto-close.
 	pub(crate) fn weak(&self) -> TrackWeak {
 		TrackWeak {
 			info: self.info.clone(),
 			state: self.state.weak(),
+			datagrams: self.datagrams.clone(),
 		}
+	}
+
+	/// Subscribe to datagrams on this track.
+	///
+	/// Returns a [`DatagramsConsumer`] with its own cursor. The subscription's
+	/// `max_latency` is applied per-call by the consumer's `recv` / `poll_recv`.
+	/// For strict (`max_latency == 0`) semantics, the caller should also invoke
+	/// [`DatagramsConsumer::skip_to_latest`] before the first poll.
+	pub fn subscribe_datagrams(&self, _sub: super::DatagramsSubscription) -> DatagramsConsumer {
+		// `max_latency` is applied per-call by the caller's recv loop; we just
+		// hand back an independent per-subscriber cursor.
+		self.datagrams.clone()
 	}
 }
 

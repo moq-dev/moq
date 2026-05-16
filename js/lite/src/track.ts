@@ -1,9 +1,17 @@
 import { Signal } from "@moq/signals";
+import { Datagram, MAX_DATAGRAM_AGE_MS, MAX_DATAGRAM_PAYLOAD } from "./datagram.ts";
 import { Group } from "./group.ts";
+
+interface DatagramSlot {
+	datagram: Datagram;
+	createdAt: number; // performance.now() at write time
+}
 
 export class TrackState {
 	groups = new Signal<Group[]>([]);
 	closed = new Signal<boolean | Error>(false);
+	/** Datagrams cache; entries older than `MAX_DATAGRAM_AGE_MS` are evicted on each touch. */
+	datagrams = new Signal<DatagramSlot[]>([]);
 }
 
 export class Track {
@@ -12,6 +20,7 @@ export class Track {
 	state = new TrackState();
 	#next?: number;
 	#nextSequence = 0;
+	#nextDatagramSequence = 0;
 
 	readonly closed: Promise<Error | undefined>;
 
@@ -90,6 +99,95 @@ export class Track {
 		const group = this.appendGroup();
 		group.writeBool(bool);
 		group.close();
+	}
+
+	/**
+	 * Write a datagram with an explicit sequence number.
+	 *
+	 * Throws if the payload exceeds {@link MAX_DATAGRAM_PAYLOAD} or the track is closed.
+	 */
+	writeDatagram(datagram: Datagram) {
+		if (this.state.closed.peek()) throw new Error("track is closed");
+		if (datagram.payload.byteLength > MAX_DATAGRAM_PAYLOAD) {
+			throw new Error(`datagram payload ${datagram.payload.byteLength} > ${MAX_DATAGRAM_PAYLOAD}`);
+		}
+		if (datagram.sequence >= this.#nextDatagramSequence) {
+			this.#nextDatagramSequence = datagram.sequence + 1;
+		}
+		this.#pushDatagram(datagram);
+	}
+
+	/**
+	 * Append a datagram with the next auto-assigned sequence; returns the assigned value.
+	 */
+	appendDatagram(payload: Uint8Array): number {
+		if (this.state.closed.peek()) throw new Error("track is closed");
+		if (payload.byteLength > MAX_DATAGRAM_PAYLOAD) {
+			throw new Error(`datagram payload ${payload.byteLength} > ${MAX_DATAGRAM_PAYLOAD}`);
+		}
+		const sequence = this.#nextDatagramSequence++;
+		this.#pushDatagram(new Datagram(sequence, payload));
+		return sequence;
+	}
+
+	#pushDatagram(datagram: Datagram) {
+		const now = performance.now();
+		this.state.datagrams.mutate((slots) => {
+			slots.push({ datagram, createdAt: now });
+			// Evict expired entries from the front. The ring stays small (33ms TTL),
+			// so a linear scan is fine.
+			while (slots.length > 0 && now - slots[0].createdAt > MAX_DATAGRAM_AGE_MS) {
+				slots.shift();
+			}
+		});
+	}
+
+	/**
+	 * Drop any currently-cached datagrams. Useful before the first
+	 * {@link recvDatagram} for strict (`maxLatency = 0`) semantics so the
+	 * consumer doesn't replay history.
+	 */
+	skipDatagramsToLatest() {
+		this.state.datagrams.set([]);
+	}
+
+	/**
+	 * Block until the next datagram arrives.
+	 *
+	 * `maxLatencyMs > 0` skips cache entries older than that bound. `0` means
+	 * "no upper bound" (the cache eviction TTL still applies). For strict
+	 * semantics call {@link skipDatagramsToLatest} once before the first
+	 * {@link recvDatagram} call.
+	 */
+	async recvDatagram(maxLatencyMs: number): Promise<Datagram | undefined> {
+		for (;;) {
+			const now = performance.now();
+			let result: Datagram | undefined;
+			this.state.datagrams.mutate((slots) => {
+				while (slots.length > 0) {
+					const head = slots[0];
+					const age = now - head.createdAt;
+					if (age > MAX_DATAGRAM_AGE_MS) {
+						slots.shift();
+						continue;
+					}
+					if (maxLatencyMs > 0 && age > maxLatencyMs) {
+						slots.shift();
+						continue;
+					}
+					result = head.datagram;
+					slots.shift();
+					break;
+				}
+			});
+			if (result) return result;
+
+			const closed = this.state.closed.peek();
+			if (closed instanceof Error) throw closed;
+			if (closed) return undefined;
+
+			await Signal.race(this.state.datagrams, this.state.closed);
+		}
 	}
 
 	/**
@@ -220,5 +318,8 @@ export class Track {
 		for (const group of this.state.groups.peek()) {
 			group.close(abort);
 		}
+		// Datagrams have no per-entry close; just drop the cache so any waiting
+		// consumer wakes and observes `closed`.
+		this.state.datagrams.set([]);
 	}
 }

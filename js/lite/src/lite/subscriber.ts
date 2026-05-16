@@ -2,13 +2,15 @@ import type { Signal } from "@moq/signals";
 import { Announced } from "../announced.ts";
 import type { Bandwidth } from "../bandwidth.ts";
 import { Broadcast, type TrackRequest } from "../broadcast.ts";
+import { Datagram as DatagramModel, MAX_DATAGRAM_AGE_MS } from "../datagram.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
-import { type Reader, Stream } from "../stream.ts";
+import { Reader, Stream } from "../stream.ts";
 import type * as Time from "../time.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
+import { Datagram as DatagramMessage, Datagrams, DatagramsOk } from "./datagram.ts";
 import type { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -181,6 +183,17 @@ export class Subscriber {
 		await stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(stream.writer, this.version);
 
+		// On Lite04Datagrams, also open a DATAGRAMS upstream stream so any datagrams the peer
+		// publishes for this track land in the same Track via routeDatagram().
+		const datagramsTask =
+			this.version === Version.DRAFT_04_DATAGRAMS
+				? this.#runDatagramsStream(id, broadcast, request.track.name).catch((err: unknown) => {
+						console.debug(
+							`datagrams upstream closed: id=${id} broadcast=${broadcast} track=${request.track.name} error=${error(err).message}`,
+						);
+					})
+				: undefined;
+
 		try {
 			// The first response MUST be a SUBSCRIBE_OK.
 			const resp = await decodeSubscribeResponse(stream.reader, this.version);
@@ -203,6 +216,45 @@ export class Subscriber {
 			stream.abort(e);
 		} finally {
 			this.#subscribes.delete(id);
+			if (datagramsTask) {
+				await datagramsTask;
+			}
+		}
+	}
+
+	async #runDatagramsStream(id: bigint, broadcast: Path.Valid, track: string) {
+		const msg = new Datagrams({ id, broadcast, track, maxLatency: MAX_DATAGRAM_AGE_MS });
+		const stream = await Stream.open(this.#quic);
+		await stream.writer.u53(StreamId.Datagrams);
+		await msg.encode(stream.writer, this.version);
+
+		try {
+			// The first response MUST be a DatagramsOk.
+			await DatagramsOk.decode(stream.reader, this.version);
+			// Stay open until the peer closes; we don't issue updates yet.
+			await stream.reader.closed;
+			stream.close();
+		} catch (err) {
+			stream.abort(error(err));
+		}
+	}
+
+	/**
+	 * Decode an incoming QUIC datagram body and route it to the appropriate Track.
+	 * @internal
+	 */
+	async routeDatagram(bytes: Uint8Array) {
+		const reader = new Reader(undefined, bytes);
+		const wire = await DatagramMessage.decode(reader, this.version);
+		const track = this.#subscribes.get(wire.subscribe);
+		if (!track) {
+			// Not an active subscription — drop silently.
+			return;
+		}
+		try {
+			track.writeDatagram(new DatagramModel(wire.sequence, wire.payload));
+		} catch (err) {
+			console.debug(`datagram write failed: id=${wire.subscribe}`, err);
 		}
 	}
 

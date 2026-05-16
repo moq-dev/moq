@@ -6,6 +6,7 @@ import { type Stream, Writer } from "../stream.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, type AnnounceInterest } from "./announce.ts";
+import { Datagram as DatagramMessage, type Datagrams, DatagramsOk, DatagramsUpdate } from "./datagram.ts";
 import { Group as GroupMessage } from "./group.ts";
 import type { Origin } from "./origin.ts";
 import { Probe } from "./probe.ts";
@@ -266,6 +267,104 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			group.close(e);
+		}
+	}
+
+	/**
+	 * Handles a DATAGRAMS subscription (Lite04Datagrams).
+	 * @internal
+	 */
+	async runDatagrams(msg: Datagrams, stream: Stream) {
+		if (this.version !== Version.DRAFT_04_DATAGRAMS) {
+			stream.writer.reset(new Error("datagrams not supported on this version"));
+			return;
+		}
+
+		const broadcast = this.#broadcasts.peek()?.get(msg.broadcast);
+		if (!broadcast) {
+			stream.writer.reset(new Error("not found"));
+			return;
+		}
+
+		const track = broadcast.subscribe(msg.track, 0);
+
+		try {
+			let maxLatency = msg.maxLatency;
+			if (maxLatency === 0) {
+				track.skipDatagramsToLatest();
+			}
+			await new DatagramsOk(maxLatency).encode(stream.writer, this.version);
+
+			const serving = (async () => {
+				for (;;) {
+					const datagram = await track.recvDatagram(maxLatency);
+					if (!datagram) break;
+					await this.#sendDatagram(msg.id, datagram.sequence, datagram.payload);
+				}
+			})();
+
+			for (;;) {
+				const decode = DatagramsUpdate.decodeMaybe(stream.reader, this.version);
+				const result = await Promise.any([serving, decode]);
+				if (!result) break;
+
+				if (result instanceof DatagramsUpdate) {
+					const wasStrict = maxLatency === 0;
+					maxLatency = result.maxLatency;
+					if (maxLatency === 0 && !wasStrict) {
+						track.skipDatagramsToLatest();
+					}
+				}
+			}
+
+			stream.close();
+			track.close();
+		} catch (err: unknown) {
+			const e = error(err);
+			console.warn(`datagrams error: broadcast=${msg.broadcast} track=${track.name} error=${e.message}`);
+			track.close(e);
+			stream.abort(e);
+		}
+	}
+
+	async #sendDatagram(sub: bigint, sequence: number, payload: Uint8Array) {
+		// Pre-size for the wire body: u62 + u53 each is at most 8 bytes, plus payload.
+		const wire = new DatagramMessage(sub, sequence, payload);
+		// We need a Writer that builds an in-memory buffer. The Writer class wraps a
+		// WritableStream, so we collect into a chunked buffer and then send via the
+		// QUIC datagrams writer.
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream({
+				write(chunk: Uint8Array) {
+					// The Writer reuses an internal scratch buffer between varint writes,
+					// so each chunk must be snapshotted before the next write overwrites it.
+					chunks.push(new Uint8Array(chunk));
+				},
+			}),
+		);
+		await wire.encode(writer, this.version);
+		writer.close();
+		await writer.closed;
+
+		const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+		const buf = new Uint8Array(total);
+		let offset = 0;
+		for (const c of chunks) {
+			buf.set(c, offset);
+			offset += c.byteLength;
+		}
+
+		// Best-effort send. WebTransport datagrams may be dropped under congestion;
+		// matching the fire-and-forget contract we don't retry.
+		const datagrams = (this.#quic as unknown as { datagrams: { writable: WritableStream<Uint8Array> } }).datagrams;
+		const w = datagrams.writable.getWriter();
+		try {
+			await w.write(buf);
+		} catch {
+			// Drop on error — congestion controller backpressure or peer not receiving.
+		} finally {
+			w.releaseLock();
 		}
 	}
 

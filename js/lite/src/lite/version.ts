@@ -3,6 +3,7 @@ export const Version = {
 	DRAFT_02: 0xff0dad02,
 	DRAFT_03: 0xff0dad03,
 	DRAFT_04: 0xff0dad04,
+	DRAFT_04_DATAGRAMS: 0xff0dad05,
 } as const;
 
 export type Version = (typeof Version)[keyof typeof Version];
@@ -17,11 +18,15 @@ export const ALPN_03 = "moq-lite-03";
 /// The ALPN string for Draft04, which uses ALPN-based version negotiation.
 export const ALPN_04 = "moq-lite-04";
 
+/// Experimental Draft04 variant adding a DATAGRAMS control stream + QUIC datagram bodies.
+export const ALPN_04_DATAGRAMS = "moq-lite-04-datagrams";
+
 const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_01]: "moq-lite-01",
 	[Version.DRAFT_02]: "moq-lite-02",
 	[Version.DRAFT_03]: "moq-lite-03",
 	[Version.DRAFT_04]: "moq-lite-04",
+	[Version.DRAFT_04_DATAGRAMS]: "moq-lite-04-datagrams",
 };
 
 export function versionName(v: Version): string {
