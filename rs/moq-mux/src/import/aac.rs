@@ -1,10 +1,6 @@
 use anyhow::Context;
 use bytes::{Buf, BytesMut};
 
-// Pack ~100ms of audio per group. AAC frames are typically ~21ms (1024 samples at 48kHz),
-// so 5 frames is a good fit. Any value works — this is just a knob for relay efficiency.
-const GROUP_FRAMES: usize = 5;
-
 /// Typed AAC configuration for initialization without binary blobs.
 pub struct AacConfig {
 	pub profile: u8,
@@ -102,12 +98,12 @@ impl AacConfig {
 ///
 /// Initialized from an AudioSpecificConfig blob (variable-length, typically extracted from
 /// an MP4 ESDS atom). Each input buffer passed to [`decode`](Self::decode) is published as
-/// one hang frame; group boundaries are managed automatically every ~100 ms.
+/// one hang frame in its own group, so the relay can forward each frame without waiting for
+/// a group boundary. The codec's packet loss concealment handles drops.
 pub struct Aac {
 	catalog: crate::catalog::Producer,
 	track: crate::container::Producer<crate::container::Hang>,
 	zero: Option<tokio::time::Instant>,
-	frames: usize,
 }
 
 impl Aac {
@@ -138,7 +134,6 @@ impl Aac {
 			catalog,
 			track: crate::container::Producer::new(track, crate::container::Hang::Legacy),
 			zero: None,
-			frames: 0,
 		})
 	}
 
@@ -165,21 +160,16 @@ impl Aac {
 			buf.advance(len);
 		}
 
-		// Start a new group every GROUP_FRAMES frames.
+		// Each frame is its own group so the relay can forward it immediately.
+		// The codec's packet loss concealment handles drops.
 		let frame = crate::container::Frame {
 			timestamp: pts,
 			payload: payload.freeze(),
-			keyframe: self.frames % GROUP_FRAMES == 0,
+			keyframe: true,
 		};
-		self.frames += 1;
 
 		self.track.write(frame)?;
-
-		// Close the group immediately after the Nth frame so the relay can forward it
-		// without waiting for the next keyframe to arrive.
-		if self.frames % GROUP_FRAMES == 0 {
-			self.track.finish_group()?;
-		}
+		self.track.finish_group()?;
 
 		Ok(())
 	}
