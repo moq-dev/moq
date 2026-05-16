@@ -1,0 +1,60 @@
+set fallback
+
+# Path to the moq-ffi staticlib output. Resolved at runtime so callers
+# can override (e.g. CARGO_TARGET_DIR=/tmp/target just go build).
+export MOQ_FFI_LIB_DIR := env('MOQ_FFI_LIB_DIR', justfile_directory() / '..' / 'target' / 'release')
+
+# Build the moq-ffi staticlib and then both Go modules.
+default: build
+
+# Build the moq-ffi staticlib and then both Go modules.
+build: ffi
+	go build github.com/moq-dev/moq/go/moq-ffi/moq github.com/moq-dev/moq/go/moq-lite github.com/moq-dev/moq/go/moq-lite/examples/clock
+
+# Run all Go tests, building moq-ffi first.
+test: ffi
+	go test github.com/moq-dev/moq/go/moq-ffi/moq github.com/moq-dev/moq/go/moq-lite
+
+# Build the moq-ffi staticlib for the host. Skipped if already up to date.
+ffi:
+	cargo build --release -p moq-ffi
+
+# Regenerate moq-ffi/moq_ffi.go from the current uniffi schema.
+# Run only when the moq-ffi Rust API changes.
+gen: ffi
+	#!/usr/bin/env bash
+	set -euo pipefail
+	# uniffi-bindgen-go needs a shared library to introspect the schema.
+	# Use the cdylib that cargo build already produced.
+	libdir="${MOQ_FFI_LIB_DIR}"
+	case "$(uname -s)" in
+		Darwin) lib="$libdir/libmoq_ffi.dylib" ;;
+		Linux)  lib="$libdir/libmoq_ffi.so" ;;
+		MINGW*|MSYS*|CYGWIN*) lib="$libdir/moq_ffi.dll" ;;
+		*) echo "unsupported host OS"; exit 1 ;;
+	esac
+	uniffi-bindgen-go \
+		--out-dir moq-ffi \
+		--no-format \
+		"$lib"
+	gofmt -w moq-ffi
+
+# Run Go static checks. Wired into the top-level `just check`.
+check: ffi
+	#!/usr/bin/env bash
+	set -euo pipefail
+	go vet github.com/moq-dev/moq/go/moq-ffi/moq github.com/moq-dev/moq/go/moq-lite github.com/moq-dev/moq/go/moq-lite/examples/clock
+	diff=$(gofmt -l moq-ffi moq-lite)
+	if [ -n "$diff" ]; then
+		echo "gofmt issues in:"
+		echo "$diff"
+		exit 1
+	fi
+
+# Auto-format. Wired into the top-level `just fix`.
+fix:
+	gofmt -w moq-ffi moq-lite
+
+# Remove built artifacts (does not touch the cargo target dir).
+clean:
+	go clean -cache

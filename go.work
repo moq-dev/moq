@@ -1,0 +1,6 @@
+go 1.23
+
+use (
+	./go/moq-ffi
+	./go/moq-lite
+)

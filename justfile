@@ -5,6 +5,7 @@
 
 mod demo
 mod cdn
+mod go
 
 # Shortcuts to avoid `demo::` prefix.
 mod boy 'demo/boy'
@@ -56,6 +57,11 @@ check *args:
 
 	# requires: cargo install cargo-sort
 	cargo sort --workspace --check
+
+	# Run the Go checks (only if Go is installed).
+	if command -v go &> /dev/null; then
+		just go check
+	fi
 
 # Run comprehensive CI checks including feature edge cases
 ci:
@@ -129,6 +135,11 @@ test *args:
 		uv run --package moq-lite --no-sync pytest py/moq-lite/tests/
 	fi
 
+	# Run the Go tests.
+	if command -v go &> /dev/null; then
+		just go test
+	fi
+
 # Automatically fix some issues.
 fix:
 	# Fix the Javascript dependencies.
@@ -150,6 +161,9 @@ fix:
 
 	# Fix the Python issues.
 	if command -v uv &> /dev/null; then uv run ruff check --fix py/ && uv run ruff format py/; fi
+
+	# Fix the Go formatting.
+	if command -v go &> /dev/null; then just go fix; fi
 
 	if command -v tofu &> /dev/null; then (cd cdn && just fix); fi
 

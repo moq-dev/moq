@@ -64,6 +64,10 @@ Key architectural rule: The CDN/relay does not know anything about media. Anythi
   publish/           # Publish media to streams + UI (published as @moq/publish)
   moq-boy/           # MoQ Boy web viewer (published as @moq/boy)
 
+/go/                  # Go bindings (cgo + uniffi-bindgen-go on top of moq-ffi)
+  moq-ffi/           # Generated raw UniFFI Go bindings (regenerate via `just go gen`)
+  moq-lite/          # Ergonomic Go wrapper (published as github.com/moq-dev/moq/go/moq-lite)
+
 /demo/                # Demos and test media
   boy/               # MoQ Boy demo (ROM hosting, orchestration justfile)
   relay/             # Relay server configs (relay.toml, root.toml, leaf*.toml)

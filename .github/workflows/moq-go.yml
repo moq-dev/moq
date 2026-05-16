@@ -1,0 +1,98 @@
+name: moq-go
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "go/**"
+      - "rs/moq-ffi/**"
+      - ".github/workflows/moq-go.yml"
+    tags:
+      - "go/moq-lite/v*"
+  pull_request:
+    paths:
+      - "go/**"
+      - "rs/moq-ffi/**"
+      - ".github/workflows/moq-go.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.23"
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build moq-ffi staticlib
+        shell: bash
+        run: cargo build --release -p moq-ffi --target ${{ matrix.target }}
+
+      - name: Go vet
+        # cgo can only link against host-target artifacts, so skip vet/test on
+        # cross-compiled targets. The build above still verifies the staticlib
+        # is producible for that target.
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        env:
+          MOQ_FFI_LIB_DIR: ${{ github.workspace }}/target/${{ matrix.target }}/release
+        run: cd go && go vet ./...
+
+      - name: Go test
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        env:
+          MOQ_FFI_LIB_DIR: ${{ github.workspace }}/target/${{ matrix.target }}/release
+        run: cd go && go test ./...
+
+  # Tag-triggered "release". For Go modules the tag IS the release: the module
+  # proxy serves the tagged source. This job validates that the tag matches
+  # Go's required scheme for monorepo submodules and warms the proxy.
+  release:
+    name: Release
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/go/moq-lite/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Warm the Go module proxy
+        run: |
+          ver="${GITHUB_REF#refs/tags/go/moq-lite/}"
+          curl -fsSL "https://proxy.golang.org/github.com/moq-dev/moq/go/moq-lite/@v/${ver}.info" \
+            || (echo "module proxy did not see the tag yet; rerun in a few minutes" && exit 1)
