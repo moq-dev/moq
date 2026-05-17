@@ -10,6 +10,7 @@ mod log;
 pub mod media;
 pub mod origin;
 pub mod producer;
+pub mod server;
 pub mod session;
 
 uniffi::setup_scaffolding!("moq");

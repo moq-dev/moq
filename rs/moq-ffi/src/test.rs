@@ -1,5 +1,6 @@
 use super::origin::*;
 use super::producer::*;
+use super::server::MoqServer;
 use super::session::MoqClient;
 
 use std::time::Duration;
@@ -368,4 +369,93 @@ fn without_runtime() {
 	})
 	.join()
 	.expect("client thread panicked — FFI method missing runtime guard");
+}
+
+#[tokio::test]
+async fn server_client_roundtrip() {
+	// Server side: bind, set a publish origin, accept incoming sessions.
+	let server_origin = MoqOriginProducer::new();
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into());
+	server.set_tls_generate(vec!["localhost".into()]);
+	server.set_publish(Some(server_origin.clone()));
+
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let url = format!("https://{addr}");
+
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept()
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		request.ok().await.expect("handshake failed")
+	});
+
+	// Client side: connect, subscribe via a consume origin.
+	let client_origin = MoqOriginProducer::new();
+	let client = MoqClient::new();
+	client.set_tls_disable_verify(true);
+	client.set_bind("127.0.0.1:0".into()).unwrap();
+	client.set_consume(Some(client_origin.clone()));
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("server accept timed out")
+		.expect("server accept task panicked");
+
+	// Publish a broadcast on the server side.
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let init = opus_head();
+	let media = broadcast.publish_media("opus".into(), init).unwrap();
+	server_origin.publish("hello".into(), &broadcast).unwrap();
+
+	// Receive the announcement on the client side via the consume origin.
+	let consumer = client_origin.consume();
+	let announced = consumer.announced("".into()).unwrap();
+	let announcement = tokio::time::timeout(TIMEOUT, announced.next())
+		.await
+		.expect("timed out waiting for announcement over the wire")
+		.unwrap()
+		.expect("expected an announcement");
+	assert_eq!(announcement.path(), "hello");
+
+	// Subscribe to the audio track and verify a frame round-trips.
+	let bc = announcement.broadcast();
+	let catalog_consumer = bc.subscribe_catalog().unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out waiting for catalog")
+		.unwrap()
+		.expect("expected a catalog");
+	let (track_name, audio) = catalog.audio.iter().next().unwrap();
+	let media_consumer = bc
+		.subscribe_media(track_name.clone(), audio.container.clone(), 10_000)
+		.unwrap();
+
+	let payload = b"hello over the wire".to_vec();
+	media.write_frame(payload.clone(), 1_000_000).unwrap();
+
+	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
+		.await
+		.expect("timed out waiting for frame")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.payload, payload);
+	assert_eq!(frame.timestamp_us, 1_000_000);
+
+	// Clean up.
+	media.finish().unwrap();
+	broadcast.finish().unwrap();
+	session.cancel(0);
+	server_session.cancel(0);
+	server.cancel();
 }

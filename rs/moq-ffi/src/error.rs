@@ -32,6 +32,9 @@ pub enum MoqError {
 	#[error("connect: {0}")]
 	Connect(String),
 
+	#[error("bind: {0}")]
+	Bind(String),
+
 	#[error("codec: {0}")]
 	Codec(String),
 
