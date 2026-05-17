@@ -1,4 +1,5 @@
-import { Effect, type Signal } from "@moq/signals";
+import type { Effect, Signal } from "@moq/signals";
+import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";
 import { audio, buffer, icon, network, video } from "./icons";
 
@@ -7,25 +8,17 @@ const POLL_MS = 250;
 type Kind = "network" | "video" | "audio" | "buffer";
 
 function row(kind: Kind, label: string, svg: string): { el: HTMLElement; data: HTMLSpanElement } {
-	const el = document.createElement("div");
-	el.className = `stats__item stats__item--${kind}`;
+	const el = DOM.create("div", { className: `stats__item stats__item--${kind}` });
 
-	const iconWrap = document.createElement("div");
-	iconWrap.className = "stats__icon-wrapper";
+	const iconWrap = DOM.create("div", { className: "stats__icon-wrapper" });
 	iconWrap.appendChild(icon(svg));
 
-	const detail = document.createElement("div");
-	detail.className = "stats__item-detail";
+	const title = DOM.create("span", { className: "stats__item-title" }, label);
+	const data = DOM.create("span", { className: "stats__item-data" }, "N/A");
 
-	const title = document.createElement("span");
-	title.className = "stats__item-title";
-	title.textContent = label;
-
-	const data = document.createElement("span");
-	data.className = "stats__item-data";
-	data.textContent = "N/A";
-
+	const detail = DOM.create("div", { className: "stats__item-detail" });
 	detail.append(title, data);
+
 	el.append(iconWrap, detail);
 	return { el, data };
 }
@@ -156,37 +149,19 @@ function bufferRow(parent: Effect, watch: MoqWatch): HTMLElement {
 }
 
 export function statsPanel(parent: Effect, watch: MoqWatch, visible: Signal<boolean>): HTMLElement {
-	const wrap = document.createElement("div");
-	wrap.className = "stats";
-
-	const panel = document.createElement("div");
-	panel.className = "stats__panel";
+	const wrap = DOM.create("div", { className: "stats" });
+	const panel = DOM.create("div", { className: "stats__panel" });
 	wrap.appendChild(panel);
 
-	let inner: Effect | undefined;
 	parent.run((effect) => {
 		const showing = effect.get(visible);
 		wrap.style.display = showing ? "" : "none";
-		if (!showing) {
-			inner?.close();
-			inner = undefined;
-			panel.replaceChildren();
-			return;
-		}
+		if (!showing) return;
 
-		const local = new Effect();
-		inner = local;
-		effect.cleanup(() => {
-			local.close();
-			if (inner === local) inner = undefined;
-		});
-
-		panel.replaceChildren(
-			networkRow(local, watch),
-			videoRow(local, watch),
-			audioRow(local, watch),
-			bufferRow(local, watch),
-		);
+		DOM.render(effect, panel, networkRow(effect, watch));
+		DOM.render(effect, panel, videoRow(effect, watch));
+		DOM.render(effect, panel, audioRow(effect, watch));
+		DOM.render(effect, panel, bufferRow(effect, watch));
 	});
 
 	return wrap;

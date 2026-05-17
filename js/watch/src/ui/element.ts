@@ -1,4 +1,5 @@
 import { Effect, Signal } from "@moq/signals";
+import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";
 import { bufferControl } from "./components/buffer-control";
 import { bufferingIndicator } from "./components/buffering-indicator";
@@ -11,64 +12,74 @@ import { watchStatusIndicator } from "./components/watch-status-indicator";
 import { statsPanel } from "./stats";
 import styles from "./styles/index.css?inline";
 
-const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
-
 export default class MoqWatchUi extends HTMLElement {
-	signals = new Effect();
+	#signals?: Effect;
 	#root: ShadowRoot;
-	#mounted = false;
+	#watch = new Signal<MoqWatch | undefined>(undefined);
+	#observer: MutationObserver;
 
 	constructor() {
 		super();
-		cleanup.register(this, this.signals);
 		this.#root = this.attachShadow({ mode: "open" });
 
 		const style = document.createElement("style");
 		style.textContent = styles;
 		this.#root.appendChild(style);
+
+		this.#observer = new MutationObserver(() => this.#updateWatch());
 	}
 
 	connectedCallback() {
-		if (this.#mounted) return;
-		this.#mounted = true;
+		this.#updateWatch();
+		this.#observer.observe(this, { childList: true });
 
-		void customElements.whenDefined("moq-watch").then(() => {
-			const watch = this.querySelector("moq-watch") as MoqWatch | null;
-			if (!watch) return;
-			this.#mount(watch);
-		});
+		const signals = new Effect();
+		this.#signals = signals;
+		signals.run(this.#render.bind(this));
 	}
 
-	#mount(watch: MoqWatch) {
-		const root = this.#root;
+	disconnectedCallback() {
+		this.#observer.disconnect();
+		this.#signals?.close();
+		this.#signals = undefined;
+	}
+
+	#updateWatch() {
+		const watch = this.querySelector("moq-watch") as MoqWatch | null;
+		this.#watch.set(watch ?? undefined);
+	}
+
+	#render(effect: Effect) {
+		const watch = effect.get(this.#watch);
+		if (!watch) return;
+
 		const visible = new Signal(false);
 
-		const videoContainer = document.createElement("div");
-		videoContainer.className = "watch-ui__video-container";
-
-		const slot = document.createElement("slot");
-		videoContainer.append(slot, statsPanel(this.signals, watch, visible), bufferingIndicator(this.signals, watch));
-		root.appendChild(videoContainer);
-
-		const controls = document.createElement("div");
-		controls.className = "watch-ui__controls";
-
-		const playback = document.createElement("div");
-		playback.className = "watch-ui__playback-controls flex--align-center";
-		playback.append(
-			playPauseButton(this.signals, watch),
-			volumeSlider(this.signals, watch),
-			watchStatusIndicator(this.signals, watch),
-			statsButton(this.signals, visible),
-			fullscreenButton(this.signals, watch),
+		const videoContainer = DOM.create("div", { className: "watch-ui__video-container" });
+		videoContainer.append(
+			DOM.create("slot"),
+			statsPanel(effect, watch, visible),
+			bufferingIndicator(effect, watch),
 		);
 
-		const latency = document.createElement("div");
-		latency.className = "watch-ui__latency-controls";
-		latency.append(bufferControl(this.signals, watch), qualitySelector(this.signals, watch));
+		const controls = DOM.create("div", { className: "watch-ui__controls" });
+
+		const playback = DOM.create("div", { className: "watch-ui__playback-controls flex--align-center" });
+		playback.append(
+			playPauseButton(effect, watch),
+			volumeSlider(effect, watch),
+			watchStatusIndicator(effect, watch),
+			statsButton(effect, visible),
+			fullscreenButton(effect, watch),
+		);
+
+		const latency = DOM.create("div", { className: "watch-ui__latency-controls" });
+		latency.append(bufferControl(effect, watch), qualitySelector(effect, watch));
 
 		controls.append(playback, latency);
-		root.appendChild(controls);
+
+		DOM.render(effect, this.#root, videoContainer);
+		DOM.render(effect, this.#root, controls);
 	}
 }
 

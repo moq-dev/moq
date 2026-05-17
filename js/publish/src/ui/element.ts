@@ -1,4 +1,5 @@
-import { Effect } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
+import * as DOM from "@moq/signals/dom";
 import type MoqPublish from "../element";
 import { cameraSourceButton } from "./components/camera-source-button";
 import { fileSourceButton } from "./components/file-source-button";
@@ -8,64 +9,73 @@ import { publishStatusIndicator } from "./components/publish-status-indicator";
 import { screenSourceButton } from "./components/screen-source-button";
 import styles from "./styles/index.css?inline";
 
-const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
-
 export default class MoqPublishUi extends HTMLElement {
-	signals = new Effect();
+	#signals?: Effect;
 	#root: ShadowRoot;
-	#mounted = false;
+	#publish = new Signal<MoqPublish | undefined>(undefined);
+	#observer: MutationObserver;
+	#initialized = false;
 
 	constructor() {
 		super();
-		cleanup.register(this, this.signals);
 		this.#root = this.attachShadow({ mode: "open" });
 
 		const style = document.createElement("style");
 		style.textContent = styles;
 		this.#root.appendChild(style);
+
+		this.#root.appendChild(DOM.create("slot"));
+
+		this.#observer = new MutationObserver(() => this.#updatePublish());
 	}
 
 	connectedCallback() {
-		if (this.#mounted) return;
-		this.#mounted = true;
+		this.#updatePublish();
+		this.#observer.observe(this, { childList: true });
 
-		void customElements.whenDefined("moq-publish").then(() => {
-			const publish = this.querySelector("moq-publish") as MoqPublish | null;
-			if (!publish) return;
-			this.#mount(publish);
-		});
+		const signals = new Effect();
+		this.#signals = signals;
+		signals.run(this.#render.bind(this));
 	}
 
-	#mount(publish: MoqPublish) {
-		// Start with "nothing" selected so the UI matches what the user sees.
-		publish.muted = true;
-		publish.invisible = true;
-		publish.source = undefined;
+	disconnectedCallback() {
+		this.#observer.disconnect();
+		this.#signals?.close();
+		this.#signals = undefined;
+	}
 
-		const root = this.#root;
-		root.appendChild(document.createElement("slot"));
+	#updatePublish() {
+		const publish = this.querySelector("moq-publish") as MoqPublish | null;
+		this.#publish.set(publish ?? undefined);
+	}
 
-		const controls = document.createElement("div");
-		controls.className = "publish-ui__controls flex--center flex--space-between";
+	#render(effect: Effect) {
+		const publish = effect.get(this.#publish);
+		if (!publish) return;
 
-		const selector = document.createElement("div");
-		selector.className = "publish-ui__source-selector flex--center";
+		// Start with "nothing" selected so the UI matches what the user sees, but only once.
+		if (!this.#initialized) {
+			this.#initialized = true;
+			publish.muted = true;
+			publish.invisible = true;
+			publish.source = undefined;
+		}
 
-		const label = document.createElement("span");
-		label.className = "publish-ui__source-label";
-		label.textContent = "Source:";
+		const controls = DOM.create("div", { className: "publish-ui__controls flex--center flex--space-between" });
 
+		const selector = DOM.create("div", { className: "publish-ui__source-selector flex--center" });
 		selector.append(
-			label,
-			microphoneSourceButton(this.signals, publish),
-			cameraSourceButton(this.signals, publish),
-			screenSourceButton(this.signals, publish),
-			fileSourceButton(this.signals, publish),
-			nothingSourceButton(this.signals, publish),
+			DOM.create("span", { className: "publish-ui__source-label" }, "Source:"),
+			microphoneSourceButton(effect, publish),
+			cameraSourceButton(effect, publish),
+			screenSourceButton(effect, publish),
+			fileSourceButton(effect, publish),
+			nothingSourceButton(effect, publish),
 		);
 
-		controls.append(selector, publishStatusIndicator(this.signals, publish));
-		root.appendChild(controls);
+		controls.append(selector, publishStatusIndicator(effect, publish));
+
+		DOM.render(effect, this.#root, controls);
 	}
 }
 
