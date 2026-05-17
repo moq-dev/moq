@@ -169,6 +169,7 @@ export class Encoder {
 					// Each audio frame is its own group so the relay can forward it without
 					// waiting for a group boundary. Loss is handled by the codec's PLC.
 					producer.encode(frame, frame.timestamp as Time.Micro, true);
+					producer.finishGroup();
 				},
 				error: (err) => {
 					console.error("encoder error", err);

@@ -38,6 +38,12 @@ export class Producer {
 		this.#group?.writeFrame(Producer.#encode(data, timestamp));
 	}
 
+	// Close the current group so the relay can forward it without waiting for the next keyframe.
+	finishGroup() {
+		this.#group?.close();
+		this.#group = undefined;
+	}
+
 	static #encode(source: Uint8Array | Source, timestamp: Time.Micro): Uint8Array {
 		const timestampBytes = Moq.Varint.encode(timestamp);
 
