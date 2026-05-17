@@ -153,8 +153,7 @@ export class Encoder {
 
 		effect.set(this.active, true, false);
 
-		const producer = new Container.Legacy.Producer(track);
-		effect.cleanup(() => producer.close());
+		effect.cleanup(() => track.close());
 
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
@@ -168,12 +167,11 @@ export class Encoder {
 
 					// Each audio frame is its own group so the relay can forward it without
 					// waiting for a group boundary. Loss is handled by the codec's PLC.
-					producer.encode(frame, frame.timestamp as Time.Micro, true);
-					producer.finishGroup();
+					track.writeFrame(Container.Legacy.encodeFrame(frame, frame.timestamp as Time.Micro));
 				},
 				error: (err) => {
 					console.error("encoder error", err);
-					producer.close(err);
+					track.close(err);
 					worklet.port.onmessage = null;
 				},
 			});
