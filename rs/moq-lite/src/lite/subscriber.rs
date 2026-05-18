@@ -38,9 +38,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		session: S,
 		origin: Option<OriginProducer>,
 		recv_bandwidth: Option<BandwidthProducer>,
-		self_origin: crate::Origin,
 		version: Version,
 	) -> Self {
+		// Identity for incoming-hop loop detection. Derived from the local
+		// origin we publish into so it matches the relay identity across
+		// every session sharing that origin — required for cross-session
+		// loop detection. If no origin is attached (the announce loop is
+		// inert anyway), fall back to a random session-local id.
+		let self_origin = origin.as_deref().copied().unwrap_or_else(crate::Origin::random);
 		Self {
 			session,
 			origin,

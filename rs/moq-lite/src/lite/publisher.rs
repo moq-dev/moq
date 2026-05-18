@@ -27,9 +27,13 @@ pub(super) struct Publisher<S: web_transport_trait::Session> {
 }
 
 impl<S: web_transport_trait::Session> Publisher<S> {
-	pub fn new(session: S, origin: Option<OriginConsumer>, self_origin: Origin, version: Version) -> Self {
+	pub fn new(session: S, origin: Option<OriginConsumer>, version: Version) -> Self {
 		// Default to a dummy origin that is immediately closed.
 		let origin = origin.unwrap_or_else(|| Origin::random().produce().consume());
+		// Identity stamped onto outbound announce hops. Derived from the
+		// origin we're consuming so it matches the local relay identity
+		// across every session — required for cross-session loop detection.
+		let self_origin = *origin;
 		Self {
 			session,
 			origin,

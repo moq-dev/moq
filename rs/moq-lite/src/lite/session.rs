@@ -1,5 +1,5 @@
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, Origin, OriginConsumer, OriginProducer, coding::Stream,
+	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, coding::Stream,
 	lite::SessionInfo,
 };
 
@@ -28,12 +28,13 @@ pub fn start<S: web_transport_trait::Session>(
 		_ => Some(recv_bw),
 	};
 
-	// Shared per-session origin: the publisher stamps it onto outbound
-	// announce hops, and the subscriber carries it so callers can opt into
-	// filtering out their own reflected announces.
-	let origin = Origin::random();
-	let publisher = Publisher::new(session.clone(), publish, origin, version);
-	let subscriber = Subscriber::new(session.clone(), subscribe, recv_bw_for_sub, origin, version);
+	// Publisher and Subscriber each derive their identity from their own
+	// attached origin (publish.info / subscribe.info). This is what gets
+	// stamped onto outbound hops and checked against incoming hops, so it
+	// must be stable across every session that shares the local origin —
+	// required for cross-session cluster loop detection.
+	let publisher = Publisher::new(session.clone(), publish, version);
+	let subscriber = Subscriber::new(session.clone(), subscribe, recv_bw_for_sub, version);
 
 	web_async::spawn(async move {
 		let res = tokio::select! {
