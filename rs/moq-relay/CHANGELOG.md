@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2](https://github.com/moq-dev/moq/compare/moq-relay-v0.11.1...moq-relay-v0.11.2) - 2026-05-18
+
+### Other
+
+- tolerate Ended for unknown paths ([#1423](https://github.com/moq-dev/moq/pull/1423))
+
 ## [0.11.1](https://github.com/moq-dev/moq/compare/moq-relay-v0.11.0...moq-relay-v0.11.1) - 2026-05-18
 
 ### Other

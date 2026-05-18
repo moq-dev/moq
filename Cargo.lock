@@ -3708,7 +3708,7 @@ dependencies = [
 
 [[package]]
 name = "moq-lite"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "bytes",
  "conducer",
