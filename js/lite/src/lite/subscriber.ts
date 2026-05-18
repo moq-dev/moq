@@ -93,7 +93,10 @@ export class Subscriber {
 
 	async #runAnnounced(announced: Announced, prefix: Path.Valid, options: AnnouncedOptions): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
-		const msg = new AnnounceInterest(prefix);
+		// Send our own session-level origin id so the peer can skip announces
+		// whose hop chain already passed through us. Matches the Rust subscriber's
+		// `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
+		const msg = new AnnounceInterest(prefix, this.origin);
 
 		try {
 			// Open a stream and send the announce interest.

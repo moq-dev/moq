@@ -92,9 +92,11 @@ export class Announce {
 
 export class AnnounceInterest {
 	prefix: Path.Valid;
-	excludeHop: number;
+	// 62-bit Origin id of the peer asking for announces. Zero means "no exclusion".
+	// Must be a bigint: peer origins are up to 62 bits and overflow u53.
+	excludeHop: bigint;
 
-	constructor(prefix: Path.Valid, excludeHop = 0) {
+	constructor(prefix: Path.Valid, excludeHop: bigint = 0n) {
 		this.prefix = prefix;
 		this.excludeHop = excludeHop;
 	}
@@ -107,22 +109,22 @@ export class AnnounceInterest {
 			case Version.DRAFT_03:
 				break;
 			default:
-				// Lite04+: exclude_hop field
-				await w.u53(this.excludeHop);
+				// Lite04+: exclude_hop field (u62 varint).
+				await w.u62(this.excludeHop);
 				break;
 		}
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<AnnounceInterest> {
 		const prefix = Path.from(await r.string());
-		let excludeHop = 0;
+		let excludeHop = 0n;
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
 			case Version.DRAFT_03:
 				break;
 			default:
-				excludeHop = await r.u53();
+				excludeHop = await r.u62();
 				break;
 		}
 		return new AnnounceInterest(prefix, excludeHop);
