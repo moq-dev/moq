@@ -4,7 +4,7 @@ import { icon, stats } from "../icons";
 export function statsButton(parent: Effect, visible: Signal<boolean>): HTMLElement {
 	const button = document.createElement("button");
 	button.type = "button";
-	button.className = "button flex--center";
+	button.className = "button flex-center";
 	button.replaceChildren(icon(stats));
 
 	parent.run((effect) => {

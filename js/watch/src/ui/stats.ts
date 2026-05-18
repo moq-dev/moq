@@ -8,15 +8,15 @@ const POLL_MS = 250;
 type Kind = "network" | "video" | "audio" | "buffer";
 
 function row(kind: Kind, label: string, svg: string): { el: HTMLElement; data: HTMLSpanElement } {
-	const el = DOM.create("div", { className: `stats__item stats__item--${kind}` });
+	const el = DOM.create("div", { className: `stats-item stats-item--${kind}` });
 
-	const iconWrap = DOM.create("div", { className: "stats__icon-wrapper" });
+	const iconWrap = DOM.create("div", { className: "stats-icon-wrapper" });
 	iconWrap.appendChild(icon(svg));
 
-	const title = DOM.create("span", { className: "stats__item-title" }, label);
-	const data = DOM.create("span", { className: "stats__item-data" }, "N/A");
+	const title = DOM.create("span", { className: "stats-item-title" }, label);
+	const data = DOM.create("span", { className: "stats-item-data" }, "N/A");
 
-	const detail = DOM.create("div", { className: "stats__item-detail" });
+	const detail = DOM.create("div", { className: "stats-item-detail" });
 	detail.append(title, data);
 
 	el.append(iconWrap, detail);
@@ -150,7 +150,7 @@ function bufferRow(parent: Effect, watch: MoqWatch): HTMLElement {
 
 export function statsPanel(parent: Effect, watch: MoqWatch, visible: Signal<boolean>): HTMLElement {
 	const wrap = DOM.create("div", { className: "stats" });
-	const panel = DOM.create("div", { className: "stats__panel" });
+	const panel = DOM.create("div", { className: "stats-panel" });
 	wrap.appendChild(panel);
 
 	parent.run((effect) => {

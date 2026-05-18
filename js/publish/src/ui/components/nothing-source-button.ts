@@ -14,7 +14,7 @@ export function nothingSourceButton(parent: Effect, publish: MoqPublish): HTMLEl
 		const muted = effect.get(publish.state.muted);
 		const invisible = effect.get(publish.state.invisible);
 		const active = source === undefined && muted && invisible;
-		button.className = `button publish-ui__source-button flex--center publish-ui__source-button--no-source${active ? " publish-ui__source-button--no-source-active" : ""}`;
+		button.className = `button source-button flex-center source-button--no-source${active ? " source-button--no-source-active" : ""}`;
 	});
 
 	parent.event(button, "click", () => {

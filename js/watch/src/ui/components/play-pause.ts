@@ -5,7 +5,7 @@ import { icon, pause, play } from "../icons";
 export function playPauseButton(parent: Effect, watch: MoqWatch): HTMLElement {
 	const button = document.createElement("button");
 	button.type = "button";
-	button.className = "button button--playback flex--center";
+	button.className = "button button--playback flex-center";
 
 	parent.run((effect) => {
 		const paused = effect.get(watch.backend.paused);

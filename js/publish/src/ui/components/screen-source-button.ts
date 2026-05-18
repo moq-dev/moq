@@ -13,7 +13,7 @@ export function screenSourceButton(parent: Effect, publish: MoqPublish): HTMLEle
 		const source = effect.get(publish.state.source);
 		const invisible = effect.get(publish.state.invisible);
 		const active = source === "screen" && !invisible;
-		button.className = `button publish-ui__source-button flex--center${active ? " publish-ui__source-button--active" : ""}`;
+		button.className = `button source-button flex-center${active ? " source-button--active" : ""}`;
 	});
 
 	parent.event(button, "click", () => {

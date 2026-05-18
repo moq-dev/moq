@@ -11,11 +11,11 @@ function volumeIcon(volumePct: number, muted: boolean): string {
 
 export function volumeSlider(parent: Effect, watch: MoqWatch): HTMLElement {
 	const wrapper = document.createElement("div");
-	wrapper.className = "watch-ui__volume-slider flex--center";
+	wrapper.className = "volume-slider flex-center";
 
 	const button = document.createElement("button");
 	button.type = "button";
-	button.className = "button flex--center";
+	button.className = "button flex-center";
 
 	const slider = document.createElement("input");
 	slider.type = "range";
@@ -23,7 +23,7 @@ export function volumeSlider(parent: Effect, watch: MoqWatch): HTMLElement {
 	slider.max = "100";
 
 	const label = document.createElement("span");
-	label.className = "watch-ui__volume-label";
+	label.className = "volume-label";
 
 	wrapper.append(button, slider, label);
 

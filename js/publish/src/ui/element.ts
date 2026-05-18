@@ -67,11 +67,11 @@ export default class MoqPublishUi extends HTMLElement {
 			}
 		}
 
-		const controls = DOM.create("div", { className: "publish-ui__controls flex--center flex--space-between" });
+		const controls = DOM.create("div", { className: "controls flex-center flex-space-between" });
 
-		const selector = DOM.create("div", { className: "publish-ui__source-selector flex--center" });
+		const selector = DOM.create("div", { className: "source-selector flex-center" });
 		selector.append(
-			DOM.create("span", { className: "publish-ui__source-label" }, "Source:"),
+			DOM.create("span", { className: "source-label" }, "Source:"),
 			microphoneSourceButton(effect, publish),
 			cameraSourceButton(effect, publish),
 			screenSourceButton(effect, publish),

@@ -3,9 +3,9 @@ import type MoqWatch from "../../element";
 
 export function bufferingIndicator(parent: Effect, watch: MoqWatch): HTMLElement {
 	const container = document.createElement("div");
-	container.className = "watch-ui__buffering flex--center";
+	container.className = "buffering flex-center";
 	const spinner = document.createElement("div");
-	spinner.className = "watch-ui__buffering-spinner";
+	spinner.className = "buffering-spinner";
 	container.appendChild(spinner);
 
 	parent.run((effect) => {

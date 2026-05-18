@@ -20,7 +20,7 @@ function deriveStatus(
 
 export function publishStatusIndicator(parent: Effect, publish: MoqPublish): HTMLElement {
 	const wrapper = document.createElement("div");
-	wrapper.className = "publish-ui__status-indicator flex--center";
+	wrapper.className = "status-indicator flex-center";
 
 	const dot = document.createElement("span");
 	const text = document.createElement("span");
@@ -40,8 +40,8 @@ export function publishStatusIndicator(parent: Effect, publish: MoqPublish): HTM
 			!!audioSource && !muted,
 			!!videoSource && !invisible,
 		);
-		dot.className = `publish-ui__status-indicator-dot publish-ui__status-indicator-dot--${variant}`;
-		text.className = `publish-ui__status-indicator-text publish-ui__status-indicator-text--${variant}`;
+		dot.className = `status-indicator-dot status-indicator-dot--${variant}`;
+		text.className = `status-indicator-text status-indicator-text--${variant}`;
 		text.textContent = label;
 	});
 

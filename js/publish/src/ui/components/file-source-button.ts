@@ -20,7 +20,7 @@ export function fileSourceButton(parent: Effect, publish: MoqPublish): HTMLEleme
 	parent.run((effect) => {
 		const source = effect.get(publish.state.source);
 		const active = source instanceof File;
-		button.className = `button publish-ui__source-button flex--center${active ? " publish-ui__source-button--active" : ""}`;
+		button.className = `button source-button flex-center${active ? " source-button--active" : ""}`;
 	});
 
 	parent.event(button, "click", () => input.click());

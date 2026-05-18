@@ -10,7 +10,7 @@ export { arrowDown, arrowUp, ban, camera, file, microphone, screen };
 
 export function icon(svg: string): HTMLElement {
 	const span = document.createElement("span");
-	span.className = "flex--center";
+	span.className = "flex-center";
 	span.setAttribute("role", "img");
 	span.setAttribute("aria-hidden", "true");
 	span.innerHTML = svg;

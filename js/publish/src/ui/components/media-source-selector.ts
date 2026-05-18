@@ -9,16 +9,16 @@ export type SelectorOptions = {
 
 export function mediaSourceSelector(parent: Effect, opts: SelectorOptions): HTMLElement {
 	const wrapper = document.createElement("div");
-	wrapper.className = "publish-ui__media-selector-wrapper flex--center";
+	wrapper.className = "media-selector-wrapper flex-center";
 
 	const toggle = document.createElement("button");
 	toggle.type = "button";
-	toggle.className = "button publish-ui__media-selector-toggle";
+	toggle.className = "button media-selector-toggle";
 	toggle.title = "Show Sources";
 	toggle.appendChild(icon(arrowDown));
 
 	const select = document.createElement("select");
-	select.className = "publish-ui__media-selector-dropdown";
+	select.className = "media-selector-dropdown";
 	select.style.display = "none";
 
 	wrapper.append(toggle, select);

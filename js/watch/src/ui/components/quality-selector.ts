@@ -9,16 +9,16 @@ function formatBitrate(bps: number): string {
 
 export function qualitySelector(parent: Effect, watch: MoqWatch): HTMLElement {
 	const wrapper = document.createElement("div");
-	wrapper.className = "watch-ui__quality-selector";
+	wrapper.className = "quality-selector";
 
 	const label = document.createElement("label");
 	label.htmlFor = "moq-watch-quality-select";
-	label.className = "watch-ui__quality-label";
+	label.className = "quality-label";
 	label.textContent = "Quality: ";
 
 	const select = document.createElement("select");
 	select.id = "moq-watch-quality-select";
-	select.className = "watch-ui__quality-select";
+	select.className = "quality-select";
 
 	wrapper.append(label, select);
 

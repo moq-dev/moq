@@ -5,7 +5,7 @@ import { fullscreenEnter, fullscreenExit, icon } from "../icons";
 export function fullscreenButton(parent: Effect, watch: MoqWatch): HTMLElement {
 	const button = document.createElement("button");
 	button.type = "button";
-	button.className = "button flex--center";
+	button.className = "button flex-center";
 	button.title = "Fullscreen";
 	button.setAttribute("aria-label", "Fullscreen");
 	button.replaceChildren(icon(fullscreenEnter));

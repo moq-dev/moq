@@ -44,13 +44,13 @@
 	--border-radius-lg: 1rem;
 }
 
-.flex--center {
+.flex-center {
 	display: flex;
 	justify-content: center;
 	align-items: center;
 }
 
-.flex--align-center {
+.flex-align-center {
 	align-items: center;
 }
 

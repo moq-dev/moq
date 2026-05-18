@@ -5,7 +5,7 @@ import { camera, icon } from "../icons";
 import { mediaSourceSelector } from "./media-source-selector";
 
 export function cameraSourceButton(parent: Effect, publish: MoqPublish): HTMLElement {
-	const wrapper = DOM.create("div", { className: "publish-ui__source-button-wrapper flex--center" });
+	const wrapper = DOM.create("div", { className: "source-button-wrapper flex-center" });
 
 	const button = DOM.create("button", {
 		type: "button",
@@ -28,7 +28,7 @@ export function cameraSourceButton(parent: Effect, publish: MoqPublish): HTMLEle
 		const source = effect.get(publish.state.source);
 		const invisible = effect.get(publish.state.invisible);
 		const active = source === "camera" && !invisible;
-		button.className = `button publish-ui__source-button flex--center${active ? " publish-ui__source-button--active" : ""}`;
+		button.className = `button source-button flex-center${active ? " source-button--active" : ""}`;
 
 		if (!active) return;
 

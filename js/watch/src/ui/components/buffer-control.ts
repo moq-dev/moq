@@ -76,10 +76,10 @@ function drawRanges(
 
 export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Milli = DEFAULT_MAX): HTMLElement {
 	const wrapper = document.createElement("div");
-	wrapper.className = "watch-ui__buffer";
+	wrapper.className = "buffer";
 
 	const viz = document.createElement("div");
-	viz.className = "watch-ui__buffer-visualization";
+	viz.className = "buffer-visualization";
 	viz.setAttribute("role", "slider");
 	viz.tabIndex = 0;
 	viz.setAttribute("aria-valuemin", MIN_RANGE.toString());
@@ -87,37 +87,37 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 	viz.setAttribute("aria-label", "Buffer jitter");
 
 	const playhead = document.createElement("div");
-	playhead.className = "watch-ui__buffer-playhead";
+	playhead.className = "buffer-playhead";
 
 	const videoTrack = document.createElement("div");
-	videoTrack.className = "watch-ui__buffer-track watch-ui__buffer-track--video";
+	videoTrack.className = "buffer-track buffer-track--video";
 	const videoLabel = document.createElement("span");
-	videoLabel.className = "watch-ui__buffer-track-label";
+	videoLabel.className = "buffer-track-label";
 	videoLabel.textContent = "Video";
 	const videoCanvas = document.createElement("canvas");
-	videoCanvas.className = "watch-ui__buffer-canvas";
+	videoCanvas.className = "buffer-canvas";
 	videoTrack.append(videoLabel, videoCanvas);
 
 	const audioTrack = document.createElement("div");
-	audioTrack.className = "watch-ui__buffer-track watch-ui__buffer-track--audio";
+	audioTrack.className = "buffer-track buffer-track--audio";
 	const audioLabel = document.createElement("span");
-	audioLabel.className = "watch-ui__buffer-track-label";
+	audioLabel.className = "buffer-track-label";
 	audioLabel.textContent = "Audio";
 	const audioCanvas = document.createElement("canvas");
-	audioCanvas.className = "watch-ui__buffer-canvas";
+	audioCanvas.className = "buffer-canvas";
 	audioTrack.append(audioLabel, audioCanvas);
 
 	const targetArea = document.createElement("div");
-	targetArea.className = "watch-ui__buffer-target-area";
+	targetArea.className = "buffer-target-area";
 	const targetLine = document.createElement("div");
-	targetLine.className = "watch-ui__buffer-target-line";
+	targetLine.className = "buffer-target-line";
 	const targetLabel = document.createElement("span");
-	targetLabel.className = "watch-ui__buffer-target-label";
+	targetLabel.className = "buffer-target-label";
 	targetLine.appendChild(targetLabel);
 	targetArea.appendChild(targetLine);
 
 	const help = document.createElement("span");
-	help.className = "watch-ui__buffer-help";
+	help.className = "buffer-help";
 	help.textContent = "click to change latency";
 
 	viz.append(playhead, videoTrack, audioTrack, targetArea, help);
@@ -153,7 +153,7 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 
 	parent.event(viz, "mousedown", (e) => {
 		dragging = true;
-		viz.classList.add("watch-ui__buffer-visualization--dragging");
+		viz.classList.add("buffer-visualization--dragging");
 		interact();
 		updateFromX(e.clientX);
 	});
@@ -165,7 +165,7 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 	parent.event(document, "mouseup", () => {
 		if (!dragging) return;
 		dragging = false;
-		viz.classList.remove("watch-ui__buffer-visualization--dragging");
+		viz.classList.remove("buffer-visualization--dragging");
 	});
 
 	parent.event(viz, "keydown", (e) => {

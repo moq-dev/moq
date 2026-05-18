@@ -19,7 +19,7 @@ function deriveStatus(
 
 export function watchStatusIndicator(parent: Effect, watch: MoqWatch): HTMLElement {
 	const wrapper = document.createElement("div");
-	wrapper.className = "watch-ui__status-indicator flex--center";
+	wrapper.className = "status-indicator flex-center";
 
 	const dot = document.createElement("span");
 	const text = document.createElement("span");
@@ -31,8 +31,8 @@ export function watchStatusIndicator(parent: Effect, watch: MoqWatch): HTMLEleme
 		const broadcast = effect.get(watch.broadcast.status);
 		const { variant, text: label } = deriveStatus(url, conn, broadcast);
 
-		dot.className = `watch-ui__status-indicator-dot watch-ui__status-indicator-dot--${variant}`;
-		text.className = `watch-ui__status-indicator-text watch-ui__status-indicator-text--${variant}`;
+		dot.className = `status-indicator-dot status-indicator-dot--${variant}`;
+		text.className = `status-indicator-text status-indicator-text--${variant}`;
 		text.textContent = label;
 	});
 

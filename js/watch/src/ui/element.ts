@@ -55,16 +55,16 @@ export default class MoqWatchUi extends HTMLElement {
 
 		const visible = new Signal(false);
 
-		const videoContainer = DOM.create("div", { className: "watch-ui__video-container" });
+		const videoContainer = DOM.create("div", { className: "video-container" });
 		videoContainer.append(
 			DOM.create("slot"),
 			statsPanel(effect, watch, visible),
 			bufferingIndicator(effect, watch),
 		);
 
-		const controls = DOM.create("div", { className: "watch-ui__controls" });
+		const controls = DOM.create("div", { className: "controls" });
 
-		const playback = DOM.create("div", { className: "watch-ui__playback-controls flex--align-center" });
+		const playback = DOM.create("div", { className: "playback-controls flex-align-center" });
 		playback.append(
 			playPauseButton(effect, watch),
 			volumeSlider(effect, watch),
@@ -73,7 +73,7 @@ export default class MoqWatchUi extends HTMLElement {
 			fullscreenButton(effect, watch),
 		);
 
-		const latency = DOM.create("div", { className: "watch-ui__latency-controls" });
+		const latency = DOM.create("div", { className: "latency-controls" });
 		latency.append(bufferControl(effect, watch), qualitySelector(effect, watch));
 
 		controls.append(playback, latency);
