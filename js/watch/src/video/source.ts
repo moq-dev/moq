@@ -23,10 +23,10 @@ export type Target = {
 	pixels?: number;
 
 	// Maximum desired coded width in pixels.
-	maxWidth?: number;
+	width?: number;
 
 	// Maximum desired coded height in pixels.
-	maxHeight?: number;
+	height?: number;
 
 	// Maximum desired bitrate in bits per second.
 	bitrate?: number;
@@ -80,11 +80,11 @@ function byPixels(target: number): RenditionFilter {
 
 /**
  * Filter and rank renditions by maximum coded dimensions.
- * Returns renditions where codedWidth <= maxWidth AND codedHeight <= maxHeight
+ * Returns renditions where codedWidth <= width AND codedHeight <= height
  * (each cap is optional). Within-budget renditions rank by area (largest first).
  * If nothing fits, falls back to the single smallest over-budget rendition.
  */
-function byDimensions(maxWidth?: number, maxHeight?: number): RenditionFilter {
+function byDimensions(width?: number, height?: number): RenditionFilter {
 	return (entries) => {
 		const within: { name: string; size: number }[] = [];
 		const rest: { name: string; size: number }[] = [];
@@ -92,8 +92,8 @@ function byDimensions(maxWidth?: number, maxHeight?: number): RenditionFilter {
 		for (const [name, config] of entries) {
 			if (!config.codedWidth || !config.codedHeight) continue;
 			const size = config.codedWidth * config.codedHeight;
-			const fitsWidth = maxWidth == null || config.codedWidth <= maxWidth;
-			const fitsHeight = maxHeight == null || config.codedHeight <= maxHeight;
+			const fitsWidth = width == null || config.codedWidth <= width;
+			const fitsHeight = height == null || config.codedHeight <= height;
 			if (fitsWidth && fitsHeight) {
 				within.push({ name, size });
 			} else {
@@ -315,8 +315,8 @@ export class Source {
 		if (target?.pixels != null) {
 			filters.push(byPixels(target.pixels));
 		}
-		if (target?.maxWidth != null || target?.maxHeight != null) {
-			filters.push(byDimensions(target.maxWidth, target.maxHeight));
+		if (target?.width != null || target?.height != null) {
+			filters.push(byDimensions(target.width, target.height));
 		}
 		if (target?.bitrate != null) {
 			filters.push(byBitrate(target.bitrate));
