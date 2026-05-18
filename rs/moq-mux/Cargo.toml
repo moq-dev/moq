@@ -24,8 +24,8 @@ conducer = { workspace = true }
 h264-parser = { version = "0.4.0" }
 hang = { workspace = true }
 m3u8-rs = { version = "6" }
-moq-lite = { workspace = true, features = ["serde"] }
 moq-msf = { workspace = true }
+moq-net = { workspace = true, features = ["serde"] }
 mp4-atom = { version = "0.10.0", features = ["tokio", "bytes", "serde"] }
 num_enum = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }

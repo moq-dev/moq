@@ -11,27 +11,27 @@ use base64::Engine;
 #[derive(Clone)]
 pub struct Producer {
 	/// Access to the underlying hang catalog track producer.
-	pub hang_track: moq_lite::TrackProducer,
+	pub hang_track: moq_net::TrackProducer,
 
 	/// Access to the underlying MSF catalog track producer.
-	pub msf_track: moq_lite::TrackProducer,
+	pub msf_track: moq_net::TrackProducer,
 
 	current: Arc<Mutex<hang::Catalog>>,
 }
 
 impl Producer {
 	/// Create a new catalog producer, inserting both catalog tracks into the broadcast.
-	pub fn new(broadcast: &mut moq_lite::BroadcastProducer) -> Result<Self, moq_lite::Error> {
+	pub fn new(broadcast: &mut moq_net::BroadcastProducer) -> Result<Self, moq_net::Error> {
 		Self::with_catalog(broadcast, hang::Catalog::default())
 	}
 
 	/// Create a new catalog producer with the given initial catalog.
 	pub fn with_catalog(
-		broadcast: &mut moq_lite::BroadcastProducer,
+		broadcast: &mut moq_net::BroadcastProducer,
 		catalog: hang::Catalog,
-	) -> Result<Self, moq_lite::Error> {
+	) -> Result<Self, moq_net::Error> {
 		let hang_track = broadcast.create_track(hang::Catalog::default_track())?;
-		let msf_track = broadcast.create_track(moq_lite::Track::new(moq_msf::DEFAULT_NAME))?;
+		let msf_track = broadcast.create_track(moq_net::Track::new(moq_msf::DEFAULT_NAME))?;
 
 		Ok(Self {
 			hang_track,
@@ -56,14 +56,14 @@ impl Producer {
 	}
 
 	/// Create a consumer for this catalog, receiving updates as they're published.
-	pub fn consume(&self) -> Result<super::Consumer, moq_lite::Error> {
+	pub fn consume(&self) -> Result<super::Consumer, moq_net::Error> {
 		let track = self.hang_track.consume();
 		let subscriber = track;
 		Ok(super::Consumer::new(subscriber))
 	}
 
 	/// Finish publishing to this catalog.
-	pub fn finish(&mut self) -> Result<(), moq_lite::Error> {
+	pub fn finish(&mut self) -> Result<(), moq_net::Error> {
 		self.hang_track.finish()?;
 		self.msf_track.finish()?;
 		Ok(())
@@ -77,8 +77,8 @@ impl Producer {
 /// On drop, both the hang and MSF catalog tracks are updated if the catalog was mutated.
 pub struct Guard<'a> {
 	catalog: MutexGuard<'a, hang::Catalog>,
-	hang_track: &'a mut moq_lite::TrackProducer,
-	msf_track: &'a mut moq_lite::TrackProducer,
+	hang_track: &'a mut moq_net::TrackProducer,
+	msf_track: &'a mut moq_net::TrackProducer,
 	updated: bool,
 }
 

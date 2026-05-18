@@ -144,7 +144,7 @@ export default defineConfig({
 					text: "Crates",
 					link: "/rs/crate",
 					items: [
-						{ text: "moq-lite", link: "/rs/crate/moq-lite" },
+						{ text: "moq-net", link: "/rs/crate/moq-net" },
 						{ text: "moq-native", link: "/rs/crate/moq-native" },
 						{ text: "moq-token", link: "/rs/crate/moq-token" },
 						{ text: "hang", link: "/rs/crate/hang" },
@@ -166,7 +166,7 @@ export default defineConfig({
 					text: "Packages",
 					link: "/js/@moq",
 					items: [
-						{ text: "@moq/lite", link: "/js/@moq/lite" },
+						{ text: "@moq/net", link: "/js/@moq/net" },
 						{
 							text: "@moq/hang",
 							link: "/js/@moq/hang/",

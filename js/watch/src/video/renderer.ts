@@ -1,4 +1,4 @@
-import { Time } from "@moq/lite";
+import { Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 

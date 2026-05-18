@@ -1,4 +1,4 @@
-import * as Moq from "@moq/lite";
+import * as Moq from "@moq/net";
 
 async function main() {
 	const url = new URL("https://cdn.moq.dev/anon");

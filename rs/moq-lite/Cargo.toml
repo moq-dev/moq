@@ -1,29 +1,23 @@
 [package]
 name = "moq-lite"
-description = "Media over QUIC - Transport (Lite)"
+description = "Deprecated: renamed to moq-net. This crate re-exports moq-net for backwards compatibility and will not receive further updates."
 authors = ["Luke Curley"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
-version = "0.16.3"
+version = "0.17.0"
 edition = "2024"
 rust-version.workspace = true
 
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
+[lib]
+test = false
+doctest = false
+
 [features]
-serde = ["dep:serde"]
+serde = ["moq-net/serde"]
 
 [dependencies]
-bytes = "1"
-conducer = { workspace = true }
-futures = "0.3"
-num_enum = "0.7"
-rand = "0.9.2"
-serde = { workspace = true, optional = true, features = ["rc"] }
-thiserror = "2"
-tokio = { workspace = true, features = ["macros", "io-util", "sync", "test-util", "time"] }
-tracing = "0.1"
-web-async = { workspace = true }
-web-transport-trait = { workspace = true }
+moq-net = { workspace = true }

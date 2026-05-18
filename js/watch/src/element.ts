@@ -1,6 +1,6 @@
 import type * as Catalog from "@moq/hang/catalog";
-import type { Time } from "@moq/lite";
-import * as Moq from "@moq/lite";
+import type { Time } from "@moq/net";
+import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
 import { Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";

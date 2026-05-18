@@ -15,7 +15,7 @@ use web_transport_noq::noq;
 pub(crate) struct NoqClient {
 	pub quic: noq::Endpoint,
 	pub transport: Arc<noq::TransportConfig>,
-	pub versions: moq_lite::Versions,
+	pub versions: moq_net::Versions,
 }
 
 impl NoqClient {
@@ -289,7 +289,7 @@ impl NoqRequest {
 					.context("failed to receive WebTransport request")?;
 				Ok(Self::WebTransport { request, alpns })
 			}
-			alpn if moq_lite::ALPNS.contains(&alpn) => {
+			alpn if moq_net::ALPNS.contains(&alpn) => {
 				anyhow::ensure!(!host.is_empty(), "missing server name for raw QUIC connection");
 				let host_str = if host.contains(':') {
 					format!("[{}]", host)

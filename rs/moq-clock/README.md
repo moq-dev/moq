@@ -10,7 +10,7 @@
 
 A tiny example app that publishes or subscribes to a clock track over [Media over QUIC](https://moq.dev).
 
-Useful as a reference for [moq-lite](https://github.com/moq-dev/moq/tree/main/rs/moq-lite) usage and for sanity-checking relay connectivity and latency. The JS port lives in [@moq/clock](https://github.com/moq-dev/moq/tree/main/js/clock).
+Useful as a reference for [moq-net](https://github.com/moq-dev/moq/tree/main/rs/moq-net) usage and for sanity-checking relay connectivity and latency. The JS port lives in [@moq/clock](https://github.com/moq-dev/moq/tree/main/js/clock).
 
 ## Install
 

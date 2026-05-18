@@ -1,31 +1,17 @@
-"""moq-lite — Ergonomic Python wrapper for MoQ (Media over QUIC)."""
+"""Deprecated: moq-lite has been renamed to moq-net.
 
-from .client import Client
-from .origin import Announced, AnnouncedBroadcast, Announcement, OriginConsumer, OriginProducer
-from .publish import BroadcastProducer, GroupProducer, MediaProducer, TrackProducer
-from .subscribe import BroadcastConsumer, CatalogConsumer, Container, GroupConsumer, MediaConsumer, TrackConsumer
-from .types import Audio, Catalog, Dimensions, Frame, Video
+This package re-exports ``moq_net`` for backwards compatibility and will not receive
+further updates. Please migrate your dependencies from ``moq-lite`` to ``moq-net``.
+"""
 
-__all__ = [
-    "Audio",
-    "Announced",
-    "AnnouncedBroadcast",
-    "Announcement",
-    "BroadcastConsumer",
-    "BroadcastProducer",
-    "Catalog",
-    "Container",
-    "CatalogConsumer",
-    "Client",
-    "Dimensions",
-    "Frame",
-    "GroupConsumer",
-    "GroupProducer",
-    "MediaConsumer",
-    "MediaProducer",
-    "OriginConsumer",
-    "OriginProducer",
-    "TrackConsumer",
-    "TrackProducer",
-    "Video",
-]
+import warnings
+
+warnings.warn(
+    "The 'moq-lite' Python package has been renamed to 'moq-net'. "
+    "This shim re-exports moq_net and will not receive further updates. "
+    "Please migrate to moq-net.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+from moq_net import *  # noqa: E402, F401, F403

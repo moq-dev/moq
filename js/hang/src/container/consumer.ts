@@ -1,5 +1,5 @@
-import type { Time } from "@moq/lite";
-import * as Moq from "@moq/lite";
+import type { Time } from "@moq/net";
+import * as Moq from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 
 import type { Format } from "./format";

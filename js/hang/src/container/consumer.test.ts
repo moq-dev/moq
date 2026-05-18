@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Group, type Time, Track, Varint } from "@moq/lite";
+import { Group, type Time, Track, Varint } from "@moq/net";
 import type { InitSegment } from "./cmaf/decode.ts";
 import { encodeDataSegment } from "./cmaf/encode.ts";
 import { Format as CmafFormat } from "./cmaf/format.ts";

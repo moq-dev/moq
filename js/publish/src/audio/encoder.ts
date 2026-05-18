@@ -1,8 +1,8 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
-import type * as Moq from "@moq/lite";
-import type { Time } from "@moq/lite";
+import type * as Moq from "@moq/net";
+import type { Time } from "@moq/net";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import type * as Capture from "./capture";
 import type { Source } from "./types";

@@ -13,6 +13,7 @@ members = [
     "rs/moq-msf",
     "rs/moq-mux",
     "rs/moq-native",
+    "rs/moq-net",
     "rs/moq-relay",
     "rs/moq-token",
     "rs/moq-token-cli",
@@ -29,6 +30,7 @@ default-members = [
     # "rs/moq-gst",   # requires GStreamer
     "rs/moq-lite",
     "rs/moq-msf",
+    "rs/moq-net",
     "rs/moq-mux",
     "rs/moq-native",
     "rs/moq-relay",
@@ -43,10 +45,10 @@ rust-version = "1.85"
 [workspace.dependencies]
 conducer = { version = "0.3", path = "rs/conducer" }
 hang = { version = "0.16", path = "rs/hang" }
-moq-lite = { version = "0.16", path = "rs/moq-lite" }
 moq-msf = { version = "0.1", path = "rs/moq-msf" }
 moq-mux = { version = "0.4", path = "rs/moq-mux" }
 moq-native = { version = "0.14", path = "rs/moq-native", default-features = false }
+moq-net = { version = "0.1", path = "rs/moq-net" }
 moq-token = { version = "0.6", path = "rs/moq-token" }
 qmux = { version = "0.0.5", default-features = false }
 

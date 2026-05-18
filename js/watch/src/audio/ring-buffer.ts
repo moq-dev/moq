@@ -1,4 +1,4 @@
-import { Time } from "@moq/lite";
+import { Time } from "@moq/net";
 
 export class AudioRingBuffer {
 	#buffer: Float32Array[];

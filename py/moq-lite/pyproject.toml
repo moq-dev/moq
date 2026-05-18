@@ -4,28 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "moq-lite"
-version = "0.0.3"
-description = "Ergonomic Python wrapper for MoQ (Media over QUIC)"
+version = "0.1.0"
+description = "Deprecated: renamed to moq-net. This package re-exports moq-net for backwards compatibility and will not receive further updates."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "Luke Curley", email = "kixelated@gmail.com" }]
 keywords = ["quic", "http3", "webtransport", "media", "live", "streaming"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 7 - Inactive",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Topic :: Multimedia :: Sound/Audio",
-    "Topic :: Multimedia :: Video",
 ]
-dependencies = ["moq-ffi~=0.2.0"]
+dependencies = ["moq-net"]
+
+[tool.uv.sources]
+moq-net = { workspace = true }
 
 [project.urls]
 Homepage = "https://github.com/moq-dev/moq"
 Repository = "https://github.com/moq-dev/moq"
-
-[dependency-groups]
-dev = ["pytest", "pytest-asyncio"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"

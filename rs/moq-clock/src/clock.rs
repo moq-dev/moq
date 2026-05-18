@@ -1,7 +1,7 @@
 use anyhow::Context;
 
 use chrono::prelude::*;
-use moq_lite::*;
+use moq_net::*;
 
 pub struct Publisher {
 	track: TrackProducer,

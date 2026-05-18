@@ -1,46 +1,46 @@
 ---
-title: "@moq/lite"
+title: "@moq/net"
 description: Core pub/sub protocol for browsers
 ---
 
-# @moq/lite
+# @moq/net
 
-[![npm](https://img.shields.io/npm/v/@moq/lite)](https://www.npmjs.com/package/@moq/lite)
+[![npm](https://img.shields.io/npm/v/@moq/net)](https://www.npmjs.com/package/@moq/net)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-A TypeScript implementation of [Media over QUIC](https://moq.dev/) providing real-time data delivery in web browsers. Implements the [moq-lite specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/).
+A TypeScript implementation of [Media over QUIC](https://moq.dev/) providing real-time data delivery in web browsers. At session setup it negotiates one of two wire protocols: the simplified [moq-lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/) protocol or the full IETF [moq-transport](https://datatracker.ietf.org/group/moq/documents/) protocol.
 
 ## Overview
 
-`@moq/lite` is the browser equivalent of the Rust `moq-lite` crate, providing the core networking layer for MoQ. For higher-level media functionality, use [@moq/hang](/js/@moq/hang/).
+`@moq/net` is the browser equivalent of the Rust `moq-net` crate, providing the core networking layer for MoQ. For higher-level media functionality, use [@moq/hang](/js/@moq/hang/).
 
 ## Installation
 
 ```bash
-bun add @moq/lite
+bun add @moq/net
 # or
-npm add @moq/lite
-pnpm add @moq/lite
-yarn add @moq/lite
+npm add @moq/net
+pnpm add @moq/net
+yarn add @moq/net
 ```
 
 ## Quick Start
 
 ### Basic Connection
 
-See [`js/lite/examples/connection.ts`](https://github.com/moq-dev/moq/blob/main/js/lite/examples/connection.ts)
+See [`js/net/examples/connection.ts`](https://github.com/moq-dev/moq/blob/main/js/net/examples/connection.ts)
 
 ### Publishing Data
 
-See [`js/lite/examples/publish.ts`](https://github.com/moq-dev/moq/blob/main/js/lite/examples/publish.ts)
+See [`js/net/examples/publish.ts`](https://github.com/moq-dev/moq/blob/main/js/net/examples/publish.ts)
 
 ### Subscribing to Data
 
-See [`js/lite/examples/subscribe.ts`](https://github.com/moq-dev/moq/blob/main/js/lite/examples/subscribe.ts)
+See [`js/net/examples/subscribe.ts`](https://github.com/moq-dev/moq/blob/main/js/net/examples/subscribe.ts)
 
 ### Stream Discovery
 
-See [`js/lite/examples/discovery.ts`](https://github.com/moq-dev/moq/blob/main/js/lite/examples/discovery.ts)
+See [`js/net/examples/discovery.ts`](https://github.com/moq-dev/moq/blob/main/js/net/examples/discovery.ts)
 
 ## Core Concepts
 
@@ -60,7 +60,7 @@ Collections of frames (usually aligned with keyframes).
 
 Individual data chunks.
 
-See the [publishing example](https://github.com/moq-dev/moq/blob/main/js/lite/examples/publish.ts) for usage of all core concepts.
+See the [publishing example](https://github.com/moq-dev/moq/blob/main/js/net/examples/publish.ts) for usage of all core concepts.
 
 ## Advanced Usage
 
@@ -70,7 +70,7 @@ Pass JWT tokens via query parameters in the URL. See [Authentication guide](/app
 
 ## Running Server-Side
 
-`@moq/lite` can also run server-side using a [WebTransport polyfill](https://github.com/fails-components/webtransport). See the [`js/lite/README.md`](https://github.com/moq-dev/moq/blob/main/js/lite/README.md#server-side-usage) for setup instructions.
+`@moq/net` can also run server-side using a [WebTransport polyfill](https://github.com/fails-components/webtransport). See the [`js/net/README.md`](https://github.com/moq-dev/moq/blob/main/js/net/README.md#server-side-usage) for setup instructions.
 
 ## Browser Compatibility
 

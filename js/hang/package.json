@@ -20,7 +20,7 @@
 	"dependencies": {
 		"@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
 		"@libav.js/variant-opus-af": "^6.8.8",
-		"@moq/lite": "workspace:^",
+		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"@svta/cml-iso-bmff": "^1.0.0-alpha.9",
 		"zod": "^4.1.5"

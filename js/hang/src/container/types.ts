@@ -1,4 +1,4 @@
-import { Time } from "@moq/lite";
+import { Time } from "@moq/net";
 
 export interface Frame {
 	data: Uint8Array;

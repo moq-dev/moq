@@ -2398,9 +2398,9 @@ dependencies = [
  "derive_more",
  "hex",
  "lazy_static",
- "moq-lite",
  "moq-mux",
  "moq-native",
+ "moq-net",
  "regex",
  "serde",
  "serde_json",
@@ -3416,9 +3416,9 @@ dependencies = [
  "bytes",
  "cbindgen",
  "hang",
- "moq-lite",
  "moq-mux",
  "moq-native",
+ "moq-net",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3622,9 +3622,9 @@ dependencies = [
  "clap",
  "ffmpeg-next",
  "hang",
- "moq-lite",
  "moq-mux",
  "moq-native",
+ "moq-net",
  "serde",
  "serde_json",
  "tokio",
@@ -3660,8 +3660,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "moq-lite",
  "moq-native",
+ "moq-net",
  "tokio",
  "tracing",
  "url",
@@ -3677,9 +3677,9 @@ version = "0.2.10"
 dependencies = [
  "bytes",
  "hang",
- "moq-lite",
  "moq-mux",
  "moq-native",
+ "moq-net",
  "pollster",
  "thiserror 2.0.18",
  "tokio",
@@ -3697,9 +3697,9 @@ dependencies = [
  "gst-plugin-version-helper",
  "gstreamer",
  "hang",
- "moq-lite",
  "moq-mux",
  "moq-native",
+ "moq-net",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3708,19 +3708,9 @@ dependencies = [
 
 [[package]]
 name = "moq-lite"
-version = "0.16.3"
+version = "0.17.0"
 dependencies = [
- "bytes",
- "conducer",
- "futures",
- "num_enum",
- "rand 0.9.4",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "web-async",
- "web-transport-trait",
+ "moq-net",
 ]
 
 [[package]]
@@ -3744,8 +3734,8 @@ dependencies = [
  "h264-parser",
  "hang",
  "m3u8-rs",
- "moq-lite",
  "moq-msf",
+ "moq-net",
  "mp4-atom",
  "num_enum",
  "reqwest 0.12.28",
@@ -3769,7 +3759,7 @@ dependencies = [
  "hex",
  "humantime",
  "humantime-serde",
- "moq-lite",
+ "moq-net",
  "parking_lot",
  "qmux",
  "quinn",
@@ -3799,6 +3789,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-net"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "conducer",
+ "futures",
+ "num_enum",
+ "rand 0.9.4",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "web-async",
+ "web-transport-trait",
+]
+
+[[package]]
 name = "moq-relay"
 version = "0.11.3"
 dependencies = [
@@ -3811,8 +3818,8 @@ dependencies = [
  "http-body",
  "http-cache-reqwest",
  "jsonwebtoken",
- "moq-lite",
  "moq-native",
+ "moq-net",
  "moq-token",
  "qmux",
  "rcgen 0.13.2",

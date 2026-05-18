@@ -22,7 +22,7 @@ npm add @moq/watch
 
 For quick demos or single-page embeds where a bundler is overkill, load the
 package straight from jsDelivr with the `+esm` endpoint. jsDelivr transforms
-the published file and rewrites bare imports (like `@moq/hang`, `@moq/lite`)
+the published file and rewrites bare imports (like `@moq/hang`, `@moq/net`)
 to other `+esm` URLs, so it loads in the browser with no import map or local
 build step:
 
@@ -176,4 +176,4 @@ const broadcast = new Watch.Broadcast({
 
 - **[@moq/publish](/js/@moq/publish)** — Publish media to MoQ broadcasts
 - **[@moq/hang](/js/@moq/hang/)** — Core media library (catalog, container, support)
-- **[@moq/lite](/js/@moq/lite)** — Core pub/sub transport protocol
+- **[@moq/net](/js/@moq/net)** — Core pub/sub transport protocol

@@ -36,7 +36,7 @@ pub struct Avc3 {
 }
 
 impl Avc3 {
-	pub fn new(mut broadcast: moq_lite::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	pub fn new(mut broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		// Create the track eagerly so callers can monitor used/unused before any frames arrive.
 		// The catalog entry is added later in init() once the codec config is known.
 		let track = broadcast.unique_track(".avc3").expect("failed to create avc3 track");
@@ -55,7 +55,7 @@ impl Avc3 {
 
 	/// Returns a reference to the underlying track producer, e.g. for
 	/// monitoring subscriber state via `used()`/`unused()`.
-	pub fn track(&self) -> &moq_lite::TrackProducer {
+	pub fn track(&self) -> &moq_net::TrackProducer {
 		&self.track.track
 	}
 

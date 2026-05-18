@@ -42,7 +42,7 @@ hex = "0.4"
 humantime = "2.3"
 humantime-serde = "1.1"
 
-moq-lite = { workspace = true, features = ["serde"] }
+moq-net = { workspace = true, features = ["serde"] }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 qmux = { workspace = true, features = ["wss", "tls"], optional = true }
 quinn = { version = "0.11", default-features = false, features = [

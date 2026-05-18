@@ -24,9 +24,9 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 ffmpeg-next = "8"
 hang = { workspace = true }
-moq-lite = { workspace = true }
 moq-mux = { workspace = true }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
 tokio = { workspace = true, features = ["full"] }

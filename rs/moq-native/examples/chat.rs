@@ -6,7 +6,7 @@ async fn main() -> anyhow::Result<()> {
 	moq_native::Log::new(tracing::Level::DEBUG).init();
 
 	// Create an origin that we can publish to and the session can consume from.
-	let origin = moq_lite::Origin::random().produce();
+	let origin = moq_net::Origin::random().produce();
 
 	// Run the broadcast production and the session in parallel.
 	// This is a simple example of how you can concurrently run multiple tasks.
@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 // Connect to the server and publish our origin of broadcasts.
-async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
+async fn run_session(origin: moq_net::OriginConsumer) -> anyhow::Result<()> {
 	// Optional: Use moq_native to make a QUIC client.
 	let client = moq_native::ClientConfig::default().init()?;
 
@@ -34,14 +34,14 @@ async fn run_session(origin: moq_lite::OriginConsumer) -> anyhow::Result<()> {
 }
 
 // Produce a broadcast and publish it to the origin.
-async fn run_broadcast(origin: moq_lite::OriginProducer) -> anyhow::Result<()> {
+async fn run_broadcast(origin: moq_net::OriginProducer) -> anyhow::Result<()> {
 	// Create and publish a broadcast to the origin..
 	// A broadcast is a collection of tracks, but in this example we'll only create one.
-	let mut broadcast = moq_lite::Broadcast::new().produce();
+	let mut broadcast = moq_net::Broadcast::new().produce();
 
 	// Create a track that we'll insert into the broadcast.
 	// A track is a series of groups representing a live stream.
-	let mut track = broadcast.create_track(moq_lite::Track {
+	let mut track = broadcast.create_track(moq_net::Track {
 		name: "chat".to_string(),
 		priority: 0,
 	})?;

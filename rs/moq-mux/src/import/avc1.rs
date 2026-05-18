@@ -9,7 +9,7 @@ use bytes::Bytes;
 /// is provided out-of-band via the catalog, and frames contain length-prefixed NAL units
 /// without inline parameter sets.
 pub struct Avc1 {
-	broadcast: moq_lite::BroadcastProducer,
+	broadcast: moq_net::BroadcastProducer,
 	catalog: crate::catalog::Producer,
 	track: Option<crate::container::Producer<crate::container::Hang>>,
 	config: Option<hang::catalog::VideoConfig>,
@@ -25,7 +25,7 @@ pub struct Avc1 {
 }
 
 impl Avc1 {
-	pub fn new(broadcast: moq_lite::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
+	pub fn new(broadcast: moq_net::BroadcastProducer, catalog: crate::catalog::Producer) -> Self {
 		Self {
 			broadcast,
 			catalog,
@@ -116,7 +116,7 @@ impl Avc1 {
 	}
 
 	/// Returns a reference to the underlying track producer.
-	pub fn track(&self) -> anyhow::Result<&moq_lite::TrackProducer> {
+	pub fn track(&self) -> anyhow::Result<&moq_net::TrackProducer> {
 		Ok(&self.track.as_ref().context("not initialized")?.track)
 	}
 

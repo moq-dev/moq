@@ -21,7 +21,7 @@ pub enum Error {
 
 	/// Error from the underlying MoQ protocol layer.
 	#[error("moq error: {0}")]
-	Moq(#[from] moq_lite::Error),
+	Moq(#[from] moq_net::Error),
 
 	/// URL parsing error.
 	#[error("url error: {0}")]
@@ -93,7 +93,7 @@ pub enum Error {
 
 	/// Timestamp value overflow.
 	#[error("timestamp overflow")]
-	TimestampOverflow(#[from] moq_lite::TimeOverflow),
+	TimestampOverflow(#[from] moq_net::TimeOverflow),
 
 	/// Log level parsing error.
 	#[error("level error: {0}")]

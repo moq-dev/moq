@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-05-18
+
+### Changed
+
+- **Deprecated**: this crate has been renamed to [`moq-net`](https://crates.io/crates/moq-net).
+  It now re-exports `moq-net` for backwards compatibility. Please migrate your dependencies
+  from `moq-lite` to `moq-net`.
+
 ## [0.16.2](https://github.com/moq-dev/moq/compare/moq-lite-v0.16.1...moq-lite-v0.16.2) - 2026-05-18
 
 ### Other

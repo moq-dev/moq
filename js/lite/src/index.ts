@@ -1,10 +1,10 @@
-export * as Signals from "@moq/signals";
-export * from "./announced.ts";
-export * from "./bandwidth.ts";
-export * from "./broadcast.ts";
-export * as Connection from "./connection/index.ts";
-export * from "./group.ts";
-export * as Path from "./path.ts";
-export * as Time from "./time.ts";
-export * from "./track.ts";
-export * as Varint from "./varint.ts";
+const _warned = { value: false };
+if (!_warned.value) {
+	_warned.value = true;
+	console.warn(
+		"[@moq/lite] This package has been renamed to @moq/net. The shim re-exports @moq/net and will not receive further updates. Please migrate.",
+	);
+}
+
+/** @deprecated `@moq/lite` has been renamed to `@moq/net`. This shim re-exports `@moq/net` and will not receive further updates. */
+export * from "@moq/net";

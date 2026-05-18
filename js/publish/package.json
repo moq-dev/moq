@@ -24,7 +24,7 @@
 	},
 	"dependencies": {
 		"@moq/hang": "workspace:^",
-		"@moq/lite": "workspace:^",
+		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^"
 	},
 	"devDependencies": {

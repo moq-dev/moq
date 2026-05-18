@@ -8,7 +8,7 @@ description: Core media library (catalog, container, support)
 [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang)
 [![TypeScript](https://img.shields.io/badge/TypeScript-ready-blue.svg)](https://www.typescriptlang.org/)
 
-Core media library for [Media over QUIC](https://moq.dev), built on top of [@moq/lite](/js/@moq/lite). Provides shared primitives used by [`@moq/watch`](/js/@moq/watch) and [`@moq/publish`](/js/@moq/publish).
+Core media library for [Media over QUIC](https://moq.dev), built on top of [@moq/net](/js/@moq/net). Provides shared primitives used by [`@moq/watch`](/js/@moq/watch) and [`@moq/publish`](/js/@moq/publish).
 
 ## Overview
 
@@ -56,7 +56,7 @@ import * as Publish from "@moq/publish";
 
 - **[@moq/watch](/js/@moq/watch)** — Subscribe to and render MoQ broadcasts
 - **[@moq/publish](/js/@moq/publish)** — Publish media to MoQ broadcasts
-- **[@moq/lite](/js/@moq/lite)** — Core pub/sub transport protocol
+- **[@moq/net](/js/@moq/net)** — Core pub/sub transport protocol
 - **[@moq/signals](/js/@moq/signals)** — Reactive signals library
 
 ## Protocol Specification
@@ -68,5 +68,5 @@ See the [hang specification](https://datatracker.ietf.org/doc/draft-lcurley-moq-
 - Learn about [watching streams](/js/@moq/hang/watch)
 - Learn about [publishing streams](/js/@moq/hang/publish)
 - Use [Web Components](/js/env/web)
-- Use [@moq/lite](/js/@moq/lite) for custom protocols
+- Use [@moq/net](/js/@moq/net) for custom protocols
 - View [code examples](https://github.com/moq-dev/moq/tree/main/js)

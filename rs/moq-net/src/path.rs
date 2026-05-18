@@ -56,7 +56,7 @@ impl<'a> AsPath for &'a String {
 ///
 /// # Examples
 /// ```
-/// use moq_lite::{Path};
+/// use moq_net::{Path};
 ///
 /// // Creation automatically trims slashes
 /// let path1 = Path::new("/foo/bar/");
@@ -108,7 +108,7 @@ impl<'a> Path<'a> {
 	///
 	/// # Examples
 	/// ```
-	/// use moq_lite::Path;
+	/// use moq_net::Path;
 	///
 	/// let path = Path::new("foo/bar");
 	/// assert!(path.has_prefix("foo"));
@@ -210,7 +210,7 @@ impl<'a> Path<'a> {
 	///
 	/// # Examples
 	/// ```
-	/// use moq_lite::Path;
+	/// use moq_net::Path;
 	///
 	/// let base = Path::new("foo");
 	/// let joined = base.join("bar");
@@ -337,7 +337,7 @@ impl PathPrefixes {
 	///
 	/// Accepts anything iterable over path-like items:
 	/// ```
-	/// use moq_lite::PathPrefixes;
+	/// use moq_net::PathPrefixes;
 	///
 	/// let list = PathPrefixes::new(["demo", "demo/foo", "anon"]);
 	/// assert_eq!(list.len(), 2); // "demo/foo" subsumed by "demo"

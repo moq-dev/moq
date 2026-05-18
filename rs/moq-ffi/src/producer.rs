@@ -9,13 +9,13 @@ use crate::error::MoqError;
 // ---- UniFFI Objects ----
 
 struct BroadcastProducer {
-	broadcast: moq_lite::BroadcastProducer,
+	broadcast: moq_net::BroadcastProducer,
 	catalog: moq_mux::catalog::Producer,
 }
 
 struct MediaProducer {
 	decoder: moq_mux::import::Framed,
-	track: moq_lite::TrackProducer,
+	track: moq_net::TrackProducer,
 }
 
 #[derive(uniffi::Object)]
@@ -24,7 +24,7 @@ pub struct MoqBroadcastProducer {
 }
 
 impl MoqBroadcastProducer {
-	pub(crate) fn consume_inner(&self) -> Result<moq_lite::BroadcastConsumer, MoqError> {
+	pub(crate) fn consume_inner(&self) -> Result<moq_net::BroadcastConsumer, MoqError> {
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
 		Ok(state.broadcast.consume())
@@ -50,7 +50,7 @@ impl MoqBroadcastProducer {
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let mut broadcast = moq_lite::Broadcast::new().produce();
+		let mut broadcast = moq_net::Broadcast::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast)?;
 		Ok(Arc::new(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer { broadcast, catalog })),
@@ -93,7 +93,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::RUNTIME.enter();
 		let guard = self.state.lock().unwrap();
 		let state = guard.as_ref().ok_or_else(|| MoqError::Closed)?;
-		let track = moq_lite::Track { name, priority: 0 };
+		let track = moq_net::Track { name, priority: 0 };
 		// Clone the broadcast handle (shared Arc internally) to get &mut access.
 		let mut broadcast = state.broadcast.clone();
 		let producer = broadcast.create_track(track)?;
@@ -116,7 +116,7 @@ impl MoqBroadcastProducer {
 
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
-	inner: std::sync::Mutex<Option<moq_lite::TrackProducer>>,
+	inner: std::sync::Mutex<Option<moq_net::TrackProducer>>,
 }
 
 #[uniffi::export]
@@ -193,7 +193,7 @@ impl MoqTrackProducer {
 #[derive(uniffi::Object)]
 pub struct MoqGroupProducer {
 	sequence: u64,
-	inner: std::sync::Mutex<Option<moq_lite::GroupProducer>>,
+	inner: std::sync::Mutex<Option<moq_net::GroupProducer>>,
 }
 
 #[uniffi::export]

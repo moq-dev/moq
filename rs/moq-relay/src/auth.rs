@@ -2,8 +2,8 @@ use anyhow::Context;
 use axum::http;
 use http_cache_reqwest::{Cache, CacheMode, HttpCache, HttpCacheOptions, MokaManager};
 #[cfg(test)]
-use moq_lite::AsPath;
-use moq_lite::{Path, PathOwned, PathPrefixes};
+use moq_net::AsPath;
+use moq_net::{Path, PathOwned, PathPrefixes};
 use moq_token::{Key, KeyId};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};

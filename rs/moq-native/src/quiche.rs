@@ -18,7 +18,7 @@ pub(crate) struct QuicheClient {
 	pub bind: net::SocketAddr,
 	pub disable_verify: bool,
 	pub max_streams: u64,
-	pub versions: moq_lite::Versions,
+	pub versions: moq_net::Versions,
 }
 
 impl QuicheClient {
@@ -283,7 +283,7 @@ impl QuicheRequest {
 					.context("failed to accept WebTransport request")?;
 				Ok(Self::WebTransport { request, alpns })
 			}
-			alpn if moq_lite::ALPNS.contains(&alpn) => Ok(Self::Raw {
+			alpn if moq_net::ALPNS.contains(&alpn) => Ok(Self::Raw {
 				connection: conn,
 				request: ConnectRequest::new("moqt://".to_string().parse::<Url>().unwrap()),
 				response: web_transport_quiche::proto::ConnectResponse::OK.with_protocol(alpn),

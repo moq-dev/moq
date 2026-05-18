@@ -114,7 +114,7 @@ Integrate MoQ into your application without fear. Focused on [native](/rs/env/na
 
 Some highlights:
 
-- [moq-lite](/rs/crate/moq-lite) - Performs the core asynchronous networking, caching, and fanout.
+- [moq-net](/rs/crate/moq-net) - Performs the core asynchronous networking, caching, and fanout.
 - [moq-mux](/rs/crate/moq-mux) - Media muxers/demuxers for fMP4, CMAF, and HLS import.
 - [libmoq](/rs/crate/libmoq) - C bindings for the above, no finagling Rust into your build system.
 - [web-transport](/rs/crate/web-transport) - A suite of crates required to get QUIC access in the browser, plus some polyfills.
@@ -127,7 +127,7 @@ Or run on [native](/js/env/native) with polyfills via Node/Bun/Deno.
 
 Some highlights:
 
-- [@moq/lite](/js/@moq/lite) - Performs the core asynchronous networking.
+- [@moq/net](/js/@moq/net) - Performs the core asynchronous networking.
 - [@moq/hang](/js/@moq/hang/) - Performs any media stuff: capture, encode, transmux, decode, render.
 - [@moq/watch](/js/@moq/watch) - Subscribe to and render MoQ broadcasts.
 - [@moq/publish](/js/@moq/publish) - Publish media to MoQ broadcasts.

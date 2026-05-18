@@ -8,7 +8,7 @@
 //! This covers raw QUIC (moqt://) and WebTransport (https://) transports,
 //! exercising every protocol version the library supports.
 
-use moq_native::moq_lite::{self, Origin, Track};
+use moq_native::moq_net::{self, Origin, Track};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -19,8 +19,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// `client_version` and `server_version` can differ to test version negotiation.
 /// `None` means "support all versions" (empty version vec).
 async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_version: Option<&str>) {
-	let client_version: Option<moq_lite::Version> = client_version.map(|v| v.parse().expect("invalid client version"));
-	let server_version: Option<moq_lite::Version> = server_version.map(|v| v.parse().expect("invalid server version"));
+	let client_version: Option<moq_net::Version> = client_version.map(|v| v.parse().expect("invalid client version"));
+	let server_version: Option<moq_net::Version> = server_version.map(|v| v.parse().expect("invalid server version"));
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
@@ -430,7 +430,7 @@ async fn broadcast_webtransport_negotiate_client_all_server_transport_18() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket() {
-	use moq_native::moq_lite::{Origin, Track};
+	use moq_native::moq_net::{Origin, Track};
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();
@@ -534,7 +534,7 @@ async fn broadcast_websocket() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket_fallback() {
-	use moq_native::moq_lite::{Origin, Track};
+	use moq_native::moq_net::{Origin, Track};
 
 	// ── publisher (server) ──────────────────────────────────────────
 	let pub_origin = Origin::random().produce();

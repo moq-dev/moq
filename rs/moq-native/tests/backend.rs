@@ -4,7 +4,7 @@
 //! Each test is gated with `#[cfg(feature = "...")]` so it only compiles when the
 //! corresponding backend is enabled. Running `cargo test --all-features` exercises all.
 
-use moq_native::moq_lite::{Origin, Track};
+use moq_native::moq_net::{Origin, Track};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);

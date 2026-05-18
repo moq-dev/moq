@@ -15,7 +15,7 @@ use axum::{
 	http::StatusCode,
 	response::Response,
 };
-use moq_lite::{OriginConsumer, OriginProducer};
+use moq_net::{OriginConsumer, OriginProducer};
 
 use crate::{AuthParams, AuthToken, WebState, web::AuthQuery, web::MtlsPeer, web::landing_response};
 
@@ -81,7 +81,7 @@ where
 {
 	// Wrap the WebSocket in a WebTransport compatibility layer.
 	let ws = qmux::ws::accept(socket, None);
-	let session = moq_lite::Server::new()
+	let session = moq_net::Server::new()
 		.with_publish(subscribe)
 		.with_consume(publish)
 		// TODO: Uncomment when observability feature is merged

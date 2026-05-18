@@ -1,6 +1,6 @@
 //! # hang: WebCodecs compatible media encoding for MoQ
 //!
-//! Media-specific library built on [moq_lite] for streaming audio and video with WebCodecs.
+//! Media-specific library built on [moq_net] for streaming audio and video with WebCodecs.
 //!
 //! Each `hang` broadcast consists of:
 //!
@@ -20,8 +20,8 @@ pub mod catalog;
 /// The container is the contents of each media track.
 pub mod container;
 
-/// Export the moq-lite version we use.
-pub use moq_lite;
+/// Export the moq-net version we use.
+pub use moq_net;
 
 pub use catalog::Catalog;
 pub use error::*;
