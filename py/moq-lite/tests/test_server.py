@@ -65,7 +65,7 @@ async def test_server_client_roundtrip():
             accept_task.cancel()
             try:
                 await accept_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
             media.finish()
             broadcast.finish()
@@ -88,11 +88,13 @@ async def test_server_request_close():
             client = moq_ffi.MoqClient()
             client.set_tls_disable_verify(True)
             client.set_bind("127.0.0.1:0")
-            with pytest.raises(Exception):
+            # MoqError is an Exception subclass at runtime; UniFFI's generated
+            # code rebinds the name so the static checker doesn't see it.
+            with pytest.raises(moq_ffi.MoqError):  # type: ignore[arg-type]
                 await asyncio.wait_for(client.connect(f"https://{server.local_addr}"), timeout=5.0)
         finally:
             reject_task.cancel()
             try:
                 await reject_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass

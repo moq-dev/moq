@@ -26,12 +26,21 @@ async def run(bind: str, broadcast_name: str, track_name: str, host: str) -> Non
         server.publish(broadcast_name, broadcast)
         print(f"serving {broadcast_name!r} track={track_name!r} on https://{server.local_addr}")
 
-        sessions: list = []
+        # Hold session tasks so the connections live as long as their session
+        # does, but no longer. Each task waits on session.closed() and is
+        # discarded from the set when the client disconnects.
+        session_tasks: set[asyncio.Task] = set()
+
+        async def serve_session(request: moq.Request) -> None:
+            session = await request.ok()
+            await session.closed()
 
         async def accept_loop() -> None:
             async for request in server:
                 print(f"  accepted {request.transport} session from {request.url}")
-                sessions.append(await request.ok())
+                task = asyncio.create_task(serve_session(request))
+                session_tasks.add(task)
+                task.add_done_callback(session_tasks.discard)
 
         accept_task = asyncio.create_task(accept_loop())
         try:

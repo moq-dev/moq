@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from moq_ffi import MoqRequest, MoqServer
+from moq_ffi import MoqRequest, MoqServer, MoqSession
 
 from .origin import OriginProducer
 from .publish import BroadcastProducer
@@ -38,7 +38,7 @@ class Request:
         server's configured consume origin if unset."""
         self._inner.set_consume(origin._inner if origin is not None else None)
 
-    async def ok(self):
+    async def ok(self) -> MoqSession:
         """Complete the MoQ handshake and return the established session.
 
         The caller must hold the returned session to keep the connection
