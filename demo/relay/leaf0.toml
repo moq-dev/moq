@@ -35,9 +35,8 @@ tls.root = ["ca.pem"]
 listen = "[::]:4444"
 
 [cluster]
-# Connect to the "root" node, which will proxy any broadcasts from the other leaf.
-# NOTE: We could absolutely connect to the other leaf directly too, but this helps test proper cluster.
-# ex. imagine us-west connects directly to us-central, but not us-east.
+# Connect only to the root. leaf1 will dial us directly, forming a loop
+# (leaf1 -> root, leaf1 -> leaf0, leaf0 -> root) to exercise cluster loop detection.
 connect = ["localhost:4443"]
 
 [auth]
