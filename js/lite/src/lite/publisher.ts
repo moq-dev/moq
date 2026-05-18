@@ -281,8 +281,10 @@ export class Publisher {
 			getStats?: () => Promise<{ estimatedSendRate: number | null }>;
 		};
 		if (!quic.getStats) {
-			// Close gracefully instead of aborting to avoid killing the session.
-			stream.close();
+			// Best-effort: close the write side with a FIN so the peer's reader sees EOF.
+			// Don't STOP_SENDING the read side, which can surface as a session-level
+			// error in some WebTransport implementations.
+			stream.writer.close();
 			return;
 		}
 
@@ -322,9 +324,8 @@ export class Publisher {
 				}
 			}
 		} catch (err: unknown) {
-			const e = error(err);
-			console.warn(`probe error: ${e.message}`);
-			stream.abort(e);
+			console.warn("probe stream error", err);
+			stream.writer.close();
 		}
 	}
 

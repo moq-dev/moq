@@ -170,23 +170,37 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	/// Opens a PROBE stream when consumers exist, reads bandwidth estimates.
-	/// Returns Ok(()) only when recv_bandwidth is None (disabled).
-	/// Stream-level errors (e.g. peer reset) are non-fatal and logged as debug.
+	///
+	/// PROBE measures the peer's upload bandwidth to us, which is only meaningful
+	/// when the peer is publishing broadcasts. If we have no origin to insert
+	/// remote broadcasts into, skip the probe stream entirely. Otherwise probe
+	/// is best-effort: any failure here MUST NOT tear down the session, so on
+	/// error we abort the BandwidthProducer and return Ok.
 	async fn run_recv_bandwidth(self) -> Result<(), Error> {
+		if self.origin.is_none() {
+			return Ok(());
+		}
+
 		let Some(bandwidth) = &self.recv_bandwidth else {
 			return Ok(());
 		};
 
-		bandwidth.used().await?;
-
-		let res = self.run_probe_stream(bandwidth).await;
-		match res {
-			Ok(()) | Err(Error::Cancel | Error::Transport(_) | Error::Decode(_) | Error::Remote(_)) => {
-				tracing::debug!("probe stream closed");
-				Ok(())
-			}
-			Err(err) => Err(err),
+		if let Err(err) = bandwidth.used().await {
+			tracing::warn!(%err, "probe stream error");
+			return Ok(());
 		}
+
+		match self.run_probe_stream(bandwidth).await {
+			Ok(()) => {
+				tracing::debug!("probe stream closed");
+			}
+			Err(err) => {
+				tracing::warn!(%err, "probe stream error");
+				let _ = bandwidth.close(err);
+			}
+		}
+
+		Ok(())
 	}
 
 	async fn run_probe_stream(&self, bandwidth: &BandwidthProducer) -> Result<(), Error> {

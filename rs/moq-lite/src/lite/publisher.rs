@@ -74,18 +74,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let version = self.version;
 
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_probe(&session, &mut stream, version).await {
-				match &err {
-					Error::Cancel | Error::Transport(_) => {
-						tracing::debug!("probe stream closed");
-					}
-					err => {
-						tracing::warn!(%err, "probe stream error");
-					}
+			match Self::run_probe(&session, &mut stream, version).await {
+				Ok(()) => {
+					tracing::debug!("probe stream closed");
 				}
-				stream.writer.abort(&err);
-			} else {
-				tracing::debug!("probe stream complete");
+				Err(err) => {
+					tracing::warn!(%err, "probe stream error");
+					stream.writer.abort(&err);
+				}
 			}
 		});
 	}

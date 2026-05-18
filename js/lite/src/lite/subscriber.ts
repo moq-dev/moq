@@ -258,16 +258,26 @@ export class Subscriber {
 		if (!this.#recvBandwidth) return;
 		if (this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02) return;
 
-		const stream = await Stream.open(this.#quic);
-		await stream.writer.u53(StreamId.Probe);
+		// Probe is best-effort: any failure (stream reset by peer, missing peer support,
+		// transport hiccup) MUST NOT tear down the connection. On error, drop the
+		// bandwidth/RTT estimates so consumers know they're stale.
+		try {
+			const stream = await Stream.open(this.#quic);
+			await stream.writer.u53(StreamId.Probe);
 
-		for (;;) {
-			const probe = await Probe.decodeMaybe(stream.reader, this.version);
-			if (!probe) break;
-			this.#recvBandwidth.set(probe.bitrate || undefined);
-			if (this.#rtt && probe.rtt !== undefined) {
-				this.#rtt.set(probe.rtt as Time.Milli);
+			for (;;) {
+				const probe = await Probe.decodeMaybe(stream.reader, this.version);
+				if (!probe) break;
+				this.#recvBandwidth.set(probe.bitrate || undefined);
+				if (this.#rtt && probe.rtt !== undefined) {
+					this.#rtt.set(probe.rtt as Time.Milli);
+				}
 			}
+		} catch (err: unknown) {
+			console.warn("probe stream error", err);
+		} finally {
+			this.#recvBandwidth.set(undefined);
+			this.#rtt?.set(undefined);
 		}
 	}
 
