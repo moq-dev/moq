@@ -540,6 +540,20 @@ test("Leading-ones varint: 0xFC is a 7-byte form on draft-18+ (per #1595)", () =
 	}).toThrow(/buffer too short/);
 });
 
+test("Reader#u62: rejects 0xFC 7-byte form on draft-17", async () => {
+	const bytes = new Uint8Array([0xfc, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]);
+	const reader = new Reader(undefined, bytes, Version.DRAFT_17);
+	await expect(reader.u62()).rejects.toThrow(/reserved on draft-17/);
+});
+
+test("Reader#u62: accepts 0xFC 7-byte form on draft-18", async () => {
+	const value = 0x12_3456_789a_bcn;
+	const bytes = new Uint8Array([0xfc, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]);
+	const reader = new Reader(undefined, bytes, Version.DRAFT_18);
+	expect(await reader.u62()).toBe(value);
+	expect(await reader.done()).toBe(true);
+});
+
 test("Leading-ones varint: 7-byte form round-trips on draft-18", () => {
 	// Encode 7 bytes manually: 1111110_0 (prefix bit 48 = 0) + 6 bytes payload
 	const value = 0x12_3456_789a_bcn;
@@ -887,6 +901,11 @@ test("SubscribeUpdate v18: 1 byte shorter than v17 (no required_request_id_delta
 	const v17 = await encodeVersioned(msg, Version.DRAFT_17);
 	const v18 = await encodeVersioned(msg, Version.DRAFT_18);
 	expect(v17.length).toBe(v18.length + 1);
+
+	// Round-trip the v18 bytes too. A different shape that happens to be one byte
+	// shorter would silently pass the length check otherwise.
+	const decoded = await decodeVersioned(v18, Subscribe.SubscribeUpdate.decode, Version.DRAFT_18);
+	expect(decoded.requestId).toBe(10n);
 });
 
 test("PublishNamespace v18: round trip without required_request_id_delta", async () => {

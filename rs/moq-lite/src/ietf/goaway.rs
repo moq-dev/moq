@@ -33,7 +33,16 @@ impl Message for GoAway<'_> {
 		let new_session_uri = Cow::<str>::decode(r, version)?;
 		let timeout = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => 0,
-			_ => u64::decode(r, version)?,
+			Version::Draft17 => u64::decode(r, version)?,
+			_ => {
+				let timeout = u64::decode(r, version)?;
+				// Draft-18+: optional trailing Request ID (#1559). Drain if present;
+				// moq-lite doesn't act on per-request GOAWAY so the value is discarded.
+				if r.has_remaining() {
+					let _ = u64::decode(r, version)?;
+				}
+				timeout
+			}
 		};
 		Ok(Self {
 			new_session_uri,
@@ -116,5 +125,26 @@ mod tests {
 
 		assert_eq!(decoded.new_session_uri, "moqt://relay.example/");
 		assert_eq!(decoded.timeout, 5000);
+	}
+
+	/// Draft-18 added an optional trailing Request ID (#1559). A peer that emits
+	/// one must not break our decoder; we drain and discard it.
+	#[test]
+	fn test_goaway_v18_drains_optional_request_id() {
+		use bytes::Buf;
+
+		// Hand-construct a draft-18 GOAWAY body that includes the optional Request ID.
+		let mut buf = BytesMut::new();
+		"moqt://relay.example/".encode(&mut buf, Version::Draft18).unwrap();
+		5000u64.encode(&mut buf, Version::Draft18).unwrap();
+		// Optional trailing Request ID:
+		42u64.encode(&mut buf, Version::Draft18).unwrap();
+
+		let mut bytes = bytes::Bytes::from(buf.to_vec());
+		let decoded: GoAway = GoAway::decode_msg(&mut bytes, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.new_session_uri, "moqt://relay.example/");
+		assert_eq!(decoded.timeout, 5000);
+		assert!(!bytes.has_remaining(), "trailing Request ID should be consumed");
 	}
 }
