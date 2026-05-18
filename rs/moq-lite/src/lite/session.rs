@@ -1,6 +1,5 @@
 use crate::{
-	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, coding::Stream,
-	lite::SessionInfo,
+	BandwidthConsumer, BandwidthProducer, Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo,
 };
 
 use super::{Publisher, Subscriber, Version};
