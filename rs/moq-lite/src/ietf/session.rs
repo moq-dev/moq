@@ -1,7 +1,7 @@
 use crate::{
 	Error, OriginConsumer, OriginProducer,
 	coding::{Encode, Reader, Stream, Writer},
-	ietf::{self, FetchHeader, GroupFlags, RequestId},
+	ietf::{self, FetchHeader, RequestId},
 	setup,
 };
 
@@ -188,10 +188,16 @@ async fn run_uni_group<S: web_transport_trait::Session>(
 ) -> Result<(), Error> {
 	let kind: u64 = stream.decode_peek().await?;
 
+	// SUBGROUP_HEADER type bytes match the form 0b0XX1XXXX (spec §11.4.2):
+	// draft-14-17 use 0x10-0x1D and 0x30-0x3D, draft-18 adds 0x40 (FIRST_OBJECT)
+	// extending the form to also cover 0x50-0x5D and 0x70-0x7D. Per-version and
+	// per-bit validation (e.g., FIRST_OBJECT must be 0 on draft-17) is done in
+	// `GroupFlags::decode`.
+	if kind <= 0xff && (kind & 0x90) == 0x10 {
+		return subscriber.recv_group(stream).await;
+	}
+
 	match kind {
-		GroupFlags::START..=GroupFlags::END | GroupFlags::START_NO_PRIORITY..=GroupFlags::END_NO_PRIORITY => {
-			subscriber.recv_group(stream).await
-		}
 		FetchHeader::TYPE => Err(Error::Unsupported),
 		_ => Err(Error::UnexpectedStream),
 	}
