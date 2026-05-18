@@ -562,4 +562,82 @@ mod tests {
 		assert_eq!(decoded.stream_count, 5);
 		assert_eq!(decoded.reason_phrase, "OK");
 	}
+
+	#[test]
+	fn test_publish_v18_round_trip() {
+		let msg = Publish {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+			track_alias: 42,
+			group_order: GroupOrder::Descending,
+			largest_location: Some(Location { group: 10, object: 5 }),
+			forward: true,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: Publish = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+		assert_eq!(decoded.track_alias, 42);
+		assert_eq!(decoded.largest_location, Some(Location { group: 10, object: 5 }));
+		assert!(decoded.forward);
+	}
+
+	/// Draft-18 drops the required_request_id_delta varint (#1615).
+	/// For Publish (#1D) the field is a single zero varint = 1 byte.
+	#[test]
+	fn test_publish_v18_is_one_byte_shorter_than_v17() {
+		let msg = Publish {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+			track_alias: 42,
+			group_order: GroupOrder::Descending,
+			largest_location: None,
+			forward: true,
+		};
+
+		let v17 = encode_message(&msg, Version::Draft17);
+		let v18 = encode_message(&msg, Version::Draft18);
+		assert_eq!(v17.len(), v18.len() + 1);
+	}
+
+	#[test]
+	fn test_publish_ok_v18_round_trip() {
+		let msg = PublishOk {
+			request_id: None,
+			forward: true,
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter_type: FilterType::LargestObject,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: PublishOk = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+		assert!(decoded.forward);
+		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	#[test]
+	fn test_publish_done_v18_round_trip() {
+		let msg = PublishDone {
+			request_id: None,
+			status_code: 200,
+			stream_count: 5,
+			reason_phrase: "OK".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: PublishDone = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+		assert_eq!(decoded.status_code, 200);
+		assert_eq!(decoded.stream_count, 5);
+		assert_eq!(decoded.reason_phrase, "OK");
+	}
 }

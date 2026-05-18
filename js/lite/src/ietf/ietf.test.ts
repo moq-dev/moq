@@ -896,3 +896,112 @@ test("PublishNamespace v18: round trip without required_request_id_delta", async
 	expect(decoded.requestId).toBe(5n);
 	expect(decoded.trackNamespace).toBe("v18/broadcast" as Path.Valid);
 });
+
+test("Publish v18: round trip", async () => {
+	const msg = new Publish({
+		requestId: 7n,
+		trackNamespace: Path.from("v18/ns"),
+		trackName: "video",
+		trackAlias: 1n,
+		groupOrder: 2,
+		contentExists: false,
+		largest: undefined,
+		forward: true,
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, Publish.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(7n);
+	expect(decoded.trackNamespace).toBe("v18/ns" as Path.Valid);
+	expect(decoded.trackName).toBe("video");
+	expect(decoded.trackAlias).toBe(1n);
+	expect(decoded.forward).toBe(true);
+});
+
+test("PublishDone v18: no requestId", async () => {
+	const msg = new PublishDone({ statusCode: 200, reasonPhrase: "OK" });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, PublishDone.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(undefined);
+	expect(decoded.statusCode).toBe(200);
+	expect(decoded.reasonPhrase).toBe("OK");
+});
+
+test("RequestOk v18: no requestId (regression: don't treat Draft18 as legacy)", async () => {
+	const msg = new RequestOk({});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, RequestOk.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(undefined);
+});
+
+test("RequestError v18: no requestId, retry_interval still present", async () => {
+	const msg = new RequestError({
+		errorCode: 500,
+		reasonPhrase: "boom",
+		retryInterval: 1234n,
+	});
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, RequestError.decode, Version.DRAFT_18);
+
+	expect(decoded.requestId).toBe(undefined);
+	expect(decoded.errorCode).toBe(500);
+	expect(decoded.reasonPhrase).toBe("boom");
+	expect(decoded.retryInterval).toBe(1234n);
+});
+
+test("Subscribe v18 wire bytes match v17 (FIRST_OBJECT bit doesn't affect control messages)", async () => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+	});
+
+	const v17 = await encodeVersioned(msg, Version.DRAFT_17);
+	const v18 = await encodeVersioned(msg, Version.DRAFT_18);
+
+	// Draft18 drops the required_request_id_delta (1 byte) from v17.
+	expect(v18.length).toBe(v17.length - 1);
+});
+
+test("PublishNamespaceDone v18: rejected (removed in draft-17+)", async () => {
+	const msg = new Announce.PublishNamespaceDone({ requestId: 1n });
+	const { stream } = createTestWritableStream();
+	const writer = new Writer(stream, Version.DRAFT_18);
+	await expect(msg.encode(writer, Version.DRAFT_18)).rejects.toThrow(/removed in draft-17/);
+});
+
+test("GoAway v18: round trip (timeout field still present)", async () => {
+	const msg = new GoAway.GoAway({ newSessionUri: "moqt://relay.example/", timeout: 5000n });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_18);
+	const decoded = await decodeVersioned(encoded, GoAway.GoAway.decode, Version.DRAFT_18);
+
+	expect(decoded.newSessionUri).toBe("moqt://relay.example/");
+	expect(decoded.timeout).toBe(5000n);
+});
+
+test("Parameters v18 wire is identical to v17 (no count prefix, delta encoded keys)", async () => {
+	const params = new SetupOptions();
+	params.setVarint(0x2n, 42n);
+	params.setVarint(0x4n, 100n);
+
+	const v17 = (() => {
+		const { stream, written } = createTestWritableStream();
+		const w = new Writer(stream, Version.DRAFT_17);
+		return params.encode(w, Version.DRAFT_17).then(() => concatChunks(written));
+	})();
+	const v18 = (() => {
+		const { stream, written } = createTestWritableStream();
+		const w = new Writer(stream, Version.DRAFT_18);
+		return params.encode(w, Version.DRAFT_18).then(() => concatChunks(written));
+	})();
+
+	expect(Array.from(await v18)).toEqual(Array.from(await v17));
+});

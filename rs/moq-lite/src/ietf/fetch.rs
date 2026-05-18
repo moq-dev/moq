@@ -495,4 +495,42 @@ mod tests {
 		assert!(!decoded.end_of_track);
 		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
 	}
+
+	#[test]
+	fn test_fetch_v18_round_trip() {
+		let msg = Fetch {
+			request_id: RequestId(1),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			fetch_type: FetchType::Standalone {
+				namespace: Path::new("test"),
+				track: "video".into(),
+				start: Location { group: 0, object: 0 },
+				end: Location { group: 10, object: 5 },
+			},
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: Fetch = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.subscriber_priority, 128);
+	}
+
+	#[test]
+	fn test_fetch_ok_v18_round_trip() {
+		let msg = FetchOk {
+			request_id: None,
+			group_order: GroupOrder::Descending,
+			end_of_track: false,
+			end_location: Location { group: 5, object: 3 },
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: FetchOk = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+		assert!(!decoded.end_of_track);
+		assert_eq!(decoded.end_location, Location { group: 5, object: 3 });
+	}
 }

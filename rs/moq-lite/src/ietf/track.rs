@@ -181,4 +181,20 @@ mod tests {
 		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
 		assert_eq!(decoded.track_name, "video");
 	}
+
+	#[test]
+	fn test_track_status_v18_round_trip() {
+		let msg = TrackStatus {
+			request_id: RequestId(1),
+			track_namespace: Path::new("test/ns"),
+			track_name: "video".into(),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: TrackStatus = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(1));
+		assert_eq!(decoded.track_namespace.as_str(), "test/ns");
+		assert_eq!(decoded.track_name, "video");
+	}
 }

@@ -256,4 +256,42 @@ mod tests {
 		assert_eq!(decoded.reason_phrase, "Internal error");
 		assert_eq!(decoded.retry_interval, 3000);
 	}
+
+	#[test]
+	fn test_request_ok_v18_round_trip() {
+		let msg = RequestOk { request_id: None };
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: RequestOk = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+	}
+
+	/// Regression: pre-fix, the `version != Draft17` check caused Draft18 to be
+	/// treated as Draft14-16 and panic in the encoder.
+	#[test]
+	fn test_request_ok_v18_wire_matches_v17() {
+		let msg = RequestOk { request_id: None };
+		let v17 = encode_message(&msg, Version::Draft17);
+		let v18 = encode_message(&msg, Version::Draft18);
+		assert_eq!(v17, v18);
+	}
+
+	#[test]
+	fn test_request_error_v18_round_trip() {
+		let msg = RequestError {
+			request_id: None,
+			error_code: 500,
+			reason_phrase: "Internal error".into(),
+			retry_interval: 3000,
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: RequestError = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, None);
+		assert_eq!(decoded.error_code, 500);
+		assert_eq!(decoded.reason_phrase, "Internal error");
+		assert_eq!(decoded.retry_interval, 3000);
+	}
 }

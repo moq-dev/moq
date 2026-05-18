@@ -1,9 +1,10 @@
 import Session from "@moq/qmux";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
-import { Reader, Stream, Writer } from "../stream.ts";
+import { Stream } from "../stream.ts";
 import * as Hex from "../util/hex.ts";
 import type { Established } from "./established.ts";
+import { exchangeSetup } from "./handshake.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = 500;
@@ -105,7 +106,7 @@ export async function connect(url: URL, props?: ConnectProps): Promise<Establish
 				? Ietf.Version.DRAFT_17
 				: undefined;
 	if (modernVersion !== undefined) {
-		return await modernHandshake(url, session as WebTransport, modernVersion);
+		return await handshakeAlpn(url, session as WebTransport, modernVersion);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
@@ -187,7 +188,7 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 				? Ietf.Version.DRAFT_17
 				: undefined;
 	if (modernVersion !== undefined) {
-		return await modernHandshake(url, session, modernVersion);
+		return await handshakeAlpn(url, session, modernVersion);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {
 		setupVersion = Ietf.Version.DRAFT_16;
 	} else if (protocol === Ietf.ALPN.DRAFT_15) {
@@ -246,49 +247,11 @@ async function connectTransport(url: URL, session: WebTransport): Promise<Establ
 }
 
 /**
- * Draft-17+ handshake: SETUP is exchanged over a pair of uni streams using
- * stream type 0x2F00. The same wire format applies for draft-17 and draft-18.
+ * Draft-17+ client handshake. ALPN already pinned the version; SETUP is
+ * exchanged over a pair of uni streams using stream type 0x2F00.
  */
-async function modernHandshake(url: URL, session: WebTransport, version: Ietf.IetfVersion): Promise<Established> {
-	const encoder = new TextEncoder();
-	const params = new Ietf.SetupOptions();
-	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-
-	const setupMsg = new Ietf.Setup({ parameters: params });
-
-	const [sendWriter, recvReader] = await Promise.all([
-		(async () => {
-			const writable = (await session.createUnidirectionalStream()) as WritableStream<Uint8Array>;
-			const writer = new Writer(writable, version);
-			await writer.u53(Ietf.Setup.id); // 0x2F00 stream type
-			await setupMsg.encode(writer, version);
-			return { writable, writer };
-		})(),
-		(async () => {
-			const uniReader = session.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
-				ReadableStream<Uint8Array>
-			>;
-			const next = await uniReader.read();
-			uniReader.releaseLock();
-			if (next.done) throw new Error("no incoming uni stream for SETUP");
-			const readable = next.value;
-			const reader = new Reader(readable, undefined, version);
-			const streamType = await reader.u53();
-			if (streamType !== Ietf.Setup.id) {
-				throw new Error(`unexpected stream type on setup uni: 0x${streamType.toString(16)}`);
-			}
-			const serverSetup = await Ietf.Setup.decode(reader, version);
-			console.debug(url.toString(), "received server setup", { version, serverSetup });
-			return { readable, reader };
-		})(),
-	]);
-
-	const controlStream = new Stream({
-		writable: sendWriter.writable,
-		readable: recvReader.readable,
-		writer: sendWriter.writer,
-		reader: recvReader.reader,
-	});
+async function handshakeAlpn(url: URL, session: WebTransport, version: Ietf.IetfVersion): Promise<Established> {
+	const controlStream = await exchangeSetup(session, version, "moq-lite-js");
 
 	return new Ietf.Connection({
 		url,

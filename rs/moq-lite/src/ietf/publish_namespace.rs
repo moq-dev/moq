@@ -321,6 +321,31 @@ mod tests {
 	}
 
 	#[test]
+	fn test_publish_namespace_v18_round_trip() {
+		let msg = PublishNamespace {
+			request_id: RequestId(5),
+			track_namespace: Path::new("v18/broadcast"),
+		};
+
+		let encoded = encode_message(&msg, Version::Draft18);
+		let decoded: PublishNamespace = decode_message(&encoded, Version::Draft18).unwrap();
+
+		assert_eq!(decoded.request_id, RequestId(5));
+		assert_eq!(decoded.track_namespace.as_str(), "v18/broadcast");
+	}
+
+	#[test]
+	fn test_publish_namespace_done_v18_rejected() {
+		let msg = PublishNamespaceDone {
+			track_namespace: Path::default(),
+			request_id: RequestId(42),
+		};
+
+		let mut buf = BytesMut::new();
+		assert!(msg.encode_msg(&mut buf, Version::Draft18).is_err());
+	}
+
+	#[test]
 	fn test_publish_namespace_done_v17_rejected() {
 		let msg = PublishNamespaceDone {
 			track_namespace: Path::default(),
