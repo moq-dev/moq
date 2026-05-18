@@ -275,7 +275,7 @@ export class Subscriber {
 			for (;;) {
 				const probe = await Probe.decodeMaybe(stream.reader, this.version);
 				if (!probe) break;
-				this.#recvBandwidth.set(probe.bitrate || undefined);
+				this.#recvBandwidth.set(probe.bitrate ?? undefined);
 				if (this.#rtt && probe.rtt !== undefined) {
 					this.#rtt.set(probe.rtt as Time.Milli);
 				}
